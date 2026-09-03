@@ -1,0 +1,75 @@
+{
+  "schema": "visloc_m8_openloris_sparse_global_ba_ab_v1",
+  "date": "2026-09-04",
+  "dataset": "OpenLORIS corridor1-1",
+  "ground_truth_used_only_after_mapping": true,
+  "question": "Can the current pure-visual sparse Schur solver run global rig BA below 2 GiB and close the remaining COLMAP trajectory gap?",
+  "one_k_gate": {
+    "frames": 500,
+    "registered_images": 1000,
+    "mean_reprojection_error_px": 0.735533914,
+    "mapper_seconds": 44.011199,
+    "process_wall_seconds": 44.73,
+    "peak_rss_kib": 269052,
+    "ate_rmse_m": 0.027034707755088115,
+    "ate_p95_m": 0.042169776589474996,
+    "colmap_ate_rmse_m": 0.027968541677842282,
+    "colmap_ate_p95_m": 0.042266006958647205,
+    "status": "pass"
+  },
+  "ten_k_full_post_deferred_global": {
+    "status": "dnf_memory_cap",
+    "termination": "external VmRSS monitor sent SIGTERM after crossing 2 GiB",
+    "observed_rss_kib": 2320792,
+    "process_peak_rss_kib": 2320268,
+    "elapsed_seconds_at_termination": 190.43
+  },
+  "ten_k_global_base_post_deferred_window60": {
+    "status": "rejected_trajectory_gate",
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_images": 8988,
+    "tracks": 358664,
+    "observations": 1480784,
+    "mean_reprojection_error_px": 0.666577547,
+    "mapper_seconds": 374.481326,
+    "process_wall_seconds": 378.74,
+    "peak_rss_kib": 1716224,
+    "ate_rmse_m": 0.3982623261714992,
+    "ate_p95_m": 0.8197464460903927,
+    "ate_max_m": 2.3641622248761682,
+    "colmap_ate_rmse_m": 0.3843065335437528,
+    "colmap_ate_p95_m": 0.6386693943260212
+  },
+  "growth_global_ba_500_1000_2000_4000": {
+    "status": "rejected_registration_and_trajectory_gates",
+    "one_k": {
+      "registered_images": 1000,
+      "models": 1,
+      "mean_reprojection_error_px": 0.720678690,
+      "mapper_seconds": 30.425045,
+      "process_wall_seconds": 31.13,
+      "peak_rss_kib": 264880,
+      "ate_rmse_m": 0.026703233595482503,
+      "ate_p95_m": 0.04134610748761521,
+      "status": "pass_identical_to_control"
+    },
+    "ten_k": {
+      "registered_images": 9992,
+      "models": 2,
+      "largest_model_images": 8982,
+      "mean_reprojection_error_px": 0.684425619,
+      "mapper_seconds": 446.203040,
+      "process_wall_seconds": 451.02,
+      "peak_rss_kib": 1621132,
+      "ate_rmse_m": 0.8176245069611214,
+      "ate_p95_m": 1.3566461921827122,
+      "ate_max_m": 12.738065844144815,
+      "control_registered_images": 9998,
+      "control_ate_rmse_m": 0.3875394944236389,
+      "control_ate_p95_m": 0.768357778430078
+    },
+    "diagnosis": "COLMAP-style geometric growth solves stay below 2 GiB, but moving the active gauge during incremental registration changes later PnP outcomes, loses six images, and amplifies repeated-corridor outliers; the opt-in API and CLI were removed"
+  },
+  "conclusion": "The sparse Schur implementation removes the historical 14 GiB global-BA failure and passes the frozen 1k gate. At 10k, globally re-solving after deferred track growth still exceeds 2 GiB. Solving only the established base and returning post-deferred refinement to 60-frame windows stays bounded but worsens trajectory. A separate COLMAP-style 500/1000/2000/4000-frame growth schedule also stays at 1.55 GiB, yet loses six registrations and regresses RMSE/p95 to 0.81762/1.35665 m. Reprojection-only global BA is not the missing inter-segment gauge constraint; both experimental scheduling controls were removed."
+}

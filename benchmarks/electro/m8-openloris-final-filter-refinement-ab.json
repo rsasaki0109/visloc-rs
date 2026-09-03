@@ -1,0 +1,192 @@
+{
+  "schema": "visloc_m8_openloris_final_filter_refinement_ab_v1",
+  "recorded_at": "2026-09-04T00:00:00+09:00",
+  "dataset": "OpenLORIS corridor1-1",
+  "status": "filter_only_10k_improves_all_metrics_but_trajectory_gate_remains",
+  "ground_truth_used_only_after_mapping": true,
+  "upstream_reference": {
+    "repository": "https://github.com/colmap/colmap",
+    "incremental_mapper_source": "https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc",
+    "observation_manager_source": "https://github.com/colmap/colmap/blob/main/src/colmap/sfm/observation_manager.cc",
+    "adapted_order": "BA, bounded observation filter, BA; track completion already precedes the optional final cycle",
+    "difference": "visloc bounds the number of extra cycles explicitly and reuses windowed rig BA; no global dense normal matrix or observation Cartesian product is introduced"
+  },
+  "implementation": {
+    "default": "disabled",
+    "cli": "--final-filter-refinement-passes N",
+    "filter_threshold": "existing max_reprojection_error_px",
+    "unregistered_observations": "retained",
+    "tracks_with_fewer_than_two_registered_inliers": "unpositioned",
+    "complexity": "O(passes * retained observations) filtering plus the already bounded windowed BA",
+    "counters": [
+      "final_filter_refinement_passes",
+      "final_filter_refinement_pruned_observations"
+    ]
+  },
+  "default_off_regression": {
+    "tier_images": 1000,
+    "cameras_txt_byte_identical": true,
+    "images_txt_byte_identical": true,
+    "points3D_txt_byte_identical": true,
+    "control_mean_reprojection_px": 0.803496621
+  },
+  "one_k": {
+    "control": {
+      "registered_images": 1000,
+      "tracks": 6530,
+      "observations": 279489,
+      "mean_reprojection_px": 0.803496621,
+      "ate_rmse_m": 0.026806030654362677,
+      "ate_p95_m": 0.04152242374395737,
+      "mapper_seconds": 36.1144,
+      "peak_rss_kib": 307972
+    },
+    "one_pass": {
+      "registered_images": 1000,
+      "tracks": 6528,
+      "observations": 276769,
+      "mean_reprojection_px": 0.771117131,
+      "ate_rmse_m": 0.027230545207903953,
+      "ate_p95_m": 0.04154642837172894,
+      "ate_max_m": 0.08274382970171379,
+      "filtered_observations": 26215,
+      "mapper_seconds": 57.176654,
+      "process_wall_seconds": 58.01,
+      "peak_rss_kib": 307968
+    },
+    "two_passes": {
+      "registered_images": 1000,
+      "tracks": 6528,
+      "observations": 275857,
+      "mean_reprojection_px": 0.758533516,
+      "ate_rmse_m": 0.027502587927645702,
+      "ate_p95_m": 0.04187721841717199,
+      "ate_max_m": 0.0834419285407951,
+      "filtered_observations": 28935,
+      "mapper_seconds": 73.210235,
+      "process_wall_seconds": 73.96,
+      "peak_rss_kib": 308024
+    },
+    "three_passes": {
+      "registered_images": 1000,
+      "tracks": 6527,
+      "observations": 274796,
+      "mean_reprojection_px": 0.758152968,
+      "ate_rmse_m": 0.02775791263152044,
+      "ate_p95_m": 0.04245524590897138,
+      "ate_max_m": 0.08383568634536354,
+      "filtered_observations": 29847,
+      "mapper_seconds": 91.072674,
+      "process_wall_seconds": 91.87,
+      "peak_rss_kib": 307940,
+      "verdict": "rejected: p95 exceeds the frozen COLMAP 1k gate by 0.000189 m"
+    },
+    "colmap_gate": "pass: registration, 0.810207 px reprojection, 0.027969 m RMSE, and 0.042266 m p95"
+  },
+  "two_point_five_k": {
+    "control": {
+      "registered_images": 2500,
+      "tracks": 21724,
+      "observations": 544508,
+      "mean_reprojection_px": 0.919684407,
+      "ate_rmse_m": 0.07184754184375838,
+      "ate_p95_m": 0.13545439738681667,
+      "mapper_seconds": 86.435007,
+      "peak_rss_kib": 508956
+    },
+    "one_pass": {
+      "registered_images": 2500,
+      "tracks": 21711,
+      "observations": 536103,
+      "mean_reprojection_px": 0.875282623,
+      "ate_rmse_m": 0.07116246758983924,
+      "ate_p95_m": 0.13457571271320476,
+      "ate_max_m": 0.23618175218125356,
+      "filtered_observations": 92617,
+      "mapper_seconds": 126.211283,
+      "process_wall_seconds": 127.85,
+      "peak_rss_kib": 508884
+    },
+    "two_passes": {
+      "registered_images": 2500,
+      "tracks": 21707,
+      "observations": 533194,
+      "mean_reprojection_px": 0.862563334,
+      "ate_rmse_m": 0.0707218252224504,
+      "ate_p95_m": 0.134531516137793,
+      "ate_max_m": 0.23588759885722857,
+      "filtered_observations": 101022,
+      "mapper_seconds": 164.745576,
+      "process_wall_seconds": 166.33,
+      "peak_rss_kib": 508880
+    },
+    "verdict": "promote two passes: registration is unchanged while trajectory and reprojection improve again; 1k remains within every COLMAP gate"
+  },
+  "ten_k_robust_combination": {
+    "status": "rejected",
+    "input_policy": "frozen adaptive features plus repair19/targeted7 verified snapshot, two models, deferred registration, completion2, isolated-pose pre/post, robust 75%, Huber 3 px, final filter pass 1",
+    "registered_images": 9994,
+    "models": 2,
+    "tracks": 46552,
+    "observations": 693480,
+    "mean_reprojection_px": 0.896498581,
+    "ate_rmse_m": 0.9156823844445806,
+    "ate_p95_m": 1.1843798099460512,
+    "ate_max_m": 20.819629356992976,
+    "mapper_seconds": 194.371323,
+    "process_wall_seconds": 195.84,
+    "peak_rss_kib": 977264,
+    "verdict": "rejected: reprojection passes but registration and trajectory fail; repeated-corridor false long tracks do not generalize from 2.5k"
+  },
+  "ten_k_filter_only": {
+    "status": "two_passes_improve_but_do_not_close_trajectory_gate",
+    "input_policy": "same frozen adaptive control without robust triangulation; final filter/refinement pass is the only new behavior",
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_frames": 4494,
+    "tracks": 43902,
+    "observations": 623923,
+    "mean_reprojection_px": 0.891927129,
+    "ate_rmse_m": 0.39276179565503405,
+    "ate_p95_m": 0.778578632520469,
+    "ate_max_m": 1.4989798317311365,
+    "mapper_seconds": 185.722994,
+    "process_wall_seconds": 187.10,
+    "peak_rss_kib": 977292,
+    "colmap_gate": {
+      "registration": "pass",
+      "largest_model": "pass",
+      "reprojection": "pass",
+      "ate_rmse": "fail by 0.008455 m",
+      "ate_p95": "fail by 0.139910 m",
+      "mapper_time": "pass",
+      "peak_rss": "pass"
+    },
+    "next_action": "two passes passed the 1k and 2.5k promotion gates; run the same robust-off two-pass policy at 10k"
+    ,
+    "two_passes": {
+      "registered_images": 9998,
+      "models": 2,
+      "largest_model_frames": 4494,
+      "tracks": 43890,
+      "observations": 618034,
+      "mean_reprojection_px": 0.871172595,
+      "ate_rmse_m": 0.3914657699869576,
+      "ate_p95_m": 0.772050521743752,
+      "ate_max_m": 1.5021026216068685,
+      "mapper_seconds": 226.567253,
+      "process_wall_seconds": 228.11,
+      "peak_rss_kib": 977380,
+      "colmap_gate": {
+        "registration": "pass",
+        "largest_model": "pass",
+        "reprojection": "pass",
+        "ate_rmse": "fail by 0.007159 m",
+        "ate_p95": "fail by 0.133382 m",
+        "mapper_time": "pass",
+        "peak_rss": "pass"
+      }
+    },
+    "next_action_after_two_passes": "a third pass failed the 1k p95 gate, so freeze the maximum at two and return to the measured 10k segment-5/6 topology deficit"
+  }
+}

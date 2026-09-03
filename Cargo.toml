@@ -47,6 +47,7 @@ categories = ["computer-vision", "science::robotics"]
 nalgebra = "0.33"
 rand = { version = "0.8", features = ["small_rng"] }
 rayon = "1"
+sha2 = "0.10"
 thiserror = "2"
 
 [features]
@@ -63,6 +64,7 @@ onnx-cuda = ["onnx-inference", "visloc-vision/onnx-cuda"]
 
 [dependencies]
 nalgebra = { workspace = true }
+sha2 = { workspace = true }
 visloc-core = { path = "crates/core", version = "0.1.0" }
 visloc-vision = { path = "crates/vision", version = "0.1.0" }
 visloc-io = { path = "crates/io", version = "0.1.0" }

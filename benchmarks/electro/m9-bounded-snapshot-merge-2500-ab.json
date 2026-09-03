@@ -1,0 +1,47 @@
+{
+  "schema": "visloc_m9_bounded_snapshot_merge_ab_v1",
+  "recorded_at": "2026-09-03T14:10:21+09:00",
+  "status": "exact_output_ab_pass_10k_pending",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "images": 2500,
+    "candidate_pairs": 17500,
+    "snapshot_shards": 547,
+    "verified_pairs": 16987,
+    "accepted_correspondences": 3172962
+  },
+  "software": {
+    "base_git_commit": "371ba09571500172e9c2b6c25cae558979bad210",
+    "worktree_note": "bounded atomic file merge implementation was uncommitted for this A/B"
+  },
+  "results": {
+    "owned_decode_merge": {
+      "wall_seconds": 5.648317164974287,
+      "peak_rss_kib": 429460,
+      "exit_status": 0
+    },
+    "bounded_atomic_file_merge": {
+      "wall_seconds": 6.76,
+      "user_seconds": 4.91,
+      "system_seconds": 0.49,
+      "peak_rss_kib": 7740,
+      "exit_status": 0
+    },
+    "bounded_vs_owned": {
+      "peak_rss_reduction_percent": 98.20,
+      "wall_time_ratio": 1.197
+    }
+  },
+  "exact_output_proof": {
+    "owned_snapshot_sha256": "aab03045433ba613e1605f84809e5f6d3a0b017e72f6389c63ad87812edcec80",
+    "bounded_snapshot_sha256": "aab03045433ba613e1605f84809e5f6d3a0b017e72f6389c63ad87812edcec80",
+    "byte_identical": true,
+    "checksum_and_envelope_validation": true,
+    "atomic_publish": true
+  },
+  "acceptance": {
+    "exact_output": "pass",
+    "bounded_merge_state": "pass_at_2500",
+    "final_10k_gate": "pending"
+  }
+}

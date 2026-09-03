@@ -1086,8 +1086,8 @@ pub struct TrackBuildStats {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TrackBuildOutput {
     pub(crate) tracks: Vec<Vec<(usize, usize)>>,
-    conflicting_components: Vec<Vec<(usize, usize)>>,
-    stats: TrackBuildStats,
+    pub(crate) conflicting_components: Vec<Vec<(usize, usize)>>,
+    pub(crate) stats: TrackBuildStats,
 }
 
 pub(crate) fn build_track_output(
@@ -1137,19 +1137,6 @@ pub(crate) fn build_track_output(
         canonicalize_track_order(features, &mut output);
     }
     output
-}
-
-/// Build the deterministic conflict-free union-find tracks used by the
-/// generalized-rig mapper without exposing the incremental mapper's large
-/// configuration surface.  Rig reconstruction owns its camera-aware scoring
-/// and triangulation, but track connectivity must stay identical to the
-/// established incremental path.
-pub(crate) fn build_basic_tracks(
-    image_count: usize,
-    pairwise: &[PairwiseMatches],
-    min_track_length: usize,
-) -> Vec<Vec<(usize, usize)>> {
-    build_tracks_detailed(image_count, pairwise, min_track_length).tracks
 }
 
 /// Number of coordinate units retained by the opt-in physical ordering key.
@@ -2969,6 +2956,31 @@ pub(crate) fn build_tracks_incremental_correspondence(
     pairwise: &[PairwiseMatches],
     min_track_length: usize,
 ) -> TrackBuildOutput {
+    build_tracks_incremental_correspondence_impl(features, pairwise, min_track_length, true)
+}
+
+/// Build conflict-preserving tracks in the verified input stream order.
+///
+/// This is intentionally separate from the physical-key-order policy above.
+/// A caller can first supply a frozen, trusted correspondence prefix and then
+/// append lower-priority bridge pairs.  Conflicting bridge edges are therefore
+/// rejected without allowing their numeric image/keypoint ids to displace the
+/// trusted prefix.  The caller is responsible for binding and checksumming the
+/// input order when reproducibility matters.
+pub(crate) fn build_tracks_incremental_correspondence_in_order(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+) -> TrackBuildOutput {
+    build_tracks_incremental_correspondence_impl(features, pairwise, min_track_length, false)
+}
+
+fn build_tracks_incremental_correspondence_impl(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+    sort_edges: bool,
+) -> TrackBuildOutput {
     #[derive(Debug, Default)]
     struct WorkingTrack {
         observations: Vec<(usize, usize)>,
@@ -3007,7 +3019,9 @@ pub(crate) fn build_tracks_incremental_correspondence(
             edges.push((image_i, image_j, keypoint_i, keypoint_j));
         }
     }
-    edges.sort_unstable();
+    if sort_edges {
+        edges.sort_unstable();
+    }
 
     let mut tracks = Vec::<WorkingTrack>::new();
     let mut observation_to_track = HashMap::<(usize, usize), usize>::new();
@@ -3233,6 +3247,35 @@ pub(crate) fn build_tracks_confidence_ordered(
     pairwise: &[PairwiseMatches],
     min_track_length: usize,
 ) -> TrackBuildOutput {
+    build_tracks_confidence_ordered_impl(n_images, pairwise, min_track_length, 0)
+}
+
+/// Build confidence-ordered tracks while processing a trusted pair prefix
+/// before every remaining pair.
+///
+/// Confidence ordering is retained independently inside both tiers. A frozen
+/// base snapshot can therefore establish its proven tracks before newly
+/// verified component bridges compete for observations.
+pub(crate) fn build_tracks_confidence_ordered_with_trusted_prefix(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+    trusted_pair_prefix: usize,
+) -> TrackBuildOutput {
+    build_tracks_confidence_ordered_impl(
+        n_images,
+        pairwise,
+        min_track_length,
+        trusted_pair_prefix.min(pairwise.len()),
+    )
+}
+
+fn build_tracks_confidence_ordered_impl(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+    trusted_pair_prefix: usize,
+) -> TrackBuildOutput {
     let _ = n_images;
     #[derive(Clone, Copy)]
     struct Candidate {
@@ -3242,10 +3285,11 @@ pub(crate) fn build_tracks_confidence_ordered(
         keypoint_j: usize,
         verified_inliers: usize,
         essential_inliers: usize,
+        trusted: bool,
     }
 
     let mut candidates = Vec::new();
-    for pair in pairwise {
+    for (pair_index, pair) in pairwise.iter().enumerate() {
         let essential_inliers = pair.essential_matches.as_ref().map_or(0, Vec::len);
         let (image_i, image_j, swapped) = if pair.image_i <= pair.image_j {
             (pair.image_i, pair.image_j, false)
@@ -3265,6 +3309,7 @@ pub(crate) fn build_tracks_confidence_ordered(
                 keypoint_j,
                 verified_inliers: pair.matches.len(),
                 essential_inliers,
+                trusted: pair_index < trusted_pair_prefix,
             });
         }
     }
@@ -3272,8 +3317,9 @@ pub(crate) fn build_tracks_confidence_ordered(
     // independent of the input pair/vector order; duplicate candidates are
     // harmless because the second one finds the same component.
     candidates.sort_unstable_by(|a, b| {
-        b.verified_inliers
-            .cmp(&a.verified_inliers)
+        b.trusted
+            .cmp(&a.trusted)
+            .then_with(|| b.verified_inliers.cmp(&a.verified_inliers))
             .then_with(|| b.essential_inliers.cmp(&a.essential_inliers))
             .then_with(|| a.image_i.cmp(&b.image_i))
             .then_with(|| a.image_j.cmp(&b.image_j))

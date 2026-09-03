@@ -1,0 +1,95 @@
+{
+  "schema": "visloc_m8_openloris_track_support_loss_v1",
+  "recorded_at": "2026-09-03T15:20:00Z",
+  "dataset": "OpenLORIS corridor1-1 10k",
+  "status": "implementation_boundary_identified",
+  "ground_truth_used": false,
+  "snapshot": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps",
+    "sha256": "c9b30f7f7c29257e79dda6fe9b479924917b1e875d351085768b19af1e476857",
+    "images": 10000,
+    "verified_pairs": 60347,
+    "accepted_correspondences": 3352705,
+    "pair_order_hash": "9212f128785b66df",
+    "unordered_edge_hash": "682ecdd637ca7484"
+  },
+  "bin_definition": {
+    "frames": 500,
+    "snapshot_pair_bin": "floor(midpoint(frame_i, frame_j) / 500)",
+    "long_pair_minimum_gap_frames": 16,
+    "map_observation_bin": "floor(observing frame / 500)",
+    "map_track_bin": "floor(median observation frame / 500)",
+    "warning": "snapshot pair correspondences and final unique map observations are different populations; their raw counts are not a retention fraction"
+  },
+  "snapshot_bins": [
+    {"frame_start": 0, "pairs": 9601, "accepted": 867324, "long_pairs": 2903, "long_accepted": 284703},
+    {"frame_start": 500, "pairs": 5266, "accepted": 234606, "long_pairs": 568, "long_accepted": 14758},
+    {"frame_start": 1000, "pairs": 6695, "accepted": 433714, "long_pairs": 1865, "long_accepted": 109658},
+    {"frame_start": 1500, "pairs": 5657, "accepted": 183239, "long_pairs": 1155, "long_accepted": 54522},
+    {"frame_start": 2000, "pairs": 5119, "accepted": 200660, "long_pairs": 1062, "long_accepted": 50859},
+    {"frame_start": 2500, "pairs": 6481, "accepted": 462247, "long_pairs": 1679, "long_accepted": 98641},
+    {"frame_start": 3000, "pairs": 6315, "accepted": 280717, "long_pairs": 1583, "long_accepted": 46546},
+    {"frame_start": 3500, "pairs": 5863, "accepted": 376131, "long_pairs": 1016, "long_accepted": 33803},
+    {"frame_start": 4000, "pairs": 4990, "accepted": 153645, "long_pairs": 276, "long_accepted": 4902},
+    {"frame_start": 4500, "pairs": 4360, "accepted": 160422, "long_pairs": 162, "long_accepted": 4307}
+  ],
+  "largest_visloc_component_final_bins": [
+    {"frame_start": 0, "map_observations": 128268, "anchored_tracks": 3953},
+    {"frame_start": 500, "map_observations": 67438, "anchored_tracks": 5029},
+    {"frame_start": 1000, "map_observations": 64540, "anchored_tracks": 4663},
+    {"frame_start": 1500, "map_observations": 49753, "anchored_tracks": 5342},
+    {"frame_start": 2000, "map_observations": 64090, "anchored_tracks": 3848},
+    {"frame_start": 2500, "map_observations": 91512, "anchored_tracks": 4845},
+    {"frame_start": 3000, "map_observations": 35705, "anchored_tracks": 3052},
+    {"frame_start": 3500, "map_observations": 33407, "anchored_tracks": 3489},
+    {"frame_start": 4000, "map_observations": 54296, "anchored_tracks": 5982}
+  ],
+  "mapper_temporal_stage_diagnostic": {
+    "activation": "VISLOC_SFM_TEMPORAL_SUPPORT_BIN_FRAMES=500",
+    "state_bound": "one linear track/observation scan per reported stage plus O(frame_bins * 6 span classes) counters; disabled during normal mapping",
+    "output_matches_control_byte_for_byte": true,
+    "registered_images": 9998,
+    "tracks": 43929,
+    "observations": 638024,
+    "mean_reprojection_px": 0.990548356,
+    "mapper_seconds": 197.173198,
+    "process_wall_seconds": 202.53,
+    "peak_rss_kib": 976812,
+    "drift_bin_frames_3000_3499": {
+      "constructed": {"tracks": 6881, "observations": 82910, "span_32_127_tracks": 1015, "span_128_plus_tracks": 105},
+      "positioned": {"tracks": 3105, "observations": 50850, "span_32_127_tracks": 647, "span_128_plus_tracks": 60},
+      "published": {"tracks": 3052, "observations": 35817, "span_32_127_tracks": 483, "span_128_plus_tracks": 20},
+      "positioned_track_fraction_of_constructed": 0.451242551955,
+      "published_observation_fraction_of_constructed": 0.431998552647
+    },
+    "model_sha256": {
+      "component_000_cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "component_000_images_txt": "ba012c4e9e39d9453555130017d2d30e3788b9be347d23f6c7f259273f7dc517",
+      "component_000_points3D_txt": "68d697d67208e0aa5f11d7639953dd70f8f9643d5ee46354532ccdc207333a3a"
+    },
+    "artifacts": {
+      "mapper_log": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-temporal-support-diagnostic-v1/mapper.log",
+      "time_log": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-temporal-support-diagnostic-v1/mapper.time.txt",
+      "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-temporal-support-diagnostic-v1/model"
+    }
+  },
+  "cross_system_drift_bin": {
+    "frames": "3000-3499",
+    "visloc_anchored_tracks": 3052,
+    "colmap_anchored_tracks": 10236,
+    "visloc_track_span_median_frames": 9.0,
+    "colmap_track_span_median_frames": 17.0,
+    "visloc_endpoint_angle_median_deg": 2.592052599370607,
+    "colmap_endpoint_angle_median_deg": 6.26336669729853
+  },
+  "decision": {
+    "retrieval_or_verification_starvation_supported": false,
+    "reason": "the drift bin still contains 6,315 verified pairs, 280,717 accepted correspondences, and 46,546 accepted correspondences on pairs at least 16 frames apart; it is not the weakest verified-input bin",
+    "post_verification_support_loss_supported": true,
+    "next_action": "A/B bounded robust observation pruning during initial track triangulation: one inconsistent registered observation must not reject an otherwise supported track, but each accepted subset must retain at least two inliers and a majority of registered observations; stop at 1k on any quality regression"
+  },
+  "temporal_model_evidence": {
+    "path": "benchmarks/electro/m8-openloris-temporal-support-residuals.json",
+    "sha256": "ee17ef1aae8fbf583e508a1ba69d6c4af96e6279fd317b2a3a1edffaf175fc74"
+  }
+}

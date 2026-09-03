@@ -39,6 +39,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from benchmark_electro import (  # noqa: E402
     ValidationError,
+    parse_candidate_shard_v2,
     parse_candidate_manifest_with_metadata,
     sha256_file,
     validate_candidate_shards,
@@ -205,9 +206,12 @@ def _candidate_source_from_index(candidate_index: Path) -> tuple[Path, dict[str,
     indexed_pairs: list[tuple[int, int]] = []
     for shard in candidate["shards"]:
         shard_path = candidate_index.parent / _safe_relative(shard["path"], "candidate shard path")
-        shard_names, shard_pairs, _ = parse_candidate_manifest_with_metadata(shard_path)
-        if shard_names != names:
-            raise ValidationError("candidate shard image order differs from source manifest")
+        if shard.get("format") == "v2":
+            _, shard_pairs = parse_candidate_shard_v2(shard_path)
+        else:
+            shard_names, shard_pairs, _ = parse_candidate_manifest_with_metadata(shard_path)
+            if shard_names != names:
+                raise ValidationError("candidate shard image order differs from source manifest")
         indexed_pairs.extend(shard_pairs)
     if indexed_pairs != pairs:
         raise ValidationError("candidate shards do not preserve source pair order")

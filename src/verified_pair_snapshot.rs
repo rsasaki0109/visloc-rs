@@ -6,8 +6,10 @@
 //! stable FNV-1a checksum.  It is an interchange format for the example
 //! executable, not a replacement for the historical human-readable imports.
 
+use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -212,6 +214,535 @@ pub fn write_atomic(path: &Path, snapshot: &Snapshot) -> Result<(), String> {
     })
 }
 
+#[derive(Debug, Clone)]
+struct MergePairIndex {
+    image_i: u64,
+    image_j: u64,
+    normalized_i: u64,
+    normalized_j: u64,
+    edge_offset: u64,
+    match_count: u64,
+    encoded_len: u64,
+    encoded_hash: u64,
+}
+
+fn snapshot_envelope(snapshot: &Snapshot) -> Snapshot {
+    let effective_config = format!("verified-pair-export-v1;{}", snapshot.verifier_config);
+    Snapshot {
+        schema_version: snapshot.schema_version,
+        image_names: snapshot.image_names.clone(),
+        image_manifest_hash: snapshot.image_manifest_hash,
+        feature_manifest_hash: snapshot.feature_manifest_hash,
+        feature_counts: snapshot.feature_counts.clone(),
+        width: snapshot.width,
+        height: snapshot.height,
+        intrinsics_bits: snapshot.intrinsics_bits,
+        effective_config_hash: fnv1a64(effective_config.as_bytes()),
+        effective_config,
+        verifier_config_hash: snapshot.verifier_config_hash,
+        verifier_config: snapshot.verifier_config.clone(),
+        pair_order_hash: 0,
+        unordered_edge_hash: 0,
+        accepted_match_count: 0,
+        pairs: Vec::new(),
+    }
+}
+
+fn validate_merge_envelope(
+    shard_index: usize,
+    snapshot: &Snapshot,
+    first: &Snapshot,
+) -> Result<(), String> {
+    if snapshot.schema_version != SCHEMA_VERSION {
+        return Err(format!(
+            "snapshot shard {shard_index} has unsupported schema {} (expected {SCHEMA_VERSION})",
+            snapshot.schema_version
+        ));
+    }
+    if snapshot.image_names != first.image_names {
+        return Err(format!(
+            "snapshot shard {shard_index} image manifest differs from shard 0"
+        ));
+    }
+    if snapshot.feature_manifest_hash != first.feature_manifest_hash
+        || snapshot.feature_counts != first.feature_counts
+        || snapshot.image_manifest_hash != first.image_manifest_hash
+    {
+        return Err(format!(
+            "snapshot shard {shard_index} feature/image manifest differs from shard 0"
+        ));
+    }
+    if snapshot.width != first.width
+        || snapshot.height != first.height
+        || snapshot.intrinsics_bits != first.intrinsics_bits
+    {
+        return Err(format!(
+            "snapshot shard {shard_index} camera envelope differs from shard 0"
+        ));
+    }
+    if snapshot.verifier_config_hash != first.verifier_config_hash
+        || snapshot.verifier_config != first.verifier_config
+    {
+        return Err(format!(
+            "snapshot shard {shard_index} matcher/verifier configuration differs from shard 0"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_merge_pair(pair: &PairRecord, image_count: usize) -> Result<(u64, u64), String> {
+    let image_i = usize::try_from(pair.image_i)
+        .map_err(|_| "snapshot pair image_i does not fit usize".to_owned())?;
+    let image_j = usize::try_from(pair.image_j)
+        .map_err(|_| "snapshot pair image_j does not fit usize".to_owned())?;
+    if image_i >= image_count || image_j >= image_count || image_i == image_j {
+        return Err(format!(
+            "snapshot pair has invalid image indices ({image_i},{image_j})"
+        ));
+    }
+    Ok((
+        pair.image_i.min(pair.image_j),
+        pair.image_i.max(pair.image_j),
+    ))
+}
+
+fn encoded_pair_hash(pair: &PairRecord) -> Result<u64, String> {
+    let mut digest = PayloadDigestWriter::new(std::io::sink());
+    encode_pair(pair, &mut digest)?;
+    Ok(digest.checksum)
+}
+
+fn read_spool_u64(reader: &mut BufReader<std::fs::File>) -> Result<u64, String> {
+    let mut bytes = [0; 8];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("read merge edge spool: {error}"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn unordered_edge_hash_from_spool(
+    path: &Path,
+    pair_indexes: &[MergePairIndex],
+    edge_len: u64,
+) -> Result<u64, String> {
+    let expected_len = pair_indexes.iter().try_fold(0u64, |total, pair| {
+        let bytes = pair
+            .match_count
+            .checked_mul(16)
+            .ok_or_else(|| "merge edge spool length overflow".to_owned())?;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| "merge edge spool length overflow".to_owned())
+    })?;
+    if edge_len != expected_len {
+        return Err(format!(
+            "merge edge spool length {edge_len} differs from expected {expected_len}"
+        ));
+    }
+
+    let mut order = pair_indexes.to_vec();
+    order.sort_unstable_by_key(|pair| (pair.normalized_i, pair.normalized_j));
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("read merge edge spool {}: {error}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hash = 0xcbf29ce484222325u64;
+    for pair in order {
+        reader
+            .seek(SeekFrom::Start(pair.edge_offset))
+            .map_err(|error| format!("seek merge edge spool {}: {error}", path.display()))?;
+        for _ in 0..pair.match_count {
+            let left = read_spool_u64(&mut reader)?;
+            let right = read_spool_u64(&mut reader)?;
+            hash = hash_u64(hash, pair.normalized_i);
+            hash = hash_u64(hash, pair.normalized_j);
+            hash = hash_u64(hash, left);
+            hash = hash_u64(hash, right);
+        }
+    }
+    Ok(hash)
+}
+
+fn payload_pair_order_hash_offset(snapshot: &Snapshot) -> Result<u64, String> {
+    validate_snapshot_envelope(snapshot)?;
+    let mut offset = 4u64 + 8;
+    let mut add = |value: u64| -> Result<(), String> {
+        offset = offset
+            .checked_add(value)
+            .ok_or_else(|| "snapshot payload offset overflow".to_owned())?;
+        Ok(())
+    };
+    for name in &snapshot.image_names {
+        add(8 + name.len() as u64)?;
+    }
+    add(8 + 8 + 8 + 8 * snapshot.feature_counts.len() as u64)?;
+    add(8 + 8 + 8 * 4)?;
+    add(8 + 8 + snapshot.effective_config.len() as u64)?;
+    add(8 + 8 + snapshot.verifier_config.len() as u64)?;
+    Ok(offset)
+}
+
+static MERGE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct MergeTemporaryFile {
+    path: PathBuf,
+}
+
+impl Drop for MergeTemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn create_merge_temporary_file(
+    parent: &Path,
+    filename: &str,
+    role: &str,
+) -> Result<(MergeTemporaryFile, std::fs::File), String> {
+    for _ in 0..128 {
+        let counter = MERGE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            ".{filename}.{role}-{}-{counter}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((MergeTemporaryFile { path }, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "create merge temporary file {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err("could not allocate a unique merge temporary file".to_owned())
+}
+
+fn write_streamed_merge_temp(
+    temporary_path: &Path,
+    file: std::fs::File,
+    input_paths: &[PathBuf],
+    first: &Snapshot,
+    merged: &Snapshot,
+    expected_pairs: &[MergePairIndex],
+    payload_len: u64,
+) -> Result<(), String> {
+    let header_len = (MAGIC.len() + 4 + 8) as u64;
+    let pair_order_offset = payload_pair_order_hash_offset(merged)?;
+    let pair_order_file_offset = header_len
+        .checked_add(pair_order_offset)
+        .ok_or_else(|| "snapshot pair-order offset overflow".to_owned())?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(MAGIC)
+        .and_then(|()| writer.write_all(&SCHEMA_VERSION.to_le_bytes()))
+        .and_then(|()| writer.write_all(&payload_len.to_le_bytes()))
+        .map_err(|error| {
+            format!(
+                "write merge temporary {}: {error}",
+                temporary_path.display()
+            )
+        })?;
+
+    let mut payload_writer = PayloadDigestWriter::new(&mut writer);
+    encode_payload_prefix(
+        merged,
+        0,
+        merged.unordered_edge_hash,
+        merged.accepted_match_count,
+        expected_pairs.len() as u64,
+        &mut payload_writer,
+    )?;
+    let mut ordered_hash = ordered_pair_hash_seed(expected_pairs.len() as u64);
+    let mut pair_cursor = 0usize;
+    let mut encoded_pair_bytes = 0u64;
+    let mut accepted_match_count = 0u64;
+    for (shard_index, path) in input_paths.iter().enumerate() {
+        let snapshot = read(path)?;
+        validate_merge_envelope(shard_index, &snapshot, first)?;
+        for pair in &snapshot.pairs {
+            let expected = expected_pairs.get(pair_cursor).ok_or_else(|| {
+                format!("merge input shard {shard_index} contains an unexpected pair")
+            })?;
+            let (normalized_i, normalized_j) = validate_merge_pair(pair, first.image_names.len())?;
+            let encoded_len = pair_payload_len(pair)?;
+            let encoded_hash = encoded_pair_hash(pair)?;
+            if pair.image_i != expected.image_i
+                || pair.image_j != expected.image_j
+                || normalized_i != expected.normalized_i
+                || normalized_j != expected.normalized_j
+                || pair.matches.len() as u64 != expected.match_count
+                || encoded_len != expected.encoded_len
+                || encoded_hash != expected.encoded_hash
+            {
+                return Err(format!(
+                    "merge input pair {pair_cursor} changed between validation passes"
+                ));
+            }
+            ordered_hash = hash_ordered_pair(ordered_hash, pair);
+            encode_pair(pair, &mut payload_writer)?;
+            encoded_pair_bytes = encoded_pair_bytes
+                .checked_add(encoded_len)
+                .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
+            accepted_match_count = accepted_match_count
+                .checked_add(pair.matches.len() as u64)
+                .ok_or_else(|| "snapshot accepted match count overflow".to_owned())?;
+            pair_cursor += 1;
+        }
+    }
+    if pair_cursor != expected_pairs.len() {
+        return Err(format!(
+            "merge inputs contain {pair_cursor} pairs but validation found {}",
+            expected_pairs.len()
+        ));
+    }
+    let prefix_len = payload_prefix_len(merged)?;
+    let expected_pair_bytes = payload_len
+        .checked_sub(prefix_len)
+        .ok_or_else(|| "snapshot payload length is smaller than its envelope".to_owned())?;
+    if encoded_pair_bytes != expected_pair_bytes {
+        return Err(format!(
+            "merge encoded pair length {encoded_pair_bytes} differs from expected {expected_pair_bytes}"
+        ));
+    }
+    if accepted_match_count != merged.accepted_match_count {
+        return Err(format!(
+            "merge accepted match count {accepted_match_count} differs from expected {}",
+            merged.accepted_match_count
+        ));
+    }
+    if payload_writer.len != payload_len {
+        return Err(format!(
+            "merge encoded payload length {} differs from expected {payload_len}",
+            payload_writer.len
+        ));
+    }
+    payload_writer.flush().map_err(|error| {
+        format!(
+            "flush merge temporary {}: {error}",
+            temporary_path.display()
+        )
+    })?;
+    drop(payload_writer);
+    writer.flush().map_err(|error| {
+        format!(
+            "flush merge temporary {}: {error}",
+            temporary_path.display()
+        )
+    })?;
+    drop(writer);
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temporary_path)
+        .map_err(|error| {
+            format!(
+                "reopen merge temporary {}: {error}",
+                temporary_path.display()
+            )
+        })?;
+    let expected_file_len = header_len
+        .checked_add(payload_len)
+        .ok_or_else(|| "snapshot output length overflow".to_owned())?;
+    if file
+        .metadata()
+        .map_err(|error| format!("stat merge temporary {}: {error}", temporary_path.display()))?
+        .len()
+        != expected_file_len
+    {
+        return Err(format!(
+            "merge temporary {} has an unexpected length",
+            temporary_path.display()
+        ));
+    }
+    file.seek(SeekFrom::Start(pair_order_file_offset))
+        .map_err(|error| format!("seek merge temporary {}: {error}", temporary_path.display()))?;
+    file.write_all(&ordered_hash.to_le_bytes())
+        .map_err(|error| format!("write merge pair-order hash: {error}"))?;
+    file.seek(SeekFrom::Start(header_len))
+        .map_err(|error| format!("seek merge payload {}: {error}", temporary_path.display()))?;
+    let mut remaining = payload_len;
+    let mut checksum = 0xcbf29ce484222325u64;
+    let mut buffer = vec![0; 1024 * 1024];
+    while remaining > 0 {
+        let chunk_len = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| "snapshot checksum chunk does not fit usize".to_owned())?;
+        file.read_exact(&mut buffer[..chunk_len])
+            .map_err(|error| format!("read merge payload: {error}"))?;
+        for byte in &buffer[..chunk_len] {
+            checksum ^= u64::from(*byte);
+            checksum = checksum.wrapping_mul(0x100000001b3);
+        }
+        remaining -= chunk_len as u64;
+    }
+    file.seek(SeekFrom::Start(expected_file_len))
+        .map_err(|error| format!("seek merge checksum: {error}"))?;
+    file.write_all(&checksum.to_le_bytes())
+        .map_err(|error| format!("write merge checksum: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("flush merge checksum: {error}"))?;
+    Ok(())
+}
+
+/// Merge snapshot files with bounded memory and atomically publish the result.
+///
+/// The input files are decoded one at a time.  The first pass performs the
+/// normal checksum, envelope, raw-index, and cross-shard overlap validation
+/// while retaining only compact pair metadata and an on-disk accepted-edge
+/// spool.  A second pass streams the canonical pair encoding into a temporary
+/// output, so the final path is not changed unless every input and the output
+/// checksum succeed.  The resulting bytes are identical to
+/// `write_atomic(output, &merge_owned(decoded_inputs))`.
+pub fn merge_files_atomic<P: AsRef<Path>>(output: &Path, inputs: &[P]) -> Result<(), String> {
+    if inputs.is_empty() {
+        return Err("cannot merge an empty verified-pair snapshot list".to_owned());
+    }
+    let input_paths = inputs
+        .iter()
+        .map(|path| path.as_ref().to_path_buf())
+        .collect::<Vec<_>>();
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "create merge output directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let filename = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("snapshot path has no valid filename: {}", output.display()))?;
+
+    let (edge_temporary, edge_file) = create_merge_temporary_file(parent, filename, "edges")?;
+    let edge_path = edge_temporary.path.clone();
+    let mut edge_writer = BufWriter::new(edge_file);
+    let mut first = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut pair_indexes = Vec::new();
+    let mut edge_offset = 0u64;
+    let mut pair_count = 0u64;
+    let mut pair_payload_bytes = 0u64;
+    let mut accepted_match_count = 0u64;
+    for (shard_index, path) in input_paths.iter().enumerate() {
+        let snapshot = read(path)?;
+        if let Some(first_snapshot) = first.as_ref() {
+            validate_merge_envelope(shard_index, &snapshot, first_snapshot)?;
+        } else {
+            validate_snapshot_envelope(&snapshot)?;
+            first = Some(snapshot_envelope(&snapshot));
+        }
+        let image_count = first
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.image_names.len());
+        for pair in snapshot.pairs {
+            let (normalized_i, normalized_j) = validate_merge_pair(&pair, image_count)?;
+            if !seen.insert((normalized_i, normalized_j)) {
+                return Err(format!(
+                    "snapshot shards overlap at image pair ({normalized_i},{normalized_j})"
+                ));
+            }
+            let encoded_len = pair_payload_len(&pair)?;
+            let encoded_hash = encoded_pair_hash(&pair)?;
+            let match_count = pair.matches.len() as u64;
+            let edge_start = edge_offset;
+            let mut normalized_matches = pair
+                .matches
+                .iter()
+                .map(|&(left, right)| {
+                    if pair.image_i > pair.image_j {
+                        (right, left)
+                    } else {
+                        (left, right)
+                    }
+                })
+                .collect::<Vec<_>>();
+            normalized_matches.sort_unstable();
+            for &(left, right) in &normalized_matches {
+                put_u64(&mut edge_writer, left)?;
+                put_u64(&mut edge_writer, right)?;
+            }
+            edge_offset = edge_offset
+                .checked_add(
+                    match_count
+                        .checked_mul(16)
+                        .ok_or_else(|| "merge edge spool length overflow".to_owned())?,
+                )
+                .ok_or_else(|| "merge edge spool length overflow".to_owned())?;
+            pair_count = pair_count
+                .checked_add(1)
+                .ok_or_else(|| "snapshot pair count overflow".to_owned())?;
+            pair_payload_bytes = pair_payload_bytes
+                .checked_add(encoded_len)
+                .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
+            accepted_match_count = accepted_match_count
+                .checked_add(match_count)
+                .ok_or_else(|| "snapshot accepted match count overflow".to_owned())?;
+            pair_indexes.push(MergePairIndex {
+                image_i: pair.image_i,
+                image_j: pair.image_j,
+                normalized_i,
+                normalized_j,
+                edge_offset: edge_start,
+                match_count,
+                encoded_len,
+                encoded_hash,
+            });
+        }
+    }
+    edge_writer
+        .flush()
+        .map_err(|error| format!("flush merge edge spool {}: {error}", edge_path.display()))?;
+    drop(edge_writer);
+
+    let first =
+        first.ok_or_else(|| "cannot merge an empty verified-pair snapshot list".to_owned())?;
+    let edge_len = std::fs::metadata(&edge_path)
+        .map_err(|error| format!("stat merge edge spool {}: {error}", edge_path.display()))?
+        .len();
+    let unordered_edge_hash = unordered_edge_hash_from_spool(&edge_path, &pair_indexes, edge_len)?;
+    let mut merged = snapshot_envelope(&first);
+    merged.unordered_edge_hash = unordered_edge_hash;
+    merged.accepted_match_count = accepted_match_count;
+    let payload_len = payload_prefix_len(&merged)?
+        .checked_add(pair_payload_bytes)
+        .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
+    if pair_count != pair_indexes.len() as u64 {
+        return Err("merge pair index count overflow".to_owned());
+    }
+
+    let (output_temporary, output_file) = create_merge_temporary_file(parent, filename, "output")?;
+    let output_path = output_temporary.path.clone();
+    write_streamed_merge_temp(
+        &output_path,
+        output_file,
+        &input_paths,
+        &first,
+        &merged,
+        &pair_indexes,
+        payload_len,
+    )?;
+    std::fs::rename(&output_path, output).map_err(|error| {
+        format!(
+            "install merged verified-pair snapshot {}: {error}",
+            output.display()
+        )
+    })?;
+    // The temporary path has been atomically moved to the requested output.
+    // It is safe for the guard to remove this now-nonexistent path.
+    drop(output_temporary);
+    drop(edge_temporary);
+    Ok(())
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -230,35 +761,43 @@ fn hash_u64(mut hash: u64, value: u64) -> u64 {
 }
 
 fn ordered_pair_hash(pairs: &[PairRecord]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    hash = hash_u64(hash, pairs.len() as u64);
+    let mut hash = ordered_pair_hash_seed(pairs.len() as u64);
     for pair in pairs {
-        hash = hash_u64(hash, pair.image_i);
-        hash = hash_u64(hash, pair.image_j);
-        hash = hash_u64(hash, u64::from(pair.config));
-        hash = hash_u64(hash, pair.matches.len() as u64);
-        for &(left, right) in &pair.matches {
+        hash = hash_ordered_pair(hash, pair);
+    }
+    hash
+}
+
+fn ordered_pair_hash_seed(pair_count: u64) -> u64 {
+    hash_u64(0xcbf29ce484222325u64, pair_count)
+}
+
+fn hash_ordered_pair(mut hash: u64, pair: &PairRecord) -> u64 {
+    hash = hash_u64(hash, pair.image_i);
+    hash = hash_u64(hash, pair.image_j);
+    hash = hash_u64(hash, u64::from(pair.config));
+    hash = hash_u64(hash, pair.matches.len() as u64);
+    for &(left, right) in &pair.matches {
+        hash = hash_u64(hash, left);
+        hash = hash_u64(hash, right);
+    }
+    if let Some(matches) = &pair.essential_matches {
+        hash = hash_u64(hash, 1);
+        hash = hash_u64(hash, matches.len() as u64);
+        for &(left, right) in matches {
             hash = hash_u64(hash, left);
             hash = hash_u64(hash, right);
         }
-        if let Some(matches) = &pair.essential_matches {
-            hash = hash_u64(hash, 1);
-            hash = hash_u64(hash, matches.len() as u64);
-            for &(left, right) in matches {
-                hash = hash_u64(hash, left);
-                hash = hash_u64(hash, right);
-            }
-        } else {
-            hash = hash_u64(hash, 0);
+    } else {
+        hash = hash_u64(hash, 0);
+    }
+    if let Some(matrix) = pair.essential_matrix_bits {
+        hash = hash_u64(hash, 1);
+        for value in matrix {
+            hash = hash_u64(hash, value);
         }
-        if let Some(matrix) = pair.essential_matrix_bits {
-            hash = hash_u64(hash, 1);
-            for value in matrix {
-                hash = hash_u64(hash, value);
-            }
-        } else {
-            hash = hash_u64(hash, 0);
-        }
+    } else {
+        hash = hash_u64(hash, 0);
     }
     hash
 }
@@ -379,7 +918,7 @@ fn put_matrix3<W: Write>(out: &mut W, value: &Option<[u64; 3]>) -> Result<(), St
     Ok(())
 }
 
-fn encode_payload<W: Write>(snapshot: &Snapshot, out: &mut W) -> Result<(), String> {
+fn validate_snapshot_envelope(snapshot: &Snapshot) -> Result<(), String> {
     if snapshot.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported verified-pair snapshot schema {} (expected {})",
@@ -393,6 +932,18 @@ fn encode_payload<W: Write>(snapshot: &Snapshot, out: &mut W) -> Result<(), Stri
             snapshot.feature_counts.len()
         ));
     }
+    Ok(())
+}
+
+fn encode_payload_prefix<W: Write>(
+    snapshot: &Snapshot,
+    pair_order_hash: u64,
+    unordered_edge_hash: u64,
+    accepted_match_count: u64,
+    pair_count: u64,
+    out: &mut W,
+) -> Result<(), String> {
+    validate_snapshot_envelope(snapshot)?;
     put_u32(out, snapshot.schema_version)?;
     put_u64(out, snapshot.image_names.len() as u64)?;
     for name in &snapshot.image_names {
@@ -410,41 +961,58 @@ fn encode_payload<W: Write>(snapshot: &Snapshot, out: &mut W) -> Result<(), Stri
     put_string(out, &snapshot.effective_config)?;
     put_u64(out, snapshot.verifier_config_hash)?;
     put_string(out, &snapshot.verifier_config)?;
-    put_u64(out, snapshot.pair_order_hash)?;
-    put_u64(out, snapshot.unordered_edge_hash)?;
-    put_u64(out, snapshot.accepted_match_count)?;
-    put_u64(out, snapshot.pairs.len() as u64)?;
+    put_u64(out, pair_order_hash)?;
+    put_u64(out, unordered_edge_hash)?;
+    put_u64(out, accepted_match_count)?;
+    put_u64(out, pair_count)?;
+    Ok(())
+}
+
+fn encode_pair<W: Write>(pair: &PairRecord, out: &mut W) -> Result<(), String> {
+    if pair.raw_match_count != pair.raw_matches.len() as u64 {
+        return Err(format!(
+            "snapshot raw match count {} does not match raw stream length {} for pair ({},{})",
+            pair.raw_match_count,
+            pair.raw_matches.len(),
+            pair.image_i,
+            pair.image_j,
+        ));
+    }
+    put_u64(out, pair.image_i)?;
+    put_u64(out, pair.image_j)?;
+    put_u64(out, pair.raw_match_count)?;
+    put_match_vec(out, &pair.raw_matches)?;
+    put_u64_vec(out, &pair.accepted_inlier_indices)?;
+    put_u64_vec(out, &pair.essential_inlier_indices)?;
+    put_match_vec(out, &pair.matches)?;
+    put_bool(out, pair.essential_matches.is_some())?;
+    if let Some(matches) = &pair.essential_matches {
+        put_match_vec(out, matches)?;
+    }
+    put_u8(out, pair.config)?;
+    put_bool(out, pair.calibrated)?;
+    put_u64(out, pair.e_inlier_count)?;
+    put_u64(out, pair.f_inlier_count)?;
+    put_u64(out, pair.h_inlier_count)?;
+    put_matrix9(out, &pair.essential_matrix_bits)?;
+    put_matrix9(out, &pair.fundamental_matrix_bits)?;
+    put_matrix9(out, &pair.homography_matrix_bits)?;
+    put_matrix9(out, &pair.relative_rotation_bits)?;
+    put_matrix3(out, &pair.relative_translation_bits)?;
+    Ok(())
+}
+
+fn encode_payload<W: Write>(snapshot: &Snapshot, out: &mut W) -> Result<(), String> {
+    encode_payload_prefix(
+        snapshot,
+        snapshot.pair_order_hash,
+        snapshot.unordered_edge_hash,
+        snapshot.accepted_match_count,
+        snapshot.pairs.len() as u64,
+        out,
+    )?;
     for pair in &snapshot.pairs {
-        if pair.raw_match_count != pair.raw_matches.len() as u64 {
-            return Err(format!(
-                "snapshot raw match count {} does not match raw stream length {} for pair ({},{})",
-                pair.raw_match_count,
-                pair.raw_matches.len(),
-                pair.image_i,
-                pair.image_j,
-            ));
-        }
-        put_u64(out, pair.image_i)?;
-        put_u64(out, pair.image_j)?;
-        put_u64(out, pair.raw_match_count)?;
-        put_match_vec(out, &pair.raw_matches)?;
-        put_u64_vec(out, &pair.accepted_inlier_indices)?;
-        put_u64_vec(out, &pair.essential_inlier_indices)?;
-        put_match_vec(out, &pair.matches)?;
-        put_bool(out, pair.essential_matches.is_some())?;
-        if let Some(matches) = &pair.essential_matches {
-            put_match_vec(out, matches)?;
-        }
-        put_u8(out, pair.config)?;
-        put_bool(out, pair.calibrated)?;
-        put_u64(out, pair.e_inlier_count)?;
-        put_u64(out, pair.f_inlier_count)?;
-        put_u64(out, pair.h_inlier_count)?;
-        put_matrix9(out, &pair.essential_matrix_bits)?;
-        put_matrix9(out, &pair.fundamental_matrix_bits)?;
-        put_matrix9(out, &pair.homography_matrix_bits)?;
-        put_matrix9(out, &pair.relative_rotation_bits)?;
-        put_matrix3(out, &pair.relative_translation_bits)?;
+        encode_pair(pair, out)?;
     }
     Ok(())
 }
@@ -581,6 +1149,7 @@ fn decode_payload<R: Read>(
     input: R,
     payload_len: u64,
     retain_audit_streams: bool,
+    mapper_match_limit: Option<usize>,
 ) -> Result<Snapshot, String> {
     let mut reader = Reader::new(input, payload_len);
     let schema_version = reader.u32()?;
@@ -631,8 +1200,8 @@ fn decode_payload<R: Read>(
         }
         let accepted_inlier_indices = reader.u64_vec("accepted inlier indices")?;
         let essential_inlier_indices = reader.u64_vec("essential inlier indices")?;
-        let matches = reader.match_vec("accepted matches")?;
-        let essential_matches = if reader.bool()? {
+        let mut matches = reader.match_vec("accepted matches")?;
+        let mut essential_matches = if reader.bool()? {
             Some(reader.match_vec("essential matches")?)
         } else {
             None
@@ -695,6 +1264,14 @@ fn decode_payload<R: Read>(
         let homography_matrix_bits = reader.matrix9("homography matrix")?;
         let relative_rotation_bits = reader.matrix9("relative rotation")?;
         let relative_translation_bits = reader.matrix3("relative translation")?;
+        if let Some(limit) = mapper_match_limit {
+            matches.truncate(limit);
+            // Generalized mapper replay consumes only the selected accepted
+            // stream. Essential matches were checked against their raw
+            // indices above, then can be released at the pair boundary
+            // instead of duplicating the graph-wide correspondence payload.
+            essential_matches = None;
+        }
         pairs.push(PairRecord {
             image_i,
             image_j,
@@ -738,6 +1315,9 @@ fn decode_payload<R: Read>(
             reader.payload_len - reader.offset
         ));
     }
+    let accepted_match_count = mapper_match_limit.map_or(accepted_match_count, |_| {
+        pairs.iter().map(|pair| pair.matches.len() as u64).sum()
+    });
     Ok(Snapshot {
         schema_version,
         image_names,
@@ -764,20 +1344,8 @@ struct PayloadDigestWriter<W> {
     len: u64,
 }
 
-fn payload_len(snapshot: &Snapshot) -> Result<u64, String> {
-    if snapshot.schema_version != SCHEMA_VERSION {
-        return Err(format!(
-            "unsupported verified-pair snapshot schema {} (expected {})",
-            snapshot.schema_version, SCHEMA_VERSION
-        ));
-    }
-    if snapshot.image_names.len() != snapshot.feature_counts.len() {
-        return Err(format!(
-            "snapshot image/feature manifest length mismatch: {} names vs {} feature counts",
-            snapshot.image_names.len(),
-            snapshot.feature_counts.len()
-        ));
-    }
+fn payload_prefix_len(snapshot: &Snapshot) -> Result<u64, String> {
+    validate_snapshot_envelope(snapshot)?;
     let mut len = 4u64 + 8;
     let mut add = |value: u64| -> Result<(), String> {
         len = len
@@ -793,39 +1361,62 @@ fn payload_len(snapshot: &Snapshot) -> Result<u64, String> {
     add(8 + 8 + snapshot.effective_config.len() as u64)?;
     add(8 + 8 + snapshot.verifier_config.len() as u64)?;
     add(8 + 8 + 8 + 8)?;
+    Ok(len)
+}
+
+fn pair_payload_len(pair: &PairRecord) -> Result<u64, String> {
+    let mut len = 0u64;
+    let mut add = |value: u64| -> Result<(), String> {
+        len = len
+            .checked_add(value)
+            .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
+        Ok(())
+    };
+    if pair.raw_match_count != pair.raw_matches.len() as u64 {
+        return Err(format!(
+            "snapshot raw match count {} does not match raw stream length {} for pair ({},{})",
+            pair.raw_match_count,
+            pair.raw_matches.len(),
+            pair.image_i,
+            pair.image_j,
+        ));
+    }
+    add(8 * 3)?;
+    add(8 + 16 * pair.raw_matches.len() as u64)?;
+    add(8 + 8 * pair.accepted_inlier_indices.len() as u64)?;
+    add(8 + 8 * pair.essential_inlier_indices.len() as u64)?;
+    add(8 + 16 * pair.matches.len() as u64)?;
+    add(1)?;
+    if let Some(matches) = &pair.essential_matches {
+        add(8 + 16 * matches.len() as u64)?;
+    }
+    add(1 + 1 + 8 * 3)?;
+    for matrix in [
+        &pair.essential_matrix_bits,
+        &pair.fundamental_matrix_bits,
+        &pair.homography_matrix_bits,
+        &pair.relative_rotation_bits,
+    ] {
+        add(1 + if matrix.is_some() { 8 * 9 } else { 0 })?;
+    }
+    add(1 + if pair.relative_translation_bits.is_some() {
+        8 * 3
+    } else {
+        0
+    })?;
+    Ok(len)
+}
+
+fn payload_len(snapshot: &Snapshot) -> Result<u64, String> {
+    let mut len = payload_prefix_len(snapshot)?;
+    let mut add = |value: u64| -> Result<(), String> {
+        len = len
+            .checked_add(value)
+            .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
+        Ok(())
+    };
     for pair in &snapshot.pairs {
-        if pair.raw_match_count != pair.raw_matches.len() as u64 {
-            return Err(format!(
-                "snapshot raw match count {} does not match raw stream length {} for pair ({},{})",
-                pair.raw_match_count,
-                pair.raw_matches.len(),
-                pair.image_i,
-                pair.image_j,
-            ));
-        }
-        add(8 * 3)?;
-        add(8 + 16 * pair.raw_matches.len() as u64)?;
-        add(8 + 8 * pair.accepted_inlier_indices.len() as u64)?;
-        add(8 + 8 * pair.essential_inlier_indices.len() as u64)?;
-        add(8 + 16 * pair.matches.len() as u64)?;
-        add(1)?;
-        if let Some(matches) = &pair.essential_matches {
-            add(8 + 16 * matches.len() as u64)?;
-        }
-        add(1 + 1 + 8 * 3)?;
-        for matrix in [
-            &pair.essential_matrix_bits,
-            &pair.fundamental_matrix_bits,
-            &pair.homography_matrix_bits,
-            &pair.relative_rotation_bits,
-        ] {
-            add(1 + if matrix.is_some() { 8 * 9 } else { 0 })?;
-        }
-        add(1 + if pair.relative_translation_bits.is_some() {
-            8 * 3
-        } else {
-            0
-        })?;
+        add(pair_payload_len(pair)?)?;
     }
     Ok(len)
 }
@@ -892,7 +1483,11 @@ pub fn write(path: &Path, snapshot: &Snapshot) -> Result<(), String> {
         .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
-fn read_with_retention(path: &Path, retain_audit_streams: bool) -> Result<Snapshot, String> {
+fn read_with_retention(
+    path: &Path,
+    retain_audit_streams: bool,
+    mapper_match_limit: Option<usize>,
+) -> Result<Snapshot, String> {
     let header_len = MAGIC.len() + 4 + 8;
     let mut file =
         std::fs::File::open(path).map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -966,12 +1561,13 @@ fn read_with_retention(path: &Path, retain_audit_streams: bool) -> Result<Snapsh
         BufReader::new(file.take(payload_len)),
         payload_len,
         retain_audit_streams,
+        mapper_match_limit,
     )
 }
 
 /// Read, checksum-validate, and losslessly decode a snapshot without reordering anything.
 pub fn read(path: &Path) -> Result<Snapshot, String> {
-    read_with_retention(path, true)
+    read_with_retention(path, true, None)
 }
 
 /// Read a snapshot for mapper replay while bounding transient memory per pair.
@@ -982,12 +1578,26 @@ pub fn read(path: &Path) -> Result<Snapshot, String> {
 /// snapshot retains the exact mapper stream, two-view metadata, and envelope.
 /// It is intentionally lossy and must not be re-exported as a full snapshot.
 pub fn read_mapper_compact(path: &Path) -> Result<Snapshot, String> {
-    read_with_retention(path, false)
+    read_with_retention(path, false, None)
+}
+
+/// Read a mapper snapshot while retaining at most `limit` accepted
+/// correspondences per image pair and dropping the mapper-unused essential
+/// match stream after validation.
+///
+/// The checksum, raw streams, and all raw-index relations are still consumed
+/// and validated before truncation. Unlike truncating the decoded snapshot,
+/// discarded pair payloads never accumulate across the image graph.
+pub fn read_mapper_compact_capped(path: &Path, limit: usize) -> Result<Snapshot, String> {
+    read_with_retention(path, false, Some(limit))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{merge, read, read_mapper_compact, write, PairRecord, Snapshot, SCHEMA_VERSION};
+    use super::{
+        merge, merge_files_atomic, read, read_mapper_compact, read_mapper_compact_capped, write,
+        PairRecord, Snapshot, SCHEMA_VERSION,
+    };
     use std::path::PathBuf;
 
     fn sample() -> Snapshot {
@@ -1029,7 +1639,17 @@ mod tests {
                 essential_matrix_bits: Some(std::array::from_fn(|i| (i as f64 + 0.25).to_bits())),
                 fundamental_matrix_bits: Some(std::array::from_fn(|i| (i as f64 - 0.5).to_bits())),
                 homography_matrix_bits: None,
-                relative_rotation_bits: None,
+                relative_rotation_bits: Some([
+                    1.0f64.to_bits(),
+                    0.0f64.to_bits(),
+                    0.0f64.to_bits(),
+                    0.0f64.to_bits(),
+                    1.0f64.to_bits(),
+                    0.0f64.to_bits(),
+                    0.0f64.to_bits(),
+                    0.0f64.to_bits(),
+                    1.0f64.to_bits(),
+                ]),
                 relative_translation_bits: Some([
                     0.1f64.to_bits(),
                     0.2f64.to_bits(),
@@ -1072,10 +1692,32 @@ mod tests {
             compact.pairs[0].essential_matrix_bits,
             snapshot.pairs[0].essential_matrix_bits
         );
+        assert_eq!(
+            compact.pairs[0].relative_rotation_bits,
+            snapshot.pairs[0].relative_rotation_bits
+        );
         assert_eq!(compact.pairs[0].raw_match_count, 0);
         assert!(compact.pairs[0].raw_matches.is_empty());
         assert!(compact.pairs[0].accepted_inlier_indices.is_empty());
         assert!(compact.pairs[0].essential_inlier_indices.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn capped_mapper_read_validates_full_pair_then_retains_prefix() {
+        let path = temp_path("compact_capped");
+        let snapshot = sample();
+        write(&path, &snapshot).unwrap();
+        let compact = read_mapper_compact_capped(&path, 1).unwrap();
+        assert_eq!(compact.accepted_match_count, 1);
+        assert_eq!(compact.pairs[0].matches, &snapshot.pairs[0].matches[..1]);
+        assert!(compact.pairs[0].essential_matches.is_none());
+        assert_eq!(
+            compact.pairs[0].relative_rotation_bits,
+            snapshot.pairs[0].relative_rotation_bits
+        );
+        assert!(compact.pairs[0].raw_matches.is_empty());
+        assert!(compact.pairs[0].accepted_inlier_indices.is_empty());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1088,6 +1730,8 @@ mod tests {
 
         let error = read_mapper_compact(&path).unwrap_err();
         assert!(error.contains("accepted match"));
+        let capped_error = read_mapper_compact_capped(&path, 0).unwrap_err();
+        assert!(capped_error.contains("accepted match"));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1233,5 +1877,103 @@ mod tests {
         second.verifier_config = "different".into();
         let error = merge(&[first, second]).unwrap_err();
         assert!(error.contains("configuration"));
+    }
+
+    #[test]
+    fn streamed_file_merge_is_byte_identical_to_owned_merge() {
+        let first_path = temp_path("file-merge-first");
+        let second_path = temp_path("file-merge-second");
+        let expected_path = temp_path("file-merge-expected");
+        let output_path = temp_path("file-merge-output");
+
+        let mut first = sample();
+        first.image_names.push("c.png".into());
+        first.feature_counts.push(5);
+        first.pairs[0].image_i = 2;
+        first.pairs[0].image_j = 0;
+        let mut second = first.clone();
+        second.pairs[0].image_i = 1;
+        second.pairs[0].image_j = 2;
+
+        write(&first_path, &first).unwrap();
+        write(&second_path, &second).unwrap();
+        let expected = merge(&[first.clone(), second.clone()]).unwrap();
+        write(&expected_path, &expected).unwrap();
+
+        merge_files_atomic(&output_path, &[first_path.clone(), second_path.clone()]).unwrap();
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            std::fs::read(&expected_path).unwrap()
+        );
+        assert_eq!(read(&output_path).unwrap(), expected);
+
+        for path in [first_path, second_path, expected_path, output_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn streamed_file_merge_rejects_overlap_without_replacing_output() {
+        let first_path = temp_path("file-merge-overlap-first");
+        let second_path = temp_path("file-merge-overlap-second");
+        let output_path = temp_path("file-merge-overlap-output");
+        let first = sample();
+        let second = first.clone();
+        write(&first_path, &first).unwrap();
+        write(&second_path, &second).unwrap();
+        std::fs::write(&output_path, b"previous-output").unwrap();
+
+        let error = merge_files_atomic(&output_path, &[first_path.clone(), second_path.clone()])
+            .unwrap_err();
+        assert!(error.contains("overlap"));
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"previous-output");
+
+        for path in [first_path, second_path, output_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn streamed_file_merge_rejects_checksum_without_replacing_output() {
+        let first_path = temp_path("file-merge-checksum-first");
+        let second_path = temp_path("file-merge-checksum-second");
+        let output_path = temp_path("file-merge-checksum-output");
+        write(&first_path, &sample()).unwrap();
+        write(&second_path, &sample()).unwrap();
+        let mut corrupted = std::fs::read(&second_path).unwrap();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 1;
+        std::fs::write(&second_path, corrupted).unwrap();
+        std::fs::write(&output_path, b"previous-output").unwrap();
+
+        let error = merge_files_atomic(&output_path, &[first_path.clone(), second_path.clone()])
+            .unwrap_err();
+        assert!(error.contains("checksum"));
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"previous-output");
+
+        for path in [first_path, second_path, output_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn streamed_file_merge_rejects_raw_index_without_replacing_output() {
+        let first_path = temp_path("file-merge-raw-index-first");
+        let second_path = temp_path("file-merge-raw-index-second");
+        let output_path = temp_path("file-merge-raw-index-output");
+        write(&first_path, &sample()).unwrap();
+        let mut invalid = sample();
+        invalid.pairs[0].accepted_inlier_indices[0] = 99;
+        write(&second_path, &invalid).unwrap();
+        std::fs::write(&output_path, b"previous-output").unwrap();
+
+        let error = merge_files_atomic(&output_path, &[first_path.clone(), second_path.clone()])
+            .unwrap_err();
+        assert!(error.contains("accepted match"));
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"previous-output");
+
+        for path in [first_path, second_path, output_path] {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }

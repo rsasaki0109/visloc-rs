@@ -29,8 +29,10 @@ pub use camera_rig::{
 
 pub mod rig_sfm;
 pub use rig_sfm::{
-    incremental_rig_sfm, RigBaStats, RigFrame, RigFrameImage, RigSfmConfig, RigSfmError,
-    RigSfmResult, RigSfmWorkStats,
+    incremental_rig_sfm, metric_temporal_quadrilateral_tracks,
+    metric_temporal_quadrilateral_tracks_in_frame_gap, refine_rig_sfm_with_fixed_frame_rotations,
+    RigBaStats, RigFrame, RigFrameImage, RigSfmConfig, RigSfmError, RigSfmResult, RigSfmWorkStats,
+    RigTrackBuilder,
 };
 
 pub mod covisibility_ba;

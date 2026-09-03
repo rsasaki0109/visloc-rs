@@ -1,0 +1,72 @@
+{
+  "schema": "visloc_m9_streamed_match_worker_ab_v1",
+  "recorded_at": "2026-09-03T13:15:00+09:00",
+  "status": "single_run_exact_output_ab_pass_10k_pending",
+  "purpose": "Bound descriptor residency in the persistent match worker without changing any verified-pair snapshot bytes.",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "images": 1000,
+    "candidate_pairs": 7000,
+    "candidate_shards": 219,
+    "candidate_index_sha256": "5249483ef4e8904edbaf187ff41bdddea3179ae509b6d64eb02461e9857bf6ca",
+    "feature_manifest_sha256": "5c525e54670bf9cd43be9b4e63b5926e8810ed99839f4380a683306d7a863d6e"
+  },
+  "software": {
+    "base_git_commit": "371ba09571500172e9c2b6c25cae558979bad210",
+    "worktree_note": "streaming implementation was uncommitted for this A/B",
+    "cached_stream_binary_sha256": "1c8a52e6911c92303f07cc837350eec430fef0ae6e3705d732dcc4820f0b2e73",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)"
+  },
+  "contract": {
+    "feature_extractor": "files",
+    "matcher": "nn",
+    "verification_mode": "full",
+    "min_matches": 12,
+    "match_ratio": 0.8,
+    "rayon_threads": 4,
+    "malloc_arena_max": 1,
+    "descriptor_cache_rows": 65536,
+    "concurrent_load_note": "all arms ran while the same eight-shard 10k feature extraction job was active; timings are diagnostic single runs, not final medians"
+  },
+  "results": {
+    "resident": {
+      "wall_seconds": 125.55,
+      "user_seconds": 112.11,
+      "system_seconds": 1.22,
+      "peak_rss_kib": 158056,
+      "exit_status": 0
+    },
+    "streamed_without_cache": {
+      "wall_seconds": 195.05,
+      "user_seconds": 152.02,
+      "system_seconds": 2.26,
+      "peak_rss_kib": 25928,
+      "exit_status": 0
+    },
+    "streamed_lru_cache": {
+      "wall_seconds": 118.20,
+      "user_seconds": 127.04,
+      "system_seconds": 4.45,
+      "peak_rss_kib": 57600,
+      "exit_status": 0
+    },
+    "cached_vs_resident": {
+      "wall_speedup": 1.0622,
+      "peak_rss_reduction_percent": 63.56
+    }
+  },
+  "exact_output_proof": {
+    "snapshot_files_compared": 219,
+    "resident_snapshot_hash_manifest_sha256": "fb9254aeac78f3817ff559f0da8c4ecdaad036af3db4ad313e8f82af1beea220",
+    "streamed_snapshot_hash_manifest_sha256": "fb9254aeac78f3817ff559f0da8c4ecdaad036af3db4ad313e8f82af1beea220",
+    "byte_identical": true,
+    "feature_fingerprint_revalidated_on_each_cache_miss": true
+  },
+  "acceptance": {
+    "exact_output": "pass",
+    "bounded_descriptor_state": "pass_at_1k",
+    "single_run_performance": "pass",
+    "final_10k_and_three_run_gate": "pending"
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "schema": "visloc_m8_openloris_dense256x2_10k_rotation_gate_ab_v1",
+  "recorded_at": "2026-09-03T17:00:00+09:00",
+  "status": "quality_improvement_but_m8_gate_failed",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "frames": 5000,
+    "images": 10000,
+    "feature_rows": 3476573,
+    "ground_truth_used_only_after_mapping": true
+  },
+  "verified_graph": {
+    "candidate_pairs": 80000,
+    "verified_pairs": 64862,
+    "accepted_correspondences_uncapped": 7698149,
+    "mapper_correspondences_at_pair_cap_256": 7551021,
+    "long_pairs_checked_at_frame_gap_128": 5056,
+    "snapshot_sha256": "02cd6475098453cb6cf93761ff990ea31acba86217b715dfaf43660f3af0f05c"
+  },
+  "pose_prior": {
+    "source": "visloc first-pass local-track reconstruction; COLMAP text is only the interchange format",
+    "ground_truth_used": false,
+    "component_000_images_sha256": "23418b4ba93ab06b5a701dd08ba4cb41b87455323975b17ec6c71df959f53364",
+    "component_001_images_sha256": "2e9e3171ffdff51fc2d7d4c346fa5d3d64dae11e91beee4d7302e5ab20cf8ff5"
+  },
+  "results": {
+    "ungated_control": {
+      "registered_frames": 4968,
+      "registered_images": 9936,
+      "models": 2,
+      "largest_model_frames": 4492,
+      "mean_reprojection_error_px": 0.811234565,
+      "mapper_seconds": 96.947,
+      "peak_rss_kib": 1121496,
+      "ate_rmse_m": 0.8780638409006788,
+      "ate_p95_m": 1.4852709962357342
+    },
+    "rotation_5deg_e1": {
+      "structure_long_pairs": 179,
+      "deferred_long_pairs": 4877,
+      "registered_frames": 4968,
+      "registered_images": 9936,
+      "models": 2,
+      "largest_model_frames": 4492,
+      "mean_reprojection_error_px": 0.798247379,
+      "mapper_seconds": 97.138768,
+      "process_wall_seconds": 100.17,
+      "peak_rss_kib": 1124644,
+      "ate_rmse_m": 0.63996688437647,
+      "ate_median_m": 0.466895962515944,
+      "ate_p95_m": 1.174448983518099,
+      "component_000_images_sha256": "5bb60f64e1f22c6bc1e1a87b677ac71a1dc642bde2dc2b1847dacff65c7dac0a",
+      "component_001_images_sha256": "2e9e3171ffdff51fc2d7d4c346fa5d3d64dae11e91beee4d7302e5ab20cf8ff5"
+    },
+    "rotation_4deg_e1": {
+      "structure_long_pairs": 156,
+      "mean_reprojection_error_px": 0.791601657,
+      "mapper_seconds": 99.390410,
+      "peak_rss_kib": 1125020,
+      "ate_rmse_m": 0.9245417273920655,
+      "ate_p95_m": 1.5440444841014065
+    },
+    "rotation_10deg_e1": {
+      "structure_long_pairs": 286,
+      "mean_reprojection_error_px": 0.796835516,
+      "mapper_seconds": 99.048561,
+      "peak_rss_kib": 1124764,
+      "ate_rmse_m": 0.9147356912318766,
+      "ate_p95_m": 1.5876855502885299
+    },
+    "rotation_5deg_e35": {
+      "structure_long_pairs": 164,
+      "mean_reprojection_error_px": 0.799133546,
+      "mapper_seconds": 96.967823,
+      "peak_rss_kib": 1125388,
+      "ate_rmse_m": 0.945989609133546,
+      "ate_p95_m": 1.3447489018048968
+    },
+    "rotation_5deg_then_bounded_chordal_fixed_rotation_ba": {
+      "status": "rejected_no_material_quality_gain_and_too_slow",
+      "candidate_rotation_pairs": 22556,
+      "deduped_rotation_pairs": 13394,
+      "averaged_frames": 12,
+      "unsafe_update_components": 50,
+      "max_proposed_update_deg": 156.335967,
+      "max_applied_update_deg": 0.81757,
+      "support_rollback": false,
+      "registered_frames": 4968,
+      "registered_images": 9936,
+      "models": 2,
+      "largest_model_frames": 4492,
+      "tracks": 74212,
+      "observations": 574238,
+      "mean_reprojection_error_px": 0.763807534,
+      "mapper_seconds": 1307.539551,
+      "process_wall_seconds": 1310.81,
+      "peak_rss_kib": 1701412,
+      "ate_rmse_m": 0.6382404881436353,
+      "ate_median_m": 0.4673222564864769,
+      "ate_p95_m": 1.1732893074693713,
+      "component_000_images_sha256": "9b6cb9d207241a3a5a490d294ac6b58e00c1e120d4cd141014d4b599b54e13eb",
+      "component_001_images_sha256": "2c8e147eeea39dc514ff79ebec82eaa8165aff80564a19a698c3766e10782a29"
+    }
+  },
+  "colmap_10k_gate": {
+    "registered_images_min": 9998,
+    "largest_model_frames_min": 4494,
+    "models_max": 2,
+    "mean_reprojection_error_px_max": 0.903003,
+    "ate_rmse_m_max": 0.3843065,
+    "ate_p95_m_max": 0.638669,
+    "peak_rss_kib_max": 2097152
+  },
+  "acceptance": {
+    "best_variant": "rotation_5deg_e1",
+    "reprojection": "pass",
+    "mapper_speed": "pass",
+    "memory": "pass",
+    "registration": "fail",
+    "trajectory": "fail",
+    "promote_as_m8_champion": false,
+    "next_action": "reject full fixed-rotation BA; diagnose the long-range rotation graph and use bounded local/incremental refinement only after a synthetic plus small-tier quality gate"
+  }
+}

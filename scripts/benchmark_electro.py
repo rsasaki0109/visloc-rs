@@ -33,10 +33,12 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE_MAGIC = "visloc_candidate_manifest_v1"
+CANDIDATE_SHARD_MAGIC_V2 = "visloc_candidate_shard_v2"
 CANDIDATE_INDEX_SCHEMA = "visloc_electro_candidate_shards_v1"
 MATCH_INDEX_SCHEMA = "visloc_electro_match_shards_v1"
 FEATURE_MANIFEST_SCHEMA = "visloc_electro_feature_manifest_v1"
 PERSISTENT_MATCH_WORKER_PLAN_MAGIC = "visloc_match_worker_plan_v1"
+PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2 = "visloc_match_worker_plan_v2"
 SHA256_RE = set("0123456789abcdef")
 GNU_TIME = Path("/usr/bin/time")
 PERSISTENT_MATCH_ENV = {
@@ -206,6 +208,149 @@ def parse_candidate_manifest_with_metadata(
     return names, pairs, metadata
 
 
+def candidate_image_manifest_sha256(image_names: list[str]) -> str:
+    """Hash the canonical image order without duplicating it in each shard.
+
+    The payload deliberately uses the same line spelling as the image entries
+    in ``visloc_candidate_manifest_v1``.  It is kept separate from the source
+    manifest digest so a compact shard can bind both the source artifact and
+    the canonical image order carried by a persistent-worker plan.
+    """
+
+    digest = hashlib.sha256()
+    for index, name in enumerate(image_names):
+        if not isinstance(name, str) or not name or any(char.isspace() for char in name):
+            raise ValidationError(f"candidate image name {name!r} cannot contain whitespace")
+        digest.update(f"image {index} {name}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def parse_candidate_shard_v2(path: Path) -> tuple[dict[str, Any], list[tuple[int, int]]]:
+    """Parse a compact pair-index-only candidate shard.
+
+    A v2 shard has no image-name rows or policy metadata.  Those are bound by
+    the source manifest SHA-256; the image count/order SHA-256 is repeated in
+    the persistent plan and checked by the Rust worker before matching.
+    """
+
+    lines = _noncomment_lines(path)
+    cursor = 0
+
+    def next_line(label: str) -> str:
+        nonlocal cursor
+        if cursor >= len(lines):
+            raise ValidationError(f"candidate shard {path} is truncated while reading {label}")
+        value = lines[cursor]
+        cursor += 1
+        return value
+
+    if next_line("header") != CANDIDATE_SHARD_MAGIC_V2:
+        raise ValidationError(f"candidate shard {path} has unsupported v2 header")
+
+    def hash_line(label: str) -> str:
+        fields = next_line(label).split()
+        if len(fields) != 2 or fields[0] != label:
+            raise ValidationError(f"candidate shard {path} requires `{label} SHA256`")
+        return _sha256(fields[1], f"candidate shard {path} {label}")
+
+    def count_line(label: str) -> int:
+        fields = next_line(label).split()
+        if len(fields) != 2 or fields[0] != label:
+            raise ValidationError(f"candidate shard {path} requires `{label} N`")
+        try:
+            value = int(fields[1])
+        except ValueError as exc:
+            raise ValidationError(f"candidate shard {path} {label} count is not numeric") from exc
+        if value < 0:
+            raise ValidationError(f"candidate shard {path} {label} count must be non-negative")
+        return value
+
+    source_manifest_sha256 = hash_line("source_manifest_sha256")
+    image_manifest_sha256 = hash_line("image_manifest_sha256")
+    image_count = count_line("images")
+    if image_count < 2:
+        raise ValidationError(f"candidate shard {path} needs at least two images")
+    pair_count = count_line("pairs")
+    pairs: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for pair_number in range(pair_count):
+        fields = next_line("pair entry").split()
+        if len(fields) != 3 or fields[0] != "pair":
+            raise ValidationError(f"candidate shard {path} pair {pair_number} must be pair I J")
+        try:
+            first, second = int(fields[1]), int(fields[2])
+        except ValueError as exc:
+            raise ValidationError(
+                f"candidate shard {path} pair {pair_number} is not numeric"
+            ) from exc
+        if not (0 <= first < second < image_count):
+            raise ValidationError(
+                f"candidate shard {path} pair {pair_number} must satisfy 0 <= I < J < {image_count}"
+            )
+        pair = (first, second)
+        if pair in seen:
+            raise ValidationError(f"candidate shard {path} repeats pair {pair}")
+        seen.add(pair)
+        pairs.append(pair)
+    if cursor != len(lines):
+        raise ValidationError(f"candidate shard {path} has unexpected trailing data")
+    return (
+        {
+            "source_manifest_sha256": source_manifest_sha256,
+            "image_manifest_sha256": image_manifest_sha256,
+            "image_count": image_count,
+            "pair_count": pair_count,
+        },
+        pairs,
+    )
+
+
+def write_candidate_shard_v2(
+    path: Path,
+    image_count: int,
+    source_manifest_sha256: str,
+    image_manifest_sha256: str,
+    pairs: Iterable[tuple[int, int]],
+    *,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Atomically write a compact pair-index-only candidate shard."""
+
+    if image_count < 2:
+        raise ValidationError("candidate shard requires at least two images")
+    source_manifest_sha256 = _sha256(source_manifest_sha256, "candidate source manifest hash")
+    image_manifest_sha256 = _sha256(image_manifest_sha256, "candidate image manifest hash")
+    pairs = list(pairs)
+    lines = [
+        CANDIDATE_SHARD_MAGIC_V2,
+        f"source_manifest_sha256 {source_manifest_sha256}",
+        f"image_manifest_sha256 {image_manifest_sha256}",
+        f"images {image_count}",
+    ]
+    # Keep policy labels in comments solely for human inspection and to make
+    # accidental edits visible to the shard digest.  They are not part of the
+    # v2 parse state and therefore do not replicate the image manifest.
+    for key, value in sorted((metadata or {}).items()):
+        if not key or not value or any(char.isspace() for char in key) or any(char.isspace() for char in value):
+            raise ValidationError(f"candidate metadata must use whitespace-free KEY VALUE: {key!r}={value!r}")
+        lines.append(f"# metadata {key} {value}")
+    # Comments belong before the pair envelope so all non-comment readers see
+    # the fixed v2 header/hash/count ordering.
+    lines.append(f"pairs {len(pairs)}")
+    seen: set[tuple[int, int]] = set()
+    for pair in pairs:
+        if len(pair) != 2:
+            raise ValidationError(f"candidate pair must contain two indices: {pair!r}")
+        first, second = pair
+        if not (0 <= first < second < image_count):
+            raise ValidationError(f"candidate pair {pair!r} is outside canonical image order")
+        if pair in seen:
+            raise ValidationError(f"candidate pair {pair!r} is duplicated")
+        seen.add(pair)
+        lines.append(f"pair {first} {second}")
+    _atomic_bytes(path, ("\n".join(lines) + "\n").encode("utf-8"))
+
+
 def write_candidate_manifest(
     path: Path,
     image_names: list[str],
@@ -262,6 +407,8 @@ def split_candidate_manifest(
     pair_source: str | None = None,
     temporal_pyramid_max_offset: int | None = None,
     rig_frame_manifest: Path | None = None,
+    retrieval_component_manifest: Path | None = None,
+    retrieval_min_frame_gap: int | None = None,
 ) -> dict[str, Any]:
     """Create deterministic candidate shards and an image-bound index.
 
@@ -277,20 +424,39 @@ def split_candidate_manifest(
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     source_hash = sha256_file(source)
+    image_manifest_hash = candidate_image_manifest_sha256(names)
     shards: list[dict[str, Any]] = []
     for shard_number, start in enumerate(range(0, len(pairs), pairs_per_shard)):
         end = min(start + pairs_per_shard, len(pairs))
         path = output_dir / f"candidate-{shard_number:06d}.txt"
         expected_pairs = pairs[start:end]
         reusable = False
+        shard_format = "v2"
         if resume and path.is_file():
             try:
-                existing_names, existing_pairs, existing_metadata = parse_candidate_manifest_with_metadata(path)
-                reusable = (
-                    existing_names == names
-                    and existing_pairs == expected_pairs
-                    and existing_metadata == metadata
-                )
+                existing_lines = _noncomment_lines(path)
+                if not existing_lines:
+                    raise ValidationError(f"candidate shard {path} is empty")
+                first_line = existing_lines[0]
+                if first_line == CANDIDATE_SHARD_MAGIC_V2:
+                    envelope, existing_pairs = parse_candidate_shard_v2(path)
+                    shard_format = "v2"
+                    reusable = (
+                        envelope["source_manifest_sha256"] == source_hash
+                        and envelope["image_manifest_sha256"] == image_manifest_hash
+                        and envelope["image_count"] == len(names)
+                        and existing_pairs == expected_pairs
+                    )
+                elif first_line == CANDIDATE_MAGIC:
+                    parse_candidate_manifest_with_metadata(path)
+                    # A valid legacy shard is accepted for compatibility, but
+                    # rewrite it as compact v2 on the next prepare/resume so
+                    # an old O(N*shards) artifact is migrated rather than
+                    # perpetuated.
+                    reusable = False
+                    shard_format = "v1"
+                else:
+                    reusable = False
                 if reusable:
                     # A successful parse is not enough: the index records and
                     # later resume checks rely on this exact digest.
@@ -298,7 +464,15 @@ def split_candidate_manifest(
             except ValidationError:
                 reusable = False
         if not reusable:
-            write_candidate_manifest(path, names, expected_pairs, metadata=metadata)
+            write_candidate_shard_v2(
+                path,
+                len(names),
+                source_hash,
+                image_manifest_hash,
+                expected_pairs,
+                metadata=metadata,
+            )
+            shard_format = "v2"
         digest = sha256_file(path)
         shards.append(
             {
@@ -309,6 +483,7 @@ def split_candidate_manifest(
                 "pair_count": end - start,
                 "sha256": digest,
                 "status": "complete",
+                "format": shard_format,
             }
         )
     candidate_policy: dict[str, Any] = {
@@ -320,6 +495,10 @@ def split_candidate_manifest(
         candidate_policy["pair_source"] = pair_source
     if temporal_pyramid_max_offset is not None:
         candidate_policy["temporal_pyramid_max_offset"] = temporal_pyramid_max_offset
+    if retrieval_min_frame_gap is not None:
+        if retrieval_min_frame_gap <= 0:
+            raise ValidationError("retrieval_min_frame_gap must be positive")
+        candidate_policy["retrieval_min_frame_gap"] = retrieval_min_frame_gap
     if local_grouping is not None:
         candidate_policy["local_grouping"] = local_grouping
     if rig_frame_manifest is not None:
@@ -328,10 +507,23 @@ def split_candidate_manifest(
             raise ValidationError(f"rig frame manifest is missing: {rig_frame_manifest}")
         candidate_policy["rig_frame_manifest"] = str(rig_frame_manifest)
         candidate_policy["rig_frame_manifest_sha256"] = sha256_file(rig_frame_manifest)
+    if retrieval_component_manifest is not None:
+        retrieval_component_manifest = retrieval_component_manifest.expanduser().resolve()
+        if not retrieval_component_manifest.is_file():
+            raise ValidationError(
+                f"retrieval component manifest is missing: {retrieval_component_manifest}"
+            )
+        candidate_policy["retrieval_component_manifest"] = str(
+            retrieval_component_manifest
+        )
+        candidate_policy["retrieval_component_manifest_sha256"] = sha256_file(
+            retrieval_component_manifest
+        )
     index = {
         "schema": CANDIDATE_INDEX_SCHEMA,
         "source_manifest": str(source),
         "source_manifest_sha256": source_hash,
+        "image_manifest_sha256": image_manifest_hash,
         "image_names": names,
         "pair_count": len(pairs),
         "pairs_per_shard": pairs_per_shard,
@@ -375,6 +567,16 @@ def validate_candidate_shards(index_path: Path) -> dict[str, Any]:
     names = index.get("image_names")
     if not isinstance(names, list) or len(names) < 2 or any(not isinstance(name, str) for name in names):
         raise ValidationError("candidate index image_names must be a non-empty string list")
+    expected_image_manifest_hash = candidate_image_manifest_sha256(names)
+    recorded_image_manifest_hash = index.get("image_manifest_sha256")
+    if recorded_image_manifest_hash is not None:
+        recorded_image_manifest_hash = _sha256(
+            recorded_image_manifest_hash, "candidate image manifest hash"
+        )
+        if recorded_image_manifest_hash != expected_image_manifest_hash:
+            raise ValidationError(
+                "candidate index image manifest hash differs from image_names"
+            )
     pair_count = index.get("pair_count")
     if not isinstance(pair_count, int) or pair_count < 0:
         raise ValidationError("candidate index pair_count must be a non-negative integer")
@@ -428,6 +630,31 @@ def validate_candidate_shards(index_path: Path) -> dict[str, Any]:
                 raise ValidationError(
                     f"rig frame manifest hash mismatch: expected {expected_rig_hash}, got {actual_rig_hash}"
                 )
+        component_manifest_value = policy.get("retrieval_component_manifest")
+        component_manifest_hash = policy.get("retrieval_component_manifest_sha256")
+        if (component_manifest_value is None) != (component_manifest_hash is None):
+            raise ValidationError(
+                "candidate index retrieval_component_manifest and its sha256 must be recorded together"
+            )
+        if component_manifest_value is not None:
+            if not isinstance(component_manifest_value, str) or not component_manifest_value:
+                raise ValidationError(
+                    "candidate index retrieval_component_manifest must be a path"
+                )
+            component_manifest = Path(component_manifest_value).expanduser()
+            expected_component_hash = _sha256(
+                component_manifest_hash, "retrieval component manifest hash"
+            )
+            if not component_manifest.is_file():
+                raise ValidationError(
+                    f"retrieval component manifest is missing: {component_manifest}"
+                )
+            actual_component_hash = sha256_file(component_manifest)
+            if actual_component_hash != expected_component_hash:
+                raise ValidationError(
+                    "retrieval component manifest hash mismatch: "
+                    f"expected {expected_component_hash}, got {actual_component_hash}"
+                )
     metadata = index.get("candidate_manifest_metadata", {})
     if not isinstance(metadata, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)
@@ -454,11 +681,43 @@ def validate_candidate_shards(index_path: Path) -> dict[str, Any]:
             raise ValidationError(
                 f"candidate shard {expected_id} hash mismatch: expected {expected_hash}, got {actual_hash}"
             )
-        shard_names, shard_pairs, shard_metadata = parse_candidate_manifest_with_metadata(path)
-        if shard_names != names:
-            raise ValidationError(f"candidate shard {expected_id} image order differs from index")
-        if shard_metadata != metadata:
-            raise ValidationError(f"candidate shard {expected_id} metadata differs from index")
+        shard_format = shard.get("format")
+        shard_lines = _noncomment_lines(path)
+        if not shard_lines:
+            raise ValidationError(f"candidate shard {expected_id} is empty")
+        if shard_lines[0] == CANDIDATE_SHARD_MAGIC_V2:
+            if shard_format is None:
+                shard_format = "v2"
+                shard["format"] = shard_format
+            if shard_format not in (None, "v2"):
+                raise ValidationError(f"candidate shard {expected_id} format disagrees with content")
+            envelope, shard_pairs = parse_candidate_shard_v2(path)
+            if envelope["source_manifest_sha256"] != expected_source_hash:
+                raise ValidationError(
+                    f"candidate shard {expected_id} source manifest hash differs from index"
+                )
+            if envelope["image_manifest_sha256"] != expected_image_manifest_hash:
+                raise ValidationError(
+                    f"candidate shard {expected_id} image manifest hash differs from index"
+                )
+            if envelope["image_count"] != len(names):
+                raise ValidationError(
+                    f"candidate shard {expected_id} image count differs from index"
+                )
+            shard_metadata: dict[str, str] = {}
+        elif shard_lines[0] == CANDIDATE_MAGIC:
+            if shard_format is None:
+                shard_format = "v1"
+                shard["format"] = shard_format
+            if shard_format not in (None, "v1"):
+                raise ValidationError(f"candidate shard {expected_id} format disagrees with content")
+            shard_names, shard_pairs, shard_metadata = parse_candidate_manifest_with_metadata(path)
+            if shard_names != names:
+                raise ValidationError(f"candidate shard {expected_id} image order differs from index")
+            if shard_metadata != metadata:
+                raise ValidationError(f"candidate shard {expected_id} metadata differs from index")
+        else:
+            raise ValidationError(f"candidate shard {expected_id} has unsupported header")
         start, end = shard.get("start"), shard.get("end")
         if not isinstance(start, int) or not isinstance(end, int) or start != cursor or end < start:
             raise ValidationError(f"candidate shard {expected_id} has a non-contiguous range")
@@ -477,6 +736,8 @@ def validate_candidate_shards(index_path: Path) -> dict[str, Any]:
         "index": index,
         "index_sha256": sha256_file(index_path),
         "image_names": names,
+        "source_manifest_sha256": expected_source_hash,
+        "image_manifest_sha256": expected_image_manifest_hash,
         "pair_count": pair_count,
         "candidate_manifest_metadata": metadata,
         "shards": shards,
@@ -714,6 +975,8 @@ def build_candidate_command(
     candidate_budget: int | None = None,
     rig_local_grouping: bool = False,
     rig_frame_manifest: Path | None = None,
+    retrieval_component_manifest: Path | None = None,
+    retrieval_min_frame_gap: int | None = None,
     pair_source: str = "vlad-union",
     temporal_pyramid_max_offset: int = 32,
     stream_candidate_features: bool = False,
@@ -779,6 +1042,22 @@ def build_candidate_command(
         if pair_source != "temporal-pyramid":
             raise ValidationError("rig_frame_manifest requires pair_source temporal-pyramid")
         command.extend(["--rig-frame-manifest", str(rig_frame_manifest)])
+    if retrieval_component_manifest is not None:
+        if pair_source != "temporal-pyramid":
+            raise ValidationError(
+                "retrieval_component_manifest requires pair_source temporal-pyramid"
+            )
+        command.extend(
+            ["--retrieval-component-manifest", str(retrieval_component_manifest)]
+        )
+    if retrieval_min_frame_gap is not None:
+        if pair_source != "temporal-pyramid":
+            raise ValidationError(
+                "retrieval_min_frame_gap requires pair_source temporal-pyramid"
+            )
+        if retrieval_min_frame_gap <= 0:
+            raise ValidationError("retrieval_min_frame_gap must be positive")
+        command.extend(["--retrieval-min-frame-gap", str(retrieval_min_frame_gap)])
     if candidate_budget is not None:
         command.extend(["--candidate-budget", str(candidate_budget)])
     if stream_candidate_features:
@@ -864,6 +1143,7 @@ def build_persistent_match_command(
     images_dir: Path | None = None,
     min_matches: int = 30,
     match_ratio: float = 0.8,
+    stream_match_features: bool = False,
 ) -> list[str]:
     """Build the single-process frozen NN/full persistent worker command."""
 
@@ -896,6 +1176,8 @@ def build_persistent_match_command(
     ]
     if images_dir is not None:
         command.extend(["--images-dir", str(images_dir)])
+    if stream_match_features:
+        command.append("--stream-match-features")
     return command
 
 
@@ -1060,10 +1342,15 @@ def parse_persistent_match_worker_plan(path: Path) -> dict[str, Any]:
             raise ValidationError(f"persistent match worker {label} count must be non-negative")
         return value
 
-    if next_line("header") != PERSISTENT_MATCH_WORKER_PLAN_MAGIC:
+    schema = next_line("header")
+    if schema not in {
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2,
+    }:
         raise ValidationError(
             f"persistent match worker plan {path} has unsupported header"
         )
+    is_v2 = schema == PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2
     image_count = count_line("images")
     if image_count < 2:
         raise ValidationError("persistent match worker plan needs at least two images")
@@ -1086,6 +1373,8 @@ def parse_persistent_match_worker_plan(path: Path) -> dict[str, Any]:
             raise ValidationError(f"persistent match worker plan requires `{label} SHA256`")
         return _sha256(fields[1], label)
 
+    candidate_source_sha256 = hash_line("candidate_source_sha256") if is_v2 else None
+    image_manifest_sha256 = hash_line("image_manifest_sha256") if is_v2 else None
     candidate_index_sha256 = hash_line("candidate_index_sha256")
     feature_manifest_sha256 = hash_line("feature_manifest_sha256")
     pair_count = count_line("pairs")
@@ -1139,8 +1428,10 @@ def parse_persistent_match_worker_plan(path: Path) -> dict[str, Any]:
     if cursor != len(lines):
         raise ValidationError(f"persistent match worker plan {path} has unexpected trailing data")
     return {
-        "schema": PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
+        "schema": schema,
         "image_names": image_names,
+        "candidate_source_sha256": candidate_source_sha256,
+        "image_manifest_sha256": image_manifest_sha256,
         "pair_count": pair_count,
         "candidate_index_sha256": candidate_index_sha256,
         "feature_manifest_sha256": feature_manifest_sha256,
@@ -1172,6 +1463,11 @@ def validate_persistent_match_worker_plan(
     artifact_root = match_index_path.resolve().parent.parent
     if plan["image_names"] != candidate["image_names"]:
         raise ValidationError("persistent worker plan image order differs from candidate index")
+    if plan["schema"] == PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2:
+        if plan["candidate_source_sha256"] != candidate["source_manifest_sha256"]:
+            raise ValidationError("persistent worker plan candidate source hash differs")
+        if plan["image_manifest_sha256"] != candidate["image_manifest_sha256"]:
+            raise ValidationError("persistent worker plan image manifest hash differs")
     if plan["candidate_index_sha256"] != candidate["index_sha256"]:
         raise ValidationError("persistent worker plan candidate index hash differs")
     if plan["feature_manifest_sha256"] != sha256_file(feature_manifest_path):
@@ -1247,15 +1543,31 @@ def write_persistent_match_worker_plan(
         match_index_path.resolve().parent, artifact_root, "match index directory"
     )
     feature_manifest_sha256 = sha256_file(feature_manifest_path)
+    plan_schema = (
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2
+        if any(shard.get("format") == "v2" for shard in candidate["shards"])
+        else PERSISTENT_MATCH_WORKER_PLAN_MAGIC
+    )
     lines = [
-        PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
+        plan_schema,
         f"images {len(candidate['image_names'])}",
         *[f"image {index} {name}" for index, name in enumerate(candidate["image_names"])],
-        f"candidate_index_sha256 {candidate['index_sha256']}",
-        f"feature_manifest_sha256 {feature_manifest_sha256}",
-        f"pairs {sum(int(candidate['shards'][entry['id']]['pair_count']) for entry in pending)}",
-        f"shards {len(pending)}",
     ]
+    if plan_schema == PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2:
+        lines.extend(
+            [
+                f"candidate_source_sha256 {candidate['source_manifest_sha256']}",
+                f"image_manifest_sha256 {candidate['image_manifest_sha256']}",
+            ]
+        )
+    lines.extend(
+        [
+            f"candidate_index_sha256 {candidate['index_sha256']}",
+            f"feature_manifest_sha256 {feature_manifest_sha256}",
+            f"pairs {sum(int(candidate['shards'][entry['id']]['pair_count']) for entry in pending)}",
+            f"shards {len(pending)}",
+        ]
+    )
     for entry in pending:
         shard = candidate["shards"][entry["id"]]
         candidate_path = f"{candidate_prefix}/{shard['path']}"
@@ -1324,6 +1636,7 @@ def run_match_shards(
     match_ratio: float = 0.8,
     resume: bool = True,
     persistent_matcher: bool = False,
+    stream_match_features: bool = False,
     feature_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run pending match shards, updating the index only after hash checks."""
@@ -1346,7 +1659,11 @@ def run_match_shards(
             min_matches=min_matches,
             match_ratio=match_ratio,
             resume=resume,
+            stream_match_features=stream_match_features,
         )
+
+    if stream_match_features:
+        raise ValidationError("streamed match features require the persistent matcher")
 
     plan = validate_match_index(match_index_path, candidate_index_path)
     index = plan["index"]
@@ -1665,6 +1982,7 @@ def run_persistent_matcher(
     min_matches: int = 30,
     match_ratio: float = 0.8,
     resume: bool = True,
+    stream_match_features: bool = False,
 ) -> dict[str, Any]:
     """Run all pending shards through one Rust feature-bank process."""
 
@@ -1691,7 +2009,9 @@ def run_persistent_matcher(
     for entry in index["shards"]:
         if entry["id"] in pending_ids:
             entry["status"] = "running"
-    index["worker_mode"] = "persistent-v1"
+    index["worker_mode"] = (
+        "persistent-stream-v1" if stream_match_features else "persistent-v1"
+    )
     index["worker_plan"] = str(plan_path.resolve())
     atomic_json(match_index_path, index)
     root = match_index_path.resolve().parent
@@ -1705,6 +2025,7 @@ def run_persistent_matcher(
         images_dir=images_dir,
         min_matches=min_matches,
         match_ratio=match_ratio,
+        stream_match_features=stream_match_features,
     )
     timing_path = root.parent / "timing" / "persistent-match.time.txt"
     log_path = root / "persistent-match.log"
@@ -1745,7 +2066,8 @@ def run_persistent_matcher(
         require_all=True,
     )
     persistent_worker = {
-        "mode": "persistent-v1",
+        "mode": "persistent-stream-v1" if stream_match_features else "persistent-v1",
+        "stream_match_features": stream_match_features,
         "plan": str(plan_path.resolve()),
         "plan_sha256": sha256_file(plan_path),
         "elapsed_s": worker_elapsed,
@@ -1852,9 +2174,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temporal-pyramid-max-offset", type=int, default=32)
     parser.add_argument(
+        "--retrieval-min-frame-gap",
+        type=int,
+        help="exclude nearer rig-frame pairs from appearance retrieval fill only",
+    )
+    parser.add_argument(
         "--rig-frame-manifest",
         type=Path,
         help="generalized-rig-manifest-v1 used for explicit temporal/cross-camera grouping",
+    )
+    parser.add_argument(
+        "--retrieval-component-manifest",
+        type=Path,
+        help="first-pass retrieval-component-manifest-v1 for cross-component ANN fill",
     )
     parser.add_argument("--candidate-budget", type=int)
     parser.add_argument(
@@ -1879,6 +2211,11 @@ def _parser() -> argparse.ArgumentParser:
         "--persistent-matcher",
         action="store_true",
         help="run all pending match shards in one plan-driven Rust worker (opt-in)",
+    )
+    parser.add_argument(
+        "--stream-match-features",
+        action="store_true",
+        help="hydrate and cache only descriptors needed by each persistent match shard",
     )
     parser.add_argument("--min-pnp-inliers", type=int, default=12)
     parser.add_argument("--max-mapper-matches-per-pair", type=int)
@@ -1923,12 +2260,34 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.persistent_matcher and mode not in {"match", "run"}:
             raise ValidationError("--persistent-matcher is only valid with --match or --run")
+        if args.stream_match_features and not args.persistent_matcher:
+            raise ValidationError("--stream-match-features requires --persistent-matcher")
         if args.rig_frame_manifest is not None:
             if args.pair_source != "temporal-pyramid":
                 raise ValidationError("--rig-frame-manifest requires --pair-source temporal-pyramid")
             args.rig_frame_manifest = args.rig_frame_manifest.expanduser().resolve()
             if not args.rig_frame_manifest.is_file():
                 raise ValidationError(f"rig frame manifest is missing: {args.rig_frame_manifest}")
+        if args.retrieval_component_manifest is not None:
+            if args.pair_source != "temporal-pyramid":
+                raise ValidationError(
+                    "--retrieval-component-manifest requires --pair-source temporal-pyramid"
+                )
+            args.retrieval_component_manifest = (
+                args.retrieval_component_manifest.expanduser().resolve()
+            )
+            if not args.retrieval_component_manifest.is_file():
+                raise ValidationError(
+                    "retrieval component manifest is missing: "
+                    f"{args.retrieval_component_manifest}"
+                )
+        if args.retrieval_min_frame_gap is not None:
+            if args.pair_source != "temporal-pyramid":
+                raise ValidationError(
+                    "--retrieval-min-frame-gap requires --pair-source temporal-pyramid"
+                )
+            if args.retrieval_min_frame_gap <= 0:
+                raise ValidationError("--retrieval-min-frame-gap must be positive")
         artifact_root = args.artifact_root.expanduser().resolve()
         if mode == "verify":
             if not artifact_root.is_dir():
@@ -1991,6 +2350,8 @@ def main(argv: list[str] | None = None) -> int:
                         candidate_budget=args.candidate_budget,
                         rig_local_grouping=args.rig_local_grouping,
                         rig_frame_manifest=args.rig_frame_manifest,
+                        retrieval_component_manifest=args.retrieval_component_manifest,
+                        retrieval_min_frame_gap=args.retrieval_min_frame_gap,
                         pair_source=args.pair_source,
                         temporal_pyramid_max_offset=args.temporal_pyramid_max_offset,
                         stream_candidate_features=args.stream_candidate_features,
@@ -2030,6 +2391,8 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 rig_frame_manifest=args.rig_frame_manifest,
+                retrieval_component_manifest=args.retrieval_component_manifest,
+                retrieval_min_frame_gap=args.retrieval_min_frame_gap,
             )
             candidate_sharding_elapsed = time.monotonic() - sharding_started
         if mode in {"verify", "match", "map"} and not candidate_index_path.is_file():
@@ -2069,6 +2432,7 @@ def main(argv: list[str] | None = None) -> int:
                 match_ratio=args.match_ratio,
                 resume=not args.no_resume,
                 persistent_matcher=args.persistent_matcher,
+                stream_match_features=args.stream_match_features,
                 feature_manifest_path=feature_manifest_path,
             )
             persistent_worker_measurement = match_result.get("persistent_worker")

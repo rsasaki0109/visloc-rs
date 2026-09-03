@@ -1,0 +1,100 @@
+{
+  "schema": "visloc_m8_openloris_positioned_track_merge_ab_v1",
+  "date": "2026-09-04",
+  "dataset": "OpenLORIS corridor1-1, frozen calibrated-rig tiers",
+  "method": {
+    "ground_truth_used_during_mapping": false,
+    "description": "bounded post-registration merge of disjoint positioned track fragments connected by an existing verified correspondence",
+    "gates": "different unambiguous owners, disjoint image sets, 3-D distance, symmetric endpoint cross-reprojection, deterministic winner",
+    "state_bound": "O(total keypoints + total observations + passes * verified matches); no track-pair matrix",
+    "max_passes": 2,
+    "max_cross_reprojection_error_px": 1.0
+  },
+  "tier_1000_nonregression": {
+    "position_distance_m": 0.05,
+    "registered_images": 1000,
+    "models": 1,
+    "mean_reprojection_error_px": 0.720678690,
+    "ate_rmse_m": 0.026703233595482503,
+    "ate_p95_m": 0.04134610748761521,
+    "ate_max_m": 0.08045566543261787,
+    "mapper_seconds": 18.652809,
+    "process_wall_seconds": 19.93,
+    "peak_rss_kib": 141588,
+    "candidate_track_visits": 0,
+    "merged_tracks": 0,
+    "model_text_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "90773af9546ea351f9610721eab2ccac7b6d55f9c0638fd7ce596942012610d6",
+      "points3D_txt": "8850f161ac44f76ef6d512f8c1739493970849a380f6a232c82e3006a33f346a"
+    },
+    "control_text_byte_identical": true,
+    "status": "pass_no_applicable_candidates"
+  },
+  "tier_10000_control": {
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_images": 8988,
+    "tracks": 360968,
+    "observations": 1528640,
+    "mean_reprojection_error_px": 0.681997968,
+    "ate_rmse_m": 0.3875394944236389,
+    "ate_p95_m": 0.768357778430078,
+    "ate_max_m": 1.4004886553813485,
+    "mapper_seconds": 339.423269,
+    "process_wall_seconds": 343.96,
+    "peak_rss_kib": 1397916
+  },
+  "tier_10000_distance_0_05_m": {
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_images": 8988,
+    "tracks": 360930,
+    "observations": 1528664,
+    "mean_reprojection_error_px": 0.682012445,
+    "ate_rmse_m": 0.3876708667108201,
+    "ate_p95_m": 0.7751058336249442,
+    "ate_max_m": 1.4004886553813485,
+    "mapper_seconds": 335.996201,
+    "process_wall_seconds": 340.52,
+    "peak_rss_kib": 1398216,
+    "dominant_component": {
+      "passes": 2,
+      "verified_pair_visits": 142636,
+      "candidate_track_visits": 260541,
+      "merged_tracks": 34,
+      "merged_observations": 213,
+      "cross_reprojection_rejections": 150,
+      "images_txt_sha256": "f3d720eda686ee089846fc325a20264acffb076928d66403a757236fbbb71b90",
+      "points3D_txt_sha256": "0c6dd03f75dd2205510f50e113b43f8a09ada6c3834c1137002a33a587583eca"
+    },
+    "status": "rejected_trajectory_and_reprojection_gate"
+  },
+  "tier_10000_distance_0_25_m": {
+    "selection_reason": "pre-scoring structural follow-up: only 34 of 260541 candidate visits merged under 0.05 m",
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_images": 8988,
+    "tracks": 360915,
+    "observations": 1528585,
+    "mean_reprojection_error_px": 0.682108532,
+    "ate_rmse_m": 0.38764844833893286,
+    "ate_p95_m": 0.7750784499864982,
+    "ate_max_m": 1.4004886553813485,
+    "mapper_seconds": 338.488492,
+    "process_wall_seconds": 342.78,
+    "peak_rss_kib": 1398456,
+    "dominant_component": {
+      "passes": 2,
+      "verified_pair_visits": 142636,
+      "candidate_track_visits": 260445,
+      "merged_tracks": 53,
+      "merged_observations": 347,
+      "cross_reprojection_rejections": 369,
+      "images_txt_sha256": "af55300eacc92338c2bc4f5b1b3764738a839ed5513dd718c3ea5ad1d1edac90",
+      "points3D_txt_sha256": "e7996b808cdda52c4a3233f116d939beeef3c2d40ffa5710dda96a03c827566c"
+    },
+    "status": "rejected_trajectory_and_reprojection_gate"
+  },
+  "conclusion": "The bounded merge is a 1k no-op and preserves exact output there. At 10k both geometric thresholds retain registration and the memory bound but worsen RMSE, p95, and reprojection. Increasing the distance threshold adds only 19 merges, so 3-D distance is not the main cause of fragmentation. Existing verified correspondences mostly encounter image conflicts or already-owned topology; post-registration pairwise merge is removed rather than promoted. The next quality intervention must preserve supported alternatives before same-image conflict resolution or improve long-lived landmark formation during incremental triangulation."
+}

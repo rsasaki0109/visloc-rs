@@ -1,0 +1,727 @@
+{
+  "schema": "visloc_sfm_temporal_support_diagnostic_v1",
+  "bin_frames": 500,
+  "ground_truth_used": false,
+  "groups": {
+    "visloc": [
+      {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-deferred-grouped-interp2-min6-finalfix32-completion2-isolated-prepost-v1/model/component-000",
+        "registered_images": 8988,
+        "points": 40203,
+        "invalid_projections": 0,
+        "reprojection_px": {
+          "count": 589009,
+          "mean": 1.0033004922868307,
+          "median": 0.7220170240119378,
+          "p95": 2.9042611654274704
+        },
+        "bins": [
+          {
+            "frame_start": 0,
+            "frame_end_exclusive": 500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 128268,
+              "mean": 0.9791168148440953,
+              "median": 0.658719830564369,
+              "p95": 2.9835186814225327
+            },
+            "tracks_anchored": 3953,
+            "track_observations": {
+              "count": 3953,
+              "mean": 31.97596761952947,
+              "median": 7.0,
+              "p95": 157.0
+            },
+            "track_span_frames": {
+              "count": 3953,
+              "mean": 61.7500632431065,
+              "median": 22.0,
+              "p95": 293.0
+            },
+            "endpoint_angle_deg": {
+              "count": 3953,
+              "mean": 3.5126101594227377,
+              "median": 2.2227609254516945,
+              "p95": 11.113098747681855
+            }
+          },
+          {
+            "frame_start": 500,
+            "frame_end_exclusive": 1000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 67438,
+              "mean": 0.9705895496639397,
+              "median": 0.6958978925967176,
+              "p95": 2.8498221189833393
+            },
+            "tracks_anchored": 5029,
+            "track_observations": {
+              "count": 5029,
+              "mean": 13.92722211175184,
+              "median": 4.0,
+              "p95": 55.0
+            },
+            "track_span_frames": {
+              "count": 5029,
+              "mean": 17.128454961224897,
+              "median": 8.0,
+              "p95": 66.0
+            },
+            "endpoint_angle_deg": {
+              "count": 5029,
+              "mean": 3.710364215930141,
+              "median": 2.266666857625971,
+              "p95": 12.428496931229152
+            }
+          },
+          {
+            "frame_start": 1000,
+            "frame_end_exclusive": 1500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 64540,
+              "mean": 1.1695474935696868,
+              "median": 0.8913033305136593,
+              "p95": 3.127409078930976
+            },
+            "tracks_anchored": 4663,
+            "track_observations": {
+              "count": 4663,
+              "mean": 13.689041389663307,
+              "median": 3.0,
+              "p95": 64.0
+            },
+            "track_span_frames": {
+              "count": 4663,
+              "mean": 22.94702980913575,
+              "median": 10.0,
+              "p95": 86.89999999999964
+            },
+            "endpoint_angle_deg": {
+              "count": 4663,
+              "mean": 4.847046480921982,
+              "median": 2.5550625929306383,
+              "p95": 17.71332946527273
+            }
+          },
+          {
+            "frame_start": 1500,
+            "frame_end_exclusive": 2000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 49753,
+              "mean": 1.0786406015208976,
+              "median": 0.8189842297550975,
+              "p95": 2.9570704915591293
+            },
+            "tracks_anchored": 5342,
+            "track_observations": {
+              "count": 5342,
+              "mean": 9.303070011231748,
+              "median": 3.0,
+              "p95": 39.94999999999982
+            },
+            "track_span_frames": {
+              "count": 5342,
+              "mean": 13.662298764507675,
+              "median": 8.0,
+              "p95": 51.0
+            },
+            "endpoint_angle_deg": {
+              "count": 5342,
+              "mean": 4.411026164325146,
+              "median": 2.5254221141828745,
+              "p95": 14.845885359589285
+            }
+          },
+          {
+            "frame_start": 2000,
+            "frame_end_exclusive": 2500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 64090,
+              "mean": 0.9415523786229021,
+              "median": 0.6962545451366535,
+              "p95": 2.6734546156621217
+            },
+            "tracks_anchored": 3848,
+            "track_observations": {
+              "count": 3848,
+              "mean": 16.13929313929314,
+              "median": 6.0,
+              "p95": 67.0
+            },
+            "track_span_frames": {
+              "count": 3848,
+              "mean": 20.06470893970894,
+              "median": 11.0,
+              "p95": 69.64999999999964
+            },
+            "endpoint_angle_deg": {
+              "count": 3848,
+              "mean": 3.7112819485592476,
+              "median": 2.269879459273425,
+              "p95": 11.5994895848043
+            }
+          },
+          {
+            "frame_start": 2500,
+            "frame_end_exclusive": 3000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 91512,
+              "mean": 0.9008524020208287,
+              "median": 0.6260693723030656,
+              "p95": 2.737459043225151
+            },
+            "tracks_anchored": 4845,
+            "track_observations": {
+              "count": 4845,
+              "mean": 19.264396284829722,
+              "median": 6.0,
+              "p95": 77.0
+            },
+            "track_span_frames": {
+              "count": 4845,
+              "mean": 24.068524251805986,
+              "median": 12.0,
+              "p95": 88.0
+            },
+            "endpoint_angle_deg": {
+              "count": 4845,
+              "mean": 4.011852459844038,
+              "median": 2.4180198999806275,
+              "p95": 12.390661693284192
+            }
+          },
+          {
+            "frame_start": 3000,
+            "frame_end_exclusive": 3500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 35705,
+              "mean": 1.032217237196703,
+              "median": 0.7860266056925942,
+              "p95": 2.844843980242647
+            },
+            "tracks_anchored": 3052,
+            "track_observations": {
+              "count": 3052,
+              "mean": 11.735583224115334,
+              "median": 4.0,
+              "p95": 52.0
+            },
+            "track_span_frames": {
+              "count": 3052,
+              "mean": 17.351900393184795,
+              "median": 9.0,
+              "p95": 62.0
+            },
+            "endpoint_angle_deg": {
+              "count": 3052,
+              "mean": 4.468550206245516,
+              "median": 2.592052599370607,
+              "p95": 14.91088806951636
+            }
+          },
+          {
+            "frame_start": 3500,
+            "frame_end_exclusive": 4000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 33407,
+              "mean": 1.1908207120732943,
+              "median": 0.9471366186788366,
+              "p95": 3.0606246358365126
+            },
+            "tracks_anchored": 3489,
+            "track_observations": {
+              "count": 3489,
+              "mean": 9.558039552880482,
+              "median": 4.0,
+              "p95": 40.0
+            },
+            "track_span_frames": {
+              "count": 3489,
+              "mean": 13.027801662367441,
+              "median": 8.0,
+              "p95": 46.0
+            },
+            "endpoint_angle_deg": {
+              "count": 3489,
+              "mean": 4.295305945840602,
+              "median": 2.4227375165946605,
+              "p95": 15.450175117733338
+            }
+          },
+          {
+            "frame_start": 4000,
+            "frame_end_exclusive": 4500,
+            "registered_images": 988,
+            "reprojection_px": {
+              "count": 54296,
+              "mean": 0.9455739645691241,
+              "median": 0.6791915151746666,
+              "p95": 2.774985848930588
+            },
+            "tracks_anchored": 5982,
+            "track_observations": {
+              "count": 5982,
+              "mean": 9.099632230023403,
+              "median": 4.0,
+              "p95": 34.0
+            },
+            "track_span_frames": {
+              "count": 5982,
+              "mean": 9.730692076228687,
+              "median": 6.0,
+              "p95": 34.0
+            },
+            "endpoint_angle_deg": {
+              "count": 5982,
+              "mean": 3.456260225648305,
+              "median": 1.9505025478796407,
+              "p95": 11.923651067892918
+            }
+          }
+        ]
+      },
+      {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-deferred-grouped-interp2-min6-finalfix32-completion2-isolated-prepost-v1/model/component-001",
+        "registered_images": 1010,
+        "points": 3726,
+        "invalid_projections": 0,
+        "reprojection_px": {
+          "count": 49015,
+          "mean": 0.8373070472613187,
+          "median": 0.5855755566605583,
+          "p95": 2.5477770493618124
+        },
+        "bins": [
+          {
+            "frame_start": 4000,
+            "frame_end_exclusive": 4500,
+            "registered_images": 10,
+            "reprojection_px": {
+              "count": 208,
+              "mean": 0.7745689233316997,
+              "median": 0.5616894903267113,
+              "p95": 1.9189828959260908
+            },
+            "tracks_anchored": 5,
+            "track_observations": {
+              "count": 5,
+              "mean": 5.0,
+              "median": 5.0,
+              "p95": 6.8
+            },
+            "track_span_frames": {
+              "count": 5,
+              "mean": 4.4,
+              "median": 5.0,
+              "p95": 5.8
+            },
+            "endpoint_angle_deg": {
+              "count": 5,
+              "mean": 2.326957136386264,
+              "median": 1.8518741162703711,
+              "p95": 4.042509800455521
+            }
+          },
+          {
+            "frame_start": 4500,
+            "frame_end_exclusive": 5000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 48807,
+              "mean": 0.8375744173061354,
+              "median": 0.5856886377818173,
+              "p95": 2.5484833390354016
+            },
+            "tracks_anchored": 3721,
+            "track_observations": {
+              "count": 3721,
+              "mean": 13.165815640956732,
+              "median": 4.0,
+              "p95": 53.0
+            },
+            "track_span_frames": {
+              "count": 3721,
+              "mean": 17.167428110722923,
+              "median": 9.0,
+              "p95": 63.0
+            },
+            "endpoint_angle_deg": {
+              "count": 3721,
+              "mean": 5.643501533299244,
+              "median": 3.0882399428650764,
+              "p95": 19.14842987690498
+            }
+          }
+        ]
+      }
+    ],
+    "colmap": [
+      {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/models-text/0",
+        "registered_images": 8988,
+        "points": 103611,
+        "invalid_projections": 0,
+        "reprojection_px": {
+          "count": 1800787,
+          "mean": 0.912582660631451,
+          "median": 0.6766956398668833,
+          "p95": 2.5468223340315004
+        },
+        "bins": [
+          {
+            "frame_start": 0,
+            "frame_end_exclusive": 500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 311816,
+              "mean": 0.8891195233297421,
+              "median": 0.6590001032058582,
+              "p95": 2.473053718860176
+            },
+            "tracks_anchored": 4642,
+            "track_observations": {
+              "count": 4642,
+              "mean": 66.74321413183972,
+              "median": 14.0,
+              "p95": 362.9499999999998
+            },
+            "track_span_frames": {
+              "count": 4642,
+              "mean": 59.48276604911676,
+              "median": 18.0,
+              "p95": 293.0
+            },
+            "endpoint_angle_deg": {
+              "count": 4642,
+              "mean": 6.023846589561626,
+              "median": 4.3602629710563665,
+              "p95": 16.970003407816197
+            }
+          },
+          {
+            "frame_start": 500,
+            "frame_end_exclusive": 1000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 205513,
+              "mean": 0.8731307859092552,
+              "median": 0.6477258582554324,
+              "p95": 2.451057397958082
+            },
+            "tracks_anchored": 11861,
+            "track_observations": {
+              "count": 11861,
+              "mean": 18.06272658291881,
+              "median": 8.0,
+              "p95": 69.0
+            },
+            "track_span_frames": {
+              "count": 11861,
+              "mean": 26.99831380153444,
+              "median": 15.0,
+              "p95": 98.0
+            },
+            "endpoint_angle_deg": {
+              "count": 11861,
+              "mean": 8.063494069159375,
+              "median": 5.798635105480045,
+              "p95": 22.672362599532864
+            }
+          },
+          {
+            "frame_start": 1000,
+            "frame_end_exclusive": 1500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 182164,
+              "mean": 1.0388930080465029,
+              "median": 0.8116045224765791,
+              "p95": 2.7238338257731156
+            },
+            "tracks_anchored": 13680,
+            "track_observations": {
+              "count": 13680,
+              "mean": 12.77251461988304,
+              "median": 5.0,
+              "p95": 48.0
+            },
+            "track_span_frames": {
+              "count": 13680,
+              "mean": 25.070906432748536,
+              "median": 16.0,
+              "p95": 78.0
+            },
+            "endpoint_angle_deg": {
+              "count": 13680,
+              "mean": 8.820346612359904,
+              "median": 6.618315331826707,
+              "p95": 23.120142445588893
+            }
+          },
+          {
+            "frame_start": 1500,
+            "frame_end_exclusive": 2000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 148271,
+              "mean": 1.0454275707670866,
+              "median": 0.8250638528075529,
+              "p95": 2.721409542554035
+            },
+            "tracks_anchored": 12328,
+            "track_observations": {
+              "count": 12328,
+              "mean": 12.049805321219987,
+              "median": 5.0,
+              "p95": 44.0
+            },
+            "track_span_frames": {
+              "count": 12328,
+              "mean": 22.68883841661259,
+              "median": 16.0,
+              "p95": 68.0
+            },
+            "endpoint_angle_deg": {
+              "count": 12328,
+              "mean": 8.747048153766452,
+              "median": 6.33780830912761,
+              "p95": 23.901319855793602
+            }
+          },
+          {
+            "frame_start": 2000,
+            "frame_end_exclusive": 2500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 220805,
+              "mean": 0.8735551107965176,
+              "median": 0.6456698923997606,
+              "p95": 2.4561697541945255
+            },
+            "tracks_anchored": 11813,
+            "track_observations": {
+              "count": 11813,
+              "mean": 18.297299585202744,
+              "median": 10.0,
+              "p95": 63.0
+            },
+            "track_span_frames": {
+              "count": 11813,
+              "mean": 27.83238804706679,
+              "median": 19.0,
+              "p95": 80.0
+            },
+            "endpoint_angle_deg": {
+              "count": 11813,
+              "mean": 6.988591277928902,
+              "median": 5.324201082648785,
+              "p95": 17.689183710347184
+            }
+          },
+          {
+            "frame_start": 2500,
+            "frame_end_exclusive": 3000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 226434,
+              "mean": 0.8061694649522875,
+              "median": 0.5636460331715871,
+              "p95": 2.387658056726152
+            },
+            "tracks_anchored": 10125,
+            "track_observations": {
+              "count": 10125,
+              "mean": 22.78953086419753,
+              "median": 11.0,
+              "p95": 81.79999999999927
+            },
+            "track_span_frames": {
+              "count": 10125,
+              "mean": 30.596444444444444,
+              "median": 17.0,
+              "p95": 104.0
+            },
+            "endpoint_angle_deg": {
+              "count": 10125,
+              "mean": 7.425389739589212,
+              "median": 5.5148971069168145,
+              "p95": 18.588512929096385
+            }
+          },
+          {
+            "frame_start": 3000,
+            "frame_end_exclusive": 3500,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 166304,
+              "mean": 0.8762347608197448,
+              "median": 0.6274686571119863,
+              "p95": 2.5151949816177592
+            },
+            "tracks_anchored": 10236,
+            "track_observations": {
+              "count": 10236,
+              "mean": 16.321512309495898,
+              "median": 6.0,
+              "p95": 65.0
+            },
+            "track_span_frames": {
+              "count": 10236,
+              "mean": 30.073466197733488,
+              "median": 17.0,
+              "p95": 98.0
+            },
+            "endpoint_angle_deg": {
+              "count": 10236,
+              "mean": 8.74313327860875,
+              "median": 6.26336669729853,
+              "p95": 23.630938552054314
+            }
+          },
+          {
+            "frame_start": 3500,
+            "frame_end_exclusive": 4000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 161691,
+              "mean": 1.0688385976432218,
+              "median": 0.8452708953310122,
+              "p95": 2.760820723285693
+            },
+            "tracks_anchored": 14492,
+            "track_observations": {
+              "count": 14492,
+              "mean": 11.072591774772288,
+              "median": 5.0,
+              "p95": 38.0
+            },
+            "track_span_frames": {
+              "count": 14492,
+              "mean": 20.275186309688102,
+              "median": 14.0,
+              "p95": 59.44999999999891
+            },
+            "endpoint_angle_deg": {
+              "count": 14492,
+              "mean": 8.474921623751335,
+              "median": 6.3001869546960645,
+              "p95": 21.95518732751185
+            }
+          },
+          {
+            "frame_start": 4000,
+            "frame_end_exclusive": 4500,
+            "registered_images": 988,
+            "reprojection_px": {
+              "count": 177789,
+              "mean": 0.8350214789163278,
+              "median": 0.5936674604053491,
+              "p95": 2.4312820848789007
+            },
+            "tracks_anchored": 14434,
+            "track_observations": {
+              "count": 14434,
+              "mean": 12.402937508660107,
+              "median": 7.0,
+              "p95": 42.0
+            },
+            "track_span_frames": {
+              "count": 14434,
+              "mean": 18.56567825966468,
+              "median": 14.0,
+              "p95": 51.0
+            },
+            "endpoint_angle_deg": {
+              "count": 14434,
+              "mean": 8.336060565854298,
+              "median": 6.122466903099689,
+              "p95": 22.703229808884725
+            }
+          }
+        ]
+      },
+      {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/models-text/1",
+        "registered_images": 1010,
+        "points": 10099,
+        "invalid_projections": 1,
+        "reprojection_px": {
+          "count": 147027,
+          "mean": 0.785677916412353,
+          "median": 0.5575918125194015,
+          "p95": 2.3023052123322794
+        },
+        "bins": [
+          {
+            "frame_start": 4000,
+            "frame_end_exclusive": 4500,
+            "registered_images": 10,
+            "reprojection_px": {
+              "count": 209,
+              "mean": 0.6773379903560492,
+              "median": 0.48073684820061957,
+              "p95": 1.8785408972382949
+            },
+            "tracks_anchored": 7,
+            "track_observations": {
+              "count": 7,
+              "mean": 5.0,
+              "median": 5.0,
+              "p95": 6.399999999999999
+            },
+            "track_span_frames": {
+              "count": 7,
+              "mean": 5.285714285714286,
+              "median": 5.0,
+              "p95": 8.0
+            },
+            "endpoint_angle_deg": {
+              "count": 7,
+              "mean": 4.330758385008499,
+              "median": 3.7520881279912603,
+              "p95": 7.359438245219961
+            }
+          },
+          {
+            "frame_start": 4500,
+            "frame_end_exclusive": 5000,
+            "registered_images": 1000,
+            "reprojection_px": {
+              "count": 146818,
+              "mean": 0.7858321416745536,
+              "median": 0.5576749973338441,
+              "p95": 2.302614062353033
+            },
+            "tracks_anchored": 10092,
+            "track_observations": {
+              "count": 10092,
+              "mean": 14.56529924692826,
+              "median": 6.0,
+              "p95": 54.0
+            },
+            "track_span_frames": {
+              "count": 10092,
+              "mean": 24.368906064209273,
+              "median": 16.0,
+              "p95": 79.0
+            },
+            "endpoint_angle_deg": {
+              "count": 10092,
+              "mean": 9.76867334964113,
+              "median": 7.438247320722759,
+              "p95": 25.86512595694164
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
