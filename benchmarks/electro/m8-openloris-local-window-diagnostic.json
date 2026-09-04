@@ -1,0 +1,103 @@
+{
+  "schema": "visloc_m8_openloris_local_window_diagnostic_v1",
+  "recorded_at": "2026-09-04",
+  "status": "supports_overlapping_submap_experiment",
+  "base_git_commit": "76e061c",
+  "ground_truth_used_for_mapping": false,
+  "ground_truth_usage": "post-map scoring only; never used for window selection, matching, registration, or reconstruction",
+  "method": {
+    "name": "bounded_contiguous_frame_range_replay",
+    "cli": "--frame-range-start START --frame-range-count COUNT",
+    "semantics": "read and validate the frozen base and deferred overlay, retain one contiguous frame range, deterministically remap its images, and preserve pair order plus the base/deferred boundary",
+    "state_bound": "O(source images + source verified pairs) transient filtering state and O(window observations) mapper state; no frame Cartesian or N^2 state",
+    "snapshot_serialization": false
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "source_frames": 5000,
+    "source_images": 10000,
+    "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt",
+    "rig_manifest_sha256": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943",
+    "base_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps",
+    "base_snapshot_sha256": "c9b30f7f7c29257e79dda6fe9b479924917b1e875d351085768b19af1e476857",
+    "deferred_overlay_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps",
+    "deferred_overlay_snapshot_sha256": "02cd6475098453cb6cf93761ff990ea31acba86217b715dfaf43660f3af0f05c",
+    "tier_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-10000.json",
+    "tier_manifest_sha256": "a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c",
+    "common_configuration": "the frozen 10k dense-deferred 32--128 champion, including base prefix 59961, max two models, local BA 10/40/8, two endpoint-fixed final BA passes, pair-confidence tracks, two completion passes, isolated pose repair, and two final filter refinements"
+  },
+  "windows": [
+    {
+      "frame_range": [2500, 3000],
+      "retained_images": 1000,
+      "retained_pairs": 7337,
+      "retained_base_pairs": 5890,
+      "registered_frames": 500,
+      "registered_images": 1000,
+      "models": 1,
+      "tracks": 27557,
+      "observations": 177046,
+      "mean_reprojection_error_px": 0.674509072,
+      "mapper_seconds": 35.416736,
+      "wall_seconds": 39.197660,
+      "peak_rss_kib": 340092,
+      "ate_rmse_m": 0.18693728213282415,
+      "ate_p95_m": 0.32773987907927826,
+      "ate_max_m": 0.36219019055800994,
+      "sim3_scale": 0.9427114630633276,
+      "images_txt_sha256": "a8816b3b4b163d2c25f173929b2980bed490e79404e6767950a2b3fbfc078403",
+      "score_sha256": "7fe6dfe8ae23e92133bdbe08cc376fc51e1d8a5f9faca21565ddc40e54601c5b"
+    },
+    {
+      "frame_range": [3000, 3500],
+      "retained_images": 1000,
+      "retained_pairs": 6879,
+      "retained_base_pairs": 5487,
+      "registered_frames": 500,
+      "registered_images": 1000,
+      "models": 2,
+      "model_frames": [260, 240],
+      "model_images": [520, 480],
+      "tracks": 29974,
+      "observations": 115261,
+      "mean_reprojection_error_px": 0.675275820,
+      "mapper_seconds": 16.259845,
+      "wall_seconds": 19.01,
+      "peak_rss_kib": 340060,
+      "component_weighted_ate_rmse_m": 0.04601404008474228,
+      "component_weighted_ate_p95_m": 0.08759663329529255,
+      "components": [
+        {
+          "frames": 260,
+          "images": 520,
+          "ate_rmse_m": 0.05885439340808992,
+          "ate_p95_m": 0.11409471481211032,
+          "sim3_scale": 0.9073533486789831,
+          "images_txt_sha256": "204f974062ce8bcc8c61f3d7cf35ca47efbe6a025bf2aa73913442ac937dd70b",
+          "score_sha256": "b87b0e6d1da0d5442ad65cab74c66bd8cb9ad69d70c4c1e084ffc153e41e0f58"
+        },
+        {
+          "frames": 240,
+          "images": 480,
+          "ate_rmse_m": 0.03210365731778234,
+          "ate_p95_m": 0.05889037831873996,
+          "sim3_scale": 0.9393621358427822,
+          "images_txt_sha256": "c9c66e35c1c82415fa3dd3c0bca8dc316bfdc9c83cf4eb001d14e4106dc691be",
+          "score_sha256": "cef375937faff30cc0c67450d28e4bc8e9536484d54868c649a8566a4ad40899"
+        }
+      ]
+    }
+  ],
+  "comparison": {
+    "full_10k_visloc_champion": {
+      "ate_rmse_m": 0.3875394944,
+      "ate_p95_m": 0.7683577784,
+      "mean_reprojection_error_px": 0.681997968
+    },
+    "interpretation": "Both local windows preserve complete image registration and COLMAP-beating reprojection. The second problem interval is locally 8.4x lower in RMSE and 8.8x lower in p95 than the full-map score when its two gauges are aligned independently. This local/global gap supports bounded overlapping submaps with robust shared-frame Sim(3) stitching; it does not itself pass the M8 10k gate."
+  },
+  "next_gate": {
+    "experiment": "reconstruct overlapping bounded windows, robustly estimate adjacent Sim3 transforms only from shared registered frame centres, compose a deterministic chain, and score the published trajectory without GT in mapping",
+    "promotion_requires": "9998/10000 registration, at most two output gauges, largest model at least 4494 frames, reprojection <= 0.903003 px, RMSE <= 0.384307 m, p95 <= 0.638669 m, peak RSS <= 2 GiB, deterministic output, and no N^2 state"
+  }
+}
