@@ -585,7 +585,7 @@ the verified input or consulting GT. The replay validates the full frozen
 snapshot and overlay, retains only one requested frame interval, remaps image
 IDs deterministically, preserves pair order and the base/deferred boundary,
 and never forms a frame Cartesian product. Frames 2,500--2,999 registered all
-1,000 images in one model at 0.67451 px and scored 0.18694/0.32774 m
+1,000 images in one model at 0.68259 px and scored 0.29411/0.54979 m
 RMSE/p95. Frames 3,000--3,499 also registered all 1,000 images at 0.67528 px;
 its naturally disconnected 260/240-frame models scored a component-weighted
 0.04601/0.08760 m. Peak RSS was about 332 MiB in both runs. The sharp
@@ -595,6 +595,8 @@ long-gauge trajectory. It promotes an overlapping-window Sim(3) stitching
 experiment, not the M8 result itself. Exact inputs, hashes, commands, resource
 counters, and scores are frozen in
 [`m8-openloris-local-window-diagnostic.json`](../benchmarks/electro/m8-openloris-local-window-diagnostic.json).
+The first window was rerun with the current release binary and reproduced all
+three model files byte-for-byte; an earlier stale-binary score was discarded.
 
 The GT-free cause is observable in the dense final map. It contains 352,185
 independently triangulated local stereo points and 28,092 tracks with such

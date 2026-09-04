@@ -35,18 +35,23 @@
       "registered_frames": 500,
       "registered_images": 1000,
       "models": 1,
-      "tracks": 27557,
-      "observations": 177046,
-      "mean_reprojection_error_px": 0.674509072,
-      "mapper_seconds": 35.416736,
-      "wall_seconds": 39.197660,
-      "peak_rss_kib": 340092,
-      "ate_rmse_m": 0.18693728213282415,
-      "ate_p95_m": 0.32773987907927826,
-      "ate_max_m": 0.36219019055800994,
-      "sim3_scale": 0.9427114630633276,
-      "images_txt_sha256": "a8816b3b4b163d2c25f173929b2980bed490e79404e6767950a2b3fbfc078403",
-      "score_sha256": "7fe6dfe8ae23e92133bdbe08cc376fc51e1d8a5f9faca21565ddc40e54601c5b"
+      "tracks": 27432,
+      "observations": 180028,
+      "mean_reprojection_error_px": 0.682592997,
+      "mapper_seconds": 36.865336,
+      "peak_rss_kib": 339764,
+      "ate_rmse_m": 0.2941103770787429,
+      "ate_p95_m": 0.5497919387137824,
+      "ate_max_m": 0.635907112501902,
+      "sim3_scale": 0.960507374753806,
+      "images_txt_sha256": "826129599d9b3acba4ff39c80950a31800ee2e8484801facd8833c4031150ecb",
+      "score_sha256": "d0a0402de9cdc5b02b6e99492da468a904e4b7a5b802fe3c418e24b6874a6959",
+      "repeat_byte_identical": true,
+      "repeat_model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "826129599d9b3acba4ff39c80950a31800ee2e8484801facd8833c4031150ecb",
+        "points3D_txt": "6fb6cc666ea45ea9059c2d9eb6607f3ffd6adf5818ebe26c418f24a872a8db66"
+      }
     },
     {
       "frame_range": [3000, 3500],
@@ -94,7 +99,7 @@
       "ate_p95_m": 0.7683577784,
       "mean_reprojection_error_px": 0.681997968
     },
-    "interpretation": "Both local windows preserve complete image registration and COLMAP-beating reprojection. The second problem interval is locally 8.4x lower in RMSE and 8.8x lower in p95 than the full-map score when its two gauges are aligned independently. This local/global gap supports bounded overlapping submaps with robust shared-frame Sim(3) stitching; it does not itself pass the M8 10k gate."
+    "interpretation": "Both local windows preserve complete image registration and COLMAP-beating reprojection. The second problem interval is locally 8.4x lower in RMSE and 8.8x lower in p95 than the full-map score when its two gauges are aligned independently. The current release reproduces the first window byte-for-byte; an earlier stale-binary measurement was discarded. This local/global gap supports bounded overlapping submaps with robust shared-frame Sim(3) stitching; it does not itself pass the M8 10k gate."
   },
   "next_gate": {
     "experiment": "reconstruct overlapping bounded windows, robustly estimate adjacent Sim3 transforms only from shared registered frame centres, compose a deterministic chain, and score the published trajectory without GT in mapping",
