@@ -830,6 +830,18 @@ must not import those observations into dynamic ownership or track topology.
 Frozen trace hashes and comparisons are in
 [`m8-openloris-dynamic-registration-trace-1k.json`](../benchmarks/electro/m8-openloris-dynamic-registration-trace-1k.json).
 
+The first owner-neutral proposal A/B confirms but does not close that diagnosis.
+Exposing all 35,824 observations from the selected 96 seed components restores
+the exact legacy first PnP choice (frame 58, 158/158 support/inliers, identical
+pose). The paths diverge again at registration order two because tracks newly
+positioned after frame 58 still expose direct CSR neighbours only. The final
+arm registers 1,000/1,000 at 172,608 KiB in 34.47 s, but regresses to 0.02930 m
+RMSE / 0.04408 m p95 / 0.74408 px, so it is rejected. The next A/B generalizes
+the proven visibility mechanism: retain a compact observation-to-clean-component
+index, and publish each component once when its first dynamic track becomes
+positioned. These are still PnP proposals only—no transitive owner or track
+topology—and total component scans and storage must remain O(observations).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a
