@@ -1093,6 +1093,26 @@ The complete record, including the score digest and exact default-off hashes,
 is frozen in
 [`m8-openloris-two-frame-metric-seed-ab.json`](../benchmarks/electro/m8-openloris-two-frame-metric-seed-ab.json).
 
+### GR6P oracle prerequisite established (2026-09-04)
+
+The actual COLMAP GR6P solver now has a small, deterministic offline oracle
+fixture: six generalized multi-camera correspondences produce eight candidates,
+with candidate 5 recovering the known metric motion at zero rotation error and
+`5.35e-14` m translation error. Two independent regenerations are byte-identical
+(`6f7d7aaf85ea5762ffcfd672064d282d7b709d77f523c6593dcc9eaa26984da2`). The
+pinned COLMAP 4.2.0.dev0 image is used only to extract the installed headers and
+archives; it has no compiler, so the reproducible script uses the host C++17
+compiler and the image's copied runtime libraries, with Docker networking
+disabled. Full paths, hashes, commands, and license attribution are recorded in
+[`m8-colmap-gr6p-oracle-fixture.json`](../benchmarks/electro/m8-colmap-gr6p-oracle-fixture.json).
+
+This is a solver-parity prerequisite only, not an M8 quality result. The prior
+pure-Rust GR8P prototype reached a convention-correct truth generalized-
+epipolar residual, but its official-style rotation search was numerically
+sensitive and the prototype was not retained. The next step is GR6P parity
+against this fixture before mapper wiring; no GR6P/GR8P quality claim is made
+until that gate passes.
+
 ## M9 — make the quality champion faster than COLMAP
 
 Freeze the M8 quality champion before performance edits.

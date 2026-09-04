@@ -1,0 +1,143 @@
+{
+  "schema": "visloc_m8_colmap_gr6p_oracle_fixture_v1",
+  "recorded_at": "2026-09-04",
+  "status": "prerequisite_established",
+  "purpose": "Offline Rust GR6P solver-parity gate only; this fixture is not an M8 quality result or a COLMAP-versus-visloc claim.",
+  "upstream": {
+    "colmap": {
+      "project": "COLMAP",
+      "version": "4.2.0.dev0",
+      "image": "colmap/colmap@sha256:b809882552887b6471094dcadd2f2eb01656b010663564c43a5e7f04c0a08f2f",
+      "api": "colmap::GR6PEstimator::Estimate",
+      "license": "BSD-3-Clause",
+      "source": "https://github.com/colmap/colmap"
+    },
+    "poselib": {
+      "library": "libPoseLib.a",
+      "license": "BSD-3-Clause",
+      "source": "https://github.com/PoseLib/PoseLib"
+    }
+  },
+  "artifacts": {
+    "generator_source": {
+      "path": "benchmarks/electro/tools/colmap_gr6p_fixture.cc",
+      "sha256": "776ad046e438d262f751bd43b2794b4ef9eec49fcc13a49777a2cd144b62d32f"
+    },
+    "regeneration_script": {
+      "path": "scripts/generate_colmap_gr6p_fixture.sh",
+      "sha256": "79a03163f7b4242e60861e17a9eed8d3bd169458f8a73b1d21caf8ad79e93953"
+    },
+    "fixture": {
+      "path": "benchmarks/electro/fixtures/colmap-gr6p-v1.json",
+      "sha256": "6f7d7aaf85ea5762ffcfd672064d282d7b709d77f523c6593dcc9eaa26984da2"
+    }
+  },
+  "generation": {
+    "command": "scripts/generate_colmap_gr6p_fixture.sh --output benchmarks/electro/fixtures/colmap-gr6p-v1.json",
+    "network": "disabled: docker create uses --network none and the script never pulls or installs packages",
+    "source_mount": "repository mounted at /src:ro in the pinned container",
+    "artifact_extraction": "docker create followed by docker cp of the pinned COLMAP headers, libcolmap_estimators_solvers.a, libPoseLib.a, libcolmap_math.a, libglog.so, and libgflags.so into a mktemp directory",
+    "compile": "host C++17 c++ with /usr/include/eigen3; the pinned image is runtime-only and has no g++",
+    "runtime": "the glog/gflags shared libraries copied from the same image are used through a temporary LD_LIBRARY_PATH",
+    "host_prerequisites": [
+      "local Docker image with the exact digest above",
+      "host C++17 compiler",
+      "/usr/include/eigen3",
+      "python3",
+      "sha256sum"
+    ],
+    "pose_lib_abi_bridge": "The image omits PoseLib headers; the generator mirrors the upstream alignas(32) CameraPose layout (Eigen::Vector4d q followed by Eigen::Vector3d t, q in wxyz order), matching COLMAP's pinned q(0..3)/t conversion."
+  },
+  "problem": {
+    "correspondences": 6,
+    "source_sensor_count": 3,
+    "target_sensor_count": 3,
+    "known_metric_motion": true,
+    "non_pure_translation": true,
+    "candidate_count": 8,
+    "best_candidate_index": 5,
+    "best_candidate": {
+      "rotation_error_rad": 0.0,
+      "translation_error": 5.346032970467701e-14,
+      "residual_sum": 2.0945609465450073e-32,
+      "residual_max": 7.575749288314356e-33,
+      "ranking_error": 6.677847501113803e-14
+    },
+    "candidate_metrics": [
+      {
+        "rotation_error_rad": 1.4789571494170943,
+        "translation_error": 17.453461585696182,
+        "residual_sum": 5.7780364530875842e-32,
+        "residual_max": 2.4471831017584487e-32,
+        "ranking_error": 23.280460334989559
+      },
+      {
+        "rotation_error_rad": 0.79117854464883586,
+        "translation_error": 7.3628238379038136,
+        "residual_sum": 3.6091642363245497e-32,
+        "residual_max": 1.3127082571567371e-32,
+        "ranking_error": 9.9882439272788375
+      },
+      {
+        "rotation_error_rad": 0.13587459206116884,
+        "translation_error": 0.76346285291457483,
+        "residual_sum": 6.0611211488477979e-33,
+        "residual_max": 2.3864593793445913e-33,
+        "ranking_error": 1.0895328528112482
+      },
+      {
+        "rotation_error_rad": 0.039315119754598123,
+        "translation_error": 0.30669742674277795,
+        "residual_sum": 1.132608922643676e-29,
+        "residual_max": 1.1032467542920602e-29,
+        "ranking_error": 0.42241762886484702
+      },
+      {
+        "rotation_error_rad": 0.0035532192508257445,
+        "translation_error": 0.029539889820234127,
+        "residual_sum": 2.1969496889487245e-32,
+        "residual_max": 1.2784973811413784e-32,
+        "ranking_error": 0.040452146082915572
+      },
+      {
+        "rotation_error_rad": 0.0,
+        "translation_error": 5.3460329704677012e-14,
+        "residual_sum": 2.0945609465450073e-32,
+        "residual_max": 7.5757492883143561e-33,
+        "ranking_error": 6.6778475011138032e-14
+      },
+      {
+        "rotation_error_rad": 0.022481462497774996,
+        "translation_error": 0.19861342681487509,
+        "residual_sum": 1.4973121790211883e-32,
+        "residual_max": 9.147068343158023e-33,
+        "ranking_error": 0.27057386732769317
+      },
+      {
+        "rotation_error_rad": 0.037856089441930064,
+        "translation_error": 0.427547104770026,
+        "residual_sum": 1.7541224920009714e-24,
+        "residual_max": 1.6366350178470943e-24,
+        "ranking_error": 0.57191459244199294
+      }
+    ]
+  },
+  "independent_regeneration": {
+    "runs": 2,
+    "fixture_sha256": [
+      "6f7d7aaf85ea5762ffcfd672064d282d7b709d77f523c6593dcc9eaa26984da2",
+      "6f7d7aaf85ea5762ffcfd672064d282d7b709d77f523c6593dcc9eaa26984da2"
+    ],
+    "byte_identical": true,
+    "json_parse": true
+  },
+  "decision": {
+    "established": true,
+    "scope": "Use the checked fixture as the offline oracle before any Rust GR6P mapper wiring.",
+    "not_claimed": [
+      "No M8 trajectory, registration, speed, or memory quality claim",
+      "No assertion that GR6P is superior to or equivalent to COLMAP's full initialization schedule"
+    ],
+    "next_gate": "Implement or wrap Rust GR6P, compare the six observations, truth pose, all candidates, and residual ordering against this fixture, then consider mapper integration."
+  }
+}
