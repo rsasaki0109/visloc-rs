@@ -130,6 +130,23 @@
       "mean_reprojection_px": 0.754932077,
       "ate_rmse_m": 0.02979942896217806,
       "ate_p95_m": 0.04540173331069834
+    },
+    "minimum_two_owner_neighbors": {
+      "decision": "rejected_and_removed",
+      "support_one_model_byte_identical_to_baseline": true,
+      "registered_images": 1000,
+      "models": 1,
+      "continuation_support_rejections": 51197,
+      "tracks": 7853,
+      "observations": 253135,
+      "mean_reprojection_px": 0.743411440,
+      "ate_rmse_m": 0.02919422947265066,
+      "ate_p95_m": 0.043480596686306314,
+      "ate_max_m": 0.08553005512951992,
+      "mapper_seconds": 38.052470,
+      "wall_seconds": 38.93,
+      "peak_rss_kib": 170796,
+      "reason": "counting two owned CSR neighbors slightly improved p95 but worsened RMSE and still failed both trajectory controls; support count alone does not prove a geometrically independent cycle"
     }
   },
   "promotion_gate": {
@@ -145,6 +162,6 @@
   "decision": {
     "retain_default_off_diagnostic": true,
     "reject_single_edge_owner_merge": true,
-    "next_action": "require stronger multi-edge or cycle-supported correspondence admission before integrating deferred 10k growth; do not tune against ground truth and do not run the 10k decision arm yet"
+    "next_action": "test cycle-supported correspondence admission before integrating deferred 10k growth; a two-neighbor count was insufficient, so support must encode independent closed-path geometry rather than multiplicity; do not tune against ground truth and do not run the 10k decision arm yet"
   }
 }

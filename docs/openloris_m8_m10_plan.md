@@ -804,10 +804,13 @@ official COLMAP control's 0.02797 m / 0.04227 m / 0.81021 px. Registration and
 resource bounds pass, but trajectory parity does not. A single-edge fragment
 merge reduced topology fragmentation but worsened RMSE to 0.02941 m and was
 removed. Metric-only BA, disabled local BA, and twice-frequent local BA also
-failed. The dynamic path therefore remains a diagnostic and is not promoted
-to 2.5k or 10k. The next admission rule must require independent multi-edge or
-cycle support before an owner is extended; it may not recover quality by
-tuning against GT. Exact counters, hashes, and rejected A/Bs are frozen in
+failed. Requiring two currently owned neighbours rejected 51,197 continuation
+attempts and slightly improved p95 to 0.04348 m, but regressed RMSE to 0.02919
+m; that temporary option was removed as well. The dynamic path therefore
+remains a diagnostic and is not promoted to 2.5k or 10k. The next admission
+rule must encode an independent closed correspondence path rather than raw
+neighbour multiplicity; it may not recover quality by tuning against GT.
+Exact counters, hashes, and rejected A/Bs are frozen in
 [`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
 
 The current pure-visual sparse Schur solver also reopened the historical
