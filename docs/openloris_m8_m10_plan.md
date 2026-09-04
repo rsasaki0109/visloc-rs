@@ -816,6 +816,20 @@ PnP/local-BA pose transition that diverges from the frozen legacy mapper,
 without consulting GT during mapping. Exact counters, hashes, and A/Bs are frozen in
 [`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
 
+That registration transition is now traced without GT. Both paths select frame
+8 with 88 landmarks, but their first PnP choice already differs: legacy chooses
+frame 58 with 158/158 support/inliers, while dynamic chooses frame 12 with
+130/130. Across the 500-frame run, 347 frames occupy a different registration
+order; same-frame camera centres first differ by more than 1 mm at dynamic
+order 12 and by more than 10 mm at order 100. The mean and maximum final
+same-frame deltas are 0.00765 m and 0.05337 m. Registration scheduling therefore
+diverges before substantial pose drift. The bounded next A/B will expose the
+full legacy components of the selected seed tracks only as owner-neutral initial
+PnP proposals, then discard that bootstrap state before CSR-driven growth. It
+must not import those observations into dynamic ownership or track topology.
+Frozen trace hashes and comparisons are in
+[`m8-openloris-dynamic-registration-trace-1k.json`](../benchmarks/electro/m8-openloris-dynamic-registration-trace-1k.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a

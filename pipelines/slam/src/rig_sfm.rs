@@ -656,6 +656,36 @@ struct CachedRigCorrespondence {
     direct_point3d: Option<Point3<f64>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RegistrationTrace {
+    mode: &'static str,
+    order: usize,
+    frame: usize,
+    support: usize,
+    inliers: usize,
+    sensors: usize,
+}
+
+fn registration_trace_line(trace: RegistrationTrace, pose: &Pose) -> String {
+    let center = pose.camera_center_world();
+    format!(
+        "rig-registration-trace: mode={} order={} frame={} support={} inliers={} sensors={} cx={:.17e} cy={:.17e} cz={:.17e}",
+        trace.mode,
+        trace.order,
+        trace.frame,
+        trace.support,
+        trace.inliers,
+        trace.sensors,
+        center.x, center.y, center.z
+    )
+}
+
+fn emit_registration_trace(enabled: bool, trace: RegistrationTrace, pose: &Pose) {
+    if enabled {
+        eprintln!("{}", registration_trace_line(trace, pose));
+    }
+}
+
 /// Reconstruct synchronized rig frames with one generalized body pose per
 /// timestamp.  The first pose fixes the world gauge; the calibrated inter-
 /// sensor baseline fixes metric scale.
@@ -683,6 +713,7 @@ pub fn incremental_rig_sfm(
         return incremental_rig_sfm_dynamic(rig, frames, features, pairwise, config);
     }
 
+    let trace_registration = std::env::var_os("VISLOC_SFM_TRACE_REGISTRATION").is_some();
     let image_assignment = image_assignment(frames, features.len());
     let temporal_support_bin_frames = temporal_support_bin_frames_from_env();
     let registration_prefix = config
@@ -824,6 +855,20 @@ pub fn incremental_rig_sfm(
     let mut frame_poses = vec![None; frames.len()];
     frame_poses[seed_frame_index] = Some(Pose::identity());
     let mut registration_order = vec![seed_frame_index];
+    emit_registration_trace(
+        trace_registration,
+        RegistrationTrace {
+            mode: "legacy",
+            order: 0,
+            frame: seed_frame_index,
+            support: seed_triangulation.landmarks.len(),
+            inliers: seed_triangulation.landmarks.len(),
+            sensors: rig.sensors().len(),
+        },
+        frame_poses[seed_frame_index]
+            .as_ref()
+            .expect("seed pose installed"),
+    );
 
     let pnp = GeneralizedPnPRansac {
         iterations: config.pnp_max_iterations,
@@ -947,6 +992,18 @@ pub fn incremental_rig_sfm(
                 }
                 continue;
             }
+            emit_registration_trace(
+                trace_registration,
+                RegistrationTrace {
+                    mode: "legacy",
+                    order: registration_order.len(),
+                    frame,
+                    support: correspondences.len(),
+                    inliers: report.inliers.len(),
+                    sensors: distinct_sensors,
+                },
+                &report.pose,
+            );
             work.pnp_registrations += 1;
             work.direct_bridge_registrations += usize::from(used_direct_bridge);
             frame_poses[frame] = Some(report.pose);
@@ -2387,6 +2444,7 @@ fn dynamic_grow_from_seed(
     seed_edges: &[(RigObservationId, RigObservationId)],
     bootstrap: DynamicBootstrapStats,
 ) -> Result<Option<DynamicGrowth>, RigSfmError> {
+    let trace_registration = std::env::var_os("VISLOC_SFM_TRACE_REGISTRATION").is_some();
     let mut frame_poses = vec![None; frames.len()];
     frame_poses[seed_frame] = Some(Pose::identity());
     let mut image_poses = vec![None; features.len()];
@@ -2418,6 +2476,20 @@ fn dynamic_grow_from_seed(
     if seed_triangulation.landmarks.len() < required_seed_landmarks {
         return Ok(None);
     }
+    emit_registration_trace(
+        trace_registration,
+        RegistrationTrace {
+            mode: "dynamic",
+            order: 0,
+            frame: seed_frame,
+            support: seed_triangulation.landmarks.len(),
+            inliers: seed_triangulation.landmarks.len(),
+            sensors: rig.sensors().len(),
+        },
+        frame_poses[seed_frame]
+            .as_ref()
+            .expect("seed pose installed"),
+    );
 
     let mut work = RigSfmWorkStats {
         triangulation_attempts: seed_triangulation.attempts,
@@ -2537,6 +2609,18 @@ fn dynamic_grow_from_seed(
             work.pnp_inlier_rejections += 1;
             continue;
         }
+        emit_registration_trace(
+            trace_registration,
+            RegistrationTrace {
+                mode: "dynamic",
+                order: registration_order.len(),
+                frame,
+                support: correspondences.len(),
+                inliers: report.inliers.len(),
+                sensors: distinct_sensors,
+            },
+            &report.pose,
+        );
         frame_poses[frame] = Some(report.pose);
         install_image_poses(
             rig,
@@ -6829,6 +6913,26 @@ mod tests {
     use visloc_vision::pnp::RigSensor;
 
     use super::*;
+
+    #[test]
+    fn registration_trace_line_formats_camera_center_precisely() {
+        let pose =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-1.25, 2.5, -3.75));
+        assert_eq!(
+            registration_trace_line(
+                RegistrationTrace {
+                    mode: "dynamic",
+                    order: 4,
+                    frame: 7,
+                    support: 12,
+                    inliers: 10,
+                    sensors: 2,
+                },
+                &pose,
+            ),
+            "rig-registration-trace: mode=dynamic order=4 frame=7 support=12 inliers=10 sensors=2 cx=1.25000000000000000e0 cy=-2.50000000000000000e0 cz=3.75000000000000000e0"
+        );
+    }
 
     #[test]
     fn metric_seed_support_counts_each_multisensor_track_once_per_frame() {

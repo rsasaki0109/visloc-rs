@@ -1,0 +1,71 @@
+{
+  "schema": "visloc_m8_openloris_dynamic_registration_trace_1k_v1",
+  "recorded_at": "2026-09-04T10:26:16+09:00",
+  "dataset": "OpenLORIS corridor1-1",
+  "status": "diagnosis_complete",
+  "ground_truth_used_for_selection_or_mapping": false,
+  "hypothesis": "the dynamic mapper diverges because its seed tracks expose only direct CSR neighbours, whereas the legacy seed tracks expose their full transitive components to initial PnP ranking",
+  "inputs": {
+    "frames": 500,
+    "images": 1000,
+    "verified_pairs": 6935,
+    "compacted_matches": 1605174,
+    "keypoints": 361170,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k",
+    "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps"
+  },
+  "trace": {
+    "enable": "VISLOC_SFM_TRACE_REGISTRATION=1",
+    "fields": [
+      "mode",
+      "registration_order",
+      "frame",
+      "pnp_support",
+      "pnp_inliers",
+      "distinct_sensors",
+      "camera_center_world"
+    ],
+    "legacy_sha256": "3b56a9baec038eff997884b3ac41738b0d99c3a9cbd33e95f6b52292b475356e",
+    "dynamic_sha256": "26d300996ee3f52310d0c80e934f9edf247cef0af2952165d86441f580af54d8",
+    "rows_per_arm": 500,
+    "same_seed": {
+      "frame": 8,
+      "landmarks": 88
+    },
+    "first_registration_divergence": {
+      "order": 1,
+      "legacy_frame": 58,
+      "legacy_support": 158,
+      "legacy_inliers": 158,
+      "dynamic_frame": 12,
+      "dynamic_support": 130,
+      "dynamic_inliers": 130
+    },
+    "same_frame_summary": {
+      "registration_sequence_mismatches": 347,
+      "equal_registration_order": 153,
+      "mean_absolute_order_delta": 8.304,
+      "mean_camera_center_delta_m": 0.007647734611906548,
+      "maximum_camera_center_delta_m": 0.0533749699408299,
+      "maximum_delta_frame": 499,
+      "first_dynamic_registration_with_delta_over_1mm": {
+        "frame": 42,
+        "dynamic_order": 12,
+        "delta_m": 0.0010611596321127236
+      },
+      "first_dynamic_registration_with_delta_over_10mm": {
+        "frame": 98,
+        "dynamic_order": 100,
+        "delta_m": 0.010776983192010198
+      }
+    }
+  },
+  "decision": {
+    "registration_schedule_diverges_before_pose_drift": true,
+    "reject_more_continuation_topology_threshold_tuning": true,
+    "next_ab": "for selected seed tracks only, expose their legacy-component observations as owner-neutral initial PnP proposals; preserve dynamic ownership and CSR growth, drop global components before registration, and promote only if the frozen 1k trajectory gate passes",
+    "promote_to_2500": false,
+    "promote_to_10000": false
+  }
+}
