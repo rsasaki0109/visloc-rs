@@ -1009,6 +1009,29 @@ At 10k, visloc-rs must be no worse than the stronger official COLMAP control on:
 The result must also keep peak RSS at or below 2 GiB and show no `N^2` state.
 Passing registration alone or reprojection alone does not complete M8.
 
+### Rig-BATA quality experiment rejected at 1k (2026-09-04)
+
+A bounded, fixed-rotation rig-BATA prototype tested GLOMAP's `ONLY_POINTS`
+bearing residual after the final visual refinement. The detached solver fixed
+the seed centre, used positive inverse depths and Cauchy IRLS, and committed
+only when finite state, cheirality, published support, and pixel reprojection
+all remained non-regressing. Its state was linear in positioned observations,
+tracks, and frames; it formed no frame-pair matrix.
+
+The first arm used only the 33 metric-anchored tracks and underconstrained 378
+movable frame centres: one/two rounds worsened pixel reprojection, while
+four/eight rounds created new negative-depth observations. The corrected arm
+used all 2,753 positioned tracks (29,751 observations) in the seed-connected
+component while requiring a real metric anchor. It improved the all-positioned
+mean from 5.224 px to as low as 3.011 px and created no negative-depth
+observations, but every one/two/four/eight-round candidate reduced the set of
+published inlier observations or tracks. The transaction therefore rolled
+back every arm, preserving the frozen 1k model byte-for-byte. The 10k run was
+skipped by the 1k promotion gate, and the prototype was removed rather than
+retained as an ineffective option. Full commands, hashes, gates, and variants
+are frozen in
+[`m8-openloris-rig-bata-ab.json`](../benchmarks/electro/m8-openloris-rig-bata-ab.json).
+
 ## M9 — make the quality champion faster than COLMAP
 
 Freeze the M8 quality champion before performance edits.

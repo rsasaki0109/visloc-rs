@@ -1,0 +1,71 @@
+{
+  "schema": "visloc_m8_openloris_rig_bata_ab_v1",
+  "recorded_at": "2026-09-04T15:00:00+09:00",
+  "status": "rejected_at_frozen_1k",
+  "base_git_commit": "0e20699005758440ee34cc7d98806aeb3c017b33",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "prototype_binary_sha256": "091e52b207e23a5d9968cfd9de510f5a805c5da59e79a421fb62c5594fee4cc9",
+  "method_basis": {
+    "description": "Fixed-rotation rig BATA ONLY_POINTS residual u - lambda * (X - C - c), positive inverse depth, Cauchy IRLS, fixed seed centre, sparse alternating point/centre updates.",
+    "glomap_global_positioning": "https://github.com/colmap/glomap/blob/main/glomap/estimators/global_positioning.cc",
+    "glomap_cost_functions": "https://github.com/colmap/glomap/blob/main/glomap/estimators/cost_function.h",
+    "state_complexity": "O(positioned observations + positioned tracks + registered frames); no frame-pair or N^2 state"
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "frames": 500,
+    "images": 1000,
+    "rig_manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "verified_snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "tier_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "verified_pairs": 6869,
+    "verified_matches": 661428
+  },
+  "frozen_default_off_control": {
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "tracks": 2658,
+    "observations": 27716,
+    "mean_reprojection_error_px": 0.671637382,
+    "mapper_seconds": 4.040606,
+    "wall_seconds": 4.64,
+    "peak_rss_kib": 81988,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+      "points3D_txt": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af"
+    },
+    "matches_frozen_champion_byte_for_byte": true
+  },
+  "metric_tracks_only": {
+    "optimized_frames": 378,
+    "optimized_tracks": 33,
+    "optimized_observations": 3345,
+    "variants": [
+      {"iterations": 1, "cauchy_scale": 0.1, "max_centre_update_m": 0.043878727, "rollback_reason": "pixel_reprojection", "candidate_mean_all_positioned_px": 5.922070069},
+      {"iterations": 2, "cauchy_scale": 0.1, "max_centre_update_m": 0.067782003, "rollback_reason": "pixel_reprojection", "candidate_mean_all_positioned_px": 6.138448946},
+      {"iterations": 4, "cauchy_scale": 0.1, "max_centre_update_m": 0.080000253, "rollback_reason": "cheirality", "positive_depth_observations_before": 29725, "positive_depth_observations_after": 29723, "newly_noncheiral_observations": 3},
+      {"iterations": 8, "cauchy_scale": 0.1, "max_centre_update_m": 0.139700817, "rollback_reason": "cheirality", "positive_depth_observations_before": 29725, "positive_depth_observations_after": 29723, "newly_noncheiral_observations": 4},
+      {"iterations": 1, "cauchy_scale": 0.01, "max_centre_update_m": 0.048879557, "rollback_reason": "pixel_reprojection", "candidate_mean_all_positioned_px": 5.757168664},
+      {"iterations": 1, "cauchy_scale": 0.001, "max_centre_update_m": 0.049226351, "rollback_reason": "pixel_reprojection", "candidate_mean_all_positioned_px": 5.696880178}
+    ]
+  },
+  "all_positioned_tracks_with_metric_anchor": {
+    "optimized_frames": 499,
+    "optimized_tracks": 2753,
+    "optimized_observations": 29751,
+    "variants": [
+      {"iterations": 1, "cauchy_scale": 0.1, "max_centre_update_m": 0.044832567, "positive_depth_observations_after": 29735, "candidate_mean_all_positioned_px": 3.292059062, "rollback_reason": "published_inlier_support"},
+      {"iterations": 2, "cauchy_scale": 0.1, "max_centre_update_m": 0.063030315, "positive_depth_observations_after": 29737, "candidate_mean_all_positioned_px": 3.777104037, "rollback_reason": "published_inlier_support"},
+      {"iterations": 4, "cauchy_scale": 0.1, "max_centre_update_m": 0.067301994, "positive_depth_observations_after": 29739, "candidate_mean_all_positioned_px": 3.010681669, "rollback_reason": "published_inlier_support"},
+      {"iterations": 8, "cauchy_scale": 0.1, "max_centre_update_m": 0.079479739, "positive_depth_observations_after": 29743, "candidate_mean_all_positioned_px": 3.706732843, "rollback_reason": "published_inlier_support"}
+    ],
+    "newly_noncheiral_observations": 0
+  },
+  "decision": {
+    "promoted": false,
+    "reason": "Every tested candidate violated either positive-depth or published inlier-support/pixel non-regression at frozen 1k. Transaction rollback preserved registration, published quality, and byte-identical output.",
+    "ten_k_run": "skipped_by_1k_promotion_gate",
+    "source_policy": "prototype removed after recording evidence"
+  }
+}
