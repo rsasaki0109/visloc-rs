@@ -14,7 +14,8 @@ use thiserror::Error;
 use visloc_core::geometry::{Pose, SE3};
 use visloc_vision::features::FeatureSet;
 use visloc_vision::pnp::{
-    GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedPnPRansac,
+    GeneralizedCameraObservation, GeneralizedCameraRig, GeneralizedCorrespondence2D3D,
+    GeneralizedPnPRansac, GeneralizedRelativeCorrespondence,
 };
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
@@ -5185,6 +5186,191 @@ fn metric_seed_candidates(supports: &[usize]) -> Vec<usize> {
     candidates.into_iter().map(|(frame, _)| frame).collect()
 }
 
+/// One sparse verified temporal frame pair retained for a bounded metric seed
+/// probe.  Frame ids are indices in the supplied `frames` slice, not image
+/// ids; the endpoint orientation is always `frame_a -> frame_b`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Gr6pTemporalPairCandidate {
+    frame_a: usize,
+    frame_b: usize,
+    support: usize,
+    sensor_pair_diversity: usize,
+}
+
+/// Aggregate verified cross-frame support without constructing a frame
+/// Cartesian product.  The map contains only frame pairs observed in the
+/// sparse input stream, so its storage is O(distinct observed frame pairs).
+/// A zero cap intentionally returns before touching the stream.
+#[allow(dead_code)]
+fn collect_gr6p_temporal_pair_candidates(
+    pairwise: &[PairwiseMatches],
+    image_assignment: &[(usize, usize)],
+    max_candidates: usize,
+) -> Vec<Gr6pTemporalPairCandidate> {
+    if max_candidates == 0 {
+        return Vec::new();
+    }
+    let mut aggregates = HashMap::<(usize, usize), (usize, BTreeSet<(usize, usize)>)>::new();
+    for pair in pairwise {
+        let Some(&(frame_i, sensor_i)) = image_assignment.get(pair.image_i) else {
+            continue;
+        };
+        let Some(&(frame_j, sensor_j)) = image_assignment.get(pair.image_j) else {
+            continue;
+        };
+        if frame_i == frame_j {
+            continue;
+        }
+        let (frame_a, frame_b, source_sensor, target_sensor) = if frame_i < frame_j {
+            (frame_i, frame_j, sensor_i, sensor_j)
+        } else {
+            (frame_j, frame_i, sensor_j, sensor_i)
+        };
+        let entry = aggregates
+            .entry((frame_a, frame_b))
+            .or_insert_with(|| (0, BTreeSet::new()));
+        entry.0 = entry.0.saturating_add(pair.matches.len());
+        entry.1.insert((source_sensor, target_sensor));
+    }
+    let mut candidates = aggregates
+        .into_iter()
+        .map(
+            |((frame_a, frame_b), (support, sensor_pairs))| Gr6pTemporalPairCandidate {
+                frame_a,
+                frame_b,
+                support,
+                sensor_pair_diversity: sensor_pairs.len(),
+            },
+        )
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| {
+        right
+            .support
+            .cmp(&left.support)
+            .then_with(|| left.frame_a.cmp(&right.frame_a))
+            .then_with(|| left.frame_b.cmp(&right.frame_b))
+    });
+    candidates.truncate(max_candidates);
+    candidates
+}
+
+/// Build unique generalized-ray correspondences for one selected temporal
+/// pair.  The input pair stream is scanned only for that selected frame pair;
+/// image endpoints are canonicalized by frame order, then exact endpoint
+/// duplicates and repeated source/target observations are removed in stable
+/// tuple order before the optional cap is applied.
+#[allow(dead_code)]
+fn build_gr6p_temporal_correspondences(
+    pairwise: &[PairwiseMatches],
+    candidate: Gr6pTemporalPairCandidate,
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    max_correspondences: usize,
+) -> Vec<GeneralizedRelativeCorrespondence> {
+    let mut endpoint_pairs = Vec::<(usize, usize, usize, usize)>::new();
+    for pair in pairwise {
+        let Some(&(frame_i, _)) = image_assignment.get(pair.image_i) else {
+            continue;
+        };
+        let Some(&(frame_j, _)) = image_assignment.get(pair.image_j) else {
+            continue;
+        };
+        let orientation = if frame_i == candidate.frame_a && frame_j == candidate.frame_b {
+            Some(false)
+        } else if frame_i == candidate.frame_b && frame_j == candidate.frame_a {
+            Some(true)
+        } else {
+            None
+        };
+        let Some(swapped) = orientation else {
+            continue;
+        };
+        for &(keypoint_i, keypoint_j) in &pair.matches {
+            let (source_image, source_keypoint, target_image, target_keypoint) = if swapped {
+                (pair.image_j, keypoint_j, pair.image_i, keypoint_i)
+            } else {
+                (pair.image_i, keypoint_i, pair.image_j, keypoint_j)
+            };
+            endpoint_pairs.push((source_image, source_keypoint, target_image, target_keypoint));
+        }
+    }
+    endpoint_pairs.sort_unstable();
+    endpoint_pairs.dedup();
+
+    let mut source_seen = BTreeSet::new();
+    let mut target_seen = BTreeSet::new();
+    let mut correspondences = Vec::new();
+    for (source_image, source_keypoint, target_image, target_keypoint) in endpoint_pairs {
+        let Some(source) = gr6p_observation_from_pixel(
+            rig,
+            features,
+            image_assignment,
+            candidate.frame_a,
+            source_image,
+            source_keypoint,
+        ) else {
+            continue;
+        };
+        let Some(target) = gr6p_observation_from_pixel(
+            rig,
+            features,
+            image_assignment,
+            candidate.frame_b,
+            target_image,
+            target_keypoint,
+        ) else {
+            continue;
+        };
+        if !source_seen.insert((source_image, source_keypoint))
+            || !target_seen.insert((target_image, target_keypoint))
+        {
+            continue;
+        }
+        correspondences.push(GeneralizedRelativeCorrespondence {
+            rig1: source,
+            rig2: target,
+        });
+        if max_correspondences > 0 && correspondences.len() >= max_correspondences {
+            break;
+        }
+    }
+    correspondences
+}
+
+#[allow(dead_code)]
+fn gr6p_observation_from_pixel(
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    expected_frame: usize,
+    image: usize,
+    keypoint: usize,
+) -> Option<GeneralizedCameraObservation> {
+    let &(frame, sensor_index) = image_assignment.get(image)?;
+    if frame != expected_frame {
+        return None;
+    }
+    let pixel = *features.get(image)?.keypoints.get(keypoint)?;
+    if !pixel.coords.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let sensor = rig.sensor(sensor_index)?;
+    let normalized = sensor.camera.normalize_pixel(&pixel)?;
+    if !normalized.coords.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let bearing_sensor = Vector3::new(normalized.x, normalized.y, 1.0).try_normalize(1.0e-15)?;
+    let bearing_rig = sensor
+        .sensor_from_rig
+        .rotation
+        .inverse_transform_vector(&bearing_sensor)
+        .try_normalize(1.0e-15)?;
+    let origin = rig.sensor_origin_rig(sensor_index)?.coords;
+    GeneralizedCameraObservation::new(origin, bearing_rig).ok()
+}
+
 fn install_image_poses(
     rig: &GeneralizedCameraRig,
     frame: &RigFrame,
@@ -6951,6 +7137,112 @@ mod tests {
 
         assert_eq!(metric_frame_supports(3, &tracks, &assignment), [1, 0, 2]);
         assert_eq!(metric_seed_candidates(&[6, 8, 8, 5]), [1, 2, 0]);
+    }
+
+    #[test]
+    fn gr6p_temporal_candidates_aggregate_sparse_pairs_and_tie_break() {
+        let assignment = vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)];
+        let pairs = vec![
+            PairwiseMatches::new(2, 0, vec![(0, 0), (1, 1), (2, 2)]),
+            PairwiseMatches::new(1, 3, vec![(3, 3), (4, 4), (5, 5), (6, 6)]),
+            PairwiseMatches::new(4, 0, vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]),
+            PairwiseMatches::new(4, 2, vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]),
+            PairwiseMatches::new(0, 1, vec![(0, 0)]),
+        ];
+
+        let candidates = collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8);
+        assert_eq!(
+            candidates,
+            vec![
+                Gr6pTemporalPairCandidate {
+                    frame_a: 0,
+                    frame_b: 1,
+                    support: 7,
+                    sensor_pair_diversity: 2,
+                },
+                Gr6pTemporalPairCandidate {
+                    frame_a: 0,
+                    frame_b: 2,
+                    support: 5,
+                    sensor_pair_diversity: 1,
+                },
+                Gr6pTemporalPairCandidate {
+                    frame_a: 1,
+                    frame_b: 2,
+                    support: 5,
+                    sensor_pair_diversity: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 2),
+            candidates[..2]
+        );
+        assert!(collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 0).is_empty());
+        assert_eq!(
+            candidates,
+            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8)
+        );
+    }
+
+    #[test]
+    fn gr6p_temporal_correspondences_are_canonical_deduplicated_and_capped() {
+        let camera = Camera::pinhole(1, 100, 100, 100.0, 100.0, 50.0, 50.0);
+        let rig = GeneralizedCameraRig::new(vec![
+            RigSensor {
+                camera: camera.clone(),
+                sensor_from_rig: SE3::identity(),
+            },
+            RigSensor {
+                camera,
+                sensor_from_rig: SE3::new(UnitQuaternion::identity(), Vector3::new(-0.2, 0.0, 0.0)),
+            },
+        ])
+        .unwrap();
+        let keypoints = (0..8)
+            .map(|index| Point2::new(60.0 + index as f64, 50.0 + 0.5 * index as f64))
+            .collect::<Vec<_>>();
+        let features = (0..4)
+            .map(|_| FeatureSet::new(keypoints.clone(), vec![Vec::new(); keypoints.len()]).unwrap())
+            .collect::<Vec<_>>();
+        let assignment = vec![(0, 0), (0, 1), (1, 0), (1, 1)];
+        let candidate = Gr6pTemporalPairCandidate {
+            frame_a: 0,
+            frame_b: 1,
+            support: 8,
+            sensor_pair_diversity: 2,
+        };
+        let pairs = vec![
+            // Reversed image order must still produce frame 0 -> frame 1.
+            PairwiseMatches::new(2, 0, vec![(0, 0), (1, 1), (2, 2)]),
+            PairwiseMatches::new(3, 1, vec![(3, 3), (4, 4), (5, 5)]),
+            // Exact endpoint duplicates are ignored.
+            PairwiseMatches::new(0, 2, vec![(0, 0), (1, 1)]),
+        ];
+        let all =
+            build_gr6p_temporal_correspondences(&pairs, candidate, &rig, &features, &assignment, 0);
+        assert_eq!(all.len(), 6);
+        assert_eq!(
+            all,
+            build_gr6p_temporal_correspondences(&pairs, candidate, &rig, &features, &assignment, 0,)
+        );
+        assert_eq!(all[0].rig1.origin, Vector3::zeros());
+        assert_eq!(all[3].rig1.origin, Vector3::new(0.2, 0.0, 0.0));
+        let expected_bearing = Vector3::new(0.1, 0.0, 1.0).normalize();
+        assert!((all[0].rig1.bearing - expected_bearing).norm() < 1.0e-12);
+        assert!((all[0].rig2.bearing - expected_bearing).norm() < 1.0e-12);
+        assert_eq!(
+            build_gr6p_temporal_correspondences(
+                &pairs,
+                candidate,
+                &rig,
+                &features,
+                &assignment,
+                3,
+            )
+            .len(),
+            3
+        );
     }
 
     #[test]
