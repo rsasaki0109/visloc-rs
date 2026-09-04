@@ -230,6 +230,9 @@ pub struct RigSfmConfig {
     /// Number of top verified temporal frame pairs considered by the bounded
     /// GR6P metric seed. Zero disables the proposal path completely.
     pub gr6p_seed_candidate_cap: usize,
+    /// Minimum temporal frame-index separation admitted before the top-K
+    /// support ranking. Zero preserves the unrestricted candidate stream.
+    pub gr6p_seed_min_frame_gap: usize,
     /// Maximum unique ray correspondences built for each GR6P candidate.
     /// This must be at least six when the candidate path is enabled.
     pub gr6p_seed_correspondence_cap: usize,
@@ -313,6 +316,7 @@ impl Default for RigSfmConfig {
             structure_refinement_iterations: 5,
             dynamic_correspondence_tracking: false,
             gr6p_seed_candidate_cap: 0,
+            gr6p_seed_min_frame_gap: 0,
             gr6p_seed_correspondence_cap: 512,
             gr6p_seed_max_iterations: 64,
             gr6p_seed_min_iterations: 16,
@@ -858,6 +862,21 @@ pub fn incremental_rig_sfm(
         // its mutations and is committed below.
         let gr6p_tracks_baseline = config.robust_triangulation_pruning.then(|| tracks.clone());
         for proposal in &gr6p_selection.proposals {
+            if trace_registration {
+                eprintln!(
+                    "rig-gr6p-proposal: frame_a={} frame_b={} support={} correspondences={} inliers={} sensors={} positive_depth_fraction={:.9} baseline_m={:.9} mean_residual_rad={:.12e} candidate_models={}",
+                    proposal.frame_a,
+                    proposal.frame_b,
+                    proposal.candidate_support,
+                    proposal.correspondence_count,
+                    proposal.inlier_count,
+                    proposal.sensor_pair_diversity,
+                    proposal.positive_depth_fraction,
+                    proposal.baseline_m,
+                    proposal.mean_residual_rad,
+                    proposal.candidate_models,
+                );
+            }
             for track in &mut tracks {
                 track.position = None;
             }
@@ -889,6 +908,12 @@ pub fn incremental_rig_sfm(
             total_seed_pruned_observations += triangulation.pruned_observations;
             total_seed_majority_rejections += triangulation.majority_rejections;
             let seed_landmarks = triangulation.landmarks.len();
+            if trace_registration {
+                eprintln!(
+                    "rig-gr6p-proposal-triangulation: frame_a={} frame_b={} landmarks={} required={}",
+                    proposal.frame_a, proposal.frame_b, seed_landmarks, required_seed_landmarks,
+                );
+            }
             if seed_landmarks >= required_seed_landmarks {
                 accepted_seed = Some((proposal.frame_a, triangulation.landmarks));
                 accepted_gr6p_proposal = Some(proposal.clone());
@@ -5419,6 +5444,7 @@ fn collect_gr6p_temporal_pair_candidates(
     pairwise: &[PairwiseMatches],
     image_assignment: &[(usize, usize)],
     max_candidates: usize,
+    min_frame_gap: usize,
 ) -> Vec<Gr6pTemporalPairCandidate> {
     if max_candidates == 0 {
         return Vec::new();
@@ -5439,6 +5465,9 @@ fn collect_gr6p_temporal_pair_candidates(
         } else {
             (frame_j, frame_i, sensor_j, sensor_i)
         };
+        if frame_b - frame_a < min_frame_gap {
+            continue;
+        }
         let entry = aggregates
             .entry((frame_a, frame_b))
             .or_insert_with(|| (0, BTreeSet::new()));
@@ -5684,6 +5713,7 @@ fn select_gr6p_temporal_seed_proposals(
         pairwise,
         image_assignment,
         config.gr6p_seed_candidate_cap,
+        config.gr6p_seed_min_frame_gap,
     );
     let candidate_pairs = candidates.len();
     let mut probes = 0usize;
@@ -7645,7 +7675,7 @@ mod tests {
             PairwiseMatches::new(0, 1, vec![(0, 0)]),
         ];
 
-        let candidates = collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8);
+        let candidates = collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8, 0);
         assert_eq!(
             candidates,
             vec![
@@ -7670,13 +7700,17 @@ mod tests {
             ]
         );
         assert_eq!(
-            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 2),
+            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 2, 0),
             candidates[..2]
         );
-        assert!(collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 0).is_empty());
+        assert!(collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 0, 0).is_empty());
+        assert_eq!(
+            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8, 2),
+            candidates[1..2]
+        );
         assert_eq!(
             candidates,
-            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8)
+            collect_gr6p_temporal_pair_candidates(&pairs, &assignment, 8, 0)
         );
     }
 

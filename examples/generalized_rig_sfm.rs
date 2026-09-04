@@ -126,6 +126,7 @@ struct Args {
     preview_pair_confidence_conflicts: bool,
     dynamic_correspondence_tracking: bool,
     gr6p_seed_candidate_cap: usize,
+    gr6p_seed_min_frame_gap: usize,
     gr6p_seed_correspondence_cap: usize,
     gr6p_seed_max_iterations: usize,
     gr6p_seed_min_iterations: usize,
@@ -239,6 +240,7 @@ fn parse_args() -> Result<Args, String> {
     let mut preview_pair_confidence_conflicts = false;
     let mut dynamic_correspondence_tracking = false;
     let mut gr6p_seed_candidate_cap = defaults.gr6p_seed_candidate_cap;
+    let mut gr6p_seed_min_frame_gap = defaults.gr6p_seed_min_frame_gap;
     let mut gr6p_seed_correspondence_cap = defaults.gr6p_seed_correspondence_cap;
     let mut gr6p_seed_max_iterations = defaults.gr6p_seed_max_iterations;
     let mut gr6p_seed_min_iterations = defaults.gr6p_seed_min_iterations;
@@ -278,6 +280,9 @@ fn parse_args() -> Result<Args, String> {
             "--dynamic-correspondence-tracking" => dynamic_correspondence_tracking = true,
             "--gr6p-seed-candidate-cap" => {
                 gr6p_seed_candidate_cap = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-min-frame-gap" => {
+                gr6p_seed_min_frame_gap = value()?.parse().map_err(|error| format!("{error}"))?
             }
             "--gr6p-seed-correspondence-cap" => {
                 gr6p_seed_correspondence_cap =
@@ -621,6 +626,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--preview-rig-correspondence-csr|--preview-pair-confidence-conflicts] ",
                     "[--dynamic-correspondence-tracking] ",
                     "[--gr6p-seed-candidate-cap 0] ",
+                    "[--gr6p-seed-min-frame-gap 0] ",
                     "[--gr6p-seed-correspondence-cap 512] ",
                     "[--gr6p-seed-max-iterations 64] ",
                     "[--gr6p-seed-min-iterations 16] ",
@@ -918,6 +924,7 @@ fn parse_args() -> Result<Args, String> {
         preview_pair_confidence_conflicts,
         dynamic_correspondence_tracking,
         gr6p_seed_candidate_cap,
+        gr6p_seed_min_frame_gap,
         gr6p_seed_correspondence_cap,
         gr6p_seed_max_iterations,
         gr6p_seed_min_iterations,
@@ -1539,6 +1546,7 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         structure_refinement_iterations: args.structure_refinement_iterations,
         dynamic_correspondence_tracking: args.dynamic_correspondence_tracking,
         gr6p_seed_candidate_cap: args.gr6p_seed_candidate_cap,
+        gr6p_seed_min_frame_gap: args.gr6p_seed_min_frame_gap,
         gr6p_seed_correspondence_cap: args.gr6p_seed_correspondence_cap,
         gr6p_seed_max_iterations: args.gr6p_seed_max_iterations,
         gr6p_seed_min_iterations: args.gr6p_seed_min_iterations,
