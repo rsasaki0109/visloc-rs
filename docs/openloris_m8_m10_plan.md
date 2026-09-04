@@ -1109,9 +1109,23 @@ disabled. Full paths, hashes, commands, and license attribution are recorded in
 This is a solver-parity prerequisite only, not an M8 quality result. The prior
 pure-Rust GR8P prototype reached a convention-correct truth generalized-
 epipolar residual, but its official-style rotation search was numerically
-sensitive and the prototype was not retained. The next step is GR6P parity
-against this fixture before mapper wiring; no GR6P/GR8P quality claim is made
-until that gate passes.
+sensitive and the prototype was not retained.
+
+The pure-Rust GR6P port now passes the frozen oracle: it returns the same eight
+finite candidates and its best metric pose is within `1e-8` of the COLMAP
+truth. Swapping both observations recovers the inverse transform within the
+same tolerance, repeated solves are identical, malformed bearings fail closed,
+and a one-sided generalized rig remains observable while a fully central
+sample is rejected. The solver has no native dependency and keeps the full
+PoseLib BSD-3-Clause attribution. A bounded deterministic RANSAC wrapper adds
+six-point sampling and an isotropic angular tangent-Sampson score. Its 20-row
+synthetic test (15 noisy inliers and five outliers) recovers the metric pose,
+rejects all outliers, and respects a 64-trial cap; a warmed release test takes
+about `0.05 s` on the benchmark host. Both slices pass the complete local
+`visloc-vision` library suite, workspace check, clippy with warnings denied,
+formatting, MSRV, and every feature-matrix CI job. Mapper wiring and the frozen
+1k quality gate remain outstanding, so this is not yet a GR6P quality
+promotion.
 
 ## M9 — make the quality champion faster than COLMAP
 
