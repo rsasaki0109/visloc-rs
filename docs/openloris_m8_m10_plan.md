@@ -842,6 +842,18 @@ index, and publish each component once when its first dynamic track becomes
 positioned. These are still PnP proposals only—no transitive owner or track
 topology—and total component scans and storage must remain O(observations).
 
+That streaming extension is also rejected. It publishes 4,760 clean components
+and scans 142,125 component observations exactly once, remaining bounded at
+175,548 KiB, but order two still diverges and the final result regresses to
+0.02940 m RMSE / 0.04400 m p95 / 0.74609 px in 37.51 s. A component can contain
+two newly registered views connected only through unregistered CSR nodes;
+legacy pre-union membership triangulates it, while no positioned dynamic
+fragment exists to source the streaming proposal. Thus visibility alone is not
+enough: a further dynamic experiment would require an owner-neutral shadow
+landmark per clean component, triangulated only after it has sufficient
+registered rays. It must remain separate from dynamic ownership and pass 1k
+before promotion. The failed streaming option and compact index are removed.
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a

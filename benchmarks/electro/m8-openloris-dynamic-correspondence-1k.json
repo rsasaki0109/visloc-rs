@@ -191,6 +191,41 @@
         "points3D_txt": "d95b7156cff19ae0d575503dece0190ec672ea9cc12f5ac0b70ada799b4229d9"
       },
       "reason": "owner-neutral selected seed-component proposals exactly restore the legacy first PnP choice and pose, proving the visibility diagnosis, but newly positioned tracks again expose only direct CSR neighbours; registration diverges at order two and both frozen trajectory controls regress"
+    },
+    "streamed_positioned_component_pnp_proposals": {
+      "decision": "rejected_and_removed",
+      "registered_images": 1000,
+      "models": 1,
+      "first_pnp_matches_legacy": true,
+      "second_pnp_diverges_from_legacy": true,
+      "published_components": 4760,
+      "published_component_observations": 142125,
+      "proposal_cache_insertions": 108185,
+      "each_component_scanned_at_most_once": true,
+      "persistent_complexity": "O(observations + components + verified CSR edges)",
+      "tracks": 8182,
+      "observations": 270342,
+      "mean_reprojection_px": 0.746086380,
+      "ate_rmse_m": 0.029400060505733704,
+      "ate_p95_m": 0.0440043008437575,
+      "ate_max_m": 0.0857191021900096,
+      "mapper_seconds": 37.506387,
+      "wall_seconds": 38.31,
+      "peak_rss_kib": 175548,
+      "registration_trace": {
+        "sequence_mismatches": 350,
+        "mean_absolute_order_delta": 6.264,
+        "mean_camera_center_delta_m": 0.008091519497462561,
+        "maximum_camera_center_delta_m": 0.05379959100087829,
+        "sha256": "66cd9b4b38714ae0f1ce1f6a2a03a45fc846a3918b2f8bb5cd61828a6a054b22"
+      },
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "9a7aa9db417a6134070c11b5d393d09cc5164e233e25744736c346dc7ebc511a",
+        "points3D_txt": "c89f6a1368b15f3d78e2beb01101920d71429d7454927e3d6f910245686c388b"
+      },
+      "score_sha256": "85acffa31d842e1f3e8c00a78689f987c480af040a48d69d4a9efd7c6b39886a",
+      "reason": "publishing every clean component touched by an already positioned dynamic fragment cannot expose a clean component whose registered observations remain separated by unregistered CSR nodes; unlike legacy pre-union tracks, no proposal 3-D point exists for those components, so order two still diverges and trajectory regresses further"
     }
   },
   "promotion_gate": {
@@ -206,6 +241,6 @@
   "decision": {
     "retain_default_off_diagnostic": true,
     "reject_single_edge_owner_merge": true,
-    "next_action": "replace the rejected bootstrap-only proposal with a compact retained-component index and expose each clean legacy component at most once when its first dynamic track becomes positioned; proposals remain owner-neutral, ownership remains registration-time CSR-driven, persistent work stays O(observations plus edges), and the arm must pass the frozen 1k trajectory controls before any larger tier"
+    "next_action": "if the dynamic path is continued, test a bounded clean-component shadow-landmark state: when a newly registered frame gives a clean component two or more registered rays, triangulate a proposal-only point and expose its unregistered observations without assigning dynamic owners; this specifically covers registered views separated by unregistered CSR nodes and must pass frozen 1k before any larger tier"
   }
 }
