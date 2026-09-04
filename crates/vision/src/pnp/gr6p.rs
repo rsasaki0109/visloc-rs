@@ -31,6 +31,8 @@
 // https://github.com/PoseLib/PoseLib/blob/master/PoseLib/solvers/gen_relpose_6pt.cc
 
 use nalgebra::{DMatrix, Matrix3, Matrix6, Quaternion, SMatrix, SVector, UnitQuaternion, Vector3};
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 
 use super::gr6p_data::{C0_IND, C1_IND, COEFFS0_IND, COEFFS1_IND, PT_INDEX};
 
@@ -118,6 +120,73 @@ pub enum GeneralizedRelativePoseError {
 pub type GeneralizedRelativePoseResult =
     Result<Vec<GeneralizedRelativePose>, GeneralizedRelativePoseError>;
 
+/// Configuration for bounded deterministic GR6P RANSAC.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeneralizedRelativePoseRansacConfig {
+    /// Maximum number of six-point hypotheses to sample.
+    pub max_iterations: usize,
+    /// Minimum number of hypotheses to sample before confidence termination.
+    pub min_iterations: usize,
+    /// Desired probability of having sampled an all-inlier minimal set.
+    pub confidence: f64,
+    /// Inlier threshold for the rig-frame angular epipolar residual, in
+    /// radians. The squared threshold is compared with the squared residual.
+    pub inlier_angular_threshold: f64,
+    /// Seed for the deterministic sampler.
+    pub seed: u64,
+    /// Minimum consensus size required for a report. GR6P requires at least 6.
+    pub min_inliers: usize,
+}
+
+impl Default for GeneralizedRelativePoseRansacConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 256,
+            min_iterations: 32,
+            confidence: 0.999,
+            inlier_angular_threshold: 0.01,
+            seed: 7,
+            min_inliers: 6,
+        }
+    }
+}
+
+/// Errors detected before bounded GR6P RANSAC starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneralizedRelativePoseRansacError {
+    /// The iteration, confidence, threshold, or consensus configuration is invalid.
+    InvalidConfiguration,
+    /// GR6P needs six observations for every minimal sample.
+    InsufficientCorrespondences { expected: usize, actual: usize },
+    /// An origin or bearing at the given input index is non-finite.
+    NonFiniteObservation { index: usize },
+    /// A bearing at the given input index cannot be normalized.
+    ZeroLengthBearing { index: usize },
+}
+
+/// Report from a successful bounded GR6P RANSAC search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneralizedRelativePoseRansacReport {
+    /// Best metric transform mapping rig 1 coordinates into rig 2 coordinates.
+    pub pose: GeneralizedRelativePose,
+    /// Indices of input correspondences inside the angular residual threshold.
+    pub inliers: Vec<usize>,
+    /// Number of minimal samples actually probed, never larger than the cap.
+    pub iterations: usize,
+    /// Total number of polynomial candidates returned by all probed samples.
+    pub candidate_models: usize,
+    /// Mean inlier angular epipolar residual, in radians.
+    pub mean_residual: f64,
+    /// Maximum inlier angular epipolar residual, in radians.
+    pub max_residual: f64,
+}
+
+/// Result type for bounded GR6P RANSAC. `Ok(None)` means that no candidate
+/// reached `min_inliers`; malformed input and configuration are returned as
+/// explicit errors instead.
+pub type GeneralizedRelativePoseRansacResult =
+    Result<Option<GeneralizedRelativePoseRansacReport>, GeneralizedRelativePoseRansacError>;
+
 /// Validate and normalize the six observations required by GR6P.
 pub fn normalize_gr6p_correspondences(
     correspondences: &[GeneralizedRelativeCorrespondence],
@@ -199,6 +268,332 @@ pub fn estimate_gr6p_with_config(
         return Ok(Vec::new());
     }
     solve_gr6p_polynomial(&normalized)
+}
+
+/// Compute the squared rig-frame angular Sampson residual for one
+/// generalized-ray correspondence and a candidate pose.
+///
+/// The residual is dimensionless in the formula, but its small-error square
+/// root is an angular error in radians. It uses the generalized epipolar
+/// constraint from COLMAP's GR6P residual path, with isotropic tangent-plane
+/// ray noise because this API carries rig-frame bearings rather than
+/// camera-specific pixel Jacobians. COLMAP's pixel-Jacobian tangent Sampson
+/// residual is consequently measured in pixels; this rig-frame form is the
+/// corresponding angular form and should be thresholded in radians.
+pub fn generalized_epipolar_residual_squared(
+    correspondence: &GeneralizedRelativeCorrespondence,
+    pose: &GeneralizedRelativePose,
+) -> f64 {
+    let Some(bearing1) = correspondence.rig1.bearing.try_normalize(1.0e-15) else {
+        return f64::INFINITY;
+    };
+    let Some(bearing2) = correspondence.rig2.bearing.try_normalize(1.0e-15) else {
+        return f64::INFINITY;
+    };
+    let origin1 = correspondence.rig1.origin;
+    let origin2 = correspondence.rig2.origin;
+    if !origin1.iter().all(|value| value.is_finite())
+        || !origin2.iter().all(|value| value.is_finite())
+        || !pose.translation.iter().all(|value| value.is_finite())
+        || !pose
+            .rotation
+            .quaternion()
+            .coords
+            .iter()
+            .all(|value| value.is_finite())
+    {
+        return f64::INFINITY;
+    }
+
+    let rig1_bearing_in_rig2 = pose.rotation * bearing1;
+    let q = pose.translation + pose.rotation * origin1 - origin2;
+    let constraint = bearing2.dot(&q.cross(&rig1_bearing_in_rig2));
+
+    // Pull the ray-space gradients into each observation's unit-sphere
+    // tangent plane. The projections remove the radial component, matching
+    // COLMAP's J^T g denominator when ray noise is isotropic in angle.
+    let gradient1 = pose.rotation.inverse_transform_vector(&bearing2.cross(&q));
+    let gradient2 = q.cross(&rig1_bearing_in_rig2);
+    let tangent_gradient1 = gradient1 - bearing1 * bearing1.dot(&gradient1);
+    let tangent_gradient2 = gradient2 - bearing2 * bearing2.dot(&gradient2);
+    let denominator = tangent_gradient1.norm_squared() + tangent_gradient2.norm_squared();
+    if !constraint.is_finite() || !denominator.is_finite() || denominator <= 0.0 {
+        return f64::INFINITY;
+    }
+    let residual_squared = constraint * constraint / denominator;
+    if residual_squared.is_finite() {
+        residual_squared
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// Compute the rig-frame angular Sampson residual in radians.
+pub fn generalized_epipolar_residual(
+    correspondence: &GeneralizedRelativeCorrespondence,
+    pose: &GeneralizedRelativePose,
+) -> f64 {
+    generalized_epipolar_residual_squared(correspondence, pose).sqrt()
+}
+
+/// Run bounded, deterministic GR6P RANSAC over all generalized-ray
+/// correspondences.
+pub fn estimate_gr6p_ransac(
+    correspondences: &[GeneralizedRelativeCorrespondence],
+) -> GeneralizedRelativePoseRansacResult {
+    estimate_gr6p_ransac_with_config(
+        correspondences,
+        &GeneralizedRelativePoseRansacConfig::default(),
+    )
+}
+
+/// Configurable bounded GR6P RANSAC entry point.
+pub fn estimate_gr6p_ransac_with_config(
+    correspondences: &[GeneralizedRelativeCorrespondence],
+    config: &GeneralizedRelativePoseRansacConfig,
+) -> GeneralizedRelativePoseRansacResult {
+    validate_gr6p_ransac_config(config)?;
+    if correspondences.len() < 6 {
+        return Err(
+            GeneralizedRelativePoseRansacError::InsufficientCorrespondences {
+                expected: 6,
+                actual: correspondences.len(),
+            },
+        );
+    }
+
+    let normalized = correspondences
+        .iter()
+        .enumerate()
+        .map(|(index, correspondence)| {
+            normalize_ransac_observation(correspondence.rig1, index).and_then(|rig1| {
+                normalize_ransac_observation(correspondence.rig2, index)
+                    .map(|rig2| GeneralizedRelativeCorrespondence { rig1, rig2 })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let threshold_squared = config.inlier_angular_threshold.powi(2);
+    let mut rng = SmallRng::seed_from_u64(config.seed);
+    let mut best: Option<(GeneralizedRelativePose, RansacScore)> = None;
+    let mut iterations: usize = 0;
+    let mut candidate_models: usize = 0;
+    let mut required_iterations = config.max_iterations;
+
+    while iterations < config.max_iterations && iterations < required_iterations {
+        let sample = sample_six_without_replacement(&normalized, &mut rng);
+        let candidates = estimate_gr6p(&sample).unwrap_or_default();
+        candidate_models = candidate_models.saturating_add(candidates.len());
+        for candidate in candidates {
+            let score = score_gr6p_pose(&normalized, &candidate, threshold_squared);
+            if score.inliers.len() < config.min_inliers {
+                continue;
+            }
+            let replace = best
+                .as_ref()
+                .map(|(best_pose, best_score)| {
+                    is_better_gr6p_score(&score, &candidate, best_score, best_pose)
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((candidate, score));
+                required_iterations = required_iterations.min(confidence_iterations(
+                    config.confidence,
+                    best.as_ref()
+                        .map(|(_, score)| score.inliers.len())
+                        .unwrap_or(0),
+                    normalized.len(),
+                    config.min_iterations,
+                    config.max_iterations,
+                ));
+            }
+        }
+        iterations += 1;
+    }
+
+    let Some((pose, score)) = best else {
+        return Ok(None);
+    };
+    let mean_residual = score.residual_sum / score.inliers.len() as f64;
+    Ok(Some(GeneralizedRelativePoseRansacReport {
+        pose,
+        inliers: score.inliers,
+        iterations,
+        candidate_models,
+        mean_residual,
+        max_residual: score.max_residual,
+    }))
+}
+
+fn validate_gr6p_ransac_config(
+    config: &GeneralizedRelativePoseRansacConfig,
+) -> Result<(), GeneralizedRelativePoseRansacError> {
+    if config.max_iterations == 0
+        || config.min_iterations == 0
+        || config.min_iterations > config.max_iterations
+        || !config.confidence.is_finite()
+        || config.confidence <= 0.0
+        || config.confidence >= 1.0
+        || !config.inlier_angular_threshold.is_finite()
+        || config.inlier_angular_threshold <= 0.0
+        || config.min_inliers < 6
+    {
+        return Err(GeneralizedRelativePoseRansacError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn normalize_ransac_observation(
+    observation: GeneralizedCameraObservation,
+    index: usize,
+) -> Result<GeneralizedCameraObservation, GeneralizedRelativePoseRansacError> {
+    if !observation.origin.iter().all(|value| value.is_finite())
+        || !observation.bearing.iter().all(|value| value.is_finite())
+    {
+        return Err(GeneralizedRelativePoseRansacError::NonFiniteObservation { index });
+    }
+    let norm = observation.bearing.norm();
+    if !norm.is_finite() || norm <= 1.0e-12 {
+        return Err(GeneralizedRelativePoseRansacError::ZeroLengthBearing { index });
+    }
+    Ok(GeneralizedCameraObservation {
+        origin: observation.origin,
+        bearing: observation.bearing / norm,
+    })
+}
+
+fn sample_six_without_replacement(
+    correspondences: &[GeneralizedRelativeCorrespondence],
+    rng: &mut SmallRng,
+) -> [GeneralizedRelativeCorrespondence; 6] {
+    let sampled_indices = sample_six_indices_without_replacement(correspondences.len(), rng);
+    sampled_indices.map(|index| correspondences[index])
+}
+
+fn sample_six_indices_without_replacement(len: usize, rng: &mut SmallRng) -> [usize; 6] {
+    debug_assert!(len >= 6);
+    let mut sampled_indices = [0usize; 6];
+    for index in 0..len {
+        if index < sampled_indices.len() {
+            sampled_indices[index] = index;
+        } else {
+            let replacement = rng.gen_range(0..=index);
+            if replacement < sampled_indices.len() {
+                sampled_indices[replacement] = index;
+            }
+        }
+    }
+    sampled_indices
+}
+
+#[derive(Clone, Debug)]
+struct RansacScore {
+    inliers: Vec<usize>,
+    residual_sum: f64,
+    max_residual: f64,
+}
+
+fn score_gr6p_pose(
+    correspondences: &[GeneralizedRelativeCorrespondence],
+    pose: &GeneralizedRelativePose,
+    threshold_squared: f64,
+) -> RansacScore {
+    let mut inliers = Vec::new();
+    let mut residual_sum = 0.0;
+    let mut max_residual = 0.0_f64;
+    for (index, correspondence) in correspondences.iter().enumerate() {
+        let residual_squared = generalized_epipolar_residual_squared(correspondence, pose);
+        if residual_squared.is_finite() && residual_squared <= threshold_squared {
+            let residual = residual_squared.sqrt();
+            inliers.push(index);
+            residual_sum += residual;
+            max_residual = max_residual.max(residual);
+        }
+    }
+    RansacScore {
+        inliers,
+        residual_sum,
+        max_residual,
+    }
+}
+
+fn confidence_iterations(
+    confidence: f64,
+    inliers: usize,
+    total: usize,
+    min_iterations: usize,
+    max_iterations: usize,
+) -> usize {
+    if inliers >= total {
+        return min_iterations;
+    }
+    let ratio = inliers as f64 / total as f64;
+    if ratio <= 0.0 || !ratio.is_finite() {
+        return max_iterations;
+    }
+    let probability = ratio.powi(6);
+    if probability >= 1.0 {
+        return min_iterations;
+    }
+    let denominator = (1.0 - probability).ln();
+    if !denominator.is_finite() || denominator >= 0.0 {
+        return max_iterations;
+    }
+    let needed = ((1.0 - confidence).ln() / denominator).ceil();
+    if !needed.is_finite() {
+        return max_iterations;
+    }
+    (needed as usize).clamp(min_iterations, max_iterations)
+}
+
+fn is_better_gr6p_score(
+    candidate: &RansacScore,
+    candidate_pose: &GeneralizedRelativePose,
+    incumbent: &RansacScore,
+    incumbent_pose: &GeneralizedRelativePose,
+) -> bool {
+    match candidate.inliers.len().cmp(&incumbent.inliers.len()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            match candidate.residual_sum.total_cmp(&incumbent.residual_sum) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => pose_tie_key_is_less(candidate_pose, incumbent_pose),
+            }
+        }
+    }
+}
+
+fn pose_tie_key(pose: &GeneralizedRelativePose) -> [f64; 7] {
+    let quaternion = pose.rotation.quaternion();
+    let sign = if quaternion.w < 0.0 { -1.0 } else { 1.0 };
+    [
+        sign * quaternion.w,
+        sign * quaternion.i,
+        sign * quaternion.j,
+        sign * quaternion.k,
+        pose.translation.x,
+        pose.translation.y,
+        pose.translation.z,
+    ]
+}
+
+fn pose_tie_key_is_less(
+    candidate: &GeneralizedRelativePose,
+    incumbent: &GeneralizedRelativePose,
+) -> bool {
+    for (candidate_value, incumbent_value) in pose_tie_key(candidate)
+        .into_iter()
+        .zip(pose_tie_key(incumbent))
+    {
+        match candidate_value.total_cmp(&incumbent_value) {
+            std::cmp::Ordering::Less => return true,
+            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    false
 }
 
 fn origin_spread(correspondences: &[GeneralizedRelativeCorrespondence; 6], first_rig: bool) -> f64 {
@@ -1346,6 +1741,81 @@ mod tests {
         rotation_error.max((pose.translation - truth_translation).norm())
     }
 
+    fn synthetic_ransac_input() -> (
+        Vec<GeneralizedRelativeCorrespondence>,
+        UnitQuaternion<f64>,
+        Vector3<f64>,
+        usize,
+    ) {
+        let truth_rotation = UnitQuaternion::from_euler_angles(0.12, -0.08, 0.17);
+        let truth_translation = Vector3::new(0.7, -0.24, 0.31);
+        let origins = [
+            Vector3::zeros(),
+            Vector3::new(0.46, 0.08, 0.03),
+            Vector3::new(-0.22, 0.39, 0.11),
+        ];
+        let mut correspondences = Vec::new();
+        for index in 0..15 {
+            let origin1 = origins[index % origins.len()];
+            let origin2 = origins[(index + 1) % origins.len()];
+            let point1 = Vector3::new(
+                -1.8 + 0.41 * (index % 6) as f64,
+                -1.1 + 0.37 * (index % 5) as f64,
+                4.5 + 0.29 * index as f64,
+            );
+            let point2 = truth_rotation * point1 + truth_translation;
+            let source_noise = Vector3::new(
+                0.00003 * ((index % 3) as f64 - 1.0),
+                -0.00002 * ((index % 4) as f64 - 1.5),
+                0.00001 * (index % 2) as f64,
+            );
+            let target_noise = Vector3::new(
+                -0.00002 * ((index % 4) as f64 - 1.5),
+                0.000025 * ((index % 3) as f64 - 1.0),
+                -0.00001 * (index % 2) as f64,
+            );
+            correspondences.push(GeneralizedRelativeCorrespondence {
+                rig1: GeneralizedCameraObservation {
+                    origin: origin1,
+                    bearing: (point1 - origin1 + source_noise).normalize(),
+                },
+                rig2: GeneralizedCameraObservation {
+                    origin: origin2,
+                    bearing: (point2 - origin2 + target_noise).normalize(),
+                },
+            });
+        }
+        let inlier_count = correspondences.len();
+        for index in 0..5 {
+            correspondences.push(GeneralizedRelativeCorrespondence {
+                rig1: GeneralizedCameraObservation {
+                    origin: origins[index % origins.len()],
+                    bearing: Vector3::new(
+                        0.25 + 0.09 * index as f64,
+                        -0.6 + 0.07 * index as f64,
+                        0.75,
+                    )
+                    .normalize(),
+                },
+                rig2: GeneralizedCameraObservation {
+                    origin: origins[(index + 1) % origins.len()],
+                    bearing: Vector3::new(
+                        -0.7 + 0.08 * index as f64,
+                        0.2 - 0.05 * index as f64,
+                        0.55,
+                    )
+                    .normalize(),
+                },
+            });
+        }
+        (
+            correspondences,
+            truth_rotation,
+            truth_translation,
+            inlier_count,
+        )
+    }
+
     #[test]
     fn matches_colmap_gr6p_oracle_fixture() {
         let (input, truth_rotation, truth_translation) = fixture_input();
@@ -1458,5 +1928,136 @@ mod tests {
             "one-sided central GR6P error: {best_error:e}, candidates: {}",
             solutions.len()
         );
+    }
+
+    #[test]
+    fn gr6p_ransac_recovers_noisy_inliers_and_rejects_outliers() {
+        let (input, truth_rotation, truth_translation, inlier_count) = synthetic_ransac_input();
+        let config = GeneralizedRelativePoseRansacConfig {
+            max_iterations: 64,
+            min_iterations: 8,
+            confidence: 0.999,
+            inlier_angular_threshold: 0.002,
+            seed: 19,
+            min_inliers: inlier_count,
+        };
+        let report = estimate_gr6p_ransac_with_config(&input, &config)
+            .unwrap()
+            .expect("RANSAC should find the noisy inlier consensus");
+        assert_eq!(report.inliers.len(), inlier_count);
+        assert!(report.inliers.iter().all(|&index| index < inlier_count));
+        assert!(report.iterations >= config.min_iterations);
+        assert!(report.iterations <= config.max_iterations);
+        assert!(report.candidate_models > 0);
+        assert!(report.mean_residual <= config.inlier_angular_threshold);
+        assert!(report.max_residual <= config.inlier_angular_threshold);
+        assert!(
+            pose_error(&report.pose, truth_rotation, truth_translation) < 1.0e-3,
+            "RANSAC pose error: {}",
+            pose_error(&report.pose, truth_rotation, truth_translation)
+        );
+    }
+
+    #[test]
+    fn gr6p_ransac_is_deterministic_and_respects_iteration_cap() {
+        let (input, _, _) = fixture_input();
+        let config = GeneralizedRelativePoseRansacConfig {
+            max_iterations: 3,
+            min_iterations: 3,
+            confidence: 0.99,
+            inlier_angular_threshold: 0.01,
+            seed: 41,
+            min_inliers: 6,
+        };
+        let first = estimate_gr6p_ransac_with_config(&input, &config)
+            .unwrap()
+            .expect("bounded RANSAC should return a model");
+        let second = estimate_gr6p_ransac_with_config(&input, &config)
+            .unwrap()
+            .expect("bounded RANSAC should return a model");
+        assert_eq!(first, second);
+        assert_eq!(first.iterations, config.max_iterations);
+        assert!(first.candidate_models <= config.max_iterations * 8);
+    }
+
+    #[test]
+    fn gr6p_ransac_rejects_invalid_and_degenerate_inputs_without_panicking() {
+        let (input, _, _, _) = synthetic_ransac_input();
+        let invalid = GeneralizedRelativePoseRansacConfig {
+            max_iterations: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            estimate_gr6p_ransac_with_config(&input, &invalid),
+            Err(GeneralizedRelativePoseRansacError::InvalidConfiguration)
+        );
+        let defaults = GeneralizedRelativePoseRansacConfig::default();
+        let invalid = GeneralizedRelativePoseRansacConfig {
+            min_iterations: defaults.max_iterations + 1,
+            ..defaults
+        };
+        assert_eq!(
+            estimate_gr6p_ransac_with_config(&input, &invalid),
+            Err(GeneralizedRelativePoseRansacError::InvalidConfiguration)
+        );
+        let too_few = [correspondence(); 5];
+        assert_eq!(
+            estimate_gr6p_ransac(&too_few),
+            Err(
+                GeneralizedRelativePoseRansacError::InsufficientCorrespondences {
+                    expected: 6,
+                    actual: 5,
+                }
+            )
+        );
+
+        let mut nonfinite = input.clone();
+        nonfinite[0].rig2.origin.x = f64::NAN;
+        assert_eq!(
+            estimate_gr6p_ransac(&nonfinite),
+            Err(GeneralizedRelativePoseRansacError::NonFiniteObservation { index: 0 })
+        );
+        let mut zero_length = input.clone();
+        zero_length[1].rig1.bearing = Vector3::zeros();
+        assert_eq!(
+            estimate_gr6p_ransac(&zero_length),
+            Err(GeneralizedRelativePoseRansacError::ZeroLengthBearing { index: 1 })
+        );
+
+        let (mut degenerate, _, _, _) = synthetic_ransac_input();
+        degenerate.truncate(6);
+        for item in &mut degenerate {
+            item.rig1.origin = Vector3::zeros();
+            item.rig2.origin = Vector3::zeros();
+        }
+        assert!(estimate_gr6p_ransac(&degenerate).unwrap().is_none());
+    }
+
+    #[test]
+    fn gr6p_ransac_sampling_has_no_duplicate_indices() {
+        let (input, _, _, _) = synthetic_ransac_input();
+        let mut rng = SmallRng::seed_from_u64(23);
+        let sample = sample_six_indices_without_replacement(input.len(), &mut rng);
+        for left in 0..sample.len() {
+            for right in (left + 1)..sample.len() {
+                assert_ne!(sample[left], sample[right]);
+            }
+        }
+    }
+
+    #[test]
+    fn generalized_epipolar_residual_is_angular_and_zero_at_truth() {
+        let (input, truth_rotation, truth_translation, _) = synthetic_ransac_input();
+        let truth = GeneralizedRelativePose {
+            rotation: truth_rotation,
+            translation: truth_translation,
+        };
+        for correspondence in &input[..15] {
+            assert!(generalized_epipolar_residual(correspondence, &truth) < 1.0e-5);
+            assert!(generalized_epipolar_residual_squared(correspondence, &truth) <= 1.0e-10);
+        }
+        let mut perturbed = truth;
+        perturbed.translation.x += 0.1;
+        assert!(generalized_epipolar_residual(&input[0], &perturbed) > 1.0e-4);
     }
 }

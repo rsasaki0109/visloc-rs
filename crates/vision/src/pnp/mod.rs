@@ -11,9 +11,14 @@ pub use generalized::{
     GeneralizedGaussNewtonPoseRefiner, GeneralizedPnPRansac, GeneralizedRansacReport, RigSensor,
 };
 pub use gr6p::{
-    estimate_gr6p, estimate_gr6p_with_config, normalize_gr6p_correspondences,
+    estimate_gr6p, estimate_gr6p_ransac, estimate_gr6p_ransac_with_config,
+    estimate_gr6p_with_config, generalized_epipolar_residual,
+    generalized_epipolar_residual_squared, normalize_gr6p_correspondences,
     GeneralizedCameraObservation, GeneralizedRelativeCorrespondence, GeneralizedRelativePose,
-    GeneralizedRelativePoseConfig, GeneralizedRelativePoseError, GeneralizedRelativePoseResult,
+    GeneralizedRelativePoseConfig, GeneralizedRelativePoseError,
+    GeneralizedRelativePoseRansacConfig, GeneralizedRelativePoseRansacError,
+    GeneralizedRelativePoseRansacReport, GeneralizedRelativePoseRansacResult,
+    GeneralizedRelativePoseResult,
 };
 pub use p3p::P3PGrunert;
 
