@@ -905,6 +905,18 @@ hypotheses, and skip point-point merges. Full stats, histogram, commands, and
 the official COLMAP references are in
 [`m8-openloris-pair-confidence-conflict-topology.json`](../benchmarks/electro/m8-openloris-pair-confidence-conflict-topology.json).
 
+The owner-before-Create follow-up used the bounded, COLMAP
+`IncrementalTriangulator::Find`/`Create`-inspired arm: each registered CSR
+reference row scored at most 32 neighbours and 128 ray-pair hypotheses, then
+claimed only one mutually-exclusive inlier set. It retained all 1,000 images
+at 1k, but regressed reprojection/RMSE/p95 from 0.743283945 / 0.029099636 /
+0.043678871 to 0.762919353 / 0.029501087 / 0.044415400, so the arm is
+rejected and not promoted to 2.5k. The uncommitted source and CLI changes
+were reverted; future work must preserve mutually-exclusive hypotheses before
+ownership, never duplicate an observation across output tracks. Exact
+counters, commands, and model hashes are frozen in
+[`m8-openloris-dynamic-batched-create-ab.json`](../benchmarks/electro/m8-openloris-dynamic-batched-create-ab.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a
