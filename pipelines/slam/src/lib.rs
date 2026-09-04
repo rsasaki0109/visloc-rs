@@ -94,6 +94,14 @@ pub use submap_alignment::{
     SubmapSim3RejectionReason, VerifiedSubmapConstraint,
 };
 
+pub mod rig_submap_alignment;
+pub use rig_submap_alignment::{
+    estimate_rig_submap_camera_centre_constraint, estimate_rig_submap_sim3_constraint,
+    RigSubmapAlignmentConfig, RigSubmapAlignmentDiagnostics, RigSubmapAlignmentError,
+    RigSubmapAlignmentRejection, RigSubmapAlignmentRejectionReason, RigSubmapAlignmentResult,
+    RigSubmapInputSide,
+};
+
 pub mod hierarchical_submap_graph;
 pub use hierarchical_submap_graph::{
     HierarchicalSubmapGraph, HierarchicalSubmapGraphError, HierarchicalSubmapId,
