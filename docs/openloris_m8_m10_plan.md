@@ -1123,9 +1123,33 @@ synthetic test (15 noisy inliers and five outliers) recovers the metric pose,
 rejects all outliers, and respects a 64-trial cap; a warmed release test takes
 about `0.05 s` on the benchmark host. Both slices pass the complete local
 `visloc-vision` library suite, workspace check, clippy with warnings denied,
-formatting, MSRV, and every feature-matrix CI job. Mapper wiring and the frozen
-1k quality gate remain outstanding, so this is not yet a GR6P quality
-promotion.
+formatting, MSRV, and every feature-matrix CI job. The solver and RANSAC are
+retained as independently verified primitives; the mapper experiment below
+was not promoted.
+
+### Actual GR6P mapper seed rejected at frozen 1k (2026-09-04)
+
+The COLMAP-parity solver was wired into a default-off, bounded two-frame seed.
+It scans only observed verified frame pairs, probes a deterministic top-K, caps
+each solver input, gates metric baseline and positive depth, installs both rig
+poses transactionally, and falls back to the byte-identical legacy seed. The
+disabled control reproduced all three frozen champion model hashes exactly:
+1000/1000 images, 0.671637382 px, 0.022695321 m RMSE, and 0.037778776 m p95.
+
+The default 32-pair arm retained 1000/1000 registration and about 81 MiB peak
+RSS, but regressed to 0.677408584 px, 0.038155278 m RMSE, and 0.060275376 m
+p95. A bounded parameter sweep varied metric baseline, candidate cap, and
+minimum temporal separation. Its best reprojection arm (cap 256, gap 32,
+baseline 5 mm) reached 0.652017612 px, but converged to a worse trajectory
+basin: 0.043577863 m RMSE and 0.064972761 m p95, with mapper time increasing
+from 3.31 s to 7.55 s. Larger sweeps either fell back, worsened reprojection,
+or cost up to 32.06 s. Because no arm matched registration, reprojection, RMSE,
+and p95 simultaneously, the mandatory 1k gate failed and no 10k result is
+claimed. Mapper/CLI integration is removed; the validated solver and RANSAC
+remain available for future algorithms that can score global trajectory
+basins rather than local two-view fit. Exact commands, hashes, counters, and
+the skipped-10k decision are frozen in
+[`m8-openloris-gr6p-seed-ab.json`](../benchmarks/electro/m8-openloris-gr6p-seed-ab.json).
 
 ## M9 — make the quality champion faster than COLMAP
 

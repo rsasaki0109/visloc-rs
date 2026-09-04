@@ -1,0 +1,130 @@
+{
+  "schema": "visloc_m8_openloris_gr6p_seed_ab_v1",
+  "recorded_at": "2026-09-04",
+  "status": "rejected_at_frozen_1k",
+  "base_git_commit": "d74195c6",
+  "ground_truth_used_for_mapping": false,
+  "method": {
+    "name": "bounded_colmap_parity_gr6p_two_frame_seed",
+    "solver": "pure Rust port validated against the frozen COLMAP GR6P oracle",
+    "candidate_state": "O(E) sparse observed frame-pair aggregation plus bounded top-K probes; no frame Cartesian or N^2 state",
+    "default_off": true,
+    "dynamic_correspondence_mode": "explicitly incompatible"
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "frames": 500,
+    "images": 1000,
+    "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "rig_manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "features_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/features",
+    "verified_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps",
+    "verified_snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "verified_pairs": 6869,
+    "verified_matches": 661428,
+    "tier_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+    "tier_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa"
+  },
+  "frozen_control": {
+    "configuration": "GR6P disabled",
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "tracks": 2658,
+    "observations": 27716,
+    "mean_reprojection_error_px": 0.671637382,
+    "mapper_seconds": 3.309359,
+    "wall_seconds": 3.764960,
+    "peak_rss_kib": 82452,
+    "ate_rmse_m": 0.02269532080131782,
+    "ate_p95_m": 0.03777877644562742,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+      "points3D_txt": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af"
+    },
+    "byte_identical_to_frozen_champion": true
+  },
+  "default_candidate": {
+    "configuration": "--gr6p-seed-candidate-cap 32",
+    "candidate_pairs": 32,
+    "probes": 32,
+    "correspondences": 8772,
+    "candidate_models": 370,
+    "accepted_pair": [23, 24],
+    "inliers": 239,
+    "seed_landmarks": 15,
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "tracks": 2689,
+    "observations": 28207,
+    "mean_reprojection_error_px": 0.677408584,
+    "mapper_seconds": 3.576306,
+    "wall_seconds": 4.012100,
+    "peak_rss_kib": 82932,
+    "ate_rmse_m": 0.038155278159443376,
+    "ate_p95_m": 0.06027537612675103,
+    "ate_max_m": 0.08603363733334539,
+    "sim3_scale": 1.3859537439232659,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "f40fba78df621ed5b161143514994451b6ac06e481a52d499ed704bca66c5da4",
+      "points3D_txt": "7c303ae8fb9020fe56a6dc1cf107060693f3699bee65826744eb310ec3c5a278"
+    },
+    "score_sha256": "91f8896fcae58c3f17067555e376559a96661e98a8bfe95eb9a4d193f893baa6"
+  },
+  "best_reprojection_candidate": {
+    "configuration": "--gr6p-seed-candidate-cap 256 --gr6p-seed-min-frame-gap 32 --gr6p-seed-min-baseline-m 0.005",
+    "candidate_pairs": 256,
+    "probes": 252,
+    "correspondences": 49644,
+    "candidate_models": 4174,
+    "accepted_pair": [25, 67],
+    "inliers": 160,
+    "metric_baseline_m": 0.012191047,
+    "seed_landmarks": 8,
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "tracks": 2677,
+    "observations": 27518,
+    "mean_reprojection_error_px": 0.652017612,
+    "mapper_seconds": 7.554595,
+    "wall_seconds": 8.094759,
+    "peak_rss_kib": 82628,
+    "ate_rmse_m": 0.04357786281976183,
+    "ate_p95_m": 0.06497276088923251,
+    "ate_max_m": 0.0904836956654168,
+    "sim3_scale": 1.3418506647972028,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "81743b24466c29a77a5ff5962f759d8dcee7e0812b79f2fcf1c2fc40c8b75f6c",
+      "points3D_txt": "251ad6e245f157f42069dc7c0928a563b8172f1309a22880e375c6183ad20fad"
+    },
+    "score_sha256": "99fd4bde2110062775ddea1c3d02f534f457b7c0c86b1a82eec4b6a6159c1266"
+  },
+  "bounded_sweep": [
+    {"candidate_cap": 32, "min_frame_gap": 0, "min_baseline_m": 0.005, "pair": [23, 24], "mean_reprojection_error_px": 0.677408584},
+    {"candidate_cap": 32, "min_frame_gap": 0, "min_baseline_m": 0.01, "pair": [8, 16], "mean_reprojection_error_px": 0.719295875},
+    {"candidate_cap": 32, "min_frame_gap": 0, "min_baseline_m": 0.02, "pair": [8, 16], "mean_reprojection_error_px": 0.719295875},
+    {"candidate_cap": 32, "min_frame_gap": 0, "min_baseline_m": 0.05, "fallback": true, "mean_reprojection_error_px": 0.671637382},
+    {"candidate_cap": 32, "min_frame_gap": 16, "fallback": true, "mean_reprojection_error_px": 0.671637382},
+    {"candidate_cap": 32, "min_frame_gap": 24, "pair": [340, 372], "mean_reprojection_error_px": 0.816253642},
+    {"candidate_cap": 256, "min_frame_gap": 0, "min_baseline_m": 0.05, "fallback": true, "mean_reprojection_error_px": 0.671637382},
+    {"candidate_cap": 2234, "min_frame_gap": 0, "min_baseline_m": 0.05, "pair": [451, 453], "mean_reprojection_error_px": 0.693479938, "mapper_seconds": 32.055191}
+  ],
+  "promotion_gate": {
+    "registration": true,
+    "reprojection_non_regression": false,
+    "ate_rmse_non_regression": false,
+    "ate_p95_non_regression": false,
+    "overall": false
+  },
+  "ten_k": {
+    "status": "skipped_by_frozen_1k_promotion_gate",
+    "reason": "No accepted GR6P configuration matched the frozen champion in reprojection, RMSE, and p95 simultaneously."
+  },
+  "decision": {
+    "promoted": false,
+    "source_policy": "remove mapper integration and experimental CLI; retain the independently useful COLMAP-parity solver and bounded RANSAC",
+    "conclusion": "The real GR6P solver preserves registration and bounded memory, but seed choice converges to a different trajectory basin. Lower reprojection alone does not imply better ATE."
+  }
+}
