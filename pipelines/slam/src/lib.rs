@@ -59,9 +59,10 @@ pub mod incremental_sfm;
 pub use incremental_sfm::{
     incremental_sfm, incremental_sfm_with_initial_poses,
     incremental_sfm_with_sequence_fallback_overrides, incremental_sfm_with_track_membership,
-    preview_track_build_stats, run_fixed_rotation_support_bundle_adjustment,
-    run_fixed_support_bundle_adjustment, IncrementalSfmConfig, IncrementalSfmError,
-    IncrementalSfmResult, NextImagePolicy, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
+    preview_pair_confidence_conflicts, preview_track_build_stats,
+    run_fixed_rotation_support_bundle_adjustment, run_fixed_support_bundle_adjustment,
+    IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult, NextImagePolicy,
+    PairConfidenceConflictStats, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
 };
 
 pub mod local_submap;

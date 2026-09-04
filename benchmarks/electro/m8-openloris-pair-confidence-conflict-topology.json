@@ -1,0 +1,140 @@
+{
+  "schema": "visloc_m8_openloris_pair_confidence_conflict_topology_v1",
+  "date": "2026-09-04",
+  "status": "diagnostic_only_recorded",
+  "method": {
+    "flag": "--preview-pair-confidence-conflicts",
+    "description": "Reproduce PairConfidence ordering and image-compatible DSU decisions, then summarize rejected-edge topology over final successful components.",
+    "diagnostic_only": true,
+    "mapper_mutation": false,
+    "ground_truth_used": false,
+    "normal_mapper_output_touched": false,
+    "complexity": "State O(nodes + candidate/rejected edges); no image-pair Cartesian product or N^2 component-pair state. Runtime mirrors PairConfidence sorting, union, and image-set conflict checks, followed by a linear second DSU over rejected endpoints and final roots.",
+    "region_definition": "Rejected endpoints are mapped to final successful DSU roots and connected with a second compact DSU; each successful component is counted once per disjoint conflict region."
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "protocol": "frozen calibrated-rig M8 tiers"
+  },
+  "runs": {
+    "tier_1000": {
+      "input": {
+        "frames": 500,
+        "images": 1000,
+        "verified_pairs": 6935,
+        "verified_matches": 1605174,
+        "keypoints": 361170,
+        "mapping_pair_prefix": "all",
+        "mapping_pairs": 6935,
+        "mapping_correspondences": 1605174
+      },
+      "command_from_time_txt": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps --max-matches-per-pair 256 --pair-confidence-tracks --preview-pair-confidence-conflicts",
+      "stats": {
+        "correspondences": 1605174,
+        "nodes": 336631,
+        "accepted_edges": 324039,
+        "rejected_edges": 31044,
+        "final_components": 12592,
+        "conflict_regions": 1075,
+        "involved_components": 3929,
+        "involved_observations": 173027,
+        "max_region_components": 107,
+        "max_region_observations": 1723,
+        "max_overlapping_images_per_rejected_edge": 562,
+        "region_component_count_histogram": [[2, 580], [3, 242], [4, 81], [5, 47], [6, 27], [7, 22], [8, 10], [9, 14], [10, 8], [11, 3], [12, 8], [13, 4], [14, 8], [15, 3], [16, 4], [18, 2], [19, 1], [20, 1], [21, 3], [23, 2], [26, 1], [32, 1], [56, 1], [75, 1], [107, 1]]
+      },
+      "timing": {
+        "user_seconds": 0.88,
+        "system_seconds": 0.17,
+        "build_seconds": 0.535056,
+        "process_wall_seconds": 1.05,
+        "peak_rss_kib": 233428,
+        "source_time": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/pair-confidence-conflict-preview-v1/time.txt",
+        "source_stderr": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/pair-confidence-conflict-preview-v1/stderr.txt"
+      }
+    },
+    "tier_10000": {
+      "input": {
+        "frames": 5000,
+        "images": 10000,
+        "verified_pairs": 71318,
+        "verified_matches": 4451958,
+        "keypoints": 5085131,
+        "mapping_pair_prefix": 59961,
+        "mapping_pairs": 59961,
+        "mapping_correspondences": 3337520
+      },
+      "command_from_time_txt": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --deferred-registration-pair-prefix 59961 --max-matches-per-pair 256 --pair-confidence-tracks --preview-pair-confidence-conflicts",
+      "stats": {
+        "correspondences": 3337520,
+        "nodes": 1330338,
+        "accepted_edges": 1217068,
+        "rejected_edges": 345936,
+        "final_components": 113270,
+        "conflict_regions": 4341,
+        "involved_components": 50427,
+        "involved_observations": 1058566,
+        "max_region_components": 9044,
+        "max_region_observations": 204601,
+        "max_overlapping_images_per_rejected_edge": 402,
+        "region_component_count_histogram": [[2, 2011], [3, 698], [4, 416], [5, 246], [6, 158], [7, 127], [8, 86], [9, 81], [10, 48], [11, 47], [12, 35], [13, 42], [14, 24], [15, 37], [16, 20], [17, 27], [18, 16], [19, 9], [20, 9], [21, 11], [22, 12], [23, 11], [24, 6], [25, 5], [26, 7], [27, 10], [28, 8], [29, 4], [30, 7], [31, 4], [32, 4], [33, 8], [34, 6], [35, 2], [36, 2], [37, 3], [38, 7], [39, 4], [40, 2], [41, 3], [42, 3], [44, 1], [45, 3], [46, 2], [47, 2], [49, 5], [50, 3], [51, 1], [52, 1], [53, 2], [56, 1], [58, 1], [59, 1], [61, 3], [63, 2], [64, 1], [66, 1], [68, 1], [69, 1], [70, 3], [72, 1], [73, 1], [74, 1], [75, 1], [78, 1], [79, 1], [81, 2], [83, 1], [85, 1], [87, 1], [93, 1], [102, 1], [103, 1], [106, 2], [109, 2], [110, 1], [115, 1], [116, 1], [118, 1], [124, 1], [135, 1], [140, 2], [146, 1], [159, 1], [160, 1], [162, 1], [172, 1], [187, 1], [293, 1], [395, 1], [425, 1], [2666, 1], [3894, 1], [7799, 1], [9044, 1]]
+      },
+      "timing": {
+        "user_seconds": 6.28,
+        "system_seconds": 1.56,
+        "build_seconds": 2.770818,
+        "process_wall_seconds": 8.03,
+        "peak_rss_kib": 832196,
+        "source_time": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/pair-confidence-conflict-preview-10k-v1/time.txt",
+        "source_stderr": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/pair-confidence-conflict-preview-10k-v1/stderr.txt"
+      }
+    }
+  },
+  "default_output_regression": {
+    "control_commit": "f70d77f",
+    "head_control": {
+      "registered_images": 1000,
+      "tracks": 6654,
+      "observations": 268586,
+      "mean_reprojection_error_px": 0.755513995,
+      "mapper_seconds": 73.414119,
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "8e8f275def1da03279cce7b9c20d97b559dd9adfbfd2c93087d390fe2488169d",
+        "points3D_txt": "f51f832acabed11dbecf6202d4f309e34a69b8057cfb0102a67acab5781dfe3c"
+      }
+    },
+    "current_default": {
+      "registered_images": 1000,
+      "tracks": 6654,
+      "observations": 268586,
+      "mean_reprojection_error_px": 0.755513995,
+      "mapper_seconds": 98.361477,
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "8e8f275def1da03279cce7b9c20d97b559dd9adfbfd2c93087d390fe2488169d",
+        "points3D_txt": "f51f832acabed11dbecf6202d4f309e34a69b8057cfb0102a67acab5781dfe3c"
+      }
+    },
+    "byte_identical": true,
+    "timing_is_not_a_decision_gate": true,
+    "timing_note": "The current default mapper run is slower than the f70d77f control, but this diagnostic-only preview does not mutate the mapper and timing is recorded for context rather than used as a regression decision."
+  },
+  "conclusion": {
+    "candidate_region_k": 2,
+    "decision": "rejected",
+    "reason": "The topology preview is bounded and deterministic, but 10k contains giant conflict regions; a region-K=2 recovery policy would be an unsafe coarse approximation rather than a mutually-exclusive ownership solution.",
+    "largest_region_component_counts": [9044, 7799, 3894, 2666],
+    "next_action": {
+      "dynamic_activate_frame": "Do not immediately claim a (None, None) edge one endpoint at a time.",
+      "reference_pattern": "For one reference row, batch registered unowned neighbors and use robust multi-view triangulation in the style of COLMAP IncrementalTriangulator::Find/Create.",
+      "ownership": "Claim observations exclusively only after the robust triangulation inlier mask is known; never duplicate an observation across tracks.",
+      "bounds": "Apply row-degree and hypothesis caps so the work remains O(edges).",
+      "point_point_edges": "Skip point-point continuation/merge candidates in this arm."
+    },
+    "reference_urls": [
+      "https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_triangulator.h",
+      "https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_triangulator.cc"
+    ]
+  }
+}

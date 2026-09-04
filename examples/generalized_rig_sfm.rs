@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use nalgebra::{Matrix3, Point2, Point3, Quaternion, UnitQuaternion, Vector3};
 use visloc_rs::slam::global_sfm::average_positions_with_independent_edge_scales;
+use visloc_rs::slam::incremental_sfm::preview_pair_confidence_conflicts;
 use visloc_rs::verified_pair_snapshot;
 use visloc_rs::{
     build_rig_correspondence, incremental_rig_sfm,
@@ -122,6 +123,7 @@ struct Args {
     ba_huber_delta: f64,
     structure_refinement_iterations: usize,
     preview_rig_correspondence_csr: bool,
+    preview_pair_confidence_conflicts: bool,
     dynamic_correspondence_tracking: bool,
 }
 
@@ -226,6 +228,7 @@ fn parse_args() -> Result<Args, String> {
     let mut ba_huber_delta = 6.0;
     let mut structure_refinement_iterations = defaults.structure_refinement_iterations;
     let mut preview_rig_correspondence_csr = false;
+    let mut preview_pair_confidence_conflicts = false;
     let mut dynamic_correspondence_tracking = false;
     while let Some(flag) = values.next() {
         let mut value = || {
@@ -255,6 +258,7 @@ fn parse_args() -> Result<Args, String> {
             "--feature-suffix" => feature_suffix = value()?,
             "--snapshot" => snapshot = Some(PathBuf::from(value()?)),
             "--preview-rig-correspondence-csr" => preview_rig_correspondence_csr = true,
+            "--preview-pair-confidence-conflicts" => preview_pair_confidence_conflicts = true,
             "--dynamic-correspondence-tracking" => dynamic_correspondence_tracking = true,
             "--out-colmap" => out_colmap = Some(PathBuf::from(value()?)),
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
@@ -531,7 +535,7 @@ fn parse_args() -> Result<Args, String> {
                     "--deferred-overlay-min-temporal-frame-gap COUNT ",
                     "--deferred-overlay-max-frame-gap COUNT ",
                     "--deferred-overlay-max-matches-per-pair COUNT] ",
-                    "--snapshot FILE --out-colmap DIR [--feature-suffix _features.txt] ",
+                    "--snapshot FILE [--out-colmap DIR] [--feature-suffix _features.txt] ",
                     "[--max-models 1] [--min-model-frames 10] ",
                     "[--min-pnp-inliers 8] [--min-pnp-sensors 2] ",
                     "[--direct-stereo-pnp-max-frame-gap 0] ",
@@ -571,6 +575,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--triangulation-min-inlier-fraction 0.5] ",
                     "[--max-reprojection-error-px 4] ",
                     "[--pnp-max-iterations 512] [--max-matches-per-pair 0] ",
+                    "[--preview-rig-correspondence-csr|--preview-pair-confidence-conflicts] ",
                     "[--dynamic-correspondence-tracking] ",
                     "[--max-track-frame-gap 0] ",
                     "[--local-ba-every 10] [--local-ba-window 40] ",
@@ -770,6 +775,9 @@ fn parse_args() -> Result<Args, String> {
     {
         return Err("--triangulation-min-inlier-fraction must be finite and in [0.5, 1]".into());
     }
+    let out_colmap = out_colmap.or_else(|| {
+        (preview_rig_correspondence_csr || preview_pair_confidence_conflicts).then(PathBuf::new)
+    });
     Ok(Args {
         manifest: manifest.ok_or("--manifest is required")?,
         features_dir: features_dir.ok_or("--features-dir is required")?,
@@ -856,6 +864,7 @@ fn parse_args() -> Result<Args, String> {
         ba_huber_delta,
         structure_refinement_iterations,
         preview_rig_correspondence_csr,
+        preview_pair_confidence_conflicts,
         dynamic_correspondence_tracking,
     })
 }
@@ -3101,6 +3110,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         features.iter().map(FeatureSet::len).sum::<usize>(),
         peak_rss_kib().unwrap_or(0),
     );
+    if args.preview_pair_confidence_conflicts {
+        let pair_count = args
+            .deferred_registration_pair_prefix
+            .unwrap_or(pairs.len());
+        let mapping_pairs = pairs.get(..pair_count).ok_or_else(|| {
+            format!(
+                "--deferred-registration-pair-prefix {pair_count} exceeds {} verified pairs",
+                pairs.len()
+            )
+        })?;
+        let trusted_prefix = match args.track_builder {
+            RigTrackBuilder::TrustedPrefixPairConfidence(pair_count) => pair_count,
+            _ => 0,
+        };
+        let preview_started = Instant::now();
+        let stats =
+            preview_pair_confidence_conflicts(features.len(), mapping_pairs, trusted_prefix);
+        eprintln!(
+            "rig-pair-confidence-conflicts: correspondences={} nodes={} accepted_edges={} rejected_edges={} final_components={} conflict_regions={} involved_components={} involved_observations={} max_region_components={} max_region_observations={} max_overlapping_images_per_rejected_edge={} histogram={:?} build_seconds={:.6} VmHWM={} KiB",
+            stats.correspondences,
+            stats.nodes,
+            stats.accepted_edges,
+            stats.rejected_edges,
+            stats.final_components,
+            stats.conflict_regions,
+            stats.involved_components,
+            stats.involved_observations,
+            stats.max_region_components,
+            stats.max_region_observations,
+            stats.max_overlapping_images_per_rejected_edge,
+            stats.region_component_count_histogram,
+            preview_started.elapsed().as_secs_f64(),
+            peak_rss_kib().unwrap_or(0),
+        );
+        return Ok(());
+    }
     if args.preview_rig_correspondence_csr {
         let pair_count = args
             .deferred_registration_pair_prefix

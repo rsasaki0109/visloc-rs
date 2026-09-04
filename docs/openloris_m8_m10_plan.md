@@ -888,6 +888,23 @@ mutually-exclusive partition or hypothesis selection before ownership, never
 duplicate observation assignment. Details are frozen in
 [`m8-openloris-conflict-region-recovery-ab.json`](../benchmarks/electro/m8-openloris-conflict-region-recovery-ab.json).
 
+The diagnostic-only PairConfidence topology preview is bounded and leaves the
+mapper untouched: at 1k it processed 1,605,174 correspondences in 0.535056 s
+(1.05 s wall, 233,428 KiB) and found 1,075 regions, while the 10k mapping
+prefix processed 3,337,520 correspondences in 2.770818 s (8.03 s wall,
+832,196 KiB) and found 4,341 regions. The 10k histogram includes regions of
+9,044, 7,799, 3,894, and 2,666 successful components, so a region-K=2 recovery
+policy is rejected. The default PairConfidence mapper remains byte-identical
+to the f70d77f control (1,000 images, 6,654 tracks, 268,586 observations,
+0.755513995 px reprojection); timing is recorded but is not a decision gate.
+The next arm must resolve ownership before publication: for each reference
+row, batch registered unowned neighbors and follow COLMAP's
+`IncrementalTriangulator::Find`/`Create` pattern with robust multi-view
+triangulation, claim only inlier observations exclusively, cap row degree and
+hypotheses, and skip point-point merges. Full stats, histogram, commands, and
+the official COLMAP references are in
+[`m8-openloris-pair-confidence-conflict-topology.json`](../benchmarks/electro/m8-openloris-pair-confidence-conflict-topology.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a
