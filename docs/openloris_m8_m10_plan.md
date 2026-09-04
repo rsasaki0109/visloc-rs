@@ -854,6 +854,25 @@ landmark per clean component, triangulated only after it has sufficient
 registered rays. It must remain separate from dynamic ownership and pass 1k
 before promotion. The failed streaming option and compact index are removed.
 
+That final shadow-landmark A/B is now closed and removed as well. The bounded
+prototype stored one compact component state and retried triangulation only at
+power-of-two registered support (2, 4, 8, ...), so persistent state remained
+`O(observations + components + CSR)` with no image-pair matrix. It registered
+1,000/1,000 images and owner-neutral shadow inliers did bridge unregistered CSR
+nodes, but the 3,627 published shadows required 15,909 triangulation attempts.
+Mapper time rose from the frozen visloc control's 16.50 s to 35.04 s and peak
+RSS rose from 142,044 to 187,852 KiB. More importantly, RMSE/p95 regressed to
+0.03183/0.04750 m, worse than both visloc (0.02670/0.04135 m) and COLMAP
+(0.02797/0.04227 m), despite 0.72586 px reprojection remaining better than
+COLMAP. Seed-time shadow publication also changed the first PnP from legacy
+frame 58 to frame 74, so it destroyed the scheduling equivalence restored by
+the narrower seed-component arm. Dynamic component widening is therefore
+exhausted as the next correction source. The next bounded experiment is the
+GT-independent paired-pose-jump repair already isolated by the 10k trajectory
+audit; it must first preserve the frozen 1k control, then pass strong and
+adaptive 10k gates. Exact counters, hashes, and decisions remain in
+[`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a

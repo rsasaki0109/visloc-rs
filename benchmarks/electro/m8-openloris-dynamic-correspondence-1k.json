@@ -1,6 +1,6 @@
 {
   "schema": "visloc_m8_openloris_dynamic_correspondence_1k_v1",
-  "recorded_at": "2026-09-04T09:39:56+09:00",
+  "recorded_at": "2026-09-04T12:04:49+09:00",
   "dataset": "OpenLORIS corridor1-1",
   "status": "rejected_at_1k_promotion_gate",
   "ground_truth_used_for_selection_or_mapping": false,
@@ -226,6 +226,60 @@
       },
       "score_sha256": "85acffa31d842e1f3e8c00a78689f987c480af040a48d69d4a9efd7c6b39886a",
       "reason": "publishing every clean component touched by an already positioned dynamic fragment cannot expose a clean component whose registered observations remain separated by unregistered CSR nodes; unlike legacy pre-union tracks, no proposal 3-D point exists for those components, so order two still diverges and trajectory regresses further"
+    },
+    "power_of_two_component_shadow_pnp": {
+      "decision": "rejected_and_removed",
+      "registered_images": 1000,
+      "models": 1,
+      "seed_frame": 8,
+      "tracks": 9507,
+      "observations": 266329,
+      "mean_reprojection_px": 0.725859022,
+      "ate_rmse_m": 0.031834421791424636,
+      "ate_p95_m": 0.04750435377416578,
+      "ate_max_m": 0.0885664983153662,
+      "mapper_seconds": 35.041384,
+      "wall_seconds": 35.813813,
+      "peak_rss_kib": 187852,
+      "component_index_observations": 163604,
+      "component_index_components": 8663,
+      "shadow_attempts": 15909,
+      "shadow_landmarks": 3627,
+      "shadow_published_observations": 63634,
+      "shadow_cache_insertions": 53886,
+      "shadow_cache_conflicts": 9748,
+      "shadow_owner_conflicts": 0,
+      "shadow_pnp_inliers": 48496,
+      "persistent_complexity": "O(observations + components + verified CSR edges); no image-pair matrix or N^2 state",
+      "retry_policy": "triangulate unpublished components when registered support crosses 2, 4, 8, ... observations",
+      "registration_trace": {
+        "legacy_first_three_after_seed": [
+          "frame 58: 158/158 support/inliers",
+          "frame 74: 185/185 support/inliers",
+          "frame 26: 190/190 support/inliers"
+        ],
+        "shadow_first_three_after_seed": [
+          "frame 74: 158/158 support/inliers",
+          "frame 61: 178/177 support/inliers",
+          "frame 58: 177/177 support/inliers"
+        ],
+        "sha256": "c77e960def3bbb1dd9a90e6d0804a0ce40aced5ff48dd6f76887d0e8828fd7f8"
+      },
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "d267c6c3f5694a85ee51222243117d8ba9f50af2942c9676b322cfe7ff7a18ae",
+        "points3D_txt": "6757c70111cc47e521de879f465b2aa534c2f111ab13b99caf17c5857ecb93b7"
+      },
+      "score_sha256": "831dab5296d3e57eabfbb1b217caf39d4b522b73d2f9ee90a9700358c34ac6c6",
+      "gate": {
+        "registration_pass": true,
+        "reprojection_vs_colmap_pass": true,
+        "trajectory_vs_visloc_control_pass": false,
+        "trajectory_vs_colmap_pass": false,
+        "mapper_speed_vs_visloc_control_pass": false,
+        "memory_bound_pass": true
+      },
+      "reason": "owner-neutral shadow landmarks prove that unregistered CSR bridges can feed PnP without owner write-back, but publishing seed-time shadows changes the first PnP from legacy frame 58 to frame 74; 15,909 repeated triangulation attempts more than double mapper time and the resulting trajectory is worse than both frozen visloc and COLMAP controls"
     }
   },
   "promotion_gate": {
@@ -236,11 +290,11 @@
     "trajectory_vs_visloc_control_pass": false,
     "trajectory_vs_colmap_pass": false,
     "memory_bound_pass": true,
-    "reason": "the best dynamic arm is 8.97% worse than the frozen visloc ATE RMSE and 4.04% worse than the official COLMAP ATE RMSE"
+    "reason": "all dynamic arms fail trajectory parity; the shadow arm additionally more than doubles mapper time versus the frozen visloc control"
   },
   "decision": {
     "retain_default_off_diagnostic": true,
     "reject_single_edge_owner_merge": true,
-    "next_action": "if the dynamic path is continued, test a bounded clean-component shadow-landmark state: when a newly registered frame gives a clean component two or more registered rays, triangulate a proposal-only point and expose its unregistered observations without assigning dynamic owners; this specifically covers registered views separated by unregistered CSR nodes and must pass frozen 1k before any larger tier"
+    "next_action": "stop widening dynamic component proposals; A/B the bounded GT-independent paired-pose-jump repair already identified in the 10k trajectory audit, beginning with frozen 1k non-regression and then strong/adaptive 10k"
   }
 }
