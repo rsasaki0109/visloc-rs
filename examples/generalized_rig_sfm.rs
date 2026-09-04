@@ -125,6 +125,14 @@ struct Args {
     preview_rig_correspondence_csr: bool,
     preview_pair_confidence_conflicts: bool,
     dynamic_correspondence_tracking: bool,
+    gr6p_seed_candidate_cap: usize,
+    gr6p_seed_correspondence_cap: usize,
+    gr6p_seed_max_iterations: usize,
+    gr6p_seed_min_iterations: usize,
+    gr6p_seed_min_inliers: usize,
+    gr6p_seed_angular_threshold_deg: f64,
+    gr6p_seed_min_positive_depth_fraction: f64,
+    gr6p_seed_min_baseline_m: f64,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -230,6 +238,14 @@ fn parse_args() -> Result<Args, String> {
     let mut preview_rig_correspondence_csr = false;
     let mut preview_pair_confidence_conflicts = false;
     let mut dynamic_correspondence_tracking = false;
+    let mut gr6p_seed_candidate_cap = defaults.gr6p_seed_candidate_cap;
+    let mut gr6p_seed_correspondence_cap = defaults.gr6p_seed_correspondence_cap;
+    let mut gr6p_seed_max_iterations = defaults.gr6p_seed_max_iterations;
+    let mut gr6p_seed_min_iterations = defaults.gr6p_seed_min_iterations;
+    let mut gr6p_seed_min_inliers = defaults.gr6p_seed_min_inliers;
+    let mut gr6p_seed_angular_threshold_deg = defaults.gr6p_seed_angular_threshold_deg;
+    let mut gr6p_seed_min_positive_depth_fraction = defaults.gr6p_seed_min_positive_depth_fraction;
+    let mut gr6p_seed_min_baseline_m = defaults.gr6p_seed_min_baseline_m;
     while let Some(flag) = values.next() {
         let mut value = || {
             values
@@ -260,6 +276,33 @@ fn parse_args() -> Result<Args, String> {
             "--preview-rig-correspondence-csr" => preview_rig_correspondence_csr = true,
             "--preview-pair-confidence-conflicts" => preview_pair_confidence_conflicts = true,
             "--dynamic-correspondence-tracking" => dynamic_correspondence_tracking = true,
+            "--gr6p-seed-candidate-cap" => {
+                gr6p_seed_candidate_cap = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-correspondence-cap" => {
+                gr6p_seed_correspondence_cap =
+                    value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-max-iterations" => {
+                gr6p_seed_max_iterations = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-min-iterations" => {
+                gr6p_seed_min_iterations = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-min-inliers" => {
+                gr6p_seed_min_inliers = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-angular-threshold-deg" => {
+                gr6p_seed_angular_threshold_deg =
+                    value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-min-positive-depth-fraction" => {
+                gr6p_seed_min_positive_depth_fraction =
+                    value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--gr6p-seed-min-baseline-m" => {
+                gr6p_seed_min_baseline_m = value()?.parse().map_err(|error| format!("{error}"))?
+            }
             "--out-colmap" => out_colmap = Some(PathBuf::from(value()?)),
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
             "--min-model-frames" => {
@@ -577,6 +620,14 @@ fn parse_args() -> Result<Args, String> {
                     "[--pnp-max-iterations 512] [--max-matches-per-pair 0] ",
                     "[--preview-rig-correspondence-csr|--preview-pair-confidence-conflicts] ",
                     "[--dynamic-correspondence-tracking] ",
+                    "[--gr6p-seed-candidate-cap 0] ",
+                    "[--gr6p-seed-correspondence-cap 512] ",
+                    "[--gr6p-seed-max-iterations 64] ",
+                    "[--gr6p-seed-min-iterations 16] ",
+                    "[--gr6p-seed-min-inliers 12] ",
+                    "[--gr6p-seed-angular-threshold-deg 0.5] ",
+                    "[--gr6p-seed-min-positive-depth-fraction 0.8] ",
+                    "[--gr6p-seed-min-baseline-m 1e-4] ",
                     "[--max-track-frame-gap 0] ",
                     "[--local-ba-every 10] [--local-ba-window 40] ",
                     "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
@@ -866,6 +917,14 @@ fn parse_args() -> Result<Args, String> {
         preview_rig_correspondence_csr,
         preview_pair_confidence_conflicts,
         dynamic_correspondence_tracking,
+        gr6p_seed_candidate_cap,
+        gr6p_seed_correspondence_cap,
+        gr6p_seed_max_iterations,
+        gr6p_seed_min_iterations,
+        gr6p_seed_min_inliers,
+        gr6p_seed_angular_threshold_deg,
+        gr6p_seed_min_positive_depth_fraction,
+        gr6p_seed_min_baseline_m,
     })
 }
 
@@ -1479,6 +1538,14 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         final_ba_min_pose_observations: args.final_ba_min_pose_observations,
         structure_refinement_iterations: args.structure_refinement_iterations,
         dynamic_correspondence_tracking: args.dynamic_correspondence_tracking,
+        gr6p_seed_candidate_cap: args.gr6p_seed_candidate_cap,
+        gr6p_seed_correspondence_cap: args.gr6p_seed_correspondence_cap,
+        gr6p_seed_max_iterations: args.gr6p_seed_max_iterations,
+        gr6p_seed_min_iterations: args.gr6p_seed_min_iterations,
+        gr6p_seed_min_inliers: args.gr6p_seed_min_inliers,
+        gr6p_seed_angular_threshold_deg: args.gr6p_seed_angular_threshold_deg,
+        gr6p_seed_min_positive_depth_fraction: args.gr6p_seed_min_positive_depth_fraction,
+        gr6p_seed_min_baseline_m: args.gr6p_seed_min_baseline_m,
         ba_config: visloc_rs::BaConfig {
             robust_kernel: RobustKernel::Huber {
                 delta: args.ba_huber_delta,

@@ -14,8 +14,9 @@ use thiserror::Error;
 use visloc_core::geometry::{Pose, SE3};
 use visloc_vision::features::FeatureSet;
 use visloc_vision::pnp::{
-    GeneralizedCameraObservation, GeneralizedCameraRig, GeneralizedCorrespondence2D3D,
-    GeneralizedPnPRansac, GeneralizedRelativeCorrespondence,
+    estimate_gr6p_ransac_with_config, GeneralizedCameraObservation, GeneralizedCameraRig,
+    GeneralizedCorrespondence2D3D, GeneralizedPnPRansac, GeneralizedRelativeCorrespondence,
+    GeneralizedRelativePose, GeneralizedRelativePoseRansacConfig,
 };
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
@@ -226,6 +227,24 @@ pub struct RigSfmConfig {
     /// registration-time point-map semantics.  The historical all-pairs
     /// track builder remains byte-for-byte unchanged when this is `false`.
     pub dynamic_correspondence_tracking: bool,
+    /// Number of top verified temporal frame pairs considered by the bounded
+    /// GR6P metric seed. Zero disables the proposal path completely.
+    pub gr6p_seed_candidate_cap: usize,
+    /// Maximum unique ray correspondences built for each GR6P candidate.
+    /// This must be at least six when the candidate path is enabled.
+    pub gr6p_seed_correspondence_cap: usize,
+    /// Bounded six-point RANSAC sample limits for each candidate.
+    pub gr6p_seed_max_iterations: usize,
+    pub gr6p_seed_min_iterations: usize,
+    /// Minimum consensus size required from a GR6P candidate.
+    pub gr6p_seed_min_inliers: usize,
+    /// GR6P angular Sampson inlier threshold, in degrees at this mapper API
+    /// boundary (converted to radians for the vision solver).
+    pub gr6p_seed_angular_threshold_deg: f64,
+    /// Minimum fraction of RANSAC inliers with finite positive depths.
+    pub gr6p_seed_min_positive_depth_fraction: f64,
+    /// Minimum metric translation norm of an accepted temporal seed.
+    pub gr6p_seed_min_baseline_m: f64,
 }
 
 impl Default for RigSfmConfig {
@@ -293,6 +312,14 @@ impl Default for RigSfmConfig {
             final_filter_refinement_passes: 0,
             structure_refinement_iterations: 5,
             dynamic_correspondence_tracking: false,
+            gr6p_seed_candidate_cap: 0,
+            gr6p_seed_correspondence_cap: 512,
+            gr6p_seed_max_iterations: 64,
+            gr6p_seed_min_iterations: 16,
+            gr6p_seed_min_inliers: 12,
+            gr6p_seed_angular_threshold_deg: 0.5,
+            gr6p_seed_min_positive_depth_fraction: 0.8,
+            gr6p_seed_min_baseline_m: 1.0e-4,
         }
     }
 }
@@ -548,6 +575,8 @@ pub enum RigSfmError {
     DynamicIncompatible(&'static str),
     #[error("dynamic correspondence tracking cannot represent {kind} index {index} in a u32 slot")]
     DynamicIndexOverflow { kind: &'static str, index: usize },
+    #[error("GR6P seed configuration is invalid: {0}")]
+    InvalidGr6pSeedConfiguration(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1629,6 +1658,9 @@ struct DynamicGrowth {
 /// behavior would make the opt-in flag appear to work while bypassing the
 /// requested registration-time semantics.
 fn validate_dynamic_configuration(config: &RigSfmConfig) -> Result<(), RigSfmError> {
+    if config.gr6p_seed_candidate_cap > 0 {
+        return Err(RigSfmError::DynamicIncompatible("GR6P two-frame seed"));
+    }
     if config.deferred_registration_pair_prefix.is_some()
         || config.deferred_retriangulation_pair_prefix.is_some()
         || config.retriangulate_deferred_tracks_after_registration
@@ -4783,6 +4815,48 @@ fn validate_inputs(
     pairwise: &[PairwiseMatches],
     config: &RigSfmConfig,
 ) -> Result<(), RigSfmError> {
+    if config.gr6p_seed_candidate_cap > 0 {
+        if config.gr6p_seed_correspondence_cap < 6 {
+            return Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "correspondence cap must be at least 6",
+            ));
+        }
+        if config.gr6p_seed_max_iterations == 0
+            || config.gr6p_seed_min_iterations == 0
+            || config.gr6p_seed_min_iterations > config.gr6p_seed_max_iterations
+        {
+            return Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "minimum/maximum RANSAC iterations are invalid",
+            ));
+        }
+        if config.gr6p_seed_min_inliers < 6
+            || config.gr6p_seed_min_inliers > config.gr6p_seed_correspondence_cap
+        {
+            return Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "minimum inliers must be in the correspondence-cap range and at least 6",
+            ));
+        }
+        if !config.gr6p_seed_angular_threshold_deg.is_finite()
+            || config.gr6p_seed_angular_threshold_deg <= 0.0
+            || config.gr6p_seed_angular_threshold_deg >= 180.0
+        {
+            return Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "angular threshold must be finite and in (0, 180) degrees",
+            ));
+        }
+        if !config.gr6p_seed_min_positive_depth_fraction.is_finite()
+            || !(0.0..=1.0).contains(&config.gr6p_seed_min_positive_depth_fraction)
+        {
+            return Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "positive-depth fraction must be finite and in [0, 1]",
+            ));
+        }
+        if !config.gr6p_seed_min_baseline_m.is_finite() || config.gr6p_seed_min_baseline_m <= 0.0 {
+            return Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "minimum baseline must be finite and positive",
+            ));
+        }
+    }
     if !(1..=rig.sensors().len()).contains(&config.min_pnp_sensors) {
         return Err(RigSfmError::InvalidMinPnpSensors {
             requested: config.min_pnp_sensors,
@@ -5301,7 +5375,7 @@ fn build_gr6p_temporal_correspondences(
 
     let mut source_seen = BTreeSet::new();
     let mut target_seen = BTreeSet::new();
-    let mut correspondences = Vec::new();
+    let mut entries = Vec::new();
     for (source_image, source_keypoint, target_image, target_keypoint) in endpoint_pairs {
         let Some(source) = gr6p_observation_from_pixel(
             rig,
@@ -5328,11 +5402,48 @@ fn build_gr6p_temporal_correspondences(
         {
             continue;
         }
-        correspondences.push(GeneralizedRelativeCorrespondence {
-            rig1: source,
-            rig2: target,
-        });
-        if max_correspondences > 0 && correspondences.len() >= max_correspondences {
+        entries.push((
+            (
+                image_assignment[source_image].1,
+                image_assignment[target_image].1,
+            ),
+            GeneralizedRelativeCorrespondence {
+                rig1: source,
+                rig2: target,
+            },
+        ));
+    }
+    if max_correspondences == 0 || entries.len() <= max_correspondences {
+        return entries
+            .into_iter()
+            .map(|(_, correspondence)| correspondence)
+            .collect();
+    }
+
+    // A raw endpoint sort can fill a tight cap with one sensor pair and make
+    // a genuinely generalized candidate look central.  Interleave the
+    // deterministic sensor-pair buckets so every available pair contributes
+    // before any bucket receives a second round.
+    let mut buckets = BTreeMap::<(usize, usize), Vec<GeneralizedRelativeCorrespondence>>::new();
+    for (sensor_pair, correspondence) in entries {
+        buckets.entry(sensor_pair).or_default().push(correspondence);
+    }
+    let bucket_keys = buckets.keys().copied().collect::<Vec<_>>();
+    let mut correspondences = Vec::with_capacity(max_correspondences);
+    'rounds: for offset in 0.. {
+        let mut added = false;
+        for key in &bucket_keys {
+            let Some(correspondence) = buckets.get(key).and_then(|bucket| bucket.get(offset))
+            else {
+                continue;
+            };
+            correspondences.push(*correspondence);
+            added = true;
+            if correspondences.len() == max_correspondences {
+                break 'rounds;
+            }
+        }
+        if !added {
             break;
         }
     }
@@ -5369,6 +5480,210 @@ fn gr6p_observation_from_pixel(
         .try_normalize(1.0e-15)?;
     let origin = rig.sensor_origin_rig(sensor_index)?.coords;
     GeneralizedCameraObservation::new(origin, bearing_rig).ok()
+}
+
+/// A geometrically gated GR6P proposal before it is installed as the mapper's
+/// two-frame seed.  The counters are retained here so a later mapper wiring
+/// slice can report the exact bounded work without retaining every RANSAC
+/// report or inlier vector.
+#[derive(Debug, Clone, PartialEq)]
+struct Gr6pTemporalSeedProposal {
+    frame_a: usize,
+    frame_b: usize,
+    pose: GeneralizedRelativePose,
+    candidate_support: usize,
+    sensor_pair_diversity: usize,
+    correspondence_count: usize,
+    inlier_count: usize,
+    positive_depth_fraction: f64,
+    baseline_m: f64,
+    mean_residual_rad: f64,
+    candidate_models: usize,
+}
+
+/// Select the best bounded GR6P proposal from the sparse temporal pair
+/// stream.  This function is intentionally side-effect free: it does not
+/// install poses or mutate tracks, which lets mapper integration make seed
+/// installation transactional after the proposal gates pass.
+#[allow(dead_code)]
+fn select_gr6p_temporal_seed_proposal(
+    pairwise: &[PairwiseMatches],
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    config: &RigSfmConfig,
+) -> Option<Gr6pTemporalSeedProposal> {
+    if config.gr6p_seed_candidate_cap == 0
+        || config.gr6p_seed_correspondence_cap < 6
+        || config.gr6p_seed_max_iterations == 0
+        || config.gr6p_seed_min_iterations == 0
+        || config.gr6p_seed_min_iterations > config.gr6p_seed_max_iterations
+        || config.gr6p_seed_min_inliers < 6
+        || config.gr6p_seed_min_inliers > config.gr6p_seed_correspondence_cap
+        || !config.gr6p_seed_angular_threshold_deg.is_finite()
+        || config.gr6p_seed_angular_threshold_deg <= 0.0
+        || config.gr6p_seed_angular_threshold_deg >= 180.0
+        || !config.gr6p_seed_min_positive_depth_fraction.is_finite()
+        || !(0.0..=1.0).contains(&config.gr6p_seed_min_positive_depth_fraction)
+        || !config.gr6p_seed_min_baseline_m.is_finite()
+        || config.gr6p_seed_min_baseline_m <= 0.0
+    {
+        return None;
+    }
+
+    let candidates = collect_gr6p_temporal_pair_candidates(
+        pairwise,
+        image_assignment,
+        config.gr6p_seed_candidate_cap,
+    );
+    let mut best = None;
+    for candidate in candidates {
+        if candidate.support < 6 || candidate.sensor_pair_diversity < 2 {
+            continue;
+        }
+        let correspondences = build_gr6p_temporal_correspondences(
+            pairwise,
+            candidate,
+            rig,
+            features,
+            image_assignment,
+            config.gr6p_seed_correspondence_cap,
+        );
+        if correspondences.len() < 6 {
+            continue;
+        }
+        let ransac_config = GeneralizedRelativePoseRansacConfig {
+            max_iterations: config.gr6p_seed_max_iterations,
+            min_iterations: config.gr6p_seed_min_iterations,
+            confidence: 0.999,
+            inlier_angular_threshold: config.gr6p_seed_angular_threshold_deg.to_radians(),
+            seed: config.ransac_seed,
+            min_inliers: config.gr6p_seed_min_inliers,
+        };
+        let Ok(Some(report)) = estimate_gr6p_ransac_with_config(&correspondences, &ransac_config)
+        else {
+            continue;
+        };
+        let baseline_m = report.pose.translation.norm();
+        if !baseline_m.is_finite() || baseline_m < config.gr6p_seed_min_baseline_m {
+            continue;
+        }
+        if !report.mean_residual.is_finite()
+            || !report
+                .pose
+                .rotation
+                .quaternion()
+                .coords
+                .iter()
+                .all(|value| value.is_finite())
+            || !report
+                .pose
+                .translation
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            continue;
+        }
+        let Some(positive_depth_fraction) =
+            gr6p_positive_depth_fraction(&correspondences, &report.inliers, &report.pose)
+        else {
+            continue;
+        };
+        if positive_depth_fraction < config.gr6p_seed_min_positive_depth_fraction {
+            continue;
+        }
+        let proposal = Gr6pTemporalSeedProposal {
+            frame_a: candidate.frame_a,
+            frame_b: candidate.frame_b,
+            pose: report.pose,
+            candidate_support: candidate.support,
+            sensor_pair_diversity: candidate.sensor_pair_diversity,
+            correspondence_count: correspondences.len(),
+            inlier_count: report.inliers.len(),
+            positive_depth_fraction,
+            baseline_m,
+            mean_residual_rad: report.mean_residual,
+            candidate_models: report.candidate_models,
+        };
+        let replace = best
+            .as_ref()
+            .map(|incumbent| gr6p_seed_proposal_is_better(&proposal, incumbent))
+            .unwrap_or(true);
+        if replace {
+            best = Some(proposal);
+        }
+    }
+    best
+}
+
+fn gr6p_seed_proposal_is_better(
+    candidate: &Gr6pTemporalSeedProposal,
+    incumbent: &Gr6pTemporalSeedProposal,
+) -> bool {
+    match candidate.inlier_count.cmp(&incumbent.inlier_count) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            match candidate
+                .mean_residual_rad
+                .total_cmp(&incumbent.mean_residual_rad)
+            {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => match candidate.frame_a.cmp(&incumbent.frame_a) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Greater => false,
+                    std::cmp::Ordering::Equal => candidate.frame_b < incumbent.frame_b,
+                },
+            }
+        }
+    }
+}
+
+fn gr6p_positive_depth_fraction(
+    correspondences: &[GeneralizedRelativeCorrespondence],
+    inliers: &[usize],
+    pose: &GeneralizedRelativePose,
+) -> Option<f64> {
+    if inliers.is_empty() {
+        return None;
+    }
+    let positive = inliers
+        .iter()
+        .filter_map(|&index| correspondences.get(index))
+        .filter(|correspondence| {
+            gr6p_positive_depths(correspondence, pose)
+                .is_some_and(|(left, right)| left > 0.0 && right > 0.0)
+        })
+        .count();
+    if positive == 0 {
+        return Some(0.0);
+    }
+    let fraction = positive as f64 / inliers.len() as f64;
+    fraction.is_finite().then_some(fraction)
+}
+
+fn gr6p_positive_depths(
+    correspondence: &GeneralizedRelativeCorrespondence,
+    pose: &GeneralizedRelativePose,
+) -> Option<(f64, f64)> {
+    let bearing1 = correspondence.rig1.bearing.try_normalize(1.0e-15)?;
+    let bearing2 = correspondence.rig2.bearing.try_normalize(1.0e-15)?;
+    let inverse = pose.rotation.inverse();
+    let target_origin_in_source =
+        inverse.transform_vector(&(correspondence.rig2.origin - pose.translation));
+    let target_bearing_in_source = inverse.transform_vector(&bearing2);
+    let offset = correspondence.rig1.origin - target_origin_in_source;
+    let cosine = bearing1.dot(&target_bearing_in_source);
+    let denominator = 1.0 - cosine * cosine;
+    if !denominator.is_finite() || denominator <= 1.0e-12 {
+        return None;
+    }
+    let left_projection = bearing1.dot(&offset);
+    let right_projection = target_bearing_in_source.dot(&offset);
+    let left_depth = (cosine * right_projection - left_projection) / denominator;
+    let right_depth = (right_projection - cosine * left_projection) / denominator;
+    (left_depth.is_finite() && right_depth.is_finite()).then_some((left_depth, right_depth))
 }
 
 fn install_image_poses(
@@ -7242,6 +7557,139 @@ mod tests {
             )
             .len(),
             3
+        );
+    }
+
+    #[test]
+    fn gr6p_temporal_seed_proposal_recovers_metric_pose_with_outliers() {
+        let camera = Camera::pinhole(1, 640, 480, 300.0, 300.0, 320.0, 240.0);
+        let rig = GeneralizedCameraRig::new(vec![
+            RigSensor {
+                camera: camera.clone(),
+                sensor_from_rig: SE3::identity(),
+            },
+            RigSensor {
+                camera,
+                sensor_from_rig: SE3::new(UnitQuaternion::identity(), Vector3::new(-0.4, 0.0, 0.0)),
+            },
+        ])
+        .unwrap();
+        let truth_rotation = UnitQuaternion::from_euler_angles(0.04, -0.03, 0.06);
+        let truth_translation = Vector3::new(0.7, -0.2, 0.3);
+        let points = (0..12)
+            .map(|index| {
+                Vector3::new(
+                    -1.2 + 0.23 * index as f64,
+                    -0.7 + 0.11 * (index % 7) as f64,
+                    4.0 + 0.31 * index as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut keypoints = vec![Vec::new(); 4];
+        for point in &points {
+            let point_source = Point3::from(*point);
+            let point_target = Point3::from(truth_rotation * *point + truth_translation);
+            for (image, sensor_index, point_in_rig) in [
+                (0, 0, point_source),
+                (1, 1, point_source),
+                (2, 0, point_target),
+                (3, 1, point_target),
+            ] {
+                let sensor = &rig.sensors()[sensor_index];
+                keypoints[image].push(
+                    sensor
+                        .camera
+                        .project(&sensor.sensor_from_rig.transform_point(&point_in_rig))
+                        .unwrap(),
+                );
+            }
+        }
+        // Deliberately inconsistent rows exercise the bounded RANSAC wrapper.
+        for image in &mut keypoints {
+            image.extend([
+                Point2::new(11.0, 17.0),
+                Point2::new(601.0, 41.0),
+                Point2::new(89.0, 451.0),
+            ]);
+        }
+        let features = keypoints
+            .into_iter()
+            .map(|points| FeatureSet::new(points, vec![Vec::new(); 15]).unwrap())
+            .collect::<Vec<_>>();
+        let assignment = vec![(0, 0), (0, 1), (1, 0), (1, 1)];
+        let pairwise = vec![
+            PairwiseMatches::new(0, 2, (0..15).map(|index| (index, index)).collect()),
+            PairwiseMatches::new(1, 3, (0..15).map(|index| (index, index)).collect()),
+        ];
+        let config = RigSfmConfig {
+            gr6p_seed_candidate_cap: 1,
+            gr6p_seed_correspondence_cap: 24,
+            gr6p_seed_max_iterations: 64,
+            gr6p_seed_min_iterations: 8,
+            gr6p_seed_min_inliers: 6,
+            gr6p_seed_angular_threshold_deg: 0.5,
+            gr6p_seed_min_positive_depth_fraction: 0.8,
+            gr6p_seed_min_baseline_m: 1.0e-4,
+            ransac_seed: 37,
+            ..RigSfmConfig::default()
+        };
+
+        let proposal =
+            select_gr6p_temporal_seed_proposal(&pairwise, &rig, &features, &assignment, &config)
+                .expect("known metric temporal pair should produce a proposal");
+        assert_eq!((proposal.frame_a, proposal.frame_b), (0, 1));
+        assert!(proposal.inlier_count >= 12);
+        assert!(proposal.positive_depth_fraction >= 0.8);
+        assert!(proposal.baseline_m >= config.gr6p_seed_min_baseline_m);
+        assert!(proposal.mean_residual_rad < config.gr6p_seed_angular_threshold_deg.to_radians());
+        assert!((proposal.pose.rotation.inverse() * truth_rotation).angle() < 1.0e-6);
+        assert!((proposal.pose.translation - truth_translation).norm() < 1.0e-6);
+        assert_eq!(
+            proposal,
+            select_gr6p_temporal_seed_proposal(&pairwise, &rig, &features, &assignment, &config,)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn gr6p_seed_validation_is_enabled_only_for_opt_in_and_rejects_dynamic_mode() {
+        let camera = Camera::pinhole(1, 32, 32, 20.0, 20.0, 16.0, 16.0);
+        let rig = GeneralizedCameraRig::new(vec![
+            RigSensor {
+                camera: camera.clone(),
+                sensor_from_rig: SE3::identity(),
+            },
+            RigSensor {
+                camera,
+                sensor_from_rig: SE3::new(UnitQuaternion::identity(), Vector3::new(-0.1, 0.0, 0.0)),
+            },
+        ])
+        .unwrap();
+        let disabled = RigSfmConfig {
+            gr6p_seed_correspondence_cap: 1,
+            gr6p_seed_min_baseline_m: f64::NAN,
+            ..RigSfmConfig::default()
+        };
+        assert!(validate_inputs(&rig, &[], &[], &[], &disabled).is_ok());
+
+        let invalid = RigSfmConfig {
+            gr6p_seed_candidate_cap: 1,
+            gr6p_seed_correspondence_cap: 5,
+            ..RigSfmConfig::default()
+        };
+        assert_eq!(
+            validate_inputs(&rig, &[], &[], &[], &invalid),
+            Err(RigSfmError::InvalidGr6pSeedConfiguration(
+                "correspondence cap must be at least 6"
+            ))
+        );
+        let dynamic = RigSfmConfig {
+            gr6p_seed_candidate_cap: 1,
+            ..RigSfmConfig::default()
+        };
+        assert_eq!(
+            validate_dynamic_configuration(&dynamic),
+            Err(RigSfmError::DynamicIncompatible("GR6P two-frame seed"))
         );
     }
 
