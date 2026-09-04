@@ -3,10 +3,17 @@ use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 
 mod generalized;
+mod gr6p;
+mod gr6p_data;
 mod p3p;
 pub use generalized::{
     GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedDltPoseEstimator,
     GeneralizedGaussNewtonPoseRefiner, GeneralizedPnPRansac, GeneralizedRansacReport, RigSensor,
+};
+pub use gr6p::{
+    estimate_gr6p, estimate_gr6p_with_config, normalize_gr6p_correspondences,
+    GeneralizedCameraObservation, GeneralizedRelativeCorrespondence, GeneralizedRelativePose,
+    GeneralizedRelativePoseConfig, GeneralizedRelativePoseError, GeneralizedRelativePoseResult,
 };
 pub use p3p::P3PGrunert;
 
