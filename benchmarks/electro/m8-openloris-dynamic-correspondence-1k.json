@@ -147,6 +147,22 @@
       "wall_seconds": 38.93,
       "peak_rss_kib": 170796,
       "reason": "counting two owned CSR neighbors slightly improved p95 but worsened RMSE and still failed both trajectory controls; support count alone does not prove a geometrically independent cycle"
+    },
+    "owned_correspondence_triangle": {
+      "decision": "rejected_and_removed",
+      "registered_images": 1000,
+      "models": 1,
+      "continuation_cycle_rejections": 69393,
+      "tracks": 8030,
+      "observations": 247336,
+      "mean_reprojection_px": 0.731076048,
+      "ate_rmse_m": 0.02912747785421342,
+      "ate_p95_m": 0.04371580107387254,
+      "ate_max_m": 0.0852740440839713,
+      "mapper_seconds": 31.245290,
+      "wall_seconds": 32.01,
+      "peak_rss_kib": 166236,
+      "reason": "requiring a closed u-v-w correspondence triangle with the third observation already owned improved time, RSS, and reprojection but slightly worsened both RMSE and p95; appearance-cycle consistency is not trajectory-geometric independence"
     }
   },
   "promotion_gate": {
@@ -162,6 +178,6 @@
   "decision": {
     "retain_default_off_diagnostic": true,
     "reject_single_edge_owner_merge": true,
-    "next_action": "test cycle-supported correspondence admission before integrating deferred 10k growth; a two-neighbor count was insufficient, so support must encode independent closed-path geometry rather than multiplicity; do not tune against ground truth and do not run the 10k decision arm yet"
+    "next_action": "stop correspondence-topology-only admission tuning and measure registration-pose deltas against the frozen legacy mapper without ground-truth access; both multiplicity and closed appearance cycles failed, so the next hypothesis must target the PnP/local-BA state transition that first diverges; do not run the 10k decision arm yet"
   }
 }

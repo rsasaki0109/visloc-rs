@@ -806,11 +806,14 @@ merge reduced topology fragmentation but worsened RMSE to 0.02941 m and was
 removed. Metric-only BA, disabled local BA, and twice-frequent local BA also
 failed. Requiring two currently owned neighbours rejected 51,197 continuation
 attempts and slightly improved p95 to 0.04348 m, but regressed RMSE to 0.02919
-m; that temporary option was removed as well. The dynamic path therefore
-remains a diagnostic and is not promoted to 2.5k or 10k. The next admission
-rule must encode an independent closed correspondence path rather than raw
-neighbour multiplicity; it may not recover quality by tuning against GT.
-Exact counters, hashes, and rejected A/Bs are frozen in
+m; that temporary option was removed as well. Requiring a closed
+correspondence triangle rejected 69,393 continuations and improved runtime,
+RSS, and reprojection, but still regressed RMSE/p95 to 0.02913/0.04372 m and
+was removed. The dynamic path therefore remains a diagnostic and is not
+promoted to 2.5k or 10k. Raw multiplicity and appearance-cycle topology are
+both closed as correction sources. The next diagnostic must locate the first
+PnP/local-BA pose transition that diverges from the frozen legacy mapper,
+without consulting GT during mapping. Exact counters, hashes, and A/Bs are frozen in
 [`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
 
 The current pure-visual sparse Schur solver also reopened the historical
