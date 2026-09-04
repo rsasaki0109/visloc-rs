@@ -787,6 +787,29 @@ become registered; pre-unioning the entire graph would preserve the failure
 being addressed. Frozen details are in
 [`m8-openloris-rig-correspondence-csr-preview.json`](../benchmarks/electro/m8-openloris-rig-correspondence-csr-preview.json).
 
+Phase 2 now exercises that CSR behind the default-off
+`--dynamic-correspondence-tracking` mapper path. The first direct-stereo-only
+bootstrap exposed only three seed frames and selected frame 26; a bounded
+bootstrap fix now inspects legacy component membership only long enough to
+recover the historical support-descending metric seed order, copies the
+selected frame's 96 stereo pairs, and drops the global tracks before dynamic
+growth. This restores the frozen frame-8 seed and registers 1,000/1,000 images
+in one model. Every one of the 361,170 observation rows is activated once and
+3,210,348 directed CSR edges are visited without an image-pair matrix.
+
+The quality gate nevertheless rejects the arm. Its best result is 0.02910 m
+RMSE / 0.04368 m p95 / 0.74328 px at 171,732 KiB and 36.54 mapper seconds,
+versus the frozen visloc control's 0.02670 m / 0.04135 m / 0.72068 px and the
+official COLMAP control's 0.02797 m / 0.04227 m / 0.81021 px. Registration and
+resource bounds pass, but trajectory parity does not. A single-edge fragment
+merge reduced topology fragmentation but worsened RMSE to 0.02941 m and was
+removed. Metric-only BA, disabled local BA, and twice-frequent local BA also
+failed. The dynamic path therefore remains a diagnostic and is not promoted
+to 2.5k or 10k. The next admission rule must require independent multi-edge or
+cycle support before an owner is extended; it may not recover quality by
+tuning against GT. Exact counters, hashes, and rejected A/Bs are frozen in
+[`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a

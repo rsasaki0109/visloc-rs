@@ -1,0 +1,150 @@
+{
+  "schema": "visloc_m8_openloris_dynamic_correspondence_1k_v1",
+  "recorded_at": "2026-09-04T09:39:56+09:00",
+  "dataset": "OpenLORIS corridor1-1",
+  "status": "rejected_at_1k_promotion_gate",
+  "ground_truth_used_for_selection_or_mapping": false,
+  "hypothesis": "a bounded correspondence CSR with registration-time create/continue ownership avoids global pre-union aliases while preserving COLMAP-style mapper growth",
+  "inputs": {
+    "frames": 500,
+    "images": 1000,
+    "verified_pairs": 6935,
+    "compacted_matches": 1605174,
+    "keypoints": 361170,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k",
+    "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps",
+    "snapshot_sha256": "c5a59bed8a21fe6a6ca553eb2fd80049954c7505103a5569f0f804526a80b971",
+    "score_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0"
+  },
+  "implementation": {
+    "flag": "--dynamic-correspondence-tracking",
+    "default": false,
+    "csr": "u32 flattened observations, u64 image offsets, sorted deduplicated bidirectional edges",
+    "bootstrap": "legacy union membership is inspected only to select one frame-local metric seed; the global tracks are dropped before growth",
+    "growth": "each CSR row is activated at most once; ownership is installed only for registered images and accepted PnP inliers",
+    "persistent_complexity": "O(observations + verified correspondence edges + registered dynamic tracks); no frame-pair matrix and no all-unregistered-frame rescan",
+    "unsupported_combinations": [
+      "deferred registration or retriangulation",
+      "post-registration track completion",
+      "metric conflict recovery",
+      "alternate prebuilt track builders",
+      "robust triangulation pruning",
+      "direct or motion bridge registration"
+    ]
+  },
+  "frozen_controls": {
+    "visloc_legacy": {
+      "registered_images": 1000,
+      "models": 1,
+      "seed_frame": 8,
+      "tracks": 4716,
+      "observations": 130900,
+      "mean_reprojection_px": 0.720678690,
+      "ate_rmse_m": 0.026703233595482503,
+      "ate_p95_m": 0.04134610748761521,
+      "ate_max_m": 0.08045566543261787,
+      "mapper_seconds_remeasured": 16.499276,
+      "wall_seconds_remeasured": 17.25,
+      "peak_rss_kib_remeasured": 142044
+    },
+    "official_colmap": {
+      "registered_images": 1000,
+      "mean_reprojection_px": 0.8102073187543721,
+      "ate_rmse_m": 0.027968541677842282,
+      "ate_p95_m": 0.042266006958647205,
+      "mapper_seconds": 2073.399966248,
+      "peak_rss_kib": 629664
+    }
+  },
+  "experiments": {
+    "direct_stereo_seed_only": {
+      "decision": "rejected",
+      "seed_frame": 26,
+      "registered_images": 1000,
+      "models": 1,
+      "mean_reprojection_px": 0.743881604,
+      "ate_rmse_m": 0.029189895795399212,
+      "ate_p95_m": 0.04403729015477546,
+      "reason": "only three direct same-frame stereo seed candidates existed; the frozen frame-8 seed was unreachable"
+    },
+    "legacy_membership_bootstrap": {
+      "decision": "best_dynamic_arm_but_rejected",
+      "seed_frame": 8,
+      "bootstrap_legacy_tracks": 8663,
+      "bootstrap_candidates": 422,
+      "bootstrap_seed_support": 96,
+      "bootstrap_seed_landmarks": 88,
+      "registered_images": 1000,
+      "models": 1,
+      "tracks": 8441,
+      "observations": 271594,
+      "mean_reprojection_px": 0.743283945,
+      "ate_rmse_m": 0.029099635763349854,
+      "ate_p95_m": 0.043678871077456695,
+      "ate_max_m": 0.0852041159532134,
+      "mapper_seconds": 36.543878,
+      "wall_seconds": 37.37,
+      "peak_rss_kib": 171732,
+      "activated_rows": 361170,
+      "directed_edges_visited": 3210348,
+      "dynamic_track_creates": 16886,
+      "dynamic_track_continues": 300392,
+      "owner_conflicts": 61871,
+      "same_image_conflicts": 9394,
+      "geometry_rejections": 21897,
+      "pnp_graph_insertions": 237183,
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "af37165e09603859c19b84ea7babe6d2c5b785036260957b1ac7dcf5da19a6c5",
+        "points3D_txt": "ca7d7793d45ef16513e88698ab1c667ebbb6563abc75a6468ac8edbbc62a6aa8"
+      },
+      "repeat_model_byte_identical": true
+    },
+    "single_edge_fragment_merge": {
+      "decision": "rejected_and_removed",
+      "successful_merges": 3375,
+      "ate_rmse_m": 0.029407962982371708,
+      "ate_p95_m": 0.04414794150607097,
+      "reason": "unpositioned single-edge merges reintroduced repeated-corridor aliases"
+    },
+    "metric_tracks_only_ba": {
+      "decision": "rejected",
+      "mapper_seconds": 12.196179,
+      "mean_reprojection_px": 0.805458368,
+      "ate_rmse_m": 0.11362428482395126,
+      "ate_p95_m": 0.2495575982827879
+    },
+    "local_ba_disabled": {
+      "decision": "rejected",
+      "mapper_seconds": 23.659712,
+      "mean_reprojection_px": 0.659240693,
+      "ate_rmse_m": 0.07054962935176212,
+      "ate_p95_m": 0.10139839074515558
+    },
+    "local_ba_every_5": {
+      "decision": "rejected",
+      "mapper_seconds": 45.733037,
+      "mean_reprojection_px": 0.754932077,
+      "ate_rmse_m": 0.02979942896217806,
+      "ate_p95_m": 0.04540173331069834
+    }
+  },
+  "promotion_gate": {
+    "promote_to_2500": false,
+    "promote_to_10000": false,
+    "registration_pass": true,
+    "reprojection_vs_colmap_pass": true,
+    "trajectory_vs_visloc_control_pass": false,
+    "trajectory_vs_colmap_pass": false,
+    "memory_bound_pass": true,
+    "reason": "the best dynamic arm is 8.97% worse than the frozen visloc ATE RMSE and 4.04% worse than the official COLMAP ATE RMSE"
+  },
+  "decision": {
+    "retain_default_off_diagnostic": true,
+    "reject_single_edge_owner_merge": true,
+    "next_action": "require stronger multi-edge or cycle-supported correspondence admission before integrating deferred 10k growth; do not tune against ground truth and do not run the 10k decision arm yet"
+  }
+}

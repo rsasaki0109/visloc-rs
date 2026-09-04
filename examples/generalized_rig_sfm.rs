@@ -122,6 +122,7 @@ struct Args {
     ba_huber_delta: f64,
     structure_refinement_iterations: usize,
     preview_rig_correspondence_csr: bool,
+    dynamic_correspondence_tracking: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -225,6 +226,7 @@ fn parse_args() -> Result<Args, String> {
     let mut ba_huber_delta = 6.0;
     let mut structure_refinement_iterations = defaults.structure_refinement_iterations;
     let mut preview_rig_correspondence_csr = false;
+    let mut dynamic_correspondence_tracking = false;
     while let Some(flag) = values.next() {
         let mut value = || {
             values
@@ -253,6 +255,7 @@ fn parse_args() -> Result<Args, String> {
             "--feature-suffix" => feature_suffix = value()?,
             "--snapshot" => snapshot = Some(PathBuf::from(value()?)),
             "--preview-rig-correspondence-csr" => preview_rig_correspondence_csr = true,
+            "--dynamic-correspondence-tracking" => dynamic_correspondence_tracking = true,
             "--out-colmap" => out_colmap = Some(PathBuf::from(value()?)),
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
             "--min-model-frames" => {
@@ -568,6 +571,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--triangulation-min-inlier-fraction 0.5] ",
                     "[--max-reprojection-error-px 4] ",
                     "[--pnp-max-iterations 512] [--max-matches-per-pair 0] ",
+                    "[--dynamic-correspondence-tracking] ",
                     "[--max-track-frame-gap 0] ",
                     "[--local-ba-every 10] [--local-ba-window 40] ",
                     "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
@@ -852,6 +856,7 @@ fn parse_args() -> Result<Args, String> {
         ba_huber_delta,
         structure_refinement_iterations,
         preview_rig_correspondence_csr,
+        dynamic_correspondence_tracking,
     })
 }
 
@@ -1464,6 +1469,7 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         ba_metric_tracks_only: args.ba_metric_tracks_only,
         final_ba_min_pose_observations: args.final_ba_min_pose_observations,
         structure_refinement_iterations: args.structure_refinement_iterations,
+        dynamic_correspondence_tracking: args.dynamic_correspondence_tracking,
         ba_config: visloc_rs::BaConfig {
             robust_kernel: RobustKernel::Huber {
                 delta: args.ba_huber_delta,
@@ -1841,7 +1847,7 @@ fn map_remaining_models(
             result.work.paired_pose_jump_repaired_frames,
         ));
         eprintln!(
-            "rig-component: rank={rank} supplied_frames={supplied_frames} pairs={verified_pairs} registered_frames={} registered_images={} tracks={tracks} observations={observations} mean_reprojection_px={:.9} seed_global_frame={seed_global_frame} triangulation_attempts={} robust_triangulation_tracks={} robust_triangulation_pruned_observations={} robust_triangulation_majority_rejections={} pnp_attempts={} pnp_insufficient_sensors={} pnp_estimation_failures={} pnp_inlier_rejections={} pnp_registrations={} direct_bridge_pair_visits={} direct_bridge_correspondences={} direct_bridge_registrations={} motion_bridge_pair_visits={} motion_bridge_estimation_failures={} motion_bridge_rotation_rejections={} motion_bridge_registrations={} deferred_pair_visits={} deferred_correspondences={} deferred_pnp_attempts={} deferred_pnp_estimation_failures={} deferred_pnp_inlier_rejections={} deferred_registrations={} deferred_interpolation_registrations={} deferred_observations_attached={} deferred_retriangulated_tracks={} deferred_retriangulated_observations={} unregistered_zero_support={} unregistered_below_pnp_support={} unregistered_eligible_pnp={} unregistered_below_sensors={} max_unregistered_support={} geometry_recovered_tracks={} geometry_recovered_observations={} track_completion_passes={} track_completion_pair_visits={} track_completion_observations={} track_completion_reprojection_rejections={} isolated_pose_repair_passes={} isolated_pose_repairs={} paired_pose_jump_repairs={} paired_pose_jump_repaired_frames={} VmHWM={} KiB",
+            "rig-component: rank={rank} supplied_frames={supplied_frames} pairs={verified_pairs} registered_frames={} registered_images={} tracks={tracks} observations={observations} mean_reprojection_px={:.9} seed_global_frame={seed_global_frame} triangulation_attempts={} robust_triangulation_tracks={} robust_triangulation_pruned_observations={} robust_triangulation_majority_rejections={} pnp_attempts={} pnp_insufficient_sensors={} pnp_estimation_failures={} pnp_inlier_rejections={} pnp_registrations={} dynamic_activated_rows={} dynamic_activated_edges={} dynamic_track_creates={} dynamic_track_continues={} dynamic_owner_conflicts={} dynamic_same_image_conflicts={} dynamic_geometry_rejections={} dynamic_observation_lookup_entries={} dynamic_pnp_graph_insertions={} dynamic_bootstrap_legacy_tracks={} dynamic_bootstrap_candidates={} dynamic_bootstrap_seed_support={} dynamic_bootstrap_seed_pairs={} dynamic_bootstrap_seed_landmarks={} dynamic_bootstrap_direct_fallbacks={} direct_bridge_pair_visits={} direct_bridge_correspondences={} direct_bridge_registrations={} motion_bridge_pair_visits={} motion_bridge_estimation_failures={} motion_bridge_rotation_rejections={} motion_bridge_registrations={} deferred_pair_visits={} deferred_correspondences={} deferred_pnp_attempts={} deferred_pnp_estimation_failures={} deferred_pnp_inlier_rejections={} deferred_registrations={} deferred_interpolation_registrations={} deferred_observations_attached={} deferred_retriangulated_tracks={} deferred_retriangulated_observations={} unregistered_zero_support={} unregistered_below_pnp_support={} unregistered_eligible_pnp={} unregistered_below_sensors={} max_unregistered_support={} geometry_recovered_tracks={} geometry_recovered_observations={} track_completion_passes={} track_completion_pair_visits={} track_completion_observations={} track_completion_reprojection_rejections={} isolated_pose_repair_passes={} isolated_pose_repairs={} paired_pose_jump_repairs={} paired_pose_jump_repaired_frames={} VmHWM={} KiB",
             result.registered_frames,
             result.registered_images,
             result.mean_reprojection_error_px,
@@ -1854,6 +1860,21 @@ fn map_remaining_models(
             result.work.pnp_estimation_failures,
             result.work.pnp_inlier_rejections,
             result.work.pnp_registrations,
+            result.work.dynamic_activated_rows,
+            result.work.dynamic_activated_edges,
+            result.work.dynamic_track_creates,
+            result.work.dynamic_track_continues,
+            result.work.dynamic_owner_conflicts,
+            result.work.dynamic_same_image_conflicts,
+            result.work.dynamic_geometry_rejections,
+            result.work.dynamic_observation_lookup_entries,
+            result.work.dynamic_pnp_graph_insertions,
+            result.work.dynamic_bootstrap_legacy_tracks,
+            result.work.dynamic_bootstrap_candidates,
+            result.work.dynamic_bootstrap_seed_support,
+            result.work.dynamic_bootstrap_seed_pairs,
+            result.work.dynamic_bootstrap_seed_landmarks,
+            result.work.dynamic_bootstrap_direct_fallbacks,
             result.work.direct_bridge_pair_visits,
             result.work.direct_bridge_correspondence_insertions,
             result.work.direct_bridge_registrations,
@@ -3279,7 +3300,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "tracks={} observations={} mean_reprojection_px={:.9} seed_frame={} ",
             "mapper_seconds={:.6} total_seconds={:.6} VmHWM_KiB={} ",
             "track_components={} conflicting_track_edges={} retained_track_observations={} ",
-            "triangulation_attempts={} robust_triangulation_tracks={} robust_triangulation_pruned_observations={} robust_triangulation_majority_rejections={} cache_insertions={} pnp_attempts={} pnp_insufficient_sensors={} pnp_estimation_failures={} pnp_inlier_rejections={} pnp_registrations={} direct_bridge_pair_visits={} direct_bridge_correspondences={} direct_bridge_registrations={} motion_bridge_pair_visits={} motion_bridge_estimation_failures={} motion_bridge_rotation_rejections={} motion_bridge_registrations={} deferred_pair_visits={} deferred_correspondences={} deferred_pnp_attempts={} deferred_pnp_estimation_failures={} deferred_pnp_inlier_rejections={} deferred_registrations={} deferred_interpolation_registrations={} deferred_observations_attached={} deferred_retriangulated_tracks={} deferred_retriangulated_observations={} unregistered_zero_support={} unregistered_below_pnp_support={} unregistered_eligible_pnp={} unregistered_below_sensors={} max_unregistered_support={} local_ba_runs={} ba_retriangulated_tracks={} ba_requeued_frames={} structure_refined_tracks={} geometry_recovered_tracks={} geometry_recovered_observations={} track_completion_passes={} track_completion_pair_visits={} track_completion_observations={} track_completion_reprojection_rejections={} final_filter_refinement_passes={} final_filter_refinement_pruned_observations={} isolated_pose_repair_passes={} isolated_pose_repairs={} paired_pose_jump_repairs={} paired_pose_jump_repaired_frames={} out={}"
+            "triangulation_attempts={} robust_triangulation_tracks={} robust_triangulation_pruned_observations={} robust_triangulation_majority_rejections={} cache_insertions={} pnp_attempts={} pnp_insufficient_sensors={} pnp_estimation_failures={} pnp_inlier_rejections={} pnp_registrations={} dynamic_activated_rows={} dynamic_activated_edges={} dynamic_track_creates={} dynamic_track_continues={} dynamic_owner_conflicts={} dynamic_same_image_conflicts={} dynamic_geometry_rejections={} dynamic_observation_lookup_entries={} dynamic_pnp_graph_insertions={} dynamic_bootstrap_legacy_tracks={} dynamic_bootstrap_candidates={} dynamic_bootstrap_seed_support={} dynamic_bootstrap_seed_pairs={} dynamic_bootstrap_seed_landmarks={} dynamic_bootstrap_direct_fallbacks={} direct_bridge_pair_visits={} direct_bridge_correspondences={} direct_bridge_registrations={} motion_bridge_pair_visits={} motion_bridge_estimation_failures={} motion_bridge_rotation_rejections={} motion_bridge_registrations={} deferred_pair_visits={} deferred_correspondences={} deferred_pnp_attempts={} deferred_pnp_estimation_failures={} deferred_pnp_inlier_rejections={} deferred_registrations={} deferred_interpolation_registrations={} deferred_observations_attached={} deferred_retriangulated_tracks={} deferred_retriangulated_observations={} unregistered_zero_support={} unregistered_below_pnp_support={} unregistered_eligible_pnp={} unregistered_below_sensors={} max_unregistered_support={} local_ba_runs={} ba_retriangulated_tracks={} ba_requeued_frames={} structure_refined_tracks={} geometry_recovered_tracks={} geometry_recovered_observations={} track_completion_passes={} track_completion_pair_visits={} track_completion_observations={} track_completion_reprojection_rejections={} final_filter_refinement_passes={} final_filter_refinement_pruned_observations={} isolated_pose_repair_passes={} isolated_pose_repairs={} paired_pose_jump_repairs={} paired_pose_jump_repaired_frames={} out={}"
         ),
         result.registered_frames,
         frames.len(),
@@ -3305,6 +3326,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         result.work.pnp_estimation_failures,
         result.work.pnp_inlier_rejections,
         result.work.pnp_registrations,
+        result.work.dynamic_activated_rows,
+        result.work.dynamic_activated_edges,
+        result.work.dynamic_track_creates,
+        result.work.dynamic_track_continues,
+        result.work.dynamic_owner_conflicts,
+        result.work.dynamic_same_image_conflicts,
+        result.work.dynamic_geometry_rejections,
+        result.work.dynamic_observation_lookup_entries,
+        result.work.dynamic_pnp_graph_insertions,
+        result.work.dynamic_bootstrap_legacy_tracks,
+        result.work.dynamic_bootstrap_candidates,
+        result.work.dynamic_bootstrap_seed_support,
+        result.work.dynamic_bootstrap_seed_pairs,
+        result.work.dynamic_bootstrap_seed_landmarks,
+        result.work.dynamic_bootstrap_direct_fallbacks,
         result.work.direct_bridge_pair_visits,
         result.work.direct_bridge_correspondence_insertions,
         result.work.direct_bridge_registrations,
