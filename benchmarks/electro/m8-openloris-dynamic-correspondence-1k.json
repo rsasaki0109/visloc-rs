@@ -295,6 +295,6 @@
   "decision": {
     "retain_default_off_diagnostic": true,
     "reject_single_edge_owner_merge": true,
-    "next_action": "stop widening dynamic component proposals; A/B the bounded GT-independent paired-pose-jump repair already identified in the 10k trajectory audit, beginning with frozen 1k non-regression and then strong/adaptive 10k"
+    "next_action": "stop widening clean-component visibility and pose-continuity repairs; the remaining bounded A/B is to preserve at most a small fixed number of geometrically supported track alternatives before irreversible same-image ownership conflict resolution, and promote only if frozen 1k trajectory and runtime gates pass"
   }
 }

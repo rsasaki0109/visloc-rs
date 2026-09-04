@@ -868,9 +868,12 @@ COLMAP. Seed-time shadow publication also changed the first PnP from legacy
 frame 58 to frame 74, so it destroyed the scheduling equivalence restored by
 the narrower seed-component arm. Dynamic component widening is therefore
 exhausted as the next correction source. The next bounded experiment is the
-GT-independent paired-pose-jump repair already isolated by the 10k trajectory
-audit; it must first preserve the frozen 1k control, then pass strong and
-adaptive 10k gates. Exact counters, hashes, and decisions remain in
+remaining conflict-resolution boundary: preserve only a small fixed number of
+geometrically supported track alternatives before same-image ownership becomes
+irreversible, and require the frozen 1k trajectory and runtime gates before a
+larger tier. The GT-independent paired-pose-jump path is not reopened here: its
+real 10k A/B already regressed RMSE/p95 versus isolated-only despite a positive
+offline screen. Exact counters, hashes, and decisions remain in
 [`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
 
 The current pure-visual sparse Schur solver also reopened the historical
