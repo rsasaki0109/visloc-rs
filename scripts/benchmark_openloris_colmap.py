@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from openloris_rig_frames import RigFrameGroupingError, canonicalize_rig_timestamps
+except ModuleNotFoundError:  # importlib-based repository tests
+    from scripts.openloris_rig_frames import RigFrameGroupingError, canonicalize_rig_timestamps
+
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -160,6 +165,16 @@ def _load_tier_records(path: Path, names: list[str]) -> dict[str, dict[str, Any]
         records[name] = {"camera": camera, "timestamp": timestamp}
     if set(records) != set(names):
         raise ValidationError("tier manifest image envelope differs from candidate manifest")
+    try:
+        canonical, repaired_pairs = canonicalize_rig_timestamps(
+            ({"name": name, **record} for name, record in records.items())
+        )
+    except RigFrameGroupingError as exc:
+        raise ValidationError(str(exc)) from exc
+    for name, timestamp in canonical.items():
+        records[name]["timestamp"] = timestamp
+    for record in records.values():
+        record["repaired_timestamp_pairs"] = repaired_pairs
     return records
 
 
@@ -205,6 +220,11 @@ def _stage_rig_images(
             "frames": len(frame_cameras),
             "cameras": {str(key): cameras[key] for key in sorted(cameras)},
             "layout": "rig/cameraN/TIMESTAMP.png",
+            "timestamp_pair_tolerance_seconds": 0.001,
+            "repaired_timestamp_pairs": max(
+                (int(record.get("repaired_timestamp_pairs", 0)) for record in records.values()),
+                default=0,
+            ),
         },
         aliases,
     )

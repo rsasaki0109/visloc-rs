@@ -1,0 +1,236 @@
+{
+  "schema": "visloc_m8_openloris_robust_triangulation_ab_v1",
+  "recorded_at": "2026-09-03T16:20:00Z",
+  "dataset": "OpenLORIS corridor1-1",
+  "status": "trajectory_gain_reprojection_tradeoff_10k_not_promoted",
+  "ground_truth_used_only_after_mapping": true,
+  "implementation": {
+    "mapping_default": "disabled",
+    "rule": "after widest-ray triangulation, retain a track only when at least two and the configured fraction of currently registered observations reproject within the existing mapper threshold; prune only failing registered observations",
+    "failed_seed_behavior": "restore the complete pre-attempt track state",
+    "unregistered_observations": "retained for later registration and publication filtering",
+    "complexity": "linear in observations evaluated by an already scheduled triangulation attempt; no pair or track Cartesian product",
+    "counters": [
+      "robust_triangulation_tracks",
+      "robust_triangulation_pruned_observations",
+      "robust_triangulation_majority_rejections"
+    ]
+  },
+  "one_k_pair_confidence_control": {
+    "registered_images": 1000,
+    "tracks": 6266,
+    "observations": 270204,
+    "mean_reprojection_px": 0.776125899,
+    "ate_rmse_m": 0.02751234807567878,
+    "ate_p95_m": 0.042354933105516426
+  },
+  "one_k_variants": [
+    {
+      "minimum_inlier_fraction": 0.5,
+      "ba_huber_delta_px": 6.0,
+      "registered_images": 1000,
+      "tracks": 6681,
+      "observations": 281401,
+      "mean_reprojection_px": 0.804685412,
+      "ate_rmse_m": 0.027221381932520577,
+      "ate_p95_m": 0.04204123395955278,
+      "robust_tracks": 6700,
+      "pruned_observations": 1421,
+      "majority_rejections": 6002,
+      "mapper_seconds": 37.585611,
+      "process_wall_seconds": 38.36,
+      "peak_rss_kib": 307932
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 6.0,
+      "registered_images": 1000,
+      "tracks": 6528,
+      "observations": 280583,
+      "mean_reprojection_px": 0.804321011,
+      "ate_rmse_m": 0.02687497094349862,
+      "ate_p95_m": 0.0417518138771473,
+      "robust_tracks": 6541,
+      "pruned_observations": 706,
+      "majority_rejections": 8563,
+      "mapper_seconds": 37.160573,
+      "process_wall_seconds": 37.96,
+      "peak_rss_kib": 307960
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 3.0,
+      "registered_images": 1000,
+      "tracks": 6530,
+      "observations": 279489,
+      "mean_reprojection_px": 0.803496621,
+      "ate_rmse_m": 0.026806030654362677,
+      "ate_p95_m": 0.04152242374395737,
+      "robust_tracks": 6538,
+      "pruned_observations": 660,
+      "majority_rejections": 8980,
+      "mapper_seconds": 36.1144,
+      "process_wall_seconds": 36.89,
+      "peak_rss_kib": 307972,
+      "colmap_1k_gate": "pass: 1000 registered, 0.810207 px, 0.027969 m RMSE, and 0.042266 m p95 controls all beaten"
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 1.0,
+      "registered_images": 1000,
+      "tracks": 6524,
+      "observations": 277411,
+      "mean_reprojection_px": 0.782869704,
+      "ate_rmse_m": 0.027290998329519672,
+      "ate_p95_m": 0.041744988009232674,
+      "ate_max_m": 0.08255636599601582,
+      "mapper_seconds": 38.989798,
+      "process_wall_seconds": 39.81,
+      "peak_rss_kib": 307908,
+      "colmap_1k_gate": "pass, but trajectory is worse than the 3 px arm"
+    }
+  ],
+  "two_point_five_k_legacy_control": {
+    "note": "same ANN snapshot but legacy union-find, so this is an absolute quality reference rather than an exact track-builder A/B",
+    "registered_images": 2500,
+    "tracks": 15937,
+    "observations": 200975,
+    "mean_reprojection_px": 0.788548738,
+    "ate_rmse_m": 0.1339271644647581,
+    "ate_p95_m": 0.23736387771051076
+  },
+  "two_point_five_k_variants": [
+    {
+      "minimum_inlier_fraction": 0.5,
+      "ba_huber_delta_px": 6.0,
+      "tracks": 22493,
+      "observations": 545214,
+      "mean_reprojection_px": 0.938123873,
+      "ate_rmse_m": 0.07757230185140909,
+      "ate_p95_m": 0.12823865877645504,
+      "mapper_seconds": 87.105225,
+      "peak_rss_kib": 508760
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 6.0,
+      "tracks": 21723,
+      "observations": 538416,
+      "mean_reprojection_px": 0.939672691,
+      "ate_rmse_m": 0.07278799674832595,
+      "ate_p95_m": 0.1407561694996199,
+      "mapper_seconds": 88.350911,
+      "peak_rss_kib": 508824
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 3.0,
+      "tracks": 21724,
+      "observations": 544508,
+      "mean_reprojection_px": 0.919684407,
+      "ate_rmse_m": 0.07184754184375838,
+      "ate_p95_m": 0.13545439738681667,
+      "mapper_seconds": 86.435007,
+      "process_wall_seconds": 88.14,
+      "peak_rss_kib": 508956
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 3.0,
+      "completion_passes": 2,
+      "completion_reprojection_px": 1.0,
+      "tracks": 21725,
+      "observations": 547706,
+      "mean_reprojection_px": 0.91669043,
+      "ate_rmse_m": 0.07184754184375838,
+      "ate_p95_m": 0.13545439738681667,
+      "mapper_seconds": 91.888909,
+      "process_wall_seconds": 93.51,
+      "peak_rss_kib": 508672,
+      "completion_added_observations": 3165
+    },
+    {
+      "minimum_inlier_fraction": 0.75,
+      "ba_huber_delta_px": 1.0,
+      "registered_images": 2500,
+      "tracks": 21705,
+      "observations": 536815,
+      "mean_reprojection_px": 0.918726659,
+      "ate_rmse_m": 0.07352150639462898,
+      "ate_p95_m": 0.14237268483951498,
+      "ate_max_m": 0.22433352461712153,
+      "mapper_seconds": 88.43151,
+      "process_wall_seconds": 90.04,
+      "peak_rss_kib": 508628,
+      "verdict": "rejected: only 0.000958 px below the 3 px arm while both RMSE and p95 regress"
+    }
+  ],
+  "residual_diagnosis": {
+    "evidence": "m8-openloris-robust-triangulation-2500-residuals.json",
+    "finding": "the robust arm restores long-span support but raises residuals in every span class, so the tradeoff is not localized to one temporal-span tail",
+    "legacy_32_127_observations_mean_px": [
+      58296,
+      0.7490386129733779
+    ],
+    "robust_32_127_observations_mean_px": [
+      187414,
+      0.8969195158369746
+    ],
+    "legacy_128_plus_observations_mean_px": [
+      60187,
+      0.7932318665083653
+    ],
+    "robust_128_plus_observations_mean_px": [
+      225818,
+      0.9313771931558821
+    ]
+  },
+  "rejected_structure_refinement_probe": {
+    "implementation_retained": false,
+    "change": "fixed-pose landmark refinement Huber delta 1 px, with pose-moving BA held at 3 px",
+    "one_k": {
+      "registered_images": 1000,
+      "tracks": 6526,
+      "observations": 265119,
+      "mean_reprojection_px": 0.801885281,
+      "ate_rmse_m": 0.026806030654362677,
+      "ate_p95_m": 0.04152242374395737,
+      "mapper_seconds": 37.372451,
+      "peak_rss_kib": 307772
+    },
+    "two_point_five_k": {
+      "registered_images": 2500,
+      "tracks": 21679,
+      "observations": 501683,
+      "mean_reprojection_px": 0.948206209,
+      "mapper_seconds": 86.574919,
+      "peak_rss_kib": 508600
+    },
+    "verdict": "rejected and removed: 2.5k reprojection regressed by 0.028522 px and 42825 observations were lost; fixed-pose landmark-only robustification does not resolve pose/structure inconsistency"
+  },
+  "rejected_wide_angle_probe": {
+    "implementation_retained": false,
+    "rule": "strict all-inlier tracks keep the 1 degree gate; only robustly pruned tracks require at least 5 degrees",
+    "threshold_source": "GT-free drift-bin endpoint-angle medians: visloc 2.59 degrees versus COLMAP 6.26 degrees",
+    "one_k": {
+      "registered_images": 1000,
+      "tracks": 6330,
+      "observations": 269964,
+      "mean_reprojection_px": 0.747490401,
+      "ate_rmse_m": 0.02818244030369779,
+      "ate_p95_m": 0.04260414185787242,
+      "mapper_seconds": 73.700516,
+      "peak_rss_kib": 308056,
+      "angle_rejections": 9270
+    },
+    "verdict": "rejected at 1k and removed: both RMSE and p95 exceed COLMAP; triangulation angle alone cannot distinguish useful wide tracks from corridor aliases"
+  },
+  "decision": {
+    "one_k": "pass against the frozen COLMAP controls",
+    "two_point_five_k_trajectory": "large improvement",
+    "two_point_five_k_reprojection": "tradeoff remains; completion, Huber-1 BA, and landmark-only Huber-1 refinement are insufficient",
+    "ten_k": "rejected: combined with the promoted final filter pass, registration fell to 9994 and trajectory regressed to 0.915682 m RMSE despite 0.896499 px reprojection",
+    "promote_to_10k": false,
+    "next_action": "do not use robust triangulation on repeated-corridor 10k; isolate the final filter/refinement pass on the pre-existing 9998-image adaptive trajectory"
+  }
+}

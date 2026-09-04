@@ -1,0 +1,115 @@
+{
+  "schema": "visloc_m8_openloris_prefix_stable_seed_ab_v1",
+  "recorded_at": "2026-09-04",
+  "repository_head_before_experiment": "8c8c527",
+  "status": "rejected_and_source_removed",
+  "hypothesis": "Restricting metric seed selection to the first 500 local synchronized frames makes initialization prefix-stable across tiers and may prevent repeated-corridor support from moving the 10k seed into the drift interval.",
+  "ground_truth_used_for_mapping": false,
+  "implementation": {
+    "option": "--seed-candidate-frame-limit 500",
+    "behavior": "filter legacy and dynamic metric seed candidates to local frame_index < 500 before the existing support-descending sort",
+    "default_changed": false,
+    "complexity": "within the existing O(F log F) candidate ordering, with no additional persistent state",
+    "tests": {
+      "cargo_test_visloc_slam_lib": "620 passed, 0 failed, 7 ignored",
+      "clippy_visloc_slam_all_targets": "pass with -D warnings",
+      "clippy_generalized_rig_sfm_example": "pass with -D warnings"
+    }
+  },
+  "motivation": {
+    "colmap_1k_successful_initial_temporal_frames": [445, 477],
+    "colmap_10k_successful_initial_temporal_frames": [446, 462],
+    "visloc_frozen_1k_seed_frame": 26,
+    "visloc_10k_control_seed_frames": [2943, 4622],
+    "interpretation": "COLMAP's successful two-view initialization is stable across the 1k and 10k prefixes, whereas visloc's all-frame maximum metric-support seed moves with tier size. The tested limit is a prefix-stability proxy, not a reproduction of COLMAP's two-view initializer."
+  },
+  "frozen_1k": {
+    "inputs": {
+      "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+      "rig_manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+      "features_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/features",
+      "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps",
+      "snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+      "verified_pairs": 6869,
+      "verified_matches": 661428
+    },
+    "command": "target/release/examples/generalized_rig_sfm --manifest <rig-manifest> --features-dir <features> --snapshot <snapshot> --out-colmap <output> --seed-candidate-frame-limit 500",
+    "result": {
+      "registered_frames": 500,
+      "registered_images": 1000,
+      "seed_frame": 26,
+      "tracks": 2658,
+      "observations": 27716,
+      "mean_reprojection_px": 0.671637382,
+      "mapper_seconds": 3.635715,
+      "process_wall_seconds": 4.13,
+      "peak_rss_kib": 81928,
+      "cameras_txt_sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt_sha256": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+      "points3D_txt_sha256": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af",
+      "byte_identical_to_frozen_champion": true
+    },
+    "gate": "pass"
+  },
+  "ten_k": {
+    "control": {
+      "registered_frames": 4999,
+      "registered_images": 9998,
+      "models": 2,
+      "largest_model_frames": 4494,
+      "seed_frames": [2943, 4622],
+      "tracks": 360968,
+      "observations": 1528640,
+      "mean_reprojection_px": 0.681997968,
+      "mapper_seconds": 339.423269,
+      "peak_rss_kib": 1397916,
+      "ate_rmse_m": 0.3875394944236389,
+      "ate_p95_m": 0.768357778430078
+    },
+    "candidate": {
+      "only_mapping_change": "--seed-candidate-frame-limit 500",
+      "registered_frames": 4998,
+      "registered_images": 9996,
+      "models": 2,
+      "largest_model_frames": 4493,
+      "seed_frames": [38, 4622],
+      "tracks": 355216,
+      "observations": 1490972,
+      "mean_reprojection_px": 0.685862,
+      "mapper_seconds": 355.833619,
+      "process_wall_seconds": 360.69,
+      "peak_rss_kib": 1393748,
+      "ate_rmse_m": 0.945168127107828,
+      "ate_p95_m": 1.4759959566009195,
+      "ate_max_m": 6.781908347724377,
+      "dominant_component": {
+        "registered_frames": 4493,
+        "registered_images": 8986,
+        "ate_rmse_m": 0.9992346564000718,
+        "ate_p95_m": 1.4910601994057087,
+        "images_txt_sha256": "5c33f51502b44207d233f0200eab2f8624dfa0cd73620a263245fc506837b0b3",
+        "points3D_txt_sha256": "6368bf58f9fea46ec978de90f86283669dddd45a8eeac018cd20b63be0ae14fc"
+      },
+      "second_component": {
+        "registered_frames": 505,
+        "registered_images": 1010,
+        "ate_rmse_m": 0.17335354370745124,
+        "ate_p95_m": 0.2235545830261059,
+        "images_txt_sha256": "8ca0c858705d4cd6ecafae95f50050ab66e95ca14d037921929e2d642a7813ee",
+        "points3D_txt_sha256": "dc09fa137394ae6ccc12282cc527803aef62a68dc4b656cd7a308e5b2045cf6a"
+      },
+      "score_json_sha256": "efe5ce79e133737c96799ac13e33e3fbdec150f5ae2ec6b18fb9adaa206ff302",
+      "memory_gate_2_gib": "pass",
+      "registration_gate": "fail",
+      "trajectory_gate": "fail",
+      "reprojection_nonregression_vs_visloc_control": "fail"
+    },
+    "colmap_gate": {
+      "registered_images": 9998,
+      "ate_rmse_m": 0.3843065335437528,
+      "ate_p95_m": 0.6386693943260212,
+      "mean_reprojection_px": 0.9030031518617252
+    }
+  },
+  "decision": "Reject the prefix-limit proxy and remove its config, CLI, and tests. Moving the seed from frame 2943 to frame 38 loses two registrations and more than doubles RMSE; all-frame support selection is not the diagnosed correction boundary. This result does not test or reject COLMAP-style two-view rig initialization with explicit temporal parallax."
+}

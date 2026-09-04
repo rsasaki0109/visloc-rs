@@ -1,0 +1,535 @@
+{
+  "schema": "visloc_m8_openloris_10k_first_divergence_v1",
+  "recorded_at": "2026-09-03T19:00:00+09:00",
+  "status": "registration_and_reprojection_gates_pass_trajectory_gate_open",
+  "dataset": "OpenLORIS corridor1-1 tier-10000",
+  "ground_truth_used_only_after_mapping": true,
+  "colmap_frontend_boundary": {
+    "keypoints": 3476053,
+    "verified_pairs": 69621,
+    "verified_correspondences": 9352301,
+    "export_wall_seconds": 4.32,
+    "export_peak_rss_kib": 27872,
+    "pairs_bin_sha256": "1d83e70f9b112778d32ae561c04b1c1d4894716522485818946af68b628e6eee",
+    "snapshot_sha256": "0bf6e55988045d1d231aaf8698c07f46ec65844bf002a6c3e69a4846d74a8cfd",
+    "mapper_cap_256": {
+      "correspondences": 9033534,
+      "registered_frames": 1943,
+      "registered_images": 3886,
+      "models": 1,
+      "mapper_seconds": 44.243324,
+      "process_wall_seconds": 46.15,
+      "peak_rss_kib": 1315360,
+      "verdict": "raw COLMAP verified correspondences trigger track conflicts; pair-count deficit is not the sole cause"
+    }
+  },
+  "colmap_track_membership_boundary": {
+    "source_tracks": 113710,
+    "repaired_conflicting_tracks": 15918,
+    "removed_duplicate_image_observations": 56269,
+    "chain_pairs": 98248,
+    "chain_correspondences": 1777836,
+    "pairs_bin_sha256": "ca27b6cadcaec8a67905c47e799763de6bf8ff55cab8c53b81a5f9c7e7240ddf",
+    "snapshot_sha256": "320fb894ccc16e5529d4c13f01c6c78431d9da1a3a2d0d5fc2fc3b7004090462",
+    "registered_frames": 4493,
+    "registered_images": 8986,
+    "models": 1,
+    "tracks": 96568,
+    "observations": 1328853,
+    "mean_reprojection_error_px": 1.019137632,
+    "mapper_seconds": 195.35778,
+    "process_wall_seconds": 196.13,
+    "peak_rss_kib": 978980,
+    "ate_rmse_m": 7.629711267413342,
+    "ate_p95_m": 13.73030717819633,
+    "images_sha256": "5aa09222b95d92bb36e4f032d23c84de6314c4f481697ff74bfc68b979c9d58e",
+    "verdict": "track membership recovers the COLMAP-sized largest component but cannot transfer COLMAP initialization, retriangulation, or BA quality"
+  },
+  "visloc_rotation_5deg_ba_ab": {
+    "pnp_only": {
+      "registered_images": 6486,
+      "models": 2,
+      "mean_reprojection_error_px": 0.930805969,
+      "mapper_seconds": 32.874886,
+      "peak_rss_kib": 1195144,
+      "ate_rmse_m": 1.3154413727827416,
+      "ate_p95_m": 1.7912010663859623,
+      "verdict": "local BA is required to sustain the registration frontier"
+    },
+    "local_ba_only": {
+      "registered_images": 9936,
+      "models": 2,
+      "mean_reprojection_error_px": 0.822793777,
+      "mapper_seconds": 66.253241,
+      "peak_rss_kib": 1275568,
+      "ate_rmse_m": 0.648723408109841,
+      "ate_p95_m": 1.169378321128923,
+      "verdict": "most trajectory drift is already present before final BA"
+    },
+    "local_and_final_ba": {
+      "registered_images": 9936,
+      "models": 2,
+      "mean_reprojection_error_px": 0.798247379,
+      "mapper_seconds": 97.138768,
+      "peak_rss_kib": 1124644,
+      "ate_rmse_m": 0.63996688437647,
+      "ate_p95_m": 1.174448983518099,
+      "verdict": "final BA makes only a small RMSE improvement"
+    },
+    "local_ba_two_fixed_ends": {
+      "status": "rejected",
+      "registered_images": 9936,
+      "models": 2,
+      "mean_reprojection_error_px": 0.792939018,
+      "mapper_seconds": 117.206912,
+      "peak_rss_kib": 1277820,
+      "ate_rmse_m": 1.9270425301433174,
+      "ate_p95_m": 3.023871326245375,
+      "verdict": "fixing the newest PnP pose bakes its error into later windows"
+    }
+  },
+  "pose_increment_diagnostic": {
+    "rotation_5deg_common_adjacent_frames": 4964,
+    "relative_rotation_error_median_deg": 0.08506034,
+    "relative_rotation_error_p95_deg": 0.29952388,
+    "translation_step_ratio_median_first_500_frames": 1.01571337,
+    "translation_step_ratio_median_frames_3000_3499": 1.21699241,
+    "metric_anchored_tracks_before_mapping": 38160,
+    "all_tracks_before_mapping": 139154,
+    "conclusion": "rotation increments are already accurate; translation scale changes accumulate during incremental PnP/local BA despite available metric stereo tracks"
+  },
+  "rejected_small_tier_scale_prior": {
+    "tier": "1000 images",
+    "prior": "isotropic translation trust region around each pre-BA generalized-PnP centre",
+    "sigma_m": 0.05,
+    "registered_images": 1000,
+    "mean_reprojection_error_px": 0.716984417,
+    "mapper_seconds": 24.720761,
+    "peak_rss_kib": 141312,
+    "ate_rmse_m": 0.031071096138637757,
+    "ate_p95_m": 0.04707522678443039,
+    "control_ate_rmse_m": 0.026703233595482503,
+    "control_ate_p95_m": 0.04134610748761521,
+    "verdict": "rejected before 10k because it regresses the frozen 1k visloc and COLMAP quality gates"
+  },
+  "track_builder_ab": {
+    "conflict_preserving_1k": {
+      "status": "rejected_before_10k",
+      "registered_images": 1000,
+      "tracks": 6485,
+      "observations": 268464,
+      "mean_reprojection_error_px": 0.820486551,
+      "ate_rmse_m": 0.029774665469204008,
+      "ate_p95_m": 0.04529667857522527,
+      "reason": "doubles retained observations but fails the frozen 1k trajectory gate"
+    },
+    "metric_temporal_cycle_1k": {
+      "status": "promoted_to_10k",
+      "registered_images": 1000,
+      "tracks": 6461,
+      "observations": 265742,
+      "mean_reprojection_error_px": 0.780045996,
+      "mapper_seconds": 35.290972,
+      "peak_rss_kib": 197188,
+      "ate_rmse_m": 0.02664962323684387,
+      "ate_p95_m": 0.041042562319801724
+    },
+    "metric_temporal_cycle_10k": {
+      "status": "rejected",
+      "registered_images": 9936,
+      "models": 2,
+      "tracks": 103301,
+      "observations": 1565365,
+      "mean_reprojection_error_px": 0.93569314,
+      "mapper_seconds": 303.678995,
+      "process_wall_seconds": 306.91,
+      "peak_rss_kib": 1657468,
+      "ate_rmse_m": 1.5582000027665381,
+      "ate_p95_m": 3.17808206197693,
+      "reason": "cycle support at 1k admits repeated-environment false cycles at 10k"
+    }
+  },
+  "frontend_minimum_support_ab": {
+    "candidate_pairs": 80000,
+    "candidate_gap_region": {
+      "incident_pairs": 542,
+      "left_boundary_pairs": 126,
+      "inside_pairs": 290,
+      "right_boundary_pairs": 126
+    },
+    "min_matches_30": {
+      "verified_pairs": 64862,
+      "accepted_correspondences": 7698149,
+      "gap_incident_pairs": 51,
+      "gap_right_boundary_pairs": 3,
+      "worker_seconds": 564.98124658101,
+      "worker_peak_rss_kib": 451532
+    },
+    "min_matches_8": {
+      "verified_pairs": 70567,
+      "accepted_correspondences": 7818765,
+      "gap_incident_pairs": 242,
+      "gap_right_boundary_pairs": 33,
+      "worker_seconds": 572.974234519992,
+      "worker_peak_rss_kib": 451544,
+      "snapshot_sha256": "01137f6ca189c0d54eb59940a7eadccd9cde775b4e472db303b2934de4ff408a"
+    },
+    "all_pairs_in_structure": {
+      "status": "rejected",
+      "registered_images": 8986,
+      "mean_reprojection_error_px": 0.741699661,
+      "mapper_seconds": 121.34623,
+      "peak_rss_kib": 1407312,
+      "ate_rmse_m": 0.8892237930909427,
+      "ate_p95_m": 1.0140051298484354,
+      "reason": "low-support edges corrupt legacy union-find track topology"
+    },
+    "strong_structure_deferred_weak_direct_bridge": {
+      "status": "registration_gate_pass_quality_gate_fail",
+      "structure_min_pair_matches": 30,
+      "structure_pairs": 59985,
+      "structure_correspondences": 7249960,
+      "deferred_pairs": 10582,
+      "deferred_correspondences": 421677,
+      "weak_support_pairs": 5705,
+      "weak_support_correspondences": 120616,
+      "direct_stereo_max_frame_gap": 2,
+      "direct_stereo_min_pnp_sensors": 1,
+      "registered_frames": 4999,
+      "registered_images": 9998,
+      "models": 2,
+      "largest_model_frames": 4494,
+      "tracks": 81374,
+      "observations": 955111,
+      "mean_reprojection_error_px": 0.730311392,
+      "mapper_seconds": 136.540858,
+      "process_wall_seconds": 139.96,
+      "peak_rss_kib": 1480916,
+      "ate_rmse_m": 0.6372900130652346,
+      "ate_p95_m": 1.1701771760690913,
+      "ate_max_m": 1.7579266859123097,
+      "component_000_images_sha256": "4dc68dce9e78c3d35cd1c70ac76cb29231380656d1ac146797c996797c67979b",
+      "component_001_images_sha256": "ecb9fb56b4df30c8786b0a0c53faeafb41a590a6e9de38f822bec7501f4384d3"
+    }
+  },
+  "rejected_metric_only_ba_1k": {
+    "status": "rejected_before_10k",
+    "registered_images": 1000,
+    "mapper_seconds": 12.768975,
+    "peak_rss_kib": 169952,
+    "ate_rmse_m": 0.1791375408903268,
+    "ate_p95_m": 0.4440808502346633,
+    "control_ate_rmse_m": 0.0267226,
+    "reason": "removing non-metric BA rows destroys small-tier trajectory accuracy despite reducing runtime"
+  },
+  "rejected_deferred_observation_admission": {
+    "permissive_4px": {
+      "status": "rejected",
+      "observations_attached": 8951,
+      "registered_images": 9998,
+      "ate_rmse_m": 1.4684415258530514,
+      "ate_p95_m": 1.1415934698661079,
+      "ate_max_m": 64.3711515594726,
+      "reason": "repeated-corridor false observations and exposing recovered tracks to deferred PnP produced a catastrophic pose outlier"
+    },
+    "metric_long_1px_one_per_track": {
+      "status": "rejected_no_material_gain",
+      "observations_attached": 84,
+      "registered_images": 9998,
+      "mean_reprojection_error_px": 0.730363438,
+      "mapper_seconds": 138.065885,
+      "peak_rss_kib": 1479440,
+      "ate_rmse_m": 0.6372908733123358,
+      "ate_p95_m": 1.1701782226808883,
+      "control_ate_rmse_m": 0.6372900130652346,
+      "control_ate_p95_m": 1.1701771760690913,
+      "reason": "safe one-sided observation completion is too sparse to change trajectory"
+    }
+  },
+  "bounded_whole_graph_track_completion": {
+    "status": "promoted_as_reprojection_only_non_regression_not_a_trajectory_fix",
+    "contract": "after all registrations, scan the sparse verified graph for at most two passes; attach only an unowned endpoint below 1 px to an existing positioned track; never merge positioned tracks or mutate the PnP index",
+    "complexity": "O(keypoints + observations + max_passes * verified matches), two bounded owner slots per extracted keypoint, no image-pair Cartesian product",
+    "one_k": {
+      "registered_images": 1000,
+      "observations_before": 172752,
+      "observations_after": 172803,
+      "attached_observations": 51,
+      "mean_reprojection_error_px_before": 0.675028911,
+      "mean_reprojection_error_px_after": 0.675017188,
+      "mapper_seconds": 19.756467,
+      "peak_rss_kib": 172880,
+      "ate_rmse_m": 0.026722566257661517,
+      "ate_p95_m": 0.04125735392460113,
+      "dense_owner_index_output_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "6be6cbcd9d5df381609e80e917739ef8f8b0a028e0400fda56d6581b172967bb",
+        "points3D_txt": "157f37f42825c7fc08d8399017db0526555b8387330b3c01adb3ad2439dee64c"
+      },
+      "dense_owner_index_matches_previous_output": true
+    },
+    "ten_k": {
+      "registered_images": 9998,
+      "models": 2,
+      "attached_observations": 10348,
+      "observations_before": 955111,
+      "observations_after": 965983,
+      "mean_reprojection_error_px_before": 0.730311392,
+      "mean_reprojection_error_px_after": 0.7277069,
+      "mapper_seconds": 139.150744,
+      "process_wall_seconds": 142.41,
+      "peak_rss_kib": 1481008,
+      "ate_rmse_m": 0.6372900130652346,
+      "ate_p95_m": 1.1701771760690913,
+      "trajectory_effect": "none because completion deliberately keeps registered poses fixed",
+      "dense_owner_index_output_sha256": {
+        "component_000_images_txt": "0732722930e53c12033456b944c3ace44ca6a379f5a8670ddbe879d98b7f7aca",
+        "component_000_points3D_txt": "e56912b3fa8f47444318cbebea1444b16c2acba939275c52b371d5db25d219c1",
+        "component_001_images_txt": "8504a4a3c0779eee7a8361749f98b5229c8d62d9adcc9b568e2a55bc96e1957d",
+        "component_001_points3D_txt": "c8343b12b4be4a868c945beaf17847c87d04de7d765c9f33abe847a5b39605e7"
+      },
+      "dense_owner_index_matches_previous_output": true,
+      "memory_gate_2_gib": "pass"
+    },
+    "rejected_ba_order_arms_1k": {
+      "strict_before_first_ba": "1 px and 2 px admitted zero observations",
+      "four_px_before_first_ba": {
+        "attached_observations": 2879,
+        "mean_reprojection_error_px": 0.696322276,
+        "ate_rmse_m": 0.026763224186607645,
+        "ate_p95_m": 0.041321277519558115
+      },
+      "second_ba_after_completion": {
+        "mapper_seconds": 39.095122,
+        "mean_reprojection_error_px": 0.679145243,
+        "ate_rmse_m": 0.0271019293122929,
+        "ate_p95_m": 0.04186975469789904
+      }
+    }
+  },
+  "rejected_metric_track_ba_weighting": {
+    "status": "removed_after_10k",
+    "all_metric_tracks_weight_2": {
+      "one_k_ate_rmse_m": 0.025389220373825943,
+      "dense_legacy_10k_ate_rmse_m": 0.6754578788236554,
+      "adaptive_pair_confidence_10k_ate_rmse_m": 0.8655968992689893,
+      "reason": "short-tier improvement did not generalize; repeated-scene false stereo tracks were amplified"
+    },
+    "two_or_more_stereo_frames_weight_2": {
+      "one_k_ate_rmse_m": 0.026418981776873376,
+      "ten_k_ate_rmse_m": 0.8394893170225198,
+      "ten_k_ate_p95_m": 1.3941730597926203,
+      "reason": "support count alone cannot distinguish a long repeated-environment false track"
+    },
+    "two_stereo_frames_inside_each_ba_window_weight_2": {
+      "one_k_mean_reprojection_error_px": 0.672358655,
+      "one_k_ate_rmse_m": 0.025635914033427458,
+      "one_k_ate_p95_m": 0.039816240286216366,
+      "ten_k_registered_images": 9998,
+      "ten_k_mapper_seconds": 135.206551,
+      "ten_k_peak_rss_kib": 1480960,
+      "ten_k_mean_reprojection_error_px": 0.733432628,
+      "ten_k_ate_rmse_m": 0.8636921419344635,
+      "ten_k_ate_p95_m": 1.4673876820364404,
+      "reason": "window-local support also improves 1k but amplifies locally coherent repeated-scene false tracks at 10k"
+    }
+  },
+  "colmap_ba_on_visloc_small_component": {
+    "registered_images": 1010,
+    "input_ate_rmse_m": 0.19023277894198543,
+    "output_ate_rmse_m": 0.1403728817099688,
+    "output_ate_p95_m": 0.3039824430339376,
+    "colmap_native_component_ate_rmse_m": 0.05570902120435261,
+    "iterations": 101,
+    "wall_seconds": 40.62,
+    "conclusion": "global BA helps the visloc tracks but cannot close the gap; track completion/retriangulation and refinement are both required"
+  },
+  "stereo_track_self_consistency_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-stereo-track-consistency.json",
+    "status": "rejected_as_a_direct_ba_weight",
+    "reason": "the worse visloc large-component trajectory has a lower median cross-frame stereo-point deviation than the COLMAP control (0.0862 m versus 0.1153 m), while the COLMAP small component has zero tracks eligible for a two-stereo-frame screen"
+  },
+  "metric_interframe_motion_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-metric-motion-observability.json",
+    "status": "rejected_as_a_scale_constraint",
+    "reason": "short gaps are depth-noise dominated, supported pairs collapse to six per 500-frame bin in the middle corridor, and the frame-3000 signal requests a 1.056 scale increase where post-mapping GT shows the mapper is already 1.217 times too large"
+  },
+  "adaptive_fixed_track_colmap_ba": {
+    "status": "rejected_trajectory_regression",
+    "input_registered_images": 9998,
+    "input_observations": 619514,
+    "input_mean_reprojection_px": 1.007267671,
+    "input_ate_rmse_m": 0.415503911421413,
+    "input_ate_p95_m": 0.8321569790268923,
+    "component_000": {
+      "residuals": 1142102,
+      "iterations": 101,
+      "wall_seconds": 45.95,
+      "initial_ceres_cost_px": 0.667675,
+      "final_ceres_cost_px": 0.608598,
+      "ate_rmse_m": 0.44765465162300055,
+      "ate_p95_m": 0.888898719238466
+    },
+    "component_001": {
+      "residuals": 96926,
+      "iterations": 101,
+      "wall_seconds": 37.12,
+      "initial_ceres_cost_px": 0.56874,
+      "final_ceres_cost_px": 0.488196,
+      "ate_rmse_m": 0.13960273995116215,
+      "ate_p95_m": 0.17824165170234907
+    },
+    "output_usable_observations": 619368,
+    "output_nonprojectable_observations": 146,
+    "output_usable_weighted_mean_reprojection_px": 0.897244158,
+    "output_ate_rmse_m": 0.4251594988500085,
+    "output_ate_p95_m": 0.8373422569876906,
+    "verdict": "COLMAP-grade global BA closes the reprojection gate on fixed adaptive tracks but worsens trajectory; solver replacement alone cannot close M8"
+  },
+  "adaptive_completion_and_colmap_ba_followup": {
+    "status": "rejected_as_a_trajectory_fix",
+    "completion_only": {
+      "registered_images": 9998,
+      "observations_before": 619514,
+      "observations_after": 639135,
+      "attached_observations": 19660,
+      "mean_reprojection_px_before": 1.007267671,
+      "mean_reprojection_px_after": 0.990457158,
+      "mapper_seconds": 174.241015,
+      "process_wall_seconds": 181.2,
+      "peak_rss_kib": 976716,
+      "ate_rmse_m": 0.415503911421413,
+      "ate_p95_m": 0.8321569790268923,
+      "trajectory_effect": "none because completion deliberately keeps registered poses fixed"
+    },
+    "completion_then_colmap_ba": {
+      "output_usable_observations": 638996,
+      "output_nonprojectable_observations": 139,
+      "output_usable_weighted_mean_reprojection_px": 0.884569454,
+      "output_ate_rmse_m": 0.42776076,
+      "output_ate_p95_m": 0.83813064,
+      "output_ate_max_m": 4.9908,
+      "verdict": "reprojection passes but trajectory regresses"
+    },
+    "point_filtering_then_colmap_ba": {
+      "filter_max_reprojection_px": 4.0,
+      "filter_min_triangulation_angle_deg": 1.5,
+      "filter_min_track_length": 2,
+      "output_usable_observations": 576047,
+      "output_nonprojectable_observations": 7,
+      "output_usable_weighted_mean_reprojection_px": 0.871223147,
+      "output_ate_rmse_m": 0.42983415,
+      "output_ate_p95_m": 0.8526323,
+      "output_ate_max_m": 5.624,
+      "verdict": "COLMAP-style filtering improves reprojection further but worsens trajectory further"
+    },
+    "conclusion": "bounded completion is retained for reprojection and memory behavior, but neither fixed-track BA nor COLMAP point filtering repairs the trajectory topology"
+  },
+  "temporal_support_residual_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-temporal-support-residuals.json",
+    "ground_truth_used": false,
+    "bin_frames": 500,
+    "largest_component": {
+      "visloc_points": 40203,
+      "colmap_points": 103611,
+      "visloc_reprojection_observations": 589009,
+      "colmap_reprojection_observations": 1800787
+    },
+    "known_scale_drift_bin_frames_3000_3499": {
+      "visloc_anchored_tracks": 3052,
+      "colmap_anchored_tracks": 10236,
+      "visloc_track_observations_median": 4.0,
+      "colmap_track_observations_median": 6.0,
+      "visloc_track_span_frames_median": 9.0,
+      "colmap_track_span_frames_median": 17.0,
+      "visloc_endpoint_angle_median_deg": 2.592052599370607,
+      "colmap_endpoint_angle_median_deg": 6.26336669729853,
+      "visloc_mean_reprojection_px": 1.032217237196703,
+      "colmap_mean_reprojection_px": 0.8762347608197448
+    },
+    "interpretation": "the first actionable GT-free divergence is missing long, wide-angle track support rather than rotation accuracy or nonlinear solver quality; the deficit is already pronounced in the independently identified translation-scale drift interval"
+  },
+  "post_verification_support_loss_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-track-support-loss.json",
+    "drift_bin_verified_pairs": 6315,
+    "drift_bin_accepted_correspondences": 280717,
+    "drift_bin_long_accepted_correspondences": 46546,
+    "conclusion": "the drift interval is not starved at retrieval or geometric verification; the long/wide-angle deficit appears after verified input publication"
+  },
+  "robust_triangulation_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-robust-triangulation-ab.json",
+    "status": "trajectory_gain_with_reprojection_tradeoff",
+    "one_k_colmap_gate": "pass",
+    "two_point_five_k_rmse_before_m": 0.1339271644647581,
+    "two_point_five_k_rmse_after_m": 0.07184754184375838,
+    "two_point_five_k_reprojection_before_px": 0.788548738,
+    "two_point_five_k_reprojection_after_px": 0.919684407
+  },
+  "final_filter_refinement_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-final-filter-refinement-ab.json",
+    "status": "registration_reprojection_resource_gates_pass_trajectory_gate_open",
+    "passes": 2,
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_frames": 4494,
+    "mean_reprojection_error_px": 0.871172595,
+    "mapper_seconds": 226.567253,
+    "peak_rss_kib": 977380,
+    "ate_rmse_m": 0.3914657699869576,
+    "ate_p95_m": 0.772050521743752,
+    "reason_three_passes_not_run_at_10k": "the three-pass arm fails the frozen 1k COLMAP p95 gate"
+  },
+  "ann80k_same_base_union_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-ann80k-union-10k-ab.json",
+    "status": "rejected_as_post_registration_completion_only",
+    "new_pairs": 10264,
+    "new_correspondences": 606602,
+    "registered_images": 9998,
+    "mean_reprojection_error_px": 0.865364971,
+    "mapper_seconds": 224.831165,
+    "peak_rss_kib": 1061400,
+    "ate_rmse_m": 0.392827845328473,
+    "ate_p95_m": 0.7860381249813265,
+    "diagnosis": "appended ANN pairs lie after the 59961-pair structure prefix, so initial triangulation attempts remain exactly 493620 and only post-registration support changes"
+  },
+  "ann80k_frozen_track_extension_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-ann80k-union-10k-ab.json",
+    "status": "rejected_diagnostic_only",
+    "admitted_pairs": 3919,
+    "admitted_correspondences": 9109,
+    "registered_images": 9994,
+    "mean_reprojection_error_px": 0.871025011,
+    "mapper_seconds": 225.505856,
+    "peak_rss_kib": 985276,
+    "ate_rmse_m": 1.2861179950656476,
+    "ate_p95_m": 1.6645793025934488,
+    "diagnosis": "one-sided track membership without an independent geometric consistency signal still admits repeated-corridor aliases"
+  },
+  "disjoint_dense_deferred_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-disjoint-dense-deferred-ab.json",
+    "status": "registration_reprojection_resource_gates_pass_trajectory_gate_open",
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_frames": 4494,
+    "mean_reprojection_error_px": 0.681997968,
+    "mapper_seconds": 333.369247,
+    "peak_rss_kib": 1397980,
+    "ate_rmse_m": 0.3875394944236389,
+    "ate_p95_m": 0.768357778430078,
+    "diagnosis": "post-registration dense metric tracks close most of the RMSE gap but neither longer candidates nor a 120-frame final BA window correct segment-5/6 p95 drift"
+  },
+  "segment_gauge_and_sequential_tracklet_followup": {
+    "evidence": "benchmarks/electro/m8-openloris-disjoint-dense-deferred-ab.json",
+    "status": "gauge_diagnosed_ba_and_unvalidated_incremental_paths_rejected",
+    "segment_6_component_gauge_rmse_m": 0.869764,
+    "segment_6_independent_sim3_rmse_m": 0.077587,
+    "sequential_overlay_pairs": 14929,
+    "sequential_overlay_correspondences": 952485,
+    "post_registration_metric_tracks": 27976,
+    "post_registration_peak_rss_kib": 1342928,
+    "post_registration_ate_rmse_m": 0.3899865859693134,
+    "unvalidated_after_seed_large_component_rmse_m": 0.6961997978761649,
+    "diagnosis": "local shape is accurate enough but adjacent SIFT cycles remain systematically aliased in the dominant repeated corridor; neither post-hoc scale-moving BA nor direct incremental admission is safe"
+  },
+  "next_action": "implement a bounded forward-backward photometric tracking gate on original adjacent-frame pixels, independent of SIFT descriptor identity and reconstructed poses; intersect its accepted endpoints with exact stereo-temporal quadrilaterals before any incremental publication"
+}

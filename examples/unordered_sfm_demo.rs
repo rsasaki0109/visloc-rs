@@ -26,8 +26,18 @@
 //!      `--temporal-pyramid-max-offset` (default 32), then adds pairs with
 //!      the same timestamp across cameras, and finally fills a bounded
 //!      `--candidate-budget` with highest-scoring VLAD retrieval pairs.
+//!      Levels through offset 32 stay dense; longer levels are sampled with
+//!      stride `offset / 16` after the cross-camera edges. This reaches wide
+//!      gaps without making every long level linear in the sequence length.
 //!      This is deterministic and GT-free; it is useful when numeric
 //!      timestamps are irregular or have large nanosecond gaps.
+//!      `--rig-frame-manifest` accepts the `generalized-rig-manifest-v1`
+//!      used by `generalized_rig_sfm`; its explicit `F frame image sensor`
+//!      rows override filename-derived grouping for datasets whose synchronized
+//!      cameras use different aliases or timestamps.
+//!      `--retrieval-min-frame-gap` applies a rig-frame temporal exclusion
+//!      only to appearance fill, reserving it for loop-closure baselines while
+//!      leaving the temporal pyramid and same-frame rig edges unchanged.
 //!      File-backed exports can add `--stream-candidate-features` to release
 //!      local descriptors per image. `--retrieval-backend lsh` enables the
 //!      deterministic approximate index; `--ann-bits 0` scales its signature
@@ -445,9 +455,8 @@
 #![allow(clippy::type_complexity)]
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
-#[cfg(feature = "image-io")]
 use std::io::Read;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -455,6 +464,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use visloc_rs::slam::{
     run_fixed_rotation_support_bundle_adjustment, run_fixed_support_bundle_adjustment,
 };
@@ -2095,6 +2105,11 @@ struct Args {
     /// snapshot per plan shard.  This is default-off and intentionally
     /// restricted to the frozen NN/full/plain incremental match path.
     persistent_match_worker_plan: Option<PathBuf>,
+    /// Keep only calibrated keypoints resident in a persistent match worker
+    /// and hydrate descriptors for the current candidate shard on demand.
+    /// This bounds descriptor memory by shard incidence instead of image
+    /// count, at the cost of re-reading images shared by multiple shards.
+    stream_match_features: bool,
     /// Diagnostic-only coordinate replacement after a validated snapshot
     /// import.  The override directory must have the same image names, row
     /// counts, and descriptor bit patterns as the snapshot's base features;
@@ -2497,6 +2512,18 @@ struct Args {
     /// `vlad-union` local schedule.  This opt-in keeps temporal edges within
     /// each camera and adds only same-timestamp cross-camera rig edges.
     rig_local_grouping: bool,
+    /// Explicit generalized-rig frame/image/sensor assignments for temporal
+    /// candidate generation. This avoids inferring synchronization from image
+    /// aliases when different sensors use different names or timestamps.
+    rig_frame_manifest: Option<PathBuf>,
+    /// Optional labels from a completed first-pass reconstruction. When
+    /// present, appearance fill prioritizes pairs whose registered endpoints
+    /// belong to different components. Ground truth is never consulted.
+    retrieval_component_manifest: Option<PathBuf>,
+    /// Reject appearance-retrieval fill edges whose rig frame ids differ by
+    /// less than this value. Temporal-pyramid and same-frame rig edges are
+    /// unaffected; this keeps a bounded retrieval budget for loop closure.
+    retrieval_min_frame_gap: Option<u64>,
     /// Maximum positional offset for the rig-aware temporal-pyramid
     /// candidate source.  Powers of two from 1 through this value are used;
     /// the default is 32.  This is deliberately a positional offset rather
@@ -3319,8 +3346,80 @@ fn rig_local_pairs(image_names: &[String], window: u64) -> Result<Vec<(usize, us
 /// integer frame counter.  Same-timestamp cross-camera pairs are returned
 /// separately so the caller can give them a stable priority after temporal
 /// edges and before VLAD fill edges.
-fn rig_temporal_pyramid_pairs(
+fn generalized_rig_frame_groups(
+    path: &Path,
     image_names: &[String],
+) -> Result<Vec<(String, u64)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --rig-frame-manifest {path:?}: {error}"))?;
+    let image_indices = image_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut groups = vec![None; image_names.len()];
+    let mut magic = false;
+    for (line_number, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line == "# generalized-rig-manifest-v1" {
+            magic = true;
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') || line.starts_with("S ") {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.first() != Some(&"F") || fields.len() != 4 {
+            return Err(format!(
+                "invalid --rig-frame-manifest row {} (expected F frame_id image_name sensor_index)",
+                line_number + 1
+            ));
+        }
+        let frame = fields[1].parse::<u64>().map_err(|error| {
+            format!(
+                "invalid frame id {:?} at --rig-frame-manifest row {}: {error}",
+                fields[1],
+                line_number + 1
+            )
+        })?;
+        let sensor = fields[3].parse::<u64>().map_err(|error| {
+            format!(
+                "invalid sensor index {:?} at --rig-frame-manifest row {}: {error}",
+                fields[3],
+                line_number + 1
+            )
+        })?;
+        let Some(&image) = image_indices.get(fields[2]) else {
+            return Err(format!(
+                "--rig-frame-manifest row {} names unknown image {:?}",
+                line_number + 1,
+                fields[2]
+            ));
+        };
+        if groups[image]
+            .replace((format!("sensor-{sensor}"), frame))
+            .is_some()
+        {
+            return Err(format!(
+                "--rig-frame-manifest repeats image {:?}",
+                fields[2]
+            ));
+        }
+    }
+    if !magic {
+        return Err("--rig-frame-manifest is not generalized-rig-manifest-v1".into());
+    }
+    if let Some((index, _)) = groups.iter().enumerate().find(|(_, group)| group.is_none()) {
+        return Err(format!(
+            "--rig-frame-manifest is missing loaded image {:?}",
+            image_names[index]
+        ));
+    }
+    Ok(groups.into_iter().map(Option::unwrap).collect())
+}
+
+fn rig_temporal_pyramid_pairs_from_groups(
+    groups: &[(String, u64)],
     max_offset: u64,
 ) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
     if max_offset == 0 {
@@ -3329,8 +3428,8 @@ fn rig_temporal_pyramid_pairs(
     let mut by_camera = BTreeMap::<String, Vec<(u64, usize)>>::new();
     let mut by_timestamp = BTreeMap::<u64, Vec<(String, usize)>>::new();
     let mut seen = HashSet::<(String, u64)>::new();
-    for (index, name) in image_names.iter().enumerate() {
-        let (camera, timestamp) = rig_camera_timestamp(name)?;
+    for (index, (camera, timestamp)) in groups.iter().enumerate() {
+        let (camera, timestamp) = (camera.clone(), *timestamp);
         if !seen.insert((camera.clone(), timestamp)) {
             return Err(format!(
                 "temporal-pyramid grouping repeats timestamp {timestamp} for camera prefix {camera:?}"
@@ -3359,17 +3458,23 @@ fn rig_temporal_pyramid_pairs(
         offset *= 2;
     }
     let mut temporal = Vec::new();
+    let mut long_temporal = Vec::new();
     let mut temporal_seen = HashSet::<(usize, usize)>::new();
     for &offset in &offsets {
+        let stride = if offset <= 32 { 1 } else { offset / 16 };
         for entries in by_camera.values() {
-            for left in 0..entries.len().saturating_sub(offset) {
+            for left in (0..entries.len().saturating_sub(offset)).step_by(stride) {
                 let right = left + offset;
                 let pair = (
                     entries[left].1.min(entries[right].1),
                     entries[left].1.max(entries[right].1),
                 );
                 if temporal_seen.insert(pair) {
-                    temporal.push(pair);
+                    if offset <= 32 {
+                        temporal.push(pair);
+                    } else {
+                        long_temporal.push(pair);
+                    }
                 }
             }
         }
@@ -3393,7 +3498,51 @@ fn rig_temporal_pyramid_pairs(
             }
         }
     }
+    // Metric same-frame edges must not be displaced by sparse long-baseline
+    // levels under a bounded budget. The caller consumes this priority tail
+    // after dense temporal edges, so append long levels after rig edges.
+    cross_camera.extend(long_temporal);
     Ok((temporal, cross_camera))
+}
+
+fn rig_temporal_pyramid_pairs(
+    image_names: &[String],
+    max_offset: u64,
+) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
+    let groups = image_names
+        .iter()
+        .map(|name| rig_camera_timestamp(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    rig_temporal_pyramid_pairs_from_groups(&groups, max_offset)
+}
+
+fn rig_temporal_pyramid_pairs_with_manifest(
+    image_names: &[String],
+    max_offset: u64,
+    rig_frame_manifest: Option<&Path>,
+) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
+    if let Some(path) = rig_frame_manifest {
+        let groups = generalized_rig_frame_groups(path, image_names)?;
+        rig_temporal_pyramid_pairs_from_groups(&groups, max_offset)
+    } else {
+        rig_temporal_pyramid_pairs(image_names, max_offset)
+    }
+}
+
+fn rig_frame_ids(
+    image_names: &[String],
+    rig_frame_manifest: Option<&Path>,
+) -> Result<Vec<u64>, String> {
+    if let Some(path) = rig_frame_manifest {
+        return Ok(generalized_rig_frame_groups(path, image_names)?
+            .into_iter()
+            .map(|(_, frame)| frame)
+            .collect());
+    }
+    image_names
+        .iter()
+        .map(|name| rig_camera_timestamp(name).map(|(_, timestamp)| timestamp))
+        .collect()
 }
 
 fn temporal_pyramid_offsets_string(max_offset: u64) -> String {
@@ -3409,6 +3558,113 @@ fn temporal_pyramid_offsets_string(max_offset: u64) -> String {
     values.join(",")
 }
 
+fn retrieval_component_labels(
+    path: &Path,
+    image_names: &[String],
+) -> Result<Vec<Option<u64>>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --retrieval-component-manifest {path:?}: {error}"))?;
+    let image_indices = image_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut labels = vec![None; image_names.len()];
+    let mut magic = false;
+    let mut components = HashSet::new();
+    for (line_number, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line == "# retrieval-component-manifest-v1" {
+            magic = true;
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.first() != Some(&"C") || fields.len() != 3 {
+            return Err(format!(
+                "invalid --retrieval-component-manifest row {} (expected C component_id image_name)",
+                line_number + 1
+            ));
+        }
+        let component = fields[1].parse::<u64>().map_err(|error| {
+            format!(
+                "invalid component id {:?} at --retrieval-component-manifest row {}: {error}",
+                fields[1],
+                line_number + 1
+            )
+        })?;
+        let Some(&image) = image_indices.get(fields[2]) else {
+            return Err(format!(
+                "--retrieval-component-manifest row {} names unknown image {:?}",
+                line_number + 1,
+                fields[2]
+            ));
+        };
+        if labels[image].replace(component).is_some() {
+            return Err(format!(
+                "--retrieval-component-manifest repeats image {:?}",
+                fields[2]
+            ));
+        }
+        components.insert(component);
+    }
+    if !magic {
+        return Err("--retrieval-component-manifest is not retrieval-component-manifest-v1".into());
+    }
+    if components.len() < 2 {
+        return Err(
+            "--retrieval-component-manifest must contain at least two component ids".into(),
+        );
+    }
+    Ok(labels)
+}
+
+fn append_component_balanced_retrieval(
+    selected: &mut Vec<(usize, usize)>,
+    seen: &mut HashSet<(usize, usize)>,
+    retrieval: &[((usize, usize), f32)],
+    labels: &[Option<u64>],
+    budget: usize,
+) {
+    let mut by_component_pair = BTreeMap::<(u64, u64), Vec<(usize, usize)>>::new();
+    for &(pair, _) in retrieval {
+        let (Some(left), Some(right)) = (labels[pair.0], labels[pair.1]) else {
+            continue;
+        };
+        if left == right {
+            continue;
+        }
+        let key = (left.min(right), left.max(right));
+        by_component_pair.entry(key).or_default().push(pair);
+    }
+    let mut cursors = BTreeMap::<(u64, u64), usize>::new();
+    loop {
+        let mut progress = false;
+        for (&component_pair, pairs) in &by_component_pair {
+            let cursor = cursors.entry(component_pair).or_default();
+            while *cursor < pairs.len() && seen.contains(&pairs[*cursor]) {
+                *cursor += 1;
+            }
+            if *cursor == pairs.len() {
+                continue;
+            }
+            let pair = pairs[*cursor];
+            *cursor += 1;
+            seen.insert(pair);
+            selected.push(pair);
+            progress = true;
+            if selected.len() == budget {
+                return;
+            }
+        }
+        if !progress {
+            return;
+        }
+    }
+}
+
 /// Candidate pairs from a rig-aware temporal pyramid plus a deterministic
 /// VLAD fill.  Temporal edges are selected first, same-timestamp rig edges
 /// second, and retrieval-only edges by descending VLAD score last.  The
@@ -3421,18 +3677,33 @@ fn candidate_pairs_temporal_pyramid(
     topk: usize,
     max_offset: u64,
     budget: Option<usize>,
+    rig_frame_manifest: Option<&Path>,
+    retrieval_component_manifest: Option<&Path>,
+    retrieval_min_frame_gap: Option<u64>,
 ) -> Result<Vec<(usize, usize)>, String> {
     let retrieval = candidate_pairs_vlad_scored(features, vocab_size, topk, false, false);
-    candidate_pairs_temporal_pyramid_from_retrieval(image_names, retrieval, max_offset, budget)
+    candidate_pairs_temporal_pyramid_from_retrieval(
+        image_names,
+        retrieval,
+        max_offset,
+        budget,
+        rig_frame_manifest,
+        retrieval_component_manifest,
+        retrieval_min_frame_gap,
+    )
 }
 
 fn candidate_pairs_temporal_pyramid_from_retrieval(
     image_names: &[String],
-    retrieval: Vec<((usize, usize), f32)>,
+    mut retrieval: Vec<((usize, usize), f32)>,
     max_offset: u64,
     budget: Option<usize>,
+    rig_frame_manifest: Option<&Path>,
+    retrieval_component_manifest: Option<&Path>,
+    retrieval_min_frame_gap: Option<u64>,
 ) -> Result<Vec<(usize, usize)>, String> {
-    let (temporal, cross_camera) = rig_temporal_pyramid_pairs(image_names, max_offset)?;
+    let (temporal, cross_camera) =
+        rig_temporal_pyramid_pairs_with_manifest(image_names, max_offset, rig_frame_manifest)?;
     let mut selected = Vec::new();
     let mut seen = HashSet::<(usize, usize)>::new();
     for pair in temporal.into_iter().chain(cross_camera) {
@@ -3440,15 +3711,34 @@ fn candidate_pairs_temporal_pyramid_from_retrieval(
             selected.push(pair);
         }
     }
+    if let Some(min_gap) = retrieval_min_frame_gap {
+        let frames = rig_frame_ids(image_names, rig_frame_manifest)?;
+        retrieval.retain(|&((left, right), _)| frames[left].abs_diff(frames[right]) >= min_gap);
+    }
+    // Retrieval producers retain pairs in canonical-key order so their output
+    // is deterministic.  A bounded temporal-pyramid fill, however, promises
+    // the strongest appearance edges first.  Re-rank here at the policy
+    // boundary instead of relying on an incidental producer traversal order.
+    retrieval.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1).then_with(|| lhs.0.cmp(&rhs.0)));
     if let Some(budget) = budget {
         selected.truncate(budget);
         if selected.len() < budget {
+            if let Some(path) = retrieval_component_manifest {
+                let labels = retrieval_component_labels(path, image_names)?;
+                append_component_balanced_retrieval(
+                    &mut selected,
+                    &mut seen,
+                    &retrieval,
+                    &labels,
+                    budget,
+                );
+            }
             for (pair, _) in retrieval {
+                if selected.len() == budget {
+                    break;
+                }
                 if seen.insert(pair) {
                     selected.push(pair);
-                    if selected.len() == budget {
-                        break;
-                    }
                 }
             }
         }
@@ -3516,6 +3806,7 @@ fn filter_pairs_by_stem_window(
 }
 
 const CANDIDATE_MANIFEST_MAGIC: &str = "visloc_candidate_manifest_v1";
+const CANDIDATE_SHARD_MAGIC_V2: &str = "visloc_candidate_shard_v2";
 
 /// Parse a small, image-name-bound candidate-pair manifest.  The format is
 /// intentionally line-oriented so it can be inspected, hashed, and generated
@@ -3672,7 +3963,193 @@ fn parse_candidate_manifest_with_metadata(
     Ok((pairs, metadata))
 }
 
+/// Compute the SHA-256 binding for the canonical image order carried by a
+/// persistent match plan.  This is intentionally independent of the source
+/// manifest's pair schedule: compact shards contain only pair indices and
+/// repeat this digest in their small envelope.
+fn candidate_image_manifest_sha256(image_names: &[String]) -> String {
+    let mut digest = Sha256::new();
+    for (index, name) in image_names.iter().enumerate() {
+        digest.update(format!("image {index} {name}\n").as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Hash a candidate shard without retaining its text.  The plan already
+/// carries this digest because the Python preparation stage validates it; the
+/// worker repeats the check so a changed/corrupt shard cannot pass merely on
+/// syntactically valid pair indices.
+fn candidate_file_sha256(path: &Path) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot open candidate shard {path:?}: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot hash candidate shard {path:?}: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Parse a compact v2 candidate shard and bind it to the canonical plan.
+/// Unlike the legacy v1 parser, this never materializes an image-name list
+/// from the shard.  The plan's image names are the sole authority for index
+/// bounds and order, while the source/image SHA-256 envelope prevents a shard
+/// from being replayed with a different source schedule or image order.
+#[cfg(test)]
+fn parse_candidate_shard_v2(
+    path: &Path,
+    image_names: &[String],
+    expected_source_manifest_sha256: Option<&str>,
+    expected_image_manifest_sha256: Option<&str>,
+) -> Result<Vec<(usize, usize)>, String> {
+    let canonical_image_manifest_sha256 = candidate_image_manifest_sha256(image_names);
+    parse_candidate_shard_v2_bound(
+        path,
+        image_names,
+        expected_source_manifest_sha256,
+        expected_image_manifest_sha256,
+        &canonical_image_manifest_sha256,
+    )
+}
+
+/// Parse a compact shard after the plan parser has already checked the
+/// canonical image-order digest.  Keeping that digest outside this helper
+/// avoids hashing the O(N) plan image list once per shard during the worker's
+/// validation and matching passes.
+fn parse_candidate_shard_v2_bound(
+    path: &Path,
+    image_names: &[String],
+    expected_source_manifest_sha256: Option<&str>,
+    expected_image_manifest_sha256: Option<&str>,
+    canonical_image_manifest_sha256: &str,
+) -> Result<Vec<(usize, usize)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read candidate shard {path:?}: {error}"))?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let mut cursor = 0usize;
+    let next = |cursor: &mut usize, label: &str| -> Result<&str, String> {
+        let line = lines.get(*cursor).copied().ok_or_else(|| {
+            format!("candidate shard {path:?} is truncated while reading {label}")
+        })?;
+        *cursor += 1;
+        Ok(line)
+    };
+    if next(&mut cursor, "header")? != CANDIDATE_SHARD_MAGIC_V2 {
+        return Err(format!(
+            "candidate shard {path:?} has unsupported v2 header (expected {CANDIDATE_SHARD_MAGIC_V2})"
+        ));
+    }
+    let parse_hash = |line: &str, kind: &str| -> Result<String, String> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let value = fields.get(1).copied().unwrap_or_default();
+        if fields.len() != 2
+            || fields[0] != kind
+            || value.len() != 64
+            || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!("candidate shard {path:?} requires `{kind} SHA256`"));
+        }
+        Ok(value.to_ascii_lowercase())
+    };
+    let parse_count = |line: &str, kind: &str| -> Result<usize, String> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 2 || fields[0] != kind {
+            return Err(format!("candidate shard {path:?} requires `{kind} N`"));
+        }
+        fields[1].parse::<usize>().map_err(|error| {
+            format!("candidate shard {path:?} {kind} count is not numeric: {error}")
+        })
+    };
+    let source_manifest_sha256 = parse_hash(
+        next(&mut cursor, "source manifest hash")?,
+        "source_manifest_sha256",
+    )?;
+    let expected_source = expected_source_manifest_sha256.ok_or_else(|| {
+        format!("candidate shard {path:?} requires a v2 persistent plan source hash")
+    })?;
+    if source_manifest_sha256 != expected_source.to_ascii_lowercase() {
+        return Err(format!(
+            "candidate shard {path:?} source manifest hash differs from persistent plan"
+        ));
+    }
+    let image_manifest_sha256 = parse_hash(
+        next(&mut cursor, "image manifest hash")?,
+        "image_manifest_sha256",
+    )?;
+    if image_manifest_sha256 != canonical_image_manifest_sha256 {
+        return Err(format!(
+            "candidate shard {path:?} image manifest hash does not match plan image order"
+        ));
+    }
+    let expected_image = expected_image_manifest_sha256.ok_or_else(|| {
+        format!("candidate shard {path:?} requires a v2 persistent plan image hash")
+    })?;
+    if image_manifest_sha256 != expected_image.to_ascii_lowercase() {
+        return Err(format!(
+            "candidate shard {path:?} image manifest hash differs from persistent plan"
+        ));
+    }
+    let image_count = parse_count(next(&mut cursor, "image count")?, "images")?;
+    if image_count != image_names.len() {
+        return Err(format!(
+            "candidate shard {path:?} image count {} differs from loaded {}",
+            image_count,
+            image_names.len()
+        ));
+    }
+    let pair_count = parse_count(next(&mut cursor, "pair count")?, "pairs")?;
+    let mut pairs = Vec::with_capacity(pair_count);
+    let mut seen = HashSet::with_capacity(pair_count);
+    for pair_number in 0..pair_count {
+        let line = next(&mut cursor, "pair entry")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 3 || fields[0] != "pair" {
+            return Err(format!(
+                "candidate shard {path:?} pair {pair_number} must be pair I J"
+            ));
+        }
+        let i = fields[1].parse::<usize>().map_err(|error| {
+            format!(
+                "candidate shard {path:?} pair {pair_number} first index is not numeric: {error}"
+            )
+        })?;
+        let j = fields[2].parse::<usize>().map_err(|error| {
+            format!(
+                "candidate shard {path:?} pair {pair_number} second index is not numeric: {error}"
+            )
+        })?;
+        if i >= image_names.len() || j >= image_names.len() || i >= j {
+            return Err(format!(
+                "candidate shard {path:?} pair {pair_number} must satisfy 0 <= I < J < {}",
+                image_names.len()
+            ));
+        }
+        if !seen.insert((i, j)) {
+            return Err(format!("candidate shard {path:?} repeats pair ({i},{j})"));
+        }
+        pairs.push((i, j));
+    }
+    if cursor != lines.len() {
+        return Err(format!(
+            "candidate shard {path:?} has unexpected trailing data"
+        ));
+    }
+    Ok(pairs)
+}
+
 const PERSISTENT_MATCH_WORKER_PLAN_MAGIC: &str = "visloc_match_worker_plan_v1";
+const PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2: &str = "visloc_match_worker_plan_v2";
 
 #[derive(Debug, Clone)]
 struct PersistentMatchWorkerShard {
@@ -3689,6 +4166,8 @@ struct PersistentMatchWorkerPlan {
     pair_count: usize,
     candidate_index_sha256: String,
     feature_manifest_sha256: String,
+    candidate_source_sha256: Option<String>,
+    image_manifest_sha256: Option<String>,
     shards: Vec<PersistentMatchWorkerShard>,
 }
 
@@ -3738,12 +4217,17 @@ fn parse_persistent_match_worker_plan(path: &Path) -> Result<PersistentMatchWork
         *cursor += 1;
         Ok(line)
     };
-    if next(&mut cursor, "header")? != PERSISTENT_MATCH_WORKER_PLAN_MAGIC {
-        return Err(format!(
-            "persistent match worker plan {} has unsupported header (expected {PERSISTENT_MATCH_WORKER_PLAN_MAGIC})",
-            path.display()
-        ));
-    }
+    let schema = next(&mut cursor, "header")?;
+    let is_v2 = match schema {
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC => false,
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2 => true,
+        _ => {
+            return Err(format!(
+                "persistent match worker plan {} has unsupported header (expected {PERSISTENT_MATCH_WORKER_PLAN_MAGIC} or {PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2})",
+                path.display()
+            ));
+        }
+    };
     let parse_count = |line: &str, kind: &str| -> Result<usize, String> {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() != 2 || fields[0] != kind {
@@ -3805,6 +4289,31 @@ fn parse_persistent_match_worker_plan(path: &Path) -> Result<PersistentMatchWork
         }
         Ok(value.to_ascii_lowercase())
     };
+    let candidate_source_sha256 = if is_v2 {
+        Some(parse_hash(
+            next(&mut cursor, "candidate source hash")?,
+            "candidate_source_sha256",
+        )?)
+    } else {
+        None
+    };
+    let image_manifest_sha256 = if is_v2 {
+        Some(parse_hash(
+            next(&mut cursor, "image manifest hash")?,
+            "image_manifest_sha256",
+        )?)
+    } else {
+        None
+    };
+    if let Some(expected_image_manifest_sha256) = image_manifest_sha256.as_deref() {
+        let actual_image_manifest_sha256 = candidate_image_manifest_sha256(&image_names);
+        if expected_image_manifest_sha256 != actual_image_manifest_sha256 {
+            return Err(format!(
+                "persistent match worker plan {} image manifest hash differs from image order",
+                path.display()
+            ));
+        }
+    }
     let candidate_index_sha256 = parse_hash(
         next(&mut cursor, "candidate index hash")?,
         "candidate_index_sha256",
@@ -3903,8 +4412,52 @@ fn parse_persistent_match_worker_plan(path: &Path) -> Result<PersistentMatchWork
         pair_count,
         candidate_index_sha256,
         feature_manifest_sha256,
+        candidate_source_sha256,
+        image_manifest_sha256,
         shards,
     })
+}
+
+/// Dispatch a persistent-worker candidate shard by its versioned envelope.
+/// Ordinary ``--candidate-manifest`` input continues to use the legacy v1
+/// image-name-bound parser; only the plan-driven worker accepts compact v2.
+fn parse_persistent_candidate_manifest(
+    path: &Path,
+    image_names: &[String],
+    plan: &PersistentMatchWorkerPlan,
+    expected_candidate_sha256: &str,
+) -> Result<(Vec<(usize, usize)>, BTreeMap<String, String>), String> {
+    let actual_candidate_sha256 = candidate_file_sha256(path)?;
+    if actual_candidate_sha256 != expected_candidate_sha256.to_ascii_lowercase() {
+        return Err(format!(
+            "candidate shard {path:?} SHA-256 differs from persistent plan"
+        ));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read candidate manifest {path:?}: {error}"))?;
+    let header = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .ok_or_else(|| format!("candidate manifest {path:?} is empty"))?;
+    match header {
+        CANDIDATE_MANIFEST_MAGIC => parse_candidate_manifest_with_metadata(path, image_names),
+        CANDIDATE_SHARD_MAGIC_V2 => Ok((
+            parse_candidate_shard_v2_bound(
+                path,
+                image_names,
+                plan.candidate_source_sha256.as_deref(),
+                plan.image_manifest_sha256.as_deref(),
+                plan.image_manifest_sha256.as_deref().ok_or_else(|| {
+                    format!("candidate shard {path:?} requires a v2 persistent plan image hash")
+                })?,
+            )?,
+            BTreeMap::new(),
+        )),
+        _ => Err(format!(
+            "candidate manifest {path:?} has unsupported header"
+        )),
+    }
 }
 
 /// Write a candidate manifest through a same-directory temporary file and
@@ -4138,6 +4691,9 @@ where
     let mut pair_stem_window: Option<u64> = None;
     let mut local_stem_window: Option<u64> = None;
     let mut rig_local_grouping = false;
+    let mut rig_frame_manifest: Option<PathBuf> = None;
+    let mut retrieval_component_manifest: Option<PathBuf> = None;
+    let mut retrieval_min_frame_gap: Option<u64> = None;
     let mut temporal_pyramid_max_offset = 32u64;
     let mut candidate_budget: Option<usize> = None;
     let mut refine_intrinsics = false;
@@ -4263,6 +4819,7 @@ where
     let mut snapshot_keypoints_only = false;
     let mut export_verified_pairs_only = false;
     let mut persistent_match_worker_plan: Option<PathBuf> = None;
+    let mut stream_match_features = false;
     let mut candidate_manifest: Option<PathBuf> = None;
     let mut export_candidate_manifest: Option<PathBuf> = None;
     let mut stream_candidate_features = false;
@@ -4490,6 +5047,42 @@ where
                 local_stem_window = Some(window);
             }
             "--rig-local-grouping" => rig_local_grouping = true,
+            "--rig-frame-manifest" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--rig-frame-manifest requires PATH")?
+                    .clone();
+                if raw.trim().is_empty() {
+                    return Err("--rig-frame-manifest requires a non-empty PATH".into());
+                }
+                a.remove(i + 1);
+                rig_frame_manifest = Some(PathBuf::from(raw));
+            }
+            "--retrieval-component-manifest" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--retrieval-component-manifest requires PATH")?
+                    .clone();
+                if raw.trim().is_empty() {
+                    return Err("--retrieval-component-manifest requires a non-empty PATH".into());
+                }
+                a.remove(i + 1);
+                retrieval_component_manifest = Some(PathBuf::from(raw));
+            }
+            "--retrieval-min-frame-gap" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--retrieval-min-frame-gap requires a positive integer")?
+                    .clone();
+                let gap: u64 = raw.parse().map_err(|error| {
+                    format!("--retrieval-min-frame-gap must be a positive integer: {error}")
+                })?;
+                if gap == 0 {
+                    return Err("--retrieval-min-frame-gap must be at least 1".into());
+                }
+                a.remove(i + 1);
+                retrieval_min_frame_gap = Some(gap);
+            }
             "--temporal-pyramid-max-offset" => {
                 let raw = a
                     .get(i + 1)
@@ -5013,6 +5606,7 @@ where
                 a.remove(i + 1);
                 persistent_match_worker_plan = Some(PathBuf::from(raw));
             }
+            "--stream-match-features" => stream_match_features = true,
             "--candidate-manifest" => {
                 let raw = a
                     .get(i + 1)
@@ -5311,6 +5905,17 @@ where
     if rig_local_grouping && pair_source != PairSource::VladUnion {
         return Err("--rig-local-grouping requires --pair-source vlad-union".into());
     }
+    if rig_frame_manifest.is_some() && pair_source != PairSource::TemporalPyramid {
+        return Err("--rig-frame-manifest requires --pair-source temporal-pyramid".into());
+    }
+    if retrieval_component_manifest.is_some() && pair_source != PairSource::TemporalPyramid {
+        return Err(
+            "--retrieval-component-manifest requires --pair-source temporal-pyramid".into(),
+        );
+    }
+    if retrieval_min_frame_gap.is_some() && pair_source != PairSource::TemporalPyramid {
+        return Err("--retrieval-min-frame-gap requires --pair-source temporal-pyramid".into());
+    }
     if pair_source == PairSource::TemporalPyramid
         && (local_stem_window.is_some() || rig_local_grouping)
     {
@@ -5352,6 +5957,9 @@ where
         && (exhaustive
             || local_stem_window.is_some()
             || rig_local_grouping
+            || rig_frame_manifest.is_some()
+            || retrieval_component_manifest.is_some()
+            || retrieval_min_frame_gap.is_some()
             || candidate_budget.is_some()
             || pair_stem_window.is_some()
             || pair_source == PairSource::Transitive)
@@ -5640,6 +6248,24 @@ where
             );
         }
     }
+    if stream_match_features {
+        if persistent_match_worker_plan.is_none() {
+            return Err(
+                "--stream-match-features requires --persistent-match-worker-plan PLAN".into(),
+            );
+        }
+        if feature_extractor != FeatureExtractorKind::Files {
+            return Err(
+                "--stream-match-features currently requires --feature-extractor files".into(),
+            );
+        }
+        if snapshot_keypoints_only {
+            return Err(
+                "--stream-match-features and --snapshot-keypoints-only are mutually exclusive"
+                    .into(),
+            );
+        }
+    }
     if import_verified_pairs_snapshot.is_some() {
         if import_matches_file.is_some() || import_matches_supplement_file.is_some() {
             return Err(
@@ -5649,6 +6275,7 @@ where
         if pair_stem_window.is_some()
             || local_stem_window.is_some()
             || rig_local_grouping
+            || rig_frame_manifest.is_some()
             || candidate_budget.is_some()
             || candidate_manifest.is_some()
             || export_candidate_manifest.is_some()
@@ -5715,6 +6342,9 @@ where
         pair_stem_window,
         local_stem_window,
         rig_local_grouping,
+        rig_frame_manifest,
+        retrieval_component_manifest,
+        retrieval_min_frame_gap,
         temporal_pyramid_max_offset,
         candidate_budget,
         match_ratio,
@@ -5902,6 +6532,7 @@ where
         snapshot_keypoints_only,
         export_verified_pairs_only,
         persistent_match_worker_plan,
+        stream_match_features,
         snapshot_coordinate_override_dir,
         diagnose_ba_oracle_poses_file,
         diagnose_fixed_rotation_ba,
@@ -5950,6 +6581,7 @@ fn validate_persistent_match_worker_args(args: &Args) -> Result<(), String> {
             || args.pair_stem_window.is_some()
             || args.local_stem_window.is_some()
             || args.rig_local_grouping
+            || args.retrieval_min_frame_gap.is_some()
             || args.candidate_budget.is_some()
             || args.pair_source != PairSource::Vlad
             || args.retrieval_topk != 12
@@ -8326,6 +8958,9 @@ fn ordered_pairwise_edge_hash(pairwise: &[PairwiseMatches]) -> u64 {
     hash
 }
 
+const STREAM_DESCRIPTOR_CACHE_ROWS: usize = 65_536;
+const PERSISTENT_MATCH_MAX_PAIRS_PER_SHARD: usize = 32;
+
 /// Run a versioned, plan-driven match worker without reloading the feature
 /// bank between candidate shards.  Candidate manifests are preflighted before
 /// the first snapshot is published so a duplicate pair or metadata mismatch
@@ -8334,12 +8969,13 @@ fn ordered_pairwise_edge_hash(pairwise: &[PairwiseMatches]) -> u64 {
 /// result is dropped before the next shard starts.
 fn run_persistent_match_worker(
     plan: &PersistentMatchWorkerPlan,
-    features: &[FeatureSet],
+    features: &mut [FeatureSet],
     image_names: &[String],
     camera: &Camera,
     matcher: &PairMatcher,
     args: &Args,
     feature_validation: &SnapshotFeatureValidation,
+    stream_sources: Option<(&[PathBuf], &[SnapshotFeatureFileFingerprint])>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if plan.image_names != image_names {
         return Err("persistent match worker plan image order differs from loaded features".into());
@@ -8349,9 +8985,22 @@ fn run_persistent_match_worker(
     let mut total_pairs = 0usize;
     for shard in &plan.shards {
         let candidate_path = plan.root.join(&shard.candidate_path);
-        let (candidates, metadata) =
-            parse_candidate_manifest_with_metadata(&candidate_path, image_names)
-                .map_err(std::io::Error::other)?;
+        let (candidates, metadata) = parse_persistent_candidate_manifest(
+            &candidate_path,
+            image_names,
+            plan,
+            &shard.candidate_sha256,
+        )
+        .map_err(std::io::Error::other)?;
+        if candidates.len() > PERSISTENT_MATCH_MAX_PAIRS_PER_SHARD {
+            return Err(format!(
+                "persistent match worker shard {} has {} candidate pairs; maximum is {}",
+                shard.id,
+                candidates.len(),
+                PERSISTENT_MATCH_MAX_PAIRS_PER_SHARD
+            )
+            .into());
+        }
         if let Some(expected) = expected_metadata.as_ref() {
             if expected != &metadata {
                 return Err(format!(
@@ -8395,12 +9044,44 @@ fn run_persistent_match_worker(
         plan.candidate_index_sha256, plan.feature_manifest_sha256,
     )?;
     stdout.flush()?;
+    let mut stream_cache = BTreeSet::<(u64, usize)>::new();
+    let mut stream_stamps = vec![None; features.len()];
+    let mut stream_clock = 0u64;
+    let mut stream_resident_rows = 0usize;
+    let mut stream_peak_resident_rows = 0usize;
+    let mut stream_peak_resident_images = 0usize;
     for shard in &plan.shards {
         let candidate_path = plan.root.join(&shard.candidate_path);
-        let (candidates, _candidate_metadata) =
-            parse_candidate_manifest_with_metadata(&candidate_path, image_names)
-                .map_err(std::io::Error::other)?;
+        let (candidates, _candidate_metadata) = parse_persistent_candidate_manifest(
+            &candidate_path,
+            image_names,
+            plan,
+            &shard.candidate_sha256,
+        )
+        .map_err(std::io::Error::other)?;
         let started = std::time::Instant::now();
+        let incident_images = candidate_incident_images(&candidates);
+        if let Some((paths, fingerprints)) = stream_sources {
+            let missing = incident_images
+                .iter()
+                .copied()
+                .filter(|&image| stream_stamps[image].is_none())
+                .collect::<Vec<_>>();
+            hydrate_match_images(features, paths, fingerprints, &missing)
+                .map_err(std::io::Error::other)?;
+            for &image in &incident_images {
+                if let Some(old_stamp) = stream_stamps[image] {
+                    stream_cache.remove(&(old_stamp, image));
+                } else {
+                    stream_resident_rows += features[image].descriptors.len();
+                }
+                stream_clock = stream_clock.wrapping_add(1);
+                stream_stamps[image] = Some(stream_clock);
+                stream_cache.insert((stream_clock, image));
+            }
+            stream_peak_resident_rows = stream_peak_resident_rows.max(stream_resident_rows);
+            stream_peak_resident_images = stream_peak_resident_images.max(stream_cache.len());
+        }
         let (mut pairwise, _stats, metadata) = verify_pairs(
             features,
             camera,
@@ -8478,7 +9159,79 @@ fn run_persistent_match_worker(
         drop(candidates);
         drop(metadata);
         drop(pairwise);
+        while stream_resident_rows > STREAM_DESCRIPTOR_CACHE_ROWS {
+            let Some((stamp, image)) = stream_cache.pop_first() else {
+                break;
+            };
+            if stream_stamps[image] != Some(stamp) {
+                continue;
+            }
+            stream_resident_rows =
+                stream_resident_rows.saturating_sub(features[image].descriptors.len());
+            features[image].descriptors = Vec::new();
+            stream_stamps[image] = None;
+        }
         trim_process_allocator();
+    }
+    if stream_sources.is_some() {
+        writeln!(
+            stdout,
+            "persistent-match-stream-state cache_rows_cap={} peak_resident_rows={} peak_resident_images={} final_resident_rows={} final_resident_images={}",
+            STREAM_DESCRIPTOR_CACHE_ROWS,
+            stream_peak_resident_rows,
+            stream_peak_resident_images,
+            stream_resident_rows,
+            stream_cache.len(),
+        )?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
+fn candidate_incident_images(candidates: &[(usize, usize)]) -> Vec<usize> {
+    let mut images = candidates
+        .iter()
+        .flat_map(|&(left, right)| [left, right])
+        .collect::<Vec<_>>();
+    images.sort_unstable();
+    images.dedup();
+    images
+}
+
+fn hydrate_match_images(
+    features: &mut [FeatureSet],
+    paths: &[PathBuf],
+    fingerprints: &[SnapshotFeatureFileFingerprint],
+    images: &[usize],
+) -> Result<(), String> {
+    if paths.len() != features.len() || fingerprints.len() != features.len() {
+        return Err(format!(
+            "streamed match feature manifest mismatch: {} feature sets, {} paths, {} fingerprints",
+            features.len(),
+            paths.len(),
+            fingerprints.len(),
+        ));
+    }
+    for &image in images {
+        let path = paths
+            .get(image)
+            .ok_or_else(|| format!("candidate references missing feature image {image}"))?;
+        let source = read_feature_set(path)
+            .map_err(|error| format!("cannot stream match feature {path:?}: {error}"))?;
+        let observed = snapshot_feature_file_fingerprint(&source);
+        if observed != fingerprints[image] {
+            return Err(format!(
+                "streamed match feature image {image} ({path:?}) changed after preflight"
+            ));
+        }
+        if source.keypoints.len() != features[image].keypoints.len() {
+            return Err(format!(
+                "streamed match feature image {image} has {} source and {} calibrated keypoints",
+                source.keypoints.len(),
+                features[image].keypoints.len(),
+            ));
+        }
+        features[image].descriptors = source.descriptors;
     }
     Ok(())
 }
@@ -10227,6 +10980,9 @@ fn candidate_pairs(
             args.retrieval_topk,
             args.temporal_pyramid_max_offset,
             args.candidate_budget,
+            args.rig_frame_manifest.as_deref(),
+            args.retrieval_component_manifest.as_deref(),
+            args.retrieval_min_frame_gap,
         ),
         PairSource::VocabTree | PairSource::Transitive => Ok(candidate_pairs_vocab_tree(
             features,
@@ -10314,8 +11070,36 @@ fn candidate_manifest_metadata(args: &Args, image_count: usize) -> BTreeMap<Stri
     if args.pair_source == PairSource::TemporalPyramid {
         metadata.insert(
             "local_grouping".to_owned(),
-            "rig-prefix-timestamp-v1".to_owned(),
+            if args.rig_frame_manifest.is_some() {
+                "generalized-rig-manifest-v1"
+            } else {
+                "rig-prefix-timestamp-v1"
+            }
+            .to_owned(),
         );
+        if let Some(path) = &args.rig_frame_manifest {
+            metadata.insert(
+                "rig_frame_manifest".to_owned(),
+                path.to_string_lossy().into_owned(),
+            );
+        }
+        if let Some(path) = &args.retrieval_component_manifest {
+            metadata.insert(
+                "retrieval_component_manifest".to_owned(),
+                path.to_string_lossy().into_owned(),
+            );
+            metadata.insert(
+                "retrieval_fill_policy".to_owned(),
+                "component-pair-round-robin-then-global-score-v1".to_owned(),
+            );
+        }
+        if let Some(gap) = args.retrieval_min_frame_gap {
+            metadata.insert("retrieval_min_frame_gap".to_owned(), gap.to_string());
+            metadata.insert(
+                "retrieval_temporal_exclusion".to_owned(),
+                "rig-frame-absolute-gap-v1".to_owned(),
+            );
+        }
         metadata.insert("cross_camera_rule".to_owned(), "same-timestamp".to_owned());
         metadata.insert(
             "temporal_offsets".to_owned(),
@@ -10325,6 +11109,16 @@ fn candidate_manifest_metadata(args: &Args, image_count: usize) -> BTreeMap<Stri
             "temporal_pyramid_max_offset".to_owned(),
             args.temporal_pyramid_max_offset.to_string(),
         );
+        metadata.insert(
+            "temporal_long_level_sampling".to_owned(),
+            "dense-through-32;stride=offset/16".to_owned(),
+        );
+        if args.retrieval_component_manifest.is_none() {
+            metadata.insert(
+                "retrieval_fill_policy".to_owned(),
+                "global-score-desc-v1".to_owned(),
+            );
+        }
         metadata.insert(
             "candidate_budget".to_owned(),
             args.candidate_budget
@@ -15534,6 +16328,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             retrieval,
             args.temporal_pyramid_max_offset,
             args.candidate_budget,
+            args.rig_frame_manifest.as_deref(),
+            args.retrieval_component_manifest.as_deref(),
+            args.retrieval_min_frame_gap,
         )?;
         let path = args
             .export_candidate_manifest
@@ -15561,18 +16358,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mut locus_metadata,
     ) = match args.feature_extractor {
         FeatureExtractorKind::Files => {
-            let (features, image_names, locus_metadata) = if args.snapshot_keypoints_only {
-                let loaded = load_images_keypoints_only(
-                    &args.features_dir,
-                    &args.feature_suffix,
-                    &args.image_suffix,
-                )?;
-                snapshot_feature_paths = Some(loaded.paths);
-                snapshot_feature_fingerprints = Some(loaded.fingerprints);
-                (loaded.features, loaded.image_names, loaded.locus_metadata)
-            } else {
-                load_images(&args.features_dir, &args.feature_suffix, &args.image_suffix)?
-            };
+            let (features, image_names, locus_metadata) =
+                if args.snapshot_keypoints_only || args.stream_match_features {
+                    let loaded = load_images_keypoints_only(
+                        &args.features_dir,
+                        &args.feature_suffix,
+                        &args.image_suffix,
+                    )?;
+                    snapshot_feature_paths = Some(loaded.paths);
+                    snapshot_feature_fingerprints = Some(loaded.fingerprints);
+                    (loaded.features, loaded.image_names, loaded.locus_metadata)
+                } else {
+                    load_images(&args.features_dir, &args.feature_suffix, &args.image_suffix)?
+                };
             let primary_keypoint_counts = features.iter().map(FeatureSet::len).collect();
             let alternate_descriptors = vec![None; features.len()];
             (
@@ -15657,7 +16455,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         per_image_calibration = Some(loaded);
         log_process_memory("example-after-calibration-canonicalization");
     }
-    let snapshot_feature_validation = if args.snapshot_keypoints_only {
+    let snapshot_feature_validation = if args.snapshot_keypoints_only || args.stream_match_features
+    {
         let paths = snapshot_feature_paths
             .as_deref()
             .ok_or("--snapshot-keypoints-only did not retain feature source paths")?;
@@ -15667,9 +16466,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let validation = snapshot_feature_validation_from_files(paths, &features, fingerprints)
             .map_err(std::io::Error::other)?;
         println!(
-            "snapshot keypoints-only replay: retained {} keypoint sets; descriptor payloads re-read one file at a time (feature-manifest-fnv1a64={:016x})",
-            features.len(),
-            validation.feature_manifest_hash,
+            "memory-bounded feature load: retained {} keypoint sets; descriptor payloads re-read one file at a time (feature-manifest-fnv1a64={:016x})",
+            features.len(), validation.feature_manifest_hash,
         );
         log_process_memory("example-after-keypoints-only-feature-fingerprint");
         Some(validation)
@@ -16099,24 +16897,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drop(initial_poses);
         drop(imported_snapshot);
         trim_process_allocator();
-        let feature_validation = SnapshotFeatureValidation {
-            feature_counts: features.iter().map(FeatureSet::len).collect(),
-            feature_manifest_hash: snapshot_feature_manifest_hash(&features),
+        let feature_validation =
+            snapshot_feature_validation
+                .clone()
+                .unwrap_or_else(|| SnapshotFeatureValidation {
+                    feature_counts: features.iter().map(FeatureSet::len).collect(),
+                    feature_manifest_hash: snapshot_feature_manifest_hash(&features),
+                });
+        let stream_sources = if args.stream_match_features {
+            Some((
+                snapshot_feature_paths
+                    .as_deref()
+                    .ok_or("--stream-match-features lost its feature source paths")?,
+                snapshot_feature_fingerprints
+                    .as_deref()
+                    .ok_or("--stream-match-features lost its feature fingerprints")?,
+            ))
+        } else {
+            None
         };
         println!(
-            "persistent match worker: {} shard(s), {} candidate pairs, feature-manifest-fnv1a64={:016x}",
+            "persistent match worker: {} shard(s), {} candidate pairs, feature-manifest-fnv1a64={:016x}, streamed_features={}, descriptor_cache_rows={}",
             plan.shards.len(),
             plan.pair_count,
             feature_validation.feature_manifest_hash,
+            args.stream_match_features,
+            if args.stream_match_features {
+                STREAM_DESCRIPTOR_CACHE_ROWS
+            } else {
+                0
+            },
         );
         run_persistent_match_worker(
             &plan,
-            &features,
+            &mut features,
             &image_names,
             &args.camera,
             &pair_matcher,
             &args,
             &feature_validation,
+            stream_sources,
         )?;
         return Ok(());
     }
@@ -17524,7 +18344,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod diagnose_cli_tests {
     use super::{
         apply_snapshot_coordinate_override, apply_union_traversal_order,
-        apply_union_traversal_order_with_features, candidate_pairs_vlad_lsh_scored,
+        apply_union_traversal_order_with_features, candidate_image_manifest_sha256,
+        candidate_pairs_temporal_pyramid_from_retrieval, candidate_pairs_vlad_lsh_scored,
         candidate_pairs_vlad_scored, candidate_pairs_vlad_scored_from_globals,
         candidate_pairs_vlad_union, canonicalize_feature_order, canonicalize_pairwise_loci,
         cap_mapper_pair_matches, colmap_guided_geometry, colmap_guided_matches,
@@ -17536,19 +18357,20 @@ mod diagnose_cli_tests {
         load_images_keypoints_only, load_input_colmap_calibration, match_candidate_cmp,
         model_cross_validation_is_held_out, model_cross_validation_is_held_out_for_pixels,
         model_cross_validation_selection_score, parse_args_from, parse_candidate_manifest,
-        parse_candidate_manifest_with_metadata, parse_colmap_image_camera_assignments,
-        parse_colmap_track_membership, parse_diagnose_stems, ranked_view_graph_components,
-        read_feature_set, remap_feature_keypoints_by_old_to_new,
+        parse_candidate_manifest_with_metadata, parse_candidate_shard_v2,
+        parse_colmap_image_camera_assignments, parse_colmap_track_membership, parse_diagnose_stems,
+        ranked_view_graph_components, read_feature_set, remap_feature_keypoints_by_old_to_new,
         replace_feature_keypoints_from_native, rig_local_pairs, rig_temporal_pyramid_pairs,
-        robust_huber_mean, snapshot_export_config, snapshot_feature_manifest_hash,
-        snapshot_feature_validation_from_files, stream_vlad_globals_from_feature_files,
-        summarize_model_cross_validation_bucket, temporal_pyramid_offsets_string,
-        translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
-        verified_pair_oracle_map, write_candidate_manifest, write_candidate_manifest_with_metadata,
-        Camera, ColmapTrackMembership, ConfigurationType, EssentialPairQuality,
-        FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver,
-        ModelCrossValidationBucket, ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches,
-        PerImageCameras, RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
+        rig_temporal_pyramid_pairs_with_manifest, robust_huber_mean, snapshot_export_config,
+        snapshot_feature_manifest_hash, snapshot_feature_validation_from_files,
+        stream_vlad_globals_from_feature_files, summarize_model_cross_validation_bucket,
+        temporal_pyramid_offsets_string, translation_direction_delta_deg,
+        unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
+        write_candidate_manifest, write_candidate_manifest_with_metadata, Camera,
+        ColmapTrackMembership, ConfigurationType, EssentialPairQuality, FeatureLocusMetadata,
+        ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver, ModelCrossValidationBucket,
+        ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches, PerImageCameras,
+        RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
     };
     use nalgebra::{Matrix3, Point2, Vector3};
     use std::cmp::Ordering as CmpOrdering;
@@ -17683,6 +18505,67 @@ mod diagnose_cli_tests {
     }
 
     #[test]
+    fn compact_candidate_shard_v2_binds_source_and_plan_image_order() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_candidate_shard_v2_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("candidate-000000.txt");
+        let names = vec!["left.png".to_owned(), "right.png".to_owned()];
+        let source_hash = "a".repeat(64);
+        let image_hash = candidate_image_manifest_sha256(&names);
+        std::fs::write(
+            &path,
+            format!(
+                "visloc_candidate_shard_v2\nsource_manifest_sha256 {source_hash}\n\
+                 image_manifest_sha256 {image_hash}\nimages 2\npairs 1\npair 0 1\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_candidate_shard_v2(&path, &names, Some(&source_hash), Some(&image_hash),)
+                .unwrap(),
+            vec![(0, 1)]
+        );
+
+        let mut wrong_names = names.clone();
+        wrong_names.swap(0, 1);
+        assert!(parse_candidate_shard_v2(
+            &path,
+            &wrong_names,
+            Some(&source_hash),
+            Some(&image_hash),
+        )
+        .unwrap_err()
+        .contains("image manifest hash"));
+        assert!(
+            parse_candidate_shard_v2(&path, &names, Some(&"b".repeat(64)), Some(&image_hash),)
+                .unwrap_err()
+                .contains("source manifest hash")
+        );
+        std::fs::write(
+            &path,
+            format!(
+                "visloc_candidate_shard_v2\nsource_manifest_sha256 {source_hash}\n\
+                 image_manifest_sha256 {image_hash}\nimages 3\npairs 1\npair 0 1\n"
+            ),
+        )
+        .unwrap();
+        assert!(
+            parse_candidate_shard_v2(&path, &names, Some(&source_hash), Some(&image_hash),)
+                .unwrap_err()
+                .contains("image count")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn candidate_schedule_flags_are_explicit_and_validated() {
         let union = parse_args_from(minimal_args(&[
             "--pair-source",
@@ -17717,6 +18600,8 @@ mod diagnose_cli_tests {
             "64",
             "--candidate-budget",
             "12000",
+            "--retrieval-min-frame-gap",
+            "128",
         ]))
         .unwrap();
         assert!(matches!(
@@ -17725,6 +18610,20 @@ mod diagnose_cli_tests {
         ));
         assert_eq!(temporal.temporal_pyramid_max_offset, 64);
         assert_eq!(temporal.candidate_budget, Some(12000));
+        assert_eq!(temporal.retrieval_min_frame_gap, Some(128));
+        let temporal_manifest = parse_args_from(minimal_args(&[
+            "--pair-source",
+            "temporal-pyramid",
+            "--rig-frame-manifest",
+            "/tmp/rig.txt",
+        ]))
+        .unwrap();
+        assert_eq!(
+            temporal_manifest.rig_frame_manifest,
+            Some(PathBuf::from("/tmp/rig.txt"))
+        );
+        assert!(parse_args_from(minimal_args(&["--rig-frame-manifest", "/tmp/rig.txt",])).is_err());
+        assert!(parse_args_from(minimal_args(&["--retrieval-min-frame-gap", "128",])).is_err());
         assert!(parse_args_from(minimal_args(&[
             "--pair-source",
             "temporal-pyramid",
@@ -17961,6 +18860,194 @@ mod diagnose_cli_tests {
         let (temporal, cross) = rig_temporal_pyramid_pairs(&names, 32).unwrap();
         assert!(temporal.is_empty());
         assert_eq!(cross, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn temporal_pyramid_samples_long_levels_after_metric_rig_edges() {
+        let names = (0..200)
+            .map(|index| format!("cam1_{index:06}.png"))
+            .chain((0..200).map(|index| format!("cam2_{index:06}.png")))
+            .collect::<Vec<_>>();
+
+        let (_, priority_tail) = rig_temporal_pyramid_pairs(&names, 128).unwrap();
+
+        assert_eq!(priority_tail.len(), 200 + 68 + 18);
+        assert_eq!(priority_tail[0], (0, 200));
+        assert_eq!(priority_tail[199], (199, 399));
+        assert!(priority_tail.contains(&(0, 64)));
+        assert!(priority_tail.contains(&(0, 128)));
+        assert!(priority_tail.contains(&(200, 264)));
+        assert!(priority_tail.contains(&(200, 328)));
+        assert!(!priority_tail.contains(&(1, 65)));
+        assert!(!priority_tail.contains(&(1, 129)));
+    }
+
+    #[test]
+    fn temporal_pyramid_budget_fills_by_retrieval_score_not_pair_key() {
+        let names = (0..4)
+            .map(|index| format!("cam1_{index:06}.png"))
+            .collect::<Vec<_>>();
+        let retrieval = vec![((0, 2), 0.1), ((0, 3), 0.9)];
+
+        let pairs = candidate_pairs_temporal_pyramid_from_retrieval(
+            &names,
+            retrieval,
+            1,
+            Some(4),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(pairs.contains(&(0, 3)));
+        assert!(!pairs.contains(&(0, 2)));
+    }
+
+    #[test]
+    fn temporal_pyramid_component_fill_round_robins_component_pairs() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_retrieval_component_manifest_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("components.txt");
+        std::fs::write(
+            &path,
+            "# retrieval-component-manifest-v1\n\
+             C 0 cam1_000000.png\n\
+             C 0 cam1_000001.png\n\
+             C 1 cam1_000003.png\n\
+             C 1 cam1_000004.png\n\
+             C 2 cam1_000005.png\n",
+        )
+        .unwrap();
+        let names = (0..6)
+            .map(|index| format!("cam1_{index:06}.png"))
+            .collect::<Vec<_>>();
+        let retrieval = vec![((0, 3), 0.9), ((1, 4), 0.8), ((0, 5), 0.7)];
+
+        let pairs = candidate_pairs_temporal_pyramid_from_retrieval(
+            &names,
+            retrieval,
+            1,
+            Some(7),
+            None,
+            Some(&path),
+            None,
+        )
+        .unwrap();
+
+        assert!(pairs.contains(&(0, 3)));
+        assert!(pairs.contains(&(0, 5)));
+        assert!(!pairs.contains(&(1, 4)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn temporal_pyramid_retrieval_gap_excludes_near_fill_only() {
+        let names = (0..6)
+            .map(|index| format!("cam1_{index:06}.png"))
+            .collect::<Vec<_>>();
+        let retrieval = vec![((0, 2), 0.9), ((0, 5), 0.8)];
+
+        let pairs = candidate_pairs_temporal_pyramid_from_retrieval(
+            &names,
+            retrieval,
+            1,
+            Some(7),
+            None,
+            None,
+            Some(4),
+        )
+        .unwrap();
+
+        assert!(pairs.contains(&(0, 1)), "temporal base edge was removed");
+        assert!(pairs.contains(&(0, 5)), "long retrieval edge was removed");
+        assert!(!pairs.contains(&(0, 2)), "near retrieval edge was retained");
+    }
+
+    #[test]
+    fn temporal_pyramid_retrieval_gap_uses_explicit_rig_frames() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_retrieval_gap_rig_manifest_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rig.txt");
+        std::fs::write(
+            &path,
+            "# generalized-rig-manifest-v1\n\
+             F 0 left_900.png 0\n\
+             F 10 left_100.png 0\n\
+             F 20 left_500.png 0\n\
+             F 0 right_901.png 1\n\
+             F 10 right_101.png 1\n\
+             F 20 right_501.png 1\n",
+        )
+        .unwrap();
+        let names = [
+            "left_900.png",
+            "left_100.png",
+            "left_500.png",
+            "right_901.png",
+            "right_101.png",
+            "right_501.png",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let retrieval = vec![((0, 4), 0.9), ((0, 5), 0.8)];
+
+        let pairs = candidate_pairs_temporal_pyramid_from_retrieval(
+            &names,
+            retrieval,
+            1,
+            Some(8),
+            Some(&path),
+            None,
+            Some(15),
+        )
+        .unwrap();
+
+        assert!(pairs.contains(&(0, 5)));
+        assert!(!pairs.contains(&(0, 4)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn temporal_pyramid_manifest_groups_different_camera_aliases_into_frames() {
+        let root =
+            std::env::temp_dir().join(format!("visloc_rig_frame_manifest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rig.txt");
+        std::fs::write(
+            &path,
+            "# generalized-rig-manifest-v1\n\
+             S 0 1 10 10 1 1 1 1 1 0 0 0 0 0 0\n\
+             S 1 2 10 10 1 1 1 1 1 0 0 0 1 0 0\n\
+             F 0 cam1_000000.png 0\n\
+             F 0 cam2_000001.png 1\n\
+             F 1 cam1_000002.png 0\n\
+             F 1 cam2_000003.png 1\n",
+        )
+        .unwrap();
+        let names = vec![
+            "cam1_000000.png".to_owned(),
+            "cam1_000002.png".to_owned(),
+            "cam2_000001.png".to_owned(),
+            "cam2_000003.png".to_owned(),
+        ];
+
+        let (temporal, cross) =
+            rig_temporal_pyramid_pairs_with_manifest(&names, 1, Some(&path)).unwrap();
+
+        assert_eq!(temporal, vec![(0, 1), (2, 3)]);
+        assert_eq!(cross, vec![(0, 2), (1, 3)]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -20177,14 +21264,15 @@ mod sift_extra_tests {
 #[cfg(test)]
 mod append_only_matcher_tests {
     use super::{
-        append_only_nn_matches, f_to_e_stability_gate, parse_args_from,
+        append_only_nn_matches, candidate_image_manifest_sha256, candidate_incident_images,
+        f_to_e_stability_gate, hydrate_match_images, load_images_keypoints_only, parse_args_from,
         parse_persistent_match_worker_plan, project_fundamental_to_essential,
         refine_uncalibrated_f_winner, select_calibrated_essential_primary,
         sequence_f_to_e_high_support_override_gate, sequence_f_to_e_stability_gate,
         should_exclude_strict_uncalibrated_f_winner, snapshot_feature_manifest_hash,
         write_verified_pair_snapshot, write_verified_pair_snapshot_atomic,
         FToECandidateDiagnostics, PairMatcher, PairwiseMatches, SnapshotFeatureValidation,
-        PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC, PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2,
     };
     use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
     use std::collections::HashMap;
@@ -20650,9 +21738,50 @@ mod append_only_matcher_tests {
     }
 
     #[test]
+    fn persistent_worker_plan_v2_carries_compact_shard_bindings() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_persistent_plan_v2_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let names = vec!["left.png".to_owned(), "right.png".to_owned()];
+        let source_hash = "a".repeat(64);
+        let image_hash = candidate_image_manifest_sha256(&names);
+        let plan = format!(
+            "{PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2}\n\
+             images 2\nimage 0 left.png\nimage 1 right.png\n\
+             candidate_source_sha256 {source_hash}\n\
+             image_manifest_sha256 {image_hash}\n\
+             candidate_index_sha256 {source_hash}\n\
+             feature_manifest_sha256 {source_hash}\n\
+             pairs 1\nshards 1\n\
+             shard 0 candidates/candidate-000000.txt matches/verified-000000.vps {source_hash}\n"
+        );
+        let path = root.join("v2.plan");
+        std::fs::write(&path, plan).unwrap();
+        let parsed = parse_persistent_match_worker_plan(&path).unwrap();
+        assert_eq!(
+            parsed.candidate_source_sha256.as_deref(),
+            Some(source_hash.as_str())
+        );
+        assert_eq!(
+            parsed.image_manifest_sha256.as_deref(),
+            Some(image_hash.as_str())
+        );
+        assert_eq!(parsed.image_names, names);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn persistent_worker_cli_is_opt_in_and_fail_closed() {
         let defaults = parse_args_from(minimal_args(&[])).unwrap();
         assert!(defaults.persistent_match_worker_plan.is_none());
+        assert!(!defaults.stream_match_features);
         let valid = parse_args_from(vec![
             "--input-colmap-calibration".to_owned(),
             "/tmp/calibration".to_owned(),
@@ -20668,6 +21797,20 @@ mod append_only_matcher_tests {
             valid.persistent_match_worker_plan,
             Some(PathBuf::from("/tmp/match-worker.plan"))
         );
+        let streamed = parse_args_from(vec![
+            "--input-colmap-calibration".to_owned(),
+            "/tmp/calibration".to_owned(),
+            "--verification-mode".to_owned(),
+            "full".to_owned(),
+            "--persistent-match-worker-plan".to_owned(),
+            "/tmp/match-worker.plan".to_owned(),
+            "--stream-match-features".to_owned(),
+            "--out-colmap".to_owned(),
+            "/tmp/persistent-model".to_owned(),
+        ])
+        .unwrap();
+        assert!(streamed.stream_match_features);
+        assert!(parse_args_from(minimal_args(&["--stream-match-features"])).is_err());
 
         for extra in [
             vec!["--mapper", "global"],
@@ -20698,6 +21841,46 @@ mod append_only_matcher_tests {
                 "persistent worker accepted unsupported options: {extra:?}"
             );
         }
+    }
+
+    #[test]
+    fn streamed_match_hydrates_only_candidate_incident_descriptors() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_streamed_match_features_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, row) in [
+            ("a_features.txt", "1 2 0.1 0.2\n"),
+            ("b_features.txt", "3 4 0.3 0.4\n"),
+            ("c_features.txt", "5 6 0.5 0.6\n"),
+        ] {
+            std::fs::write(root.join(name), row).unwrap();
+        }
+        let loaded = load_images_keypoints_only(&root, "_features.txt", ".png").unwrap();
+        let mut features = loaded.features;
+        assert!(features
+            .iter()
+            .all(|set| set.descriptors.iter().all(Vec::is_empty)));
+
+        let hydrated = candidate_incident_images(&[(0, 2)]);
+        hydrate_match_images(
+            &mut features,
+            &loaded.paths,
+            &loaded.fingerprints,
+            &hydrated,
+        )
+        .unwrap();
+        assert_eq!(hydrated, [0, 2]);
+        assert_eq!(features[0].descriptors, [vec![0.2]]);
+        assert!(features[1].descriptors[0].is_empty());
+        assert_eq!(features[2].descriptors, [vec![0.6]]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use visloc_rs::verified_pair_snapshot::{merge_owned, read, write_atomic};
+use visloc_rs::verified_pair_snapshot::merge_files_atomic;
 
 fn usage() -> ! {
     eprintln!(
@@ -82,19 +82,10 @@ fn run() -> Result<(), String> {
     if snapshots.is_empty() {
         return Err("at least one --snapshot is required".into());
     }
-    let decoded = snapshots
-        .iter()
-        .map(|path| {
-            read(path).map_err(|error| format!("invalid snapshot {}: {error}", path.display()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let merged = merge_owned(decoded)?;
-    write_atomic(&output, &merged)?;
+    merge_files_atomic(&output, &snapshots)?;
     println!(
-        "merged {} snapshot shard(s): {} pairs, {} accepted correspondences -> {}",
+        "merged {} snapshot shard(s) -> {}",
         snapshots.len(),
-        merged.pairs.len(),
-        merged.accepted_match_count,
         output.display(),
     );
     Ok(())

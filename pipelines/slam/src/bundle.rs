@@ -41,7 +41,9 @@
 //!   way as assembly, collecting each landmark's `(Vec<(p,q,block)>,
 //!   Vec<(p,upd)>)` pair per chunk and then flattening/merging into the
 //!   shared reduced system `s` / `b_reduced` by a serial pass over each
-//!   chunk, in landmark-ascending order.
+//!   chunk, in landmark-ascending order. Pure-visual sparse BA instead keeps
+//!   this stage serial so parallel observation assembly does not force a
+//!   dense camera Hessian or change the block-sparse O(nnz) memory bound.
 //! - **Back-substitution** (`solve_step`'s per-landmark `δ_L` loop): each
 //!   landmark writes only its own 3 rows of `delta_l`, so this is
 //!   embarrassingly parallel with no merge step at all.
@@ -94,6 +96,82 @@ use crate::{solve_normal_equations, LinearSolver, PoseGraphError, RobustKernel};
 fn ba_step_debug_enabled() -> bool {
     std::env::var_os("VISLOC_SFM_DEBUG_BA").is_some()
         && std::env::var_os("VISLOC_SFM_DEBUG_BA_STEPS").is_some()
+}
+
+#[cfg(test)]
+mod generalized_rig_factor_tests {
+    use nalgebra::{Point3, UnitQuaternion, Vector3};
+
+    use super::*;
+
+    #[test]
+    fn arbitrary_sensor_factors_refine_one_shared_body_pose() {
+        let camera_left = Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5);
+        let camera_right = Camera::pinhole(2, 848, 800, 284.8, 286.1, 428.0, 397.5);
+        let sensors = [
+            (camera_left.clone(), SE3::identity()),
+            (
+                camera_right,
+                SE3::new(UnitQuaternion::identity(), Vector3::new(-0.20, 0.0, 0.0)),
+            ),
+        ];
+        let truth = [
+            Pose::identity(),
+            Pose::from_world_to_camera(
+                UnitQuaternion::from_euler_angles(0.01, -0.04, 0.02),
+                Vector3::new(-0.35, 0.03, 0.01),
+            ),
+        ];
+        let mut problem = BundleAdjustment::new(camera_left);
+        problem.add_pose(0, truth[0].clone());
+        problem.add_pose(
+            1,
+            Pose::from_world_to_camera(
+                UnitQuaternion::from_euler_angles(0.03, -0.01, -0.01),
+                Vector3::new(-0.27, -0.02, 0.04),
+            ),
+        );
+        problem.fix_pose(0);
+        for landmark in 0..24u64 {
+            let point = Point3::new(
+                (landmark % 6) as f64 * 0.25 - 0.6,
+                (landmark / 6) as f64 * 0.22 - 0.3,
+                4.0 + (landmark % 5) as f64 * 0.15,
+            );
+            problem.add_landmark(
+                landmark,
+                Point3::from(point.coords + Vector3::new(0.02, -0.01, 0.03)),
+            );
+            for (frame, frame_pose) in truth.iter().enumerate() {
+                for (camera, sensor_from_rig) in &sensors {
+                    let point_rig = frame_pose.transform_world_point(&point);
+                    let pixel = camera
+                        .project(&sensor_from_rig.transform_point(&point_rig))
+                        .unwrap();
+                    problem.add_rig_observation(BaRigObservation {
+                        keyframe_id: frame as u64,
+                        landmark_id: landmark,
+                        xy: pixel,
+                        camera: camera.clone(),
+                        sensor_from_rig: sensor_from_rig.clone(),
+                    });
+                }
+            }
+        }
+        let initial_cost = problem.cost();
+        let initial_center_error =
+            (problem.poses[&1].camera_center_world() - truth[1].camera_center_world()).norm();
+        let result = problem
+            .optimize(&BaConfig {
+                max_iterations: 30,
+                ..BaConfig::default()
+            })
+            .unwrap();
+        let final_center_error =
+            (problem.poses[&1].camera_center_world() - truth[1].camera_center_world()).norm();
+        assert!(result.final_cost < initial_cost * 1.0e-6);
+        assert!(final_center_error < initial_center_error * 1.0e-3);
+    }
 }
 
 /// Convert optional normalized matcher confidences into relative BA
@@ -218,6 +296,20 @@ pub struct BaGeneralStereoObservation {
     pub xy_right: Point2<f64>,
     pub right_camera: Camera,
     pub left_to_right: SE3,
+}
+
+/// One observation from an arbitrary sensor rigidly attached to a shared rig
+/// frame. `poses[keyframe_id]` stores `T_rig<-world`; the fixed extrinsic is
+/// `T_sensor<-rig`. This is the non-central counterpart of
+/// [`BaObservation`] and allows every sensor pixel to constrain one body pose
+/// without requiring a same-landmark observation in a designated left camera.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaRigObservation {
+    pub keyframe_id: u64,
+    pub landmark_id: u64,
+    pub xy: Point2<f64>,
+    pub camera: Camera,
+    pub sensor_from_rig: SE3,
 }
 
 /// Rotation-alignment gravity prior on every non-fixed pose.
@@ -509,6 +601,8 @@ pub struct BundleAdjustment {
     /// Calibrated non-rectified stereo observations. These use [`Self::camera`]
     /// as the left camera and carry their right camera/extrinsic explicitly.
     pub general_stereo_observations: Vec<BaGeneralStereoObservation>,
+    /// Arbitrary calibrated rig-sensor observations sharing the frame poses.
+    pub rig_observations: Vec<BaRigObservation>,
     pub camera: Camera,
     /// Pose ids whose `Pose` is held constant during optimization.
     pub fixed_poses: BTreeSet<u64>,
@@ -597,6 +691,7 @@ impl BundleAdjustment {
             observations: Vec::new(),
             stereo_observations: Vec::new(),
             general_stereo_observations: Vec::new(),
+            rig_observations: Vec::new(),
             camera,
             fixed_poses: BTreeSet::new(),
             fixed_pose_rotations: BTreeSet::new(),
@@ -632,6 +727,7 @@ impl BundleAdjustment {
             || !self.observations.is_empty()
             || !self.stereo_observations.is_empty()
             || !self.general_stereo_observations.is_empty()
+            || !self.rig_observations.is_empty()
         {
             return None;
         }
@@ -808,6 +904,10 @@ impl BundleAdjustment {
         self.general_stereo_observations.push(obs);
     }
 
+    pub fn add_rig_observation(&mut self, observation: BaRigObservation) {
+        self.rig_observations.push(observation);
+    }
+
     /// Set the rectified-stereo baseline (positive, metric, in the units of
     /// the landmark coordinates). Required when any
     /// [`Self::stereo_observations`] are present.
@@ -870,7 +970,17 @@ impl BundleAdjustment {
             general_stereo_residual_jacobians(&left_intrinsics, obs, pose, point).is_none()
         });
 
-        mono.count() + stereo.count() + general_stereo.count()
+        let rig = self.rig_observations.iter().filter(|observation| {
+            let (Some(pose), Some(point)) = (
+                self.poses.get(&observation.keyframe_id),
+                self.landmarks.get(&observation.landmark_id),
+            ) else {
+                return true;
+            };
+            rig_residual_jacobians(observation, pose, point).is_none()
+        });
+
+        mono.count() + stereo.count() + general_stereo.count() + rig.count()
     }
 
     /// Robust reprojection cost: `Σ ρ(||r||²)` where `ρ` is the supplied
@@ -1101,6 +1211,20 @@ impl BundleAdjustment {
             let w = gnc_weights.map_or(1.0, |weights| weights[general_offset + index]);
             total += w * kernel.cost(residual.norm_squared());
         }
+        let rig_offset = general_offset + self.general_stereo_observations.len();
+        for (index, observation) in self.rig_observations.iter().enumerate() {
+            let (Some(pose), Some(point)) = (
+                self.poses.get(&observation.keyframe_id),
+                self.landmarks.get(&observation.landmark_id),
+            ) else {
+                continue;
+            };
+            let Some((residual, _, _)) = rig_residual_jacobians(observation, pose, point) else {
+                continue;
+            };
+            let weight = gnc_weights.map_or(1.0, |weights| weights[rig_offset + index]);
+            total += weight * kernel.cost(residual.norm_squared());
+        }
         if let Some(prior) = &self.gravity_prior {
             for pose in self.poses.values() {
                 let r_mat = pose
@@ -1249,7 +1373,8 @@ impl BundleAdjustment {
     fn reprojection_squared_residuals(&self) -> Vec<f64> {
         let n = self.observations.len()
             + self.stereo_observations.len()
-            + self.general_stereo_observations.len();
+            + self.general_stereo_observations.len()
+            + self.rig_observations.len();
         let mut out = Vec::with_capacity(n);
         let Some(intrinsics) = self.intrinsics() else {
             out.resize(n, f64::NAN);
@@ -1301,13 +1426,25 @@ impl BundleAdjustment {
             })();
             out.push(s.unwrap_or(f64::NAN));
         }
+        for observation in &self.rig_observations {
+            let squared = (|| {
+                let pose = self.poses.get(&observation.keyframe_id)?;
+                let point = self.landmarks.get(&observation.landmark_id)?;
+                let (residual, _, _) = rig_residual_jacobians(observation, pose, point)?;
+                Some(residual.norm_squared())
+            })();
+            out.push(squared.unwrap_or(f64::NAN));
+        }
         out
     }
 
     /// Run Levenberg-Marquardt bundle adjustment with Schur-complement
     /// landmark elimination. Returns iteration trace and final cost.
     pub fn optimize(&mut self, config: &BaConfig) -> Result<BaResult, BaError> {
-        if !config.refine_intrinsics || !self.general_stereo_observations.is_empty() {
+        if !config.refine_intrinsics
+            || !self.general_stereo_observations.is_empty()
+            || !self.rig_observations.is_empty()
+        {
             return self.optimize_weighted(config, None);
         }
         // Joint pose + structure + intrinsics refinement (the COLMAP self-
@@ -1347,7 +1484,8 @@ impl BundleAdjustment {
     fn validate_observation_weights(&self, observation_weights: &[f64]) -> Result<(), BaError> {
         let expected = self.observations.len()
             + self.stereo_observations.len()
-            + self.general_stereo_observations.len();
+            + self.general_stereo_observations.len()
+            + self.rig_observations.len();
         if observation_weights.len() != expected {
             return Err(BaError::ObservationWeightCount {
                 expected,
@@ -1888,7 +2026,8 @@ impl BundleAdjustment {
         let initial_cost = self.robust_cost(&kernel_none);
         let n = self.observations.len()
             + self.stereo_observations.len()
-            + self.general_stereo_observations.len();
+            + self.general_stereo_observations.len()
+            + self.rig_observations.len();
 
         // GNC inlier scale: largest residual seeds the convex μ₀; the same
         // residuals optionally drive the MAD auto-estimate of `c` (with the
@@ -2014,7 +2153,8 @@ impl BundleAdjustment {
         }
         let has_visual_observations = !self.observations.is_empty()
             || !self.stereo_observations.is_empty()
-            || !self.general_stereo_observations.is_empty();
+            || !self.general_stereo_observations.is_empty()
+            || !self.rig_observations.is_empty();
         let has_imu_factors = !self.imu_factors.is_empty();
         if !has_visual_observations && !has_imu_factors {
             return Err(BaError::NoObservations);
@@ -2054,6 +2194,17 @@ impl BundleAdjustment {
                 return Err(BaError::MissingLandmark(obs.landmark_id));
             }
             if obs.right_camera.intrinsics().is_none() {
+                return Err(BaError::UnsupportedCameraModel);
+            }
+        }
+        for observation in &self.rig_observations {
+            if !self.poses.contains_key(&observation.keyframe_id) {
+                return Err(BaError::MissingPose(observation.keyframe_id));
+            }
+            if !self.landmarks.contains_key(&observation.landmark_id) {
+                return Err(BaError::MissingLandmark(observation.landmark_id));
+            }
+            if observation.camera.intrinsics().is_none() {
                 return Err(BaError::UnsupportedCameraModel);
             }
         }
@@ -2383,6 +2534,7 @@ fn clear_visual_and_structural_costs(ba: &mut BundleAdjustment) {
     ba.observations.clear();
     ba.stereo_observations.clear();
     ba.general_stereo_observations.clear();
+    ba.rig_observations.clear();
     ba.gravity_prior = None;
     ba.per_pose_gravity_prior = None;
     ba.position_prior = None;
@@ -3014,7 +3166,6 @@ fn build_normal_equations(
     let bias_offset = pose_dim + v_count * 3;
     let total_dim = pose_dim + v_count * 3 + b_count * 6;
     let pure_visual_pose_blocks = prefer_pose_blocks
-        && !parallel
         && v_count == 0
         && b_count == 0
         && ba.position_prior.is_none()
@@ -3257,6 +3408,45 @@ fn build_normal_equations(
         if let (Some(p), Some(l)) = (i_pose, i_lm) {
             let cross: Matrix6x3<f64> = j_pose.transpose() * j_lm;
             landmarks[l].cross.push((p, w * cross));
+        }
+    }
+
+    // Arbitrary calibrated rig sensor: two residual rows tied directly to
+    // the shared body pose through the fixed `sensor <- rig` extrinsic.
+    let rig_offset = general_offset + ba.general_stereo_observations.len();
+    for (index, observation) in ba.rig_observations.iter().enumerate() {
+        let pose = &ba.poses[&observation.keyframe_id];
+        let point = &ba.landmarks[&observation.landmark_id];
+        let Some((residual, j_pose, j_lm)) = rig_residual_jacobians(observation, pose, point)
+        else {
+            continue;
+        };
+        let squared_residual = residual.norm_squared();
+        let weight = kernel.weight(squared_residual)
+            * gnc_weights.map_or(1.0, |weights| weights[rig_offset + index]);
+        let pose_slot = pose_index.get(&observation.keyframe_id).copied();
+        let landmark_slot = landmark_index.get(&observation.landmark_id).copied();
+        if let Some(slot) = pose_slot {
+            let hessian: Matrix6<f64> = j_pose.transpose() * j_pose;
+            let gradient: Vector6<f64> = j_pose.transpose() * residual;
+            for row in 0..6 {
+                for column in 0..6 {
+                    h_pp[(slot * 6 + row, slot * 6 + column)] += weight * hessian[(row, column)];
+                }
+                b_p[slot * 6 + row] += weight * gradient[row];
+            }
+        }
+        if let Some(slot) = landmark_slot {
+            let hessian: Matrix3<f64> = j_lm.transpose() * j_lm;
+            let gradient: Vector3<f64> = j_lm.transpose() * residual;
+            landmarks[slot].h_ll += weight * hessian;
+            landmarks[slot].b_l += weight * gradient;
+        }
+        if let (Some(pose_slot), Some(landmark_slot)) = (pose_slot, landmark_slot) {
+            let cross: Matrix6x3<f64> = j_pose.transpose() * j_lm;
+            landmarks[landmark_slot]
+                .cross
+                .push((pose_slot, weight * cross));
         }
     }
 
@@ -4008,7 +4198,6 @@ fn solve_step(
         debug_assert_eq!(v_count, 0);
         debug_assert_eq!(b_count, 0);
         debug_assert_eq!(linear_solver, LinearSolver::Sparse);
-        debug_assert!(!parallel);
         let CameraHessian::PoseDiagonal(diagonal) =
             std::mem::replace(&mut system.h_pp, CameraHessian::pose_diagonal(0))
         else {
@@ -4862,6 +5051,39 @@ fn general_stereo_residual_jacobians(
     Some((residual, j_pose, j_landmark))
 }
 
+fn rig_residual_jacobians(
+    observation: &BaRigObservation,
+    pose: &Pose,
+    point_world: &Point3<f64>,
+) -> Option<(Vector2<f64>, Matrix2x6<f64>, Matrix2x3<f64>)> {
+    let intrinsics = observation.camera.intrinsics()?;
+    let point_rig = pose.transform_world_point(point_world);
+    let point_sensor = observation.sensor_from_rig.transform_point(&point_rig);
+    let predicted = project_pinhole(&intrinsics, &point_sensor)?;
+    let residual = predicted - observation.xy;
+    let projection = pinhole_projection_jacobian(&intrinsics, &point_sensor)?;
+    let rotation_world_to_rig = pose
+        .world_to_camera
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    let rotation_rig_to_sensor = observation
+        .sensor_from_rig
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    let mut d_rig_d_pose = Matrix3x6::<f64>::zeros();
+    d_rig_d_pose
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&rotation_world_to_rig);
+    d_rig_d_pose
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&(-rotation_world_to_rig * skew(&point_world.coords)));
+    let j_pose = projection * rotation_rig_to_sensor * d_rig_d_pose;
+    let j_landmark = projection * rotation_rig_to_sensor * rotation_world_to_rig;
+    Some((residual, j_pose, j_landmark))
+}
+
 fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
@@ -5667,6 +5889,34 @@ mod parallel_ba_tests {
             ba_serial.landmarks, ba_parallel.landmarks,
             "landmarks must match exactly"
         );
+    }
+
+    #[test]
+    fn parallel_sparse_ba_keeps_pose_block_system_and_matches_serial() {
+        let mut ba_serial = build_synthetic_ba(TEST_CAMERAS, TEST_LANDMARKS);
+        let mut ba_parallel = ba_serial.clone();
+        let serial_config = BaConfig {
+            max_iterations: 8,
+            linear_solver: LinearSolver::Sparse,
+            parallel: false,
+            ..BaConfig::default()
+        };
+        let parallel_config = BaConfig {
+            parallel: true,
+            ..serial_config
+        };
+
+        let result_serial = ba_serial
+            .optimize(&serial_config)
+            .expect("serial sparse BA should solve the synthetic problem");
+        let result_parallel = ba_parallel
+            .optimize(&parallel_config)
+            .expect("parallel sparse BA should solve the synthetic problem");
+
+        assert_eq!(result_serial.final_cost, result_parallel.final_cost);
+        assert_eq!(result_serial.iterations, result_parallel.iterations);
+        assert_eq!(ba_serial.poses, ba_parallel.poses);
+        assert_eq!(ba_serial.landmarks, ba_parallel.landmarks);
     }
 
     #[test]

@@ -1083,11 +1083,49 @@ pub struct TrackBuildStats {
     pub retained_observations: usize,
 }
 
+/// Bounded topology diagnostics for the confidence-ordered rig-track policy.
+///
+/// This preview intentionally reports only the conflict regions induced by
+/// rejected confidence-ordered edges. It does not change the normal builder,
+/// materialize alternate tracks, or retain any state for a mapper run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PairConfidenceConflictStats {
+    /// Number of verified match rows offered to the confidence ordering.
+    pub correspondences: usize,
+    /// Number of distinct `(image, keypoint)` endpoints touched by a row.
+    pub nodes: usize,
+    /// Number of edges that joined two previously distinct, image-compatible
+    /// DSU components.
+    pub accepted_edges: usize,
+    /// Number of edges rejected because their two components shared an image.
+    pub rejected_edges: usize,
+    /// Number of final DSU components after accepted unions.
+    pub final_components: usize,
+    /// Number of connected regions in the graph of final components induced by
+    /// rejected edges.
+    pub conflict_regions: usize,
+    /// Number of final components involved in at least one conflict region.
+    pub involved_components: usize,
+    /// Sum of observations in each involved final component, counted once per
+    /// disjoint region.
+    pub involved_observations: usize,
+    /// Largest number of final components in one conflict region.
+    pub max_region_components: usize,
+    /// Largest number of observations in one conflict region.
+    pub max_region_observations: usize,
+    /// Largest number of images shared by the two components at a rejected
+    /// edge, measured at the rejection point.
+    pub max_overlapping_images_per_rejected_edge: usize,
+    /// Histogram of conflict-region component counts as deterministic
+    /// ascending `(component_count, region_count)` entries.
+    pub region_component_count_histogram: Vec<(usize, usize)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TrackBuildOutput {
     pub(crate) tracks: Vec<Vec<(usize, usize)>>,
-    conflicting_components: Vec<Vec<(usize, usize)>>,
-    stats: TrackBuildStats,
+    pub(crate) conflicting_components: Vec<Vec<(usize, usize)>>,
+    pub(crate) stats: TrackBuildStats,
 }
 
 pub(crate) fn build_track_output(
@@ -2956,6 +2994,31 @@ pub(crate) fn build_tracks_incremental_correspondence(
     pairwise: &[PairwiseMatches],
     min_track_length: usize,
 ) -> TrackBuildOutput {
+    build_tracks_incremental_correspondence_impl(features, pairwise, min_track_length, true)
+}
+
+/// Build conflict-preserving tracks in the verified input stream order.
+///
+/// This is intentionally separate from the physical-key-order policy above.
+/// A caller can first supply a frozen, trusted correspondence prefix and then
+/// append lower-priority bridge pairs.  Conflicting bridge edges are therefore
+/// rejected without allowing their numeric image/keypoint ids to displace the
+/// trusted prefix.  The caller is responsible for binding and checksumming the
+/// input order when reproducibility matters.
+pub(crate) fn build_tracks_incremental_correspondence_in_order(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+) -> TrackBuildOutput {
+    build_tracks_incremental_correspondence_impl(features, pairwise, min_track_length, false)
+}
+
+fn build_tracks_incremental_correspondence_impl(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+    sort_edges: bool,
+) -> TrackBuildOutput {
     #[derive(Debug, Default)]
     struct WorkingTrack {
         observations: Vec<(usize, usize)>,
@@ -2994,7 +3057,9 @@ pub(crate) fn build_tracks_incremental_correspondence(
             edges.push((image_i, image_j, keypoint_i, keypoint_j));
         }
     }
-    edges.sort_unstable();
+    if sort_edges {
+        edges.sort_unstable();
+    }
 
     let mut tracks = Vec::<WorkingTrack>::new();
     let mut observation_to_track = HashMap::<(usize, usize), usize>::new();
@@ -3207,6 +3272,63 @@ impl CorrespondencePointState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ConfidenceCandidate {
+    image_i: usize,
+    image_j: usize,
+    keypoint_i: usize,
+    keypoint_j: usize,
+    verified_inliers: usize,
+    essential_inliers: usize,
+    trusted: bool,
+}
+
+fn confidence_ordered_candidates(
+    pairwise: &[PairwiseMatches],
+    trusted_prefix: usize,
+) -> Vec<ConfidenceCandidate> {
+    let trusted_prefix = trusted_prefix.min(pairwise.len());
+    let mut candidates = Vec::new();
+    for (pair_index, pair) in pairwise.iter().enumerate() {
+        let essential_inliers = pair.essential_matches.as_ref().map_or(0, Vec::len);
+        let (image_i, image_j, swapped) = if pair.image_i <= pair.image_j {
+            (pair.image_i, pair.image_j, false)
+        } else {
+            (pair.image_j, pair.image_i, true)
+        };
+        for &(keypoint_i, keypoint_j) in &pair.matches {
+            let (keypoint_i, keypoint_j) = if swapped {
+                (keypoint_j, keypoint_i)
+            } else {
+                (keypoint_i, keypoint_j)
+            };
+            candidates.push(ConfidenceCandidate {
+                image_i,
+                image_j,
+                keypoint_i,
+                keypoint_j,
+                verified_inliers: pair.matches.len(),
+                essential_inliers,
+                trusted: pair_index < trusted_prefix,
+            });
+        }
+    }
+    // Stronger verified pairs first. Every remaining field makes ties
+    // independent of the input pair/vector order; duplicate candidates are
+    // harmless because the second one finds the same component.
+    candidates.sort_unstable_by(|a, b| {
+        b.trusted
+            .cmp(&a.trusted)
+            .then_with(|| b.verified_inliers.cmp(&a.verified_inliers))
+            .then_with(|| b.essential_inliers.cmp(&a.essential_inliers))
+            .then_with(|| a.image_i.cmp(&b.image_i))
+            .then_with(|| a.image_j.cmp(&b.image_j))
+            .then_with(|| a.keypoint_i.cmp(&b.keypoint_i))
+            .then_with(|| a.keypoint_j.cmp(&b.keypoint_j))
+    });
+    candidates
+}
+
 /// Build tracks in a deterministic confidence order while refusing a merge
 /// that would put two observations from the same image in one component.
 ///
@@ -3220,53 +3342,211 @@ pub(crate) fn build_tracks_confidence_ordered(
     pairwise: &[PairwiseMatches],
     min_track_length: usize,
 ) -> TrackBuildOutput {
+    build_tracks_confidence_ordered_impl(n_images, pairwise, min_track_length, 0)
+}
+
+/// Build confidence-ordered tracks while processing a trusted pair prefix
+/// before every remaining pair.
+///
+/// Confidence ordering is retained independently inside both tiers. A frozen
+/// base snapshot can therefore establish its proven tracks before newly
+/// verified component bridges compete for observations.
+pub(crate) fn build_tracks_confidence_ordered_with_trusted_prefix(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+    trusted_pair_prefix: usize,
+) -> TrackBuildOutput {
+    build_tracks_confidence_ordered_impl(
+        n_images,
+        pairwise,
+        min_track_length,
+        trusted_pair_prefix.min(pairwise.len()),
+    )
+}
+
+/// Preview the conflict topology produced by confidence-ordered track
+/// construction without materializing tracks or changing any mapper state.
+///
+/// The candidate order and image-compatible union-find decisions mirror
+/// [`build_tracks_confidence_ordered_impl`]. Rejected edge endpoints are then
+/// projected onto the final successful-component roots and connected by a
+/// second compact union-find. The resulting regions are therefore sparse
+/// summaries of the rejected topology, not a component-pair matrix. Apart
+/// from the deterministic candidate sort and PairConfidence image-set
+/// conflict checks, the second compact DSU pass over rejected endpoints and
+/// final roots is linear in the touched observations and rejected edges; no
+/// N² state is allocated.
+pub fn preview_pair_confidence_conflicts(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    trusted_prefix: usize,
+) -> PairConfidenceConflictStats {
     let _ = n_images;
-    #[derive(Clone, Copy)]
-    struct Candidate {
-        image_i: usize,
-        image_j: usize,
-        keypoint_i: usize,
-        keypoint_j: usize,
-        verified_inliers: usize,
-        essential_inliers: usize,
+    let candidates = confidence_ordered_candidates(pairwise, trusted_prefix);
+
+    let mut node_id = HashMap::<(usize, usize), usize>::new();
+    let mut nodes = Vec::<(usize, usize)>::new();
+    let mut parent = Vec::new();
+    let mut component_size = Vec::new();
+    let mut component_images = Vec::<HashSet<usize>>::new();
+    let node_of = |image: usize,
+                   keypoint: usize,
+                   node_id: &mut HashMap<(usize, usize), usize>,
+                   nodes: &mut Vec<(usize, usize)>,
+                   parent: &mut Vec<usize>,
+                   component_size: &mut Vec<usize>,
+                   component_images: &mut Vec<HashSet<usize>>|
+     -> usize {
+        if let Some(&id) = node_id.get(&(image, keypoint)) {
+            return id;
+        }
+        let id = nodes.len();
+        node_id.insert((image, keypoint), id);
+        nodes.push((image, keypoint));
+        parent.push(id);
+        component_size.push(1);
+        component_images.push(HashSet::from([image]));
+        id
+    };
+
+    let mut accepted_edges = 0usize;
+    let mut rejected_endpoints = Vec::<(usize, usize)>::new();
+    let mut max_overlapping_images_per_rejected_edge = 0usize;
+    for candidate in candidates {
+        let left = node_of(
+            candidate.image_i,
+            candidate.keypoint_i,
+            &mut node_id,
+            &mut nodes,
+            &mut parent,
+            &mut component_size,
+            &mut component_images,
+        );
+        let right = node_of(
+            candidate.image_j,
+            candidate.keypoint_j,
+            &mut node_id,
+            &mut nodes,
+            &mut parent,
+            &mut component_size,
+            &mut component_images,
+        );
+        let left_root = find(&mut parent, left);
+        let right_root = find(&mut parent, right);
+        if left_root == right_root {
+            continue;
+        }
+        let overlap = if component_images[left_root].len() <= component_images[right_root].len() {
+            component_images[left_root]
+                .iter()
+                .filter(|image| component_images[right_root].contains(image))
+                .count()
+        } else {
+            component_images[right_root]
+                .iter()
+                .filter(|image| component_images[left_root].contains(image))
+                .count()
+        };
+        if overlap != 0 {
+            rejected_endpoints.push((left, right));
+            max_overlapping_images_per_rejected_edge =
+                max_overlapping_images_per_rejected_edge.max(overlap);
+            continue;
+        }
+        accepted_edges += 1;
+        // Union-by-size is the same movement bound and root tie-break as the
+        // confidence builder; component image sets are moved, never copied.
+        let (root, child) = if component_size[left_root] > component_size[right_root]
+            || (component_size[left_root] == component_size[right_root] && left_root < right_root)
+        {
+            (left_root, right_root)
+        } else {
+            (right_root, left_root)
+        };
+        parent[child] = root;
+        component_size[root] += component_size[child];
+        let child_images = std::mem::take(&mut component_images[child]);
+        component_images[root].extend(child_images);
     }
 
-    let mut candidates = Vec::new();
-    for pair in pairwise {
-        let essential_inliers = pair.essential_matches.as_ref().map_or(0, Vec::len);
-        let (image_i, image_j, swapped) = if pair.image_i <= pair.image_j {
-            (pair.image_i, pair.image_j, false)
-        } else {
-            (pair.image_j, pair.image_i, true)
-        };
-        for &(keypoint_i, keypoint_j) in &pair.matches {
-            let (keypoint_i, keypoint_j) = if swapped {
-                (keypoint_j, keypoint_i)
-            } else {
-                (keypoint_i, keypoint_j)
-            };
-            candidates.push(Candidate {
-                image_i,
-                image_j,
-                keypoint_i,
-                keypoint_j,
-                verified_inliers: pair.matches.len(),
-                essential_inliers,
-            });
-        }
+    let mut node_roots = Vec::with_capacity(nodes.len());
+    let mut final_roots = Vec::new();
+    for node in 0..nodes.len() {
+        let root = find(&mut parent, node);
+        node_roots.push(root);
+        final_roots.push(root);
     }
-    // Stronger verified pairs first. Every remaining field makes ties
-    // independent of the input pair/vector order; duplicate candidates are
-    // harmless because the second one finds the same component.
-    candidates.sort_unstable_by(|a, b| {
-        b.verified_inliers
-            .cmp(&a.verified_inliers)
-            .then_with(|| b.essential_inliers.cmp(&a.essential_inliers))
-            .then_with(|| a.image_i.cmp(&b.image_i))
-            .then_with(|| a.image_j.cmp(&b.image_j))
-            .then_with(|| a.keypoint_i.cmp(&b.keypoint_i))
-            .then_with(|| a.keypoint_j.cmp(&b.keypoint_j))
-    });
+    final_roots.sort_unstable();
+    final_roots.dedup();
+    let root_to_component = final_roots
+        .iter()
+        .enumerate()
+        .map(|(component, &root)| (root, component))
+        .collect::<HashMap<_, _>>();
+
+    // The rejected-edge graph is built only over final roots that actually
+    // participate in a rejection. Thus a long chain collapses to one region,
+    // while unrelated successful components remain entirely untouched.
+    let mut region_parent = (0..final_roots.len()).collect::<Vec<_>>();
+    let mut involved = HashSet::new();
+    for &(left, right) in &rejected_endpoints {
+        let left_component = root_to_component[&node_roots[left]];
+        let right_component = root_to_component[&node_roots[right]];
+        involved.insert(left_component);
+        involved.insert(right_component);
+        union(&mut region_parent, left_component, right_component);
+    }
+    let mut region_members = HashMap::<usize, Vec<usize>>::new();
+    for component in involved {
+        let region = find(&mut region_parent, component);
+        region_members.entry(region).or_default().push(component);
+    }
+
+    let mut histogram = BTreeMap::<usize, usize>::new();
+    let mut involved_components = 0usize;
+    let mut involved_observations = 0usize;
+    let mut max_region_components = 0usize;
+    let mut max_region_observations = 0usize;
+    for members in region_members.values_mut() {
+        members.sort_unstable();
+        members.dedup();
+        let region_components = members.len();
+        let region_observations = members
+            .iter()
+            .map(|&component| component_size[final_roots[component]])
+            .sum::<usize>();
+        *histogram.entry(region_components).or_default() += 1;
+        involved_components += region_components;
+        involved_observations += region_observations;
+        max_region_components = max_region_components.max(region_components);
+        max_region_observations = max_region_observations.max(region_observations);
+    }
+
+    PairConfidenceConflictStats {
+        correspondences: pairwise.iter().map(|pair| pair.matches.len()).sum(),
+        nodes: nodes.len(),
+        accepted_edges,
+        rejected_edges: rejected_endpoints.len(),
+        final_components: final_roots.len(),
+        conflict_regions: region_members.len(),
+        involved_components,
+        involved_observations,
+        max_region_components,
+        max_region_observations,
+        max_overlapping_images_per_rejected_edge,
+        region_component_count_histogram: histogram.into_iter().collect(),
+    }
+}
+
+fn build_tracks_confidence_ordered_impl(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+    trusted_pair_prefix: usize,
+) -> TrackBuildOutput {
+    let _ = n_images;
+    let candidates = confidence_ordered_candidates(pairwise, trusted_pair_prefix);
 
     let mut node_id: HashMap<(usize, usize), usize> = HashMap::new();
     let mut nodes: Vec<(usize, usize)> = Vec::new();
@@ -15571,6 +15851,127 @@ mod tests {
             assert_eq!(
                 build_tracks_confidence_ordered(3, &reordered, 2).tracks,
                 expected
+            );
+        }
+
+        let reversed_orientation = [
+            PairwiseMatches::new(1, 0, vec![(1, 0)]),
+            PairwiseMatches::new(2, 1, vec![(1, 1), (0, 0)]),
+            PairwiseMatches::new(1, 0, vec![(1, 1), (0, 0)]),
+        ];
+        for permutation in [vec![1, 2, 0], vec![0, 2, 1]] {
+            let reordered = permutation
+                .into_iter()
+                .map(|index| reversed_orientation[index].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                build_tracks_confidence_ordered(3, &reordered, 2).tracks,
+                expected,
+                "pair orientation and match order must not change the builder"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_confidence_conflict_preview_reports_zero_conflicts() {
+        let pairwise = vec![PairwiseMatches::new(0, 1, vec![(0, 0), (1, 1)])];
+        let stats = preview_pair_confidence_conflicts(2, &pairwise, 0);
+        assert_eq!(
+            stats,
+            PairConfidenceConflictStats {
+                correspondences: 2,
+                nodes: 4,
+                accepted_edges: 2,
+                rejected_edges: 0,
+                final_components: 2,
+                conflict_regions: 0,
+                involved_components: 0,
+                involved_observations: 0,
+                max_region_components: 0,
+                max_region_observations: 0,
+                max_overlapping_images_per_rejected_edge: 0,
+                region_component_count_histogram: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn pair_confidence_conflict_preview_reports_one_region() {
+        let pairwise = vec![
+            PairwiseMatches::new(0, 1, vec![(0, 1)]),
+            PairwiseMatches::new(1, 2, vec![(0, 0), (1, 1)]),
+            PairwiseMatches::new(0, 1, vec![(0, 0), (1, 1)]),
+        ];
+        let stats = preview_pair_confidence_conflicts(3, &pairwise, 0);
+        assert_eq!(stats.correspondences, 5);
+        assert_eq!(stats.nodes, 6);
+        assert_eq!(stats.accepted_edges, 4);
+        assert_eq!(stats.rejected_edges, 1);
+        assert_eq!(stats.final_components, 2);
+        assert_eq!(stats.conflict_regions, 1);
+        assert_eq!(stats.involved_components, 2);
+        assert_eq!(stats.involved_observations, 6);
+        assert_eq!(stats.max_region_components, 2);
+        assert_eq!(stats.max_region_observations, 6);
+        assert_eq!(stats.max_overlapping_images_per_rejected_edge, 3);
+        assert_eq!(stats.region_component_count_histogram, vec![(2, 1)]);
+    }
+
+    #[test]
+    fn pair_confidence_conflict_preview_chained_rejections_share_one_region() {
+        let pairwise = vec![PairwiseMatches::new(
+            0,
+            1,
+            vec![(0, 0), (0, 1), (1, 1), (1, 2), (2, 2)],
+        )];
+        let stats = preview_pair_confidence_conflicts(2, &pairwise, 0);
+        assert_eq!(stats.correspondences, 5);
+        assert_eq!(stats.nodes, 6);
+        assert_eq!(stats.accepted_edges, 3);
+        assert_eq!(stats.rejected_edges, 2);
+        assert_eq!(stats.final_components, 3);
+        assert_eq!(stats.conflict_regions, 1);
+        assert_eq!(stats.involved_components, 3);
+        assert_eq!(stats.involved_observations, 6);
+        assert_eq!(stats.max_region_components, 3);
+        assert_eq!(stats.max_region_observations, 6);
+        assert_eq!(stats.max_overlapping_images_per_rejected_edge, 1);
+        assert_eq!(stats.region_component_count_histogram, vec![(3, 1)]);
+    }
+
+    #[test]
+    fn pair_confidence_conflict_preview_is_permutation_deterministic() {
+        let pairwise = vec![
+            PairwiseMatches::new(0, 1, vec![(0, 1)]),
+            PairwiseMatches::new(1, 2, vec![(0, 0), (1, 1)]),
+            PairwiseMatches::new(0, 1, vec![(0, 0), (1, 1)]),
+        ];
+        let expected = preview_pair_confidence_conflicts(3, &pairwise, 0);
+        for permutation in [vec![2, 0, 1], vec![1, 2, 0], vec![0, 2, 1]] {
+            let reordered = permutation
+                .into_iter()
+                .map(|index| pairwise[index].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                preview_pair_confidence_conflicts(3, &reordered, 0),
+                expected
+            );
+        }
+
+        let reversed_orientation = [
+            PairwiseMatches::new(1, 0, vec![(1, 0)]),
+            PairwiseMatches::new(2, 1, vec![(1, 1), (0, 0)]),
+            PairwiseMatches::new(1, 0, vec![(1, 1), (0, 0)]),
+        ];
+        for permutation in [vec![1, 2, 0], vec![0, 2, 1]] {
+            let reordered = permutation
+                .into_iter()
+                .map(|index| reversed_orientation[index].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                preview_pair_confidence_conflicts(3, &reordered, 0),
+                expected,
+                "pair orientation and match order must not change the preview"
             );
         }
     }

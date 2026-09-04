@@ -2,7 +2,24 @@ use nalgebra::{DMatrix, DVector, Matrix3, Point2, Point3, UnitQuaternion, Vector
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 
+mod generalized;
+mod gr6p;
+mod gr6p_data;
 mod p3p;
+pub use generalized::{
+    GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedDltPoseEstimator,
+    GeneralizedGaussNewtonPoseRefiner, GeneralizedPnPRansac, GeneralizedRansacReport, RigSensor,
+};
+pub use gr6p::{
+    estimate_gr6p, estimate_gr6p_ransac, estimate_gr6p_ransac_with_config,
+    estimate_gr6p_with_config, generalized_epipolar_residual,
+    generalized_epipolar_residual_squared, normalize_gr6p_correspondences,
+    GeneralizedCameraObservation, GeneralizedRelativeCorrespondence, GeneralizedRelativePose,
+    GeneralizedRelativePoseConfig, GeneralizedRelativePoseError,
+    GeneralizedRelativePoseRansacConfig, GeneralizedRelativePoseRansacError,
+    GeneralizedRelativePoseRansacReport, GeneralizedRelativePoseRansacResult,
+    GeneralizedRelativePoseResult,
+};
 pub use p3p::P3PGrunert;
 
 #[derive(Debug, Clone, PartialEq)]

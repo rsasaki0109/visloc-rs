@@ -1,0 +1,64 @@
+{
+  "schema": "visloc_m8_openloris_robust_triangulation_hypothesis_ab_v1",
+  "date": "2026-09-04",
+  "dataset": "OpenLORIS corridor1-1, frozen calibrated-rig tiers",
+  "hypothesis": {
+    "source_reference": "COLMAP IncrementalTriangulator::Create uses robust triangulation over correspondence-graph observations",
+    "ground_truth_used_during_mapping": false,
+    "change": "replace the robust-pruning path's single widest-ray candidate with consensus scoring over every pair of at most 16 evenly sampled registered rays",
+    "bound": "at most 120 point hypotheses per scheduled track attempt; each hypothesis scans that track's registered observations; O(120 * observations) work and O(16) added state, independent of image count squared",
+    "selection": "maximum reprojection inliers, then minimum total/mean squared error, maximum angle, and stable ray indices",
+    "ordinary_non_robust_path_changed": false
+  },
+  "tier_1000": {
+    "registered_images": 1000,
+    "models": 1,
+    "tracks": 6823,
+    "observations": 274189,
+    "mean_reprojection_error_px": 0.756772429,
+    "ate_rmse_m": 0.026878938548836058,
+    "ate_p95_m": 0.04078867949842184,
+    "ate_max_m": 0.08269214535535506,
+    "mapper_seconds": 73.583702,
+    "process_wall_seconds": 74.34,
+    "peak_rss_kib": 232952,
+    "robust_tracks": 6842,
+    "pruned_observations": 809,
+    "majority_rejections": 6320,
+    "images_txt_sha256": "3f8ccae94d991613c56ccdb5fed00dc1773953e18e1b41f9a74a81c0da41b9d0",
+    "points3D_txt_sha256": "ff53a09b4a2341f9560fbd5566872c6f589b9626d8910e02c22e23b22f96fe43",
+    "colmap_gate": "pass"
+  },
+  "tier_10000": {
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_images": 8988,
+    "tracks": 381961,
+    "observations": 1757769,
+    "mean_reprojection_error_px": 0.733106700,
+    "ate_rmse_m": 1.3105085819732232,
+    "ate_p95_m": 2.6727070497051266,
+    "ate_max_m": 3.4787696710797227,
+    "mapper_seconds": 374.506050,
+    "process_wall_seconds": 378.85,
+    "peak_rss_kib": 1424996,
+    "dominant_component": {
+      "registered_images": 8988,
+      "robust_tracks": 46737,
+      "pruned_observations": 11774,
+      "majority_rejections": 105228,
+      "ate_rmse_m": 1.3878193774197745,
+      "ate_p95_m": 2.6891259888663677,
+      "images_txt_sha256": "71936b016bf44621bf43b8e0b284bdca758c77ed36c6082dd80f9a9d628e01b1",
+      "points3D_txt_sha256": "00ecdcd2fa269ad284326455cb71d40c552be76cc3e9fd5ef8f7a98dc926a290"
+    },
+    "second_component": {
+      "registered_images": 1010,
+      "ate_rmse_m": 0.06277019834084593,
+      "ate_p95_m": 0.13273600944672106,
+      "images_txt_sha256": "f3f87bb704a920da4708a662066d9788db95b3355a7254c2f04afd844260d3cf"
+    },
+    "status": "rejected_trajectory_gate"
+  },
+  "conclusion": "The bounded consensus estimator fixes the synthetic widest-pair failure and improves the frozen 1k robust arm, but catastrophically strengthens self-consistent repeated-corridor aliases in the 10k dominant component. The simultaneously improved second component demonstrates that the implementation is active and can help non-aliased geometry; the scale-specific failure is the expected circularity of selecting hypotheses with the pose estimate being corrected. The experiment is removed. A future COLMAP-style create/continue path needs independent correspondence identity or incremental locality, not global consensus against the already-drifted trajectory."
+}

@@ -1,0 +1,300 @@
+{
+  "schema": "visloc_m8_openloris_dynamic_correspondence_1k_v1",
+  "recorded_at": "2026-09-04T12:04:49+09:00",
+  "dataset": "OpenLORIS corridor1-1",
+  "status": "rejected_at_1k_promotion_gate",
+  "ground_truth_used_for_selection_or_mapping": false,
+  "hypothesis": "a bounded correspondence CSR with registration-time create/continue ownership avoids global pre-union aliases while preserving COLMAP-style mapper growth",
+  "inputs": {
+    "frames": 500,
+    "images": 1000,
+    "verified_pairs": 6935,
+    "compacted_matches": 1605174,
+    "keypoints": 361170,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k",
+    "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps",
+    "snapshot_sha256": "c5a59bed8a21fe6a6ca553eb2fd80049954c7505103a5569f0f804526a80b971",
+    "score_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0"
+  },
+  "implementation": {
+    "flag": "--dynamic-correspondence-tracking",
+    "default": false,
+    "csr": "u32 flattened observations, u64 image offsets, sorted deduplicated bidirectional edges",
+    "bootstrap": "legacy union membership is inspected only to select one frame-local metric seed; the global tracks are dropped before growth",
+    "growth": "each CSR row is activated at most once; ownership is installed only for registered images and accepted PnP inliers",
+    "persistent_complexity": "O(observations + verified correspondence edges + registered dynamic tracks); no frame-pair matrix and no all-unregistered-frame rescan",
+    "unsupported_combinations": [
+      "deferred registration or retriangulation",
+      "post-registration track completion",
+      "metric conflict recovery",
+      "alternate prebuilt track builders",
+      "robust triangulation pruning",
+      "direct or motion bridge registration"
+    ]
+  },
+  "frozen_controls": {
+    "visloc_legacy": {
+      "registered_images": 1000,
+      "models": 1,
+      "seed_frame": 8,
+      "tracks": 4716,
+      "observations": 130900,
+      "mean_reprojection_px": 0.720678690,
+      "ate_rmse_m": 0.026703233595482503,
+      "ate_p95_m": 0.04134610748761521,
+      "ate_max_m": 0.08045566543261787,
+      "mapper_seconds_remeasured": 16.499276,
+      "wall_seconds_remeasured": 17.25,
+      "peak_rss_kib_remeasured": 142044
+    },
+    "official_colmap": {
+      "registered_images": 1000,
+      "mean_reprojection_px": 0.8102073187543721,
+      "ate_rmse_m": 0.027968541677842282,
+      "ate_p95_m": 0.042266006958647205,
+      "mapper_seconds": 2073.399966248,
+      "peak_rss_kib": 629664
+    }
+  },
+  "experiments": {
+    "direct_stereo_seed_only": {
+      "decision": "rejected",
+      "seed_frame": 26,
+      "registered_images": 1000,
+      "models": 1,
+      "mean_reprojection_px": 0.743881604,
+      "ate_rmse_m": 0.029189895795399212,
+      "ate_p95_m": 0.04403729015477546,
+      "reason": "only three direct same-frame stereo seed candidates existed; the frozen frame-8 seed was unreachable"
+    },
+    "legacy_membership_bootstrap": {
+      "decision": "best_dynamic_arm_but_rejected",
+      "seed_frame": 8,
+      "bootstrap_legacy_tracks": 8663,
+      "bootstrap_candidates": 422,
+      "bootstrap_seed_support": 96,
+      "bootstrap_seed_landmarks": 88,
+      "registered_images": 1000,
+      "models": 1,
+      "tracks": 8441,
+      "observations": 271594,
+      "mean_reprojection_px": 0.743283945,
+      "ate_rmse_m": 0.029099635763349854,
+      "ate_p95_m": 0.043678871077456695,
+      "ate_max_m": 0.0852041159532134,
+      "mapper_seconds": 36.543878,
+      "wall_seconds": 37.37,
+      "peak_rss_kib": 171732,
+      "activated_rows": 361170,
+      "directed_edges_visited": 3210348,
+      "dynamic_track_creates": 16886,
+      "dynamic_track_continues": 300392,
+      "owner_conflicts": 61871,
+      "same_image_conflicts": 9394,
+      "geometry_rejections": 21897,
+      "pnp_graph_insertions": 237183,
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "af37165e09603859c19b84ea7babe6d2c5b785036260957b1ac7dcf5da19a6c5",
+        "points3D_txt": "ca7d7793d45ef16513e88698ab1c667ebbb6563abc75a6468ac8edbbc62a6aa8"
+      },
+      "repeat_model_byte_identical": true
+    },
+    "single_edge_fragment_merge": {
+      "decision": "rejected_and_removed",
+      "successful_merges": 3375,
+      "ate_rmse_m": 0.029407962982371708,
+      "ate_p95_m": 0.04414794150607097,
+      "reason": "unpositioned single-edge merges reintroduced repeated-corridor aliases"
+    },
+    "metric_tracks_only_ba": {
+      "decision": "rejected",
+      "mapper_seconds": 12.196179,
+      "mean_reprojection_px": 0.805458368,
+      "ate_rmse_m": 0.11362428482395126,
+      "ate_p95_m": 0.2495575982827879
+    },
+    "local_ba_disabled": {
+      "decision": "rejected",
+      "mapper_seconds": 23.659712,
+      "mean_reprojection_px": 0.659240693,
+      "ate_rmse_m": 0.07054962935176212,
+      "ate_p95_m": 0.10139839074515558
+    },
+    "local_ba_every_5": {
+      "decision": "rejected",
+      "mapper_seconds": 45.733037,
+      "mean_reprojection_px": 0.754932077,
+      "ate_rmse_m": 0.02979942896217806,
+      "ate_p95_m": 0.04540173331069834
+    },
+    "minimum_two_owner_neighbors": {
+      "decision": "rejected_and_removed",
+      "support_one_model_byte_identical_to_baseline": true,
+      "registered_images": 1000,
+      "models": 1,
+      "continuation_support_rejections": 51197,
+      "tracks": 7853,
+      "observations": 253135,
+      "mean_reprojection_px": 0.743411440,
+      "ate_rmse_m": 0.02919422947265066,
+      "ate_p95_m": 0.043480596686306314,
+      "ate_max_m": 0.08553005512951992,
+      "mapper_seconds": 38.052470,
+      "wall_seconds": 38.93,
+      "peak_rss_kib": 170796,
+      "reason": "counting two owned CSR neighbors slightly improved p95 but worsened RMSE and still failed both trajectory controls; support count alone does not prove a geometrically independent cycle"
+    },
+    "owned_correspondence_triangle": {
+      "decision": "rejected_and_removed",
+      "registered_images": 1000,
+      "models": 1,
+      "continuation_cycle_rejections": 69393,
+      "tracks": 8030,
+      "observations": 247336,
+      "mean_reprojection_px": 0.731076048,
+      "ate_rmse_m": 0.02912747785421342,
+      "ate_p95_m": 0.04371580107387254,
+      "ate_max_m": 0.0852740440839713,
+      "mapper_seconds": 31.245290,
+      "wall_seconds": 32.01,
+      "peak_rss_kib": 166236,
+      "reason": "requiring a closed u-v-w correspondence triangle with the third observation already owned improved time, RSS, and reprojection but slightly worsened both RMSE and p95; appearance-cycle consistency is not trajectory-geometric independence"
+    },
+    "selected_seed_component_pnp_proposals": {
+      "decision": "rejected_as_partial_visibility_fix",
+      "registered_images": 1000,
+      "models": 1,
+      "first_pnp_matches_legacy": true,
+      "first_pnp_frame": 58,
+      "first_pnp_support": 158,
+      "first_pnp_inliers": 158,
+      "second_pnp_diverges_from_legacy": true,
+      "proposal_components": 96,
+      "proposal_observations": 35824,
+      "proposal_cache_insertions": 31768,
+      "tracks": 8318,
+      "observations": 269769,
+      "mean_reprojection_px": 0.744082753,
+      "ate_rmse_m": 0.029301720979239453,
+      "ate_p95_m": 0.04407965808454181,
+      "ate_max_m": 0.0852374821884608,
+      "mapper_seconds": 34.465572,
+      "wall_seconds": 35.22,
+      "peak_rss_kib": 172608,
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "9e0566d82595afaf5f0a008a1cecd0cbcb87977b6267eb18e6742424ad62b4f6",
+        "points3D_txt": "d95b7156cff19ae0d575503dece0190ec672ea9cc12f5ac0b70ada799b4229d9"
+      },
+      "reason": "owner-neutral selected seed-component proposals exactly restore the legacy first PnP choice and pose, proving the visibility diagnosis, but newly positioned tracks again expose only direct CSR neighbours; registration diverges at order two and both frozen trajectory controls regress"
+    },
+    "streamed_positioned_component_pnp_proposals": {
+      "decision": "rejected_and_removed",
+      "registered_images": 1000,
+      "models": 1,
+      "first_pnp_matches_legacy": true,
+      "second_pnp_diverges_from_legacy": true,
+      "published_components": 4760,
+      "published_component_observations": 142125,
+      "proposal_cache_insertions": 108185,
+      "each_component_scanned_at_most_once": true,
+      "persistent_complexity": "O(observations + components + verified CSR edges)",
+      "tracks": 8182,
+      "observations": 270342,
+      "mean_reprojection_px": 0.746086380,
+      "ate_rmse_m": 0.029400060505733704,
+      "ate_p95_m": 0.0440043008437575,
+      "ate_max_m": 0.0857191021900096,
+      "mapper_seconds": 37.506387,
+      "wall_seconds": 38.31,
+      "peak_rss_kib": 175548,
+      "registration_trace": {
+        "sequence_mismatches": 350,
+        "mean_absolute_order_delta": 6.264,
+        "mean_camera_center_delta_m": 0.008091519497462561,
+        "maximum_camera_center_delta_m": 0.05379959100087829,
+        "sha256": "66cd9b4b38714ae0f1ce1f6a2a03a45fc846a3918b2f8bb5cd61828a6a054b22"
+      },
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "9a7aa9db417a6134070c11b5d393d09cc5164e233e25744736c346dc7ebc511a",
+        "points3D_txt": "c89f6a1368b15f3d78e2beb01101920d71429d7454927e3d6f910245686c388b"
+      },
+      "score_sha256": "85acffa31d842e1f3e8c00a78689f987c480af040a48d69d4a9efd7c6b39886a",
+      "reason": "publishing every clean component touched by an already positioned dynamic fragment cannot expose a clean component whose registered observations remain separated by unregistered CSR nodes; unlike legacy pre-union tracks, no proposal 3-D point exists for those components, so order two still diverges and trajectory regresses further"
+    },
+    "power_of_two_component_shadow_pnp": {
+      "decision": "rejected_and_removed",
+      "registered_images": 1000,
+      "models": 1,
+      "seed_frame": 8,
+      "tracks": 9507,
+      "observations": 266329,
+      "mean_reprojection_px": 0.725859022,
+      "ate_rmse_m": 0.031834421791424636,
+      "ate_p95_m": 0.04750435377416578,
+      "ate_max_m": 0.0885664983153662,
+      "mapper_seconds": 35.041384,
+      "wall_seconds": 35.813813,
+      "peak_rss_kib": 187852,
+      "component_index_observations": 163604,
+      "component_index_components": 8663,
+      "shadow_attempts": 15909,
+      "shadow_landmarks": 3627,
+      "shadow_published_observations": 63634,
+      "shadow_cache_insertions": 53886,
+      "shadow_cache_conflicts": 9748,
+      "shadow_owner_conflicts": 0,
+      "shadow_pnp_inliers": 48496,
+      "persistent_complexity": "O(observations + components + verified CSR edges); no image-pair matrix or N^2 state",
+      "retry_policy": "triangulate unpublished components when registered support crosses 2, 4, 8, ... observations",
+      "registration_trace": {
+        "legacy_first_three_after_seed": [
+          "frame 58: 158/158 support/inliers",
+          "frame 74: 185/185 support/inliers",
+          "frame 26: 190/190 support/inliers"
+        ],
+        "shadow_first_three_after_seed": [
+          "frame 74: 158/158 support/inliers",
+          "frame 61: 178/177 support/inliers",
+          "frame 58: 177/177 support/inliers"
+        ],
+        "sha256": "c77e960def3bbb1dd9a90e6d0804a0ce40aced5ff48dd6f76887d0e8828fd7f8"
+      },
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "d267c6c3f5694a85ee51222243117d8ba9f50af2942c9676b322cfe7ff7a18ae",
+        "points3D_txt": "6757c70111cc47e521de879f465b2aa534c2f111ab13b99caf17c5857ecb93b7"
+      },
+      "score_sha256": "831dab5296d3e57eabfbb1b217caf39d4b522b73d2f9ee90a9700358c34ac6c6",
+      "gate": {
+        "registration_pass": true,
+        "reprojection_vs_colmap_pass": true,
+        "trajectory_vs_visloc_control_pass": false,
+        "trajectory_vs_colmap_pass": false,
+        "mapper_speed_vs_visloc_control_pass": false,
+        "memory_bound_pass": true
+      },
+      "reason": "owner-neutral shadow landmarks prove that unregistered CSR bridges can feed PnP without owner write-back, but publishing seed-time shadows changes the first PnP from legacy frame 58 to frame 74; 15,909 repeated triangulation attempts more than double mapper time and the resulting trajectory is worse than both frozen visloc and COLMAP controls"
+    }
+  },
+  "promotion_gate": {
+    "promote_to_2500": false,
+    "promote_to_10000": false,
+    "registration_pass": true,
+    "reprojection_vs_colmap_pass": true,
+    "trajectory_vs_visloc_control_pass": false,
+    "trajectory_vs_colmap_pass": false,
+    "memory_bound_pass": true,
+    "reason": "all dynamic arms fail trajectory parity; the shadow arm additionally more than doubles mapper time versus the frozen visloc control"
+  },
+  "decision": {
+    "retain_default_off_diagnostic": true,
+    "reject_single_edge_owner_merge": true,
+    "next_action": "stop widening clean-component visibility and pose-continuity repairs; the remaining bounded A/B is to preserve at most a small fixed number of geometrically supported track alternatives before irreversible same-image ownership conflict resolution, and promote only if frozen 1k trajectory and runtime gates pass"
+  }
+}

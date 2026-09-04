@@ -1,0 +1,184 @@
+{
+  "schema": "visloc_m8_openloris_photometric_quadrilateral_ab_v1",
+  "date": "2026-09-04",
+  "dataset": "OpenLORIS corridor1-1, frozen 10,000-image rig tier",
+  "selection_policy": {
+    "ground_truth_used": false,
+    "descriptor_values_used": false,
+    "reconstructed_poses_used": false,
+    "candidate": "exact stereo-temporal four-edge quadrilateral over adjacent frames",
+    "gate": "pyramidal LK on both sensor-temporal edges; endpoint <= 2 px, forward/backward <= 1 px, max LK error <= 20",
+    "quadrilaterals_tsv_sha256": "7a371a79745a2912320d79366858df92e64477e83d4767c93a35cb71828b67ae",
+    "accepted_tsv_sha256": "00db0e698b77a060541c3a148b785782bf5052e276a47260b364cc3715c1c3ac",
+    "script_sha256": "6daf364bc036badfde0c888f2b377b2663126e5d8c3c7564d33dfb8cb4d011d9"
+  },
+  "photometric_diagnostic": {
+    "candidate_tracks": 65747,
+    "candidate_temporal_edges": 131494,
+    "lk_status_failures": 154,
+    "accepted_tracks": 59948,
+    "acceptance_fraction": 0.91179825695469,
+    "wall_seconds": 107.21,
+    "peak_rss_kib": 148400,
+    "target_error_px": {
+      "median": 0.3073829114437103,
+      "p95": 2.025384032726286,
+      "p99": 6.994173412322999
+    },
+    "forward_backward_error_px": {
+      "median": 0.00713902828283608,
+      "p95": 0.12363563440740101,
+      "p99": 1.0771748495101943
+    },
+    "frame_bin_acceptance": {
+      "0-499": [6921, 7190],
+      "500-999": [5960, 6473],
+      "1000-1499": [5612, 6488],
+      "1500-1999": [5589, 6573],
+      "2000-2499": [6584, 7081],
+      "2500-2999": [7834, 7982],
+      "3000-3499": [6153, 6596],
+      "3500-3999": [4116, 4999],
+      "4000-4499": [4741, 5369],
+      "4500-4999": [6438, 6996]
+    }
+  },
+  "post_registration_ab": {
+    "status": "superseded_methodological_confound",
+    "deferred_matches_before_whitelist": 967670,
+    "deferred_matches_after_whitelist": 239792,
+    "deferred_retriangulated_tracks": 34839,
+    "deferred_retriangulated_observations": 139356,
+    "registered_images": 9980,
+    "models": 2,
+    "largest_model_images": 8972,
+    "mean_reprojection_error_px": 0.772858026,
+    "mapper_seconds": 237.262886,
+    "process_wall_seconds": 241.70,
+    "peak_rss_kib": 1263008,
+    "ate_rmse_m": 0.39043150556067807,
+    "ate_p95_m": 0.7644831213144856,
+    "ate_max_m": 1.3889650814607584,
+    "component_images_txt_sha256": [
+      "453c9ac298030cf8c8fc3e0a1c78eceb9071e2d2d5d7ab123b6b2eeb442336cc",
+      "bebadf6885ede394787d60f815d08f7b1cd045bd67e32229a2c82dec2dc31fe6"
+    ]
+  },
+  "adjacent_metric_motion_diagnostic": {
+    "ground_truth_used": false,
+    "tracks_with_two_local_stereo_points": 39745,
+    "local_stereo_points": 156107,
+    "candidate_frame_pairs": 4399,
+    "accepted_frame_pairs": 3767,
+    "median_rotation_disagreement_deg": 0.9730183621402636,
+    "median_translation_direction_cosine": 0.34489670001497363,
+    "mapper_consistent_pairs_rotation_1deg_direction_cos_0_99": 32,
+    "mapper_consistent_pairs_frames_3000_3499": 0,
+    "diagnosis": "the short stereo baseline and tiny adjacent motion make translation direction ill-conditioned; these estimates are not safe metric odometry factors"
+  },
+  "wide_baseline_32_128": {
+    "candidate_tracks": 81045,
+    "accepted_tracks": 36981,
+    "acceptance_fraction": 0.45630205441421434,
+    "lk_status_failures": 14732,
+    "photometric_wall_seconds": 111.13,
+    "photometric_peak_rss_kib": 160160,
+    "accepted_tracks_frames_2500_3499": 6078,
+    "mapping_contract": "original deferred pairs retained for registration; a disjoint filtered copy is used only for exact quadrilateral retriangulation",
+    "deferred_matches_screened": 1114438,
+    "deferred_matches_retained_for_retriangulation": 144034,
+    "registered_images": 9998,
+    "models": 2,
+    "largest_model_images": 8988,
+    "deferred_retriangulated_tracks": 30355,
+    "deferred_retriangulated_observations": 121420,
+    "mean_reprojection_error_px": 0.797590254,
+    "mapper_seconds": 264.897922,
+    "process_wall_seconds": 269.51,
+    "peak_rss_kib": 1312132,
+    "ate_rmse_m": 0.3900423018469193,
+    "ate_p95_m": 0.775568707135539,
+    "ate_max_m": 1.4987603922760226,
+    "status": "rejected_trajectory_gate"
+  },
+  "wide_metric_factor_diagnostic": {
+    "ground_truth_used_for_estimation": false,
+    "descriptor_values_used": false,
+    "reconstructed_poses_used": false,
+    "script_sha256": "45394e83f81f3bdf358b9487cd7cc8ce91d531d7367622123ce7473eb12fc2e3",
+    "min_stereo_angle_0_5_deg": {
+      "input_tracks": 36981,
+      "triangulated_tracks": 29102,
+      "candidate_frame_pairs": 1298,
+      "accepted_factors": 468,
+      "median_inlier_fraction": 0.8235294117647058,
+      "median_inlier_residual_m": 0.03918148956966578,
+      "translation_median_m": 0.04572221354809488,
+      "translation_p95_m": 0.7732402929653189,
+      "translation_max_m": 4.331606433770799,
+      "accepted_factor_frame_bins": {
+        "0-499": 363,
+        "500-999": 69,
+        "1000-1499": 12,
+        "2000-2499": 5,
+        "3000-3499": 12,
+        "4500-4999": 7
+      },
+      "diagnosis": "the loose stereo-angle gate produces late factors, but their direction and scale are unstable under the narrow physical baseline"
+    },
+    "min_stereo_angle_2_deg": {
+      "input_tracks": 36981,
+      "triangulated_tracks": 4687,
+      "candidate_frame_pairs": 398,
+      "accepted_factors": 200,
+      "median_inlier_fraction": 1.0,
+      "median_inlier_residual_m": 0.013625116665984581,
+      "translation_median_m": 0.016315301246844674,
+      "translation_p95_m": 0.06851760137322586,
+      "translation_max_m": 0.1867068746755971,
+      "accepted_factor_frame_bins": {
+        "0-499": 195,
+        "500-999": 5
+      },
+      "diagnosis": "the defensible stereo-angle gate leaves no factor beyond frame 970 and therefore no constraint in the 2500-3499 drift region"
+    },
+    "status": "rejected_observability_gate"
+  },
+  "stereo_pnp_factor_diagnostic": {
+    "ground_truth_used_for_estimation": false,
+    "descriptor_values_used": false,
+    "reconstructed_poses_used": false,
+    "script_sha256": "b7abddfb53904a2621ae2762518c7b0646b739807989a0976ddccf0f0dcfc720",
+    "input_tracks": 36981,
+    "candidate_frame_pairs": 2029,
+    "frame_pairs_with_any_source_triangulation": 1506,
+    "method": "triangulate metric 3-D in one rig frame, solve independent target PnP for both calibrated sensors, repeat in reverse, then require sensor and forward/reverse agreement",
+    "gates": {
+      "min_stereo_angle_deg": 0.5,
+      "min_correspondences": 8,
+      "min_inliers": 6,
+      "pnp_reprojection_px": 2.0,
+      "max_sensor_rotation_error_deg": 0.5,
+      "max_sensor_translation_error_m": 0.02,
+      "max_forward_reverse_rotation_error_deg": 2.0,
+      "max_forward_reverse_translation_error_m": 0.1
+    },
+    "accepted_frame_pairs": 398,
+    "accepted_directional_factors": 796,
+    "accepted_pair_frame_bins": {
+      "0-499": 325,
+      "500-999": 64,
+      "1000-1499": 8,
+      "2000-2499": 1
+    },
+    "drift_region_2500_3499_factors": 0,
+    "median_sensor_rotation_error_deg": 0.10827208059303281,
+    "median_sensor_translation_error_m": 0.005366478671092346,
+    "median_forward_reverse_rotation_error_deg": 0.07099434281365667,
+    "median_forward_reverse_translation_error_m": 0.0036033682548237203,
+    "wall_seconds": 7.44,
+    "peak_rss_kib": 172984,
+    "status": "rejected_observability_coverage_gate"
+  },
+  "conclusion": "The pose-free photometric check is bounded and discriminates wide-baseline candidates much more strongly than adjacent candidates. The first adjacent mapping experiment also filtered registration support and is therefore retained only as a superseded methodological negative. A corrected 32-128-frame experiment keeps registration support intact and preserves 9,998 images, but explicit wide metric tracks score 0.39004/0.77557 m RMSE/p95 versus the 0.38754/0.76836 m visloc control. Independent support exists, but adding it as ordinary reprojection tracks does not repair the remaining gauge drift. Direct metric factors are also rejected: a 2-degree stereo 3-D-to-3-D gate yields 200 clean fits only at the start, while a one-sided stereo-PnP formulation yields 398 sensor- and bidirectionally-consistent pairs but none in frames 2,500-3,499. Lowering observability gates reaches later frames only by admitting mutually inconsistent direction and scale."
+}

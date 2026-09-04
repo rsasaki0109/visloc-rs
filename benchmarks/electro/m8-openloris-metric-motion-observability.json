@@ -1,0 +1,60 @@
+{
+  "schema": "visloc_m8_openloris_metric_motion_observability_v1",
+  "status": "diagnostic_valid_sparse_scale_constraint_hypothesis_rejected",
+  "ground_truth_used_for_estimation": false,
+  "method": "triangulate each matched point independently in its calibrated rig frame, aggregate shared 3D-to-3D tracks by bounded frame gap, estimate relative SE(3) with deterministic Kabsch RANSAC, and compare metric translation with the reconstructed rig motion",
+  "complexity": "bounded by stereo track observations times configured frame gap plus per-supported-frame-pair RANSAC; no image-pair Cartesian product",
+  "implementation": {
+    "script": "scripts/diagnose_rig_metric_motion.py",
+    "script_sha256": "595d9fa5fcfeb1adfd69c2c50025ae9e13c3aa05afe4a96011fc35d5cc0ae22c",
+    "test": "tests/test_diagnose_rig_metric_motion.py",
+    "test_sha256": "8ae76875af7b458ae5c292ab852a697a197d32236a9d4173209e578ed1ac0e5b",
+    "synthetic_contract": "recovers a known 1 m metric translation at ratio 1.0 without trajectory ground truth"
+  },
+  "one_k_short_gap_1_to_2": {
+    "candidate_frame_pairs": 893,
+    "accepted_frame_pairs": 839,
+    "translation_ratio_median": 22.30373504099167,
+    "translation_ratio_p95": 202.76841425374013,
+    "direction_cosine_median": 0.15986977222062818,
+    "verdict": "unobservable because real inter-frame motion is far below stereo depth noise"
+  },
+  "one_k_exact_gap_128": {
+    "candidate_frame_pairs": 320,
+    "accepted_frame_pairs": 294,
+    "mapper_translation_median_m": 0.202700705197766,
+    "stereo_metric_translation_median_m": 0.2256063549533224,
+    "translation_ratio_median": 1.0935488760668706,
+    "translation_ratio_p05": 0.9765589523364775,
+    "translation_ratio_p95": 1.2339886361628982,
+    "direction_cosine_median": 0.9930031381020202,
+    "verdict": "observable but only the first 500-frame region has enough exact-gap support at 10k"
+  },
+  "ten_k_gap_16_to_32": {
+    "component": 0,
+    "candidate_frame_pairs": 60548,
+    "accepted_frame_pairs": 14902,
+    "rejected_low_support_pairs": 45605,
+    "translation_ratio_median": 1.0997677702105366,
+    "direction_cosine_median": 0.9685356323447157,
+    "frame_bins": {
+      "0-499": {"pairs": 7673, "translation_ratio_median": 1.4648356144166248},
+      "500-999": {"pairs": 4072, "translation_ratio_median": 1.0782492977357037},
+      "1000-1499": {"pairs": 1510, "translation_ratio_median": 1.0435307508569702},
+      "1500-1999": {"pairs": 289, "translation_ratio_median": 1.0377137435902872},
+      "2000-2499": {"pairs": 6, "translation_ratio_median": 0.9950589895065461},
+      "2500-2999": {"pairs": 6, "translation_ratio_median": 1.0646952955672455},
+      "3000-3499": {"pairs": 97, "translation_ratio_median": 1.055969129412978},
+      "3500-3999": {"pairs": 80, "translation_ratio_median": 1.0300272132712456},
+      "4000-4499": {"pairs": 1169, "translation_ratio_median": 1.0388072949268063}
+    }
+  },
+  "post_mapping_gt_cross_check": {
+    "mapper_to_gt_translation_step_ratio_frames_3000_to_3499": 1.21699241,
+    "required_metric_to_mapper_direction_for_scale_correction": "below 1.0",
+    "observed_metric_to_mapper_translation_ratio": 1.055969129412978,
+    "verdict": "the stereo-track estimate points in the wrong correction direction in the known drift region"
+  },
+  "decision": "do not add these sparse relative translations as mapper constraints: support nearly disappears across frames 2000-3999 and the surviving frame-3000 signal would enlarge rather than correct the independently measured scale drift",
+  "next_action": "return to the near-gate adaptive pair-confidence mapper and test whether COLMAP-grade global refinement can close its small remaining trajectory and reprojection gap before changing track topology again"
+}

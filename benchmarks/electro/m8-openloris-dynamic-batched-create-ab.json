@@ -1,0 +1,88 @@
+{
+  "schema": "visloc_m8_openloris_dynamic_batched_create_ab_v1",
+  "date": "2026-09-04",
+  "dataset": "OpenLORIS corridor1-1, frozen calibrated-rig 1k",
+  "ground_truth_used_during_mapping": false,
+  "method": {
+    "description": "bounded registration-time multi-view Create for one CSR reference row and its registered, unowned neighbours",
+    "inspiration": "COLMAP IncrementalTriangulator::Find/Create",
+    "ownership": "score ray-pair hypotheses before the first owner write; claim only the winning track's mutually-exclusive inlier observations",
+    "limits": {
+      "max_neighbors": 32,
+      "max_hypotheses": 128,
+      "candidate_state": "O(observations + CSR edges); no region or track-pair matrix"
+    },
+    "ground_truth_role": "post-mapping score only"
+  },
+  "inputs": {
+    "images": 1000,
+    "verified_pairs": 6935,
+    "matches": 1605174,
+    "keypoints": 361170,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k",
+    "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps",
+    "control_output": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-dynamic-head7482053-control-v1",
+    "candidate_output": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-dynamic-batched-create-v1"
+  },
+  "source_experiment": {
+    "state": "uncommitted source/CLI experiment, subsequently reverted",
+    "default_path_changed": false,
+    "promotion_tier": "1k frozen acceptance run"
+  },
+  "commands": {
+    "control": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-dynamic-head7482053-control-v1/model --max-matches-per-pair 256 --dynamic-correspondence-tracking",
+    "candidate": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-dynamic-batched-create-v1/model --max-matches-per-pair 256 --dynamic-correspondence-tracking --dynamic-batched-create"
+  },
+  "control": {
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "models": 1,
+    "tracks": 8441,
+    "observations": 271594,
+    "mean_reprojection_error_px": 0.743283945,
+    "ate_rmse_m": 0.029099635763349854,
+    "ate_p95_m": 0.043678871077456695,
+    "ate_max_m": 0.0852041159532134,
+    "mapper_seconds": 33.862056,
+    "total_seconds": 34.630680,
+    "process_wall_seconds": 34.64,
+    "peak_rss_kib": 171932,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "af37165e09603859c19b84ea7babe6d2c5b785036260957b1ac7dcf5da19a6c5",
+      "points3D_txt": "ca7d7793d45ef16513e88698ab1c667ebbb6563abc75a6468ac8edbbc62a6aa8"
+    }
+  },
+  "candidate": {
+    "flag": "--dynamic-batched-create",
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "models": 1,
+    "tracks": 9318,
+    "observations": 259655,
+    "mean_reprojection_error_px": 0.762919353,
+    "ate_rmse_m": 0.029501086816290163,
+    "ate_p95_m": 0.04441540041273464,
+    "ate_max_m": 0.08574459620124009,
+    "mapper_seconds": 31.518696,
+    "total_seconds": 32.262170,
+    "process_wall_seconds": 32.27,
+    "peak_rss_kib": 166372,
+    "counters": {
+      "attempts": 84753,
+      "successes": 9243,
+      "hypotheses": 19998,
+      "claimed_observations": 27870,
+      "rejections": 75510
+    },
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "01d119ec08768238fee4f3ba19a839adf5e132483785c46d06c9f972d04a2af9",
+      "points3D_txt": "22277c7fa51469de5b041bf3b56143ff8b61c1a76a0a79ab4a238add30a3517c"
+    }
+  },
+  "decision": "rejected_and_reverted",
+  "conclusion": "The owner-before-Create transaction completed at 1k and retained all 1000 images, but it regressed RMSE, p95, and reprojection despite lower measured time and peak RSS. The bounded arm is rejected and is not promoted to 2.5k.",
+  "next_action": "Preserve mutually-exclusive alternatives or hypotheses before ownership is irreversible; never duplicate an observation across output tracks."
+}

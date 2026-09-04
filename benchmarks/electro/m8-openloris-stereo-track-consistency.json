@@ -1,0 +1,73 @@
+{
+  "schema": "visloc_m8_openloris_stereo_track_consistency_ab_v1",
+  "status": "diagnostic_valid_direct_ba_weighting_hypothesis_rejected",
+  "ground_truth_used": false,
+  "method": "independently triangulate every synchronized multi-sensor observation of a reconstructed track, take the coordinate-wise median world point, and measure each stereo point's maximum distance from that centre",
+  "complexity": "linear in COLMAP track observations plus per-track coordinate sorts; no image-pair Cartesian product",
+  "implementation": {
+    "script": "scripts/diagnose_rig_stereo_track_consistency.py",
+    "script_sha256": "cf3faa8ae4c70b1b41cf7e86996c0dfcb81cd697fab739a3565054889d9f7721",
+    "test": "tests/test_diagnose_rig_stereo_track_consistency.py",
+    "test_sha256": "839f78505063be02b6caeb66aa561e93adeaf2e7ba6559b349bc345645254da2",
+    "synthetic_tests": "3 passed"
+  },
+  "minimum_triangulation_angle_deg": 1.0,
+  "visloc_1k": {
+    "registered_images": 1000,
+    "tracks": 4809,
+    "eligible_tracks": 222,
+    "eligible_observations": 81585,
+    "stereo_frames_per_track_median": 87,
+    "max_cross_frame_deviation_median_m": 0.19600989224731324,
+    "max_cross_frame_deviation_p95_m": 0.7042119441604082,
+    "tracks_at_or_below_0_1m": 63
+  },
+  "visloc_10k": {
+    "component_000": {
+      "registered_images": 8988,
+      "tracks": 73636,
+      "eligible_tracks": 11771,
+      "eligible_observations": 494259,
+      "stereo_frames_per_track_median": 6,
+      "max_cross_frame_deviation_median_m": 0.086211367136984,
+      "max_cross_frame_deviation_p95_m": 0.48812076015589195,
+      "tracks_at_or_below_0_1m": 6473
+    },
+    "component_001": {
+      "registered_images": 1010,
+      "tracks": 7741,
+      "eligible_tracks": 1307,
+      "eligible_observations": 37360,
+      "stereo_frames_per_track_median": 5,
+      "max_cross_frame_deviation_median_m": 0.0529015328230276,
+      "max_cross_frame_deviation_p95_m": 0.43268268030053175,
+      "tracks_at_or_below_0_1m": 906
+    }
+  },
+  "colmap_10k_same_condition_control": {
+    "component_000": {
+      "registered_images": 8988,
+      "tracks": 103611,
+      "eligible_tracks": 2347,
+      "eligible_observations": 292248,
+      "stereo_frames_per_track_median": 10,
+      "max_cross_frame_deviation_median_m": 0.11533679008808075,
+      "max_cross_frame_deviation_p95_m": 0.7002305487062821,
+      "tracks_at_or_below_0_1m": 1091
+    },
+    "component_001": {
+      "registered_images": 1010,
+      "tracks": 10099,
+      "eligible_tracks": 0,
+      "eligible_observations": 0
+    },
+    "trajectory_ate_rmse_m": 0.3843065335437528,
+    "trajectory_ate_p95_m": 0.6386693943260212
+  },
+  "visloc_10k_trajectory": {
+    "ate_rmse_m": 0.6372900130652346,
+    "ate_p95_m": 1.1701771760690913
+  },
+  "decision": "do not weight BA rows from this endogenous consistency score: the worse visloc trajectory is more self-consistent than the COLMAP control in the large component, and COLMAP reconstructs the small component without any track eligible for the proposed two-stereo-frame screen",
+  "next_action": "measure and constrain independent metric inter-frame motion from synchronized stereo 3D-to-3D correspondences; unlike track reprojection self-consistency, relative metric motion exposes translation-scale drift without using pose ground truth"
+}

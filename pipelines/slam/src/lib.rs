@@ -15,9 +15,9 @@ pub mod bundle;
 mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
-    BaResult, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner,
-    GravityPrior, NavigationStatePrior, PairwisePoseFactor, PerPoseGravityObservation,
-    PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
+    BaResult, BaRigObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
+    BundleAdjustmentRefiner, GravityPrior, NavigationStatePrior, PairwisePoseFactor,
+    PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
 };
 
 pub mod camera_rig;
@@ -25,6 +25,23 @@ pub use camera_rig::{
     incremental_sfm_with_per_image_cameras, reconstruct_global_sfm_with_per_image_cameras,
     PerImageCameraError, PerImageCameraGlobalError, PerImageCameraIncrementalError,
     PerImageCameras,
+};
+
+pub mod rig_sfm;
+pub use rig_sfm::{
+    incremental_rig_sfm, metric_temporal_quadrilateral_tracks,
+    metric_temporal_quadrilateral_tracks_in_frame_gap, refine_rig_sfm_with_fixed_frame_rotations,
+    RigBaStats, RigFrame, RigFrameImage, RigSfmConfig, RigSfmError, RigSfmResult, RigSfmWorkStats,
+    RigTrackBuilder,
+};
+
+pub mod rig_correspondence;
+pub use rig_correspondence::{
+    build_rig_correspondence, build_rig_correspondence_csr,
+    build_rig_correspondence_csr_from_features, preview_rig_correspondence_stats,
+    preview_rig_correspondence_stats_from_features, RigCorrespondenceBuild,
+    RigCorrespondenceBuildError, RigCorrespondenceCsr, RigCorrespondenceCsrBuilder,
+    RigCorrespondencePreviewStats, RigObservationId,
 };
 
 pub mod covisibility_ba;
@@ -42,9 +59,10 @@ pub mod incremental_sfm;
 pub use incremental_sfm::{
     incremental_sfm, incremental_sfm_with_initial_poses,
     incremental_sfm_with_sequence_fallback_overrides, incremental_sfm_with_track_membership,
-    preview_track_build_stats, run_fixed_rotation_support_bundle_adjustment,
-    run_fixed_support_bundle_adjustment, IncrementalSfmConfig, IncrementalSfmError,
-    IncrementalSfmResult, NextImagePolicy, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
+    preview_pair_confidence_conflicts, preview_track_build_stats,
+    run_fixed_rotation_support_bundle_adjustment, run_fixed_support_bundle_adjustment,
+    IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult, NextImagePolicy,
+    PairConfidenceConflictStats, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
 };
 
 pub mod local_submap;

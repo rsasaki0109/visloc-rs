@@ -77,6 +77,76 @@ class ElectroBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(benchmark.ValidationError, "hash mismatch"):
                 benchmark.validate_candidate_shards(root / "candidates" / "index.json")
 
+    def test_compact_candidate_shards_scale_with_pairs_not_image_count_per_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_count = 100_000
+            names = [f"{index:06d}.png" for index in range(image_count)]
+            pairs = [(index, index + 1) for index in range(0, 128, 2)]
+            source = root / "candidates.txt"
+            benchmark.write_candidate_manifest(source, names, pairs)
+            index = benchmark.split_candidate_manifest(source, root / "candidates", 8)
+
+            self.assertEqual(index["image_manifest_sha256"], benchmark.candidate_image_manifest_sha256(names))
+            self.assertTrue(all(shard["format"] == "v2" for shard in index["shards"]))
+            self.assertTrue(
+                all(
+                    "image " not in (root / "candidates" / shard["path"]).read_text(
+                        encoding="utf-8"
+                    )
+                    for shard in index["shards"]
+                )
+            )
+            validated = benchmark.validate_candidate_shards(root / "candidates" / "index.json")
+            self.assertEqual(validated["pair_count"], len(pairs))
+            shard_bytes = sum(
+                (root / "candidates" / shard["path"]).stat().st_size
+                for shard in index["shards"]
+            )
+            # A v1 shard repeats roughly the whole image manifest for every
+            # shard.  v2 remains bounded by one source image manifest plus
+            # pair-index/envelope bytes, even at 100k images.
+            self.assertLess(shard_bytes, source.stat().st_size)
+
+    def test_compact_candidate_shard_rejects_corruption_and_image_count_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _, _ = self._candidate(root)
+            benchmark.split_candidate_manifest(source, root / "candidates", 2)
+            index_path = root / "candidates" / "index.json"
+            shard_path = root / "candidates" / "candidate-000000.txt"
+            original = shard_path.read_text(encoding="utf-8")
+
+            shard_path.write_text(
+                original.replace("source_manifest_sha256 ", "source_manifest_sha256 " + "0"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(benchmark.ValidationError, "hash mismatch"):
+                benchmark.validate_candidate_shards(index_path)
+
+            shard_path.write_text(original.replace("images 5", "images 4"), encoding="utf-8")
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index["shards"][0]["sha256"] = benchmark.sha256_file(shard_path)
+            index_path.write_text(json.dumps(index) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(benchmark.ValidationError, "image count differs"):
+                benchmark.validate_candidate_shards(index_path)
+
+    def test_legacy_v1_candidate_shard_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, names, pairs = self._candidate(root)
+            candidate_dir = root / "candidates"
+            index = benchmark.split_candidate_manifest(source, candidate_dir, 2)
+            legacy_path = candidate_dir / "candidate-000000.txt"
+            benchmark.write_candidate_manifest(legacy_path, names, pairs[:2])
+            index["shards"][0]["format"] = "v1"
+            index["shards"][0]["sha256"] = benchmark.sha256_file(legacy_path)
+            (candidate_dir / "index.json").write_text(
+                json.dumps(index) + "\n", encoding="utf-8"
+            )
+            validated = benchmark.validate_candidate_shards(candidate_dir / "index.json")
+            self.assertEqual(validated["shards"][0]["format"], "v1")
+
     def test_measured_command_records_peak_rss_and_exit_status(self) -> None:
         if not benchmark.GNU_TIME.is_file():
             self.skipTest("GNU time is unavailable")
@@ -402,6 +472,8 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 pair_source="temporal-pyramid",
                 temporal_pyramid_max_offset=64,
                 candidate_budget=12000,
+                rig_frame_manifest=Path("/input/rig.txt"),
+                retrieval_min_frame_gap=128,
             )
             self.assertIn("--pair-source", temporal_candidate_command)
             self.assertIn("temporal-pyramid", temporal_candidate_command)
@@ -409,6 +481,18 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertIn("64", temporal_candidate_command)
             self.assertNotIn("--local-stem-window", temporal_candidate_command)
             self.assertNotIn("--rig-local-grouping", temporal_candidate_command)
+            self.assertEqual(
+                temporal_candidate_command[
+                    temporal_candidate_command.index("--rig-frame-manifest") + 1
+                ],
+                "/input/rig.txt",
+            )
+            self.assertEqual(
+                temporal_candidate_command[
+                    temporal_candidate_command.index("--retrieval-min-frame-gap") + 1
+                ],
+                "128",
+            )
 
             ann_candidate_command = benchmark.build_candidate_command(
                 Path("/bin/visloc"),
@@ -446,7 +530,7 @@ class ElectroBenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, names, _ = self._candidate(root)
-            benchmark.split_candidate_manifest(source, root / "candidates", 2)
+            candidate_summary = benchmark.split_candidate_manifest(source, root / "candidates", 2)
             candidate_index = root / "candidates" / "index.json"
             benchmark.prepare_match_index(candidate_index, root / "matches")
             match_index = root / "matches" / "index.json"
@@ -460,6 +544,13 @@ class ElectroBenchmarkTests(unittest.TestCase):
             parsed = benchmark.parse_persistent_match_worker_plan(plan_path)
             validation = benchmark.validate_persistent_match_worker_plan(
                 plan_path, candidate_index, match_index, feature_manifest
+            )
+            self.assertEqual(parsed["schema"], benchmark.PERSISTENT_MATCH_WORKER_PLAN_MAGIC_V2)
+            self.assertEqual(
+                parsed["candidate_source_sha256"], candidate_summary["source_manifest_sha256"]
+            )
+            self.assertEqual(
+                parsed["image_manifest_sha256"], candidate_summary["image_manifest_sha256"]
             )
             self.assertEqual(parsed["image_names"], names)
             self.assertEqual(
@@ -507,6 +598,15 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertIn("incremental", command)
             self.assertNotIn("--gt", command)
             self.assertNotIn("points3D.txt", command)
+
+            streamed_command = benchmark.build_persistent_match_command(
+                Path("/bin/visloc"),
+                features_dir=root / "features",
+                calibration_dir=root / "calibration",
+                plan=plan_path,
+                stream_match_features=True,
+            )
+            self.assertIn("--stream-match-features", streamed_command)
 
     def test_persistent_completion_parser_rejects_corruption_and_duplicate_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -618,14 +718,18 @@ class ElectroBenchmarkTests(unittest.TestCase):
                     features_dir=root / "features",
                     calibration_dir=root,
                     feature_manifest_path=feature_manifest,
+                    stream_match_features=True,
                 )
             self.assertEqual(len(calls), 2)
+            self.assertIn("--stream-match-features", calls[1])
             resumed_plan = benchmark.parse_persistent_match_worker_plan(
                 Path(calls[1][calls[1].index("--persistent-match-worker-plan") + 1])
             )
             self.assertEqual([shard["id"] for shard in resumed_plan["shards"]], [1, 2])
             self.assertEqual(first_snapshot.read_bytes(), first_bytes)
             self.assertEqual(result["persistent_worker"]["shards"], 2)
+            self.assertEqual(result["persistent_worker"]["mode"], "persistent-stream-v1")
+            self.assertTrue(result["persistent_worker"]["stream_match_features"])
             complete = json.loads(match_index.read_text(encoding="utf-8"))
             self.assertEqual([entry["status"] for entry in complete["shards"]], ["complete"] * 3)
 
@@ -646,6 +750,11 @@ class ElectroBenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, _, _ = self._candidate(root)
+            rig_manifest = root / "rig.txt"
+            rig_manifest.write_text(
+                "# generalized-rig-manifest-v1\nF 0 a.png 0\nF 0 b.png 1\n",
+                encoding="utf-8",
+            )
             index = benchmark.split_candidate_manifest(
                 source,
                 root / "temporal-candidates",
@@ -654,7 +763,9 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 candidate_budget=12000,
                 pair_source="temporal-pyramid",
                 temporal_pyramid_max_offset=32,
-                local_grouping="rig-prefix-timestamp-v1",
+                retrieval_min_frame_gap=128,
+                local_grouping="generalized-rig-manifest-v1",
+                rig_frame_manifest=rig_manifest,
             )
             self.assertEqual(
                 index["candidate_policy"],
@@ -664,10 +775,19 @@ class ElectroBenchmarkTests(unittest.TestCase):
                     "candidate_budget": 12000,
                     "pair_source": "temporal-pyramid",
                     "temporal_pyramid_max_offset": 32,
-                    "local_grouping": "rig-prefix-timestamp-v1",
+                    "retrieval_min_frame_gap": 128,
+                    "local_grouping": "generalized-rig-manifest-v1",
+                    "rig_frame_manifest": str(rig_manifest.resolve()),
+                    "rig_frame_manifest_sha256": benchmark.sha256_file(rig_manifest),
                 },
             )
             benchmark.validate_candidate_shards(root / "temporal-candidates" / "index.json")
+            rig_manifest.write_text(
+                "# generalized-rig-manifest-v1\nF 1 a.png 0\nF 1 b.png 1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(benchmark.ValidationError, "rig frame manifest hash mismatch"):
+                benchmark.validate_candidate_shards(root / "temporal-candidates" / "index.json")
 
     def test_feature_manifest_rejects_changed_bytes_even_with_same_size(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

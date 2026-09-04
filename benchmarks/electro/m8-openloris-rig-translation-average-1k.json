@@ -1,0 +1,91 @@
+{
+  "schema": "visloc_m8_openloris_rig_translation_average_1k_v1",
+  "recorded_at": "2026-09-03T14:45:00Z",
+  "dataset": "OpenLORIS corridor1-1",
+  "status": "rejected_at_1k_promotion_gate",
+  "ground_truth_used_for_selection_or_mapping": false,
+  "hypothesis": "fixed incremental rig rotations plus correspondence-reestimated pair directions and independent per-edge scales can remove segment-scale translation drift without changing registration or map support",
+  "input": {
+    "frames": 500,
+    "images": 1000,
+    "verified_pairs": 6935,
+    "compacted_matches": 1605174,
+    "keypoints": 361170,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features",
+    "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps"
+  },
+  "configuration": {
+    "mapping_default": "disabled",
+    "reference_sensor": "sensor closest to the rig origin; must be within 1e-6 m",
+    "minimum_frame_gap": 8,
+    "minimum_matches": 30,
+    "maximum_direction_error_deg": 60.0,
+    "maximum_update_m": 2.0,
+    "solver_iterations": 8,
+    "direction_estimator": "smallest fixed-rotation epipolar nullspace from at most 64 deterministic correspondences",
+    "maximum_nullspace_ratio": 0.1,
+    "edge_weight": "min(essential_inliers, 128)",
+    "connectivity_backbone": "unit-weight consecutive registered-frame directions from the current trajectory; edge scales remain independent",
+    "complexity": "O(frames + verified correspondences + sparse edges); no image-pair matrix",
+    "publication": "Sim(3)-align to the current gauge, cap the maximum pose update, fixed-rotation structure refinement, then transactional support and reprojection guards"
+  },
+  "control": {
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "tracks": 4809,
+    "observations": 172752,
+    "mean_reprojection_px": 0.675028911,
+    "mapper_seconds": 20.361269,
+    "total_seconds": 21.078254,
+    "peak_rss_kib": 172508
+  },
+  "translation_candidate": {
+    "candidate_pairs": 2388,
+    "accepted_pairs": 727,
+    "degenerate_pairs": 1650,
+    "direction_rejections": 11,
+    "deduped_edges": 727,
+    "backbone_edges": 499,
+    "solved_frames": 500,
+    "maximum_proposed_update_m": 1.577601766,
+    "unsafe_update": false,
+    "tracks": 364,
+    "track_retained_fraction": 0.075691411936,
+    "observations": 63732,
+    "observation_retained_fraction": 0.368921922756,
+    "mean_reprojection_px": 1.466792498,
+    "reprojection_control_ratio": 2.172932853834,
+    "support_regressed": true,
+    "reprojection_regressed": true
+  },
+  "transactional_result": {
+    "support_rollback": true,
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "tracks": 4809,
+    "observations": 172752,
+    "mean_reprojection_px": 0.675028911,
+    "mapper_seconds": 184.591598,
+    "total_seconds": 185.353819,
+    "peak_rss_kib": 261196,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "c45e3fb294b5b870b3f8bfc8804f1f40357634019e0d401e0ce7d29bde77ba41",
+      "points3D_txt": "843b31fa9161905087bcfe0074bb5238aa84348d61968af5258c8691f6f06eec"
+    },
+    "byte_identical_to_control": true
+  },
+  "decision": {
+    "promote_to_2500": false,
+    "promote_to_10000": false,
+    "reason": "the fully connected 1k proposal retained only 7.57% of tracks and 36.89% of observations while increasing reprojection error by 117.29%; both independent publication guards failed",
+    "interpretation": "pairwise translation directions in the corridor do not provide a consistent segment-scale solution under this sparse independent-scale formulation; adding a current-trajectory backbone establishes connectivity but does not make the accepted long edges geometrically compatible",
+    "next_action": "retain this default-off bounded diagnostic and move the quality investigation to temporal localization of track/topology residuals around the first 10k drift segment before proposing another pose solver"
+  },
+  "artifacts": {
+    "output": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256-metric-recover-transavg-gap8-v4",
+    "mapper_log": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256-metric-recover-transavg-gap8-v4/mapper.log",
+    "time_log": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256-metric-recover-transavg-gap8-v4/mapper.time.txt"
+  }
+}

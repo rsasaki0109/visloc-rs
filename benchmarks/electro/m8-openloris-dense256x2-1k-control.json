@@ -1,0 +1,86 @@
+{
+  "schema": "visloc_m8_openloris_dense256x2_control_v1",
+  "recorded_at": "2026-09-03T13:55:00+09:00",
+  "status": "1k_same_candidate_quality_pass_10k_pending",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "frames": 500,
+    "images": 1000,
+    "candidate_pairs": 7000,
+    "candidate_index_sha256": "5249483ef4e8904edbaf187ff41bdddea3179ae509b6d64eb02461e9857bf6ca",
+    "feature_rows": 361170,
+    "feature_manifest_sha256": "e438dfe167adf17c74bafc5b1d8efecc7bf82f4d88329c23f3dcdb894cbc97d2",
+    "verified_pairs": 6935,
+    "verified_correspondences": 1775213,
+    "verified_snapshot_sha256": "c5a59bed8a21fe6a6ca553eb2fd80049954c7505103a5569f0f804526a80b971",
+    "ground_truth_used_only_after_mapping": true
+  },
+  "frontend": {
+    "sift_max_keypoints": 256,
+    "sift_max_orientations": 2,
+    "l1_root": true,
+    "vlfeat_compatible_detector": true,
+    "vlfeat_compatible_descriptor": true,
+    "vlfeat_bilinear_orientations": true,
+    "vlfeat_compatible_output_order": true,
+    "colmap_compatible_grayscale": true,
+    "min_matches": 30,
+    "match_ratio": 0.8,
+    "persistent_match_mode": "persistent-stream-v1",
+    "persistent_match_wall_seconds": 179.2342002490186,
+    "persistent_match_peak_rss_kib": 67224,
+    "merge_wall_seconds": 2.122166832035873,
+    "merge_peak_rss_kib": 207636
+  },
+  "promoted_1k_mapper_arm": {
+    "track_builder": "legacy-union-find",
+    "max_matches_per_pair": 256,
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "mapper_seconds": 42.431873,
+    "total_replay_seconds": 44.407351,
+    "peak_rss_kib": 141564,
+    "tracks": 4716,
+    "observations": 130900,
+    "mean_reprojection_error_px": 0.720678690,
+    "ate_rmse_m": 0.026703233595482503,
+    "ate_median_m": 0.024097695374255795,
+    "ate_p95_m": 0.04134610748761521,
+    "ate_max_m": 0.08045566543261787,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "90773af9546ea351f9610721eab2ccac7b6d55f9c0638fd7ce596942012610d6",
+      "points3D_txt": "8850f161ac44f76ef6d512f8c1739493970849a380f6a232c82e3006a33f346a"
+    }
+  },
+  "compact_capped_reader_ab": {
+    "contract": "full checksum/raw-index validation, retain first 256 accepted matches per pair, release mapper-unused essential matches per pair",
+    "post_decode_truncation_peak_rss_kib": 205832,
+    "stream_decode_peak_rss_kib": 140792,
+    "peak_rss_reduction_percent": 31.60,
+    "byte_identical_model": true
+  },
+  "official_colmap_1k_control": {
+    "registered_images": 1000,
+    "mean_reprojection_error_px": 0.8102073187543721,
+    "ate_rmse_m": 0.027968541677842282,
+    "ate_p95_m": 0.042266006958647205,
+    "mapper_seconds": 2073.399966248,
+    "mapper_peak_rss_kib": 629664
+  },
+  "comparison": {
+    "registration_gate": "pass_equal_100_percent",
+    "reprojection_gate": "pass",
+    "ate_rmse_gate": "pass",
+    "ate_p95_gate": "pass",
+    "mapper_wall_gate": "pass_single_run",
+    "mapper_rss_gate": "pass_single_run",
+    "m8_10k_exit_gate": "pending"
+  },
+  "rejected_1k_arms": {
+    "pair_confidence": "p95 0.042354933 m exceeded COLMAP 0.042266006 m and mapper time increased",
+    "max_matches_per_pair_96": "RMSE 0.034246618 m and p95 0.050962093 m regressed",
+    "max_matches_per_pair_192": "passed COLMAP but was slightly less accurate than cap 256"
+  },
+  "measurement_note": "single runs overlapped the same eight-process 10k feature extraction; final performance claims require unloaded three-run medians"
+}

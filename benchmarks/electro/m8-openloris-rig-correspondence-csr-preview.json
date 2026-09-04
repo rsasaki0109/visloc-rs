@@ -1,0 +1,57 @@
+{
+  "schema": "visloc-m8-rig-correspondence-csr-preview-v1",
+  "date": "2026-09-04",
+  "git_commit_before_change": "7f002f7",
+  "status": "phase1_preflight_pass_mapper_behavior_unchanged",
+  "purpose": "Preflight the bounded read-only observation graph required by a future COLMAP-style registration-time create/continue mapper path. This result is infrastructure evidence, not an M8 trajectory pass.",
+  "input": {
+    "dataset": "OpenLORIS corridor1-1",
+    "frames": 5000,
+    "images": 10000,
+    "feature_observations": 5085131,
+    "all_verified_pairs": 71318,
+    "all_verified_matches": 4451958,
+    "mapping_pair_prefix": 59961,
+    "mapping_matches_after_cap_256": 3337520,
+    "protocol": "The manifest, base snapshot, dense feature append, deferred overlay filtering, pair cap, and mapping prefix are identical to the current 10k visloc quality champion. Only the mapping prefix enters the CSR; the deferred-only tail remains outside the registration graph."
+  },
+  "representation": {
+    "observation_id": "u32",
+    "image_offsets": "u64 sentinel array",
+    "row_offsets": "u64 CSR offsets",
+    "neighbors": "sorted deduplicated u32 observation ids",
+    "construction": "canonical edge sort/dedup followed by degree, prefix, and fill passes",
+    "complexity": "O(observations + verified_matches) state; no image-pair Cartesian product and no N^2 image state"
+  },
+  "run_1": {
+    "undirected_unique_edges": 3337520,
+    "directed_unique_edges": 6675040,
+    "duplicate_drops": 0,
+    "max_row_degree": 68,
+    "persistent_bytes": 67461224,
+    "persistent_mib": 64.335083,
+    "csr_build_seconds": 0.311254,
+    "process_wall_seconds": 8.36,
+    "peak_rss_kib": 589468,
+    "digest": "4c81124f200f3a8c"
+  },
+  "run_2": {
+    "undirected_unique_edges": 3337520,
+    "directed_unique_edges": 6675040,
+    "duplicate_drops": 0,
+    "max_row_degree": 68,
+    "persistent_bytes": 67461224,
+    "csr_build_seconds": 0.300311,
+    "peak_rss_kib": 589520,
+    "digest": "4c81124f200f3a8c"
+  },
+  "gates": {
+    "deterministic_digest": "pass",
+    "persistent_state_below_2_gib": "pass",
+    "bounded_sparse_state": "pass",
+    "unit_tests": "6 passed",
+    "default_mapper_output_preservation": "by construction: the graph is built only by the explicit preview flag and incremental_rig_sfm has no call site"
+  },
+  "command": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --out-colmap /tmp/visloc-rig-csr-preview-unused --max-models 2 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --deferred-registration-pair-prefix 59961 --max-matches-per-pair 256 --preview-rig-correspondence-csr",
+  "decision": "Promote the CSR as Phase 1 groundwork. Phase 2 must consume it in an opt-in registration-time create/continue path, begin from metric stereo seed observations, keep one owner per observation and one observation per image per point, and pass the frozen 1k gate before any 10k quality claim."
+}
