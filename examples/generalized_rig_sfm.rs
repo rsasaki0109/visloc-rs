@@ -125,15 +125,6 @@ struct Args {
     preview_rig_correspondence_csr: bool,
     preview_pair_confidence_conflicts: bool,
     dynamic_correspondence_tracking: bool,
-    gr6p_seed_candidate_cap: usize,
-    gr6p_seed_min_frame_gap: usize,
-    gr6p_seed_correspondence_cap: usize,
-    gr6p_seed_max_iterations: usize,
-    gr6p_seed_min_iterations: usize,
-    gr6p_seed_min_inliers: usize,
-    gr6p_seed_angular_threshold_deg: f64,
-    gr6p_seed_min_positive_depth_fraction: f64,
-    gr6p_seed_min_baseline_m: f64,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -239,15 +230,6 @@ fn parse_args() -> Result<Args, String> {
     let mut preview_rig_correspondence_csr = false;
     let mut preview_pair_confidence_conflicts = false;
     let mut dynamic_correspondence_tracking = false;
-    let mut gr6p_seed_candidate_cap = defaults.gr6p_seed_candidate_cap;
-    let mut gr6p_seed_min_frame_gap = defaults.gr6p_seed_min_frame_gap;
-    let mut gr6p_seed_correspondence_cap = defaults.gr6p_seed_correspondence_cap;
-    let mut gr6p_seed_max_iterations = defaults.gr6p_seed_max_iterations;
-    let mut gr6p_seed_min_iterations = defaults.gr6p_seed_min_iterations;
-    let mut gr6p_seed_min_inliers = defaults.gr6p_seed_min_inliers;
-    let mut gr6p_seed_angular_threshold_deg = defaults.gr6p_seed_angular_threshold_deg;
-    let mut gr6p_seed_min_positive_depth_fraction = defaults.gr6p_seed_min_positive_depth_fraction;
-    let mut gr6p_seed_min_baseline_m = defaults.gr6p_seed_min_baseline_m;
     while let Some(flag) = values.next() {
         let mut value = || {
             values
@@ -278,36 +260,6 @@ fn parse_args() -> Result<Args, String> {
             "--preview-rig-correspondence-csr" => preview_rig_correspondence_csr = true,
             "--preview-pair-confidence-conflicts" => preview_pair_confidence_conflicts = true,
             "--dynamic-correspondence-tracking" => dynamic_correspondence_tracking = true,
-            "--gr6p-seed-candidate-cap" => {
-                gr6p_seed_candidate_cap = value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-min-frame-gap" => {
-                gr6p_seed_min_frame_gap = value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-correspondence-cap" => {
-                gr6p_seed_correspondence_cap =
-                    value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-max-iterations" => {
-                gr6p_seed_max_iterations = value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-min-iterations" => {
-                gr6p_seed_min_iterations = value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-min-inliers" => {
-                gr6p_seed_min_inliers = value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-angular-threshold-deg" => {
-                gr6p_seed_angular_threshold_deg =
-                    value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-min-positive-depth-fraction" => {
-                gr6p_seed_min_positive_depth_fraction =
-                    value()?.parse().map_err(|error| format!("{error}"))?
-            }
-            "--gr6p-seed-min-baseline-m" => {
-                gr6p_seed_min_baseline_m = value()?.parse().map_err(|error| format!("{error}"))?
-            }
             "--out-colmap" => out_colmap = Some(PathBuf::from(value()?)),
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
             "--min-model-frames" => {
@@ -625,15 +577,6 @@ fn parse_args() -> Result<Args, String> {
                     "[--pnp-max-iterations 512] [--max-matches-per-pair 0] ",
                     "[--preview-rig-correspondence-csr|--preview-pair-confidence-conflicts] ",
                     "[--dynamic-correspondence-tracking] ",
-                    "[--gr6p-seed-candidate-cap 0] ",
-                    "[--gr6p-seed-min-frame-gap 0] ",
-                    "[--gr6p-seed-correspondence-cap 512] ",
-                    "[--gr6p-seed-max-iterations 64] ",
-                    "[--gr6p-seed-min-iterations 16] ",
-                    "[--gr6p-seed-min-inliers 12] ",
-                    "[--gr6p-seed-angular-threshold-deg 0.5] ",
-                    "[--gr6p-seed-min-positive-depth-fraction 0.8] ",
-                    "[--gr6p-seed-min-baseline-m 1e-4] ",
                     "[--max-track-frame-gap 0] ",
                     "[--local-ba-every 10] [--local-ba-window 40] ",
                     "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
@@ -923,15 +866,6 @@ fn parse_args() -> Result<Args, String> {
         preview_rig_correspondence_csr,
         preview_pair_confidence_conflicts,
         dynamic_correspondence_tracking,
-        gr6p_seed_candidate_cap,
-        gr6p_seed_min_frame_gap,
-        gr6p_seed_correspondence_cap,
-        gr6p_seed_max_iterations,
-        gr6p_seed_min_iterations,
-        gr6p_seed_min_inliers,
-        gr6p_seed_angular_threshold_deg,
-        gr6p_seed_min_positive_depth_fraction,
-        gr6p_seed_min_baseline_m,
     })
 }
 
@@ -1545,15 +1479,6 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         final_ba_min_pose_observations: args.final_ba_min_pose_observations,
         structure_refinement_iterations: args.structure_refinement_iterations,
         dynamic_correspondence_tracking: args.dynamic_correspondence_tracking,
-        gr6p_seed_candidate_cap: args.gr6p_seed_candidate_cap,
-        gr6p_seed_min_frame_gap: args.gr6p_seed_min_frame_gap,
-        gr6p_seed_correspondence_cap: args.gr6p_seed_correspondence_cap,
-        gr6p_seed_max_iterations: args.gr6p_seed_max_iterations,
-        gr6p_seed_min_iterations: args.gr6p_seed_min_iterations,
-        gr6p_seed_min_inliers: args.gr6p_seed_min_inliers,
-        gr6p_seed_angular_threshold_deg: args.gr6p_seed_angular_threshold_deg,
-        gr6p_seed_min_positive_depth_fraction: args.gr6p_seed_min_positive_depth_fraction,
-        gr6p_seed_min_baseline_m: args.gr6p_seed_min_baseline_m,
         ba_config: visloc_rs::BaConfig {
             robust_kernel: RobustKernel::Huber {
                 delta: args.ba_huber_delta,
@@ -1993,19 +1918,6 @@ fn map_remaining_models(
             result.work.paired_pose_jump_repaired_frames,
             peak_rss_kib().unwrap_or(0),
         );
-        if args.gr6p_seed_candidate_cap > 0 {
-            eprintln!(
-                "rig-component-gr6p: rank={rank} candidate_pairs={} probes={} correspondences={} candidate_models={} inliers={} accepted={} fallbacks={} landmarks={}",
-                result.work.gr6p_seed_candidate_pairs,
-                result.work.gr6p_seed_probes,
-                result.work.gr6p_seed_correspondences,
-                result.work.gr6p_seed_candidate_models,
-                result.work.gr6p_seed_inliers,
-                result.work.gr6p_seed_accepted,
-                result.work.gr6p_seed_fallbacks,
-                result.work.gr6p_seed_landmarks,
-            );
-        }
     }
     let mean_reprojection = weighted_reprojection / total_observations.max(1) as f64;
     manifest.push_str(&format!(
@@ -3431,7 +3343,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         concat!(
             "rig-replay result: registered_frames={}/{} registered_images={}/{} ",
             "tracks={} observations={} mean_reprojection_px={:.9} seed_frame={} ",
-            "gr6p_seed_candidate_pairs={} gr6p_seed_probes={} gr6p_seed_correspondences={} gr6p_seed_candidate_models={} gr6p_seed_inliers={} gr6p_seed_accepted={} gr6p_seed_fallbacks={} gr6p_seed_landmarks={} ",
             "mapper_seconds={:.6} total_seconds={:.6} VmHWM_KiB={} ",
             "track_components={} conflicting_track_edges={} retained_track_observations={} ",
             "triangulation_attempts={} robust_triangulation_tracks={} robust_triangulation_pruned_observations={} robust_triangulation_majority_rejections={} cache_insertions={} pnp_attempts={} pnp_insufficient_sensors={} pnp_estimation_failures={} pnp_inlier_rejections={} pnp_registrations={} dynamic_activated_rows={} dynamic_activated_edges={} dynamic_track_creates={} dynamic_track_continues={} dynamic_owner_conflicts={} dynamic_same_image_conflicts={} dynamic_geometry_rejections={} dynamic_observation_lookup_entries={} dynamic_pnp_graph_insertions={} dynamic_bootstrap_legacy_tracks={} dynamic_bootstrap_candidates={} dynamic_bootstrap_seed_support={} dynamic_bootstrap_seed_pairs={} dynamic_bootstrap_seed_landmarks={} dynamic_bootstrap_direct_fallbacks={} direct_bridge_pair_visits={} direct_bridge_correspondences={} direct_bridge_registrations={} motion_bridge_pair_visits={} motion_bridge_estimation_failures={} motion_bridge_rotation_rejections={} motion_bridge_registrations={} deferred_pair_visits={} deferred_correspondences={} deferred_pnp_attempts={} deferred_pnp_estimation_failures={} deferred_pnp_inlier_rejections={} deferred_registrations={} deferred_interpolation_registrations={} deferred_observations_attached={} deferred_retriangulated_tracks={} deferred_retriangulated_observations={} unregistered_zero_support={} unregistered_below_pnp_support={} unregistered_eligible_pnp={} unregistered_below_sensors={} max_unregistered_support={} local_ba_runs={} ba_retriangulated_tracks={} ba_requeued_frames={} structure_refined_tracks={} geometry_recovered_tracks={} geometry_recovered_observations={} track_completion_passes={} track_completion_pair_visits={} track_completion_observations={} track_completion_reprojection_rejections={} final_filter_refinement_passes={} final_filter_refinement_pruned_observations={} isolated_pose_repair_passes={} isolated_pose_repairs={} paired_pose_jump_repairs={} paired_pose_jump_repaired_frames={} out={}"
@@ -3444,14 +3355,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         export.observation_count,
         result.mean_reprojection_error_px,
         result.seed_frame_index,
-        result.work.gr6p_seed_candidate_pairs,
-        result.work.gr6p_seed_probes,
-        result.work.gr6p_seed_correspondences,
-        result.work.gr6p_seed_candidate_models,
-        result.work.gr6p_seed_inliers,
-        result.work.gr6p_seed_accepted,
-        result.work.gr6p_seed_fallbacks,
-        result.work.gr6p_seed_landmarks,
         mapper_seconds,
         started.elapsed().as_secs_f64(),
         peak_rss_kib().unwrap_or(0),
