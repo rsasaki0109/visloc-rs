@@ -1032,6 +1032,27 @@ retained as an ineffective option. Full commands, hashes, gates, and variants
 are frozen in
 [`m8-openloris-rig-bata-ab.json`](../benchmarks/electro/m8-openloris-rig-bata-ab.json).
 
+### Prefix-stable metric seed proxy rejected at 10k (2026-09-04)
+
+COLMAP's successful two-view initialization stays near the same temporal
+prefix at both tiers (frames 445/477 at 1k and 446/462 at 10k), while the
+visloc metric-support seed moves from frame 26 at the frozen 1k control to
+frame 2943 in the 10k champion. A default-off proxy therefore restricted the
+existing support-sorted seed candidates to the first 500 local synchronized
+frames. It was byte-identical to the frozen 1k champion, including all three
+model hashes, so the small-tier gate passed exactly.
+
+On the otherwise frozen 10k champion command, however, the proxy selected
+frame 38, registered only 9,996/10,000 images, and reduced the largest model
+from 4,494 to 4,493 frames. Reprojection remained low at 0.685862 px and peak
+RSS stayed bounded at 1,393,748 KiB, but post-mapping ATE regressed from
+0.38754/0.76836 m RMSE/p95 to 0.94517/1.47600 m. The option and tests were
+removed. This closes tier-prefix restriction as a seed policy; it does not
+test COLMAP's actual two-view initialization, which uses temporal parallax
+rather than a one-frame stereo-support maximum. Exact inputs, hashes, and
+component scores are frozen in
+[`m8-openloris-prefix-stable-seed-ab.json`](../benchmarks/electro/m8-openloris-prefix-stable-seed-ab.json).
+
 ## M9 — make the quality champion faster than COLMAP
 
 Freeze the M8 quality champion before performance edits.
