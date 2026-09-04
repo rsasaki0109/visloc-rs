@@ -1053,6 +1053,46 @@ rather than a one-frame stereo-support maximum. Exact inputs, hashes, and
 component scores are frozen in
 [`m8-openloris-prefix-stable-seed-ab.json`](../benchmarks/electro/m8-openloris-prefix-stable-seed-ab.json).
 
+### Bounded two-frame metric seed rejected at frozen 1k (2026-09-04)
+
+A default-off bounded two-frame seed was tested as a closer proxy for COLMAP's
+temporal-parallax initialization. Verified edges were scanned once into sparse
+canonical temporal frame pairs, with deterministic match-count ranking and a
+32-probe cap. Each source endpoint reused the existing same-frame stereo
+triangulation and each target was solved with the existing
+`GeneralizedPnPRansac`; no new solver, dense frame-pair table, or trial-count
+track clones were introduced. The state bound was `O(E)` for candidate
+aggregation plus `O(F + observations)` mapper state. The dynamic-correspondence
+mode is incompatible with this experiment because it cannot provide the legacy
+metric source tracks required by the probe.
+
+The frozen 1k control registered `500/500` frames (`1000/1000` images), with
+2,658 tracks, 27,716 observations, `0.671637382 px` reprojection error,
+`3.254479 s` mapper time, `3.70 s` wall time, and `81,928 KiB` peak RSS. Its
+seed was frame 26 and all three model files remained byte-identical to the
+champion (`cameras.txt` `65e29cd8...`, `images.txt` `937098610...`, and
+`points3D.txt` `11eb71b6...`). The candidate considered 2,234 pairs and probed
+32; source frame 42 to target frame 26 was the sole accepted probe, with 17/17
+inliers, `0.062470°` median temporal parallax, and a `0.002086812 m` metric
+baseline. It retained `500/500` frames and `1000/1000` images, but changed the
+map to 2,806 tracks / 28,421 observations, `0.770560867 px`, `4.021271 s`,
+`4.53 s`, and `82,384 KiB`. Its score was `0.11912569450660591 m` RMSE,
+`0.2160373033773416 m` p95, `0.3669530777398771 m` max,
+`0.08574868160134173 m` median, and Sim(3) scale `1.605404874928131`
+(`score_sha256=c6b9140a491a05fbd7887469304f067a575a2dc4dccd727f142eef0c1caf3780`).
+
+This is a clear quality failure against the frozen 1k champion
+(`0.02269532080131782 m` RMSE, `0.03777877644562742 m` p95, and
+`0.671637382 px`): registration passed, but all three quality checks failed.
+The implementation was removed, and the required test evidence remains
+`620 passed, 0 failed, 7 ignored` with zero prototype symbols after revert.
+The 10k run was skipped by the failed 1k promotion gate. This experiment is a
+stereo-PnP proxy and does not refute COLMAP GR6P/GR8P itself; this route is
+closed (`stereo-PnP proxyでありCOLMAP GR6P/GR8P自体を否定しないが、この経路は終了`).
+The complete record, including the score digest and exact default-off hashes,
+is frozen in
+[`m8-openloris-two-frame-metric-seed-ab.json`](../benchmarks/electro/m8-openloris-two-frame-metric-seed-ab.json).
+
 ## M9 — make the quality champion faster than COLMAP
 
 Freeze the M8 quality champion before performance edits.

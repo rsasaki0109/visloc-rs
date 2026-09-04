@@ -1,0 +1,112 @@
+{
+  "schema": "visloc_m8_openloris_two_frame_metric_seed_ab_v1",
+  "recorded_at": "2026-09-04",
+  "status": "rejected_at_frozen_1k",
+  "base_git_commit": "80d4b94e377f79ce20fdac9ec80c52d172971aca",
+  "ground_truth_used_for_mapping": false,
+  "method": {
+    "name": "bounded_two_frame_metric_seed",
+    "configuration": "--two-frame-seed-trials 32",
+    "design": "Scan verified pairwise edges once, aggregate sparse canonical temporal frame pairs, rank by match count with deterministic frame-id ties, and probe at most the configured number of pairs/orientations. For each source endpoint, reuse same-frame stereo triangulate_frontier; build target 2D-3D observations from existing tracks and solve with the existing GeneralizedPnPRansac. Require sensor diversity, minimum inliers, positive depth, reprojection, metric baseline, and temporal-parallax gates. Restore probe state after every trial and replay only the best pair transactionally before normal frontier growth.",
+    "candidate_state_complexity": "O(E) sparse verified-edge aggregation plus O(F + observations) persistent mapper state; no frame Cartesian product or N^2 proxy",
+    "trial_state_policy": "reused and discarded per probe; one baseline restoration, no trial-count track clones",
+    "dynamic_correspondence_mode": "incompatible: this seed requires legacy metric source tracks and existing track observations; no dynamic-ownership result is inferred",
+    "solver_policy": "no new solver; existing same-frame stereo triangulation and GeneralizedPnPRansac only"
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "frames": 500,
+    "images": 1000,
+    "rig_manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "verified_snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "tier_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "verified_pairs": 6869,
+    "verified_matches": 661428
+  },
+  "tests": {
+    "cargo_test_visloc_slam_lib": "620 passed, 0 failed, 7 ignored",
+    "default_off_source_and_cli": "prototype removed; default behavior restored to HEAD",
+    "default_off_exact_model_hashes": true,
+    "n2_state_assertion": "pass; no frame-pair Cartesian allocation",
+    "prototype_symbols_after_revert": 0
+  },
+  "frozen_default_off_control": {
+    "registered_frames": 500,
+    "registered_frames_total": 500,
+    "registered_images": 1000,
+    "registered_images_total": 1000,
+    "tracks": 2658,
+    "observations": 27716,
+    "mean_reprojection_error_px": 0.671637382,
+    "mapper_seconds": 3.254479,
+    "wall_seconds": 3.70,
+    "peak_rss_kib": 81928,
+    "seed_frame": 26,
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+      "points3D_txt": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af"
+    },
+    "byte_identical_to_frozen_champion": true
+  },
+  "two_frame_candidate": {
+    "source_frame": 42,
+    "target_frame": 26,
+    "candidate_pairs": 2234,
+    "probes": 32,
+    "accepted_probes": 1,
+    "inliers": 17,
+    "inlier_ratio": 1.0,
+    "median_temporal_parallax_deg": 0.062470,
+    "metric_baseline_m": 0.002086812,
+    "registered_frames": 500,
+    "registered_frames_total": 500,
+    "registered_images": 1000,
+    "registered_images_total": 1000,
+    "tracks": 2806,
+    "observations": 28421,
+    "mean_reprojection_error_px": 0.770560867,
+    "mapper_seconds": 4.021271,
+    "wall_seconds": 4.53,
+    "peak_rss_kib": 82384,
+    "score": {
+      "ate_rmse_m": 0.11912569450660591,
+      "ate_p95_m": 0.2160373033773416,
+      "ate_max_m": 0.3669530777398771,
+      "ate_median_m": 0.08574868160134173,
+      "sim3_scale": 1.605404874928131,
+      "score_sha256": "c6b9140a491a05fbd7887469304f067a575a2dc4dccd727f142eef0c1caf3780"
+    },
+    "local_seed_gates": "accepted by the bounded probe gates; the 0.002086812 m baseline and 0.062470 degree parallax are nevertheless weak",
+    "global_quality_gate": "fail"
+  },
+  "promotion_gate": {
+    "baseline": {
+      "ate_rmse_m": 0.02269532080131782,
+      "ate_p95_m": 0.03777877644562742,
+      "mean_reprojection_error_px": 0.671637382
+    },
+    "candidate": {
+      "ate_rmse_m": 0.11912569450660591,
+      "ate_p95_m": 0.2160373033773416,
+      "mean_reprojection_error_px": 0.770560867
+    },
+    "checks": {
+      "registration": true,
+      "ate_rmse_non_regression": false,
+      "ate_p95_non_regression": false,
+      "reprojection_non_regression": false,
+      "overall": false
+    },
+    "decision": "The candidate is a clear frozen-1k quality failure despite retaining full registration."
+  },
+  "ten_k": {
+    "status": "skipped_by_frozen_1k_promotion_gate",
+    "reason": "The two-frame seed failed the required 1k RMSE, p95, and reprojection gates; no 10k run or artifact is claimed."
+  },
+  "decision": {
+    "promoted": false,
+    "source_policy": "remove all prototype source, CLI wiring, and tests; keep HEAD default behavior",
+    "conclusion": "Rejected. This is a stereo-PnP proxy and does not refute COLMAP GR6P/GR8P itself; this route is closed. stereo-PnP proxyでありCOLMAP GR6P/GR8P自体を否定しないが、この経路は終了。"
+  }
+}
