@@ -876,6 +876,18 @@ real 10k A/B already regressed RMSE/p95 versus isolated-only despite a positive
 offline screen. Exact counters, hashes, and decisions remain in
 [`m8-openloris-dynamic-correspondence-1k.json`](../benchmarks/electro/m8-openloris-dynamic-correspondence-1k.json).
 
+The frozen-1k PairConfidence conflict-region recovery A/B reached BA with
+3,778,059 observations and cost 6,320,355.944471336 -> 3,883,862.718358550
+after 864 iterations (`converged=false`), using 88.13 s user / 0.19 s system /
+88.34 s wall and 233,740 KiB peak RSS, but export failed with
+`InvalidExportInput("keypoint (0, 3) belongs to multiple exported landmarks")`.
+Successful components had already been emitted, so additive recovery violated
+the observation-ownership invariant; exporter rejection is correct and the
+experiment is rejected/reverted. The only next arm is a bounded,
+mutually-exclusive partition or hypothesis selection before ownership, never
+duplicate observation assignment. Details are frozen in
+[`m8-openloris-conflict-region-recovery-ab.json`](../benchmarks/electro/m8-openloris-conflict-region-recovery-ab.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a

@@ -1,0 +1,56 @@
+{
+  "schema": "visloc_m8_openloris_conflict_region_recovery_ab_v1",
+  "date": "2026-09-04",
+  "status": "rejected_reverted",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "tier": "frozen-1k",
+    "frames": 500,
+    "images": 1000,
+    "verified_pairs": 6935,
+    "verified_matches": 1605174,
+    "keypoints": 361170
+  },
+  "source_experiment": {
+    "name": "rig-pair-confidence-conflict-regions-v1",
+    "state": "uncommitted/reverted",
+    "command": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-pair-confidence-conflict-regions-v1/model --max-matches-per-pair 256 --pair-confidence-tracks --recover-metric-conflict-tracks --robust-triangulation-pruning --triangulation-min-inlier-fraction 0.75 --ba-huber-delta 3 --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --repair-isolated-pose-outliers --final-filter-refinement-passes 2"
+  },
+  "baseline": {
+    "evidence": "existing rig-pair-confidence v1 score/time/model",
+    "registered_images": 1000,
+    "models": 1,
+    "tracks": 6823,
+    "observations": 274189,
+    "mean_reprojection_error_px": 0.756772429,
+    "ate_rmse_m": 0.026878938548836058,
+    "ate_p95_m": 0.04078867949842184,
+    "ate_max_m": 0.08269214535535506,
+    "mapper_seconds": 73.583702,
+    "total_seconds": 74.325553,
+    "peak_rss_kib": 232952
+  },
+  "candidate": {
+    "exit_status": 1,
+    "user_seconds": 88.13,
+    "system_seconds": 0.19,
+    "wall_seconds": 88.34,
+    "peak_rss_kib": 233740,
+    "registered_images": null,
+    "quality": null,
+    "bundle_adjustment": {
+      "observations": 3778059,
+      "cost": "6320355.944471336->3883862.718358550",
+      "iterations": 864,
+      "converged": false
+    },
+    "error": "InvalidExportInput(\"keypoint (0, 3) belongs to multiple exported landmarks\")"
+  },
+  "conclusion": {
+    "finding": "The recovery path violates the ownership invariant because successful components have already been emitted; additive recovery can add an observation already owned by another exported landmark.",
+    "exporter_behavior": "Exporter rejection is correct.",
+    "positioned_track_merge_10k": "The positioned-track merge experiment already worsened quality at 10k, so it does not justify this post-ownership additive bridge.",
+    "decision": "rejected/reverted",
+    "next_action": "Use a bounded mutually-exclusive partition or hypothesis selection before ownership is assigned; never duplicate an observation across tracks."
+  }
+}
