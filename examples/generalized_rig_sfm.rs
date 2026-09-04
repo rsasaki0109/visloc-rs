@@ -1985,6 +1985,19 @@ fn map_remaining_models(
             result.work.paired_pose_jump_repaired_frames,
             peak_rss_kib().unwrap_or(0),
         );
+        if args.gr6p_seed_candidate_cap > 0 {
+            eprintln!(
+                "rig-component-gr6p: rank={rank} candidate_pairs={} probes={} correspondences={} candidate_models={} inliers={} accepted={} fallbacks={} landmarks={}",
+                result.work.gr6p_seed_candidate_pairs,
+                result.work.gr6p_seed_probes,
+                result.work.gr6p_seed_correspondences,
+                result.work.gr6p_seed_candidate_models,
+                result.work.gr6p_seed_inliers,
+                result.work.gr6p_seed_accepted,
+                result.work.gr6p_seed_fallbacks,
+                result.work.gr6p_seed_landmarks,
+            );
+        }
     }
     let mean_reprojection = weighted_reprojection / total_observations.max(1) as f64;
     manifest.push_str(&format!(
@@ -3410,6 +3423,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         concat!(
             "rig-replay result: registered_frames={}/{} registered_images={}/{} ",
             "tracks={} observations={} mean_reprojection_px={:.9} seed_frame={} ",
+            "gr6p_seed_candidate_pairs={} gr6p_seed_probes={} gr6p_seed_correspondences={} gr6p_seed_candidate_models={} gr6p_seed_inliers={} gr6p_seed_accepted={} gr6p_seed_fallbacks={} gr6p_seed_landmarks={} ",
             "mapper_seconds={:.6} total_seconds={:.6} VmHWM_KiB={} ",
             "track_components={} conflicting_track_edges={} retained_track_observations={} ",
             "triangulation_attempts={} robust_triangulation_tracks={} robust_triangulation_pruned_observations={} robust_triangulation_majority_rejections={} cache_insertions={} pnp_attempts={} pnp_insufficient_sensors={} pnp_estimation_failures={} pnp_inlier_rejections={} pnp_registrations={} dynamic_activated_rows={} dynamic_activated_edges={} dynamic_track_creates={} dynamic_track_continues={} dynamic_owner_conflicts={} dynamic_same_image_conflicts={} dynamic_geometry_rejections={} dynamic_observation_lookup_entries={} dynamic_pnp_graph_insertions={} dynamic_bootstrap_legacy_tracks={} dynamic_bootstrap_candidates={} dynamic_bootstrap_seed_support={} dynamic_bootstrap_seed_pairs={} dynamic_bootstrap_seed_landmarks={} dynamic_bootstrap_direct_fallbacks={} direct_bridge_pair_visits={} direct_bridge_correspondences={} direct_bridge_registrations={} motion_bridge_pair_visits={} motion_bridge_estimation_failures={} motion_bridge_rotation_rejections={} motion_bridge_registrations={} deferred_pair_visits={} deferred_correspondences={} deferred_pnp_attempts={} deferred_pnp_estimation_failures={} deferred_pnp_inlier_rejections={} deferred_registrations={} deferred_interpolation_registrations={} deferred_observations_attached={} deferred_retriangulated_tracks={} deferred_retriangulated_observations={} unregistered_zero_support={} unregistered_below_pnp_support={} unregistered_eligible_pnp={} unregistered_below_sensors={} max_unregistered_support={} local_ba_runs={} ba_retriangulated_tracks={} ba_requeued_frames={} structure_refined_tracks={} geometry_recovered_tracks={} geometry_recovered_observations={} track_completion_passes={} track_completion_pair_visits={} track_completion_observations={} track_completion_reprojection_rejections={} final_filter_refinement_passes={} final_filter_refinement_pruned_observations={} isolated_pose_repair_passes={} isolated_pose_repairs={} paired_pose_jump_repairs={} paired_pose_jump_repaired_frames={} out={}"
@@ -3422,6 +3436,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         export.observation_count,
         result.mean_reprojection_error_px,
         result.seed_frame_index,
+        result.work.gr6p_seed_candidate_pairs,
+        result.work.gr6p_seed_probes,
+        result.work.gr6p_seed_correspondences,
+        result.work.gr6p_seed_candidate_models,
+        result.work.gr6p_seed_inliers,
+        result.work.gr6p_seed_accepted,
+        result.work.gr6p_seed_fallbacks,
+        result.work.gr6p_seed_landmarks,
         mapper_seconds,
         started.elapsed().as_secs_f64(),
         peak_rss_kib().unwrap_or(0),
