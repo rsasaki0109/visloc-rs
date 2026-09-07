@@ -789,3 +789,22 @@ value `1e-3`. Separate operator cancellation/residual drift, conditioning and
 convergence hypotheses before changing preconditioning or residual updates;
 the current measurements do not prove which is the sole cause. Preserve the
 true-residual gate and keep this next diagnostic in a separate PR.
+
+The next oracle must remain library `#[cfg(test)]` code, with an explicitly
+ignored real-input test and ordinary small synthetic CI tests. A hidden or
+nondefault-feature public method still expands the public API and is not the
+selected approach. If private test code needs an interchange input, prefer an
+explicit example-only export of bounded pose/point/observation records linked
+to the frozen source hashes, preserving every observation and its order; do
+not export a normal matrix or duplicate the complete source model in memory.
+The exporter/fixture is a proposed implementation mechanism, not yet built.
+
+Before any explicit Schur allocation, cap variable poses at 512, points at
+8,192, observations at 262,144, scalar dimension at 3,072 and pre-count the
+cross-pair work against an explicit bound. A real-input test must fail clearly
+when its requested fixture is missing or over cap, not report an empty passing
+measurement. Reuse one initial normal system across the two damping values;
+keep only the small pose-diagonal copy needed by the mutating direct path.
+Record arithmetic scales and check the existing gradient/RHS sign and the
+objective's factor of two before reporting predicted reduction. No claim that
+the direct step itself meets the PCG residual target is made before measuring it.
