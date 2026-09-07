@@ -49,5 +49,23 @@
     "gt_used": false,
     "interpretation": "Pose discontinuities coincide with the lost connectivity boundary and a nearby interval; source geometry and pose-owner provenance must establish cause before any correction is selected."
   },
-  "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. Diagnose source tracks and integration rejection across frame 1999/2000 before further BA policy changes. Do not change the scoring alignment or relax the target to hide this split."
+  "source_bridge_trace": {
+    "source_node_id": 25,
+    "source_window_start": 1950,
+    "other_source_nodes_with_cross_boundary_tracks": 0,
+    "cross_boundary_source_point_rows": 31,
+    "merge_new": 19,
+    "merge_extended": 12,
+    "merge_collision_rejected": 0,
+    "cross_boundary_tracks_in_final_model": 0,
+    "loss_stage": "Final atlas-pose triangulation, after successful observation ownership merging",
+    "independent_dlt_replay_source_row_classification": {
+      "mean_error_above_2px": 18,
+      "mean_within_2px_but_max_above_4px": 3,
+      "nonpositive_depth": 10,
+      "parallax_or_degeneracy": 0
+    },
+    "counting_caveat": "31 counts source point rows. Distinct final-union track identities and valid left/right-only triangulations are the next audit; do not infer 31 independent geometric constraints from this count alone."
+  },
+  "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. The only source bridge rows survive merging but fail atlas-pose triangulation. Next compare source/atlas pose ownership and left/right-only geometric support before choosing a correction. Do not change scoring alignment or relax the target to hide this split."
 }

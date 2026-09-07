@@ -74,6 +74,15 @@ The first BA policy preserves this split. Before changing BA filtering, trace
 which source tracks cross frame 1999/2000 and where integration loses them.
 See [connectivity evidence](../benchmarks/electro/m8-openloris-atlas-connectivity-v1.json).
 
+The source trace finds 31 cross-boundary point rows, all in node 25 (window
+start 1950). All pass ownership merging (19 new / 12 extended, no collision
+rejection), but no crossing track survives final atlas-pose triangulation.
+An independent row-level replay attributes failures to reprojection or depth,
+not absent input matches. The next bounded audit compares source/atlas pose
+ownership and left/right-only triangulations, deduplicated by final union track
+identity. It must distinguish a component-wide gauge mismatch from a short
+interval's publication error before selecting any correction.
+
 For subsequent policy design, the upstream
 [COLMAP local BA implementation](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)
 refines a local bundle, completes/merges tracks, then filters observations.
