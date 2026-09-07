@@ -1532,3 +1532,24 @@ numerical steps and LM/depth/rollback gates remain unchanged. Small explicit
 full-normal tests and debug ON/OFF model/trace comparisons must precede using
 the diagnostic to select a new policy. The 1k regression, unmet 10k COLMAP
 RMSE and full mapper/E2E/scale requirements remain unresolved.
+
+Further read-only inspection of PR #85's certified scaled 1k debug log finds
+nine of ten rejected candidates lower the reported cost but increase
+nonprojectable observations from zero to 209, 211 or 14. Their actual solve
+lambda is 1e-5. The other rejection (iteration 6) increases cost without
+increasing nonprojectable observations. The existing cost routine omits
+nonprojectable observations, so the nine decreases are not comparable
+same-observation objective improvements. New diagnostics must report both
+counts and both acceptance gates; define rho only when both counts are zero,
+cost values are finite and predicted decrease is positive. Otherwise record
+an explicit undefined reason without changing the existing LM decisions.
+
+The implementation should fold each landmark's three residual/denominator
+entries immediately after its cross terms, retaining only pose accumulators
+and one landmark's aggregation. This reduces new diagnostic scratch to
+O(P + maximum track length), rather than storing another residual/denominator
+pair for every landmark. Use nonquadratic cross aggregation and preserve each
+coefficient's contribution order. If physical-equivalent metrics are evaluated
+by reconstructing coefficients and recomputing the residual, label that extra
+rounding explicitly; it is not bit-identical to simply scaling the already
+computed residual by `T^-1`.
