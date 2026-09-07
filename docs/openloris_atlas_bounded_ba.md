@@ -949,3 +949,13 @@ the representations/preconditioner separately; it does not establish that a
 cluster implementation will fit this project's memory budget or solve its
 current numerical failure. Any later cluster arm needs an explicit bounded
 storage/work design and an unchanged-quality comparison.
+
+A separate numerical-stability candidate, not selected for this isolation PR,
+is [Demmel et al., CVPR 2021, Square Root Bundle Adjustment](https://openaccess.thecvf.com/content/CVPR2021/html/Demmel_Square_Root_Bundle_Adjustment_for_Large-Scale_Reconstruction_CVPR_2021_paper.html).
+It eliminates landmark variables with QR/nullspace operations and reports
+better numerical stability than normal-equation Schur elimination, but also
+larger memory requirements on dense problems. The authors' [RootBA OSS](https://github.com/nikolausdemmel/rootba)
+is a reference, not a dependency added here. Our inference is that such a
+representation may merit a bounded experiment if accumulation is limiting;
+its reported BAL results do not prove a win for this calibrated rig or justify
+replacing the current linear-storage design without a track-length memory audit.
