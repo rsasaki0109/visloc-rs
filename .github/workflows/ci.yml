@@ -6,6 +6,28 @@ on:
   pull_request:
 
 jobs:
+  ceres-reference:
+    name: Ceres frozen-reference tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install standalone reference dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ libceres-dev
+          dpkg-query -W g++ libceres-dev libeigen3-dev libsuitesparse-dev
+
+      - name: Build and test bounded Ceres reference
+        run: |
+          ceres_build_dir=$(mktemp -d)
+          g++ -std=c++17 -O2 -Wall -Wextra -Werror -I/usr/include/eigen3 \
+            tools/ceres_rig_reference/ceres_rig_reference.cc -lceres -lglog \
+            -o "$ceres_build_dir/ceres_rig_reference"
+          "$ceres_build_dir/ceres_rig_reference" --self-test
+
   msrv:
     runs-on: ubuntu-latest
     steps:

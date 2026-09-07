@@ -1,5 +1,59 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Ceres参照の採点完了（2026-09-08）: publisher `90672d4` をroot独立6テスト後に
+> 実行し、出力2回の3ファイルbyte一致、全identity/校正/anchor/正深度/1成分を確認。
+> 全1,000画像・500支持frame・4,716点・130,900観測・361,170 keypointを保持。
+> post-only GT（308画像、同条件の再採点一致）はRMSE/p95 **0.029571/0.044943 m**で悪化。
+> cost113473.879982/平均再投影0.674902 pxは改善しても軌跡改善にはつながりませんでした。
+> [最終証跡](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json)。
+> 独立Ceresでも同じ傾向を示すため、次は観測目的関数/幾何/観測可能性の条件を調べます。
+> 唯一原因の断定やGT選択の減衰sweepはしません。Luna Maxが一次資料の研究レビュー中。
+> draft PR #89は最終証跡/CI/merge確認へ。C++/測定binaryは変更せず保持。
+> 以下の「publisher/GT未完了」は各時点の履歴です。全体M8–M10 goalは未完了のままです。
+
+> Ceres 1k実行完了（2026-09-08）: Luna Maxの`1f31335`をroot独立認証。
+> self-test/微分再検証通過、初期130,900残差dumpは監査済みcheckpointとbyte一致。
+> 固定条件の実solveを1回実行し77.45 s / peak RSS305,072 KiBでexit0。
+> 20反復上限のNO_CONVERGENCE（usable）であり、収束確認済みとは扱いません。
+> 実更新13受理/7拒否（Ceresのsuccessful14は初期iteration0込み）。
+> 独立最終state監査でcost113473.8799820374、平均再投影0.6749016424 px、
+> 全130,900正深度・全500支持frame・全pose/point ID・固定anchorを確認。
+> 最大pose中心移動0.02943 m、XYZ移動231.001 m。GT/モデル出力監査はまだ未実施。
+> [solve証跡](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json)。
+> Luna MaxはPython model publisherとテストを実装中。C++はこれ以上変更せず測定binaryを保持。
+> [draft PR #89](https://github.com/rsasaki0109/visloc-rs/pull/89)を作成済み。
+> 初期head `a8553c1`はCI9項目通過(run34158171089)。solve head `1f31335`は
+> run34158566321のCI9項目も通過。publisher/全監査/最終CIが揃うまでdraft・非mergeです。
+> 既定Rust/README性能値は不変。全体goalと10k精度/native E2E/各規模ゲートは未完了。
+
+> Ceres微分の独立検証（2026-09-08）: rootが凍結`1d6424f`の実AutoDiff因子と
+> 実ProductManifoldを使い、独立Eigen投影の数値微分・別途導いた解析式と照合。
+> ambient/XYZ/tangentのFD最大差は5.22e-7/5.05e-7/3.25e-7（許容1e-5）、
+> 解析tangent最大差1.14e-13（許容1e-9）で通過。
+> [微分証跡](../benchmarks/electro/m8-openloris-ceres-factor-derivatives-v1.json)。
+> これは新SolveInMemory/Problem/保存経路の試験ではありません。Luna Maxがそれらと
+> synthetic solveテストを作業中。実1k solveは未実施、final sourceレビュー後に再認証します。
+
+> Ceres初期parity通過（2026-09-08）: `1d6424f`をroot独立buildし、自己テストと
+> 同一1k全130,900観測の独立照合が通過。残差座標の最大差は9.84e-11 px、
+> 深度最大差1.82e-12 m。全ID/order/xy/XYZ・校正・元fixture hashを確認済み。
+> [初期parity証跡](../benchmarks/electro/m8-openloris-ceres-initial-parity-v1.json)。
+> 初回は一時出力のENOENT誤判定で保存前に失敗。修正と保存成功/no-clobberテストを追加し、
+> 失敗実行を証跡に残しました。元入力・既存出力は変更していません。
+> 次はLuna Maxで同じAutoDiff因子を使うsolve/state出力と、微分・manifold・固定anchorの
+> synthetic testを実装。rootレビュー前に実1k solveは行いません。
+> 現在も `feat/m8-frozen-ceres-reference`、PR未作成。最適化・モデル出力・GT採点は未実施。
+> これはCOLMAP native性能比較ではなく、README/既定solverの昇格根拠ではありません。
+
+> 最新の続行（2026-09-08）: PR #88はhead `9ba5c3b` のCI8項目
+> （run `34154673044`）通過後、`23cbe88`へmerge済み。旧branch整理済み。
+> 現在は `feat/m8-frozen-ceres-reference`。既存のRust oracle fixtureを再利用し、
+> Luna Maxで独立Ceres参照を実装中です。COLMAP native pipelineの比較とは区別します。
+> 開発依存は専用container `visloc-m8-ceres-reference-v1` 内だけへ追加、host変更なし。
+> Ceres 2.2.0と全入力hashを固定し、初期残差parityを証明するまでsolveしません。
+> 今回のfixtureは既存1k全観測・rig/anchorを保持し、10kへ拡大しません。
+> 前turnは2件のPR統合と実測/図修正まで進捗あり。全体goalは引き続きactive。
+
 > 最新の続行（2026-09-08）: PR #87はhead `054b1ef` のCI8項目
 > （run `34153720050`）通過後、`d91fc44`へmerge済み。旧local/remote branchも整理済み。
 > 現在は `docs/electro-cdf-annotation`。Luna Maxで既存Electro図のCDF方向説明と

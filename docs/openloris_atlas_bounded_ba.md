@@ -1714,3 +1714,136 @@ The result motivates distinguishing the observation objective and geometry
 from the optimization path before another solver policy is proposed. It does
 not prove the cause of the trajectory regression or that robust loss,
 calibration refinement or point removal would fix it. GT stays post-only.
+
+### Frozen Ceres reference contract (2026-09-08)
+
+The existing Rust-exported `VISLOC_BA_ORACLE_FIXTURE 1` contains the exact
+camera/rig transforms, fixed pose and complete ordered observation set needed
+by this diagnostic. Reuse the frozen 1k fixture, SHA256
+`a71ef3401ea6d75a06f18ded0d475ad48fd929202a64fecaeaa790ee964da1ea`,
+instead of introducing a COLMAP rig/frame reconstruction conversion first.
+This is a **standalone Ceres reference**, not COLMAP native BA or mapper
+performance. The existing mapper reference remains unchanged.
+
+Before the one fixed-configuration solve, independently verify all 500 poses,
+4,716 XYZ points, 130,900 observations, two PINHOLE cameras, fixed frame 0 and
+sensor extrinsics against the original model/manifest, including identities
+and ordering. No pixel offset is added. Emit every initial residual and depth
+and compare against an independent projection: per residual coordinate
+`abs(error) <= 1e-6 px + 1e-12 * abs(reference residual)`; depth tolerance
+`1e-9 m + 1e-12 * abs(reference depth)`; initial squared-cost tolerance
+`1e-6 + 1e-10 * abs(reference cost)`. These are arithmetic-parity tolerances,
+not relaxed trajectory gates. A mismatch invalidates the reference run.
+
+Use Ceres 2.2.0, AutoDiff PINHOLE rig factors, wxyz QuaternionManifold plus
+translation blocks, all XYZ variable, fixed camera/sensor transforms and
+all anchor pose coordinates constant. The reference may pack wxyz quaternion
+and translation into one seven-scalar block with
+`ProductManifold<QuaternionManifold, EuclideanManifold<3>>`; group 1 then
+contains these pose blocks and group 0 the three-scalar XYZ blocks. This
+packing does not free either part of the anchor. No robust loss or filtering.
+Nonfinite/behind-camera candidates fail residual evaluation instead of
+dropping observations. Ceres minimizes one-half the squared cost; report the
+common full squared cost separately. The [Ceres tutorial](https://ceres-solver.readthedocs.io/latest/nnls_tutorial.html)
+and versioned [manifold](https://github.com/ceres-solver/ceres-solver/blob/2.2.0/include/ceres/manifold.h)
+and [solver options](https://github.com/ceres-solver/ceres-solver/blob/2.2.0/include/ceres/solver.h)
+define the reference conventions.
+
+Fix one thread, LM, initial trust-region radius 1e4, SPARSE_SCHUR with points
+in elimination group 0 and pose blocks in group 1, and max_num_iterations 20.
+Record all other versioned Ceres stopping/damping defaults and actual
+iterations; do not call them equivalent to visloc's PCG/LM stopping policy.
+The installed 2.2.0 header gives function/gradient/parameter tolerances
+1e-6/1e-10/1e-8, min/max radius 1e-32/1e16, min relative decrease 1e-3,
+LM diagonal bounds 1e-6/1e32, at most five consecutive invalid steps, Jacobi
+scaling on and nonmonotonic/inner iterations off. These defaults are not
+COLMAP's overridden BA settings.
+No GT-selected lambda/tolerance sweep. Keep the diagnostic under a dedicated
+2 GiB container memory/swap limit, one CPU and a 900 s solve timeout; no
+explicit dense global normal, and no enlargement of the fixture to atlas.
+Development dependencies stay in this disposable, task-specific container.
+
+Publish only a validated model preserving all original image/keypoint/track
+tokens and camera bytes; independently audit fixed calibration/anchor,
+finite positive-depth state, full support and connectivity before scoring.
+Report identity failures or solver termination honestly, never repair the
+output silently. A single nonconvex reference is evidence about this
+objective, not proof of the cause or of general COLMAP parity. The prior
+adaptive 1k failure still prohibits adaptive atlas/default promotion.
+
+#### Publication and derivative acceptance gates
+
+Initial residual agreement alone does not validate optimization. Before the
+real solve, test ambient AutoDiff derivatives against independent central
+differences, and tangent derivatives against finite differences through the
+actual ProductManifold `Plus` operation. Use nonidentity rig and sensor
+rotations, a nonzero baseline, variable poses and XYZ, and positive depths
+away from the rejection boundary. Also run a synthetic Ceres Problem with
+the same factor/block/manifold setup and check cost decrease, unchanged
+anchor parameters and unchanged calibration. Check derivative tolerances on
+the synthetic case, not against GT or by tuning real-data solver settings.
+
+The solved state must contain every original pose and point ID exactly once,
+the fixed anchor ID and all original source digests. Model publication must
+bind that state to the original fixture/model/rig manifest; frame and sensor
+membership comes from image names in the manifest, never image-ID arithmetic.
+For each output image, compose `T_sensor<-rig * T_rig<-world`. Preserve camera
+file bytes, image ID/camera ID/name and order, every POINTS2D token and order,
+and each point's ID/RGB/track tokens and order. Only pose coordinates, XYZ
+and recomputed mean Euclidean reprojection ERROR may change.
+
+Reject missing/extra/duplicate state IDs, nonfinite values, invalid quaternions,
+source digest mismatch, unsupported output observations or anchor movement.
+Recompute every final observation's positive depth and full squared cost
+from serialized output before GT scoring. Audit both directions of tracks,
+all 1,000 supported images/500 supported frames/4,716 points/130,900 observations,
+the original 361,170 keypoints and one connected rig component. Preserve
+the existing fixed-anchor comparison tolerance rather than loosening it
+to accommodate a candidate. Stage output in an owned private directory;
+reject any existing destination, symlink or source overlap, and never remove
+an unowned path when publication fails. This is a separate post-solve tool,
+not part of the measured Ceres optimization time; report phase timing clearly.
+
+### Frozen Ceres result: lower cost, worse trajectory (2026-09-08)
+
+The [reference evidence](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json)
+records one certified Ceres solve at `1f31335`, followed by the strict model
+publisher at `90672d4`. Root rebuilt and checked derivatives independently;
+all initial residual/depth rows byte-match the earlier audited checkpoint.
+The process took 77.45 s and 305,072 KiB peak RSS, including fixture evaluation
+and state output but excluding model publication, scoring and mapping. Ceres
+reports 76.776 s internally and stops at the 20-iteration limit with a usable
+state (`NO_CONVERGENCE`), not a demonstrated converged optimum. Its successful
+count of 14 includes iteration zero: 13 actual updates were accepted, seven
+rejected. No second real solve or parameter sweep was run.
+
+The following arms use the same frozen initial state and observations, but
+different documented solver policies; historical Rust figures come from the
+linked PR #85/#87 evidence, not new benchmark runs:
+
+| Frozen 1k arm | Full squared cost | RMSE (m) | p95 (m) | Mean observation error (px) |
+| --- | ---: | ---: | ---: | ---: |
+| Legacy matrix-free | 118070.554369 | 0.026608 | 0.041100 | 0.691589 |
+| Rust direct | 117496.033074 | 0.026519 | 0.040989 | 0.689260 |
+| Fixed column-scaled | 113754.040510 | 0.028550 | 0.043791 | 0.675819 |
+| Adaptive column-scaled | 113550.219339 | 0.029190 | 0.044521 | 0.675153 |
+| Standalone Ceres | 113473.879982 | 0.029571 | 0.044943 | 0.674902 |
+
+Both publications of the same Ceres state are byte-identical. Independent
+audits retain all 1,000 supported images, 500 supported rig frames in one
+component, 4,716 points, 130,900 observations and 361,170 keypoints, full
+identity/order, exact camera bytes and fixed calibration/anchor. Every final
+observation has positive depth. Maximum landmark motion is 231.001 m and
+maximum camera-centre motion 0.029428 m; maximum observation error is
+5.103062 px. These are reported separately from the mean. GT was consumed
+only after publication audits; the same 308 images were scored and the
+repeat score is identical.
+
+An independent optimizer also lowers this objective while worsening the
+trajectory. That supports investigating the observation objective and
+geometric observability, but neither identifies a unique cause nor proves
+that a different objective would improve accuracy. The existing COLMAP mapper
+has a different point/observation set and is not this frozen objective control.
+No atlas/default/README promotion follows. The next step is a bounded,
+GT-free diagnosis of which input geometry and track populations carry cost
+reduction and state motion, with its metric and work cap fixed before use.
