@@ -2036,6 +2036,44 @@ impl BundleAdjustment {
         })
     }
 
+    /// Run column-scaled matrix-free BA with the opt-in adaptive LM damping
+    /// policy.  The existing column-scaled entry point remains unchanged;
+    /// this method changes only the accepted-step lambda update and records
+    /// its scalar decision trace.  It requires zero initially non-projectable
+    /// observations, a finite positive same-observation quadratic prediction,
+    /// and the existing cost/feasibility gates for candidate acceptance.
+    /// Linear failures and rejected candidates retain the configured lambda
+    /// increase factor; only accepted candidates use the fixed rho rule
+    /// `max(1/3, 1 - (2*rho - 1)^3)`.  PCG options and the normal-equation
+    /// solve are otherwise identical.
+    pub fn optimize_matrix_free_column_scaled_adaptive(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaColumnScalingOptions,
+    ) -> Result<MatrixFreeBaAdaptiveDampingResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options.pcg)?;
+        if self.nonprojectable_observation_count() != 0 {
+            return Err(MatrixFreeBaError::Ineligible(
+                "adaptive damping requires zero initial non-projectable observations",
+            ));
+        }
+        let (result, runtime) = self.run_matrix_free_column_scaled_backend(
+            config,
+            MatrixFreeRuntime::with_column_scaling_adaptive(options.pcg),
+        )?;
+        Ok(MatrixFreeBaAdaptiveDampingResult {
+            ba: MatrixFreeBaResult {
+                initial_cost: result.initial_cost,
+                final_cost: result.final_cost,
+                iterations: result.iterations,
+                matrix_free_iterations: runtime.iterations,
+                converged: result.converged,
+            },
+            scaling_iterations: runtime.column_scaling_iterations.unwrap_or_default(),
+            adaptive_iterations: runtime.adaptive_iterations.unwrap_or_default(),
+        })
+    }
+
     /// Run the matrix-free backend with a bounded true-residual restart policy.
     ///
     /// This is an additive diagnostic entry point.  The existing
@@ -3028,7 +3066,7 @@ impl BundleAdjustment {
         &mut self,
         config: &BaConfig,
         gnc_weights: Option<&[f64]>,
-        backend: &mut BaSolveBackend,
+        mut backend: &mut BaSolveBackend,
     ) -> Result<BaResult, BaError> {
         let intrinsics = self.intrinsics().ok_or(BaError::UnsupportedCameraModel)?;
         if self.poses.is_empty() {
@@ -3193,6 +3231,10 @@ impl BundleAdjustment {
         let mut block_symbolic_cache = None;
 
         for iteration in 0..config.max_iterations {
+            let adaptive_damping = match &backend {
+                BaSolveBackend::MatrixFreeColumnScaled(runtime) => runtime.adaptive_damping,
+                _ => false,
+            };
             let prefer_pose_blocks = matches!(
                 backend,
                 BaSolveBackend::MatrixFree(_) | BaSolveBackend::MatrixFreeColumnScaled(_)
@@ -3239,7 +3281,7 @@ impl BundleAdjustment {
                     config.parallel,
                     &mut block_symbolic_cache,
                 )
-                .map(|(delta_poses, delta_landmarks)| (delta_poses, delta_landmarks, None)),
+                .map(|(delta_poses, delta_landmarks)| (delta_poses, delta_landmarks, None, None)),
                 BaSolveBackend::MatrixFree(runtime)
                 | BaSolveBackend::MatrixFreeColumnScaled(runtime) => {
                     let column_scaled = runtime.column_scaling_iterations.is_some();
@@ -3281,6 +3323,7 @@ impl BundleAdjustment {
                             runtime.restart_iterations.is_some(),
                             scaling_state.as_ref(),
                             schur_debug_context,
+                            adaptive_damping,
                         ),
                     };
                     match solve_result {
@@ -3298,6 +3341,7 @@ impl BundleAdjustment {
                             Ok((
                                 outcome.delta_poses,
                                 outcome.delta_landmarks,
+                                outcome.adaptive_prediction,
                                 outcome.quality,
                             ))
                         }
@@ -3333,12 +3377,44 @@ impl BundleAdjustment {
                     }
                 }
             };
-            let (delta_poses, delta_landmarks, quality) = match solve_result {
+            let (delta_poses, delta_landmarks, adaptive_prediction, quality) = match solve_result {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
                     // Treat singular system the same as a rejected LM step:
                     // bump λ and retry.
-                    lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
+                    let next_lambda = if adaptive_damping {
+                        bounded_adaptive_lambda(
+                            lambda,
+                            config.lambda_increase_factor,
+                            config.min_lambda,
+                            config.max_lambda,
+                        )
+                    } else {
+                        (lambda * config.lambda_increase_factor).min(config.max_lambda)
+                    };
+                    if adaptive_damping {
+                        if let BaSolveBackend::MatrixFreeColumnScaled(runtime) = &mut backend {
+                            runtime
+                                .adaptive_iterations
+                                .as_mut()
+                                .expect("adaptive damping diagnostics are enabled")
+                                .push(MatrixFreeBaAdaptiveDampingIterationStats {
+                                    iteration,
+                                    solve_lambda,
+                                    next_lambda,
+                                    predicted_undamped_squared_decrease: None,
+                                    actual_cost_decrease: None,
+                                    rho: None,
+                                    cost_gate: None,
+                                    feasibility_gate: None,
+                                    nonprojectable_before: current_nonprojectable,
+                                    nonprojectable_after: None,
+                                    accepted: false,
+                                    reason: "linear_failure".to_owned(),
+                                });
+                        }
+                    }
+                    lambda = next_lambda;
                     iterations.push(BaIterationStats {
                         iteration,
                         cost_before,
@@ -3415,13 +3491,30 @@ impl BundleAdjustment {
                 *pt = Point3::from(pt.coords + v);
             }
 
+            let nonprojectable_before = current_nonprojectable;
             let cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
             let nonprojectable_after = self.nonprojectable_observation_count();
             let cost_accepted = match config.initial_lambda {
                 None => true, // Pure GN: accept unconditionally.
                 Some(_) => cost_after < cost_before,
             };
-            let step_accepted = cost_accepted && nonprojectable_after <= current_nonprojectable;
+            let feasibility_gate = nonprojectable_after <= current_nonprojectable;
+            let mut step_accepted = cost_accepted && feasibility_gate;
+            let adaptive_decision = if adaptive_damping {
+                let decision = adaptive_step_decision(
+                    adaptive_prediction,
+                    cost_before,
+                    cost_after,
+                    nonprojectable_before,
+                    nonprojectable_after,
+                    cost_accepted,
+                    nonprojectable_before == nonprojectable_after && nonprojectable_after == 0,
+                );
+                step_accepted &= decision.accepted;
+                Some(decision)
+            } else {
+                None
+            };
 
             if let Some(quality) = quality {
                 emit_matrix_free_step_quality(
@@ -3430,10 +3523,10 @@ impl BundleAdjustment {
                     quality,
                     cost_before,
                     cost_after,
-                    current_nonprojectable,
+                    nonprojectable_before,
                     nonprojectable_after,
                     cost_accepted,
-                    nonprojectable_after <= current_nonprojectable,
+                    nonprojectable_after <= nonprojectable_before,
                     step_accepted,
                 );
             }
@@ -3457,8 +3550,8 @@ impl BundleAdjustment {
                     iteration,
                     step_accepted,
                     cost_accepted,
-                    nonprojectable_after <= current_nonprojectable,
-                    current_nonprojectable,
+                    nonprojectable_after <= nonprojectable_before,
+                    nonprojectable_before,
                     nonprojectable_after,
                     cost_before,
                     cost_after,
@@ -3471,7 +3564,39 @@ impl BundleAdjustment {
                 self.landmarks = saved_landmarks;
                 self.velocities = saved_velocities;
                 self.biases = saved_biases;
-                lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
+                let next_lambda = if adaptive_damping {
+                    bounded_adaptive_lambda(
+                        lambda,
+                        config.lambda_increase_factor,
+                        config.min_lambda,
+                        config.max_lambda,
+                    )
+                } else {
+                    (lambda * config.lambda_increase_factor).min(config.max_lambda)
+                };
+                if let Some(decision) = adaptive_decision {
+                    if let BaSolveBackend::MatrixFreeColumnScaled(runtime) = &mut backend {
+                        runtime
+                            .adaptive_iterations
+                            .as_mut()
+                            .expect("adaptive damping diagnostics are enabled")
+                            .push(MatrixFreeBaAdaptiveDampingIterationStats {
+                                iteration,
+                                solve_lambda,
+                                next_lambda,
+                                predicted_undamped_squared_decrease: decision.prediction,
+                                actual_cost_decrease: decision.actual_cost_decrease,
+                                rho: decision.rho,
+                                cost_gate: Some(decision.cost_gate),
+                                feasibility_gate: Some(decision.feasibility_gate),
+                                nonprojectable_before,
+                                nonprojectable_after: Some(nonprojectable_after),
+                                accepted: false,
+                                reason: decision.reason,
+                            });
+                    }
+                }
+                lambda = next_lambda;
                 iterations.push(BaIterationStats {
                     iteration,
                     cost_before,
@@ -3501,7 +3626,36 @@ impl BundleAdjustment {
             });
             current_cost = cost_after;
             current_nonprojectable = nonprojectable_after;
-            if config.initial_lambda.is_some() {
+            if let Some(decision) = adaptive_decision {
+                let next_lambda = adaptive_accepted_lambda(
+                    lambda,
+                    decision.rho.expect("accepted adaptive step has rho"),
+                    config.min_lambda,
+                    config.max_lambda,
+                )
+                .expect("accepted adaptive step has finite positive rho");
+                if let BaSolveBackend::MatrixFreeColumnScaled(runtime) = &mut backend {
+                    runtime
+                        .adaptive_iterations
+                        .as_mut()
+                        .expect("adaptive damping diagnostics are enabled")
+                        .push(MatrixFreeBaAdaptiveDampingIterationStats {
+                            iteration,
+                            solve_lambda,
+                            next_lambda,
+                            predicted_undamped_squared_decrease: decision.prediction,
+                            actual_cost_decrease: decision.actual_cost_decrease,
+                            rho: decision.rho,
+                            cost_gate: Some(decision.cost_gate),
+                            feasibility_gate: Some(decision.feasibility_gate),
+                            nonprojectable_before,
+                            nonprojectable_after: Some(nonprojectable_after),
+                            accepted: true,
+                            reason: decision.reason,
+                        });
+                }
+                lambda = next_lambda;
+            } else if config.initial_lambda.is_some() {
                 lambda = (lambda * config.lambda_decrease_factor).max(config.min_lambda);
             }
 
@@ -3724,6 +3878,33 @@ pub struct MatrixFreeBaColumnScalingIterationStats {
 pub struct MatrixFreeBaColumnScalingResult {
     pub ba: MatrixFreeBaResult,
     pub scaling_iterations: Vec<MatrixFreeBaColumnScalingIterationStats>,
+}
+
+/// Scalar per-LM-iteration accounting for adaptive column-scaled damping.
+/// Prediction is evaluated in the current scaled coordinates; it is not a
+/// full backward-error diagnostic and does not retain normal-equation state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaAdaptiveDampingIterationStats {
+    pub iteration: usize,
+    pub solve_lambda: f64,
+    pub next_lambda: f64,
+    pub predicted_undamped_squared_decrease: Option<f64>,
+    pub actual_cost_decrease: Option<f64>,
+    pub rho: Option<f64>,
+    pub cost_gate: Option<bool>,
+    pub feasibility_gate: Option<bool>,
+    pub nonprojectable_before: usize,
+    pub nonprojectable_after: Option<usize>,
+    pub accepted: bool,
+    pub reason: String,
+}
+
+/// Result of the opt-in adaptive column-scaled matrix-free BA run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaAdaptiveDampingResult {
+    pub ba: MatrixFreeBaResult,
+    pub scaling_iterations: Vec<MatrixFreeBaColumnScalingIterationStats>,
+    pub adaptive_iterations: Vec<MatrixFreeBaAdaptiveDampingIterationStats>,
 }
 
 /// Additive options for the bounded true-residual restart diagnostic.
@@ -4195,6 +4376,97 @@ fn quality_coordinate_metrics(
         normwise_backward_error,
         componentwise_backward_error,
     })
+}
+
+/// Compute only the scalar undamped quadratic prediction needed by the
+/// adaptive damping policy.  This intentionally does not allocate the
+/// residual/denominator scratch used by the opt-in backward-error diagnostic.
+/// Same-pose cross blocks are coalesced in insertion order per landmark so
+/// duplicate rig-sensor contributions have one bounded local representation.
+fn matrix_free_undamped_prediction(
+    system: &NormalEquationsBa,
+    delta_poses: &DVector<f64>,
+    delta_landmarks: &DVector<f64>,
+) -> Result<f64, &'static str> {
+    let CameraHessian::PoseDiagonal(pose_blocks) = &system.h_pp else {
+        return Err("adaptive prediction requires pose-diagonal normal equations");
+    };
+    if system.b_p.len() != pose_blocks.len() * 6
+        || delta_poses.len() != pose_blocks.len() * 6
+        || delta_landmarks.len() != system.landmarks.len() * 3
+    {
+        return Err("adaptive prediction delta dimensions mismatch");
+    }
+
+    let mut gradient_dot = 0.0;
+    let mut hessian_quadratic = 0.0;
+    for (pose, block) in pose_blocks.iter().enumerate() {
+        for row in 0..6 {
+            let row_index = pose * 6 + row;
+            let delta_row = delta_poses[row_index];
+            let rhs_row = system.b_p[row_index];
+            quality_add(&mut gradient_dot, rhs_row * delta_row)?;
+            for column in 0..6 {
+                let delta_column = delta_poses[pose * 6 + column];
+                quality_add(
+                    &mut hessian_quadratic,
+                    delta_row * block[(row, column)] * delta_column,
+                )?;
+            }
+        }
+    }
+
+    for (landmark_index, landmark) in system.landmarks.iter().enumerate() {
+        for row in 0..3 {
+            let row_index = landmark_index * 3 + row;
+            let delta_row = delta_landmarks[row_index];
+            let rhs_row = landmark.b_l[row];
+            quality_add(&mut gradient_dot, rhs_row * delta_row)?;
+            for column in 0..3 {
+                let delta_column = delta_landmarks[landmark_index * 3 + column];
+                quality_add(
+                    &mut hessian_quadratic,
+                    delta_row * landmark.h_ll[(row, column)] * delta_column,
+                )?;
+            }
+        }
+
+        let mut grouped_cross: BTreeMap<usize, Matrix6x3<f64>> = BTreeMap::new();
+        for (pose, cross) in &landmark.cross {
+            if *pose >= pose_blocks.len() {
+                return Err("adaptive prediction cross pose index is invalid");
+            }
+            if let Some(accumulated) = grouped_cross.get_mut(pose) {
+                *accumulated += *cross;
+                if !accumulated.iter().all(|value| value.is_finite()) {
+                    return Err("adaptive prediction cross accumulation is non-finite");
+                }
+            } else {
+                grouped_cross.insert(*pose, *cross);
+            }
+        }
+        for (pose, cross) in grouped_cross {
+            for row in 0..6 {
+                let pose_delta = delta_poses[pose * 6 + row];
+                for column in 0..3 {
+                    let landmark_delta = delta_landmarks[landmark_index * 3 + column];
+                    // The symmetric pose/landmark block occurs twice in
+                    // delta^T H delta.
+                    quality_add(
+                        &mut hessian_quadratic,
+                        2.0 * pose_delta * cross[(row, column)] * landmark_delta,
+                    )?;
+                }
+            }
+        }
+    }
+
+    let prediction = -2.0 * gradient_dot - hessian_quadratic;
+    if prediction.is_finite() {
+        Ok(prediction)
+    } else {
+        Err("adaptive prediction is non-finite")
+    }
 }
 
 fn matrix_free_step_quality(
@@ -4684,6 +4956,7 @@ mod column_scaling_tests {
             false,
             Some(&state),
             None,
+            false,
         ) {
             Ok(outcome) => outcome,
             Err(_) => panic!("scaled synthetic matrix-free solve should succeed"),
@@ -5178,6 +5451,8 @@ struct MatrixFreeRuntime {
     restart_limit: usize,
     restart_iterations: Option<Vec<MatrixFreeBaRestartIterationStats>>,
     column_scaling_iterations: Option<Vec<MatrixFreeBaColumnScalingIterationStats>>,
+    adaptive_damping: bool,
+    adaptive_iterations: Option<Vec<MatrixFreeBaAdaptiveDampingIterationStats>>,
     failure: Option<MatrixFreeBaError>,
 }
 
@@ -5189,6 +5464,8 @@ impl MatrixFreeRuntime {
             restart_limit: 0,
             restart_iterations: None,
             column_scaling_iterations: None,
+            adaptive_damping: false,
+            adaptive_iterations: None,
             failure: None,
         }
     }
@@ -5200,6 +5477,8 @@ impl MatrixFreeRuntime {
             restart_limit,
             restart_iterations: Some(Vec::new()),
             column_scaling_iterations: None,
+            adaptive_damping: false,
+            adaptive_iterations: None,
             failure: None,
         }
     }
@@ -5211,8 +5490,123 @@ impl MatrixFreeRuntime {
             restart_limit: 0,
             restart_iterations: None,
             column_scaling_iterations: Some(Vec::new()),
+            adaptive_damping: false,
+            adaptive_iterations: None,
             failure: None,
         }
+    }
+
+    fn with_column_scaling_adaptive(options: MatrixFreeBaOptions) -> Self {
+        Self {
+            options,
+            iterations: Vec::new(),
+            restart_limit: 0,
+            restart_iterations: None,
+            column_scaling_iterations: Some(Vec::new()),
+            adaptive_damping: true,
+            adaptive_iterations: Some(Vec::new()),
+            failure: None,
+        }
+    }
+}
+
+const ADAPTIVE_ACCEPT_MIN_LAMBDA_FACTOR: f64 = 1.0 / 3.0;
+
+fn bounded_adaptive_lambda(lambda: f64, multiplier: f64, min_lambda: f64, max_lambda: f64) -> f64 {
+    let product = lambda * multiplier;
+    if !product.is_finite() {
+        max_lambda
+    } else {
+        product.clamp(min_lambda, max_lambda)
+    }
+}
+
+fn adaptive_accepted_lambda(
+    lambda: f64,
+    rho: f64,
+    min_lambda: f64,
+    max_lambda: f64,
+) -> Result<f64, &'static str> {
+    if !rho.is_finite() || rho <= 0.0 {
+        return Err("adaptive rho is non-finite or non-positive");
+    }
+    // Clamp before cubing so a very large finite rho cannot overflow the
+    // policy expression.  This is a fixed policy, not a user-tunable sweep.
+    let centered = if rho >= 1.0 {
+        1.0
+    } else {
+        (2.0 * rho - 1.0).max(-1.0)
+    };
+    let multiplier = (1.0 - centered * centered * centered).max(ADAPTIVE_ACCEPT_MIN_LAMBDA_FACTOR);
+    if !multiplier.is_finite() {
+        return Err("adaptive lambda multiplier is non-finite");
+    }
+    Ok(bounded_adaptive_lambda(
+        lambda, multiplier, min_lambda, max_lambda,
+    ))
+}
+
+#[derive(Debug)]
+struct AdaptiveStepDecision {
+    prediction: Option<f64>,
+    actual_cost_decrease: Option<f64>,
+    rho: Option<f64>,
+    cost_gate: bool,
+    feasibility_gate: bool,
+    accepted: bool,
+    reason: String,
+}
+
+fn adaptive_step_decision(
+    prediction: Option<Result<f64, &'static str>>,
+    cost_before: f64,
+    cost_after: f64,
+    nonprojectable_before: usize,
+    nonprojectable_after: usize,
+    cost_gate: bool,
+    feasibility_gate: bool,
+) -> AdaptiveStepDecision {
+    let prediction_value = prediction.as_ref().and_then(|value| match value {
+        Ok(value) if value.is_finite() => Some(*value),
+        _ => None,
+    });
+    let prediction_error = match prediction.as_ref() {
+        Some(Err(error)) => Some(*error),
+        Some(Ok(value)) if !value.is_finite() => Some("adaptive prediction is non-finite"),
+        _ => None,
+    };
+    let (actual_cost_decrease, rho, rho_reason) = matrix_free_quality_actual_and_rho(
+        cost_before,
+        cost_after,
+        prediction_value,
+        nonprojectable_before,
+        nonprojectable_after,
+    );
+    let rho_positive = rho.is_some_and(|value| value > 0.0);
+    let accepted = cost_gate && feasibility_gate && rho_positive;
+    let reason = if accepted {
+        "accepted".to_owned()
+    } else if !cost_gate && !feasibility_gate {
+        "candidate_rejected_cost_and_feasibility_gate".to_owned()
+    } else if !cost_gate {
+        "candidate_rejected_cost_gate".to_owned()
+    } else if !feasibility_gate {
+        "candidate_rejected_feasibility_gate".to_owned()
+    } else if let Some(error) = prediction_error {
+        format!("candidate_rejected_prediction:{error}")
+    } else if rho.is_some() && !rho_positive {
+        "candidate_rejected_rho_nonpositive".to_owned()
+    } else {
+        format!("candidate_rejected_rho:{rho_reason}")
+    };
+    AdaptiveStepDecision {
+        prediction: prediction_value,
+        actual_cost_decrease,
+        rho,
+        cost_gate,
+        feasibility_gate,
+        accepted,
+        reason,
     }
 }
 
@@ -6712,6 +7106,7 @@ struct MatrixFreeStepOutcome {
     delta_landmarks: DVector<f64>,
     diagnostics: MatrixFreeBaIterationStats,
     restart_diagnostics: Option<MatrixFreeBaRestartIterationStats>,
+    adaptive_prediction: Option<Result<f64, &'static str>>,
     quality: Option<MatrixFreeStepQuality>,
 }
 
@@ -6727,7 +7122,7 @@ struct MatrixFreeStepError {
 // with the existing textual PCG failure.  Keeping it inline avoids an
 // allocation on the successful/default path; the large-error lint is not an
 // API concern here.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn solve_matrix_free_step(
     system: &NormalEquationsBa,
     lambda: f64,
@@ -6736,6 +7131,7 @@ fn solve_matrix_free_step(
     collect_restart_diagnostics: bool,
     scaling_state: Option<&ColumnEquilibrationState>,
     schur_debug_context: Option<SchurBlockDebugContext<'_>>,
+    collect_adaptive_prediction: bool,
 ) -> Result<MatrixFreeStepOutcome, MatrixFreeStepError> {
     let to_step_error = |error: implicit_schur::ImplicitSchurError| {
         let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
@@ -6814,6 +7210,8 @@ fn solve_matrix_free_step(
             to_step_error(error)
         }
     })?;
+    let adaptive_prediction = collect_adaptive_prediction
+        .then(|| matrix_free_undamped_prediction(system, &delta_poses, &delta_landmarks));
     let quality = ba_lm_step_quality_debug_enabled().then(|| {
         matrix_free_step_quality(
             system,
@@ -6850,6 +7248,7 @@ fn solve_matrix_free_step(
             pcg_failure: None,
         },
         restart_diagnostics: restart_diagnostics.map(Into::into),
+        adaptive_prediction,
         quality,
     })
 }
@@ -9727,6 +10126,26 @@ mod matrix_free_ba_api_tests {
             scaled_extrinsics
         );
         assert!(!scaled_result.scaling_iterations.is_empty());
+
+        let mut rig_adaptive = rig.clone();
+        rig_adaptive.fixed_landmarks.insert(0);
+        rig_adaptive.fixed_pose_rotations.insert(1);
+        let adaptive_anchor_pose = rig_adaptive.poses[&0].clone();
+        let adaptive_fixed_rotation = rig_adaptive.poses[&1].world_to_camera.rotation;
+        let adaptive_fixed_landmark = rig_adaptive.landmarks[&0];
+        let adaptive_result = rig_adaptive
+            .optimize_matrix_free_column_scaled_adaptive(
+                &matrix_free_config(),
+                MatrixFreeBaColumnScalingOptions::default(),
+            )
+            .unwrap();
+        assert!(adaptive_result.ba.final_cost.is_finite());
+        assert_eq!(rig_adaptive.poses[&0], adaptive_anchor_pose);
+        assert_eq!(
+            rig_adaptive.poses[&1].world_to_camera.rotation,
+            adaptive_fixed_rotation
+        );
+        assert_eq!(rig_adaptive.landmarks[&0], adaptive_fixed_landmark);
     }
 
     #[test]
@@ -9908,6 +10327,106 @@ mod matrix_free_ba_api_tests {
             .matrix_free_iterations
             .iter()
             .all(|iteration| iteration.pcg_failure.is_some()));
+    }
+
+    #[test]
+    fn adaptive_damping_is_deterministic_and_records_candidate_gates() {
+        let problem = make_problem();
+        let config = matrix_free_config();
+        let mut first = problem.clone();
+        let mut second = problem;
+        let first_result = first
+            .optimize_matrix_free_column_scaled_adaptive(
+                &config,
+                MatrixFreeBaColumnScalingOptions::default(),
+            )
+            .unwrap();
+        let second_result = second
+            .optimize_matrix_free_column_scaled_adaptive(
+                &config,
+                MatrixFreeBaColumnScalingOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(first_result, second_result);
+        assert_eq!(first, second);
+        assert!(!first_result.adaptive_iterations.is_empty());
+        assert!(first_result
+            .adaptive_iterations
+            .iter()
+            .all(|stats| stats.next_lambda.is_finite()
+                && stats.next_lambda >= config.min_lambda
+                && stats.next_lambda <= config.max_lambda
+                && stats.cost_gate.is_some()
+                && stats.feasibility_gate.is_some()
+                && stats.nonprojectable_after.is_some()));
+        assert!(first_result
+            .adaptive_iterations
+            .iter()
+            .any(|stats| stats.accepted));
+    }
+
+    #[test]
+    fn adaptive_damping_rejects_nonpositive_rho_without_panic() {
+        let decision =
+            adaptive_step_decision(Some(Ok(f64::MAX)), f64::from_bits(1), 0.0, 0, 0, true, true);
+        assert_eq!(decision.actual_cost_decrease, Some(f64::from_bits(1)));
+        assert_eq!(decision.rho, Some(0.0));
+        assert!(!decision.accepted);
+        assert_eq!(decision.reason, "candidate_rejected_rho_nonpositive");
+        assert_eq!(
+            adaptive_accepted_lambda(1.0, 0.0, 1.0e-6, 1.0e6),
+            Err("adaptive rho is non-finite or non-positive")
+        );
+    }
+
+    #[test]
+    fn adaptive_damping_policy_clamps_and_distinguishes_prediction_failure() {
+        let high_rho = adaptive_accepted_lambda(1.0, 2.0, 1.0e-6, 1.0e6).unwrap();
+        assert_eq!(high_rho, 1.0 / 3.0);
+        let moderate_rho = adaptive_accepted_lambda(1.0, 0.25, 1.0e-6, 1.0e6).unwrap();
+        assert!((moderate_rho - 1.125).abs() < 1.0e-15);
+        let bounded = adaptive_accepted_lambda(1.0e6, 2.0, 1.0e-6, 10.0).unwrap();
+        assert_eq!(bounded, 10.0);
+
+        let rejected = adaptive_step_decision(
+            Some(Err("adaptive prediction is non-finite")),
+            2.0,
+            1.0,
+            0,
+            0,
+            true,
+            true,
+        );
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.prediction, None);
+        assert_eq!(rejected.rho, None);
+        assert_eq!(
+            rejected.reason,
+            "candidate_rejected_prediction:adaptive prediction is non-finite"
+        );
+
+        let invalid = adaptive_step_decision(Some(Ok(f64::NAN)), 2.0, 1.0, 0, 0, true, true);
+        assert!(!invalid.accepted);
+        assert_eq!(invalid.prediction, None);
+        assert_eq!(invalid.rho, None);
+    }
+
+    #[test]
+    fn adaptive_damping_rejects_initial_nonprojectable_state_without_mutation() {
+        let mut problem = make_problem();
+        problem.landmarks.get_mut(&1).unwrap().coords.z = -1.0;
+        let before = problem.clone();
+        let result = problem.optimize_matrix_free_column_scaled_adaptive(
+            &matrix_free_config(),
+            MatrixFreeBaColumnScalingOptions::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(MatrixFreeBaError::Ineligible(
+                "adaptive damping requires zero initial non-projectable observations"
+            ))
+        ));
+        assert_eq!(problem, before);
     }
 
     #[test]

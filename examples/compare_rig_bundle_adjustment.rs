@@ -16,14 +16,14 @@ use nalgebra::{Point2, Point3, Quaternion, UnitQuaternion, Vector3};
 use sha2::{Digest, Sha256};
 use visloc_rs::io::colmap::parse_cameras_txt;
 use visloc_rs::slam::{
-    BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaColumnScalingOptions,
-    MatrixFreeBaColumnScalingResult, MatrixFreeBaOptions, MatrixFreeBaRestartOptions,
-    MatrixFreeBaRestartResult, MatrixFreeBaResult, RobustKernel,
+    BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaAdaptiveDampingResult,
+    MatrixFreeBaColumnScalingOptions, MatrixFreeBaColumnScalingResult, MatrixFreeBaOptions,
+    MatrixFreeBaRestartOptions, MatrixFreeBaRestartResult, MatrixFreeBaResult, RobustKernel,
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--matrix-free-column-scaling] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
+    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--matrix-free-column-scaling] [--matrix-free-adaptive-damping] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -37,6 +37,8 @@ const MIN_BASELINE_M: f64 = 1.0e-9;
 const MIN_DEPTH_M: f64 = 1.0e-12;
 const MAX_PCG_ITERATIONS: usize = 128;
 const PCG_TOLERANCE: f64 = 1.0e-12;
+const ADAPTIVE_PCG_MAX_ITERATIONS: usize = 512;
+const ADAPTIVE_PCG_RELATIVE_TOLERANCE: f64 = 1.0e-8;
 const BA_MAX_ITERATIONS: usize = 20;
 const BA_INITIAL_LAMBDA: f64 = 1.0e-4;
 const ORACLE_MAX_VARIABLE_POSES: usize = 512;
@@ -86,6 +88,7 @@ struct Args {
     allow_unsupported_sensor_images: bool,
     allow_unsupported_sensor_images_explicit: bool,
     matrix_free_column_scaling: bool,
+    matrix_free_adaptive_damping: bool,
     oracle_fixture_out: Option<PathBuf>,
 }
 
@@ -180,6 +183,7 @@ enum OptimizationResult {
     MatrixFree(MatrixFreeBaResult),
     MatrixFreeRestart(MatrixFreeBaRestartResult),
     MatrixFreeColumnScaled(MatrixFreeBaColumnScalingResult),
+    MatrixFreeAdaptive(MatrixFreeBaAdaptiveDampingResult),
 }
 
 fn main() {
@@ -216,6 +220,8 @@ where
     let mut allow_unsupported_seen = false;
     let mut matrix_free_column_scaling = false;
     let mut matrix_free_column_scaling_seen = false;
+    let mut matrix_free_adaptive_damping = false;
+    let mut matrix_free_adaptive_damping_seen = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -268,6 +274,14 @@ where
             }
             matrix_free_column_scaling_seen = true;
             matrix_free_column_scaling = true;
+            continue;
+        }
+        if flag == "--matrix-free-adaptive-damping" {
+            if matrix_free_adaptive_damping_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            matrix_free_adaptive_damping_seen = true;
+            matrix_free_adaptive_damping = true;
             continue;
         }
         if flag == "--pcg-relative-tolerance" {
@@ -359,12 +373,13 @@ where
             || pcg_restarts_seen
             || fixed_frame_seen
             || allow_unsupported_seen
-            || matrix_free_column_scaling_seen)
+            || matrix_free_column_scaling_seen
+            || matrix_free_adaptive_damping_seen)
     {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
              --solver, --out-dir, --fixed-frame-id, --allow-unsupported-sensor-images, \
-             --matrix-free-column-scaling, --pcg-max-iterations, --pcg-relative-tolerance or \
+             --matrix-free-column-scaling, --matrix-free-adaptive-damping, --pcg-max-iterations, --pcg-relative-tolerance or \
              --pcg-max-restarts\n{USAGE}"
         ));
     }
@@ -388,11 +403,17 @@ where
         allow_unsupported_sensor_images,
         allow_unsupported_sensor_images_explicit: allow_unsupported_seen,
         matrix_free_column_scaling,
+        matrix_free_adaptive_damping,
         oracle_fixture_out,
     };
     if args.solver == Some(SolverArm::Direct) && matrix_free_column_scaling_seen {
         return Err(format!(
             "matrix-free column scaling is only valid for matrix-free\n{USAGE}"
+        ));
+    }
+    if args.solver == Some(SolverArm::Direct) && matrix_free_adaptive_damping_seen {
+        return Err(format!(
+            "adaptive damping is only valid for matrix-free\n{USAGE}"
         ));
     }
     if args.solver == Some(SolverArm::Direct)
@@ -405,6 +426,20 @@ where
     if matrix_free_column_scaling && pcg_restarts_seen && pcg_max_restarts != 0 {
         return Err(format!(
             "--matrix-free-column-scaling rejects nonzero --pcg-max-restarts\n{USAGE}"
+        ));
+    }
+    if matrix_free_adaptive_damping && !matrix_free_column_scaling {
+        return Err(format!(
+            "--matrix-free-adaptive-damping requires --matrix-free-column-scaling\n{USAGE}"
+        ));
+    }
+    if matrix_free_adaptive_damping
+        && (pcg_max_iterations != ADAPTIVE_PCG_MAX_ITERATIONS
+            || pcg_relative_tolerance != ADAPTIVE_PCG_RELATIVE_TOLERANCE
+            || pcg_max_restarts != 0)
+    {
+        return Err(format!(
+            "adaptive damping requires PCG max_iterations=512, relative_tolerance=1e-8, and max_restarts=0\n{USAGE}"
         ));
     }
     Ok(args)
@@ -506,6 +541,14 @@ fn run(args: &Args) -> Result<(), String> {
             1.0e-6_f64, 1.0e32_f64,
         );
     }
+    if args.matrix_free_adaptive_damping {
+        println!(
+            "adaptive_damping_configuration solver=matrix-free-column-scaled-adaptive policy=accepted_rho_cubic_min_factor[1/3] prediction_coordinates=scaled prediction=undamped_squared_cost same_observation_gate=true pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0",
+            ADAPTIVE_PCG_MAX_ITERATIONS,
+            ADAPTIVE_PCG_RELATIVE_TOLERANCE,
+            PCG_TOLERANCE,
+        );
+    }
     if solver == SolverArm::MatrixFree && args.pcg_max_restarts_explicit {
         println!(
             "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e} max_restarts_per_solve={}",
@@ -535,14 +578,27 @@ fn run(args: &Args) -> Result<(), String> {
                 pcg_absolute_tolerance: PCG_TOLERANCE,
             };
             if args.matrix_free_column_scaling {
-                let result = prepared
-                    .ba
-                    .optimize_matrix_free_column_scaled(
-                        &config,
-                        MatrixFreeBaColumnScalingOptions { pcg: options },
-                    )
-                    .map_err(|error| format!("matrix-free column-scaled BA failed: {error}"))?;
-                OptimizationResult::MatrixFreeColumnScaled(result)
+                if args.matrix_free_adaptive_damping {
+                    let result = prepared
+                        .ba
+                        .optimize_matrix_free_column_scaled_adaptive(
+                            &config,
+                            MatrixFreeBaColumnScalingOptions { pcg: options },
+                        )
+                        .map_err(|error| {
+                            format!("matrix-free adaptive column-scaled BA failed: {error}")
+                        })?;
+                    OptimizationResult::MatrixFreeAdaptive(result)
+                } else {
+                    let result = prepared
+                        .ba
+                        .optimize_matrix_free_column_scaled(
+                            &config,
+                            MatrixFreeBaColumnScalingOptions { pcg: options },
+                        )
+                        .map_err(|error| format!("matrix-free column-scaled BA failed: {error}"))?;
+                    OptimizationResult::MatrixFreeColumnScaled(result)
+                }
             } else if args.pcg_max_restarts_explicit {
                 let result = prepared
                     .ba
@@ -590,6 +646,14 @@ fn run(args: &Args) -> Result<(), String> {
                 result.ba.converged,
             )
         }
+        OptimizationResult::MatrixFreeAdaptive(result) => {
+            print_matrix_free_adaptive_trace(result, args.pcg_max_iterations);
+            (
+                result.ba.final_cost,
+                result.ba.iterations.len(),
+                result.ba.converged,
+            )
+        }
     };
     if !final_cost.is_finite() {
         return Err("final BA cost is non-finite".to_owned());
@@ -605,12 +669,50 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
-    let solver_name = if args.matrix_free_column_scaling {
+    let solver_name = if args.matrix_free_adaptive_damping {
+        "matrix-free-column-scaled-adaptive"
+    } else if args.matrix_free_column_scaling {
         "matrix-free-column-scaled"
     } else {
         summary.solver.as_str()
     };
-    if args.matrix_free_column_scaling {
+    if args.matrix_free_adaptive_damping {
+        let adaptive_iterations = match &optimization {
+            OptimizationResult::MatrixFreeAdaptive(result) => result.adaptive_iterations.len(),
+            _ => 0,
+        };
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 adaptive_damping=true adaptive_iterations={} prediction_coordinates=scaled prediction=undamped_squared_cost acceptance_rho=actual_same_observation_cost_decrease_over_prediction accepted_lambda_factor=max_1_3_1_minus_centered_rho_cubed solver_seconds={:.6} total_seconds={:.6} out={}",
+            solver_name,
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest
+                .assignments
+                .values()
+                .map(|assignment| assignment.frame_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            source.points.len(),
+            source
+                .points
+                .iter()
+                .map(|point| point.observations.len())
+                .sum::<usize>(),
+            args.fixed_frame_id,
+            args.allow_unsupported_sensor_images,
+            source_supported_image_count(&source),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            adaptive_iterations,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else if args.matrix_free_column_scaling {
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 residual_coordinates=scaled damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d column_scaling_diagonal=clamp_hjj[1e-6,1e32] solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
@@ -2422,6 +2524,62 @@ fn print_matrix_free_column_scaled_trace(
     }
 }
 
+fn print_matrix_free_adaptive_trace(
+    result: &MatrixFreeBaAdaptiveDampingResult,
+    max_pcg_iterations: usize,
+) {
+    for iteration in &result.ba.iterations {
+        println!(
+            "lm_trace solver=matrix-free-column-scaled-adaptive iteration={} cost_before={:.15e} cost_after={:.15e} pose_step={:.15e} landmark_step={:.15e} lambda={:.15e} accepted={} step_coordinates=physical damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d",
+            iteration.iteration,
+            iteration.cost_before,
+            iteration.cost_after,
+            iteration.max_pose_step,
+            iteration.max_landmark_step,
+            iteration.lambda,
+            iteration.step_accepted,
+        );
+    }
+    for iteration in &result.ba.matrix_free_iterations {
+        println!(
+            "pcg_trace solver=matrix-free-column-scaled-adaptive iteration={} pcg_iterations={} residual={} target={} failure={} max_pcg_iterations={} residual_coordinates=scaled damping_metric=identity",
+            iteration.iteration,
+            option_usize(iteration.pcg_iterations),
+            option_f64(iteration.pcg_residual_norm),
+            option_f64(iteration.pcg_target),
+            iteration.pcg_failure.as_deref().unwrap_or("none"),
+            max_pcg_iterations,
+        );
+    }
+    for scaling in &result.scaling_iterations {
+        println!(
+            "column_scaling_trace solver=matrix-free-column-scaled-adaptive iteration={} minimum_diagonal={:.17e} maximum_diagonal={:.17e} clamped_to_minimum={} clamped_to_maximum={} diagonal_policy=clamp_hjj[1e-6,1e32]",
+            scaling.iteration,
+            scaling.minimum_diagonal,
+            scaling.maximum_diagonal,
+            scaling.clamped_to_minimum,
+            scaling.clamped_to_maximum,
+        );
+    }
+    for adaptive in &result.adaptive_iterations {
+        println!(
+            "adaptive_damping_trace solver=matrix-free-column-scaled-adaptive iteration={} solve_lambda={:.17e} next_lambda={:.17e} prediction={} actual_cost_decrease={} rho={} cost_gate={} feasibility_gate={} nonprojectable_before={} nonprojectable_after={} accepted={} reason={:?}",
+            adaptive.iteration,
+            adaptive.solve_lambda,
+            adaptive.next_lambda,
+            option_f64(adaptive.predicted_undamped_squared_decrease),
+            option_f64(adaptive.actual_cost_decrease),
+            option_f64(adaptive.rho),
+            option_bool(adaptive.cost_gate),
+            option_bool(adaptive.feasibility_gate),
+            adaptive.nonprojectable_before,
+            option_usize(adaptive.nonprojectable_after),
+            adaptive.accepted,
+            adaptive.reason,
+        );
+    }
+}
+
 fn print_matrix_free_restart_trace(result: &MatrixFreeBaRestartResult, max_pcg_iterations: usize) {
     print_matrix_free_trace(&result.ba, max_pcg_iterations);
     for iteration in &result.restart_iterations {
@@ -2476,6 +2634,10 @@ fn option_usize(value: Option<usize>) -> String {
 
 fn option_f64(value: Option<f64>) -> String {
     value.map_or_else(|| "unknown".to_owned(), |value| format!("{value:.15e}"))
+}
+
+fn option_bool(value: Option<bool>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
 }
 
 fn unique_image_indices(images: &[SourceImage]) -> Result<BTreeMap<u64, usize>, String> {
@@ -2643,6 +2805,7 @@ mod tests {
         assert!(!default.allow_unsupported_sensor_images);
         assert!(!default.allow_unsupported_sensor_images_explicit);
         assert!(!default.matrix_free_column_scaling);
+        assert!(!default.matrix_free_adaptive_damping);
     }
 
     #[test]
@@ -2736,6 +2899,200 @@ mod tests {
                 "--export-oracle-fixture",
                 "fixture.txt",
                 "--matrix-free-column-scaling",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
+    }
+
+    #[test]
+    fn parses_adaptive_damping_only_with_fixed_matrix_free_policy() {
+        let adaptive = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(adaptive.matrix_free_column_scaling);
+        assert!(adaptive.matrix_free_adaptive_damping);
+        assert_eq!(adaptive.pcg_max_iterations, 512);
+        assert_eq!(adaptive.pcg_relative_tolerance, 1.0e-8);
+        assert_eq!(adaptive.pcg_max_restarts, 0);
+
+        let missing_scaling = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(missing_scaling.contains("requires --matrix-free-column-scaling"));
+
+        let wrong_max_iterations = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "128",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(wrong_max_iterations.contains("requires PCG max_iterations=512"));
+
+        let wrong_relative_tolerance = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-7",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(wrong_relative_tolerance.contains("relative_tolerance=1e-8"));
+
+        let nonzero_restart = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-restarts",
+                "1",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(nonzero_restart.contains("rejects nonzero --pcg-max-restarts"));
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("only valid for matrix-free"));
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--matrix-free-adaptive-damping",
             ]
             .into_iter()
             .map(str::to_owned),
