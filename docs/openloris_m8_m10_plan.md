@@ -95,6 +95,18 @@ invalid-depth trial observations; PCG 128/512 fail. At `1e10`, PCG converges in
 numerical traces are unchanged. Next isolate accumulation versus convergence
 with explicit lower-Schur PCG using the same preconditioner and stopping rule;
 this is a diagnostic gate, not a tolerance relaxation or a 10k promotion.
+PR #80 passed all eight final-head CI checks (run `34122318818`) and merged
+as `2b4ef99`; its old branch was removed. Work continues on
+`feat/m8-explicit-pcg-isolation` with the identical frozen fixture.
+That isolation is implemented (`cb14bdc`) and measured twice with all numerical
+lines identical; [evidence](../benchmarks/electro/m8-openloris-explicit-pcg-isolation-v1.json).
+At the first useful direct damping (`1e5`), explicit PCG nearly reaches but fails
+its true-residual target, while implicit PCG has a larger residual; the dense
+reference also fails that target. The next bounded stability candidate compares
+Cholesky-based damped landmark elimination with the current small general
+inverse, before any nonlinear/10k promotion. Scaling and a separately defined
+inexact policy remain available: the diagnostic tolerance is not a substitute
+for the user's actual quality, speed and memory requirements.
 
 ## Historical M7 baseline
 

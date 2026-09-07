@@ -463,7 +463,7 @@
   "raw_schur_asymmetry": "Maximum absolute off-diagonal element difference |S_ij-S_ji|; not a Frobenius or spectral norm.",
   "delta_errors": "Euclidean norms over concatenated deltas; pose combines rotation and translation coordinates, not a metre-only physical pose error.",
   "geometry_rms_error": "sqrt(sum(valid observation squared pixel residual)/valid observation count); not arithmetic mean reprojection error.",
-  "action_relative_errors": "Absolute action difference norm divided by sum of base-action norm and per-landmark eliminated-action norms, not by final Schur-action norm.",
+  "action_relative_errors": "Absolute action difference norm divided by max(1, norm(base action) + norm(accumulated eliminated action)), not by final Schur-action norm and not by a sum of per-landmark norms.",
   "pcg_true_residual": "Euclidean norm of rhs minus implicit action; lower-Schur residual separately reported.",
   "initial_cost_bits": "Decimal u64 string to avoid JSON consumer integer rounding."
 }

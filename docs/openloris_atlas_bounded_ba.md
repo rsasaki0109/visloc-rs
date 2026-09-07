@@ -867,7 +867,7 @@ identity and coordinates, point coordinates and initial-cost bits
 `4683430141614839853` (126,510.39875730938). No observation was removed.
 The same initial normal system has 499 free pose blocks / scalar dimension 2,994.
 
-| Initial solve damping | PCG 128 / 512 | Direct step residual: lower / implicit | Trial geometry |
+| Initial solve damping | Matrix-free PCG 128 / 512 | Direct step residual: lower / implicit | Trial geometry |
 |---|---|---|---|
 | `1e-4` | both fail; true residual 41,263.7 / 318.346 against `7.35e-7` | `2.75e-6` / `0.01848` | 880 nonpositive-depth observations |
 | `1e10` | both succeed at 22 iterations; `5.64e-7` against `7.38e-7` | `3.02e-9` / `4.49e-7` | all 130,900 valid |
@@ -883,7 +883,7 @@ accuracy. PCG recursive and true residuals are close at these low-damping
 iteration limits, so residual replacement alone is not established as a fix.
 
 At high damping, matrix-free/explicit pose-delta difference is `2.09e-17` and
-all trial costs are 126,477.42813448103. Low-damping trial geometry cost/RMS
+all trial geometry costs are 126,477.42813448103. Low-damping trial geometry cost/RMS
 exclude 880 invalid observations and must not be called full-objective
 improvements. Reported feasibility means finite and valid geometry, not that
 the PCG residual target passed. Prediction fields distinguish half-cost damped,
@@ -901,3 +901,125 @@ implicit action, with the same input, damping, block-Jacobi preconditioner,
 128/512 limits and true-residual rule. This isolates accumulation from
 convergence/preconditioning before selecting scaling or a different
 preconditioner. Preserve the baseline and do not silently relax its tolerance.
+
+PR #80 passed all eight final-head CI checks (run `34122318818`, head
+`b294bab`) and merged as `2b4ef99`; its local and remote topic branches were
+removed. The fixture also re-exported byte-identically to a second filename.
+The arithmetic-scale denominator above is specifically
+`max(1, ||base_action|| + ||accumulated_eliminated_action||)`, not a sum of
+individual landmark-action norms.
+
+### Explicit-PCG isolation contract
+
+The next test-only arm borrows the existing lower-mirrored Schur matrix and
+calls the **same existing implicit operator's preconditioner application**.
+It must not substitute an independently recomputed block diagonal: that would
+change two numerical components at once. Preserve RHS, zero initial iterate,
+PCG recurrence, true-residual recheck, damping and iteration caps. A test-only
+callback recurrence must reproduce the production PCG when given the implicit
+action, including failure diagnostics, before interpreting its explicit-action
+comparison. This leaves production APIs and defaults untouched.
+
+For explicit PCG, report both its own lower-Schur residual and a re-evaluation
+with the implicit action; convergence for one finite-precision representation
+does not establish convergence for the other. Report successful complete steps
+and trial geometry separately from failed numerical trials. Retain both damping
+values and the previous oracle report as controls. Reuse the existing bounded
+matrix and fixture, not an additional model clone or a new production dense path.
+
+Include `lambda=1e5` in the new isolation report in addition to the two endpoint
+controls. The frozen PR #79 `direct-serial-1.log` rejects LM0 through LM8 and
+first accepts LM9 at solve damping `1e5`, with trial cost
+118,084.4047208355. Thus this third damping also uses the unchanged initial
+model and tests a step that actually improved the baseline optimizer, rather
+than only a geometrically invalid low-damping step and a tiny high-damping
+step. Preserve the original four-case oracle report for direct comparison;
+the isolation report has six cases (three damping values, two iteration caps).
+
+If both representations stall, investigate preconditioning and conditioning;
+if only the implicit representation stalls, prioritize accumulation and
+symmetry. These are hypotheses to refine with the measured residuals, not a
+binary proof of a unique cause. Do not turn a shorter failed solve into a speed
+claim, relax the stopping threshold, or promote to 10k from this experiment.
+
+[Ceres' official solver FAQ](https://ceres-solver.readthedocs.io/latest/solving_faqs.html)
+(checked 2026-09-07) discusses explicit Schur for smaller problems and stronger
+cluster preconditioners when Schur-Jacobi is insufficient. This supports testing
+the representations/preconditioner separately; it does not establish that a
+cluster implementation will fit this project's memory budget or solve its
+current numerical failure. Any later cluster arm needs an explicit bounded
+storage/work design and an unchanged-quality comparison.
+
+A separate numerical-stability candidate, not selected for this isolation PR,
+is [Demmel et al., CVPR 2021, Square Root Bundle Adjustment](https://openaccess.thecvf.com/content/CVPR2021/html/Demmel_Square_Root_Bundle_Adjustment_for_Large-Scale_Reconstruction_CVPR_2021_paper.html).
+It eliminates landmark variables with QR/nullspace operations and reports
+better numerical stability than normal-equation Schur elimination, but also
+larger memory requirements on dense problems. The authors' [RootBA OSS](https://github.com/nikolausdemmel/rootba)
+is a reference, not a dependency added here. Our inference is that such a
+representation may merit a bounded experiment if accumulation is limiting;
+its reported BAL results do not prove a win for this calibrated rig or justify
+replacing the current linear-storage design without a track-length memory audit.
+
+An independent frozen-fixture count illustrates that constraint: storing a
+naive dense `2 * observation_count` by `6 * unique_free_pose_count` camera
+Jacobian for every landmark would require 232,363,908 f64 entries,
+1,858,911,264 bytes (1.731 GiB), already at 1k and before damping, RHS or
+workspace. Same-frame sensor observations share pose columns; fixed pose 0
+is excluded from columns but its observation rows remain. Maximum track length
+is 893 observations. This is a hypothetical storage warning, **not** measured
+RootBA memory or a lower bound for implicit/streamed QR. Do not select that
+naive layout for the 10k implementation.
+
+### Explicit-PCG isolation results (2026-09-07)
+
+[Evidence](../benchmarks/electro/m8-openloris-explicit-pcg-isolation-v1.json)
+records implementation `cb14bdc`. Both arms use the same normal system, RHS,
+existing block-Jacobi preconditioner and stopping rule. The original four-case
+oracle is assembled separately first and reproduces all PR #80 numerical lines
+exactly. The new isolation system is then assembled once for all six cases.
+
+| Damping | Cap | Explicit lower-PCG true residual | Implicit-PCG true residual | Outcome |
+|---|---:|---:|---:|---|
+| `1e-4` | 128 | 5,614.69 | 41,263.7 | both hit cap |
+| `1e-4` | 512 | 0.0355111 | 318.346 | both hit cap |
+| `1e5` | 128 | 1,411.68 | 1,673.76 | both hit cap |
+| `1e5` | 512 | `8.947e-7` | `9.079e-4` | explicit recheck fails at 316; implicit hits cap |
+| `1e10` | 128 / 512 | `3.336e-8` | `5.639e-7` | explicit 23 / implicit 22 iterations, both pass |
+
+Targets are approximately `7.35e-7` to `7.38e-7`. At the useful `1e5` damping,
+explicit recursive residual reaches `7.537e-8`, but its true residual exceeds
+the target, so rejection is correct under this baseline contract. The dense
+reference itself has lower/implicit residuals `2.143e-6` / `0.002572` there.
+This does not prove the target is mathematically unattainable. It does show
+that replacing the operator with an explicit matrix is not sufficient to pass
+the current gate, and that both failures cannot be attributed solely to the
+preconditioner. Failed iterates are discarded, so their cross-operator
+residuals, deltas and trial geometry are unavailable, not zero.
+
+At high damping, the explicit solution also passes the implicit-action recheck
+(`1.275e-7`); its pose/landmark delta differences from the implicit solution are
+`2.09e-17` / `9.92e-18`. All 130,900 trial observations remain valid and trial
+geometry cost is unchanged from PR #80. Two serial release executions reproduce
+all eleven numerical lines exactly. Whole diagnostic process wall times are
+45.02 / 44.77 s and peak RSS 346,196 / 346,148 KiB; these include reference
+factorizations and repeated arms, are from a shared host, and are not solver
+speed or production memory results. No new model or README claim is promoted.
+
+The next bounded improvement candidate is a test-only damped-landmark-block
+Cholesky construction versus the current general 3x3 inverse, used consistently
+by the implicit action, explicit reference and preconditioner. First measure
+the input-block and inverse asymmetry; do not assume it is nonzero. Keep
+physical coordinates, damping, observations, caps and stopping rule unchanged,
+then compare actual residuals, convergence and valid-step quality. A win here
+must still pass a full nonlinear 1k comparison before production promotion.
+
+[Ceres' Schur implementation](https://ceres-solver.googlesource.com/ceres-solver/+/master/internal/ceres/schur_eliminator.h)
+discusses Cholesky inversion for SPD landmark blocks but uses a general inverse
+in its small fixed-size specialization for speed. Thus it supports considering
+the stability/speed tradeoff, not claiming that Cholesky is always faster or
+that the existing inverse is inherently incorrect. Separately labeled
+coordinate scaling or an inexact LM policy remain options after this A/B;
+the fixed `1e-12` rule is a diagnostic baseline, not the user's ultimate goal.
+Any changed policy must retain honest true-residual reporting and demonstrate
+the requested trajectory/reprojection/resource quality, not merely report more
+linear solves as successful.
