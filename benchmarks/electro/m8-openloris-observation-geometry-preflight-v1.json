@@ -49,7 +49,7 @@
     "max_track_length": 893
   },
   "count_method": "awk: skip comment/empty rows; k=(NF-8)/2 per points3D row; sum k, k*k, k*(k-1)/2; no pair traversal",
-  "pair_work_cap": 64000000,
+  "sum_squared_track_lengths_cap": 64000000,
   "run_plan": [
     "initial self-control",
     "legacy",
