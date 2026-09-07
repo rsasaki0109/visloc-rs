@@ -1226,6 +1226,18 @@ actual cross-track recovery and accounting for any existing support loss
 before considering an adoption policy. See the
 [bounded BA and connectivity record](openloris_atlas_bounded_ba.md).
 
+The strict generalized-PnP diagnostic subsequently succeeds with six or more
+distinct inlier tracks in 10 frames. Only the frame 2000 candidate reconnects
+the supported main graph: two complete crossing tracks add 30 observations,
+while five failed existing tracks remove 39 observations without creating new
+unsupported images or frames. This is a hypothetical graph audit, before
+frame 4493 recovery, not a serialized model or a trajectory-quality pass.
+Next implement one default-off transactional candidate with deterministic,
+GT-free selection: strictly reduce supported components, preserve every
+supported image/frame and retain unchanged geometry gates. Run it together
+with unsupported-frame recovery, independently audit the real model and then
+score the original two model gauges without changing alignment conventions.
+
 Freeze the M8 quality champion before performance edits.
 
 ### Exact-output performance work accepted during M8 diagnosis (2026-09-03)
