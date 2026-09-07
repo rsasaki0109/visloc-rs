@@ -54,7 +54,7 @@
     "points3D_sha256": "e38c35ce5b5ea20811d993d024752e540263667759b6fbecf68b66e1a131b077"
   },
   "aggregate_score": {
-    "tail_model": "Reused unchanged fixed-pose-v1/component-001",
+    "tail_model": "Score initially used fixed-pose-v1/component-001; subsequent recovery-v1/component-001 replay is byte-identical",
     "pose_rows": 9998,
     "supported_images": 9997,
     "supported_rig_frames": 4999,
@@ -64,9 +64,24 @@
     "colmap_p95_gate_m": 0.6386693943260212,
     "trajectory_gate_pass": false
   },
+  "non_regression_checks": {
+    "binary": "Archived recovery-v1 executable above",
+    "default_main_output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/recovery-default-control/component-000",
+    "default_main_byte_identical_to_fixed_pose_baseline": true,
+    "recovery_enabled_tail_byte_identical_to_fixed_pose_baseline": true,
+    "compared_files_each": ["cameras.txt", "images.txt", "points3D.txt", "image_support.tsv", "frame_support.tsv", "integration_summary.tsv"],
+    "main_existing_landmarks_unchanged": 319137,
+    "main_existing_landmarks_lost": 0,
+    "landmark_comparison": "Exact track observation list identity and serialized XYZ/RGB/ERROR; output-local point IDs may be renumbered",
+    "main_added_landmarks": 10,
+    "default_main_wall_s": 10.42,
+    "default_main_peak_rss_kib": 508620,
+    "recovery_enabled_tail_wall_s": 3.61,
+    "recovery_enabled_tail_peak_rss_kib": 77320,
+    "resource_caveat": "Concurrent control runs, not performance acceptance measurements"
+  },
   "limitations": [
     "Single integration/recovery run, not mapper-only or native E2E performance evidence",
-    "Follow-up acceptance tests and allocation improvements are still in progress",
-    "Tail component reused, not rerun with the recovery flag in this measurement"
+    "Follow-up acceptance tests and allocation improvements are still in progress"
   ]
 }
