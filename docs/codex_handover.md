@@ -3,30 +3,27 @@
 > 現在の引き継ぎ先（2026-09-07）:
 > [OpenLORIS M8–M10計画](openloris_m8_m10_plan.md) と
 > [rig-atlas診断記録](openloris_rig_atlas_diagnostic.md)。以下は9月1日時点の
-> 履歴です。M8は未完了で、最新の軌跡のみの診断は9,998画像、
-> RMSE 0.391778 m / p95 0.643698 m。COLMAPの精度ゲートと
-> 統合ランドマークモデルの品質ゲートはまだ通過していません。
-> [実ランドマーク統合](openloris_atlas_landmark_integration.md)は平均再投影
-> 0.633124 pxですが、frame 4493の観測消失で支持画像は9,996枚です。
-> 続くGT非使用のpose回復pilotでframe 4493は10点の支持を取り戻しました。
-> 全体RMSE/p95は0.391465/0.643175 mで未達のため、次は回復処理の
-> 受理条件テストと省メモリ化を固め、観測ベースの有界な最適化へ進みます。
-> その後、厳格な局所BAはRMSE/p95が0.391797/0.643537 mに悪化し非昇格。
-> [連結性監査](../benchmarks/electro/m8-openloris-atlas-connectivity-v1.json)では
-> 主成分内がframe 1999/2000で分断（2,000＋2,494フレーム）していました。
-> 境界を跨ぐ31本のtrackはmergeを通過しますが再三角測量で全て消失。
-> 左側だけで三角測量できる14点から、右側14フレームに6点以上の対応が得られます。
-> 既存GeneralizedPnPによる有界な診断は10フレームで6点以上のinlierを得ましたが、
-> 全観測保持で戻る境界trackはframe 2000の2本だけで、既存5本が再三角測量に失敗。
-> 仮想graph監査では、この5本・39観測を除いても支持付き主成分が接続し、新規支持喪失は0。
-> 既定OFFのtransactional修復と4493回復を組み合わせた実モデルの独立監査で、
-> 全4,999フレームの支持と4,494＋505の連結成分を確認。RMSE/p95は
-> 0.391075/0.643107 mへ改善しましたがCOLMAP精度ゲートは未達です。
-> 現在の土台は[boundary修復モデル](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json)。
-> 次はこの連結済みモデルで観測ベースの有界な精度改善を検証します。
-> 続く同一runのstrict BAは、BA直前checkpoint完全一致を確認したうえで
-> RMSE/p95が0.391408/0.643460 mに悪化し非昇格。現在は除去前全観測のcost検査・
-> 支持/連結性維持・除去数会計を備えた別モードのpost-BA filteringを実装中です。
+> 履歴です。**M8は未完了**。現在の比較入力は
+> [boundary修復モデル](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json)
+> （PR #72でmainへ統合済み）。独立監査で9,998画像姿勢、9,997支持画像、
+> 全4,999支持rigフレーム、4,494＋505の連結成分を確認しています。
+> 平均再投影誤差は0.633112 px、軌跡RMSE/p95は0.391075/0.643107 m。
+> COLMAPの0.384307/0.638669 mの精度ゲートはまだ未達です。
+>
+> [同一入力のstrict BA](../benchmarks/electro/m8-openloris-atlas-connected-strict-ba-v1.json)
+> はBA直前checkpointの全6ファイル一致を確認しましたが、RMSE/p95が
+> 0.391408/0.643460 mに悪化したため非昇格。現在はDraft PR #73
+> (`feat/m8-connected-atlas-refinement`) で、既定OFFの
+> `--joint-rig-ba-filter-observations` を実装・レビュー中です。
+> 除去前の全観測costと、同じ残存観測集合での前後costを別々に検査し、
+> 支持画像・フレームと連結性を維持します。変更する局所候補だけを保持し、
+> 削除した観測・trackを明示的に数えます。詳細は
+> [有界BAの検証契約](openloris_atlas_bounded_ba.md)を参照してください。
+>
+> 次の順序は、削除・拒否・rollbackのテスト、既定OFFでのstrict出力一致、
+> 同一checkpointからの10k試走、独立した幾何/連結性監査と軌跡評価、再実行一致です。
+> この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
+> 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
