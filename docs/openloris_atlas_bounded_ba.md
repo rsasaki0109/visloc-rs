@@ -184,3 +184,37 @@ That is different from rejecting a whole window when any track exceeds a
 gate. The existing visloc `filter_positioned_track_observations` likewise
 filters observations after BA. These are references for a future controlled
 experiment, not evidence that filtering alone will recover missing connectivity.
+
+## Real-model boundary repair
+
+The default-off transactional implementation now passes 31 example tests and
+Clippy. With unsupported-frame recovery followed by
+`--repair-cross-boundary --repair-left-max-frame 1999`, the first candidate
+(frame 2000) passes the geometry/support/connectivity policy. Only its two
+sensor poses and affected landmarks are changed; existing calibration stays
+fixed. Removed tracks and observations remain explicit: 5 tracks / 39
+observations removed, 2 complete tracks / 30 observations added.
+
+Independent auditing of the serialized output confirms all 4,999 rig frames
+are supported and the main/tail track graphs are connected (4,494 + 505),
+matching the frozen COLMAP component sizes. The frame 4493 recovery remains
+intact. All bidirectional references, positive depths and fixed-rig checks
+pass. An independent repeat yields byte-identical main model/support/summary
+files.
+
+| Quality measure | Recovery baseline | Boundary repair | Frozen COLMAP |
+| --- | ---: | ---: | ---: |
+| Supported rig frames | 4,999 | 4,999 | 4,999 |
+| Main connected groups | 2 | 1 | 1 |
+| Supported images | 9,997 | 9,997 | 9,996 |
+| Trajectory RMSE | 0.391465 m | 0.391075 m | 0.384307 m |
+| Trajectory p95 | 0.643175 m | 0.643107 m | 0.638669 m |
+
+Aggregate mean reprojection is 0.633112 px with 353,794 landmarks and
+1,453,320 observations. The main integration/recovery/repair pilot takes
+11.99 s at 509,284 KiB peak RSS; this is not mapper/E2E timing.
+Both trajectory gates still fail, so this is a connected refinement
+foundation, **not** the M8 quality champion. Continue observation-based
+refinement on this connected real model, preserving the original scoring
+alignment and reporting any observation filtering. Full hashes and controls:
+[boundary-repair evidence](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json).

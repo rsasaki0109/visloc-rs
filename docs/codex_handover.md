@@ -19,7 +19,11 @@
 > 既存GeneralizedPnPによる有界な診断は10フレームで6点以上のinlierを得ましたが、
 > 全観測保持で戻る境界trackはframe 2000の2本だけで、既存5本が再三角測量に失敗。
 > 仮想graph監査では、この5本・39観測を除いても支持付き主成分が接続し、新規支持喪失は0。
-> 現在は既定OFFのtransactional修復を実装中。実モデルの独立監査・精度評価はこれからです。
+> 既定OFFのtransactional修復と4493回復を組み合わせた実モデルの独立監査で、
+> 全4,999フレームの支持と4,494＋505の連結成分を確認。RMSE/p95は
+> 0.391075/0.643107 mへ改善しましたがCOLMAP精度ゲートは未達です。
+> 現在の土台は[boundary修復モデル](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json)。
+> 次はこの連結済みモデルで観測ベースの有界な精度改善を検証します。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

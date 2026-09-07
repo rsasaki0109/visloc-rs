@@ -1238,6 +1238,15 @@ supported image/frame and retain unchanged geometry gates. Run it together
 with unsupported-frame recovery, independently audit the real model and then
 score the original two model gauges without changing alignment conventions.
 
+The real transactional repair plus frame 4493 recovery now passes independent
+serialized-model connectivity/support auditing: 4,999 supported rig frames,
+connected main/tail groups of 4,494 + 505 and no new unsupported images.
+Main output is byte-identical on repeat. RMSE/p95 improve to
+0.391075/0.643107 m but still fail COLMAP's frozen limits. Continue bounded
+observation-based refinement from this connected model; do not promote it as
+the quality champion or retune scoring alignment. See
+[real-model evidence](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json).
+
 Freeze the M8 quality champion before performance edits.
 
 ### Exact-output performance work accepted during M8 diagnosis (2026-09-03)
