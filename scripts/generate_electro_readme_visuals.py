@@ -56,6 +56,13 @@ ELECTRO_FLAT_RE = re.compile(
     r"(?:^|/)cam(?P<camera>[0-9]+)_(?P<timestamp>[0-9]+)\.[^/]+$"
 )
 
+# The distribution panel is an ECDF: at a fixed error threshold, a higher
+# curve means that more cameras are already within that threshold.  Keep the
+# wording in one constant so the visual's direction cannot silently regress.
+CDF_DIRECTION_NOTE = "higher/left curve = tighter camera-centre agreement"
+SUMMARY_CARD_METRICS_X = 0.57
+SUMMARY_CARD_METRICS_FONTSIZE = 6.7
+
 
 @dataclass
 class ModelData:
@@ -470,12 +477,12 @@ def add_summary_card(ax, y_top: float, metrics: RunMetrics, total: int, color: s
         family="DejaVu Sans Mono",
     )
     ax.text(
-        0.60,
+        SUMMARY_CARD_METRICS_X,
         y_top - 0.119,
         f"median {format_metric_m(metrics.median_m)}  ·  p95 {format_metric_m(metrics.p95_m)}",
         transform=ax.transAxes,
         color=ink,
-        fontsize=7.15,
+        fontsize=SUMMARY_CARD_METRICS_FONTSIZE,
         va="top",
         family="DejaVu Sans Mono",
     )
@@ -642,7 +649,16 @@ def build_png(
     distribution.set_ylabel("cameras within error [%]")
     distribution.set_title("Residual distribution to official reference", loc="left", color=ink, pad=8, fontweight="bold")
     distribution.legend(fontsize=7.1, loc="lower right", framealpha=0.94, facecolor="#ffffff")
-    distribution.text(0.03, 0.045, "lower curve = tighter camera-centre agreement", transform=distribution.transAxes, color=muted, fontsize=6.7, va="bottom")
+    distribution.text(
+        0.03,
+        -0.22,
+        CDF_DIRECTION_NOTE,
+        transform=distribution.transAxes,
+        color=muted,
+        fontsize=6.7,
+        va="top",
+        clip_on=False,
+    )
 
     summary.text(0.03, 0.98, "MEASURED RUN", transform=summary.transAxes, color=muted, fontsize=7.4, fontweight="bold", va="top")
     summary.text(0.03, 0.91, args.run_label, transform=summary.transAxes, color=ink, fontsize=10.2, fontweight="bold", va="top")
