@@ -620,7 +620,7 @@ final-head CI checks (run 34108930129), merged as `0460c9c`, and its old branch
 was removed; [numerical evidence](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)
 records scope and limitations. No production or 10k performance claim follows.
 
-#### Integration gate (runtime API merged in PR #78; real-model comparison pending)
+#### Integration gate (runtime API merged in PR #78; 1k numerical agreement failed)
 
 After the private numerical gate and CI, expose an additive, opt-in pure-visual
 entry point with separate iterative options. Keep existing public enum variants,
@@ -679,8 +679,9 @@ per LM iteration, with termination at the LM iteration/damping limits.
 
 The [frozen 1k input](../benchmarks/electro/m8-openloris-matrix-free-1k-input-v1.json)
 has been independently hash-checked, geometry-audited and trajectory-rescored.
-Its direct/implicit experiment driver and measured A/B are still outstanding;
-input preparation and API unit tests do not constitute a real-model comparison.
+The single-arm driver is implemented in `c810be9`; ten example tests, targeted
+clippy, formatting and the release build pass. Initial real-model results are
+below; input preparation and API unit tests alone are not the comparison gate.
 
 #### Frozen 1k post-map experiment contract
 
@@ -694,7 +695,7 @@ stereo; this is evidence of metric observations, not a numerical-rank proof.
 
 Both arms fix frame 0 only, retain all landmarks and observations, and use
 20 LM iterations, initial damping `1e-4`, no robust loss, fixed intrinsics and
-distortion, and serial execution. The candidate starts with 128 PCG iterations
+distortion, and `BaConfig::parallel=false`. The candidate starts with 128 PCG iterations
 and relative/absolute tolerances `1e-12`. Any later iteration-budget arm must
 be separately labeled and justified by the recorded true linear residuals;
 do not silently loosen tolerances or fall back to a direct solve.
@@ -715,6 +716,12 @@ images afterward using the frozen scorer and calibration; GT is never passed
 to optimization. Numerical agreement with direct BA, improvement over the
 input, and the COLMAP trajectory gate are separate results.
 
+The first runs exposed an independent thread control: the existing block
+Cholesky backend uses the Rayon pool even with `BaConfig::parallel=false`.
+Retain those runs as automatic-thread diagnostics (nine live process threads
+were observed for direct BA); use explicit `RAYON_NUM_THREADS=1` for separately
+labeled single-thread controls. Do not call the initial direct runs single-threaded.
+
 Record pure solve time separately from whole-process elapsed time and peak
 RSS, including loading, validation, problem assembly and publication in the
 latter. Run arms serially with no concurrent project build or benchmark;
@@ -722,3 +729,63 @@ record the shared-machine limitation. These are **post-mapping BA** costs,
 not mapper-only or native end-to-end costs. Repeated runs must reproduce the
 model and numerical trace, excluding timing/path fields. No 10k experiment or
 performance promotion follows until the actual 1k results have been reviewed.
+
+The experimental command uses a complete matching rig manifest and requires
+every image to have support in one connected rig-frame component:
+
+```bash
+cargo build --release --example compare_rig_bundle_adjustment
+# Use separate new/empty output directories; run these processes serially.
+RAYON_NUM_THREADS=1 /usr/bin/time -v target/release/examples/compare_rig_bundle_adjustment \
+  --model /path/to/frozen/model --rig-manifest /path/to/rig-manifest.txt \
+  --solver direct --out-dir /path/to/results/direct
+RAYON_NUM_THREADS=1 /usr/bin/time -v target/release/examples/compare_rig_bundle_adjustment \
+  --model /path/to/frozen/model --rig-manifest /path/to/rig-manifest.txt \
+  --solver matrix-free --out-dir /path/to/results/matrix-free
+```
+
+Initial 1k runs have identical initial cost `126510.3987573094`. Direct BA ends
+at `117496.0317308232`, whereas default 128-iteration PCG ends at
+`126419.0824771856`; both exhaust 20 LM iterations without convergence. PCG
+reports both iteration-limit failures and true-residual verification failures,
+so its shorter run is **not equivalent-work acceleration**. Recomputed mean
+reprojection is 0.689260 px for direct and 0.720314 px for PCG, versus 0.720679 px
+for the input. Direct increases maximum observation error from 3.999569 to
+4.937790 px; retaining all observations is not a guarantee of maximum-error
+nonregression.
+
+Independent output audits retain all 1,000 images, 500 supported frames,
+4,716 landmarks and 130,900 observations in one component, with positive
+depths and fixed calibration. Every original POINTS2D token and point
+ID/RGB/track token/order is preserved. Post-map RMSE/p95 is
+0.026519/0.040989 m for direct and 0.026703/0.041347 m for PCG. These scores do
+not establish numerical agreement between solvers.
+
+The [complete 1k comparison record](../benchmarks/electro/m8-openloris-matrix-free-rig-ba-comparison-v1.json)
+contains ten serially executed processes: two automatic-thread runs per solver,
+then two explicit single-thread runs each for direct, PCG-128 and PCG-512.
+Every same-condition repeat has byte-identical model files and numerical
+traces. All PCG variants produce the same final model. PCG-512 changes the
+failure counts from 12 iteration-limit / 5 true-residual failures to 10 / 7,
+but still accepts only three steps; increasing the budget alone is not promoted.
+Single-thread direct costs differ slightly from automatic-thread direct
+(`117496.0330739301` versus `117496.0317308232`), so cross-thread bit identity is
+not claimed. Compared with single-thread direct, PCG retains maximum camera
+centre/landmark differences of 0.003442/0.042606 m: the solver-agreement gate fails.
+
+Single-thread whole-process times are 45.54/57.34 s for direct, 6.43/8.08 s for
+PCG-128 and 17.53/20.90 s for PCG-512. Corresponding peak RSS ranges are
+161,736–161,780 / 84,644–84,692 / 84,436–84,516 KiB. These shared-machine
+measurements describe different optimization progress, not an equivalent-
+quality speedup or a pipeline memory win. The README comparison is not promoted.
+
+Next use the exact same initial normal equations at solve damping `1e-4` and
+`1e10` to compare explicit Schur/direct and implicit action/RHS/steps, true
+residuals, predicted decrease and feasibility. PCG makes no state updates before
+LM14, so the initial model is sufficient for both diagnostic damping values.
+Existing LM trace `lambda` is the increased value after rejection, but the
+solve value after acceptance: LM0 solves at `1e-4`, not its logged rejection
+value `1e-3`. Separate operator cancellation/residual drift, conditioning and
+convergence hypotheses before changing preconditioning or residual updates;
+the current measurements do not prove which is the sole cause. Preserve the
+true-residual gate and keep this next diagnostic in a separate PR.
