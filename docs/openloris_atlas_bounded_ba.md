@@ -352,3 +352,52 @@ Both components repeat byte-for-byte across all six output files; the tail
 repeat omits checkpoint writing and still matches. All eight CI checks pass
 for implementation `be09d1a` (run 34094029224). Hashes, exact counts and scope are in
 [filtered BA evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
+
+### Next controlled arm: preserve valid optimized points
+
+PR #73 is merged as `07a4104`, after all eight final-head CI checks passed
+(run 34094661047). Its filtering arm remains the measured experimental candidate,
+not a COLMAP-parity claim. The next branch is
+`feat/m8-preserve-optimized-atlas-points`.
+
+A code audit finds that every retained selected track currently replaces the
+raw BA point with a DLT estimate, even when no observation was removed. The
+main pilot has 120/150 nonconverged windows at the iteration cap. Its cumulative
+full-observation raw BA cost falls 6.11%, whereas cumulative retained-key cost
+after DLT falls 2.78%. **These percentages use different key sets and overlapping
+windows; they do not prove DLT is the cause of the remaining trajectory gap.**
+They motivate a controlled comparison, not more iteration/threshold searching.
+
+The [upstream local BA implementation](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)
+solves BA, merges/completes relevant tracks, then filters observations. It does
+not unconditionally replace every retained optimized point with a DLT estimate
+in that local-BA sequence. This motivates preserving an already valid solution;
+the proposed arm still does not implement COLMAP's full merge/completion policy.
+
+Use an explicitly named, default-off
+`--joint-rig-ba-preserve-optimized-points`, requiring the filtering flag:
+
+- If the post-classification observation keys are exactly unchanged, validate
+  the raw BA XYZ against the same finite, bounded-sample parallax, positive-depth,
+  min-two, mean-2-px and max-4-px gates. Retain it only if all gates pass, with
+  freshly evaluated output metrics.
+- Otherwise use the existing DLT path unchanged. In particular, any observation
+  deletion still forces DLT. Do not add a new nonlinear solver or robust loss.
+- Keep one 60-frame/stride-30 sweep, 20 BA iterations, calibration, anchors,
+  resource caps and full-original/same-retained-key cost gates unchanged.
+- Preserve the original support sets, connectivity and transactional deletion
+  ledger. Stage only the bounded window's updates.
+- Log raw-retained and DLT-attempted track counts plus fallback reasons by
+  window and cumulatively; these count window events, not unique model points.
+
+Freeze the same source/recovery/repair checkpoint before either arm. First
+prove flag-OFF equality to `connected-filtered-ba-v1`, then run the new arm,
+independently audit the actual output and score only after mapping. Require
+repeat byte identity and retain negative results. Both COLMAP trajectory gates
+and the entire M8–M10 speed/memory/nonregression objective remain unchanged.
+
+The previous photometric quadrilateral experiment is already complete on a
+different mapper input; do not repeat it as if it were new. Neither optimized
+point retention, fixed-pose nonlinear point refinement nor a second sweep has
+yet been measured on this connected filtering input. Test point retention first
+to isolate this implementation difference before introducing other changes.

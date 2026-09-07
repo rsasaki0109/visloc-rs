@@ -1347,9 +1347,12 @@ All 44 example tests, 20 independent auditor tests and eight implementation CI
 checks pass. Details and reproducible hashes are in
 [filtered BA evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
 
-Finish PR #73 final CI/merge, then use observation/solver diagnostics to choose
-the next GT-free, bounded refinement step. Do not select thresholds or mapping
-actions using ground truth. Mapper/native-E2E performance, tier nonregression,
+PR #73 final CI/merge and branch cleanup are complete (`07a4104`). The next
+controlled arm preserves raw BA point positions only when observation keys are
+unchanged and every existing geometry gate passes; other points retain the
+current DLT path. See the [exact comparison contract](openloris_atlas_bounded_ba.md).
+Do not select thresholds or mapping actions using ground truth.
+Mapper/native-E2E performance, tier nonregression,
 restart and 100k I/O requirements remain unchanged and incomplete.
 
 ## Stop conditions

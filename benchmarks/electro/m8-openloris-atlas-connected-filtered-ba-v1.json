@@ -75,6 +75,8 @@
     "both_trajectory_gates_pass": false
   },
   "verification": {
+    "final_ci": {"run_id": 34094661047, "head_commit": "852ffde4de1239657db04163662d45f9044ebd3d", "checks_passed": 8, "rust_duration": "3m29s"},
+    "merge": {"pr": 73, "commit": "07a41049a71157c1863740a69409e2fbc728a627", "merged_at": "2026-09-07T07:20:22Z", "local_and_remote_branch_removed": true},
     "example_tests_passed": 44,
     "independent_python_auditor_tests_passed": 20,
     "example_and_tests_clippy_warnings_denied": "pass",
