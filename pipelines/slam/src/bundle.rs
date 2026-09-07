@@ -7332,6 +7332,34 @@ mod matrix_free_real_oracle_tests {
         matrix_free_prediction: Option<PredictedDecrease>,
     }
 
+    /// Result of the test-only PCG recurrence when the explicitly materialized
+    /// lower-mirrored Schur matrix is used as the action.  A failed solve does
+    /// not retain its last iterate: in particular, no failed trial is passed
+    /// to the geometry or prediction checks below.
+    #[derive(Debug, Clone, PartialEq)]
+    struct ExplicitPcgIsolationReport {
+        lambda: f64,
+        pcg_max_iterations: usize,
+        status: String,
+        iterations: Option<usize>,
+        recursive_residual: Option<f64>,
+        lower_true_residual: Option<f64>,
+        implicit_true_residual: Option<f64>,
+        target: Option<f64>,
+        dense_lower_true_residual: Option<f64>,
+        dense_implicit_true_residual: Option<f64>,
+        pose_error_vs_dense: Option<f64>,
+        landmark_error_vs_dense: Option<f64>,
+        implicit_pcg_status: String,
+        implicit_pcg_iterations: Option<usize>,
+        implicit_pcg_true_residual: Option<f64>,
+        implicit_pcg_target: Option<f64>,
+        explicit_vs_implicit_pose_error: Option<f64>,
+        explicit_vs_implicit_landmark_error: Option<f64>,
+        feasibility: Option<Feasibility>,
+        prediction: Option<PredictedDecrease>,
+    }
+
     fn parse_f64(token: &str, context: &str) -> Result<f64, String> {
         let value = token
             .parse::<f64>()
@@ -7915,6 +7943,470 @@ mod matrix_free_real_oracle_tests {
             return Err("oracle explicit Schur is non-finite".to_owned());
         }
         Ok((schur, rhs, singular_landmarks))
+    }
+
+    fn explicit_lower_action(
+        schur: &DMatrix<f64>,
+        x: &DVector<f64>,
+    ) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError> {
+        if schur.nrows() != schur.ncols() {
+            return Err(implicit_schur::ImplicitSchurError::DimensionMismatch {
+                expected: schur.nrows(),
+                actual: schur.ncols(),
+            });
+        }
+        if x.len() != schur.nrows() {
+            return Err(implicit_schur::ImplicitSchurError::DimensionMismatch {
+                expected: schur.nrows(),
+                actual: x.len(),
+            });
+        }
+        if !x.iter().all(|value| value.is_finite()) {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "operator input",
+            ));
+        }
+        let output = schur * x;
+        if !output.iter().all(|value| value.is_finite()) {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "operator output",
+            ));
+        }
+        Ok(output)
+    }
+
+    fn checked_test_pcg_result<Apply>(
+        rhs: &DVector<f64>,
+        solution: DVector<f64>,
+        iterations: usize,
+        recursive_norm: f64,
+        target: f64,
+        apply: &mut Apply,
+    ) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError>
+    where
+        Apply: FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
+    {
+        let applied = apply(&solution)?;
+        let true_residual = rhs - &applied;
+        let true_norm = true_residual.norm();
+        if !true_norm.is_finite() {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "true PCG residual",
+            ));
+        }
+        if true_norm > target {
+            return Err(implicit_schur::ImplicitSchurError::ResidualCheckFailed {
+                iterations,
+                recursive_norm,
+                true_norm,
+                target,
+            });
+        }
+        Ok(implicit_schur::PcgResult {
+            solution,
+            iterations,
+            residual_norm: true_norm,
+            target,
+        })
+    }
+
+    /// Test-only generic PCG recurrence copied from the production implicit
+    /// operator.  The callbacks make it possible to run the exact recurrence
+    /// against either the implicit action or a borrowed explicit lower-Schur
+    /// matrix, while keeping the production solver/API untouched.
+    fn solve_test_pcg<Apply, Preconditioner>(
+        rhs: &DVector<f64>,
+        dimension: usize,
+        options: implicit_schur::PcgOptions,
+        mut apply: Apply,
+        mut apply_preconditioner: Preconditioner,
+    ) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError>
+    where
+        Apply: FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
+        Preconditioner:
+            FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
+    {
+        if rhs.len() != dimension {
+            return Err(implicit_schur::ImplicitSchurError::DimensionMismatch {
+                expected: dimension,
+                actual: rhs.len(),
+            });
+        }
+        if !rhs.iter().all(|value| value.is_finite()) {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "PCG right hand side",
+            ));
+        }
+        if !options.relative_tolerance.is_finite()
+            || options.relative_tolerance < 0.0
+            || !options.absolute_tolerance.is_finite()
+            || options.absolute_tolerance < 0.0
+        {
+            return Err(implicit_schur::ImplicitSchurError::InvalidTolerance);
+        }
+        let rhs_norm = rhs.norm();
+        let target = options
+            .absolute_tolerance
+            .max(options.relative_tolerance * rhs_norm);
+        if !target.is_finite() {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG target"));
+        }
+        let mut solution = DVector::zeros(dimension);
+        let mut residual = rhs.clone();
+        let mut residual_norm = residual.norm();
+        if !residual_norm.is_finite() {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "initial residual",
+            ));
+        }
+        if residual_norm <= target {
+            return checked_test_pcg_result(rhs, solution, 0, residual_norm, target, &mut apply);
+        }
+        if options.max_iterations == 0 {
+            return Err(implicit_schur::ImplicitSchurError::MaxIterations {
+                iterations: 0,
+                recursive_norm: residual_norm,
+                residual_norm,
+                target,
+            });
+        }
+
+        let mut preconditioned = apply_preconditioner(&residual)?;
+        let mut direction = preconditioned.clone();
+        let mut rho = residual.dot(&preconditioned);
+        if !rho.is_finite() || rho <= 0.0 {
+            return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
+        }
+
+        for iteration in 1..=options.max_iterations {
+            let applied = apply(&direction)?;
+            let curvature = direction.dot(&applied);
+            if !curvature.is_finite() || curvature <= 0.0 {
+                return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
+            }
+            let alpha = rho / curvature;
+            if !alpha.is_finite() {
+                return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG step"));
+            }
+            solution += alpha * &direction;
+            residual -= alpha * applied;
+            residual_norm = residual.norm();
+            if !solution.iter().all(|value| value.is_finite()) || !residual_norm.is_finite() {
+                return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG iterate"));
+            }
+            if residual_norm <= target {
+                return checked_test_pcg_result(
+                    rhs,
+                    solution,
+                    iteration,
+                    residual_norm,
+                    target,
+                    &mut apply,
+                );
+            }
+            if iteration == options.max_iterations {
+                let true_residual = rhs - &apply(&solution)?;
+                let true_norm = true_residual.norm();
+                if !true_norm.is_finite() {
+                    return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                        "true PCG residual",
+                    ));
+                }
+                if true_norm <= target {
+                    return Ok(implicit_schur::PcgResult {
+                        solution,
+                        iterations: iteration,
+                        residual_norm: true_norm,
+                        target,
+                    });
+                }
+                return Err(implicit_schur::ImplicitSchurError::MaxIterations {
+                    iterations: iteration,
+                    recursive_norm: residual_norm,
+                    residual_norm: true_norm,
+                    target,
+                });
+            }
+            preconditioned = apply_preconditioner(&residual)?;
+            let next_rho = residual.dot(&preconditioned);
+            if !next_rho.is_finite() || next_rho <= 0.0 {
+                return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
+            }
+            let beta = next_rho / rho;
+            if !beta.is_finite() {
+                return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                    "PCG direction",
+                ));
+            }
+            direction = &preconditioned + beta * direction;
+            rho = next_rho;
+        }
+        unreachable!("the max-iteration branch returns above");
+    }
+
+    fn pcg_error_details(
+        error: &implicit_schur::ImplicitSchurError,
+    ) -> (Option<usize>, Option<f64>, Option<f64>, Option<f64>) {
+        match *error {
+            implicit_schur::ImplicitSchurError::ResidualCheckFailed {
+                iterations,
+                recursive_norm,
+                true_norm,
+                target,
+            }
+            | implicit_schur::ImplicitSchurError::MaxIterations {
+                iterations,
+                recursive_norm,
+                residual_norm: true_norm,
+                target,
+            } => (
+                Some(iterations),
+                Some(recursive_norm),
+                Some(true_norm),
+                Some(target),
+            ),
+            _ => (None, None, None, None),
+        }
+    }
+
+    fn failed_explicit_pcg_reports(lambda: f64, status: String) -> Vec<ExplicitPcgIsolationReport> {
+        [128_usize, 512_usize]
+            .into_iter()
+            .map(|pcg_max_iterations| ExplicitPcgIsolationReport {
+                lambda,
+                pcg_max_iterations,
+                status: status.clone(),
+                iterations: None,
+                recursive_residual: None,
+                lower_true_residual: None,
+                implicit_true_residual: None,
+                target: None,
+                dense_lower_true_residual: None,
+                dense_implicit_true_residual: None,
+                pose_error_vs_dense: None,
+                landmark_error_vs_dense: None,
+                implicit_pcg_status: "not_run".to_owned(),
+                implicit_pcg_iterations: None,
+                implicit_pcg_true_residual: None,
+                implicit_pcg_target: None,
+                explicit_vs_implicit_pose_error: None,
+                explicit_vs_implicit_landmark_error: None,
+                feasibility: None,
+                prediction: None,
+            })
+            .collect()
+    }
+
+    fn run_explicit_pcg_isolation(
+        ba: &BundleAdjustment,
+    ) -> Result<Vec<ExplicitPcgIsolationReport>, String> {
+        let (system, pose_blocks, _landmark_count, _observation_count) = build_oracle_system(ba)?;
+        let CameraHessian::PoseDiagonal(_diagonal) = &system.h_pp else {
+            return Err("explicit PCG oracle requires pose blocks".to_owned());
+        };
+        let dimension = pose_blocks * 6;
+        let mut reports = Vec::new();
+
+        // Keep the two PR #80 damping cases and add the measured practical
+        // acceptance-region case without changing the legacy four reports.
+        for lambda in [1.0e-4, 1.0e5, 1.0e10] {
+            let (raw_schur, rhs, _singular_landmarks) = match explicit_schur_rhs(&system, lambda) {
+                Ok(value) => value,
+                Err(error) => {
+                    reports.extend(failed_explicit_pcg_reports(
+                        lambda,
+                        format!("failure:explicit_schur:{error}"),
+                    ));
+                    continue;
+                }
+            };
+            let mut lower_schur = raw_schur;
+            mirror_lower_triangle(&mut lower_schur);
+            let operator = match implicit_schur::ImplicitSchurOperator::new(&system, lambda) {
+                Ok(operator) => operator,
+                Err(error) => {
+                    reports.extend(failed_explicit_pcg_reports(
+                        lambda,
+                        format!("failure:implicit_operator:{error:?}"),
+                    ));
+                    continue;
+                }
+            };
+
+            let explicit_pose = solve_normal_equations(&lower_schur, &rhs).ok();
+            let explicit_landmarks = explicit_pose
+                .as_ref()
+                .and_then(|pose| operator.complete_delta(pose).ok());
+            let dense_lower_true_residual = explicit_pose.as_ref().and_then(|pose| {
+                explicit_lower_action(&lower_schur, pose)
+                    .ok()
+                    .map(|applied| (&rhs - applied).norm())
+            });
+            let dense_implicit_true_residual = explicit_pose.as_ref().and_then(|pose| {
+                operator
+                    .apply(pose)
+                    .ok()
+                    .map(|applied| (&rhs - applied).norm())
+            });
+
+            for pcg_max_iterations in [128_usize, 512_usize] {
+                let options = implicit_schur::PcgOptions {
+                    max_iterations: pcg_max_iterations,
+                    relative_tolerance: ORACLE_PC_TOLERANCE,
+                    absolute_tolerance: ORACLE_PC_TOLERANCE,
+                };
+
+                // Both arms consume this same rhs and preconditioner from one
+                // assembled normal system.  The production arm is retained as
+                // the recurrence/diagnostic comparison for the generic test
+                // recurrence used by the explicit action.
+                let implicit_result = operator.solve_pcg(&rhs, options);
+                let (
+                    implicit_pcg_status,
+                    implicit_pcg_iterations,
+                    implicit_pcg_true_residual,
+                    implicit_pcg_target,
+                    implicit_solution,
+                ) = match implicit_result {
+                    Ok(result) => (
+                        "success".to_owned(),
+                        Some(result.iterations),
+                        Some(result.residual_norm),
+                        Some(result.target),
+                        Some(result.solution),
+                    ),
+                    Err(error) => {
+                        let (iterations, _recursive, residual, target) = pcg_error_details(&error);
+                        (
+                            format!("failure:{error:?}"),
+                            iterations,
+                            residual,
+                            target,
+                            None,
+                        )
+                    }
+                };
+
+                let explicit_result = solve_test_pcg(
+                    &rhs,
+                    dimension,
+                    options,
+                    |x| explicit_lower_action(&lower_schur, x),
+                    |residual| operator.apply_preconditioner(residual),
+                );
+                let (
+                    explicit_status,
+                    explicit_iterations,
+                    explicit_recursive_residual,
+                    explicit_lower_true_residual,
+                    explicit_implicit_true_residual,
+                    explicit_target,
+                    explicit_solution,
+                ) = match explicit_result {
+                    Ok(result) => {
+                        let lower_true_residual =
+                            explicit_lower_action(&lower_schur, &result.solution)
+                                .ok()
+                                .map(|applied| (&rhs - applied).norm());
+                        let implicit_true_residual = operator
+                            .apply(&result.solution)
+                            .ok()
+                            .map(|applied| (&rhs - applied).norm());
+                        (
+                            "success_lower_pcg".to_owned(),
+                            Some(result.iterations),
+                            None,
+                            lower_true_residual,
+                            implicit_true_residual,
+                            Some(result.target),
+                            Some(result.solution),
+                        )
+                    }
+                    Err(error) => {
+                        let (iterations, recursive_residual, lower_true_residual, target) =
+                            pcg_error_details(&error);
+                        (
+                            format!("failure:{error:?}"),
+                            iterations,
+                            recursive_residual,
+                            lower_true_residual,
+                            None,
+                            target,
+                            None,
+                        )
+                    }
+                };
+
+                let delta_landmarks = explicit_solution
+                    .as_ref()
+                    .and_then(|pose| operator.complete_delta(pose).ok());
+                let feasibility = explicit_solution.as_ref().and_then(|pose| {
+                    delta_landmarks.as_ref().map(|landmarks| {
+                        feasibility(
+                            ba,
+                            &system,
+                            lambda,
+                            &lower_schur,
+                            &rhs,
+                            pose,
+                            landmarks,
+                            explicit_implicit_true_residual,
+                        )
+                    })
+                });
+                let prediction = explicit_solution.as_ref().and_then(|pose| {
+                    delta_landmarks.as_ref().and_then(|landmarks| {
+                        predicted_decrease(&system, lambda, pose, landmarks).ok()
+                    })
+                });
+                let pose_error_vs_dense = explicit_solution
+                    .as_ref()
+                    .and_then(|pose| explicit_pose.as_ref().map(|dense| (pose - dense).norm()));
+                let landmark_error_vs_dense = delta_landmarks.as_ref().and_then(|landmarks| {
+                    explicit_landmarks
+                        .as_ref()
+                        .map(|dense| (landmarks - dense).norm())
+                });
+                let explicit_vs_implicit_pose_error =
+                    explicit_solution.as_ref().and_then(|explicit| {
+                        implicit_solution
+                            .as_ref()
+                            .map(|implicit| (explicit - implicit).norm())
+                    });
+                let implicit_landmarks = implicit_solution
+                    .as_ref()
+                    .and_then(|pose| operator.complete_delta(pose).ok());
+                let explicit_vs_implicit_landmark_error =
+                    delta_landmarks.as_ref().and_then(|explicit| {
+                        implicit_landmarks
+                            .as_ref()
+                            .map(|implicit| (explicit - implicit).norm())
+                    });
+                reports.push(ExplicitPcgIsolationReport {
+                    lambda,
+                    pcg_max_iterations,
+                    status: explicit_status,
+                    iterations: explicit_iterations,
+                    recursive_residual: explicit_recursive_residual,
+                    lower_true_residual: explicit_lower_true_residual,
+                    implicit_true_residual: explicit_implicit_true_residual,
+                    target: explicit_target,
+                    dense_lower_true_residual,
+                    dense_implicit_true_residual,
+                    pose_error_vs_dense,
+                    landmark_error_vs_dense,
+                    implicit_pcg_status,
+                    implicit_pcg_iterations,
+                    implicit_pcg_true_residual,
+                    implicit_pcg_target,
+                    explicit_vs_implicit_pose_error,
+                    explicit_vs_implicit_landmark_error,
+                    feasibility,
+                    prediction,
+                });
+            }
+        }
+        Ok(reports)
     }
 
     fn schur_asymmetry(matrix: &DMatrix<f64>) -> f64 {
@@ -8646,6 +9138,92 @@ mod matrix_free_real_oracle_tests {
                 assert!((prediction.squared_damped - 2.0 * prediction.half_damped).abs() < 1.0e-9);
             }
         }
+
+        let isolation_reports = run_explicit_pcg_isolation(&synthetic_rig_problem()).unwrap();
+        assert_eq!(isolation_reports.len(), 6);
+        let mut successful_explicit_arms = 0;
+        for report in isolation_reports {
+            assert!(report.target.is_some_and(f64::is_finite));
+            assert!(report.implicit_pcg_target.is_some_and(f64::is_finite));
+            if report.status == "success_lower_pcg" {
+                successful_explicit_arms += 1;
+                assert!(report.lower_true_residual.is_some_and(f64::is_finite));
+                assert!(report.implicit_true_residual.is_some_and(f64::is_finite));
+                assert!(report.feasibility.is_some());
+                assert!(report.prediction.is_some());
+            }
+            if report.implicit_pcg_status == "success" {
+                assert!(report
+                    .implicit_pcg_true_residual
+                    .is_some_and(f64::is_finite));
+            }
+            if report.lambda == 1.0e10 {
+                assert_eq!(report.status, "success_lower_pcg");
+                assert_eq!(report.implicit_pcg_status, "success");
+                let explicit_target = report.target.expect("high-lambda explicit target");
+                let explicit_lower_residual = report
+                    .lower_true_residual
+                    .expect("high-lambda explicit lower residual");
+                assert!(explicit_lower_residual <= explicit_target);
+                assert!(report
+                    .implicit_true_residual
+                    .expect("high-lambda explicit implicit residual")
+                    .is_finite());
+                assert!(report
+                    .dense_lower_true_residual
+                    .expect("high-lambda dense lower residual")
+                    .is_finite());
+                assert!(report
+                    .dense_implicit_true_residual
+                    .expect("high-lambda dense implicit residual")
+                    .is_finite());
+                let implicit_target = report
+                    .implicit_pcg_target
+                    .expect("high-lambda implicit target");
+                let implicit_residual = report
+                    .implicit_pcg_true_residual
+                    .expect("high-lambda implicit residual");
+                assert!(implicit_residual <= implicit_target);
+                assert!(
+                    report
+                        .pose_error_vs_dense
+                        .expect("high-lambda explicit dense pose delta")
+                        < 1.0e-7
+                );
+                assert!(
+                    report
+                        .landmark_error_vs_dense
+                        .expect("high-lambda explicit dense landmark delta")
+                        < 1.0e-7
+                );
+                assert!(
+                    report
+                        .explicit_vs_implicit_pose_error
+                        .expect("high-lambda pose arm comparison")
+                        < 1.0e-7
+                );
+                assert!(
+                    report
+                        .explicit_vs_implicit_landmark_error
+                        .expect("high-lambda landmark arm comparison")
+                        < 1.0e-7
+                );
+                assert!(
+                    report
+                        .feasibility
+                        .as_ref()
+                        .expect("high-lambda explicit feasibility")
+                        .feasible
+                );
+                assert!(report
+                    .prediction
+                    .as_ref()
+                    .expect("high-lambda explicit prediction")
+                    .squared_damped
+                    .is_finite());
+            }
+        }
+        assert!(successful_explicit_arms > 0);
     }
 
     #[test]
@@ -8767,6 +9345,59 @@ mod matrix_free_real_oracle_tests {
     }
 
     #[test]
+    fn generic_test_pcg_matches_implicit_recurrence_and_failure_diagnostics() {
+        let diagonal = vec![
+            Matrix6::from_diagonal(&Vector6::from_element(20.0)),
+            Matrix6::from_diagonal(&Vector6::from_element(22.0)),
+        ];
+        let mut cross = Matrix6x3::zeros();
+        for component in 0..3 {
+            cross[(component, component)] = 0.25;
+        }
+        let system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(diagonal),
+            b_p: DVector::from_iterator(12, (0..12).map(|index| 0.03 * (index + 1) as f64)),
+            landmarks: vec![LandmarkBlock {
+                h_ll: Matrix3::from_diagonal(&Vector3::new(7.0, 8.0, 9.0)),
+                b_l: Vector3::new(0.2, -0.1, 0.3),
+                cross: vec![(0, cross), (1, -cross)],
+            }],
+        };
+        let operator = implicit_schur::ImplicitSchurOperator::new(&system, 0.25).unwrap();
+        let options = [
+            implicit_schur::PcgOptions::default(),
+            implicit_schur::PcgOptions {
+                max_iterations: 1,
+                relative_tolerance: 0.0,
+                absolute_tolerance: 1.0e-30,
+            },
+        ];
+        let mut saw_success = false;
+        let mut saw_failure = false;
+        for options in options {
+            let expected = operator.solve_pcg(operator.rhs(), options);
+            let actual = solve_test_pcg(
+                operator.rhs(),
+                operator.dimension(),
+                options,
+                |x| operator.apply(x),
+                |residual| operator.apply_preconditioner(residual),
+            );
+            assert_eq!(actual, expected);
+            match expected {
+                Ok(_) => saw_success = true,
+                Err(implicit_schur::ImplicitSchurError::MaxIterations { .. })
+                | Err(implicit_schur::ImplicitSchurError::ResidualCheckFailed { .. }) => {
+                    saw_failure = true;
+                }
+                Err(error) => panic!("unexpected PCG diagnostic: {error:?}"),
+            }
+        }
+        assert!(saw_success);
+        assert!(saw_failure);
+    }
+
+    #[test]
     #[ignore = "requires an explicitly exported frozen 1k fixture and source hash"]
     fn ignored_real_fixture_runs_bounded_damping_oracle() {
         let path = env::var_os("VISLOC_MATRIX_FREE_ORACLE_FIXTURE")
@@ -8786,6 +9417,11 @@ mod matrix_free_real_oracle_tests {
         );
         for report in reports {
             println!("matrix_free_oracle {report:?}");
+        }
+        let isolation_reports = run_explicit_pcg_isolation(&fixture.ba).unwrap();
+        assert_eq!(isolation_reports.len(), 6);
+        for report in isolation_reports {
+            println!("explicit_pcg_isolation {report:?}");
         }
     }
 }
