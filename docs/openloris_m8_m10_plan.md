@@ -1195,6 +1195,24 @@ its internal cost but worsens RMSE/p95 to 0.431011/0.717679 m; it also remains
 diagnostic-only. The next integration gate is a real, observation-validated
 landmark model with bounded refinement, not another score-tuned graph policy.
 
+The first real landmark integration now produces 353,787 landmarks and
+1,453,205 observations at 0.633124 px mean reprojection error. However, only
+9,996 images have observation support: all tracks touching frame 4493 fail
+triangulation at a discontinuous stitched pose. RMSE/p95 remain
+0.391778/0.643698 m, so this is not a quality pass. The next bounded step is
+observation-based unsupported-frame recovery, then bounded refinement, with
+unchanged calibration and reprojection gates. See the
+[landmark integration record](openloris_atlas_landmark_integration.md).
+
+The subsequent default-off recovery pilot triangulates anchors without the
+target frame and recovers frame 4493 with 10 final landmark supports. It restores
+all 4,999 supplied rig frames across the two gauges; RMSE/p95 are still
+0.391465/0.643175 m and fail the frozen trajectory gates. After acceptance-test
+and allocation review, the next quality boundary is bounded observation-based
+pose/landmark refinement, preserving calibration, supported registration and
+all reprojection gates. See
+[recovery evidence](../benchmarks/electro/m8-openloris-atlas-recovery-v1.json).
+
 Freeze the M8 quality champion before performance edits.
 
 ### Exact-output performance work accepted during M8 diagnosis (2026-09-03)

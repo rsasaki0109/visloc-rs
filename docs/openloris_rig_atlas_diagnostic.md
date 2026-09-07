@@ -296,6 +296,22 @@ largest union has 1,264 observations. This is a rejected diagnostic, not an
 accepted merge policy. Integration must detect these conflicts before mutating
 ownership and report rejected support, rather than silently combining them.
 
+All source windows also pass an independent bidirectional-track/projection
+audit: 803,676 source points, 3,364,422 observations, two consistent camera
+definitions across windows, no non-positive-depth observations, mean
+0.6777286687176332 px and maximum 3.9999762218186277 px reprojection error.
+These are source-window statistics with overlap duplicates, not integrated
+model quality. Exact audit results and provenance are retained in
+[source audit evidence](../benchmarks/electro/m8-openloris-atlas-source-audit.json).
+
+For continued integration, the 69 source model files and L newest trajectory
+are copied under
+`/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1`.
+Every source copy is byte-identical; `nodes.tsv` changes paths only. Replaying
+the trajectory stitcher with these relocated inputs reproduces both L output
+hashes exactly. This removes the source models' dependency on `/tmp`, but is
+not the complete workflow's restart/stress acceptance test.
+
 `RigSfmResult` contains poses and tracks, but the public fixed-rotation
 refinement entry point adjusts translations and landmarks of an existing
 result; it is not a bounded, fixed-pose atlas triangulation/import API. Calling
@@ -304,6 +320,13 @@ it does not by itself establish correct integrated geometry or the memory gate.
 The existing COLMAP text writer emits zero in the points3D `ERROR` field.
 Consequently, a merged model's quality must be recomputed from actual camera
 projection and observation pixels, not read from those placeholder errors.
+COLMAP's [upstream `UpdatePoint3DErrors` implementation](https://github.com/colmap/colmap/blob/main/src/colmap/scene/reconstruction.cc)
+stores the arithmetic mean of Euclidean reprojection errors per point, not
+the RMS. Its [format documentation](https://colmap.github.io/format.html#points3d-txt)
+also notes that stored errors are updated after global BA. The independent
+frozen-control audit gives 0.9030031049631768 px directly versus
+0.9030031518617252 px from stored per-point values; the historical gate is
+unchanged, and both comparisons should be reported for integrated output.
 An independent read-only projection audit of window 650 confirms this:
 40,754 points / 162,892 observations have bidirectionally consistent tracks,
 zero non-positive-depth observations, and mean error

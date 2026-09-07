@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "scope": "Read-only audits of original local-window models, not an integrated model or mapper benchmark",
+  "nodes_tsv": "/tmp/visloc-m8-seam650-nodes-20260907.tsv",
+  "nodes_sha256": "564f0ac7f31fcac0e3995a65cfe3fe7711ebdef100b30f28f8970c81c1cea0ce",
+  "durable_copy": {
+    "root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1",
+    "nodes_sha256": "69b3f668b43e2410a4d0518f0df9a5d6d65493444eb68b18c8721bac4307bc13",
+    "all_69_source_files_byte_identical": true,
+    "source_content_digest_sha256": "f9c2b2503d992778d633dc0b37e91a09cfe181121580f5d3c67e68fa2f7b28c8",
+    "content_digest_method": "SHA256 of newline-separated per-file SHA256 hex digests, nodes order, images then cameras then points; paths excluded",
+    "relocated_input_replay_byte_identical_both_components": true,
+    "atlas_directory": "atlas-l-newest",
+    "replay_directory": "atlas-l-replay",
+    "atlas_images_sha256": [
+      "a26a3a4444dd73be2e707d5c89c3ebce845fd92a34eb8c18a0d2e6833e489ed3",
+      "44005eeee990cb8b1fb10f9e253d64d789e9f66b0e99502dd4e530f579f77ca0"
+    ]
+  },
+  "source_digest": {
+    "sha256": "1f66c8e453a2fb1952e14ec2492b3f6369ccff0ac7d793905588c08c833fcc55",
+    "method": "SHA256 of concatenated sha256sum output records (including paths), in nodes TSV order, each node images.txt then sibling cameras.txt then points3D.txt"
+  },
+  "coordinate_identity": {
+    "nodes": 23,
+    "window_image_rows": 21566,
+    "unique_image_names": 9998,
+    "shared_image_names": 8482,
+    "maximum_window_occurrences": 3,
+    "full_ordered_xy_mismatches": 0,
+    "method": "Per-image SHA256 of ordered little-endian float64 x,y pairs; POINT3D_ID excluded"
+  },
+  "source_geometry": {
+    "points_including_overlap_duplicates": 803676,
+    "observations_including_overlap_duplicates": 3364422,
+    "observation_weighted_mean_reprojection_px": 0.6777286687176332,
+    "maximum_reprojection_px": 3.9999762218186277,
+    "nonpositive_depth_observations": 0,
+    "unique_camera_definition_rows": 2,
+    "bidirectional_track_references_valid": true,
+    "all_exported_ERROR_fields_zero": true,
+    "method": "Reproject actual points through each source PINHOLE camera and world-to-camera pose; verify both image-to-point and point-to-image references"
+  },
+  "naive_union_diagnostic": {
+    "accepted_merge_policy": false,
+    "unique_observations": 1750273,
+    "transitive_union_tracks": 380669,
+    "tracks_with_multiple_keypoints_in_one_image": 833,
+    "extra_same_image_observations": 10611,
+    "largest_track_observations": 1264,
+    "decision": "Do not use unguarded transitive union; detect conflicts before mutating ownership"
+  },
+  "unique_observation_support_before_filtering": {
+    "images": 9998,
+    "rig_frames": 4999,
+    "images_with_zero_observations": 1,
+    "rig_frames_with_zero_observations": 0,
+    "minimum_observations_per_image": 0,
+    "minimum_observations_per_rig_frame": 14,
+    "rig_frames_below_six_observations": 0,
+    "frame_4493_observations": 14,
+    "note": "Deduplicated by image name and original keypoint index; before collision rejection or atlas-pose triangulation. A zero-observation sensor image may still belong to a supported calibrated rig frame."
+  },
+  "colmap_projection_crosscheck": {
+    "control_evidence": "m8-openloris-colmap-10k-control.json",
+    "root": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/models-text",
+    "images_and_points_hashes_match_control": true,
+    "observations": 1947815,
+    "direct_observation_weighted_mean_reprojection_px": 0.9030031049631768,
+    "frozen_stored_error_weighted_mean_px": 0.9030031518617252,
+    "components": [
+      {
+        "id": 0,
+        "observations": 1800787,
+        "direct_mean_reprojection_px": 0.9125826606313493,
+        "max_absolute_stored_point_error_difference_px": 1.9578643821634156e-8
+      },
+      {
+        "id": 1,
+        "observations": 147028,
+        "direct_mean_reprojection_px": 0.7856734853463605,
+        "max_absolute_stored_point_error_difference_px": 0.04567989305042297
+      }
+    ],
+    "nonpositive_depth_observations": 0,
+    "bidirectional_track_references_valid": true,
+    "note": "Frozen historical gate is unchanged. Report the direct projection comparison as well; stored per-point ERROR values are not universally exact."
+  },
+  "limitations": [
+    "Observation counts include duplicates between overlapping windows",
+    "Reprojection describes source poses, not final atlas poses",
+    "Coordinate identity alone does not validate a merged track's geometry",
+    "No integrated registration, trajectory, reprojection, or performance gate is claimed"
+  ]
+}
