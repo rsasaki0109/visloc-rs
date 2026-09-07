@@ -1481,6 +1481,291 @@ impl BundleAdjustment {
         self.optimize_weighted(config, Some(observation_weights))
     }
 
+    /// Run the opt-in matrix-free pure-visual bundle adjustment backend.
+    ///
+    /// The method deliberately leaves [`BaConfig`] and [`LinearSolver`]
+    /// unchanged.  It assembles the same pure-visual normal equations as the
+    /// ordinary optimizer, requires a `PoseDiagonal` camera Hessian, and
+    /// solves its landmark-eliminated system with bounded preconditioned CG.
+    /// `config.linear_solver` is ignored for this method; there is no dense
+    /// fallback.  External observation weights and GNC remain on the legacy
+    /// weighted entry points.
+    /// Existing LM acceptance, rollback, damping, and non-projectable gates
+    /// are shared with the ordinary weighted optimizer through a private
+    /// backend dispatch.  A failed reduced solve is recorded and rejected by
+    /// the same bounded LM retry path before any pose or landmark is modified.
+    ///
+    /// Gauge completeness is the caller's responsibility.  This entry point
+    /// requires at least one actual fixed pose as a minimal anchor, but does
+    /// not attempt to prove that every connected component (or monocular
+    /// scale) is fully anchored.  Positive damping and PCG convergence are
+    /// numerical facts, not a gauge proof.
+    pub fn optimize_matrix_free(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+    ) -> Result<MatrixFreeBaResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options)?;
+        let mut backend = BaSolveBackend::MatrixFree(MatrixFreeRuntime::new(options));
+        let result = self
+            .optimize_weighted_backend(config, None, &mut backend)
+            .map_err(|error| {
+                if let BaSolveBackend::MatrixFree(runtime) = &backend {
+                    if let Some(failure) = &runtime.failure {
+                        return failure.clone();
+                    }
+                }
+                MatrixFreeBaError::Ba(error)
+            })?;
+        let BaSolveBackend::MatrixFree(runtime) = backend else {
+            unreachable!("matrix-free entry installs the matrix-free backend");
+        };
+        Ok(MatrixFreeBaResult {
+            initial_cost: result.initial_cost,
+            final_cost: result.final_cost,
+            iterations: result.iterations,
+            matrix_free_iterations: runtime.iterations,
+            converged: result.converged,
+        })
+    }
+
+    fn validate_matrix_free_entry(
+        &self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+    ) -> Result<(), MatrixFreeBaError> {
+        if config.refine_intrinsics || config.refine_distortion {
+            return Err(MatrixFreeBaError::Ineligible(
+                "intrinsics/distortion refinement is not supported",
+            ));
+        }
+        if config.max_iterations == 0 {
+            return Err(MatrixFreeBaError::InvalidConfiguration(
+                "max_iterations must be positive",
+            ));
+        }
+        let initial_lambda = match config.initial_lambda {
+            Some(value) if value.is_finite() && value > 0.0 => value,
+            Some(_) => {
+                return Err(MatrixFreeBaError::InvalidConfiguration(
+                    "initial_lambda must be finite and positive",
+                ))
+            }
+            None => {
+                return Err(MatrixFreeBaError::InvalidConfiguration(
+                    "matrix-free LM requires an explicit positive initial_lambda",
+                ))
+            }
+        };
+        if !config.lambda_increase_factor.is_finite()
+            || config.lambda_increase_factor <= 1.0
+            || !config.lambda_decrease_factor.is_finite()
+            || config.lambda_decrease_factor <= 0.0
+            || config.lambda_decrease_factor >= 1.0
+            || !config.max_lambda.is_finite()
+            || config.max_lambda < initial_lambda
+            || !config.min_lambda.is_finite()
+            || config.min_lambda <= 0.0
+            || config.min_lambda > initial_lambda
+            || !config.step_tolerance.is_finite()
+            || config.step_tolerance < 0.0
+            || !config.cost_tolerance.is_finite()
+            || config.cost_tolerance < 0.0
+            || config
+                .relative_cost_tolerance
+                .is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(MatrixFreeBaError::InvalidConfiguration(
+                "LM damping/tolerance values are not finite or ordered",
+            ));
+        }
+        if options.max_pcg_iterations == 0
+            || !options.pcg_relative_tolerance.is_finite()
+            || options.pcg_relative_tolerance < 0.0
+            || !options.pcg_absolute_tolerance.is_finite()
+            || options.pcg_absolute_tolerance <= 0.0
+        {
+            return Err(MatrixFreeBaError::InvalidConfiguration(
+                "PCG iteration and tolerance values are invalid",
+            ));
+        }
+        match config.robust_kernel {
+            RobustKernel::None => {}
+            RobustKernel::Huber { delta } if delta.is_finite() && delta > 0.0 => {}
+            RobustKernel::Cauchy { c } if c.is_finite() && c > 0.0 => {}
+            _ => {
+                return Err(MatrixFreeBaError::InvalidConfiguration(
+                    "robust-kernel scale must be finite and positive",
+                ))
+            }
+        }
+
+        let calibration_is_finite = |camera: &Camera| {
+            let Some((fx, fy, cx, cy)) = camera.intrinsics() else {
+                return false;
+            };
+            let no_nonzero_distortion = camera
+                .radial_distortion()
+                .is_none_or(|(k1, k2)| k1 == 0.0 && k2 == 0.0);
+            matches!(
+                camera.model,
+                CameraModel::Pinhole | CameraModel::SimplePinhole
+            ) && no_nonzero_distortion
+                && fx.is_finite()
+                && fy.is_finite()
+                && cx.is_finite()
+                && cy.is_finite()
+                && fx > 0.0
+                && fy > 0.0
+                && camera.params.iter().all(|value| value.is_finite())
+        };
+        if !calibration_is_finite(&self.camera) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "camera calibration is unsupported or non-finite",
+            ));
+        }
+        if !self.poses.keys().any(|id| self.fixed_poses.contains(id)) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "at least one existing pose must be fixed as a gauge anchor",
+            ));
+        }
+        if !self.velocities.is_empty()
+            || !self.biases.is_empty()
+            || !self.imu_factors.is_empty()
+            || !self.fixed_velocities.is_empty()
+            || !self.fixed_biases.is_empty()
+            || !self.bias_random_walk_factors.is_empty()
+            || self.navigation_state_prior.is_some()
+            || self.gravity_prior.is_some()
+            || self.per_pose_gravity_prior.is_some()
+            || self.position_prior.is_some()
+            || !self.pairwise_pose_factors.is_empty()
+        {
+            return Err(MatrixFreeBaError::Ineligible(
+                "non-visual states or priors are not supported",
+            ));
+        }
+        if self.poses.is_empty() {
+            return Err(MatrixFreeBaError::Ba(BaError::NoPoses));
+        }
+        let has_visual_observations = !self.observations.is_empty()
+            || !self.stereo_observations.is_empty()
+            || !self.general_stereo_observations.is_empty()
+            || !self.rig_observations.is_empty();
+        if !has_visual_observations {
+            return Err(MatrixFreeBaError::Ba(BaError::NoObservations));
+        }
+        if self.landmarks.is_empty() {
+            return Err(MatrixFreeBaError::Ba(BaError::NoLandmarks));
+        }
+        if !self.poses.keys().any(|id| !self.fixed_poses.contains(id)) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "matrix-free backend requires a variable pose",
+            ));
+        }
+        let pose_and_landmark_are_finite = self.poses.values().all(|pose| {
+            pose.world_to_camera
+                .matrix()
+                .iter()
+                .all(|value| value.is_finite())
+        }) && self
+            .landmarks
+            .values()
+            .all(|point| point.coords.iter().all(|value| value.is_finite()));
+        if !pose_and_landmark_are_finite {
+            return Err(MatrixFreeBaError::Ineligible(
+                "pose or landmark state is non-finite",
+            ));
+        }
+        if !self
+            .robust_cost_weighted(&config.robust_kernel, None)
+            .is_finite()
+        {
+            return Err(MatrixFreeBaError::Ineligible(
+                "initial visual cost is non-finite",
+            ));
+        }
+        if !self.observations.iter().all(|observation| {
+            observation.xy.coords.iter().all(|value| value.is_finite())
+                && self.poses.contains_key(&observation.keyframe_id)
+                && self.landmarks.contains_key(&observation.landmark_id)
+        }) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "monocular observation has an invalid pose, landmark, or pixel",
+            ));
+        }
+        if !self.stereo_observations.iter().all(|observation| {
+            observation.xy.coords.iter().all(|value| value.is_finite())
+                && observation.u_right.is_finite()
+                && self.poses.contains_key(&observation.keyframe_id)
+                && self.landmarks.contains_key(&observation.landmark_id)
+        }) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "stereo observation has invalid ids or pixels",
+            ));
+        }
+        if !self.stereo_observations.is_empty()
+            && !matches!(
+                self.stereo_baseline,
+                Some(value) if value.is_finite() && value > 0.0
+            )
+        {
+            return Err(MatrixFreeBaError::Ba(BaError::MissingStereoBaseline));
+        }
+        if !self.general_stereo_observations.iter().all(|observation| {
+            observation
+                .xy_left
+                .coords
+                .iter()
+                .all(|value| value.is_finite())
+                && observation
+                    .xy_right
+                    .coords
+                    .iter()
+                    .all(|value| value.is_finite())
+                && calibration_is_finite(&observation.right_camera)
+                && self.poses.contains_key(&observation.keyframe_id)
+                && self.landmarks.contains_key(&observation.landmark_id)
+                && observation
+                    .left_to_right
+                    .translation
+                    .iter()
+                    .all(|value| value.is_finite())
+                && observation
+                    .left_to_right
+                    .rotation
+                    .coords
+                    .iter()
+                    .all(|value| value.is_finite())
+        }) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "general stereo calibration or observation is invalid",
+            ));
+        }
+        if !self.rig_observations.iter().all(|observation| {
+            observation.xy.coords.iter().all(|value| value.is_finite())
+                && calibration_is_finite(&observation.camera)
+                && self.poses.contains_key(&observation.keyframe_id)
+                && self.landmarks.contains_key(&observation.landmark_id)
+                && observation
+                    .sensor_from_rig
+                    .translation
+                    .iter()
+                    .all(|value| value.is_finite())
+                && observation
+                    .sensor_from_rig
+                    .rotation
+                    .coords
+                    .iter()
+                    .all(|value| value.is_finite())
+        }) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "rig calibration or observation is invalid",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_observation_weights(&self, observation_weights: &[f64]) -> Result<(), BaError> {
         let expected = self.observations.len()
             + self.stereo_observations.len()
@@ -2147,6 +2432,16 @@ impl BundleAdjustment {
         config: &BaConfig,
         gnc_weights: Option<&[f64]>,
     ) -> Result<BaResult, BaError> {
+        let mut backend = BaSolveBackend::Legacy;
+        self.optimize_weighted_backend(config, gnc_weights, &mut backend)
+    }
+
+    fn optimize_weighted_backend(
+        &mut self,
+        config: &BaConfig,
+        gnc_weights: Option<&[f64]>,
+        backend: &mut BaSolveBackend,
+    ) -> Result<BaResult, BaError> {
         let intrinsics = self.intrinsics().ok_or(BaError::UnsupportedCameraModel)?;
         if self.poses.is_empty() {
             return Err(BaError::NoPoses);
@@ -2310,6 +2605,8 @@ impl BundleAdjustment {
         let mut block_symbolic_cache = None;
 
         for iteration in 0..config.max_iterations {
+            let prefer_pose_blocks = matches!(backend, BaSolveBackend::MatrixFree(_))
+                || config.linear_solver == LinearSolver::Sparse;
             let mut system = build_normal_equations(
                 self,
                 &intrinsics,
@@ -2320,7 +2617,7 @@ impl BundleAdjustment {
                 &kernel,
                 gnc_weights,
                 config.parallel,
-                config.linear_solver == LinearSolver::Sparse,
+                prefer_pose_blocks,
             );
             constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, &mut system);
             log_process_memory("ba-after-normal-equations");
@@ -2336,17 +2633,43 @@ impl BundleAdjustment {
             let cost_before = current_cost;
             log_process_memory("ba-before-solve-step");
 
-            let (delta_poses, delta_landmarks) = match solve_step(
-                &mut system,
-                pose_index.len(),
-                landmark_index.len(),
-                velocity_index.len(),
-                bias_index.len(),
-                lambda,
-                config.linear_solver,
-                config.parallel,
-                &mut block_symbolic_cache,
-            ) {
+            let solve_result = match backend {
+                BaSolveBackend::Legacy => solve_step(
+                    &mut system,
+                    pose_index.len(),
+                    landmark_index.len(),
+                    velocity_index.len(),
+                    bias_index.len(),
+                    lambda,
+                    config.linear_solver,
+                    config.parallel,
+                    &mut block_symbolic_cache,
+                ),
+                BaSolveBackend::MatrixFree(runtime) => {
+                    match solve_matrix_free_step(&system, lambda, runtime.options) {
+                        Ok((delta_poses, delta_landmarks, mut diagnostics)) => {
+                            diagnostics.iteration = iteration;
+                            runtime.iterations.push(diagnostics);
+                            Ok((delta_poses, delta_landmarks))
+                        }
+                        Err(error) => {
+                            runtime.iterations.push(MatrixFreeBaIterationStats {
+                                iteration,
+                                pcg_iterations: error.pcg_iterations,
+                                pcg_residual_norm: error.pcg_residual_norm,
+                                pcg_target: error.pcg_target,
+                                pcg_failure: Some(error.diagnostic.clone()),
+                            });
+                            runtime.failure = Some(MatrixFreeBaError::LinearSolve {
+                                iteration,
+                                diagnostic: error.diagnostic,
+                            });
+                            Err(BaError::SingularSystem)
+                        }
+                    }
+                }
+            };
+            let (delta_poses, delta_landmarks) = match solve_result {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
                     // Treat singular system the same as a rejected LM step:
@@ -2642,6 +2965,116 @@ pub struct BaResult {
     pub final_cost: f64,
     pub iterations: Vec<BaIterationStats>,
     pub converged: bool,
+}
+
+/// Options for the opt-in matrix-free pure-visual BA entry point.
+///
+/// This is deliberately separate from [`BaConfig`]: adding a solver variant
+/// there would change the default path and would make existing callers
+/// accidentally opt into a new numerical backend.  The matrix-free entry
+/// point requires a finite, positive LM start value and uses PCG for each
+/// reduced pose solve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatrixFreeBaOptions {
+    /// Maximum PCG iterations for one LM linear solve.
+    pub max_pcg_iterations: usize,
+    /// Relative PCG residual tolerance.
+    pub pcg_relative_tolerance: f64,
+    /// Absolute PCG residual tolerance.
+    pub pcg_absolute_tolerance: f64,
+}
+
+impl Default for MatrixFreeBaOptions {
+    fn default() -> Self {
+        Self {
+            max_pcg_iterations: 128,
+            pcg_relative_tolerance: 1.0e-12,
+            pcg_absolute_tolerance: 1.0e-12,
+        }
+    }
+}
+
+/// Per-LM-iteration diagnostics returned by [`BundleAdjustment::optimize_matrix_free`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaIterationStats {
+    pub iteration: usize,
+    pub pcg_iterations: Option<usize>,
+    pub pcg_residual_norm: Option<f64>,
+    pub pcg_target: Option<f64>,
+    pub pcg_failure: Option<String>,
+}
+
+/// Result of the opt-in matrix-free BA run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaResult {
+    pub initial_cost: f64,
+    pub final_cost: f64,
+    pub iterations: Vec<BaIterationStats>,
+    pub matrix_free_iterations: Vec<MatrixFreeBaIterationStats>,
+    pub converged: bool,
+}
+
+/// Failure from the opt-in matrix-free pure-visual BA entry point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatrixFreeBaError {
+    /// The problem contains a factor/state that the pure-visual operator does
+    /// not assemble (for example IMU, navigation, or a non-visual prior).
+    Ineligible(&'static str),
+    /// The matrix-free LM/PCG options are not finite or cannot make progress.
+    InvalidConfiguration(&'static str),
+    /// The existing BA input validation rejected the problem.
+    Ba(BaError),
+    /// The reduced operator or PCG solve failed.  The textual payload is a
+    /// deterministic diagnostic representation of the private numerical error.
+    LinearSolve {
+        iteration: usize,
+        diagnostic: String,
+    },
+}
+
+impl std::fmt::Display for MatrixFreeBaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ineligible(reason) => write!(f, "matrix-free BA is ineligible: {reason}"),
+            Self::InvalidConfiguration(reason) => {
+                write!(f, "invalid matrix-free BA configuration: {reason}")
+            }
+            Self::Ba(error) => write!(f, "matrix-free BA input error: {error}"),
+            Self::LinearSolve {
+                iteration,
+                diagnostic,
+            } => write!(
+                f,
+                "matrix-free reduced solve failed at iteration {iteration}: {diagnostic}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MatrixFreeBaError {}
+
+/// Internal dispatch state for the shared LM loop.  The legacy variant is
+/// deliberately the default path; the matrix-free variant is only installed
+/// by [`BundleAdjustment::optimize_matrix_free`].
+enum BaSolveBackend {
+    Legacy,
+    MatrixFree(MatrixFreeRuntime),
+}
+
+struct MatrixFreeRuntime {
+    options: MatrixFreeBaOptions,
+    iterations: Vec<MatrixFreeBaIterationStats>,
+    failure: Option<MatrixFreeBaError>,
+}
+
+impl MatrixFreeRuntime {
+    fn new(options: MatrixFreeBaOptions) -> Self {
+        Self {
+            options,
+            iterations: Vec::new(),
+            failure: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -4135,6 +4568,53 @@ fn constrain_fixed_pose_rotations(
     }
 }
 
+struct MatrixFreeStepError {
+    diagnostic: String,
+    pcg_iterations: Option<usize>,
+    pcg_residual_norm: Option<f64>,
+    pcg_target: Option<f64>,
+}
+
+fn solve_matrix_free_step(
+    system: &NormalEquationsBa,
+    lambda: f64,
+    options: MatrixFreeBaOptions,
+) -> Result<(DVector<f64>, DVector<f64>, MatrixFreeBaIterationStats), MatrixFreeStepError> {
+    let to_step_error = |error: implicit_schur::ImplicitSchurError| {
+        let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
+        MatrixFreeStepError {
+            diagnostic: format!("{error:?}"),
+            pcg_iterations,
+            pcg_residual_norm,
+            pcg_target,
+        }
+    };
+    let operator =
+        implicit_schur::ImplicitSchurOperator::new(system, lambda).map_err(to_step_error)?;
+    let pcg_options = implicit_schur::PcgOptions {
+        max_iterations: options.max_pcg_iterations,
+        relative_tolerance: options.pcg_relative_tolerance,
+        absolute_tolerance: options.pcg_absolute_tolerance,
+    };
+    let pcg = operator
+        .solve_pcg(operator.rhs(), pcg_options)
+        .map_err(to_step_error)?;
+    let delta_landmarks = operator
+        .complete_delta(&pcg.solution)
+        .map_err(to_step_error)?;
+    Ok((
+        pcg.solution,
+        delta_landmarks,
+        MatrixFreeBaIterationStats {
+            iteration: 0,
+            pcg_iterations: Some(pcg.iterations),
+            pcg_residual_norm: Some(pcg.residual_norm),
+            pcg_target: Some(pcg.target),
+            pcg_failure: None,
+        },
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_step(
     system: &mut NormalEquationsBa,
@@ -5298,20 +5778,17 @@ impl LocalRefiner for BundleAdjustmentRefiner {
     }
 }
 
-/// Test-only implicit Schur prototype.
+/// Private matrix-free Schur backend.
 ///
-/// This deliberately does not participate in the public BA API.  It is a
-/// small numerical oracle for a future matrix-free backend: the production
-/// solver still uses `LinearSolver::{Dense,Sparse}` unchanged.  The operator
-/// consumes the already assembled pure-visual `PoseDiagonal` system and
-/// never constructs pose-pair blocks, triplets, or a Cholesky factor.
-#[cfg(test)]
-mod implicit_schur_prototype_tests {
+/// The backend consumes an assembled pure-visual `PoseDiagonal` system and
+/// never constructs pose-pair blocks, triplets, or a Cholesky factor.  Its
+/// public entry point remains on [`BundleAdjustment`]; keeping the numerical
+/// implementation here avoids a second operator implementation in tests.
+mod implicit_schur {
     use super::*;
-    use nalgebra::UnitQuaternion;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
-    enum ImplicitSchurError {
+    pub(super) enum ImplicitSchurError {
         DenseCameraHessian,
         EmptySystem,
         DimensionMismatch {
@@ -5324,22 +5801,44 @@ mod implicit_schur_prototype_tests {
         NonSpdPreconditioner(usize),
         NonPositiveCurvature,
         ResidualCheckFailed {
+            iterations: usize,
             recursive_norm: f64,
             true_norm: f64,
             target: f64,
         },
         MaxIterations {
             iterations: usize,
+            recursive_norm: f64,
             residual_norm: f64,
             target: f64,
         },
     }
 
+    impl ImplicitSchurError {
+        pub(super) fn diagnostics(&self) -> (Option<usize>, Option<f64>, Option<f64>) {
+            match *self {
+                Self::ResidualCheckFailed {
+                    iterations,
+                    true_norm,
+                    target,
+                    ..
+                }
+                | Self::MaxIterations {
+                    iterations,
+                    residual_norm: true_norm,
+                    target,
+                    ..
+                } => (Some(iterations), Some(true_norm), Some(target)),
+                _ => (None, None, None),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
-    struct PcgOptions {
-        max_iterations: usize,
-        relative_tolerance: f64,
-        absolute_tolerance: f64,
+    pub(super) struct PcgOptions {
+        pub(super) max_iterations: usize,
+        pub(super) relative_tolerance: f64,
+        pub(super) absolute_tolerance: f64,
     }
 
     impl Default for PcgOptions {
@@ -5353,11 +5852,11 @@ mod implicit_schur_prototype_tests {
     }
 
     #[derive(Debug, Clone, PartialEq)]
-    struct PcgResult {
-        solution: DVector<f64>,
-        iterations: usize,
-        residual_norm: f64,
-        target: f64,
+    pub(super) struct PcgResult {
+        pub(super) solution: DVector<f64>,
+        pub(super) iterations: usize,
+        pub(super) residual_norm: f64,
+        pub(super) target: f64,
     }
 
     /// A pure-visual Schur operator over the six-dimensional pose blocks.
@@ -5368,7 +5867,7 @@ mod implicit_schur_prototype_tests {
     /// landmark is intentional: the constructor groups those blocks only for
     /// the preconditioner, while `apply` evaluates every original cross block
     /// so same-frame multi-sensor terms are not lost.
-    struct ImplicitSchurOperator<'a> {
+    pub(super) struct ImplicitSchurOperator<'a> {
         diagonal: Vec<Matrix6<f64>>,
         landmarks: &'a [LandmarkBlock],
         h_ll_inverse: Vec<Option<Matrix3<f64>>>,
@@ -5377,7 +5876,10 @@ mod implicit_schur_prototype_tests {
     }
 
     impl<'a> ImplicitSchurOperator<'a> {
-        fn new(system: &'a NormalEquationsBa, lambda: f64) -> Result<Self, ImplicitSchurError> {
+        pub(super) fn new(
+            system: &'a NormalEquationsBa,
+            lambda: f64,
+        ) -> Result<Self, ImplicitSchurError> {
             if !lambda.is_finite() || lambda < 0.0 {
                 return Err(ImplicitSchurError::InvalidLambda);
             }
@@ -5523,19 +6025,20 @@ mod implicit_schur_prototype_tests {
             })
         }
 
-        fn dimension(&self) -> usize {
+        pub(super) fn dimension(&self) -> usize {
             self.diagonal.len() * 6
         }
 
-        fn rhs(&self) -> &DVector<f64> {
+        pub(super) fn rhs(&self) -> &DVector<f64> {
             &self.rhs
         }
 
-        fn h_ll_inverse(&self, index: usize) -> Option<Matrix3<f64>> {
+        #[cfg(test)]
+        pub(super) fn h_ll_inverse(&self, index: usize) -> Option<Matrix3<f64>> {
             self.h_ll_inverse[index]
         }
 
-        fn apply(&self, x: &DVector<f64>) -> Result<DVector<f64>, ImplicitSchurError> {
+        pub(super) fn apply(&self, x: &DVector<f64>) -> Result<DVector<f64>, ImplicitSchurError> {
             if x.len() != self.dimension() {
                 return Err(ImplicitSchurError::DimensionMismatch {
                     expected: self.dimension(),
@@ -5578,7 +6081,7 @@ mod implicit_schur_prototype_tests {
             Ok(out)
         }
 
-        fn apply_preconditioner(
+        pub(super) fn apply_preconditioner(
             &self,
             residual: &DVector<f64>,
         ) -> Result<DVector<f64>, ImplicitSchurError> {
@@ -5605,7 +6108,7 @@ mod implicit_schur_prototype_tests {
             Ok(out)
         }
 
-        fn solve_pcg(
+        pub(super) fn solve_pcg(
             &self,
             rhs: &DVector<f64>,
             options: PcgOptions,
@@ -5649,6 +6152,7 @@ mod implicit_schur_prototype_tests {
             if options.max_iterations == 0 {
                 return Err(ImplicitSchurError::MaxIterations {
                     iterations: 0,
+                    recursive_norm: residual_norm,
                     residual_norm,
                     target,
                 });
@@ -5681,9 +6185,23 @@ mod implicit_schur_prototype_tests {
                     return self.checked_result(rhs, solution, iteration, residual_norm, target);
                 }
                 if iteration == options.max_iterations {
+                    let true_residual = rhs - &self.apply(&solution)?;
+                    let true_norm = true_residual.norm();
+                    if !true_norm.is_finite() {
+                        return Err(ImplicitSchurError::NonFinite("true PCG residual"));
+                    }
+                    if true_norm <= target {
+                        return Ok(PcgResult {
+                            solution,
+                            iterations: iteration,
+                            residual_norm: true_norm,
+                            target,
+                        });
+                    }
                     return Err(ImplicitSchurError::MaxIterations {
                         iterations: iteration,
-                        residual_norm,
+                        recursive_norm: residual_norm,
+                        residual_norm: true_norm,
                         target,
                     });
                 }
@@ -5718,6 +6236,7 @@ mod implicit_schur_prototype_tests {
             }
             if true_norm > target {
                 return Err(ImplicitSchurError::ResidualCheckFailed {
+                    iterations,
                     recursive_norm,
                     true_norm,
                     target,
@@ -5731,7 +6250,7 @@ mod implicit_schur_prototype_tests {
             })
         }
 
-        fn complete_delta(
+        pub(super) fn complete_delta(
             &self,
             delta_pose: &DVector<f64>,
         ) -> Result<DVector<f64>, ImplicitSchurError> {
@@ -5768,232 +6287,157 @@ mod implicit_schur_prototype_tests {
         }
     }
 
-    fn explicit_schur(system: &NormalEquationsBa, lambda: f64) -> DMatrix<f64> {
-        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
-            panic!("test oracle requires pose blocks");
-        };
-        let dimension = diagonal.len() * 6;
-        let mut schur = DMatrix::zeros(dimension, dimension);
-        for (pose, block) in diagonal.iter().enumerate() {
-            let mut damped = *block;
-            for component in 0..6 {
-                damped[(component, component)] += lambda;
-            }
-            schur
-                .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
-                .copy_from(&damped);
-        }
-        for landmark in &system.landmarks {
-            let mut h_ll = landmark.h_ll;
-            for component in 0..3 {
-                h_ll[(component, component)] += lambda;
-            }
-            let Some(inverse) = h_ll.try_inverse() else {
-                continue;
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use nalgebra::UnitQuaternion;
+
+        fn explicit_schur(system: &NormalEquationsBa, lambda: f64) -> DMatrix<f64> {
+            let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+                panic!("test oracle requires pose blocks");
             };
-            for (pose, a) in &landmark.cross {
-                for (other_pose, b) in &landmark.cross {
-                    let block = a * inverse * b.transpose();
-                    for row in 0..6 {
-                        for column in 0..6 {
-                            schur[(pose * 6 + row, other_pose * 6 + column)] -=
-                                block[(row, column)];
+            let dimension = diagonal.len() * 6;
+            let mut schur = DMatrix::zeros(dimension, dimension);
+            for (pose, block) in diagonal.iter().enumerate() {
+                let mut damped = *block;
+                for component in 0..6 {
+                    damped[(component, component)] += lambda;
+                }
+                schur
+                    .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
+                    .copy_from(&damped);
+            }
+            for landmark in &system.landmarks {
+                let mut h_ll = landmark.h_ll;
+                for component in 0..3 {
+                    h_ll[(component, component)] += lambda;
+                }
+                let Some(inverse) = h_ll.try_inverse() else {
+                    continue;
+                };
+                for (pose, a) in &landmark.cross {
+                    for (other_pose, b) in &landmark.cross {
+                        let block = a * inverse * b.transpose();
+                        for row in 0..6 {
+                            for column in 0..6 {
+                                schur[(pose * 6 + row, other_pose * 6 + column)] -=
+                                    block[(row, column)];
+                            }
                         }
                     }
                 }
             }
+            schur
         }
-        schur
-    }
 
-    fn synthetic_system() -> NormalEquationsBa {
-        let diagonal = vec![
-            Matrix6::from_diagonal(&Vector6::from_element(20.0)),
-            Matrix6::from_diagonal(&Vector6::from_element(22.0)),
-        ];
-        let cross0 =
-            Matrix6x3::from_fn(|row, column| 0.02 * (row as f64 + 1.0) * (column as f64 + 1.0));
-        let cross1 =
-            Matrix6x3::from_fn(|row, column| 0.015 * (row as f64 + 2.0) * (column as f64 + 1.0));
-        let cross2 =
-            Matrix6x3::from_fn(|row, column| 0.01 * (row as f64 + 3.0) * (column as f64 + 2.0));
-        NormalEquationsBa {
-            h_pp: CameraHessian::PoseDiagonal(diagonal),
-            b_p: DVector::from_iterator(12, (0..12).map(|index| 0.03 * (index + 1) as f64)),
-            landmarks: vec![LandmarkBlock {
-                h_ll: Matrix3::from_diagonal(&Vector3::new(7.0, 8.0, 9.0)),
-                b_l: Vector3::new(0.2, -0.1, 0.3),
-                // The first two entries deliberately share pose 0, as two
-                // sensors on one rig frame would.
-                cross: vec![(0, cross0), (0, cross1), (1, cross2)],
-            }],
-        }
-    }
-
-    fn hand_check_system() -> NormalEquationsBa {
-        let mut a = Matrix6x3::zeros();
-        for component in 0..3 {
-            a[(component, component)] = 1.0;
-        }
-        NormalEquationsBa {
-            h_pp: CameraHessian::PoseDiagonal(vec![
-                Matrix6::from_diagonal(&Vector6::from_element(10.0)),
-                Matrix6::from_diagonal(&Vector6::from_element(10.0)),
-            ]),
-            b_p: DVector::from_iterator(12, (1..=12).map(|value| value as f64)),
-            landmarks: vec![LandmarkBlock {
-                h_ll: Matrix3::from_diagonal(&Vector3::from_element(4.0)),
-                b_l: Vector3::new(1.0, 2.0, 3.0),
-                // B = 10 I, H_ll = 4 I, A = [I; 0], with two sensor
-                // observations sharing pose 0 and one observation at pose 1.
-                cross: vec![(0, a), (0, 2.0 * a), (1, -a)],
-            }],
-        }
-    }
-
-    fn full_normal_system(system: &NormalEquationsBa, lambda: f64) -> (DMatrix<f64>, DVector<f64>) {
-        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
-            panic!("test oracle requires pose blocks");
-        };
-        let mut normal = DMatrix::zeros(15, 15);
-        for (pose, block) in diagonal.iter().enumerate() {
-            let mut damped = *block;
-            for component in 0..6 {
-                damped[(component, component)] += lambda;
+        fn synthetic_system() -> NormalEquationsBa {
+            let diagonal = vec![
+                Matrix6::from_diagonal(&Vector6::from_element(20.0)),
+                Matrix6::from_diagonal(&Vector6::from_element(22.0)),
+            ];
+            let cross0 =
+                Matrix6x3::from_fn(|row, column| 0.02 * (row as f64 + 1.0) * (column as f64 + 1.0));
+            let cross1 = Matrix6x3::from_fn(|row, column| {
+                0.015 * (row as f64 + 2.0) * (column as f64 + 1.0)
+            });
+            let cross2 =
+                Matrix6x3::from_fn(|row, column| 0.01 * (row as f64 + 3.0) * (column as f64 + 2.0));
+            NormalEquationsBa {
+                h_pp: CameraHessian::PoseDiagonal(diagonal),
+                b_p: DVector::from_iterator(12, (0..12).map(|index| 0.03 * (index + 1) as f64)),
+                landmarks: vec![LandmarkBlock {
+                    h_ll: Matrix3::from_diagonal(&Vector3::new(7.0, 8.0, 9.0)),
+                    b_l: Vector3::new(0.2, -0.1, 0.3),
+                    // The first two entries deliberately share pose 0, as two
+                    // sensors on one rig frame would.
+                    cross: vec![(0, cross0), (0, cross1), (1, cross2)],
+                }],
             }
-            normal
-                .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
-                .copy_from(&damped);
         }
-        let mut h_ll = system.landmarks[0].h_ll;
-        for component in 0..3 {
-            h_ll[(component, component)] += lambda;
+
+        fn hand_check_system() -> NormalEquationsBa {
+            let mut a = Matrix6x3::zeros();
+            for component in 0..3 {
+                a[(component, component)] = 1.0;
+            }
+            NormalEquationsBa {
+                h_pp: CameraHessian::PoseDiagonal(vec![
+                    Matrix6::from_diagonal(&Vector6::from_element(10.0)),
+                    Matrix6::from_diagonal(&Vector6::from_element(10.0)),
+                ]),
+                b_p: DVector::from_iterator(12, (1..=12).map(|value| value as f64)),
+                landmarks: vec![LandmarkBlock {
+                    h_ll: Matrix3::from_diagonal(&Vector3::from_element(4.0)),
+                    b_l: Vector3::new(1.0, 2.0, 3.0),
+                    // B = 10 I, H_ll = 4 I, A = [I; 0], with two sensor
+                    // observations sharing pose 0 and one observation at pose 1.
+                    cross: vec![(0, a), (0, 2.0 * a), (1, -a)],
+                }],
+            }
         }
-        normal.fixed_view_mut::<3, 3>(12, 12).copy_from(&h_ll);
-        for (pose, cross) in &system.landmarks[0].cross {
-            for row in 0..6 {
-                for column in 0..3 {
-                    normal[(pose * 6 + row, 12 + column)] += cross[(row, column)];
-                    normal[(12 + column, pose * 6 + row)] += cross[(row, column)];
+
+        fn full_normal_system(
+            system: &NormalEquationsBa,
+            lambda: f64,
+        ) -> (DMatrix<f64>, DVector<f64>) {
+            let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+                panic!("test oracle requires pose blocks");
+            };
+            let mut normal = DMatrix::zeros(15, 15);
+            for (pose, block) in diagonal.iter().enumerate() {
+                let mut damped = *block;
+                for component in 0..6 {
+                    damped[(component, component)] += lambda;
+                }
+                normal
+                    .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
+                    .copy_from(&damped);
+            }
+            let mut h_ll = system.landmarks[0].h_ll;
+            for component in 0..3 {
+                h_ll[(component, component)] += lambda;
+            }
+            normal.fixed_view_mut::<3, 3>(12, 12).copy_from(&h_ll);
+            for (pose, cross) in &system.landmarks[0].cross {
+                for row in 0..6 {
+                    for column in 0..3 {
+                        normal[(pose * 6 + row, 12 + column)] += cross[(row, column)];
+                        normal[(12 + column, pose * 6 + row)] += cross[(row, column)];
+                    }
                 }
             }
-        }
-        let mut rhs = DVector::zeros(15);
-        for (index, value) in system.b_p.iter().enumerate() {
-            rhs[index] = -*value;
-        }
-        for (index, value) in system.landmarks[0].b_l.iter().enumerate() {
-            rhs[12 + index] = -*value;
-        }
-        (normal, rhs)
-    }
-
-    #[test]
-    fn implicit_operator_matches_explicit_schur_rhs_preconditioner_and_step() {
-        let lambda = 0.25;
-        let system = synthetic_system();
-        let operator = ImplicitSchurOperator::new(&system, lambda).unwrap();
-        let explicit = explicit_schur(&system, lambda);
-        let x = DVector::from_iterator(12, (0..12).map(|index| 0.04 * (index + 1) as f64));
-        let explicit_product = &explicit * &x;
-        let implicit_product = operator.apply(&x).unwrap();
-        assert!((&explicit_product - implicit_product).norm() < 1.0e-12);
-
-        let mut explicit_rhs = -&system.b_p;
-        let h_ll_inverse = operator.h_ll_inverse(0).unwrap();
-        for (pose, cross) in &system.landmarks[0].cross {
-            let update: Vector6<f64> = cross * h_ll_inverse * system.landmarks[0].b_l;
-            for component in 0..6 {
-                explicit_rhs[pose * 6 + component] += update[component];
+            let mut rhs = DVector::zeros(15);
+            for (index, value) in system.b_p.iter().enumerate() {
+                rhs[index] = -*value;
             }
+            for (index, value) in system.landmarks[0].b_l.iter().enumerate() {
+                rhs[12 + index] = -*value;
+            }
+            (normal, rhs)
         }
-        assert_eq!(operator.rhs.as_slice(), explicit_rhs.as_slice());
 
-        let mut direct_system = synthetic_system();
-        let direct = solve_step(
-            &mut direct_system,
-            2,
-            1,
-            0,
-            0,
-            lambda,
-            LinearSolver::Sparse,
-            false,
-            &mut None,
-        )
-        .unwrap();
-        let result = operator
-            .solve_pcg(operator.rhs(), PcgOptions::default())
-            .unwrap();
-        assert!(result.residual_norm <= result.target);
-        assert!((&result.solution - &direct.0).norm() < 1.0e-9);
-        let implicit_landmark_delta = operator.complete_delta(&result.solution).unwrap();
-        assert!((&implicit_landmark_delta - direct.1).norm() < 1.0e-9);
-
-        // The pose-0 preconditioner block must include the cross term between
-        // the two repeated pose-0 sensor blocks, not two independent terms.
-        let mut pose0_cross = system.landmarks[0].cross[0].1;
-        pose0_cross += system.landmarks[0].cross[1].1;
-        let mut expected = Matrix6::from_diagonal(&Vector6::from_element(20.0));
-        for component in 0..6 {
-            expected[(component, component)] += lambda;
-        }
-        expected -= pose0_cross * h_ll_inverse * pose0_cross.transpose();
-        let probe = DVector::from_iterator(12, (0..12).map(|index| (index + 1) as f64));
-        let applied = operator.apply_preconditioner(&probe).unwrap();
-        let expected_inverse = expected.cholesky().unwrap().inverse();
-        let expected_pose0 =
-            expected_inverse * Vector6::from_iterator((0..6).map(|i| (i + 1) as f64));
-        assert!((applied.fixed_rows::<6>(0).into_owned() - expected_pose0).norm() < 1.0e-12);
-    }
-
-    #[test]
-    fn hand_check_fixture_matches_schur_and_full_normal_for_both_damping_values() {
-        for lambda in [0.0, 0.5] {
-            let system = hand_check_system();
+        #[test]
+        fn implicit_operator_matches_explicit_schur_rhs_preconditioner_and_step() {
+            let lambda = 0.25;
+            let system = synthetic_system();
             let operator = ImplicitSchurOperator::new(&system, lambda).unwrap();
-            let schur = explicit_schur(&system, lambda);
-            let expected_pose0 = if lambda == 0.0 { 7.75 } else { 8.5 };
-            let expected_pose1 = if lambda == 0.0 {
-                9.75
-            } else {
-                10.277777777777779
-            };
-            let expected_cross = if lambda == 0.0 {
-                0.75
-            } else {
-                0.6666666666666666
-            };
-            for component in 0..3 {
-                assert!((schur[(component, component)] - expected_pose0).abs() < 1.0e-12);
-                assert!((schur[(6 + component, 6 + component)] - expected_pose1).abs() < 1.0e-12);
-                assert!((schur[(component, 6 + component)] - expected_cross).abs() < 1.0e-12);
-                assert!((schur[(6 + component, component)] - expected_cross).abs() < 1.0e-12);
-            }
-            for component in 3..6 {
-                assert!((schur[(component, component)] - (10.0 + lambda)).abs() < 1.0e-12);
-                assert!((schur[(6 + component, 6 + component)] - (10.0 + lambda)).abs() < 1.0e-12);
-                assert_eq!(schur[(component, 6 + component)], 0.0);
-            }
+            let explicit = explicit_schur(&system, lambda);
+            let x = DVector::from_iterator(12, (0..12).map(|index| 0.04 * (index + 1) as f64));
+            let explicit_product = &explicit * &x;
+            let implicit_product = operator.apply(&x).unwrap();
+            assert!((&explicit_product - implicit_product).norm() < 1.0e-12);
 
-            let expected_rhs0 = if lambda == 0.0 {
-                [-0.25, -0.5, -0.75]
-            } else {
-                [-1.0 / 3.0, -2.0 / 3.0, -1.0]
-            };
-            let expected_rhs1 = if lambda == 0.0 {
-                [-7.25, -8.5, -9.75]
-            } else {
-                [-65.0 / 9.0, -76.0 / 9.0, -29.0 / 3.0]
-            };
-            for component in 0..3 {
-                assert!((operator.rhs[component] - expected_rhs0[component]).abs() < 1.0e-12);
-                assert!((operator.rhs[6 + component] - expected_rhs1[component]).abs() < 1.0e-12);
+            let mut explicit_rhs = -&system.b_p;
+            let h_ll_inverse = operator.h_ll_inverse(0).unwrap();
+            for (pose, cross) in &system.landmarks[0].cross {
+                let update: Vector6<f64> = cross * h_ll_inverse * system.landmarks[0].b_l;
+                for component in 0..6 {
+                    explicit_rhs[pose * 6 + component] += update[component];
+                }
             }
+            assert_eq!(operator.rhs.as_slice(), explicit_rhs.as_slice());
 
-            let (normal, full_rhs) = full_normal_system(&system, lambda);
-            let full_delta = solve_normal_equations(&normal, &full_rhs).unwrap();
-            let mut direct_system = hand_check_system();
+            let mut direct_system = synthetic_system();
             let direct = solve_step(
                 &mut direct_system,
                 2,
@@ -6006,360 +6450,803 @@ mod implicit_schur_prototype_tests {
                 &mut None,
             )
             .unwrap();
-            assert!((direct.0.clone() - full_delta.rows(0, 12)).norm() < 1.0e-10);
-            assert!((direct.1.clone() - full_delta.rows(12, 3)).norm() < 1.0e-10);
             let result = operator
                 .solve_pcg(operator.rhs(), PcgOptions::default())
                 .unwrap();
-            assert!((result.solution.clone() - full_delta.rows(0, 12)).norm() < 1.0e-9);
+            assert!(result.residual_norm <= result.target);
+            assert!((&result.solution - &direct.0).norm() < 1.0e-9);
+            let implicit_landmark_delta = operator.complete_delta(&result.solution).unwrap();
+            assert!((&implicit_landmark_delta - direct.1).norm() < 1.0e-9);
+
+            // The pose-0 preconditioner block must include the cross term between
+            // the two repeated pose-0 sensor blocks, not two independent terms.
+            let mut pose0_cross = system.landmarks[0].cross[0].1;
+            pose0_cross += system.landmarks[0].cross[1].1;
+            let mut expected = Matrix6::from_diagonal(&Vector6::from_element(20.0));
+            for component in 0..6 {
+                expected[(component, component)] += lambda;
+            }
+            expected -= pose0_cross * h_ll_inverse * pose0_cross.transpose();
+            let probe = DVector::from_iterator(12, (0..12).map(|index| (index + 1) as f64));
+            let applied = operator.apply_preconditioner(&probe).unwrap();
+            let expected_inverse = expected.cholesky().unwrap().inverse();
+            let expected_pose0 =
+                expected_inverse * Vector6::from_iterator((0..6).map(|i| (i + 1) as f64));
+            assert!((applied.fixed_rows::<6>(0).into_owned() - expected_pose0).norm() < 1.0e-12);
+        }
+
+        #[test]
+        fn hand_check_fixture_matches_schur_and_full_normal_for_both_damping_values() {
+            for lambda in [0.0, 0.5] {
+                let system = hand_check_system();
+                let operator = ImplicitSchurOperator::new(&system, lambda).unwrap();
+                let schur = explicit_schur(&system, lambda);
+                let expected_pose0 = if lambda == 0.0 { 7.75 } else { 8.5 };
+                let expected_pose1 = if lambda == 0.0 {
+                    9.75
+                } else {
+                    10.277777777777779
+                };
+                let expected_cross = if lambda == 0.0 {
+                    0.75
+                } else {
+                    0.6666666666666666
+                };
+                for component in 0..3 {
+                    assert!((schur[(component, component)] - expected_pose0).abs() < 1.0e-12);
+                    assert!(
+                        (schur[(6 + component, 6 + component)] - expected_pose1).abs() < 1.0e-12
+                    );
+                    assert!((schur[(component, 6 + component)] - expected_cross).abs() < 1.0e-12);
+                    assert!((schur[(6 + component, component)] - expected_cross).abs() < 1.0e-12);
+                }
+                for component in 3..6 {
+                    assert!((schur[(component, component)] - (10.0 + lambda)).abs() < 1.0e-12);
+                    assert!(
+                        (schur[(6 + component, 6 + component)] - (10.0 + lambda)).abs() < 1.0e-12
+                    );
+                    assert_eq!(schur[(component, 6 + component)], 0.0);
+                }
+
+                let expected_rhs0 = if lambda == 0.0 {
+                    [-0.25, -0.5, -0.75]
+                } else {
+                    [-1.0 / 3.0, -2.0 / 3.0, -1.0]
+                };
+                let expected_rhs1 = if lambda == 0.0 {
+                    [-7.25, -8.5, -9.75]
+                } else {
+                    [-65.0 / 9.0, -76.0 / 9.0, -29.0 / 3.0]
+                };
+                for component in 0..3 {
+                    assert!((operator.rhs[component] - expected_rhs0[component]).abs() < 1.0e-12);
+                    assert!(
+                        (operator.rhs[6 + component] - expected_rhs1[component]).abs() < 1.0e-12
+                    );
+                }
+
+                let (normal, full_rhs) = full_normal_system(&system, lambda);
+                let full_delta = solve_normal_equations(&normal, &full_rhs).unwrap();
+                let mut direct_system = hand_check_system();
+                let direct = solve_step(
+                    &mut direct_system,
+                    2,
+                    1,
+                    0,
+                    0,
+                    lambda,
+                    LinearSolver::Sparse,
+                    false,
+                    &mut None,
+                )
+                .unwrap();
+                assert!((direct.0.clone() - full_delta.rows(0, 12)).norm() < 1.0e-10);
+                assert!((direct.1.clone() - full_delta.rows(12, 3)).norm() < 1.0e-10);
+                let result = operator
+                    .solve_pcg(operator.rhs(), PcgOptions::default())
+                    .unwrap();
+                assert!((result.solution.clone() - full_delta.rows(0, 12)).norm() < 1.0e-9);
+                assert!(
+                    (operator.complete_delta(&result.solution).unwrap() - full_delta.rows(12, 3))
+                        .norm()
+                        < 1.0e-9
+                );
+            }
+        }
+
+        #[test]
+        fn implicit_operator_matches_explicit_schur_and_direct_step_without_damping() {
+            let system = synthetic_system();
+            let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
+            let explicit = explicit_schur(&system, 0.0);
+            let x = DVector::from_iterator(12, (0..12).map(|index| 0.02 * (index + 2) as f64));
+            assert!((operator.apply(&x).unwrap() - explicit * &x).norm() < 1.0e-10);
+
+            let mut direct_system = synthetic_system();
+            let direct = solve_step(
+                &mut direct_system,
+                2,
+                1,
+                0,
+                0,
+                0.0,
+                LinearSolver::Sparse,
+                false,
+                &mut None,
+            )
+            .unwrap();
+            let result = operator
+                .solve_pcg(operator.rhs(), PcgOptions::default())
+                .unwrap();
+            assert!((&result.solution - &direct.0).norm() < 1.0e-9);
             assert!(
-                (operator.complete_delta(&result.solution).unwrap() - full_delta.rows(12, 3))
-                    .norm()
-                    < 1.0e-9
+                (operator.complete_delta(&result.solution).unwrap() - direct.1).norm() < 1.0e-9
+            );
+        }
+
+        #[test]
+        fn rig_sensor_observations_share_one_pose_slot_and_keep_cross_terms() {
+            let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+            let mut ba = BundleAdjustment::new(camera.clone());
+            ba.add_pose(0, Pose::identity());
+            ba.add_landmark(0, Point3::new(0.3, -0.2, 4.0));
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: 0,
+                landmark_id: 0,
+                xy: Point2::new(357.5, 215.0),
+                camera: camera.clone(),
+                sensor_from_rig: SE3::identity(),
+            });
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: 0,
+                landmark_id: 0,
+                xy: Point2::new(382.0, 215.0),
+                camera,
+                sensor_from_rig: SE3::new(UnitQuaternion::identity(), Vector3::new(0.2, 0.0, 0.0)),
+            });
+            let pose_index = BTreeMap::from([(0_u64, 0_usize)]);
+            let landmark_index = BTreeMap::from([(0_u64, 0_usize)]);
+            let system = build_normal_equations(
+                &ba,
+                &ba.camera.intrinsics().unwrap(),
+                &pose_index,
+                &landmark_index,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &RobustKernel::None,
+                None,
+                false,
+                true,
+            );
+            assert_eq!(system.landmarks[0].cross.len(), 2);
+            assert_eq!(
+                system.landmarks[0]
+                    .cross
+                    .iter()
+                    .map(|(pose, _)| *pose)
+                    .collect::<Vec<_>>(),
+                vec![0, 0]
+            );
+            let operator = ImplicitSchurOperator::new(&system, 0.1).unwrap();
+            let x = DVector::from_element(6, 0.2);
+            let expected = explicit_schur(&system, 0.1) * &x;
+            let actual = operator.apply(&x).unwrap();
+            // Explicit and implicit forms reassociate cross-sensor products.  The
+            // rounding scale is the sum of the unreduced Bx term and the
+            // eliminated E C⁻¹ Eᵀx term, since their subtraction can cancel to a
+            // much smaller Schur result.  This is scale-aware rather than a
+            // pixel-constant absolute threshold and follows camera/rig scaling.
+            let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+                panic!("rig matvec test requires pose blocks");
+            };
+            let mut base = DVector::zeros(x.len());
+            for (pose, block) in diagonal.iter().enumerate() {
+                let mut damped = *block;
+                for component in 0..6 {
+                    damped[(component, component)] += 0.1;
+                }
+                let value = damped * x.fixed_rows::<6>(pose * 6).into_owned();
+                for component in 0..6 {
+                    base[pose * 6 + component] = value[component];
+                }
+            }
+            // Sum the magnitudes of the individual E C⁻¹ Eᵀx pair products, not
+            // only their potentially-cancelled aggregate.  This captures the
+            // arithmetic scale of the two evaluation orders.
+            let inverse = (system.landmarks[0].h_ll + 0.1 * Matrix3::<f64>::identity())
+                .try_inverse()
+                .unwrap();
+            let mut eliminated_term_scale = 0.0;
+            for (_pose, a) in &system.landmarks[0].cross {
+                for (other_pose, b) in &system.landmarks[0].cross {
+                    let x_other: Vector6<f64> = x.fixed_rows::<6>(other_pose * 6).into_owned();
+                    let term: Vector6<f64> = a * inverse * b.transpose() * x_other;
+                    eliminated_term_scale += term.norm();
+                }
+            }
+            let scale =
+                (base.norm() + eliminated_term_scale + actual.norm() + expected.norm()).max(1.0);
+            let tolerance = 64.0 * f64::EPSILON * scale;
+            let difference = (&actual - &expected).norm();
+            assert!(
+                difference <= tolerance,
+                "rig matvec diff={} scale={} tolerance={}",
+                difference,
+                scale,
+                tolerance
+            );
+        }
+
+        #[test]
+        fn fixed_rotation_is_preserved_by_operator_and_back_substitution() {
+            let mut system = synthetic_system();
+            let pose_index = BTreeMap::from([(10_u64, 0_usize), (20_u64, 1_usize)]);
+            let fixed = BTreeSet::from([10_u64]);
+            constrain_fixed_pose_rotations(&fixed, &pose_index, &mut system);
+            let operator = ImplicitSchurOperator::new(&system, 0.5).unwrap();
+            assert_eq!(operator.rhs[3], 0.0);
+            assert_eq!(operator.rhs[4], 0.0);
+            assert_eq!(operator.rhs[5], 0.0);
+            let mut x = DVector::zeros(12);
+            x[3] = 1.0;
+            x[4] = -2.0;
+            x[5] = 3.0;
+            let applied = operator.apply(&x).unwrap();
+            assert_eq!(applied[3], 1.5);
+            assert_eq!(applied[4], -3.0);
+            assert_eq!(applied[5], 4.5);
+            let result = operator
+                .solve_pcg(operator.rhs(), PcgOptions::default())
+                .unwrap();
+            assert_eq!(result.solution[3], 0.0);
+            assert_eq!(result.solution[4], 0.0);
+            assert_eq!(result.solution[5], 0.0);
+        }
+
+        #[test]
+        fn operator_rejects_dense_dimension_and_nonfinite_inputs() {
+            let mut system = synthetic_system();
+            let dimension = system.b_p.len();
+            system.h_pp = CameraHessian::Dense(DMatrix::identity(dimension, dimension));
+            assert!(matches!(
+                ImplicitSchurOperator::new(&system, 0.0),
+                Err(ImplicitSchurError::DenseCameraHessian)
+            ));
+
+            let mut system = synthetic_system();
+            system.b_p = DVector::zeros(1);
+            assert!(matches!(
+                ImplicitSchurOperator::new(&system, 0.0),
+                Err(ImplicitSchurError::DimensionMismatch {
+                    expected: 12,
+                    actual: 1,
+                })
+            ));
+
+            let mut system = synthetic_system();
+            system.landmarks[0].cross[0].1[(0, 0)] = f64::NAN;
+            assert!(matches!(
+                ImplicitSchurOperator::new(&system, 0.0),
+                Err(ImplicitSchurError::NonFinite("landmark cross block"))
+            ));
+
+            let mut system = synthetic_system();
+            system.landmarks[0].cross[0].0 = usize::MAX;
+            assert!(matches!(
+                ImplicitSchurOperator::new(&system, 0.0),
+                Err(ImplicitSchurError::DimensionMismatch {
+                    expected: 2,
+                    actual: usize::MAX,
+                })
+            ));
+
+            let system = synthetic_system();
+            let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
+            let mut nonfinite = DVector::zeros(operator.dimension());
+            nonfinite[0] = f64::NAN;
+            assert_eq!(
+                operator.apply(&nonfinite),
+                Err(ImplicitSchurError::NonFinite("operator input"))
+            );
+
+            let system = synthetic_system();
+            assert!(matches!(
+                ImplicitSchurOperator::new(&system, f64::NAN),
+                Err(ImplicitSchurError::InvalidLambda)
+            ));
+            let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
+            assert!(matches!(
+                operator.solve_pcg(
+                    operator.rhs(),
+                    PcgOptions {
+                        relative_tolerance: -1.0,
+                        ..PcgOptions::default()
+                    }
+                ),
+                Err(ImplicitSchurError::InvalidTolerance)
+            ));
+            let mut huge_rhs = operator.rhs().clone();
+            huge_rhs[0] = f64::MAX;
+            assert!(matches!(
+                operator.solve_pcg(
+                    &huge_rhs,
+                    PcgOptions {
+                        relative_tolerance: 2.0,
+                        ..PcgOptions::default()
+                    }
+                ),
+                Err(ImplicitSchurError::NonFinite("PCG target"))
+            ));
+        }
+
+        #[test]
+        fn empty_pose_operator_rejects_pose_reduced_system() {
+            let empty = NormalEquationsBa {
+                h_pp: CameraHessian::PoseDiagonal(Vec::new()),
+                b_p: DVector::zeros(0),
+                landmarks: Vec::new(),
+            };
+            assert!(matches!(
+                ImplicitSchurOperator::new(&empty, 0.0),
+                Err(ImplicitSchurError::EmptySystem)
+            ));
+            // This only checks the prototype's empty pose-reduced input.  It is
+            // not a production all-fixed-pose solver test: solve_step has a
+            // separate p_count == 0 landmark-only branch.
+        }
+
+        #[test]
+        fn singular_landmark_inverse_is_skipped_like_direct_solver() {
+            let mut system = synthetic_system();
+            system.landmarks[0].h_ll = Matrix3::zeros();
+            let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
+            assert!(operator.h_ll_inverse(0).is_none());
+            let expected = DVector::from_iterator(12, system.b_p.iter().map(|value| -value));
+            assert_eq!(operator.rhs.as_slice(), expected.as_slice());
+            let delta_landmarks = operator.complete_delta(&DVector::zeros(12)).unwrap();
+            assert!(delta_landmarks.iter().all(|value| *value == 0.0));
+        }
+
+        #[test]
+        fn pcg_reports_limits_curvature_and_zero_rhs_without_gauge_claim() {
+            let system = synthetic_system();
+            let operator = ImplicitSchurOperator::new(&system, 0.25).unwrap();
+            let zero = DVector::zeros(operator.dimension());
+            let zero_result = operator
+                .solve_pcg(
+                    &zero,
+                    PcgOptions {
+                        max_iterations: 0,
+                        ..PcgOptions::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(zero_result.iterations, 0);
+            assert_eq!(zero_result.residual_norm, 0.0);
+
+            let limited = operator.solve_pcg(
+                operator.rhs(),
+                PcgOptions {
+                    max_iterations: 0,
+                    ..PcgOptions::default()
+                },
+            );
+            assert!(matches!(
+                limited,
+                Err(ImplicitSchurError::MaxIterations { .. })
+            ));
+
+            let bad_solution = DVector::zeros(operator.dimension());
+            assert!(matches!(
+                operator.checked_result(operator.rhs(), bad_solution, 0, 0.0, 0.0),
+                Err(ImplicitSchurError::ResidualCheckFailed { .. })
+            ));
+
+            let mut indefinite = synthetic_system();
+            if let CameraHessian::PoseDiagonal(diagonal) = &mut indefinite.h_pp {
+                for block in diagonal {
+                    *block = Matrix6::from_diagonal(&Vector6::from_element(5.0));
+                }
+            }
+            indefinite.landmarks[0].h_ll = Matrix3::identity();
+            indefinite.landmarks[0].cross = vec![
+                (
+                    0,
+                    Matrix6x3::from_fn(
+                        |row, column| {
+                            if row == 0 && column == 0 {
+                                2.0
+                            } else {
+                                0.0
+                            }
+                        },
+                    ),
+                ),
+                (
+                    1,
+                    Matrix6x3::from_fn(
+                        |row, column| {
+                            if row == 0 && column == 0 {
+                                2.0
+                            } else {
+                                0.0
+                            }
+                        },
+                    ),
+                ),
+            ];
+            let indefinite_operator = ImplicitSchurOperator::new(&indefinite, 0.0).unwrap();
+            let mut negative_eigenvector = DVector::zeros(indefinite_operator.dimension());
+            negative_eigenvector[0] = 1.0;
+            negative_eigenvector[6] = 1.0;
+            assert!(matches!(
+                indefinite_operator.solve_pcg(&negative_eigenvector, PcgOptions::default()),
+                Err(ImplicitSchurError::NonPositiveCurvature)
+            ));
+        }
+
+        #[test]
+        fn repeated_pcg_runs_are_deterministic() {
+            let system = synthetic_system();
+            let operator = ImplicitSchurOperator::new(&system, 0.25).unwrap();
+            let first = operator
+                .solve_pcg(operator.rhs(), PcgOptions::default())
+                .unwrap();
+            let second = operator
+                .solve_pcg(operator.rhs(), PcgOptions::default())
+                .unwrap();
+            assert_eq!(first, second);
+        }
+    }
+}
+
+#[cfg(test)]
+mod matrix_free_ba_api_tests {
+    use super::*;
+    use nalgebra::{UnitQuaternion, Vector3};
+
+    fn make_problem() -> BundleAdjustment {
+        let camera = Camera::pinhole(7, 640, 480, 420.0, 418.0, 320.0, 240.0);
+        let mut problem = BundleAdjustment::new(camera.clone());
+        let truth_pose0 = Pose::identity();
+        let truth_pose1 = Pose::from_world_to_camera(
+            UnitQuaternion::from_euler_angles(0.01, -0.02, 0.015),
+            Vector3::new(-0.18, 0.015, 0.02),
+        );
+        let truth_pose2 = Pose::from_world_to_camera(
+            UnitQuaternion::from_euler_angles(-0.015, 0.025, -0.01),
+            Vector3::new(-0.34, -0.01, 0.04),
+        );
+        problem.poses.insert(0, truth_pose0.clone());
+        problem.poses.insert(
+            1,
+            Pose::from_world_to_camera(
+                UnitQuaternion::from_euler_angles(0.012, -0.018, 0.016),
+                Vector3::new(-0.205, 0.022, 0.026),
+            ),
+        );
+        problem.poses.insert(
+            2,
+            Pose::from_world_to_camera(
+                UnitQuaternion::from_euler_angles(-0.013, 0.023, -0.012),
+                Vector3::new(-0.365, -0.004, 0.045),
+            ),
+        );
+        problem.fixed_poses.insert(0);
+        let points = [
+            Point3::new(-0.8, -0.45, 3.8),
+            Point3::new(-0.35, 0.55, 4.2),
+            Point3::new(0.05, -0.25, 4.6),
+            Point3::new(0.45, 0.35, 5.0),
+            Point3::new(0.85, -0.5, 5.4),
+            Point3::new(-0.65, 0.25, 5.8),
+            Point3::new(0.25, 0.7, 6.2),
+            Point3::new(0.7, 0.15, 6.8),
+        ];
+        for (landmark_id, truth_point) in points.into_iter().enumerate() {
+            problem.landmarks.insert(
+                landmark_id as u64,
+                Point3::from(truth_point.coords + Vector3::new(0.006, -0.004, 0.008)),
+            );
+            for (keyframe_id, pose) in [(0, &truth_pose0), (1, &truth_pose1), (2, &truth_pose2)] {
+                let xy = camera
+                    .project(&pose.transform_world_point(&truth_point))
+                    .expect("synthetic point must project");
+                problem.observations.push(BaObservation {
+                    keyframe_id,
+                    landmark_id: landmark_id as u64,
+                    xy,
+                });
+            }
+        }
+        problem.fixed_landmarks.insert(0);
+        problem
+    }
+
+    fn matrix_free_config() -> BaConfig {
+        BaConfig {
+            max_iterations: 4,
+            linear_solver: LinearSolver::Sparse,
+            ..BaConfig::default()
+        }
+    }
+
+    #[test]
+    fn matrix_free_mono_matches_sparse_cost_and_keeps_anchor_fixed() {
+        let problem = make_problem();
+        let mut direct = problem.clone();
+        let mut matrix_free = problem.clone();
+        let config = matrix_free_config();
+        let direct_result = direct.optimize(&config).unwrap();
+        let matrix_result = matrix_free
+            .optimize_matrix_free(&config, MatrixFreeBaOptions::default())
+            .unwrap();
+        assert!(matrix_result.final_cost <= matrix_result.initial_cost);
+        assert!(direct_result.final_cost <= direct_result.initial_cost);
+        assert!((direct_result.final_cost - matrix_result.final_cost).abs() < 1.0e-6);
+        assert_eq!(matrix_free.poses[&0], problem.poses[&0]);
+        for id in 1..=2 {
+            assert!(matrix_free.poses[&id] != problem.poses[&id]);
+            assert!(
+                (direct.poses[&id].world_to_camera.matrix()
+                    - matrix_free.poses[&id].world_to_camera.matrix())
+                .norm()
+                    < 1.0e-5
+            );
+        }
+        assert_eq!(matrix_free.landmarks[&0], problem.landmarks[&0]);
+        for id in 1..8 {
+            assert!(
+                (direct.landmarks[&id].coords - matrix_free.landmarks[&id].coords).norm() < 1.0e-5
+            );
+        }
+        assert!(matrix_result
+            .matrix_free_iterations
+            .iter()
+            .all(|iteration| iteration.pcg_failure.is_none()));
+
+        let mut dense_config = config;
+        dense_config.linear_solver = LinearSolver::Dense;
+        let mut dense_dispatch = problem.clone();
+        let dense_dispatch_result = dense_dispatch
+            .optimize_matrix_free(&dense_config, MatrixFreeBaOptions::default())
+            .unwrap();
+        assert_eq!(matrix_result, dense_dispatch_result);
+
+        let mut repeat = problem.clone();
+        let repeat_result = repeat
+            .optimize_matrix_free(&config, MatrixFreeBaOptions::default())
+            .unwrap();
+        assert_eq!(matrix_result, repeat_result);
+        assert_eq!(matrix_free, repeat);
+    }
+
+    #[test]
+    fn matrix_free_supports_rectified_stereo_and_rig_visual_factors() {
+        let mut stereo = make_problem();
+        stereo.fixed_landmarks.clear();
+        let camera = stereo.camera.clone();
+        let baseline = 0.12;
+        stereo.stereo_baseline = Some(baseline);
+        stereo.stereo_observations = stereo
+            .observations
+            .drain(..)
+            .map(|observation| {
+                let pose = &stereo.poses[&observation.keyframe_id];
+                let point = &stereo.landmarks[&observation.landmark_id];
+                let xc = pose.transform_world_point(point);
+                BaStereoObservation {
+                    keyframe_id: observation.keyframe_id,
+                    landmark_id: observation.landmark_id,
+                    xy: observation.xy,
+                    u_right: observation.xy.x - camera.params[0] * baseline / xc.z,
+                }
+            })
+            .collect();
+        let mut stereo_direct = stereo.clone();
+        let stereo_direct_result = stereo_direct.optimize(&matrix_free_config()).unwrap();
+        let stereo_result = stereo
+            .optimize_matrix_free(&matrix_free_config(), MatrixFreeBaOptions::default())
+            .unwrap();
+        assert!(stereo_result.final_cost.is_finite());
+        assert!(stereo_result.final_cost < stereo_result.initial_cost);
+        assert!((stereo_direct_result.final_cost - stereo_result.final_cost).abs() < 1.0e-6);
+
+        let mut rig = make_problem();
+        rig.fixed_landmarks.clear();
+        let camera = rig.camera.clone();
+        let sensor1 = SE3::new(
+            UnitQuaternion::from_euler_angles(0.02, -0.01, 0.03),
+            Vector3::new(0.22, -0.015, 0.01),
+        );
+        let observations = std::mem::take(&mut rig.observations);
+        for observation in observations {
+            let pose = &rig.poses[&observation.keyframe_id].world_to_camera;
+            let point = &rig.landmarks[&observation.landmark_id];
+            for sensor_from_rig in [SE3::identity(), sensor1.clone()] {
+                let sensor_pose = sensor_from_rig.compose(pose);
+                let xy = camera
+                    .project(&sensor_pose.transform_point(point))
+                    .expect("rig synthetic point must project");
+                rig.rig_observations.push(BaRigObservation {
+                    keyframe_id: observation.keyframe_id,
+                    landmark_id: observation.landmark_id,
+                    xy,
+                    camera: camera.clone(),
+                    sensor_from_rig,
+                });
+            }
+        }
+        let rig_before_extrinsics: Vec<SE3> = rig
+            .rig_observations
+            .iter()
+            .map(|observation| observation.sensor_from_rig.clone())
+            .collect();
+        rig.poses.get_mut(&1).unwrap().world_to_camera.translation.x += 0.03;
+        rig.poses.get_mut(&2).unwrap().world_to_camera.translation.y -= 0.02;
+        for id in 1..8 {
+            rig.landmarks.get_mut(&id).unwrap().coords.z += 0.015;
+        }
+        let mut rig_direct = rig.clone();
+        let rig_direct_result = rig_direct.optimize(&matrix_free_config()).unwrap();
+        let rig_result = rig
+            .optimize_matrix_free(&matrix_free_config(), MatrixFreeBaOptions::default())
+            .unwrap();
+        assert!(rig_result.final_cost.is_finite());
+        assert!(rig_result.final_cost < rig_result.initial_cost);
+        assert!((rig_direct_result.final_cost - rig_result.final_cost).abs() < 1.0e-6);
+        for id in 1..=2 {
+            assert!(
+                (rig_direct.poses[&id].world_to_camera.matrix()
+                    - rig.poses[&id].world_to_camera.matrix())
+                .norm()
+                    < 1.0e-5
+            );
+        }
+        for id in 0..8 {
+            assert!((rig_direct.landmarks[&id].coords - rig.landmarks[&id].coords).norm() < 1.0e-5);
+        }
+        assert_eq!(
+            rig.rig_observations
+                .iter()
+                .map(|observation| observation.sensor_from_rig.clone())
+                .collect::<Vec<_>>(),
+            rig_before_extrinsics
+        );
+    }
+
+    #[test]
+    fn matrix_free_rejects_unsupported_input_without_mutation() {
+        let mut no_anchor = make_problem();
+        no_anchor.fixed_poses.clear();
+        let before = no_anchor.clone();
+        assert!(matches!(
+            no_anchor.optimize_matrix_free(&matrix_free_config(), MatrixFreeBaOptions::default()),
+            Err(MatrixFreeBaError::Ineligible(_))
+        ));
+        assert_eq!(no_anchor, before);
+
+        let mut with_prior = make_problem();
+        with_prior.position_prior = Some(PositionPrior::default());
+        assert!(matches!(
+            with_prior.optimize_matrix_free(&matrix_free_config(), MatrixFreeBaOptions::default()),
+            Err(MatrixFreeBaError::Ineligible(_))
+        ));
+
+        let mut bad_config = make_problem();
+        let mut config = matrix_free_config();
+        config.initial_lambda = None;
+        assert!(matches!(
+            bad_config.optimize_matrix_free(&config, MatrixFreeBaOptions::default()),
+            Err(MatrixFreeBaError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn matrix_free_preflight_rejects_nonfinite_and_unsupported_cases_deterministically() {
+        let mut cases: Vec<(&str, BundleAdjustment, BaConfig)> = Vec::new();
+        for (label, initial_lambda) in [
+            ("none-lambda", None),
+            ("zero-lambda", Some(0.0)),
+            ("nan-lambda", Some(f64::NAN)),
+        ] {
+            let mut config = matrix_free_config();
+            config.initial_lambda = initial_lambda;
+            cases.push((label, make_problem(), config));
+        }
+        let mut reversed = matrix_free_config();
+        reversed.min_lambda = 2.0;
+        reversed.max_lambda = 1.0;
+        cases.push(("reversed-lambda", make_problem(), reversed));
+
+        let mut invalid_kernel = matrix_free_config();
+        invalid_kernel.robust_kernel = RobustKernel::Huber { delta: f64::NAN };
+        cases.push(("invalid-kernel", make_problem(), invalid_kernel));
+
+        let mut nonfinite_pose = make_problem();
+        nonfinite_pose
+            .poses
+            .get_mut(&1)
+            .unwrap()
+            .world_to_camera
+            .translation
+            .x = f64::NAN;
+        cases.push(("nonfinite-pose", nonfinite_pose, matrix_free_config()));
+
+        let mut nonfinite_landmark = make_problem();
+        nonfinite_landmark.landmarks.get_mut(&1).unwrap().coords.y = f64::NAN;
+        cases.push((
+            "nonfinite-landmark",
+            nonfinite_landmark,
+            matrix_free_config(),
+        ));
+
+        let mut distorted = make_problem();
+        distorted.camera =
+            Camera::pinhole_radial(7, 640, 480, 420.0, 418.0, 320.0, 240.0, 0.01, 0.0);
+        cases.push(("nonzero-distortion", distorted, matrix_free_config()));
+
+        let mut fake_anchor = make_problem();
+        fake_anchor.fixed_poses.insert(99);
+        fake_anchor.fixed_poses.remove(&0);
+        cases.push(("unknown-anchor", fake_anchor, matrix_free_config()));
+
+        let mut all_fixed = make_problem();
+        all_fixed.fixed_poses.insert(1);
+        all_fixed.fixed_poses.insert(2);
+        cases.push(("all-fixed", all_fixed, matrix_free_config()));
+
+        let mut unsupported_state = make_problem();
+        unsupported_state.velocities.insert(1, Vector3::zeros());
+        cases.push(("velocity-state", unsupported_state, matrix_free_config()));
+
+        for (label, mut problem, config) in cases {
+            let pose_snapshot = format!("{:?}", problem.poses);
+            let landmark_snapshot = format!("{:?}", problem.landmarks);
+            let result = problem.optimize_matrix_free(&config, MatrixFreeBaOptions::default());
+            assert!(
+                matches!(
+                    result,
+                    Err(MatrixFreeBaError::InvalidConfiguration(_))
+                        | Err(MatrixFreeBaError::Ineligible(_))
+                ),
+                "{label}: unexpected result {result:?}"
+            );
+            assert_eq!(
+                format!("{:?}", problem.poses),
+                pose_snapshot,
+                "{label} poses changed"
+            );
+            assert_eq!(
+                format!("{:?}", problem.landmarks),
+                landmark_snapshot,
+                "{label} landmarks changed"
             );
         }
     }
 
     #[test]
-    fn implicit_operator_matches_explicit_schur_and_direct_step_without_damping() {
-        let system = synthetic_system();
-        let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
-        let explicit = explicit_schur(&system, 0.0);
-        let x = DVector::from_iterator(12, (0..12).map(|index| 0.02 * (index + 2) as f64));
-        assert!((operator.apply(&x).unwrap() - explicit * &x).norm() < 1.0e-10);
-
-        let mut direct_system = synthetic_system();
-        let direct = solve_step(
-            &mut direct_system,
-            2,
-            1,
-            0,
-            0,
-            0.0,
-            LinearSolver::Sparse,
-            false,
-            &mut None,
-        )
-        .unwrap();
-        let result = operator
-            .solve_pcg(operator.rhs(), PcgOptions::default())
-            .unwrap();
-        assert!((&result.solution - &direct.0).norm() < 1.0e-9);
-        assert!((operator.complete_delta(&result.solution).unwrap() - direct.1).norm() < 1.0e-9);
-    }
-
-    #[test]
-    fn rig_sensor_observations_share_one_pose_slot_and_keep_cross_terms() {
-        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
-        let mut ba = BundleAdjustment::new(camera.clone());
-        ba.add_pose(0, Pose::identity());
-        ba.add_landmark(0, Point3::new(0.3, -0.2, 4.0));
-        ba.add_rig_observation(BaRigObservation {
-            keyframe_id: 0,
-            landmark_id: 0,
-            xy: Point2::new(357.5, 215.0),
-            camera: camera.clone(),
-            sensor_from_rig: SE3::identity(),
-        });
-        ba.add_rig_observation(BaRigObservation {
-            keyframe_id: 0,
-            landmark_id: 0,
-            xy: Point2::new(382.0, 215.0),
-            camera,
-            sensor_from_rig: SE3::new(UnitQuaternion::identity(), Vector3::new(0.2, 0.0, 0.0)),
-        });
-        let pose_index = BTreeMap::from([(0_u64, 0_usize)]);
-        let landmark_index = BTreeMap::from([(0_u64, 0_usize)]);
-        let system = build_normal_equations(
-            &ba,
-            &ba.camera.intrinsics().unwrap(),
-            &pose_index,
-            &landmark_index,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &RobustKernel::None,
-            None,
-            false,
-            true,
-        );
-        assert_eq!(system.landmarks[0].cross.len(), 2);
-        assert_eq!(
-            system.landmarks[0]
-                .cross
-                .iter()
-                .map(|(pose, _)| *pose)
-                .collect::<Vec<_>>(),
-            vec![0, 0]
-        );
-        let operator = ImplicitSchurOperator::new(&system, 0.1).unwrap();
-        let x = DVector::from_element(6, 0.2);
-        let expected = explicit_schur(&system, 0.1) * &x;
-        let actual = operator.apply(&x).unwrap();
-        // Explicit and implicit forms reassociate cross-sensor products.  The
-        // rounding scale is the sum of the unreduced Bx term and the
-        // eliminated E C⁻¹ Eᵀx term, since their subtraction can cancel to a
-        // much smaller Schur result.  This is scale-aware rather than a
-        // pixel-constant absolute threshold and follows camera/rig scaling.
-        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
-            panic!("rig matvec test requires pose blocks");
+    fn matrix_free_failed_pcg_rolls_back_and_reports_attempt() {
+        let mut problem = make_problem();
+        let before = problem.clone();
+        let mut config = matrix_free_config();
+        config.max_iterations = 3;
+        let options = MatrixFreeBaOptions {
+            max_pcg_iterations: 1,
+            pcg_relative_tolerance: 0.0,
+            pcg_absolute_tolerance: 1.0e-30,
         };
-        let mut base = DVector::zeros(x.len());
-        for (pose, block) in diagonal.iter().enumerate() {
-            let mut damped = *block;
-            for component in 0..6 {
-                damped[(component, component)] += 0.1;
-            }
-            let value = damped * x.fixed_rows::<6>(pose * 6).into_owned();
-            for component in 0..6 {
-                base[pose * 6 + component] = value[component];
-            }
-        }
-        // Sum the magnitudes of the individual E C⁻¹ Eᵀx pair products, not
-        // only their potentially-cancelled aggregate.  This captures the
-        // arithmetic scale of the two evaluation orders.
-        let inverse = (system.landmarks[0].h_ll + 0.1 * Matrix3::<f64>::identity())
-            .try_inverse()
-            .unwrap();
-        let mut eliminated_term_scale = 0.0;
-        for (_pose, a) in &system.landmarks[0].cross {
-            for (other_pose, b) in &system.landmarks[0].cross {
-                let x_other: Vector6<f64> = x.fixed_rows::<6>(other_pose * 6).into_owned();
-                let term: Vector6<f64> = a * inverse * b.transpose() * x_other;
-                eliminated_term_scale += term.norm();
-            }
-        }
-        let scale =
-            (base.norm() + eliminated_term_scale + actual.norm() + expected.norm()).max(1.0);
-        let tolerance = 64.0 * f64::EPSILON * scale;
-        let difference = (&actual - &expected).norm();
-        assert!(
-            difference <= tolerance,
-            "rig matvec diff={} scale={} tolerance={}",
-            difference,
-            scale,
-            tolerance
-        );
-    }
-
-    #[test]
-    fn fixed_rotation_is_preserved_by_operator_and_back_substitution() {
-        let mut system = synthetic_system();
-        let pose_index = BTreeMap::from([(10_u64, 0_usize), (20_u64, 1_usize)]);
-        let fixed = BTreeSet::from([10_u64]);
-        constrain_fixed_pose_rotations(&fixed, &pose_index, &mut system);
-        let operator = ImplicitSchurOperator::new(&system, 0.5).unwrap();
-        assert_eq!(operator.rhs[3], 0.0);
-        assert_eq!(operator.rhs[4], 0.0);
-        assert_eq!(operator.rhs[5], 0.0);
-        let mut x = DVector::zeros(12);
-        x[3] = 1.0;
-        x[4] = -2.0;
-        x[5] = 3.0;
-        let applied = operator.apply(&x).unwrap();
-        assert_eq!(applied[3], 1.5);
-        assert_eq!(applied[4], -3.0);
-        assert_eq!(applied[5], 4.5);
-        let result = operator
-            .solve_pcg(operator.rhs(), PcgOptions::default())
-            .unwrap();
-        assert_eq!(result.solution[3], 0.0);
-        assert_eq!(result.solution[4], 0.0);
-        assert_eq!(result.solution[5], 0.0);
-    }
-
-    #[test]
-    fn operator_rejects_dense_dimension_and_nonfinite_inputs() {
-        let mut system = synthetic_system();
-        let dimension = system.b_p.len();
-        system.h_pp = CameraHessian::Dense(DMatrix::identity(dimension, dimension));
-        assert!(matches!(
-            ImplicitSchurOperator::new(&system, 0.0),
-            Err(ImplicitSchurError::DenseCameraHessian)
-        ));
-
-        let mut system = synthetic_system();
-        system.b_p = DVector::zeros(1);
-        assert!(matches!(
-            ImplicitSchurOperator::new(&system, 0.0),
-            Err(ImplicitSchurError::DimensionMismatch {
-                expected: 12,
-                actual: 1,
-            })
-        ));
-
-        let mut system = synthetic_system();
-        system.landmarks[0].cross[0].1[(0, 0)] = f64::NAN;
-        assert!(matches!(
-            ImplicitSchurOperator::new(&system, 0.0),
-            Err(ImplicitSchurError::NonFinite("landmark cross block"))
-        ));
-
-        let mut system = synthetic_system();
-        system.landmarks[0].cross[0].0 = usize::MAX;
-        assert!(matches!(
-            ImplicitSchurOperator::new(&system, 0.0),
-            Err(ImplicitSchurError::DimensionMismatch {
-                expected: 2,
-                actual: usize::MAX,
-            })
-        ));
-
-        let system = synthetic_system();
-        let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
-        let mut nonfinite = DVector::zeros(operator.dimension());
-        nonfinite[0] = f64::NAN;
-        assert_eq!(
-            operator.apply(&nonfinite),
-            Err(ImplicitSchurError::NonFinite("operator input"))
-        );
-
-        let system = synthetic_system();
-        assert!(matches!(
-            ImplicitSchurOperator::new(&system, f64::NAN),
-            Err(ImplicitSchurError::InvalidLambda)
-        ));
-        let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
-        assert!(matches!(
-            operator.solve_pcg(
-                operator.rhs(),
-                PcgOptions {
-                    relative_tolerance: -1.0,
-                    ..PcgOptions::default()
-                }
-            ),
-            Err(ImplicitSchurError::InvalidTolerance)
-        ));
-        let mut huge_rhs = operator.rhs().clone();
-        huge_rhs[0] = f64::MAX;
-        assert!(matches!(
-            operator.solve_pcg(
-                &huge_rhs,
-                PcgOptions {
-                    relative_tolerance: 2.0,
-                    ..PcgOptions::default()
-                }
-            ),
-            Err(ImplicitSchurError::NonFinite("PCG target"))
-        ));
-    }
-
-    #[test]
-    fn empty_pose_operator_rejects_pose_reduced_system() {
-        let empty = NormalEquationsBa {
-            h_pp: CameraHessian::PoseDiagonal(Vec::new()),
-            b_p: DVector::zeros(0),
-            landmarks: Vec::new(),
-        };
-        assert!(matches!(
-            ImplicitSchurOperator::new(&empty, 0.0),
-            Err(ImplicitSchurError::EmptySystem)
-        ));
-        // This only checks the prototype's empty pose-reduced input.  It is
-        // not a production all-fixed-pose solver test: solve_step has a
-        // separate p_count == 0 landmark-only branch.
-    }
-
-    #[test]
-    fn singular_landmark_inverse_is_skipped_like_direct_solver() {
-        let mut system = synthetic_system();
-        system.landmarks[0].h_ll = Matrix3::zeros();
-        let operator = ImplicitSchurOperator::new(&system, 0.0).unwrap();
-        assert!(operator.h_ll_inverse(0).is_none());
-        let expected = DVector::from_iterator(12, system.b_p.iter().map(|value| -value));
-        assert_eq!(operator.rhs.as_slice(), expected.as_slice());
-        let delta_landmarks = operator.complete_delta(&DVector::zeros(12)).unwrap();
-        assert!(delta_landmarks.iter().all(|value| *value == 0.0));
-    }
-
-    #[test]
-    fn pcg_reports_limits_curvature_and_zero_rhs_without_gauge_claim() {
-        let system = synthetic_system();
-        let operator = ImplicitSchurOperator::new(&system, 0.25).unwrap();
-        let zero = DVector::zeros(operator.dimension());
-        let zero_result = operator
-            .solve_pcg(
-                &zero,
-                PcgOptions {
-                    max_iterations: 0,
-                    ..PcgOptions::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(zero_result.iterations, 0);
-        assert_eq!(zero_result.residual_norm, 0.0);
-
-        let limited = operator.solve_pcg(
-            operator.rhs(),
-            PcgOptions {
-                max_iterations: 0,
-                ..PcgOptions::default()
-            },
-        );
-        assert!(matches!(
-            limited,
-            Err(ImplicitSchurError::MaxIterations { .. })
-        ));
-
-        let bad_solution = DVector::zeros(operator.dimension());
-        assert!(matches!(
-            operator.checked_result(operator.rhs(), bad_solution, 0, 0.0, 0.0),
-            Err(ImplicitSchurError::ResidualCheckFailed { .. })
-        ));
-
-        let mut indefinite = synthetic_system();
-        if let CameraHessian::PoseDiagonal(diagonal) = &mut indefinite.h_pp {
-            for block in diagonal {
-                *block = Matrix6::from_diagonal(&Vector6::from_element(5.0));
-            }
-        }
-        indefinite.landmarks[0].h_ll = Matrix3::identity();
-        indefinite.landmarks[0].cross = vec![
-            (
-                0,
-                Matrix6x3::from_fn(
-                    |row, column| {
-                        if row == 0 && column == 0 {
-                            2.0
-                        } else {
-                            0.0
-                        }
-                    },
-                ),
-            ),
-            (
-                1,
-                Matrix6x3::from_fn(
-                    |row, column| {
-                        if row == 0 && column == 0 {
-                            2.0
-                        } else {
-                            0.0
-                        }
-                    },
-                ),
-            ),
-        ];
-        let indefinite_operator = ImplicitSchurOperator::new(&indefinite, 0.0).unwrap();
-        let mut negative_eigenvector = DVector::zeros(indefinite_operator.dimension());
-        negative_eigenvector[0] = 1.0;
-        negative_eigenvector[6] = 1.0;
-        assert!(matches!(
-            indefinite_operator.solve_pcg(&negative_eigenvector, PcgOptions::default()),
-            Err(ImplicitSchurError::NonPositiveCurvature)
-        ));
-    }
-
-    #[test]
-    fn repeated_pcg_runs_are_deterministic() {
-        let system = synthetic_system();
-        let operator = ImplicitSchurOperator::new(&system, 0.25).unwrap();
-        let first = operator
-            .solve_pcg(operator.rhs(), PcgOptions::default())
-            .unwrap();
-        let second = operator
-            .solve_pcg(operator.rhs(), PcgOptions::default())
-            .unwrap();
-        assert_eq!(first, second);
+        let result = problem.optimize_matrix_free(&config, options).unwrap();
+        assert_eq!(problem, before);
+        assert_eq!(result.matrix_free_iterations.len(), 3);
+        assert!(result.matrix_free_iterations.iter().all(|iteration| {
+            iteration.pcg_failure.is_some()
+                && iteration.pcg_iterations == Some(1)
+                && iteration.pcg_residual_norm.is_some()
+        }));
+        assert_eq!(result.iterations.len(), 3);
+        assert!(result.iterations[0].lambda < result.iterations[1].lambda);
+        assert!(result.iterations[1].lambda < result.iterations[2].lambda);
     }
 }
 

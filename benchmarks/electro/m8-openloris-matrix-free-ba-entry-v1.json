@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "runtime_integration_local_gate_passed_final_ci_pending",
+  "implementation_commit": "1d7427fb1cb7a65c60b38d7231d9ed1fbaf2863e",
+  "metric_fixture_commits": [
+    "2d77ae95b1aefb66f17d67ef4c466d881f5a26b6",
+    "f496f9888c774de88c21724f9400c63c55c40a5f"
+  ],
+  "source_sha256": {
+    "pipelines/slam/src/bundle.rs": "672a68dceb8f69ecfc36e7f48ea3f1f58531c881417f90c710778213f8958b15",
+    "pipelines/slam/src/lib.rs": "bc6a4ae6d8e9bd66171398733bb9667c9b49d878c5e6d2c99be5ec071cc3a065"
+  },
+  "contract": {
+    "entry_point": "BundleAdjustment::optimize_matrix_free",
+    "options": "MatrixFreeBaOptions: max_pcg_iterations, pcg_relative_tolerance, pcg_absolute_tolerance",
+    "result": "MatrixFreeBaResult with existing LM stats plus optional PCG iteration/residual/target values and explicit failure reasons",
+    "existing_LinearSolver_BaConfig_BaError_BaResult_shape_changed": false,
+    "default_backend_changed": false,
+    "LM_acceptance_rollback_and_damping_shared": true,
+    "operator_shared_with_numerical_oracles": true,
+    "matrix_free_ignores_legacy_solver_selection": "Always request PoseDiagonal assembly and implicit PCG, including when config.linear_solver is Dense",
+    "unsupported_factors_rejected_before_assembly": true,
+    "nonvisual_states_priors_or_intrinsics_refinement_supported": false,
+    "calibration": "Finite undistorted PINHOLE/SIMPLE_PINHOLE; fixed general-stereo/rig extrinsics",
+    "LM_configuration": "Finite positive initial/min lambda, min <= initial <= max, increase > 1, decrease in (0,1), nonnegative finite tolerances, positive iteration limits",
+    "gauge": "Require an existing fixed pose and a variable pose; caller must still anchor every component and monocular scale",
+    "all_fixed_pose_input": "New method rejects before assembly; existing landmark-only solver path unchanged",
+    "failure": "No partial application of a failed delta; log diagnostic, reject through shared LM loop and increase lambda within limits",
+    "dense_or_direct_fallback": false,
+    "true_residual": "Recomputed on successful exits and iteration-limit reporting; unknown diagnostics remain optional",
+    "scope_of_memory_structure": "Operator avoids reduced pose-pair matrix and factor fill, but retains normal-equation observation/cross state and existing linear-size rollback copies"
+  },
+  "initial_root_validation": {
+    "cargo test -p visloc-slam --lib bundle::matrix_free_ba_api_tests": "5 passed",
+    "cargo test -p visloc-slam --lib bundle::": "26 passed, including 10 operator and 5 API tests",
+    "cargo test -p visloc-slam --test bundle_adjustment": "57 passed, 1 pre-existing benchmark ignored",
+    "cargo test -p visloc-slam --test gnc_robust_ba": "6 passed",
+    "cargo clippy -p visloc-slam --lib --tests -- -D warnings": "passed",
+    "cargo fmt --check": "passed",
+    "python3 -m unittest discover -s tests -p 'test_*openloris*.py'": "23 passed",
+    "python3 -m unittest discover -s tests -p 'test_audit_colmap*.py'": "23 passed"
+  },
+  "final_fixture_root_validation": {
+    "cargo test -p visloc-slam --lib bundle::matrix_free_ba_api_tests": "5 passed after metric-only scale anchoring and all-eight-point rig comparison",
+    "cargo clippy -p visloc-slam --lib --tests -- -D warnings": "passed",
+    "cargo fmt --check": "passed",
+    "docs_links": "passed",
+    "registry_validate": "189 files passed",
+    "registry_generated_docs": "up to date",
+    "exact_head_CI": "pending before merge"
+  },
+  "coverage": {
+    "mono": "Fixed pose and a truth-position fixed point anchor scale; compare both variable pose matrices and variable points against direct Sparse BA, final cost and exact repeat state/trace",
+    "rig": "Two fixed sensors with nonzero baseline and relative rotation; fix only a pose, not points; perturb free state after generating observations, verify cost decrease, both variable pose/all eight point direct agreement and unchanged extrinsics",
+    "stereo": "Rectified-stereo update and direct final-cost comparison with a fixed pose but no fixed point",
+    "geometry_comparison_tolerance": "1e-5 L2 for point coordinates / Frobenius norm for pose matrices; not a trajectory RMSE measurement",
+    "cost_comparison_absolute_tolerance": 1e-6,
+    "bounded_failure": "Three one-PCG-iteration failures, increasing lambda, recorded actual count/true residual, unchanged input state",
+    "preflight": "Missing/fake anchor, all poses fixed, representative unsupported prior/state, nonfinite poses/points, nonzero distortion, invalid LM/kernel settings",
+    "legacy": "Existing parallel determinism, landmark-only, weighted BA, IMU/prior, intrinsics and GNC tests retained and passed"
+  },
+  "real_model_gate": {
+    "input_evidence": "benchmarks/electro/m8-openloris-matrix-free-1k-input-v1.json",
+    "input_hash_geometry_and_trajectory_revalidated": true,
+    "one_k_candidate_driver_or_AB_run": false,
+    "connected_ten_k_global_run": false,
+    "speed_peak_RSS_or_trajectory_improvement_claimed": false,
+    "next": "Freeze a name/keypoint-preserving same-input post-mapping driver and exact settings; compare direct and implicit on 1k before connected-atlas 10k. Keep GT post-solve only. Full M8-M10 quality/resource/E2E/tier/restart/100k gates remain open."
+  }
+}

@@ -16,7 +16,8 @@ mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
     BaResult, BaRigObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
-    BundleAdjustmentRefiner, GravityPrior, NavigationStatePrior, PairwisePoseFactor,
+    BundleAdjustmentRefiner, GravityPrior, MatrixFreeBaError, MatrixFreeBaIterationStats,
+    MatrixFreeBaOptions, MatrixFreeBaResult, NavigationStatePrior, PairwisePoseFactor,
     PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
 };
 

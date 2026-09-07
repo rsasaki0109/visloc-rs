@@ -6,6 +6,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Opt-in matrix-free pure-visual BA (2026-09-07).** Added a separate
+  `BundleAdjustment::optimize_matrix_free` entry point with bounded PCG and
+  per-iteration linear-solver diagnostics. It uses an implicit Schur product
+  and block-Jacobi preconditioning without forming the reduced pose-pair
+  matrix or its Cholesky fill. The existing solver enum/configuration and
+  default backend remain unchanged; LM acceptance and rollback are shared.
+  Unsupported factors and calibration are rejected before assembly. This
+  is a solver-integration step, not evidence of a 10k speed, peak-RSS or
+  trajectory improvement; same-input real-model comparisons remain required.
+
 - **Calibrated rig-atlas diagnostics (2026-09-07).** Added opt-in bounded
   fixed-rotation/unit-scale seam estimators and a trajectory-only stitching
   example with deterministic overlap ownership and sparse metric SE3 controls.
