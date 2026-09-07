@@ -69,6 +69,8 @@
     "p95_gate_pass": false
   },
   "verification": {
+    "final_ci": {"run_id": 34097238801, "head_commit": "65a806a796fa16b66b08972bdfb286c0a0d25231", "checks_passed": 8, "rust_duration": "3m30s"},
+    "merge": {"pr": 74, "commit": "f92fa3ca118c2f1825e30be4700fb13cf0cd3760", "merged_at": "2026-09-07T07:51:58Z", "local_and_remote_branch_removed": true},
     "example_tests_passed": 47,
     "python_auditor_tests_passed": 21,
     "clippy_format_diff_and_release_build": "pass",

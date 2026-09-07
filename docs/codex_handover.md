@@ -30,7 +30,15 @@
 > `feat/m8-preserve-optimized-atlas-points`（PR #74）の点保持モードも同一入力で測定済み。
 > 全支持/連結性・再実行一致を満たしますが、RMSE/p95は0.389420/0.639357 mへ
 > 悪化したため非昇格です。47 example tests / 21 auditor testsが通過。
-> 現在はPR #74の証拠整理と最終CI/mergeを進めています。
+> PR #74は最終CI8項目通過後、`f92fa3c`へmergeし旧branchも整理済み。
+> 現在は `feat/m8-two-sweep-atlas-refinement` で従来filtered(DLT)方式の
+> 固定2回適用を実装・測定しました（`c99c381`、50 example / 23 auditor tests通過）。
+> 両成分の1回目checkpointと既存filteredモデル、BA前checkpointと修復モデル、
+> 1回適用controlはいずれも全6ファイル一致。2回目も支持・連結性を維持しますが、
+> RMSE/p95は0.390165/0.633716 mでRMSEが悪化したため非昇格です。
+> 2回目の追加削除140点・2,193観測も独立監査と一致。両成分の再実行は
+> 最終出力・1回目checkpointとも全6ファイル一致。PR #75の最終CI確認待ちです。
+> 次は精度変更を混ぜず、同じwindowのlandmark選択scanの重複だけを削減します。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

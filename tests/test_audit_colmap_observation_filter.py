@@ -61,6 +61,30 @@ class FilterAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             self.run_audit(self.model(""), self.model("").rstrip() + "\n")
 
+    def test_two_pass_deletion_accounting_composes_after_renumbering(self):
+        def two_images(ids):
+            keys = " ".join(f"{i * 10} 20 {point}" for i, point in enumerate(ids))
+            return self.model(keys, second=f"2 1 0 0 0 -1 0 0 1 other.png\n{keys}\n")
+
+        baseline = two_images([10, 20, 30])
+        pass_one = two_images([1, -1, 2])
+        pass_two = two_images([-1, -1, 1])
+        first = self.run_audit(baseline, pass_one)
+        second = self.run_audit(pass_one, pass_two)
+        total = self.run_audit(baseline, pass_two)
+        for field in ("removed_observations", "removed_points"):
+            self.assertEqual(first[field] + second[field], total[field])
+        self.assertEqual(total["removed_observations"], 4)
+        self.assertEqual(total["removed_points"], 2)
+        self.assertEqual(total["supported_images_after"], 2)
+
+    def test_second_pass_cannot_resurrect_deleted_observation(self):
+        baseline = self.model("10 20 1 30 40 2")
+        pass_one = self.model("10 20 -1 30 40 1")
+        self.run_audit(baseline, pass_one)
+        with self.assertRaisesRegex(ValueError, "added an observation"):
+            self.run_audit(pass_one, baseline)
+
 
 if __name__ == "__main__":
     unittest.main()

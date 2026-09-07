@@ -11,8 +11,9 @@
 //! root containing multiple component gauges is rejected rather than
 //! flattening independent gauges into one model. Poses remain fixed by default.
 //! Optional unsupported-frame recovery uses leave-target-out landmarks and
-//! calibrated generalized PnP. A separate `--joint-rig-ba` opt-in runs one
-//! bounded forward sweep of calibrated rig bundle adjustment.
+//! calibrated generalized PnP. A separate `--joint-rig-ba` opt-in runs a
+//! bounded forward sweep of calibrated rig bundle adjustment; its observation
+//! filter can explicitly repeat that fixed two-sweep experiment.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -27,7 +28,7 @@ use visloc_rs::vision::pnp::{
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
-const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba [--pre-ba-out-dir PATH]]\n    [--joint-rig-ba-filter-observations [--joint-rig-ba-preserve-optimized-points]]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
+const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba [--pre-ba-out-dir PATH]]\n    [--joint-rig-ba-filter-observations [--joint-rig-ba-preserve-optimized-points]]\n    [--joint-rig-ba-filter-sweeps 1|2 [--post-pass1-out-dir PATH]]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
 const XY_TOLERANCE_PX: f64 = 1.0e-9;
 const INTRINSIC_TOLERANCE: f64 = 1.0e-8;
 const MIN_TRACK_OBSERVATIONS: usize = 2;
@@ -66,10 +67,12 @@ struct Args {
     atlas_dir: PathBuf,
     out_dir: PathBuf,
     pre_ba_out_dir: Option<PathBuf>,
+    post_pass1_out_dir: Option<PathBuf>,
     recover_zero_support_frames: bool,
     joint_rig_ba: bool,
     joint_rig_ba_filter_observations: bool,
     joint_rig_ba_preserve_optimized_points: bool,
+    joint_rig_ba_filter_sweeps: u8,
     diagnose_cross_boundary_pnp: bool,
     diagnostic_left_max_frame: Option<u64>,
     repair_cross_boundary: bool,
@@ -382,10 +385,13 @@ where
     let mut atlas_dir = None;
     let mut out_dir = None;
     let mut pre_ba_out_dir = None;
+    let mut post_pass1_out_dir = None;
     let mut recover_zero_support_frames = false;
     let mut joint_rig_ba = false;
     let mut joint_rig_ba_filter_observations = false;
     let mut joint_rig_ba_preserve_optimized_points = false;
+    let mut joint_rig_ba_filter_sweeps = 1u8;
+    let mut filter_sweeps_explicit = false;
     let mut diagnose_cross_boundary_pnp = false;
     let mut diagnostic_left_max_frame = None;
     let mut repair_cross_boundary = false;
@@ -433,6 +439,38 @@ where
                 return Err(format!("{flag} requires PATH, got {value:?}\n{USAGE}"));
             }
             pre_ba_out_dir = Some(PathBuf::from(value));
+            continue;
+        }
+        if flag == "--post-pass1-out-dir" {
+            if post_pass1_out_dir.is_some() {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires PATH\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires PATH, got {value:?}\n{USAGE}"));
+            }
+            post_pass1_out_dir = Some(PathBuf::from(value));
+            continue;
+        }
+        if flag == "--joint-rig-ba-filter-sweeps" {
+            if filter_sweeps_explicit {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires 1 or 2\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires 1 or 2, got {value:?}\n{USAGE}"));
+            }
+            joint_rig_ba_filter_sweeps = value
+                .parse::<u8>()
+                .map_err(|error| format!("{flag} requires 1 or 2: {error}\n{USAGE}"))?;
+            if !matches!(joint_rig_ba_filter_sweeps, 1 | 2) {
+                return Err(format!("{flag} accepts only 1 or 2\n{USAGE}"));
+            }
+            filter_sweeps_explicit = true;
             continue;
         }
         if flag == "--diagnose-cross-boundary-pnp" {
@@ -532,6 +570,16 @@ where
     if pre_ba_out_dir.is_some() && !joint_rig_ba {
         return Err(format!("--pre-ba-out-dir requires --joint-rig-ba\n{USAGE}"));
     }
+    if post_pass1_out_dir.is_some() && joint_rig_ba_filter_sweeps != 2 {
+        return Err(format!(
+            "--post-pass1-out-dir requires --joint-rig-ba-filter-sweeps 2\n{USAGE}"
+        ));
+    }
+    if filter_sweeps_explicit && !joint_rig_ba_filter_observations {
+        return Err(format!(
+            "--joint-rig-ba-filter-sweeps requires --joint-rig-ba-filter-observations\n{USAGE}"
+        ));
+    }
     if joint_rig_ba_filter_observations && !joint_rig_ba {
         return Err(format!(
             "--joint-rig-ba-filter-observations requires --joint-rig-ba\n{USAGE}"
@@ -543,16 +591,33 @@ where
             "--joint-rig-ba-preserve-optimized-points requires --joint-rig-ba and --joint-rig-ba-filter-observations\n{USAGE}"
         ));
     }
+    if joint_rig_ba_filter_sweeps == 2 && post_pass1_out_dir.is_none() {
+        return Err(format!(
+            "--joint-rig-ba-filter-sweeps 2 requires --post-pass1-out-dir PATH\n{USAGE}"
+        ));
+    }
+    if joint_rig_ba_filter_sweeps == 2 && !joint_rig_ba_filter_observations {
+        return Err(format!(
+            "--joint-rig-ba-filter-sweeps 2 requires --joint-rig-ba-filter-observations\n{USAGE}"
+        ));
+    }
+    if joint_rig_ba_filter_sweeps == 2 && joint_rig_ba_preserve_optimized_points {
+        return Err(format!(
+            "--joint-rig-ba-filter-sweeps 2 cannot be combined with --joint-rig-ba-preserve-optimized-points\n{USAGE}"
+        ));
+    }
     Ok(Args {
         rig_manifest: rig_manifest.ok_or_else(|| format!("--rig-manifest is required\n{USAGE}"))?,
         nodes_tsv: nodes_tsv.ok_or_else(|| format!("--nodes-tsv is required\n{USAGE}"))?,
         atlas_dir: atlas_dir.ok_or_else(|| format!("--atlas-dir is required\n{USAGE}"))?,
         out_dir: out_dir.ok_or_else(|| format!("--out-dir is required\n{USAGE}"))?,
         pre_ba_out_dir,
+        post_pass1_out_dir,
         recover_zero_support_frames,
         joint_rig_ba,
         joint_rig_ba_filter_observations,
         joint_rig_ba_preserve_optimized_points,
+        joint_rig_ba_filter_sweeps,
         diagnose_cross_boundary_pnp,
         diagnostic_left_max_frame,
         repair_cross_boundary,
@@ -609,6 +674,9 @@ fn validate_write_destinations(args: &Args, nodes: &[NodeSpec]) -> Result<(), St
     if let Some(path) = args.pre_ba_out_dir.as_deref() {
         destinations.push(("--pre-ba-out-dir", path));
     }
+    if let Some(path) = args.post_pass1_out_dir.as_deref() {
+        destinations.push(("--post-pass1-out-dir", path));
+    }
     let mut inputs = vec![
         ("--rig-manifest", args.rig_manifest.as_path()),
         ("--nodes-tsv", args.nodes_tsv.as_path()),
@@ -655,6 +723,32 @@ fn validate_write_destinations(args: &Args, nodes: &[NodeSpec]) -> Result<(), St
             {
                 return Err(format!(
                     "--pre-ba-out-dir {:?} must be new or empty; refusing to overwrite an existing checkpoint",
+                    path
+                ));
+            }
+        }
+    }
+    if let Some(path) = args.post_pass1_out_dir.as_deref() {
+        if path.exists() {
+            if !path.is_dir() {
+                return Err(format!(
+                    "--post-pass1-out-dir {:?} exists but is not a directory",
+                    path
+                ));
+            }
+            let mut entries = fs::read_dir(path).map_err(|error| {
+                format!("read --post-pass1-out-dir {}: {error}", path.display())
+            })?;
+            if entries
+                .next()
+                .transpose()
+                .map_err(|error| {
+                    format!("inspect --post-pass1-out-dir {}: {error}", path.display())
+                })?
+                .is_some()
+            {
+                return Err(format!(
+                    "--post-pass1-out-dir {:?} must be new or empty; refusing to overwrite an existing checkpoint",
                     path
                 ));
             }
@@ -832,57 +926,67 @@ fn run(args: &Args) -> Result<(), String> {
             );
         }
         if args.joint_rig_ba_filter_observations {
-            let summary = run_joint_rig_ba_filtering_with_policy(
-                &manifest,
-                &mut store,
-                &mut global_images,
-                &cameras,
-                &mut landmarks,
-                args.joint_rig_ba_preserve_optimized_points,
-            )?;
-            validate_output_cameras(&manifest, &global_images, &cameras)?;
-            if args.joint_rig_ba_preserve_optimized_points {
+            if args.joint_rig_ba_filter_sweeps == 2 {
+                let pass1 = run_joint_rig_ba_filtering_with_policy_and_pass(
+                    &manifest,
+                    &mut store,
+                    &mut global_images,
+                    &cameras,
+                    &mut landmarks,
+                    false,
+                    Some(1),
+                )?;
+                validate_output_cameras(&manifest, &global_images, &cameras)?;
+                print_joint_rig_ba_filter_summary(&pass1, false, Some(1));
+                print_joint_rig_ba_filter_pass_support(1, &global_images, &landmarks)?;
+                let post_pass1_out_dir = args
+                    .post_pass1_out_dir
+                    .as_deref()
+                    .expect("sweep 2 validates --post-pass1-out-dir");
+                stats.output_landmarks = landmarks.len();
+                stats.output_observations = landmark_observation_count(&landmarks);
+                require_nonempty_landmarks(&landmarks, stats.output_observations)?;
+                let support = write_model_canonical(
+                    post_pass1_out_dir,
+                    &global_images,
+                    &cameras,
+                    &landmarks,
+                    &stats,
+                )?;
                 println!(
-                    "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} raw_preserved_tracks={} dlt_attempted_tracks={} raw_fallback_reasons={} raw_counts_are_window_events=true full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
-                    summary.windows_considered,
-                    summary.windows_accepted,
-                    summary.windows_skipped,
-                    summary.selected_landmarks,
-                    summary.selected_observations,
-                    summary.max_referenced_frames,
-                    summary.max_free_frames,
-                    summary.max_iterations,
-                    summary.converged_windows,
-                    summary.removed_observations,
-                    summary.removed_tracks,
-                    summary.retriangulated_tracks,
-                    summary.raw_preserved_tracks,
-                    summary.dlt_attempted_tracks,
-                    format_raw_fallback_reason_counts(&summary.raw_fallback_reason_counts),
-                    summary.full_pre_ba_cost,
-                    summary.full_post_ba_cost,
-                    summary.retained_pre_ba_cost,
-                    summary.retained_post_filter_cost,
+                    "post_pass1_checkpoint out_dir={} landmarks={} observations={} supported_images={} supported_frames={}",
+                    post_pass1_out_dir.display(),
+                    stats.output_landmarks,
+                    stats.output_observations,
+                    support.supported_image_count,
+                    support.supported_frame_count,
                 );
+                let pass2 = run_joint_rig_ba_filtering_with_policy_and_pass(
+                    &manifest,
+                    &mut store,
+                    &mut global_images,
+                    &cameras,
+                    &mut landmarks,
+                    false,
+                    Some(2),
+                )?;
+                validate_output_cameras(&manifest, &global_images, &cameras)?;
+                print_joint_rig_ba_filter_summary(&pass2, false, Some(2));
+                print_joint_rig_ba_filter_pass_support(2, &global_images, &landmarks)?;
             } else {
-                println!(
-                    "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
-                    summary.windows_considered,
-                    summary.windows_accepted,
-                    summary.windows_skipped,
-                    summary.selected_landmarks,
-                    summary.selected_observations,
-                    summary.max_referenced_frames,
-                    summary.max_free_frames,
-                    summary.max_iterations,
-                    summary.converged_windows,
-                    summary.removed_observations,
-                    summary.removed_tracks,
-                    summary.retriangulated_tracks,
-                    summary.full_pre_ba_cost,
-                    summary.full_post_ba_cost,
-                    summary.retained_pre_ba_cost,
-                    summary.retained_post_filter_cost,
+                let summary = run_joint_rig_ba_filtering_with_policy(
+                    &manifest,
+                    &mut store,
+                    &mut global_images,
+                    &cameras,
+                    &mut landmarks,
+                    args.joint_rig_ba_preserve_optimized_points,
+                )?;
+                validate_output_cameras(&manifest, &global_images, &cameras)?;
+                print_joint_rig_ba_filter_summary(
+                    &summary,
+                    args.joint_rig_ba_preserve_optimized_points,
+                    None,
                 );
             }
         } else {
@@ -5496,6 +5600,81 @@ fn run_joint_rig_ba_filtering(
     run_joint_rig_ba_filtering_with_policy(manifest, store, images, cameras, landmarks, false)
 }
 
+fn print_joint_rig_ba_filter_log(pass: Option<usize>, line: std::fmt::Arguments<'_>) {
+    if let Some(pass) = pass {
+        println!("pass={pass} cost_scope=overlapping_window_events {line}");
+    } else {
+        println!("{line}");
+    }
+}
+
+fn print_joint_rig_ba_filter_summary(
+    summary: &JointRigBaFilteringSummary,
+    preserve_optimized_points: bool,
+    pass: Option<usize>,
+) {
+    if preserve_optimized_points {
+        print_joint_rig_ba_filter_log(pass, format_args!(
+            "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} raw_preserved_tracks={} dlt_attempted_tracks={} raw_fallback_reasons={} raw_counts_are_window_events=true full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
+            summary.windows_considered,
+            summary.windows_accepted,
+            summary.windows_skipped,
+            summary.selected_landmarks,
+            summary.selected_observations,
+            summary.max_referenced_frames,
+            summary.max_free_frames,
+            summary.max_iterations,
+            summary.converged_windows,
+            summary.removed_observations,
+            summary.removed_tracks,
+            summary.retriangulated_tracks,
+            summary.raw_preserved_tracks,
+            summary.dlt_attempted_tracks,
+            format_raw_fallback_reason_counts(&summary.raw_fallback_reason_counts),
+            summary.full_pre_ba_cost,
+            summary.full_post_ba_cost,
+            summary.retained_pre_ba_cost,
+            summary.retained_post_filter_cost,
+        ));
+    } else {
+        print_joint_rig_ba_filter_log(pass, format_args!(
+            "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
+            summary.windows_considered,
+            summary.windows_accepted,
+            summary.windows_skipped,
+            summary.selected_landmarks,
+            summary.selected_observations,
+            summary.max_referenced_frames,
+            summary.max_free_frames,
+            summary.max_iterations,
+            summary.converged_windows,
+            summary.removed_observations,
+            summary.removed_tracks,
+            summary.retriangulated_tracks,
+            summary.full_pre_ba_cost,
+            summary.full_post_ba_cost,
+            summary.retained_pre_ba_cost,
+            summary.retained_post_filter_cost,
+        ));
+    }
+}
+
+fn print_joint_rig_ba_filter_pass_support(
+    pass: usize,
+    images: &BTreeMap<u64, GlobalImage>,
+    landmarks: &[LandmarkOutput],
+) -> Result<(), String> {
+    let support =
+        support_connectivity_for_landmarks(landmarks, &BTreeMap::new(), &BTreeSet::new(), images)?;
+    println!(
+        "pass={pass} cost_scope=overlapping_window_events support_images={} support_frames={} components={}",
+        support.supported_images.len(),
+        support.supported_frames.len(),
+        support.component_count
+    );
+    Ok(())
+}
+
 fn run_joint_rig_ba_filtering_with_policy(
     manifest: &RigManifest,
     store: &mut TrackStore,
@@ -5503,6 +5682,26 @@ fn run_joint_rig_ba_filtering_with_policy(
     cameras: &BTreeMap<u64, Camera>,
     landmarks: &mut Vec<LandmarkOutput>,
     preserve_optimized_points: bool,
+) -> Result<JointRigBaFilteringSummary, String> {
+    run_joint_rig_ba_filtering_with_policy_and_pass(
+        manifest,
+        store,
+        images,
+        cameras,
+        landmarks,
+        preserve_optimized_points,
+        None,
+    )
+}
+
+fn run_joint_rig_ba_filtering_with_policy_and_pass(
+    manifest: &RigManifest,
+    store: &mut TrackStore,
+    images: &mut BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &mut Vec<LandmarkOutput>,
+    preserve_optimized_points: bool,
+    pass: Option<usize>,
 ) -> Result<JointRigBaFilteringSummary, String> {
     let baseline_connectivity =
         support_connectivity_for_landmarks(landmarks, &BTreeMap::new(), &BTreeSet::new(), images)?;
@@ -5566,7 +5765,7 @@ fn run_joint_rig_ba_filtering_with_policy(
                         .or_default() += *count;
                 }
                 if preserve_optimized_points {
-                    println!(
+                    print_joint_rig_ba_filter_log(pass, format_args!(
                         "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} removed_observations={} removed_tracks={} retriangulated_tracks={} raw_preserved_tracks={} dlt_attempted_tracks={} raw_fallback_reasons={} raw_counts_are_window_events=true reasons={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9} iterations={} converged={}",
                         active_frames.first().copied().unwrap_or_default(),
                         active_frames.last().copied().unwrap_or_default(),
@@ -5588,9 +5787,9 @@ fn run_joint_rig_ba_filtering_with_policy(
                         candidate.retained_post_filter_cost,
                         candidate.iterations,
                         candidate.converged,
-                    );
+                    ));
                 } else {
-                    println!(
+                    print_joint_rig_ba_filter_log(pass, format_args!(
                         "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} removed_observations={} removed_tracks={} retriangulated_tracks={} reasons={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9} iterations={} converged={}",
                         active_frames.first().copied().unwrap_or_default(),
                         active_frames.last().copied().unwrap_or_default(),
@@ -5609,7 +5808,7 @@ fn run_joint_rig_ba_filtering_with_policy(
                         candidate.retained_post_filter_cost,
                         candidate.iterations,
                         candidate.converged,
-                    );
+                    ));
                 }
             }
             Err(reason) => {
@@ -5617,7 +5816,7 @@ fn run_joint_rig_ba_filtering_with_policy(
                 let (selected_count, observation_count, referenced_count, free_count) =
                     window_counts.unwrap_or_default();
                 if preserve_optimized_points {
-                    println!(
+                    print_joint_rig_ba_filter_log(pass, format_args!(
                         "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} raw_preserved_tracks=0 dlt_attempted_tracks=0 raw_fallback_reasons=none raw_counts_are_window_events=true reason={reason}",
                         active_frames.first().copied().unwrap_or_default(),
                         active_frames.last().copied().unwrap_or_default(),
@@ -5626,9 +5825,9 @@ fn run_joint_rig_ba_filtering_with_policy(
                         observation_count,
                         referenced_count,
                         free_count,
-                    );
+                    ));
                 } else {
-                    println!(
+                    print_joint_rig_ba_filter_log(pass, format_args!(
                         "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} reason={reason}",
                         active_frames.first().copied().unwrap_or_default(),
                         active_frames.last().copied().unwrap_or_default(),
@@ -5637,7 +5836,7 @@ fn run_joint_rig_ba_filtering_with_policy(
                         observation_count,
                         referenced_count,
                         free_count,
-                    );
+                    ));
                 }
             }
         }
@@ -6366,6 +6565,25 @@ fn percentile(values: &[f64], fraction: f64) -> Option<f64> {
 mod tests {
     use super::*;
 
+    fn minimal_parse_args(extra: &[&str]) -> Result<Args, String> {
+        let mut args = vec![
+            "example",
+            "--rig-manifest",
+            "r",
+            "--nodes-tsv",
+            "n",
+            "--atlas-dir",
+            "a",
+            "--out-dir",
+            "o",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        args.extend(extra.iter().map(|value| (*value).to_owned()));
+        parse_args(args)
+    }
+
     fn test_image(id: u64, name: &str, keypoints: Vec<Point2<f64>>) -> GlobalImage {
         GlobalImage {
             atlas: AtlasImage {
@@ -6959,6 +7177,8 @@ mod tests {
         assert!(!args.joint_rig_ba_filter_observations);
         assert!(!args.joint_rig_ba_preserve_optimized_points);
         assert_eq!(args.pre_ba_out_dir, None);
+        assert_eq!(args.post_pass1_out_dir, None);
+        assert_eq!(args.joint_rig_ba_filter_sweeps, 1);
         assert!(!args.diagnose_cross_boundary_pnp);
         assert_eq!(args.diagnostic_left_max_frame, None);
         assert!(!args.repair_cross_boundary);
@@ -7038,6 +7258,7 @@ mod tests {
         ])
         .unwrap();
         assert!(args.joint_rig_ba_preserve_optimized_points);
+        assert_eq!(args.joint_rig_ba_filter_sweeps, 1);
         let error = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -7066,6 +7287,72 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("requires --joint-rig-ba and --joint-rig-ba-filter-observations"));
+
+        let args = minimal_parse_args(&[
+            "--joint-rig-ba",
+            "--joint-rig-ba-filter-observations",
+            "--joint-rig-ba-filter-sweeps",
+            "2",
+            "--post-pass1-out-dir",
+            "pass1",
+        ])
+        .unwrap();
+        assert_eq!(args.joint_rig_ba_filter_sweeps, 2);
+        assert_eq!(args.post_pass1_out_dir, Some(PathBuf::from("pass1")));
+        for invalid in ["0", "3", "255"] {
+            let error = minimal_parse_args(&[
+                "--joint-rig-ba",
+                "--joint-rig-ba-filter-observations",
+                "--joint-rig-ba-filter-sweeps",
+                invalid,
+                "--post-pass1-out-dir",
+                "pass1",
+            ])
+            .unwrap_err();
+            assert!(error.contains("accepts only 1 or 2"), "{invalid}: {error}");
+        }
+        let error = minimal_parse_args(&[
+            "--joint-rig-ba",
+            "--joint-rig-ba-filter-observations",
+            "--joint-rig-ba-filter-sweeps",
+            "2",
+        ])
+        .unwrap_err();
+        assert!(error.contains("post-pass1-out-dir"));
+        let error = minimal_parse_args(&[
+            "--joint-rig-ba",
+            "--joint-rig-ba-filter-sweeps",
+            "2",
+            "--post-pass1-out-dir",
+            "pass1",
+        ])
+        .unwrap_err();
+        assert!(error.contains("filter-observations"));
+        let error = minimal_parse_args(&[
+            "--joint-rig-ba",
+            "--joint-rig-ba-filter-observations",
+            "--joint-rig-ba-filter-sweeps",
+            "2",
+            "--post-pass1-out-dir",
+            "pass1",
+            "--joint-rig-ba-filter-sweeps",
+            "1",
+        ])
+        .unwrap_err();
+        assert!(error.contains("duplicate argument"));
+        let error = minimal_parse_args(&[
+            "--joint-rig-ba",
+            "--joint-rig-ba-filter-observations",
+            "--joint-rig-ba-filter-sweeps",
+            "2",
+            "--post-pass1-out-dir",
+            "pass1",
+            "--joint-rig-ba-preserve-optimized-points",
+        ])
+        .unwrap_err();
+        assert!(error.contains("cannot be combined"));
+        let error = minimal_parse_args(&["--post-pass1-out-dir", "pass1"]).unwrap_err();
+        assert!(error.contains("filter-sweeps 2"));
         let args = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -7259,6 +7546,29 @@ mod tests {
     }
 
     #[test]
+    fn canonical_pass1_checkpoint_writer_does_not_mutate_filter_state() {
+        let (_manifest, _store, images, cameras, mut landmarks, _active) = joint_ba_fixture();
+        landmarks.reverse();
+        let before_images = images.clone();
+        let before_landmarks = landmarks.clone();
+        let root = std::env::temp_dir().join(format!(
+            "visloc_integrate_canonical_checkpoint_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let stats = IngestStats {
+            output_landmarks: landmarks.len(),
+            output_observations: landmark_observation_count(&landmarks),
+            ..IngestStats::default()
+        };
+        write_model_canonical(&root, &images, &cameras, &landmarks, &stats).unwrap();
+        assert_eq!(images, before_images);
+        assert_eq!(landmarks, before_landmarks);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn output_and_checkpoint_ancestor_collision_is_rejected() {
         let root = std::env::temp_dir().join(format!(
             "visloc_integrate_checkpoint_paths_{}_{}",
@@ -7273,10 +7583,12 @@ mod tests {
             atlas_dir: root.join("atlas"),
             out_dir: root.join("out"),
             pre_ba_out_dir: Some(root.join("out/checkpoint")),
+            post_pass1_out_dir: None,
             recover_zero_support_frames: false,
             joint_rig_ba: true,
             joint_rig_ba_filter_observations: false,
             joint_rig_ba_preserve_optimized_points: false,
+            joint_rig_ba_filter_sweeps: 1,
             diagnose_cross_boundary_pnp: false,
             diagnostic_left_max_frame: None,
             repair_cross_boundary: false,
@@ -7287,6 +7599,53 @@ mod tests {
             window_start: 0,
             images_txt: root.join("source/images.txt"),
         }];
+        let error = validate_write_destinations(&args, &nodes).unwrap_err();
+        assert!(error.contains("ambiguous output destinations"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn post_pass1_checkpoint_requires_empty_nonoverlapping_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_integrate_post_pass1_paths_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::write(root.join("source/images.txt"), "").unwrap();
+        let nodes = vec![NodeSpec {
+            node_id: 1,
+            window_start: 0,
+            images_txt: root.join("source/images.txt"),
+        }];
+        let mut args = Args {
+            rig_manifest: root.join("manifest.tsv"),
+            nodes_tsv: root.join("nodes.tsv"),
+            atlas_dir: root.join("atlas"),
+            out_dir: root.join("out"),
+            pre_ba_out_dir: None,
+            post_pass1_out_dir: Some(root.join("post")),
+            recover_zero_support_frames: false,
+            joint_rig_ba: true,
+            joint_rig_ba_filter_observations: true,
+            joint_rig_ba_preserve_optimized_points: false,
+            joint_rig_ba_filter_sweeps: 2,
+            diagnose_cross_boundary_pnp: false,
+            diagnostic_left_max_frame: None,
+            repair_cross_boundary: false,
+            repair_left_max_frame: None,
+        };
+        validate_write_destinations(&args, &nodes).unwrap();
+        fs::create_dir_all(args.post_pass1_out_dir.as_ref().unwrap()).unwrap();
+        fs::write(
+            args.post_pass1_out_dir.as_ref().unwrap().join("stale"),
+            "stale",
+        )
+        .unwrap();
+        let error = validate_write_destinations(&args, &nodes).unwrap_err();
+        assert!(error.contains("post-pass1-out-dir") && error.contains("new or empty"));
+        args.post_pass1_out_dir = Some(root.join("out/post"));
         let error = validate_write_destinations(&args, &nodes).unwrap_err();
         assert!(error.contains("ambiguous output destinations"));
         let _ = fs::remove_dir_all(root);
@@ -7508,6 +7867,88 @@ mod tests {
         assert_eq!(summary.windows_accepted, 1);
         assert_eq!(summary.windows_skipped, 0);
         assert!(summary.retriangulated_tracks > 0);
+    }
+
+    #[test]
+    fn two_filter_sweeps_are_deterministic_and_preserve_support() {
+        let (manifest, mut store, mut images, cameras, mut landmarks, _active) = joint_ba_fixture();
+        let first = run_joint_rig_ba_filtering_with_policy_and_pass(
+            &manifest,
+            &mut store,
+            &mut images,
+            &cameras,
+            &mut landmarks,
+            false,
+            Some(1),
+        )
+        .unwrap();
+        let second = run_joint_rig_ba_filtering_with_policy_and_pass(
+            &manifest,
+            &mut store,
+            &mut images,
+            &cameras,
+            &mut landmarks,
+            false,
+            Some(2),
+        )
+        .unwrap();
+        assert!(first.windows_accepted > 0);
+        assert!(second.windows_accepted > 0);
+        for image in images.values() {
+            let sensor = &manifest.sensors[&image.atlas.sensor_index];
+            let rig_pose =
+                derive_rig_pose_for_frame(&manifest, image.atlas.frame_id, &images).unwrap();
+            let expected = sensor.sensor_from_rig.compose(&rig_pose.world_to_camera);
+            assert!(
+                (expected.translation - image.atlas.pose.world_to_camera.translation).norm()
+                    < 1.0e-8
+            );
+            let rotation_error =
+                expected.rotation.inverse() * image.atlas.pose.world_to_camera.rotation;
+            assert!(rotation_error.angle() < 1.0e-8);
+        }
+        let support = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        assert_eq!(support.supported_frames.len(), 3);
+
+        let (
+            manifest_again,
+            mut store_again,
+            mut images_again,
+            cameras_again,
+            mut landmarks_again,
+            _active,
+        ) = joint_ba_fixture();
+        let first_again = run_joint_rig_ba_filtering_with_policy_and_pass(
+            &manifest_again,
+            &mut store_again,
+            &mut images_again,
+            &cameras_again,
+            &mut landmarks_again,
+            false,
+            Some(1),
+        )
+        .unwrap();
+        let second_again = run_joint_rig_ba_filtering_with_policy_and_pass(
+            &manifest_again,
+            &mut store_again,
+            &mut images_again,
+            &cameras_again,
+            &mut landmarks_again,
+            false,
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(first, first_again);
+        assert_eq!(second, second_again);
+        assert_eq!(store, store_again);
+        assert_eq!(images, images_again);
+        assert_eq!(landmarks, landmarks_again);
     }
 
     #[test]
