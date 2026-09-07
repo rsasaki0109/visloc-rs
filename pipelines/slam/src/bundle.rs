@@ -5830,6 +5830,64 @@ mod implicit_schur_prototype_tests {
         }
     }
 
+    fn hand_check_system() -> NormalEquationsBa {
+        let mut a = Matrix6x3::zeros();
+        for component in 0..3 {
+            a[(component, component)] = 1.0;
+        }
+        NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![
+                Matrix6::from_diagonal(&Vector6::from_element(10.0)),
+                Matrix6::from_diagonal(&Vector6::from_element(10.0)),
+            ]),
+            b_p: DVector::from_iterator(12, (1..=12).map(|value| value as f64)),
+            landmarks: vec![LandmarkBlock {
+                h_ll: Matrix3::from_diagonal(&Vector3::from_element(4.0)),
+                b_l: Vector3::new(1.0, 2.0, 3.0),
+                // B = 10 I, H_ll = 4 I, A = [I; 0], with two sensor
+                // observations sharing pose 0 and one observation at pose 1.
+                cross: vec![(0, a), (0, 2.0 * a), (1, -a)],
+            }],
+        }
+    }
+
+    fn full_normal_system(system: &NormalEquationsBa, lambda: f64) -> (DMatrix<f64>, DVector<f64>) {
+        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+            panic!("test oracle requires pose blocks");
+        };
+        let mut normal = DMatrix::zeros(15, 15);
+        for (pose, block) in diagonal.iter().enumerate() {
+            let mut damped = *block;
+            for component in 0..6 {
+                damped[(component, component)] += lambda;
+            }
+            normal
+                .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
+                .copy_from(&damped);
+        }
+        let mut h_ll = system.landmarks[0].h_ll;
+        for component in 0..3 {
+            h_ll[(component, component)] += lambda;
+        }
+        normal.fixed_view_mut::<3, 3>(12, 12).copy_from(&h_ll);
+        for (pose, cross) in &system.landmarks[0].cross {
+            for row in 0..6 {
+                for column in 0..3 {
+                    normal[(pose * 6 + row, 12 + column)] += cross[(row, column)];
+                    normal[(12 + column, pose * 6 + row)] += cross[(row, column)];
+                }
+            }
+        }
+        let mut rhs = DVector::zeros(15);
+        for (index, value) in system.b_p.iter().enumerate() {
+            rhs[index] = -*value;
+        }
+        for (index, value) in system.landmarks[0].b_l.iter().enumerate() {
+            rhs[12 + index] = -*value;
+        }
+        (normal, rhs)
+    }
+
     #[test]
     fn implicit_operator_matches_explicit_schur_rhs_preconditioner_and_step() {
         let lambda = 0.25;
@@ -5887,6 +5945,79 @@ mod implicit_schur_prototype_tests {
         let expected_pose0 =
             expected_inverse * Vector6::from_iterator((0..6).map(|i| (i + 1) as f64));
         assert!((applied.fixed_rows::<6>(0).into_owned() - expected_pose0).norm() < 1.0e-12);
+    }
+
+    #[test]
+    fn hand_check_fixture_matches_schur_and_full_normal_for_both_damping_values() {
+        for lambda in [0.0, 0.5] {
+            let system = hand_check_system();
+            let operator = ImplicitSchurOperator::new(&system, lambda).unwrap();
+            let schur = explicit_schur(&system, lambda);
+            let expected_pose0 = if lambda == 0.0 { 7.75 } else { 8.5 };
+            let expected_pose1 = if lambda == 0.0 {
+                9.75
+            } else {
+                10.277777777777779
+            };
+            let expected_cross = if lambda == 0.0 {
+                0.75
+            } else {
+                0.6666666666666666
+            };
+            for component in 0..3 {
+                assert!((schur[(component, component)] - expected_pose0).abs() < 1.0e-12);
+                assert!((schur[(6 + component, 6 + component)] - expected_pose1).abs() < 1.0e-12);
+                assert!((schur[(component, 6 + component)] - expected_cross).abs() < 1.0e-12);
+                assert!((schur[(6 + component, component)] - expected_cross).abs() < 1.0e-12);
+            }
+            for component in 3..6 {
+                assert!((schur[(component, component)] - (10.0 + lambda)).abs() < 1.0e-12);
+                assert!((schur[(6 + component, 6 + component)] - (10.0 + lambda)).abs() < 1.0e-12);
+                assert_eq!(schur[(component, 6 + component)], 0.0);
+            }
+
+            let expected_rhs0 = if lambda == 0.0 {
+                [-0.25, -0.5, -0.75]
+            } else {
+                [-1.0 / 3.0, -2.0 / 3.0, -1.0]
+            };
+            let expected_rhs1 = if lambda == 0.0 {
+                [-7.25, -8.5, -9.75]
+            } else {
+                [-65.0 / 9.0, -76.0 / 9.0, -29.0 / 3.0]
+            };
+            for component in 0..3 {
+                assert!((operator.rhs[component] - expected_rhs0[component]).abs() < 1.0e-12);
+                assert!((operator.rhs[6 + component] - expected_rhs1[component]).abs() < 1.0e-12);
+            }
+
+            let (normal, full_rhs) = full_normal_system(&system, lambda);
+            let full_delta = solve_normal_equations(&normal, &full_rhs).unwrap();
+            let mut direct_system = hand_check_system();
+            let direct = solve_step(
+                &mut direct_system,
+                2,
+                1,
+                0,
+                0,
+                lambda,
+                LinearSolver::Sparse,
+                false,
+                &mut None,
+            )
+            .unwrap();
+            assert!((direct.0.clone() - full_delta.rows(0, 12)).norm() < 1.0e-10);
+            assert!((direct.1.clone() - full_delta.rows(12, 3)).norm() < 1.0e-10);
+            let result = operator
+                .solve_pcg(operator.rhs(), PcgOptions::default())
+                .unwrap();
+            assert!((result.solution.clone() - full_delta.rows(0, 12)).norm() < 1.0e-9);
+            assert!(
+                (operator.complete_delta(&result.solution).unwrap() - full_delta.rows(12, 3))
+                    .norm()
+                    < 1.0e-9
+            );
+        }
     }
 
     #[test]
@@ -5964,7 +6095,50 @@ mod implicit_schur_prototype_tests {
         let x = DVector::from_element(6, 0.2);
         let expected = explicit_schur(&system, 0.1) * &x;
         let actual = operator.apply(&x).unwrap();
-        assert!((&actual - expected).norm() < 1.0e-9);
+        // Explicit and implicit forms reassociate cross-sensor products.  The
+        // rounding scale is the sum of the unreduced Bx term and the
+        // eliminated E C⁻¹ Eᵀx term, since their subtraction can cancel to a
+        // much smaller Schur result.  This is scale-aware rather than a
+        // pixel-constant absolute threshold and follows camera/rig scaling.
+        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+            panic!("rig matvec test requires pose blocks");
+        };
+        let mut base = DVector::zeros(x.len());
+        for (pose, block) in diagonal.iter().enumerate() {
+            let mut damped = *block;
+            for component in 0..6 {
+                damped[(component, component)] += 0.1;
+            }
+            let value = damped * x.fixed_rows::<6>(pose * 6).into_owned();
+            for component in 0..6 {
+                base[pose * 6 + component] = value[component];
+            }
+        }
+        // Sum the magnitudes of the individual E C⁻¹ Eᵀx pair products, not
+        // only their potentially-cancelled aggregate.  This captures the
+        // arithmetic scale of the two evaluation orders.
+        let inverse = (system.landmarks[0].h_ll + 0.1 * Matrix3::<f64>::identity())
+            .try_inverse()
+            .unwrap();
+        let mut eliminated_term_scale = 0.0;
+        for (_pose, a) in &system.landmarks[0].cross {
+            for (other_pose, b) in &system.landmarks[0].cross {
+                let x_other: Vector6<f64> = x.fixed_rows::<6>(other_pose * 6).into_owned();
+                let term: Vector6<f64> = a * inverse * b.transpose() * x_other;
+                eliminated_term_scale += term.norm();
+            }
+        }
+        let scale =
+            (base.norm() + eliminated_term_scale + actual.norm() + expected.norm()).max(1.0);
+        let tolerance = 64.0 * f64::EPSILON * scale;
+        let difference = (&actual - &expected).norm();
+        assert!(
+            difference <= tolerance,
+            "rig matvec diff={} scale={} tolerance={}",
+            difference,
+            scale,
+            tolerance
+        );
     }
 
     #[test]
@@ -6070,7 +6244,7 @@ mod implicit_schur_prototype_tests {
     }
 
     #[test]
-    fn empty_pose_operator_is_not_a_landmark_only_fallback() {
+    fn empty_pose_operator_rejects_pose_reduced_system() {
         let empty = NormalEquationsBa {
             h_pp: CameraHessian::PoseDiagonal(Vec::new()),
             b_p: DVector::zeros(0),
@@ -6080,9 +6254,9 @@ mod implicit_schur_prototype_tests {
             ImplicitSchurOperator::new(&empty, 0.0),
             Err(ImplicitSchurError::EmptySystem)
         ));
-        // The production solve_step has a separate p_count == 0 branch for
-        // landmark-only BA; this pose-reduced prototype intentionally does
-        // not silently take ownership of that path.
+        // This only checks the prototype's empty pose-reduced input.  It is
+        // not a production all-fixed-pose solver test: solve_step has a
+        // separate p_count == 0 landmark-only branch.
     }
 
     #[test]
