@@ -4858,6 +4858,32 @@ mod lm_step_quality_tests {
         assert!((actual - expected).abs() <= 1.0e-11 * scale);
     }
 
+    fn dense_quality_metrics(
+        undamped: &DMatrix<f64>,
+        damped: &DMatrix<f64>,
+        rhs: &DVector<f64>,
+        delta: &DVector<f64>,
+    ) -> (f64, f64, f64) {
+        let residual = damped * delta + rhs;
+        let prediction = -2.0 * rhs.dot(delta) - delta.dot(&(undamped * delta));
+        let denominator = damped.norm() * delta.norm() + rhs.norm();
+        let mut componentwise: f64 = 0.0;
+        for row in 0..damped.nrows() {
+            let row_denominator = (0..damped.ncols())
+                .map(|column| damped[(row, column)].abs() * delta[column].abs())
+                .sum::<f64>()
+                + rhs[row].abs();
+            let ratio = if row_denominator == 0.0 {
+                assert_eq!(residual[row], 0.0);
+                0.0
+            } else {
+                residual[row].abs() / row_denominator
+            };
+            componentwise = componentwise.max(ratio);
+        }
+        (prediction, residual.norm() / denominator, componentwise)
+    }
+
     #[test]
     fn quality_matches_explicit_full_normal_prediction_and_eta() {
         let system = synthetic_system();
@@ -4882,23 +4908,8 @@ mod lm_step_quality_tests {
         let mut delta = DVector::zeros(9);
         delta.rows_mut(0, 6).copy_from(&delta_pose);
         delta.rows_mut(6, 3).copy_from(&delta_landmark);
-        let residual = &damped * &delta + &b;
-        let expected_prediction = -2.0 * b.dot(&delta) - delta.dot(&(&h * &delta));
-        let expected_normwise = residual.norm() / (damped.norm() * delta.norm() + b.norm());
-        let mut expected_componentwise: f64 = 0.0;
-        for row in 0..damped.nrows() {
-            let denominator = (0..damped.ncols())
-                .map(|column| damped[(row, column)].abs() * delta[column].abs())
-                .sum::<f64>()
-                + b[row].abs();
-            let ratio = if denominator == 0.0 {
-                assert_eq!(residual[row], 0.0);
-                0.0
-            } else {
-                residual[row].abs() / denominator
-            };
-            expected_componentwise = expected_componentwise.max(ratio);
-        }
+        let (expected_prediction, expected_normwise, expected_componentwise) =
+            dense_quality_metrics(&h, &damped, &b, &delta);
 
         assert_close(
             quality.predicted_undamped_squared_decrease,
@@ -4935,13 +4946,18 @@ mod lm_step_quality_tests {
         let mut delta = DVector::zeros(12);
         delta.rows_mut(0, 6).copy_from(&delta_pose);
         delta.rows_mut(6, 6).copy_from(&delta_landmarks);
-        let expected_prediction = -2.0 * b.dot(&delta) - delta.dot(&(&h * &delta));
+        let mut damped = h.clone();
+        for index in 0..damped.nrows() {
+            damped[(index, index)] += lambda;
+        }
+        let (expected_prediction, expected_normwise, expected_componentwise) =
+            dense_quality_metrics(&h, &damped, &b, &delta);
         assert_close(
             quality.predicted_undamped_squared_decrease,
             expected_prediction,
         );
-        assert!(quality.normwise_backward_error.is_finite());
-        assert!(quality.componentwise_backward_error.is_finite());
+        assert_close(quality.normwise_backward_error, expected_normwise);
+        assert_close(quality.componentwise_backward_error, expected_componentwise);
     }
 
     #[test]
@@ -4949,25 +4965,58 @@ mod lm_step_quality_tests {
         let original = synthetic_system();
         let mut scaled = synthetic_system();
         let state = column_equilibrate_normal_system(&mut scaled).unwrap();
-        let physical_pose = DVector::from_row_slice(&[0.2, -0.3, 0.4, -0.5, 0.6, -0.7]);
-        let physical_landmark = DVector::from_row_slice(&[0.8, -0.9, 1.0]);
-        let mut scaled_pose = physical_pose.clone();
-        let mut scaled_landmark = physical_landmark.clone();
+        let lambda = 0.5;
+        let (scaled_h, scaled_b) = full_normal(&scaled);
+        let mut scaled_damped = scaled_h.clone();
+        for index in 0..scaled_damped.nrows() {
+            scaled_damped[(index, index)] += lambda;
+        }
+        let scaled_solution = scaled_damped
+            .clone()
+            .lu()
+            .solve(&(-scaled_b.clone()))
+            .expect("scaled synthetic system should solve");
+        // Use a solved step plus a small, non-collinear perturbation.  This
+        // keeps the residual nonzero without making eta a saturated 1.0
+        // artifact of an arbitrary hand-written delta.
+        let scaled_delta = scaled_solution
+            + DVector::from_row_slice(&[
+                3.0e-3, -2.0e-3, 1.5e-3, -1.0e-3, 2.5e-3, -1.25e-3, 1.75e-3, -2.25e-3, 0.875e-3,
+            ]);
+        let scaled_pose = scaled_delta.rows(0, 6).into_owned();
+        let scaled_landmark = scaled_delta.rows(6, 3).into_owned();
+
+        let mut physical_transform = DVector::zeros(9);
         for component in 0..6 {
-            scaled_pose[component] /= state.pose_transforms[0][component];
+            physical_transform[component] = state.pose_transforms[0][component];
         }
         for component in 0..3 {
-            scaled_landmark[component] /= state.landmark_transforms[0][component];
+            physical_transform[6 + component] = state.landmark_transforms[0][component];
         }
-        let lambda = 0.5;
-        let original_quality = quality_coordinate_metrics(
-            &original,
-            lambda,
-            &physical_pose,
-            &physical_landmark,
-            MatrixFreeQualityCoordinate::Current,
-        )
-        .unwrap();
+        let mut inverse_transform = DVector::zeros(9);
+        let mut physical_delta = DVector::zeros(9);
+        for index in 0..9 {
+            inverse_transform[index] = physical_transform[index].recip();
+            physical_delta[index] = physical_transform[index] * scaled_delta[index];
+        }
+        let mut physical_h = DMatrix::zeros(9, 9);
+        let mut physical_damped = DMatrix::zeros(9, 9);
+        let mut physical_b = DVector::zeros(9);
+        for row in 0..9 {
+            physical_b[row] = inverse_transform[row] * scaled_b[row];
+            for column in 0..9 {
+                physical_h[(row, column)] =
+                    inverse_transform[row] * scaled_h[(row, column)] * inverse_transform[column];
+                physical_damped[(row, column)] = inverse_transform[row]
+                    * scaled_damped[(row, column)]
+                    * inverse_transform[column];
+            }
+        }
+
+        let (scaled_expected_prediction, scaled_expected_normwise, scaled_expected_eta) =
+            dense_quality_metrics(&scaled_h, &scaled_damped, &scaled_b, &scaled_delta);
+        let (physical_expected_prediction, physical_expected_normwise, physical_expected_eta) =
+            dense_quality_metrics(&physical_h, &physical_damped, &physical_b, &physical_delta);
         let scaled_quality = quality_coordinate_metrics(
             &scaled,
             lambda,
@@ -4986,16 +5035,54 @@ mod lm_step_quality_tests {
         .unwrap();
 
         assert_close(
-            original_quality.componentwise_backward_error,
-            scaled_quality.componentwise_backward_error,
+            scaled_quality.predicted_undamped_squared_decrease,
+            scaled_expected_prediction,
         );
         assert_close(
-            original_quality.componentwise_backward_error,
+            scaled_quality.normwise_backward_error,
+            scaled_expected_normwise,
+        );
+        assert_close(
+            scaled_quality.componentwise_backward_error,
+            scaled_expected_eta,
+        );
+        assert_close(
+            physical_equivalent.predicted_undamped_squared_decrease,
+            physical_expected_prediction,
+        );
+        assert_close(
+            physical_equivalent.normwise_backward_error,
+            physical_expected_normwise,
+        );
+        assert_close(
             physical_equivalent.componentwise_backward_error,
+            physical_expected_eta,
+        );
+        assert_close(scaled_expected_eta, physical_expected_eta);
+        assert!(scaled_expected_eta > 0.0 && scaled_expected_eta < 1.0);
+        assert!(physical_expected_eta > 0.0 && physical_expected_eta < 1.0);
+
+        // Undamped prediction is invariant under the positive diagonal
+        // coordinate transform, even though lambda I is represented as
+        // lambda*diag(d) after returning to physical coordinates.
+        let (original_h, original_b) = full_normal(&original);
+        let original_quality = quality_coordinate_metrics(
+            &original,
+            lambda,
+            &physical_delta.rows(0, 6).into_owned(),
+            &physical_delta.rows(6, 3).into_owned(),
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap();
+        let original_expected_prediction = -2.0 * original_b.dot(&physical_delta)
+            - physical_delta.dot(&(&original_h * &physical_delta));
+        assert_close(
+            original_quality.predicted_undamped_squared_decrease,
+            original_expected_prediction,
         );
         assert_close(
             original_quality.predicted_undamped_squared_decrease,
-            physical_equivalent.predicted_undamped_squared_decrease,
+            physical_expected_prediction,
         );
     }
 
