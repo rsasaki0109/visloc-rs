@@ -34,7 +34,8 @@
   "completed_runs": [
     {"label": "baseline-main-1", "wall_s": 172.69, "peak_rss_kib": 525052, "six_files_match_frozen_filtering_main": true},
     {"label": "baseline-main-2", "wall_s": 172.80, "peak_rss_kib": 525268, "six_files_and_complete_log_match_baseline_main_1": true},
-    {"label": "candidate-main-1", "wall_s": 154.39, "peak_rss_kib": 524984, "six_files_and_complete_log_match_baseline_main_1": true}
+    {"label": "candidate-main-1", "wall_s": 154.39, "peak_rss_kib": 524984, "six_files_and_complete_log_match_baseline_main_1": true},
+    {"label": "baseline-main-3", "wall_s": 169.48, "peak_rss_kib": 525232, "six_files_and_complete_log_match_baseline_main_1": true}
   ],
   "verification": {
     "example_tests_default": 51,
@@ -43,7 +44,8 @@
     "clippy_no_default_release_build_and_diff_check": "pass",
     "tests_cover": ["shared selection/count/candidate equivalence", "retention-policy equivalence", "over-cap rejection equivalence", "reselection after landmark compaction", "existing one/two-sweep determinism and support guards"],
     "pr": 76,
-    "ci_status": "pending"
+    "implementation_ci": {"run_id": 34102096800, "head_commit": "1eacc08", "checks_passed": 8, "rust_duration": "3m42s"},
+    "final_ci_status": "not_yet_run"
   },
   "decision": "Do not claim a measured gain until serial repeats and regression checks complete. Byte-identical output preserves the prior experimental quality result; it does not close the outstanding COLMAP RMSE gate or full M8-M10 objective."
 }

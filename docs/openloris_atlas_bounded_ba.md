@@ -520,3 +520,26 @@ cache these indices across accepted updates. This needs no global adjacency
 index or extra whole-model copy. Verify complete output equality and measure
 time/RSS before claiming a gain. Removing duplicate scans does not eliminate
 the remaining per-window global scan or prove linear total runtime.
+
+### Read-only solver-memory audit (not a selected next implementation)
+
+The current pure-visual sparse path in `pipelines/slam/src/bundle.rs`,
+`solve_step_pose_blocks`, avoids a dense camera Hessian but still materializes
+the reduced Schur matrix as block-column maps. Its nested pose-pair loop for
+each landmark adds shared-track couplings, and it calls the direct cached
+block-Cholesky solver. `LandmarkBlock.cross` retains pose/landmark cross blocks.
+No matrix-free iterative Schur/PCG path currently exists in these solvers.
+
+A matrix-free Schur operator could avoid storing the reduced matrix and its
+factor fill, but would still retain observation/cross-block state unless that
+is explicitly streamed. It must not silently reuse the current global-BA
+memory or quality claims: the earlier >2 GiB global experiment used a different
+native-mapper input, not this connected atlas. No such method has been measured
+on the connected-atlas input and no accuracy or memory win is established.
+
+Before selecting this larger change, require small-system operator/step checks
+against explicit Schur with identical damping, bounded iteration and residual
+criteria, singular/low-parallax handling, deterministic LM acceptance, fixed
+rig calibration and correct component gauges. Whole-process peak RSS and time
+still need measurement. This audit identifies a memory option; it does not
+authorize an unbounded global solve or replace the outstanding quality gate.

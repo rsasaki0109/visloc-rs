@@ -45,6 +45,8 @@
 > 選択scan共有は `1eacc08` で実装済み、51 example / 23 auditor tests通過。
 > PR #76でserial比較中。基準2回は172.69/172.80 s、変更版初回154.39 sで
 > 全6ファイル・ログ全文一致。各3回測定と他モードの非回帰を完了してから判断します。
+> 基準3回目169.48 sも一致、基準中央値172.69 s。変更版2回目を実行中。
+> 実装commitのCIは8項目通過（run 34102096800）、最終headのCI/mergeは未完了。
 > [scan共有の測定記録](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json)。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
