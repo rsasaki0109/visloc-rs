@@ -1167,3 +1167,122 @@ Then compare frozen real systems and full nonlinear 1k quality/resources
 with explicit restart counters. A reduction in recheck failures alone is
 not sufficient for promotion; retain direct/strict controls and all geometry,
 identity and GT gates. No restart implementation is included in this result.
+
+### Actual atlas driver-boundary pilot (2026-09-07)
+
+[Evidence](../benchmarks/electro/m8-openloris-matrix-free-atlas-pilot-v1.json)
+records a PR #82 binary trial on the retained filtered main component under
+`RLIMIT_AS=2 GiB`, CPU 900 s and core dumps disabled. Its derived rig manifest
+keeps original sensor/header lines and selects F records by exact source image
+name, without relabeling IDs or changing calibration. The model contains
+8,988 poses, 318,222 points, 1,313,899 observations and 4,672,106 full keypoints.
+
+The process rejects during source preflight: image 8987 (`cam1_008986.png`,
+sensor 0, frame 4493) has no landmark support. This is the known retained
+source state, not a newly lost image. Sensor 1 of the same calibrated frame,
+image 8988, has ten observations, and all 4,494 rig frames are supported.
+No BA starts and no model is published. The 0.94 s / 407,032 KiB process
+measurement is parsing/preflight only, not a solver memory or 10k pass.
+Virtual-address-space limiting is stricter than an RSS limit and cannot turn
+an aborted solve into a resource success.
+
+Before full atlas comparison, the driver needs a separately explicit mode
+that retains observation-free sensor images only when their shared rig frame
+is supported by another sensor. Preserve the original supported and unsupported
+image sets; still reject unsupported entire frames and disconnected frame
+graphs. Do not delete a sensor row to bypass validation. The tail has 505
+frames with IDs 4495..4999, so also expose an explicit existing supported
+fixed-frame ID (default 0 unchanged), anchoring the tail at 4495 without
+renumbering. This is a driver boundary extension, not a change to physical
+calibration, observation selection, PCG or LM acceptance.
+
+Keep the two original components and score them together with the existing
+post-only alignment. Direct-BA numerical agreement remains a diagnostic;
+the ultimate advancement gate is measured COLMAP quality and resources,
+not perfect agreement with one internal backend. The unsupported-image
+boundary and anchor extension are not yet implemented in this pilot.
+
+An independent streaming point/track scan also finds main-component positive
+depths from `1.8218e-6` to 14,900.75 m (tail 0.01513 to 39.07486 m). This is
+a conditioning clue, not a measured Hessian condition number or permission
+to remove points. Main/tail have 281,079 / 30,995 tracks with same-frame
+cross-sensor observations; metric observations are present, without proving
+full rank. Excluding the selected anchor's observations gives 1,313,303 /
+124,955 cross entries and sums of squared per-point cross counts 40,517,191 /
+3,124,173. These are work/storage inventory, not a dense allocation plan.
+
+### Bounded PCG residual restart: 1k result (2026-09-08)
+
+[Nine-run evidence](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json)
+uses implementation `ca67e80`, explicit restart limit 0/1 and the unchanged
+512-total-iteration budget. True residual failure can restart once, but never
+extends the budget or bypasses the nonlinear acceptance/depth checks. The
+default remains restart-off; existing API shapes and the LM loop are retained.
+
+At relative tolerance 1e-8, restart increases successful linear solves from
+3 to 5 and accepted LM steps from 3 to 4. Seven restarts produce cost
+118070.232073 versus 118070.554369 without restart, and GT RMSE
+0.02660802754 versus 0.02660805517 m: the trajectory improvement is negligible.
+The recovered linear solve at LM8 is still rejected by LM; the trace alone
+does not establish the exact rejection reason. Maximum individual reprojection
+also rises slightly, from 4.840089 to 4.840263 px. Direct remains better in
+cost and trajectory RMSE, so this is not an equivalent-quality speed result.
+
+Restart-on repeats have identical model files and all 60 numerical/diagnostic
+trace rows. Legacy relative/direct repeats are also exact; explicit restart 0
+matches the legacy model and LM/PCG trace. Under strict 1e-12 tolerance,
+seven restarts leave the final model byte-identical to strict restart-off.
+All 1,000 supported images, 500 supported frames, 4,716 points, 130,900
+observations and 361,170 full keypoints are retained, with one connected
+frame graph, fixed calibration and no nonpositive depths.
+
+Restart-on wall times are 24.00/20.82 s, relative-off 23.71/20.21 s and
+direct 56.01/44.67 s on the shared host; these are local single-thread BA
+processes, not mapper/native end-to-end measurements. This implementation
+does not promote the 10k or README performance claims. The next experiment
+is the actual two-component atlas with the explicit boundary/anchor policy,
+not further tuning solely to reproduce the internal direct backend.
+
+### Actual two-component matrix-free BA (2026-09-08)
+
+[Six-run evidence and independent audits](../benchmarks/electro/m8-openloris-matrix-free-atlas-policy-v1.json).
+Driver `c2eeb70` preserves the original main/tail anchors 0/4495 and retains
+the known unsupported main sensor image only through explicit shared-rig
+support policy. The 17 example tests and a fresh default-policy 1k run pass;
+the latter's three model files and 40 LM/PCG rows match the previous driver.
+Both actual components now complete under the 2 GiB virtual-address-space
+cap, CPU 900 s cap, disabled core dumps and one Rayon thread.
+
+| Same 10k evaluation | Registered images | Pooled GT RMSE / p95 (m) | Observation-weighted reprojection (px) |
+|---|---:|---:|---:|
+| Frozen COLMAP | 9,998 | 0.384307 / 0.638669 | 0.903003 |
+| Retained filtered atlas input | 9,998 | 0.388993 / 0.638173 | 0.581744 |
+| Matrix-free post-map BA | 9,998 | 0.388720 / 0.638174 | 0.579509 |
+
+GT is used only for post-mapping scoring with one Sim(3) per original
+component and pooled errors from 9,306 scored images. All 9,997 supported
+images, 4,999 supported frames, 352,837 points and 1,438,880 observations
+remain. Full keypoint, point/track identity, calibration and original fixed
+anchors pass independent checks; no nonpositive depths appear. The tail's
+maximum individual reprojection rises to 4.097846 px and maximum track mean
+to 2.239294 px, so this is not universal per-observation nonregression.
+
+Main restart-off takes 88.75 s and 1,079,880 KiB peak RSS; tail takes
+41.40 s and 109,036 KiB. These are separate serial local BA processes, not
+the full mapper or native pipeline, and cannot be compared to COLMAP's
+mapper time as a speedup. Main accepts only 1 of 18 LM trials and stops at
+the existing maximum-damping boundary; tail accepts 8 of 20. Main's first
+nine trials reject `NonSpdPreconditioner(191)`, followed by two curvature
+failures. The number 191 is a variable-pose slot, not a source frame ID.
+
+Enabling one bounded restart performs four restarts on main and zero on tail.
+Both final models are byte-identical to restart-off: no 10k quality benefit
+from restart. Restart-on repeats match all six model files and both components'
+LM/PCG/restart traces exactly. Main repeats take 93.85/93.64 s and tail
+41.81/41.12 s; main peak RSS is 1,079,764/1,079,724 KiB. The slightly
+improved atlas still fails COLMAP's RMSE gate.
+Keep the production defaults and README claims unchanged. Next isolate the
+failed main preconditioner block using bounded diagnostics (slot/frame mapping,
+actual solve damping, 6x6 block spectrum and local subtraction norms), without
+dropping observations, adding a dense global matrix or claiming a cause from
+support/depth range alone.

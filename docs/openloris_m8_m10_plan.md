@@ -126,6 +126,31 @@ direct; repeats are exact and all identities/support/calibration/depth remain
 valid. No equivalent-quality speedup or 10k promotion. Next test one bounded,
 event-triggered true-residual restart within the original PCG iteration cap,
 as a separate default-off arm; see the [detailed contract](openloris_atlas_bounded_ba.md).
+PR #82 passed all eight final-head checks (run `34130693082`, head `cd226dd`)
+and merged as `35df35f`; local and remote topic branches were removed.
+Continuation branch: `feat/m8-bounded-pcg-residual-restart`. The full 10k,
+scale/restart/100k and comparable mapper/native-E2E gates remain open.
+An actual main-atlas [resource-capped pilot](../benchmarks/electro/m8-openloris-matrix-free-atlas-pilot-v1.json)
+reveals a driver-boundary rejection before BA: a known observation-free sensor
+image belongs to an otherwise observed calibrated rig frame. Preserve that
+image; explicitly support this case and a nonzero tail anchor in a separate
+driver mode before running both components. The pilot is not a solver RSS pass.
+The bounded-restart implementation `ca67e80` now has a
+[nine-run 1k comparison](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json).
+Relative restart improves accepted LM steps 3 to 4, but RMSE changes by only
+2.76e-8 m; strict restart leaves the final model exactly unchanged. Repeated
+models and traces match. These results do not establish equivalent-quality
+speed or 10k improvement. Driver extension `c2eeb70` adds explicit shared-rig
+unsupported-sensor retention and an existing fixed-frame ID; 17 example tests
+pass and the default 1k model/40 numerical rows match the previous driver.
+The [actual two-component comparison](../benchmarks/electro/m8-openloris-matrix-free-atlas-policy-v1.json)
+now completes under the cap, with main peak RSS about 1.03 GiB and identical
+repeat models/traces. Pooled RMSE/p95 is 0.388720/0.638174 m, reprojection
+0.579509 px, preserving all original support/identity/calibration. Restart
+does not change either final model. COLMAP's RMSE gate still fails. Next
+diagnose the main component's failed Schur preconditioner block using only
+bounded local state; do not discard observations or claim mapper/E2E speed
+from these local BA process times. Production defaults and README stay unchanged.
 
 ## Historical M7 baseline
 

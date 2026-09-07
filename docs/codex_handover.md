@@ -1,5 +1,17 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新追記（2026-09-08）: `feat/m8-bounded-pcg-residual-restart` の
+> `ca67e80` で上限1回・総反復数を延長しないPCG再開を実装し、1kの9本を測定済み。
+> [証跡](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json)。
+> 相対許容誤差1e-8では線形成功3→5、LM受理3→4だが、RMSE改善は約2.76e-8 mで
+> ごく小さい。strict設定では再開7回でも最終モデルは従来と同一。10k/README非昇格。
+> `c2eeb70` の明示的な共有rig支持・元ID固定anchor対応で、実atlas両成分も完走。
+> [6本の証跡](../benchmarks/electro/m8-openloris-matrix-free-atlas-policy-v1.json)。
+> 主成分peak RSS約1.03 GiB、再実行のモデル・数値trace一致。合算RMSE/p95は
+> 0.388720/0.638174 m、平均再投影0.579509 px。COLMAPのRMSEにはまだ未達。
+> 再開あり/なしの最終モデルは同一。主成分の前処理block正定値性失敗が次の診断対象。
+> M8–M10のCOLMAP比較・E2E・各規模ゲートは未完了。
+
 > 現在の引き継ぎ先（2026-09-07）:
 > [OpenLORIS M8–M10計画](openloris_m8_m10_plan.md) と
 > [rig-atlas診断記録](openloris_rig_atlas_diagnostic.md)。以下は9月1日時点の
@@ -124,6 +136,15 @@
 > 全支持・identity・depth・calibration保持、各repeat完全一致、旧direct/strictもPR #79一致。
 > 次候補はtrue residual再確認失敗時だけ最大1回restartする別arm（総512反復内）。
 > まだ未実装。デフォルト変更・N²状態・反復上限のリセットは行いません。
+> PR #82は最終head `cd226dd` のCI全8項目（run 34130693082）通過後、
+> `35df35f`へmerge済み。旧local/remote branchも削除しました。
+> 続きは `feat/m8-bounded-pcg-residual-restart`。まず既定OFFの回復機構を
+> 同じ総反復上限で実装・検証し、1k nonlinearのdirect/strict/relative controlと比較します。
+> PR #82 binaryの2 GiB制限付きatlas主成分試走は、既知の観測なしsensor画像8987で
+> preflight reject（BA未開始、0.94 s /407032 KiB）。[証跡](../benchmarks/electro/m8-openloris-matrix-free-atlas-pilot-v1.json)。
+> 同frame4493のもう片側は10観測を持ち、全rig frameは支持されています。画像削除で迂回しません。
+> 10k driverには支持rig内の観測なしsensor画像保持と、tail用の明示anchor4495が必要。
+> restart機構とは別の明示モードとして既定1k動作を保ち、実装後に両成分を再試走します。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

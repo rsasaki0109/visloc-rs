@@ -17,12 +17,12 @@ use sha2::{Digest, Sha256};
 use visloc_rs::io::colmap::parse_cameras_txt;
 use visloc_rs::slam::{
     BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaOptions,
-    MatrixFreeBaResult, RobustKernel,
+    MatrixFreeBaRestartOptions, MatrixFreeBaRestartResult, MatrixFreeBaResult, RobustKernel,
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N] [--pcg-relative-tolerance X]\n\
+    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -78,6 +78,12 @@ struct Args {
     pcg_max_iterations: usize,
     pcg_relative_tolerance: f64,
     pcg_relative_tolerance_explicit: bool,
+    pcg_max_restarts: usize,
+    pcg_max_restarts_explicit: bool,
+    fixed_frame_id: u64,
+    fixed_frame_explicit: bool,
+    allow_unsupported_sensor_images: bool,
+    allow_unsupported_sensor_images_explicit: bool,
     oracle_fixture_out: Option<PathBuf>,
 }
 
@@ -170,6 +176,7 @@ struct RunSummary {
 enum OptimizationResult {
     Direct(visloc_rs::slam::BaResult),
     MatrixFree(MatrixFreeBaResult),
+    MatrixFreeRestart(MatrixFreeBaRestartResult),
 }
 
 fn main() {
@@ -198,6 +205,12 @@ where
     let mut pcg_seen = false;
     let mut pcg_relative_tolerance = PCG_TOLERANCE;
     let mut pcg_relative_seen = false;
+    let mut pcg_max_restarts = 0;
+    let mut pcg_restarts_seen = false;
+    let mut fixed_frame_id = 0_u64;
+    let mut fixed_frame_seen = false;
+    let mut allow_unsupported_sensor_images = false;
+    let mut allow_unsupported_seen = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -216,6 +229,32 @@ where
             if pcg_max_iterations == 0 {
                 return Err(format!("{flag} must be positive\n{USAGE}"));
             }
+            continue;
+        }
+        if flag == "--fixed-frame-id" {
+            if fixed_frame_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            fixed_frame_seen = true;
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires a nonnegative integer\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!(
+                    "{flag} requires a nonnegative integer, got {value:?}\n{USAGE}"
+                ));
+            }
+            fixed_frame_id = value.parse::<u64>().map_err(|error| {
+                format!("{flag} requires a nonnegative integer: {error}\n{USAGE}")
+            })?;
+            continue;
+        }
+        if flag == "--allow-unsupported-sensor-images" {
+            if allow_unsupported_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            allow_unsupported_seen = true;
+            allow_unsupported_sensor_images = true;
             continue;
         }
         if flag == "--pcg-relative-tolerance" {
@@ -241,6 +280,25 @@ where
                 return Err(format!(
                     "{flag} must be finite, positive, and less than 1\n{USAGE}"
                 ));
+            }
+            continue;
+        }
+        if flag == "--pcg-max-restarts" {
+            if pcg_restarts_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            pcg_restarts_seen = true;
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires 0 or 1\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires 0 or 1, got {value:?}\n{USAGE}"));
+            }
+            pcg_max_restarts = value
+                .parse::<usize>()
+                .map_err(|error| format!("{flag} requires 0 or 1: {error}\n{USAGE}"))?;
+            if pcg_max_restarts > 1 {
+                return Err(format!("{flag} must be 0 or 1\n{USAGE}"));
             }
             continue;
         }
@@ -281,11 +339,18 @@ where
         }
     }
     if oracle_fixture_out.is_some()
-        && (solver.is_some() || out_dir.is_some() || pcg_seen || pcg_relative_seen)
+        && (solver.is_some()
+            || out_dir.is_some()
+            || pcg_seen
+            || pcg_relative_seen
+            || pcg_restarts_seen
+            || fixed_frame_seen
+            || allow_unsupported_seen)
     {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
-             --solver, --out-dir, --pcg-max-iterations or --pcg-relative-tolerance\n{USAGE}"
+             --solver, --out-dir, --fixed-frame-id, --allow-unsupported-sensor-images, \
+             --pcg-max-iterations, --pcg-relative-tolerance or --pcg-max-restarts\n{USAGE}"
         ));
     }
     if oracle_fixture_out.is_none() && (solver.is_none() || out_dir.is_none()) {
@@ -301,9 +366,17 @@ where
         pcg_max_iterations,
         pcg_relative_tolerance,
         pcg_relative_tolerance_explicit: pcg_relative_seen,
+        pcg_max_restarts,
+        pcg_max_restarts_explicit: pcg_restarts_seen,
+        fixed_frame_id,
+        fixed_frame_explicit: fixed_frame_seen,
+        allow_unsupported_sensor_images,
+        allow_unsupported_sensor_images_explicit: allow_unsupported_seen,
         oracle_fixture_out,
     };
-    if args.solver == Some(SolverArm::Direct) && (pcg_seen || pcg_relative_seen) {
+    if args.solver == Some(SolverArm::Direct)
+        && (pcg_seen || pcg_relative_seen || pcg_restarts_seen)
+    {
         return Err(format!(
             "PCG options are only valid for matrix-free\n{USAGE}"
         ));
@@ -331,7 +404,12 @@ fn run(args: &Args) -> Result<(), String> {
     validate_input_paths(args)?;
     let manifest = parse_rig_manifest(&args.rig_manifest)?;
     let source = load_source_model(&args.model, &manifest)?;
-    validate_source_model(&source, &manifest)?;
+    validate_source_model_with_policy(
+        &source,
+        &manifest,
+        args.fixed_frame_id,
+        args.allow_unsupported_sensor_images,
+    )?;
     if args.oracle_fixture_out.is_none() {
         let out_dir = args
             .out_dir
@@ -340,7 +418,7 @@ fn run(args: &Args) -> Result<(), String> {
         prepare_output_path(out_dir, &args.model, &args.rig_manifest)?;
     }
 
-    let mut prepared = build_problem(&source, &manifest)?;
+    let mut prepared = build_problem_with_anchor(&source, &manifest, args.fixed_frame_id)?;
     if let Some(fixture_path) = &args.oracle_fixture_out {
         let source_hashes = hash_source_inputs(&args.model, &args.rig_manifest)?;
         export_oracle_fixture(
@@ -385,7 +463,25 @@ fn run(args: &Args) -> Result<(), String> {
         ..BaConfig::default()
     };
     let solver_started = Instant::now();
-    if solver == SolverArm::MatrixFree && args.pcg_relative_tolerance_explicit {
+    let policy_explicit =
+        args.fixed_frame_explicit || args.allow_unsupported_sensor_images_explicit;
+    if policy_explicit {
+        println!(
+            "rig_driver_policy fixed_frame_id={} allow_unsupported_sensor_images={} source_supported_image_count={} source_image_count={}",
+            args.fixed_frame_id,
+            args.allow_unsupported_sensor_images,
+            source_supported_image_count(&source),
+            source.images.len(),
+        );
+    }
+    if solver == SolverArm::MatrixFree && args.pcg_max_restarts_explicit {
+        println!(
+            "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e} max_restarts_per_solve={}",
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            args.pcg_max_restarts,
+        );
+    } else if solver == SolverArm::MatrixFree && args.pcg_relative_tolerance_explicit {
         println!(
             "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e}",
             args.pcg_relative_tolerance,
@@ -406,11 +502,25 @@ fn run(args: &Args) -> Result<(), String> {
                 pcg_relative_tolerance: args.pcg_relative_tolerance,
                 pcg_absolute_tolerance: PCG_TOLERANCE,
             };
-            let result = prepared
-                .ba
-                .optimize_matrix_free(&config, options)
-                .map_err(|error| format!("matrix-free BA failed: {error}"))?;
-            OptimizationResult::MatrixFree(result)
+            if args.pcg_max_restarts_explicit {
+                let result = prepared
+                    .ba
+                    .optimize_matrix_free_with_restart(
+                        &config,
+                        options,
+                        MatrixFreeBaRestartOptions {
+                            max_restarts_per_solve: args.pcg_max_restarts,
+                        },
+                    )
+                    .map_err(|error| format!("matrix-free BA failed: {error}"))?;
+                OptimizationResult::MatrixFreeRestart(result)
+            } else {
+                let result = prepared
+                    .ba
+                    .optimize_matrix_free(&config, options)
+                    .map_err(|error| format!("matrix-free BA failed: {error}"))?;
+                OptimizationResult::MatrixFree(result)
+            }
         }
     };
     let solver_seconds = solver_started.elapsed().as_secs_f64();
@@ -423,11 +533,19 @@ fn run(args: &Args) -> Result<(), String> {
             print_matrix_free_trace(result, args.pcg_max_iterations);
             (result.final_cost, result.iterations.len(), result.converged)
         }
+        OptimizationResult::MatrixFreeRestart(result) => {
+            print_matrix_free_restart_trace(result, args.pcg_max_iterations);
+            (
+                result.ba.final_cost,
+                result.ba.iterations.len(),
+                result.ba.converged,
+            )
+        }
     };
     if !final_cost.is_finite() {
         return Err("final BA cost is non-finite".to_owned());
     }
-    publish_model(out_dir, &source, &manifest, &prepared)?;
+    publish_model_with_anchor(out_dir, &source, &manifest, &prepared, args.fixed_frame_id)?;
     let total_seconds = total_started.elapsed().as_secs_f64();
     let summary = RunSummary {
         solver,
@@ -438,7 +556,45 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
-    if args.pcg_relative_tolerance_explicit {
+    if args.pcg_max_restarts_explicit {
+        let total_rechecks = result_restart_rechecks(&optimization);
+        let total_failed_rechecks = result_restart_failed_rechecks(&optimization);
+        let total_restarts = result_restart_count(&optimization);
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts={} pcg_true_residual_rechecks={} pcg_failed_true_residual_rechecks={} pcg_restarts={} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest
+                .assignments
+                .values()
+                .map(|assignment| assignment.frame_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            source.points.len(),
+            source
+                .points
+                .iter()
+                .map(|point| point.observations.len())
+                .sum::<usize>(),
+            args.fixed_frame_id,
+            args.allow_unsupported_sensor_images,
+            source_supported_image_count(&source),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            args.pcg_max_restarts,
+            total_rechecks,
+            total_failed_rechecks,
+            total_restarts,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else if args.pcg_relative_tolerance_explicit && !policy_explicit {
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
             summary.solver.as_str(),
@@ -450,6 +606,37 @@ fn run(args: &Args) -> Result<(), String> {
             manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
             source.points.len(),
             source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else if policy_explicit {
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest
+                .assignments
+                .values()
+                .map(|assignment| assignment.frame_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            source.points.len(),
+            source
+                .points
+                .iter()
+                .map(|point| point.observations.len())
+                .sum::<usize>(),
+            args.fixed_frame_id,
+            args.allow_unsupported_sensor_images,
+            source_supported_image_count(&source),
             args.pcg_max_iterations,
             args.pcg_relative_tolerance,
             PCG_TOLERANCE,
@@ -1351,7 +1538,32 @@ fn parse_points(contents: &str) -> Result<Vec<SourcePoint>, String> {
     Ok(points)
 }
 
+#[cfg(test)]
 fn validate_source_model(source: &SourceModel, manifest: &RigManifest) -> Result<(), String> {
+    validate_source_model_with_policy(source, manifest, 0, false)
+}
+
+fn image_has_landmark_support(image: &SourceImage) -> bool {
+    image
+        .keypoints
+        .iter()
+        .any(|keypoint| keypoint.point3d_id.is_some())
+}
+
+fn source_supported_image_count(source: &SourceModel) -> usize {
+    source
+        .images
+        .iter()
+        .filter(|image| image_has_landmark_support(image))
+        .count()
+}
+
+fn validate_source_model_with_policy(
+    source: &SourceModel,
+    manifest: &RigManifest,
+    fixed_frame_id: u64,
+    allow_unsupported_sensor_images: bool,
+) -> Result<(), String> {
     if source.images.len() != manifest.assignments.len() {
         return Err("source image count does not equal manifest assignment count".to_owned());
     }
@@ -1363,8 +1575,27 @@ fn validate_source_model(source: &SourceModel, manifest: &RigManifest) -> Result
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    if !frame_ids.contains(&0) {
-        return Err("frame 0 is required as the fixed BA pose".to_owned());
+    if !frame_ids.contains(&fixed_frame_id) {
+        if fixed_frame_id == 0 {
+            return Err("frame 0 is required as the fixed BA pose".to_owned());
+        }
+        return Err(format!(
+            "fixed frame {fixed_frame_id} is not present in the manifest"
+        ));
+    }
+    let mut frame_support = frame_ids
+        .iter()
+        .copied()
+        .map(|frame_id| (frame_id, false))
+        .collect::<BTreeMap<_, _>>();
+    for image in &source.images {
+        let assignment = source
+            .image_to_assignment
+            .get(&image.image_id)
+            .ok_or_else(|| format!("image {} has no manifest assignment", image.image_id))?;
+        if image_has_landmark_support(image) {
+            frame_support.insert(assignment.frame_id, true);
+        }
     }
     let frame_indices = frame_ids
         .iter()
@@ -1450,15 +1681,25 @@ fn validate_source_model(source: &SourceModel, manifest: &RigManifest) -> Result
             ));
         }
     }
-    for image in &source.images {
-        if !image
-            .keypoints
-            .iter()
-            .any(|keypoint| keypoint.point3d_id.is_some())
-        {
+    if !frame_support[&fixed_frame_id] {
+        return Err(format!(
+            "fixed frame {fixed_frame_id} has no landmark observations"
+        ));
+    }
+    if !allow_unsupported_sensor_images {
+        for image in &source.images {
+            if !image_has_landmark_support(image) {
+                return Err(format!(
+                    "source image {} has no landmark support",
+                    image.image_id
+                ));
+            }
+        }
+    }
+    for frame_id in &frame_ids {
+        if !frame_support[frame_id] {
             return Err(format!(
-                "source image {} has no landmark support",
-                image.image_id
+                "source frame {frame_id} has no landmark-supported image"
             ));
         }
     }
@@ -1662,7 +1903,16 @@ impl FrameUnionFind {
     }
 }
 
+#[cfg(test)]
 fn build_problem(source: &SourceModel, manifest: &RigManifest) -> Result<PreparedProblem, String> {
+    build_problem_with_anchor(source, manifest, 0)
+}
+
+fn build_problem_with_anchor(
+    source: &SourceModel,
+    manifest: &RigManifest,
+    fixed_frame_id: u64,
+) -> Result<PreparedProblem, String> {
     let mut rig_poses = BTreeMap::new();
     for (frame_id, image_index) in &source.sensor_zero_image_by_frame {
         let image = &source.images[*image_index];
@@ -1677,6 +1927,9 @@ fn build_problem(source: &SourceModel, manifest: &RigManifest) -> Result<Prepare
             },
         );
     }
+    if !rig_poses.contains_key(&fixed_frame_id) {
+        return Err(format!("fixed frame {fixed_frame_id} has no sensor 0 pose"));
+    }
     let first_camera = source
         .cameras
         .values()
@@ -1687,7 +1940,7 @@ fn build_problem(source: &SourceModel, manifest: &RigManifest) -> Result<Prepare
     for (frame_id, pose) in &rig_poses {
         ba.add_pose(*frame_id, pose.clone());
     }
-    ba.fix_pose(0);
+    ba.fix_pose(fixed_frame_id);
     for point in &source.points {
         ba.add_landmark(point.point3d_id, point.position);
     }
@@ -1713,16 +1966,33 @@ fn build_problem(source: &SourceModel, manifest: &RigManifest) -> Result<Prepare
     Ok(PreparedProblem { ba })
 }
 
+#[cfg(test)]
 fn publish_model(
     out_dir: &Path,
     source: &SourceModel,
     manifest: &RigManifest,
     prepared: &PreparedProblem,
 ) -> Result<(), String> {
+    publish_model_with_anchor(out_dir, source, manifest, prepared, 0)
+}
+
+fn publish_model_with_anchor(
+    out_dir: &Path,
+    source: &SourceModel,
+    manifest: &RigManifest,
+    prepared: &PreparedProblem,
+    fixed_frame_id: u64,
+) -> Result<(), String> {
     let source_frame_zero = source
         .sensor_zero_image_by_frame
-        .get(&0)
-        .ok_or_else(|| "frame 0 is required as the fixed BA pose".to_owned())?;
+        .get(&fixed_frame_id)
+        .ok_or_else(|| {
+            if fixed_frame_id == 0 {
+                "frame 0 is required as the fixed BA pose".to_owned()
+            } else {
+                format!("fixed frame {fixed_frame_id} has no sensor 0 image")
+            }
+        })?;
     let source_sensor_zero = &source.images[*source_frame_zero].pose.world_to_camera;
     let source_rig_zero = manifest.sensors[&0]
         .sensor_from_rig
@@ -1731,13 +2001,17 @@ fn publish_model(
     let optimized_frame_zero = prepared
         .ba
         .poses
-        .get(&0)
-        .ok_or_else(|| "BA omitted fixed frame 0".to_owned())?;
-    ensure_pose_unchanged(&source_rig_zero, &optimized_frame_zero.world_to_camera)?;
+        .get(&fixed_frame_id)
+        .ok_or_else(|| format!("BA omitted fixed frame {fixed_frame_id}"))?;
+    ensure_pose_unchanged(
+        &source_rig_zero,
+        &optimized_frame_zero.world_to_camera,
+        fixed_frame_id,
+    )?;
     atomic_write_model(out_dir, source, manifest, prepared)
 }
 
-fn ensure_pose_unchanged(source: &SE3, candidate: &SE3) -> Result<(), String> {
+fn ensure_pose_unchanged(source: &SE3, candidate: &SE3, fixed_frame_id: u64) -> Result<(), String> {
     let source_center = source.inverse().transform_point(&Point3::origin());
     let candidate_center = candidate.inverse().transform_point(&Point3::origin());
     let center_error = (source_center - candidate_center).norm();
@@ -1752,7 +2026,7 @@ fn ensure_pose_unchanged(source: &SE3, candidate: &SE3) -> Result<(), String> {
         || rotation_error > FIXED_POSE_TOLERANCE_DEG
     {
         return Err(format!(
-            "fixed frame 0 changed: center={center_error:.9} rotation={rotation_error:.9}deg"
+            "fixed frame {fixed_frame_id} changed: center={center_error:.9} rotation={rotation_error:.9}deg"
         ));
     }
     Ok(())
@@ -2024,6 +2298,54 @@ fn print_matrix_free_trace(result: &MatrixFreeBaResult, max_pcg_iterations: usiz
     }
 }
 
+fn print_matrix_free_restart_trace(result: &MatrixFreeBaRestartResult, max_pcg_iterations: usize) {
+    print_matrix_free_trace(&result.ba, max_pcg_iterations);
+    for iteration in &result.restart_iterations {
+        println!(
+            "pcg_restart_trace solver=matrix-free iteration={} pcg_iterations={} true_residual_rechecks={} failed_true_residual_rechecks={} restarts={} terminal_failure={}",
+            iteration.iteration,
+            option_usize(iteration.pcg_iterations),
+            iteration.true_residual_rechecks,
+            iteration.failed_true_residual_rechecks,
+            iteration.restarts,
+            iteration.terminal_failure.as_deref().unwrap_or("none"),
+        );
+    }
+}
+
+fn result_restart_rechecks(result: &OptimizationResult) -> usize {
+    match result {
+        OptimizationResult::MatrixFreeRestart(result) => result
+            .restart_iterations
+            .iter()
+            .map(|stats| stats.true_residual_rechecks)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn result_restart_failed_rechecks(result: &OptimizationResult) -> usize {
+    match result {
+        OptimizationResult::MatrixFreeRestart(result) => result
+            .restart_iterations
+            .iter()
+            .map(|stats| stats.failed_true_residual_rechecks)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn result_restart_count(result: &OptimizationResult) -> usize {
+    match result {
+        OptimizationResult::MatrixFreeRestart(result) => result
+            .restart_iterations
+            .iter()
+            .map(|stats| stats.restarts)
+            .sum(),
+        _ => 0,
+    }
+}
+
 fn option_usize(value: Option<usize>) -> String {
     value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
 }
@@ -2190,6 +2512,268 @@ mod tests {
         .unwrap();
         assert_eq!(default.pcg_relative_tolerance, PCG_TOLERANCE);
         assert!(!default.pcg_relative_tolerance_explicit);
+        assert_eq!(default.pcg_max_restarts, 0);
+        assert!(!default.pcg_max_restarts_explicit);
+        assert_eq!(default.fixed_frame_id, 0);
+        assert!(!default.fixed_frame_explicit);
+        assert!(!default.allow_unsupported_sensor_images);
+        assert!(!default.allow_unsupported_sensor_images_explicit);
+    }
+
+    #[test]
+    fn parses_explicit_anchor_and_unsupported_sensor_policy() {
+        let args = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--fixed-frame-id",
+                "4495",
+                "--allow-unsupported-sensor-images",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.fixed_frame_id, 4495);
+        assert!(args.fixed_frame_explicit);
+        assert!(args.allow_unsupported_sensor_images);
+        assert!(args.allow_unsupported_sensor_images_explicit);
+
+        for invalid in ["-1", "not-a-frame"] {
+            let error = parse_args(
+                [
+                    "compare",
+                    "--model",
+                    "model",
+                    "--rig-manifest",
+                    "rig.txt",
+                    "--solver",
+                    "direct",
+                    "--out-dir",
+                    "out",
+                    "--fixed-frame-id",
+                    invalid,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap_err();
+            assert!(error.contains("fixed-frame-id"));
+        }
+
+        let missing = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--fixed-frame-id",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(missing.contains("fixed-frame-id"));
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--fixed-frame-id",
+                "1",
+                "--fixed-frame-id",
+                "2",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let duplicate_policy = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--allow-unsupported-sensor-images",
+                "--allow-unsupported-sensor-images",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate_policy.contains("duplicate argument"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--fixed-frame-id",
+                "4495",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
+    }
+
+    #[test]
+    fn parses_bounded_pcg_restarts_only_for_matrix_free() {
+        let explicit = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(explicit.pcg_max_restarts, 1);
+        assert!(explicit.pcg_max_restarts_explicit);
+
+        for invalid in ["-1", "2", "NaN", "inf"] {
+            let error = parse_args(
+                [
+                    "compare",
+                    "--model",
+                    "model",
+                    "--rig-manifest",
+                    "rig.txt",
+                    "--solver",
+                    "matrix-free",
+                    "--out-dir",
+                    "out",
+                    "--pcg-max-restarts",
+                    invalid,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("pcg-max-restarts"),
+                "invalid={invalid:?} error={error}"
+            );
+        }
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+                "1",
+                "--pcg-max-restarts",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let missing = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(missing.contains("requires 0 or 1"));
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("only valid for matrix-free"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
     }
 
     #[test]
@@ -2548,6 +3132,91 @@ mod tests {
             sensor_zero_image_by_frame: BTreeMap::from([(0, 0)]),
         };
         (source, manifest)
+    }
+
+    fn unsupported_sensor_fixture() -> (SourceModel, RigManifest) {
+        let (mut source, mut manifest) = publication_fixture();
+        // Sensor 0 has no points in frame 0, while sensor 1 still supports
+        // that calibrated rig frame.  The explicit policy must preserve the
+        // sensor-0 image rather than dropping or relabeling it.
+        source.images[0].keypoints[0].point3d_id = None;
+        source.images[0].points2d_line = "0 0 -1".to_owned();
+        source.images.push(SourceImage {
+            image_id: 30,
+            camera_id: 1,
+            name: "frame1-sensor0.png".to_owned(),
+            pose: Pose::identity(),
+            keypoints: vec![SourceKeypoint {
+                xy: Point2::new(0.0, 0.0),
+                point3d_id: Some(7),
+            }],
+            points2d_line: "0 0 7".to_owned(),
+        });
+        source.image_indices.insert(30, 2);
+        source.image_to_assignment.insert(
+            30,
+            ImageAssignment {
+                frame_id: 1,
+                sensor_index: 0,
+            },
+        );
+        source.sensor_zero_image_by_frame.insert(1, 2);
+        source.points[0].track_tokens = "20 0 30 0".to_owned();
+        source.points[0].observations = vec![
+            ObservationRef {
+                image_id: 20,
+                keypoint_index: 0,
+            },
+            ObservationRef {
+                image_id: 30,
+                keypoint_index: 0,
+            },
+        ];
+        manifest.assignments.insert(
+            "frame1-sensor0.png".to_owned(),
+            ImageAssignment {
+                frame_id: 1,
+                sensor_index: 0,
+            },
+        );
+        (source, manifest)
+    }
+
+    #[test]
+    fn unsupported_sensor_image_requires_explicit_policy_but_keeps_frame_support() {
+        let (source, manifest) = unsupported_sensor_fixture();
+        let error = validate_source_model(&source, &manifest).unwrap_err();
+        assert!(error.contains("source image 10 has no landmark support"));
+        validate_source_model_with_policy(&source, &manifest, 1, true).unwrap();
+        let prepared = build_problem_with_anchor(&source, &manifest, 1).unwrap();
+        assert!(prepared.ba.fixed_poses.contains(&1));
+        assert!(!prepared.ba.fixed_poses.contains(&0));
+        assert!(
+            validate_source_model_with_policy(&source, &manifest, 99, true)
+                .unwrap_err()
+                .contains("fixed frame 99 is not present")
+        );
+
+        let output = std::env::temp_dir().join(format!(
+            "visloc-compare-unsupported-sensor-{}",
+            std::process::id()
+        ));
+        assert!(!output.exists());
+        publish_model_with_anchor(&output, &source, &manifest, &prepared, 1).unwrap();
+        let written_images =
+            parse_images(&fs::read_to_string(output.join("images.txt")).unwrap()).unwrap();
+        assert_eq!(written_images.len(), source.images.len());
+        assert_eq!(written_images[0].image_id, 10);
+        assert_eq!(written_images[0].name, "sensor0.png");
+        assert_eq!(written_images[0].keypoints[0].point3d_id, None);
+        fs::remove_dir_all(output).unwrap();
+
+        let mut unsupported_frame = source;
+        unsupported_frame.images[2].keypoints[0].point3d_id = None;
+        unsupported_frame.images[2].points2d_line = "0 0 -1".to_owned();
+        let error =
+            validate_source_model_with_policy(&unsupported_frame, &manifest, 0, true).unwrap_err();
+        assert!(error.contains("source frame 1 has no landmark-supported image"));
     }
 
     #[test]

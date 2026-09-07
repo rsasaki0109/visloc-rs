@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "experiment": "m8-openloris-matrix-free-atlas-pilot-v1",
+  "date": "2026-09-07",
+  "status": "preflight_rejected_no_ba_execution_no_promotion",
+  "purpose": "Check the actual10k atlas main-component driver boundary under a2GiB virtual-address-space limit. This is not a completed10k solver benchmark.",
+  "implementation_commit": "7b6056ab0568fcf9cc41f780ca6089cb72052a4f",
+  "merged_commit": "35df35fd7b00d21cb339c5d6ded8caf19ac1f48a",
+  "binary_sha256": "9eb784dc5ce56cf4c051adc87145680af4ef148f743c2bf80fe5431678732ff2",
+  "source": "examples/compare_rig_bundle_adjustment.rs",
+  "source_sha256": "16993280d5a58c7f8ccd4d51a12d70eea60d48cb9d088a892caff00b34818c6a",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1",
+  "command": "RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/main-relative-512-1.time prlimit --as=2147483648:2147483648 --core=0:0 --cpu=900:900 -- target/release/examples/compare_rig_bundle_adjustment --model /home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1/component-000 --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/component-000-rig-manifest.txt --solver matrix-free --pcg-max-iterations 512 --pcg-relative-tolerance 1e-8 --out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/main-relative-512-1/model > /home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/main-relative-512-1.log 2>&1",
+  "input": {
+    "source_evidence": "m8-openloris-atlas-connected-filtered-ba-v1.json",
+    "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1/component-000",
+    "model_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+      "points3D.txt": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14"
+    },
+    "source_rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt",
+    "source_rig_sha256": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943",
+    "derived_component_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/component-000-rig-manifest.txt",
+    "derived_manifest_sha256": "697229db44fa4cc79fee65c9607ec626205cb3254e19525513999df463d36803",
+    "derivation": "Keep all original header/sensor lines and only F lines whose image name occurs in component000 images.txt. Assert exact name-set equality and8988 images/4494 frames. Do not relabel any image/frame/sensor or alter calibration.",
+    "independent_streaming_support_inventory": [
+      {
+        "component": "component-000",
+        "images": 8988,
+        "keypoints": 4672106,
+        "observations": 1313899,
+        "frames": 4494,
+        "supported_frames": 4494,
+        "unsupported_frames": [],
+        "unsupported_images": [
+          8987
+        ],
+        "frame_range": [
+          0,
+          4493
+        ],
+        "selected_frame": [
+          {
+            "image_id": 8987,
+            "name": "cam1_008986.png",
+            "frame_id": 4493,
+            "sensor_index": 0,
+            "keypoints": 30,
+            "observations": 0
+          },
+          {
+            "image_id": 8988,
+            "name": "cam2_008987.png",
+            "frame_id": 4493,
+            "sensor_index": 1,
+            "keypoints": 77,
+            "observations": 10
+          }
+        ]
+      },
+      {
+        "component": "component-001",
+        "images": 1010,
+        "keypoints": 412966,
+        "observations": 124981,
+        "frames": 505,
+        "supported_frames": 505,
+        "unsupported_frames": [],
+        "unsupported_images": [],
+        "frame_range": [
+          4495,
+          4999
+        ],
+        "selected_frame": []
+      }
+    ],
+    "independent_point_track_inventory": [
+      {
+        "component": "component-000",
+        "fixed_frame_id": 0,
+        "points": 318222,
+        "observations": 1313899,
+        "free_cross_entries": 1313303,
+        "sum_free_cross_len_squared": 40517191,
+        "max_track_length": 716,
+        "cross_sensor_tracks": 281927,
+        "tracks_with_same_frame_stereo": 281079,
+        "min_observation_depth_m": 0.0000018217814077292616,
+        "max_observation_depth_m": 14900.749682097221
+      },
+      {
+        "component": "component-001",
+        "fixed_frame_id": 4495,
+        "points": 34615,
+        "observations": 124981,
+        "free_cross_entries": 124955,
+        "sum_free_cross_len_squared": 3124173,
+        "max_track_length": 252,
+        "cross_sensor_tracks": 31022,
+        "tracks_with_same_frame_stereo": 30995,
+        "min_observation_depth_m": 0.015132880404370552,
+        "max_observation_depth_m": 39.074860109895056
+      }
+    ],
+    "tail_manifest_prepared": {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/component-001-rig-manifest.txt",
+      "sha256": "cbbdd020c6310dbf8b1ca65fed34270098ecd778c9fff756379559d80c707e12",
+      "derivation": "Same exact source image-name membership selection; preserve frameIDs4495..4999 and all sensor calibration."
+    }
+  },
+  "limits": {
+    "address_space_bytes": 2147483648,
+    "cpu_seconds": 900,
+    "core_dump_bytes": 0,
+    "rayon_num_threads": 1,
+    "note": "RLIMIT_AS caps virtual address space, not just RSS. It is a conservative failure guard; a preflight abort proves no BA memory bound."
+  },
+  "result": {
+    "exit_status": 1,
+    "error": "source image 8987 has no landmark support",
+    "wall_seconds": 0.94,
+    "peak_rss_kib": 407032,
+    "solver_started": false,
+    "output_model_published": false,
+    "log_sha256": "f190ce4a7d1141327db94c55e3a91e8afa80715950b4c2127662839e0957e972",
+    "time_sha256": "53fcd378a0604933c29806d2d2ef5a1abbdae68d77dd7390421465adf596cc8a"
+  },
+  "interpretation": [
+    "The source's8987 supported images out of8988 poses is known and unchanged; all4494 rig frames have observations. Image8987/sensor0/frame4493 has0 observations, while image8988/sensor1 in the same calibrated rig frame has10.",
+    "The1k driver intentionally requires every image to have landmark support and a fixed frame0; it rejects this existing atlas boundary before constructing/solving BA. The tail uses frameIDs4495..4999 and also needs explicit anchor selection.",
+    "No image/observation was dropped, no ID was relabeled, no threshold was silently bypassed, and neither source model nor calibration changed.",
+    "407032KiB is only parse/preflight process peak, not solver peak or a2GiB10k pass. No timing/quality/README promotion.",
+    "Independent per-track depth scan finds main-component positive depths from1.8218e-6 to14900.75m; this large physical range is a conditioning clue, not a Hessian condition estimate or permission to remove observations. Both components contain many same-frame cross-sensor tracks; this supports metric observations but is not a full-rank proof."
+  ],
+  "next_driver_contract": {
+    "status": "planned_separate_from_current_restart_algorithm",
+    "anchor": "Add explicit fixed-frame selection with default0 preserved. Require chosen frame exists and is observed; solve each pre-existing component separately, anchor main0 and tail4495 without frame renumbering.",
+    "support": "Explicit opt-in can retain a sensor image without observations only when its shared calibrated rig frame is observed by another sensor. Still reject an unobserved rig frame or disconnected frame graph. Preserve the exact original image support and unsupported-image sets.",
+    "identity": "Retain all images, full POINTS2D, tracks, IDs, frame/sensor assignments and physical calibration; do not delete unsupported sensor rows as a workaround.",
+    "validation": "Default strict1k path remains exact; add same-frame-other-sensor support, unsupported entire-frame rejection, missing/invalid anchor and unchanged-output identity tests. Audit both actual components and score combined unchanged-component alignment.",
+    "promotion": "Direct numerical agreement is diagnostic, not a substitute for the user's COLMAP objective. Advancement uses complete support/depth/identity and measured COLMAP trajectory/reprojection/resource gates; no claim that a partial main-component run satisfies full10k or E2E."
+  }
+}
