@@ -151,6 +151,16 @@ does not change either final model. COLMAP's RMSE gate still fails. Next
 diagnose the main component's failed Schur preconditioner block using only
 bounded local state; do not discard observations or claim mapper/E2E speed
 from these local BA process times. Production defaults and README stay unchanged.
+The [local Schur diagnostic](../benchmarks/electro/m8-openloris-local-schur-block-diagnostic-v1.json)
+now confirms large cancellation/asymmetry around dominant point 13921. Two
+main dumps are exact, and diagnostic ON/OFF plus 1k OFF controls preserve the
+previous models/traces. The selected block becomes SPD before the global PCG
+succeeds, and a single-inverse high-precision correction proxy is not sufficient
+at every damping. Next test explicit column equilibration with scaled-coordinate
+LM damping as a labeled behavioral policy, retaining all observations and only
+linear-size scale vectors. See the formula and full-normal/1k/atlas gates in
+the [bounded BA record](openloris_atlas_bounded_ba.md). The diagnostic itself
+does not improve quality or close the M8–M10 goal.
 
 ## Historical M7 baseline
 

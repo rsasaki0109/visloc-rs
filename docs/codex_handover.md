@@ -5,6 +5,12 @@
 > 続行branchは `feat/m8-local-schur-block-diagnostic`。主成分のvariable-pose slot 191
 > （元frame 192）の6×6ブロックを明示診断し、算術順序・既定solver・全観測を維持したまま
 > 正定値性失敗と消去項の数値規模を確認します。診断だけで精度目標を達成したとは扱いません。
+> `bd3291a` の局所診断を実測済み。ON2回の18行dump・モデル・数値traceが一致し、
+> 主成分/1kのOFF対照もPR #83と一致しました。
+> [証跡](../benchmarks/electro/m8-openloris-local-schur-block-diagnostic-v1.json)。
+> 巨大な消去項の支配点は13921。低減衰で局所Schurが非正定値となり、局所SPD化後も
+> 全体PCG失敗が残ります。次は明示的な列スケーリング＋scaled座標でのLM減衰を、
+> 物理減衰の変更としてA/Bします。観測を除去せず、全normal複製なしで実装する計画です。
 
 > 最新追記（2026-09-08）: `feat/m8-bounded-pcg-residual-restart` の
 > `ca67e80` で上限1回・総反復数を延長しないPCG再開を実装し、1kの9本を測定済み。
