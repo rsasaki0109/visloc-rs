@@ -32,6 +32,45 @@ on GT or relax the failed gate.
 These local BA diagnostics do not close mapper/native-E2E, final tier/restart
 or 100k I/O gates, and do not authorize new README performance claims.
 
+PR #87 merged as `d91fc44` after all eight checks on `054b1ef`
+(run `34153720050`). The next solver diagnostic is a **single frozen-input
+COLMAP/Ceres reference**, preceded by a feasibility/parity check:
+
+1. Preserve the exact 1k state, 4,716 points, 130,900 observations, image and
+   keypoint identities, rig frames, intrinsics, sensor extrinsics and fixed
+   frame 0. Keep all XYZ variable, no robust loss and no filtering.
+2. Prove import/export identity and initial per-observation residual agreement,
+   including pixel conventions and Ceres's one-half cost convention. No
+   implicit default gauge or track-selection substitution is acceptable.
+3. Before execution, fix the available solver's 20-iteration, one-thread
+   settings, resource cap and stopping criteria. Record version/binary and
+   input hashes. Do not run a lambda/tolerance sweep or select settings on GT.
+4. Independently report common squared cost, trajectory RMSE/p95, full support,
+   depth, calibration/anchor, pose/point motion, wall and RSS. The existing
+   COLMAP mapper has 5,505 points/289,336 observations and is not this same-input
+   objective control. This local diagnostic cannot establish mapper/E2E speed.
+
+If another solver lowers the same objective while trajectory worsens, that
+supports an objective/observability mismatch, but does not prove its cause.
+If comparable cost accompanies a better trajectory, optimization-path analysis
+remains justified. A single nonconvex run cannot identify a unique cause;
+residual/input mismatch invalidates the comparison altogether.
+
+The primary [COLMAP BA source](https://github.com/colmap/colmap/blob/main/src/colmap/estimators/bundle_adjustment_ceres.cc)
+and [configuration API](https://colmap.github.io/pycolmap/pycolmap.html)
+provide the reference residual/calibration controls; the
+[Ceres covariance discussion](https://ceres-solver.readthedocs.io/latest/nnls_covariance.html)
+explains why rank/observability and gauge must be treated separately from
+residual size. These moving upstream sources were reviewed 2026-09-08, not
+claimed to be the exact installed binary's source.
+
+Read-only feasibility checks found the original COLMAP 4.2.0.dev0 container
+image `sha256:b809882552887b6471094dcadd2f2eb01656b010663564c43a5e7f04c0a08f2f`.
+Its BA CLI exposes fixed intrinsics/sensor extrinsics and iteration settings,
+but no explicit anchor option was found in help. Host pycolmap is absent and
+the image has no python3. No reference solve or installation has occurred:
+an exact configuration path must be established before measuring.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,
