@@ -1,5 +1,14 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新の続行（2026-09-08）: PR #88はhead `9ba5c3b` のCI8項目
+> （run `34154673044`）通過後、`23cbe88`へmerge済み。旧branch整理済み。
+> 現在は `feat/m8-frozen-ceres-reference`。既存のRust oracle fixtureを再利用し、
+> Luna Maxで独立Ceres参照を実装中です。COLMAP native pipelineの比較とは区別します。
+> 開発依存は専用container `visloc-m8-ceres-reference-v1` 内だけへ追加、host変更なし。
+> Ceres 2.2.0と全入力hashを固定し、初期残差parityを証明するまでsolveしません。
+> 今回のfixtureは既存1k全観測・rig/anchorを保持し、10kへ拡大しません。
+> 前turnは2件のPR統合と実測/図修正まで進捗あり。全体goalは引き続きactive。
+
 > 最新の続行（2026-09-08）: PR #87はhead `054b1ef` のCI8項目
 > （run `34153720050`）通過後、`d91fc44`へmerge済み。旧local/remote branchも整理済み。
 > 現在は `docs/electro-cdf-annotation`。Luna Maxで既存Electro図のCDF方向説明と

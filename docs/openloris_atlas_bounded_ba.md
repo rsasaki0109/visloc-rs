@@ -1714,3 +1714,50 @@ The result motivates distinguishing the observation objective and geometry
 from the optimization path before another solver policy is proposed. It does
 not prove the cause of the trajectory regression or that robust loss,
 calibration refinement or point removal would fix it. GT stays post-only.
+
+### Frozen Ceres reference contract (2026-09-08)
+
+The existing Rust-exported `VISLOC_BA_ORACLE_FIXTURE 1` contains the exact
+camera/rig transforms, fixed pose and complete ordered observation set needed
+by this diagnostic. Reuse the frozen 1k fixture, SHA256
+`a71ef3401ea6d75a06f18ded0d475ad48fd929202a64fecaeaa790ee964da1ea`,
+instead of introducing a COLMAP rig/frame reconstruction conversion first.
+This is a **standalone Ceres reference**, not COLMAP native BA or mapper
+performance. The existing mapper reference remains unchanged.
+
+Before the one fixed-configuration solve, independently verify all 500 poses,
+4,716 XYZ points, 130,900 observations, two PINHOLE cameras, fixed frame 0 and
+sensor extrinsics against the original model/manifest, including identities
+and ordering. No pixel offset is added. Emit every initial residual and depth
+and compare against an independent projection: per residual coordinate
+`abs(error) <= 1e-6 px + 1e-12 * abs(reference residual)`; depth tolerance
+`1e-9 m + 1e-12 * abs(reference depth)`; initial squared-cost tolerance
+`1e-6 + 1e-10 * abs(reference cost)`. These are arithmetic-parity tolerances,
+not relaxed trajectory gates. A mismatch invalidates the reference run.
+
+Use Ceres 2.2.0, AutoDiff PINHOLE rig factors, wxyz QuaternionManifold plus
+translation blocks, all XYZ variable, fixed camera/sensor transforms and
+both anchor pose blocks constant. No robust loss or observation filtering.
+Nonfinite/behind-camera candidates fail residual evaluation instead of
+dropping observations. Ceres minimizes one-half the squared cost; report the
+common full squared cost separately. The [Ceres tutorial](https://ceres-solver.readthedocs.io/latest/nnls_tutorial.html)
+and versioned [manifold](https://github.com/ceres-solver/ceres-solver/blob/2.2.0/include/ceres/manifold.h)
+and [solver options](https://github.com/ceres-solver/ceres-solver/blob/2.2.0/include/ceres/solver.h)
+define the reference conventions.
+
+Fix one thread, LM, initial trust-region radius 1e4, SPARSE_SCHUR with points
+in elimination group 0 and pose blocks in group 1, and max_num_iterations 20.
+Record all other versioned Ceres stopping/damping defaults and actual
+iterations; do not call them equivalent to visloc's PCG/LM stopping policy.
+No GT-selected lambda/tolerance sweep. Keep the diagnostic under a dedicated
+2 GiB container memory/swap limit, one CPU and a 900 s solve timeout; no
+explicit dense global normal, and no enlargement of the fixture to atlas.
+Development dependencies stay in this disposable, task-specific container.
+
+Publish only a validated model preserving all original image/keypoint/track
+tokens and camera bytes; independently audit fixed calibration/anchor,
+finite positive-depth state, full support and connectivity before scoring.
+Report identity failures or solver termination honestly, never repair the
+output silently. A single nonconvex reference is evidence about this
+objective, not proof of the cause or of general COLMAP parity. The prior
+adaptive 1k failure still prohibits adaptive atlas/default promotion.
