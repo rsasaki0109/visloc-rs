@@ -19,10 +19,16 @@ It distinguishes nine infeasible 1k candidates and one negative-rho candidate
 from small measured linear backward errors. Main alternates ten PCG caps
 with ten high-rho accepted updates, under the 2 GiB cap.
 
-Next, predeclare and A/B a separate opt-in step-quality-based damping policy.
-Hold observations, calibration, PCG tolerance/budget and post-only GT scoring
-fixed; require frozen 1k nonregression before advancing to larger tiers.
-Do not combine damping changes with an inexact-solve/tolerance experiment.
+The predeclared accepted-rho damping A/B is now measured on frozen 1k:
+[seven-run evidence](../benchmarks/electro/m8-openloris-adaptive-scaled-lm-v1.json).
+It accepts 15/20 steps rather than fixed-scaled's 10/20, but regresses
+RMSE/p95 to 0.029190/0.044521 m versus legacy MF's 0.026608/0.041100 m.
+All observations, calibration, support and repeatability checks pass; mean
+reprojection improves to 0.675153 px. The candidate fails the predeclared
+quality gate, so **no adaptive atlas run or default promotion is authorized**.
+Next, distinguish solver behavior from the frozen observation objective and
+COLMAP reference conditions; do not select another damping/tolerance sweep
+on GT or relax the failed gate.
 These local BA diagnostics do not close mapper/native-E2E, final tier/restart
 or 100k I/O gates, and do not authorize new README performance claims.
 

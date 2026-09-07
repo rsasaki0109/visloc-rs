@@ -16,7 +16,8 @@ mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
     BaResult, BaRigObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
-    BundleAdjustmentRefiner, GravityPrior, MatrixFreeBaColumnScalingIterationStats,
+    BundleAdjustmentRefiner, GravityPrior, MatrixFreeBaAdaptiveDampingIterationStats,
+    MatrixFreeBaAdaptiveDampingResult, MatrixFreeBaColumnScalingIterationStats,
     MatrixFreeBaColumnScalingOptions, MatrixFreeBaColumnScalingResult, MatrixFreeBaError,
     MatrixFreeBaIterationStats, MatrixFreeBaOptions, MatrixFreeBaRestartIterationStats,
     MatrixFreeBaRestartOptions, MatrixFreeBaRestartResult, MatrixFreeBaResult,

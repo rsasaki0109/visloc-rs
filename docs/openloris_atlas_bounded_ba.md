@@ -1601,3 +1601,116 @@ No diagnostic arithmetic failure occurred. All atlas candidates that reached
 nonlinear evaluation had zero nonprojectable observations before and after.
 The scaled 1k trajectory regression and pooled 10k COLMAP RMSE gap remain:
 the diagnostic does not alter either result or promote this solver policy.
+
+### Predeclared adaptive-damping A/B contract (2026-09-08)
+
+PR #86 merged as `d339093` after eight final-head checks on `b5ffa66`
+(run `34149951882`). Continue on `feat/m8-adaptive-scaled-lm-damping`.
+This is a production-capable opt-in policy experiment, not a default change.
+
+Change only the accepted-step multiplier to
+`u(rho) = max(1/3, 1 - (2*rho - 1)^3)` and
+`lambda_next = clamp(lambda_solve * u(rho), min_lambda, max_lambda)`.
+For finite `rho >= 1`, evaluate the saturated factor directly to avoid cubic
+overflow. Keep the existing rejection/linear-failure increase factor (10 in
+the experiment). The accepted-step formula follows the
+[Ceres LM strategy source](https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/levenberg_marquardt_strategy.cc)
+(reviewed 2026-09-08), but Ceres also adapts its rejection multiplier and uses
+different linear-solve stopping rules. This isolated policy is not a Ceres
+implementation or a claim of equivalent behavior.
+
+Use the current scaled system's undamped squared-cost prediction and the
+same zero-nonprojectable rho contract as PR #86. The new opt-in entry must
+reject initially nonprojectable input before mutation. A finite candidate
+with invalid/nonpositive prediction or unavailable rho is an explicit
+candidate rejection with rollback, not a fabricated linear failure. Existing
+cost/feasibility gates remain necessary. Require strictly positive finite rho
+for acceptance: division of a positive finite decrease by a large prediction
+can underflow to zero and must reject, not reach an accepted-update assertion.
+For linear failures, uncomputed candidate cost/feasibility gates and the
+post-candidate nonprojectable count are unavailable, not fabricated values.
+Log actual solve lambda separately
+from the next lambda; retain finite bounds and bounded termination.
+
+Compute only the prediction scalar from borrowed blocks and deltas, after
+back-substitution and before physical unscaling. Do not enable full residual/
+backward-error scans merely to use adaptive damping. No additional model or
+normal clone, dense global matrix, full residual scratch or per-point history.
+Keep any same-pose cross aggregation bounded by one track and preserve its
+coefficient contribution order. Old APIs, struct shapes, defaults and logs
+remain unchanged; new API/results and CLI selection are additive. The CLI
+requires explicit column scaling and rejects direct/oracle/export/nonzero
+restart combinations.
+
+The frozen 1k comparison uses PCG 512 iterations, relative tolerance 1e-8,
+absolute tolerance 1e-12, restart zero, initial lambda 1e-4, bounds 1e-9–1e12,
+20 LM attempts and one Rayon thread. Keep every input observation and fixed
+rig calibration/anchor. Freeze source and binary hashes before timed runs,
+with no concurrent local compilation. Legacy MF and direct controls must
+match their earlier outputs; fixed-scaled and adaptive arms each run twice.
+An adaptive debug-ON control must preserve OFF models and numerical traces.
+
+The fixed-scaled arm isolates the policy change but is **not** a passing
+quality reference. Before any adaptive atlas run, require 1k RMSE no worse
+than legacy MF's 0.026608055174816774 m and p95 no worse than
+0.04109998478546261 m; report direct and COLMAP alongside it. Require identical
+image/keypoint/track identities and counts, all 1,000 supported images and 500
+supported rig frames in one component, fixed cameras/rig/anchor, finite state,
+zero nonpositive depths, and mean observation reprojection no worse than
+legacy MF's 0.691588658326868 px. Report maxima and point movement separately;
+the input filter thresholds are not invented post-BA maximum-error gates.
+Also require same-observation final objective no worse than legacy MF and
+repeatability of outputs/traces. GT stays post-only: no damping/tolerance
+sweep selected on trajectory score. Report timing and RSS without claiming
+mapper/native-E2E acceleration. Failure of this 1k gate stops atlas progression
+for this candidate and requires a new evidence-based decision, not a relaxed
+threshold or README promotion.
+
+### Adaptive-damping result: 1k gate failed (2026-09-08)
+
+The [seven-run evidence](../benchmarks/electro/m8-openloris-adaptive-scaled-lm-v1.json)
+uses the `005dbcc` production build, SHA256
+`58dfc58ff1ce821f92547b00dc2627efa6a82978d1dad85444313858972ec5b6`.
+Later `75df6e5` and `7e25dee` only strengthen tests; no release rebuild occurred.
+The input, PCG policy, initial damping, 20-attempt budget and single thread
+were held fixed. All runs completed serially without overlapping compilation.
+
+| 1k arm | Wall s | Peak RSS KiB | Accepted / attempts | RMSE / p95 m | Mean observation error px |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Legacy MF | 24.11 | 84,424 | 3 / 20 | 0.026608 / 0.041100 | 0.691589 |
+| Direct | 55.57 | 161,916 | 5 / 20 | 0.026519 / 0.040989 | 0.689260 |
+| Fixed-scaled | 27.93 / 27.67 | 84,628 / 84,840 | 10 / 20 | 0.028550 / 0.043791 | 0.675819 |
+| Adaptive-scaled | 25.83 / 25.54 | 84,860 / 84,852 | 15 / 20 | 0.029190 / 0.044521 | 0.675153 |
+| Existing COLMAP mapper reference | Not a same-input BA timing | — | — | 0.027969 / 0.042266 | 0.810207 |
+
+Adaptive debug ON takes 26.97 s / 84,864 KiB. Its three model files and all
+LM/PCG/scaling/adaptive traces match OFF and the OFF repeat exactly. Legacy,
+direct and fixed-scaled models and prior numerical traces match PR #85.
+The reference quality numbers carry over those exact bytes; adaptive GT,
+geometry and full identity checks were independently recomputed. Times here
+include model loading/export but exclude frontend, mapping and atlas creation.
+They are not mapper/native-E2E claims or a speed comparison with COLMAP.
+
+All 20 adaptive PCG solves succeed. Five candidates (iterations 2, 8, 10, 13,
+16) increase nonprojectable counts and are rejected with unavailable rho;
+the remaining 15 pass both gates. Prediction-only scalars agree with the
+separate full-quality diagnostic, and all accepted/rejected damping factors
+and actual-to-next lambda chains are independently verified. The raw CLI
+uses `unknown` for absent optional values; audit parser v2 normalizes this to
+JSON null and decodes quoted reasons without changing any solver output.
+
+Final cost is 113550.2193390116, but the trajectory gate fails both RMSE and
+p95. All 1,000 supported images, 500 supported rig frames in one component,
+4,716 points, 130,900 observations and 361,170 keypoints remain. Camera bytes,
+full image/keypoint/track identity and order are preserved; fixed sensor
+extrinsics and anchor frame 0 pass the serialized geometry tolerance, and no
+nonpositive depth remains. Maximum observation error is 5.101116 px and
+maximum landmark movement is 230.771019 m; these are reported independently,
+not hidden by mean error or reinterpreted as invented post-BA filter gates.
+
+**Do not run adaptive atlas or promote the default/README.** Fewer rejected
+steps and lower reprojection cost do not establish better trajectory accuracy.
+The result motivates distinguishing the observation objective and geometry
+from the optimization path before another solver policy is proposed. It does
+not prove the cause of the trajectory regression or that robust loss,
+calibration refinement or point removal would fix it. GT stays post-only.
