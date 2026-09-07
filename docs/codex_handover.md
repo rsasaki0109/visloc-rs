@@ -1,5 +1,19 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新実測（2026-09-08）: Luna Maxのadaptive scaled LMを `005dbcc` の認証済み
+> binaryで7本測定。`75df6e5` / `7e25dee` はtest-only補強で再buildなし。
+> 新方式は1kでPCG20/20成功・LM15/20受理、25.83 / 25.54 s、peak RSS
+> 84,860 / 84,852 KiB。mean再投影0.675153 pxへ改善した一方、
+> RMSE/p95は0.029190 / 0.044521 mへ悪化し、事前のlegacy非回帰条件に未達。
+> **adaptive atlasは実行せず、既定solver/READMEへ昇格しません。**
+> 全1,000画像・500支持rig frame・4,716点・130,900観測・361,170 keypointを維持。
+> 反復とdebug ON/OFFのモデル/数値trace一致、従来/直接解法/scaled対照もPR #85と一致。
+> [7本の証跡](../benchmarks/electro/m8-openloris-adaptive-scaled-lm-v1.json)。
+> BA57件（1 ignored）＋CLI19件、関連Python46件が通過。CI/PRはこれから。
+> 次は減衰/tolerance sweepではなく、同一観測目的関数とCOLMAP側条件の切り分け。
+> READMEの既存CDF図注「lower curve」は方向が逆なので、別のnative生成修正で扱います。
+> M8–M10全体goalは未完了です。
+
 > 最新の続行（2026-09-08）: PR #86は最終head `b5ffa66` のCI8項目
 > （run `34149951882`）通過後、`d339093`へmerge済み。local/remote旧branchも整理済み。
 > 現在は `feat/m8-adaptive-scaled-lm-damping`。Luna Maxで受理後の減衰係数を
