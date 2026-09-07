@@ -34,6 +34,26 @@
     "track_connected_component_sizes": [500],
     "track_connected_component_frame_ranges": [[0, 499]]
   },
+  "independent_input_trajectory_rescore": {
+    "scorer": "scripts/score_openloris_model.py",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+    "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+    "max_interpolation_gap_seconds": 0.1,
+    "models": 1,
+    "registered_images": 1000,
+    "gt_scored_images": 308,
+    "rmse_m": 0.026703233595482503,
+    "p95_m": 0.04134610748761521,
+    "median_m": 0.024097695374255795,
+    "max_m": 0.08045566543261787,
+    "matches_historical_input_score": true,
+    "optimization_or_candidate_run_performed": false
+  },
   "comparison_contract": {
     "solver_only_change": true,
     "keep_all_input_observations_and_their_order": true,
