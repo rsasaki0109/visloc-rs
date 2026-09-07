@@ -70,3 +70,14 @@ source audits and durable locations are in
 [source evidence](../benchmarks/electro/m8-openloris-atlas-source-audit.json).
 Exact output hashes, archived executable hash, resource measurements and scores
 are in [fixed-pose evidence](../benchmarks/electro/m8-openloris-atlas-fixed-pose-v1.json).
+
+For an independent read-only check of either engine's serialized PINHOLE model:
+
+```bash
+python3 scripts/audit_colmap_pinhole_model.py /path/to/component-000 /path/to/component-001
+python3 -m unittest discover -s tests -p test_audit_colmap_pinhole_model.py
+```
+
+The auditor rejects unsupported camera models and malformed references. It
+reports nonpositive-depth counts and stored-versus-recomputed mean error;
+callers must inspect those values, not treat process success as a quality pass.
