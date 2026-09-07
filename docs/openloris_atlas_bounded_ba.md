@@ -253,3 +253,39 @@ every removed observation/track, preserve supported image/frame sets and
 prevent component splits. That arm is not implemented or accepted by this
 plan alone. Both trajectory gates and the full M8–M10 performance/nonregression
 requirements remain open.
+
+### Connected strict control result
+
+Both pre-BA checkpoints match the frozen repair output across all six files.
+The run without checkpoint output also produces identical final main files,
+so checkpoint serialization does not change the BA result. The default-off
+control remains byte-identical to fixed-pose integration; the tail is unchanged.
+
+Strict BA again accepts 8/150 main windows and 0/17 tail windows. Of the 142
+main rejections, the first failing track exceeds the max-4-px gate in 117
+windows and the mean-2-px gate in 25. Windows starting at 1950 and 1980 remain
+rejected despite the repaired graph. Main/tail connectivity and all support
+are preserved, but RMSE/p95 worsen to 0.391408/0.643460 m. The strict result
+is not promoted. Its 132.07 s / 525,412 KiB main measurement includes the
+checkpoint and is only a shared-machine refinement pilot.
+See [connected strict evidence](../benchmarks/electro/m8-openloris-atlas-connected-strict-ba-v1.json).
+
+### Separate post-BA filtering arm
+
+The next explicitly named mode keeps the solver, window schedule, calibration
+and resource caps unchanged. It first checks finite, non-increasing cost on
+the **entire original selected observation set**, before any removal. Only
+then may it discard observations failing projection/depth/max-4-px checks.
+Tracks with fewer than two observations or failing the unchanged DLT/mean-2-px/
+max-4-px/depth checks are removed with complete accounting.
+
+On the final retained keys, require independently recomputed post-filter cost
+to be no larger than the **pre-BA cost on those same keys**. Log full pre/post
+BA costs and retained pre-BA/post-filter costs separately. Require the same
+supported image/frame sets and no component split. Stage only sparse candidate
+updates and removal IDs, apply in place only after all gates pass, and validate
+the entire model before publishing. No GT-based selection or threshold sweep.
+
+This isolates filtering, inspired by the upstream local-BA/filter ordering and
+existing visloc rig filtering. It does not reproduce COLMAP's complete
+merge/completion policy or establish a quality improvement before measurement.

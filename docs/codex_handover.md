@@ -24,6 +24,9 @@
 > 0.391075/0.643107 mへ改善しましたがCOLMAP精度ゲートは未達です。
 > 現在の土台は[boundary修復モデル](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json)。
 > 次はこの連結済みモデルで観測ベースの有界な精度改善を検証します。
+> 続く同一runのstrict BAは、BA直前checkpoint完全一致を確認したうえで
+> RMSE/p95が0.391408/0.643460 mに悪化し非昇格。現在は除去前全観測のcost検査・
+> 支持/連結性維持・除去数会計を備えた別モードのpost-BA filteringを実装中です。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

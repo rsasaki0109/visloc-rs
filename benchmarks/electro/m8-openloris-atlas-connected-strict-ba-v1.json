@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "strict_connected_ba_rejected_for_trajectory_regression",
+  "implementation_commit": "c5723e1",
+  "source_sha256": "d47f487a4b071c41bbc46a6a403e47c265d5bc6b466cdf3a3e2446a28af38bdb",
+  "binary_sha256": "3cab452d3beef33e904fee98c9f6fb95c4978716a5bb3b7b885e50154f744051",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/connected-strict-ba-v1",
+  "control": {
+    "pipeline": "Source integration -> unsupported-frame recovery -> boundary repair -> pre-BA checkpoint -> unchanged strict joint rig BA",
+    "main_and_tail_checkpoints_six_files_byte_identical_to_boundary_repair_v1": true,
+    "checkpoint_changes_ba_input_order": false,
+    "without_checkpoint_main_six_files_byte_identical_to_with_checkpoint": true,
+    "default_flag_off_six_files_byte_identical_to_fixed_pose_v1": true,
+    "tail_final_six_files_byte_identical_to_boundary_repair_v1": true,
+    "gt_used_for_mapping_or_selection": false,
+    "scoring_alignment_changed": false
+  },
+  "strict_policy": {
+    "window_frames": 60,
+    "stride_frames": 30,
+    "max_iterations": 20,
+    "landmark_cap": 16384,
+    "observation_cap": 262144,
+    "referenced_pose_cap": 1024,
+    "calibration_fixed": true,
+    "all_selected_observations_included": true,
+    "outside_window_poses_fixed": true,
+    "observation_filtering": false,
+    "geometry_gates": "positive depth, min 2 observations, mean <= 2 px, max <= 4 px",
+    "independent_full_selected_cost_nonincreasing_required": true
+  },
+  "result": {
+    "main_windows_considered": 150,
+    "main_windows_accepted": 8,
+    "main_windows_rejected": 142,
+    "rejected_window_first_failure": {"max_above_4px": 117, "mean_above_2px": 25},
+    "accepted_window_start_frames": [630, 660, 3750, 3840, 3870, 4050, 4170, 4260],
+    "tail_windows_considered": 17,
+    "tail_windows_accepted": 0,
+    "repaired_boundary_windows_1950_and_1980_accepted": false,
+    "image_poses": 9998,
+    "supported_images": 9997,
+    "supported_rig_frames": 4999,
+    "main_track_component_sizes": [4494],
+    "tail_track_component_sizes": [505],
+    "landmarks": 353794,
+    "observations": 1453320,
+    "aggregate_independent_mean_reprojection_px": 0.6319935341936267,
+    "max_reprojection_px": 3.9997751583746717,
+    "nonpositive_depth_observations": 0,
+    "fixed_sensor_extrinsics_valid": true,
+    "bidirectional_references_valid": true,
+    "main_max_stored_mean_difference_px": 0.0002773622734828299
+  },
+  "trajectory": {
+    "baseline_rmse_m": 0.3910753333289945,
+    "baseline_p95_m": 0.643107449141167,
+    "strict_ba_rmse_m": 0.391407546117924,
+    "strict_ba_p95_m": 0.6434603651354734,
+    "colmap_rmse_gate_m": 0.3843065335437528,
+    "colmap_p95_gate_m": 0.6386693943260212,
+    "both_trajectory_gates_pass": false
+  },
+  "verification": {
+    "example_tests_passed": 34,
+    "slam_library_tests_passed": 645,
+    "example_and_slam_library_clippy_warnings_denied": "pass",
+    "full_workspace_local_tests": "Not passed: attempt exhausted disk capacity. Only cargo clean --profile dev was used to remove 20.5 GiB of regenerable dev artifacts; source, datasets and release artifacts were preserved. Full-workspace validation is delegated to CI.",
+    "main_wall_s_with_checkpoint": 132.07,
+    "main_peak_rss_kib": 525412,
+    "tail_wall_s_with_checkpoint": 12.00,
+    "tail_peak_rss_kib": 77700,
+    "timing_scope": "Shared-machine integration/recovery/repair/checkpoint/BA pilot; not mapper or native E2E and not a COLMAP speed claim."
+  },
+  "hashes": {
+    "main_images": "6e4853c880a942b50a443d02f903a9f23de2bea17108e6115cf497b9039d093f",
+    "main_points": "06f5ce2cd6e3cfab7e1e75b345a211f3cd5f48cb6a7033f2ba1e5c823e948448",
+    "score_json": "9c978879f0de92d245dc4283a651872fffade71ce8a7bc5cf21550d9a42becf0",
+    "independent_audit_json": "2124f7e0e906b54b34c8fd2efef3b1694d0629a22dc2802c66eb68efae332917"
+  },
+  "decision": "Do not promote strict BA. Test a separately named post-BA filtering arm, preserving pre-filter full-observation cost checks, explicit removal accounting, support sets and component connectivity. Keep boundary-repair-v1 as the connected refinement baseline and retain all original M8-M10 acceptance gates."
+}
