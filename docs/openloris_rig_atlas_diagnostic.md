@@ -320,6 +320,13 @@ it does not by itself establish correct integrated geometry or the memory gate.
 The existing COLMAP text writer emits zero in the points3D `ERROR` field.
 Consequently, a merged model's quality must be recomputed from actual camera
 projection and observation pixels, not read from those placeholder errors.
+COLMAP's [upstream `UpdatePoint3DErrors` implementation](https://github.com/colmap/colmap/blob/main/src/colmap/scene/reconstruction.cc)
+stores the arithmetic mean of Euclidean reprojection errors per point, not
+the RMS. Its [format documentation](https://colmap.github.io/format.html#points3d-txt)
+also notes that stored errors are updated after global BA. The independent
+frozen-control audit gives 0.9030031049631768 px directly versus
+0.9030031518617252 px from stored per-point values; the historical gate is
+unchanged, and both comparisons should be reported for integrated output.
 An independent read-only projection audit of window 650 confirms this:
 40,754 points / 162,892 observations have bidirectionally consistent tracks,
 zero non-positive-depth observations, and mean error

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "real_landmark_model_baseline_quality_fail",
+  "source_evidence": "m8-openloris-atlas-source-audit.json",
+  "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/fixed-pose-v1",
+  "code": {
+    "base_commit": "251a35b",
+    "example_was_uncommitted": true,
+    "example_source_sha256": "badd51d6f0c2ca1c78f7335d54a141972035f3b491552eaae41659d24f9a99a9",
+    "archived_release_binary_sha256": "93efe703788637b0caec337029cfc375c6ff628fb786d849506e2038d7f3ae08"
+  },
+  "policy": {
+    "atlas": "L newest, no metric SE3 optimization",
+    "poses_fixed": true,
+    "independent_components_processed_separately": true,
+    "maximum_dlt_sample_observations": 64,
+    "evaluate_all_track_observations": true,
+    "maximum_mean_track_reprojection_px": 2.0,
+    "maximum_individual_reprojection_px": 4.0,
+    "track_union": "Deterministic conflict-free multi-owner union; transactional same-image/different-keypoint rejection"
+  },
+  "components": [
+    {
+      "id": 0,
+      "image_poses": 8988,
+      "supported_images": 8986,
+      "rig_frames": 4494,
+      "supported_rig_frames": 4493,
+      "unsupported_rig_frame_ids": [4493],
+      "landmarks": 319137,
+      "observations": 1327572,
+      "independent_mean_reprojection_px": 0.6433042158124566,
+      "independent_max_reprojection_px": 3.9997751603614966,
+      "max_stored_mean_error_difference_px": 0.000004546919823544826,
+      "process_wall_s": 10.36,
+      "peak_rss_kib": 508296,
+      "images_sha256": "23fdb41b8603bb77cd29aa2cb500c22cb91ce0f7c09814d24e06ecd47956df37",
+      "points3D_sha256": "607e259cdb6623bf4626c54bf409bc9ac9459e7228a5eec74a4a1e8022917eb3"
+    },
+    {
+      "id": 1,
+      "image_poses": 1010,
+      "supported_images": 1010,
+      "rig_frames": 505,
+      "supported_rig_frames": 505,
+      "unsupported_rig_frame_ids": [],
+      "landmarks": 34650,
+      "observations": 125633,
+      "independent_mean_reprojection_px": 0.5255479115927202,
+      "independent_max_reprojection_px": 3.9963254056753867,
+      "max_stored_mean_error_difference_px": 3.080058197379998e-8,
+      "process_wall_s": 3.60,
+      "peak_rss_kib": 77056,
+      "images_sha256": "96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff",
+      "points3D_sha256": "33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c"
+    }
+  ],
+  "aggregate": {
+    "image_poses": 9998,
+    "supported_images": 9996,
+    "supported_rig_frames": 4998,
+    "landmarks": 353787,
+    "observations": 1453205,
+    "retained_fraction_of_unique_source_observations": 0.8302733345026747,
+    "independent_observation_weighted_mean_reprojection_px": 0.6331239055547585,
+    "component_weighted_ate_rmse_m": 0.39177824798683475,
+    "component_weighted_ate_p95_m": 0.6436978626265533,
+    "integration_process_wall_s_sum": 13.96,
+    "integration_peak_rss_kib_max": 508296,
+    "nonpositive_depth_observations": 0,
+    "bidirectional_track_references_valid": true
+  },
+  "verification": {
+    "example_tests_passed": 13,
+    "example_clippy_warnings_denied": true,
+    "release_build": true,
+    "independent_output_projection_audit": true
+  },
+  "decision": "Not promoted: frame 4493 loses all 14 source observations, and fixed trajectory still misses both COLMAP ATE gates. Low mean reprojection alone is insufficient.",
+  "limitations": [
+    "Integration-only resource measurement excludes source window mapping and frontend phases",
+    "Single measured run per component, not the final three-run performance comparison",
+    "9,998 pose rows do not prove 9,998 observation-supported images",
+    "No pose BA or pose recovery has yet been applied"
+  ]
+}

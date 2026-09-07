@@ -5,7 +5,10 @@
 > [rig-atlas診断記録](openloris_rig_atlas_diagnostic.md)。以下は9月1日時点の
 > 履歴です。M8は未完了で、最新の軌跡のみの診断は9,998画像、
 > RMSE 0.391778 m / p95 0.643698 m。COLMAPの精度ゲートと
-> 統合ランドマークモデルの再投影評価はまだ通過していません。
+> 統合ランドマークモデルの品質ゲートはまだ通過していません。
+> [実ランドマーク統合](openloris_atlas_landmark_integration.md)は平均再投影
+> 0.633124 pxですが、frame 4493の観測消失で支持画像は9,996枚です。
+> 次はGTを使わない有界なpose回復と観測ベースの改善です。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
