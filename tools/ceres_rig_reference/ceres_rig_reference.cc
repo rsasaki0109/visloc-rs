@@ -7,6 +7,7 @@
 // checked.
 
 #include <ceres/ceres.h>
+#include <ceres/product_manifold.h>
 #include <ceres/rotation.h>
 #include <ceres/version.h>
 
@@ -44,6 +45,10 @@
 namespace fs = std::filesystem;
 
 namespace ceres_rig_reference {
+
+static_assert(CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR == 2 &&
+                  CERES_VERSION_REVISION == 0,
+              "the frozen reference requires Ceres 2.2.0");
 
 constexpr std::size_t kMaxCameras = 16;
 constexpr std::size_t kMaxPoses = 512;
@@ -124,8 +129,23 @@ struct EvaluationSummary {
 struct Cli {
   bool self_test = false;
   bool evaluate_only = false;
+  bool solve = false;
   fs::path fixture;
   fs::path dump;
+  fs::path state;
+};
+
+struct SolveParameters {
+  std::vector<std::array<double, 7>> poses;
+  std::vector<std::array<double, 3>> landmarks;
+};
+
+struct SolveResult {
+  SolveParameters parameters;
+  EvaluationSummary initial_evaluation;
+  EvaluationSummary final_evaluation;
+  ceres::Solver::Options solver_options;
+  ceres::Solver::Summary solver_summary;
 };
 
 // This is the single residual functor shared by evaluate-only and the future
@@ -205,20 +225,28 @@ struct CeresObservationEvaluation {
   double eigen_depth = 0.0;
 };
 
-CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
-                                             const Observation& observation,
-                                             const Landmark& landmark,
-                                             const Camera& camera) {
+Eigen::Vector3d EigenTransformPoint(const double* pose_parameters,
+                                    const Observation& observation,
+                                    const double* point_parameters) {
+  const Eigen::Quaterniond pose_rotation(
+      pose_parameters[0], pose_parameters[1], pose_parameters[2],
+      pose_parameters[3]);
+  const Eigen::Vector3d pose_translation(
+      pose_parameters[4], pose_parameters[5], pose_parameters[6]);
+  const Eigen::Vector3d point_world(
+      point_parameters[0], point_parameters[1], point_parameters[2]);
+  return observation.sensor_from_rig_rotation *
+             (pose_rotation * point_world + pose_translation) +
+         observation.sensor_from_rig_translation;
+}
+
+CeresObservationEvaluation EvaluateWithCeresParameters(
+    const double* pose_parameters,
+    const double* point_parameters,
+    const Observation& observation,
+    const Camera& camera) {
   const std::unique_ptr<ceres::CostFunction> cost =
       MakeRigReprojectionCost(camera, observation);
-  const Eigen::Quaterniond& rotation = pose.rotation;
-  const double pose_parameters[7] = {
-      rotation.w(), rotation.x(), rotation.y(), rotation.z(),
-      pose.translation.x(), pose.translation.y(), pose.translation.z(),
-  };
-  const double point_parameters[3] = {
-      landmark.position.x(), landmark.position.y(), landmark.position.z(),
-  };
   RigReprojectionCost transform_functor;
   transform_functor.intrinsics = camera.intrinsics;
   transform_functor.observed = observation.xy;
@@ -242,11 +270,28 @@ CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
   CeresObservationEvaluation result;
   result.residual = Eigen::Vector2d(residual[0], residual[1]);
   result.depth = point_sensor[2];
-  result.eigen_depth = TransformPoint(pose, observation, landmark).z();
+  result.eigen_depth =
+      EigenTransformPoint(pose_parameters, observation, point_parameters).z();
   if (!std::isfinite(result.depth) || !(result.depth > 0.0)) {
     throw FixtureError("Ceres AutoDiff accepted an invalid depth");
   }
   return result;
+}
+
+CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
+                                             const Observation& observation,
+                                             const Landmark& landmark,
+                                             const Camera& camera) {
+  const Eigen::Quaterniond& rotation = pose.rotation;
+  const double pose_parameters[7] = {
+      rotation.w(), rotation.x(), rotation.y(), rotation.z(),
+      pose.translation.x(), pose.translation.y(), pose.translation.z(),
+  };
+  const double point_parameters[3] = {
+      landmark.position.x(), landmark.position.y(), landmark.position.z(),
+  };
+  return EvaluateWithCeresParameters(pose_parameters, point_parameters,
+                                     observation, camera);
 }
 
 std::string Trim(const std::string& input) {
@@ -763,6 +808,110 @@ EvaluationSummary Evaluate(const Fixture& fixture, std::ostream& dump) {
   return summary;
 }
 
+class NullStreamBuffer final : public std::streambuf {
+ protected:
+  int_type overflow(int_type character = traits_type::eof()) override {
+    return traits_type::not_eof(character);
+  }
+};
+
+SolveParameters MakeSolveParameters(const Fixture& fixture) {
+  SolveParameters parameters;
+  parameters.poses.reserve(fixture.poses.size());
+  for (const Pose& pose : fixture.poses) {
+    const Eigen::Quaterniond& rotation = pose.rotation;
+    parameters.poses.push_back({rotation.w(), rotation.x(), rotation.y(),
+                                rotation.z(), pose.translation.x(),
+                                pose.translation.y(), pose.translation.z()});
+  }
+  parameters.landmarks.reserve(fixture.landmarks.size());
+  for (const Landmark& landmark : fixture.landmarks) {
+    parameters.landmarks.push_back(
+        {landmark.position.x(), landmark.position.y(), landmark.position.z()});
+  }
+  return parameters;
+}
+
+EvaluationSummary EvaluateParameterState(const Fixture& fixture,
+                                         const SolveParameters& parameters,
+                                         std::ostream* dump,
+                                         const char* observation_prefix) {
+  if (parameters.poses.size() != fixture.poses.size() ||
+      parameters.landmarks.size() != fixture.landmarks.size()) {
+    throw FixtureError("parameter state dimensions do not match fixture");
+  }
+  EvaluationSummary summary;
+  summary.observation_count = fixture.observations.size();
+  if (dump != nullptr) {
+    *dump << std::setprecision(17);
+  }
+  for (std::size_t index = 0; index < fixture.observations.size(); ++index) {
+    const Observation& observation = fixture.observations[index];
+    const std::size_t pose_index = fixture.pose_index.at(observation.frame_id);
+    const std::size_t landmark_index =
+        fixture.landmark_index.at(observation.landmark_id);
+    const Camera& camera = fixture.cameras.at(
+        fixture.camera_index.at(observation.camera_id));
+    const CeresObservationEvaluation ceres = EvaluateWithCeresParameters(
+        parameters.poses[pose_index].data(),
+        parameters.landmarks[landmark_index].data(), observation, camera);
+    const Eigen::Vector3d point_sensor = EigenTransformPoint(
+        parameters.poses[pose_index].data(), observation,
+        parameters.landmarks[landmark_index].data());
+    if (!point_sensor.allFinite() || !(point_sensor.z() > 0.0)) {
+      throw FixtureError("solve state has nonfinite or nonpositive depth at " +
+                         std::string(observation_prefix) + " observation " +
+                         std::to_string(index));
+    }
+    const Eigen::Vector2d eigen_residual(
+        camera.intrinsics[0] * point_sensor.x() / point_sensor.z() +
+            camera.intrinsics[2] - observation.xy.x(),
+        camera.intrinsics[1] * point_sensor.y() / point_sensor.z() +
+            camera.intrinsics[3] - observation.xy.y());
+    const double squared_cost = ceres.residual.squaredNorm();
+    const double eigen_squared_cost = eigen_residual.squaredNorm();
+    if (!ceres.residual.allFinite() || !eigen_residual.allFinite() ||
+        !std::isfinite(squared_cost) || !std::isfinite(eigen_squared_cost)) {
+      throw FixtureError("solve state has nonfinite residual at " +
+                         std::string(observation_prefix) + " observation " +
+                         std::to_string(index));
+    }
+    summary.squared_cost += squared_cost;
+    summary.eigen_squared_cost += eigen_squared_cost;
+    if (!std::isfinite(summary.squared_cost) ||
+        !std::isfinite(summary.eigen_squared_cost)) {
+      throw FixtureError("solve state squared cost overflowed");
+    }
+    const double depth_difference = std::abs(ceres.depth - point_sensor.z());
+    if (!std::isfinite(depth_difference)) {
+      throw FixtureError("solve state depth parity is nonfinite at " +
+                         std::string(observation_prefix) + " observation " +
+                         std::to_string(index));
+    }
+    summary.max_ceres_eigen_depth_abs_diff = std::max(
+        summary.max_ceres_eigen_depth_abs_diff, depth_difference);
+    const double max_residual_difference =
+        (ceres.residual - eigen_residual).cwiseAbs().maxCoeff();
+    if (!std::isfinite(max_residual_difference)) {
+      throw FixtureError("solve state residual parity is nonfinite at " +
+                         std::string(observation_prefix) + " observation " +
+                         std::to_string(index));
+    }
+    summary.max_ceres_eigen_residual_abs_diff = std::max(
+        summary.max_ceres_eigen_residual_abs_diff, max_residual_difference);
+    ++summary.positive_depth_count;
+    summary.minimum_depth = std::min(summary.minimum_depth, ceres.depth);
+    summary.maximum_depth = std::max(summary.maximum_depth, ceres.depth);
+    if (dump != nullptr) {
+      *dump << observation_prefix << ' ' << index << ' ' << observation.frame_id
+            << ' ' << observation.landmark_id << ' ' << observation.camera_id
+            << ' ' << ceres.residual.x() << ' ' << ceres.residual.y() << ' '
+            << ceres.depth << ' ' << squared_cost << '\n';
+    }
+  }
+  return summary;
+}
+
 bool IsPathPrefix(const fs::path& ancestor, const fs::path& candidate) {
   std::error_code error;
   const fs::path relative = fs::relative(candidate, ancestor, error);
@@ -808,6 +957,221 @@ void ValidateOutputPath(const fs::path& fixture_path, const fs::path& output_pat
   if (IsPathPrefix(input, output) || IsPathPrefix(output, input)) {
     throw FixtureError("output path overlaps fixture input");
   }
+}
+
+ceres::Solver::Options MakeReferenceSolverOptions(
+    const std::shared_ptr<ceres::ParameterBlockOrdering>& ordering) {
+  ceres::Solver::Options options;
+  options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+  options.linear_solver_type = ceres::SPARSE_SCHUR;
+  options.linear_solver_ordering = ordering;
+  options.max_num_iterations = 20;
+  options.num_threads = 1;
+  options.initial_trust_region_radius = 1e4;
+  options.max_trust_region_radius = 1e16;
+  options.min_trust_region_radius = 1e-32;
+  options.min_relative_decrease = 1e-3;
+  options.min_lm_diagonal = 1e-6;
+  options.max_lm_diagonal = 1e32;
+  options.max_num_consecutive_invalid_steps = 5;
+  options.function_tolerance = 1e-6;
+  options.gradient_tolerance = 1e-10;
+  options.parameter_tolerance = 1e-8;
+  options.use_nonmonotonic_steps = false;
+  options.use_inner_iterations = false;
+  options.dynamic_sparsity = false;
+  options.use_mixed_precision_solves = false;
+  options.max_num_refinement_iterations = 0;
+  options.min_linear_solver_iterations = 0;
+  options.max_linear_solver_iterations = 500;
+  options.max_num_spse_iterations = 5;
+  options.use_spse_initialization = false;
+  options.spse_tolerance = 0.1;
+  options.eta = 0.1;
+  options.jacobi_scaling = true;
+  options.preconditioner_type = ceres::JACOBI;
+  options.minimizer_progress_to_stdout = false;
+  options.logging_type = ceres::SILENT;
+  options.check_gradients = false;
+  options.gradient_check_relative_precision = 1e-8;
+  options.gradient_check_numeric_derivative_relative_step_size = 1e-6;
+  options.max_solver_time_in_seconds = 1e9;
+  return options;
+}
+
+void WriteReferenceOptions(std::ostream& output,
+                           const ceres::Solver::Options& options) {
+  const auto bool_value = [](bool value) { return value ? 1 : 0; };
+  output << "OPTIONS_BEGIN\n"
+         << "OPTION_TRUST_REGION_STRATEGY LEVENBERG_MARQUARDT\n"
+         << "OPTION_LINEAR_SOLVER SPARSE_SCHUR\n"
+         << "OPTION_LINEAR_SOLVER_ORDERING points_group_0_poses_group_1\n"
+         << std::setprecision(17)
+         << "OPTION_MAX_NUM_ITERATIONS " << options.max_num_iterations << '\n'
+         << "OPTION_NUM_THREADS " << options.num_threads << '\n'
+         << "OPTION_INITIAL_TRUST_REGION_RADIUS "
+         << options.initial_trust_region_radius << '\n'
+         << "OPTION_MAX_TRUST_REGION_RADIUS "
+         << options.max_trust_region_radius << '\n'
+         << "OPTION_MIN_TRUST_REGION_RADIUS "
+         << options.min_trust_region_radius << '\n'
+         << "OPTION_MIN_RELATIVE_DECREASE " << options.min_relative_decrease
+         << '\n'
+         << "OPTION_MIN_LM_DIAGONAL " << options.min_lm_diagonal << '\n'
+         << "OPTION_MAX_LM_DIAGONAL " << options.max_lm_diagonal << '\n'
+         << "OPTION_MAX_CONSECUTIVE_INVALID_STEPS "
+         << options.max_num_consecutive_invalid_steps << '\n'
+         << "OPTION_FUNCTION_TOLERANCE " << options.function_tolerance << '\n'
+         << "OPTION_GRADIENT_TOLERANCE " << options.gradient_tolerance << '\n'
+         << "OPTION_PARAMETER_TOLERANCE " << options.parameter_tolerance << '\n'
+         << "OPTION_USE_NONMONOTONIC_STEPS "
+         << bool_value(options.use_nonmonotonic_steps) << '\n'
+         << "OPTION_USE_INNER_ITERATIONS "
+         << bool_value(options.use_inner_iterations) << '\n'
+         << "OPTION_DYNAMIC_SPARSITY " << bool_value(options.dynamic_sparsity)
+         << '\n'
+         << "OPTION_USE_MIXED_PRECISION_SOLVES "
+         << bool_value(options.use_mixed_precision_solves) << '\n'
+         << "OPTION_MAX_REFINEMENT_ITERATIONS "
+         << options.max_num_refinement_iterations << '\n'
+         << "OPTION_MIN_LINEAR_SOLVER_ITERATIONS "
+         << options.min_linear_solver_iterations << '\n'
+         << "OPTION_MAX_LINEAR_SOLVER_ITERATIONS "
+         << options.max_linear_solver_iterations << '\n'
+         << "OPTION_MAX_SPSE_ITERATIONS " << options.max_num_spse_iterations
+         << '\n'
+         << "OPTION_USE_SPSE_INITIALIZATION "
+         << bool_value(options.use_spse_initialization) << '\n'
+         << "OPTION_SPSE_TOLERANCE " << options.spse_tolerance << '\n'
+         << "OPTION_ETA " << options.eta << '\n'
+         << "OPTION_JACOBI_SCALING " << bool_value(options.jacobi_scaling) << '\n'
+         << "OPTION_PRECONDITIONER JACOBI\n"
+         << "OPTION_MINIMIZER_PROGRESS_TO_STDOUT "
+         << bool_value(options.minimizer_progress_to_stdout) << '\n'
+         << "OPTION_LOGGING SILENT\n"
+         << "OPTION_MAX_SOLVER_TIME_IN_SECONDS "
+         << options.max_solver_time_in_seconds << '\n'
+         << "OPTION_CHECK_GRADIENTS " << bool_value(options.check_gradients)
+         << '\n'
+         << "OPTION_GRADIENT_CHECK_RELATIVE_PRECISION "
+         << options.gradient_check_relative_precision << '\n'
+         << "OPTION_GRADIENT_CHECK_NUMERIC_STEP "
+         << options.gradient_check_numeric_derivative_relative_step_size << '\n'
+         << "OPTIONS_END\n";
+}
+
+SolveResult SolveInMemory(const Fixture& fixture) {
+  NullStreamBuffer initial_buffer;
+  std::ostream initial_output(&initial_buffer);
+  const EvaluationSummary initial_evaluation = Evaluate(fixture, initial_output);
+  const double initial_tolerance =
+      1e-6 + 1e-10 * std::abs(fixture.declared_initial_cost);
+  if (std::abs(initial_evaluation.squared_cost -
+               fixture.declared_initial_cost) > initial_tolerance) {
+    throw FixtureError("solve initial full squared cost does not match fixture "
+                       "declaration");
+  }
+
+  SolveParameters parameters = MakeSolveParameters(fixture);
+  ceres::Problem problem;
+  for (std::array<double, 7>& pose : parameters.poses) {
+    auto* manifold =
+        new ceres::ProductManifold<ceres::QuaternionManifold,
+                                   ceres::EuclideanManifold<3>>();
+    problem.AddParameterBlock(pose.data(), static_cast<int>(pose.size()),
+                              manifold);
+  }
+  for (std::array<double, 3>& landmark : parameters.landmarks) {
+    problem.AddParameterBlock(landmark.data(),
+                              static_cast<int>(landmark.size()));
+  }
+  for (const Observation& observation : fixture.observations) {
+    const std::size_t pose_index = fixture.pose_index.at(observation.frame_id);
+    const std::size_t landmark_index =
+        fixture.landmark_index.at(observation.landmark_id);
+    const Camera& camera = fixture.cameras.at(
+        fixture.camera_index.at(observation.camera_id));
+    std::unique_ptr<ceres::CostFunction> cost =
+        MakeRigReprojectionCost(camera, observation);
+    problem.AddResidualBlock(cost.release(), nullptr,
+                             parameters.poses[pose_index].data(),
+                             parameters.landmarks[landmark_index].data());
+  }
+  const std::size_t fixed_pose_index =
+      fixture.pose_index.at(fixture.fixed_pose_id);
+  problem.SetParameterBlockConstant(parameters.poses[fixed_pose_index].data());
+
+  auto ordering = std::make_shared<ceres::ParameterBlockOrdering>();
+  for (std::array<double, 3>& landmark : parameters.landmarks) {
+    ordering->AddElementToGroup(landmark.data(), 0);
+  }
+  for (std::array<double, 7>& pose : parameters.poses) {
+    ordering->AddElementToGroup(pose.data(), 1);
+  }
+  ceres::Solver::Options options = MakeReferenceSolverOptions(ordering);
+  ceres::Solver::Summary solver_summary;
+  ceres::Solve(options, &problem, &solver_summary);
+  if (!solver_summary.IsSolutionUsable()) {
+    std::ostringstream failure_report;
+    failure_report << "Ceres solve did not produce a usable state: "
+                   << solver_summary.BriefReport() << '\n'
+                   << solver_summary.FullReport() << "ITERATIONS\n";
+    for (const ceres::IterationSummary& iteration :
+         solver_summary.iterations) {
+      failure_report << iteration.iteration << ' '
+                     << (iteration.step_is_valid ? 1 : 0) << ' '
+                     << (iteration.step_is_successful ? 1 : 0) << ' '
+                     << iteration.cost << ' ' << iteration.cost_change << ' '
+                     << iteration.gradient_norm << ' ' << iteration.step_norm
+                     << ' ' << iteration.relative_decrease << '\n';
+    }
+    throw FixtureError(failure_report.str());
+  }
+  if (!std::isfinite(solver_summary.initial_cost) ||
+      !std::isfinite(solver_summary.final_cost)) {
+    throw FixtureError("Ceres solve reported nonfinite half squared cost");
+  }
+  for (std::size_t index = 0; index < parameters.poses.size(); ++index) {
+    const std::array<double, 7>& pose = parameters.poses[index];
+    const double norm = std::sqrt(pose[0] * pose[0] + pose[1] * pose[1] +
+                                  pose[2] * pose[2] + pose[3] * pose[3]);
+    if (!std::isfinite(norm) || std::abs(norm - 1.0) > 1e-8) {
+      throw FixtureError("Ceres solve produced a non-unit pose quaternion");
+    }
+    if (index == fixed_pose_index) {
+      const Pose& original = fixture.poses[index];
+      const double expected[7] = {original.rotation.w(), original.rotation.x(),
+                                  original.rotation.y(), original.rotation.z(),
+                                  original.translation.x(), original.translation.y(),
+                                  original.translation.z()};
+      for (std::size_t coordinate = 0; coordinate < 7; ++coordinate) {
+        if (DoubleBits(pose[coordinate]) != DoubleBits(expected[coordinate])) {
+          throw FixtureError("Ceres solve changed fixed anchor pose");
+        }
+      }
+    }
+  }
+  const EvaluationSummary final_evaluation =
+      EvaluateParameterState(fixture, parameters, nullptr, "FINAL");
+  const double half_cost_tolerance =
+      1e-6 + 1e-10 * std::max(initial_evaluation.squared_cost,
+                              final_evaluation.squared_cost);
+  if (std::abs(2.0 * solver_summary.initial_cost -
+               initial_evaluation.squared_cost) > half_cost_tolerance ||
+      std::abs(2.0 * solver_summary.final_cost -
+               final_evaluation.squared_cost) > half_cost_tolerance) {
+    throw FixtureError("Ceres half-cost and independent full-cost evaluations "
+                       "disagree");
+  }
+  const double nonincrease_tolerance =
+      1e-9 + 1e-12 * std::abs(initial_evaluation.squared_cost);
+  if (final_evaluation.squared_cost >
+      initial_evaluation.squared_cost + nonincrease_tolerance) {
+    throw FixtureError("Ceres solve increased the full squared cost");
+  }
+  options.linear_solver_ordering.reset();
+  return SolveResult{std::move(parameters), initial_evaluation, final_evaluation,
+                     std::move(options), std::move(solver_summary)};
 }
 
 fs::path MakeStagingPath(const fs::path& output) {
@@ -958,6 +1322,164 @@ EvaluationSummary EvaluateToFile(const Fixture& fixture,
   }
 }
 
+void WriteSolveState(std::ostream& output,
+                     const Fixture& fixture,
+                     const SolveResult& result) {
+  output << std::setprecision(17)
+         << "VISLOC_BA_CERES_SOLVE_STATE 1\n"
+         << "SOURCE_SHA256 " << fixture.source_sha256 << '\n'
+         << "SOURCE_SHA256_CAMERAS " << fixture.source_sha256_cameras << '\n'
+         << "SOURCE_SHA256_IMAGES " << fixture.source_sha256_images << '\n'
+         << "SOURCE_SHA256_POINTS " << fixture.source_sha256_points << '\n'
+         << "SOURCE_SHA256_MANIFEST " << fixture.source_sha256_manifest << '\n'
+         << "CERES_VERSION " << CERES_VERSION_STRING << '\n'
+         << "FIXED_POSE " << fixture.fixed_pose_id << '\n'
+         << "CAMERA_COUNT " << fixture.cameras.size() << '\n'
+         << "POSE_COUNT " << fixture.poses.size() << '\n'
+         << "LANDMARK_COUNT " << fixture.landmarks.size() << '\n'
+         << "OBSERVATION_COUNT " << fixture.observations.size() << '\n'
+         << "DECLARED_INITIAL_COST " << fixture.declared_initial_cost << '\n'
+         << "DECLARED_INITIAL_COST_BITS "
+         << fixture.declared_initial_cost_bits << '\n'
+         << "SOLVER_MODE CERES_STANDALONE_REFERENCE\n"
+         << "COST_CONVENTION CERES_HALF_SQUARED_INTERNAL_FULL_SQUARED_REPORTED\n";
+  WriteReferenceOptions(output, result.solver_options);
+  output << "INITIAL_FULL_SQUARED_COST "
+         << result.initial_evaluation.squared_cost << '\n'
+         << "INITIAL_FULL_SQUARED_COST_BITS "
+         << DoubleBits(result.initial_evaluation.squared_cost) << '\n'
+         << "INITIAL_OBSERVATIONS " << result.initial_evaluation.observation_count
+         << '\n'
+         << "INITIAL_ALL_OBSERVATIONS_VALID 1\n"
+         << "INITIAL_POSITIVE_DEPTH "
+         << result.initial_evaluation.positive_depth_count << '\n'
+         << "INITIAL_MIN_DEPTH " << result.initial_evaluation.minimum_depth << '\n'
+         << "INITIAL_MAX_DEPTH " << result.initial_evaluation.maximum_depth << '\n'
+         << "INITIAL_CERES_EIGEN_MAX_RESIDUAL_ABS_DIFF "
+         << result.initial_evaluation.max_ceres_eigen_residual_abs_diff << '\n'
+         << "INITIAL_CERES_EIGEN_MAX_DEPTH_ABS_DIFF "
+         << result.initial_evaluation.max_ceres_eigen_depth_abs_diff << '\n'
+         << "FINAL_FULL_SQUARED_COST " << result.final_evaluation.squared_cost
+         << '\n'
+         << "FINAL_FULL_SQUARED_COST_BITS "
+         << DoubleBits(result.final_evaluation.squared_cost) << '\n'
+         << "FINAL_OBSERVATIONS " << result.final_evaluation.observation_count
+         << '\n'
+         << "FINAL_ALL_OBSERVATIONS_VALID 1\n"
+         << "FINAL_POSITIVE_DEPTH "
+         << result.final_evaluation.positive_depth_count << '\n'
+         << "FINAL_MIN_DEPTH " << result.final_evaluation.minimum_depth << '\n'
+         << "FINAL_MAX_DEPTH " << result.final_evaluation.maximum_depth << '\n'
+         << "FINAL_CERES_EIGEN_MAX_RESIDUAL_ABS_DIFF "
+         << result.final_evaluation.max_ceres_eigen_residual_abs_diff << '\n'
+         << "FINAL_CERES_EIGEN_MAX_DEPTH_ABS_DIFF "
+         << result.final_evaluation.max_ceres_eigen_depth_abs_diff << '\n'
+         << "CERES_SUMMARY_INITIAL_HALF_COST "
+         << result.solver_summary.initial_cost << '\n'
+         << "CERES_SUMMARY_FINAL_HALF_COST "
+         << result.solver_summary.final_cost << '\n'
+         << "CERES_SUMMARY_TERMINATION_TYPE "
+         << static_cast<int>(result.solver_summary.termination_type) << '\n'
+         << "CERES_SUMMARY_IS_SOLUTION_USABLE "
+         << (result.solver_summary.IsSolutionUsable() ? 1 : 0) << '\n'
+         << "CERES_SUMMARY_NUM_SUCCESSFUL_STEPS "
+         << result.solver_summary.num_successful_steps << '\n'
+         << "CERES_SUMMARY_NUM_UNSUCCESSFUL_STEPS "
+         << result.solver_summary.num_unsuccessful_steps << '\n'
+         << "CERES_SUMMARY_TOTAL_TIME_SECONDS "
+         << result.solver_summary.total_time_in_seconds << '\n'
+         << "CERES_SUMMARY_MESSAGE_BEGIN\n"
+         << result.solver_summary.message << '\n'
+         << "CERES_SUMMARY_MESSAGE_END\n"
+         << "CERES_SUMMARY_FULL_REPORT_BEGIN\n"
+         << result.solver_summary.FullReport();
+  if (result.solver_summary.FullReport().empty() ||
+      result.solver_summary.FullReport().back() != '\n') {
+    output << '\n';
+  }
+  output << "CERES_SUMMARY_FULL_REPORT_END\n"
+         << "ITERATION_COUNT " << result.solver_summary.iterations.size() << '\n';
+  for (const ceres::IterationSummary& iteration :
+       result.solver_summary.iterations) {
+    output << "ITERATION " << iteration.iteration << ' '
+           << (iteration.step_is_valid ? 1 : 0) << ' '
+           << (iteration.step_is_successful ? 1 : 0) << ' '
+           << (iteration.step_is_nonmonotonic ? 1 : 0) << ' '
+           << iteration.cost << ' ' << iteration.cost_change << ' '
+           << iteration.gradient_max_norm << ' ' << iteration.gradient_norm << ' '
+           << iteration.step_norm << ' ' << iteration.relative_decrease << ' '
+           << iteration.trust_region_radius << ' ' << iteration.eta << ' '
+           << iteration.linear_solver_iterations << ' '
+           << iteration.iteration_time_in_seconds << ' '
+           << iteration.step_solver_time_in_seconds << ' '
+           << iteration.cumulative_time_in_seconds << '\n';
+  }
+  output << "POSE_STATE_BEGIN\n";
+  for (std::size_t index = 0; index < fixture.poses.size(); ++index) {
+    const std::array<double, 7>& pose = result.parameters.poses[index];
+    output << "POSE " << fixture.poses[index].id << ' ' << pose[0] << ' '
+           << pose[1] << ' ' << pose[2] << ' ' << pose[3] << ' ' << pose[4]
+           << ' ' << pose[5] << ' ' << pose[6] << '\n';
+  }
+  output << "POSE_STATE_END\nLANDMARK_STATE_BEGIN\n";
+  for (std::size_t index = 0; index < fixture.landmarks.size(); ++index) {
+    const std::array<double, 3>& landmark = result.parameters.landmarks[index];
+    output << "LANDMARK " << fixture.landmarks[index].id << ' ' << landmark[0]
+           << ' ' << landmark[1] << ' ' << landmark[2] << '\n';
+  }
+  output << "LANDMARK_STATE_END\nEND\n";
+}
+
+SolveResult SolveToFile(const Fixture& fixture,
+                        const fs::path& fixture_path,
+                        const fs::path& output_path) {
+  ValidateOutputPath(fixture_path, output_path);
+  SolveResult result = SolveInMemory(fixture);
+  const fs::path staging = MakeStagingPath(output_path);
+  bool owns_staging = false;
+  try {
+    const int file_descriptor =
+        ::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (file_descriptor < 0) {
+      throw FixtureError("cannot exclusively create solve staging file: " +
+                         std::string(std::strerror(errno)));
+    }
+    owns_staging = true;
+    {
+      ExclusiveFileBuffer buffer(file_descriptor);
+      std::ostream output(&buffer);
+      WriteSolveState(output, fixture, result);
+      output.flush();
+      if (!output) {
+        throw FixtureError("cannot flush solve staging file");
+      }
+    }
+    std::error_code error;
+    fs::create_hard_link(staging, output_path, error);
+    if (error) {
+      throw FixtureError("cannot publish solve output without overwrite: " +
+                         error.message());
+    }
+    fs::remove(staging, error);
+    if (error) {
+      throw FixtureError("cannot remove owned solve staging file: " +
+                         error.message());
+    }
+    owns_staging = false;
+    std::ifstream state_input(output_path, std::ios::binary);
+    if (!state_input) {
+      throw FixtureError("published solve output cannot be reopened");
+    }
+    return result;
+  } catch (...) {
+    if (owns_staging) {
+      std::error_code cleanup_error;
+      fs::remove(staging, cleanup_error);
+    }
+    throw;
+  }
+}
+
 std::string SyntheticFixture() {
   constexpr const char* kDigest =
       "0000000000000000000000000000000000000000000000000000000000000000";
@@ -983,6 +1505,281 @@ std::string SyntheticFixture() {
           << "RIG_OBSERVATION 0 1 -2.5 0 2 1 0 0 0 -0.5 0 0\n"
           << "END\n";
   return fixture.str();
+}
+
+std::string SyntheticSolveFixture() {
+  constexpr const char* kDigest =
+      "0000000000000000000000000000000000000000000000000000000000000000";
+  Camera camera1;
+  camera1.id = 1;
+  camera1.width = 640;
+  camera1.height = 480;
+  camera1.intrinsics = {300.0, 300.0, 320.0, 240.0};
+  Camera camera2 = camera1;
+  camera2.id = 2;
+
+  Pose true_pose0;
+  true_pose0.id = 0;
+  true_pose0.rotation = Eigen::Quaterniond::Identity();
+  true_pose0.translation = Eigen::Vector3d::Zero();
+  Pose true_pose1;
+  true_pose1.id = 1;
+  true_pose1.rotation = Eigen::Quaterniond(
+      Eigen::AngleAxisd(0.025, Eigen::Vector3d(0.0, 1.0, 0.0)));
+  true_pose1.translation = Eigen::Vector3d(0.18, -0.10, 0.04);
+
+  Pose initial_pose1;
+  initial_pose1.id = 1;
+  initial_pose1.rotation = Eigen::Quaterniond(
+      Eigen::AngleAxisd(0.060, Eigen::Vector3d(0.0, 1.0, 0.0)));
+  initial_pose1.translation = Eigen::Vector3d(0.30, -0.18, 0.12);
+
+  Landmark true_landmark1;
+  true_landmark1.id = 1;
+  true_landmark1.position = Eigen::Vector3d(0.20, -0.15, 4.20);
+  Landmark true_landmark2;
+  true_landmark2.id = 2;
+  true_landmark2.position = Eigen::Vector3d(-0.35, 0.25, 5.30);
+  Landmark true_landmark3;
+  true_landmark3.id = 3;
+  true_landmark3.position = Eigen::Vector3d(0.55, -0.35, 6.10);
+  Landmark true_landmark4;
+  true_landmark4.id = 4;
+  true_landmark4.position = Eigen::Vector3d(-0.65, -0.20, 4.80);
+  Landmark initial_landmark1 = true_landmark1;
+  initial_landmark1.position = Eigen::Vector3d(0.28, -0.08, 4.45);
+  Landmark initial_landmark2 = true_landmark2;
+  initial_landmark2.position = Eigen::Vector3d(-0.22, 0.18, 5.00);
+  Landmark initial_landmark3 = true_landmark3;
+  initial_landmark3.position = Eigen::Vector3d(0.48, -0.30, 5.80);
+  Landmark initial_landmark4 = true_landmark4;
+  initial_landmark4.position = Eigen::Vector3d(-0.58, -0.15, 5.10);
+
+  const Eigen::Quaterniond sensor1_rotation = Eigen::Quaterniond::Identity();
+  const Eigen::Vector3d sensor1_translation = Eigen::Vector3d::Zero();
+  const Eigen::Quaterniond sensor2_rotation(
+      Eigen::AngleAxisd(0.18, Eigen::Vector3d(0.2, 0.5, 0.3).normalized()));
+  const Eigen::Vector3d sensor2_translation(0.35, -0.03, 0.02);
+
+  const std::array<Pose, 2> true_poses = {true_pose0, true_pose1};
+  const std::array<Landmark, 4> true_landmarks = {
+      true_landmark1, true_landmark2, true_landmark3, true_landmark4};
+  const std::array<Camera, 2> cameras = {camera1, camera2};
+  const std::array<Eigen::Quaterniond, 2> sensor_rotations = {
+      sensor1_rotation, sensor2_rotation};
+  const std::array<Eigen::Vector3d, 2> sensor_translations = {
+      sensor1_translation, sensor2_translation};
+
+  auto project = [&](const Pose& pose,
+                     const Landmark& landmark,
+                     std::size_t camera_index) -> Eigen::Vector2d {
+    const Eigen::Vector3d point_sensor =
+        sensor_rotations[camera_index] *
+            (pose.rotation * landmark.position + pose.translation) +
+        sensor_translations[camera_index];
+    if (!point_sensor.allFinite() || !(point_sensor.z() > 0.0)) {
+      throw FixtureError("synthetic solve fixture has invalid depth");
+    }
+    const Camera& camera = cameras[camera_index];
+    return Eigen::Vector2d(
+        camera.intrinsics[0] * point_sensor.x() / point_sensor.z() +
+            camera.intrinsics[2],
+        camera.intrinsics[1] * point_sensor.y() / point_sensor.z() +
+            camera.intrinsics[3]);
+  };
+  auto write_quaternion = [](std::ostream& output,
+                             const Eigen::Quaterniond& rotation) {
+    output << rotation.w() << ' ' << rotation.x() << ' ' << rotation.y() << ' '
+           << rotation.z();
+  };
+
+  std::ostringstream fixture;
+  fixture << std::setprecision(17)
+          << "VISLOC_BA_ORACLE_FIXTURE 1\n"
+          << "SOURCE_SHA256 " << kDigest << "\n"
+          << "SOURCE_SHA256_CAMERAS " << kDigest << "\n"
+          << "SOURCE_SHA256_IMAGES " << kDigest << "\n"
+          << "SOURCE_SHA256_POINTS " << kDigest << "\n"
+          << "SOURCE_SHA256_MANIFEST " << kDigest << "\n"
+          << "INITIAL_COST 0\n"
+          << "INITIAL_COST_BITS 0\n"
+          << "CAMERA_COUNT 2\n"
+          << "POSE_COUNT 2\n"
+          << "LANDMARK_COUNT 4\n"
+          << "OBSERVATION_COUNT 16\n"
+          << "CAMERA 1 PINHOLE 640 480 4 300 300 320 240\n"
+          << "CAMERA 2 PINHOLE 640 480 4 300 300 320 240\n"
+          << "POSE 0 ";
+  write_quaternion(fixture, true_pose0.rotation);
+  fixture << ' ' << true_pose0.translation.x() << ' '
+          << true_pose0.translation.y() << ' ' << true_pose0.translation.z()
+          << "\nPOSE 1 ";
+  write_quaternion(fixture, initial_pose1.rotation);
+  fixture << ' ' << initial_pose1.translation.x() << ' '
+          << initial_pose1.translation.y() << ' ' << initial_pose1.translation.z()
+          << "\nFIXED_POSE 0\n"
+          << "LANDMARK 1 " << initial_landmark1.position.x() << ' '
+          << initial_landmark1.position.y() << ' ' << initial_landmark1.position.z()
+          << "\nLANDMARK 2 " << initial_landmark2.position.x() << ' '
+          << initial_landmark2.position.y() << ' ' << initial_landmark2.position.z()
+          << "\nLANDMARK 3 " << initial_landmark3.position.x() << ' '
+          << initial_landmark3.position.y() << ' ' << initial_landmark3.position.z()
+          << "\nLANDMARK 4 " << initial_landmark4.position.x() << ' '
+          << initial_landmark4.position.y() << ' ' << initial_landmark4.position.z()
+          << '\n';
+  for (std::size_t frame_index = 0; frame_index < true_poses.size();
+       ++frame_index) {
+    for (const Landmark& landmark : true_landmarks) {
+      for (std::size_t camera_index = 0; camera_index < cameras.size();
+           ++camera_index) {
+        const Eigen::Vector2d xy =
+            project(true_poses[frame_index], landmark, camera_index);
+        fixture << "RIG_OBSERVATION " << frame_index << ' ' << landmark.id << ' '
+                << xy.x() << ' ' << xy.y() << ' ' << cameras[camera_index].id
+                << ' ';
+        write_quaternion(fixture, sensor_rotations[camera_index]);
+        fixture << ' ' << sensor_translations[camera_index].x() << ' '
+                << sensor_translations[camera_index].y() << ' '
+                << sensor_translations[camera_index].z() << '\n';
+      }
+    }
+  }
+  fixture << "END\n";
+  return fixture.str();
+}
+
+Eigen::Vector2d EvaluateSyntheticResidual(const Camera& camera,
+                                          const Observation& observation,
+                                          const std::array<double, 7>& pose,
+                                          const std::array<double, 3>& landmark) {
+  Eigen::Quaterniond pose_rotation(pose[0], pose[1], pose[2], pose[3]);
+  const double pose_norm = pose_rotation.norm();
+  if (!std::isfinite(pose_norm) || pose_norm <= 0.0) {
+    throw FixtureError("synthetic derivative evaluation has invalid quaternion");
+  }
+  pose_rotation.normalize();
+  const Eigen::Vector3d point_world(landmark[0], landmark[1], landmark[2]);
+  const Eigen::Vector3d pose_translation(pose[4], pose[5], pose[6]);
+  const Eigen::Vector3d point_sensor =
+      observation.sensor_from_rig_rotation *
+          (pose_rotation * point_world + pose_translation) +
+      observation.sensor_from_rig_translation;
+  if (!point_sensor.allFinite() || !(point_sensor.z() > 0.0)) {
+    throw FixtureError("synthetic derivative evaluation has invalid depth");
+  }
+  return Eigen::Vector2d(
+      camera.intrinsics[0] * point_sensor.x() / point_sensor.z() +
+          camera.intrinsics[2] - observation.xy.x(),
+      camera.intrinsics[1] * point_sensor.y() / point_sensor.z() +
+          camera.intrinsics[3] - observation.xy.y());
+}
+
+void RequireClose(const std::string& label,
+                  double actual,
+                  double expected,
+                  double relative_tolerance) {
+  const double scale =
+      std::max({1.0, std::abs(actual), std::abs(expected)});
+  if (!std::isfinite(actual) || !std::isfinite(expected) ||
+      std::abs(actual - expected) > relative_tolerance * scale) {
+    throw FixtureError("synthetic derivative mismatch for " + label);
+  }
+}
+
+void CheckSyntheticJacobians(const Fixture& fixture) {
+  const Observation& observation = fixture.observations.at(15);
+  const Camera& camera = fixture.cameras.at(
+      fixture.camera_index.at(observation.camera_id));
+  SolveParameters parameters = MakeSolveParameters(fixture);
+  const std::size_t pose_index = fixture.pose_index.at(observation.frame_id);
+  const std::size_t landmark_index =
+      fixture.landmark_index.at(observation.landmark_id);
+  const std::array<double, 7>& pose = parameters.poses[pose_index];
+  const std::array<double, 3>& landmark = parameters.landmarks[landmark_index];
+  const std::unique_ptr<ceres::CostFunction> cost =
+      MakeRigReprojectionCost(camera, observation);
+  const double* parameter_blocks[] = {pose.data(), landmark.data()};
+  double residual[2] = {0.0, 0.0};
+  double pose_jacobian[2 * 7] = {};
+  double landmark_jacobian[2 * 3] = {};
+  double* jacobians[] = {pose_jacobian, landmark_jacobian};
+  if (!cost->Evaluate(parameter_blocks, residual, jacobians)) {
+    throw FixtureError("synthetic AutoDiff Jacobian evaluation failed");
+  }
+  constexpr double kFiniteDifferenceStep = 1e-7;
+  for (std::size_t coordinate = 0; coordinate < pose.size(); ++coordinate) {
+    std::array<double, 7> plus = pose;
+    std::array<double, 7> minus = pose;
+    plus[coordinate] += kFiniteDifferenceStep;
+    minus[coordinate] -= kFiniteDifferenceStep;
+    const Eigen::Vector2d plus_residual =
+        EvaluateSyntheticResidual(camera, observation, plus, landmark);
+    const Eigen::Vector2d minus_residual =
+        EvaluateSyntheticResidual(camera, observation, minus, landmark);
+    const Eigen::Vector2d finite_difference =
+        (plus_residual - minus_residual) / (2.0 * kFiniteDifferenceStep);
+    for (std::size_t row = 0; row < 2; ++row) {
+      RequireClose("ambient pose Jacobian", pose_jacobian[row * 7 + coordinate],
+                   finite_difference[row], 5e-5);
+    }
+  }
+  for (std::size_t coordinate = 0; coordinate < landmark.size(); ++coordinate) {
+    std::array<double, 3> plus = landmark;
+    std::array<double, 3> minus = landmark;
+    plus[coordinate] += kFiniteDifferenceStep;
+    minus[coordinate] -= kFiniteDifferenceStep;
+    const Eigen::Vector2d plus_residual =
+        EvaluateSyntheticResidual(camera, observation, pose, plus);
+    const Eigen::Vector2d minus_residual =
+        EvaluateSyntheticResidual(camera, observation, pose, minus);
+    const Eigen::Vector2d finite_difference =
+        (plus_residual - minus_residual) / (2.0 * kFiniteDifferenceStep);
+    for (std::size_t row = 0; row < 2; ++row) {
+      RequireClose("landmark Jacobian", landmark_jacobian[row * 3 + coordinate],
+                   finite_difference[row], 5e-5);
+    }
+  }
+
+  using PoseManifold =
+      ceres::ProductManifold<ceres::QuaternionManifold,
+                             ceres::EuclideanManifold<3>>;
+  PoseManifold manifold;
+  double plus_jacobian[7 * 6] = {};
+  if (!manifold.PlusJacobian(pose.data(), plus_jacobian)) {
+    throw FixtureError("synthetic ProductManifold Jacobian evaluation failed");
+  }
+  constexpr std::size_t kTangentSize = 6;
+  for (std::size_t tangent_coordinate = 0;
+       tangent_coordinate < kTangentSize; ++tangent_coordinate) {
+    std::array<double, kTangentSize> plus_delta{};
+    std::array<double, kTangentSize> minus_delta{};
+    plus_delta[tangent_coordinate] = kFiniteDifferenceStep;
+    minus_delta[tangent_coordinate] = -kFiniteDifferenceStep;
+    std::array<double, 7> plus_pose{};
+    std::array<double, 7> minus_pose{};
+    if (!manifold.Plus(pose.data(), plus_delta.data(), plus_pose.data()) ||
+        !manifold.Plus(pose.data(), minus_delta.data(), minus_pose.data())) {
+      throw FixtureError("synthetic ProductManifold Plus failed");
+    }
+    const Eigen::Vector2d plus_residual =
+        EvaluateSyntheticResidual(camera, observation, plus_pose, landmark);
+    const Eigen::Vector2d minus_residual =
+        EvaluateSyntheticResidual(camera, observation, minus_pose, landmark);
+    const Eigen::Vector2d finite_difference =
+        (plus_residual - minus_residual) / (2.0 * kFiniteDifferenceStep);
+    for (std::size_t row = 0; row < 2; ++row) {
+      double tangent_derivative = 0.0;
+      for (std::size_t ambient_coordinate = 0; ambient_coordinate < 7;
+           ++ambient_coordinate) {
+        tangent_derivative +=
+            pose_jacobian[row * 7 + ambient_coordinate] *
+            plus_jacobian[ambient_coordinate * kTangentSize +
+                          tangent_coordinate];
+      }
+      RequireClose("ProductManifold tangent Jacobian", tangent_derivative,
+                   finite_difference[row], 5e-5);
+    }
+  }
 }
 
 void ExpectFailure(const std::string& text, const std::string& expected) {
@@ -1129,6 +1926,162 @@ void RunSelfTests() {
     }
   }
 
+  {
+    const std::string solve_text = SyntheticSolveFixture();
+    std::istringstream solve_input(solve_text);
+    Fixture solve_fixture = ParseFixture(solve_input, "synthetic-solve");
+    NullStreamBuffer solve_initial_buffer;
+    std::ostream solve_initial_output(&solve_initial_buffer);
+    const EvaluationSummary solve_initial =
+        Evaluate(solve_fixture, solve_initial_output);
+    if (!(solve_initial.squared_cost > 0.0) ||
+        solve_initial.observation_count != 16 ||
+        solve_initial.positive_depth_count != 16) {
+      throw FixtureError("self-test synthetic solve fixture is trivial or invalid");
+    }
+    solve_fixture.declared_initial_cost = solve_initial.squared_cost;
+    solve_fixture.declared_initial_cost_bits =
+        DoubleBits(solve_initial.squared_cost);
+    CheckSyntheticJacobians(solve_fixture);
+    const auto sensor_before = solve_fixture.sensor_from_rig_by_camera;
+    const SolveResult first_solve = SolveInMemory(solve_fixture);
+    if (!(first_solve.final_evaluation.squared_cost <
+          first_solve.initial_evaluation.squared_cost) ||
+        first_solve.solver_summary.num_successful_steps <= 0) {
+      throw FixtureError("self-test synthetic Ceres solve made no progress");
+    }
+    const SolveResult second_solve = SolveInMemory(solve_fixture);
+    if (DoubleBits(first_solve.final_evaluation.squared_cost) !=
+            DoubleBits(second_solve.final_evaluation.squared_cost) ||
+        first_solve.parameters.poses.size() != second_solve.parameters.poses.size() ||
+        first_solve.parameters.landmarks.size() !=
+            second_solve.parameters.landmarks.size()) {
+      throw FixtureError("self-test synthetic Ceres solve is not deterministic");
+    }
+    for (std::size_t index = 0; index < first_solve.parameters.poses.size();
+         ++index) {
+      for (std::size_t coordinate = 0; coordinate < 7; ++coordinate) {
+        if (DoubleBits(first_solve.parameters.poses[index][coordinate]) !=
+            DoubleBits(second_solve.parameters.poses[index][coordinate])) {
+          throw FixtureError("self-test synthetic pose solve is not deterministic");
+        }
+      }
+    }
+    for (std::size_t index = 0; index < first_solve.parameters.landmarks.size();
+         ++index) {
+      for (std::size_t coordinate = 0; coordinate < 3; ++coordinate) {
+        if (DoubleBits(first_solve.parameters.landmarks[index][coordinate]) !=
+            DoubleBits(second_solve.parameters.landmarks[index][coordinate])) {
+          throw FixtureError(
+              "self-test synthetic landmark solve is not deterministic");
+        }
+      }
+    }
+    if (solve_fixture.sensor_from_rig_by_camera.size() != sensor_before.size()) {
+      throw FixtureError("self-test synthetic sensor calibration changed");
+    }
+    for (const auto& sensor : sensor_before) {
+      const auto after = solve_fixture.sensor_from_rig_by_camera.find(sensor.first);
+      if (after == solve_fixture.sensor_from_rig_by_camera.end() ||
+          (sensor.second.first.coeffs() - after->second.first.coeffs())
+                  .cwiseAbs()
+                  .maxCoeff() != 0.0 ||
+          (sensor.second.second - after->second.second).cwiseAbs().maxCoeff() !=
+              0.0) {
+        throw FixtureError("self-test synthetic sensor calibration changed");
+      }
+    }
+
+    std::error_code temp_error;
+    const fs::path temp_directory = fs::temp_directory_path(temp_error);
+    if (temp_error) {
+      throw FixtureError("self-test cannot find temporary directory for solve: " +
+                         temp_error.message());
+    }
+    const auto stamp =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string prefix =
+        "ceres-rig-reference-solve-test-" + std::to_string(::getpid()) + "-" +
+        std::to_string(static_cast<long long>(stamp));
+    std::string directory_template =
+        (temp_directory / (prefix + "-XXXXXX")).string();
+    std::vector<char> directory_buffer(directory_template.begin(),
+                                        directory_template.end());
+    directory_buffer.push_back('\0');
+    char* directory_name = ::mkdtemp(directory_buffer.data());
+    if (directory_name == nullptr) {
+      throw FixtureError("self-test cannot create solve temporary directory: " +
+                         std::string(std::strerror(errno)));
+    }
+    const fs::path owned_directory(directory_name);
+    const fs::path fixture_path = owned_directory / "input.fixture";
+    const fs::path state_path = owned_directory / "solve.state";
+    try {
+      std::ostringstream persisted_text;
+      persisted_text << std::setprecision(17)
+                     << solve_text.substr(0, solve_text.find("INITIAL_COST 0"))
+                     << "INITIAL_COST " << solve_fixture.declared_initial_cost
+                     << "\nINITIAL_COST_BITS "
+                     << solve_fixture.declared_initial_cost_bits << '\n'
+                     << solve_text.substr(solve_text.find("INITIAL_COST_BITS 0\n") +
+                                          std::string("INITIAL_COST_BITS 0\n").size());
+      WriteExclusiveTextFile(fixture_path, persisted_text.str());
+      const SolveResult published =
+          SolveToFile(solve_fixture, fixture_path, state_path);
+      if (DoubleBits(published.final_evaluation.squared_cost) !=
+          DoubleBits(first_solve.final_evaluation.squared_cost)) {
+        throw FixtureError("self-test published solve differs from in-memory solve");
+      }
+      std::ifstream state_input(state_path, std::ios::binary);
+      std::ostringstream state_contents;
+      state_contents << state_input.rdbuf();
+      if (!state_input.is_open() || state_input.fail() ||
+          state_contents.str().find("VISLOC_BA_CERES_SOLVE_STATE 1") ==
+              std::string::npos ||
+          state_contents.str().find("POSE 0 ") == std::string::npos ||
+          state_contents.str().find("POSE 1 ") == std::string::npos ||
+          state_contents.str().find("LANDMARK 1 ") == std::string::npos ||
+          state_contents.str().find("LANDMARK 2 ") == std::string::npos ||
+          state_contents.str().find("ITERATION_COUNT ") == std::string::npos ||
+          state_contents.str().find("CERES_SUMMARY_FULL_REPORT_BEGIN") ==
+              std::string::npos) {
+        throw FixtureError("self-test solve state output mismatch");
+      }
+      const std::string published_state = state_contents.str();
+      bool existing_state_rejected = false;
+      try {
+        (void)SolveToFile(solve_fixture, fixture_path, state_path);
+      } catch (const FixtureError& error) {
+        if (std::string(error.what()).find("output path already exists") ==
+            std::string::npos) {
+          throw FixtureError("self-test solve existing-state error mismatch: " +
+                             std::string(error.what()));
+        }
+        existing_state_rejected = true;
+      }
+      if (!existing_state_rejected) {
+        throw FixtureError("self-test expected existing solve state rejection");
+      }
+      std::ifstream unchanged_state_input(state_path, std::ios::binary);
+      std::ostringstream unchanged_state;
+      unchanged_state << unchanged_state_input.rdbuf();
+      if (!unchanged_state_input.is_open() || unchanged_state_input.fail() ||
+          unchanged_state.str() != published_state) {
+        throw FixtureError("self-test existing solve state was modified");
+      }
+    } catch (...) {
+      std::error_code cleanup_error;
+      fs::remove_all(owned_directory, cleanup_error);
+      throw;
+    }
+    std::error_code cleanup_error;
+    fs::remove_all(owned_directory, cleanup_error);
+    if (cleanup_error) {
+      throw FixtureError("self-test cannot remove solve temporary directory: " +
+                         cleanup_error.message());
+    }
+  }
+
   std::string bad_depth = valid;
   const std::string old_landmark = "LANDMARK 1 0 0 2";
   const std::string new_landmark = "LANDMARK 1 0 0 -2";
@@ -1183,9 +2136,7 @@ std::string Usage() {
   return "Usage:\n"
          "  ceres_rig_reference --self-test\n"
          "  ceres_rig_reference --evaluate-only --fixture PATH --dump PATH\n"
-         "\n"
-         "The solve/publication mode is intentionally not enabled in this\n"
-         "parser/evaluate-only checkpoint.\n";
+         "  ceres_rig_reference --solve --fixture PATH --state PATH\n";
 }
 
 Cli ParseCli(int argc, char** argv) {
@@ -1209,6 +2160,11 @@ Cli ParseCli(int argc, char** argv) {
         throw FixtureError("duplicate --evaluate-only");
       }
       cli.evaluate_only = true;
+    } else if (argument == "--solve") {
+      if (cli.solve) {
+        throw FixtureError("duplicate --solve");
+      }
+      cli.solve = true;
     } else if (argument == "--fixture") {
       if (!cli.fixture.empty()) {
         throw FixtureError("duplicate --fixture");
@@ -1219,6 +2175,11 @@ Cli ParseCli(int argc, char** argv) {
         throw FixtureError("duplicate --dump");
       }
       cli.dump = require_value("--dump");
+    } else if (argument == "--state") {
+      if (!cli.state.empty()) {
+        throw FixtureError("duplicate --state");
+      }
+      cli.state = require_value("--state");
     } else if (argument == "--help" || argument == "-h") {
       throw FixtureError(Usage());
     } else {
@@ -1226,15 +2187,31 @@ Cli ParseCli(int argc, char** argv) {
     }
   }
   if (cli.self_test) {
-    if (cli.evaluate_only || !cli.fixture.empty() || !cli.dump.empty()) {
+    if (cli.evaluate_only || cli.solve || !cli.fixture.empty() ||
+        !cli.dump.empty() || !cli.state.empty()) {
       throw FixtureError("--self-test is standalone\n" + Usage());
     }
     return cli;
   }
-  if (!cli.evaluate_only || cli.fixture.empty() || cli.dump.empty()) {
-    throw FixtureError("evaluate-only requires --fixture and --dump\n" + Usage());
+  if (cli.evaluate_only && cli.solve) {
+    throw FixtureError("--evaluate-only and --solve are mutually exclusive\n" +
+                       Usage());
   }
-  return cli;
+  if (cli.evaluate_only) {
+    if (cli.fixture.empty() || cli.dump.empty() || !cli.state.empty()) {
+      throw FixtureError("evaluate-only requires --fixture and --dump\n" +
+                         Usage());
+    }
+    return cli;
+  }
+  if (cli.solve) {
+    if (cli.fixture.empty() || cli.state.empty() || !cli.dump.empty()) {
+      throw FixtureError("solve requires --fixture and --state\n" + Usage());
+    }
+    return cli;
+  }
+  throw FixtureError("one of --evaluate-only or --solve is required\n" +
+                     Usage());
 }
 
 }  // namespace ceres_rig_reference
@@ -1258,31 +2235,57 @@ int main(int argc, char** argv) {
       throw FixtureError("cannot open fixture " + cli.fixture.string());
     }
     const Fixture fixture = ParseFixture(input, cli.fixture.string());
-    const EvaluationSummary summary =
-        EvaluateToFile(fixture, cli.fixture, cli.dump);
-    const double absolute_delta =
-        summary.squared_cost - fixture.declared_initial_cost;
-    std::cout << std::setprecision(17)
-              << "mode=evaluate-only ceres_version=" << CERES_VERSION_STRING
-              << " source_sha256=" << fixture.source_sha256
-              << " fixed_pose=" << fixture.fixed_pose_id
-              << " cameras=" << fixture.cameras.size()
-              << " poses=" << fixture.poses.size()
-              << " landmarks=" << fixture.landmarks.size()
-              << " observations=" << summary.observation_count
-              << " positive_depth=" << summary.positive_depth_count
-              << " declared_initial_cost=" << fixture.declared_initial_cost
-              << " evaluated_squared_cost=" << summary.squared_cost
-              << " evaluated_cost_bits=" << DoubleBits(summary.squared_cost)
-              << " eigen_squared_cost=" << summary.eigen_squared_cost
-              << " ceres_eigen_max_residual_abs_diff="
-              << summary.max_ceres_eigen_residual_abs_diff
-              << " ceres_eigen_max_depth_abs_diff="
-              << summary.max_ceres_eigen_depth_abs_diff
-              << " cost_delta=" << absolute_delta
-              << " min_depth=" << summary.minimum_depth
-              << " max_depth=" << summary.maximum_depth
-              << " dump=" << cli.dump << '\n';
+    if (cli.evaluate_only) {
+      const EvaluationSummary summary =
+          EvaluateToFile(fixture, cli.fixture, cli.dump);
+      const double absolute_delta =
+          summary.squared_cost - fixture.declared_initial_cost;
+      std::cout << std::setprecision(17)
+                << "mode=evaluate-only ceres_version=" << CERES_VERSION_STRING
+                << " source_sha256=" << fixture.source_sha256
+                << " fixed_pose=" << fixture.fixed_pose_id
+                << " cameras=" << fixture.cameras.size()
+                << " poses=" << fixture.poses.size()
+                << " landmarks=" << fixture.landmarks.size()
+                << " observations=" << summary.observation_count
+                << " positive_depth=" << summary.positive_depth_count
+                << " declared_initial_cost=" << fixture.declared_initial_cost
+                << " evaluated_squared_cost=" << summary.squared_cost
+                << " evaluated_cost_bits=" << DoubleBits(summary.squared_cost)
+                << " eigen_squared_cost=" << summary.eigen_squared_cost
+                << " ceres_eigen_max_residual_abs_diff="
+                << summary.max_ceres_eigen_residual_abs_diff
+                << " ceres_eigen_max_depth_abs_diff="
+                << summary.max_ceres_eigen_depth_abs_diff
+                << " cost_delta=" << absolute_delta
+                << " min_depth=" << summary.minimum_depth
+                << " max_depth=" << summary.maximum_depth
+                << " dump=" << cli.dump << '\n';
+    } else {
+      const SolveResult result = SolveToFile(fixture, cli.fixture, cli.state);
+      std::cout << std::setprecision(17)
+                << "mode=solve ceres_version=" << CERES_VERSION_STRING
+                << " source_sha256=" << fixture.source_sha256
+                << " fixed_pose=" << fixture.fixed_pose_id
+                << " cameras=" << fixture.cameras.size()
+                << " poses=" << fixture.poses.size()
+                << " landmarks=" << fixture.landmarks.size()
+                << " observations=" << fixture.observations.size()
+                << " initial_full_squared_cost="
+                << result.initial_evaluation.squared_cost
+                << " initial_full_squared_cost_bits="
+                << DoubleBits(result.initial_evaluation.squared_cost)
+                << " final_full_squared_cost="
+                << result.final_evaluation.squared_cost
+                << " final_full_squared_cost_bits="
+                << DoubleBits(result.final_evaluation.squared_cost)
+                << " termination_type="
+                << static_cast<int>(result.solver_summary.termination_type)
+                << " successful_steps="
+                << result.solver_summary.num_successful_steps
+                << " iterations=" << result.solver_summary.iterations.size()
+                << " state=" << cli.state << '\n';
+    }
     return 0;
   } catch (const FixtureError& error) {
     std::cerr << "ceres_rig_reference: " << error.what() << '\n';

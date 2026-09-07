@@ -3,8 +3,10 @@
 This bounded diagnostic evaluates the existing Rust-exported
 `VISLOC_BA_ORACLE_FIXTURE 1` with Ceres 2.2.0. It is **not a COLMAP mapper
 benchmark** and does not change the production Rust solver. The current
-checkpoint supports evaluation only; solving and model publication are not
-enabled.
+tool has two bounded operations: `--evaluate-only` checks the initial
+geometry, and `--solve` runs one fixed Ceres reference solve and publishes a
+state report. It does not publish a COLMAP model or change the production Rust
+solver. The binary has a compile-time Ceres 2.2.0 guard.
 
 Build inside an environment providing Ceres 2.2.0, Eigen and glog:
 
@@ -15,6 +17,8 @@ g++ -std=c++17 -O2 -Wall -Wextra -Werror -I/usr/include/eigen3 \
 /tmp/ceres_rig_reference --self-test
 /tmp/ceres_rig_reference --evaluate-only \
   --fixture /path/to/input.fixture --dump /path/to/new-evaluation.tsv
+/tmp/ceres_rig_reference --solve \
+  --fixture /path/to/input.fixture --state /path/to/new-solve.state
 ```
 
 The output parent must already exist. Existing outputs, including symlinks,
@@ -23,6 +27,23 @@ depth, plus the full squared cost (not Ceres's half-cost convention).
 Nonfinite or nonpositive-depth observations fail evaluation; none are
 silently dropped. Source SHA fields are copied from the fixture, so an
 independent audit must verify them against the original source files.
+
+The solve operation uses the frozen contract: Ceres 2.2.0 AutoDiff PINHOLE
+factors, a seven-scalar wxyz-plus-translation pose with
+`ProductManifold<QuaternionManifold, EuclideanManifold<3>>`, fixed pose 0,
+all points variable, fixed sensor/calibration values, SPARSE_SCHUR with point
+group 0 and pose group 1, LM, one thread, initial trust-region radius `1e4`,
+and at most 20 iterations. It records the actual options, full Ceres report,
+every Ceres iteration, initial/final full squared costs and depth checks, and
+all final `POSE`/`LANDMARK` state rows. Ceres's internal half-cost convention
+is labeled separately. A state is published only after finite positive-depth,
+full-observation validation; output paths are exclusive and existing paths or
+symlinks are rejected. The state file starts with
+`VISLOC_BA_CERES_SOLVE_STATE 1`, carries all `SOURCE_SHA256_*` fields,
+`FIXED_POSE`, counts, initial/final full-cost records and termination/report
+records, then writes `POSE id qw qx qy qz tx ty tz` and
+`LANDMARK id x y z` rows between explicit state-section markers before
+`END`. It is a diagnostic state report, not a publication-ready COLMAP model.
 
 The diagnostic is capped at 512 poses, 8,192 landmarks and 262,144
 observations. These are input bounds, not a measured memory guarantee.
