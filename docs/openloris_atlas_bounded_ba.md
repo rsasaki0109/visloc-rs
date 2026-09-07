@@ -294,3 +294,30 @@ how to optimize it; do not weaken the connectivity check to hide that cost.
 This isolates filtering, inspired by the upstream local-BA/filter ordering and
 existing visloc rig filtering. It does not reproduce COLMAP's complete
 merge/completion policy or establish a quality improvement before measurement.
+
+### Independent deletion accounting
+
+Run the transition auditor on each original component, followed by the existing
+standalone geometry/rig/connectivity auditor on the actual output:
+
+```bash
+python3 scripts/audit_colmap_observation_filter.py \
+  BASELINE/component-000/images.txt FILTERED/component-000/images.txt
+python3 scripts/audit_colmap_pinhole_model.py \
+  FILTERED/component-000 FILTERED/component-001 --rig-manifest RIG_MANIFEST
+```
+
+The transition auditor streams image rows and checks unchanged image identity,
+camera assignment and every keypoint's serialized coordinates/order. It allows
+point-ID renumbering and deletion only, rejecting added observations, track
+merges/splits and lost image support. Its removed-observation and removed-point
+counts must match the accepted-window log totals. It uses O(points) ID mappings;
+its memory is audit overhead, not included in mapper RSS measurements.
+It does not replace the second auditor's points3D references, projection,
+fixed-rig and frame-connectivity checks.
+
+The transition auditor's seven tests and the geometry auditor's thirteen tests
+pass. Applied to the frozen connected strict control, it independently confirms
+8,988 main image rows, 319,144 points and 1,327,687 observations unchanged, with
+840 changed pose rows and zero removed observations or points. Filtering-mode
+results still require measurement.
