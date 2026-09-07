@@ -8,6 +8,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -119,6 +120,34 @@ class ScoreOpenLorisModelTests(unittest.TestCase):
             transforms = score.load_camera_extrinsics(path)
             self.assertTrue(np.allclose(transforms[1][:3, 3], [1.0, 2.0, 3.0]))
             self.assertTrue(np.allclose(transforms[2][:3, 3], [5.0, 2.0, 3.0]))
+
+    def test_aggregate_pools_image_errors_not_component_metrics(self) -> None:
+        names = [f"image-{index}" for index in range(5)]
+        manifest = {name: (1, float(index)) for index, name in enumerate(names)}
+        reference = {name: np.zeros(3) for name in names}
+        components = [
+            ({"rmse_m": 0.0, "p95_m": 0.0}, np.zeros(3), names[:3]),
+            ({"rmse_m": 4.0, "p95_m": 4.0}, np.full(2, 4.0), names[3:]),
+        ]
+        # Isolate aggregation from per-component alignment (tested separately).
+        with (
+            mock.patch.object(score, "load_manifest", return_value=manifest),
+            mock.patch.object(score, "load_ground_truth", return_value=None),
+            mock.patch.object(score, "load_camera_extrinsics", return_value=None),
+            mock.patch.object(score, "interpolate_camera_centres", return_value=reference),
+            mock.patch.object(score, "load_model_centres", side_effect=[names[:3], names[3:]]),
+            mock.patch.object(score, "score_component", side_effect=components),
+            mock.patch.object(score, "sha256_file", return_value="fixture-only"),
+        ):
+            result = score.score(
+                [Path("component-a"), Path("component-b")],
+                Path("manifest"), Path("ground-truth"), Path("transforms"),
+            )
+        self.assertEqual(result["models"], 2)
+        self.assertEqual(result["gt_scored_images"], 5)
+        self.assertAlmostEqual(result["component_weighted_rmse_m"], math.sqrt(32.0 / 5.0))
+        self.assertEqual(result["component_weighted_p95_m"], 4.0)
+        self.assertEqual(result["component_weighted_median_m"], 0.0)
 
     def test_alias_map_is_reversed_for_colmap_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
