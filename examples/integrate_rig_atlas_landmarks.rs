@@ -27,7 +27,7 @@ use visloc_rs::vision::pnp::{
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
-const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
+const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba [--pre-ba-out-dir PATH]]\n    [--joint-rig-ba-filter-observations]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
 const XY_TOLERANCE_PX: f64 = 1.0e-9;
 const INTRINSIC_TOLERANCE: f64 = 1.0e-8;
 const MIN_TRACK_OBSERVATIONS: usize = 2;
@@ -65,8 +65,10 @@ struct Args {
     nodes_tsv: PathBuf,
     atlas_dir: PathBuf,
     out_dir: PathBuf,
+    pre_ba_out_dir: Option<PathBuf>,
     recover_zero_support_frames: bool,
     joint_rig_ba: bool,
+    joint_rig_ba_filter_observations: bool,
     diagnose_cross_boundary_pnp: bool,
     diagnostic_left_max_frame: Option<u64>,
     repair_cross_boundary: bool,
@@ -258,6 +260,51 @@ struct JointRigBaSummary {
     final_cost: f64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+struct JointRigBaFilteringSummary {
+    windows_considered: usize,
+    windows_accepted: usize,
+    windows_skipped: usize,
+    selected_landmarks: usize,
+    selected_observations: usize,
+    max_referenced_frames: usize,
+    max_free_frames: usize,
+    max_iterations: usize,
+    converged_windows: usize,
+    removed_observations: usize,
+    removed_tracks: usize,
+    retriangulated_tracks: usize,
+    removed_reason_counts: BTreeMap<FilterObservationReason, usize>,
+    full_pre_ba_cost: f64,
+    full_post_ba_cost: f64,
+    retained_pre_ba_cost: f64,
+    retained_post_filter_cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FilterObservationReason {
+    NonFinite,
+    BehindCamera,
+    ProjectionFailure,
+    ReprojectionOverMax,
+    TrackBelowMinimum,
+    RetriangulationFailed,
+}
+
+impl std::fmt::Display for FilterObservationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::NonFinite => "nonfinite",
+            Self::BehindCamera => "behind-camera",
+            Self::ProjectionFailure => "projection-failure",
+            Self::ReprojectionOverMax => "reprojection-over-max",
+            Self::TrackBelowMinimum => "track-below-minimum",
+            Self::RetriangulationFailed => "retriangulation-failed",
+        };
+        f.write_str(label)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeRejection {
     DuplicateCandidateObservation,
@@ -298,8 +345,10 @@ where
     let mut nodes_tsv = None;
     let mut atlas_dir = None;
     let mut out_dir = None;
+    let mut pre_ba_out_dir = None;
     let mut recover_zero_support_frames = false;
     let mut joint_rig_ba = false;
+    let mut joint_rig_ba_filter_observations = false;
     let mut diagnose_cross_boundary_pnp = false;
     let mut diagnostic_left_max_frame = None;
     let mut repair_cross_boundary = false;
@@ -320,6 +369,26 @@ where
                 return Err(format!("duplicate argument {flag}\n{USAGE}"));
             }
             joint_rig_ba = true;
+            continue;
+        }
+        if flag == "--joint-rig-ba-filter-observations" {
+            if joint_rig_ba_filter_observations {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            joint_rig_ba_filter_observations = true;
+            continue;
+        }
+        if flag == "--pre-ba-out-dir" {
+            if pre_ba_out_dir.is_some() {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires PATH\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires PATH, got {value:?}\n{USAGE}"));
+            }
+            pre_ba_out_dir = Some(PathBuf::from(value));
             continue;
         }
         if flag == "--diagnose-cross-boundary-pnp" {
@@ -416,9 +485,12 @@ where
             "--diagnose-cross-boundary-pnp and --repair-cross-boundary are mutually exclusive\n{USAGE}"
         ));
     }
-    if repair_cross_boundary && joint_rig_ba {
+    if pre_ba_out_dir.is_some() && !joint_rig_ba {
+        return Err(format!("--pre-ba-out-dir requires --joint-rig-ba\n{USAGE}"));
+    }
+    if joint_rig_ba_filter_observations && !joint_rig_ba {
         return Err(format!(
-            "--repair-cross-boundary cannot be combined with joint BA\n{USAGE}"
+            "--joint-rig-ba-filter-observations requires --joint-rig-ba\n{USAGE}"
         ));
     }
     Ok(Args {
@@ -426,8 +498,10 @@ where
         nodes_tsv: nodes_tsv.ok_or_else(|| format!("--nodes-tsv is required\n{USAGE}"))?,
         atlas_dir: atlas_dir.ok_or_else(|| format!("--atlas-dir is required\n{USAGE}"))?,
         out_dir: out_dir.ok_or_else(|| format!("--out-dir is required\n{USAGE}"))?,
+        pre_ba_out_dir,
         recover_zero_support_frames,
         joint_rig_ba,
+        joint_rig_ba_filter_observations,
         diagnose_cross_boundary_pnp,
         diagnostic_left_max_frame,
         repair_cross_boundary,
@@ -435,9 +509,113 @@ where
     })
 }
 
+fn resolved_comparison_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("resolve current directory: {error}"))?
+            .join(path)
+    };
+    let mut probe = absolute;
+    let mut missing = Vec::new();
+    let base = loop {
+        match fs::canonicalize(&probe) {
+            Ok(path) => break path,
+            Err(error) => {
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot resolve path {:?}: {error}", path));
+                };
+                missing.push(name.to_os_string());
+                if !probe.pop() {
+                    return Err(format!("cannot resolve path {:?}: {error}", path));
+                }
+            }
+        }
+    };
+    let mut resolved = base;
+    for component in missing.iter().rev() {
+        if component == "." {
+            continue;
+        }
+        if component == ".." {
+            resolved.pop();
+        } else {
+            resolved.push(component);
+        }
+    }
+    Ok(resolved)
+}
+
+fn paths_overlap(first: &Path, second: &Path) -> Result<bool, String> {
+    let first = resolved_comparison_path(first)?;
+    let second = resolved_comparison_path(second)?;
+    Ok(first == second || first.starts_with(&second) || second.starts_with(&first))
+}
+
+fn validate_write_destinations(args: &Args, nodes: &[NodeSpec]) -> Result<(), String> {
+    let mut destinations = vec![("--out-dir", args.out_dir.as_path())];
+    if let Some(path) = args.pre_ba_out_dir.as_deref() {
+        destinations.push(("--pre-ba-out-dir", path));
+    }
+    let mut inputs = vec![
+        ("--rig-manifest", args.rig_manifest.as_path()),
+        ("--nodes-tsv", args.nodes_tsv.as_path()),
+        ("--atlas-dir", args.atlas_dir.as_path()),
+    ];
+    inputs.extend(
+        nodes
+            .iter()
+            .map(|node| ("node images.txt", node.images_txt.as_path())),
+    );
+    for (index, (destination_name, destination)) in destinations.iter().enumerate() {
+        for (other_name, other) in destinations.iter().skip(index + 1) {
+            if paths_overlap(destination, other)? {
+                return Err(format!(
+                    "{destination_name} {:?} overlaps {other_name} {:?}; refusing ambiguous output destinations",
+                    destination, other
+                ));
+            }
+        }
+        for (input_name, input) in &inputs {
+            if paths_overlap(destination, input)? {
+                return Err(format!(
+                    "{destination_name} {:?} overlaps input {input_name} {:?}; refusing to write input data",
+                    destination, input
+                ));
+            }
+        }
+    }
+    if let Some(path) = args.pre_ba_out_dir.as_deref() {
+        if path.exists() {
+            if !path.is_dir() {
+                return Err(format!(
+                    "--pre-ba-out-dir {:?} exists but is not a directory",
+                    path
+                ));
+            }
+            let mut entries = fs::read_dir(path)
+                .map_err(|error| format!("read --pre-ba-out-dir {}: {error}", path.display()))?;
+            if entries
+                .next()
+                .transpose()
+                .map_err(|error| format!("inspect --pre-ba-out-dir {}: {error}", path.display()))?
+                .is_some()
+            {
+                return Err(format!(
+                    "--pre-ba-out-dir {:?} must be new or empty; refusing to overwrite an existing checkpoint",
+                    path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run(args: &Args) -> Result<(), String> {
     let manifest = parse_rig_manifest(&args.rig_manifest)?;
     let nodes = parse_node_specs(&args.nodes_tsv)?;
+    validate_write_destinations(args, &nodes)?;
     let atlas_images = parse_atlas_images(&args.atlas_dir, &manifest)?;
     let mut cameras = BTreeMap::<u64, Camera>::new();
     let mut global_images = atlas_images
@@ -582,29 +760,79 @@ fn run(args: &Args) -> Result<(), String> {
         );
     }
     if args.joint_rig_ba {
-        let summary = run_joint_rig_ba(
-            &manifest,
-            &store,
-            &mut global_images,
-            &cameras,
-            &mut landmarks,
-        )?;
-        validate_output_cameras(&manifest, &global_images, &cameras)?;
-        println!(
-            "joint_rig_ba windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} max_solver_initial_cost={:.9} min_solver_final_cost={:.9} final_cost={:.9}",
-            summary.windows_considered,
-            summary.windows_accepted,
-            summary.windows_skipped,
-            summary.selected_landmarks,
-            summary.selected_observations,
-            summary.max_referenced_frames,
-            summary.max_free_frames,
-            summary.max_iterations,
-            summary.converged_windows,
-            summary.max_solver_initial_cost,
-            summary.min_solver_final_cost,
-            summary.final_cost,
-        );
+        if let Some(pre_ba_out_dir) = args.pre_ba_out_dir.as_deref() {
+            require_nonempty_landmarks(&landmarks, landmark_observation_count(&landmarks))?;
+            stats.output_landmarks = landmarks.len();
+            stats.output_observations = landmark_observation_count(&landmarks);
+            let support = write_model_canonical(
+                pre_ba_out_dir,
+                &global_images,
+                &cameras,
+                &landmarks,
+                &stats,
+            )?;
+            println!(
+                "pre_ba_checkpoint out_dir={} landmarks={} observations={} supported_images={} supported_frames={}",
+                pre_ba_out_dir.display(),
+                stats.output_landmarks,
+                stats.output_observations,
+                support.supported_image_count,
+                support.supported_frame_count,
+            );
+        }
+        if args.joint_rig_ba_filter_observations {
+            let summary = run_joint_rig_ba_filtering(
+                &manifest,
+                &mut store,
+                &mut global_images,
+                &cameras,
+                &mut landmarks,
+            )?;
+            validate_output_cameras(&manifest, &global_images, &cameras)?;
+            println!(
+                "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
+                summary.windows_considered,
+                summary.windows_accepted,
+                summary.windows_skipped,
+                summary.selected_landmarks,
+                summary.selected_observations,
+                summary.max_referenced_frames,
+                summary.max_free_frames,
+                summary.max_iterations,
+                summary.converged_windows,
+                summary.removed_observations,
+                summary.removed_tracks,
+                summary.retriangulated_tracks,
+                summary.full_pre_ba_cost,
+                summary.full_post_ba_cost,
+                summary.retained_pre_ba_cost,
+                summary.retained_post_filter_cost,
+            );
+        } else {
+            let summary = run_joint_rig_ba(
+                &manifest,
+                &store,
+                &mut global_images,
+                &cameras,
+                &mut landmarks,
+            )?;
+            validate_output_cameras(&manifest, &global_images, &cameras)?;
+            println!(
+                "joint_rig_ba windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} max_solver_initial_cost={:.9} min_solver_final_cost={:.9} final_cost={:.9}",
+                summary.windows_considered,
+                summary.windows_accepted,
+                summary.windows_skipped,
+                summary.selected_landmarks,
+                summary.selected_observations,
+                summary.max_referenced_frames,
+                summary.max_free_frames,
+                summary.max_iterations,
+                summary.converged_windows,
+                summary.max_solver_initial_cost,
+                summary.min_solver_final_cost,
+                summary.final_cost,
+            );
+        }
     }
     landmarks.sort_by_key(|landmark| {
         (
@@ -2089,6 +2317,89 @@ fn diagnostic_add_track_to_dsu(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupportConnectivity {
+    supported_images: BTreeSet<u64>,
+    supported_frames: BTreeSet<u64>,
+    frame_components: BTreeMap<u64, usize>,
+    component_count: usize,
+}
+
+fn support_connectivity_for_landmarks(
+    baseline_landmarks: &[LandmarkOutput],
+    replacements: &BTreeMap<usize, LandmarkOutput>,
+    removed_track_ids: &BTreeSet<usize>,
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<SupportConnectivity, String> {
+    let frame_ids = diagnostic_frame_ids(images);
+    let frame_indices = frame_ids
+        .iter()
+        .enumerate()
+        .map(|(index, frame_id)| (*frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut dsu = DiagnosticDsu::new(frame_ids.len());
+    let mut supported_images = BTreeSet::new();
+    let mut supported_frames = BTreeSet::new();
+    for (index, baseline) in baseline_landmarks.iter().enumerate() {
+        if removed_track_ids.contains(&baseline.track_id) {
+            continue;
+        }
+        let keys = replacements
+            .get(&index)
+            .map(|landmark| landmark.observations.as_slice())
+            .unwrap_or(&baseline.observations);
+        diagnostic_add_track_to_dsu(
+            keys,
+            images,
+            &frame_indices,
+            &mut dsu,
+            &mut supported_images,
+            &mut supported_frames,
+        )?;
+    }
+    let mut root_to_component = BTreeMap::<usize, usize>::new();
+    let mut frame_components = BTreeMap::new();
+    for frame_id in &supported_frames {
+        let frame_index = *frame_indices
+            .get(frame_id)
+            .ok_or_else(|| "supported connectivity frame index is missing".to_owned())?;
+        let root = dsu.find(frame_index);
+        let next = root_to_component.len();
+        let component = *root_to_component.entry(root).or_insert(next);
+        frame_components.insert(*frame_id, component);
+    }
+    Ok(SupportConnectivity {
+        supported_images,
+        supported_frames,
+        component_count: root_to_component.len(),
+        frame_components,
+    })
+}
+
+fn connectivity_not_split(baseline: &SupportConnectivity, candidate: &SupportConnectivity) -> bool {
+    if baseline.supported_images != candidate.supported_images
+        || baseline.supported_frames != candidate.supported_frames
+        || candidate.component_count > baseline.component_count
+    {
+        return false;
+    }
+    let mut component_map = BTreeMap::<usize, usize>::new();
+    for frame_id in &baseline.supported_frames {
+        let Some(&baseline_component) = baseline.frame_components.get(frame_id) else {
+            return false;
+        };
+        let Some(&candidate_component) = candidate.frame_components.get(frame_id) else {
+            return false;
+        };
+        if let Some(previous) = component_map.insert(baseline_component, candidate_component) {
+            if previous != candidate_component {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn diagnostic_connectivity_report(
@@ -3619,6 +3930,85 @@ fn evaluate_landmark_metrics(
     })
 }
 
+// The filter mode must inspect depth failures after the all-observation cost
+// gate.  Camera::project intentionally rejects non-positive depth, so this
+// raw-cost helper evaluates the same projection equations without applying
+// the depth gate.  The depth gate remains mandatory during candidate
+// filtering/retriangulation and in the final validator.
+fn project_allowing_nonpositive_depth(
+    camera: &Camera,
+    point_camera: &Point3<f64>,
+) -> Option<Point2<f64>> {
+    if !point_camera.coords.iter().all(|value| value.is_finite()) || point_camera.z == 0.0 {
+        return None;
+    }
+    if point_camera.z > 0.0 {
+        return camera.project(point_camera);
+    }
+    let (fx, fy, cx, cy) = camera.intrinsics()?;
+    if ![fx, fy, cx, cy].iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let mut x = point_camera.x / point_camera.z;
+    let mut y = point_camera.y / point_camera.z;
+    if let Some((k1, k2)) = camera.radial_distortion() {
+        if !k1.is_finite() || !k2.is_finite() {
+            return None;
+        }
+        let r2 = x * x + y * y;
+        let d = 1.0 + k1 * r2 + k2 * r2 * r2;
+        x *= d;
+        y *= d;
+    }
+    let projected = Point2::new(fx * x + cx, fy * y + cy);
+    projected
+        .coords
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(projected)
+}
+
+fn evaluate_landmark_metrics_allowing_nonpositive_depth(
+    landmark: &LandmarkOutput,
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<LandmarkMetrics, String> {
+    let mut errors = Vec::with_capacity(landmark.observations.len());
+    for key in &landmark.observations {
+        let image = images
+            .get(&key.global_image_id)
+            .ok_or_else(|| "landmark references unknown image".to_owned())?;
+        let camera = cameras
+            .get(&image.atlas.camera_id)
+            .ok_or_else(|| "landmark references unknown camera".to_owned())?;
+        let observation = observations
+            .get(key)
+            .ok_or_else(|| "landmark references unknown observation".to_owned())?;
+        let pose = pose_for_image(image, pose_overrides);
+        let point_camera = pose.transform_world_point(&landmark.position);
+        let projected = project_allowing_nonpositive_depth(camera, &point_camera)
+            .ok_or_else(|| "landmark projection became non-finite".to_owned())?;
+        let error = (projected - observation.xy).norm();
+        if !error.is_finite() {
+            return Err("landmark reprojection became non-finite".to_owned());
+        }
+        errors.push(error);
+    }
+    if errors.is_empty() {
+        return Err("landmark has no observations".to_owned());
+    }
+    let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+    let rms = (errors.iter().map(|error| error * error).sum::<f64>() / errors.len() as f64).sqrt();
+    Ok(LandmarkMetrics {
+        max_error: errors.iter().copied().fold(0.0, f64::max),
+        errors,
+        mean_error: mean,
+        rms_error: rms,
+    })
+}
+
 fn pose_for_image<'a>(image: &'a GlobalImage, pose_overrides: &'a BTreeMap<u64, Pose>) -> &'a Pose {
     pose_overrides
         .get(&image.atlas.global_image_id)
@@ -3637,6 +4027,25 @@ struct JointRigBaWindowUpdate {
     final_cost: f64,
     solver_initial_cost: f64,
     solver_final_cost: f64,
+    iterations: usize,
+    converged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct JointRigBaFilteringCandidate {
+    pose_overrides: BTreeMap<u64, Pose>,
+    landmark_updates: BTreeMap<usize, LandmarkOutput>,
+    removed_observations: BTreeMap<ObservationKey, FilterObservationReason>,
+    removed_track_ids: BTreeSet<usize>,
+    selected_landmarks: usize,
+    selected_observations: usize,
+    referenced_frames: usize,
+    free_frames: usize,
+    full_pre_ba_cost: f64,
+    full_post_ba_cost: f64,
+    retained_pre_ba_cost: f64,
+    retained_post_filter_cost: f64,
+    retriangulated_tracks: usize,
     iterations: usize,
     converged: bool,
 }
@@ -3856,7 +4265,7 @@ fn validate_joint_ba_update(
     Ok(())
 }
 
-fn build_joint_rig_ba_window(
+fn build_joint_rig_ba_window_raw(
     manifest: &RigManifest,
     store: &TrackStore,
     images: &BTreeMap<u64, GlobalImage>,
@@ -4054,7 +4463,7 @@ fn build_joint_rig_ba_window(
             .ok_or_else(|| JointRigBaSkip::Invalid("BA omitted selected landmark".to_owned()))?;
         let mut candidate = old.clone();
         candidate.position = position;
-        let metrics = evaluate_landmark_metrics(
+        let metrics = evaluate_landmark_metrics_allowing_nonpositive_depth(
             &candidate,
             &store.observations,
             images,
@@ -4079,7 +4488,7 @@ fn build_joint_rig_ba_window(
             &BTreeMap::new(),
         )
         .map_err(JointRigBaSkip::Invalid)?;
-        let new_metrics = evaluate_landmark_metrics(
+        let new_metrics = evaluate_landmark_metrics_allowing_nonpositive_depth(
             landmark_updates
                 .get(index)
                 .ok_or_else(|| JointRigBaSkip::Invalid("BA update omitted landmark".to_owned()))?,
@@ -4114,6 +4523,21 @@ fn build_joint_rig_ba_window(
         iterations: result.iterations.len(),
         converged: result.converged,
     };
+    Ok(update)
+}
+
+fn build_joint_rig_ba_window(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+) -> Result<JointRigBaWindowUpdate, JointRigBaSkip> {
+    let selected = selected_landmarks_for_frames(landmarks, active_frames, images)
+        .map_err(JointRigBaSkip::Invalid)?;
+    let update =
+        build_joint_rig_ba_window_raw(manifest, store, images, cameras, landmarks, active_frames)?;
     if let Err(reason) =
         validate_joint_ba_update(&update, store, images, cameras, landmarks, &selected)
     {
@@ -4131,6 +4555,105 @@ fn build_joint_rig_ba_window(
         return Err(reason);
     }
     Ok(update)
+}
+
+fn classify_filter_observation(
+    key: ObservationKey,
+    position: &Point3<f64>,
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<f64, FilterObservationReason> {
+    if !position.coords.iter().all(|value| value.is_finite()) {
+        return Err(FilterObservationReason::NonFinite);
+    }
+    let image = images
+        .get(&key.global_image_id)
+        .ok_or(FilterObservationReason::ProjectionFailure)?;
+    let camera = cameras
+        .get(&image.atlas.camera_id)
+        .ok_or(FilterObservationReason::ProjectionFailure)?;
+    let observation = observations
+        .get(&key)
+        .ok_or(FilterObservationReason::ProjectionFailure)?;
+    if !observation.xy.coords.iter().all(|value| value.is_finite()) {
+        return Err(FilterObservationReason::NonFinite);
+    }
+    let point_camera = pose_for_image(image, pose_overrides).transform_world_point(position);
+    if !point_camera.coords.iter().all(|value| value.is_finite()) {
+        return Err(FilterObservationReason::NonFinite);
+    }
+    if point_camera.z <= 0.0 {
+        return Err(FilterObservationReason::BehindCamera);
+    }
+    let projected = project_allowing_nonpositive_depth(camera, &point_camera)
+        .ok_or(FilterObservationReason::ProjectionFailure)?;
+    let error = (projected - observation.xy).norm();
+    if !error.is_finite() {
+        return Err(FilterObservationReason::NonFinite);
+    }
+    if error > MAX_REPROJECTION_PX {
+        return Err(FilterObservationReason::ReprojectionOverMax);
+    }
+    Ok(error)
+}
+
+fn cost_for_landmark_keys(
+    position: &Point3<f64>,
+    keys: &[ObservationKey],
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<f64, String> {
+    let mut cost = 0.0;
+    for key in keys {
+        let image = images
+            .get(&key.global_image_id)
+            .ok_or_else(|| "landmark references unknown image".to_owned())?;
+        let camera = cameras
+            .get(&image.atlas.camera_id)
+            .ok_or_else(|| "landmark references unknown camera".to_owned())?;
+        let observation = observations
+            .get(key)
+            .ok_or_else(|| "landmark references unknown observation".to_owned())?;
+        let point_camera = pose_for_image(image, pose_overrides).transform_world_point(position);
+        let projected = project_allowing_nonpositive_depth(camera, &point_camera)
+            .ok_or_else(|| "landmark cost became non-finite".to_owned())?;
+        let error = (projected - observation.xy).norm();
+        if !error.is_finite() {
+            return Err("landmark cost became non-finite".to_owned());
+        }
+        cost += error * error;
+    }
+    if !cost.is_finite() {
+        return Err("landmark cost became non-finite".to_owned());
+    }
+    Ok(cost)
+}
+
+fn cost_non_increasing(before: f64, after: f64) -> bool {
+    before.is_finite() && after.is_finite() && after <= before + 1.0e-8 * before.abs().max(1.0)
+}
+
+fn validate_filter_costs(
+    full_pre_ba_cost: f64,
+    full_post_ba_cost: f64,
+    retained_pre_ba_cost: f64,
+    retained_post_filter_cost: f64,
+) -> Result<(), String> {
+    if !cost_non_increasing(full_pre_ba_cost, full_post_ba_cost) {
+        return Err(format!(
+            "full selected cost increased before filtering from {full_pre_ba_cost:.12} to {full_post_ba_cost:.12}"
+        ));
+    }
+    if !cost_non_increasing(retained_pre_ba_cost, retained_post_filter_cost) {
+        return Err(format!(
+            "retained cost increased after filtering from {retained_pre_ba_cost:.12} to {retained_post_filter_cost:.12}"
+        ));
+    }
+    Ok(())
 }
 
 fn joint_ba_window_counts(
@@ -4159,6 +4682,648 @@ fn joint_ba_window_counts(
         referenced_frames.len(),
         free_frames,
     ))
+}
+
+fn build_joint_rig_ba_filter_candidate(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+    baseline_connectivity: &SupportConnectivity,
+) -> Result<JointRigBaFilteringCandidate, JointRigBaSkip> {
+    let selected = selected_landmarks_for_frames(landmarks, active_frames, images)
+        .map_err(JointRigBaSkip::Invalid)?;
+    let raw =
+        build_joint_rig_ba_window_raw(manifest, store, images, cameras, landmarks, active_frames)?;
+    if raw.landmark_updates.len() != selected.len() {
+        return Err(JointRigBaSkip::Invalid(
+            "raw BA candidate omitted a selected landmark".to_owned(),
+        ));
+    }
+
+    let mut full_pre_ba_cost = 0.0;
+    let mut full_post_ba_cost = 0.0;
+    for index in &selected {
+        let old = landmarks.get(*index).ok_or_else(|| {
+            JointRigBaSkip::Invalid("selected landmark index is invalid".to_owned())
+        })?;
+        let candidate = raw.landmark_updates.get(index).ok_or_else(|| {
+            JointRigBaSkip::Invalid(format!("raw BA omitted selected landmark {index}"))
+        })?;
+        if candidate.track_id != old.track_id || candidate.observations != old.observations {
+            return Err(JointRigBaSkip::Invalid(format!(
+                "raw BA changed identity or observations for landmark {index}"
+            )));
+        }
+        full_pre_ba_cost += cost_for_landmark_keys(
+            &old.position,
+            &old.observations,
+            &store.observations,
+            images,
+            cameras,
+            &BTreeMap::new(),
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        full_post_ba_cost += cost_for_landmark_keys(
+            &candidate.position,
+            &candidate.observations,
+            &store.observations,
+            images,
+            cameras,
+            &raw.pose_overrides,
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+    }
+    let mut landmark_updates = BTreeMap::new();
+    let mut removed_observations = BTreeMap::new();
+    let mut removed_track_ids = BTreeSet::new();
+    let mut retained_pre_ba_cost = 0.0;
+    let mut retained_post_filter_cost = 0.0;
+    let mut retriangulated_tracks = 0;
+    for index in &selected {
+        let old = landmarks.get(*index).ok_or_else(|| {
+            JointRigBaSkip::Invalid("selected landmark index is invalid".to_owned())
+        })?;
+        let candidate = raw.landmark_updates.get(index).ok_or_else(|| {
+            JointRigBaSkip::Invalid(format!("raw BA omitted selected landmark {index}"))
+        })?;
+        let mut retained = Vec::with_capacity(candidate.observations.len());
+        for key in &candidate.observations {
+            match classify_filter_observation(
+                *key,
+                &candidate.position,
+                &store.observations,
+                images,
+                cameras,
+                &raw.pose_overrides,
+            ) {
+                Ok(_) => retained.push(*key),
+                Err(reason) => {
+                    removed_observations.insert(*key, reason);
+                }
+            }
+        }
+        if retained.len() < MIN_TRACK_OBSERVATIONS {
+            removed_track_ids.insert(old.track_id);
+            for key in &old.observations {
+                removed_observations
+                    .entry(*key)
+                    .or_insert(FilterObservationReason::TrackBelowMinimum);
+            }
+            continue;
+        }
+
+        let refined_track = GlobalTrack {
+            observations: retained.clone(),
+        };
+        let refined = match triangulate_track_with_pose_overrides(
+            old.track_id,
+            &refined_track,
+            &store.observations,
+            images,
+            cameras,
+            &raw.pose_overrides,
+        ) {
+            Ok(landmark) => landmark,
+            Err(_) => {
+                removed_track_ids.insert(old.track_id);
+                for key in &old.observations {
+                    removed_observations
+                        .entry(*key)
+                        .or_insert(FilterObservationReason::RetriangulationFailed);
+                }
+                continue;
+            }
+        };
+        retained_pre_ba_cost += cost_for_landmark_keys(
+            &old.position,
+            &retained,
+            &store.observations,
+            images,
+            cameras,
+            &BTreeMap::new(),
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        retained_post_filter_cost += cost_for_landmark_keys(
+            &refined.position,
+            &retained,
+            &store.observations,
+            images,
+            cameras,
+            &raw.pose_overrides,
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        retriangulated_tracks += 1;
+        landmark_updates.insert(*index, refined);
+    }
+    validate_filter_costs(
+        full_pre_ba_cost,
+        full_post_ba_cost,
+        retained_pre_ba_cost,
+        retained_post_filter_cost,
+    )
+    .map_err(JointRigBaSkip::Invalid)?;
+
+    let candidate_connectivity = support_connectivity_for_landmarks(
+        landmarks,
+        &landmark_updates,
+        &removed_track_ids,
+        images,
+    )
+    .map_err(JointRigBaSkip::Invalid)?;
+    if !connectivity_not_split(baseline_connectivity, &candidate_connectivity) {
+        return Err(JointRigBaSkip::Invalid(
+            "filter candidate loses supported image/frame support or splits connectivity"
+                .to_owned(),
+        ));
+    }
+    validate_candidate_pose_overrides(manifest, images, &raw.pose_overrides)
+        .map_err(JointRigBaSkip::Invalid)?;
+    Ok(JointRigBaFilteringCandidate {
+        pose_overrides: raw.pose_overrides,
+        landmark_updates,
+        removed_observations,
+        removed_track_ids,
+        selected_landmarks: raw.selected_landmarks,
+        selected_observations: raw.selected_observations,
+        referenced_frames: raw.referenced_frames,
+        free_frames: raw.free_frames,
+        full_pre_ba_cost,
+        full_post_ba_cost,
+        retained_pre_ba_cost,
+        retained_post_filter_cost,
+        retriangulated_tracks,
+        iterations: raw.iterations,
+        converged: raw.converged,
+    })
+}
+
+fn validate_candidate_pose_overrides(
+    manifest: &RigManifest,
+    images: &BTreeMap<u64, GlobalImage>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<(), String> {
+    let mut frame_poses = BTreeMap::<u64, Pose>::new();
+    for (image_id, pose) in pose_overrides {
+        let image = images
+            .get(image_id)
+            .ok_or_else(|| "BA pose override references unknown image".to_owned())?;
+        let sensor = manifest
+            .sensors
+            .get(&image.atlas.sensor_index)
+            .ok_or_else(|| "BA pose override references unknown sensor".to_owned())?;
+        if !diagnostic_pose_is_finite(pose) {
+            return Err("BA pose override is non-finite".to_owned());
+        }
+        let rig_pose = Pose {
+            world_to_camera: sensor
+                .sensor_from_rig
+                .inverse()
+                .compose(&pose.world_to_camera),
+        };
+        if let Some(previous) = frame_poses.insert(image.atlas.frame_id, rig_pose.clone()) {
+            let center_error =
+                (previous.camera_center_world() - rig_pose.camera_center_world()).norm();
+            let rotation_error = previous
+                .world_to_camera
+                .rotation
+                .rotation_to(&rig_pose.world_to_camera.rotation)
+                .angle()
+                .to_degrees();
+            if !center_error.is_finite()
+                || !rotation_error.is_finite()
+                || center_error > MAX_RIG_CENTER_DISAGREEMENT_M
+                || rotation_error > MAX_RIG_ROTATION_DISAGREEMENT_DEG
+            {
+                return Err(format!(
+                    "BA pose overrides disagree for frame {}",
+                    image.atlas.frame_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn filter_reason_counts(
+    removed_observations: &BTreeMap<ObservationKey, FilterObservationReason>,
+) -> BTreeMap<FilterObservationReason, usize> {
+    let mut counts = BTreeMap::new();
+    for reason in removed_observations.values() {
+        *counts.entry(*reason).or_default() += 1;
+    }
+    counts
+}
+
+fn format_filter_reason_counts(counts: &BTreeMap<FilterObservationReason, usize>) -> String {
+    counts
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn validate_filter_candidate_for_apply(
+    candidate: &JointRigBaFilteringCandidate,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    landmarks: &[LandmarkOutput],
+) -> Result<(), String> {
+    for (image_id, pose) in &candidate.pose_overrides {
+        if !images.contains_key(image_id) {
+            return Err(format!(
+                "filter candidate pose override references unknown image {image_id}"
+            ));
+        }
+        if !diagnostic_pose_is_finite(pose) {
+            return Err(format!(
+                "filter candidate pose override for image {image_id} is non-finite"
+            ));
+        }
+    }
+
+    let mut replacement_tracks = BTreeSet::new();
+    let mut retained_keys = BTreeSet::new();
+    let mut expected_removed_keys = BTreeSet::new();
+    for (index, replacement) in &candidate.landmark_updates {
+        let old = landmarks
+            .get(*index)
+            .ok_or_else(|| format!("filter candidate landmark index {index} is invalid"))?;
+        if old.track_id != replacement.track_id {
+            return Err(format!(
+                "filter candidate changed track identity at landmark index {index}"
+            ));
+        }
+        if replacement.observations.len() < MIN_TRACK_OBSERVATIONS {
+            return Err(format!(
+                "filter candidate replacement track {} has too few observations",
+                replacement.track_id
+            ));
+        }
+        if !replacement
+            .position
+            .coords
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(format!(
+                "filter candidate replacement track {} has a non-finite position",
+                replacement.track_id
+            ));
+        }
+        if !replacement_tracks.insert(replacement.track_id) {
+            return Err(format!(
+                "filter candidate updates track {} more than once",
+                replacement.track_id
+            ));
+        }
+        let source_track = store.tracks.get(replacement.track_id).ok_or_else(|| {
+            format!(
+                "filter candidate replacement references unknown track {}",
+                replacement.track_id
+            )
+        })?;
+        let old_keys = old.observations.iter().copied().collect::<BTreeSet<_>>();
+        let source_keys = source_track
+            .observations
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if source_keys != old_keys {
+            return Err(format!(
+                "filter candidate source track {} disagrees with landmark observations",
+                replacement.track_id
+            ));
+        }
+        let mut replacement_keys = BTreeSet::new();
+        for key in &replacement.observations {
+            if !replacement_keys.insert(*key) {
+                return Err(format!(
+                    "filter candidate replacement track {} has duplicate observation {:?}",
+                    replacement.track_id, key
+                ));
+            }
+            if !old_keys.contains(key) {
+                return Err(format!(
+                    "filter candidate replacement track {} adds observation {:?}",
+                    replacement.track_id, key
+                ));
+            }
+            if !images.contains_key(&key.global_image_id) {
+                return Err(format!(
+                    "filter candidate replacement references unknown image {}",
+                    key.global_image_id
+                ));
+            }
+            let state = store.observations.get(key).ok_or_else(|| {
+                format!("filter candidate replacement references unknown observation {key:?}")
+            })?;
+            if state.owner_track != replacement.track_id {
+                return Err(format!(
+                    "filter candidate replacement observation {:?} belongs to track {}",
+                    key, state.owner_track
+                ));
+            }
+            retained_keys.insert(*key);
+        }
+        expected_removed_keys.extend(old_keys.difference(&replacement_keys).copied());
+        if candidate.removed_track_ids.contains(&replacement.track_id) {
+            return Err(format!(
+                "filter candidate both replaces and removes track {}",
+                replacement.track_id
+            ));
+        }
+    }
+
+    for track_id in &candidate.removed_track_ids {
+        let track = store
+            .tracks
+            .get(*track_id)
+            .ok_or_else(|| format!("filter candidate references unknown track {track_id}"))?;
+        if replacement_tracks.contains(track_id) {
+            return Err(format!(
+                "filter candidate both replaces and removes track {track_id}"
+            ));
+        }
+        for key in &track.observations {
+            if !images.contains_key(&key.global_image_id) {
+                return Err(format!(
+                    "source track {track_id} references unknown image {}",
+                    key.global_image_id
+                ));
+            }
+            let state = store.observations.get(key).ok_or_else(|| {
+                format!("source track {track_id} references unknown observation {key:?}")
+            })?;
+            if state.owner_track != *track_id {
+                return Err(format!(
+                    "source track {track_id} observation {:?} has owner {}",
+                    key, state.owner_track
+                ));
+            }
+            expected_removed_keys.insert(*key);
+        }
+    }
+
+    let actual_removed_keys = candidate
+        .removed_observations
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if actual_removed_keys != expected_removed_keys {
+        return Err(format!(
+            "filter candidate removal ledger disagrees: expected {} keys, got {}",
+            expected_removed_keys.len(),
+            actual_removed_keys.len()
+        ));
+    }
+    for key in candidate.removed_observations.keys() {
+        if !images.contains_key(&key.global_image_id) {
+            return Err(format!(
+                "filter candidate removes observation {:?} from an unknown image",
+                key
+            ));
+        }
+        let state = store
+            .observations
+            .get(key)
+            .ok_or_else(|| format!("filter candidate removes unknown observation {key:?}"))?;
+        store.tracks.get(state.owner_track).ok_or_else(|| {
+            format!(
+                "filter candidate observation {:?} has unknown owner track {}",
+                key, state.owner_track
+            )
+        })?;
+        if !candidate.removed_track_ids.contains(&state.owner_track)
+            && !replacement_tracks.contains(&state.owner_track)
+        {
+            return Err(format!(
+                "filter candidate removes observation {:?} from an untouched track {}",
+                key, state.owner_track
+            ));
+        }
+        if retained_keys.contains(key) {
+            return Err(format!(
+                "filter candidate both removes and retains observation {key:?}"
+            ));
+        }
+    }
+
+    let mut required_landmark_tracks = replacement_tracks.clone();
+    required_landmark_tracks.extend(candidate.removed_track_ids.iter().copied());
+    let mut found_landmark_tracks = BTreeSet::new();
+    for landmark in landmarks {
+        if required_landmark_tracks.contains(&landmark.track_id) {
+            found_landmark_tracks.insert(landmark.track_id);
+        }
+    }
+    for track_id in &candidate.removed_track_ids {
+        if !found_landmark_tracks.contains(track_id) {
+            return Err(format!(
+                "filter candidate removes track {track_id} without a landmark"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_joint_rig_ba_filter_candidate(
+    candidate: &JointRigBaFilteringCandidate,
+    store: &mut TrackStore,
+    images: &mut BTreeMap<u64, GlobalImage>,
+    landmarks: &mut Vec<LandmarkOutput>,
+) -> Result<(), String> {
+    // All fallible validation happens before the first mutation.  The actual
+    // apply phase below only indexes entries proven to exist here, so a
+    // rejected candidate cannot leave a partially updated model behind.
+    validate_filter_candidate_for_apply(candidate, store, images, landmarks)?;
+    apply_pose_overrides(images, &candidate.pose_overrides)?;
+    for (index, replacement) in &candidate.landmark_updates {
+        let landmark = landmarks
+            .get_mut(*index)
+            .expect("filter candidate landmark index was prevalidated");
+        *landmark = replacement.clone();
+    }
+    for key in candidate.removed_observations.keys() {
+        store.observations.remove(key);
+    }
+    for track_id in &candidate.removed_track_ids {
+        let track = store
+            .tracks
+            .get_mut(*track_id)
+            .expect("filter candidate removed track was prevalidated");
+        track.observations.clear();
+    }
+    for replacement in candidate.landmark_updates.values() {
+        let track_id = replacement.track_id;
+        store
+            .tracks
+            .get_mut(track_id)
+            .expect("replacement track was prevalidated")
+            .observations = replacement.observations.clone();
+    }
+    landmarks.retain(|landmark| !candidate.removed_track_ids.contains(&landmark.track_id));
+    Ok(())
+}
+
+fn validate_filtered_model(
+    baseline_connectivity: &SupportConnectivity,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+) -> Result<(), String> {
+    let current_connectivity =
+        support_connectivity_for_landmarks(landmarks, &BTreeMap::new(), &BTreeSet::new(), images)?;
+    if !connectivity_not_split(baseline_connectivity, &current_connectivity) {
+        return Err("final filtered model loses support or splits connectivity".to_owned());
+    }
+    for landmark in landmarks {
+        if landmark.observations.len() < MIN_TRACK_OBSERVATIONS {
+            return Err(format!(
+                "final landmark {} has too few observations",
+                landmark.track_id
+            ));
+        }
+        let metrics = evaluate_landmark_metrics(
+            landmark,
+            &store.observations,
+            images,
+            cameras,
+            &BTreeMap::new(),
+        )?;
+        if metrics.mean_error > MAX_MEAN_REPROJECTION_PX || metrics.max_error > MAX_REPROJECTION_PX
+        {
+            return Err(format!(
+                "final landmark {} failed reprojection gate",
+                landmark.track_id
+            ));
+        }
+        let track = store
+            .tracks
+            .get(landmark.track_id)
+            .ok_or_else(|| format!("final landmark {} has no source track", landmark.track_id))?;
+        if track.observations != landmark.observations {
+            return Err(format!(
+                "final landmark {} and source track observations disagree",
+                landmark.track_id
+            ));
+        }
+        for key in &landmark.observations {
+            let observation = store
+                .observations
+                .get(key)
+                .ok_or_else(|| "final landmark references removed observation".to_owned())?;
+            if observation.owner_track != landmark.track_id {
+                return Err("final landmark observation owner disagrees".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_joint_rig_ba_filtering(
+    manifest: &RigManifest,
+    store: &mut TrackStore,
+    images: &mut BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &mut Vec<LandmarkOutput>,
+) -> Result<JointRigBaFilteringSummary, String> {
+    let baseline_connectivity =
+        support_connectivity_for_landmarks(landmarks, &BTreeMap::new(), &BTreeSet::new(), images)?;
+    let mut frame_ids = images
+        .values()
+        .map(|image| image.atlas.frame_id)
+        .collect::<Vec<_>>();
+    frame_ids.sort_unstable();
+    frame_ids.dedup();
+    let mut summary = JointRigBaFilteringSummary::default();
+    for start in (0..frame_ids.len()).step_by(JOINT_BA_WINDOW_STRIDE) {
+        let end = (start + JOINT_BA_WINDOW_LENGTH).min(frame_ids.len());
+        let active_frames = frame_ids[start..end]
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        summary.windows_considered += 1;
+        let window_counts = joint_ba_window_counts(landmarks, images, &active_frames);
+        if let Ok((selected_count, observation_count, referenced_count, free_count)) =
+            window_counts.as_ref()
+        {
+            summary.selected_landmarks += *selected_count;
+            summary.selected_observations += *observation_count;
+            summary.max_referenced_frames = summary.max_referenced_frames.max(*referenced_count);
+            summary.max_free_frames = summary.max_free_frames.max(*free_count);
+        }
+        match build_joint_rig_ba_filter_candidate(
+            manifest,
+            store,
+            images,
+            cameras,
+            landmarks,
+            &active_frames,
+            &baseline_connectivity,
+        ) {
+            Ok(candidate) => {
+                let reason_counts = filter_reason_counts(&candidate.removed_observations);
+                apply_joint_rig_ba_filter_candidate(&candidate, store, images, landmarks)?;
+                summary.windows_accepted += 1;
+                summary.max_iterations = summary.max_iterations.max(candidate.iterations);
+                if candidate.converged {
+                    summary.converged_windows += 1;
+                }
+                summary.removed_observations += candidate.removed_observations.len();
+                summary.removed_tracks += candidate.removed_track_ids.len();
+                summary.retriangulated_tracks += candidate.retriangulated_tracks;
+                summary.full_pre_ba_cost += candidate.full_pre_ba_cost;
+                summary.full_post_ba_cost += candidate.full_post_ba_cost;
+                summary.retained_pre_ba_cost += candidate.retained_pre_ba_cost;
+                summary.retained_post_filter_cost += candidate.retained_post_filter_cost;
+                for (reason, count) in &reason_counts {
+                    *summary.removed_reason_counts.entry(*reason).or_default() += *count;
+                }
+                println!(
+                    "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} removed_observations={} removed_tracks={} retriangulated_tracks={} reasons={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9} iterations={} converged={}",
+                    active_frames.first().copied().unwrap_or_default(),
+                    active_frames.last().copied().unwrap_or_default(),
+                    active_frames.len(),
+                    candidate.selected_landmarks,
+                    candidate.selected_observations,
+                    candidate.referenced_frames,
+                    candidate.free_frames,
+                    candidate.removed_observations.len(),
+                    candidate.removed_track_ids.len(),
+                    candidate.retriangulated_tracks,
+                    format_filter_reason_counts(&reason_counts),
+                    candidate.full_pre_ba_cost,
+                    candidate.full_post_ba_cost,
+                    candidate.retained_pre_ba_cost,
+                    candidate.retained_post_filter_cost,
+                    candidate.iterations,
+                    candidate.converged,
+                );
+            }
+            Err(reason) => {
+                summary.windows_skipped += 1;
+                let (selected_count, observation_count, referenced_count, free_count) =
+                    window_counts.unwrap_or_default();
+                println!(
+                    "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} reason={reason}",
+                    active_frames.first().copied().unwrap_or_default(),
+                    active_frames.last().copied().unwrap_or_default(),
+                    active_frames.len(),
+                    selected_count,
+                    observation_count,
+                    referenced_count,
+                    free_count,
+                );
+            }
+        }
+    }
+    validate_filtered_model(&baseline_connectivity, store, images, cameras, landmarks)?;
+    Ok(summary)
 }
 
 fn run_joint_rig_ba(
@@ -4293,6 +5458,31 @@ fn has_observable_parallax(
     Ok(false)
 }
 
+fn landmark_observation_count(landmarks: &[LandmarkOutput]) -> usize {
+    landmarks
+        .iter()
+        .map(|landmark| landmark.observations.len())
+        .sum()
+}
+
+fn canonical_landmark_indices(landmarks: &[LandmarkOutput]) -> Vec<usize> {
+    let mut indices = (0..landmarks.len()).collect::<Vec<_>>();
+    indices.sort_by_key(|index| {
+        (
+            landmarks[*index]
+                .observations
+                .first()
+                .copied()
+                .unwrap_or(ObservationKey {
+                    global_image_id: u64::MAX,
+                    keypoint_index: usize::MAX,
+                }),
+            landmarks[*index].track_id,
+        )
+    });
+    indices
+}
+
 fn write_model(
     out_dir: &Path,
     images: &BTreeMap<u64, GlobalImage>,
@@ -4300,8 +5490,38 @@ fn write_model(
     landmarks: &[LandmarkOutput],
     stats: &IngestStats,
 ) -> Result<SupportSummary, String> {
+    write_model_ordered(out_dir, images, cameras, landmarks, stats, false)
+}
+
+fn write_model_canonical(
+    out_dir: &Path,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    stats: &IngestStats,
+) -> Result<SupportSummary, String> {
+    write_model_ordered(out_dir, images, cameras, landmarks, stats, true)
+}
+
+fn write_model_ordered(
+    out_dir: &Path,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    stats: &IngestStats,
+    canonical_order: bool,
+) -> Result<SupportSummary, String> {
     fs::create_dir_all(out_dir)
         .map_err(|error| format!("create output {}: {error}", out_dir.display()))?;
+    let indices = if canonical_order {
+        canonical_landmark_indices(landmarks)
+    } else {
+        (0..landmarks.len()).collect::<Vec<_>>()
+    };
+    let ordered_landmarks = indices
+        .iter()
+        .map(|index| &landmarks[*index])
+        .collect::<Vec<_>>();
     let used_cameras = images
         .values()
         .map(|image| image.atlas.camera_id)
@@ -4327,7 +5547,7 @@ fn write_model(
     let mut point_ids = BTreeMap::<ObservationKey, u64>::new();
     let mut points_text =
         String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[] as IMAGE_ID POINT2D_IDX\n");
-    for (index, landmark) in landmarks.iter().enumerate() {
+    for (index, landmark) in ordered_landmarks.iter().enumerate() {
         let point_id = index as u64 + 1;
         for key in &landmark.observations {
             if point_ids.insert(*key, point_id).is_some() {
@@ -5416,6 +6636,8 @@ mod tests {
         .unwrap();
         assert!(!args.recover_zero_support_frames);
         assert!(!args.joint_rig_ba);
+        assert!(!args.joint_rig_ba_filter_observations);
+        assert_eq!(args.pre_ba_out_dir, None);
         assert!(!args.diagnose_cross_boundary_pnp);
         assert_eq!(args.diagnostic_left_max_frame, None);
         assert!(!args.repair_cross_boundary);
@@ -5435,7 +6657,7 @@ mod tests {
         .unwrap();
         assert!(args.recover_zero_support_frames);
         assert!(!args.joint_rig_ba);
-        let error = parse_args([
+        let duplicate_error = parse_args([
             "example".to_owned(),
             "--recover-zero-support-frames".to_owned(),
             "--recover-zero-support-frames".to_owned(),
@@ -5449,7 +6671,7 @@ mod tests {
             "o".to_owned(),
         ])
         .unwrap_err();
-        assert!(error.contains("duplicate argument"));
+        assert!(duplicate_error.contains("duplicate argument"));
         let args = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -5464,7 +6686,67 @@ mod tests {
         ])
         .unwrap();
         assert!(args.joint_rig_ba);
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba".to_owned(),
+            "--joint-rig-ba-filter-observations".to_owned(),
+        ])
+        .unwrap();
+        assert!(args.joint_rig_ba_filter_observations);
         let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba-filter-observations".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --joint-rig-ba"));
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba".to_owned(),
+            "--pre-ba-out-dir".to_owned(),
+            "checkpoint".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(args.pre_ba_out_dir, Some(PathBuf::from("checkpoint")));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--pre-ba-out-dir".to_owned(),
+            "checkpoint".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --joint-rig-ba"));
+        let duplicate_error = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
             "r".to_owned(),
@@ -5478,7 +6760,7 @@ mod tests {
             "--joint-rig-ba".to_owned(),
         ])
         .unwrap_err();
-        assert!(error.contains("duplicate argument"));
+        assert!(duplicate_error.contains("duplicate argument"));
 
         let args = parse_args([
             "example".to_owned(),
@@ -5575,7 +6857,7 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("requires --repair-cross-boundary"));
-        let error = parse_args([
+        let args = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
             "r".to_owned(),
@@ -5590,8 +6872,9 @@ mod tests {
             "1999".to_owned(),
             "--joint-rig-ba".to_owned(),
         ])
-        .unwrap_err();
-        assert!(error.contains("cannot be combined with joint BA"));
+        .unwrap();
+        assert!(args.repair_cross_boundary);
+        assert!(args.joint_rig_ba);
         let error = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -5611,6 +6894,376 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn pre_ba_order_view_is_canonical_without_mutating_ba_order() {
+        let (_manifest, _store, _images, _cameras, mut landmarks, _active) = joint_ba_fixture();
+        landmarks.reverse();
+        let before = landmarks.clone();
+        let indices = canonical_landmark_indices(&landmarks);
+        assert_eq!(indices.len(), landmarks.len());
+        assert_eq!(indices, (0..landmarks.len()).rev().collect::<Vec<_>>());
+        assert_eq!(landmarks, before);
+    }
+
+    #[test]
+    fn output_and_checkpoint_ancestor_collision_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_integrate_checkpoint_paths_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let args = Args {
+            rig_manifest: root.join("manifest.tsv"),
+            nodes_tsv: root.join("nodes.tsv"),
+            atlas_dir: root.join("atlas"),
+            out_dir: root.join("out"),
+            pre_ba_out_dir: Some(root.join("out/checkpoint")),
+            recover_zero_support_frames: false,
+            joint_rig_ba: true,
+            joint_rig_ba_filter_observations: false,
+            diagnose_cross_boundary_pnp: false,
+            diagnostic_left_max_frame: None,
+            repair_cross_boundary: false,
+            repair_left_max_frame: None,
+        };
+        let nodes = vec![NodeSpec {
+            node_id: 1,
+            window_start: 0,
+            images_txt: root.join("source/images.txt"),
+        }];
+        let error = validate_write_destinations(&args, &nodes).unwrap_err();
+        assert!(error.contains("ambiguous output destinations"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_comparison_resolves_symlink_before_parent_dir() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "visloc_integrate_checkpoint_symlink_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("real")).unwrap();
+        symlink(root.join("real"), root.join("link")).unwrap();
+        assert!(paths_overlap(&root.join("link/../real"), &root.join("real")).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filtered_joint_ba_candidate_updates_transactionally_and_preserves_rig() {
+        let (manifest, mut store, mut images, cameras, mut landmarks, active) = joint_ba_fixture();
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let candidate = build_joint_rig_ba_filter_candidate(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline,
+        )
+        .unwrap();
+        assert!(cost_non_increasing(
+            candidate.full_pre_ba_cost,
+            candidate.full_post_ba_cost
+        ));
+        assert!(cost_non_increasing(
+            candidate.retained_pre_ba_cost,
+            candidate.retained_post_filter_cost
+        ));
+        apply_joint_rig_ba_filter_candidate(&candidate, &mut store, &mut images, &mut landmarks)
+            .unwrap();
+        validate_filtered_model(&baseline, &store, &images, &cameras, &landmarks).unwrap();
+        for image in images.values() {
+            let sensor = &manifest.sensors[&image.atlas.sensor_index];
+            let rig_pose =
+                derive_rig_pose_for_frame(&manifest, image.atlas.frame_id, &images).unwrap();
+            let expected = sensor.sensor_from_rig.compose(&rig_pose.world_to_camera);
+            assert!(
+                (expected.translation - image.atlas.pose.world_to_camera.translation).norm()
+                    < 1.0e-8
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_apply_removes_observations_and_track_without_resurrection() {
+        let (_manifest, mut store, mut images, cameras, mut landmarks, _active) =
+            joint_ba_fixture();
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let removed = landmarks[0].clone();
+        let removed_observations = removed
+            .observations
+            .iter()
+            .copied()
+            .map(|key| (key, FilterObservationReason::TrackBelowMinimum))
+            .collect();
+        let candidate = JointRigBaFilteringCandidate {
+            pose_overrides: BTreeMap::new(),
+            landmark_updates: BTreeMap::new(),
+            removed_observations,
+            removed_track_ids: BTreeSet::from([removed.track_id]),
+            selected_landmarks: 1,
+            selected_observations: removed.observations.len(),
+            referenced_frames: 3,
+            free_frames: 1,
+            full_pre_ba_cost: 0.0,
+            full_post_ba_cost: 0.0,
+            retained_pre_ba_cost: 0.0,
+            retained_post_filter_cost: 0.0,
+            retriangulated_tracks: 0,
+            iterations: 0,
+            converged: true,
+        };
+        apply_joint_rig_ba_filter_candidate(&candidate, &mut store, &mut images, &mut landmarks)
+            .unwrap();
+        assert!(store.tracks[removed.track_id].observations.is_empty());
+        for key in removed.observations {
+            assert!(!store.observations.contains_key(&key));
+        }
+        assert!(!landmarks
+            .iter()
+            .any(|landmark| landmark.track_id == removed.track_id));
+        validate_filtered_model(&baseline, &store, &images, &cameras, &landmarks).unwrap();
+    }
+
+    #[test]
+    fn filtered_apply_removes_a_partial_observation_and_updates_source_track() {
+        let (_manifest, mut store, mut images, cameras, mut landmarks, _active) =
+            joint_ba_fixture();
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let old = landmarks[0].clone();
+        let removed_key = old.observations[0];
+        let replacement = triangulate_track(
+            old.track_id,
+            &GlobalTrack {
+                observations: old.observations[1..].to_vec(),
+            },
+            &store.observations,
+            &images,
+            &cameras,
+        )
+        .unwrap();
+        let candidate = JointRigBaFilteringCandidate {
+            pose_overrides: BTreeMap::new(),
+            landmark_updates: BTreeMap::from([(0, replacement.clone())]),
+            removed_observations: BTreeMap::from([(
+                removed_key,
+                FilterObservationReason::ReprojectionOverMax,
+            )]),
+            removed_track_ids: BTreeSet::new(),
+            selected_landmarks: 1,
+            selected_observations: old.observations.len(),
+            referenced_frames: 3,
+            free_frames: 1,
+            full_pre_ba_cost: 0.0,
+            full_post_ba_cost: 0.0,
+            retained_pre_ba_cost: 0.0,
+            retained_post_filter_cost: 0.0,
+            retriangulated_tracks: 1,
+            iterations: 0,
+            converged: true,
+        };
+        apply_joint_rig_ba_filter_candidate(&candidate, &mut store, &mut images, &mut landmarks)
+            .unwrap();
+        assert!(!store.observations.contains_key(&removed_key));
+        assert_eq!(landmarks[0].observations, replacement.observations);
+        assert_eq!(store.tracks[0].observations, replacement.observations);
+        validate_filtered_model(&baseline, &store, &images, &cameras, &landmarks).unwrap();
+    }
+
+    #[test]
+    fn filtered_apply_rejects_invalid_candidate_without_partial_mutation() {
+        let (_manifest, mut store, mut images, _cameras, mut landmarks, _active) =
+            joint_ba_fixture();
+        let replacement = landmarks[0].clone();
+        let candidate = JointRigBaFilteringCandidate {
+            pose_overrides: BTreeMap::new(),
+            landmark_updates: BTreeMap::from([
+                (0, replacement.clone()),
+                (landmarks.len() + 1, replacement),
+            ]),
+            removed_observations: BTreeMap::new(),
+            removed_track_ids: BTreeSet::new(),
+            selected_landmarks: 2,
+            selected_observations: 0,
+            referenced_frames: 0,
+            free_frames: 0,
+            full_pre_ba_cost: 0.0,
+            full_post_ba_cost: 0.0,
+            retained_pre_ba_cost: 0.0,
+            retained_post_filter_cost: 0.0,
+            retriangulated_tracks: 0,
+            iterations: 0,
+            converged: false,
+        };
+        let before_store = store.clone();
+        let before_images = images.clone();
+        let before_landmarks = landmarks.clone();
+        let error = apply_joint_rig_ba_filter_candidate(
+            &candidate,
+            &mut store,
+            &mut images,
+            &mut landmarks,
+        )
+        .unwrap_err();
+        assert!(error.contains("landmark index"));
+        assert_eq!(store, before_store);
+        assert_eq!(images, before_images);
+        assert_eq!(landmarks, before_landmarks);
+    }
+
+    #[test]
+    fn filtered_joint_ba_run_validates_final_model_and_reports_counts() {
+        let (manifest, mut store, mut images, cameras, mut landmarks, _active) = joint_ba_fixture();
+        let summary = run_joint_rig_ba_filtering(
+            &manifest,
+            &mut store,
+            &mut images,
+            &cameras,
+            &mut landmarks,
+        )
+        .unwrap();
+        assert_eq!(summary.windows_considered, 1);
+        assert_eq!(summary.windows_accepted, 1);
+        assert_eq!(summary.windows_skipped, 0);
+        assert!(summary.retriangulated_tracks > 0);
+    }
+
+    #[test]
+    fn filtered_joint_ba_candidate_is_deterministic_and_rollback_is_sparse() {
+        let (manifest, store, images, cameras, landmarks, active) = joint_ba_fixture();
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let first = build_joint_rig_ba_filter_candidate(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline,
+        )
+        .unwrap();
+        let second = build_joint_rig_ba_filter_candidate(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+
+        let mut impossible_baseline = baseline.clone();
+        impossible_baseline.component_count = 0;
+        let error = build_joint_rig_ba_filter_candidate(
+            &manifest,
+            &store,
+            &images,
+            &cameras,
+            &landmarks,
+            &active,
+            &impossible_baseline,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("connectivity"));
+    }
+
+    #[test]
+    fn filtered_observation_depth_and_cost_gates_are_explicit() {
+        let (_manifest, store, images, cameras, landmarks, _active) = joint_ba_fixture();
+        let landmark = &landmarks[0];
+        let key = landmark.observations[0];
+        let image = &images[&key.global_image_id];
+        let behind = image
+            .atlas
+            .pose
+            .camera_to_world()
+            .transform_point(&Point3::new(0.0, 0.0, -1.0));
+        let error = classify_filter_observation(
+            key,
+            &behind,
+            &store.observations,
+            &images,
+            &cameras,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error, FilterObservationReason::BehindCamera);
+        assert!(cost_non_increasing(10.0, 10.0 + 1.0e-9));
+        assert!(!cost_non_increasing(10.0, 10.1));
+    }
+
+    #[test]
+    fn filtered_full_cost_gate_rejects_when_only_retained_cost_improves() {
+        let error = validate_filter_costs(10.0, 11.0, 5.0, 4.0).unwrap_err();
+        assert!(error.contains("full selected cost increased"));
+        let error = validate_filter_costs(10.0, 9.0, 5.0, 6.0).unwrap_err();
+        assert!(error.contains("retained cost increased"));
+    }
+
+    #[test]
+    fn filtered_partial_observation_removal_rejects_support_loss() {
+        let (_manifest, _store, images, _cameras, landmarks, _active) = joint_ba_fixture();
+        let single_track = vec![landmarks[0].clone()];
+        let baseline = support_connectivity_for_landmarks(
+            &single_track,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let replacement = LandmarkOutput {
+            observations: single_track[0].observations[..2].to_vec(),
+            ..single_track[0].clone()
+        };
+        let candidate = support_connectivity_for_landmarks(
+            &single_track,
+            &BTreeMap::from([(0, replacement)]),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        assert!(!connectivity_not_split(&baseline, &candidate));
+    }
+
+    #[test]
+    fn filtered_connectivity_rejects_a_split_and_accepts_a_merge() {
+        let baseline = SupportConnectivity {
+            supported_images: BTreeSet::new(),
+            supported_frames: BTreeSet::from([1, 2, 3]),
+            frame_components: BTreeMap::from([(1, 0), (2, 0), (3, 0)]),
+            component_count: 1,
+        };
+        let split = SupportConnectivity {
+            supported_images: BTreeSet::new(),
+            supported_frames: BTreeSet::from([1, 2, 3]),
+            frame_components: BTreeMap::from([(1, 0), (2, 1), (3, 1)]),
+            component_count: 2,
+        };
+        assert!(!connectivity_not_split(&baseline, &split));
+        let merged = SupportConnectivity {
+            supported_images: BTreeSet::new(),
+            supported_frames: BTreeSet::from([1, 2, 3]),
+            frame_components: BTreeMap::from([(1, 0), (2, 0), (3, 0)]),
+            component_count: 1,
+        };
+        assert!(connectivity_not_split(&baseline, &merged));
     }
 
     #[test]

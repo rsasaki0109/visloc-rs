@@ -1,6 +1,9 @@
 # Bounded observation-based atlas refinement
 
-Status: first strict BA policy measured and rejected for trajectory regression.
+Status: strict BA was rejected for trajectory regression; the separately named
+filtering arm improves RMSE/p95 to 0.388993/0.638173 m, passing only the frozen
+p95 gate. RMSE and the full M8–M10 objective remain unmet. See the latest result
+at the end of this document; earlier sections preserve the experiment history.
 The [recovery foundation](openloris_atlas_landmark_integration.md) is merged as
 [PR #71](https://github.com/rsasaki0109/visloc-rs/pull/71), after all eight CI
 checks passed. Its RMSE/p95 remain above the frozen COLMAP acceptance gates.
@@ -218,3 +221,134 @@ foundation, **not** the M8 quality champion. Continue observation-based
 refinement on this connected real model, preserving the original scoring
 alignment and reporting any observation filtering. Full hashes and controls:
 [boundary-repair evidence](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json).
+
+## Next controlled experiment: strict BA on the connected model
+
+PR #72 is merged at `bd07922798ac54d21d14a5bfc5ec544e947faffe`; its final
+head passed all eight CI checks. The next experiment must separate the effect
+of the repaired connectivity from any change to BA filtering or loss function.
+
+Use one process: source integration → unsupported-frame recovery → boundary
+repair → existing strict bounded BA. Do not feed repaired poses back through
+source integration as an apparent BA-only input: doing so rebuilds tracks and
+may change the observation set before optimization.
+
+An optional pre-BA checkpoint must serialize the repaired in-memory state
+through the existing writer and match all six frozen `boundary-repair-v1`
+model/support/summary files byte-for-byte. Serialization order must not change
+BA's variable or observation order. Keep only a small ordered reference/index
+view, not a complete candidate model, and release writer buffers before BA.
+Reject overlapping input/checkpoint/final destinations and do not overwrite
+an existing nonempty checkpoint.
+
+First retain the exact strict BA policy: 60-frame windows, stride 30, 20
+iterations, fixed calibration, full selected tracks and outside-window anchors,
+the existing resource caps, independently recomputed non-increasing cost,
+and unchanged positive-depth/min-two/mean-2-px/max-4-px gates. No filtering or
+threshold sweep belongs in this control. Check observation identities,
+support, component membership and fixed rig geometry after serialization;
+score only afterward with the unchanged original model alignment.
+
+If strict BA still rejects useful windows, a separately named filtering arm
+may follow the existing SfM filter/re-triangulation ordering. It must retain
+the non-increasing **full pre-filter observation** cost gate, explicitly count
+every removed observation/track, preserve supported image/frame sets and
+prevent component splits. That arm is not implemented or accepted by this
+plan alone. Both trajectory gates and the full M8–M10 performance/nonregression
+requirements remain open.
+
+### Connected strict control result
+
+Both pre-BA checkpoints match the frozen repair output across all six files.
+The run without checkpoint output also produces identical final main files,
+so checkpoint serialization does not change the BA result. The default-off
+control remains byte-identical to fixed-pose integration; the tail is unchanged.
+
+Strict BA again accepts 8/150 main windows and 0/17 tail windows. Of the 142
+main rejections, the first failing track exceeds the max-4-px gate in 117
+windows and the mean-2-px gate in 25. Windows starting at 1950 and 1980 remain
+rejected despite the repaired graph. Main/tail connectivity and all support
+are preserved, but RMSE/p95 worsen to 0.391408/0.643460 m. The strict result
+is not promoted. Its 132.07 s / 525,412 KiB main measurement includes the
+checkpoint and is only a shared-machine refinement pilot.
+See [connected strict evidence](../benchmarks/electro/m8-openloris-atlas-connected-strict-ba-v1.json).
+
+### Separate post-BA filtering arm
+
+The next explicitly named mode keeps the solver, window schedule, calibration
+and resource caps unchanged. It first checks finite, non-increasing cost on
+the **entire original selected observation set**, before any removal. Only
+then may it discard observations failing projection/depth/max-4-px checks.
+Tracks with fewer than two observations or failing the unchanged DLT/mean-2-px/
+max-4-px/depth checks are removed with complete accounting.
+
+On the final retained keys, require independently recomputed post-filter cost
+to be no larger than the **pre-BA cost on those same keys**. Log full pre/post
+BA costs and retained pre-BA/post-filter costs separately. Require the same
+supported image/frame sets and no component split. Stage only sparse candidate
+updates and removal IDs, apply in place only after all gates pass, and validate
+the entire model before publishing. No GT-based selection or threshold sweep.
+
+Rebuilding connectivity scans the model for each candidate. This has bounded
+extra state, but is not a claim of linear total runtime: window count and
+global graph scans can multiply. Measure the validation cost before deciding
+how to optimize it; do not weaken the connectivity check to hide that cost.
+
+This isolates filtering, inspired by the upstream local-BA/filter ordering and
+existing visloc rig filtering. It does not reproduce COLMAP's complete
+merge/completion policy or establish a quality improvement before measurement.
+
+### Independent deletion accounting
+
+Run the transition auditor on each original component, followed by the existing
+standalone geometry/rig/connectivity auditor on the actual output:
+
+```bash
+python3 scripts/audit_colmap_observation_filter.py \
+  BASELINE/component-000/images.txt FILTERED/component-000/images.txt
+python3 scripts/audit_colmap_pinhole_model.py \
+  FILTERED/component-000 FILTERED/component-001 --rig-manifest RIG_MANIFEST
+```
+
+The transition auditor streams image rows and checks unchanged image identity,
+camera assignment and every keypoint's serialized coordinates/order. It allows
+point-ID renumbering and deletion only, rejecting added observations, track
+merges/splits and lost image support. Its removed-observation and removed-point
+counts must match the accepted-window log totals. It uses O(points) ID mappings;
+its memory is audit overhead, not included in mapper RSS measurements.
+It does not replace the second auditor's points3D references, projection,
+fixed-rig and frame-connectivity checks.
+
+The transition auditor's seven tests and the geometry auditor's thirteen tests
+pass. Applied to the frozen connected strict control, it independently confirms
+8,988 main image rows, 319,144 points and 1,327,687 observations unchanged, with
+840 changed pose rows and zero removed observations or points.
+
+### First connected filtering result
+
+Implementation `be09d1a` passes 44 example tests and 20 independent Python auditor
+tests. Both pre-BA checkpoints match the frozen repair baseline across all six
+files; filter-OFF main output also matches the frozen connected strict BA output.
+
+All 150 main and 17 tail windows are accepted, including the previously rejected
+windows starting at 1950 and 1980. Main filtering removes 922 points / 13,788
+observations; tail filtering removes 35 points / 652 observations. The independent
+transition auditor reproduces these exact counts, with no added observations,
+track merge/split, keypoint identity change or loss of supported images.
+The independent geometry auditor confirms all 4,999 supported rig frames, one
+4,494-frame main graph and one 505-frame tail graph, fixed calibration,
+bidirectional references and positive depth. The final model has 352,837 points
+and 1,438,880 observations, with mean reprojection error 0.580644 px.
+
+With unchanged scoring, RMSE/p95 improve from 0.391075/0.643107 m to
+**0.388993/0.638173 m**. Only p95 meets the frozen COLMAP gates
+(0.384307/0.638669 m). This is an improved experimental refinement candidate,
+not a production promotion or proof of full COLMAP parity.
+
+Main/tail pilots take 201.84/15.60 s with peak RSS 525,236/77,684 KiB. They include
+integration/recovery/repair/checkpoint/refinement, run on a shared machine with
+overlapping control/repeat jobs, and are **not** mapper/native-E2E comparisons.
+Both components repeat byte-for-byte across all six output files; the tail
+repeat omits checkpoint writing and still matches. All eight CI checks pass
+for implementation `be09d1a` (run 34094029224). Hashes, exact counts and scope are in
+[filtered BA evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).

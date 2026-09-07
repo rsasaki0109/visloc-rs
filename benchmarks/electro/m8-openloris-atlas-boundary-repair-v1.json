@@ -70,6 +70,9 @@
     "independent_audit_json": "3cdd10005caf16d507905071289feda8657fa331912f209a35c2ea6e2e431ba8"
   },
   "verification": {
+    "merged_pr": 72,
+    "merge_commit": "bd07922798ac54d21d14a5bfc5ec544e947faffe",
+    "ci": {"run_id": 34089819454, "head_commit": "2c5284bdebc9af137c2b3d5fd14865144b0552e2", "checks_passed": 8, "rust_duration": "3m33s"},
     "example_tests_passed": 31,
     "python_auditor_tests_passed": 13,
     "example_clippy_warnings_denied": "pass",
