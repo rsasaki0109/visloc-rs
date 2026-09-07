@@ -296,6 +296,22 @@ largest union has 1,264 observations. This is a rejected diagnostic, not an
 accepted merge policy. Integration must detect these conflicts before mutating
 ownership and report rejected support, rather than silently combining them.
 
+All source windows also pass an independent bidirectional-track/projection
+audit: 803,676 source points, 3,364,422 observations, two consistent camera
+definitions across windows, no non-positive-depth observations, mean
+0.6777286687176332 px and maximum 3.9999762218186277 px reprojection error.
+These are source-window statistics with overlap duplicates, not integrated
+model quality. Exact audit results and provenance are retained in
+[source audit evidence](../benchmarks/electro/m8-openloris-atlas-source-audit.json).
+
+For continued integration, the 69 source model files and L newest trajectory
+are copied under
+`/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1`.
+Every source copy is byte-identical; `nodes.tsv` changes paths only. Replaying
+the trajectory stitcher with these relocated inputs reproduces both L output
+hashes exactly. This removes the source models' dependency on `/tmp`, but is
+not the complete workflow's restart/stress acceptance test.
+
 `RigSfmResult` contains poses and tracks, but the public fixed-rotation
 refinement entry point adjusts translations and landmarks of an existing
 result; it is not a bounded, fixed-pose atlas triangulation/import API. Calling
