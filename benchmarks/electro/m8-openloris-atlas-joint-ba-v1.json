@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "rejected_trajectory_regression",
+  "baseline": "m8-openloris-atlas-recovery-v1.json",
+  "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/joint-ba-v1",
+  "code": {
+    "commit": "975c9b3",
+    "source_sha256": "edee5522d3c6822b54ef04177a60175a56e0f3f2c7563b21dca9420634b7cdbc",
+    "archived_binary_sha256": "dd4836669cbc907f3f241db027af83b17584690098ac29f317499565fe342b69",
+    "example_tests_passed": 23
+  },
+  "policy": {
+    "flags": ["--recover-zero-support-frames", "--joint-rig-ba"],
+    "window_frames": 60,
+    "stride_frames": 30,
+    "maximum_iterations": 20,
+    "sweeps": 1,
+    "solver": "Sparse",
+    "robust_kernel": "None",
+    "initial_lambda": 0.0001,
+    "parallel": false,
+    "calibration_fixed": true,
+    "all_selected_track_observations_included": true,
+    "outside_window_poses_fixed": true,
+    "whole_window_rejected_if_any_track_fails_existing_gate": true,
+    "observations_never_pruned": true,
+    "gt_used_for_mapping": false
+  },
+  "main_component": {
+    "windows": 150,
+    "accepted": 8,
+    "skipped": 142,
+    "maximum_referenced_frames": 593,
+    "maximum_free_frames": 60,
+    "landmarks": 319147,
+    "observations": 1327696,
+    "supported_images": 8987,
+    "supported_rig_frames": 4494,
+    "support_files_byte_identical_to_baseline": true,
+    "independent_mean_reprojection_px": 0.6420689889448346,
+    "independent_max_reprojection_px": 3.9997751583746717,
+    "max_stored_mean_difference_px": 0.0002773622734828299,
+    "bidirectional_references_valid": true,
+    "fixed_sensor_extrinsics_valid": true,
+    "nonpositive_depth_observations": 0,
+    "wall_s": 120.50,
+    "peak_rss_kib": 520228,
+    "images_sha256": "7c9598c1015e670bab4a8eeba4a3bb55714bae1316b8441d19bc1a5f3ed071ea",
+    "points3D_sha256": "51038979b4d18c1523e4595c20c5f9d9aac2eb99a85225cda0e7b83a61d3ea11",
+    "log_sha256": "bc2004fbc996043b02a301aee6a4a69b04c5e22edb533cd19da3a414e9ab4bed"
+  },
+  "tail_component": {
+    "windows": 17,
+    "accepted": 0,
+    "skipped": 17,
+    "maximum_referenced_frames": 388,
+    "maximum_free_frames": 60,
+    "six_output_files_byte_identical_to_baseline": true,
+    "wall_s": 11.34,
+    "peak_rss_kib": 77488,
+    "log_sha256": "888242b8902c3a09ffbc1f500fe25776413e3b609f6662c79f6f92c18144e62e"
+  },
+  "aggregate": {
+    "supported_rig_frames": 4999,
+    "supported_images": 9997,
+    "landmarks": 353797,
+    "observations": 1453329,
+    "independent_mean_reprojection_px": 0.6319963264500873,
+    "component_weighted_ate_rmse_m": 0.3917968548801171,
+    "component_weighted_ate_p95_m": 0.6435374735969135,
+    "baseline_ate_rmse_m": 0.3914648883821796,
+    "baseline_ate_p95_m": 0.6431750449115206,
+    "score_sha256": "0277926797203017c386863226e92b8f55b4fc782ebea39305e8fa4ca5c7dd1e"
+  },
+  "decision": "Not promoted: reprojection improves and support is preserved, but both trajectory metrics worsen and remain above the frozen COLMAP gates.",
+  "limitations": [
+    "Single run per component, not a three-run mapper or native E2E comparison",
+    "Reported wall time includes atlas integration/recovery/BA only, not source mapping or frontend phases",
+    "Strict whole-window rejection differs from SfM pipelines that filter and retriangulate observations after BA; this remains a diagnostic policy"
+  ]
+}

@@ -1,6 +1,6 @@
 # Bounded observation-based atlas refinement
 
-Status: implementation in progress; no BA quality or performance result yet.
+Status: first strict BA policy measured and rejected for trajectory regression.
 The [recovery foundation](openloris_atlas_landmark_integration.md) is merged as
 [PR #71](https://github.com/rsasaki0109/visloc-rs/pull/71), after all eight CI
 checks passed. Its RMSE/p95 remain above the frozen COLMAP acceptance gates.
@@ -44,3 +44,21 @@ BA peak RSS or convergence. Sparse factorization, total process RSS, exact
 repeatability and unchanged default output still require execution checks.
 If strict validation rejects every window, retain that evidence and diagnose
 the failure; do not relax the frozen COLMAP acceptance gates.
+
+## First measured result
+
+The implementation passes 23 example tests. In the 10k control, 8 of 150 main
+windows were accepted and none of 17 tail windows were accepted. Main-component
+support files and all six tail output files remain byte-identical to recovery.
+The main component took 120.50 s at 520,228 KiB peak RSS; the tail took 11.34 s.
+These are integration/recovery/BA-only times, not mapper or native E2E results.
+
+Aggregate mean reprojection improves to 0.631996 px, but RMSE/p95 worsen from
+0.391465/0.643175 m to 0.391797/0.643537 m. The policy is **not promoted**.
+Early rejection diagnostics show that lower total cost can still move an
+individual track beyond its mean-2-px or maximum-4-px gate. Complete logs and
+exact hashes are in
+[first BA evidence](../benchmarks/electro/m8-openloris-atlas-joint-ba-v1.json).
+The next decision must examine rejected observations and existing post-BA
+filter/retriangulation behavior, not treat lower residual cost as trajectory
+success or loosen the frozen COLMAP target.
