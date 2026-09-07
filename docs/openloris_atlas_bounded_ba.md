@@ -908,3 +908,35 @@ removed. The fixture also re-exported byte-identically to a second filename.
 The arithmetic-scale denominator above is specifically
 `max(1, ||base_action|| + ||accumulated_eliminated_action||)`, not a sum of
 individual landmark-action norms.
+
+### Explicit-PCG isolation contract
+
+The next test-only arm borrows the existing lower-mirrored Schur matrix and
+calls the **same existing implicit operator's preconditioner application**.
+It must not substitute an independently recomputed block diagonal: that would
+change two numerical components at once. Preserve RHS, zero initial iterate,
+PCG recurrence, true-residual recheck, damping and iteration caps. A test-only
+callback recurrence must reproduce the production PCG when given the implicit
+action, including failure diagnostics, before interpreting its explicit-action
+comparison. This leaves production APIs and defaults untouched.
+
+For explicit PCG, report both its own lower-Schur residual and a re-evaluation
+with the implicit action; convergence for one finite-precision representation
+does not establish convergence for the other. Report successful complete steps
+and trial geometry separately from failed numerical trials. Retain both damping
+values and the previous oracle report as controls. Reuse the existing bounded
+matrix and fixture, not an additional model clone or a new production dense path.
+
+If both representations stall, investigate preconditioning and conditioning;
+if only the implicit representation stalls, prioritize accumulation and
+symmetry. These are hypotheses to refine with the measured residuals, not a
+binary proof of a unique cause. Do not turn a shorter failed solve into a speed
+claim, relax the stopping threshold, or promote to 10k from this experiment.
+
+[Ceres' official solver FAQ](https://ceres-solver.readthedocs.io/latest/solving_faqs.html)
+(checked 2026-09-07) discusses explicit Schur for smaller problems and stronger
+cluster preconditioners when Schur-Jacobi is insufficient. This supports testing
+the representations/preconditioner separately; it does not establish that a
+cluster implementation will fit this project's memory budget or solve its
+current numerical failure. Any later cluster arm needs an explicit bounded
+storage/work design and an unchanged-quality comparison.
