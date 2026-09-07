@@ -89,6 +89,11 @@
 > controlも各2回計測。次は同じ初期normal system/λ1e-4と1e10で作用素・真残差を
 > explicit/directと照合し、桁落ち/再帰残差のずれと収束不足を切り分けます。
 > ログのλは拒否時だけ増加後の値なので、LM0のsolve λは1e-4です。
+> PR #79は最終CI8項目（run 34116769919）通過後、`42bf86f`へmergeし旧branch整理済み。
+> 現在は `feat/m8-real-normal-system-oracle`。次の変更はtest-onlyの実normal系診断で、
+> 公開API/既定経路の変更や10k実行はまだ行いません。入力depthの独立確認では最小
+> 0.000110933 m、最大5,207 mの観測があり、スケール差は診断の手掛かりです。
+> これを理由に観測を除去したり、PCG失敗の原因を断定したりはしません。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

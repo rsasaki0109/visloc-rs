@@ -83,6 +83,10 @@ explicit/implicit actions and true residuals on the same initial normal system
 at damping `1e-4` and `1e10`; do not relax tolerances or claim equivalent-work
 acceleration from the shorter failed-PCG run. PR #79 packages the driver and
 diagnostic evidence, not a solver-performance promotion.
+PR #79 passed all eight final-head checks (run 34116769919), merged as
+`42bf86f`, and its old branch was removed. The next branch is
+`feat/m8-real-normal-system-oracle`: test-only diagnostics with an explicit
+small-system allocation cap, no production API/default change, and no 10k run.
 
 ## Historical M7 baseline
 
