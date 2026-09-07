@@ -542,8 +542,8 @@ The current pure-visual sparse path in `pipelines/slam/src/bundle.rs`,
 the reduced Schur matrix as block-column maps. Its nested pose-pair loop for
 each landmark adds shared-track couplings, and it calls the direct cached
 block-Cholesky solver. `LandmarkBlock.cross` retains pose/landmark cross blocks.
-No production matrix-free iterative Schur/PCG path currently exists in these
-solvers; the private test-only prototype below does not change that path.
+PR #77 initially validated only a private test prototype. The additive runtime
+entry point described below keeps the legacy direct path unchanged.
 
 A matrix-free Schur operator could avoid storing the reduced matrix and its
 factor fill, but would still retain observation/cross-block state unless that
@@ -644,3 +644,40 @@ components afterward. Lower linear residual or nonlinear reprojection cost
 alone does not meet the trajectory gate. Mapper-only and native-E2E accounting
 must include their respective upstream stages; this prototype supplies neither
 a pipeline memory bound nor an end-to-end speed comparison.
+
+#### Runtime entry-point contract
+
+`BundleAdjustment::optimize_matrix_free(&BaConfig, MatrixFreeBaOptions)` is the
+explicit selection point. `BaConfig::linear_solver` remains relevant to the
+existing entry points; this method always requests pose-diagonal assembly and
+implicit Schur PCG. Separate options, result diagnostics and errors avoid
+changing the fields or variants of existing public configuration/result/error
+types. The operator implementation is shared with its numerical oracle tests;
+LM acceptance, rollback and damping are shared with the existing optimizer.
+
+The initial scope is fixed, undistorted PINHOLE/SIMPLE_PINHOLE calibration with
+monocular, rectified-stereo, general-stereo or rig visual observations. Reject
+intrinsics/distortion refinement and nonvisual states/priors before assembly.
+Require finite model state and observations, valid referenced IDs, finite
+positive LM damping with ordered bounds, and bounded PCG options. The new entry
+point rejects an all-fixed-pose problem rather than silently selecting a
+different solver; the existing landmark-only optimizer remains available.
+
+At least one existing pose must be fixed. This is only a minimal eligibility
+check: the caller still must anchor every component and remove monocular scale
+freedom. Do not infer physical gauge validity from damping or convergence. A
+calibrated multi-sensor test must use a nonzero physical baseline and perturbed
+state; a zero-cost identity-sensor fixture does not verify an actual rig update.
+
+Per-iteration diagnostics distinguish failed solves from successful true-
+residual checks. Unknown values are optional rather than reported as zero.
+The linear residual is a normal-equation residual, not pixel reprojection or
+trajectory error. PCG failure rejects the step without applying its delta,
+records the reason, and enters the shared bounded LM damping retry. No dense
+or direct fallback is permitted. The limit is at most one bounded PCG solve
+per LM iteration, with termination at the LM iteration/damping limits.
+
+The [frozen 1k input](../benchmarks/electro/m8-openloris-matrix-free-1k-input-v1.json)
+has been independently hash-checked, geometry-audited and trajectory-rescored.
+Its direct/implicit experiment driver and measured A/B are still outstanding;
+input preparation and API unit tests do not constitute a real-model comparison.

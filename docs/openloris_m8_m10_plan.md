@@ -56,6 +56,15 @@ stricter per-track threshold. Recompute projection errors rather than trusting
 the historical writer's point ERROR column, and preserve original image names
 and keypoint indices when loading and publishing comparison models.
 
+The runtime API is implemented as `1d7427f`, with shared LM rejection/damping,
+pre-assembly eligibility and separate diagnostics. Independent checks pass:
+26 BA-namespace tests (including five runtime API tests), 57 existing BA
+integration tests (one benchmark ignored), six GNC tests and 46 related Python
+tests. Metric stereo/rig fixtures fix a pose but no point; the physical baseline
+anchors their scale. This closes an integration gate, not the 1k experiment or
+the outstanding M8 trajectory/resource gates. See
+[runtime API evidence](../benchmarks/electro/m8-openloris-matrix-free-ba-entry-v1.json).
+
 ## Historical M7 baseline
 
 | Evidence | Current result | Consequence |

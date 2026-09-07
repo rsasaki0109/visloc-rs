@@ -64,6 +64,15 @@
 > 旧branchも整理済み。現在は `feat/m8-matrix-free-ba-entry` で追加の選択式APIを
 > 実装中です。既定solver/API互換性を保ち、組立前の適格性検査、有限で正のLM設定、
 > 真の残差と失敗理由の診断、更新拒否を共通LM処理に組み込みます。
+> 追加APIは `1d7427f` で実装済み。共有LM loopからimplicit Schur/PCGを呼び、
+> 反復失敗は状態を変えず記録し、λを増やして上限付きで再試行します。
+> 単眼・stereo・非零baseline/回転付き2センサーrigの更新を検証し、既存BA 57件
+> （benchmark 1件ignored）、GNC 6件、BA namespace 26件が独立実行で通過。
+> [実行APIの記録](../benchmarks/electro/m8-openloris-matrix-free-ba-entry-v1.json)。
+> [1k比較入力](../benchmarks/electro/m8-openloris-matrix-free-1k-input-v1.json)は
+> 元の3ファイルhash、全支持・連結性・校正、RMSE/p95 0.026703/0.041346 mの
+> 再採点一致まで確認済み。driver/A/Bは未実施。名前・全keypoint identityを
+> 保持するpost-map比較driverが次段階で、10k global runにはまだ進みません。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 
