@@ -55,6 +55,7 @@
   },
   "verification": {
     "example_tests_passed": 27,
+    "ci": {"head_commit": "22e50e0", "run_id": 34088053061, "checks_passed": 8, "rust_duration": "4m27s"},
     "example_clippy_warnings_denied": "pass",
     "independent_repeat": {
       "diagnostic_rows_byte_identical": true,

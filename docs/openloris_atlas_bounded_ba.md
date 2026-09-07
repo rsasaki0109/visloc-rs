@@ -138,6 +138,23 @@ The next audit must check whether adding those 2 full tracks and excluding the
 2000/2001. It must count image/frame support losses, including other frames
 sharing the failed tracks, without writing a modified model.
 
+That hypothetical graph audit now shows frame 2000 joins the two supported
+groups into one 4,493-frame group, even after removing the 5 failed tracks
+(39 observations) and adding the 2 full crossing tracks (30 observations).
+No previously supported image or frame loses all support. Frame 4493 remains
+unsupported because this diagnostic precedes the separate recovery step.
+Including that isolated frame, the all-frame graph has two components, not
+one. Other candidates do not improve connectivity; candidates 2007, 2008 and
+2011 split the supported graph into three groups.
+
+This justifies a default-off transactional repair experiment, not immediate
+quality promotion. Require strictly fewer supported graph components and
+preservation of every supported image/frame; report all removed observations.
+Apply at most one candidate chosen deterministically without GT, combine it
+with unsupported-frame recovery in a real output run, then independently audit
+serialization, full graph connectivity, trajectory and reprojection. See the
+[hypothetical graph evidence](../benchmarks/electro/m8-openloris-atlas-cross-boundary-pnp-dsu-v1.json).
+
 The archived pilot took 8.20 s at 304,536 KiB peak RSS. Independent repetition
 produces byte-identical diagnostic rows and no model directory. With the flag
 off, all six model/support/summary files remain byte-identical to fixed-pose
