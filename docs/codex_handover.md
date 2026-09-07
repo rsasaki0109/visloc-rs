@@ -1,5 +1,13 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新追記（2026-09-08）: PR #84は最終head `fe4a710` のCI8項目
+> （run `34140417320`）通過後、`c49e542`へmerge済み。旧branchも整理済み。
+> 続行branchは `feat/m8-column-scaled-lm`。Luna Maxで明示的な列スケーリングと
+> scaled座標のLM減衰を実装中です。既定経路は変更せず、同一観測の1k対照と
+> 実atlas両成分の反復測定で判断します。実装・測定の契約は
+> [有界BA文書](openloris_atlas_bounded_ba.md)末尾を参照。
+> 以下の「次の診断」「未実装」は各時点の履歴で、最新状態はこの追記を優先します。
+
 > PR #83は最終head `b99f2e1` のCI8項目（run `34137338043`）と独立監査を通過し、
 > `a71f40a`へmerge済み。旧local/remote branchも整理済みです。
 > 続行branchは `feat/m8-local-schur-block-diagnostic`。主成分のvariable-pose slot 191

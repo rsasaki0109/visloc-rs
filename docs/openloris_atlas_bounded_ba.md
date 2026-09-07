@@ -1364,3 +1364,52 @@ label scaled PCG residual units. Small full-normal tests precede fixed-budget
 1k and both-component atlas A/B; observations, calibration, depth gates and
 the final COLMAP/mapper/E2E requirements are unchanged. This policy is not
 implemented or promoted by the diagnostic result.
+
+### Column-scaled LM implementation and measurement contract (2026-09-08)
+
+PR #84 merged as `c49e542` after all eight final-head checks on `fe4a710`
+(run `34140417320`). Its evidence JSON preserves the pre-CI snapshot; this
+closure records the later CI result. Implementation now proceeds on
+`feat/m8-column-scaled-lm`; no scaled-policy result is available yet.
+
+Use private fixed bounds `d_j = clamp(H_jj, 1e-6, 1e32)` after fixed-rotation
+constraints and before damping. Reject nonfinite or negative original
+diagonals; a zero diagonal uses the lower bound. Transform every pose, point,
+cross and RHS block consistently in-place. Fixed rotation unit rows have
+scale one, and fixed poses/points remain absent from the variable layout.
+Keep only iteration-local O(P+L) scale vectors and scalar diagnostic history,
+with no additional normal-system or model clone. Check transformed values
+and unscaled deltas for finiteness before applying any update. Failed solves
+discard the local system and rebuild it on the next LM iteration.
+
+The additive API and explicit `--matrix-free-column-scaling` flag must leave
+legacy options, results, arithmetic and logs unchanged when absent. Reject
+direct-solver, standalone oracle-export and nonzero PCG-restart combinations.
+Label the new residual and target values as scaled coordinates, including
+any enabled local Schur diagnostic. Existing LM step norms and acceptance
+checks use physical deltas after unscaling. This policy changes physical
+damping to `lambda diag(d)`; it is not an exact-output transformation or a
+complete reproduction of Ceres.
+
+First compare against a small full-normal direct solution of
+`(H + lambda diag(d)) delta = -b`, including calibrated nonzero rig baselines,
+fixed variables, same-pose multi-sensor cross terms, clamp boundaries and
+failure rollback. Then run serial, same-binary frozen 1k legacy matrix-free,
+direct and scaled controls. Fix 20 LM iterations, initial lambda 1e-4 and
+the existing lambda schedule; matrix-free arms use 512 PCG iterations,
+relative tolerance 1e-8, absolute tolerance 1e-12 and zero restarts.
+
+Next run each original retained atlas component twice with the same policy,
+under 2 GiB address-space, 900-second CPU and zero core-dump limits, with
+`RAYON_NUM_THREADS=1`. Keep source frame anchors 0 and 4495 respectively;
+retain the explicitly allowed unsupported main-component sensor image.
+Do not use already optimized outputs as the new input or delete near points.
+Audit all image/keypoint/point/track identities, calibration, support and
+connectivity, finite positive depths, reprojection, post-only GT scores,
+RSS, wall time and model/numerical-trace repeatability. Source and binary
+hashes must accompany measurements. Do not tune bounds using GT.
+
+COLMAP's 10k RMSE gate remains 0.3843065335 m; the previous unscaled policy
+scores 0.3887199838 m. A local BA improvement alone does not establish
+mapper-only/native-E2E speed or the remaining tier, restart and 100k I/O
+gates. Keep README comparison claims unchanged until their scope is verified.

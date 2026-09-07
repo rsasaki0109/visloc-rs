@@ -162,6 +162,14 @@ linear-size scale vectors. See the formula and full-normal/1k/atlas gates in
 the [bounded BA record](openloris_atlas_bounded_ba.md). The diagnostic itself
 does not improve quality or close the M8–M10 goal.
 
+PR #84 is merged as `c49e542` after eight final-head CI checks (run
+`34140417320`), with its branch removed. The active implementation branch is
+`feat/m8-column-scaled-lm`. It adds an explicit policy, preserving defaults,
+with fixed diagonal bounds 1e-6/1e32 and physical-coordinate LM acceptance.
+Use fixed-budget same-input 1k controls followed by both actual atlas
+components twice under the 2 GiB cap. No scaled results or README promotion
+are claimed yet; the detailed contract is in the bounded BA record above.
+
 ## Historical M7 baseline
 
 | Evidence | Current result | Consequence |
