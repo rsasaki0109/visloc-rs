@@ -1,5 +1,20 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新の続行（2026-09-08）: PR #87はhead `054b1ef` のCI8項目
+> （run `34153720050`）通過後、`d91fc44`へmerge済み。旧local/remote branchも整理済み。
+> 現在は `docs/electro-cdf-annotation`。Luna Maxで既存Electro図のCDF方向説明と
+> 重なりをnative generatorから修正します。測定値・曲線・点群は変更しません。
+> solver側の次の診断は同一frozen 1k入力のCOLMAP/Ceres BA参照。まず厳密な入力・
+> residual・rig/anchor固定の一致を証明し、一致できるまで実行しません。
+> 既存COLMAP imageはありますがhost pycolmapもcontainer python3もありません。
+> 新規インストールや条件の近似は行っていません。全体goalは未完了です。
+
+> README図修正（2026-09-08）: `695ed47` でCDF注記を正しいhigher/leftへ直し、
+> 曲線外へ移動。median/p95列もカード内へ収めました。旧assetは元generatorで再現一致、
+> 新PNGは2回＋root独立生成で一致。GIFは旧版とbyte一致の24 frameです。
+> 曲線/軌跡領域のRGB画素一致と9入力ファイルのhashをroot確認済み。
+> [生成証跡](../benchmarks/electro/readme-cdf-annotation-v1.json)。性能値・README本文は不変。
+
 > 最新実測（2026-09-08）: Luna Maxのadaptive scaled LMを `005dbcc` の認証済み
 > binaryで7本測定。`75df6e5` / `7e25dee` はtest-only補強で再buildなし。
 > 新方式は1kでPCG20/20成功・LM15/20受理、25.83 / 25.54 s、peak RSS

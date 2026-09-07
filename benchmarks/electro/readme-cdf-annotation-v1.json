@@ -1,0 +1,107 @@
+{
+  "schema": "visloc_electro_readme_cdf_annotation_v1",
+  "recorded_at": "2026-09-08",
+  "scope": "Native plot annotation/layout correction only; no new performance or memory-before/after claim",
+  "implementation_commit": "695ed47ccdef361ad22fa0803d803b8986c272c7",
+  "generator": "scripts/generate_electro_readme_visuals.py",
+  "generator_sha256": "b8a44167dbbcbb2cab0799cd889e00ab0af34fc1512e91034a0bfe37711b6906",
+  "previous_generator": {
+    "commit": "d91fc448787d04ac0f6b3f5724348087763abaeb",
+    "sha256": "7a0879532d1e239f51911cc54c1dc5fcacd88df496845a0796ff4d6aefe22cac"
+  },
+  "changes": [
+    "Correct ECDF direction to higher/left at fixed threshold/fraction",
+    "Place note below axes, clear of curves and legend",
+    "Fit median/p95 column inside summary cards"
+  ],
+  "model_hashes": {
+    "visloc_model": {
+      "cameras.txt": "f9e722f47df961c0cf3ff7414e52f5bad2ebbc60a10a5f99d8c77e2cda880b17",
+      "images.txt": "b7a4d3c9f160340232e29c0258e07045acfba358bdf8f48e97c88bda086d0099",
+      "points3D.txt": "e73ad63944034d43f24a94408d8cc3c0b11e1d95bfe025d0d6a32e8788929fbe"
+    },
+    "colmap_model": {
+      "cameras.txt": "7476e5e690797aab4fea8f9bfdeca6b643092f258e26ad24ad3d9efe744dfbbe",
+      "images.txt": "e05eebbff5c20886f99392c8971fdc8e2fba68d44706d012b3cd46aab16ea3c8",
+      "points3D.txt": "244fc6b5cdf8544b5e2de516e71dd05dd84e447ed60f0c9d277de6a8dd00fe44"
+    },
+    "reference_model": {
+      "cameras.txt": "4e390271b5c5dbc062f618f5f39478e5c4e8290bbc1e2d6468d4241afaadc05f",
+      "images.txt": "96a82412617eda38c819eb74fba4841fb2b0b0276ff08cfef2101c57de0b880b",
+      "points3D.txt": "9b69565da2cfcfce63e2965f26d822b761a66163e7c279f92baaae320419eaee"
+    }
+  },
+  "metric_sources": {
+    "benchmarks/electro/snapshot-memory-audit.json": "69773714e92603cfc9d910b8f327fcf0d74cbcd310c058d56a01feabdafc4f1e",
+    "benchmarks/electro/visloc_1200_v1.json": "d6dcd4ce77972c4aef790cdc35ec18064f2861ee5b3acd4bfb7107f714cf5e1e"
+  },
+  "metric_selection": "snapshot-memory-audit median/quality/comparison for visloc and timing/RSS; only visloc_1200_v1.colmap_control for COLMAP scores. Do not use historical visloc arm in that latter file.",
+  "original_assets": {
+    "png_sha256": "4a98f145b479ceb8b1ffc2e489847f5129803d8b20f618e3a9883fbb940f459b",
+    "gif_sha256": "13e2fd25e45811c14f851badefb8101f0ba69f0fdd20a51e4145aba0b68efb82",
+    "regenerated_directory": "/tmp/visloc-electro-readme-regeneration.KPR5ln",
+    "byte_exact": true
+  },
+  "current_assets": {
+    "png": "docs/assets/electro_1200_sfm_comparison.png",
+    "png_sha256": "d80c150f3727819e30c05b4376decf57a64f81046dee2eee0bc0845bee0fb77b",
+    "png_dimensions": [
+      1690,
+      936
+    ],
+    "gif": "docs/assets/electro_1200_sfm_comparison.gif",
+    "gif_sha256": "13e2fd25e45811c14f851badefb8101f0ba69f0fdd20a51e4145aba0b68efb82",
+    "gif_dimensions": [
+      864,
+      486
+    ],
+    "gif_frames": 24,
+    "gif_byte_unchanged": true
+  },
+  "generation": {
+    "command": "python3 scripts/generate_electro_readme_visuals.py --visloc-model /home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-snapshot-keypoints-only-i8 --colmap-model /home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/colmap_temporal_candidate12000/models_txt/0 --reference-model /home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/electro/rig_calibration_undistorted --visloc-wall-seconds 336.895 --visloc-core-seconds 230.3015 --visloc-peak-rss-kib 1459194 --visloc-registered 1200 --visloc-rmse-m 0.03501132650718982 --visloc-median-m 0.017278775570320322 --visloc-p95-m 0.07709687017668192 --colmap-wall-seconds 4929.56 --colmap-peak-rss-kib 1255996 --colmap-registered 1200 --colmap-rmse-m 0.0467931596971499 --colmap-median-m 0.031562 --colmap-p95-m 0.096808 --output-dir /tmp/visloc-electro-cdf-root.aUE4nX",
+    "agent_repeat_directories": [
+      "/tmp/visloc-electro-readme-cdf-final2.s3W0i6/run1",
+      "/tmp/visloc-electro-readme-cdf-final2.s3W0i6/run2"
+    ],
+    "root_independent_directory": "/tmp/visloc-electro-cdf-root.aUE4nX",
+    "all_three_new_outputs_byte_exact": true,
+    "default_frames": 24,
+    "default_fps": 8,
+    "default_dpi": 130,
+    "default_max_points": 5000
+  },
+  "independent_review": {
+    "png_visually_inspected": true,
+    "gif_all_24_frames_decoded": true,
+    "trajectory_panel": {
+      "rect": [
+        0,
+        120,
+        1100,
+        900
+      ],
+      "rgb_pixel_exact": true
+    },
+    "cdf_curve_panel": {
+      "rect": [
+        1118,
+        170,
+        1640,
+        435
+      ],
+      "rgb_pixel_exact": true
+    },
+    "pixel_comparison": "PIL RGB ImageChops difference against d91fc44 tracked PNG; rectangles are x0,y0,x1,y1. Full PNG differs as expected.",
+    "model_files_rehashed": 9,
+    "python_visual_tests_pass": 4,
+    "old_metric_evidence_unchanged": true,
+    "readme_text_unchanged": true
+  },
+  "limits": [
+    "Figure is an aligned final-model centre/structure display, not mapper registration progress",
+    "Mapper-only 14.6x label and source metrics are existing Electro1200 measurements, not new E2E/OpenLORIS claims",
+    "OpenLORIS adaptive 1k quality gate remains failed; no adaptive atlas/default promotion"
+  ],
+  "ci": "pending"
+}
