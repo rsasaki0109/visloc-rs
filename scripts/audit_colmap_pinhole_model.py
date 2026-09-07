@@ -73,6 +73,8 @@ def audit(model):
     maximum = 0.0
     stored_difference = 0.0
     behind = 0
+    same_image_tracks = 0
+    same_image_excess = 0
     support = dict.fromkeys(images, 0)
     for row in rows(model / "points3D.txt"):
         if len(row) < 12 or (len(row) - 8) % 2:
@@ -88,8 +90,8 @@ def audit(model):
         for offset in range(8, len(row), 2):
             image_id, index = map(int, row[offset:offset+2])
             key = (image_id, index)
-            if key in seen or image_id in track_images or index < 0:
-                raise ValueError("duplicate observation or same-image track conflict")
+            if key in seen or index < 0:
+                raise ValueError("duplicate or invalid observation")
             seen.add(key)
             track_images.add(image_id)
             rot, trans, camera, keypoints = images[image_id]
@@ -110,6 +112,9 @@ def audit(model):
             point_errors.append(error)
             support[image_id] += 1
         point_sum = math.fsum(point_errors)
+        excess = len(point_errors) - len(track_images)
+        same_image_tracks += int(excess > 0)
+        same_image_excess += excess
         errors_sum += point_sum
         maximum = max(maximum, max(point_errors))
         stored_difference = max(stored_difference,
@@ -128,6 +133,8 @@ def audit(model):
             "max_reprojection_px": maximum,
             "max_stored_mean_difference_px": stored_difference,
             "nonpositive_depth_observations": behind,
+            "tracks_with_multiple_keypoints_in_one_image": same_image_tracks,
+            "excess_same_image_track_observations": same_image_excess,
             "bidirectional_references_valid": True}
 
 

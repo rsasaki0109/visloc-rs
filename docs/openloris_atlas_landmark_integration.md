@@ -18,7 +18,7 @@ separate. Camera calibration and full keypoint order are validated.
 | Metric | Fixed-pose atlas | Frozen calibrated COLMAP |
 |---|---:|---:|
 | Pose rows | 9,998 | 9,998 |
-| Observation-supported images | 9,996 | 9,998 |
+| Observation-supported images | 9,996 | 9,996 |
 | Observation-supported rig frames | 4,998 | 4,999 |
 | ATE RMSE (m) | 0.391778 | 0.384307 |
 | ATE p95 (m) | 0.643698 | 0.638669 |
@@ -28,6 +28,10 @@ separate. Camera calibration and full keypoint order are validated.
 
 The atlas retains 83.03% of unique source observations. Low reprojection error
 does not compensate for lost registration or worse trajectory accuracy.
+COLMAP also has two unsupported individual camera images, but in distinct rig
+frames whose other camera is supported. In the atlas both unsupported images
+belong to frame 4493, leaving one fewer supported rig frame. Thus equal counts
+of supported camera images do not imply equal rig registration.
 GT is used only for post-map scoring; this repeatedly evaluated development
 sequence is not a held-out generalization result.
 
@@ -81,3 +85,7 @@ python3 -m unittest discover -s tests -p test_audit_colmap_pinhole_model.py
 The auditor rejects unsupported camera models and malformed references. It
 reports nonpositive-depth counts and stored-versus-recomputed mean error;
 callers must inspect those values, not treat process success as a quality pass.
+The frozen COLMAP models contain 14,593 / 1,325 tracks with multiple keypoints
+in the same image (51,707 / 4,562 excess observations), but no duplicate exact
+observation references. The auditor reports this distinction instead of
+imposing the atlas's stricter merge policy on the comparison engine.

@@ -41,11 +41,20 @@ class ModelAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "image-to-point"):
             AUDIT.audit(self.root)
 
-    def test_same_image_track_conflict(self):
+    def test_duplicate_observation_rejected(self):
         path = self.root / "points3D.txt"
         path.write_text(path.read_text().replace("1 0 2 0", "1 0 1 0"))
-        with self.assertRaisesRegex(ValueError, "duplicate observation"):
+        with self.assertRaisesRegex(ValueError, "duplicate or invalid"):
             AUDIT.audit(self.root)
+
+    def test_distinct_same_image_keypoints_reported(self):
+        path = self.root / "images.txt"
+        path.write_text(path.read_text().replace("0.1 0 1\n", "0.1 0 1 0.3 0 1\n"))
+        path = self.root / "points3D.txt"
+        path.write_text(path.read_text().replace("1 0 2 0", "1 0 1 1 2 0"))
+        report = AUDIT.audit(self.root)
+        self.assertEqual(report["tracks_with_multiple_keypoints_in_one_image"], 1)
+        self.assertEqual(report["excess_same_image_track_observations"], 1)
 
     def test_unsupported_distortion_rejected(self):
         (self.root / "cameras.txt").write_text("1 SIMPLE_RADIAL 100 100 10 0 0 0.1\n")
