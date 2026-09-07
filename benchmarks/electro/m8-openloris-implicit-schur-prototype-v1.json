@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "private_numerical_gate_passed_production_unmodified",
+  "pull_request": "https://github.com/rsasaki0109/visloc-rs/pull/77",
+  "initial_implementation_commit": "469ee9a",
+  "numerical_supplement_commit": "8a1485a",
+  "source_sha256": "f468f484606345958a47488ee90a20faa4abc22f6ecbbb9a4c4a4976282c32e9",
+  "scope": {
+    "source": "pipelines/slam/src/bundle.rs",
+    "module": "implicit_schur_prototype_tests",
+    "test_only": true,
+    "production_solver_public_api_and_cli_changed": false,
+    "operator": "Damped pose diagonal minus E times damped landmark inverse times E transpose; original cross-block order retained",
+    "preconditioner": "Block Jacobi of the reduced Schur matrix; repeated sensor cross blocks summed by rig pose before forming each diagonal contribution",
+    "storage": "Borrowed landmark/cross blocks, per-landmark 3x3 inverses and per-pose 6x6 diagonal/preconditioner blocks; no reduced pose-pair matrix or factor fill in the operator",
+    "explicit_dense_oracles": "Small test fixtures only; not a production fallback",
+    "successful_exit": "Recompute norm(rhs - operator(solution)) and require it to meet max(absolute_tolerance, relative_tolerance * norm(rhs))",
+    "empty_pose_input": "Rejected; production landmark-only/all-fixed BA integration is not covered",
+    "singular_landmark": "Match existing mixed-pose solve_step skip and zero back-substitution; not a physical validity claim"
+  },
+  "independent_hand_fixture": {
+    "method": "Read-only NumPy full 15x15 and reduced 12x12 solves, independent of Rust implementation",
+    "pose_diagonal": "10 I6 for each of two poses",
+    "landmark_hessian": "4 I3",
+    "cross_blocks": "A=[I3;0], [(pose0,A),(pose0,2A),(pose1,-A)]",
+    "gradients": "pose=[1,...,12], landmark=[1,2,3]",
+    "cases": [
+      {
+        "lambda": 0.0,
+        "schur_translation_diagonal_pose0": 7.75,
+        "schur_translation_diagonal_pose1": 9.75,
+        "schur_translation_cross": 0.75,
+        "reduced_rhs_first3": [-0.25, -0.5, -0.75],
+        "full_min_eigenvalue": 2.6411010564593247,
+        "full_vs_recovered_step_l2": 2.0134752377258409e-16
+      },
+      {
+        "lambda": 0.5,
+        "schur_translation_diagonal_pose0": 8.5,
+        "schur_translation_diagonal_pose1": 10.277777777777779,
+        "schur_translation_cross": 0.6666666666666666,
+        "reduced_rhs_first3": [-0.3333333333333333, -0.6666666666666666, -1.0],
+        "full_min_eigenvalue": 3.1411010564593247,
+        "full_vs_recovered_step_l2": 3.033782894060535e-16
+      }
+    ]
+  },
+  "root_validation": {
+    "cargo test -p visloc-slam --lib bundle::": "21 passed, including 10 private prototype tests",
+    "cargo clippy -p visloc-slam --lib --tests -- -D warnings": "passed",
+    "cargo fmt --check": "passed",
+    "python3 -m unittest discover -s tests -p 'test_*openloris*.py'": "23 passed",
+    "python3 -m unittest discover -s tests -p 'test_audit_colmap*.py'": "23 passed",
+    "bash scripts/check_docs_links.sh": "passed",
+    "benchmark_registry_validate": "189 files passed",
+    "benchmark_registry_check_generated": "passed"
+  },
+  "final_head_ci": "pending; see pull request exact-head checks before merge",
+  "readme_scoring_clarification": "One Sim(3) alignment per component, then pooled GT-scored image errors for RMSE and p95, not averages of component metrics. Scorer source and frozen comparison values unchanged; aggregation regression test added.",
+  "limits": {
+    "global_or_10k_experiment_run": false,
+    "pipeline_peak_rss_or_speed_gain_measured": false,
+    "trajectory_quality_gain_measured": false,
+    "gauge_validity_inferred_from_linear_convergence": false,
+    "outstanding": "Pre-assembly production eligibility checks, model gauges, deterministic nonlinear acceptance, landmark-only integration, small-model/1k comparison, connected 10k quality/resource tests, mapper/native E2E accounting, all-tier nonregression, restart and 100k I/O"
+  },
+  "primary_references": [
+    "https://ceres-solver.readthedocs.io/latest/nnls_solving.html#iterative-schur",
+    "https://homes.cs.washington.edu/~sagarwal/bal.pdf"
+  ]
+}

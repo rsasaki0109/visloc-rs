@@ -49,8 +49,18 @@
 > 全6実行でモデル・ログ全文一致、RSS中央値525,232/525,036 KiB（実質同じ）。
 > strict主成分、点保持両成分、2回適用両成分、filtered末尾成分の非回帰が完了。
 > 各6ファイルと、2回適用の両成分1巡目checkpointも凍結モデルに完全一致。
-> 実装commitのCIは8項目通過（run 34102096800）、最終headのCI/mergeは未完了。
+> PR #76は最終CI8項目通過（run 34104286558）後、`56bea96`へmergeし旧branchも整理済み。
 > [scan共有の測定記録](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json)。
+> 現在は `feat/m8-implicit-schur-prototype`。private/test-onlyのimplicit Schur作用素と
+> PCGの数値試作を実装済み。既定solver・公開API・mapper CLIは変更せず、global runは
+> まだ行いません。真の線形残差、複数センサーのcross項、明示行列との作用素・step一致を
+> 検証しています。空pose入力の拒否は、本番の全pose固定/点のみBAの検証とは別です。
+> 次の本番組み込みでは非対応factorを行列組立前に拒否し、固定gaugeの小規模/1k比較を
+> 先行します。具体的な検証契約は有界BA文書の末尾にあります。
+> `469ee9a`＋`8a1485a`の試作10テストを含むBA 21テスト、clippy/fmt、関連Python
+> 46テストが通過。手計算fixtureとfull 15×15連立系も独立照合済みです。
+> [数値検証記録](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)。
+> PR #77の最終head CI確認とmergeが次のcheckpointです。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

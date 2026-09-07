@@ -41,7 +41,9 @@ p95 target, but **RMSE parity is still open**.
 | Observation-weighted mean reprojection ↓ | 0.9030 px | **0.5817 px** | Met |
 
 Both models contain connected 4,494-frame and 505-frame components. Lower
-reprojection error is not proof of better trajectory accuracy. This is a
+reprojection error is not proof of better trajectory accuracy. ATE uses one
+Sim(3) alignment per component; RMSE and p95 are computed from the pooled
+GT-scored image errors, not averages of component scores. This is a
 repeated development-sequence evaluation, not held-out validation, and no
 10k speed win at equivalent quality is claimed. See the
 [frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
