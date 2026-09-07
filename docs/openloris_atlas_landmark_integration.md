@@ -114,7 +114,7 @@ For atlas output, add `--rig-manifest /path/to/rig-manifest.txt` to the auditor.
 Names must match the supplied manifest. This additionally validates the camera
 calibration and reconstructs a rig pose independently from each camera pose,
 rejecting inconsistent fixed extrinsics. It reports supported rig frames,
-not just supported camera images. The auditor has 12 tests, including changed
+not just supported camera images. The auditor has 13 tests, including changed
 stereo baseline rejection and rotated-sensor transform composition.
 
 The auditor rejects unsupported camera models and malformed references. It

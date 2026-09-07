@@ -80,8 +80,21 @@ rejection), but no crossing track survives final atlas-pose triangulation.
 An independent row-level replay attributes failures to reprojection or depth,
 not absent input matches. The next bounded audit compares source/atlas pose
 ownership and left/right-only triangulations, deduplicated by final union track
-identity. It must distinguish a component-wide gauge mismatch from a short
-interval's publication error before selecting any correction.
+identity.
+
+That follow-up confirms 31 distinct merged tracks. Left-only triangulation
+passes for 14, right-only for 16, and both sides for 7, without changing any
+geometry gate. The left anchors provide at least six distinct 3D-track
+correspondences in 14 right-side frames (maximum 11 per frame). These are
+resection candidates, not yet verified GeneralizedPnP recoveries.
+
+Frame 1999 uses node 25 and frame 2000 uses node 8. However, the 0.261 m jump
+at 1997/1998 is internal to node 25, and the 0.900 m jump at 2022/2023 is
+internal to node 8. A single rigid shift of the entire later component cannot
+explain all three discontinuities. The next default-off diagnostic therefore
+uses existing GeneralizedPnP on bounded per-frame candidates, independently
+checks cross-track recovery and loss of existing support, and does not publish
+new poses automatically. GT remains evaluation-only.
 
 For subsequent policy design, the upstream
 [COLMAP local BA implementation](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)

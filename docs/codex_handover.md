@@ -14,7 +14,9 @@
 > その後、厳格な局所BAはRMSE/p95が0.391797/0.643537 mに悪化し非昇格。
 > [連結性監査](../benchmarks/electro/m8-openloris-atlas-connectivity-v1.json)では
 > 主成分内がframe 1999/2000で分断（2,000＋2,494フレーム）していました。
-> 現在の優先作業は、この境界を跨ぐsource trackと統合時の観測消失の診断です。
+> 境界を跨ぐ31本のtrackはmergeを通過しますが再三角測量で全て消失。
+> 左側だけで三角測量できる14点から、右側14フレームに6点以上の対応が得られます。
+> 現在は既存GeneralizedPnPによる有界な診断を実装中で、姿勢の自動採用はしません。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

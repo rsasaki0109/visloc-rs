@@ -1213,6 +1213,19 @@ pose/landmark refinement, preserving calibration, supported registration and
 all reprojection gates. See
 [recovery evidence](../benchmarks/electro/m8-openloris-atlas-recovery-v1.json).
 
+The first strict bounded BA pilot worsens RMSE/p95 to 0.391797/0.643537 m
+and is not promoted. Independent landmark connectivity auditing also finds
+that the main output contains two disconnected groups (2,000 + 2,494 rig
+frames), unlike COLMAP's connected 4,494-frame main model. Supported frame
+count and two output files therefore do not establish connectivity parity.
+All 31 source tracks crossing frame 1999/2000 survive merging but fail
+atlas-pose triangulation. Left-only triangulation yields 14 potential anchors;
+the next bounded diagnostic uses existing GeneralizedPnP to test right-side
+resection without automatic pose publication or threshold changes. Require
+actual cross-track recovery and accounting for any existing support loss
+before considering an adoption policy. See the
+[bounded BA and connectivity record](openloris_atlas_bounded_ba.md).
+
 Freeze the M8 quality champion before performance edits.
 
 ### Exact-output performance work accepted during M8 diagnosis (2026-09-03)

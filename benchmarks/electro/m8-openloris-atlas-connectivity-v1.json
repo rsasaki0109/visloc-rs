@@ -65,7 +65,31 @@
       "nonpositive_depth": 10,
       "parallax_or_degeneracy": 0
     },
-    "counting_caveat": "31 counts source point rows. Distinct final-union track identities and valid left/right-only triangulations are the next audit; do not infer 31 independent geometric constraints from this count alone."
+    "distinct_final_union_tracks": 31,
+    "counting_caveat": "Follow-up DSU audit confirms the 31 source point rows remain 31 distinct merged tracks; this does not imply 31 geometrically valid anchors."
   },
-  "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. The only source bridge rows survive merging but fail atlas-pose triangulation. Next compare source/atlas pose ownership and left/right-only geometric support before choosing a correction. Do not change scoring alignment or relax the target to hide this split."
+  "pose_owner_audit": {
+    "frames_1997_1998_1999": {"node_id": 25, "window_start": 1950},
+    "frames_2000_2022_2023": {"node_id": 8, "window_start": 2000},
+    "interpretation": "The 1999/2000 cut changes owner, but the jumps at 1997/1998 and 2022/2023 occur within a single owner. A rigid displacement of the entire later component cannot explain all three discontinuities."
+  },
+  "split_track_dlt_audit": {
+    "method": "Split each unique merged crossing track at frame 1999/2000; apply existing endpoint-inclusive maximum-64-sample DLT and full-observation positive-depth, minimum-two-observation, mean <= 2 px and max <= 4 px gates independently on each side. No GT.",
+    "left": {"pass": 14, "mean_gate_failed": 4, "max_gate_failed": 1, "fewer_than_two_observations": 12},
+    "right": {"pass": 16, "mean_gate_failed": 6, "max_gate_failed": 3, "fewer_than_two_observations": 6},
+    "both_sides_at_least_two_observations": 16,
+    "both_sides_pass": 7,
+    "left_observation_frame_range": [1905, 1999],
+    "right_observation_frame_range": [2000, 2154],
+    "right_resection_from_left_anchors": {
+      "anchor_tracks": 14,
+      "candidate_frames": 142,
+      "distinct_frame_track_correspondences": 339,
+      "raw_observations": 554,
+      "frames_with_at_least_six_distinct_tracks": 14,
+      "max_distinct_tracks_per_frame": 11,
+      "strict_generalized_pnp_verified": false
+    }
+  },
+  "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. The 31 unique crossing tracks survive merging but fail atlas-pose triangulation. Test bounded resection candidates with existing GeneralizedPnP using independently triangulated left-side anchors, then measure cross-track recovery and existing support loss before any adoption. No whole-component pose shift, scoring realignment, GT-based selection or threshold relaxation."
 }
