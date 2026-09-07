@@ -1,5 +1,11 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> PR #83は最終head `b99f2e1` のCI8項目（run `34137338043`）と独立監査を通過し、
+> `a71f40a`へmerge済み。旧local/remote branchも整理済みです。
+> 続行branchは `feat/m8-local-schur-block-diagnostic`。主成分のvariable-pose slot 191
+> （元frame 192）の6×6ブロックを明示診断し、算術順序・既定solver・全観測を維持したまま
+> 正定値性失敗と消去項の数値規模を確認します。診断だけで精度目標を達成したとは扱いません。
+
 > 最新追記（2026-09-08）: `feat/m8-bounded-pcg-residual-restart` の
 > `ca67e80` で上限1回・総反復数を延長しないPCG再開を実装し、1kの9本を測定済み。
 > [証跡](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json)。
