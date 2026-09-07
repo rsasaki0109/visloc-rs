@@ -1377,7 +1377,10 @@ Independent audits confirm unchanged support/connected graphs and exactly
 140 points / 2,193 observations removed in pass two. Observation-weighted
 reprojection falls to 0.574285 px and p95 to 0.633716 m, but RMSE worsens to
 0.390165 m. **Do not promote two sweeps**; retain the one-sweep experimental
-candidate. Repeat-output checks are in progress. The next isolated performance
+candidate. Both final outputs and pass-one checkpoints repeat byte-for-byte
+across all six files per component; see
+[two-sweep evidence](../benchmarks/electro/m8-openloris-atlas-connected-two-sweep-ba-v1.json).
+The next isolated performance
 candidate reuses one ordered landmark-selection vector within each window;
 it must preserve all output bytes and introduces no global index or model copy.
 

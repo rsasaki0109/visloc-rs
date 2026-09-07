@@ -484,7 +484,10 @@ Final output has 352,697 landmarks and 1,436,687 observations. Observation-
 weighted mean reprojection improves to 0.574285 px and p95 to 0.633716 m,
 but **RMSE worsens from 0.388993 to 0.390165 m**, still above COLMAP's
 0.384307 m gate. Do not promote two sweeps or launch a pass-count search.
-Repeat-output checks are in progress. Main/tail pilot times are 366.03/23.23 s
+Both final outputs and pass-one checkpoints repeat across all six files per
+component, even with optional pre-BA checkpoint writing omitted on repeat.
+See [two-sweep evidence](../benchmarks/electro/m8-openloris-atlas-connected-two-sweep-ba-v1.json).
+Main/tail pilot times are 366.03/23.23 s
 at 525,168/77,932 KiB with overlapping shared-machine jobs, not mapper/native
 E2E timing or a speed comparison. The one-sweep candidate stays in README's
 COLMAP comparison table; do not replace it with a cherry-picked p95 result.

@@ -20,7 +20,9 @@
     "main_and_tail_pass1_checkpoints_six_files_match_connected_filtered_ba_v1": true,
     "default_one_sweep_main_six_files_match_connected_filtered_ba_v1": true,
     "unchanged_original_two_component_scoring_alignment": true,
-    "repeat_status": "running"
+    "repeat_main_and_tail_final_six_files_byte_identical": true,
+    "repeat_main_and_tail_pass1_six_files_byte_identical": true,
+    "repeats_omit_optional_pre_ba_checkpoint_and_still_match": true
   },
   "result": {
     "pass1_main_windows_accepted": 150,
@@ -67,10 +69,16 @@
     "example_tests_passed": 50,
     "python_auditor_tests_passed": 23,
     "implementation_read_only_review": "pass",
+    "clippy_format_diff_and_release_build": "pass",
+    "benchmark_registry_and_documentation_links": "pass",
     "main_wall_s": 366.03,
     "main_peak_rss_kib": 525168,
     "tail_wall_s": 23.23,
     "tail_peak_rss_kib": 77932,
+    "repeat_main_wall_s": 348.86,
+    "repeat_main_peak_rss_kib": 525224,
+    "repeat_tail_wall_s": 21.08,
+    "repeat_tail_peak_rss_kib": 77848,
     "concurrent_one_sweep_control_main_wall_s": 195.40,
     "concurrent_one_sweep_control_main_peak_rss_kib": 514452,
     "timing_scope": "Overlapping shared-machine integration/recovery/repair/checkpoint/refinement jobs; not mapper/native E2E or a speed comparison"
