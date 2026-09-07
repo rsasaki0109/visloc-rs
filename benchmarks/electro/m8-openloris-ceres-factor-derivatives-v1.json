@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "frozen_factor_derivative_checks_pass_new_solve_pending",
+  "frozen_source_commit": "1d6424f0c11ea2c36f3070bba90199c1ab86c84b",
+  "frozen_source_sha256": "d9a09ab5a7575083ab8a3d1309dacab4cae65ca6097e1a6c1208238a5d177164",
+  "audit_source_sha256": "16b499cd0ffb80c215cdc3bfec48442f080eb65e4ae615a34fef3b3f65d3218f",
+  "audit_binary_sha256": "35448ae9ae5a81af656fafe55fd7e03caef9ce22e5dfafbb48609b7b38b67a2b",
+  "audit_source": "// Independent root audit against the frozen evaluation checkpoint.\n#define main frozen_reference_main\n#include \"/work/ceres_ref-source-1d6424f.cc\"\n#undef main\n#include <ceres/product_manifold.h>\n\nint main() {\n  using namespace ceres_rig_reference;\n  using Row27 = Eigen::Matrix<double, 2, 7, Eigen::RowMajor>;\n  using Row23 = Eigen::Matrix<double, 2, 3, Eigen::RowMajor>;\n  using Row76 = Eigen::Matrix<double, 7, 6, Eigen::RowMajor>;\n  Eigen::Quaterniond q(.91,.17,-.23,.29), sensor(.98,-.09,.14,.03);\n  q.normalize(); sensor.normalize();\n  double pose[7]={q.w(),q.x(),q.y(),q.z(),.3,.2,.5};\n  double point[3]={.4,-.8,4.2};\n  Camera camera; camera.intrinsics={410.,405.,320.,240.};\n  Observation obs; obs.xy=Eigen::Vector2d(123.,234.);\n  obs.sensor_from_rig_rotation=sensor;\n  obs.sensor_from_rig_translation=Eigen::Vector3d(-.064,.02,.01);\n  auto cost=MakeRigReprojectionCost(camera,obs);\n  const double* parameters[]={pose,point};\n  double residual[2];\n  Row27 jp; Row23 jx;\n  double* jacobians[]={jp.data(),jx.data()};\n  if (!cost->Evaluate(parameters,residual,jacobians)) return 2;\n  // Deliberately independent Eigen projection, not the factor's TransformPoint.\n  const auto project=[&](const double* p,const double* x)->Eigen::Vector2d {\n    Eigen::Quaterniond r(p[0],p[1],p[2],p[3]); r.normalize();\n    Eigen::Vector3d y=sensor.toRotationMatrix()*\n      (r.toRotationMatrix()*Eigen::Map<const Eigen::Vector3d>(x)+\n       Eigen::Map<const Eigen::Vector3d>(p+4))+obs.sensor_from_rig_translation;\n    if (!(y.z()>0)) throw std::runtime_error(\"bad independent depth\");\n    return Eigen::Vector2d(410.*y.x()/y.z()+320.-123.,\n                          405.*y.y()/y.z()+240.-234.);\n  };\n  constexpr double eps=1e-7;\n  Row27 np; Row23 nx;\n  for(int k=0;k<7;++k) {\n    std::array<double,7> a,b; std::copy(pose,pose+7,a.begin()); b=a;\n    a[k]+=eps; b[k]-=eps;\n    np.col(k)=(project(a.data(),point)-project(b.data(),point))/(2*eps);\n  }\n  for(int k=0;k<3;++k) {\n    std::array<double,3> a,b; std::copy(point,point+3,a.begin()); b=a;\n    a[k]+=eps; b[k]-=eps;\n    nx.col(k)=(project(pose,a.data())-project(pose,b.data()))/(2*eps);\n  }\n  ceres::ProductManifold<ceres::QuaternionManifold,\n                        ceres::EuclideanManifold<3>> manifold;\n  Row76 plus;\n  if (!manifold.PlusJacobian(pose,plus.data())) return 3;\n  Eigen::Matrix<double,2,6> tangent=jp*plus, nt;\n  for(int k=0;k<6;++k) {\n    double d[6]={},a[7],b[7]; d[k]=eps;\n    if (!manifold.Plus(pose,d,a)) return 4;\n    d[k]=-eps;\n    if (!manifold.Plus(pose,d,b)) return 5;\n    nt.col(k)=(project(a,point)-project(b,point))/(2*eps);\n  }\n  Eigen::Vector3d u=q.toRotationMatrix()*Eigen::Map<const Eigen::Vector3d>(point);\n  Eigen::Vector3d y=sensor.toRotationMatrix()*(u+Eigen::Map<const Eigen::Vector3d>(pose+4))+\n                    obs.sensor_from_rig_translation;\n  Eigen::Matrix<double,2,3> projection;\n  projection << 410./y.z(),0.,-410.*y.x()/(y.z()*y.z()),\n                0.,405./y.z(),-405.*y.y()/(y.z()*y.z());\n  Eigen::Matrix3d cross;\n  cross << 0.,-u.z(),u.y(),u.z(),0.,-u.x(),-u.y(),u.x(),0.;\n  Eigen::Matrix<double,2,6> analytic;\n  analytic.leftCols<3>()=projection*sensor.toRotationMatrix()*(-2.*cross);\n  analytic.rightCols<3>()=projection*sensor.toRotationMatrix();\n  const double ambient_error=(jp-np).cwiseAbs().maxCoeff();\n  const double point_error=(jx-nx).cwiseAbs().maxCoeff();\n  const double tangent_error=(tangent-nt).cwiseAbs().maxCoeff();\n  const double analytic_error=(tangent-analytic).cwiseAbs().maxCoeff();\n  const double point_analytic_error=\n    (jx-projection*sensor.toRotationMatrix()*q.toRotationMatrix()).cwiseAbs().maxCoeff();\n  if (ambient_error>1e-5 || point_error>1e-5 || tangent_error>1e-5 ||\n      analytic_error>1e-9 || point_analytic_error>1e-9) return 6;\n  std::cout<<std::setprecision(17)\n    <<\"root_derivative_audit=PASS ambient_fd_max=\"<<ambient_error\n    <<\" point_fd_max=\"<<point_error<<\" tangent_fd_max=\"<<tangent_error\n    <<\" tangent_analytic_max=\"<<analytic_error\n    <<\" point_analytic_max=\"<<point_analytic_error<<\"\\n\";\n}\n",
+  "compile_command": "docker exec --user 1000:1000 visloc-m8-ceres-reference-v1 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I/usr/include/eigen3 /work/root-derivative-audit-v1.cc -lceres -lglog -o /work/root-derivative-audit-v1",
+  "compile_exit": 0,
+  "result": {
+    "chunk_id": "564791",
+    "wall_time_seconds": 0.000003896,
+    "exit_code": 0,
+    "original_token_count": 136,
+    "output": "root_derivative_audit=PASS ambient_fd_max=5.2160186214678106e-07 point_fd_max=5.0536750800800334e-07 tangent_fd_max=3.2470711630594451e-07 tangent_analytic_max=1.1368683772161603e-13 point_analytic_max=2.1316282072803006e-14\n16b499cd0ffb80c215cdc3bfec48442f080eb65e4ae615a34fef3b3f65d3218f  /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/root-derivative-audit-v1.cc\n35448ae9ae5a81af656fafe55fd7e03caef9ce22e5dfafbb48609b7b38b67a2b  /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/root-derivative-audit-v1\n"
+  },
+  "environment_reference": "m8-openloris-ceres-initial-parity-v1.json",
+  "scope": [
+    "Actual frozen MakeRigReprojectionCost AutoDiff ambient Jacobians vs independent Eigen projection central differences.",
+    "Actual Ceres ProductManifold Plus and PlusJacobian tangent derivatives vs independent projection central differences.",
+    "Actual AutoDiff tangent and point derivatives vs separately derived analytic formulas.",
+    "One synthetic nonidentity rig/sensor rotation with nonzero translations/baseline; all observed depths positive."
+  ],
+  "tolerances": {
+    "central_difference_step": 1e-7,
+    "finite_difference_max_absolute": 0.00001,
+    "analytic_max_absolute": 1e-9
+  },
+  "limitations": [
+    "Not a test of the new SolveInMemory implementation, actual Ceres Problem anchor constancy, or state publication.",
+    "The final solve source must be independently reviewed and rechecked before any real-data optimization.",
+    "No performance or trajectory-quality claim is made."
+  ]
+}

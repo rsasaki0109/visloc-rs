@@ -1,5 +1,13 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Ceres微分の独立検証（2026-09-08）: rootが凍結`1d6424f`の実AutoDiff因子と
+> 実ProductManifoldを使い、独立Eigen投影の数値微分・別途導いた解析式と照合。
+> ambient/XYZ/tangentのFD最大差は5.22e-7/5.05e-7/3.25e-7（許容1e-5）、
+> 解析tangent最大差1.14e-13（許容1e-9）で通過。
+> [微分証跡](../benchmarks/electro/m8-openloris-ceres-factor-derivatives-v1.json)。
+> これは新SolveInMemory/Problem/保存経路の試験ではありません。Luna Maxがそれらと
+> synthetic solveテストを作業中。実1k solveは未実施、final sourceレビュー後に再認証します。
+
 > Ceres初期parity通過（2026-09-08）: `1d6424f`をroot独立buildし、自己テストと
 > 同一1k全130,900観測の独立照合が通過。残差座標の最大差は9.84e-11 px、
 > 深度最大差1.82e-12 m。全ID/order/xy/XYZ・校正・元fixture hashを確認済み。
