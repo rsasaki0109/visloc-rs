@@ -12,7 +12,7 @@
 > Luna MaxはPython model publisherとテストを実装中。C++はこれ以上変更せず測定binaryを保持。
 > [draft PR #89](https://github.com/rsasaki0109/visloc-rs/pull/89)を作成済み。
 > 初期head `a8553c1`はCI9項目通過(run34158171089)。solve head `1f31335`は
-> run34158566321で再CI中。publisher/全監査/最終CIが揃うまでdraft・非mergeです。
+> run34158566321のCI9項目も通過。publisher/全監査/最終CIが揃うまでdraft・非mergeです。
 > 既定Rust/README性能値は不変。全体goalと10k精度/native E2E/各規模ゲートは未完了。
 
 > Ceres微分の独立検証（2026-09-08）: rootが凍結`1d6424f`の実AutoDiff因子と

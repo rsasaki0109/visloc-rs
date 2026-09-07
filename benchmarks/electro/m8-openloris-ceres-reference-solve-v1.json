@@ -580,7 +580,10 @@
   "next_ci": {
     "run": 34158566321,
     "head": "1f31335932e5fb619b4af429c2c5d49f470f3891",
-    "status": "queued_at_launch_not_final"
+    "status": "completed",
+    "conclusion": "success",
+    "all_jobs": 9,
+    "scope": "solve checkpoint, not the pending publisher or final PR head"
   },
   "limitations": [
     "No publication/GT audit yet; no trajectory quality conclusion.",
