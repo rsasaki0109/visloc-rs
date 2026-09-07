@@ -51,6 +51,42 @@
     "largest_track_observations": 1264,
     "decision": "Do not use unguarded transitive union; detect conflicts before mutating ownership"
   },
+  "unique_observation_support_before_filtering": {
+    "images": 9998,
+    "rig_frames": 4999,
+    "images_with_zero_observations": 1,
+    "rig_frames_with_zero_observations": 0,
+    "minimum_observations_per_image": 0,
+    "minimum_observations_per_rig_frame": 14,
+    "rig_frames_below_six_observations": 0,
+    "frame_4493_observations": 14,
+    "note": "Deduplicated by image name and original keypoint index; before collision rejection or atlas-pose triangulation. A zero-observation sensor image may still belong to a supported calibrated rig frame."
+  },
+  "colmap_projection_crosscheck": {
+    "control_evidence": "m8-openloris-colmap-10k-control.json",
+    "root": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/models-text",
+    "images_and_points_hashes_match_control": true,
+    "observations": 1947815,
+    "direct_observation_weighted_mean_reprojection_px": 0.9030031049631768,
+    "frozen_stored_error_weighted_mean_px": 0.9030031518617252,
+    "components": [
+      {
+        "id": 0,
+        "observations": 1800787,
+        "direct_mean_reprojection_px": 0.9125826606313493,
+        "max_absolute_stored_point_error_difference_px": 1.9578643821634156e-8
+      },
+      {
+        "id": 1,
+        "observations": 147028,
+        "direct_mean_reprojection_px": 0.7856734853463605,
+        "max_absolute_stored_point_error_difference_px": 0.04567989305042297
+      }
+    ],
+    "nonpositive_depth_observations": 0,
+    "bidirectional_track_references_valid": true,
+    "note": "Frozen historical gate is unchanged. Report the direct projection comparison as well; stored per-point ERROR values are not universally exact."
+  },
   "limitations": [
     "Observation counts include duplicates between overlapping windows",
     "Reprojection describes source poses, not final atlas poses",
