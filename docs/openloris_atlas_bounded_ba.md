@@ -1770,3 +1770,36 @@ Report identity failures or solver termination honestly, never repair the
 output silently. A single nonconvex reference is evidence about this
 objective, not proof of the cause or of general COLMAP parity. The prior
 adaptive 1k failure still prohibits adaptive atlas/default promotion.
+
+#### Publication and derivative acceptance gates
+
+Initial residual agreement alone does not validate optimization. Before the
+real solve, test ambient AutoDiff derivatives against independent central
+differences, and tangent derivatives against finite differences through the
+actual ProductManifold `Plus` operation. Use nonidentity rig and sensor
+rotations, a nonzero baseline, variable poses and XYZ, and positive depths
+away from the rejection boundary. Also run a synthetic Ceres Problem with
+the same factor/block/manifold setup and check cost decrease, unchanged
+anchor parameters and unchanged calibration. Check derivative tolerances on
+the synthetic case, not against GT or by tuning real-data solver settings.
+
+The solved state must contain every original pose and point ID exactly once,
+the fixed anchor ID and all original source digests. Model publication must
+bind that state to the original fixture/model/rig manifest; frame and sensor
+membership comes from image names in the manifest, never image-ID arithmetic.
+For each output image, compose `T_sensor<-rig * T_rig<-world`. Preserve camera
+file bytes, image ID/camera ID/name and order, every POINTS2D token and order,
+and each point's ID/RGB/track tokens and order. Only pose coordinates, XYZ
+and recomputed mean Euclidean reprojection ERROR may change.
+
+Reject missing/extra/duplicate state IDs, nonfinite values, invalid quaternions,
+source digest mismatch, unsupported output observations or anchor movement.
+Recompute every final observation's positive depth and full squared cost
+from serialized output before GT scoring. Audit both directions of tracks,
+all 1,000 supported images/500 supported frames/4,716 points/130,900 observations,
+the original 361,170 keypoints and one connected rig component. Preserve
+the existing fixed-anchor comparison tolerance rather than loosening it
+to accommodate a candidate. Stage output in an owned private directory;
+reject any existing destination, symlink or source overlap, and never remove
+an unowned path when publication fails. This is a separate post-solve tool,
+not part of the measured Ceres optimization time; report phase timing clearly.

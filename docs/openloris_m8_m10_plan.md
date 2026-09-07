@@ -68,8 +68,23 @@ Read-only feasibility checks found the original COLMAP 4.2.0.dev0 container
 image `sha256:b809882552887b6471094dcadd2f2eb01656b010663564c43a5e7f04c0a08f2f`.
 Its BA CLI exposes fixed intrinsics/sensor extrinsics and iteration settings,
 but no explicit anchor option was found in help. Host pycolmap is absent and
-the image has no python3. No reference solve or installation has occurred:
-an exact configuration path must be established before measuring.
+the image has no python3. The subsequent isolated environment installs
+Ceres 2.2.0 development dependencies only in a dedicated, network-disconnected
+container, with one CPU and a 2 GiB memory/swap limit; host packages and the
+original image remain unchanged. The standalone reference reuses the exact
+Rust oracle fixture instead of approximating COLMAP's implicit gauge.
+
+[Initial residual parity](../benchmarks/electro/m8-openloris-ceres-initial-parity-v1.json)
+passes at `1d6424f`: all 130,900 observations retain exact identities/order/xy,
+with independent maximum residual-coordinate difference 9.84e-11 px and depth
+difference 1.82e-12 m. Cameras, points, poses and sensor transforms match the
+original model/manifest. The initial full squared cost is 126510.39875730907
+versus the frozen 126510.39875730938. This verifies initial values, **not**
+the derivatives, manifold, optimizer or final model publication.
+
+The next gate is synthetic AutoDiff/tangent-Jacobian agreement and an actual
+fixed-anchor ProductManifold solve, before the single predeclared real-data
+solve. No Ceres solve or new performance claim has occurred at this checkpoint.
 
 ## Current checkpoint (2026-09-07)
 
