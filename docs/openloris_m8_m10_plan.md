@@ -1355,6 +1355,13 @@ Do not select thresholds or mapping actions using ground truth.
 Mapper/native-E2E performance, tier nonregression,
 restart and 100k I/O requirements remain unchanged and incomplete.
 
+The point-retention arm is now measured and rejected: unchanged checkpoints,
+default-OFF equality, full support/connectivity and exact repeats pass, but
+RMSE/p95 worsen to 0.389420/0.639357 m. Its slightly lower 0.580628 px
+observation-weighted reprojection and far fewer DLT calls do not close the
+trajectory gap. Preserve the filtering baseline and the
+[negative evidence](../benchmarks/electro/m8-openloris-atlas-connected-preserved-ba-v1.json).
+
 ## Stop conditions
 
 - Do not launch a larger tier after an input/hash/calibration mismatch.

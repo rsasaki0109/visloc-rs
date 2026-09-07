@@ -404,3 +404,29 @@ different mapper input; do not repeat it as if it were new. Neither optimized
 point retention, fixed-pose nonlinear point refinement nor a second sweep has
 yet been measured on this connected filtering input. Test point retention first
 to isolate this implementation difference before introducing other changes.
+
+### Optimized point retention result: not promoted
+
+Implementation `0e5a9bf` passes 47 example tests, 21 independent auditor tests,
+clippy and release build. Both pre-BA checkpoints match the same repaired model;
+retention-OFF main output matches the frozen filtering control across six files.
+Both retention-ON component outputs repeat byte-for-byte, including when the
+repeat omits checkpoint writing. All eight implementation CI checks pass.
+
+Main/tail accept 150/150 and 17/17 windows. Raw points are retained in
+846,957/82,888 selected-track events, with only 736/46 DLT attempts. These are
+overlapping window events, not unique point counts. Final removal accounting
+is 384 points / 4,408 observations, independently reproduced from serialized
+keypoint identities. All supported images, 4,999 rig frames, the 4,494/505-frame
+connected graphs, calibration and reference/depth/track-mean/max-error gates pass.
+
+Observation-weighted reprojection improves slightly from 0.581744 to 0.580628 px,
+but RMSE/p95 **worsen from 0.388993/0.638173 to 0.389420/0.639357 m**. Both
+COLMAP trajectory gates now fail. Do not promote retention or select it merely
+because it avoids DLT or preserves more landmarks. Retain the previous filtering
+model as the improved experimental candidate.
+
+Main/tail pilot wall times are 235.31/25.93 s at 525,676/77,896 KiB; they run
+with overlapping jobs on a shared machine. Neither these numbers nor fewer DLT
+calls establish mapper/native-E2E speed. Full hashes and scope are in
+[point retention evidence](../benchmarks/electro/m8-openloris-atlas-connected-preserved-ba-v1.json).

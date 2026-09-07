@@ -27,9 +27,10 @@
 > 両成分のBA直前checkpointと、filter OFFの主成分strict出力も全6ファイル一致。
 > 両成分の再実行も各6ファイル一致、実装コミットのCIは8項目通過。
 > PR #73は最終CI8項目通過後、`07a4104`へsquash merge済み。旧branchも整理済みです。
-> 現在は `feat/m8-preserve-optimized-atlas-points` で、観測集合が変わらず
-> 全幾何gateを通るBA後の3D点を保持する別モードを実装しています。
-> その他の点は従来DLTのまま。閾値・窓・反復数を変えず同一入力で比較します。
+> `feat/m8-preserve-optimized-atlas-points`（PR #74）の点保持モードも同一入力で測定済み。
+> 全支持/連結性・再実行一致を満たしますが、RMSE/p95は0.389420/0.639357 mへ
+> 悪化したため非昇格です。47 example tests / 21 auditor testsが通過。
+> 現在はPR #74の証拠整理と最終CI/mergeを進めています。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 
