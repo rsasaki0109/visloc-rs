@@ -67,6 +67,27 @@
     "max_world_point_norm_m": 8287.678420723867,
     "interpretation": "Conditioning/cancellation clue only; not a Hessian/operator audit, not proof of the sole PCG failure cause, and not a filtering criterion"
   },
+  "independent_source_point_302_scale_diagnostic": {
+    "point_id": 302,
+    "source_camera_depths_m": [
+      0.00011093307669790553,
+      0.00019652808018441603
+    ],
+    "landmark_jacobian_singular_values": [
+      5061051.199270975,
+      2961540.225766277,
+      41063.853180371814
+    ],
+    "landmark_jacobian_condition": 123.24832686889977,
+    "landmark_hessian_max_abs": 16834347216659.188,
+    "hessian_spectral_scale_eps": 0.005687503632865668,
+    "hessian_lambda_1e_minus4_addition_changes_diagonal": [
+      false,
+      false,
+      false
+    ],
+    "scope": "Source-camera local point diagnostic only; not exact reconstructed-body BA normal system, not proof of the full PCG failure cause."
+  },
   "independent_input_trajectory_rescore": {
     "scorer": "scripts/score_openloris_model.py",
     "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
