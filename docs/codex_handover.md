@@ -52,8 +52,11 @@
 > PR #76は最終CI8項目通過（run 34104286558）後、`56bea96`へmergeし旧branchも整理済み。
 > [scan共有の測定記録](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json)。
 > 現在は `feat/m8-implicit-schur-prototype`。private/test-onlyのimplicit Schur作用素と
-> PCGの数値検証へ進みます。既定solver・公開API・mapper CLIは変更せず、global runは
-> まだ行いません。具体的な検証契約は有界BA文書の末尾にあります。
+> PCGの数値試作を実装済み。既定solver・公開API・mapper CLIは変更せず、global runは
+> まだ行いません。真の線形残差、複数センサーのcross項、明示行列との作用素・step一致を
+> 検証しています。空pose入力の拒否は、本番の全pose固定/点のみBAの検証とは別です。
+> 次の本番組み込みでは非対応factorを行列組立前に拒否し、固定gaugeの小規模/1k比較を
+> 先行します。具体的な検証契約は有界BA文書の末尾にあります。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

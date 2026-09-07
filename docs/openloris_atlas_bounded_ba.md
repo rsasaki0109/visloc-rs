@@ -535,14 +535,15 @@ integration/recovery/repair/filtering/publication only,
 not the source-window mapper, atlas construction, frontend or native E2E.
 See [selection reuse evidence](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json).
 
-### Read-only solver-memory audit (not a selected next implementation)
+### Solver-memory audit (production path unchanged)
 
 The current pure-visual sparse path in `pipelines/slam/src/bundle.rs`,
 `solve_step_pose_blocks`, avoids a dense camera Hessian but still materializes
 the reduced Schur matrix as block-column maps. Its nested pose-pair loop for
 each landmark adds shared-track couplings, and it calls the direct cached
 block-Cholesky solver. `LandmarkBlock.cross` retains pose/landmark cross blocks.
-No matrix-free iterative Schur/PCG path currently exists in these solvers.
+No production matrix-free iterative Schur/PCG path currently exists in these
+solvers; the private test-only prototype below does not change that path.
 
 A matrix-free Schur operator could avoid storing the reduced matrix and its
 factor fill, but would still retain observation/cross-block state unless that
@@ -569,7 +570,7 @@ global refinement will improve this dataset's trajectory. A future experiment
 must retain identical observations, calibration, damping and GT-free acceptance
 before attributing any change to the solver.
 
-#### Proposed private operator gate
+#### Private operator gate
 
 PR #76 merged as `56bea96` after all eight final CI checks passed
 (run 34104286558); its old branch is removed. The selected next bounded task
@@ -578,6 +579,10 @@ prototype, not a new mapper flag or global solve. Reuse `NormalEquationsBa`,
 `LandmarkBlock` and the already constrained `CameraHessian::PoseDiagonal`;
 explicitly reject `Dense` input. Do not add a variant to the shared public
 `LinearSolver` enum or a required field to public `BaConfig` struct literals.
+A later production entry point must reject unsupported priors/factors before
+normal-equation assembly: rejecting an already allocated `Dense` system cannot
+undo its quadratic allocation. The private prototype alone does not prove this
+pipeline-level memory gate.
 
 For each landmark, compute the sum of all cross-block transposed products
 before applying its damped 3-by-3 inverse, then scatter through every original
@@ -591,7 +596,9 @@ Match the current pose/landmark identity damping and singular-landmark inverse
 skip/back-substitution behavior in the operator oracle. Check operator action,
 reduced RHS, preconditioner diagonal and complete pose/landmark step against
 small explicit systems, including repeated sensor slots, zero/nonzero damping,
-fixed rotations and all-fixed-pose cases. Test dimension/nonfinite errors,
+fixed rotations and empty pose systems. The prototype rejects an empty pose
+system; this is not a test of the production landmark-only/all-fixed solve.
+That separate branch must be validated during integration. Test dimension/nonfinite errors,
 residual criteria, iteration limits and repeated-run determinism. Numerical
 agreement with a direct solver is tolerance-based; default-path compatibility
 and same-prototype repeat determinism are separate checks.
@@ -601,3 +608,28 @@ positive damping, is not evidence of a physically valid gauge. Component
 anchoring and fixed-rig calibration remain model-level prerequisites before
 any later integration. This gate proves a solver primitive only; global memory,
 runtime, trajectory quality and all original M8–M10 outcomes remain unproven.
+
+#### Next integration gate (not implemented by this prototype)
+
+After the private numerical gate and CI, expose an additive, opt-in pure-visual
+entry point with separate iterative options. Keep existing public enum variants,
+configuration struct literals and default solver behavior unchanged. Before
+assembling normal equations, reject velocity/bias states and unsupported
+priors or nonvisual factors; never fall back to a dense camera matrix. Check
+component anchors and fixed physical rig calibration at the model boundary.
+
+First compare the same anchored small model against the direct solver, then a
+frozen 1k input with identical observations, calibration, damping and robust
+loss. Record true linear residuals, iteration counts, nonlinear cost acceptance,
+whole-process peak RSS, time and output geometry. Explicitly test landmark-only
+systems and rejected steps without partial pose/point mutation. A failed PCG
+solve must be visible and handled through a bounded rejection/damping policy,
+not an unbounded direct-solver fallback. Preserve deterministic repeated runs.
+
+Only after these gates pass, select a separately recorded connected-atlas 10k
+experiment with a 2 GiB stop limit and fixed observation/support/geometry
+checks. Keep GT out of optimization and acceptance; score the unchanged two
+components afterward. Lower linear residual or nonlinear reprojection cost
+alone does not meet the trajectory gate. Mapper-only and native-E2E accounting
+must include their respective upstream stages; this prototype supplies neither
+a pipeline memory bound nor an end-to-end speed comparison.

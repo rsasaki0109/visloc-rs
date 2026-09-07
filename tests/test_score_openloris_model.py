@@ -135,7 +135,13 @@ class ScoreOpenLorisModelTests(unittest.TestCase):
             mock.patch.object(score, "load_ground_truth", return_value=None),
             mock.patch.object(score, "load_camera_extrinsics", return_value=None),
             mock.patch.object(score, "interpolate_camera_centres", return_value=reference),
-            mock.patch.object(score, "load_model_centres", side_effect=[names[:3], names[3:]]),
+            mock.patch.object(
+                score, "load_model_centres",
+                side_effect=[
+                    {name: reference[name] for name in component_names}
+                    for component_names in (names[:3], names[3:])
+                ],
+            ),
             mock.patch.object(score, "score_component", side_effect=components),
             mock.patch.object(score, "sha256_file", return_value="fixture-only"),
         ):
