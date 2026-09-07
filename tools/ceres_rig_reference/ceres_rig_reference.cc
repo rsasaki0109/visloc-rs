@@ -114,6 +114,7 @@ struct EvaluationSummary {
   double squared_cost = 0.0;
   double eigen_squared_cost = 0.0;
   double max_ceres_eigen_residual_abs_diff = 0.0;
+  double max_ceres_eigen_depth_abs_diff = 0.0;
   std::size_t observation_count = 0;
   std::size_t positive_depth_count = 0;
   double minimum_depth = std::numeric_limits<double>::infinity();
@@ -138,9 +139,9 @@ struct RigReprojectionCost {
   Eigen::Vector3d sensor_from_rig_translation = Eigen::Vector3d::Zero();
 
   template <typename T>
-  bool operator()(const T* const pose,
-                  const T* const point_world,
-                  T* residuals) const {
+  bool TransformPoint(const T* const pose,
+                      const T* const point_world,
+                      T* point_sensor) const {
     T point_rig[3];
     ceres::QuaternionRotatePoint(pose, point_world, point_rig);
     point_rig[0] += T(pose[4]);
@@ -153,14 +154,21 @@ struct RigReprojectionCost {
         T(sensor_from_rig_rotation.y()),
         T(sensor_from_rig_rotation.z()),
     };
-    T point_sensor[3];
     ceres::QuaternionRotatePoint(sensor_rotation, point_rig, point_sensor);
     point_sensor[0] += T(sensor_from_rig_translation.x());
     point_sensor[1] += T(sensor_from_rig_translation.y());
     point_sensor[2] += T(sensor_from_rig_translation.z());
-    if (!ceres::IsFinite(point_sensor[0]) ||
-        !ceres::IsFinite(point_sensor[1]) ||
-        !ceres::IsFinite(point_sensor[2]) || !(point_sensor[2] > T(0))) {
+    return ceres::isfinite(point_sensor[0]) &&
+           ceres::isfinite(point_sensor[1]) &&
+           ceres::isfinite(point_sensor[2]) && point_sensor[2] > T(0);
+  }
+
+  template <typename T>
+  bool operator()(const T* const pose,
+                  const T* const point_world,
+                  T* residuals) const {
+    T point_sensor[3];
+    if (!TransformPoint(pose, point_world, point_sensor)) {
       return false;
     }
 
@@ -168,7 +176,7 @@ struct RigReprojectionCost {
                    T(intrinsics[2]) - T(observed.x());
     residuals[1] = T(intrinsics[1]) * point_sensor[1] / point_sensor[2] +
                    T(intrinsics[3]) - T(observed.y());
-    return ceres::IsFinite(residuals[0]) && ceres::IsFinite(residuals[1]);
+    return ceres::isfinite(residuals[0]) && ceres::isfinite(residuals[1]);
   }
 };
 
@@ -194,6 +202,7 @@ std::unique_ptr<ceres::CostFunction> MakeRigReprojectionCost(
 struct CeresObservationEvaluation {
   Eigen::Vector2d residual = Eigen::Vector2d::Zero();
   double depth = 0.0;
+  double eigen_depth = 0.0;
 };
 
 CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
@@ -210,6 +219,19 @@ CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
   const double point_parameters[3] = {
       landmark.position.x(), landmark.position.y(), landmark.position.z(),
   };
+  RigReprojectionCost transform_functor;
+  transform_functor.intrinsics = camera.intrinsics;
+  transform_functor.observed = observation.xy;
+  transform_functor.sensor_from_rig_rotation =
+      observation.sensor_from_rig_rotation;
+  transform_functor.sensor_from_rig_translation =
+      observation.sensor_from_rig_translation;
+  double point_sensor[3] = {0.0, 0.0, 0.0};
+  if (!transform_functor.TransformPoint(pose_parameters, point_parameters,
+                                        point_sensor)) {
+    throw FixtureError("Ceres transform rejected a nonfinite or nonpositive-depth "
+                       "observation");
+  }
   const double* parameters[] = {pose_parameters, point_parameters};
   double residual[2] = {0.0, 0.0};
   if (!cost->Evaluate(parameters, residual, nullptr) ||
@@ -219,7 +241,8 @@ CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
   }
   CeresObservationEvaluation result;
   result.residual = Eigen::Vector2d(residual[0], residual[1]);
-  result.depth = TransformPoint(pose, observation, landmark).z();
+  result.depth = point_sensor[2];
+  result.eigen_depth = TransformPoint(pose, observation, landmark).z();
   if (!std::isfinite(result.depth) || !(result.depth > 0.0)) {
     throw FixtureError("Ceres AutoDiff accepted an invalid depth");
   }
@@ -669,6 +692,8 @@ EvaluationSummary Evaluate(const Fixture& fixture, std::ostream& dump) {
     const Landmark& landmark =
         fixture.landmarks.at(fixture.landmark_index.at(observation.landmark_id));
     const Camera& camera = fixture.cameras.at(fixture.camera_index.at(observation.camera_id));
+    const CeresObservationEvaluation ceres =
+        EvaluateWithCeres(pose, observation, landmark, camera);
     const Eigen::Vector3d point_sensor =
         TransformPoint(pose, observation, landmark);
     if (!point_sensor.allFinite() || !(point_sensor.z() > 0.0)) {
@@ -687,8 +712,13 @@ EvaluationSummary Evaluate(const Fixture& fixture, std::ostream& dump) {
       throw FixtureError("evaluate-only rejected nonfinite projection at observation " +
                          std::to_string(index));
     }
-    const CeresObservationEvaluation ceres =
-        EvaluateWithCeres(pose, observation, landmark, camera);
+    const double depth_difference = std::abs(ceres.depth - ceres.eigen_depth);
+    if (!std::isfinite(depth_difference)) {
+      throw FixtureError("evaluate-only depth parity is nonfinite at observation " +
+                         std::to_string(index));
+    }
+    summary.max_ceres_eigen_depth_abs_diff = std::max(
+        summary.max_ceres_eigen_depth_abs_diff, depth_difference);
     const Eigen::Vector2d residual_difference = ceres.residual - eigen_residual;
     const double max_difference = residual_difference.cwiseAbs().maxCoeff();
     if (!std::isfinite(max_difference)) {
@@ -726,6 +756,8 @@ EvaluationSummary Evaluate(const Fixture& fixture, std::ostream& dump) {
        << "SUMMARY_EIGEN_SQUARED_COST " << summary.eigen_squared_cost << '\n'
        << "SUMMARY_CERES_EIGEN_MAX_RESIDUAL_ABS_DIFF "
        << summary.max_ceres_eigen_residual_abs_diff << '\n'
+       << "SUMMARY_CERES_EIGEN_MAX_DEPTH_ABS_DIFF "
+       << summary.max_ceres_eigen_depth_abs_diff << '\n'
        << "SUMMARY_MIN_DEPTH " << summary.minimum_depth << '\n'
        << "SUMMARY_MAX_DEPTH " << summary.maximum_depth << '\n';
   return summary;
@@ -1097,6 +1129,8 @@ int main(int argc, char** argv) {
               << " eigen_squared_cost=" << summary.eigen_squared_cost
               << " ceres_eigen_max_residual_abs_diff="
               << summary.max_ceres_eigen_residual_abs_diff
+              << " ceres_eigen_max_depth_abs_diff="
+              << summary.max_ceres_eigen_depth_abs_diff
               << " cost_delta=" << absolute_delta
               << " min_depth=" << summary.minimum_depth
               << " max_depth=" << summary.maximum_depth
