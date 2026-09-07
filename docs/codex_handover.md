@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 続行（2026-09-08）: PR #89は最終head `24c6814` のCI9項目
+> （run `34160530991`）通過後、`7e917df`へsquash merge済み。旧local/remote branch整理済み。
+> 現在は `feat/m8-observation-geometry-diagnostic`。
+> [事前固定の診断契約](openloris_observation_geometry_diagnostic.md)に従い、Luna Maxで
+> 初期モデルの視点角度・track長別のread-only集計を実装します。GT/solver/README変更なし。
+> Ceresの軌跡悪化は確定しましたが、原因は未確定。全体goalは引き続き未完了です。
+
 > Ceres参照の採点完了（2026-09-08）: publisher `90672d4` をroot独立6テスト後に
 > 実行し、出力2回の3ファイルbyte一致、全identity/校正/anchor/正深度/1成分を確認。
 > 全1,000画像・500支持frame・4,716点・130,900観測・361,170 keypointを保持。
