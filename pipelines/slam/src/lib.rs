@@ -16,10 +16,12 @@ mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
     BaResult, BaRigObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
-    BundleAdjustmentRefiner, GravityPrior, MatrixFreeBaError, MatrixFreeBaIterationStats,
-    MatrixFreeBaOptions, MatrixFreeBaRestartIterationStats, MatrixFreeBaRestartOptions,
-    MatrixFreeBaRestartResult, MatrixFreeBaResult, NavigationStatePrior, PairwisePoseFactor,
-    PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
+    BundleAdjustmentRefiner, GravityPrior, MatrixFreeBaColumnScalingIterationStats,
+    MatrixFreeBaColumnScalingOptions, MatrixFreeBaColumnScalingResult, MatrixFreeBaError,
+    MatrixFreeBaIterationStats, MatrixFreeBaOptions, MatrixFreeBaRestartIterationStats,
+    MatrixFreeBaRestartOptions, MatrixFreeBaRestartResult, MatrixFreeBaResult,
+    NavigationStatePrior, PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior,
+    PositionPrior, PositionPriorObservation,
 };
 
 pub mod camera_rig;

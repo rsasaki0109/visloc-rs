@@ -16,13 +16,14 @@ use nalgebra::{Point2, Point3, Quaternion, UnitQuaternion, Vector3};
 use sha2::{Digest, Sha256};
 use visloc_rs::io::colmap::parse_cameras_txt;
 use visloc_rs::slam::{
-    BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaOptions,
-    MatrixFreeBaRestartOptions, MatrixFreeBaRestartResult, MatrixFreeBaResult, RobustKernel,
+    BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaColumnScalingOptions,
+    MatrixFreeBaColumnScalingResult, MatrixFreeBaOptions, MatrixFreeBaRestartOptions,
+    MatrixFreeBaRestartResult, MatrixFreeBaResult, RobustKernel,
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
+    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--matrix-free-column-scaling] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -84,6 +85,7 @@ struct Args {
     fixed_frame_explicit: bool,
     allow_unsupported_sensor_images: bool,
     allow_unsupported_sensor_images_explicit: bool,
+    matrix_free_column_scaling: bool,
     oracle_fixture_out: Option<PathBuf>,
 }
 
@@ -177,6 +179,7 @@ enum OptimizationResult {
     Direct(visloc_rs::slam::BaResult),
     MatrixFree(MatrixFreeBaResult),
     MatrixFreeRestart(MatrixFreeBaRestartResult),
+    MatrixFreeColumnScaled(MatrixFreeBaColumnScalingResult),
 }
 
 fn main() {
@@ -211,6 +214,8 @@ where
     let mut fixed_frame_seen = false;
     let mut allow_unsupported_sensor_images = false;
     let mut allow_unsupported_seen = false;
+    let mut matrix_free_column_scaling = false;
+    let mut matrix_free_column_scaling_seen = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -255,6 +260,14 @@ where
             }
             allow_unsupported_seen = true;
             allow_unsupported_sensor_images = true;
+            continue;
+        }
+        if flag == "--matrix-free-column-scaling" {
+            if matrix_free_column_scaling_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            matrix_free_column_scaling_seen = true;
+            matrix_free_column_scaling = true;
             continue;
         }
         if flag == "--pcg-relative-tolerance" {
@@ -345,12 +358,14 @@ where
             || pcg_relative_seen
             || pcg_restarts_seen
             || fixed_frame_seen
-            || allow_unsupported_seen)
+            || allow_unsupported_seen
+            || matrix_free_column_scaling_seen)
     {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
              --solver, --out-dir, --fixed-frame-id, --allow-unsupported-sensor-images, \
-             --pcg-max-iterations, --pcg-relative-tolerance or --pcg-max-restarts\n{USAGE}"
+             --matrix-free-column-scaling, --pcg-max-iterations, --pcg-relative-tolerance or \
+             --pcg-max-restarts\n{USAGE}"
         ));
     }
     if oracle_fixture_out.is_none() && (solver.is_none() || out_dir.is_none()) {
@@ -372,13 +387,24 @@ where
         fixed_frame_explicit: fixed_frame_seen,
         allow_unsupported_sensor_images,
         allow_unsupported_sensor_images_explicit: allow_unsupported_seen,
+        matrix_free_column_scaling,
         oracle_fixture_out,
     };
+    if args.solver == Some(SolverArm::Direct) && matrix_free_column_scaling_seen {
+        return Err(format!(
+            "matrix-free column scaling is only valid for matrix-free\n{USAGE}"
+        ));
+    }
     if args.solver == Some(SolverArm::Direct)
         && (pcg_seen || pcg_relative_seen || pcg_restarts_seen)
     {
         return Err(format!(
             "PCG options are only valid for matrix-free\n{USAGE}"
+        ));
+    }
+    if matrix_free_column_scaling && pcg_restarts_seen && pcg_max_restarts != 0 {
+        return Err(format!(
+            "--matrix-free-column-scaling rejects nonzero --pcg-max-restarts\n{USAGE}"
         ));
     }
     Ok(args)
@@ -474,6 +500,12 @@ fn run(args: &Args) -> Result<(), String> {
             source.images.len(),
         );
     }
+    if args.matrix_free_column_scaling {
+        println!(
+            "column_scaling_configuration solver=matrix-free-column-scaled diagonal=clamp_hjj minimum={:.1e} maximum={:.1e} damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d residual_coordinates=scaled pcg_max_restarts=0",
+            1.0e-6_f64, 1.0e32_f64,
+        );
+    }
     if solver == SolverArm::MatrixFree && args.pcg_max_restarts_explicit {
         println!(
             "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e} max_restarts_per_solve={}",
@@ -502,7 +534,16 @@ fn run(args: &Args) -> Result<(), String> {
                 pcg_relative_tolerance: args.pcg_relative_tolerance,
                 pcg_absolute_tolerance: PCG_TOLERANCE,
             };
-            if args.pcg_max_restarts_explicit {
+            if args.matrix_free_column_scaling {
+                let result = prepared
+                    .ba
+                    .optimize_matrix_free_column_scaled(
+                        &config,
+                        MatrixFreeBaColumnScalingOptions { pcg: options },
+                    )
+                    .map_err(|error| format!("matrix-free column-scaled BA failed: {error}"))?;
+                OptimizationResult::MatrixFreeColumnScaled(result)
+            } else if args.pcg_max_restarts_explicit {
                 let result = prepared
                     .ba
                     .optimize_matrix_free_with_restart(
@@ -541,6 +582,14 @@ fn run(args: &Args) -> Result<(), String> {
                 result.ba.converged,
             )
         }
+        OptimizationResult::MatrixFreeColumnScaled(result) => {
+            print_matrix_free_column_scaled_trace(result, args.pcg_max_iterations);
+            (
+                result.ba.final_cost,
+                result.ba.iterations.len(),
+                result.ba.converged,
+            )
+        }
     };
     if !final_cost.is_finite() {
         return Err("final BA cost is non-finite".to_owned());
@@ -556,13 +605,49 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
-    if args.pcg_max_restarts_explicit {
+    let solver_name = if args.matrix_free_column_scaling {
+        "matrix-free-column-scaled"
+    } else {
+        summary.solver.as_str()
+    };
+    if args.matrix_free_column_scaling {
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 residual_coordinates=scaled damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d column_scaling_diagonal=clamp_hjj[1e-6,1e32] solver_seconds={:.6} total_seconds={:.6} out={}",
+            solver_name,
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest
+                .assignments
+                .values()
+                .map(|assignment| assignment.frame_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            source.points.len(),
+            source
+                .points
+                .iter()
+                .map(|point| point.observations.len())
+                .sum::<usize>(),
+            args.fixed_frame_id,
+            args.allow_unsupported_sensor_images,
+            source_supported_image_count(&source),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else if args.pcg_max_restarts_explicit {
         let total_rechecks = result_restart_rechecks(&optimization);
         let total_failed_rechecks = result_restart_failed_rechecks(&optimization);
         let total_restarts = result_restart_count(&optimization);
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts={} pcg_true_residual_rechecks={} pcg_failed_true_residual_rechecks={} pcg_restarts={} solver_seconds={:.6} total_seconds={:.6} out={}",
-            summary.solver.as_str(),
+            solver_name,
             summary.initial_cost,
             summary.final_cost,
             summary.iterations,
@@ -597,7 +682,7 @@ fn run(args: &Args) -> Result<(), String> {
     } else if args.pcg_relative_tolerance_explicit && !policy_explicit {
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
-            summary.solver.as_str(),
+            solver_name,
             summary.initial_cost,
             summary.final_cost,
             summary.iterations,
@@ -616,7 +701,7 @@ fn run(args: &Args) -> Result<(), String> {
     } else if policy_explicit {
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
-            summary.solver.as_str(),
+            solver_name,
             summary.initial_cost,
             summary.final_cost,
             summary.iterations,
@@ -647,7 +732,7 @@ fn run(args: &Args) -> Result<(), String> {
     } else {
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
-            summary.solver.as_str(),
+            solver_name,
             summary.initial_cost,
             summary.final_cost,
             summary.iterations,
@@ -2298,6 +2383,45 @@ fn print_matrix_free_trace(result: &MatrixFreeBaResult, max_pcg_iterations: usiz
     }
 }
 
+fn print_matrix_free_column_scaled_trace(
+    result: &MatrixFreeBaColumnScalingResult,
+    max_pcg_iterations: usize,
+) {
+    for iteration in &result.ba.iterations {
+        println!(
+            "lm_trace solver=matrix-free-column-scaled iteration={} cost_before={:.15e} cost_after={:.15e} pose_step={:.15e} landmark_step={:.15e} lambda={:.15e} accepted={} step_coordinates=physical damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d",
+            iteration.iteration,
+            iteration.cost_before,
+            iteration.cost_after,
+            iteration.max_pose_step,
+            iteration.max_landmark_step,
+            iteration.lambda,
+            iteration.step_accepted,
+        );
+    }
+    for iteration in &result.ba.matrix_free_iterations {
+        println!(
+            "pcg_trace solver=matrix-free-column-scaled iteration={} pcg_iterations={} residual={} target={} failure={} max_pcg_iterations={} residual_coordinates=scaled damping_metric=identity",
+            iteration.iteration,
+            option_usize(iteration.pcg_iterations),
+            option_f64(iteration.pcg_residual_norm),
+            option_f64(iteration.pcg_target),
+            iteration.pcg_failure.as_deref().unwrap_or("none"),
+            max_pcg_iterations,
+        );
+    }
+    for scaling in &result.scaling_iterations {
+        println!(
+            "column_scaling_trace solver=matrix-free-column-scaled iteration={} minimum_diagonal={:.17e} maximum_diagonal={:.17e} clamped_to_minimum={} clamped_to_maximum={} diagonal_policy=clamp_hjj[1e-6,1e32]",
+            scaling.iteration,
+            scaling.minimum_diagonal,
+            scaling.maximum_diagonal,
+            scaling.clamped_to_minimum,
+            scaling.clamped_to_maximum,
+        );
+    }
+}
+
 fn print_matrix_free_restart_trace(result: &MatrixFreeBaRestartResult, max_pcg_iterations: usize) {
     print_matrix_free_trace(&result.ba, max_pcg_iterations);
     for iteration in &result.restart_iterations {
@@ -2518,6 +2642,106 @@ mod tests {
         assert!(!default.fixed_frame_explicit);
         assert!(!default.allow_unsupported_sensor_images);
         assert!(!default.allow_unsupported_sensor_images_explicit);
+        assert!(!default.matrix_free_column_scaling);
+    }
+
+    #[test]
+    fn parses_column_scaling_only_for_matrix_free_and_rejects_conflicts() {
+        let scaled = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(scaled.matrix_free_column_scaling);
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-column-scaling",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("only valid for matrix-free"));
+
+        let nonzero_restart = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(nonzero_restart.contains("rejects nonzero --pcg-max-restarts"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--matrix-free-column-scaling",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
     }
 
     #[test]
