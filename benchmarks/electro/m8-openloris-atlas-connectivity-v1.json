@@ -69,8 +69,23 @@
     "counting_caveat": "Follow-up DSU audit confirms the 31 source point rows remain 31 distinct merged tracks; this does not imply 31 geometrically valid anchors."
   },
   "pose_owner_audit": {
+    "source_images_sha256": {
+      "node_25": "8cca2ea74975fd3946ddc0af2c79a27ab68fb0a41033ddf5113787e62db1602b",
+      "node_8": "309a48ab92e43add43366a623084344b9294b03e02528423c27615dc24dc65bc"
+    },
+    "source_track_connectivity": {
+      "node_25": {"rig_frames": 499, "supported_rig_frames": 499, "track_components": 1},
+      "node_8": {"rig_frames": 499, "supported_rig_frames": 499, "track_components": 1},
+      "method": "Reusable independent PINHOLE auditor with frozen rig manifest; large within-owner pose steps do not correspond to disconnected source landmark graphs."
+    },
     "frames_1997_1998_1999": {"node_id": 25, "window_start": 1950},
     "frames_2000_2022_2023": {"node_id": 8, "window_start": 2000},
+    "independent_source_pose_steps": [
+      {"node_id": 25, "from": 1997, "to": 1998, "center_m": 0.26090629028141693, "rotation_deg": 4.832581871058325},
+      {"node_id": 25, "from": 1999, "to": 2000, "center_m": 0.0329747677607446, "rotation_deg": 0.373075973267784},
+      {"node_id": 25, "from": 2022, "to": 2023, "center_m": 0.02734654913135472, "rotation_deg": 0.1499992687586479},
+      {"node_id": 8, "from": 2022, "to": 2023, "center_m": 0.9000796974484527, "rotation_deg": 1.0744514825630327}
+    ],
     "interpretation": "The 1999/2000 cut changes owner, but the jumps at 1997/1998 and 2022/2023 occur within a single owner. A rigid displacement of the entire later component cannot explain all three discontinuities."
   },
   "split_track_dlt_audit": {

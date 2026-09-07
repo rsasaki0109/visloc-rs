@@ -91,7 +91,11 @@ resection candidates, not yet verified GeneralizedPnP recoveries.
 Frame 1999 uses node 25 and frame 2000 uses node 8. However, the 0.261 m jump
 at 1997/1998 is internal to node 25, and the 0.900 m jump at 2022/2023 is
 internal to node 8. A single rigid shift of the entire later component cannot
-explain all three discontinuities. The next default-off diagnostic therefore
+explain all three discontinuities. Independent source-pose inspection confirms
+the same 0.261 m and 0.900 m jumps already exist in their respective owners.
+In contrast, source node 25 moves only 0.033 m across 1999/2000 and 0.027 m
+across 2022/2023; the boundary jump is not intrinsic to every available source.
+The next default-off diagnostic therefore
 uses existing GeneralizedPnP on bounded per-frame candidates, independently
 checks cross-track recovery and loss of existing support, and does not publish
 new poses automatically. GT remains evaluation-only.
