@@ -1034,3 +1034,12 @@ failure, not permission to fall back silently. The new test helper's general
 inverse control must match the existing production operator on small fixtures;
 preserve the real-data baseline reports as well. Do not retain a full second
 normal system/model or scale physical rig calibration.
+
+The locked `nalgebra 0.33.3` implementation (`src/linalg/inverse.rs`, 3x3
+branch, inspected locally) uses explicit cofactors and a determinant for
+`try_inverse`. Its formula does not imply asymmetric output for a symmetric
+input. Therefore the A/B concerns inverse accuracy as well as symmetry, not
+an assumed asymmetric-inverse defect. Record `Hll * inverse - I` residuals,
+original and inverse off-diagonal differences, and scale metrics before
+interpreting a change in PCG convergence. Cholesky can change rounding even
+when both inverse representations are symmetric.
