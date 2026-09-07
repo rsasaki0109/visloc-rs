@@ -28,14 +28,22 @@ not an end-to-end COLMAP comparison. The frozen measurements
 and output hashes are in
 [`m6-ann-streaming.json`](benchmarks/electro/m6-ann-streaming.json).
 
-**OpenLORIS 10k COLMAP control is now available:** its calibrated-rig run
-registers **9,998/10,000 images** with **0.3843 m ATE RMSE**, **0.6387 m p95**,
-and **0.9030 px** mean reprojection error. visloc's 10k quality work is still
-in progress: an experimental observation-backed atlas matches its connected
-rig-frame counts. Its latest bounded refinement reaches **0.3890 m RMSE /
-0.6382 m p95**: p95 meets the frozen control, but RMSE still misses the target.
-Observation-weighted mean reprojection error is **0.5817 px**, with all 4,999 supported rig frames
-preserved. No 10k speed win at equivalent quality is claimed. See the
+**OpenLORIS 10k — calibrated-rig quality comparison:** visloc's experimental
+observation-backed atlas preserves the connected frame counts and meets the
+p95 target, but **RMSE parity is still open**.
+
+| Metric | Frozen COLMAP control | visloc-rs experimental atlas | Target |
+| --- | ---: | ---: | --- |
+| Registered images | 9,998 / 10,000 | 9,998 / 10,000 | Met |
+| Supported rig frames | 4,999 | 4,999 | Met |
+| ATE RMSE ↓ | **0.3843 m** | 0.3890 m | **Not met** |
+| ATE p95 ↓ | 0.6387 m | **0.6382 m** | Met |
+| Observation-weighted mean reprojection ↓ | 0.9030 px | **0.5817 px** | Met |
+
+Both models contain connected 4,494-frame and 505-frame components. Lower
+reprojection error is not proof of better trajectory accuracy. This is a
+repeated development-sequence evaluation, not held-out validation, and no
+10k speed win at equivalent quality is claimed. See the
 [frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
 and [experimental refinement evidence](benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
 
