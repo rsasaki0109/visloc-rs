@@ -571,7 +571,9 @@ before attributing any change to the solver.
 
 #### Proposed private operator gate
 
-If selected after PR #76 closes, start with a private, test-only operator/PCG
+PR #76 merged as `56bea96` after all eight final CI checks passed
+(run 34104286558); its old branch is removed. The selected next bounded task
+on `feat/m8-implicit-schur-prototype` starts with a private, test-only operator/PCG
 prototype, not a new mapper flag or global solve. Reuse `NormalEquationsBa`,
 `LandmarkBlock` and the already constrained `CameraHessian::PoseDiagonal`;
 explicitly reject `Dense` input. Do not add a variant to the shared public

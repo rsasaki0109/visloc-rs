@@ -23,14 +23,15 @@ PR #76 reduces duplicate landmark-selection scans without changing any model
 or log bytes. Three serial runs per arm measure a local-stage median reduction
 from 172.69 to 154.39 s (10.6%), with essentially unchanged RSS. Remaining
 mode-regression checks now pass, including both pass-one checkpoints; final
-CI/merge checks remain in progress. These times exclude
+CI also passed all eight checks, and PR #76 merged as `56bea96` with its old
+branch removed. These times exclude
 source-window reconstruction, atlas construction and the frontend: **mapper-
 only and native-E2E performance are still unproven for this atlas pipeline**.
 Final tier nonregression, restart and 100k I/O gates also remain open.
 See [filtering quality evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json)
 and [scan-reuse measurements](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json).
 
-The next memory option under consideration is an implicit Schur operator,
+The next selected primitive-level memory experiment is an implicit Schur operator,
 initially only a private correctness prototype compared against the existing
 explicit solver. It must not silently allocate a dense system, alter public
 `LinearSolver`/`BaConfig` contracts, or infer valid rig gauges from a damped

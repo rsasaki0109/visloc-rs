@@ -102,10 +102,11 @@
       "checks_passed": 8,
       "rust_duration": "3m42s"
     },
-    "final_ci_status": "pending_final_evidence_head",
+    "final_ci": {"run_id": 34104286558, "head_commit": "7623012213bb3e00114a79258dacc91689938490", "checks_passed": 8, "rust_duration": "4m21s"},
+    "merge": {"pr": 76, "commit": "56bea962c71a728f0898390792f0168cade62dd0", "merged_at": "2026-09-07T09:12:44Z", "local_and_remote_branch_removed": true},
     "benchmark_registry_and_documentation_links": "pass"
   },
-  "decision": "Promote the output-preserving selection reuse after final CI: serial main-stage median time is 10.6 percent lower with unchanged outputs/logs and no material RSS change. All frozen mode regressions and both pass-one checkpoints match. The COLMAP RMSE gate and full mapper/native E2E, tier, restart and 100k I/O gates remain open.",
+  "decision": "Promoted after all eight final CI checks and merged as PR76: serial main-stage median time is 10.6 percent lower with unchanged outputs/logs and no material RSS change. All frozen mode regressions and both pass-one checkpoints match. The COLMAP RMSE gate and full mapper/native E2E, tier, restart and 100k I/O gates remain open.",
   "mode_regressions": {
     "candidate-filtered-tail": {
       "reference": "connected-filtered-ba-v1/component-001",
