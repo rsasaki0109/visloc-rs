@@ -4002,8 +4002,9 @@ fn quality_coordinate_metrics(
         return Err("quality diagnostic delta dimensions mismatch");
     }
 
-    // These are O(P+L) scratch vectors.  Cross terms are accumulated into
-    // them after same-pose entries are coalesced per landmark, so the
+    // These are O(P) scratch vectors; landmark scratch is streamed and cross
+    // grouping is bounded by the maximum track length. Cross terms enter
+    // these vectors after same-pose entries are coalesced per landmark, so the
     // componentwise denominator represents the actual matrix rather than a
     // sum of absolute values of duplicate stored entries.
     let mut pose_residual = vec![0.0; pose_count * 6];
