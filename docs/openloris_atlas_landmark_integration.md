@@ -76,6 +76,15 @@ nonpositive-depth observations. Integration/recovery alone took 10.69 s and
 561,888 KiB peak RSS in this pilot; this is not a complete mapper speed claim.
 See [recovery evidence](../benchmarks/electro/m8-openloris-atlas-recovery-v1.json).
 
+The final recovery implementation passes 17 example tests, including full
+synthetic acceptance and rollback when six PnP inliers leave only five target
+landmarks after triangulation. It uses sparse pose overrides and target-image
+observation-index lookups, without cloning all image/keypoint data. A replay
+produces all six main-component files byte-for-byte identically to the pilot
+at 10.80 s / 508,896 KiB peak RSS. Default-off main output and enabled tail
+output also match their fixed-pose baselines exactly. All 319,137 pre-existing
+main landmarks retain identical observations, XYZ, RGB and stored error.
+
 ### Baseline command
 
 ```bash

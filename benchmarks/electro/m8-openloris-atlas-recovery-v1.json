@@ -80,8 +80,22 @@
     "recovery_enabled_tail_peak_rss_kib": 77320,
     "resource_caveat": "Concurrent control runs, not performance acceptance measurements"
   },
+  "final_implementation_replay": {
+    "commit": "125825e",
+    "source_sha256": "a32ffd033e81131bc6cf85e301fdb19bc9be71cb1b3727183161facdad9f23be",
+    "archived_binary_sha256": "8992a061116b0d1d7087d90d68f014e9a7fedf997a44b972f23dd474c6c8c54f",
+    "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/recovery-v2",
+    "main_six_output_files_byte_identical_to_pilot": true,
+    "wall_s": 10.80,
+    "peak_rss_kib": 508896,
+    "example_tests_passed": 17,
+    "transactional_five_surviving_landmarks_rejected_test": true,
+    "six_landmark_synthetic_recovery_test": true,
+    "candidate_lookup": "Existing observation index ranges for target images, not a full track scan per frame",
+    "pose_update": "Sparse pose overrides applied in place; no whole image/keypoint clone"
+  },
   "limitations": [
-    "Single integration/recovery run, not mapper-only or native E2E performance evidence",
-    "Follow-up acceptance tests and allocation improvements are still in progress"
+    "Integration/recovery measurements are not mapper-only or native E2E performance evidence",
+    "Trajectory gates remain open; bounded observation-based BA is not implemented in this evidence"
   ]
 }
