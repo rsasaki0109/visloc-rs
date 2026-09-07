@@ -31,8 +31,10 @@ and output hashes are in
 **OpenLORIS 10k COLMAP control is now available:** its calibrated-rig run
 registers **9,998/10,000 images** with **0.3843 m ATE RMSE**, **0.6387 m p95**,
 and **0.9030 px** mean reprojection error. visloc's 10k quality work is still
-in progress; trajectory-only submap experiments do not yet establish a full
-reconstruction or a speed win at equivalent quality. See the
+in progress: an experimental observation-backed atlas matches its connected
+rig-frame counts, but **0.3911 m RMSE / 0.6431 m p95** still miss the trajectory
+targets. No
+10k speed win at equivalent quality is claimed. See the
 [frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
 and [M8–M10 comparison plan](docs/openloris_m8_m10_plan.md).
 
@@ -101,15 +103,15 @@ reproduces the same snapshot and model bytes.
 
 <p align="center"><sub>The camera-centre plot uses all 1,200 stems and Sim(3)
 alignment to the supplied calibration proxy. Ground truth is score-only. The
-two visloc columns use the same explicit 96-correspondence mapper cap, one
+visloc measurements use the same explicit 96-correspondence mapper cap, one
 bounded post-refinement registration pass, four 8-iteration global solves, and
 no follow-up global-refinement rounds; these controls are not global defaults.
 The visloc total conservatively includes its candidate generation; COLMAP
 consumes the already frozen identical candidate manifest. The two systems
 extract and verify their own features/matches. The memory-bounded replay
 re-reads one feature file at a time to validate the descriptor-bound snapshot
-hash, then keeps keypoints only. Its 1,459,194 KiB median peak is 63.6% below
-the prior visloc run and 1.16× the COLMAP mapper peak. See the
+hash, then keeps keypoints only. Its 1,459,194 KiB median peak is 1.16× the
+COLMAP mapper peak. See the
 <a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
 and <a href="benchmarks/electro/quality-attribution.json">quality-attribution ledger</a>.</sub></p>
 <p align="center"><sub>BA implementation and all nine A/B timings:

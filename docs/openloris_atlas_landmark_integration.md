@@ -110,6 +110,13 @@ python3 scripts/audit_colmap_pinhole_model.py /path/to/component-000 /path/to/co
 python3 -m unittest discover -s tests -p test_audit_colmap_pinhole_model.py
 ```
 
+For atlas output, add `--rig-manifest /path/to/rig-manifest.txt` to the auditor.
+Names must match the supplied manifest. This additionally validates the camera
+calibration and reconstructs a rig pose independently from each camera pose,
+rejecting inconsistent fixed extrinsics. It reports supported rig frames,
+not just supported camera images. The auditor has 13 tests, including changed
+stereo baseline rejection and rotated-sensor transform composition.
+
 The auditor rejects unsupported camera models and malformed references. It
 reports nonpositive-depth counts and stored-versus-recomputed mean error;
 callers must inspect those values, not treat process success as a quality pass.

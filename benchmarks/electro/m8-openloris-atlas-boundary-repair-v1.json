@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "real_model_connectivity_restored_trajectory_gates_still_fail",
+  "implementation_commit": "f9b5de9",
+  "source_sha256": "f269b945f627534d0cdfe49dbd2476fec54c8a83817510da54860acd73f3e048",
+  "binary_sha256": "66c6d97124756dfa7c245c248bac0fa4972ee9cccea41280e3b71ea651d7ad92",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/boundary-repair-v1",
+  "input": {
+    "nodes": "../nodes.tsv",
+    "atlas": "../atlas-l-newest/component-{000,001}",
+    "flags": "--recover-zero-support-frames --repair-cross-boundary --repair-left-max-frame 1999",
+    "gt_used_for_mapping_or_selection": false,
+    "gt_use": "Unchanged score_openloris_model.py evaluation after model output, one Sim3 per original model file; no extra alignment at the repaired boundary."
+  },
+  "policy": {
+    "default_off": true,
+    "order": "Unsupported-frame recovery, then boundary repair; joint BA is mutually exclusive.",
+    "selection": "Ascending candidate frame order; accept at most the first candidate with >=6 distinct RANSAC inlier tracks, full crossing tracks, strictly fewer supported graph components, and preservation of every previously supported image and frame.",
+    "geometry": "Fixed intrinsics/extrinsics; positive depth, >=2 observations, mean <=2 px, max <=4 px for every retained track. Re-triangulate affected landmarks using their actual retained observations, not resurrected source observations.",
+    "memory": "Validate by reference, then replace only affected landmarks/poses and retain the existing landmark vector in place. No complete candidate-model clone. Explicit caps on crossing tracks/observations, candidates/correspondences, and affected tracks/observations."
+  },
+  "repair": {
+    "accepted_frame": 2000,
+    "candidate_frames": 142,
+    "candidates_attempted": 1,
+    "distinct_inlier_tracks": 10,
+    "added_tracks": 2,
+    "added_observations": 30,
+    "removed_tracks": 5,
+    "removed_observations": 39,
+    "net_observation_change": -9,
+    "main_supported_component_sizes_before": [2000, 2494],
+    "main_supported_component_sizes_after": [4494],
+    "frame_4493_recovery_preserved": true
+  },
+  "independent_serialized_model_audit": {
+    "auditor": "scripts/audit_colmap_pinhole_model.py with frozen S/F rig manifest",
+    "image_poses": 9998,
+    "supported_images": 9997,
+    "supported_rig_frames": 4999,
+    "main_track_component_sizes": [4494],
+    "tail_track_component_sizes": [505],
+    "all_frame_graph_components": 2,
+    "landmarks": 353794,
+    "observations": 1453320,
+    "aggregate_mean_reprojection_px": 0.6331116915478219,
+    "main_mean_reprojection_px": 0.6432899642634164,
+    "tail_mean_reprojection_px": 0.5255479115939116,
+    "max_reprojection_px": 3.9997751583746717,
+    "main_max_stored_mean_difference_px": 0.0000015055236013417073,
+    "nonpositive_depth_observations": 0,
+    "bidirectional_references_valid": true,
+    "fixed_sensor_extrinsics_valid": true,
+    "new_unsupported_images_or_frames": 0
+  },
+  "trajectory": {
+    "recovery_baseline_rmse_m": 0.3914648883821796,
+    "recovery_baseline_p95_m": 0.6431750449115206,
+    "repaired_rmse_m": 0.3910753333289945,
+    "repaired_p95_m": 0.643107449141167,
+    "colmap_rmse_gate_m": 0.3843065335437528,
+    "colmap_p95_gate_m": 0.6386693943260212,
+    "both_trajectory_gates_pass": false
+  },
+  "hashes": {
+    "main_images": "046c7c6ed8c3ccc0a0c972b610bcf162df88347531bdae95aeb2d994f338d0c8",
+    "main_points": "a9b4e5055da4604733a4734ba95a374531fc1190edf472477713c4b75293dfef",
+    "score_json": "7d7688700139a7c30a7496b69d432d336361a29f834504e16ff66e9f425dab81",
+    "independent_audit_json": "3cdd10005caf16d507905071289feda8657fa331912f209a35c2ea6e2e431ba8"
+  },
+  "verification": {
+    "example_tests_passed": 31,
+    "python_auditor_tests_passed": 13,
+    "example_clippy_warnings_denied": "pass",
+    "main_repeat_six_model_support_summary_files_byte_identical": true,
+    "default_flag_off_six_files_byte_identical_to_fixed_pose_v1": true,
+    "independent_diff_against_recovery": {
+      "changed_pose_image_ids": [4001, 4002],
+      "changed_pose_frame_ids": [2000],
+      "all_image_identity_keypoint_lengths_order_and_xy_unchanged": true,
+      "cameras_byte_identical": true,
+      "main_supported_image_and_frame_sets_preserved": true,
+      "removed_landmarks": 5,
+      "added_landmarks": 2,
+      "common_landmarks_xyz_or_error_changed": 61,
+      "common_landmarks_completely_unchanged": 319081,
+      "every_changed_landmark_touches_frame_2000": true,
+      "tail_six_files_byte_identical": true
+    },
+    "main_repeat_wall_s": 12.52,
+    "main_repeat_peak_rss_kib": 509212,
+    "main_pilot_wall_s": 11.99,
+    "main_pilot_peak_rss_kib": 509284,
+    "tail_pilot_wall_s": 3.55,
+    "tail_pilot_peak_rss_kib": 77532,
+    "timing_scope": "Shared-machine integration/recovery/repair only. Not mapper-only or native E2E and not a COLMAP speed comparison."
+  },
+  "decision": "Accept this as a default-off connected real-model refinement foundation, not a COLMAP-quality champion. Keep M8 open for both trajectory gates; do not start final speed claims or change scoring alignment to erase the remaining error."
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "hypothetical_connectivity_improvement_not_yet_published",
+  "implementation_commit": "c6f12a4",
+  "source_sha256": "4de6eb1f195fb3d1b1be33da19dffc5e8c6206604ce94354a43fc81ea667e7df",
+  "binary_sha256": "0ee5e65bb610fef1003730fb86d88d1ad648f13fa3197e29b08ed40fbee70a03",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/cross-boundary-pnp-dsu-v1",
+  "log": "visloc-m8-cross-boundary-pnp-dsu-20260907.log",
+  "log_sha256": "5f16b1a48348fb2fb914255f08dcb819d918c93bbbda7eb27d35809d82e0c47a",
+  "baseline": {
+    "input": "Fixed-pose integration from atlas-l-newest/component-000, before frame 4493 recovery",
+    "image_poses": 8988,
+    "supported_images": 8986,
+    "rig_frames": 4494,
+    "supported_rig_frames": 4493,
+    "unsupported_rig_frame_ids": [4493],
+    "supported_track_component_sizes": [2000, 2493],
+    "all_frame_component_sizes_including_unsupported_singletons": [1, 2000, 2493]
+  },
+  "candidate_frame_2000": {
+    "method": "For this single pose candidate, union every retained baseline track except those failing full-observation re-triangulation, then add successful full crossing tracks. Never use partial left-plus-target tracks. Count supports across all observations, including non-target frames. No model modification.",
+    "added_full_cross_track_ids": [159517, 159908],
+    "added_observations": 30,
+    "removed_track_ids": [178257, 178275, 178278, 178279, 201669],
+    "removed_observations": 39,
+    "supported_images": 8986,
+    "supported_rig_frames": 4493,
+    "new_unsupported_images": 0,
+    "new_unsupported_rig_frames": 0,
+    "existing_unsupported_rig_frame_ids": [4493],
+    "supported_track_component_sizes": [4493],
+    "all_frame_component_sizes_including_unsupported_singletons": [1, 4493]
+  },
+  "negative_controls": {
+    "frames_with_no_connectivity_improvement": [2001, 2002, 2003, 2004, 2005, 2006],
+    "frames_with_supported_component_sizes_1_2000_2492": [2007, 2008, 2011]
+  },
+  "verification": {
+    "example_tests_passed": 28,
+    "clippy_warnings_denied": "pass",
+    "pilot_wall_s": 9.46,
+    "pilot_peak_rss_kib": 316816,
+    "model_written": false,
+    "gt_used": false,
+    "caveat": "The Rust diagnostic component_count/component_sizes fields count supported frames only. This evidence explicitly distinguishes those from the all-frame graph used by the independent Python auditor."
+  },
+  "decision": "Implement a default-off transactional single-frame repair, selected by geometry, strict reduction in supported graph components and preservation of every previously supported image/frame. Explicitly account for removed tracks and observations. Combine with independent unsupported-frame recovery only in a separately validated real-model run. Do not claim COLMAP parity from this hypothetical graph."
+}

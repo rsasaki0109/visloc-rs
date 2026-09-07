@@ -37,7 +37,92 @@ def rotation(q):
             (2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)))
 
 
-def audit(model):
+def audit_rig(images, identities, support, manifest):
+    """Infer the body pose independently from each serialized sensor pose."""
+    sensors, assignments, frame_sensors = {}, {}, set()
+    for row in rows(manifest):
+        if row[0] == "S" and len(row) == 16:
+            sensor = int(row[1])
+            if sensor in sensors:
+                raise ValueError("duplicate rig sensor")
+            sensors[sensor] = (int(row[2]), finite(row[5:9]),
+                               rotation(row[9:13]), finite(row[13:16]))
+        elif row[0] == "F" and len(row) == 4:
+            frame, name, sensor = int(row[1]), row[2], int(row[3])
+            if name in assignments or (frame, sensor) in frame_sensors:
+                raise ValueError("duplicate rig image or frame/sensor")
+            assignments[name] = (frame, sensor)
+            frame_sensors.add((frame, sensor))
+        else:
+            raise ValueError("malformed rig manifest row")
+    if not sensors or not assignments:
+        raise ValueError("empty rig manifest")
+    if any(sensor not in sensors for _, sensor in assignments.values()):
+        raise ValueError("unknown rig sensor")
+    frame_poses, frame_support = {}, {}
+    max_center, max_angle = 0.0, 0.0
+    for image_id, (name, camera_id) in identities.items():
+        if name not in assignments:
+            raise ValueError("image absent from rig manifest")
+        frame, sensor = assignments[name]
+        expected_id, expected_k, extrinsic_r, extrinsic_t = sensors[sensor]
+        image_r, image_t, intrinsics, _ = images[image_id]
+        if camera_id != expected_id or any(
+                abs(a-b) > 1e-8 for a, b in zip(intrinsics, expected_k)):
+            raise ValueError("rig camera calibration mismatch")
+        # T_rig<-world = inverse(T_sensor<-rig) * T_sensor<-world.
+        body_r = tuple(tuple(sum(extrinsic_r[k][i]*image_r[k][j]
+                                 for k in range(3)) for j in range(3))
+                       for i in range(3))
+        body_t = tuple(sum(extrinsic_r[k][i]*(image_t[k]-extrinsic_t[k])
+                           for k in range(3)) for i in range(3))
+        center = tuple(-sum(body_r[k][i]*body_t[k] for k in range(3))
+                       for i in range(3))
+        if frame in frame_poses:
+            reference_r, reference_center = frame_poses[frame]
+            max_center = max(max_center, math.dist(reference_center, center))
+            cosine = (sum(reference_r[i][j]*body_r[i][j]
+                          for i in range(3) for j in range(3)) - 1) / 2
+            max_angle = max(max_angle, math.degrees(math.acos(max(-1, min(1, cosine)))))
+        else:
+            frame_poses[frame] = (body_r, center)
+        frame_support[frame] = frame_support.get(frame, 0) + support[image_id]
+    if max_center > 1e-4 or max_angle > 1e-3:
+        raise ValueError("fixed sensor extrinsics violated by serialized poses")
+    parent = {frame: frame for frame in frame_support}
+
+    def find(frame):
+        while parent[frame] != frame:
+            parent[frame] = parent[parent[frame]]
+            frame = parent[frame]
+        return frame
+
+    first_frame_for_point = {}
+    for image_id, (name, _) in identities.items():
+        frame, _ = assignments[name]
+        for _, point_id in images[image_id][3]:
+            if point_id == -1:
+                continue
+            first = first_frame_for_point.setdefault(point_id, frame)
+            parent[find(frame)] = find(first)
+    groups = {}
+    for frame in parent:
+        groups.setdefault(find(frame), []).append(frame)
+    components = sorted((sorted(group) for group in groups.values()),
+                        key=lambda group: (-len(group), group[0]))
+    return {"rig_manifest": str(manifest), "rig_frames": len(frame_support),
+            "supported_rig_frames": sum(n > 0 for n in frame_support.values()),
+            "unsupported_rig_frame_ids": sorted(i for i, n in frame_support.items() if not n),
+            "max_inferred_rig_center_disagreement_m": max_center,
+            "max_inferred_rig_rotation_disagreement_deg": max_angle,
+            "fixed_sensor_extrinsics_valid": True,
+            "track_connected_components": len(components),
+            "track_connected_component_sizes": [len(group) for group in components],
+            "track_connected_component_frame_ranges": [[group[0], group[-1]]
+                                                        for group in components]}
+
+
+def audit(model, rig_manifest=None):
     cameras = {}
     for row in rows(model / "cameras.txt"):
         camera_id = int(row[0])
@@ -45,6 +130,7 @@ def audit(model):
             raise ValueError("duplicate or unsupported camera (PINHOLE required)")
         cameras[camera_id] = finite(row[4:])
     images = {}
+    identities = {}
     names = set()
     with (model / "images.txt").open() as stream:
         for line in stream:
@@ -57,6 +143,7 @@ def audit(model):
             if image_id in images or name in names or camera_id not in cameras:
                 raise ValueError("duplicate image or unknown camera")
             names.add(name)
+            identities[image_id] = (name, camera_id)
             keypoint_line = next(stream, None)
             if keypoint_line is None:
                 raise ValueError("missing keypoint row")
@@ -125,7 +212,7 @@ def audit(model):
                 raise ValueError("image-to-point reference mismatch")
     if not seen:
         raise ValueError("no supported observations")
-    return {"model": str(model), "image_poses": len(images),
+    report = {"model": str(model), "image_poses": len(images),
             "supported_images": sum(count > 0 for count in support.values()),
             "unsupported_image_ids": sorted(i for i, n in support.items() if not n),
             "landmarks": len(point_ids), "observations": len(seen),
@@ -136,10 +223,16 @@ def audit(model):
             "tracks_with_multiple_keypoints_in_one_image": same_image_tracks,
             "excess_same_image_track_observations": same_image_excess,
             "bidirectional_references_valid": True}
+    if rig_manifest is not None:
+        report["rig"] = audit_rig(images, identities, support, rig_manifest)
+    return report
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path, nargs="+")
+    parser.add_argument("--rig-manifest", type=Path,
+                        help="Optional S/F manifest with matching image names; validate fixed rig geometry")
     args = parser.parse_args()
-    print(json.dumps([audit(path) for path in args.model], indent=2, allow_nan=False))
+    print(json.dumps([audit(path, args.rig_manifest) for path in args.model],
+                     indent=2, allow_nan=False))

@@ -11,7 +11,8 @@
 //! root containing multiple component gauges is rejected rather than
 //! flattening independent gauges into one model. Poses remain fixed by default.
 //! Optional unsupported-frame recovery uses leave-target-out landmarks and
-//! calibrated generalized PnP; this example does not run bundle adjustment.
+//! calibrated generalized PnP. A separate `--joint-rig-ba` opt-in runs one
+//! bounded forward sweep of calibrated rig bundle adjustment.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -20,12 +21,13 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{DMatrix, Point2, Point3, Quaternion, UnitQuaternion, Vector3};
 use visloc_rs::io::colmap::parse_cameras_txt;
+use visloc_rs::slam::{BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, RobustKernel};
 use visloc_rs::vision::pnp::{
     GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedPnPRansac, RigSensor,
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
-const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames]";
+const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
 const XY_TOLERANCE_PX: f64 = 1.0e-9;
 const INTRINSIC_TOLERANCE: f64 = 1.0e-8;
 const MIN_TRACK_OBSERVATIONS: usize = 2;
@@ -43,6 +45,19 @@ const RECOVERY_PNP_REPROJECTION_PX: f64 = 4.0;
 const RECOVERY_PNP_SEED: u64 = 7;
 const MAX_RECOVERY_TRACKS_PER_FRAME: usize = 512;
 const MAX_RECOVERY_CORRESPONDENCES: usize = 4096;
+// The cross-boundary PnP path is diagnostic-only. These caps keep a bad
+// boundary selection from turning the report into an all-pairs experiment.
+const DIAGNOSTIC_MAX_CROSS_TRACKS: usize = 4096;
+const DIAGNOSTIC_MAX_CROSS_OBSERVATIONS: usize = 262_144;
+const DIAGNOSTIC_MAX_CANDIDATE_FRAMES: usize = 16_384;
+const DIAGNOSTIC_MAX_CORRESPONDENCES_PER_FRAME: usize = 4096;
+const JOINT_BA_WINDOW_LENGTH: usize = 60;
+const JOINT_BA_WINDOW_STRIDE: usize = 30;
+const JOINT_BA_MAX_LANDMARKS: usize = 16_384;
+const JOINT_BA_MAX_OBSERVATIONS: usize = 262_144;
+const JOINT_BA_MAX_REFERENCED_FRAMES: usize = 1_024;
+const JOINT_BA_MAX_FREE_FRAMES: usize = 60;
+const JOINT_BA_MAX_ITERATIONS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
@@ -51,6 +66,11 @@ struct Args {
     atlas_dir: PathBuf,
     out_dir: PathBuf,
     recover_zero_support_frames: bool,
+    joint_rig_ba: bool,
+    diagnose_cross_boundary_pnp: bool,
+    diagnostic_left_max_frame: Option<u64>,
+    repair_cross_boundary: bool,
+    repair_left_max_frame: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +242,22 @@ struct RecoverySummary {
     track_rejections: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+struct JointRigBaSummary {
+    windows_considered: usize,
+    windows_accepted: usize,
+    windows_skipped: usize,
+    selected_landmarks: usize,
+    selected_observations: usize,
+    max_referenced_frames: usize,
+    max_free_frames: usize,
+    max_iterations: usize,
+    converged_windows: usize,
+    max_solver_initial_cost: f64,
+    min_solver_final_cost: f64,
+    final_cost: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeRejection {
     DuplicateCandidateObservation,
@@ -263,6 +299,11 @@ where
     let mut atlas_dir = None;
     let mut out_dir = None;
     let mut recover_zero_support_frames = false;
+    let mut joint_rig_ba = false;
+    let mut diagnose_cross_boundary_pnp = false;
+    let mut diagnostic_left_max_frame = None;
+    let mut repair_cross_boundary = false;
+    let mut repair_left_max_frame = None;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -272,6 +313,59 @@ where
                 return Err(format!("duplicate argument {flag}\n{USAGE}"));
             }
             recover_zero_support_frames = true;
+            continue;
+        }
+        if flag == "--joint-rig-ba" {
+            if joint_rig_ba {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            joint_rig_ba = true;
+            continue;
+        }
+        if flag == "--diagnose-cross-boundary-pnp" {
+            if diagnose_cross_boundary_pnp {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            diagnose_cross_boundary_pnp = true;
+            continue;
+        }
+        if flag == "--repair-cross-boundary" {
+            if repair_cross_boundary {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            repair_cross_boundary = true;
+            continue;
+        }
+        if flag == "--diagnostic-left-max-frame" {
+            if diagnostic_left_max_frame.is_some() {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires FRAME\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires non-negative FRAME, got {value:?}"));
+            }
+            let frame = value
+                .parse::<u64>()
+                .map_err(|error| format!("{flag} requires an integer FRAME: {error}\n{USAGE}"))?;
+            diagnostic_left_max_frame = Some(frame);
+            continue;
+        }
+        if flag == "--repair-left-max-frame" {
+            if repair_left_max_frame.is_some() {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires FRAME\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires non-negative FRAME, got {value:?}"));
+            }
+            let frame = value
+                .parse::<u64>()
+                .map_err(|error| format!("{flag} requires an integer FRAME: {error}\n{USAGE}"))?;
+            repair_left_max_frame = Some(frame);
             continue;
         }
         let slot = match flag.as_str() {
@@ -292,12 +386,52 @@ where
         }
         *slot = Some(PathBuf::from(value));
     }
+    if diagnose_cross_boundary_pnp && diagnostic_left_max_frame.is_none() {
+        return Err(format!(
+            "--diagnose-cross-boundary-pnp requires --diagnostic-left-max-frame FRAME\n{USAGE}"
+        ));
+    }
+    if !diagnose_cross_boundary_pnp && diagnostic_left_max_frame.is_some() {
+        return Err(format!(
+            "--diagnostic-left-max-frame requires --diagnose-cross-boundary-pnp\n{USAGE}"
+        ));
+    }
+    if repair_cross_boundary && repair_left_max_frame.is_none() {
+        return Err(format!(
+            "--repair-cross-boundary requires --repair-left-max-frame FRAME\n{USAGE}"
+        ));
+    }
+    if !repair_cross_boundary && repair_left_max_frame.is_some() {
+        return Err(format!(
+            "--repair-left-max-frame requires --repair-cross-boundary\n{USAGE}"
+        ));
+    }
+    if diagnose_cross_boundary_pnp && (recover_zero_support_frames || joint_rig_ba) {
+        return Err(format!(
+            "--diagnose-cross-boundary-pnp is diagnostic-only and cannot be combined with recovery or BA\n{USAGE}"
+        ));
+    }
+    if diagnose_cross_boundary_pnp && repair_cross_boundary {
+        return Err(format!(
+            "--diagnose-cross-boundary-pnp and --repair-cross-boundary are mutually exclusive\n{USAGE}"
+        ));
+    }
+    if repair_cross_boundary && joint_rig_ba {
+        return Err(format!(
+            "--repair-cross-boundary cannot be combined with joint BA\n{USAGE}"
+        ));
+    }
     Ok(Args {
         rig_manifest: rig_manifest.ok_or_else(|| format!("--rig-manifest is required\n{USAGE}"))?,
         nodes_tsv: nodes_tsv.ok_or_else(|| format!("--nodes-tsv is required\n{USAGE}"))?,
         atlas_dir: atlas_dir.ok_or_else(|| format!("--atlas-dir is required\n{USAGE}"))?,
         out_dir: out_dir.ok_or_else(|| format!("--out-dir is required\n{USAGE}"))?,
         recover_zero_support_frames,
+        joint_rig_ba,
+        diagnose_cross_boundary_pnp,
+        diagnostic_left_max_frame,
+        repair_cross_boundary,
+        repair_left_max_frame,
     })
 }
 
@@ -373,6 +507,22 @@ fn run(args: &Args) -> Result<(), String> {
             Err(_) => stats.rejected_triangulation += 1,
         }
     }
+    if args.diagnose_cross_boundary_pnp {
+        let boundary = args
+            .diagnostic_left_max_frame
+            .expect("diagnostic boundary validated by parse_args");
+        diagnose_cross_boundary_pnp(
+            &manifest,
+            boundary,
+            &store,
+            &global_images,
+            &cameras,
+            &landmarks,
+        )?;
+        // This mode is intentionally non-mutating and must not materialize a
+        // second large COLMAP model merely to print the diagnostic evidence.
+        return Ok(());
+    }
     if args.recover_zero_support_frames {
         let RecoveryResult {
             pose_overrides,
@@ -400,6 +550,60 @@ fn run(args: &Args) -> Result<(), String> {
             summary.accepted_target_landmarks,
             summary.accepted_target_observations,
             summary.track_rejections,
+        );
+    }
+    if args.repair_cross_boundary {
+        let boundary = args
+            .repair_left_max_frame
+            .expect("repair boundary validated by parse_args");
+        let summary = repair_cross_boundary(
+            &manifest,
+            boundary,
+            &store,
+            &mut global_images,
+            &cameras,
+            &mut landmarks,
+        )?;
+        validate_output_cameras(&manifest, &global_images, &cameras)?;
+        println!(
+            "boundary_repair status={} candidates={} attempted={} accepted_frame={} added_tracks={} added_observations={} removed_tracks={} removed_observations={} supported_component_count_before={} supported_component_count_after={}",
+            summary.status,
+            summary.candidates,
+            summary.attempted,
+            summary
+                .accepted_frame
+                .map_or_else(|| "none".to_owned(), |frame| frame.to_string()),
+            summary.added_tracks,
+            summary.added_observations,
+            summary.removed_tracks,
+            summary.removed_observations,
+            summary.baseline_component_count,
+            summary.candidate_component_count,
+        );
+    }
+    if args.joint_rig_ba {
+        let summary = run_joint_rig_ba(
+            &manifest,
+            &store,
+            &mut global_images,
+            &cameras,
+            &mut landmarks,
+        )?;
+        validate_output_cameras(&manifest, &global_images, &cameras)?;
+        println!(
+            "joint_rig_ba windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} max_solver_initial_cost={:.9} min_solver_final_cost={:.9} final_cost={:.9}",
+            summary.windows_considered,
+            summary.windows_accepted,
+            summary.windows_skipped,
+            summary.selected_landmarks,
+            summary.selected_observations,
+            summary.max_referenced_frames,
+            summary.max_free_frames,
+            summary.max_iterations,
+            summary.converged_windows,
+            summary.max_solver_initial_cost,
+            summary.min_solver_final_cost,
+            summary.final_cost,
         );
     }
     landmarks.sort_by_key(|landmark| {
@@ -1463,6 +1667,1432 @@ fn triangulate_track_with_pose_overrides(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct DiagnosticCrossBoundaryTrack {
+    track_id: usize,
+    left_keys: Vec<ObservationKey>,
+    right_keys: Vec<ObservationKey>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DiagnosticDltStatus {
+    Short {
+        observations: usize,
+    },
+    Pass {
+        observations: usize,
+        mean_error: f64,
+        max_error: f64,
+    },
+    Rejected {
+        observations: usize,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DiagnosticDltResult {
+    status: DiagnosticDltStatus,
+    landmark: Option<LandmarkOutput>,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticCandidateObservation {
+    track_id: usize,
+    key: ObservationKey,
+    correspondence: GeneralizedCorrespondence2D3D,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiagnosticCandidateAudit {
+    frame_id: u64,
+    full_cross_success_track_ids: Vec<usize>,
+    retriangulated_failure_track_ids: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CrossBoundaryDiagnosticSummary {
+    boundary_frame: u64,
+    cross_tracks: usize,
+    left_pass: usize,
+    left_short: usize,
+    left_rejected: usize,
+    right_pass: usize,
+    right_short: usize,
+    right_rejected: usize,
+    both_sides_two_observations: usize,
+    both_sides_dlt_pass: usize,
+    candidate_frames: usize,
+    pnp_reports: usize,
+    distinct_anchor_frames: usize,
+    target_support_attempts: usize,
+    target_support_successes: usize,
+    full_cross_support_attempts: usize,
+    full_cross_support_successes: usize,
+    existing_support_checks: usize,
+    fixed_xyz_gate_failures: usize,
+    retriangulated_existing_support_failures: usize,
+    cap_skips: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnosticConnectivityReport {
+    supported_images: BTreeSet<u64>,
+    supported_frames: BTreeSet<u64>,
+    supported_component_sizes: Vec<usize>,
+    removed_tracks: usize,
+    removed_observations: usize,
+    added_tracks: usize,
+    added_observations: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticDsu {
+    parent: Vec<usize>,
+    size: Vec<usize>,
+}
+
+impl DiagnosticDsu {
+    fn new(count: usize) -> Self {
+        Self {
+            parent: (0..count).collect(),
+            size: vec![1; count],
+        }
+    }
+
+    fn find(&mut self, index: usize) -> usize {
+        if self.parent[index] != index {
+            let root = self.find(self.parent[index]);
+            self.parent[index] = root;
+        }
+        self.parent[index]
+    }
+
+    fn union(&mut self, left: usize, right: usize) {
+        let mut left_root = self.find(left);
+        let mut right_root = self.find(right);
+        if left_root == right_root {
+            return;
+        }
+        if self.size[left_root] < self.size[right_root] {
+            std::mem::swap(&mut left_root, &mut right_root);
+        }
+        self.parent[right_root] = left_root;
+        self.size[left_root] += self.size[right_root];
+    }
+}
+
+fn diagnostic_dlt_result(
+    track_id: usize,
+    keys: &[ObservationKey],
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+) -> DiagnosticDltResult {
+    if keys.len() < MIN_TRACK_OBSERVATIONS {
+        return DiagnosticDltResult {
+            status: DiagnosticDltStatus::Short {
+                observations: keys.len(),
+            },
+            landmark: None,
+        };
+    }
+    let track = GlobalTrack {
+        observations: keys.to_vec(),
+    };
+    match triangulate_track(track_id, &track, observations, images, cameras) {
+        Ok(landmark) => DiagnosticDltResult {
+            status: DiagnosticDltStatus::Pass {
+                observations: keys.len(),
+                mean_error: landmark.mean_error,
+                max_error: landmark.max_error,
+            },
+            landmark: Some(landmark),
+        },
+        Err(reason) => DiagnosticDltResult {
+            status: DiagnosticDltStatus::Rejected {
+                observations: keys.len(),
+                reason,
+            },
+            landmark: None,
+        },
+    }
+}
+
+fn diagnostic_dlt_status_label(status: &DiagnosticDltStatus) -> String {
+    match status {
+        DiagnosticDltStatus::Short { observations } => format!("short({observations})"),
+        DiagnosticDltStatus::Pass {
+            observations,
+            mean_error,
+            max_error,
+        } => format!("pass(obs={observations},mean={mean_error:.6},max={max_error:.6})"),
+        DiagnosticDltStatus::Rejected {
+            observations,
+            reason,
+        } => format!("reject(obs={observations},reason={reason})"),
+    }
+}
+
+fn sort_diagnostic_keys(
+    keys: &mut [ObservationKey],
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<(), String> {
+    for key in keys.iter().copied() {
+        if !images.contains_key(&key.global_image_id) {
+            return Err("diagnostic track references unknown image".to_owned());
+        }
+    }
+    // Keep the same ObservationKey ordering used by the production
+    // triangulator. In particular, bounded endpoint sampling must not change
+    // merely because this report groups keys into left/right frame sets.
+    keys.sort_unstable();
+    Ok(())
+}
+
+fn diagnostic_frame_range(
+    keys: &[ObservationKey],
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<String, String> {
+    let mut frames = keys.iter().map(|key| {
+        images
+            .get(&key.global_image_id)
+            .map(|image| image.atlas.frame_id)
+            .ok_or_else(|| "diagnostic track references unknown image".to_owned())
+    });
+    let Some(first) = frames.next() else {
+        return Ok("none".to_owned());
+    };
+    let first = first?;
+    let (minimum, maximum) = frames.try_fold((first, first), |(minimum, maximum), frame| {
+        let frame = frame?;
+        Ok::<_, String>((minimum.min(frame), maximum.max(frame)))
+    })?;
+    Ok(format!("{minimum}..{maximum}"))
+}
+
+fn collect_diagnostic_cross_tracks(
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    left_max_frame: u64,
+) -> Result<Vec<DiagnosticCrossBoundaryTrack>, String> {
+    let mut result = Vec::new();
+    let mut cross_observations = 0usize;
+    for (track_id, track) in store.tracks.iter().enumerate() {
+        let mut keys = track.observations.clone();
+        sort_diagnostic_keys(&mut keys, images)?;
+        let mut left_keys = Vec::new();
+        let mut right_keys = Vec::new();
+        for key in keys {
+            let image = images
+                .get(&key.global_image_id)
+                .ok_or_else(|| "diagnostic track references unknown image".to_owned())?;
+            if image.atlas.frame_id <= left_max_frame {
+                left_keys.push(key);
+            } else {
+                right_keys.push(key);
+            }
+        }
+        if !left_keys.is_empty() && !right_keys.is_empty() {
+            cross_observations = cross_observations
+                .checked_add(left_keys.len() + right_keys.len())
+                .ok_or_else(|| "cross-boundary diagnostic observation count overflow".to_owned())?;
+            if cross_observations > DIAGNOSTIC_MAX_CROSS_OBSERVATIONS {
+                return Err(format!(
+                    "cross-boundary diagnostic exceeds {} observations",
+                    DIAGNOSTIC_MAX_CROSS_OBSERVATIONS
+                ));
+            }
+            result.push(DiagnosticCrossBoundaryTrack {
+                track_id,
+                left_keys,
+                right_keys,
+            });
+            if result.len() > DIAGNOSTIC_MAX_CROSS_TRACKS {
+                return Err(format!(
+                    "cross-boundary diagnostic exceeds {} tracks",
+                    DIAGNOSTIC_MAX_CROSS_TRACKS
+                ));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn diagnostic_distinct_track_ids(
+    observations: &[DiagnosticCandidateObservation],
+) -> BTreeSet<usize> {
+    observations
+        .iter()
+        .map(|observation| observation.track_id)
+        .collect()
+}
+
+fn diagnostic_inlier_track_ids(
+    inliers: &[usize],
+    observations: &[DiagnosticCandidateObservation],
+) -> BTreeSet<usize> {
+    inliers
+        .iter()
+        .filter_map(|index| observations.get(*index))
+        .map(|observation| observation.track_id)
+        .collect()
+}
+
+fn diagnostic_pose_is_finite(pose: &Pose) -> bool {
+    pose.world_to_camera
+        .translation
+        .iter()
+        .all(|value| value.is_finite())
+        && pose
+            .world_to_camera
+            .rotation
+            .quaternion()
+            .coords
+            .iter()
+            .all(|value| value.is_finite())
+}
+
+fn validate_diagnostic_rig_pose(
+    manifest: &RigManifest,
+    frame_id: u64,
+    images: &BTreeMap<u64, GlobalImage>,
+    rig_pose: &Pose,
+) -> Result<usize, String> {
+    if !diagnostic_pose_is_finite(rig_pose) {
+        return Err("generalized PnP returned a non-finite rig pose".to_owned());
+    }
+    let mut sensor_count = 0;
+    for image in images
+        .values()
+        .filter(|image| image.atlas.frame_id == frame_id)
+    {
+        let sensor = manifest
+            .sensors
+            .get(&image.atlas.sensor_index)
+            .ok_or_else(|| "diagnostic image references unknown sensor".to_owned())?;
+        let sensor_pose = sensor.sensor_from_rig.compose(&rig_pose.world_to_camera);
+        if !sensor_pose
+            .translation
+            .iter()
+            .all(|value| value.is_finite())
+            || !sensor_pose
+                .rotation
+                .quaternion()
+                .coords
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return Err("generalized PnP sensor pose is non-finite".to_owned());
+        }
+        let round_trip = sensor.sensor_from_rig.inverse().compose(&sensor_pose);
+        let translation_error =
+            (round_trip.translation - rig_pose.world_to_camera.translation).norm();
+        let rotation_error = round_trip
+            .rotation
+            .rotation_to(&rig_pose.world_to_camera.rotation)
+            .angle();
+        if !translation_error.is_finite()
+            || !rotation_error.is_finite()
+            || translation_error > 1.0e-8
+            || rotation_error > 1.0e-8
+        {
+            return Err(format!(
+                "generalized PnP fixed-extrinsic round trip failed for frame {frame_id}"
+            ));
+        }
+        sensor_count += 1;
+    }
+    if sensor_count == 0 {
+        return Err(format!("diagnostic frame {frame_id} has no atlas images"));
+    }
+    Ok(sensor_count)
+}
+
+fn diagnostic_landmark_frame_index(
+    landmarks: &[LandmarkOutput],
+    images: &BTreeMap<u64, GlobalImage>,
+    candidate_frames: &BTreeSet<u64>,
+) -> Result<BTreeMap<u64, Vec<usize>>, String> {
+    let mut indexed = BTreeMap::<u64, BTreeSet<usize>>::new();
+    for (landmark_id, landmark) in landmarks.iter().enumerate() {
+        let mut seen_frames = BTreeSet::new();
+        for key in &landmark.observations {
+            let image = images
+                .get(&key.global_image_id)
+                .ok_or_else(|| "baseline landmark references unknown image".to_owned())?;
+            if candidate_frames.contains(&image.atlas.frame_id)
+                && seen_frames.insert(image.atlas.frame_id)
+            {
+                indexed
+                    .entry(image.atlas.frame_id)
+                    .or_default()
+                    .insert(landmark_id);
+            }
+        }
+    }
+    Ok(indexed
+        .into_iter()
+        .map(|(frame, ids)| (frame, ids.into_iter().collect()))
+        .collect())
+}
+
+fn diagnostic_track_with_keys(
+    left_keys: &[ObservationKey],
+    right_keys: &[ObservationKey],
+) -> GlobalTrack {
+    let mut keys = left_keys.to_vec();
+    keys.extend_from_slice(right_keys);
+    keys.sort_unstable();
+    keys.dedup();
+    GlobalTrack { observations: keys }
+}
+
+fn diagnostic_frame_ids(images: &BTreeMap<u64, GlobalImage>) -> Vec<u64> {
+    images
+        .values()
+        .map(|image| image.atlas.frame_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn diagnostic_image_ids(images: &BTreeMap<u64, GlobalImage>) -> BTreeSet<u64> {
+    images.keys().copied().collect()
+}
+
+fn diagnostic_add_track_to_dsu(
+    keys: &[ObservationKey],
+    images: &BTreeMap<u64, GlobalImage>,
+    frame_indices: &BTreeMap<u64, usize>,
+    dsu: &mut DiagnosticDsu,
+    supported_images: &mut BTreeSet<u64>,
+    supported_frames: &mut BTreeSet<u64>,
+) -> Result<(), String> {
+    let mut track_frames = BTreeSet::new();
+    for key in keys {
+        let image = images
+            .get(&key.global_image_id)
+            .ok_or_else(|| "connectivity track references unknown image".to_owned())?;
+        let frame_id = image.atlas.frame_id;
+        let frame_index = *frame_indices
+            .get(&frame_id)
+            .ok_or_else(|| "connectivity frame index is missing".to_owned())?;
+        supported_images.insert(key.global_image_id);
+        supported_frames.insert(frame_id);
+        track_frames.insert(frame_index);
+    }
+    let mut indices = track_frames.into_iter();
+    if let Some(first) = indices.next() {
+        for index in indices {
+            dsu.union(first, index);
+        }
+    }
+    Ok(())
+}
+
+fn diagnostic_connectivity_report(
+    baseline_landmarks: &[LandmarkOutput],
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    removed_track_ids: &BTreeSet<usize>,
+    added_track_ids: &BTreeSet<usize>,
+) -> Result<DiagnosticConnectivityReport, String> {
+    let frame_ids = diagnostic_frame_ids(images);
+    let frame_indices = frame_ids
+        .iter()
+        .enumerate()
+        .map(|(index, frame_id)| (*frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let actually_removed = removed_track_ids
+        .difference(added_track_ids)
+        .copied()
+        .collect::<BTreeSet<_>>();
+
+    let mut dsu = DiagnosticDsu::new(frame_ids.len());
+    let mut supported_images = BTreeSet::new();
+    let mut supported_frames = BTreeSet::new();
+    let mut removed_observations = 0;
+    let mut removed_seen = BTreeSet::new();
+    let mut added_existing_seen = BTreeSet::new();
+    for landmark in baseline_landmarks {
+        if actually_removed.contains(&landmark.track_id) {
+            removed_observations += landmark.observations.len();
+            removed_seen.insert(landmark.track_id);
+            continue;
+        }
+        if added_track_ids.contains(&landmark.track_id) {
+            added_existing_seen.insert(landmark.track_id);
+        }
+        diagnostic_add_track_to_dsu(
+            &landmark.observations,
+            images,
+            &frame_indices,
+            &mut dsu,
+            &mut supported_images,
+            &mut supported_frames,
+        )?;
+    }
+
+    if let Some(track_id) = actually_removed.difference(&removed_seen).next() {
+        return Err(format!(
+            "connectivity removal references non-baseline track {track_id}"
+        ));
+    }
+
+    let mut added_observations = 0;
+    let mut added_new = 0;
+    for track_id in added_track_ids.difference(&added_existing_seen) {
+        let track = store
+            .tracks
+            .get(*track_id)
+            .ok_or_else(|| format!("connectivity addition references unknown track {track_id}"))?;
+        added_new += 1;
+        added_observations += track.observations.len();
+        diagnostic_add_track_to_dsu(
+            &track.observations,
+            images,
+            &frame_indices,
+            &mut dsu,
+            &mut supported_images,
+            &mut supported_frames,
+        )?;
+    }
+
+    let mut component_counts = BTreeMap::<usize, usize>::new();
+    for frame_id in &supported_frames {
+        let frame_index = *frame_indices
+            .get(frame_id)
+            .ok_or_else(|| "supported connectivity frame index is missing".to_owned())?;
+        let root = dsu.find(frame_index);
+        *component_counts.entry(root).or_default() += 1;
+    }
+    let mut supported_component_sizes = component_counts.into_values().collect::<Vec<_>>();
+    supported_component_sizes.sort_unstable();
+    Ok(DiagnosticConnectivityReport {
+        supported_images,
+        supported_frames,
+        supported_component_sizes,
+        removed_tracks: actually_removed.len(),
+        removed_observations,
+        added_tracks: added_new,
+        added_observations,
+    })
+}
+
+fn diagnostic_format_usize_list(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn diagnostic_format_track_ids(ids: &[usize]) -> String {
+    ids.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn diagnostic_emit_connectivity(
+    baseline_landmarks: &[LandmarkOutput],
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    audits: &[DiagnosticCandidateAudit],
+) -> Result<(), String> {
+    let all_images = diagnostic_image_ids(images);
+    let all_frames = diagnostic_frame_ids(images)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let empty = BTreeSet::new();
+    let baseline =
+        diagnostic_connectivity_report(baseline_landmarks, store, images, &empty, &empty)?;
+    let baseline_unsupported_images = all_images
+        .difference(&baseline.supported_images)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let baseline_unsupported_frames = all_frames
+        .difference(&baseline.supported_frames)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    println!(
+        "cross_boundary_connectivity_baseline supported_images={} unsupported_images={} supported_frames={} unsupported_frames={} supported_component_count={} supported_component_sizes={}",
+        baseline.supported_images.len(),
+        baseline_unsupported_images.len(),
+        baseline.supported_frames.len(),
+        baseline_unsupported_frames.len(),
+        baseline.supported_component_sizes.len(),
+        diagnostic_format_usize_list(&baseline.supported_component_sizes),
+    );
+
+    for audit in audits {
+        let removed = audit
+            .retriangulated_failure_track_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let added = audit
+            .full_cross_success_track_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let candidate =
+            diagnostic_connectivity_report(baseline_landmarks, store, images, &removed, &added)?;
+        let candidate_unsupported_images = all_images
+            .difference(&candidate.supported_images)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let candidate_unsupported_frames = all_frames
+            .difference(&candidate.supported_frames)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let existing_unsupported_images = baseline_unsupported_images
+            .intersection(&candidate_unsupported_images)
+            .count();
+        let existing_unsupported_frames = baseline_unsupported_frames
+            .intersection(&candidate_unsupported_frames)
+            .count();
+        let recovered_existing_images = baseline_unsupported_images
+            .difference(&candidate_unsupported_images)
+            .count();
+        let recovered_existing_frames = baseline_unsupported_frames
+            .difference(&candidate_unsupported_frames)
+            .count();
+        let new_unsupported_images = candidate_unsupported_images
+            .difference(&baseline_unsupported_images)
+            .count();
+        let new_unsupported_frames = candidate_unsupported_frames
+            .difference(&baseline_unsupported_frames)
+            .count();
+        println!(
+            "cross_boundary_connectivity frame={} full_cross_success_tracks={} full_cross_success_ids={} retriangulated_failure_tracks={} retriangulated_failure_ids={} removed_tracks={} removed_observations={} added_tracks={} added_observations={} supported_images={} unsupported_images={} supported_frames={} unsupported_frames={} existing_unsupported_images={} existing_unsupported_frames={} recovered_existing_images={} recovered_existing_frames={} new_unsupported_images={} new_unsupported_frames={} supported_component_count={} supported_component_sizes={}",
+            audit.frame_id,
+            audit.full_cross_success_track_ids.len(),
+            diagnostic_format_track_ids(&audit.full_cross_success_track_ids),
+            audit.retriangulated_failure_track_ids.len(),
+            diagnostic_format_track_ids(&audit.retriangulated_failure_track_ids),
+            candidate.removed_tracks,
+            candidate.removed_observations,
+            candidate.added_tracks,
+            candidate.added_observations,
+            candidate.supported_images.len(),
+            candidate_unsupported_images.len(),
+            candidate.supported_frames.len(),
+            candidate_unsupported_frames.len(),
+            existing_unsupported_images,
+            existing_unsupported_frames,
+            recovered_existing_images,
+            recovered_existing_frames,
+            new_unsupported_images,
+            new_unsupported_frames,
+            candidate.supported_component_sizes.len(),
+            diagnostic_format_usize_list(&candidate.supported_component_sizes),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundaryRepairSummary {
+    status: String,
+    candidates: usize,
+    attempted: usize,
+    accepted_frame: Option<u64>,
+    added_tracks: usize,
+    added_observations: usize,
+    removed_tracks: usize,
+    removed_observations: usize,
+    baseline_component_count: usize,
+    candidate_component_count: usize,
+}
+
+fn boundary_repair_candidate_is_accepted(
+    baseline: &DiagnosticConnectivityReport,
+    candidate: &DiagnosticConnectivityReport,
+    added_tracks: usize,
+) -> bool {
+    added_tracks > 0
+        && candidate.supported_component_sizes.len() < baseline.supported_component_sizes.len()
+        && baseline
+            .supported_images
+            .is_subset(&candidate.supported_images)
+        && baseline
+            .supported_frames
+            .is_subset(&candidate.supported_frames)
+}
+
+fn landmark_output_gate_valid(landmark: &LandmarkOutput) -> bool {
+    landmark.observations.len() >= MIN_TRACK_OBSERVATIONS
+        && landmark
+            .position
+            .coords
+            .iter()
+            .all(|value| value.is_finite())
+        && landmark.errors.len() == landmark.observations.len()
+        && landmark.errors.iter().all(|error| error.is_finite())
+        && landmark.mean_error.is_finite()
+        && landmark.rms_error.is_finite()
+        && landmark.max_error.is_finite()
+        && landmark.mean_error <= MAX_MEAN_REPROJECTION_PX
+        && landmark.max_error <= MAX_REPROJECTION_PX
+}
+
+/// Try one deterministic, transactional cross-boundary repair.
+///
+/// This is intentionally separate from `diagnose_cross_boundary_pnp`: the
+/// diagnostic path never mutates a model, while this opt-in path stages one
+/// candidate and commits only the first candidate that improves supported
+/// frame connectivity without losing any existing support.  Existing
+/// landmark observations, rather than the source TrackStore, are authoritative
+/// for affected-track re-triangulation.
+fn repair_cross_boundary(
+    manifest: &RigManifest,
+    left_max_frame: u64,
+    store: &TrackStore,
+    images: &mut BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &mut Vec<LandmarkOutput>,
+) -> Result<BoundaryRepairSummary, String> {
+    let baseline_connectivity = diagnostic_connectivity_report(
+        landmarks,
+        store,
+        images,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )?;
+    let cross_tracks = collect_diagnostic_cross_tracks(store, images, left_max_frame)?;
+    let rig = build_generalized_rig(manifest, cameras)?;
+    let pnp = GeneralizedPnPRansac {
+        iterations: RECOVERY_PNP_ITERATIONS,
+        reprojection_threshold: RECOVERY_PNP_REPROJECTION_PX,
+        seed: RECOVERY_PNP_SEED,
+        ..GeneralizedPnPRansac::default()
+    };
+    let mut cross_by_id = BTreeMap::<usize, DiagnosticCrossBoundaryTrack>::new();
+    let mut candidates_by_frame = BTreeMap::<u64, Vec<DiagnosticCandidateObservation>>::new();
+    let mut candidate_observations = 0usize;
+    for cross in cross_tracks {
+        let left = diagnostic_dlt_result(
+            cross.track_id,
+            &cross.left_keys,
+            &store.observations,
+            images,
+            cameras,
+        );
+        let Some(anchor) = left.landmark else {
+            continue;
+        };
+        cross_by_id.insert(cross.track_id, cross.clone());
+        for key in &cross.right_keys {
+            candidate_observations = candidate_observations
+                .checked_add(1)
+                .ok_or_else(|| "boundary repair observation count overflow".to_owned())?;
+            if candidate_observations > DIAGNOSTIC_MAX_CROSS_OBSERVATIONS {
+                return Err(format!(
+                    "boundary repair exceeds {} candidate observations",
+                    DIAGNOSTIC_MAX_CROSS_OBSERVATIONS
+                ));
+            }
+            let image = images
+                .get(&key.global_image_id)
+                .ok_or_else(|| "boundary repair references unknown image".to_owned())?;
+            let observation = store
+                .observations
+                .get(key)
+                .ok_or_else(|| "boundary repair references unknown observation".to_owned())?;
+            let frame_candidates = candidates_by_frame.entry(image.atlas.frame_id).or_default();
+            frame_candidates.push(DiagnosticCandidateObservation {
+                track_id: cross.track_id,
+                key: *key,
+                correspondence: GeneralizedCorrespondence2D3D {
+                    sensor_index: image.atlas.sensor_index,
+                    point2d: observation.xy,
+                    point3d: anchor.position,
+                    confidence: None,
+                },
+            });
+            if candidates_by_frame.len() > DIAGNOSTIC_MAX_CANDIDATE_FRAMES {
+                return Err(format!(
+                    "boundary repair exceeds {} candidate frames",
+                    DIAGNOSTIC_MAX_CANDIDATE_FRAMES
+                ));
+            }
+        }
+    }
+    for observations in candidates_by_frame.values_mut() {
+        observations.sort_by_key(|observation| (observation.track_id, observation.key));
+    }
+
+    let mut summary = BoundaryRepairSummary {
+        status: "no-accepted-candidate".to_owned(),
+        candidates: candidates_by_frame.len(),
+        attempted: 0,
+        accepted_frame: None,
+        added_tracks: 0,
+        added_observations: 0,
+        removed_tracks: 0,
+        removed_observations: 0,
+        baseline_component_count: baseline_connectivity.supported_component_sizes.len(),
+        candidate_component_count: baseline_connectivity.supported_component_sizes.len(),
+    };
+
+    for (frame_id, frame_candidates) in candidates_by_frame {
+        summary.attempted += 1;
+        let distinct_candidates = diagnostic_distinct_track_ids(&frame_candidates);
+        if frame_candidates.len() > DIAGNOSTIC_MAX_CORRESPONDENCES_PER_FRAME {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=correspondence-cap correspondences={} distinct_tracks={}",
+                frame_candidates.len(),
+                distinct_candidates.len(),
+            );
+            continue;
+        }
+        if distinct_candidates.len() < RECOVERY_MIN_PNP_INLIERS {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=insufficient-distinct-candidates correspondences={} distinct_tracks={} required={}",
+                frame_candidates.len(),
+                distinct_candidates.len(),
+                RECOVERY_MIN_PNP_INLIERS,
+            );
+            continue;
+        }
+        let correspondences = frame_candidates
+            .iter()
+            .map(|observation| observation.correspondence.clone())
+            .collect::<Vec<_>>();
+        let Some(report) = pnp.estimate(&rig, &correspondences) else {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=pnp-failed correspondences={} distinct_tracks={}",
+                correspondences.len(),
+                distinct_candidates.len(),
+            );
+            continue;
+        };
+        let distinct_inliers = diagnostic_inlier_track_ids(&report.inliers, &frame_candidates);
+        if distinct_inliers.len() < RECOVERY_MIN_PNP_INLIERS {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=insufficient-distinct-inliers pnp_inliers={} distinct_inliers={} required={}",
+                report.inliers.len(),
+                distinct_inliers.len(),
+                RECOVERY_MIN_PNP_INLIERS,
+            );
+            continue;
+        }
+        // Only candidate ids are retained here.  Scanning the baseline once
+        // avoids a second model-sized track-id map for every candidate.
+        let baseline_candidate_track_ids = landmarks
+            .iter()
+            .filter(|landmark| distinct_inliers.contains(&landmark.track_id))
+            .map(|landmark| landmark.track_id)
+            .collect::<BTreeSet<_>>();
+        let mut pose_overrides = BTreeMap::new();
+        compose_recovered_frame_poses(
+            manifest,
+            frame_id,
+            &report.pose,
+            images,
+            &mut pose_overrides,
+        )?;
+        validate_diagnostic_rig_pose(manifest, frame_id, images, &report.pose)?;
+
+        let mut added_landmarks = Vec::new();
+        let mut added_ids = BTreeSet::new();
+        let mut added_keys = BTreeSet::new();
+        let mut full_cross_failure_count = 0usize;
+        let mut full_cross_failure_observations = 0usize;
+        for track_id in &distinct_inliers {
+            let cross = cross_by_id
+                .get(track_id)
+                .ok_or_else(|| format!("boundary repair lost cross track {track_id}"))?;
+            let full_track = diagnostic_track_with_keys(&cross.left_keys, &cross.right_keys);
+            let Ok(landmark) = triangulate_track_with_pose_overrides(
+                *track_id,
+                &full_track,
+                &store.observations,
+                images,
+                cameras,
+                &pose_overrides,
+            ) else {
+                full_cross_failure_count += 1;
+                full_cross_failure_observations += full_track.observations.len();
+                continue;
+            };
+            if baseline_candidate_track_ids.contains(track_id) || !added_ids.insert(*track_id) {
+                continue;
+            }
+            if landmark
+                .observations
+                .iter()
+                .any(|key| !added_keys.insert(*key))
+            {
+                println!(
+                    "boundary_repair_candidate frame={frame_id} status=rejected reason=added-observation-conflict",
+                );
+                added_landmarks.clear();
+                added_ids.clear();
+                break;
+            }
+            added_landmarks.push(landmark);
+        }
+        if added_landmarks.is_empty() {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=no-full-cross-addition full_cross_failures={} full_cross_failure_observations={}",
+                full_cross_failure_count,
+                full_cross_failure_observations,
+            );
+            continue;
+        }
+
+        let mut affected = BTreeMap::<usize, LandmarkOutput>::new();
+        let mut removed_ids = BTreeSet::new();
+        let mut removed_observations = 0usize;
+        let mut affected_count = 0usize;
+        let mut affected_observations = 0usize;
+        let mut affected_cap_exceeded = false;
+        for (index, landmark) in landmarks.iter().enumerate() {
+            let touches_candidate = landmark.observations.iter().any(|key| {
+                images
+                    .get(&key.global_image_id)
+                    .is_some_and(|image| image.atlas.frame_id == frame_id)
+            });
+            if !touches_candidate {
+                continue;
+            }
+            affected_count += 1;
+            affected_observations = affected_observations
+                .checked_add(landmark.observations.len())
+                .ok_or_else(|| "boundary repair affected observation count overflow".to_owned())?;
+            if affected_count > JOINT_BA_MAX_LANDMARKS
+                || affected_observations > JOINT_BA_MAX_OBSERVATIONS
+            {
+                println!(
+                    "boundary_repair_candidate frame={frame_id} status=rejected reason=affected-track-cap affected_landmarks={} affected_observations={} landmark_cap={} observation_cap={}",
+                    affected_count,
+                    affected_observations,
+                    JOINT_BA_MAX_LANDMARKS,
+                    JOINT_BA_MAX_OBSERVATIONS,
+                );
+                affected.clear();
+                removed_ids.clear();
+                affected_cap_exceeded = true;
+                break;
+            }
+            let original_track = GlobalTrack {
+                observations: landmark.observations.clone(),
+            };
+            match triangulate_track_with_pose_overrides(
+                landmark.track_id,
+                &original_track,
+                &store.observations,
+                images,
+                cameras,
+                &pose_overrides,
+            ) {
+                Ok(updated) => {
+                    affected.insert(index, updated);
+                }
+                Err(_) => {
+                    removed_ids.insert(landmark.track_id);
+                    removed_observations += landmark.observations.len();
+                }
+            }
+        }
+        if affected_cap_exceeded {
+            continue;
+        }
+        let retained_key_conflict = landmarks.iter().any(|landmark| {
+            !removed_ids.contains(&landmark.track_id)
+                && landmark
+                    .observations
+                    .iter()
+                    .any(|key| added_keys.contains(key))
+        });
+        if retained_key_conflict {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=retained-observation-conflict",
+            );
+            continue;
+        }
+
+        let candidate_connectivity =
+            diagnostic_connectivity_report(landmarks, store, images, &removed_ids, &added_ids)?;
+        if !boundary_repair_candidate_is_accepted(
+            &baseline_connectivity,
+            &candidate_connectivity,
+            added_landmarks.len(),
+        ) {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=support-or-connectivity-gate added_tracks={} removed_tracks={} baseline_components={} candidate_components={} baseline_supported_frames={} candidate_supported_frames={}",
+                added_landmarks.len(),
+                removed_ids.len(),
+                baseline_connectivity.supported_component_sizes.len(),
+                candidate_connectivity.supported_component_sizes.len(),
+                baseline_connectivity.supported_frames.len(),
+                candidate_connectivity.supported_frames.len(),
+            );
+            continue;
+        }
+
+        let mut all_remaining_valid = true;
+        for (index, landmark) in landmarks.iter().enumerate() {
+            if removed_ids.contains(&landmark.track_id) {
+                continue;
+            }
+            let candidate = affected.get(&index).unwrap_or(landmark);
+            if !landmark_output_gate_valid(candidate) {
+                all_remaining_valid = false;
+                break;
+            }
+            let metrics = evaluate_landmark_metrics(
+                candidate,
+                &store.observations,
+                images,
+                cameras,
+                &pose_overrides,
+            );
+            if metrics.is_err()
+                || metrics.as_ref().is_ok_and(|metrics| {
+                    metrics.mean_error > MAX_MEAN_REPROJECTION_PX
+                        || metrics.max_error > MAX_REPROJECTION_PX
+                })
+            {
+                all_remaining_valid = false;
+                break;
+            }
+        }
+        if all_remaining_valid {
+            for landmark in &added_landmarks {
+                if !landmark_output_gate_valid(landmark) {
+                    all_remaining_valid = false;
+                    break;
+                }
+            }
+        }
+        if !all_remaining_valid {
+            println!(
+                "boundary_repair_candidate frame={frame_id} status=rejected reason=remaining-landmark-gate removed_tracks={} removed_observations={}",
+                removed_ids.len(),
+                removed_observations,
+            );
+            continue;
+        }
+
+        let accepted_added_tracks = added_landmarks.len();
+        let accepted_added_observations = added_landmarks
+            .iter()
+            .map(|landmark| landmark.observations.len())
+            .sum::<usize>();
+        apply_pose_overrides(images, &pose_overrides)?;
+        for (index, replacement) in affected {
+            landmarks[index] = replacement;
+        }
+        landmarks.retain(|landmark| !removed_ids.contains(&landmark.track_id));
+        landmarks.extend(added_landmarks);
+        summary.status = "accepted".to_owned();
+        summary.accepted_frame = Some(frame_id);
+        summary.added_tracks = accepted_added_tracks;
+        summary.added_observations = accepted_added_observations;
+        summary.removed_tracks = removed_ids.len();
+        summary.removed_observations = removed_observations;
+        summary.candidate_component_count = candidate_connectivity.supported_component_sizes.len();
+        println!(
+            "boundary_repair_candidate frame={frame_id} status=accepted pnp_inliers={} distinct_inliers={} pnp_mean_px={:.6} pnp_max_px={:.6} added_tracks={} added_observations={} removed_tracks={} removed_observations={} supported_component_sizes_before={} supported_component_sizes_after={}",
+            report.inliers.len(),
+            distinct_inliers.len(),
+            report.mean_reprojection_error,
+            report.max_reprojection_error,
+            summary.added_tracks,
+            summary.added_observations,
+            summary.removed_tracks,
+            summary.removed_observations,
+            diagnostic_format_usize_list(&baseline_connectivity.supported_component_sizes),
+            diagnostic_format_usize_list(&candidate_connectivity.supported_component_sizes),
+        );
+        break;
+    }
+    Ok(summary)
+}
+
+#[cfg(test)]
+fn diagnostic_component_sizes_from_frame_tracks(
+    frame_ids: &[u64],
+    track_frames: &[Vec<u64>],
+) -> (Vec<usize>, BTreeSet<u64>) {
+    let frame_indices = frame_ids
+        .iter()
+        .enumerate()
+        .map(|(index, frame_id)| (*frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut dsu = DiagnosticDsu::new(frame_ids.len());
+    let mut supported = BTreeSet::new();
+    for track in track_frames {
+        let mut indices = track
+            .iter()
+            .filter_map(|frame_id| {
+                supported.insert(*frame_id);
+                frame_indices.get(frame_id).copied()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter();
+        if let Some(first) = indices.next() {
+            for index in indices {
+                dsu.union(first, index);
+            }
+        }
+    }
+    let mut counts = BTreeMap::<usize, usize>::new();
+    for frame_id in &supported {
+        if let Some(index) = frame_indices.get(frame_id) {
+            *counts.entry(dsu.find(*index)).or_default() += 1;
+        }
+    }
+    let mut sizes = counts.into_values().collect::<Vec<_>>();
+    sizes.sort_unstable();
+    (sizes, supported)
+}
+
+/// Run the strict, non-mutating cross-boundary generalized-PnP experiment.
+///
+/// Only tracks whose left-side DLT passes are used as 3D anchors. Each right
+/// frame is a separate candidate; there is no pose propagation or whole-gauge
+/// transform. The returned pose is used only for diagnostic re-triangulation.
+fn diagnose_cross_boundary_pnp(
+    manifest: &RigManifest,
+    left_max_frame: u64,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    baseline_landmarks: &[LandmarkOutput],
+) -> Result<CrossBoundaryDiagnosticSummary, String> {
+    let cross_tracks = collect_diagnostic_cross_tracks(store, images, left_max_frame)?;
+    let rig = build_generalized_rig(manifest, cameras)?;
+    let pnp = GeneralizedPnPRansac {
+        iterations: RECOVERY_PNP_ITERATIONS,
+        reprojection_threshold: RECOVERY_PNP_REPROJECTION_PX,
+        seed: RECOVERY_PNP_SEED,
+        ..GeneralizedPnPRansac::default()
+    };
+    let mut summary = CrossBoundaryDiagnosticSummary {
+        boundary_frame: left_max_frame,
+        cross_tracks: cross_tracks.len(),
+        ..CrossBoundaryDiagnosticSummary::default()
+    };
+    let mut evaluated = Vec::with_capacity(cross_tracks.len());
+    for cross in cross_tracks {
+        let left = diagnostic_dlt_result(
+            cross.track_id,
+            &cross.left_keys,
+            &store.observations,
+            images,
+            cameras,
+        );
+        let right = diagnostic_dlt_result(
+            cross.track_id,
+            &cross.right_keys,
+            &store.observations,
+            images,
+            cameras,
+        );
+        match &left.status {
+            DiagnosticDltStatus::Pass { .. } => summary.left_pass += 1,
+            DiagnosticDltStatus::Short { .. } => summary.left_short += 1,
+            DiagnosticDltStatus::Rejected { .. } => summary.left_rejected += 1,
+        }
+        match &right.status {
+            DiagnosticDltStatus::Pass { .. } => summary.right_pass += 1,
+            DiagnosticDltStatus::Short { .. } => summary.right_short += 1,
+            DiagnosticDltStatus::Rejected { .. } => summary.right_rejected += 1,
+        }
+        if cross.left_keys.len() >= MIN_TRACK_OBSERVATIONS
+            && cross.right_keys.len() >= MIN_TRACK_OBSERVATIONS
+        {
+            summary.both_sides_two_observations += 1;
+        }
+        if matches!(&left.status, DiagnosticDltStatus::Pass { .. })
+            && matches!(&right.status, DiagnosticDltStatus::Pass { .. })
+        {
+            summary.both_sides_dlt_pass += 1;
+        }
+        let left_range = diagnostic_frame_range(&cross.left_keys, images)?;
+        let right_range = diagnostic_frame_range(&cross.right_keys, images)?;
+        println!(
+            "cross_boundary_track track_id={} left_obs={} left_frames={} right_obs={} right_frames={} left_dlt={} right_dlt={}",
+            cross.track_id,
+            cross.left_keys.len(),
+            left_range,
+            cross.right_keys.len(),
+            right_range,
+            diagnostic_dlt_status_label(&left.status),
+            diagnostic_dlt_status_label(&right.status),
+        );
+        evaluated.push((cross, left, right));
+    }
+
+    let mut candidates_by_frame = BTreeMap::<u64, Vec<DiagnosticCandidateObservation>>::new();
+    let mut candidate_observations = 0usize;
+    for (cross, left, _) in &evaluated {
+        let Some(anchor) = left.landmark.as_ref() else {
+            continue;
+        };
+        for key in &cross.right_keys {
+            candidate_observations = candidate_observations
+                .checked_add(1)
+                .ok_or_else(|| "diagnostic candidate observation count overflow".to_owned())?;
+            if candidate_observations > DIAGNOSTIC_MAX_CROSS_OBSERVATIONS {
+                return Err(format!(
+                    "cross-boundary diagnostic exceeds {} candidate observations",
+                    DIAGNOSTIC_MAX_CROSS_OBSERVATIONS
+                ));
+            }
+            let image = images.get(&key.global_image_id).ok_or_else(|| {
+                "diagnostic right observation references unknown image".to_owned()
+            })?;
+            let observation = store
+                .observations
+                .get(key)
+                .ok_or_else(|| "diagnostic right observation is missing".to_owned())?;
+            let frame_candidates = candidates_by_frame.entry(image.atlas.frame_id).or_default();
+            frame_candidates.push(DiagnosticCandidateObservation {
+                track_id: cross.track_id,
+                key: *key,
+                correspondence: GeneralizedCorrespondence2D3D {
+                    sensor_index: image.atlas.sensor_index,
+                    point2d: observation.xy,
+                    point3d: anchor.position,
+                    confidence: None,
+                },
+            });
+            if candidates_by_frame.len() > DIAGNOSTIC_MAX_CANDIDATE_FRAMES {
+                return Err(format!(
+                    "cross-boundary diagnostic exceeds {} candidate frames",
+                    DIAGNOSTIC_MAX_CANDIDATE_FRAMES
+                ));
+            }
+        }
+    }
+    for observations in candidates_by_frame.values_mut() {
+        observations.sort_by_key(|observation| (observation.track_id, observation.key));
+    }
+    summary.candidate_frames = candidates_by_frame.len();
+    let candidate_frames = candidates_by_frame.keys().copied().collect::<BTreeSet<_>>();
+    let baseline_by_frame =
+        diagnostic_landmark_frame_index(baseline_landmarks, images, &candidate_frames)?;
+    let cross_by_id = evaluated
+        .iter()
+        .map(|(cross, _, _)| (cross.track_id, cross))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidate_audits = Vec::new();
+
+    for (frame_id, frame_candidates) in candidates_by_frame {
+        let distinct_candidates = diagnostic_distinct_track_ids(&frame_candidates);
+        if frame_candidates.len() > DIAGNOSTIC_MAX_CORRESPONDENCES_PER_FRAME {
+            summary.cap_skips += 1;
+            println!(
+                "cross_boundary_pnp_frame frame={frame_id} status=cap-exceeded correspondences={} distinct_tracks={} cap={}",
+                frame_candidates.len(),
+                distinct_candidates.len(),
+                DIAGNOSTIC_MAX_CORRESPONDENCES_PER_FRAME,
+            );
+            continue;
+        }
+        if distinct_candidates.len() < RECOVERY_MIN_PNP_INLIERS {
+            println!(
+                "cross_boundary_pnp_frame frame={frame_id} status=insufficient-distinct-candidates correspondences={} distinct_tracks={} required={}",
+                frame_candidates.len(),
+                distinct_candidates.len(),
+                RECOVERY_MIN_PNP_INLIERS,
+            );
+            continue;
+        }
+        let correspondences = frame_candidates
+            .iter()
+            .map(|observation| observation.correspondence.clone())
+            .collect::<Vec<_>>();
+        let Some(report) = pnp.estimate(&rig, &correspondences) else {
+            println!(
+                "cross_boundary_pnp_frame frame={frame_id} status=pnp-failed correspondences={} distinct_tracks={}",
+                correspondences.len(),
+                distinct_candidates.len(),
+            );
+            continue;
+        };
+        summary.pnp_reports += 1;
+        let distinct_inliers = diagnostic_inlier_track_ids(&report.inliers, &frame_candidates);
+        if distinct_inliers.len() < RECOVERY_MIN_PNP_INLIERS {
+            println!(
+                "cross_boundary_pnp_frame frame={frame_id} status=insufficient-distinct-inliers correspondences={} candidate_tracks={} inliers={} distinct_inliers={} required={}",
+                correspondences.len(),
+                distinct_candidates.len(),
+                report.inliers.len(),
+                distinct_inliers.len(),
+                RECOVERY_MIN_PNP_INLIERS,
+            );
+            continue;
+        }
+        let mut candidate_pose_overrides = BTreeMap::new();
+        compose_recovered_frame_poses(
+            manifest,
+            frame_id,
+            &report.pose,
+            images,
+            &mut candidate_pose_overrides,
+        )?;
+        let sensor_count = validate_diagnostic_rig_pose(manifest, frame_id, images, &report.pose)?;
+        summary.distinct_anchor_frames += 1;
+
+        let mut target_support_tracks = 0;
+        let mut full_cross_support_tracks = 0;
+        let mut target_support_observations = 0;
+        let mut full_cross_support_observations = 0;
+        let mut candidate_audit = DiagnosticCandidateAudit {
+            frame_id,
+            ..DiagnosticCandidateAudit::default()
+        };
+        // Only RANSAC-distinct inlier tracks are eligible for the support
+        // experiment. Outlier candidate tracks remain visible in the
+        // candidate_tracks field but cannot be presented as recovered support.
+        for track_id in &distinct_inliers {
+            let Some(cross) = cross_by_id.get(track_id) else {
+                return Err(format!("missing diagnostic cross track {track_id}"));
+            };
+            let target_keys = frame_candidates
+                .iter()
+                .filter(|observation| observation.track_id == *track_id)
+                .map(|observation| observation.key)
+                .collect::<Vec<_>>();
+            let target_track = diagnostic_track_with_keys(&cross.left_keys, &target_keys);
+            if let Ok(landmark) = triangulate_track_with_pose_overrides(
+                *track_id,
+                &target_track,
+                &store.observations,
+                images,
+                cameras,
+                &candidate_pose_overrides,
+            ) {
+                target_support_tracks += 1;
+                target_support_observations += landmark.observations.len();
+            }
+            let full_track = diagnostic_track_with_keys(&cross.left_keys, &cross.right_keys);
+            if let Ok(landmark) = triangulate_track_with_pose_overrides(
+                *track_id,
+                &full_track,
+                &store.observations,
+                images,
+                cameras,
+                &candidate_pose_overrides,
+            ) {
+                full_cross_support_tracks += 1;
+                full_cross_support_observations += landmark.observations.len();
+                candidate_audit.full_cross_success_track_ids.push(*track_id);
+            }
+        }
+        summary.target_support_attempts += distinct_inliers.len();
+        summary.target_support_successes += target_support_tracks;
+        summary.full_cross_support_attempts += distinct_inliers.len();
+        summary.full_cross_support_successes += full_cross_support_tracks;
+
+        let mut fixed_xyz_gate_failures = 0;
+        let mut retriangulated_existing_support_failures = 0;
+        let affected_landmarks = baseline_by_frame
+            .get(&frame_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        for landmark_id in affected_landmarks {
+            let landmark = baseline_landmarks
+                .get(*landmark_id)
+                .ok_or_else(|| "diagnostic baseline landmark index is invalid".to_owned())?;
+            let fixed_xyz_failed = match evaluate_landmark_metrics(
+                landmark,
+                &store.observations,
+                images,
+                cameras,
+                &candidate_pose_overrides,
+            ) {
+                Ok(metrics) => {
+                    metrics.mean_error > MAX_MEAN_REPROJECTION_PX
+                        || metrics.max_error > MAX_REPROJECTION_PX
+                }
+                Err(_) => true,
+            };
+            if fixed_xyz_failed {
+                fixed_xyz_gate_failures += 1;
+            }
+            let retriangulated_failed = store
+                .tracks
+                .get(landmark.track_id)
+                .map(|track| {
+                    triangulate_track_with_pose_overrides(
+                        landmark.track_id,
+                        track,
+                        &store.observations,
+                        images,
+                        cameras,
+                        &candidate_pose_overrides,
+                    )
+                    .is_err()
+                })
+                .unwrap_or(true);
+            if retriangulated_failed {
+                retriangulated_existing_support_failures += 1;
+                candidate_audit
+                    .retriangulated_failure_track_ids
+                    .push(landmark.track_id);
+            }
+        }
+        summary.fixed_xyz_gate_failures += fixed_xyz_gate_failures;
+        summary.existing_support_checks += affected_landmarks.len();
+        summary.retriangulated_existing_support_failures +=
+            retriangulated_existing_support_failures;
+        println!(
+            "cross_boundary_pnp_frame frame={frame_id} status=anchor-success correspondences={} candidate_tracks={} inliers={} distinct_inliers={} mean_px={:.6} max_px={:.6} sensors={} target_support_attempts={} target_support_successes={} target_support_observations={} full_cross_support_attempts={} full_cross_support_successes={} full_cross_support_observations={} affected_landmarks={} fixed_xyz_gate_failures={} retriangulated_existing_support_failures={}",
+            correspondences.len(),
+            distinct_candidates.len(),
+            report.inliers.len(),
+            distinct_inliers.len(),
+            report.mean_reprojection_error,
+            report.max_reprojection_error,
+            sensor_count,
+            distinct_inliers.len(),
+            target_support_tracks,
+            target_support_observations,
+            distinct_inliers.len(),
+            full_cross_support_tracks,
+            full_cross_support_observations,
+            affected_landmarks.len(),
+            fixed_xyz_gate_failures,
+            retriangulated_existing_support_failures,
+        );
+        candidate_audits.push(candidate_audit);
+    }
+    diagnostic_emit_connectivity(baseline_landmarks, store, images, &candidate_audits)?;
+    println!(
+        "cross_boundary_pnp_summary boundary_frame={} cross_tracks={} left_pass={} left_short={} left_rejected={} right_pass={} right_short={} right_rejected={} both_sides_two_observations={} both_sides_dlt_pass={} candidate_frames={} pnp_reports={} distinct_anchor_frames={} target_support_attempts={} target_support_successes={} full_cross_support_attempts={} full_cross_support_successes={} existing_support_checks={} fixed_xyz_gate_failures={} retriangulated_existing_support_failures={} cap_skips={} default_model_unchanged=true",
+        summary.boundary_frame,
+        summary.cross_tracks,
+        summary.left_pass,
+        summary.left_short,
+        summary.left_rejected,
+        summary.right_pass,
+        summary.right_short,
+        summary.right_rejected,
+        summary.both_sides_two_observations,
+        summary.both_sides_dlt_pass,
+        summary.candidate_frames,
+        summary.pnp_reports,
+        summary.distinct_anchor_frames,
+        summary.target_support_attempts,
+        summary.target_support_successes,
+        summary.full_cross_support_attempts,
+        summary.full_cross_support_successes,
+        summary.existing_support_checks,
+        summary.fixed_xyz_gate_failures,
+        summary.retriangulated_existing_support_failures,
+        summary.cap_skips,
+    );
+    Ok(summary)
+}
+
 #[derive(Debug, Clone)]
 struct RecoveryResult {
     pose_overrides: BTreeMap<u64, Pose>,
@@ -1931,6 +3561,26 @@ fn evaluate_landmark_position(
     cameras: &BTreeMap<u64, Camera>,
     pose_overrides: &BTreeMap<u64, Pose>,
 ) -> Result<(f64, f64), String> {
+    let metrics =
+        evaluate_landmark_metrics(landmark, observations, images, cameras, pose_overrides)?;
+    Ok((metrics.mean_error, metrics.max_error))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LandmarkMetrics {
+    errors: Vec<f64>,
+    mean_error: f64,
+    rms_error: f64,
+    max_error: f64,
+}
+
+fn evaluate_landmark_metrics(
+    landmark: &LandmarkOutput,
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<LandmarkMetrics, String> {
     let mut errors = Vec::with_capacity(landmark.observations.len());
     for key in &landmark.observations {
         let image = images
@@ -1956,14 +3606,650 @@ fn evaluate_landmark_position(
         }
         errors.push(error);
     }
+    if errors.is_empty() {
+        return Err("landmark has no observations".to_owned());
+    }
     let mean = errors.iter().sum::<f64>() / errors.len() as f64;
-    Ok((mean, errors.into_iter().fold(0.0, f64::max)))
+    let rms = (errors.iter().map(|error| error * error).sum::<f64>() / errors.len() as f64).sqrt();
+    Ok(LandmarkMetrics {
+        max_error: errors.iter().copied().fold(0.0, f64::max),
+        errors,
+        mean_error: mean,
+        rms_error: rms,
+    })
 }
 
 fn pose_for_image<'a>(image: &'a GlobalImage, pose_overrides: &'a BTreeMap<u64, Pose>) -> &'a Pose {
     pose_overrides
         .get(&image.atlas.global_image_id)
         .unwrap_or(&image.atlas.pose)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct JointRigBaWindowUpdate {
+    pose_overrides: BTreeMap<u64, Pose>,
+    landmark_updates: BTreeMap<usize, LandmarkOutput>,
+    selected_landmarks: usize,
+    selected_observations: usize,
+    referenced_frames: usize,
+    free_frames: usize,
+    initial_cost: f64,
+    final_cost: f64,
+    solver_initial_cost: f64,
+    solver_final_cost: f64,
+    iterations: usize,
+    converged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JointRigBaSkip {
+    LandmarkCap { count: usize },
+    ObservationCap { count: usize },
+    ReferencedFrameCap { count: usize },
+    NoFreeFrames,
+    Invalid(String),
+}
+
+impl std::fmt::Display for JointRigBaSkip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LandmarkCap { count } => write!(f, "landmark cap exceeded ({count})"),
+            Self::ObservationCap { count } => write!(f, "observation cap exceeded ({count})"),
+            Self::ReferencedFrameCap { count } => {
+                write!(f, "referenced-frame cap exceeded ({count})")
+            }
+            Self::NoFreeFrames => write!(f, "window has no free frames"),
+            Self::Invalid(reason) => write!(f, "invalid BA candidate: {reason}"),
+        }
+    }
+}
+
+fn derive_rig_pose_for_frame(
+    manifest: &RigManifest,
+    frame_id: u64,
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<Pose, String> {
+    let mut pose: Option<Pose> = None;
+    for image in images
+        .values()
+        .filter(|image| image.atlas.frame_id == frame_id)
+    {
+        let sensor = manifest
+            .sensors
+            .get(&image.atlas.sensor_index)
+            .ok_or_else(|| format!("frame {frame_id} references unknown sensor"))?;
+        let candidate = Pose {
+            world_to_camera: sensor
+                .sensor_from_rig
+                .inverse()
+                .compose(&image.atlas.pose.world_to_camera),
+        };
+        if let Some(previous) = &pose {
+            let center_error =
+                (previous.camera_center_world() - candidate.camera_center_world()).norm();
+            let rotation_error = previous
+                .world_to_camera
+                .rotation
+                .rotation_to(&candidate.world_to_camera.rotation)
+                .angle()
+                .to_degrees();
+            if !center_error.is_finite()
+                || !rotation_error.is_finite()
+                || center_error > MAX_RIG_CENTER_DISAGREEMENT_M
+                || rotation_error > MAX_RIG_ROTATION_DISAGREEMENT_DEG
+            {
+                return Err(format!(
+                    "frame {frame_id} rig pose disagreement: centre={center_error:.9}m rotation={rotation_error:.9}deg"
+                ));
+            }
+        } else {
+            pose = Some(candidate);
+        }
+    }
+    pose.ok_or_else(|| format!("frame {frame_id} has no atlas images"))
+}
+
+fn derive_rig_poses_for_frames(
+    manifest: &RigManifest,
+    frame_ids: &BTreeSet<u64>,
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<BTreeMap<u64, Pose>, String> {
+    frame_ids
+        .iter()
+        .map(|frame_id| {
+            derive_rig_pose_for_frame(manifest, *frame_id, images).map(|pose| (*frame_id, pose))
+        })
+        .collect()
+}
+
+fn selected_landmarks_for_frames(
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<Vec<usize>, String> {
+    let mut selected = Vec::new();
+    for (index, landmark) in landmarks.iter().enumerate() {
+        let touches_active = landmark.observations.iter().any(|key| {
+            images
+                .get(&key.global_image_id)
+                .is_some_and(|image| active_frames.contains(&image.atlas.frame_id))
+        });
+        if touches_active {
+            selected.push(index);
+        }
+    }
+    // This is intentionally a definition, not a heuristic: all tracks with
+    // an active observation are selected, so no active pose is later changed
+    // while silently leaving an unselected landmark unsupported.
+    Ok(selected)
+}
+
+fn validate_joint_ba_update(
+    update: &JointRigBaWindowUpdate,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    selected: &[usize],
+) -> Result<(), JointRigBaSkip> {
+    let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+    for (index, landmark) in landmarks.iter().enumerate() {
+        let touches_active = landmark.observations.iter().any(|key| {
+            images.get(&key.global_image_id).is_some_and(|image| {
+                update
+                    .pose_overrides
+                    .contains_key(&image.atlas.global_image_id)
+            })
+        });
+        if touches_active != selected_set.contains(&index) {
+            return Err(JointRigBaSkip::Invalid(format!(
+                "selection invariant failed for landmark index {index}"
+            )));
+        }
+    }
+    if update.landmark_updates.len() != selected.len() {
+        return Err(JointRigBaSkip::Invalid(format!(
+            "candidate landmark count {} differs from selected count {}",
+            update.landmark_updates.len(),
+            selected.len()
+        )));
+    }
+    let mut initial_cost = 0.0;
+    let mut final_cost = 0.0;
+    for index in selected {
+        let old = landmarks.get(*index).ok_or_else(|| {
+            JointRigBaSkip::Invalid("selected landmark index is invalid".to_owned())
+        })?;
+        let old_metrics =
+            evaluate_landmark_metrics(old, &store.observations, images, cameras, &BTreeMap::new())
+                .map_err(JointRigBaSkip::Invalid)?;
+        initial_cost += old_metrics
+            .errors
+            .iter()
+            .map(|error| error * error)
+            .sum::<f64>();
+        let candidate = update.landmark_updates.get(index).ok_or_else(|| {
+            JointRigBaSkip::Invalid(format!("candidate omitted selected landmark {index}"))
+        })?;
+        if candidate.track_id != old.track_id || candidate.observations != old.observations {
+            return Err(JointRigBaSkip::Invalid(format!(
+                "candidate changed identity or observations for landmark {index}"
+            )));
+        }
+        let candidate_metrics = evaluate_landmark_metrics(
+            candidate,
+            &store.observations,
+            images,
+            cameras,
+            &update.pose_overrides,
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        final_cost += candidate_metrics
+            .errors
+            .iter()
+            .map(|error| error * error)
+            .sum::<f64>();
+    }
+    if !update.initial_cost.is_finite()
+        || !update.final_cost.is_finite()
+        || !initial_cost.is_finite()
+        || !final_cost.is_finite()
+        || final_cost > initial_cost + 1.0e-8 * initial_cost.abs().max(1.0)
+    {
+        return Err(JointRigBaSkip::Invalid(format!(
+            "validated cost increased from {initial_cost:.12} to {final_cost:.12}"
+        )));
+    }
+    if (update.initial_cost - initial_cost).abs() > 1.0e-8 * initial_cost.abs().max(1.0)
+        || (update.final_cost - final_cost).abs() > 1.0e-8 * final_cost.abs().max(1.0)
+    {
+        return Err(JointRigBaSkip::Invalid(
+            "candidate cost diagnostics disagree with independent reprojection".to_owned(),
+        ));
+    }
+    for (index, candidate) in &update.landmark_updates {
+        if !selected_set.contains(index) {
+            return Err(JointRigBaSkip::Invalid(format!(
+                "candidate updated unselected landmark {index}"
+            )));
+        }
+        let metrics = evaluate_landmark_metrics(
+            candidate,
+            &store.observations,
+            images,
+            cameras,
+            &update.pose_overrides,
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        if candidate.observations.len() < MIN_TRACK_OBSERVATIONS
+            || metrics.mean_error > MAX_MEAN_REPROJECTION_PX
+            || metrics.max_error > MAX_REPROJECTION_PX
+        {
+            return Err(JointRigBaSkip::Invalid(format!(
+                "landmark {index} failed reprojection gate mean={:.6} max={:.6} observations={}",
+                metrics.mean_error,
+                metrics.max_error,
+                candidate.observations.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_joint_rig_ba_window(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+) -> Result<JointRigBaWindowUpdate, JointRigBaSkip> {
+    let selected = selected_landmarks_for_frames(landmarks, active_frames, images)
+        .map_err(JointRigBaSkip::Invalid)?;
+    if selected.len() > JOINT_BA_MAX_LANDMARKS {
+        return Err(JointRigBaSkip::LandmarkCap {
+            count: selected.len(),
+        });
+    }
+    let selected_observations = selected.iter().try_fold(0usize, |count, index| {
+        count.checked_add(landmarks[*index].observations.len())
+    });
+    let selected_observations =
+        selected_observations.ok_or(JointRigBaSkip::ObservationCap { count: usize::MAX })?;
+    if selected_observations > JOINT_BA_MAX_OBSERVATIONS {
+        return Err(JointRigBaSkip::ObservationCap {
+            count: selected_observations,
+        });
+    }
+    let mut referenced_frames = BTreeSet::new();
+    for index in &selected {
+        for key in &landmarks[*index].observations {
+            let image = images.get(&key.global_image_id).ok_or_else(|| {
+                JointRigBaSkip::Invalid("landmark references unknown image".to_owned())
+            })?;
+            referenced_frames.insert(image.atlas.frame_id);
+        }
+    }
+    if referenced_frames.len() > JOINT_BA_MAX_REFERENCED_FRAMES {
+        return Err(JointRigBaSkip::ReferencedFrameCap {
+            count: referenced_frames.len(),
+        });
+    }
+    let free_frames = active_frames
+        .intersection(&referenced_frames)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if free_frames.is_empty() {
+        return Err(JointRigBaSkip::NoFreeFrames);
+    }
+    if free_frames.len() > JOINT_BA_MAX_FREE_FRAMES {
+        return Err(JointRigBaSkip::Invalid(format!(
+            "free-frame cap exceeded ({})",
+            free_frames.len()
+        )));
+    }
+    let rig_poses = derive_rig_poses_for_frames(manifest, &referenced_frames, images)
+        .map_err(JointRigBaSkip::Invalid)?;
+    let camera = cameras
+        .values()
+        .next()
+        .cloned()
+        .ok_or_else(|| JointRigBaSkip::Invalid("no cameras available".to_owned()))?;
+    let mut ba = BundleAdjustment::new(camera);
+    for (frame_id, pose) in &rig_poses {
+        ba.add_pose(*frame_id, pose.clone());
+        if !free_frames.contains(frame_id) {
+            ba.fix_pose(*frame_id);
+        }
+    }
+    if !rig_poses
+        .keys()
+        .any(|frame_id| !free_frames.contains(frame_id))
+    {
+        let anchor = *referenced_frames
+            .first()
+            .ok_or(JointRigBaSkip::NoFreeFrames)?;
+        ba.fix_pose(anchor);
+    }
+    for index in &selected {
+        let landmark = &landmarks[*index];
+        let id = u64::try_from(landmark.track_id)
+            .map_err(|_| JointRigBaSkip::Invalid("track id exceeds u64".to_owned()))?;
+        if !landmark
+            .position
+            .coords
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(JointRigBaSkip::Invalid(format!(
+                "landmark {} has non-finite position",
+                landmark.track_id
+            )));
+        }
+        ba.add_landmark(id, landmark.position);
+    }
+    for index in &selected {
+        let landmark = &landmarks[*index];
+        let landmark_id = u64::try_from(landmark.track_id)
+            .map_err(|_| JointRigBaSkip::Invalid("track id exceeds u64".to_owned()))?;
+        for key in &landmark.observations {
+            let image = images.get(&key.global_image_id).ok_or_else(|| {
+                JointRigBaSkip::Invalid("landmark references unknown image".to_owned())
+            })?;
+            let observation = store.observations.get(key).ok_or_else(|| {
+                JointRigBaSkip::Invalid("landmark references unknown observation".to_owned())
+            })?;
+            let sensor = manifest
+                .sensors
+                .get(&image.atlas.sensor_index)
+                .ok_or_else(|| {
+                    JointRigBaSkip::Invalid("landmark references unknown sensor".to_owned())
+                })?;
+            let camera = cameras.get(&image.atlas.camera_id).ok_or_else(|| {
+                JointRigBaSkip::Invalid("landmark references unknown camera".to_owned())
+            })?;
+            if !observation.xy.coords.iter().all(|value| value.is_finite()) {
+                return Err(JointRigBaSkip::Invalid(
+                    "non-finite BA observation".to_owned(),
+                ));
+            }
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: image.atlas.frame_id,
+                landmark_id,
+                xy: observation.xy,
+                camera: camera.clone(),
+                sensor_from_rig: sensor.sensor_from_rig.clone(),
+            });
+        }
+    }
+    let baseline_cost = ba.cost();
+    if !baseline_cost.is_finite() {
+        return Err(JointRigBaSkip::Invalid(
+            "initial BA cost is non-finite".to_owned(),
+        ));
+    }
+    let result = ba
+        .optimize(&BaConfig {
+            max_iterations: JOINT_BA_MAX_ITERATIONS,
+            initial_lambda: Some(1.0e-4),
+            linear_solver: LinearSolver::Sparse,
+            robust_kernel: RobustKernel::None,
+            refine_intrinsics: false,
+            refine_distortion: false,
+            parallel: false,
+            ..BaConfig::default()
+        })
+        .map_err(|error| JointRigBaSkip::Invalid(format!("bundle adjustment failed: {error}")))?;
+    let solver_initial_cost = result.initial_cost;
+    let solver_final_cost = result.final_cost;
+    if !solver_initial_cost.is_finite() || !solver_final_cost.is_finite() {
+        return Err(JointRigBaSkip::Invalid(
+            "BA costs are non-finite".to_owned(),
+        ));
+    }
+    let mut pose_overrides = BTreeMap::new();
+    for image in images.values() {
+        if !free_frames.contains(&image.atlas.frame_id) {
+            continue;
+        }
+        let rig_pose = ba
+            .poses
+            .get(&image.atlas.frame_id)
+            .ok_or_else(|| JointRigBaSkip::Invalid("BA omitted referenced rig pose".to_owned()))?;
+        let sensor = manifest
+            .sensors
+            .get(&image.atlas.sensor_index)
+            .ok_or_else(|| {
+                JointRigBaSkip::Invalid("BA image references unknown sensor".to_owned())
+            })?;
+        let pose = Pose {
+            world_to_camera: sensor.sensor_from_rig.compose(&rig_pose.world_to_camera),
+        };
+        if !pose
+            .world_to_camera
+            .translation
+            .iter()
+            .all(|value| value.is_finite())
+            || !pose
+                .world_to_camera
+                .rotation
+                .coords
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return Err(JointRigBaSkip::Invalid(
+                "BA produced non-finite pose".to_owned(),
+            ));
+        }
+        pose_overrides.insert(image.atlas.global_image_id, pose);
+    }
+    let mut landmark_updates = BTreeMap::new();
+    for index in &selected {
+        let old = &landmarks[*index];
+        let id = u64::try_from(old.track_id)
+            .map_err(|_| JointRigBaSkip::Invalid("track id exceeds u64".to_owned()))?;
+        let position = *ba
+            .landmarks
+            .get(&id)
+            .ok_or_else(|| JointRigBaSkip::Invalid("BA omitted selected landmark".to_owned()))?;
+        let mut candidate = old.clone();
+        candidate.position = position;
+        let metrics = evaluate_landmark_metrics(
+            &candidate,
+            &store.observations,
+            images,
+            cameras,
+            &pose_overrides,
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        candidate.errors = metrics.errors;
+        candidate.mean_error = metrics.mean_error;
+        candidate.rms_error = metrics.rms_error;
+        candidate.max_error = metrics.max_error;
+        landmark_updates.insert(*index, candidate);
+    }
+    let mut initial_cost = 0.0;
+    let mut final_cost = 0.0;
+    for index in &selected {
+        let old_metrics = evaluate_landmark_metrics(
+            &landmarks[*index],
+            &store.observations,
+            images,
+            cameras,
+            &BTreeMap::new(),
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        let new_metrics = evaluate_landmark_metrics(
+            landmark_updates
+                .get(index)
+                .ok_or_else(|| JointRigBaSkip::Invalid("BA update omitted landmark".to_owned()))?,
+            &store.observations,
+            images,
+            cameras,
+            &pose_overrides,
+        )
+        .map_err(JointRigBaSkip::Invalid)?;
+        initial_cost += old_metrics
+            .errors
+            .iter()
+            .map(|error| error * error)
+            .sum::<f64>();
+        final_cost += new_metrics
+            .errors
+            .iter()
+            .map(|error| error * error)
+            .sum::<f64>();
+    }
+    let update = JointRigBaWindowUpdate {
+        pose_overrides,
+        landmark_updates,
+        selected_landmarks: selected.len(),
+        selected_observations,
+        referenced_frames: referenced_frames.len(),
+        free_frames: free_frames.len(),
+        initial_cost,
+        final_cost,
+        solver_initial_cost,
+        solver_final_cost,
+        iterations: result.iterations.len(),
+        converged: result.converged,
+    };
+    if let Err(reason) =
+        validate_joint_ba_update(&update, store, images, cameras, landmarks, &selected)
+    {
+        println!(
+            "joint_rig_ba_candidate status=rejected selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} solver_initial_cost={:.9} solver_final_cost={:.9} iterations={} converged={} reason={reason}",
+            update.selected_landmarks,
+            update.selected_observations,
+            update.referenced_frames,
+            update.free_frames,
+            update.solver_initial_cost,
+            update.solver_final_cost,
+            update.iterations,
+            update.converged,
+        );
+        return Err(reason);
+    }
+    Ok(update)
+}
+
+fn joint_ba_window_counts(
+    landmarks: &[LandmarkOutput],
+    images: &BTreeMap<u64, GlobalImage>,
+    active_frames: &BTreeSet<u64>,
+) -> Result<(usize, usize, usize, usize), String> {
+    let selected = selected_landmarks_for_frames(landmarks, active_frames, images)?;
+    let selected_observations = selected
+        .iter()
+        .map(|index| landmarks[*index].observations.len())
+        .sum::<usize>();
+    let mut referenced_frames = BTreeSet::new();
+    for index in &selected {
+        for key in &landmarks[*index].observations {
+            let image = images
+                .get(&key.global_image_id)
+                .ok_or_else(|| "landmark references unknown image".to_owned())?;
+            referenced_frames.insert(image.atlas.frame_id);
+        }
+    }
+    let free_frames = active_frames.intersection(&referenced_frames).count();
+    Ok((
+        selected.len(),
+        selected_observations,
+        referenced_frames.len(),
+        free_frames,
+    ))
+}
+
+fn run_joint_rig_ba(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &mut BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &mut [LandmarkOutput],
+) -> Result<JointRigBaSummary, String> {
+    let mut frame_ids = images
+        .values()
+        .map(|image| image.atlas.frame_id)
+        .collect::<Vec<_>>();
+    frame_ids.sort_unstable();
+    frame_ids.dedup();
+    let mut summary = JointRigBaSummary::default();
+    for start in (0..frame_ids.len()).step_by(JOINT_BA_WINDOW_STRIDE) {
+        let end = (start + JOINT_BA_WINDOW_LENGTH).min(frame_ids.len());
+        let active_frames = frame_ids[start..end]
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(active_frames.len() <= JOINT_BA_MAX_FREE_FRAMES);
+        summary.windows_considered += 1;
+        let window_counts = joint_ba_window_counts(landmarks, images, &active_frames);
+        if let Ok((selected_count, observation_count, referenced_count, free_count)) =
+            window_counts.as_ref()
+        {
+            summary.selected_landmarks += *selected_count;
+            summary.selected_observations += *observation_count;
+            summary.max_referenced_frames = summary.max_referenced_frames.max(*referenced_count);
+            summary.max_free_frames = summary.max_free_frames.max(*free_count);
+        }
+        match build_joint_rig_ba_window(manifest, store, images, cameras, landmarks, &active_frames)
+        {
+            Ok(update) => {
+                apply_pose_overrides(images, &update.pose_overrides)?;
+                for (index, landmark) in update.landmark_updates {
+                    landmarks[index] = landmark;
+                }
+                summary.windows_accepted += 1;
+                summary.max_iterations = summary.max_iterations.max(update.iterations);
+                if update.converged {
+                    summary.converged_windows += 1;
+                }
+                if summary.windows_accepted == 1 {
+                    summary.max_solver_initial_cost = update.solver_initial_cost;
+                    summary.min_solver_final_cost = update.solver_final_cost;
+                } else {
+                    summary.max_solver_initial_cost = summary
+                        .max_solver_initial_cost
+                        .max(update.solver_initial_cost);
+                    summary.min_solver_final_cost =
+                        summary.min_solver_final_cost.min(update.solver_final_cost);
+                }
+                summary.final_cost = update.final_cost;
+                println!(
+                    "joint_rig_ba_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} solver_initial_cost={:.9} solver_final_cost={:.9} validated_initial_cost={:.9} validated_final_cost={:.9} iterations={} converged={}",
+                    active_frames.first().copied().unwrap_or_default(),
+                    active_frames.last().copied().unwrap_or_default(),
+                    active_frames.len(),
+                    update.selected_landmarks,
+                    update.selected_observations,
+                    update.referenced_frames,
+                    update.free_frames,
+                    update.solver_initial_cost,
+                    update.solver_final_cost,
+                    update.initial_cost,
+                    update.final_cost,
+                    update.iterations,
+                    update.converged,
+                );
+            }
+            Err(reason) => {
+                summary.windows_skipped += 1;
+                let (selected_count, observation_count, referenced_count, free_count) =
+                    window_counts.unwrap_or_default();
+                println!(
+                    "joint_rig_ba_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} reason={reason}",
+                    active_frames.first().copied().unwrap_or_default(),
+                    active_frames.last().copied().unwrap_or_default(),
+                    active_frames.len(),
+                    selected_count,
+                    observation_count,
+                    referenced_count,
+                    free_count,
+                );
+            }
+        }
+    }
+    Ok(summary)
 }
 
 fn has_observable_parallax(
@@ -2762,6 +5048,341 @@ mod tests {
         )
     }
 
+    fn boundary_repair_fixture() -> (
+        RigManifest,
+        TrackStore,
+        BTreeMap<u64, GlobalImage>,
+        BTreeMap<u64, Camera>,
+        Vec<LandmarkOutput>,
+    ) {
+        let camera0 = Camera::pinhole(1, 640, 480, 100.0, 101.0, 320.0, 240.0);
+        let camera1 = Camera::pinhole(2, 640, 480, 102.0, 99.0, 321.0, 239.0);
+        let sensor0 = SensorCalibration {
+            camera_id: 1,
+            width: 640,
+            height: 480,
+            fx: 100.0,
+            fy: 101.0,
+            cx: 320.0,
+            cy: 240.0,
+            sensor_from_rig: SE3::identity(),
+        };
+        let sensor1 = SensorCalibration {
+            camera_id: 2,
+            width: 640,
+            height: 480,
+            fx: 102.0,
+            fy: 99.0,
+            cx: 321.0,
+            cy: 239.0,
+            sensor_from_rig: SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(0.005, -0.01, 0.008)),
+                Vector3::new(-0.35, 0.01, -0.02),
+            ),
+        };
+        let manifest = RigManifest {
+            sensors: BTreeMap::from([(0, sensor0.clone()), (1, sensor1.clone())]),
+            assignments: BTreeMap::new(),
+        };
+        let rig_pose = Pose::identity();
+        let mut images = BTreeMap::new();
+        for (image_id, frame_id, sensor_index, sensor) in [
+            (1, 10, 0, &sensor0),
+            (2, 10, 1, &sensor1),
+            (3, 30, 0, &sensor0),
+            (4, 30, 1, &sensor1),
+        ] {
+            images.insert(
+                image_id,
+                GlobalImage {
+                    atlas: AtlasImage {
+                        global_image_id: image_id,
+                        frame_id,
+                        sensor_index,
+                        name: format!("{frame_id}-{sensor_index}.png"),
+                        camera_id: sensor.camera_id,
+                        pose: Pose {
+                            world_to_camera: sensor
+                                .sensor_from_rig
+                                .compose(&rig_pose.world_to_camera),
+                        },
+                    },
+                    keypoints: vec![Point2::new(0.0, 0.0); 7],
+                },
+            );
+        }
+        let cameras = BTreeMap::from([(1, camera0.clone()), (2, camera1.clone())]);
+        let mut observations = BTreeMap::new();
+        let mut tracks = Vec::new();
+        let mut landmarks = Vec::new();
+        let mut add_track = |track_id: usize, point: Point3<f64>, keys: Vec<ObservationKey>| {
+            for key in &keys {
+                let image = images.get_mut(&key.global_image_id).unwrap();
+                let camera = cameras.get(&image.atlas.camera_id).unwrap();
+                let xy = camera
+                    .project(&image.atlas.pose.transform_world_point(&point))
+                    .unwrap();
+                image.keypoints[key.keypoint_index] = xy;
+                observations.insert(
+                    *key,
+                    ObservationState {
+                        xy,
+                        owner_track: track_id,
+                    },
+                );
+            }
+            tracks.push(GlobalTrack {
+                observations: keys.clone(),
+            });
+            (point, keys)
+        };
+        let base10 = add_track(
+            0,
+            Point3::new(0.1, -0.2, 4.6),
+            vec![
+                ObservationKey {
+                    global_image_id: 1,
+                    keypoint_index: 6,
+                },
+                ObservationKey {
+                    global_image_id: 2,
+                    keypoint_index: 6,
+                },
+            ],
+        );
+        let base30 = add_track(
+            1,
+            Point3::new(-0.2, 0.3, 5.2),
+            vec![
+                ObservationKey {
+                    global_image_id: 3,
+                    keypoint_index: 6,
+                },
+                ObservationKey {
+                    global_image_id: 4,
+                    keypoint_index: 6,
+                },
+            ],
+        );
+        landmarks.push(LandmarkOutput {
+            track_id: 0,
+            position: base10.0,
+            observations: base10.1,
+            errors: vec![0.0, 0.0],
+            rms_error: 0.0,
+            mean_error: 0.0,
+            max_error: 0.0,
+            dlt_sample_count: 2,
+        });
+        landmarks.push(LandmarkOutput {
+            track_id: 1,
+            position: base30.0,
+            observations: base30.1,
+            errors: vec![0.0, 0.0],
+            rms_error: 0.0,
+            mean_error: 0.0,
+            max_error: 0.0,
+            dlt_sample_count: 2,
+        });
+        let points = [
+            Point3::new(-1.2, -0.6, 4.5),
+            Point3::new(-0.7, 0.4, 5.1),
+            Point3::new(-0.1, -0.3, 5.8),
+            Point3::new(0.4, 0.5, 4.8),
+            Point3::new(0.9, -0.4, 5.5),
+            Point3::new(1.3, 0.2, 6.2),
+        ];
+        for (index, point) in points.into_iter().enumerate() {
+            let keys = vec![
+                ObservationKey {
+                    global_image_id: 1,
+                    keypoint_index: index,
+                },
+                ObservationKey {
+                    global_image_id: 2,
+                    keypoint_index: index,
+                },
+                ObservationKey {
+                    global_image_id: 3,
+                    keypoint_index: index,
+                },
+            ];
+            add_track(index + 2, point, keys);
+        }
+        (
+            manifest,
+            TrackStore {
+                observations,
+                tracks,
+            },
+            images,
+            cameras,
+            landmarks,
+        )
+    }
+
+    fn joint_ba_fixture() -> (
+        RigManifest,
+        TrackStore,
+        BTreeMap<u64, GlobalImage>,
+        BTreeMap<u64, Camera>,
+        Vec<LandmarkOutput>,
+        BTreeSet<u64>,
+    ) {
+        let camera0 = Camera::pinhole(1, 640, 480, 180.0, 181.0, 320.0, 240.0);
+        let camera1 = Camera::pinhole(2, 640, 480, 179.0, 180.0, 321.0, 239.0);
+        let sensor0 = SensorCalibration {
+            camera_id: 1,
+            width: 640,
+            height: 480,
+            fx: 180.0,
+            fy: 181.0,
+            cx: 320.0,
+            cy: 240.0,
+            sensor_from_rig: SE3::identity(),
+        };
+        let sensor1 = SensorCalibration {
+            camera_id: 2,
+            width: 640,
+            height: 480,
+            fx: 179.0,
+            fy: 180.0,
+            cx: 321.0,
+            cy: 239.0,
+            sensor_from_rig: SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(0.01, -0.02, 0.015)),
+                Vector3::new(-0.35, 0.02, -0.01),
+            ),
+        };
+        let manifest = RigManifest {
+            sensors: BTreeMap::from([(0, sensor0.clone()), (1, sensor1.clone())]),
+            assignments: BTreeMap::new(),
+        };
+        let truth_poses = [
+            (
+                100,
+                Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros()),
+            ),
+            (
+                140,
+                Pose::from_world_to_camera(
+                    UnitQuaternion::from_scaled_axis(Vector3::new(0.01, -0.015, 0.02)),
+                    Vector3::new(-0.35, 0.02, 0.03),
+                ),
+            ),
+            (
+                200,
+                Pose::from_world_to_camera(
+                    UnitQuaternion::from_scaled_axis(Vector3::new(-0.02, 0.01, -0.01)),
+                    Vector3::new(-0.75, -0.03, 0.02),
+                ),
+            ),
+        ];
+        let mut images = BTreeMap::new();
+        let mut image_for = BTreeMap::new();
+        let mut global_image_id = 1;
+        for (frame_id, truth_pose) in &truth_poses {
+            let rig_pose = if *frame_id == 140 {
+                Pose::from_world_to_camera(
+                    truth_pose.world_to_camera.rotation
+                        * UnitQuaternion::from_scaled_axis(Vector3::new(0.006, -0.004, 0.003)),
+                    truth_pose.world_to_camera.translation + Vector3::new(0.04, -0.02, 0.015),
+                )
+            } else {
+                truth_pose.clone()
+            };
+            for (sensor_index, sensor) in [(0usize, &sensor0), (1usize, &sensor1)] {
+                let image_id = global_image_id;
+                global_image_id += 1;
+                let pose = Pose {
+                    world_to_camera: sensor.sensor_from_rig.compose(&rig_pose.world_to_camera),
+                };
+                images.insert(
+                    image_id,
+                    GlobalImage {
+                        atlas: AtlasImage {
+                            global_image_id: image_id,
+                            frame_id: *frame_id,
+                            sensor_index,
+                            name: format!("{frame_id}-{sensor_index}.png"),
+                            camera_id: sensor.camera_id,
+                            pose,
+                        },
+                        keypoints: vec![Point2::new(0.0, 0.0); 12],
+                    },
+                );
+                image_for.insert((*frame_id, sensor_index), image_id);
+            }
+        }
+        let points = (0..12)
+            .map(|index| {
+                Point3::new(
+                    -0.9 + index as f64 * 0.16,
+                    -0.45 + (index % 4) as f64 * 0.22,
+                    4.0 + (index % 5) as f64 * 0.25,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut observations = BTreeMap::new();
+        let mut tracks = Vec::new();
+        let mut landmarks = Vec::new();
+        for (point_index, point) in points.iter().enumerate() {
+            let mut keys = Vec::new();
+            for (frame_id, truth_pose) in &truth_poses {
+                for (sensor_index, sensor, camera) in
+                    [(0usize, &sensor0, &camera0), (1usize, &sensor1, &camera1)]
+                {
+                    let image_id = image_for[&(*frame_id, sensor_index)];
+                    let xy = camera
+                        .project(
+                            &sensor
+                                .sensor_from_rig
+                                .transform_point(&truth_pose.transform_world_point(point)),
+                        )
+                        .unwrap();
+                    images.get_mut(&image_id).unwrap().keypoints[point_index] = xy;
+                    let key = ObservationKey {
+                        global_image_id: image_id,
+                        keypoint_index: point_index,
+                    };
+                    observations.insert(
+                        key,
+                        ObservationState {
+                            xy,
+                            owner_track: point_index,
+                        },
+                    );
+                    keys.push(key);
+                }
+            }
+            keys.sort_unstable();
+            tracks.push(GlobalTrack {
+                observations: keys.clone(),
+            });
+            landmarks.push(LandmarkOutput {
+                track_id: point_index,
+                position: Point3::from(point.coords + Vector3::new(0.015, -0.012, 0.025)),
+                observations: keys,
+                errors: vec![0.0; 6],
+                rms_error: 0.0,
+                mean_error: 0.0,
+                max_error: 0.0,
+                dlt_sample_count: 6,
+            });
+        }
+        (
+            manifest,
+            TrackStore {
+                observations,
+                tracks,
+            },
+            images,
+            BTreeMap::from([(1, camera0), (2, camera1)]),
+            landmarks,
+            BTreeSet::from([100, 140, 200]),
+        )
+    }
+
     #[test]
     fn args_require_all_paths_and_reject_unknown() {
         let error = parse_args(["example".to_owned(), "--rig-manifest".to_owned()]).unwrap_err();
@@ -2794,6 +5415,11 @@ mod tests {
         ])
         .unwrap();
         assert!(!args.recover_zero_support_frames);
+        assert!(!args.joint_rig_ba);
+        assert!(!args.diagnose_cross_boundary_pnp);
+        assert_eq!(args.diagnostic_left_max_frame, None);
+        assert!(!args.repair_cross_boundary);
+        assert_eq!(args.repair_left_max_frame, None);
         let args = parse_args([
             "example".to_owned(),
             "--recover-zero-support-frames".to_owned(),
@@ -2808,6 +5434,7 @@ mod tests {
         ])
         .unwrap();
         assert!(args.recover_zero_support_frames);
+        assert!(!args.joint_rig_ba);
         let error = parse_args([
             "example".to_owned(),
             "--recover-zero-support-frames".to_owned(),
@@ -2823,6 +5450,328 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("duplicate argument"));
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba".to_owned(),
+        ])
+        .unwrap();
+        assert!(args.joint_rig_ba);
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba".to_owned(),
+            "--joint-rig-ba".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("duplicate argument"));
+
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--diagnose-cross-boundary-pnp".to_owned(),
+            "--diagnostic-left-max-frame".to_owned(),
+            "1999".to_owned(),
+        ])
+        .unwrap();
+        assert!(args.diagnose_cross_boundary_pnp);
+        assert_eq!(args.diagnostic_left_max_frame, Some(1999));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--diagnose-cross-boundary-pnp".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("diagnostic-left-max-frame"));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--diagnostic-left-max-frame".to_owned(),
+            "1999".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --diagnose-cross-boundary-pnp"));
+
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--repair-cross-boundary".to_owned(),
+            "--repair-left-max-frame".to_owned(),
+            "1999".to_owned(),
+            "--recover-zero-support-frames".to_owned(),
+        ])
+        .unwrap();
+        assert!(args.repair_cross_boundary);
+        assert_eq!(args.repair_left_max_frame, Some(1999));
+        assert!(args.recover_zero_support_frames);
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--repair-cross-boundary".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("repair-left-max-frame"));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--repair-left-max-frame".to_owned(),
+            "1999".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --repair-cross-boundary"));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--repair-cross-boundary".to_owned(),
+            "--repair-left-max-frame".to_owned(),
+            "1999".to_owned(),
+            "--joint-rig-ba".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("cannot be combined with joint BA"));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--repair-cross-boundary".to_owned(),
+            "--repair-left-max-frame".to_owned(),
+            "1999".to_owned(),
+            "--diagnose-cross-boundary-pnp".to_owned(),
+            "--diagnostic-left-max-frame".to_owned(),
+            "1999".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn joint_ba_selection_is_deterministic_and_respects_window_caps() {
+        let (_manifest, store, images, _cameras, landmarks, active) = joint_ba_fixture();
+        let first = joint_ba_window_counts(&landmarks, &images, &active).unwrap();
+        let second = joint_ba_window_counts(&landmarks, &images, &active).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.0, landmarks.len());
+        assert_eq!(first.1, landmarks.len() * 6);
+        assert_eq!(first.2, 3);
+        assert_eq!(first.3, 3);
+        assert!(store
+            .tracks
+            .iter()
+            .all(|track| track.observations.len() == 6));
+        assert!(first.2 <= JOINT_BA_MAX_REFERENCED_FRAMES);
+        assert!(first.3 <= JOINT_BA_MAX_FREE_FRAMES);
+    }
+
+    #[test]
+    fn joint_ba_synthetic_update_is_transactional_and_preserves_rig_extrinsics() {
+        let (manifest, store, mut images, cameras, mut landmarks, active) = joint_ba_fixture();
+        let before_images = images.clone();
+        let before_landmarks = landmarks.clone();
+        let update =
+            build_joint_rig_ba_window(&manifest, &store, &images, &cameras, &landmarks, &active)
+                .unwrap();
+        assert!(update.final_cost <= update.initial_cost + 1.0e-8);
+        assert!(update.solver_final_cost <= update.solver_initial_cost + 1.0e-8);
+        assert!(update.iterations <= JOINT_BA_MAX_ITERATIONS);
+        assert_eq!(update.landmark_updates.len(), landmarks.len());
+        apply_pose_overrides(&mut images, &update.pose_overrides).unwrap();
+        for (index, candidate) in update.landmark_updates {
+            landmarks[index] = candidate;
+        }
+        assert_ne!(images, before_images);
+        assert_ne!(landmarks, before_landmarks);
+        for image in images.values() {
+            let sensor = &manifest.sensors[&image.atlas.sensor_index];
+            let rig_pose =
+                derive_rig_pose_for_frame(&manifest, image.atlas.frame_id, &images).unwrap();
+            let expected = sensor.sensor_from_rig.compose(&rig_pose.world_to_camera);
+            assert!(
+                (expected.translation - image.atlas.pose.world_to_camera.translation).norm()
+                    < 1.0e-8
+            );
+            assert!(
+                (expected.rotation * image.atlas.pose.world_to_camera.rotation.inverse()).angle()
+                    < 1.0e-8
+            );
+        }
+    }
+
+    #[test]
+    fn joint_ba_external_anchors_are_fixed_and_all_track_observations_are_used() {
+        let (manifest, store, mut images, cameras, landmarks, _active) = joint_ba_fixture();
+        let active = BTreeSet::from([140]);
+        let outside_before = images
+            .iter()
+            .filter(|(_, image)| image.atlas.frame_id != 140)
+            .map(|(id, image)| (*id, image.atlas.pose.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let update =
+            build_joint_rig_ba_window(&manifest, &store, &images, &cameras, &landmarks, &active)
+                .unwrap();
+        assert_eq!(update.selected_observations, landmarks.len() * 6);
+        assert_eq!(update.referenced_frames, 3);
+        assert_eq!(update.free_frames, 1);
+        assert!(update
+            .pose_overrides
+            .keys()
+            .all(|image_id| { images[image_id].atlas.frame_id == 140 }));
+        apply_pose_overrides(&mut images, &update.pose_overrides).unwrap();
+        for (image_id, pose) in outside_before {
+            assert_eq!(images[&image_id].atlas.pose, pose);
+        }
+    }
+
+    #[test]
+    fn joint_ba_repeated_input_is_bitwise_deterministic_and_validator_rejects_mutation() {
+        let (manifest, store, images, cameras, landmarks, active) = joint_ba_fixture();
+        let first =
+            build_joint_rig_ba_window(&manifest, &store, &images, &cameras, &landmarks, &active)
+                .unwrap();
+        let second =
+            build_joint_rig_ba_window(&manifest, &store, &images, &cameras, &landmarks, &active)
+                .unwrap();
+        assert_eq!(first, second);
+        let mut malformed = first.clone();
+        let index = *malformed.landmark_updates.keys().next().unwrap();
+        malformed
+            .landmark_updates
+            .get_mut(&index)
+            .unwrap()
+            .observations
+            .pop();
+        let error = validate_joint_ba_update(
+            &malformed,
+            &store,
+            &images,
+            &cameras,
+            &landmarks,
+            &selected_landmarks_for_frames(&landmarks, &active, &images).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("identity or observations"));
+        let mut nan_cost = first.clone();
+        nan_cost.initial_cost = f64::NAN;
+        let error = validate_joint_ba_update(
+            &nan_cost,
+            &store,
+            &images,
+            &cameras,
+            &landmarks,
+            &selected_landmarks_for_frames(&landmarks, &active, &images).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("validated cost"));
+    }
+
+    #[test]
+    fn joint_ba_rejects_cap_without_truncating_observations() {
+        let (manifest, store, images, cameras, mut landmarks, active) = joint_ba_fixture();
+        landmarks.extend(
+            (12..=JOINT_BA_MAX_LANDMARKS).map(|track_id| LandmarkOutput {
+                track_id,
+                position: Point3::new(0.0, 0.0, 4.0),
+                observations: vec![ObservationKey {
+                    global_image_id: 1,
+                    keypoint_index: 0,
+                }],
+                errors: vec![0.0],
+                rms_error: 0.0,
+                mean_error: 0.0,
+                max_error: 0.0,
+                dlt_sample_count: 1,
+            }),
+        );
+        let error =
+            build_joint_rig_ba_window(&manifest, &store, &images, &cameras, &landmarks, &active)
+                .unwrap_err();
+        assert!(matches!(error, JointRigBaSkip::LandmarkCap { .. }));
+        assert_eq!(landmarks.len(), JOINT_BA_MAX_LANDMARKS + 1);
+    }
+
+    #[test]
+    fn joint_ba_rejects_malformed_candidate_without_mutating_inputs() {
+        let (manifest, mut store, images, cameras, landmarks, active) = joint_ba_fixture();
+        let before_store = store.clone();
+        let before_images = images.clone();
+        let before_landmarks = landmarks.clone();
+        let key = *store.observations.keys().next().unwrap();
+        store.observations.get_mut(&key).unwrap().xy.x = f64::NAN;
+        let error =
+            build_joint_rig_ba_window(&manifest, &store, &images, &cameras, &landmarks, &active)
+                .unwrap_err();
+        assert!(matches!(error, JointRigBaSkip::Invalid(_)));
+        assert_eq!(images, before_images);
+        assert_eq!(landmarks, before_landmarks);
+        assert_ne!(store, before_store);
     }
 
     #[test]
@@ -3500,5 +6449,218 @@ mod tests {
         assert!(points.contains(" 0.2 1 0 2 0"));
         assert!(image.lines().any(|line| line.contains("320 240 1")));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnostic_cross_boundary_partition_is_deterministic() {
+        let mut images = BTreeMap::new();
+        images.insert(1, test_image(1, "a", vec![Point2::new(1.0, 1.0)]));
+        images.insert(2, test_image(2, "b", vec![Point2::new(2.0, 2.0)]));
+        images.insert(3, test_image(3, "c", vec![Point2::new(3.0, 3.0)]));
+        let store = TrackStore {
+            observations: BTreeMap::new(),
+            tracks: vec![GlobalTrack {
+                observations: vec![
+                    ObservationKey {
+                        global_image_id: 3,
+                        keypoint_index: 0,
+                    },
+                    ObservationKey {
+                        global_image_id: 1,
+                        keypoint_index: 0,
+                    },
+                    ObservationKey {
+                        global_image_id: 2,
+                        keypoint_index: 0,
+                    },
+                ],
+            }],
+        };
+        let first = collect_diagnostic_cross_tracks(&store, &images, 1).unwrap();
+        let second = collect_diagnostic_cross_tracks(&store, &images, 1).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].left_keys.len(), 1);
+        assert_eq!(first[0].right_keys.len(), 2);
+        assert_eq!(first[0].left_keys[0].global_image_id, 1);
+        assert_eq!(
+            first[0]
+                .right_keys
+                .iter()
+                .map(|key| key.global_image_id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn diagnostic_inliers_count_distinct_tracks_not_observations() {
+        let make = |track_id, image_id| DiagnosticCandidateObservation {
+            track_id,
+            key: ObservationKey {
+                global_image_id: image_id,
+                keypoint_index: 0,
+            },
+            correspondence: GeneralizedCorrespondence2D3D {
+                sensor_index: 0,
+                point2d: Point2::new(0.0, 0.0),
+                point3d: Point3::new(0.0, 0.0, 1.0),
+                confidence: None,
+            },
+        };
+        let candidates = vec![make(4, 1), make(4, 2), make(8, 3), make(9, 4)];
+        assert_eq!(diagnostic_distinct_track_ids(&candidates).len(), 3);
+        assert_eq!(
+            diagnostic_inlier_track_ids(&[0, 1, 2], &candidates).len(),
+            2
+        );
+        assert_eq!(
+            diagnostic_inlier_track_ids(&[0, 2, 3], &candidates).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn diagnostic_pose_round_trip_preserves_fixed_sensor_extrinsics() {
+        let (manifest, _store, images, cameras, _baseline, _) = recovery_fixture(false);
+        let rig_pose = Pose::from_world_to_camera(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.03, -0.02, 0.01)),
+            Vector3::new(0.2, -0.1, 0.4),
+        );
+        assert_eq!(
+            validate_diagnostic_rig_pose(&manifest, 10, &images, &rig_pose).unwrap(),
+            2
+        );
+        let rig = build_generalized_rig(&manifest, &cameras).unwrap();
+        assert_eq!(rig.sensors().len(), 2);
+    }
+
+    #[test]
+    fn diagnostic_target_track_deduplicates_shared_observations() {
+        let left = vec![ObservationKey {
+            global_image_id: 1,
+            keypoint_index: 3,
+        }];
+        let right = vec![
+            ObservationKey {
+                global_image_id: 2,
+                keypoint_index: 3,
+            },
+            ObservationKey {
+                global_image_id: 1,
+                keypoint_index: 3,
+            },
+        ];
+        let track = diagnostic_track_with_keys(&left, &right);
+        assert_eq!(track.observations.len(), 2);
+        assert_eq!(track.observations[0], left[0]);
+        assert_eq!(track.observations[1], right[0]);
+    }
+
+    #[test]
+    fn diagnostic_all_supported_frames_can_remain_disconnected() {
+        let (sizes, supported) =
+            diagnostic_component_sizes_from_frame_tracks(&[0, 1, 2, 3], &[vec![0, 1], vec![2, 3]]);
+        assert_eq!(supported, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(sizes, vec![2, 2]);
+    }
+
+    #[test]
+    fn boundary_repair_acceptance_requires_strict_connectivity_and_support_subset() {
+        let baseline = DiagnosticConnectivityReport {
+            supported_images: BTreeSet::from([1, 2]),
+            supported_frames: BTreeSet::from([10, 30]),
+            supported_component_sizes: vec![1, 1],
+            removed_tracks: 0,
+            removed_observations: 0,
+            added_tracks: 0,
+            added_observations: 0,
+        };
+        let mut candidate = baseline.clone();
+        candidate.supported_images.insert(3);
+        candidate.supported_frames.insert(40);
+        candidate.supported_component_sizes = vec![3];
+        assert!(boundary_repair_candidate_is_accepted(
+            &baseline, &candidate, 1
+        ));
+        candidate.supported_frames.remove(&10);
+        assert!(!boundary_repair_candidate_is_accepted(
+            &baseline, &candidate, 1
+        ));
+        candidate.supported_frames.insert(10);
+        candidate.supported_component_sizes = vec![1, 2];
+        assert!(!boundary_repair_candidate_is_accepted(
+            &baseline, &candidate, 1
+        ));
+        assert!(!boundary_repair_candidate_is_accepted(
+            &baseline, &candidate, 0
+        ));
+    }
+
+    #[test]
+    fn boundary_repair_accepts_first_candidate_transactionally_and_preserves_extrinsics() {
+        let (manifest, store, mut images, cameras, mut landmarks) = boundary_repair_fixture();
+        let before_images = images.clone();
+        let before_landmarks = landmarks.clone();
+        let first =
+            repair_cross_boundary(&manifest, 10, &store, &mut images, &cameras, &mut landmarks)
+                .unwrap();
+        assert_eq!(first.status, "accepted");
+        assert_eq!(first.accepted_frame, Some(30));
+        assert_eq!(first.added_tracks, 6);
+        assert_eq!(first.removed_tracks, 0);
+        assert_eq!(first.baseline_component_count, 2);
+        assert_eq!(first.candidate_component_count, 1);
+        assert_ne!(images, before_images);
+        assert_ne!(landmarks, before_landmarks);
+        assert_eq!(landmarks.len(), 8);
+        assert_eq!(
+            validate_diagnostic_rig_pose(&manifest, 30, &images, &Pose::identity()),
+            Ok(2)
+        );
+        for image in images.values() {
+            let sensor = &manifest.sensors[&image.atlas.sensor_index];
+            let rig_pose =
+                derive_rig_pose_for_frame(&manifest, image.atlas.frame_id, &images).unwrap();
+            let expected = sensor.sensor_from_rig.compose(&rig_pose.world_to_camera);
+            assert!(
+                (expected.translation - image.atlas.pose.world_to_camera.translation).norm()
+                    < 1.0e-8
+            );
+            assert!(
+                (expected.rotation * image.atlas.pose.world_to_camera.rotation.inverse()).angle()
+                    < 1.0e-8
+            );
+        }
+
+        let (manifest_again, store_again, mut images_again, cameras_again, mut landmarks_again) =
+            boundary_repair_fixture();
+        let second = repair_cross_boundary(
+            &manifest_again,
+            10,
+            &store_again,
+            &mut images_again,
+            &cameras_again,
+            &mut landmarks_again,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(images, images_again);
+        assert_eq!(landmarks, landmarks_again);
+    }
+
+    #[test]
+    fn boundary_repair_rejection_is_transactional_when_candidate_is_underconstrained() {
+        let (manifest, mut store, mut images, cameras, mut landmarks) = boundary_repair_fixture();
+        store.tracks.truncate(7);
+        let before_images = images.clone();
+        let before_landmarks = landmarks.clone();
+        let summary =
+            repair_cross_boundary(&manifest, 10, &store, &mut images, &cameras, &mut landmarks)
+                .unwrap();
+        assert_eq!(summary.status, "no-accepted-candidate");
+        assert_eq!(summary.accepted_frame, None);
+        assert_eq!(images, before_images);
+        assert_eq!(landmarks, before_landmarks);
     }
 }

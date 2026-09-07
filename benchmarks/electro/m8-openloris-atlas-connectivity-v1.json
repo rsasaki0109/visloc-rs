@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "additional_quality_deficit_confirmed",
+  "method": "Union rig frames sharing a retained landmark. Include every model frame as a vertex, including unsupported isolated frames. Camera-to-frame assignments use the frozen S/F manifest for atlas output and explicit COLMAP frames.txt DATA_IDS for the control; never infer COLMAP frames from image-ID arithmetic.",
+  "atlas_recovery": {
+    "main_model": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/recovery-v2/component-000",
+    "main_supported_frames": 4494,
+    "main_track_components": 2,
+    "main_component_sizes": [2494, 2000],
+    "main_component_frame_ranges": [[2000, 4493], [0, 1999]],
+    "tail_supported_frames": 505,
+    "tail_track_components": 1,
+    "tail_component_sizes": [505],
+    "total_model_files": 2,
+    "total_rig_track_components": 3
+  },
+  "atlas_joint_ba_v1": {
+    "main_track_components": 2,
+    "main_component_sizes": [2494, 2000],
+    "tail_model_byte_identical_to_recovery": true
+  },
+  "colmap_control": {
+    "model_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/models-text",
+    "main_supported_frames": 4494,
+    "main_track_components": 1,
+    "main_component_sizes": [4494],
+    "tail_supported_frames": 505,
+    "tail_track_components": 1,
+    "tail_component_sizes": [505],
+    "main_frames_sha256": "113b3c8f60ba243a4a7c969ffae998dcbbe343933f744590aa0d2d3e542cb6c2",
+    "tail_frames_sha256": "654e2543896e8b39b28b22eede9174c59a18017b7e770dd1b8e9cd81d3af85a6"
+  },
+  "verification": {
+    "reusable_atlas_auditor": "scripts/audit_colmap_pinhole_model.py --rig-manifest RIG_MANIFEST MODEL...",
+    "auditor_tests_passed": 13,
+    "supported_but_disconnected_fixture_test": true
+  },
+  "pose_boundary_diagnostic": {
+    "model": "atlas_recovery.main_model above",
+    "sensor": "Manifest reference sensor cam1 (identity sensor-from-rig)",
+    "frame_end_range": [1951, 2049],
+    "median_adjacent_center_step_m": 0.027915125234510067,
+    "adjacent_steps": [
+      {"from": 1997, "to": 1998, "center_m": 0.2609062903030281, "rotation_deg": 4.832581870983271},
+      {"from": 1999, "to": 2000, "center_m": 0.8618493534440352, "rotation_deg": 1.6588763952468872},
+      {"from": 2022, "to": 2023, "center_m": 0.9000796974438824, "rotation_deg": 1.0744514825908493}
+    ],
+    "gt_used": false,
+    "interpretation": "Pose discontinuities coincide with the lost connectivity boundary and a nearby interval; source geometry and pose-owner provenance must establish cause before any correction is selected."
+  },
+  "source_bridge_trace": {
+    "source_node_id": 25,
+    "source_window_start": 1950,
+    "other_source_nodes_with_cross_boundary_tracks": 0,
+    "cross_boundary_source_point_rows": 31,
+    "merge_new": 19,
+    "merge_extended": 12,
+    "merge_collision_rejected": 0,
+    "cross_boundary_tracks_in_final_model": 0,
+    "loss_stage": "Final atlas-pose triangulation, after successful observation ownership merging",
+    "independent_dlt_replay_source_row_classification": {
+      "mean_error_above_2px": 18,
+      "mean_within_2px_but_max_above_4px": 3,
+      "nonpositive_depth": 10,
+      "parallax_or_degeneracy": 0
+    },
+    "distinct_final_union_tracks": 31,
+    "counting_caveat": "Follow-up DSU audit confirms the 31 source point rows remain 31 distinct merged tracks; this does not imply 31 geometrically valid anchors."
+  },
+  "pose_owner_audit": {
+    "source_images_sha256": {
+      "node_25": "8cca2ea74975fd3946ddc0af2c79a27ab68fb0a41033ddf5113787e62db1602b",
+      "node_8": "309a48ab92e43add43366a623084344b9294b03e02528423c27615dc24dc65bc"
+    },
+    "source_track_connectivity": {
+      "node_25": {"rig_frames": 499, "supported_rig_frames": 499, "track_components": 1},
+      "node_8": {"rig_frames": 499, "supported_rig_frames": 499, "track_components": 1},
+      "method": "Reusable independent PINHOLE auditor with frozen rig manifest; large within-owner pose steps do not correspond to disconnected source landmark graphs."
+    },
+    "frames_1997_1998_1999": {"node_id": 25, "window_start": 1950},
+    "frames_2000_2022_2023": {"node_id": 8, "window_start": 2000},
+    "independent_source_pose_steps": [
+      {"node_id": 25, "from": 1997, "to": 1998, "center_m": 0.26090629028141693, "rotation_deg": 4.832581871058325},
+      {"node_id": 25, "from": 1999, "to": 2000, "center_m": 0.0329747677607446, "rotation_deg": 0.373075973267784},
+      {"node_id": 25, "from": 2022, "to": 2023, "center_m": 0.02734654913135472, "rotation_deg": 0.1499992687586479},
+      {"node_id": 8, "from": 2022, "to": 2023, "center_m": 0.9000796974484527, "rotation_deg": 1.0744514825630327}
+    ],
+    "interpretation": "The 1999/2000 cut changes owner, but the jumps at 1997/1998 and 2022/2023 occur within a single owner. A rigid displacement of the entire later component cannot explain all three discontinuities."
+  },
+  "split_track_dlt_audit": {
+    "method": "Split each unique merged crossing track at frame 1999/2000; apply existing endpoint-inclusive maximum-64-sample DLT and full-observation positive-depth, minimum-two-observation, mean <= 2 px and max <= 4 px gates independently on each side. No GT.",
+    "left": {"pass": 14, "mean_gate_failed": 4, "max_gate_failed": 1, "fewer_than_two_observations": 12},
+    "right": {"pass": 16, "mean_gate_failed": 6, "max_gate_failed": 3, "fewer_than_two_observations": 6},
+    "both_sides_at_least_two_observations": 16,
+    "both_sides_pass": 7,
+    "left_observation_frame_range": [1905, 1999],
+    "right_observation_frame_range": [2000, 2154],
+    "right_resection_from_left_anchors": {
+      "anchor_tracks": 14,
+      "candidate_frames": 142,
+      "distinct_frame_track_correspondences": 339,
+      "raw_observations": 554,
+      "frames_with_at_least_six_distinct_tracks": 14,
+      "max_distinct_tracks_per_frame": 11,
+      "strict_generalized_pnp_verified": false
+    }
+  },
+  "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. The 31 unique crossing tracks survive merging but fail atlas-pose triangulation. Test bounded resection candidates with existing GeneralizedPnP using independently triangulated left-side anchors, then measure cross-track recovery and existing support loss before any adoption. No whole-component pose shift, scoring realignment, GT-based selection or threshold relaxation."
+}

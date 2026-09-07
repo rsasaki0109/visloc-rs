@@ -67,6 +67,65 @@ class ModelAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonfinite"):
             AUDIT.audit(self.root)
 
+    def rig_manifest(self):
+        path = self.root / "rig.txt"
+        path.write_text(
+            "S 0 1 100 100 10 10 0 0 1 0 0 0 0 0 0\n"
+            "S 1 1 100 100 10 10 0 0 1 0 0 0 -1 0 0\n"
+            "F 10 a.png 0\nF 10 b.png 1\nF 20 c.png 0\n")
+        return path
+
+    def test_rig_support_and_fixed_baseline(self):
+        report = AUDIT.audit(self.root, self.rig_manifest())["rig"]
+        self.assertEqual(report["rig_frames"], 2)
+        self.assertEqual(report["supported_rig_frames"], 1)
+        self.assertEqual(report["unsupported_rig_frame_ids"], [20])
+        self.assertEqual(report["track_connected_component_sizes"], [1, 1])
+        self.assertAlmostEqual(report["max_inferred_rig_center_disagreement_m"], 0)
+
+    def test_supported_frames_can_still_be_track_disconnected(self):
+        manifest = self.rig_manifest()
+        manifest.write_text(manifest.read_text() + "F 30 d.png 0\n")
+        path = self.root / "images.txt"
+        path.write_text(path.read_text().replace("c.png\n\n", "c.png\n-4 0 2\n")
+                        + "4 1 0 0 0 -3 0 0 1 d.png\n-6 0 2\n")
+        path = self.root / "points3D.txt"
+        path.write_text(path.read_text() + "2 0 0 5 255 255 255 0 3 0 4 0\n")
+        report = AUDIT.audit(self.root, manifest)["rig"]
+        self.assertEqual(report["supported_rig_frames"], 3)
+        self.assertEqual(report["track_connected_components"], 2)
+        self.assertEqual(report["track_connected_component_sizes"], [2, 1])
+
+    def test_changed_stereo_baseline_rejected(self):
+        manifest = self.rig_manifest()
+        path = self.root / "images.txt"
+        path.write_text(path.read_text().replace("-1 0 0 1 b.png", "-1.1 0 0 1 b.png"))
+        with self.assertRaisesRegex(ValueError, "fixed sensor extrinsics"):
+            AUDIT.audit(self.root, manifest)
+
+    def test_rotated_sensor_extrinsic_composition(self):
+        manifest = self.rig_manifest()
+        manifest.write_text(manifest.read_text().replace(
+            "0 0 1 0 0 0 -1 0 0", "0 0 0.7071067811865476 0 0 0.7071067811865476 -1 0 0"))
+        path = self.root / "images.txt"
+        path.write_text(path.read_text().replace(
+            "2 1 0 0 0 -1", "2 0.7071067811865476 0 0 0.7071067811865476 -1"))
+        report = AUDIT.audit(self.root, manifest)["rig"]
+        self.assertAlmostEqual(report["max_inferred_rig_center_disagreement_m"], 0)
+        self.assertLess(report["max_inferred_rig_rotation_disagreement_deg"], 1e-5)
+
+    def test_rig_intrinsics_mismatch_rejected(self):
+        manifest = self.rig_manifest()
+        manifest.write_text(manifest.read_text().replace("100 100 10 10", "100 100 11 10"))
+        with self.assertRaisesRegex(ValueError, "rig camera calibration"):
+            AUDIT.audit(self.root, manifest)
+
+    def test_missing_rig_name_rejected(self):
+        manifest = self.rig_manifest()
+        manifest.write_text(manifest.read_text().replace("c.png", "missing.png"))
+        with self.assertRaisesRegex(ValueError, "absent from rig manifest"):
+            AUDIT.audit(self.root, manifest)
+
 
 if __name__ == "__main__":
     unittest.main()
