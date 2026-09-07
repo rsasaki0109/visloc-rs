@@ -57,6 +57,10 @@
 > 検証しています。空pose入力の拒否は、本番の全pose固定/点のみBAの検証とは別です。
 > 次の本番組み込みでは非対応factorを行列組立前に拒否し、固定gaugeの小規模/1k比較を
 > 先行します。具体的な検証契約は有界BA文書の末尾にあります。
+> `469ee9a`＋`8a1485a`の試作10テストを含むBA 21テスト、clippy/fmt、関連Python
+> 46テストが通過。手計算fixtureとfull 15×15連立系も独立照合済みです。
+> [数値検証記録](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)。
+> PR #77の最終head CI確認とmergeが次のcheckpointです。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

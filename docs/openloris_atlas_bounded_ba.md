@@ -609,6 +609,16 @@ anchoring and fixed-rig calibration remain model-level prerequisites before
 any later integration. This gate proves a solver primitive only; global memory,
 runtime, trajectory quality and all original M8–M10 outcomes remain unproven.
 
+The implementation (`469ee9a`, numerical supplement `8a1485a`) passes all ten
+private prototype tests and all 21 tests in the BA namespace, independently
+rerun by the reviewer. A hand-computable two-pose fixture checks zero/nonzero
+damping against the full 15-by-15 normal system, including same-pose sensor
+cross terms. The rig matvec tolerance uses the magnitudes of the unreduced and
+eliminated terms so cancellation does not hide the floating-point scale.
+Clippy, formatting and 46 relevant Python tests pass. PR #77 final-head CI is
+pending; [numerical evidence](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)
+records scope and limitations. No production or 10k performance claim follows.
+
 #### Next integration gate (not implemented by this prototype)
 
 After the private numerical gate and CI, expose an additive, opt-in pure-visual
