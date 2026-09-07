@@ -1,0 +1,493 @@
+{
+  "schema_version": 1,
+  "experiment": "m8-openloris-cholesky-landmark-elimination-v1",
+  "date": "2026-09-07",
+  "status": "diagnostic_complete_no_production_promotion",
+  "implementation_commit": "05500bf5d8d48ea56d1603d5d40c8289ab84716e",
+  "source_sha256": {
+    "pipelines/slam/src/bundle.rs": "0b0a4e1b4985eebeb39a87c29af0c38838ff06e1bc2981425a681e090e517a65"
+  },
+  "binary": {
+    "path": "target/release/deps/visloc_slam-033870405c01cac5",
+    "sha256": "af4173ff0df43bc4a89b42c5395e82d7e63906b1eb159d29b5c11e1afa3f7e04",
+    "build_command": "cargo test --release -p visloc-slam --lib matrix_free_real_oracle_tests --no-run"
+  },
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-cholesky-landmark-elimination-v1",
+  "input": {
+    "baseline_evidence": "m8-openloris-real-normal-system-oracle-v1.json",
+    "fixture": "/home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1/input.fixture",
+    "fixture_sha256": "a71ef3401ea6d75a06f18ded0d475ad48fd929202a64fecaeaa790ee964da1ea",
+    "combined_source_sha256": "ecb825c37e2aed47adef6b20e0d362544c56e37238861d5bcf80ed80cb915829",
+    "initial_cost": 126510.39875730938,
+    "initial_cost_bits": "4683430141614839853",
+    "poses": 500,
+    "variable_poses": 499,
+    "landmarks": 4716,
+    "observations": 130900,
+    "scalar_dimension": 2994,
+    "ground_truth_used": false
+  },
+  "execution": {
+    "rayon_num_threads": 1,
+    "relative_tolerance": 1e-12,
+    "absolute_tolerance": 1e-12,
+    "ignored_test": "bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle",
+    "arguments": [
+      "--exact",
+      "--ignored",
+      "--nocapture"
+    ],
+    "normal_assembly": "Legacy four-case, explicit six-case and Cholesky six-case groups each assemble an initial normal system sequentially. Within the new group, cases share one normal and borrow cross blocks.",
+    "cholesky_policy": "Audit original symmetry at 1e-12*max(1,maxabs(Hll)); mirror lower triangle; no averaging, substitute diagonal or fallback. Same triangular solves construct RHS, action, preconditioner and back-substitution. Diagnostic inverse is not used for the operator.",
+    "failed_iterate_policy": "Failed PCG iterates are discarded; unavailable deltas, geometry and cross-residuals are null.",
+    "setup_failure_limitation": "General inverse metrics/operator/explicit setup failure aborts this diagnostic runner. Cholesky setup failures are reported. Frozen input has no setup failure.",
+    "storage": "Test-only bounded dense references; same PR80 caps. Borrow landmark/cross data; no full second BA model retained.",
+    "production_solver_unchanged": true
+  },
+  "reproducibility": {
+    "runs": 2,
+    "all_17_numerical_report_lines_exact": true,
+    "legacy_11_lines_exact_with_pr81": true,
+    "both_runs_one_test_passed": true
+  },
+  "runs": [
+    {
+      "name": "cholesky-1",
+      "wall_seconds": 80.44,
+      "peak_rss_kib": 349472
+    },
+    {
+      "name": "cholesky-2",
+      "wall_seconds": 90.64,
+      "peak_rss_kib": 349540
+    }
+  ],
+  "artifacts": {
+    "cholesky-1.log": {
+      "sha256": "0d98daf71da8312e6dcda2760d6d61278583994b01d591ad94c9eebfa4a98b7a",
+      "bytes": 33675
+    },
+    "cholesky-1.time": {
+      "sha256": "4e4f0815c10c5a132e45cdf83b95c319926a3d3014b6e61c296cd0c9598539cd",
+      "bytes": 888
+    },
+    "cholesky-2.log": {
+      "sha256": "65e22d3ecb16a0b0a5db4c11d367da1c3dff383cf596a37d0be0d7ef72407ae5",
+      "bytes": 33675
+    },
+    "cholesky-2.time": {
+      "sha256": "9226905275f3e5d251840f06208a3d11ca800f5f4876fb66192d031d5872b647",
+      "bytes": 888
+    }
+  },
+  "measurements": [
+    {
+      "lambda": 0.0001,
+      "pcg_max_iterations": 128,
+      "general_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347216659.193,
+        "inverse_max_asymmetry": 0,
+        "inverse_max_scale": 9656.533732050944,
+        "h_ll_inverse_identity_residual": 1.9996343696102396e-8
+      },
+      "cholesky_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347216659.193,
+        "inverse_max_asymmetry": 1.3642420526593924e-12,
+        "inverse_max_scale": 9656.533732075859,
+        "h_ll_inverse_identity_residual": 2.634178031930877e-8
+      },
+      "general": {
+        "status": "failure:MaxIterations { iterations: 128, recursive_norm: 41263.72612053205, residual_norm: 41263.7264460946, target: 7.354716589947665e-7 }",
+        "iterations": 128,
+        "recursive_residual": 41263.72612053205,
+        "action_true_residual": 41263.7264460946,
+        "target": 7.354716589947665e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.000004919094885193126,
+        "dense_reference_action_true_residual": 0.016225321613743043,
+        "dense_reference_original_pose_equation_residual": 0.009733015676715463,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "cholesky": {
+        "status": "failure:MaxIterations { iterations: 128, recursive_norm: 5715.673228313901, residual_norm: 5715.673230831875, target: 7.354716589948483e-7 }",
+        "iterations": 128,
+        "recursive_residual": 5715.673228313901,
+        "action_true_residual": 5715.673230831875,
+        "target": 7.354716589948483e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.000004243451547724146,
+        "dense_reference_action_true_residual": 0.0004625243341533646,
+        "dense_reference_original_pose_equation_residual": 0.00020542703468644496,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "general_vs_cholesky_pose_error": null,
+      "general_vs_cholesky_landmark_error": null,
+      "rhs_error": 0.000003983229186736744,
+      "probe_action_error": 0.2345071616941995,
+      "probe_preconditioner_error": 8.926410798608598e-15
+    },
+    {
+      "lambda": 0.0001,
+      "pcg_max_iterations": 512,
+      "general_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347216659.193,
+        "inverse_max_asymmetry": 0,
+        "inverse_max_scale": 9656.533732050944,
+        "h_ll_inverse_identity_residual": 1.9996343696102396e-8
+      },
+      "cholesky_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347216659.193,
+        "inverse_max_asymmetry": 1.3642420526593924e-12,
+        "inverse_max_scale": 9656.533732075859,
+        "h_ll_inverse_identity_residual": 2.634178031930877e-8
+      },
+      "general": {
+        "status": "failure:MaxIterations { iterations: 512, recursive_norm: 318.34634181495545, residual_norm: 318.3459481943091, target: 7.354716589947665e-7 }",
+        "iterations": 512,
+        "recursive_residual": 318.34634181495545,
+        "action_true_residual": 318.3459481943091,
+        "target": 7.354716589947665e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.000004919094885193126,
+        "dense_reference_action_true_residual": 0.016225321613743043,
+        "dense_reference_original_pose_equation_residual": 0.009733015676715463,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "cholesky": {
+        "status": "failure:MaxIterations { iterations: 512, recursive_norm: 5.384826671199339, residual_norm: 5.384827028564624, target: 7.354716589948483e-7 }",
+        "iterations": 512,
+        "recursive_residual": 5.384826671199339,
+        "action_true_residual": 5.384827028564624,
+        "target": 7.354716589948483e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.000004243451547724146,
+        "dense_reference_action_true_residual": 0.0004625243341533646,
+        "dense_reference_original_pose_equation_residual": 0.00020542703468644496,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "general_vs_cholesky_pose_error": null,
+      "general_vs_cholesky_landmark_error": null,
+      "rhs_error": 0.000003983229186736744,
+      "probe_action_error": 0.2345071616941995,
+      "probe_preconditioner_error": 8.926410798608598e-15
+    },
+    {
+      "lambda": 100000,
+      "pcg_max_iterations": 128,
+      "general_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347316659.193,
+        "inverse_max_asymmetry": 0,
+        "inverse_max_scale": 0.000009999999536993552,
+        "h_ll_inverse_identity_residual": 2.000888343900442e-11
+      },
+      "cholesky_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347316659.193,
+        "inverse_max_asymmetry": 2.541098841762901e-21,
+        "inverse_max_scale": 0.000009999999536993552,
+        "h_ll_inverse_identity_residual": 1.8639094861936606e-11
+      },
+      "general": {
+        "status": "failure:MaxIterations { iterations: 128, recursive_norm: 1673.762060680569, residual_norm: 1673.7620609788628, target: 7.363379620295508e-7 }",
+        "iterations": 128,
+        "recursive_residual": 1673.762060680569,
+        "action_true_residual": 1673.7620609788628,
+        "target": 7.363379620295508e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.000002143103419796261,
+        "dense_reference_action_true_residual": 0.002572261272662248,
+        "dense_reference_original_pose_equation_residual": 0.0012322092488736053,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "cholesky": {
+        "status": "failure:MaxIterations { iterations: 128, recursive_norm: 1698.1763605015146, residual_norm: 1698.1763611891236, target: 7.36337962029554e-7 }",
+        "iterations": 128,
+        "recursive_residual": 1698.1763605015146,
+        "action_true_residual": 1698.1763611891236,
+        "target": 7.36337962029554e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.0000010906007117797441,
+        "dense_reference_action_true_residual": 0.000010756773267141792,
+        "dense_reference_original_pose_equation_residual": 0.000008358640687523163,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "general_vs_cholesky_pose_error": null,
+      "general_vs_cholesky_landmark_error": null,
+      "rhs_error": 1.4864285126174735e-7,
+      "probe_action_error": 0.4165489896098382,
+      "probe_preconditioner_error": 3.8130088282709313e-16
+    },
+    {
+      "lambda": 100000,
+      "pcg_max_iterations": 512,
+      "general_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347316659.193,
+        "inverse_max_asymmetry": 0,
+        "inverse_max_scale": 0.000009999999536993552,
+        "h_ll_inverse_identity_residual": 2.000888343900442e-11
+      },
+      "cholesky_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16834347316659.193,
+        "inverse_max_asymmetry": 2.541098841762901e-21,
+        "inverse_max_scale": 0.000009999999536993552,
+        "h_ll_inverse_identity_residual": 1.8639094861936606e-11
+      },
+      "general": {
+        "status": "failure:MaxIterations { iterations: 512, recursive_norm: 4.633822922386621e-6, residual_norm: 0.000907864069961008, target: 7.363379620295508e-7 }",
+        "iterations": 512,
+        "recursive_residual": 0.000004633822922386621,
+        "action_true_residual": 0.000907864069961008,
+        "target": 7.363379620295508e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.000002143103419796261,
+        "dense_reference_action_true_residual": 0.002572261272662248,
+        "dense_reference_original_pose_equation_residual": 0.0012322092488736053,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "cholesky": {
+        "status": "failure:ResidualCheckFailed { iterations: 322, recursive_norm: 5.935936186269838e-7, true_norm: 1.2149831240003597e-5, target: 7.36337962029554e-7 }",
+        "iterations": 322,
+        "recursive_residual": 5.935936186269838e-7,
+        "action_true_residual": 0.000012149831240003597,
+        "target": 7.36337962029554e-7,
+        "lower_true_residual": null,
+        "dense_reference_lower_true_residual": 0.0000010906007117797441,
+        "dense_reference_action_true_residual": 0.000010756773267141792,
+        "dense_reference_original_pose_equation_residual": 0.000008358640687523163,
+        "original_pose_equation_residual": null,
+        "pose_error_vs_dense": null,
+        "landmark_error_vs_dense": null,
+        "feasibility": null,
+        "prediction": null
+      },
+      "general_vs_cholesky_pose_error": null,
+      "general_vs_cholesky_landmark_error": null,
+      "rhs_error": 1.4864285126174735e-7,
+      "probe_action_error": 0.4165489896098382,
+      "probe_preconditioner_error": 3.8130088282709313e-16
+    },
+    {
+      "lambda": 10000000000,
+      "pcg_max_iterations": 128,
+      "general_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16844347216659.193,
+        "inverse_max_asymmetry": 0,
+        "inverse_max_scale": 9.999999999995371e-11,
+        "h_ll_inverse_identity_residual": 1.3603997225709525e-13
+      },
+      "cholesky_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16844347216659.193,
+        "inverse_max_asymmetry": 6.462348535570529e-27,
+        "inverse_max_scale": 9.99999999999537e-11,
+        "h_ll_inverse_identity_residual": 1.0805156823142815e-14
+      },
+      "general": {
+        "status": "general_pcg",
+        "iterations": 22,
+        "recursive_residual": null,
+        "action_true_residual": 5.639331821966476e-7,
+        "target": 7.377914999757461e-7,
+        "lower_true_residual": 5.248398232638574e-7,
+        "dense_reference_lower_true_residual": 6.4945806084734065e-9,
+        "dense_reference_action_true_residual": 1.28800155078187e-7,
+        "dense_reference_original_pose_equation_residual": 2.4457371213538693e-7,
+        "original_pose_equation_residual": 6.145139982320029e-7,
+        "pose_error_vs_dense": 2.0919877485600968e-17,
+        "landmark_error_vs_dense": 9.871189290876146e-18,
+        "feasibility": {
+          "finite": true,
+          "pose_true_residual": 5.248398232638574e-7,
+          "implicit_pose_true_residual": 5.639331821966476e-7,
+          "max_landmark_backsub_residual": 2.469834459723764e-7,
+          "geometry_observation_count": 130900,
+          "geometry_invalid_observations": 0,
+          "geometry_nonpositive_depth": 0,
+          "geometry_cost": 126477.42813448103,
+          "geometry_rms_error": 0.9829619111005349,
+          "geometry_max_error": 3.9989838349986138,
+          "geometry_feasible": true,
+          "feasible": true
+        },
+        "prediction": {
+          "half_damped": 8.783279833568196,
+          "squared_damped": 17.566559667136392,
+          "squared_undamped": 32.97081597530536
+        }
+      },
+      "cholesky": {
+        "status": "cholesky_pcg",
+        "iterations": 23,
+        "recursive_residual": null,
+        "action_true_residual": 1.5387753420012324e-8,
+        "target": 7.377914999757461e-7,
+        "lower_true_residual": 1.646443836696794e-8,
+        "dense_reference_lower_true_residual": 6.6976897203643895e-9,
+        "dense_reference_action_true_residual": 9.255624798049736e-9,
+        "dense_reference_original_pose_equation_residual": 7.917266175735718e-9,
+        "original_pose_equation_residual": 1.4282111275872047e-8,
+        "pose_error_vs_dense": 7.751562987913234e-19,
+        "landmark_error_vs_dense": 2.14243935352818e-19,
+        "feasibility": {
+          "finite": true,
+          "pose_true_residual": 1.646443836696794e-8,
+          "implicit_pose_true_residual": 1.5387753420012324e-8,
+          "max_landmark_backsub_residual": 5.468113297845684e-10,
+          "geometry_observation_count": 130900,
+          "geometry_invalid_observations": 0,
+          "geometry_nonpositive_depth": 0,
+          "geometry_cost": 126477.42813448103,
+          "geometry_rms_error": 0.9829619111005349,
+          "geometry_max_error": 3.9989838349986138,
+          "geometry_feasible": true,
+          "feasible": true
+        },
+        "prediction": {
+          "half_damped": 8.783279833568207,
+          "squared_damped": 17.566559667136413,
+          "squared_undamped": 32.9708159753056
+        }
+      },
+      "general_vs_cholesky_pose_error": 2.5391123445570576e-17,
+      "general_vs_cholesky_landmark_error": 1.5372211169631732e-17,
+      "rhs_error": 1.45884685975491e-11,
+      "probe_action_error": 0.011112227291183076,
+      "probe_preconditioner_error": 2.30936045125709e-24
+    },
+    {
+      "lambda": 10000000000,
+      "pcg_max_iterations": 512,
+      "general_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16844347216659.193,
+        "inverse_max_asymmetry": 0,
+        "inverse_max_scale": 9.999999999995371e-11,
+        "h_ll_inverse_identity_residual": 1.3603997225709525e-13
+      },
+      "cholesky_metrics": {
+        "h_ll_max_asymmetry": 0,
+        "h_ll_max_scale": 16844347216659.193,
+        "inverse_max_asymmetry": 6.462348535570529e-27,
+        "inverse_max_scale": 9.99999999999537e-11,
+        "h_ll_inverse_identity_residual": 1.0805156823142815e-14
+      },
+      "general": {
+        "status": "general_pcg",
+        "iterations": 22,
+        "recursive_residual": null,
+        "action_true_residual": 5.639331821966476e-7,
+        "target": 7.377914999757461e-7,
+        "lower_true_residual": 5.248398232638574e-7,
+        "dense_reference_lower_true_residual": 6.4945806084734065e-9,
+        "dense_reference_action_true_residual": 1.28800155078187e-7,
+        "dense_reference_original_pose_equation_residual": 2.4457371213538693e-7,
+        "original_pose_equation_residual": 6.145139982320029e-7,
+        "pose_error_vs_dense": 2.0919877485600968e-17,
+        "landmark_error_vs_dense": 9.871189290876146e-18,
+        "feasibility": {
+          "finite": true,
+          "pose_true_residual": 5.248398232638574e-7,
+          "implicit_pose_true_residual": 5.639331821966476e-7,
+          "max_landmark_backsub_residual": 2.469834459723764e-7,
+          "geometry_observation_count": 130900,
+          "geometry_invalid_observations": 0,
+          "geometry_nonpositive_depth": 0,
+          "geometry_cost": 126477.42813448103,
+          "geometry_rms_error": 0.9829619111005349,
+          "geometry_max_error": 3.9989838349986138,
+          "geometry_feasible": true,
+          "feasible": true
+        },
+        "prediction": {
+          "half_damped": 8.783279833568196,
+          "squared_damped": 17.566559667136392,
+          "squared_undamped": 32.97081597530536
+        }
+      },
+      "cholesky": {
+        "status": "cholesky_pcg",
+        "iterations": 23,
+        "recursive_residual": null,
+        "action_true_residual": 1.5387753420012324e-8,
+        "target": 7.377914999757461e-7,
+        "lower_true_residual": 1.646443836696794e-8,
+        "dense_reference_lower_true_residual": 6.6976897203643895e-9,
+        "dense_reference_action_true_residual": 9.255624798049736e-9,
+        "dense_reference_original_pose_equation_residual": 7.917266175735718e-9,
+        "original_pose_equation_residual": 1.4282111275872047e-8,
+        "pose_error_vs_dense": 7.751562987913234e-19,
+        "landmark_error_vs_dense": 2.14243935352818e-19,
+        "feasibility": {
+          "finite": true,
+          "pose_true_residual": 1.646443836696794e-8,
+          "implicit_pose_true_residual": 1.5387753420012324e-8,
+          "max_landmark_backsub_residual": 5.468113297845684e-10,
+          "geometry_observation_count": 130900,
+          "geometry_invalid_observations": 0,
+          "geometry_nonpositive_depth": 0,
+          "geometry_cost": 126477.42813448103,
+          "geometry_rms_error": 0.9829619111005349,
+          "geometry_max_error": 3.9989838349986138,
+          "geometry_feasible": true,
+          "feasible": true
+        },
+        "prediction": {
+          "half_damped": 8.783279833568207,
+          "squared_damped": 17.566559667136413,
+          "squared_undamped": 32.9708159753056
+        }
+      },
+      "general_vs_cholesky_pose_error": 2.5391123445570576e-17,
+      "general_vs_cholesky_landmark_error": 1.5372211169631732e-17,
+      "rhs_error": 1.45884685975491e-11,
+      "probe_action_error": 0.011112227291183076,
+      "probe_preconditioner_error": 2.30936045125709e-24
+    }
+  ],
+  "interpretation": [
+    "Original damped blocks and general inverses have zero measured asymmetry at all three lambdas; an asymmetric-general-inverse diagnosis is unsupported.",
+    "Cholesky changes finite-precision behavior and improves several residuals, but its maximum inverse identity residual is slightly worse at lambda=1e-4. No uniform superiority claim.",
+    "At lambda=1e5, cap512 Cholesky fails true-residual check at iteration322: 1.2149831240003597e-5 versus target7.36337962029554e-7. No successful nonlinear step or quality evidence at this damping.",
+    "At lambda=1e10 both methods pass; all130900 trial observations valid and trial cost126477.42813448103 identical. This is a heavily damped initial-system diagnostic, not full nonlinear optimization.",
+    "Original-pose-equation residual is ||(Hpp+lambdaI)delta_p + E delta_l + b_p||, distinct from Schur residual and its stopping target.",
+    "Hll inverse identity metric is the maximum per-landmark Frobenius norm. Scale/asymmetry maxima can occur at different landmarks. Probe differences are cross-method discrepancies, not errors against exact arithmetic.",
+    "Whole diagnostic wall/RSS include many factorization/PCG arms on a shared host, not production solver speed/memory or COLMAP end-to-end results."
+  ],
+  "next_experiment": "Separately labeled full nonlinear 1k production-general-inverse PCG512 relative1e-8 absolute1e-12 versus unchanged strict baseline and direct control; preserve observations/calibration and independently audit trajectory, reprojection, time and RSS before any promotion."
+}

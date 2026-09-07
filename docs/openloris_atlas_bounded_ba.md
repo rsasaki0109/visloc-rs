@@ -1043,3 +1043,50 @@ an assumed asymmetric-inverse defect. Record `Hll * inverse - I` residuals,
 original and inverse off-diagonal differences, and scale metrics before
 interpreting a change in PCG convergence. Cholesky can change rounding even
 when both inverse representations are symmetric.
+
+### Cholesky landmark elimination result (2026-09-07)
+
+[Frozen evidence](../benchmarks/electro/m8-openloris-cholesky-landmark-elimination-v1.json)
+records two release runs of implementation `05500bf`. All seventeen numerical
+report lines repeat exactly; the eleven existing lines also match PR #81.
+Original damped blocks and general inverses have zero measured asymmetry at
+all three damping values. The proposed asymmetric-inverse explanation is thus
+unsupported on this input. Cholesky changes rounding, but is not uniformly
+better: at `1e-4`, the maximum block inverse-identity residual increases from
+`2.000e-8` to `2.634e-8`.
+
+| Damping | Cap | General true residual | Cholesky true residual | Result |
+|---|---:|---:|---:|---|
+| `1e-4` | 512 | 318.346 | 5.38483 | both hit cap |
+| `1e5` | 512 | `9.079e-4` | `1.215e-5` | general hits cap; Cholesky recheck fails at 322 |
+| `1e10` | 128 / 512 | `5.639e-7` | `1.539e-8` | both pass, 22 / 23 iterations |
+
+At useful damping `1e5`, Cholesky recursive residual is `5.936e-7`, but true
+residual exceeds its `7.363e-7` target. Its dense reference's own-action
+residual improves from `0.002572` to `1.076e-5`, and original pose-normal
+equation residual from `0.001232` to `8.359e-6`. The latter is a different
+equation norm, not subject automatically to the Schur stopping threshold.
+No failed PCG iterate is applied or assigned hypothetical geometry metrics.
+At `1e10`, all 130,900 observations remain valid with identical trial cost
+126,477.42813448103; cross-method pose/landmark delta differences are only
+`2.54e-17` / `1.54e-17`. This does not establish nonlinear quality improvement.
+
+The test-only operator borrows existing cross blocks and uses the same
+Cholesky factors consistently in RHS, action, preconditioner and back-substitution.
+It audits symmetry before mirroring the lower triangle and never substitutes a
+diagonal or falls back. General setup failures still abort this diagnostic
+runner; Cholesky setup and PCG failures are reported. The frozen fixture has
+no setup failures. Two combined diagnostic processes take 80.44 / 90.64 s and
+349,472 / 349,540 KiB peak RSS on a shared host. These include all reference
+arms and are not production performance measurements. Cholesky remains
+test-only and no README claim is promoted.
+
+The next experiment exposes an example-only, explicitly logged
+`--pcg-relative-tolerance` option. Compare production general-inverse PCG512
+with relative `1e-8`, absolute `1e-12`, against the unchanged strict `1e-12`
+baseline and direct solver on the same full nonlinear 1k input. This is a
+separate stopping-policy arm, not Ceres' quadratic-progress `eta`, and not a
+retroactive pass of the strict oracle. Keep LM settings, observations and
+physical calibration fixed; audit full support, depth, identity, recomputed
+reprojection and post-only GT trajectory, plus repeated wall/RSS, before any
+10k promotion. Local BA timing alone cannot support a COLMAP end-to-end claim.

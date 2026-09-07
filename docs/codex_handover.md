@@ -112,7 +112,12 @@
 > 現1e-12は診断baselineで、ユーザーの最終目的は精度・速度・省メモリです。
 > PR #81は最終CI8項目（run 34125303050）通過後、`06ca2e1`へmergeし旧branch整理済み。
 > 現在は `feat/m8-cholesky-landmark-elimination`。同じ物理damping・観測集合で
-> landmark eliminationの構成だけを変えるA/Bを実装中です。
+> landmark eliminationの構成だけを変えるA/Bは `05500bf` に実装し2回の数値一致を確認。
+> [証跡](../benchmarks/electro/m8-openloris-cholesky-landmark-elimination-v1.json)。
+> general inverseの実測非対称性は0。Choleskyもλ1e5で真残差1.215e-5 > 7.363e-7で失敗し、
+> test-onlyのまま非昇格です。次はexampleで停止条件を明示し、production general inverseの
+> PCG512 relative1e-8 / absolute1e-12を、既存strict設定・directと1k全最適化で比較します。
+> これは別設定armであり旧strict gateの合格扱いにはしません。10k・README昇格は未実施。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
