@@ -75,7 +75,14 @@
     "example_tests_passed": 13,
     "example_clippy_warnings_denied": true,
     "release_build": true,
-    "independent_output_projection_audit": true
+    "independent_output_projection_audit": true,
+    "baseline_ci": {
+      "pull_request": 71,
+      "head_commit": "4ec379a",
+      "run_url": "https://github.com/rsasaki0109/visloc-rs/actions/runs/34082690119",
+      "checks_passed": 8,
+      "scope": "Committed fixed-pose baseline and auditor only; does not cover subsequent unsupported-frame recovery edits"
+    }
   },
   "main_component_repeat": {
     "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/fixed-pose-repeat/component-000",
