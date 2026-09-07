@@ -9,7 +9,35 @@ time and peak RSS in both mapper-only and native end-to-end comparisons.
 This plan is outcome-gated. ANN retrieval, bridge discovery, track repair, and
 BA changes are possible means, not milestone success by themselves.
 
-## Frozen facts and current deficits
+## Current checkpoint (2026-09-07)
+
+The connected, observation-backed atlas now preserves 9,998 registered images,
+9,997 supported images and all 4,999 supported rig frames in connected
+4,494/505-frame models. The retained one-sweep filtering candidate scores
+0.388993 m RMSE / 0.638173 m p95 and 0.581744 px observation-weighted mean
+reprojection. Only RMSE still misses the frozen COLMAP quality gates. Point
+retention and exactly two forward sweeps were measured and rejected for
+trajectory regression; PRs #74/#75 are merged as default-off diagnostics.
+
+PR #76 reduces duplicate landmark-selection scans without changing any model
+or log bytes. Three serial runs per arm measure a local-stage median reduction
+from 172.69 to 154.39 s (10.6%), with essentially unchanged RSS. Remaining
+mode-regression checks now pass, including both pass-one checkpoints; final
+CI/merge checks remain in progress. These times exclude
+source-window reconstruction, atlas construction and the frontend: **mapper-
+only and native-E2E performance are still unproven for this atlas pipeline**.
+Final tier nonregression, restart and 100k I/O gates also remain open.
+See [filtering quality evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json)
+and [scan-reuse measurements](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json).
+
+The next memory option under consideration is an implicit Schur operator,
+initially only a private correctness prototype compared against the existing
+explicit solver. It must not silently allocate a dense system, alter public
+`LinearSolver`/`BaConfig` contracts, or infer valid rig gauges from a damped
+linear solve. No global run or quality improvement is assumed from this option;
+see the [solver-memory audit and primary references](openloris_atlas_bounded_ba.md).
+
+## Historical M7 baseline
 
 | Evidence | Current result | Consequence |
 |---|---:|---|

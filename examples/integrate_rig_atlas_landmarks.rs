@@ -4459,6 +4459,26 @@ fn build_joint_rig_ba_window_raw(
 ) -> Result<JointRigBaWindowUpdate, JointRigBaSkip> {
     let selected = selected_landmarks_for_frames(landmarks, active_frames, images)
         .map_err(JointRigBaSkip::Invalid)?;
+    build_joint_rig_ba_window_raw_with_selected(
+        manifest,
+        store,
+        images,
+        cameras,
+        landmarks,
+        active_frames,
+        &selected,
+    )
+}
+
+fn build_joint_rig_ba_window_raw_with_selected(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+    selected: &[usize],
+) -> Result<JointRigBaWindowUpdate, JointRigBaSkip> {
     if selected.len() > JOINT_BA_MAX_LANDMARKS {
         return Err(JointRigBaSkip::LandmarkCap {
             count: selected.len(),
@@ -4475,7 +4495,7 @@ fn build_joint_rig_ba_window_raw(
         });
     }
     let mut referenced_frames = BTreeSet::new();
-    for index in &selected {
+    for index in selected {
         for key in &landmarks[*index].observations {
             let image = images.get(&key.global_image_id).ok_or_else(|| {
                 JointRigBaSkip::Invalid("landmark references unknown image".to_owned())
@@ -4524,7 +4544,7 @@ fn build_joint_rig_ba_window_raw(
             .ok_or(JointRigBaSkip::NoFreeFrames)?;
         ba.fix_pose(anchor);
     }
-    for index in &selected {
+    for index in selected {
         let landmark = &landmarks[*index];
         let id = u64::try_from(landmark.track_id)
             .map_err(|_| JointRigBaSkip::Invalid("track id exceeds u64".to_owned()))?;
@@ -4541,7 +4561,7 @@ fn build_joint_rig_ba_window_raw(
         }
         ba.add_landmark(id, landmark.position);
     }
-    for index in &selected {
+    for index in selected {
         let landmark = &landmarks[*index];
         let landmark_id = u64::try_from(landmark.track_id)
             .map_err(|_| JointRigBaSkip::Invalid("track id exceeds u64".to_owned()))?;
@@ -4637,7 +4657,7 @@ fn build_joint_rig_ba_window_raw(
         pose_overrides.insert(image.atlas.global_image_id, pose);
     }
     let mut landmark_updates = BTreeMap::new();
-    for index in &selected {
+    for index in selected {
         let old = &landmarks[*index];
         let id = u64::try_from(old.track_id)
             .map_err(|_| JointRigBaSkip::Invalid("track id exceeds u64".to_owned()))?;
@@ -4663,7 +4683,7 @@ fn build_joint_rig_ba_window_raw(
     }
     let mut initial_cost = 0.0;
     let mut final_cost = 0.0;
-    for index in &selected {
+    for index in selected {
         let old_metrics = evaluate_landmark_metrics(
             &landmarks[*index],
             &store.observations,
@@ -4931,12 +4951,21 @@ fn joint_ba_window_counts(
     active_frames: &BTreeSet<u64>,
 ) -> Result<(usize, usize, usize, usize), String> {
     let selected = selected_landmarks_for_frames(landmarks, active_frames, images)?;
+    joint_ba_window_counts_with_selected(landmarks, images, active_frames, &selected)
+}
+
+fn joint_ba_window_counts_with_selected(
+    landmarks: &[LandmarkOutput],
+    images: &BTreeMap<u64, GlobalImage>,
+    active_frames: &BTreeSet<u64>,
+    selected: &[usize],
+) -> Result<(usize, usize, usize, usize), String> {
     let selected_observations = selected
         .iter()
         .map(|index| landmarks[*index].observations.len())
         .sum::<usize>();
     let mut referenced_frames = BTreeSet::new();
-    for index in &selected {
+    for index in selected {
         for key in &landmarks[*index].observations {
             let image = images
                 .get(&key.global_image_id)
@@ -4976,6 +5005,7 @@ fn build_joint_rig_ba_filter_candidate(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_joint_rig_ba_filter_candidate_with_policy(
     manifest: &RigManifest,
     store: &TrackStore,
@@ -4988,8 +5018,40 @@ fn build_joint_rig_ba_filter_candidate_with_policy(
 ) -> Result<JointRigBaFilteringCandidate, JointRigBaSkip> {
     let selected = selected_landmarks_for_frames(landmarks, active_frames, images)
         .map_err(JointRigBaSkip::Invalid)?;
-    let raw =
-        build_joint_rig_ba_window_raw(manifest, store, images, cameras, landmarks, active_frames)?;
+    build_joint_rig_ba_filter_candidate_with_selected(
+        manifest,
+        store,
+        images,
+        cameras,
+        landmarks,
+        active_frames,
+        &selected,
+        baseline_connectivity,
+        preserve_optimized_points,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_joint_rig_ba_filter_candidate_with_selected(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+    selected: &[usize],
+    baseline_connectivity: &SupportConnectivity,
+    preserve_optimized_points: bool,
+) -> Result<JointRigBaFilteringCandidate, JointRigBaSkip> {
+    let raw = build_joint_rig_ba_window_raw_with_selected(
+        manifest,
+        store,
+        images,
+        cameras,
+        landmarks,
+        active_frames,
+        selected,
+    )?;
     if raw.landmark_updates.len() != selected.len() {
         return Err(JointRigBaSkip::Invalid(
             "raw BA candidate omitted a selected landmark".to_owned(),
@@ -4998,7 +5060,7 @@ fn build_joint_rig_ba_filter_candidate_with_policy(
 
     let mut full_pre_ba_cost = 0.0;
     let mut full_post_ba_cost = 0.0;
-    for index in &selected {
+    for index in selected {
         let old = landmarks.get(*index).ok_or_else(|| {
             JointRigBaSkip::Invalid("selected landmark index is invalid".to_owned())
         })?;
@@ -5038,7 +5100,7 @@ fn build_joint_rig_ba_filter_candidate_with_policy(
     let mut raw_preserved_tracks = 0;
     let mut dlt_attempted_tracks = 0;
     let mut raw_fallback_reason_counts = BTreeMap::new();
-    for index in &selected {
+    for index in selected {
         let old = landmarks.get(*index).ok_or_else(|| {
             JointRigBaSkip::Invalid("selected landmark index is invalid".to_owned())
         })?;
@@ -5719,7 +5781,13 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
             .copied()
             .collect::<BTreeSet<_>>();
         summary.windows_considered += 1;
-        let window_counts = joint_ba_window_counts(landmarks, images, &active_frames);
+        let selected_result = selected_landmarks_for_frames(landmarks, &active_frames, images);
+        let window_counts = match selected_result.as_ref() {
+            Ok(selected) => {
+                joint_ba_window_counts_with_selected(landmarks, images, &active_frames, selected)
+            }
+            Err(error) => Err(error.clone()),
+        };
         if let Ok((selected_count, observation_count, referenced_count, free_count)) =
             window_counts.as_ref()
         {
@@ -5728,16 +5796,21 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
             summary.max_referenced_frames = summary.max_referenced_frames.max(*referenced_count);
             summary.max_free_frames = summary.max_free_frames.max(*free_count);
         }
-        match build_joint_rig_ba_filter_candidate_with_policy(
-            manifest,
-            store,
-            images,
-            cameras,
-            landmarks,
-            &active_frames,
-            &baseline_connectivity,
-            preserve_optimized_points,
-        ) {
+        let candidate_result = match selected_result {
+            Ok(selected) => build_joint_rig_ba_filter_candidate_with_selected(
+                manifest,
+                store,
+                images,
+                cameras,
+                landmarks,
+                &active_frames,
+                &selected,
+                &baseline_connectivity,
+                preserve_optimized_points,
+            ),
+            Err(reason) => Err(JointRigBaSkip::Invalid(reason)),
+        };
+        match candidate_result {
             Ok(candidate) => {
                 let reason_counts = filter_reason_counts(&candidate.removed_observations);
                 apply_joint_rig_ba_filter_candidate(&candidate, store, images, landmarks)?;
@@ -8011,7 +8084,13 @@ mod tests {
             &manifest, &store, &images, &cameras, &landmarks, &active, &baseline, true,
         )
         .unwrap();
+        let selected = selected_landmarks_for_frames(&landmarks, &active, &images).unwrap();
+        let enabled_shared = build_joint_rig_ba_filter_candidate_with_selected(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &selected, &baseline, true,
+        )
+        .unwrap();
         assert_eq!(enabled, enabled_again);
+        assert_eq!(enabled, enabled_shared);
         assert!(enabled.raw_preserved_tracks > 0);
         assert!(enabled.dlt_attempted_tracks < enabled.selected_landmarks);
     }
@@ -8234,6 +8313,51 @@ mod tests {
     }
 
     #[test]
+    fn filter_window_reuses_selection_and_reselects_after_compaction() {
+        let (manifest, store, images, cameras, mut landmarks, active) = joint_ba_fixture();
+        let selected = selected_landmarks_for_frames(&landmarks, &active, &images).unwrap();
+        let counts_from_wrapper = joint_ba_window_counts(&landmarks, &images, &active).unwrap();
+        let counts_from_shared =
+            joint_ba_window_counts_with_selected(&landmarks, &images, &active, &selected).unwrap();
+        assert_eq!(counts_from_wrapper, counts_from_shared);
+
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let wrapper_candidate = build_joint_rig_ba_filter_candidate_with_policy(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline, false,
+        )
+        .unwrap();
+        let shared_candidate = build_joint_rig_ba_filter_candidate_with_selected(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &selected, &baseline, false,
+        )
+        .unwrap();
+        assert_eq!(wrapper_candidate, shared_candidate);
+
+        let old_len = landmarks.len();
+        landmarks.remove(0);
+        let selected_after_compaction =
+            selected_landmarks_for_frames(&landmarks, &active, &images).unwrap();
+        assert_eq!(selected_after_compaction.len(), old_len - 1);
+        assert_eq!(
+            selected_after_compaction,
+            (0..landmarks.len()).collect::<Vec<_>>()
+        );
+        let compacted_counts = joint_ba_window_counts_with_selected(
+            &landmarks,
+            &images,
+            &active,
+            &selected_after_compaction,
+        )
+        .unwrap();
+        assert_eq!(compacted_counts.0, old_len - 1);
+    }
+
+    #[test]
     fn joint_ba_synthetic_update_is_transactional_and_preserves_rig_extrinsics() {
         let (manifest, store, mut images, cameras, mut landmarks, active) = joint_ba_fixture();
         let before_images = images.clone();
@@ -8357,6 +8481,23 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(error, JointRigBaSkip::LandmarkCap { .. }));
         assert_eq!(landmarks.len(), JOINT_BA_MAX_LANDMARKS + 1);
+        let selected = selected_landmarks_for_frames(&landmarks, &active, &images).unwrap();
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let wrapper_error = build_joint_rig_ba_filter_candidate_with_policy(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline, true,
+        )
+        .unwrap_err();
+        let shared_error = build_joint_rig_ba_filter_candidate_with_selected(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &selected, &baseline, true,
+        )
+        .unwrap_err();
+        assert_eq!(wrapper_error, shared_error);
     }
 
     #[test]

@@ -494,6 +494,17 @@ COLMAP comparison table; do not replace it with a cherry-picked p95 result.
 
 ### Subsequent output-preserving performance candidate
 
+Two-sweep PR #75 merged as `0989877` after all eight final CI checks passed
+(run 34100723331); its old local/remote branch is removed. Work proceeds on
+`perf/m8-reuse-atlas-window-selection`. The archived baseline executable is
+`selected-scan-reuse-v1/baseline-integrate_rig_atlas_landmarks` under the frozen
+atlas artifact root (same binary SHA as the two-sweep evidence). Default
+one-sweep main run `baseline-main-1` takes 172.69 s / 525,052 KiB and matches
+all six frozen filtering files. No other task benchmark overlapped this run,
+but the machine is shared. Do not treat this single baseline as a speed gain.
+Compare multiple serial runs before/after, verify outputs and per-window logs,
+and retain mapper/native-E2E scope limitations.
+
 Keep this separate from the two-sweep quality experiment. Code inspection of
 the normal filtering-window path finds three calls to
 `selected_landmarks_for_frames`: window-count diagnostics, filtering candidate
@@ -509,3 +520,82 @@ cache these indices across accepted updates. This needs no global adjacency
 index or extra whole-model copy. Verify complete output equality and measure
 time/RSS before claiming a gain. Removing duplicate scans does not eliminate
 the remaining per-window global scan or prove linear total runtime.
+
+The selection-reuse implementation `1eacc08` passes 51 example tests and 23
+independent auditor tests. In six serial, warm-input, shared-machine main-
+component runs, baseline wall times are 172.69/172.80/169.48 s and candidate
+times are 154.39/156.84/152.09 s. Medians are **172.69 → 154.39 s (10.6% less
+time)**, with essentially unchanged RSS medians of 525,232/525,036 KiB.
+All six model files and complete logs match across every run. No task benchmark
+or build overlaps these measurements. Other-mode regression checks now pass:
+strict main, preserved-point main/tail, two-sweep main/tail and filtered tail
+each match all six frozen output files. Both two-sweep pass-one checkpoints
+also match their frozen filtering models. This measures
+integration/recovery/repair/filtering/publication only,
+not the source-window mapper, atlas construction, frontend or native E2E.
+See [selection reuse evidence](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json).
+
+### Read-only solver-memory audit (not a selected next implementation)
+
+The current pure-visual sparse path in `pipelines/slam/src/bundle.rs`,
+`solve_step_pose_blocks`, avoids a dense camera Hessian but still materializes
+the reduced Schur matrix as block-column maps. Its nested pose-pair loop for
+each landmark adds shared-track couplings, and it calls the direct cached
+block-Cholesky solver. `LandmarkBlock.cross` retains pose/landmark cross blocks.
+No matrix-free iterative Schur/PCG path currently exists in these solvers.
+
+A matrix-free Schur operator could avoid storing the reduced matrix and its
+factor fill, but would still retain observation/cross-block state unless that
+is explicitly streamed. It must not silently reuse the current global-BA
+memory or quality claims: the earlier >2 GiB global experiment used a different
+native-mapper input, not this connected atlas. No such method has been measured
+on the connected-atlas input and no accuracy or memory win is established.
+
+Before selecting this larger change, require small-system operator/step checks
+against explicit Schur with identical damping, bounded iteration and residual
+criteria, singular/low-parallax handling, deterministic LM acceptance, fixed
+rig calibration and correct component gauges. Whole-process peak RSS and time
+still need measurement. This audit identifies a memory option; it does not
+authorize an unbounded global solve or replace the outstanding quality gate.
+
+Primary references checked for this option: [Ceres' iterative Schur
+documentation](https://ceres-solver.readthedocs.io/latest/nnls_solving.html#iterative-schur)
+describes CG applied to the reduced camera system through implicit matrix-vector
+products; `SCHUR_JACOBI` uses its block diagonal as a preconditioner.
+[Agarwal et al., Bundle Adjustment in the Large, Eq. 12](https://homes.cs.washington.edu/~sagarwal/bal.pdf)
+derives the implicit product and analyzes the diagonal preconditioner's storage.
+These sources motivate an operator-level comparison, not a prediction that
+global refinement will improve this dataset's trajectory. A future experiment
+must retain identical observations, calibration, damping and GT-free acceptance
+before attributing any change to the solver.
+
+#### Proposed private operator gate
+
+If selected after PR #76 closes, start with a private, test-only operator/PCG
+prototype, not a new mapper flag or global solve. Reuse `NormalEquationsBa`,
+`LandmarkBlock` and the already constrained `CameraHessian::PoseDiagonal`;
+explicitly reject `Dense` input. Do not add a variant to the shared public
+`LinearSolver` enum or a required field to public `BaConfig` struct literals.
+
+For each landmark, compute the sum of all cross-block transposed products
+before applying its damped 3-by-3 inverse, then scatter through every original
+cross block. Multiple sensor observations may share the same rig-pose slot:
+their cross terms must interact, not be treated as separate poses. A Schur
+block-diagonal preconditioner must likewise aggregate cross blocks by pose
+before forming each diagonal contribution. Keep deterministic accumulation
+order and avoid pose-pair blocks, triplets or factor-fill state.
+
+Match the current pose/landmark identity damping and singular-landmark inverse
+skip/back-substitution behavior in the operator oracle. Check operator action,
+reduced RHS, preconditioner diagonal and complete pose/landmark step against
+small explicit systems, including repeated sensor slots, zero/nonzero damping,
+fixed rotations and all-fixed-pose cases. Test dimension/nonfinite errors,
+residual criteria, iteration limits and repeated-run determinism. Numerical
+agreement with a direct solver is tolerance-based; default-path compatibility
+and same-prototype repeat determinism are separate checks.
+
+Linear residual convergence, including zero RHS or a system regularized by
+positive damping, is not evidence of a physically valid gauge. Component
+anchoring and fixed-rig calibration remain model-level prerequisites before
+any later integration. This gate proves a solver primitive only; global memory,
+runtime, trajectory quality and all original M8–M10 outcomes remain unproven.
