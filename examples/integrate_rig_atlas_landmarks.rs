@@ -1626,6 +1626,13 @@ struct DiagnosticCandidateObservation {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiagnosticCandidateAudit {
+    frame_id: u64,
+    full_cross_success_track_ids: Vec<usize>,
+    retriangulated_failure_track_ids: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CrossBoundaryDiagnosticSummary {
     boundary_frame: u64,
     cross_tracks: usize,
@@ -1648,6 +1655,53 @@ struct CrossBoundaryDiagnosticSummary {
     fixed_xyz_gate_failures: usize,
     retriangulated_existing_support_failures: usize,
     cap_skips: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnosticConnectivityReport {
+    supported_images: BTreeSet<u64>,
+    supported_frames: BTreeSet<u64>,
+    component_sizes: Vec<usize>,
+    removed_tracks: usize,
+    removed_observations: usize,
+    added_tracks: usize,
+    added_observations: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticDsu {
+    parent: Vec<usize>,
+    size: Vec<usize>,
+}
+
+impl DiagnosticDsu {
+    fn new(count: usize) -> Self {
+        Self {
+            parent: (0..count).collect(),
+            size: vec![1; count],
+        }
+    }
+
+    fn find(&mut self, index: usize) -> usize {
+        if self.parent[index] != index {
+            let root = self.find(self.parent[index]);
+            self.parent[index] = root;
+        }
+        self.parent[index]
+    }
+
+    fn union(&mut self, left: usize, right: usize) {
+        let mut left_root = self.find(left);
+        let mut right_root = self.find(right);
+        if left_root == right_root {
+            return;
+        }
+        if self.size[left_root] < self.size[right_root] {
+            std::mem::swap(&mut left_root, &mut right_root);
+        }
+        self.parent[right_root] = left_root;
+        self.size[left_root] += self.size[right_root];
+    }
 }
 
 fn diagnostic_dlt_result(
@@ -1916,6 +1970,301 @@ fn diagnostic_track_with_keys(
     GlobalTrack { observations: keys }
 }
 
+fn diagnostic_frame_ids(images: &BTreeMap<u64, GlobalImage>) -> Vec<u64> {
+    images
+        .values()
+        .map(|image| image.atlas.frame_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn diagnostic_image_ids(images: &BTreeMap<u64, GlobalImage>) -> BTreeSet<u64> {
+    images.keys().copied().collect()
+}
+
+fn diagnostic_add_track_to_dsu(
+    keys: &[ObservationKey],
+    images: &BTreeMap<u64, GlobalImage>,
+    frame_indices: &BTreeMap<u64, usize>,
+    dsu: &mut DiagnosticDsu,
+    supported_images: &mut BTreeSet<u64>,
+    supported_frames: &mut BTreeSet<u64>,
+) -> Result<(), String> {
+    let mut track_frames = BTreeSet::new();
+    for key in keys {
+        let image = images
+            .get(&key.global_image_id)
+            .ok_or_else(|| "connectivity track references unknown image".to_owned())?;
+        let frame_id = image.atlas.frame_id;
+        let frame_index = *frame_indices
+            .get(&frame_id)
+            .ok_or_else(|| "connectivity frame index is missing".to_owned())?;
+        supported_images.insert(key.global_image_id);
+        supported_frames.insert(frame_id);
+        track_frames.insert(frame_index);
+    }
+    let mut indices = track_frames.into_iter();
+    if let Some(first) = indices.next() {
+        for index in indices {
+            dsu.union(first, index);
+        }
+    }
+    Ok(())
+}
+
+fn diagnostic_connectivity_report(
+    baseline_landmarks: &[LandmarkOutput],
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    removed_track_ids: &BTreeSet<usize>,
+    added_track_ids: &BTreeSet<usize>,
+) -> Result<DiagnosticConnectivityReport, String> {
+    let frame_ids = diagnostic_frame_ids(images);
+    let frame_indices = frame_ids
+        .iter()
+        .enumerate()
+        .map(|(index, frame_id)| (*frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let baseline_by_track = baseline_landmarks
+        .iter()
+        .map(|landmark| (landmark.track_id, landmark))
+        .collect::<BTreeMap<_, _>>();
+    if baseline_by_track.len() != baseline_landmarks.len() {
+        return Err("baseline connectivity has duplicate track ids".to_owned());
+    }
+    let baseline_track_ids = baseline_by_track.keys().copied().collect::<BTreeSet<_>>();
+    let actually_removed = removed_track_ids
+        .difference(added_track_ids)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for track_id in &actually_removed {
+        if !baseline_by_track.contains_key(track_id) {
+            return Err(format!(
+                "connectivity removal references non-baseline track {track_id}"
+            ));
+        }
+    }
+    let added_new = added_track_ids
+        .difference(&baseline_track_ids)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for track_id in &added_new {
+        if store.tracks.get(*track_id).is_none() {
+            return Err(format!(
+                "connectivity addition references unknown store track {track_id}"
+            ));
+        }
+    }
+
+    let mut dsu = DiagnosticDsu::new(frame_ids.len());
+    let mut supported_images = BTreeSet::new();
+    let mut supported_frames = BTreeSet::new();
+    let mut removed_observations = 0;
+    for landmark in baseline_landmarks {
+        if actually_removed.contains(&landmark.track_id) {
+            removed_observations += landmark.observations.len();
+            continue;
+        }
+        diagnostic_add_track_to_dsu(
+            &landmark.observations,
+            images,
+            &frame_indices,
+            &mut dsu,
+            &mut supported_images,
+            &mut supported_frames,
+        )?;
+    }
+
+    let mut added_observations = 0;
+    for track_id in &added_new {
+        let track = store
+            .tracks
+            .get(*track_id)
+            .ok_or_else(|| format!("connectivity addition references unknown track {track_id}"))?;
+        added_observations += track.observations.len();
+        diagnostic_add_track_to_dsu(
+            &track.observations,
+            images,
+            &frame_indices,
+            &mut dsu,
+            &mut supported_images,
+            &mut supported_frames,
+        )?;
+    }
+
+    let mut component_counts = BTreeMap::<usize, usize>::new();
+    for frame_id in &supported_frames {
+        let frame_index = *frame_indices
+            .get(frame_id)
+            .ok_or_else(|| "supported connectivity frame index is missing".to_owned())?;
+        let root = dsu.find(frame_index);
+        *component_counts.entry(root).or_default() += 1;
+    }
+    let mut component_sizes = component_counts.into_values().collect::<Vec<_>>();
+    component_sizes.sort_unstable();
+    Ok(DiagnosticConnectivityReport {
+        supported_images,
+        supported_frames,
+        component_sizes,
+        removed_tracks: actually_removed.len(),
+        removed_observations,
+        added_tracks: added_new.len(),
+        added_observations,
+    })
+}
+
+fn diagnostic_format_usize_list(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn diagnostic_format_track_ids(ids: &[usize]) -> String {
+    ids.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn diagnostic_emit_connectivity(
+    baseline_landmarks: &[LandmarkOutput],
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    audits: &[DiagnosticCandidateAudit],
+) -> Result<(), String> {
+    let all_images = diagnostic_image_ids(images);
+    let all_frames = diagnostic_frame_ids(images)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let empty = BTreeSet::new();
+    let baseline =
+        diagnostic_connectivity_report(baseline_landmarks, store, images, &empty, &empty)?;
+    let baseline_unsupported_images = all_images
+        .difference(&baseline.supported_images)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let baseline_unsupported_frames = all_frames
+        .difference(&baseline.supported_frames)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    println!(
+        "cross_boundary_connectivity_baseline supported_images={} unsupported_images={} supported_frames={} unsupported_frames={} component_count={} component_sizes={}",
+        baseline.supported_images.len(),
+        baseline_unsupported_images.len(),
+        baseline.supported_frames.len(),
+        baseline_unsupported_frames.len(),
+        baseline.component_sizes.len(),
+        diagnostic_format_usize_list(&baseline.component_sizes),
+    );
+
+    for audit in audits {
+        let removed = audit
+            .retriangulated_failure_track_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let added = audit
+            .full_cross_success_track_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let candidate =
+            diagnostic_connectivity_report(baseline_landmarks, store, images, &removed, &added)?;
+        let candidate_unsupported_images = all_images
+            .difference(&candidate.supported_images)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let candidate_unsupported_frames = all_frames
+            .difference(&candidate.supported_frames)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let existing_unsupported_images = baseline_unsupported_images
+            .intersection(&candidate_unsupported_images)
+            .count();
+        let existing_unsupported_frames = baseline_unsupported_frames
+            .intersection(&candidate_unsupported_frames)
+            .count();
+        let recovered_existing_images = baseline_unsupported_images
+            .difference(&candidate_unsupported_images)
+            .count();
+        let recovered_existing_frames = baseline_unsupported_frames
+            .difference(&candidate_unsupported_frames)
+            .count();
+        let new_unsupported_images = candidate_unsupported_images
+            .difference(&baseline_unsupported_images)
+            .count();
+        let new_unsupported_frames = candidate_unsupported_frames
+            .difference(&baseline_unsupported_frames)
+            .count();
+        println!(
+            "cross_boundary_connectivity frame={} full_cross_success_tracks={} full_cross_success_ids={} retriangulated_failure_tracks={} retriangulated_failure_ids={} removed_tracks={} removed_observations={} added_tracks={} added_observations={} supported_images={} unsupported_images={} supported_frames={} unsupported_frames={} existing_unsupported_images={} existing_unsupported_frames={} recovered_existing_images={} recovered_existing_frames={} new_unsupported_images={} new_unsupported_frames={} component_count={} component_sizes={}",
+            audit.frame_id,
+            audit.full_cross_success_track_ids.len(),
+            diagnostic_format_track_ids(&audit.full_cross_success_track_ids),
+            audit.retriangulated_failure_track_ids.len(),
+            diagnostic_format_track_ids(&audit.retriangulated_failure_track_ids),
+            candidate.removed_tracks,
+            candidate.removed_observations,
+            candidate.added_tracks,
+            candidate.added_observations,
+            candidate.supported_images.len(),
+            candidate_unsupported_images.len(),
+            candidate.supported_frames.len(),
+            candidate_unsupported_frames.len(),
+            existing_unsupported_images,
+            existing_unsupported_frames,
+            recovered_existing_images,
+            recovered_existing_frames,
+            new_unsupported_images,
+            new_unsupported_frames,
+            candidate.component_sizes.len(),
+            diagnostic_format_usize_list(&candidate.component_sizes),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn diagnostic_component_sizes_from_frame_tracks(
+    frame_ids: &[u64],
+    track_frames: &[Vec<u64>],
+) -> (Vec<usize>, BTreeSet<u64>) {
+    let frame_indices = frame_ids
+        .iter()
+        .enumerate()
+        .map(|(index, frame_id)| (*frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut dsu = DiagnosticDsu::new(frame_ids.len());
+    let mut supported = BTreeSet::new();
+    for track in track_frames {
+        let mut indices = track
+            .iter()
+            .filter_map(|frame_id| {
+                supported.insert(*frame_id);
+                frame_indices.get(frame_id).copied()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter();
+        if let Some(first) = indices.next() {
+            for index in indices {
+                dsu.union(first, index);
+            }
+        }
+    }
+    let mut counts = BTreeMap::<usize, usize>::new();
+    for frame_id in &supported {
+        if let Some(index) = frame_indices.get(frame_id) {
+            *counts.entry(dsu.find(*index)).or_default() += 1;
+        }
+    }
+    let mut sizes = counts.into_values().collect::<Vec<_>>();
+    sizes.sort_unstable();
+    (sizes, supported)
+}
+
 /// Run the strict, non-mutating cross-boundary generalized-PnP experiment.
 ///
 /// Only tracks whose left-side DLT passes are used as 3D anchors. Each right
@@ -2046,6 +2395,7 @@ fn diagnose_cross_boundary_pnp(
         .iter()
         .map(|(cross, _, _)| (cross.track_id, cross))
         .collect::<BTreeMap<_, _>>();
+    let mut candidate_audits = Vec::new();
 
     for (frame_id, frame_candidates) in candidates_by_frame {
         let distinct_candidates = diagnostic_distinct_track_ids(&frame_candidates);
@@ -2108,6 +2458,10 @@ fn diagnose_cross_boundary_pnp(
         let mut full_cross_support_tracks = 0;
         let mut target_support_observations = 0;
         let mut full_cross_support_observations = 0;
+        let mut candidate_audit = DiagnosticCandidateAudit {
+            frame_id,
+            ..DiagnosticCandidateAudit::default()
+        };
         // Only RANSAC-distinct inlier tracks are eligible for the support
         // experiment. Outlier candidate tracks remain visible in the
         // candidate_tracks field but cannot be presented as recovered support.
@@ -2143,6 +2497,7 @@ fn diagnose_cross_boundary_pnp(
             ) {
                 full_cross_support_tracks += 1;
                 full_cross_support_observations += landmark.observations.len();
+                candidate_audit.full_cross_success_track_ids.push(*track_id);
             }
         }
         summary.target_support_attempts += distinct_inliers.len();
@@ -2193,6 +2548,9 @@ fn diagnose_cross_boundary_pnp(
                 .unwrap_or(true);
             if retriangulated_failed {
                 retriangulated_existing_support_failures += 1;
+                candidate_audit
+                    .retriangulated_failure_track_ids
+                    .push(landmark.track_id);
             }
         }
         summary.fixed_xyz_gate_failures += fixed_xyz_gate_failures;
@@ -2218,7 +2576,9 @@ fn diagnose_cross_boundary_pnp(
             fixed_xyz_gate_failures,
             retriangulated_existing_support_failures,
         );
+        candidate_audits.push(candidate_audit);
     }
+    diagnostic_emit_connectivity(baseline_landmarks, store, images, &candidate_audits)?;
     println!(
         "cross_boundary_pnp_summary boundary_frame={} cross_tracks={} left_pass={} left_short={} left_rejected={} right_pass={} right_short={} right_rejected={} both_sides_two_observations={} both_sides_dlt_pass={} candidate_frames={} pnp_reports={} distinct_anchor_frames={} target_support_attempts={} target_support_successes={} full_cross_support_attempts={} full_cross_support_successes={} existing_support_checks={} fixed_xyz_gate_failures={} retriangulated_existing_support_failures={} cap_skips={} default_model_unchanged=true",
         summary.boundary_frame,
@@ -5448,5 +5808,13 @@ mod tests {
         assert_eq!(track.observations.len(), 2);
         assert_eq!(track.observations[0], left[0]);
         assert_eq!(track.observations[1], right[0]);
+    }
+
+    #[test]
+    fn diagnostic_all_supported_frames_can_remain_disconnected() {
+        let (sizes, supported) =
+            diagnostic_component_sizes_from_frame_tracks(&[0, 1, 2, 3], &[vec![0, 1], vec![2, 3]]);
+        assert_eq!(supported, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(sizes, vec![2, 2]);
     }
 }
