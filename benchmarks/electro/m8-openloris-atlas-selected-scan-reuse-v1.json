@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "date": "2026-09-07",
-  "status": "serial_speed_gain_verified_mode_regressions_in_progress",
+  "status": "output_preserving_local_speed_gain_verified",
   "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/selected-scan-reuse-v1",
   "baseline": {
     "implementation_commit": "c99c381",
@@ -29,15 +29,52 @@
     "own_benchmarks_or_builds_overlap": false,
     "cache_state": "Repeated warm-input runs; cache not forcibly dropped",
     "required_main_runs_per_arm": 3,
-    "planned_main_run_order": ["baseline-main-1", "baseline-main-2", "candidate-main-1", "baseline-main-3", "candidate-main-2", "candidate-main-3"]
+    "planned_main_run_order": [
+      "baseline-main-1",
+      "baseline-main-2",
+      "candidate-main-1",
+      "baseline-main-3",
+      "candidate-main-2",
+      "candidate-main-3"
+    ]
   },
   "completed_runs": [
-    {"label": "baseline-main-1", "wall_s": 172.69, "peak_rss_kib": 525052, "six_files_match_frozen_filtering_main": true},
-    {"label": "baseline-main-2", "wall_s": 172.80, "peak_rss_kib": 525268, "six_files_and_complete_log_match_baseline_main_1": true},
-    {"label": "candidate-main-1", "wall_s": 154.39, "peak_rss_kib": 524984, "six_files_and_complete_log_match_baseline_main_1": true},
-    {"label": "baseline-main-3", "wall_s": 169.48, "peak_rss_kib": 525232, "six_files_and_complete_log_match_baseline_main_1": true},
-    {"label": "candidate-main-2", "wall_s": 156.84, "peak_rss_kib": 525036, "six_files_and_complete_log_match_baseline_main_1": true},
-    {"label": "candidate-main-3", "wall_s": 152.09, "peak_rss_kib": 525080, "six_files_and_complete_log_match_baseline_main_1": true}
+    {
+      "label": "baseline-main-1",
+      "wall_s": 172.69,
+      "peak_rss_kib": 525052,
+      "six_files_match_frozen_filtering_main": true
+    },
+    {
+      "label": "baseline-main-2",
+      "wall_s": 172.8,
+      "peak_rss_kib": 525268,
+      "six_files_and_complete_log_match_baseline_main_1": true
+    },
+    {
+      "label": "candidate-main-1",
+      "wall_s": 154.39,
+      "peak_rss_kib": 524984,
+      "six_files_and_complete_log_match_baseline_main_1": true
+    },
+    {
+      "label": "baseline-main-3",
+      "wall_s": 169.48,
+      "peak_rss_kib": 525232,
+      "six_files_and_complete_log_match_baseline_main_1": true
+    },
+    {
+      "label": "candidate-main-2",
+      "wall_s": 156.84,
+      "peak_rss_kib": 525036,
+      "six_files_and_complete_log_match_baseline_main_1": true
+    },
+    {
+      "label": "candidate-main-3",
+      "wall_s": 152.09,
+      "peak_rss_kib": 525080,
+      "six_files_and_complete_log_match_baseline_main_1": true
+    }
   ],
   "serial_main_result": {
     "baseline_median_wall_s": 172.69,
@@ -51,10 +88,80 @@
     "example_tests_no_default": 51,
     "independent_auditor_tests": 23,
     "clippy_no_default_release_build_and_diff_check": "pass",
-    "tests_cover": ["shared selection/count/candidate equivalence", "retention-policy equivalence", "over-cap rejection equivalence", "reselection after landmark compaction", "existing one/two-sweep determinism and support guards"],
+    "tests_cover": [
+      "shared selection/count/candidate equivalence",
+      "retention-policy equivalence",
+      "over-cap rejection equivalence",
+      "reselection after landmark compaction",
+      "existing one/two-sweep determinism and support guards"
+    ],
     "pr": 76,
-    "implementation_ci": {"run_id": 34102096800, "head_commit": "1eacc08", "checks_passed": 8, "rust_duration": "3m42s"},
-    "final_ci_status": "not_yet_run"
+    "implementation_ci": {
+      "run_id": 34102096800,
+      "head_commit": "1eacc08",
+      "checks_passed": 8,
+      "rust_duration": "3m42s"
+    },
+    "final_ci_status": "pending_final_evidence_head",
+    "benchmark_registry_and_documentation_links": "pass"
   },
-  "decision": "Serial main-component timing gain is verified; merge remains gated on other-mode regressions and final CI. Byte-identical output preserves the prior experimental quality result; it does not close the outstanding COLMAP RMSE gate or full M8-M10 objective."
+  "decision": "Promote the output-preserving selection reuse after final CI: serial main-stage median time is 10.6 percent lower with unchanged outputs/logs and no material RSS change. All frozen mode regressions and both pass-one checkpoints match. The COLMAP RMSE gate and full mapper/native E2E, tier, restart and 100k I/O gates remain open.",
+  "mode_regressions": {
+    "candidate-filtered-tail": {
+      "reference": "connected-filtered-ba-v1/component-001",
+      "six_files_byte_identical": true,
+      "wall_s": 10.2,
+      "peak_rss_kib": 77924
+    },
+    "candidate-strict-main": {
+      "reference": "connected-strict-ba-v1/component-000",
+      "six_files_byte_identical": true,
+      "wall_s": 133.07,
+      "peak_rss_kib": 515404
+    },
+    "candidate-preserved-main": {
+      "reference": "connected-preserved-ba-v1/component-000",
+      "six_files_byte_identical": true,
+      "wall_s": 158.03,
+      "peak_rss_kib": 525860
+    },
+    "candidate-preserved-tail": {
+      "reference": "connected-preserved-ba-v1/component-001",
+      "six_files_byte_identical": true,
+      "wall_s": 12,
+      "peak_rss_kib": 77684
+    },
+    "candidate-two-main": {
+      "reference": "connected-two-sweep-ba-v1/component-000",
+      "six_files_byte_identical": true,
+      "wall_s": 301.13,
+      "peak_rss_kib": 525068
+    },
+    "candidate-two-tail": {
+      "reference": "connected-two-sweep-ba-v1/component-001",
+      "six_files_byte_identical": true,
+      "wall_s": 18.17,
+      "peak_rss_kib": 77896
+    },
+    "candidate-two-pass1-main": {
+      "reference": "connected-filtered-ba-v1/component-000",
+      "six_files_byte_identical": true
+    },
+    "candidate-two-pass1-tail": {
+      "reference": "connected-filtered-ba-v1/component-001",
+      "six_files_byte_identical": true
+    }
+  },
+  "mode_regression_timing_scope": "Diagnostic runs, not comparative speed results; older mode baselines include overlapping jobs.",
+  "hashes": {
+    "main_output_files": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+      "points3D.txt": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14",
+      "image_support.tsv": "be71783dfd7520f090c784eba46c5530ee9cb53884d75b6ad836cfc23d03dc00",
+      "frame_support.tsv": "aec4e5fd2f6d1b3e1a6fde3a8d3731d3457814b12887bc47133514605b1ffd84",
+      "integration_summary.tsv": "b4a58475cfd6ecf98b36e7902647f182c6c815a14a7f8a6c9dbde6eb096f2b97"
+    },
+    "all_six_main_full_logs": "7d96d29cd2702914f123ad267c397418d9a88b9053cbc4d5aac31429ae5c8a44"
+  }
 }

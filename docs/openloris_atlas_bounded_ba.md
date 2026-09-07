@@ -527,8 +527,11 @@ component runs, baseline wall times are 172.69/172.80/169.48 s and candidate
 times are 154.39/156.84/152.09 s. Medians are **172.69 → 154.39 s (10.6% less
 time)**, with essentially unchanged RSS medians of 525,232/525,036 KiB.
 All six model files and complete logs match across every run. No task benchmark
-or build overlaps these measurements. Other-mode regression checks remain in
-progress. This measures integration/recovery/repair/filtering/publication only,
+or build overlaps these measurements. Other-mode regression checks now pass:
+strict main, preserved-point main/tail, two-sweep main/tail and filtered tail
+each match all six frozen output files. Both two-sweep pass-one checkpoints
+also match their frozen filtering models. This measures
+integration/recovery/repair/filtering/publication only,
 not the source-window mapper, atlas construction, frontend or native E2E.
 See [selection reuse evidence](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json).
 
@@ -565,3 +568,34 @@ These sources motivate an operator-level comparison, not a prediction that
 global refinement will improve this dataset's trajectory. A future experiment
 must retain identical observations, calibration, damping and GT-free acceptance
 before attributing any change to the solver.
+
+#### Proposed private operator gate
+
+If selected after PR #76 closes, start with a private, test-only operator/PCG
+prototype, not a new mapper flag or global solve. Reuse `NormalEquationsBa`,
+`LandmarkBlock` and the already constrained `CameraHessian::PoseDiagonal`;
+explicitly reject `Dense` input. Do not add a variant to the shared public
+`LinearSolver` enum or a required field to public `BaConfig` struct literals.
+
+For each landmark, compute the sum of all cross-block transposed products
+before applying its damped 3-by-3 inverse, then scatter through every original
+cross block. Multiple sensor observations may share the same rig-pose slot:
+their cross terms must interact, not be treated as separate poses. A Schur
+block-diagonal preconditioner must likewise aggregate cross blocks by pose
+before forming each diagonal contribution. Keep deterministic accumulation
+order and avoid pose-pair blocks, triplets or factor-fill state.
+
+Match the current pose/landmark identity damping and singular-landmark inverse
+skip/back-substitution behavior in the operator oracle. Check operator action,
+reduced RHS, preconditioner diagonal and complete pose/landmark step against
+small explicit systems, including repeated sensor slots, zero/nonzero damping,
+fixed rotations and all-fixed-pose cases. Test dimension/nonfinite errors,
+residual criteria, iteration limits and repeated-run determinism. Numerical
+agreement with a direct solver is tolerance-based; default-path compatibility
+and same-prototype repeat determinism are separate checks.
+
+Linear residual convergence, including zero RHS or a system regularized by
+positive damping, is not evidence of a physically valid gauge. Component
+anchoring and fixed-rig calibration remain model-level prerequisites before
+any later integration. This gate proves a solver primitive only; global memory,
+runtime, trajectory quality and all original M8–M10 outcomes remain unproven.
