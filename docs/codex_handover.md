@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 続行（2026-09-08）: PR #85は最終head `11f36b8` のCI8項目
+> （run `34145940542`）通過後、`d751f6e`へmerge済み。旧local/remote branchも整理済み。
+> 現在は `feat/m8-lm-step-quality-diagnostic`。Luna Maxで既定OFFの更新品質診断を
+> 設計中です。予測/実際のcost減少と座標を明示した正規化残差を記録し、solverや
+> LMの採否は変更しません。元normalやモデルの追加複製は行いません。
+> 前turnは実装・測定・監査・PR統合まで進捗あり。全体goalは精度/E2E/各規模ゲートが未達です。
+
 > 最新実測（2026-09-08）: 列スケーリング＋scaled LMは `99d899b` に実装済み。
 > 1kは2回ともPCG20/20成功・LM10/20受理・モデル/数値trace一致ですが、
 > RMSE/p95が0.028550/0.043791 mへ悪化し非昇格です。

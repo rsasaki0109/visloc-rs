@@ -1501,3 +1501,34 @@ and [LM strategy source](https://github.com/ceres-solver/ceres-solver/blob/maste
 (reviewed 2026-09-08). These motivate a diagnostic, not a claim that adaptive
 LM or looser solves will cure the observed 1k trajectory regression. Keep
 GT post-only, all observations, bounded memory and defaults unchanged.
+
+### Step-quality diagnostic design checkpoint (2026-09-08)
+
+PR #85 merged as `d751f6e` after eight final-head checks on `11f36b8`
+(run `34145940542`); its evidence file is the earlier pre-CI snapshot.
+Continue on `feat/m8-lm-step-quality-diagnostic`. This adds diagnostics only,
+not another tolerance, damping or acceptance policy.
+
+For the squared-error convention, the undamped predicted decrease is
+`-2 b^T delta - delta^T H delta`; compare it with the actual cost decrease
+only for a finite, successfully computed candidate. Keep actual solve lambda
+distinct from the post-rejection lambda printed by legacy LM traces. Failed
+linear solves have no candidate decrease or fabricated residual.
+
+The scaled normal is already transformed in-place. Any residual mapped back
+from it describes the physical-equivalent system represented by those rounded
+scaled coefficients, not an independently preserved original normal. Label
+that distinction. Normalize residuals rather than comparing raw norms across
+coordinate systems. For a componentwise backward-error diagnostic, repeated
+cross contributions to the same pose/landmark coefficient must be summed
+before taking absolute values; summing absolute contributions would produce
+a different denominator. Handle zero denominators and nonfinite arithmetic
+explicitly without modifying the solve's result.
+
+Keep only bounded scalar records, linear-size scratch and at most one
+landmark's cross aggregation; no extra model/normal clone, global dense
+matrix, coefficient dump or per-point history. Existing APIs, default logs,
+numerical steps and LM/depth/rollback gates remain unchanged. Small explicit
+full-normal tests and debug ON/OFF model/trace comparisons must precede using
+the diagnostic to select a new policy. The 1k regression, unmet 10k COLMAP
+RMSE and full mapper/E2E/scale requirements remain unresolved.
