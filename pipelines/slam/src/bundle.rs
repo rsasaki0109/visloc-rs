@@ -7024,6 +7024,7 @@ mod matrix_free_ba_api_tests {
     #[test]
     fn matrix_free_supports_rectified_stereo_and_rig_visual_factors() {
         let mut stereo = make_problem();
+        stereo.fixed_landmarks.clear();
         let camera = stereo.camera.clone();
         let baseline = 0.12;
         stereo.stereo_baseline = Some(baseline);
@@ -7052,6 +7053,7 @@ mod matrix_free_ba_api_tests {
         assert!((stereo_direct_result.final_cost - stereo_result.final_cost).abs() < 1.0e-6);
 
         let mut rig = make_problem();
+        rig.fixed_landmarks.clear();
         let camera = rig.camera.clone();
         let sensor1 = SE3::new(
             UnitQuaternion::from_euler_angles(0.02, -0.01, 0.03),
