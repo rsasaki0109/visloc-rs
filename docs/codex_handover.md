@@ -42,6 +42,10 @@
 > 現在は `perf/m8-reuse-atlas-window-selection`。精度変更を混ぜず、同じwindowの
 > landmark選択scanの重複だけを削減します。比較用基準runは172.69 s /
 > 525,052 KiB、既存filtered主成分と全6ファイル一致（共有機、局所処理のみ）。
+> 選択scan共有は `1eacc08` で実装済み、51 example / 23 auditor tests通過。
+> PR #76でserial比較中。基準2回は172.69/172.80 s、変更版初回154.39 sで
+> 全6ファイル・ログ全文一致。各3回測定と他モードの非回帰を完了してから判断します。
+> [scan共有の測定記録](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json)。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

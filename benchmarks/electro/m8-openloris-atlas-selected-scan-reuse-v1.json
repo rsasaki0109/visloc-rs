@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "serial_repeats_and_mode_regressions_in_progress",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/selected-scan-reuse-v1",
+  "baseline": {
+    "implementation_commit": "c99c381",
+    "source_sha256": "0ec98e2456cc410e395f8d54f74d2ebf8566e44716bce024f86ac63d43e6483c",
+    "binary_sha256": "452b904af5b57d9e932335300a3795b5edceb4832883b98143aa96133f8f7ec5"
+  },
+  "candidate": {
+    "implementation_commit": "1eacc08",
+    "source_sha256": "a70d2e41c7a2664343fa3e4a3a4c957793b984ca24b4775cbc30daaac6e0b860",
+    "binary_sha256": "4d509142f63e39363d622ab1dd87f16c33e77cad0b9b7ccbb6a8e4f2313063eb"
+  },
+  "contract": {
+    "build_command_both": "cargo build --release --example integrate_rig_atlas_landmarks --no-default-features",
+    "explicit_build_environment_overrides": "none",
+    "same_frozen_manifest_nodes_and_atlas_inputs": true,
+    "flags": "--recover-zero-support-frames --repair-cross-boundary --repair-left-max-frame 1999 --joint-rig-ba --joint-rig-ba-filter-observations",
+    "optional_checkpoints": false,
+    "filter_sweeps": 1,
+    "optimized_point_retention": false,
+    "change": "Compute ordered selected-landmark indices once per filtering window and borrow for counts, filtering candidate and raw BA instead of three global selection scans",
+    "selected_indices_dropped_before_model_compaction": true,
+    "cross_window_cache_global_adjacency_index_or_whole_model_clone": false,
+    "numerical_order_caps_cost_geometry_support_and_connectivity_guards_unchanged": true,
+    "timing_scope": "Serial, shared-machine integration/recovery/repair/one-sweep BA/publication of the main atlas component; excludes source-window generation, atlas construction and frontend. Not mapper-only or native E2E",
+    "own_benchmarks_or_builds_overlap": false,
+    "cache_state": "Repeated warm-input runs; cache not forcibly dropped",
+    "required_main_runs_per_arm": 3,
+    "planned_main_run_order": ["baseline-main-1", "baseline-main-2", "candidate-main-1", "baseline-main-3", "candidate-main-2", "candidate-main-3"]
+  },
+  "completed_runs": [
+    {"label": "baseline-main-1", "wall_s": 172.69, "peak_rss_kib": 525052, "six_files_match_frozen_filtering_main": true},
+    {"label": "baseline-main-2", "wall_s": 172.80, "peak_rss_kib": 525268, "six_files_and_complete_log_match_baseline_main_1": true},
+    {"label": "candidate-main-1", "wall_s": 154.39, "peak_rss_kib": 524984, "six_files_and_complete_log_match_baseline_main_1": true}
+  ],
+  "verification": {
+    "example_tests_default": 51,
+    "example_tests_no_default": 51,
+    "independent_auditor_tests": 23,
+    "clippy_no_default_release_build_and_diff_check": "pass",
+    "tests_cover": ["shared selection/count/candidate equivalence", "retention-policy equivalence", "over-cap rejection equivalence", "reselection after landmark compaction", "existing one/two-sweep determinism and support guards"],
+    "pr": 76,
+    "ci_status": "pending"
+  },
+  "decision": "Do not claim a measured gain until serial repeats and regression checks complete. Byte-identical output preserves the prior experimental quality result; it does not close the outstanding COLMAP RMSE gate or full M8-M10 objective."
+}
