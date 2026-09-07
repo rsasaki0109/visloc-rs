@@ -280,6 +280,22 @@ name/global ID plus original keypoint index, never by a window-local image or
 point ID. Confirm matching pixel coordinates when joining reused indices;
 different feature-bank generations must fail closed rather than merge silently.
 
+A read-only audit of all 23 frozen source windows finds 21,566 image rows,
+9,998 unique image names, and 8,482 shared names (at most three occurrences).
+SHA-256 signatures of each complete ordered float64 `(x, y)` array agree for
+every repeated image: zero coordinate/ordering mismatches. The sources contain
+3,364,422 landmark observation references including overlap duplicates.
+Original window `images.txt` observation rows and sibling `cameras.txt` /
+`points3D.txt` exist; only the stitched trajectory output lacks landmarks.
+
+Naively unioning local tracks through shared observations is not safe: a
+read-only transitive-union diagnostic finds 803,676 source tracks, 1,750,273
+unique observations, and 380,669 unions, of which 833 contain multiple
+keypoints from the same image (10,611 excess same-image references). The
+largest union has 1,264 observations. This is a rejected diagnostic, not an
+accepted merge policy. Integration must detect these conflicts before mutating
+ownership and report rejected support, rather than silently combining them.
+
 `RigSfmResult` contains poses and tracks, but the public fixed-rotation
 refinement entry point adjusts translations and landmarks of an existing
 result; it is not a bounded, fixed-pose atlas triangulation/import API. Calling

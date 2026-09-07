@@ -1828,8 +1828,8 @@ mod tests {
             first.diagnostics.alignment_method,
             Some(RigSubmapAlignmentMethod::FixedRotationPrimary)
         );
-        assert!(first.diagnostics.fallback_attempted == false);
-        assert!(first.diagnostics.fallback_used == false);
+        assert!(!first.diagnostics.fallback_attempted);
+        assert!(!first.diagnostics.fallback_used);
         assert!(first.constraint.inlier_ratio > 0.8);
         assert_eq!(first.constraint.target_from_source.scale, 1.0);
         assert!(
