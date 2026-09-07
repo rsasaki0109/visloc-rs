@@ -1501,3 +1501,103 @@ and [LM strategy source](https://github.com/ceres-solver/ceres-solver/blob/maste
 (reviewed 2026-09-08). These motivate a diagnostic, not a claim that adaptive
 LM or looser solves will cure the observed 1k trajectory regression. Keep
 GT post-only, all observations, bounded memory and defaults unchanged.
+
+### Step-quality diagnostic design checkpoint (2026-09-08)
+
+PR #85 merged as `d751f6e` after eight final-head checks on `11f36b8`
+(run `34145940542`); its evidence file is the earlier pre-CI snapshot.
+Continue on `feat/m8-lm-step-quality-diagnostic`. This adds diagnostics only,
+not another tolerance, damping or acceptance policy.
+
+For the squared-error convention, the undamped predicted decrease is
+`-2 b^T delta - delta^T H delta`; compare it with the actual cost decrease
+only for a finite, successfully computed candidate. Keep actual solve lambda
+distinct from the post-rejection lambda printed by legacy LM traces. Failed
+linear solves have no candidate decrease or fabricated residual.
+
+The scaled normal is already transformed in-place. Any residual mapped back
+from it describes the physical-equivalent system represented by those rounded
+scaled coefficients, not an independently preserved original normal. Label
+that distinction. Normalize residuals rather than comparing raw norms across
+coordinate systems. For a componentwise backward-error diagnostic, repeated
+cross contributions to the same pose/landmark coefficient must be summed
+before taking absolute values; summing absolute contributions would produce
+a different denominator. Handle zero denominators and nonfinite arithmetic
+explicitly without modifying the solve's result.
+
+Keep only bounded scalar records, linear-size scratch and at most one
+landmark's cross aggregation; no extra model/normal clone, global dense
+matrix, coefficient dump or per-point history. Existing APIs, default logs,
+numerical steps and LM/depth/rollback gates remain unchanged. Small explicit
+full-normal tests and debug ON/OFF model/trace comparisons must precede using
+the diagnostic to select a new policy. The 1k regression, unmet 10k COLMAP
+RMSE and full mapper/E2E/scale requirements remain unresolved.
+
+Further read-only inspection of PR #85's certified scaled 1k debug log finds
+nine of ten rejected candidates lower the reported cost but increase
+nonprojectable observations from zero to 209, 211 or 14. Their actual solve
+lambda is 1e-5. The other rejection (iteration 6) increases cost without
+increasing nonprojectable observations. The existing cost routine omits
+nonprojectable observations, so the nine decreases are not comparable
+same-observation objective improvements. New diagnostics must report both
+counts and both acceptance gates; define rho only when both counts are zero,
+cost values are finite and predicted decrease is positive. Otherwise record
+an explicit undefined reason without changing the existing LM decisions.
+
+The implementation should fold each landmark's three residual/denominator
+entries immediately after its cross terms, retaining only pose accumulators
+and one landmark's aggregation. This reduces new diagnostic scratch to
+O(P + maximum track length), rather than storing another residual/denominator
+pair for every landmark. Use nonquadratic cross aggregation and preserve each
+coefficient's contribution order. If physical-equivalent metrics are evaluated
+by reconstructing coefficients and recomputing the residual, label that extra
+rounding explicitly; it is not bit-identical to simply scaling the already
+computed residual by `T^-1`.
+
+### Step-quality 1k measurement checkpoint (2026-09-08)
+
+The diagnostic implementation is `97d9fb0`; the measured release binary was
+built at `9016b8f` (scratch-bound comment correction), SHA256
+`fbc7445ac295702f6c98571420bef601bc9532735b52de01d20e86af8bb949f5`.
+Subsequent `d998fc0` changes only tests: perturbed dense solutions compare
+the same damped system in scaled and physical-equivalent coordinates, with
+strictly nonzero, nonsaturated componentwise eta. The legacy `H+lambda I`
+must not be mistaken for the physical equivalent of scaled `Hhat+lambda I`.
+
+Legacy and scaled 1k ON/OFF controls preserve every model file and existing
+LM/PCG/scaling trace from PR #85. A second scaled ON run also preserves all
+20 quality rows. Scaled candidate componentwise eta is 8.62e-11–1.33e-9,
+including the ten rejected candidates. Nine have nonprojectable observations
+and undefined rho; the sole comparable cost-increase rejection has
+rho -4.18755. Two accepted steps have low rho (0.144615 and 0.286570), while
+the existing policy still reduces lambda by ten after each acceptance.
+
+These observations separate nonlinear feasibility/model mismatch from the
+measured linear-equation error. They do not establish a forward-error bound
+for this ill-conditioned problem or explain all trajectory regression.
+Consider a separately opt-in, predeclared step-quality-based damping policy
+after completing actual-atlas diagnostics. Keep observations, PCG budget and
+tolerance, calibration and GT post-only scoring fixed for that first A/B;
+do not combine it with another tolerance sweep or claim COLMAP parity.
+
+### Completed diagnostic measurements (2026-09-08)
+
+All seven certified-binary runs are recorded in the
+[step-quality evidence](../benchmarks/electro/m8-openloris-lm-step-quality-v1.json).
+Main completes in 346.91 s / 1,090,824 KiB; tail in 38.62 s / 110,400 KiB,
+both under a 2 GiB address-space cap. These are diagnostic-ON post-map BA
+times, not mapper/native-E2E performance claims. Every output model file and
+existing numerical trace is byte-exact versus PR #85. Its independent
+geometry/identity/GT audits therefore carry over; no fresh GT scoring is
+claimed for unchanged bytes. The scaled 1k ON repeat also matches every new
+quality row and all ten existing rejected-step detail rows. Actual-atlas ON
+was measured once per component, not repeated in this diagnostic experiment.
+
+Main has ten capped solves at actual lambda 1e-4, alternating with ten
+accepted candidates at 1e-3. Their rho is 0.984477–1.000015 and componentwise
+eta is 3.83e-10–1.81e-9. Tail has eleven accepted candidates, seven capped
+solves and two true-residual-check failures; accepted rho is 0.909699–1.000608.
+No diagnostic arithmetic failure occurred. All atlas candidates that reached
+nonlinear evaluation had zero nonprojectable observations before and after.
+The scaled 1k trajectory regression and pooled 10k COLMAP RMSE gap remain:
+the diagnostic does not alter either result or promote this solver policy.
