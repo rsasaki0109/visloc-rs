@@ -110,6 +110,9 @@
 > implicit512は9.079e-4。dense参照解も同基準未達で、前処理だけが原因とは断定できません。
 > 次は物理座標・dampingを変えず、3x3 landmarkブロックのCholesky構成を別armで比較。
 > 現1e-12は診断baselineで、ユーザーの最終目的は精度・速度・省メモリです。
+> PR #81は最終CI8項目（run 34125303050）通過後、`06ca2e1`へmergeし旧branch整理済み。
+> 現在は `feat/m8-cholesky-landmark-elimination`。同じ物理damping・観測集合で
+> landmark eliminationの構成だけを変えるA/Bを実装中です。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

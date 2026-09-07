@@ -1023,3 +1023,14 @@ the fixed `1e-12` rule is a diagnostic baseline, not the user's ultimate goal.
 Any changed policy must retain honest true-residual reporting and demonstrate
 the requested trajectory/reprojection/resource quality, not merely report more
 linear solves as successful.
+
+PR #81 passed all eight final-head CI checks (run `34125303050`, head
+`7b4b6cb`) and merged as `06ca2e1`; its local/remote topic branches were removed.
+The Cholesky A/B must audit original `Hll` symmetry and inverse residuals before
+attributing any improvement to symmetry. Use each arm's block construction
+consistently for RHS, implicit action, explicit reference, preconditioner and
+landmark back-substitution. A failed Cholesky factorization is a reported
+failure, not permission to fall back silently. The new test helper's general
+inverse control must match the existing production operator on small fixtures;
+preserve the real-data baseline reports as well. Do not retain a full second
+normal system/model or scale physical rig calibration.

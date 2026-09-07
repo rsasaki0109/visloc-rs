@@ -107,6 +107,9 @@ Cholesky-based damped landmark elimination with the current small general
 inverse, before any nonlinear/10k promotion. Scaling and a separately defined
 inexact policy remain available: the diagnostic tolerance is not a substitute
 for the user's actual quality, speed and memory requirements.
+PR #81 passed all eight final-head checks (run `34125303050`, head `7b4b6cb`),
+merged as `06ca2e1`, and its topic branches were removed. The next controlled
+arm is on `feat/m8-cholesky-landmark-elimination`.
 
 ## Historical M7 baseline
 
