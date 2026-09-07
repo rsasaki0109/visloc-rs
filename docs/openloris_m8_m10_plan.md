@@ -1370,6 +1370,17 @@ Keep all thresholds, per-window caps, calibration and acceptance gates fixed;
 see the [two-sweep contract](openloris_atlas_bounded_ba.md). No result for this
 arm is claimed before execution and independent output auditing.
 
+The fixed two-sweep arm (`c99c381`) is now measured: both pass-one checkpoints
+match the prior filtering model, both pre-BA checkpoints match the repaired
+input, and the default one-sweep main control is unchanged (six files each).
+Independent audits confirm unchanged support/connected graphs and exactly
+140 points / 2,193 observations removed in pass two. Observation-weighted
+reprojection falls to 0.574285 px and p95 to 0.633716 m, but RMSE worsens to
+0.390165 m. **Do not promote two sweeps**; retain the one-sweep experimental
+candidate. Repeat-output checks are in progress. The next isolated performance
+candidate reuses one ordered landmark-selection vector within each window;
+it must preserve all output bytes and introduces no global index or model copy.
+
 ## Stop conditions
 
 - Do not launch a larger tier after an input/hash/calibration mismatch.

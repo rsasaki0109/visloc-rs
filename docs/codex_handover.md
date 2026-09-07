@@ -32,8 +32,12 @@
 > 悪化したため非昇格です。47 example tests / 21 auditor testsが通過。
 > PR #74は最終CI8項目通過後、`f92fa3c`へmergeし旧branchも整理済み。
 > 現在は `feat/m8-two-sweep-atlas-refinement` で従来filtered(DLT)方式の
-> 固定2回適用を実装中です。1回目checkpointの既存モデル完全一致を確認してから
-> 同じin-memory状態へ2回目を適用し、個別のログと出力監査を行います。
+> 固定2回適用を実装・測定しました（`c99c381`、50 example / 23 auditor tests通過）。
+> 両成分の1回目checkpointと既存filteredモデル、BA前checkpointと修復モデル、
+> 1回適用controlはいずれも全6ファイル一致。2回目も支持・連結性を維持しますが、
+> RMSE/p95は0.390165/0.633716 mでRMSEが悪化したため非昇格です。
+> 2回目の追加削除140点・2,193観測も独立監査と一致。再現性の確認中です。
+> 次は精度変更を混ぜず、同じwindowのlandmark選択scanの重複だけを削減します。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

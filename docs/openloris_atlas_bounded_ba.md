@@ -467,6 +467,28 @@ post-map scorer. Require two-run output equality and a one-sweep control. No GT
 or score may decide mapping acceptance or termination. Keep all original M8–M10
 gates, including mapper/native-E2E timing and total peak RSS, unchanged.
 
+### Two-sweep result: not promoted
+
+Implementation `c99c381` passes 50 example tests and 23 independent auditor
+tests. Both pass-one checkpoints match the existing filtered model, both pre-BA
+checkpoints match boundary repair, and the default one-sweep main control is
+unchanged, all across six files. Pass two accepts 145/150 main windows and
+17/17 tail windows, removing another 135/5 points and 2,120/73 observations.
+Independent transition audits reproduce these counts without additions,
+splits, merges or keypoint identity changes. Final geometry audits preserve
+9,998 poses, 9,997 supported images, 4,999 supported rig frames and connected
+4,494/505-frame graphs. Fixed extrinsics, bidirectional references, positive
+depth, track-mean <=2 px and observation-max <=4 px all pass.
+
+Final output has 352,697 landmarks and 1,436,687 observations. Observation-
+weighted mean reprojection improves to 0.574285 px and p95 to 0.633716 m,
+but **RMSE worsens from 0.388993 to 0.390165 m**, still above COLMAP's
+0.384307 m gate. Do not promote two sweeps or launch a pass-count search.
+Repeat-output checks are in progress. Main/tail pilot times are 366.03/23.23 s
+at 525,168/77,932 KiB with overlapping shared-machine jobs, not mapper/native
+E2E timing or a speed comparison. The one-sweep candidate stays in README's
+COLMAP comparison table; do not replace it with a cherry-picked p95 result.
+
 ### Subsequent output-preserving performance candidate
 
 Keep this separate from the two-sweep quality experiment. Code inspection of
