@@ -1553,3 +1553,51 @@ coefficient's contribution order. If physical-equivalent metrics are evaluated
 by reconstructing coefficients and recomputing the residual, label that extra
 rounding explicitly; it is not bit-identical to simply scaling the already
 computed residual by `T^-1`.
+
+### Step-quality 1k measurement checkpoint (2026-09-08)
+
+The diagnostic implementation is `97d9fb0`; the measured release binary was
+built at `9016b8f` (scratch-bound comment correction), SHA256
+`fbc7445ac295702f6c98571420bef601bc9532735b52de01d20e86af8bb949f5`.
+Subsequent `d998fc0` changes only tests: perturbed dense solutions compare
+the same damped system in scaled and physical-equivalent coordinates, with
+strictly nonzero, nonsaturated componentwise eta. The legacy `H+lambda I`
+must not be mistaken for the physical equivalent of scaled `Hhat+lambda I`.
+
+Legacy and scaled 1k ON/OFF controls preserve every model file and existing
+LM/PCG/scaling trace from PR #85. A second scaled ON run also preserves all
+20 quality rows. Scaled candidate componentwise eta is 8.62e-11–1.33e-9,
+including the ten rejected candidates. Nine have nonprojectable observations
+and undefined rho; the sole comparable cost-increase rejection has
+rho -4.18755. Two accepted steps have low rho (0.144615 and 0.286570), while
+the existing policy still reduces lambda by ten after each acceptance.
+
+These observations separate nonlinear feasibility/model mismatch from the
+measured linear-equation error. They do not establish a forward-error bound
+for this ill-conditioned problem or explain all trajectory regression.
+Consider a separately opt-in, predeclared step-quality-based damping policy
+after completing actual-atlas diagnostics. Keep observations, PCG budget and
+tolerance, calibration and GT post-only scoring fixed for that first A/B;
+do not combine it with another tolerance sweep or claim COLMAP parity.
+
+### Completed diagnostic measurements (2026-09-08)
+
+All seven certified-binary runs are recorded in the
+[step-quality evidence](../benchmarks/electro/m8-openloris-lm-step-quality-v1.json).
+Main completes in 346.91 s / 1,090,824 KiB; tail in 38.62 s / 110,400 KiB,
+both under a 2 GiB address-space cap. These are diagnostic-ON post-map BA
+times, not mapper/native-E2E performance claims. Every output model file and
+existing numerical trace is byte-exact versus PR #85. Its independent
+geometry/identity/GT audits therefore carry over; no fresh GT scoring is
+claimed for unchanged bytes. The scaled 1k ON repeat also matches every new
+quality row and all ten existing rejected-step detail rows. Actual-atlas ON
+was measured once per component, not repeated in this diagnostic experiment.
+
+Main has ten capped solves at actual lambda 1e-4, alternating with ten
+accepted candidates at 1e-3. Their rho is 0.984477–1.000015 and componentwise
+eta is 3.83e-10–1.81e-9. Tail has eleven accepted candidates, seven capped
+solves and two true-residual-check failures; accepted rho is 0.909699–1.000608.
+No diagnostic arithmetic failure occurred. All atlas candidates that reached
+nonlinear evaluation had zero nonprojectable observations before and after.
+The scaled 1k trajectory regression and pooled 10k COLMAP RMSE gap remain:
+the diagnostic does not alter either result or promote this solver policy.

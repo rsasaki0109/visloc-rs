@@ -9,6 +9,23 @@ time and peak RSS in both mapper-only and native end-to-end comparisons.
 This plan is outcome-gated. ANN retrieval, bridge discovery, track repair, and
 BA changes are possible means, not milestone success by themselves.
 
+## Latest checkpoint (2026-09-08)
+
+PR #85's opt-in column-scaled LM completes bounded atlas BA but regresses
+the 1k trajectory and still misses 10k COLMAP RMSE. The subsequent
+[step-quality diagnostic](../benchmarks/electro/m8-openloris-lm-step-quality-v1.json)
+preserves all seven measured output models and existing numerical traces.
+It distinguishes nine infeasible 1k candidates and one negative-rho candidate
+from small measured linear backward errors. Main alternates ten PCG caps
+with ten high-rho accepted updates, under the 2 GiB cap.
+
+Next, predeclare and A/B a separate opt-in step-quality-based damping policy.
+Hold observations, calibration, PCG tolerance/budget and post-only GT scoring
+fixed; require frozen 1k nonregression before advancing to larger tiers.
+Do not combine damping changes with an inexact-solve/tolerance experiment.
+These local BA diagnostics do not close mapper/native-E2E, final tier/restart
+or 100k I/O gates, and do not authorize new README performance claims.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,

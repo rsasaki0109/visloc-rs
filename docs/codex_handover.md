@@ -3,9 +3,22 @@
 > 続行（2026-09-08）: PR #85は最終head `11f36b8` のCI8項目
 > （run `34145940542`）通過後、`d751f6e`へmerge済み。旧local/remote branchも整理済み。
 > 現在は `feat/m8-lm-step-quality-diagnostic`。Luna Maxで既定OFFの更新品質診断を
-> 設計中です。予測/実際のcost減少と座標を明示した正規化残差を記録し、solverや
+> `97d9fb0`に実装済みです。予測/実際のcost減少と座標を明示した正規化残差を記録し、solverや
 > LMの採否は変更しません。元normalやモデルの追加複製は行いません。
 > 前turnは実装・測定・監査・PR統合まで進捗あり。全体goalは精度/E2E/各規模ゲートが未達です。
+
+> 更新品質診断の1k対照（2026-09-08）: 従来/列スケーリングのON/OFF全4本と
+> scaled ON再実行は、PR #85の各モデル・LM/PCG/scaling traceと完全一致。
+> ON再実行の診断20行も一致しました。scaled全候補のcomponentwise backward errorは
+> 約8.62e-11〜1.33e-9ですが、10回棄却（9回は投影不能増加、1回はcost増加）。
+> 線形残差の小ささだけでは非線形更新の妥当性を保証できません。
+> `9016b8f`でビルドした認証済みbinaryを測定し、`d998fc0`は後続のtest-only補強です。
+> 実atlas主成分346.91 s / 1,090,824 KiB、末尾38.62 s / 110,400 KiBで完走。
+> 両成分とも2 GiB上限内で、全モデルと既存数値traceはPR #85と完全一致しました。
+> 主成分は10回PCG上限到達/10回受理。受理時rhoは0.984477〜1.000015。
+> [診断の測定証跡](../benchmarks/electro/m8-openloris-lm-step-quality-v1.json)。
+> 次はPCG許容誤差を固定して、更新品質に基づく減衰制御を別の明示的なA/Bにします。
+> README/既定solverは変更せず、PR/CI確認へ進みます。
 
 > 最新実測（2026-09-08）: 列スケーリング＋scaled LMは `99d899b` に実装済み。
 > 1kは2回ともPCG20/20成功・LM10/20受理・モデル/数値trace一致ですが、
