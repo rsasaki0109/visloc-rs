@@ -1,5 +1,16 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Ceres初期parity通過（2026-09-08）: `1d6424f`をroot独立buildし、自己テストと
+> 同一1k全130,900観測の独立照合が通過。残差座標の最大差は9.84e-11 px、
+> 深度最大差1.82e-12 m。全ID/order/xy/XYZ・校正・元fixture hashを確認済み。
+> [初期parity証跡](../benchmarks/electro/m8-openloris-ceres-initial-parity-v1.json)。
+> 初回は一時出力のENOENT誤判定で保存前に失敗。修正と保存成功/no-clobberテストを追加し、
+> 失敗実行を証跡に残しました。元入力・既存出力は変更していません。
+> 次はLuna Maxで同じAutoDiff因子を使うsolve/state出力と、微分・manifold・固定anchorの
+> synthetic testを実装。rootレビュー前に実1k solveは行いません。
+> 現在も `feat/m8-frozen-ceres-reference`、PR未作成。最適化・モデル出力・GT採点は未実施。
+> これはCOLMAP native性能比較ではなく、README/既定solverの昇格根拠ではありません。
+
 > 最新の続行（2026-09-08）: PR #88はhead `9ba5c3b` のCI8項目
 > （run `34154673044`）通過後、`23cbe88`へmerge済み。旧branch整理済み。
 > 現在は `feat/m8-frozen-ceres-reference`。既存のRust oracle fixtureを再利用し、
