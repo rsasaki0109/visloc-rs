@@ -1737,7 +1737,11 @@ not relaxed trajectory gates. A mismatch invalidates the reference run.
 
 Use Ceres 2.2.0, AutoDiff PINHOLE rig factors, wxyz QuaternionManifold plus
 translation blocks, all XYZ variable, fixed camera/sensor transforms and
-both anchor pose blocks constant. No robust loss or observation filtering.
+all anchor pose coordinates constant. The reference may pack wxyz quaternion
+and translation into one seven-scalar block with
+`ProductManifold<QuaternionManifold, EuclideanManifold<3>>`; group 1 then
+contains these pose blocks and group 0 the three-scalar XYZ blocks. This
+packing does not free either part of the anchor. No robust loss or filtering.
 Nonfinite/behind-camera candidates fail residual evaluation instead of
 dropping observations. Ceres minimizes one-half the squared cost; report the
 common full squared cost separately. The [Ceres tutorial](https://ceres-solver.readthedocs.io/latest/nnls_tutorial.html)
@@ -1749,6 +1753,11 @@ Fix one thread, LM, initial trust-region radius 1e4, SPARSE_SCHUR with points
 in elimination group 0 and pose blocks in group 1, and max_num_iterations 20.
 Record all other versioned Ceres stopping/damping defaults and actual
 iterations; do not call them equivalent to visloc's PCG/LM stopping policy.
+The installed 2.2.0 header gives function/gradient/parameter tolerances
+1e-6/1e-10/1e-8, min/max radius 1e-32/1e16, min relative decrease 1e-3,
+LM diagonal bounds 1e-6/1e32, at most five consecutive invalid steps, Jacobi
+scaling on and nonmonotonic/inner iterations off. These defaults are not
+COLMAP's overridden BA settings.
 No GT-selected lambda/tolerance sweep. Keep the diagnostic under a dedicated
 2 GiB container memory/swap limit, one CPU and a 900 s solve timeout; no
 explicit dense global normal, and no enlargement of the fixture to atlas.
