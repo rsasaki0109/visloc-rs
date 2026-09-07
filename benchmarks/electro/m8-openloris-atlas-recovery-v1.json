@@ -102,6 +102,17 @@
     "merged_at": "2026-09-07T04:42:15Z",
     "squash_commit": "4896e9d663c6394a3452090b96548c75e573baaa"
   },
+  "independent_serialized_rig_audit": {
+    "script": "scripts/audit_colmap_pinhole_model.py --rig-manifest RIG_MANIFEST MODEL...",
+    "auditor_tests_passed": 12,
+    "main_supported_rig_frames": 4494,
+    "tail_supported_rig_frames": 505,
+    "main_max_inferred_rig_center_disagreement_m": 2.0470589768249782e-10,
+    "tail_max_inferred_rig_center_disagreement_m": 2.3647823556501435e-11,
+    "main_max_inferred_rig_rotation_disagreement_deg": 1.7075472925031877e-06,
+    "tail_max_inferred_rig_rotation_disagreement_deg": 1.2074182697257333e-06,
+    "calibration_and_fixed_extrinsics_valid": true
+  },
   "limitations": [
     "Integration/recovery measurements are not mapper-only or native E2E performance evidence",
     "Trajectory gates remain open; bounded observation-based BA is not implemented in this evidence"
