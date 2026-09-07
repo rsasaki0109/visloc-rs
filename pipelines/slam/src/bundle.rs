@@ -99,6 +99,15 @@ fn ba_step_debug_enabled() -> bool {
         && std::env::var_os("VISLOC_SFM_DEBUG_BA_STEPS").is_some()
 }
 
+/// Enable the scalar LM-step quality diagnostic only when all existing BA
+/// debug gates and the dedicated quality gate are present.  The diagnostic is
+/// deliberately not threaded through `BaConfig`: when this returns false the
+/// matrix-free solver does not allocate its residual/backward-error scratch
+/// or perform an additional normal-equation scan.
+fn ba_lm_step_quality_debug_enabled() -> bool {
+    ba_step_debug_enabled() && std::env::var_os("VISLOC_SFM_DEBUG_BA_LM_QUALITY").is_some()
+}
+
 /// Context for the opt-in local Schur-block diagnostic.  This is deliberately
 /// private and borrowed: the normal solver does not retain a pose/landmark
 /// history or any diagnostic records.
@@ -3212,6 +3221,10 @@ impl BundleAdjustment {
             let saved_velocities = self.velocities.clone();
             let saved_biases = self.biases.clone();
             let cost_before = current_cost;
+            // Keep the lambda actually supplied to this linear solve.  The
+            // public BaIterationStats lambda intentionally retains its
+            // historical post-rejection semantics.
+            let solve_lambda = lambda;
             log_process_memory("ba-before-solve-step");
 
             let solve_result = match backend {
@@ -3225,7 +3238,8 @@ impl BundleAdjustment {
                     config.linear_solver,
                     config.parallel,
                     &mut block_symbolic_cache,
-                ),
+                )
+                .map(|(delta_poses, delta_landmarks)| (delta_poses, delta_landmarks, None)),
                 BaSolveBackend::MatrixFree(runtime)
                 | BaSolveBackend::MatrixFreeColumnScaled(runtime) => {
                     let column_scaled = runtime.column_scaling_iterations.is_some();
@@ -3281,7 +3295,11 @@ impl BundleAdjustment {
                                     .expect("restart diagnostics are enabled")
                                     .push(restart_diagnostics);
                             }
-                            Ok((outcome.delta_poses, outcome.delta_landmarks))
+                            Ok((
+                                outcome.delta_poses,
+                                outcome.delta_landmarks,
+                                outcome.quality,
+                            ))
                         }
                         Err(error) => {
                             runtime.iterations.push(MatrixFreeBaIterationStats {
@@ -3299,6 +3317,13 @@ impl BundleAdjustment {
                                     .expect("restart diagnostics are enabled")
                                     .push(restart_diagnostics);
                             }
+                            if ba_lm_step_quality_debug_enabled() {
+                                emit_matrix_free_step_quality_failure(
+                                    iteration,
+                                    solve_lambda,
+                                    &error.diagnostic,
+                                );
+                            }
                             runtime.failure = Some(MatrixFreeBaError::LinearSolve {
                                 iteration,
                                 diagnostic: error.diagnostic,
@@ -3308,7 +3333,7 @@ impl BundleAdjustment {
                     }
                 }
             };
-            let (delta_poses, delta_landmarks) = match solve_result {
+            let (delta_poses, delta_landmarks, quality) = match solve_result {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
                     // Treat singular system the same as a rejected LM step:
@@ -3397,6 +3422,21 @@ impl BundleAdjustment {
                 Some(_) => cost_after < cost_before,
             };
             let step_accepted = cost_accepted && nonprojectable_after <= current_nonprojectable;
+
+            if let Some(quality) = quality {
+                emit_matrix_free_step_quality(
+                    iteration,
+                    solve_lambda,
+                    quality,
+                    cost_before,
+                    cost_after,
+                    current_nonprojectable,
+                    nonprojectable_after,
+                    cost_accepted,
+                    nonprojectable_after <= current_nonprojectable,
+                    step_accepted,
+                );
+            }
 
             // In particular, expose the two independent acceptance gates for
             // camera-fixed (landmark-only) solves.  A high robust cost can be
@@ -3804,6 +3844,539 @@ impl ColumnEquilibrationState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MatrixFreeCoordinateQuality {
+    /// The undamped squared-cost quadratic prediction in this coordinate
+    /// system: `-2 b·δ - δᵀHδ`.  For a scaled solve this is computed from the
+    /// rounded scaled normal system and is not an independent reconstruction
+    /// of the pre-scaling normal system.
+    predicted_undamped_squared_decrease: f64,
+    /// Normwise backward error in the coordinate system represented by this
+    /// report.  The denominator is `||A||F ||δ||2 + ||b||2` for the damped
+    /// full pose+landmark system.
+    normwise_backward_error: f64,
+    /// Componentwise backward error `max_i |r_i| / (|A||δ|+|b|)_i`.
+    componentwise_backward_error: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MatrixFreeStepQuality {
+    scaled_coordinates: bool,
+    coordinate: Option<MatrixFreeCoordinateQuality>,
+    physical_equivalent: Option<MatrixFreeCoordinateQuality>,
+    coordinate_failure: Option<&'static str>,
+    physical_equivalent_failure: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum MatrixFreeQualityCoordinate<'a> {
+    /// The coordinates currently stored in `system` and supplied to the
+    /// matrix-free solve.  This is physical for legacy MF and scaled for the
+    /// column-equilibrated path.
+    Current,
+    /// The physical-equivalent rounded system obtained from a scaled system
+    /// by applying `T⁻¹` to rows and columns.  This is intentionally not
+    /// called the original normal system: the in-place scaling arithmetic has
+    /// already rounded its coefficients.
+    PhysicalEquivalent(&'a ColumnEquilibrationState),
+}
+
+fn quality_add(total: &mut f64, value: f64) -> Result<(), &'static str> {
+    if !value.is_finite() {
+        return Err("quality diagnostic encountered a non-finite term");
+    }
+    *total += value;
+    if total.is_finite() {
+        Ok(())
+    } else {
+        Err("quality diagnostic accumulator overflowed")
+    }
+}
+
+fn quality_add_square(total: &mut f64, value: f64) -> Result<(), &'static str> {
+    if !value.is_finite() {
+        return Err("quality diagnostic encountered a non-finite value");
+    }
+    let square = value * value;
+    if !square.is_finite() {
+        return Err("quality diagnostic square overflowed");
+    }
+    quality_add(total, square)
+}
+
+fn quality_fold_residual_row(
+    residual_norm_squared: &mut f64,
+    componentwise_backward_error: &mut f64,
+    residual: f64,
+    denominator: f64,
+) -> Result<(), &'static str> {
+    if !residual.is_finite() || !denominator.is_finite() {
+        return Err("quality diagnostic residual or denominator is non-finite");
+    }
+    quality_add_square(residual_norm_squared, residual)?;
+    if denominator == 0.0 {
+        if residual != 0.0 {
+            return Err("quality diagnostic has nonzero residual over zero denominator");
+        }
+        // Zero-over-zero rows are exact zero rows (commonly fixed rotations)
+        // and contribute zero to componentwise eta.
+    } else {
+        let ratio = residual.abs() / denominator;
+        if !ratio.is_finite() {
+            return Err("quality diagnostic componentwise ratio is non-finite");
+        }
+        *componentwise_backward_error = (*componentwise_backward_error).max(ratio);
+    }
+    Ok(())
+}
+
+fn quality_pose_factors(
+    coordinate: MatrixFreeQualityCoordinate<'_>,
+    pose: usize,
+    component: usize,
+) -> Result<(f64, f64), &'static str> {
+    match coordinate {
+        MatrixFreeQualityCoordinate::Current => Ok((1.0, 1.0)),
+        MatrixFreeQualityCoordinate::PhysicalEquivalent(state) => {
+            if component >= 6 {
+                return Err("quality diagnostic pose transform component is invalid");
+            }
+            let transform = state
+                .pose_transforms
+                .get(pose)
+                .ok_or("quality diagnostic pose transform index is invalid")?[component];
+            let inverse = transform.recip();
+            if !transform.is_finite() || !inverse.is_finite() {
+                return Err("quality diagnostic pose transform is non-finite");
+            }
+            // First factor scales rows/columns of the current system.  The
+            // second factor maps the current delta into the target system.
+            Ok((inverse, transform))
+        }
+    }
+}
+
+fn quality_landmark_factors(
+    coordinate: MatrixFreeQualityCoordinate<'_>,
+    landmark: usize,
+    component: usize,
+) -> Result<(f64, f64), &'static str> {
+    match coordinate {
+        MatrixFreeQualityCoordinate::Current => Ok((1.0, 1.0)),
+        MatrixFreeQualityCoordinate::PhysicalEquivalent(state) => {
+            if component >= 3 {
+                return Err("quality diagnostic landmark transform component is invalid");
+            }
+            let transform = state
+                .landmark_transforms
+                .get(landmark)
+                .ok_or("quality diagnostic landmark transform index is invalid")?[component];
+            let inverse = transform.recip();
+            if !transform.is_finite() || !inverse.is_finite() {
+                return Err("quality diagnostic landmark transform is non-finite");
+            }
+            Ok((inverse, transform))
+        }
+    }
+}
+
+fn quality_coordinate_metrics(
+    system: &NormalEquationsBa,
+    lambda: f64,
+    delta_poses: &DVector<f64>,
+    delta_landmarks: &DVector<f64>,
+    coordinate: MatrixFreeQualityCoordinate<'_>,
+) -> Result<MatrixFreeCoordinateQuality, &'static str> {
+    if !lambda.is_finite() {
+        return Err("quality diagnostic lambda is non-finite");
+    }
+    let CameraHessian::PoseDiagonal(pose_blocks) = &system.h_pp else {
+        return Err("quality diagnostic requires pose-diagonal normal equations");
+    };
+    let pose_count = pose_blocks.len();
+    let landmark_count = system.landmarks.len();
+    if system.b_p.len() != pose_count * 6
+        || delta_poses.len() != pose_count * 6
+        || delta_landmarks.len() != landmark_count * 3
+    {
+        return Err("quality diagnostic delta dimensions mismatch");
+    }
+
+    // These are O(P+L) scratch vectors.  Cross terms are accumulated into
+    // them after same-pose entries are coalesced per landmark, so the
+    // componentwise denominator represents the actual matrix rather than a
+    // sum of absolute values of duplicate stored entries.
+    let mut pose_residual = vec![0.0; pose_count * 6];
+    let mut pose_denominator = vec![0.0; pose_count * 6];
+    let mut matrix_norm_squared = 0.0;
+    let mut delta_norm_squared = 0.0;
+    let mut rhs_norm_squared = 0.0;
+    let mut gradient_dot = 0.0;
+    let mut hessian_quadratic = 0.0;
+    let mut residual_norm_squared = 0.0;
+    let mut componentwise_backward_error: f64 = 0.0;
+
+    for (pose, block) in pose_blocks.iter().enumerate() {
+        for row in 0..6 {
+            let (row_scale, row_delta_factor) = quality_pose_factors(coordinate, pose, row)?;
+            let row_index = pose * 6 + row;
+            let delta_row = delta_poses[row_index] * row_delta_factor;
+            let rhs_row = system.b_p[row_index] * row_scale;
+            if !delta_row.is_finite() || !rhs_row.is_finite() {
+                return Err("quality diagnostic pose delta or rhs is non-finite");
+            }
+            pose_residual[row_index] = rhs_row;
+            pose_denominator[row_index] = rhs_row.abs();
+            quality_add_square(&mut delta_norm_squared, delta_row)?;
+            quality_add_square(&mut rhs_norm_squared, rhs_row)?;
+            quality_add(&mut gradient_dot, rhs_row * delta_row)?;
+
+            for column in 0..6 {
+                let (column_scale, column_delta_factor) =
+                    quality_pose_factors(coordinate, pose, column)?;
+                let column_index = pose * 6 + column;
+                let delta_column = delta_poses[column_index] * column_delta_factor;
+                let h = block[(row, column)] * row_scale * column_scale;
+                let a = h + if row == column {
+                    lambda * row_scale * column_scale
+                } else {
+                    0.0
+                };
+                if !delta_column.is_finite() || !h.is_finite() || !a.is_finite() {
+                    return Err("quality diagnostic pose system is non-finite");
+                }
+                quality_add_square(&mut matrix_norm_squared, a)?;
+                quality_add(&mut pose_residual[row_index], a * delta_column)?;
+                quality_add(
+                    &mut pose_denominator[row_index],
+                    a.abs() * delta_column.abs(),
+                )?;
+                quality_add(&mut hessian_quadratic, delta_row * h * delta_column)?;
+            }
+        }
+    }
+
+    for (landmark_index, landmark) in system.landmarks.iter().enumerate() {
+        // Landmark rows have no coupling to other landmarks, so keep their
+        // residual/denominator as a single-landmark scratch array and fold
+        // them into the scalar metrics before moving to the next landmark.
+        let mut landmark_residual = [0.0; 3];
+        let mut landmark_denominator = [0.0; 3];
+        for row in 0..3 {
+            let (row_scale, row_delta_factor) =
+                quality_landmark_factors(coordinate, landmark_index, row)?;
+            let row_index = landmark_index * 3 + row;
+            let delta_row = delta_landmarks[row_index] * row_delta_factor;
+            let rhs_row = landmark.b_l[row] * row_scale;
+            if !delta_row.is_finite() || !rhs_row.is_finite() {
+                return Err("quality diagnostic landmark delta or rhs is non-finite");
+            }
+            landmark_residual[row] = rhs_row;
+            landmark_denominator[row] = rhs_row.abs();
+            quality_add_square(&mut delta_norm_squared, delta_row)?;
+            quality_add_square(&mut rhs_norm_squared, rhs_row)?;
+            quality_add(&mut gradient_dot, rhs_row * delta_row)?;
+
+            for column in 0..3 {
+                let (column_scale, column_delta_factor) =
+                    quality_landmark_factors(coordinate, landmark_index, column)?;
+                let column_index = landmark_index * 3 + column;
+                let delta_column = delta_landmarks[column_index] * column_delta_factor;
+                let h = landmark.h_ll[(row, column)] * row_scale * column_scale;
+                let a = h + if row == column {
+                    lambda * row_scale * column_scale
+                } else {
+                    0.0
+                };
+                if !delta_column.is_finite() || !h.is_finite() || !a.is_finite() {
+                    return Err("quality diagnostic landmark system is non-finite");
+                }
+                quality_add_square(&mut matrix_norm_squared, a)?;
+                quality_add(&mut landmark_residual[row], a * delta_column)?;
+                quality_add(&mut landmark_denominator[row], a.abs() * delta_column.abs())?;
+                quality_add(&mut hessian_quadratic, delta_row * h * delta_column)?;
+            }
+        }
+
+        // The storage can contain multiple sensor contributions for the same
+        // pose.  Coalesce each pose before taking absolute values or norms.
+        let mut grouped_cross: BTreeMap<usize, Matrix6x3<f64>> = BTreeMap::new();
+        for (pose, cross) in &landmark.cross {
+            if *pose >= pose_count {
+                return Err("quality diagnostic cross pose index is invalid");
+            }
+            grouped_cross
+                .entry(*pose)
+                .and_modify(|accumulated| *accumulated += *cross)
+                .or_insert(*cross);
+        }
+        for (pose, cross) in grouped_cross {
+            for row in 0..6 {
+                let (pose_scale, pose_delta_factor) = quality_pose_factors(coordinate, pose, row)?;
+                let pose_index = pose * 6 + row;
+                let pose_delta = delta_poses[pose_index] * pose_delta_factor;
+                for column in 0..3 {
+                    let (landmark_scale, landmark_delta_factor) =
+                        quality_landmark_factors(coordinate, landmark_index, column)?;
+                    let landmark_index_flat = landmark_index * 3 + column;
+                    let landmark_delta =
+                        delta_landmarks[landmark_index_flat] * landmark_delta_factor;
+                    let g = cross[(row, column)] * pose_scale * landmark_scale;
+                    if !pose_delta.is_finite() || !landmark_delta.is_finite() || !g.is_finite() {
+                        return Err("quality diagnostic cross system is non-finite");
+                    }
+                    quality_add_square(&mut matrix_norm_squared, g)?;
+                    quality_add_square(&mut matrix_norm_squared, g)?;
+                    quality_add(&mut pose_residual[pose_index], g * landmark_delta)?;
+                    quality_add(&mut landmark_residual[column], g * pose_delta)?;
+                    quality_add(
+                        &mut pose_denominator[pose_index],
+                        g.abs() * landmark_delta.abs(),
+                    )?;
+                    quality_add(
+                        &mut landmark_denominator[column],
+                        g.abs() * pose_delta.abs(),
+                    )?;
+                    // The symmetric cross block appears twice in δᵀHδ.
+                    quality_add(
+                        &mut hessian_quadratic,
+                        2.0 * pose_delta * g * landmark_delta,
+                    )?;
+                }
+            }
+        }
+
+        for row in 0..3 {
+            quality_fold_residual_row(
+                &mut residual_norm_squared,
+                &mut componentwise_backward_error,
+                landmark_residual[row],
+                landmark_denominator[row],
+            )?;
+        }
+    }
+
+    for (residual, denominator) in pose_residual.iter().zip(pose_denominator.iter()) {
+        quality_fold_residual_row(
+            &mut residual_norm_squared,
+            &mut componentwise_backward_error,
+            *residual,
+            *denominator,
+        )?;
+    }
+    let residual_norm = residual_norm_squared.sqrt();
+    let matrix_norm = matrix_norm_squared.sqrt();
+    let delta_norm = delta_norm_squared.sqrt();
+    let rhs_norm = rhs_norm_squared.sqrt();
+    let normwise_denominator = matrix_norm * delta_norm + rhs_norm;
+    if !residual_norm.is_finite()
+        || !matrix_norm.is_finite()
+        || !delta_norm.is_finite()
+        || !rhs_norm.is_finite()
+        || !normwise_denominator.is_finite()
+    {
+        return Err("quality diagnostic normwise quantity is non-finite");
+    }
+    let normwise_backward_error = if normwise_denominator == 0.0 {
+        return Err("quality diagnostic normwise denominator is zero");
+    } else {
+        residual_norm / normwise_denominator
+    };
+    let predicted_undamped_squared_decrease = -2.0 * gradient_dot - hessian_quadratic;
+    if !predicted_undamped_squared_decrease.is_finite()
+        || !normwise_backward_error.is_finite()
+        || !componentwise_backward_error.is_finite()
+    {
+        return Err("quality diagnostic result is non-finite");
+    }
+    Ok(MatrixFreeCoordinateQuality {
+        predicted_undamped_squared_decrease,
+        normwise_backward_error,
+        componentwise_backward_error,
+    })
+}
+
+fn matrix_free_step_quality(
+    system: &NormalEquationsBa,
+    lambda: f64,
+    delta_poses: &DVector<f64>,
+    delta_landmarks: &DVector<f64>,
+    scaling_state: Option<&ColumnEquilibrationState>,
+) -> MatrixFreeStepQuality {
+    let scaled_coordinates = scaling_state.is_some();
+    let coordinate_result = quality_coordinate_metrics(
+        system,
+        lambda,
+        delta_poses,
+        delta_landmarks,
+        MatrixFreeQualityCoordinate::Current,
+    );
+    let coordinate = coordinate_result.as_ref().ok().copied();
+    let coordinate_failure = coordinate_result.as_ref().err().copied();
+    let physical_result = scaling_state.map(|state| {
+        quality_coordinate_metrics(
+            system,
+            lambda,
+            delta_poses,
+            delta_landmarks,
+            MatrixFreeQualityCoordinate::PhysicalEquivalent(state),
+        )
+    });
+    let physical_equivalent = match physical_result.as_ref() {
+        Some(result) => result.as_ref().ok().copied(),
+        None => coordinate,
+    };
+    let physical_equivalent_failure = physical_result
+        .as_ref()
+        .and_then(|result| result.as_ref().err().copied())
+        .or_else(|| {
+            if scaling_state.is_none() {
+                coordinate_failure
+            } else {
+                None
+            }
+        });
+    MatrixFreeStepQuality {
+        scaled_coordinates,
+        coordinate,
+        physical_equivalent,
+        coordinate_failure,
+        physical_equivalent_failure,
+    }
+}
+
+fn matrix_free_quality_actual_and_rho(
+    cost_before: f64,
+    cost_after: f64,
+    coordinate_prediction: Option<f64>,
+    nonprojectable_before: usize,
+    nonprojectable_after: usize,
+) -> (Option<f64>, Option<f64>, &'static str) {
+    let actual_cost_decrease = if cost_before.is_finite() && cost_after.is_finite() {
+        let decrease = cost_before - cost_after;
+        decrease.is_finite().then_some(decrease)
+    } else {
+        None
+    };
+    let (rho, rho_reason) = if nonprojectable_before != 0 || nonprojectable_after != 0 {
+        (None, "nonprojectable_count_nonzero")
+    } else if actual_cost_decrease.is_none() {
+        (None, "actual_cost_decrease_nonfinite")
+    } else {
+        match coordinate_prediction {
+            Some(prediction) if prediction.is_finite() && prediction > 0.0 => {
+                let rho = actual_cost_decrease.expect("finite actual decrease") / prediction;
+                if rho.is_finite() {
+                    (Some(rho), "defined")
+                } else {
+                    (None, "rho_nonfinite")
+                }
+            }
+            Some(_) => (None, "prediction_nonpositive_or_nonfinite"),
+            None => (None, "prediction_unavailable"),
+        }
+    };
+    (actual_cost_decrease, rho, rho_reason)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_matrix_free_step_quality(
+    iteration: usize,
+    solve_lambda: f64,
+    quality: MatrixFreeStepQuality,
+    cost_before: f64,
+    cost_after: f64,
+    nonprojectable_before: usize,
+    nonprojectable_after: usize,
+    cost_gate: bool,
+    feasibility_gate: bool,
+    step_accepted: bool,
+) {
+    let coordinate_prediction = quality
+        .coordinate
+        .map(|metrics| metrics.predicted_undamped_squared_decrease);
+    let physical_prediction = quality
+        .physical_equivalent
+        .map(|metrics| metrics.predicted_undamped_squared_decrease);
+    let (actual_cost_decrease, rho, rho_reason) = matrix_free_quality_actual_and_rho(
+        cost_before,
+        cost_after,
+        coordinate_prediction,
+        nonprojectable_before,
+        nonprojectable_after,
+    );
+    let coordinate_name = if quality.scaled_coordinates {
+        "scaled"
+    } else {
+        "physical"
+    };
+    let physical_equivalent_evaluation = if quality.scaled_coordinates {
+        "recomputed_from_rounded_scaled_coefficients"
+    } else {
+        "current_physical_system"
+    };
+    let coordinate_normwise = quality
+        .coordinate
+        .map(|metrics| metrics.normwise_backward_error);
+    let coordinate_componentwise = quality
+        .coordinate
+        .map(|metrics| metrics.componentwise_backward_error);
+    let physical_normwise = quality
+        .physical_equivalent
+        .map(|metrics| metrics.normwise_backward_error);
+    let physical_componentwise = quality
+        .physical_equivalent
+        .map(|metrics| metrics.componentwise_backward_error);
+    eprintln!(
+        concat!(
+            "sfm-debug-ba-lm-quality: iteration={} solve_lambda={:.17e} ",
+            "coordinates={} prediction_coordinates={} ",
+            "physical_equivalent_evaluation={} ",
+            "predicted_undamped_squared_decrease={:?} ",
+            "physical_equivalent_predicted_undamped_squared_decrease={:?} ",
+            "actual_cost_decrease={:?} rho={:?} rho_reason={} ",
+            "rho_prediction_coordinates={} actual_cost_scope=existing_ba_cost ",
+            "rho_cost_comparable={} nonprojectable_before={} nonprojectable_after={} ",
+            "cost_gate={} feasibility_gate={} accepted={} ",
+            "coordinate_full_normwise_backward_error={:?} ",
+            "coordinate_full_componentwise_eta={:?} ",
+            "physical_equivalent_full_normwise_backward_error={:?} ",
+            "physical_equivalent_full_componentwise_eta={:?} ",
+            "coordinate_quality_failure={:?} physical_equivalent_quality_failure={:?}"
+        ),
+        iteration,
+        solve_lambda,
+        coordinate_name,
+        coordinate_name,
+        physical_equivalent_evaluation,
+        coordinate_prediction,
+        physical_prediction,
+        actual_cost_decrease,
+        rho,
+        rho_reason,
+        coordinate_name,
+        nonprojectable_before == 0 && nonprojectable_after == 0,
+        nonprojectable_before,
+        nonprojectable_after,
+        cost_gate,
+        feasibility_gate,
+        step_accepted,
+        coordinate_normwise,
+        coordinate_componentwise,
+        physical_normwise,
+        physical_componentwise,
+        quality.coordinate_failure,
+        quality.physical_equivalent_failure,
+    );
+}
+
+fn emit_matrix_free_step_quality_failure(iteration: usize, solve_lambda: f64, diagnostic: &str) {
+    eprintln!(
+        "sfm-debug-ba-lm-quality: iteration={} solve_lambda={:.17e} linear_failure={}",
+        iteration, solve_lambda, diagnostic
+    );
+}
+
 fn column_scaling_transform(
     diagonal: f64,
     minimum: &mut f64,
@@ -4207,6 +4780,298 @@ mod column_scaling_tests {
             .unscale_deltas(&mut nonfinite_pose, &mut valid_landmarks)
             .unwrap_err()
             .contains("non-finite"));
+    }
+}
+
+#[cfg(test)]
+mod lm_step_quality_tests {
+    use super::*;
+
+    fn synthetic_system() -> NormalEquationsBa {
+        let h_pp = Matrix6::from_diagonal(&Vector6::from_row_slice(&[
+            4.0, 9.0, 16.0, 25.0, 36.0, 49.0,
+        ]));
+        let h_ll = Matrix3::from_diagonal(&Vector3::new(4.0, 9.0, 16.0));
+        let cross_a = Matrix6x3::from_fn(|row, column| {
+            if row == column {
+                0.25
+            } else if row == column + 3 {
+                -0.125
+            } else {
+                0.0
+            }
+        });
+        let cross_b = Matrix6x3::from_fn(|row, column| if row == column { -0.0625 } else { 0.0 });
+        NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![h_pp]),
+            b_p: DVector::from_row_slice(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0]),
+            landmarks: vec![LandmarkBlock {
+                h_ll,
+                b_l: Vector3::new(0.5, -0.75, 1.25),
+                // Deliberate same-pose duplicate: the quality denominator
+                // must use |cross_a + cross_b|, not |cross_a|+|cross_b|.
+                cross: vec![(0, cross_a), (0, cross_b)],
+            }],
+        }
+    }
+
+    fn full_normal(system: &NormalEquationsBa) -> (DMatrix<f64>, DVector<f64>) {
+        let CameraHessian::PoseDiagonal(pose_blocks) = &system.h_pp else {
+            panic!("quality test requires pose blocks");
+        };
+        let pose_count = pose_blocks.len();
+        let landmark_count = system.landmarks.len();
+        let dimension = pose_count * 6 + landmark_count * 3;
+        let mut h = DMatrix::zeros(dimension, dimension);
+        let mut b = DVector::zeros(dimension);
+        for (pose, block) in pose_blocks.iter().enumerate() {
+            for row in 0..6 {
+                b[pose * 6 + row] = system.b_p[pose * 6 + row];
+                for column in 0..6 {
+                    h[(pose * 6 + row, pose * 6 + column)] = block[(row, column)];
+                }
+            }
+        }
+        for (landmark_index, landmark) in system.landmarks.iter().enumerate() {
+            let offset = pose_count * 6 + landmark_index * 3;
+            for row in 0..3 {
+                b[offset + row] = landmark.b_l[row];
+                for column in 0..3 {
+                    h[(offset + row, offset + column)] = landmark.h_ll[(row, column)];
+                }
+            }
+            for (pose, cross) in &landmark.cross {
+                for row in 0..6 {
+                    for column in 0..3 {
+                        h[(pose * 6 + row, offset + column)] += cross[(row, column)];
+                        h[(offset + column, pose * 6 + row)] += cross[(row, column)];
+                    }
+                }
+            }
+        }
+        (h, b)
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        let scale = actual.abs().max(expected.abs()).max(1.0);
+        assert!((actual - expected).abs() <= 1.0e-11 * scale);
+    }
+
+    #[test]
+    fn quality_matches_explicit_full_normal_prediction_and_eta() {
+        let system = synthetic_system();
+        let before = full_normal(&system);
+        let delta_pose = DVector::from_row_slice(&[0.2, -0.3, 0.4, -0.5, 0.6, -0.7]);
+        let delta_landmark = DVector::from_row_slice(&[0.8, -0.9, 1.0]);
+        let lambda = 0.5;
+        let quality = quality_coordinate_metrics(
+            &system,
+            lambda,
+            &delta_pose,
+            &delta_landmark,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap();
+
+        let (h, b) = full_normal(&system);
+        let mut damped = h.clone();
+        for index in 0..damped.nrows() {
+            damped[(index, index)] += lambda;
+        }
+        let mut delta = DVector::zeros(9);
+        delta.rows_mut(0, 6).copy_from(&delta_pose);
+        delta.rows_mut(6, 3).copy_from(&delta_landmark);
+        let residual = &damped * &delta + &b;
+        let expected_prediction = -2.0 * b.dot(&delta) - delta.dot(&(&h * &delta));
+        let expected_normwise = residual.norm() / (damped.norm() * delta.norm() + b.norm());
+        let mut expected_componentwise: f64 = 0.0;
+        for row in 0..damped.nrows() {
+            let denominator = (0..damped.ncols())
+                .map(|column| damped[(row, column)].abs() * delta[column].abs())
+                .sum::<f64>()
+                + b[row].abs();
+            let ratio = if denominator == 0.0 {
+                assert_eq!(residual[row], 0.0);
+                0.0
+            } else {
+                residual[row].abs() / denominator
+            };
+            expected_componentwise = expected_componentwise.max(ratio);
+        }
+
+        assert_close(
+            quality.predicted_undamped_squared_decrease,
+            expected_prediction,
+        );
+        assert_close(quality.normwise_backward_error, expected_normwise);
+        assert_close(quality.componentwise_backward_error, expected_componentwise);
+        assert_eq!(before, full_normal(&system));
+    }
+
+    #[test]
+    fn quality_streams_multiple_landmarks_against_full_normal_oracle() {
+        let mut system = synthetic_system();
+        system.landmarks.push(LandmarkBlock {
+            h_ll: Matrix3::from_diagonal(&Vector3::new(7.0, 8.0, 9.0)),
+            b_l: Vector3::new(-0.2, 0.4, -0.6),
+            cross: vec![(
+                0,
+                Matrix6x3::from_fn(|row, column| if row == column + 1 { 0.15 } else { 0.0 }),
+            )],
+        });
+        let delta_pose = DVector::from_row_slice(&[0.2, -0.3, 0.4, -0.5, 0.6, -0.7]);
+        let delta_landmarks = DVector::from_row_slice(&[0.8, -0.9, 1.0, -1.1, 1.2, -1.3]);
+        let lambda = 0.5;
+        let quality = quality_coordinate_metrics(
+            &system,
+            lambda,
+            &delta_pose,
+            &delta_landmarks,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap();
+        let (h, b) = full_normal(&system);
+        let mut delta = DVector::zeros(12);
+        delta.rows_mut(0, 6).copy_from(&delta_pose);
+        delta.rows_mut(6, 6).copy_from(&delta_landmarks);
+        let expected_prediction = -2.0 * b.dot(&delta) - delta.dot(&(&h * &delta));
+        assert_close(
+            quality.predicted_undamped_squared_decrease,
+            expected_prediction,
+        );
+        assert!(quality.normwise_backward_error.is_finite());
+        assert!(quality.componentwise_backward_error.is_finite());
+    }
+
+    #[test]
+    fn componentwise_eta_is_invariant_under_positive_column_scaling() {
+        let original = synthetic_system();
+        let mut scaled = synthetic_system();
+        let state = column_equilibrate_normal_system(&mut scaled).unwrap();
+        let physical_pose = DVector::from_row_slice(&[0.2, -0.3, 0.4, -0.5, 0.6, -0.7]);
+        let physical_landmark = DVector::from_row_slice(&[0.8, -0.9, 1.0]);
+        let mut scaled_pose = physical_pose.clone();
+        let mut scaled_landmark = physical_landmark.clone();
+        for component in 0..6 {
+            scaled_pose[component] /= state.pose_transforms[0][component];
+        }
+        for component in 0..3 {
+            scaled_landmark[component] /= state.landmark_transforms[0][component];
+        }
+        let lambda = 0.5;
+        let original_quality = quality_coordinate_metrics(
+            &original,
+            lambda,
+            &physical_pose,
+            &physical_landmark,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap();
+        let scaled_quality = quality_coordinate_metrics(
+            &scaled,
+            lambda,
+            &scaled_pose,
+            &scaled_landmark,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap();
+        let physical_equivalent = quality_coordinate_metrics(
+            &scaled,
+            lambda,
+            &scaled_pose,
+            &scaled_landmark,
+            MatrixFreeQualityCoordinate::PhysicalEquivalent(&state),
+        )
+        .unwrap();
+
+        assert_close(
+            original_quality.componentwise_backward_error,
+            scaled_quality.componentwise_backward_error,
+        );
+        assert_close(
+            original_quality.componentwise_backward_error,
+            physical_equivalent.componentwise_backward_error,
+        );
+        assert_close(
+            original_quality.predicted_undamped_squared_decrease,
+            physical_equivalent.predicted_undamped_squared_decrease,
+        );
+    }
+
+    #[test]
+    fn quality_allows_fixed_zero_rows_and_reports_invalid_inputs() {
+        let mut fixed = synthetic_system();
+        constrain_fixed_pose_rotations(
+            &BTreeSet::from([7_u64]),
+            &BTreeMap::from([(7_u64, 0_usize)]),
+            &mut fixed,
+        );
+        let zero_rotation = DVector::from_row_slice(&[0.2, -0.3, 0.4, 0.0, 0.0, 0.0]);
+        let landmark = DVector::from_row_slice(&[0.8, -0.9, 1.0]);
+        let fixed_quality = quality_coordinate_metrics(
+            &fixed,
+            0.5,
+            &zero_rotation,
+            &landmark,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap();
+        assert!(fixed_quality.componentwise_backward_error.is_finite());
+
+        let mut nonfinite = synthetic_system();
+        nonfinite.b_p[0] = f64::NAN;
+        assert!(quality_coordinate_metrics(
+            &nonfinite,
+            0.5,
+            &zero_rotation,
+            &landmark,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap_err()
+        .contains("non-finite"));
+
+        let zero_system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![Matrix6::zeros()]),
+            b_p: DVector::zeros(6),
+            landmarks: Vec::new(),
+        };
+        let zero_delta = DVector::zeros(6);
+        assert!(quality_coordinate_metrics(
+            &zero_system,
+            0.0,
+            &zero_delta,
+            &DVector::zeros(0),
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .unwrap_err()
+        .contains("denominator is zero"));
+    }
+
+    #[test]
+    fn rho_is_undefined_when_nonprojectable_set_changes() {
+        let (actual, rho, reason) =
+            matrix_free_quality_actual_and_rho(100.0, 90.0, Some(20.0), 0, 1);
+        assert_eq!(actual, Some(10.0));
+        assert_eq!(rho, None);
+        assert_eq!(reason, "nonprojectable_count_nonzero");
+
+        let (actual, rho, reason) =
+            matrix_free_quality_actual_and_rho(100.0, 90.0, Some(20.0), 0, 0);
+        assert_eq!(actual, Some(10.0));
+        assert_eq!(rho, Some(0.5));
+        assert_eq!(reason, "defined");
+
+        let (actual, rho, reason) =
+            matrix_free_quality_actual_and_rho(f64::MAX, -f64::MAX, Some(1.0), 0, 0);
+        assert_eq!(actual, None);
+        assert_eq!(rho, None);
+        assert_eq!(reason, "actual_cost_decrease_nonfinite");
+
+        let (actual, rho, reason) =
+            matrix_free_quality_actual_and_rho(1.0, 0.0, Some(f64::from_bits(1)), 0, 0);
+        assert_eq!(actual, Some(1.0));
+        assert_eq!(rho, None);
+        assert_eq!(reason, "rho_nonfinite");
     }
 }
 
@@ -5759,6 +6624,7 @@ struct MatrixFreeStepOutcome {
     delta_landmarks: DVector<f64>,
     diagnostics: MatrixFreeBaIterationStats,
     restart_diagnostics: Option<MatrixFreeBaRestartIterationStats>,
+    quality: Option<MatrixFreeStepQuality>,
 }
 
 struct MatrixFreeStepError {
@@ -5860,6 +6726,15 @@ fn solve_matrix_free_step(
             to_step_error(error)
         }
     })?;
+    let quality = ba_lm_step_quality_debug_enabled().then(|| {
+        matrix_free_step_quality(
+            system,
+            lambda,
+            &delta_poses,
+            &delta_landmarks,
+            scaling_state,
+        )
+    });
     if let Some(scaling_state) = scaling_state {
         if let Err(error) = scaling_state.unscale_deltas(&mut delta_poses, &mut delta_landmarks) {
             let restart_diagnostics = restart_diagnostics.map(|diagnostics| {
@@ -5887,6 +6762,7 @@ fn solve_matrix_free_step(
             pcg_failure: None,
         },
         restart_diagnostics: restart_diagnostics.map(Into::into),
+        quality,
     })
 }
 
