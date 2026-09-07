@@ -867,7 +867,7 @@ identity and coordinates, point coordinates and initial-cost bits
 `4683430141614839853` (126,510.39875730938). No observation was removed.
 The same initial normal system has 499 free pose blocks / scalar dimension 2,994.
 
-| Initial solve damping | PCG 128 / 512 | Direct step residual: lower / implicit | Trial geometry |
+| Initial solve damping | Matrix-free PCG 128 / 512 | Direct step residual: lower / implicit | Trial geometry |
 |---|---|---|---|
 | `1e-4` | both fail; true residual 41,263.7 / 318.346 against `7.35e-7` | `2.75e-6` / `0.01848` | 880 nonpositive-depth observations |
 | `1e10` | both succeed at 22 iterations; `5.64e-7` against `7.38e-7` | `3.02e-9` / `4.49e-7` | all 130,900 valid |
@@ -883,7 +883,7 @@ accuracy. PCG recursive and true residuals are close at these low-damping
 iteration limits, so residual replacement alone is not established as a fix.
 
 At high damping, matrix-free/explicit pose-delta difference is `2.09e-17` and
-all trial costs are 126,477.42813448103. Low-damping trial geometry cost/RMS
+all trial geometry costs are 126,477.42813448103. Low-damping trial geometry cost/RMS
 exclude 880 invalid observations and must not be called full-objective
 improvements. Reported feasibility means finite and valid geometry, not that
 the PCG residual target passed. Prediction fields distinguish half-cost damped,
@@ -901,3 +901,10 @@ implicit action, with the same input, damping, block-Jacobi preconditioner,
 128/512 limits and true-residual rule. This isolates accumulation from
 convergence/preconditioning before selecting scaling or a different
 preconditioner. Preserve the baseline and do not silently relax its tolerance.
+
+PR #80 passed all eight final-head CI checks (run `34122318818`, head
+`b294bab`) and merged as `2b4ef99`; its local and remote topic branches were
+removed. The fixture also re-exported byte-identically to a second filename.
+The arithmetic-scale denominator above is specifically
+`max(1, ||base_action|| + ||accumulated_eliminated_action||)`, not a sum of
+individual landmark-action norms.

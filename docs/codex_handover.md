@@ -102,6 +102,8 @@
 > 既存direct/MF CLIのモデル3ファイル・数値traceはPR #79と一致。
 > 次は同じpreconditionerでexplicit lower-Schur PCGとimplicit PCGを比べ、
 > 蓄積誤差と収束性を切り分けます。閾値変更・10k昇格はまだ行いません。
+> PR #80は最終CI8項目（run 34122318818）通過後、`2b4ef99`へmergeし旧branch整理済み。
+> 現在は `feat/m8-explicit-pcg-isolation` で同前処理のPCG切り分けを進めています。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

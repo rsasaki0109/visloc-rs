@@ -95,6 +95,9 @@ invalid-depth trial observations; PCG 128/512 fail. At `1e10`, PCG converges in
 numerical traces are unchanged. Next isolate accumulation versus convergence
 with explicit lower-Schur PCG using the same preconditioner and stopping rule;
 this is a diagnostic gate, not a tolerance relaxation or a 10k promotion.
+PR #80 passed all eight final-head CI checks (run `34122318818`) and merged
+as `2b4ef99`; its old branch was removed. Work continues on
+`feat/m8-explicit-pcg-isolation` with the identical frozen fixture.
 
 ## Historical M7 baseline
 
