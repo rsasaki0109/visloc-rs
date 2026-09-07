@@ -1601,3 +1601,62 @@ No diagnostic arithmetic failure occurred. All atlas candidates that reached
 nonlinear evaluation had zero nonprojectable observations before and after.
 The scaled 1k trajectory regression and pooled 10k COLMAP RMSE gap remain:
 the diagnostic does not alter either result or promote this solver policy.
+
+### Predeclared adaptive-damping A/B contract (2026-09-08)
+
+PR #86 merged as `d339093` after eight final-head checks on `b5ffa66`
+(run `34149951882`). Continue on `feat/m8-adaptive-scaled-lm-damping`.
+This is a production-capable opt-in policy experiment, not a default change.
+
+Change only the accepted-step multiplier to
+`u(rho) = max(1/3, 1 - (2*rho - 1)^3)` and
+`lambda_next = clamp(lambda_solve * u(rho), min_lambda, max_lambda)`.
+For finite `rho >= 1`, evaluate the saturated factor directly to avoid cubic
+overflow. Keep the existing rejection/linear-failure increase factor (10 in
+the experiment). The accepted-step formula follows the
+[Ceres LM strategy source](https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/levenberg_marquardt_strategy.cc)
+(reviewed 2026-09-08), but Ceres also adapts its rejection multiplier and uses
+different linear-solve stopping rules. This isolated policy is not a Ceres
+implementation or a claim of equivalent behavior.
+
+Use the current scaled system's undamped squared-cost prediction and the
+same zero-nonprojectable rho contract as PR #86. The new opt-in entry must
+reject initially nonprojectable input before mutation. A finite candidate
+with invalid/nonpositive prediction or unavailable rho is an explicit
+candidate rejection with rollback, not a fabricated linear failure. Existing
+cost/feasibility gates remain necessary. Log actual solve lambda separately
+from the next lambda; retain finite bounds and bounded termination.
+
+Compute only the prediction scalar from borrowed blocks and deltas, after
+back-substitution and before physical unscaling. Do not enable full residual/
+backward-error scans merely to use adaptive damping. No additional model or
+normal clone, dense global matrix, full residual scratch or per-point history.
+Keep any same-pose cross aggregation bounded by one track and preserve its
+coefficient contribution order. Old APIs, struct shapes, defaults and logs
+remain unchanged; new API/results and CLI selection are additive. The CLI
+requires explicit column scaling and rejects direct/oracle/export/nonzero
+restart combinations.
+
+The frozen 1k comparison uses PCG 512 iterations, relative tolerance 1e-8,
+absolute tolerance 1e-12, restart zero, initial lambda 1e-4, bounds 1e-9–1e12,
+20 LM attempts and one Rayon thread. Keep every input observation and fixed
+rig calibration/anchor. Freeze source and binary hashes before timed runs,
+with no concurrent local compilation. Legacy MF and direct controls must
+match their earlier outputs; fixed-scaled and adaptive arms each run twice.
+An adaptive debug-ON control must preserve OFF models and numerical traces.
+
+The fixed-scaled arm isolates the policy change but is **not** a passing
+quality reference. Before any adaptive atlas run, require 1k RMSE no worse
+than legacy MF's 0.026608055174816774 m and p95 no worse than
+0.04109998478546261 m; report direct and COLMAP alongside it. Require identical
+image/keypoint/track identities and counts, all 1,000 supported images and 500
+supported rig frames in one component, fixed cameras/rig/anchor, finite state,
+zero nonpositive depths, and mean observation reprojection no worse than
+legacy MF's 0.691588658326868 px. Report maxima and point movement separately;
+the input filter thresholds are not invented post-BA maximum-error gates.
+Also require same-observation final objective no worse than legacy MF and
+repeatability of outputs/traces. GT stays post-only: no damping/tolerance
+sweep selected on trajectory score. Report timing and RSS without claiming
+mapper/native-E2E acceleration. Failure of this 1k gate stops atlas progression
+for this candidate and requires a new evidence-based decision, not a relaxed
+threshold or README promotion.

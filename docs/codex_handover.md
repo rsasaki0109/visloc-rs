@@ -1,5 +1,14 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新の続行（2026-09-08）: PR #86は最終head `b5ffa66` のCI8項目
+> （run `34149951882`）通過後、`d339093`へmerge済み。local/remote旧branchも整理済み。
+> 現在は `feat/m8-adaptive-scaled-lm-damping`。Luna Maxで受理後の減衰係数を
+> 更新品質rhoに応じて変える明示的なA/Bを実装します。拒否時の増加係数とPCG設定は固定。
+> 初期の投影不能観測は新モードだけ明示拒否し、候補のprediction無効と線形失敗を分けます。
+> 非昇格のscaled controlに勝つだけでは不十分で、1kのlegacy MF軌跡精度・支持・再投影の
+> 非回帰を先に確認し、未達ならatlasへ進めません。全体goalは引き続きactiveです。
+> 以下のPR/CI待ちは各時点の履歴で、最新状態はこの追記を優先します。
+
 > 続行（2026-09-08）: PR #85は最終head `11f36b8` のCI8項目
 > （run `34145940542`）通過後、`d751f6e`へmerge済み。旧local/remote branchも整理済み。
 > 現在は `feat/m8-lm-step-quality-diagnostic`。Luna Maxで既定OFFの更新品質診断を
