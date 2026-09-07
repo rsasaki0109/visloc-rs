@@ -430,3 +430,39 @@ Main/tail pilot wall times are 235.31/25.93 s at 525,676/77,896 KiB; they run
 with overlapping jobs on a shared machine. Neither these numbers nor fewer DLT
 calls establish mapper/native-E2E speed. Full hashes and scope are in
 [point retention evidence](../benchmarks/electro/m8-openloris-atlas-connected-preserved-ba-v1.json).
+
+### Next controlled arm: exactly two filtering sweeps
+
+Point-retention PR #74 is merged as `f92fa3c` after eight final-head CI checks
+passed (run 34097238801). Keep retention disabled. The next comparison changes
+only the number of original filtered/DLT sweeps from one to exactly two; it is
+not an arbitrary pass-count search or a combined retention/refinement policy.
+Previous native-mapper refinement experiments used different inputs/tracks and
+do not substitute for this connected-atlas comparison.
+
+- Add `--joint-rig-ba-filter-sweeps 1|2`, default 1. Explicit use requires the
+  filtering flag. Reject zero, values above two and duplicate arguments.
+- Two sweeps require `--post-pass1-out-dir PATH` and reject optimized-point
+  retention. The checkpoint must be new or empty, with the same input/output/
+  ancestor/symlink collision checks as the existing pre-BA checkpoint.
+- The one-sweep path must preserve existing numerical order, logs and output.
+- Run the existing filtered/DLT function once, validate, update output counts
+  and write a canonical reference-view checkpoint. Do not sort/mutate solver
+  input, reparse the checkpoint or clone the complete model. Release writer
+  buffers before applying the same function again to the in-memory state.
+- Keep window length/stride, 20-iteration solver cap, point/observation/pose
+  caps, anchors, calibration and every full-cost/retained-cost/geometry/support/
+  connectivity/transactional guard unchanged in each pass.
+- Mark pass boundaries and keep each pass's summaries separate. Costs sum
+  overlapping window events; they are not a single global objective value.
+  Count deletion reasons without retaining a pass-wide duplicate key map.
+  Since accepted transitions only delete observations, a deleted key cannot
+  reappear in another window; audit this independently from serialized outputs.
+
+Before evaluating pass two, require both pass-one checkpoints to match all six
+`connected-filtered-ba-v1` files. The pre-BA checkpoints must still match
+`boundary-repair-v1`. Run transition audits for repair→pass one and pass one→
+pass two, plus the independent final geometry/rig/connectivity audit and fixed
+post-map scorer. Require two-run output equality and a one-sweep control. No GT
+or score may decide mapping acceptance or termination. Keep all original M8–M10
+gates, including mapper/native-E2E timing and total peak RSS, unchanged.

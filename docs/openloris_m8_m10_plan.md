@@ -1362,6 +1362,14 @@ observation-weighted reprojection and far fewer DLT calls do not close the
 trajectory gap. Preserve the filtering baseline and the
 [negative evidence](../benchmarks/electro/m8-openloris-atlas-connected-preserved-ba-v1.json).
 
+PR #74 is merged (`f92fa3c`) with final CI and branch cleanup complete. Next,
+compare exactly two original filtered/DLT sweeps against one on the same
+connected state, with point retention disabled. A pass-one checkpoint must
+match the existing filtering model before pass-two results are considered.
+Keep all thresholds, per-window caps, calibration and acceptance gates fixed;
+see the [two-sweep contract](openloris_atlas_bounded_ba.md). No result for this
+arm is claimed before execution and independent output auditing.
+
 ## Stop conditions
 
 - Do not launch a larger tier after an input/hash/calibration mismatch.
