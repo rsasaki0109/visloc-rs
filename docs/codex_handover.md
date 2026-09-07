@@ -1,5 +1,20 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Ceres 1k実行完了（2026-09-08）: Luna Maxの`1f31335`をroot独立認証。
+> self-test/微分再検証通過、初期130,900残差dumpは監査済みcheckpointとbyte一致。
+> 固定条件の実solveを1回実行し77.45 s / peak RSS305,072 KiBでexit0。
+> 20反復上限のNO_CONVERGENCE（usable）であり、収束確認済みとは扱いません。
+> 実更新13受理/7拒否（Ceresのsuccessful14は初期iteration0込み）。
+> 独立最終state監査でcost113473.8799820374、平均再投影0.6749016424 px、
+> 全130,900正深度・全500支持frame・全pose/point ID・固定anchorを確認。
+> 最大pose中心移動0.02943 m、XYZ移動231.001 m。GT/モデル出力監査はまだ未実施。
+> [solve証跡](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json)。
+> Luna MaxはPython model publisherとテストを実装中。C++はこれ以上変更せず測定binaryを保持。
+> [draft PR #89](https://github.com/rsasaki0109/visloc-rs/pull/89)を作成済み。
+> 初期head `a8553c1`はCI9項目通過(run34158171089)。solve head `1f31335`は
+> run34158566321で再CI中。publisher/全監査/最終CIが揃うまでdraft・非mergeです。
+> 既定Rust/README性能値は不変。全体goalと10k精度/native E2E/各規模ゲートは未完了。
+
 > Ceres微分の独立検証（2026-09-08）: rootが凍結`1d6424f`の実AutoDiff因子と
 > 実ProductManifoldを使い、独立Eigen投影の数値微分・別途導いた解析式と照合。
 > ambient/XYZ/tangentのFD最大差は5.22e-7/5.05e-7/3.25e-7（許容1e-5）、
