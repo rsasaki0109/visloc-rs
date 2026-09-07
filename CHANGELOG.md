@@ -6,6 +6,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Calibrated rig-atlas diagnostics (2026-09-07).** Added opt-in bounded
+  fixed-rotation/unit-scale seam estimators and a trajectory-only stitching
+  example with deterministic overlap ownership and sparse metric SE3 controls.
+  Camera publication composes unchanged physical sensor extrinsics after the
+  rig transform, preserving the stereo baseline. Frozen OpenLORIS 10k controls
+  reach 9,998 images but still miss COLMAP's trajectory gates; interior-window
+  ownership and equal-weight pose-graph optimization regress and are not
+  promoted. Evidence distinguishes these diagnostics from a merged landmark
+  model and from mapper/end-to-end speed claims. Defaults remain unchanged.
+
 - **Bounded component-model recovery for disconnected large view graphs
   (2026-09-02).** Added explicit `--component-model-min-images` and
   `--component-model-max-count` controls to the unordered SfM demo and Electro

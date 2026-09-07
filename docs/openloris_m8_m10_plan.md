@@ -580,6 +580,24 @@ anchor does not solve the problem: it regresses aggregate RMSE/p95 to
 metric-labelled tracks while freeing that anchor regresses further to
 0.5319/1.1483 m, so its temporary options were removed.
 
+A mapper-local contiguous replay now tests that conclusion without changing
+the verified input or consulting GT. The replay validates the full frozen
+snapshot and overlay, retains only one requested frame interval, remaps image
+IDs deterministically, preserves pair order and the base/deferred boundary,
+and never forms a frame Cartesian product. Frames 2,500--2,999 registered all
+1,000 images in one model at 0.68259 px and scored 0.29411/0.54979 m
+RMSE/p95. Frames 3,000--3,499 also registered all 1,000 images at 0.67528 px;
+its naturally disconnected 260/240-frame models scored a component-weighted
+0.04601/0.08760 m. Peak RSS was about 332 MiB in both runs. The sharp
+local/global gap, especially across the drifting middle interval, confirms
+that bounded local reconstruction is substantially better than the published
+long-gauge trajectory. It promotes an overlapping-window Sim(3) stitching
+experiment, not the M8 result itself. Exact inputs, hashes, commands, resource
+counters, and scores are frozen in
+[`m8-openloris-local-window-diagnostic.json`](../benchmarks/electro/m8-openloris-local-window-diagnostic.json).
+The first window was rerun with the current release binary and reproduced all
+three model files byte-for-byte; an earlier stale-binary score was discarded.
+
 The GT-free cause is observable in the dense final map. It contains 352,185
 independently triangulated local stereo points and 28,092 tracks with such
 points in two frames, but robust 3D-to-3D motion at gaps 32--128 is extremely
@@ -1152,6 +1170,30 @@ the skipped-10k decision are frozen in
 [`m8-openloris-gr6p-seed-ab.json`](../benchmarks/electro/m8-openloris-gr6p-seed-ab.json).
 
 ## M9 — make the quality champion faster than COLMAP
+
+The overlapping-window trajectory experiment remains below the M8 gate.
+Its September 7 audit corrected publication that inadvertently scaled the
+calibrated stereo baseline. The corrected K diagnostic preserves all supplied
+sensor extrinsics and repeats byte-for-byte, but still registers only 9,996
+images and scores 0.478844 m RMSE / 0.897779 m p95. These are trajectory-only
+outputs, without a merged landmark model or reprojection result. See the
+[rig-atlas diagnostic](openloris_rig_atlas_diagnostic.md) for the rejected
+arms, calibration audit, corrected results, and repeat hashes. A subsequent
+500-frame replay starting at 4200 recovered frame 4493 without threshold
+changes. Adding that overlapping node reaches 9,998 images and 4,494/505-frame
+components, but RMSE/p95 remain 0.481208/0.905394 m. Registration recovery is
+therefore established for the trajectory diagnostic. A further unchanged
+500-frame replay starting at 650 supplies an alternative unit-scale route
+around a scale-changing seam. Strict-metric L reaches RMSE/p95
+0.391778/0.643698 m at the same registration, still above COLMAP's
+0.384307/0.638669 m limits. Changing overlap publication to prefer window
+interiors worsens both metrics (0.431936/0.712670 m) and is not promoted.
+The M8 accuracy and merged-model gates remain open; the linked diagnostic
+records input/output hashes and the byte-identical default-policy repeat.
+Equal-weight, scale-fixed SE3 optimization on all accepted seams reduces
+its internal cost but worsens RMSE/p95 to 0.431011/0.717679 m; it also remains
+diagnostic-only. The next integration gate is a real, observation-validated
+landmark model with bounded refinement, not another score-tuned graph policy.
 
 Freeze the M8 quality champion before performance edits.
 

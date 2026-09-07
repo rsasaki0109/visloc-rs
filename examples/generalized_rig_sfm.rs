@@ -50,6 +50,8 @@ struct Args {
     out_colmap: PathBuf,
     max_models: usize,
     min_model_frames: usize,
+    frame_range_start: Option<usize>,
+    frame_range_count: Option<usize>,
     min_pnp_inliers: usize,
     min_pnp_sensors: usize,
     direct_stereo_pnp_max_frame_gap: usize,
@@ -141,6 +143,8 @@ fn parse_args() -> Result<Args, String> {
     let mut out_colmap = None;
     let mut max_models = 1usize;
     let mut min_model_frames = 10usize;
+    let mut frame_range_start = None;
+    let mut frame_range_count = None;
     let mut min_pnp_inliers = 8usize;
     let mut max_reprojection_error_px = 4.0;
     let mut pnp_max_iterations = 512usize;
@@ -264,6 +268,12 @@ fn parse_args() -> Result<Args, String> {
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
             "--min-model-frames" => {
                 min_model_frames = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--frame-range-start" => {
+                frame_range_start = Some(value()?.parse().map_err(|error| format!("{error}"))?)
+            }
+            "--frame-range-count" => {
+                frame_range_count = Some(value()?.parse().map_err(|error| format!("{error}"))?)
             }
             "--min-pnp-inliers" => {
                 min_pnp_inliers = value()?.parse().map_err(|error| format!("{error}"))?
@@ -537,6 +547,7 @@ fn parse_args() -> Result<Args, String> {
                     "--deferred-overlay-max-matches-per-pair COUNT] ",
                     "--snapshot FILE [--out-colmap DIR] [--feature-suffix _features.txt] ",
                     "[--max-models 1] [--min-model-frames 10] ",
+                    "[--frame-range-start N --frame-range-count N] ",
                     "[--min-pnp-inliers 8] [--min-pnp-sensors 2] ",
                     "[--direct-stereo-pnp-max-frame-gap 0] ",
                     "[--direct-stereo-min-pnp-sensors COUNT] ",
@@ -770,6 +781,12 @@ fn parse_args() -> Result<Args, String> {
     if min_model_frames < 2 {
         return Err("--min-model-frames must be at least 2".into());
     }
+    validate_frame_range_args(frame_range_start, frame_range_count)?;
+    validate_frame_range_compatibility(
+        frame_range_start.is_some(),
+        max_track_frame_gap,
+        deferred_quadrilateral_whitelist_tsv.is_some(),
+    )?;
     if !triangulation_min_inlier_fraction.is_finite()
         || !(0.5..=1.0).contains(&triangulation_min_inlier_fraction)
     {
@@ -791,6 +808,8 @@ fn parse_args() -> Result<Args, String> {
         out_colmap: out_colmap.ok_or("--out-colmap is required")?,
         max_models,
         min_model_frames,
+        frame_range_start,
+        frame_range_count,
         min_pnp_inliers,
         min_pnp_sensors,
         direct_stereo_pnp_max_frame_gap,
@@ -1056,6 +1075,169 @@ fn build_frames(
         .into_values()
         .map(|images| RigFrame { images })
         .collect())
+}
+
+fn validate_frame_range_args(start: Option<usize>, count: Option<usize>) -> Result<(), String> {
+    match (start, count) {
+        (None, None) => Ok(()),
+        (Some(_), Some(0)) => Err("--frame-range-count must be positive".into()),
+        (Some(_), Some(_)) => Ok(()),
+        _ => Err("--frame-range-start and --frame-range-count must be provided together".into()),
+    }
+}
+
+fn validate_frame_range_compatibility(
+    enabled: bool,
+    max_track_frame_gap: Option<usize>,
+    has_quadrilateral_whitelist: bool,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+    if max_track_frame_gap.is_some() {
+        return Err("frame-range replay cannot be combined with --max-track-frame-gap".into());
+    }
+    if has_quadrilateral_whitelist {
+        return Err(
+            "frame-range replay cannot be combined with --deferred-quadrilateral-whitelist-tsv"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameRangeSliceStats {
+    source_frames: usize,
+    retained_frames: usize,
+    source_images: usize,
+    retained_images: usize,
+    source_pairs: usize,
+    retained_pairs: usize,
+    retained_base_pairs: Option<usize>,
+}
+
+/// Slice a validated replay in memory without materializing a frame-pair
+/// product. Pair order and the base/deferred partition are preserved exactly;
+/// only endpoints with both images in the contiguous frame range survive.
+///
+/// This derived snapshot is mapper-local and must not be serialized: envelope
+/// hashes intentionally continue to identify the validated source snapshots.
+fn slice_rig_replay_range(
+    snapshot: &mut verified_pair_snapshot::Snapshot,
+    frames: &[RigFrame],
+    start: usize,
+    count: usize,
+    deferred_pair_prefix: &mut Option<usize>,
+) -> Result<(Vec<RigFrame>, FrameRangeSliceStats), String> {
+    validate_frame_range_args(Some(start), Some(count))?;
+    let end = start
+        .checked_add(count)
+        .ok_or("frame range overflows usize")?;
+    if end > frames.len() {
+        return Err(format!(
+            "frame range [{start}, {end}) exceeds {} frames",
+            frames.len()
+        ));
+    }
+    if snapshot.image_names.len() != snapshot.feature_counts.len() {
+        return Err("snapshot image and feature-count vectors differ in length".into());
+    }
+    let source_images = snapshot.image_names.len();
+    let source_pairs = snapshot.pairs.len();
+    let original_prefix = match *deferred_pair_prefix {
+        Some(prefix) if prefix <= source_pairs => Some(prefix),
+        Some(prefix) => {
+            return Err(format!(
+                "--deferred-registration-pair-prefix {prefix} exceeds {source_pairs} pairs"
+            ));
+        }
+        None => None,
+    };
+
+    let mut selected = vec![false; source_images];
+    for frame in &frames[start..end] {
+        for image in &frame.images {
+            let slot = selected
+                .get_mut(image.image_index)
+                .ok_or_else(|| format!("frame image {} is outside snapshot", image.image_index))?;
+            if *slot {
+                return Err(format!(
+                    "snapshot image {} belongs to multiple selected frames",
+                    image.image_index
+                ));
+            }
+            *slot = true;
+        }
+    }
+    let mut old_to_new = vec![None; source_images];
+    let mut image_names = Vec::new();
+    let mut feature_counts = Vec::new();
+    for old in 0..source_images {
+        if !selected[old] {
+            continue;
+        }
+        old_to_new[old] = Some(image_names.len());
+        image_names.push(snapshot.image_names[old].clone());
+        feature_counts.push(snapshot.feature_counts[old]);
+    }
+
+    let mut sliced_frames = Vec::with_capacity(count);
+    for frame in &frames[start..end] {
+        let mut images = Vec::with_capacity(frame.images.len());
+        for image in &frame.images {
+            images.push(RigFrameImage {
+                image_index: old_to_new[image.image_index]
+                    .ok_or("selected frame image has no remapped index")?,
+                sensor_index: image.sensor_index,
+            });
+        }
+        sliced_frames.push(RigFrame { images });
+    }
+
+    let mut retained_base_pairs = 0usize;
+    let mut pairs = Vec::new();
+    for (pair_index, mut pair) in std::mem::take(&mut snapshot.pairs).into_iter().enumerate() {
+        let image_i = usize::try_from(pair.image_i)
+            .map_err(|_| "snapshot image_i does not fit usize".to_owned())?;
+        let image_j = usize::try_from(pair.image_j)
+            .map_err(|_| "snapshot image_j does not fit usize".to_owned())?;
+        if image_i >= source_images || image_j >= source_images {
+            return Err(format!(
+                "snapshot pair has image endpoint outside {source_images} images: ({image_i},{image_j})"
+            ));
+        }
+        let (Some(remapped_i), Some(remapped_j)) = (
+            old_to_new.get(image_i).copied().flatten(),
+            old_to_new.get(image_j).copied().flatten(),
+        ) else {
+            continue;
+        };
+        pair.image_i = remapped_i as u64;
+        pair.image_j = remapped_j as u64;
+        if original_prefix.is_some_and(|prefix| pair_index < prefix) {
+            retained_base_pairs += 1;
+        }
+        pairs.push(pair);
+    }
+    snapshot.image_names = image_names;
+    snapshot.feature_counts = feature_counts;
+    snapshot.accepted_match_count = pairs.iter().map(|pair| pair.matches.len() as u64).sum();
+    snapshot.pairs = pairs;
+    if original_prefix.is_some() {
+        *deferred_pair_prefix = Some(retained_base_pairs);
+    }
+
+    let stats = FrameRangeSliceStats {
+        source_frames: frames.len(),
+        retained_frames: sliced_frames.len(),
+        source_images,
+        retained_images: snapshot.image_names.len(),
+        source_pairs,
+        retained_pairs: snapshot.pairs.len(),
+        retained_base_pairs: original_prefix.map(|_| retained_base_pairs),
+    };
+    Ok((sliced_frames, stats))
 }
 
 fn convert_pairs(
@@ -2950,7 +3132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         verified_pair_snapshot::read_mapper_compact(&args.snapshot)
     }
     .map_err(std::io::Error::other)?;
-    let frames =
+    let mut frames =
         build_frames(&manifest.frame_rows, &snapshot.image_names).map_err(std::io::Error::other)?;
     if let (Some(overlay_path), Some(max_frame_gap)) = (
         args.deferred_overlay_snapshot.as_ref(),
@@ -2979,6 +3161,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             snapshot.pairs.len(),
             snapshot.pairs.iter().map(|pair| pair.matches.len()).sum::<usize>(),
             snapshot.feature_counts.iter().sum::<u64>(),
+        );
+    }
+    if let (Some(start), Some(count)) = (args.frame_range_start, args.frame_range_count) {
+        let (sliced_frames, stats) = slice_rig_replay_range(
+            &mut snapshot,
+            &frames,
+            start,
+            count,
+            &mut args.deferred_registration_pair_prefix,
+        )
+        .map_err(std::io::Error::other)?;
+        frames = sliced_frames;
+        eprintln!(
+            "rig-replay frame range: start={start} count={count} frames={}->{} images={}->{} pairs={}->{} base_pairs={:?}",
+            stats.source_frames,
+            stats.retained_frames,
+            stats.source_images,
+            stats.retained_images,
+            stats.source_pairs,
+            stats.retained_pairs,
+            stats.retained_base_pairs,
         );
     }
     let pose_priors = if args.long_pair_pose_prior_images.is_empty() {
@@ -3464,6 +3667,171 @@ mod tests {
             })),
             relative_translation_bits: None,
         }
+    }
+
+    #[test]
+    fn frame_range_arguments_require_a_positive_paired_range() {
+        assert_eq!(validate_frame_range_args(None, None), Ok(()));
+        assert_eq!(validate_frame_range_args(Some(3), Some(2)), Ok(()));
+        assert!(validate_frame_range_args(Some(3), None).is_err());
+        assert!(validate_frame_range_args(None, Some(2)).is_err());
+        assert!(validate_frame_range_args(Some(3), Some(0)).is_err());
+        assert_eq!(
+            validate_frame_range_compatibility(true, None, false),
+            Ok(())
+        );
+        assert!(validate_frame_range_compatibility(true, Some(4), false).is_err());
+        assert!(validate_frame_range_compatibility(true, None, true).is_err());
+        assert_eq!(
+            validate_frame_range_compatibility(false, Some(4), true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn frame_range_slice_rejects_invalid_topology() {
+        let make_snapshot =
+            |pair: verified_pair_snapshot::PairRecord| verified_pair_snapshot::Snapshot {
+                schema_version: verified_pair_snapshot::SCHEMA_VERSION,
+                image_names: vec!["image-0".into(), "image-1".into()],
+                image_manifest_hash: 0,
+                feature_manifest_hash: 0,
+                feature_counts: vec![10, 10],
+                width: 1,
+                height: 1,
+                intrinsics_bits: [0; 4],
+                effective_config_hash: 0,
+                effective_config: String::new(),
+                verifier_config_hash: 0,
+                verifier_config: String::new(),
+                pair_order_hash: 0,
+                unordered_edge_hash: 0,
+                accepted_match_count: 1,
+                pairs: vec![pair],
+            };
+        let duplicate_frames = vec![
+            RigFrame {
+                images: vec![RigFrameImage {
+                    image_index: 0,
+                    sensor_index: 0,
+                }],
+            },
+            RigFrame {
+                images: vec![RigFrameImage {
+                    image_index: 0,
+                    sensor_index: 1,
+                }],
+            },
+        ];
+        let mut duplicate_snapshot =
+            make_snapshot(snapshot_pair(0, 1, 1, UnitQuaternion::identity()));
+        assert!(slice_rig_replay_range(
+            &mut duplicate_snapshot,
+            &duplicate_frames,
+            0,
+            2,
+            &mut None,
+        )
+        .is_err());
+
+        let frames = vec![RigFrame {
+            images: vec![
+                RigFrameImage {
+                    image_index: 0,
+                    sensor_index: 0,
+                },
+                RigFrameImage {
+                    image_index: 1,
+                    sensor_index: 1,
+                },
+            ],
+        }];
+        let mut invalid_pair_snapshot =
+            make_snapshot(snapshot_pair(0, 2, 1, UnitQuaternion::identity()));
+        assert!(
+            slice_rig_replay_range(&mut invalid_pair_snapshot, &frames, 0, 1, &mut None,).is_err()
+        );
+    }
+
+    #[test]
+    fn frame_range_slice_remaps_images_pairs_and_deferred_prefix() {
+        let image_names = (0..6).map(|index| format!("image-{index}")).collect();
+        let mut pairs = vec![
+            snapshot_pair(0, 1, 1, UnitQuaternion::identity()),
+            snapshot_pair(2, 3, 1, UnitQuaternion::identity()),
+            snapshot_pair(2, 4, 1, UnitQuaternion::identity()),
+            snapshot_pair(4, 5, 1, UnitQuaternion::identity()),
+            snapshot_pair(1, 2, 1, UnitQuaternion::identity()),
+        ];
+        for (index, pair) in pairs.iter_mut().enumerate() {
+            pair.matches = vec![(index as u64, index as u64)];
+        }
+        let mut snapshot = verified_pair_snapshot::Snapshot {
+            schema_version: verified_pair_snapshot::SCHEMA_VERSION,
+            image_names,
+            image_manifest_hash: 0,
+            feature_manifest_hash: 0,
+            feature_counts: vec![10, 11, 12, 13, 14, 15],
+            width: 1,
+            height: 1,
+            intrinsics_bits: [0; 4],
+            effective_config_hash: 0,
+            effective_config: String::new(),
+            verifier_config_hash: 0,
+            verifier_config: String::new(),
+            pair_order_hash: 0,
+            unordered_edge_hash: 0,
+            accepted_match_count: 5,
+            pairs,
+        };
+        let frames = (0..3)
+            .map(|frame| RigFrame {
+                images: vec![
+                    RigFrameImage {
+                        image_index: 2 * frame,
+                        sensor_index: 0,
+                    },
+                    RigFrameImage {
+                        image_index: 2 * frame + 1,
+                        sensor_index: 1,
+                    },
+                ],
+            })
+            .collect::<Vec<_>>();
+        let mut prefix = Some(3);
+
+        let (sliced, stats) =
+            slice_rig_replay_range(&mut snapshot, &frames, 1, 2, &mut prefix).unwrap();
+
+        assert_eq!(sliced.len(), 2);
+        assert_eq!(
+            sliced[0]
+                .images
+                .iter()
+                .map(|image| image.image_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            snapshot.image_names,
+            ["image-2", "image-3", "image-4", "image-5"]
+        );
+        assert_eq!(snapshot.feature_counts, [12, 13, 14, 15]);
+        assert_eq!(
+            snapshot
+                .pairs
+                .iter()
+                .map(|pair| (pair.image_i, pair.image_j))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (0, 2), (2, 3)]
+        );
+        assert_eq!(snapshot.accepted_match_count, 3);
+        assert_eq!(prefix, Some(2));
+        assert_eq!(stats.retained_base_pairs, Some(2));
+        assert_eq!(stats.retained_frames, 2);
+        assert_eq!(stats.retained_images, 4);
+        assert_eq!(stats.retained_pairs, 3);
+        assert!(slice_rig_replay_range(&mut snapshot, &sliced, 1, 2, &mut prefix).is_err());
     }
 
     #[test]

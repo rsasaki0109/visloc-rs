@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "diagnostic_only_not_m8_pass",
+  "scope": "Trajectory publication only; no merged landmarks or reprojection evaluation",
+  "selection_caveat": "Development A/B on a repeatedly scored sequence, not held-out validation. Ground truth used only by post-map scorer.",
+  "code": {
+    "base_commit": "f70ae2e9b3e6460cafde80f2cafae3e41ef84cb8",
+    "worktree_dirty": true,
+    "example_source_sha256": "a049f93ff81c698803f69aebf8bcdff94ebbdf3cfca69b94776ae5848f247b17"
+  },
+  "inputs": {
+    "nodes_tsv": "/tmp/visloc-m8-seam650-nodes-20260907.tsv",
+    "nodes_sha256": "564f0ac7f31fcac0e3995a65cfe3fe7711ebdef100b30f28f8970c81c1cea0ce",
+    "rig_manifest_sha256": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943",
+    "node_count": 23,
+    "seam_config_arm": "L",
+    "forest_policy": "traversal",
+    "accepted_seams": 29,
+    "rejected_seams": 42,
+    "max_boundary_frames": 64
+  },
+  "colmap_target": {
+    "evidence": "m8-openloris-colmap-10k-control.json",
+    "registered_images_min": 9998,
+    "component_weighted_rmse_m_max": 0.3843065335437528,
+    "component_weighted_p95_m_max": 0.6386693943260212,
+    "mean_reprojection_error_px_max": 0.9030031518617252
+  },
+  "runs": [
+    {
+      "frame_owner_policy": "newest",
+      "output_root": "/tmp/visloc-m8-owner-ab-nzxeyZ/newest",
+      "registered_images": 9998,
+      "components": 2,
+      "component_weighted_rmse_m": 0.39177824798691896,
+      "component_weighted_p95_m": 0.6436978626030669,
+      "component_weighted_max_m": 1.2897666565102102,
+      "images_sha256": [
+        "a26a3a4444dd73be2e707d5c89c3ebce845fd92a34eb8c18a0d2e6833e489ed3",
+        "44005eeee990cb8b1fb10f9e253d64d789e9f66b0e99502dd4e530f579f77ca0"
+      ],
+      "byte_identical_to_prior_l": true,
+      "trajectory_gate_pass": false
+    },
+    {
+      "frame_owner_policy": "interior",
+      "output_root": "/tmp/visloc-m8-owner-ab-nzxeyZ/interior",
+      "registered_images": 9998,
+      "components": 2,
+      "component_weighted_rmse_m": 0.43193606009889973,
+      "component_weighted_p95_m": 0.7126703067449092,
+      "component_weighted_max_m": 1.1572475531719284,
+      "images_sha256": [
+        "5b25803b144fb16df686a31d490cb1138ba0a4ed5ad49550337a5406fbb51c59",
+        "4ace6d25135c0d4baa401b9a56f3f2771b44875548de49f0f0d572c2cd85d569"
+      ],
+      "trajectory_gate_pass": false,
+      "decision": "reject: RMSE and p95 regress; default remains newest"
+    }
+  ],
+  "verification": {
+    "example_tests_passed": 28,
+    "slam_library_tests_passed": 638,
+    "slam_library_tests_ignored": 7,
+    "example_clippy_warnings_denied": true,
+    "cargo_fmt_check": true
+  },
+  "not_measured": [
+    "merged_model_reprojection",
+    "mapper_only_comparative_performance",
+    "native_end_to_end_comparative_performance",
+    "three_run_performance_reproducibility"
+  ]
+}
