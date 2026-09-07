@@ -466,3 +466,21 @@ pass two, plus the independent final geometry/rig/connectivity audit and fixed
 post-map scorer. Require two-run output equality and a one-sweep control. No GT
 or score may decide mapping acceptance or termination. Keep all original M8–M10
 gates, including mapper/native-E2E timing and total peak RSS, unchanged.
+
+### Subsequent output-preserving performance candidate
+
+Keep this separate from the two-sweep quality experiment. Code inspection of
+the normal filtering-window path finds three calls to
+`selected_landmarks_for_frames`: window-count diagnostics, filtering candidate
+construction and raw BA construction each repeat the full landmark scan.
+Each scan tests observation image/frame membership and returns the same ordered
+index vector before any candidate is applied.
+
+After freezing the quality result, test computing that vector once per window
+and borrowing it for the three consumers. Keep the exact index/observation order,
+selection definition, caps, rejection behavior and independent geometry checks.
+Discard it before the next window mutates/compacts the landmark vector; never
+cache these indices across accepted updates. This needs no global adjacency
+index or extra whole-model copy. Verify complete output equality and measure
+time/RSS before claiming a gain. Removing duplicate scans does not eliminate
+the remaining per-window global scan or prove linear total runtime.
