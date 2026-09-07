@@ -98,8 +98,8 @@ pub mod rig_submap_alignment;
 pub use rig_submap_alignment::{
     estimate_rig_submap_camera_centre_constraint, estimate_rig_submap_sim3_constraint,
     RigSubmapAlignmentConfig, RigSubmapAlignmentDiagnostics, RigSubmapAlignmentError,
-    RigSubmapAlignmentRejection, RigSubmapAlignmentRejectionReason, RigSubmapAlignmentResult,
-    RigSubmapInputSide,
+    RigSubmapAlignmentMethod, RigSubmapAlignmentRejection, RigSubmapAlignmentRejectionReason,
+    RigSubmapAlignmentResult, RigSubmapBoundarySampling, RigSubmapInputSide,
 };
 
 pub mod hierarchical_submap_graph;

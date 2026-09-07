@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 現在の引き継ぎ先（2026-09-07）:
+> [OpenLORIS M8–M10計画](openloris_m8_m10_plan.md) と
+> [rig-atlas診断記録](openloris_rig_atlas_diagnostic.md)。以下は9月1日時点の
+> 履歴です。M8は未完了で、最新の軌跡のみの診断は9,998画像、
+> RMSE 0.391778 m / p95 0.643698 m。COLMAPの精度ゲートと
+> 統合ランドマークモデルの再投影評価はまだ通過していません。
+
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
 **ブランチ:** `perf/electro-m4-persistent-matcher`

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "final_example_source_sha256": "34233b97d933c4640f1269b90bed948260ceb94b0048f3c199c05f7b173e44cc",
+  "status": "rejected_diagnostic_not_m8_pass",
+  "input_evidence": "m8-openloris-atlas-owner-ab.json",
+  "nodes_sha256": "564f0ac7f31fcac0e3995a65cfe3fe7711ebdef100b30f28f8970c81c1cea0ce",
+  "output_root": "/tmp/visloc-m8-metric-se3-ab-SWSGIA",
+  "seam_config_arm": "L",
+  "frame_owner_policy": "newest",
+  "forest_policy": "traversal",
+  "optimizer": {
+    "model": "SE3, fixed unit scale",
+    "linear_solver": "Sparse",
+    "initial_lambda": 0.001,
+    "chordal_init": false,
+    "robust_kernel": "None",
+    "edge_weight": 1.0,
+    "maximum_iterations": 20,
+    "component_0_initial_cost": 1.118173145605,
+    "component_0_final_cost": 0.260483497520,
+    "component_0_iterations": 9,
+    "component_0_converged": true,
+    "component_1_iterations": 15,
+    "component_1_converged": false
+  },
+  "control": {
+    "registered_images": 9998,
+    "components": 2,
+    "component_weighted_rmse_m": 0.39177824798691896,
+    "component_weighted_p95_m": 0.6436978626030669,
+    "byte_identical_to_prior_l": true
+  },
+  "metric": {
+    "repeat_byte_identical_both_components": true,
+    "registered_images": 9998,
+    "components": 2,
+    "component_weighted_rmse_m": 0.4310112054956803,
+    "component_weighted_p95_m": 0.717679162606496,
+    "images_sha256": [
+      "b462a17319866b9212c721ecbe4df8b148f4f1eb20919ceb15cc4d99ce63deb9",
+      "44005eeee990cb8b1fb10f9e253d64d789e9f66b0e99502dd4e530f579f77ca0"
+    ]
+  },
+  "decision": "Reject: internal objective improves but both trajectory gates regress. No GT-informed weighting sweep.",
+  "verification": {
+    "example_tests_passed": 34,
+    "slam_library_tests_passed": 638,
+    "slam_library_tests_ignored": 7,
+    "example_clippy_warnings_denied": true,
+    "workspace_all_targets_check": true
+  },
+  "limitations": [
+    "Trajectory-only output; no merged landmark reprojection result",
+    "Development sequence repeatedly scored, not held-out validation",
+    "Concurrent trajectory-only time logs are not mapper or E2E benchmarks",
+    "Sparse Cholesky has graph-dependent fill-in; no general linear-memory guarantee"
+  ]
+}

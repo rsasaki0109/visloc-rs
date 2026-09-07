@@ -1171,6 +1171,30 @@ the skipped-10k decision are frozen in
 
 ## M9 — make the quality champion faster than COLMAP
 
+The overlapping-window trajectory experiment remains below the M8 gate.
+Its September 7 audit corrected publication that inadvertently scaled the
+calibrated stereo baseline. The corrected K diagnostic preserves all supplied
+sensor extrinsics and repeats byte-for-byte, but still registers only 9,996
+images and scores 0.478844 m RMSE / 0.897779 m p95. These are trajectory-only
+outputs, without a merged landmark model or reprojection result. See the
+[rig-atlas diagnostic](openloris_rig_atlas_diagnostic.md) for the rejected
+arms, calibration audit, corrected results, and repeat hashes. A subsequent
+500-frame replay starting at 4200 recovered frame 4493 without threshold
+changes. Adding that overlapping node reaches 9,998 images and 4,494/505-frame
+components, but RMSE/p95 remain 0.481208/0.905394 m. Registration recovery is
+therefore established for the trajectory diagnostic. A further unchanged
+500-frame replay starting at 650 supplies an alternative unit-scale route
+around a scale-changing seam. Strict-metric L reaches RMSE/p95
+0.391778/0.643698 m at the same registration, still above COLMAP's
+0.384307/0.638669 m limits. Changing overlap publication to prefer window
+interiors worsens both metrics (0.431936/0.712670 m) and is not promoted.
+The M8 accuracy and merged-model gates remain open; the linked diagnostic
+records input/output hashes and the byte-identical default-policy repeat.
+Equal-weight, scale-fixed SE3 optimization on all accepted seams reduces
+its internal cost but worsens RMSE/p95 to 0.431011/0.717679 m; it also remains
+diagnostic-only. The next integration gate is a real, observation-validated
+landmark model with bounded refinement, not another score-tuned graph policy.
+
 Freeze the M8 quality champion before performance edits.
 
 ### Exact-output performance work accepted during M8 diagnosis (2026-09-03)

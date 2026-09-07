@@ -23,10 +23,18 @@
 The comparisons use real images and measured runs; the detailed sections below
 state where inputs or accounting differ. Separately, on the connected
 OpenLORIS 10k stress set, streamed VLAD + LSH cuts visloc-rs candidate
-generation from 49:49 to **8:51 (5.63×)**. No COLMAP 10k run has been made, so
-that number is not presented as a COLMAP comparison. The frozen measurements
+generation from 49:49 to **8:51 (5.63×)**. That is a visloc retrieval A/B,
+not an end-to-end COLMAP comparison. The frozen measurements
 and output hashes are in
 [`m6-ann-streaming.json`](benchmarks/electro/m6-ann-streaming.json).
+
+**OpenLORIS 10k COLMAP control is now available:** its calibrated-rig run
+registers **9,998/10,000 images** with **0.3843 m ATE RMSE**, **0.6387 m p95**,
+and **0.9030 px** mean reprojection error. visloc's 10k quality work is still
+in progress; trajectory-only submap experiments do not yet establish a full
+reconstruction or a speed win at equivalent quality. See the
+[frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
+and [M8–M10 comparison plan](docs/openloris_m8_m10_plan.md).
 
 ## 10,008-image real-world SfM scale validation
 
@@ -170,9 +178,9 @@ claim. Evidence and model hashes are in
 candidate generation peaks at 1.14 GiB, matching at 851 MiB, and compact
 mapping at 501 MiB. Exact VLAD ranking still scores every image pair, so ANN
 retrieval plus streamed global descriptors now removes that quadratic ranking
-bottleneck; component and seed coverage remain the next quality target. No
-OpenLORIS COLMAP run was performed, so these 10k results are deliberately not
-presented as a COLMAP comparison. Source/license, hashes, phase ledgers, and
+bottleneck. These historical M5 results predate the calibrated-rig
+<a href="benchmarks/electro/m8-openloris-colmap-10k-control.json">M8 COLMAP control</a>
+and are not a same-condition head-to-head comparison. Source/license, hashes, phase ledgers, and
 honest dense/global negatives:
 <a href="benchmarks/electro/m5-openloris-connected-scale-validation.json">connected M5 evidence</a> ·
 <a href="docs/electro_m5_scale_validation.md">full scale report</a>.</sub></p>
