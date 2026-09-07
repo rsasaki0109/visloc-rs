@@ -1167,3 +1167,37 @@ Then compare frozen real systems and full nonlinear 1k quality/resources
 with explicit restart counters. A reduction in recheck failures alone is
 not sufficient for promotion; retain direct/strict controls and all geometry,
 identity and GT gates. No restart implementation is included in this result.
+
+### Actual atlas driver-boundary pilot (2026-09-07)
+
+[Evidence](../benchmarks/electro/m8-openloris-matrix-free-atlas-pilot-v1.json)
+records a PR #82 binary trial on the retained filtered main component under
+`RLIMIT_AS=2 GiB`, CPU 900 s and core dumps disabled. Its derived rig manifest
+keeps original sensor/header lines and selects F records by exact source image
+name, without relabeling IDs or changing calibration. The model contains
+8,988 poses, 318,222 points, 1,313,899 observations and 4,672,106 full keypoints.
+
+The process rejects during source preflight: image 8987 (`cam1_008986.png`,
+sensor 0, frame 4493) has no landmark support. This is the known retained
+source state, not a newly lost image. Sensor 1 of the same calibrated frame,
+image 8988, has ten observations, and all 4,494 rig frames are supported.
+No BA starts and no model is published. The 0.94 s / 407,032 KiB process
+measurement is parsing/preflight only, not a solver memory or 10k pass.
+Virtual-address-space limiting is stricter than an RSS limit and cannot turn
+an aborted solve into a resource success.
+
+Before full atlas comparison, the driver needs a separately explicit mode
+that retains observation-free sensor images only when their shared rig frame
+is supported by another sensor. Preserve the original supported and unsupported
+image sets; still reject unsupported entire frames and disconnected frame
+graphs. Do not delete a sensor row to bypass validation. The tail has 505
+frames with IDs 4495..4999, so also expose an explicit existing supported
+fixed-frame ID (default 0 unchanged), anchoring the tail at 4495 without
+renumbering. This is a driver boundary extension, not a change to physical
+calibration, observation selection, PCG or LM acceptance.
+
+Keep the two original components and score them together with the existing
+post-only alignment. Direct-BA numerical agreement remains a diagnostic;
+the ultimate advancement gate is measured COLMAP quality and resources,
+not perfect agreement with one internal backend. The unsupported-image
+boundary and anchor extension are not yet implemented in this pilot.

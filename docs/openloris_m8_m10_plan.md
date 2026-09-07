@@ -130,6 +130,11 @@ PR #82 passed all eight final-head checks (run `34130693082`, head `cd226dd`)
 and merged as `35df35f`; local and remote topic branches were removed.
 Continuation branch: `feat/m8-bounded-pcg-residual-restart`. The full 10k,
 scale/restart/100k and comparable mapper/native-E2E gates remain open.
+An actual main-atlas [resource-capped pilot](../benchmarks/electro/m8-openloris-matrix-free-atlas-pilot-v1.json)
+reveals a driver-boundary rejection before BA: a known observation-free sensor
+image belongs to an otherwise observed calibrated rig frame. Preserve that
+image; explicitly support this case and a nonzero tail anchor in a separate
+driver mode before running both components. The pilot is not a solver RSS pass.
 
 ## Historical M7 baseline
 

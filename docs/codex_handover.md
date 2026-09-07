@@ -128,6 +128,11 @@
 > `35df35f`へmerge済み。旧local/remote branchも削除しました。
 > 続きは `feat/m8-bounded-pcg-residual-restart`。まず既定OFFの回復機構を
 > 同じ総反復上限で実装・検証し、1k nonlinearのdirect/strict/relative controlと比較します。
+> PR #82 binaryの2 GiB制限付きatlas主成分試走は、既知の観測なしsensor画像8987で
+> preflight reject（BA未開始、0.94 s /407032 KiB）。[証跡](../benchmarks/electro/m8-openloris-matrix-free-atlas-pilot-v1.json)。
+> 同frame4493のもう片側は10観測を持ち、全rig frameは支持されています。画像削除で迂回しません。
+> 10k driverには支持rig内の観測なしsensor画像保持と、tail用の明示anchor4495が必要。
+> restart機構とは別の明示モードとして既定1k動作を保ち、実装後に両成分を再試走します。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
