@@ -9,9 +9,9 @@
 //! The trajectory-only stitcher remains unchanged.  Pass one atlas component
 //! directory (the directory containing one `images.txt`) per invocation.  A
 //! root containing multiple component gauges is rejected rather than
-//! flattening independent gauges into one model.  This example does not
-//! release poses or run bundle adjustment; that is a separate, later bounded
-//! experiment.
+//! flattening independent gauges into one model. Poses remain fixed by default.
+//! Optional unsupported-frame recovery uses leave-target-out landmarks and
+//! calibrated generalized PnP; this example does not run bundle adjustment.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -20,9 +20,12 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{DMatrix, Point2, Point3, Quaternion, UnitQuaternion, Vector3};
 use visloc_rs::io::colmap::parse_cameras_txt;
+use visloc_rs::vision::pnp::{
+    GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedPnPRansac, RigSensor,
+};
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
-const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH";
+const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames]";
 const XY_TOLERANCE_PX: f64 = 1.0e-9;
 const INTRINSIC_TOLERANCE: f64 = 1.0e-8;
 const MIN_TRACK_OBSERVATIONS: usize = 2;
@@ -34,6 +37,12 @@ const MIN_BASELINE_M: f64 = 1.0e-9;
 const MIN_RAY_CROSS_NORM: f64 = 1.0e-8;
 const MAX_RIG_CENTER_DISAGREEMENT_M: f64 = 1.0e-4;
 const MAX_RIG_ROTATION_DISAGREEMENT_DEG: f64 = 1.0e-3;
+const RECOVERY_MIN_PNP_INLIERS: usize = 6;
+const RECOVERY_PNP_ITERATIONS: usize = 4096;
+const RECOVERY_PNP_REPROJECTION_PX: f64 = 4.0;
+const RECOVERY_PNP_SEED: u64 = 7;
+const MAX_RECOVERY_TRACKS_PER_FRAME: usize = 512;
+const MAX_RECOVERY_CORRESPONDENCES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
@@ -41,6 +50,7 @@ struct Args {
     nodes_tsv: PathBuf,
     atlas_dir: PathBuf,
     out_dir: PathBuf,
+    recover_zero_support_frames: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +202,26 @@ struct SupportSummary {
     zero_support_frame_count: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RecoverySummary {
+    frames_considered: usize,
+    frames_attempted: usize,
+    frames_recovered: usize,
+    candidate_tracks: usize,
+    anchor_tracks: usize,
+    anchor_rejections: usize,
+    pnp_correspondences: usize,
+    pnp_inliers: usize,
+    pnp_rejections: usize,
+    accepted_landmarks: usize,
+    accepted_observations: usize,
+    candidate_target_landmarks: usize,
+    candidate_target_observations: usize,
+    accepted_target_landmarks: usize,
+    accepted_target_observations: usize,
+    track_rejections: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeRejection {
     DuplicateCandidateObservation,
@@ -232,9 +262,17 @@ where
     let mut nodes_tsv = None;
     let mut atlas_dir = None;
     let mut out_dir = None;
+    let mut recover_zero_support_frames = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
+        }
+        if flag == "--recover-zero-support-frames" {
+            if recover_zero_support_frames {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            recover_zero_support_frames = true;
+            continue;
         }
         let slot = match flag.as_str() {
             "--rig-manifest" => &mut rig_manifest,
@@ -259,6 +297,7 @@ where
         nodes_tsv: nodes_tsv.ok_or_else(|| format!("--nodes-tsv is required\n{USAGE}"))?,
         atlas_dir: atlas_dir.ok_or_else(|| format!("--atlas-dir is required\n{USAGE}"))?,
         out_dir: out_dir.ok_or_else(|| format!("--out-dir is required\n{USAGE}"))?,
+        recover_zero_support_frames,
     })
 }
 
@@ -333,6 +372,35 @@ fn run(args: &Args) -> Result<(), String> {
             }
             Err(_) => stats.rejected_triangulation += 1,
         }
+    }
+    if args.recover_zero_support_frames {
+        let RecoveryResult {
+            pose_overrides,
+            landmarks: recovered_landmarks,
+            summary,
+        } = recover_zero_support_frames(&manifest, &store, &global_images, &cameras, &landmarks)?;
+        apply_pose_overrides(&mut global_images, &pose_overrides)?;
+        validate_output_cameras(&manifest, &global_images, &cameras)?;
+        landmarks.extend(recovered_landmarks);
+        println!(
+            "recovery frames_considered={} frames_attempted={} frames_recovered={} candidate_tracks={} anchor_tracks={} anchor_rejections={} pnp_correspondences={} pnp_inliers={} pnp_rejections={} candidate_target_landmarks={} candidate_target_observations={} accepted_landmarks={} accepted_observations={} accepted_target_landmarks={} accepted_target_observations={} track_rejections={}",
+            summary.frames_considered,
+            summary.frames_attempted,
+            summary.frames_recovered,
+            summary.candidate_tracks,
+            summary.anchor_tracks,
+            summary.anchor_rejections,
+            summary.pnp_correspondences,
+            summary.pnp_inliers,
+            summary.pnp_rejections,
+            summary.candidate_target_landmarks,
+            summary.candidate_target_observations,
+            summary.accepted_landmarks,
+            summary.accepted_observations,
+            summary.accepted_target_landmarks,
+            summary.accepted_target_observations,
+            summary.track_rejections,
+        );
     }
     landmarks.sort_by_key(|landmark| {
         (
@@ -1286,11 +1354,29 @@ fn triangulate_track(
     images: &BTreeMap<u64, GlobalImage>,
     cameras: &BTreeMap<u64, Camera>,
 ) -> Result<LandmarkOutput, String> {
+    triangulate_track_with_pose_overrides(
+        track_id,
+        track,
+        observations,
+        images,
+        cameras,
+        &BTreeMap::new(),
+    )
+}
+
+fn triangulate_track_with_pose_overrides(
+    track_id: usize,
+    track: &GlobalTrack,
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<LandmarkOutput, String> {
     if track.observations.len() < MIN_TRACK_OBSERVATIONS {
         return Err("track has too few observations".to_owned());
     }
     let sample = bounded_sample(&track.observations, MAX_DLT_OBSERVATIONS);
-    if !has_observable_parallax(&sample, observations, images, cameras)? {
+    if !has_observable_parallax(&sample, observations, images, cameras, pose_overrides)? {
         return Err("track has no observable camera baseline/parallax".to_owned());
     }
     let mut matrix = DMatrix::<f64>::zeros(sample.len() * 2, 4);
@@ -1307,7 +1393,8 @@ fn triangulate_track(
         let normalized = camera
             .normalize_pixel(&state.xy)
             .ok_or_else(|| "camera model cannot normalize pixel".to_owned())?;
-        let pose_matrix = image.atlas.pose.matrix();
+        let pose = pose_for_image(image, pose_overrides);
+        let pose_matrix = pose.matrix();
         let row_x = index * 2;
         let row_y = row_x + 1;
         for column in 0..4 {
@@ -1341,7 +1428,8 @@ fn triangulate_track(
         let state = observations
             .get(key)
             .ok_or_else(|| "track references unknown observation".to_owned())?;
-        let point_camera = image.atlas.pose.transform_world_point(&position);
+        let pose = pose_for_image(image, pose_overrides);
+        let point_camera = pose.transform_world_point(&position);
         if !point_camera.coords.iter().all(|value| value.is_finite()) || point_camera.z <= 0.0 {
             return Err("triangulated point is behind a camera".to_owned());
         }
@@ -1375,11 +1463,515 @@ fn triangulate_track(
     })
 }
 
+#[derive(Debug, Clone)]
+struct RecoveryResult {
+    pose_overrides: BTreeMap<u64, Pose>,
+    landmarks: Vec<LandmarkOutput>,
+    summary: RecoverySummary,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryAnchor {
+    track_id: usize,
+    correspondence_indices: Vec<usize>,
+}
+
+/// Recover initially unsupported rig frames from rejected tracks without
+/// letting one unsupported frame bootstrap another.  Anchor points are
+/// triangulated only from the frame set supported by the fixed-pose model;
+/// the target frame is then estimated with the existing deterministic
+/// generalized-PnP implementation and fixed sensor extrinsics.  Everything
+/// for one frame is staged and committed only after the six-inlier and
+/// six-observation gates pass.
+fn recover_zero_support_frames(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    baseline_landmarks: &[LandmarkOutput],
+) -> Result<RecoveryResult, String> {
+    let initial_supported_frames = baseline_landmarks
+        .iter()
+        .flat_map(|landmark| landmark.observations.iter())
+        .filter_map(|key| images.get(&key.global_image_id))
+        .map(|image| image.atlas.frame_id)
+        .collect::<BTreeSet<_>>();
+    let atlas_frames = images
+        .values()
+        .map(|image| image.atlas.frame_id)
+        .collect::<BTreeSet<_>>();
+    let zero_support_frames = atlas_frames
+        .difference(&initial_supported_frames)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut summary = RecoverySummary {
+        frames_considered: zero_support_frames.len(),
+        ..RecoverySummary::default()
+    };
+    let rig = build_generalized_rig(manifest, cameras)?;
+    let pnp = GeneralizedPnPRansac {
+        iterations: RECOVERY_PNP_ITERATIONS,
+        reprojection_threshold: RECOVERY_PNP_REPROJECTION_PX,
+        seed: RECOVERY_PNP_SEED,
+        ..GeneralizedPnPRansac::default()
+    };
+    let baseline_keys = baseline_landmarks
+        .iter()
+        .flat_map(|landmark| landmark.observations.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut used_track_ids = baseline_landmarks
+        .iter()
+        .map(|landmark| landmark.track_id)
+        .collect::<BTreeSet<_>>();
+    let mut used_observations = baseline_keys;
+    let mut working_pose_overrides = BTreeMap::<u64, Pose>::new();
+    let mut recovered_landmarks = Vec::new();
+
+    for frame_id in zero_support_frames {
+        let track_ids = recovery_candidate_track_ids(frame_id, images, store);
+        let candidate_track_count = track_ids.len();
+        summary.candidate_tracks += candidate_track_count;
+        if track_ids.is_empty() {
+            continue;
+        }
+        summary.frames_attempted += 1;
+
+        let mut anchors = Vec::new();
+        let mut correspondences = Vec::new();
+        for track_id in track_ids {
+            let track = &store.tracks[track_id];
+            let target_keys = track
+                .observations
+                .iter()
+                .copied()
+                .filter(|key| {
+                    images
+                        .get(&key.global_image_id)
+                        .is_some_and(|image| image.atlas.frame_id == frame_id)
+                })
+                .collect::<Vec<_>>();
+            let anchor_keys = track
+                .observations
+                .iter()
+                .copied()
+                .filter(|key| {
+                    images.get(&key.global_image_id).is_some_and(|image| {
+                        initial_supported_frames.contains(&image.atlas.frame_id)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if target_keys.is_empty() || anchor_keys.len() < MIN_TRACK_OBSERVATIONS {
+                summary.anchor_rejections += 1;
+                continue;
+            }
+            let anchor_track = GlobalTrack {
+                observations: anchor_keys,
+            };
+            let Ok(anchor_landmark) = triangulate_track(
+                track_id,
+                &anchor_track,
+                &store.observations,
+                images,
+                cameras,
+            ) else {
+                summary.anchor_rejections += 1;
+                continue;
+            };
+            summary.anchor_tracks += 1;
+            if correspondences.len() + target_keys.len() > MAX_RECOVERY_CORRESPONDENCES {
+                break;
+            }
+            let first_correspondence = correspondences.len();
+            for key in &target_keys {
+                let image = images
+                    .get(&key.global_image_id)
+                    .ok_or_else(|| "recovery track references unknown image".to_owned())?;
+                let observation = store
+                    .observations
+                    .get(key)
+                    .ok_or_else(|| "recovery track references unknown observation".to_owned())?;
+                correspondences.push(GeneralizedCorrespondence2D3D {
+                    sensor_index: image.atlas.sensor_index,
+                    point2d: observation.xy,
+                    point3d: anchor_landmark.position,
+                    confidence: None,
+                });
+            }
+            anchors.push(RecoveryAnchor {
+                track_id,
+                correspondence_indices: (first_correspondence..correspondences.len()).collect(),
+            });
+        }
+        summary.pnp_correspondences += correspondences.len();
+        if correspondences.len() < RECOVERY_MIN_PNP_INLIERS {
+            summary.pnp_rejections += 1;
+            println!(
+                "recovery frame={frame_id} candidates={} anchors={} correspondences={} status=insufficient-correspondences",
+                candidate_track_count,
+                anchors.len(),
+                correspondences.len(),
+            );
+            continue;
+        }
+        let Some(report) = pnp.estimate(&rig, &correspondences) else {
+            summary.pnp_rejections += 1;
+            println!(
+                "recovery frame={frame_id} anchors={} correspondences={} status=pnp-failed",
+                anchors.len(),
+                correspondences.len(),
+            );
+            continue;
+        };
+        summary.pnp_inliers += report.inliers.len();
+        if report.inliers.len() < RECOVERY_MIN_PNP_INLIERS {
+            summary.pnp_rejections += 1;
+            println!(
+                "recovery frame={frame_id} anchors={} correspondences={} pnp_inliers={} status=insufficient-inliers",
+                anchors.len(),
+                correspondences.len(),
+                report.inliers.len(),
+            );
+            continue;
+        }
+        let inliers = report.inliers.iter().copied().collect::<BTreeSet<_>>();
+        let mut candidate_pose_overrides = working_pose_overrides.clone();
+        compose_recovered_frame_poses(
+            manifest,
+            frame_id,
+            &report.pose,
+            images,
+            &mut candidate_pose_overrides,
+        )?;
+        if !existing_landmarks_non_regressed(
+            baseline_landmarks,
+            &store.observations,
+            images,
+            cameras,
+            &candidate_pose_overrides,
+        )? {
+            summary.pnp_rejections += 1;
+            println!(
+                "recovery frame={frame_id} pnp_inliers={} status=existing-model-regression",
+                report.inliers.len(),
+            );
+            continue;
+        }
+
+        let anchor_count = anchors.len();
+        let mut frame_landmarks = Vec::new();
+        let mut frame_observations = BTreeSet::new();
+        for anchor in anchors {
+            if !anchor
+                .correspondence_indices
+                .iter()
+                .any(|index| inliers.contains(index))
+            {
+                summary.track_rejections += 1;
+                continue;
+            }
+            let filtered_keys = recovery_track_keys(
+                &store.tracks[anchor.track_id],
+                frame_id,
+                &initial_supported_frames,
+                images,
+            );
+            if filtered_keys.len() < MIN_TRACK_OBSERVATIONS {
+                summary.track_rejections += 1;
+                continue;
+            }
+            if filtered_keys
+                .iter()
+                .any(|key| used_observations.contains(key) || frame_observations.contains(key))
+            {
+                summary.track_rejections += 1;
+                continue;
+            }
+            let filtered_track = GlobalTrack {
+                observations: filtered_keys,
+            };
+            let Ok(landmark) = triangulate_track_with_pose_overrides(
+                anchor.track_id,
+                &filtered_track,
+                &store.observations,
+                images,
+                cameras,
+                &candidate_pose_overrides,
+            ) else {
+                summary.track_rejections += 1;
+                continue;
+            };
+            if landmark.observations.len() < MIN_TRACK_OBSERVATIONS
+                || used_track_ids.contains(&landmark.track_id)
+            {
+                summary.track_rejections += 1;
+                continue;
+            }
+            frame_observations.extend(landmark.observations.iter().copied());
+            frame_landmarks.push(landmark);
+        }
+        let accepted_observations = frame_landmarks
+            .iter()
+            .map(|landmark| landmark.observations.len())
+            .sum::<usize>();
+        let accepted_target_landmarks = frame_landmarks
+            .iter()
+            .filter(|landmark| {
+                landmark.observations.iter().any(|key| {
+                    images
+                        .get(&key.global_image_id)
+                        .is_some_and(|image| image.atlas.frame_id == frame_id)
+                })
+            })
+            .count();
+        let accepted_target_observations = frame_landmarks
+            .iter()
+            .flat_map(|landmark| landmark.observations.iter())
+            .filter(|key| {
+                images
+                    .get(&key.global_image_id)
+                    .is_some_and(|image| image.atlas.frame_id == frame_id)
+            })
+            .count();
+        summary.candidate_target_landmarks += accepted_target_landmarks;
+        summary.candidate_target_observations += accepted_target_observations;
+        if frame_landmarks.is_empty()
+            || accepted_target_landmarks < RECOVERY_MIN_PNP_INLIERS
+            || accepted_target_observations < RECOVERY_MIN_PNP_INLIERS
+        {
+            summary.track_rejections += frame_landmarks.len();
+            println!(
+                "recovery frame={frame_id} pnp_inliers={} accepted_landmarks={} accepted_observations={} target_landmarks={} target_observations={} status=track-gate-rejected",
+                report.inliers.len(),
+                frame_landmarks.len(),
+                accepted_observations,
+                accepted_target_landmarks,
+                accepted_target_observations,
+            );
+            continue;
+        }
+        for landmark in &frame_landmarks {
+            used_track_ids.insert(landmark.track_id);
+            used_observations.extend(landmark.observations.iter().copied());
+        }
+        summary.frames_recovered += 1;
+        summary.accepted_landmarks += frame_landmarks.len();
+        summary.accepted_observations += accepted_observations;
+        summary.accepted_target_landmarks += accepted_target_landmarks;
+        summary.accepted_target_observations += accepted_target_observations;
+        println!(
+            "recovery frame={frame_id} anchors={} correspondences={} pnp_inliers={} pnp_mean_px={:.6} pnp_max_px={:.6} accepted_landmarks={} accepted_observations={} target_landmarks={} target_observations={} status=accepted",
+            anchor_count,
+            correspondences.len(),
+            report.inliers.len(),
+            report.mean_reprojection_error,
+            report.max_reprojection_error,
+            frame_landmarks.len(),
+            accepted_observations,
+            accepted_target_landmarks,
+            accepted_target_observations,
+        );
+        working_pose_overrides = candidate_pose_overrides;
+        recovered_landmarks.extend(frame_landmarks);
+    }
+
+    Ok(RecoveryResult {
+        pose_overrides: working_pose_overrides,
+        landmarks: recovered_landmarks,
+        summary,
+    })
+}
+
+fn recovery_candidate_track_ids(
+    frame_id: u64,
+    images: &BTreeMap<u64, GlobalImage>,
+    store: &TrackStore,
+) -> Vec<usize> {
+    let image_ids = images
+        .values()
+        .filter(|image| image.atlas.frame_id == frame_id)
+        .map(|image| image.atlas.global_image_id)
+        .collect::<Vec<_>>();
+    let mut track_ids = BTreeSet::new();
+    for global_image_id in image_ids {
+        let first = ObservationKey {
+            global_image_id,
+            keypoint_index: 0,
+        };
+        let last = ObservationKey {
+            global_image_id,
+            keypoint_index: usize::MAX,
+        };
+        track_ids.extend(
+            store
+                .observations
+                .range(first..=last)
+                .map(|(_, state)| state.owner_track),
+        );
+        if track_ids.len() >= MAX_RECOVERY_TRACKS_PER_FRAME {
+            break;
+        }
+    }
+    track_ids
+        .into_iter()
+        .take(MAX_RECOVERY_TRACKS_PER_FRAME)
+        .filter(|track_id| {
+            store
+                .tracks
+                .get(*track_id)
+                .is_some_and(|track| !track.observations.is_empty())
+        })
+        .collect()
+}
+
+fn build_generalized_rig(
+    manifest: &RigManifest,
+    cameras: &BTreeMap<u64, Camera>,
+) -> Result<GeneralizedCameraRig, String> {
+    let mut sensors = Vec::with_capacity(manifest.sensors.len());
+    for (index, calibration) in &manifest.sensors {
+        if *index != sensors.len() {
+            return Err("rig sensor indices must be contiguous from zero".to_owned());
+        }
+        let camera = cameras
+            .get(&calibration.camera_id)
+            .ok_or_else(|| format!("recovery camera {} is unavailable", calibration.camera_id))?;
+        sensors.push(RigSensor {
+            camera: camera.clone(),
+            sensor_from_rig: calibration.sensor_from_rig.clone(),
+        });
+    }
+    GeneralizedCameraRig::new(sensors)
+        .ok_or_else(|| "recovery rig has invalid intrinsics or extrinsics".to_owned())
+}
+
+fn compose_recovered_frame_poses(
+    manifest: &RigManifest,
+    frame_id: u64,
+    rig_pose: &Pose,
+    images: &BTreeMap<u64, GlobalImage>,
+    pose_overrides: &mut BTreeMap<u64, Pose>,
+) -> Result<(), String> {
+    let mut changed = 0;
+    for image in images.values() {
+        if image.atlas.frame_id != frame_id {
+            continue;
+        }
+        let sensor = manifest
+            .sensors
+            .get(&image.atlas.sensor_index)
+            .ok_or_else(|| "recovery image references unknown sensor".to_owned())?;
+        let world_to_sensor = sensor.sensor_from_rig.compose(&rig_pose.world_to_camera);
+        pose_overrides.insert(
+            image.atlas.global_image_id,
+            Pose {
+                world_to_camera: world_to_sensor,
+            },
+        );
+        changed += 1;
+    }
+    if changed == 0 {
+        return Err(format!("recovery frame {frame_id} has no atlas images"));
+    }
+    Ok(())
+}
+
+fn apply_pose_overrides(
+    images: &mut BTreeMap<u64, GlobalImage>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<(), String> {
+    for (global_image_id, pose) in pose_overrides {
+        let image = images
+            .get_mut(global_image_id)
+            .ok_or_else(|| "recovery pose references unknown image".to_owned())?;
+        image.atlas.pose = pose.clone();
+    }
+    Ok(())
+}
+
+fn recovery_track_keys(
+    track: &GlobalTrack,
+    target_frame: u64,
+    initially_supported_frames: &BTreeSet<u64>,
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Vec<ObservationKey> {
+    track
+        .observations
+        .iter()
+        .copied()
+        .filter(|key| {
+            images.get(&key.global_image_id).is_some_and(|image| {
+                image.atlas.frame_id == target_frame
+                    || initially_supported_frames.contains(&image.atlas.frame_id)
+            })
+        })
+        .collect()
+}
+
+fn existing_landmarks_non_regressed(
+    landmarks: &[LandmarkOutput],
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<bool, String> {
+    for landmark in landmarks {
+        let (mean, max) =
+            evaluate_landmark_position(landmark, observations, images, cameras, pose_overrides)?;
+        if mean > landmark.mean_error + 1.0e-9 || max > landmark.max_error + 1.0e-9 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn evaluate_landmark_position(
+    landmark: &LandmarkOutput,
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<(f64, f64), String> {
+    let mut errors = Vec::with_capacity(landmark.observations.len());
+    for key in &landmark.observations {
+        let image = images
+            .get(&key.global_image_id)
+            .ok_or_else(|| "landmark references unknown image".to_owned())?;
+        let camera = cameras
+            .get(&image.atlas.camera_id)
+            .ok_or_else(|| "landmark references unknown camera".to_owned())?;
+        let observation = observations
+            .get(key)
+            .ok_or_else(|| "landmark references unknown observation".to_owned())?;
+        let pose = pose_for_image(image, pose_overrides);
+        let point_camera = pose.transform_world_point(&landmark.position);
+        if !point_camera.coords.iter().all(|value| value.is_finite()) || point_camera.z <= 0.0 {
+            return Err("existing landmark became invalid".to_owned());
+        }
+        let projected = camera
+            .project(&point_camera)
+            .ok_or_else(|| "existing landmark projection failed".to_owned())?;
+        let error = (projected - observation.xy).norm();
+        if !error.is_finite() {
+            return Err("existing landmark reprojection became non-finite".to_owned());
+        }
+        errors.push(error);
+    }
+    let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+    Ok((mean, errors.into_iter().fold(0.0, f64::max)))
+}
+
+fn pose_for_image<'a>(image: &'a GlobalImage, pose_overrides: &'a BTreeMap<u64, Pose>) -> &'a Pose {
+    pose_overrides
+        .get(&image.atlas.global_image_id)
+        .unwrap_or(&image.atlas.pose)
+}
+
 fn has_observable_parallax(
     keys: &[ObservationKey],
     observations: &BTreeMap<ObservationKey, ObservationState>,
     images: &BTreeMap<u64, GlobalImage>,
     cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
 ) -> Result<bool, String> {
     let mut rays = Vec::with_capacity(keys.len());
     for key in keys {
@@ -1396,13 +1988,12 @@ fn has_observable_parallax(
             .normalize_pixel(&state.xy)
             .ok_or_else(|| "camera model cannot normalize pixel".to_owned())?;
         let bearing_camera = Vector3::new(normalized.x, normalized.y, 1.0).normalize();
-        let bearing_world = image
-            .atlas
-            .pose
+        let pose = pose_for_image(image, pose_overrides);
+        let bearing_world = pose
             .camera_to_world()
             .rotation
             .transform_vector(&bearing_camera);
-        rays.push((image.atlas.pose.camera_center_world(), bearing_world));
+        rays.push((pose.camera_center_world(), bearing_world));
     }
     for (index, (center_a, ray_a)) in rays.iter().enumerate() {
         for (center_b, ray_b) in rays.iter().skip(index + 1) {
@@ -1967,6 +2558,210 @@ mod tests {
         Camera::pinhole(1, 640, 480, 100.0, 100.0, 320.0, 240.0)
     }
 
+    fn recovery_fixture(
+        add_bad_second_sensor_observation: bool,
+    ) -> (
+        RigManifest,
+        TrackStore,
+        BTreeMap<u64, GlobalImage>,
+        BTreeMap<u64, Camera>,
+        Vec<LandmarkOutput>,
+        Pose,
+    ) {
+        let camera0 = Camera::pinhole(1, 640, 480, 100.0, 101.0, 320.0, 240.0);
+        let camera1 = Camera::pinhole(2, 640, 480, 102.0, 99.0, 321.0, 239.0);
+        let sensor0 = SensorCalibration {
+            camera_id: 1,
+            width: 640,
+            height: 480,
+            fx: 100.0,
+            fy: 101.0,
+            cx: 320.0,
+            cy: 240.0,
+            sensor_from_rig: SE3::identity(),
+        };
+        let sensor1 = SensorCalibration {
+            camera_id: 2,
+            width: 640,
+            height: 480,
+            fx: 102.0,
+            fy: 99.0,
+            cx: 321.0,
+            cy: 239.0,
+            sensor_from_rig: SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(0.005, -0.01, 0.008)),
+                Vector3::new(-0.35, 0.01, -0.02),
+            ),
+        };
+        let manifest = RigManifest {
+            sensors: BTreeMap::from([(0, sensor0.clone()), (1, sensor1.clone())]),
+            assignments: BTreeMap::new(),
+        };
+        let truth_rig_pose = Pose::from_world_to_camera(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.04, -0.03, 0.02)),
+            Vector3::new(0.25, -0.15, 0.35),
+        );
+        let bad_rig_pose = Pose::from_world_to_camera(
+            UnitQuaternion::from_scaled_axis(Vector3::new(-0.1, 0.08, -0.04)),
+            Vector3::new(-0.8, 0.4, 0.2),
+        );
+        let sensor_pose = |sensor: &SensorCalibration, rig_pose: &Pose| Pose {
+            world_to_camera: sensor.sensor_from_rig.compose(&rig_pose.world_to_camera),
+        };
+        let mut images = BTreeMap::new();
+        let mut insert_image = |global_image_id, frame_id, sensor_index, camera_id, pose| {
+            images.insert(
+                global_image_id,
+                GlobalImage {
+                    atlas: AtlasImage {
+                        global_image_id,
+                        frame_id,
+                        sensor_index,
+                        name: format!("{global_image_id}.png"),
+                        camera_id,
+                        pose,
+                    },
+                    keypoints: vec![Point2::new(0.0, 0.0); 7],
+                },
+            );
+        };
+        insert_image(1, 10, 0, 1, sensor_pose(&sensor0, &Pose::identity()));
+        insert_image(2, 10, 1, 2, sensor_pose(&sensor1, &Pose::identity()));
+        insert_image(3, 20, 0, 1, sensor_pose(&sensor0, &bad_rig_pose));
+        insert_image(4, 20, 1, 2, sensor_pose(&sensor1, &bad_rig_pose));
+
+        let mut states = BTreeMap::new();
+        let mut tracks = Vec::new();
+        let base_point = Point3::new(0.1, -0.2, 4.6);
+        let base_xy0 = camera0
+            .project(&images[&1].atlas.pose.transform_world_point(&base_point))
+            .unwrap();
+        let base_xy1 = camera1
+            .project(&images[&2].atlas.pose.transform_world_point(&base_point))
+            .unwrap();
+        images.get_mut(&1).unwrap().keypoints[6] = base_xy0;
+        images.get_mut(&2).unwrap().keypoints[6] = base_xy1;
+        let base_keys = vec![
+            ObservationKey {
+                global_image_id: 1,
+                keypoint_index: 6,
+            },
+            ObservationKey {
+                global_image_id: 2,
+                keypoint_index: 6,
+            },
+        ];
+        for (key, xy) in [(base_keys[0], base_xy0), (base_keys[1], base_xy1)] {
+            states.insert(key, ObservationState { xy, owner_track: 0 });
+        }
+        tracks.push(GlobalTrack {
+            observations: base_keys.clone(),
+        });
+        let baseline_landmark = LandmarkOutput {
+            track_id: 0,
+            position: base_point,
+            observations: base_keys,
+            errors: vec![0.0, 0.0],
+            rms_error: 0.0,
+            mean_error: 0.0,
+            max_error: 0.0,
+            dlt_sample_count: 2,
+        };
+
+        let points = [
+            Point3::new(-1.2, -0.6, 4.5),
+            Point3::new(-0.7, 0.4, 5.1),
+            Point3::new(-0.1, -0.3, 5.8),
+            Point3::new(0.4, 0.5, 4.8),
+            Point3::new(0.9, -0.4, 5.5),
+            Point3::new(1.3, 0.2, 6.2),
+        ];
+        let target_pose0 = sensor_pose(&sensor0, &truth_rig_pose);
+        let target_pose1 = sensor_pose(&sensor1, &truth_rig_pose);
+        let point_count = points.len();
+        for (index, point) in points.into_iter().enumerate() {
+            let xy0 = camera0
+                .project(&target_pose0.transform_world_point(&point))
+                .unwrap();
+            let xy1 = camera1
+                .project(&target_pose1.transform_world_point(&point))
+                .unwrap();
+            let anchor_xy0 = camera0
+                .project(&images[&1].atlas.pose.transform_world_point(&point))
+                .unwrap();
+            let anchor_xy1 = camera1
+                .project(&images[&2].atlas.pose.transform_world_point(&point))
+                .unwrap();
+            images.get_mut(&1).unwrap().keypoints[index] = anchor_xy0;
+            images.get_mut(&2).unwrap().keypoints[index] = anchor_xy1;
+            images.get_mut(&4).unwrap().keypoints[index] = xy1;
+            if add_bad_second_sensor_observation && index == point_count - 1 {
+                images.get_mut(&3).unwrap().keypoints[index] = Point2::new(xy0.x + 120.0, xy0.y);
+            }
+            let key1 = ObservationKey {
+                global_image_id: 1,
+                keypoint_index: index,
+            };
+            let key2 = ObservationKey {
+                global_image_id: 2,
+                keypoint_index: index,
+            };
+            let key4 = ObservationKey {
+                global_image_id: 4,
+                keypoint_index: index,
+            };
+            let mut keys = vec![key1, key2, key4];
+            states.insert(
+                key1,
+                ObservationState {
+                    xy: images[&1].keypoints[index],
+                    owner_track: index + 1,
+                },
+            );
+            states.insert(
+                key2,
+                ObservationState {
+                    xy: images[&2].keypoints[index],
+                    owner_track: index + 1,
+                },
+            );
+            states.insert(
+                key4,
+                ObservationState {
+                    xy: xy1,
+                    owner_track: index + 1,
+                },
+            );
+            if add_bad_second_sensor_observation && index == points.len() - 1 {
+                let key3 = ObservationKey {
+                    global_image_id: 3,
+                    keypoint_index: index,
+                };
+                keys.insert(2, key3);
+                states.insert(
+                    key3,
+                    ObservationState {
+                        xy: images[&3].keypoints[index],
+                        owner_track: index + 1,
+                    },
+                );
+            }
+            keys.sort_unstable();
+            tracks.push(GlobalTrack { observations: keys });
+        }
+        (
+            manifest,
+            TrackStore {
+                observations: states,
+                tracks,
+            },
+            images,
+            BTreeMap::from([(1, camera0), (2, camera1)]),
+            vec![baseline_landmark],
+            truth_rig_pose,
+        )
+    }
+
     #[test]
     fn args_require_all_paths_and_reject_unknown() {
         let error = parse_args(["example".to_owned(), "--rig-manifest".to_owned()]).unwrap_err();
@@ -1985,6 +2780,49 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("unknown argument"));
+
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+        ])
+        .unwrap();
+        assert!(!args.recover_zero_support_frames);
+        let args = parse_args([
+            "example".to_owned(),
+            "--recover-zero-support-frames".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+        ])
+        .unwrap();
+        assert!(args.recover_zero_support_frames);
+        let error = parse_args([
+            "example".to_owned(),
+            "--recover-zero-support-frames".to_owned(),
+            "--recover-zero-support-frames".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("duplicate argument"));
     }
 
     #[test]
@@ -2413,6 +3251,154 @@ mod tests {
         assert_eq!(sample.first(), keys.first());
         assert_eq!(sample.last(), keys.last());
         assert_eq!(sample, bounded_sample(&keys, 7));
+    }
+
+    #[test]
+    fn recovery_anchor_filter_never_uses_another_unsupported_frame() {
+        let mut images = BTreeMap::new();
+        let mut supported = test_image(1, "supported", vec![Point2::new(1.0, 1.0)]);
+        supported.atlas.frame_id = 10;
+        images.insert(1, supported);
+        let mut target = test_image(2, "target", vec![Point2::new(2.0, 2.0)]);
+        target.atlas.frame_id = 20;
+        images.insert(2, target);
+        let mut other_unsupported = test_image(3, "other", vec![Point2::new(3.0, 3.0)]);
+        other_unsupported.atlas.frame_id = 30;
+        images.insert(3, other_unsupported);
+        let track = GlobalTrack {
+            observations: vec![
+                ObservationKey {
+                    global_image_id: 1,
+                    keypoint_index: 0,
+                },
+                ObservationKey {
+                    global_image_id: 2,
+                    keypoint_index: 0,
+                },
+                ObservationKey {
+                    global_image_id: 3,
+                    keypoint_index: 0,
+                },
+            ],
+        };
+        let supported_frames = BTreeSet::from([10]);
+        let keys = recovery_track_keys(&track, 20, &supported_frames, &images);
+        assert_eq!(
+            keys,
+            vec![
+                ObservationKey {
+                    global_image_id: 1,
+                    keypoint_index: 0,
+                },
+                ObservationKey {
+                    global_image_id: 2,
+                    keypoint_index: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn recovery_synthetic_end_to_end_accepts_six_target_landmarks() {
+        let (manifest, store, images, cameras, baseline, truth_rig_pose) = recovery_fixture(false);
+        let result =
+            recover_zero_support_frames(&manifest, &store, &images, &cameras, &baseline).unwrap();
+        assert_eq!(result.summary.frames_recovered, 1);
+        assert_eq!(result.summary.pnp_inliers, 6);
+        assert_eq!(result.summary.candidate_target_landmarks, 6);
+        assert_eq!(result.summary.accepted_target_landmarks, 6);
+        assert_eq!(result.landmarks.len(), 6);
+        assert_eq!(result.pose_overrides.len(), 2);
+        for (global_image_id, sensor) in &manifest.sensors {
+            let image_id = *global_image_id as u64 + 3;
+            let expected = sensor
+                .sensor_from_rig
+                .compose(&truth_rig_pose.world_to_camera);
+            let actual = &result.pose_overrides[&image_id].world_to_camera;
+            assert!((actual.translation - expected.translation).norm() < 1.0e-8);
+            assert!((actual.rotation * expected.rotation.inverse()).angle() < 1.0e-8);
+        }
+    }
+
+    #[test]
+    fn recovery_transactionally_rejects_pose_when_only_five_target_tracks_survive() {
+        let (manifest, store, images, cameras, baseline, _) = recovery_fixture(true);
+        let result =
+            recover_zero_support_frames(&manifest, &store, &images, &cameras, &baseline).unwrap();
+        assert!(result.summary.pnp_inliers >= RECOVERY_MIN_PNP_INLIERS);
+        assert_eq!(result.summary.candidate_target_landmarks, 5);
+        assert_eq!(result.summary.accepted_target_landmarks, 0);
+        assert!(result.pose_overrides.is_empty());
+        assert!(result.landmarks.is_empty());
+    }
+
+    #[test]
+    fn recovered_frame_pose_recomposes_both_fixed_sensor_extrinsics() {
+        let sensor0 = SensorCalibration {
+            camera_id: 1,
+            width: 640,
+            height: 480,
+            fx: 100.0,
+            fy: 101.0,
+            cx: 320.0,
+            cy: 240.0,
+            sensor_from_rig: SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(0.01, -0.02, 0.03)),
+                Vector3::new(0.1, -0.02, 0.04),
+            ),
+        };
+        let sensor1 = SensorCalibration {
+            camera_id: 2,
+            width: 640,
+            height: 480,
+            fx: 102.0,
+            fy: 99.0,
+            cx: 321.0,
+            cy: 239.0,
+            sensor_from_rig: SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(-0.03, 0.01, 0.02)),
+                Vector3::new(-0.2, 0.03, 0.01),
+            ),
+        };
+        let manifest = RigManifest {
+            sensors: BTreeMap::from([(0, sensor0.clone()), (1, sensor1.clone())]),
+            assignments: BTreeMap::new(),
+        };
+        let mut images = BTreeMap::new();
+        for (global_image_id, (sensor_index, camera_id)) in [(1, (0, 1)), (2, (1, 2))] {
+            images.insert(
+                global_image_id,
+                GlobalImage {
+                    atlas: AtlasImage {
+                        global_image_id,
+                        frame_id: 7,
+                        sensor_index,
+                        name: global_image_id.to_string(),
+                        camera_id,
+                        pose: Pose::identity(),
+                    },
+                    keypoints: vec![],
+                },
+            );
+        }
+        let rig_pose = Pose::from_world_to_camera(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.2, -0.1, 0.05)),
+            Vector3::new(1.0, -0.4, 0.7),
+        );
+        let mut overrides = BTreeMap::new();
+        compose_recovered_frame_poses(&manifest, 7, &rig_pose, &images, &mut overrides).unwrap();
+        assert_eq!(overrides.len(), 2);
+        for (sensor_index, calibration) in [(0, sensor0), (1, sensor1)] {
+            let expected = calibration
+                .sensor_from_rig
+                .compose(&rig_pose.world_to_camera);
+            let actual = &overrides[&(sensor_index as u64 + 1)].world_to_camera;
+            assert!((actual.translation - expected.translation).norm() < 1.0e-12);
+            assert!((actual.rotation * expected.rotation.inverse()).angle() < 1.0e-12);
+        }
+        assert!(images
+            .values()
+            .all(|image| image.atlas.pose == Pose::identity()));
     }
 
     #[test]
