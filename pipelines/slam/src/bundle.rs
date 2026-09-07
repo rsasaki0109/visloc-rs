@@ -7251,6 +7251,1546 @@ mod matrix_free_ba_api_tests {
 }
 
 #[cfg(test)]
+mod matrix_free_real_oracle_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::env;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::path::Path;
+
+    const MAX_VARIABLE_POSES: usize = 512;
+    const MAX_LANDMARKS: usize = 8_192;
+    const MAX_OBSERVATIONS: usize = 262_144;
+    const MAX_SCHUR_SCALARS: usize = 3_072;
+    const MAX_CROSS_PAIR_WORK: usize = 64_000_000;
+    const MAX_CAMERAS: usize = 64;
+    const ORACLE_PC_TOLERANCE: f64 = 1.0e-12;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct OracleFixture {
+        source_hashes: BTreeMap<String, String>,
+        initial_cost: f64,
+        initial_cost_bits: u64,
+        ba: BundleAdjustment,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct PredictedDecrease {
+        half_damped: f64,
+        squared_damped: f64,
+        squared_undamped: f64,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Feasibility {
+        finite: bool,
+        pose_true_residual: f64,
+        implicit_pose_true_residual: Option<f64>,
+        max_landmark_backsub_residual: f64,
+        geometry_observation_count: usize,
+        geometry_invalid_observations: usize,
+        geometry_nonpositive_depth: usize,
+        geometry_cost: f64,
+        geometry_rms_error: f64,
+        geometry_max_error: f64,
+        geometry_feasible: bool,
+        feasible: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct OracleCaseReport {
+        lambda: f64,
+        pcg_max_iterations: usize,
+        pose_blocks: usize,
+        landmark_count: usize,
+        observation_count: usize,
+        schur_dimension: usize,
+        singular_landmarks: usize,
+        raw_schur_asymmetry: Option<f64>,
+        schur_base_action_norm: Option<f64>,
+        schur_eliminated_action_norm: Option<f64>,
+        schur_arithmetic_scale: Option<f64>,
+        operator_raw_action_error: Option<f64>,
+        operator_raw_action_relative_error: Option<f64>,
+        operator_lower_action_error: Option<f64>,
+        operator_lower_action_relative_error: Option<f64>,
+        operator_rhs_error: Option<f64>,
+        direct_explicit_pose_error: Option<f64>,
+        direct_explicit_landmark_error: Option<f64>,
+        direct_feasibility: Option<Feasibility>,
+        explicit_feasibility: Option<Feasibility>,
+        direct_prediction: Option<PredictedDecrease>,
+        explicit_prediction: Option<PredictedDecrease>,
+        pcg_status: String,
+        pcg_iterations: Option<usize>,
+        pcg_true_residual: Option<f64>,
+        pcg_target: Option<f64>,
+        matrix_free_pose_error: Option<f64>,
+        matrix_free_landmark_error: Option<f64>,
+        matrix_free_feasibility: Option<Feasibility>,
+        matrix_free_prediction: Option<PredictedDecrease>,
+    }
+
+    fn parse_f64(token: &str, context: &str) -> Result<f64, String> {
+        let value = token
+            .parse::<f64>()
+            .map_err(|error| format!("{context}: {error}"))?;
+        if !value.is_finite() {
+            return Err(format!("{context}: non-finite value"));
+        }
+        Ok(value)
+    }
+
+    fn parse_usize(token: &str, context: &str) -> Result<usize, String> {
+        token
+            .parse::<usize>()
+            .map_err(|error| format!("{context}: {error}"))
+    }
+
+    fn parse_u64(token: &str, context: &str) -> Result<u64, String> {
+        token
+            .parse::<u64>()
+            .map_err(|error| format!("{context}: {error}"))
+    }
+
+    fn parse_se3(fields: &[&str], start: usize, context: &str) -> Result<SE3, String> {
+        if fields.len() < start + 7 {
+            return Err(format!("{context}: expected quaternion and translation"));
+        }
+        let values = (0..7)
+            .map(|index| parse_f64(fields[start + index], context))
+            .collect::<Result<Vec<_>, _>>()?;
+        let quaternion = nalgebra::Quaternion::new(values[0], values[1], values[2], values[3]);
+        let norm = quaternion.norm();
+        if !norm.is_finite() || norm <= 1.0e-12 || (norm - 1.0).abs() > 1.0e-6 {
+            return Err(format!("{context}: quaternion norm is not one"));
+        }
+        Ok(SE3::new(
+            // The exporter already validated and emitted a unit quaternion.
+            // Preserve its f64 components exactly; normalizing here would
+            // change the initial normal system by a rounding-dependent amount.
+            // `from_quaternion` normalizes.  The fixture has already checked
+            // the norm, so use the unchecked constructor to preserve every
+            // serialized f64 bit and keep the normal system identical.
+            nalgebra::UnitQuaternion::new_unchecked(quaternion),
+            Vector3::new(values[4], values[5], values[6]),
+        ))
+    }
+
+    fn parse_fixture(path: &Path) -> Result<OracleFixture, String> {
+        let file = File::open(path).map_err(|error| format!("open fixture: {error}"))?;
+        let reader = BufReader::new(file);
+        let mut source_hashes = BTreeMap::new();
+        let mut expected_initial_cost = None;
+        let mut expected_initial_cost_bits = None;
+        let mut expected_counts = BTreeMap::<String, usize>::new();
+        let mut cameras = BTreeMap::<u64, Camera>::new();
+        let mut poses = BTreeMap::<u64, Pose>::new();
+        let mut landmarks = BTreeMap::<u64, Point3<f64>>::new();
+        let mut fixed_poses = BTreeSet::new();
+        let mut rig_observations = Vec::new();
+        let mut saw_header = false;
+        let mut saw_end = false;
+
+        for (line_index, line_result) in reader.lines().enumerate() {
+            let line_number = line_index + 1;
+            let line =
+                line_result.map_err(|error| format!("fixture line {line_number}: {error}"))?;
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() {
+                continue;
+            }
+            if saw_end && fields[0] != "END" {
+                return Err(format!(
+                    "fixture line {line_number}: records after END are not allowed"
+                ));
+            }
+            if !saw_header && fields[0] != "VISLOC_BA_ORACLE_FIXTURE" {
+                return Err(format!(
+                    "fixture line {line_number}: header must be the first record"
+                ));
+            }
+            match fields[0] {
+                "VISLOC_BA_ORACLE_FIXTURE" => {
+                    if fields != ["VISLOC_BA_ORACLE_FIXTURE", "1"] {
+                        return Err(format!("fixture line {line_number}: unsupported version"));
+                    }
+                    if saw_header {
+                        return Err(format!("fixture line {line_number}: duplicate header"));
+                    }
+                    saw_header = true;
+                }
+                "SOURCE_SHA256"
+                | "SOURCE_SHA256_CAMERAS"
+                | "SOURCE_SHA256_IMAGES"
+                | "SOURCE_SHA256_POINTS"
+                | "SOURCE_SHA256_MANIFEST" => {
+                    if fields.len() != 2
+                        || fields[1].len() != 64
+                        || !fields[1].bytes().all(|byte| byte.is_ascii_hexdigit())
+                    {
+                        return Err(format!("fixture line {line_number}: invalid source hash"));
+                    }
+                    if source_hashes
+                        .insert(fields[0].to_owned(), fields[1].to_owned())
+                        .is_some()
+                    {
+                        return Err(format!("fixture line {line_number}: duplicate source hash"));
+                    }
+                }
+                "INITIAL_COST" => {
+                    if fields.len() != 2 || expected_initial_cost.is_some() {
+                        return Err(format!("fixture line {line_number}: invalid INITIAL_COST"));
+                    }
+                    expected_initial_cost = Some(parse_f64(fields[1], "initial cost")?);
+                }
+                "INITIAL_COST_BITS" => {
+                    if fields.len() != 2 || expected_initial_cost_bits.is_some() {
+                        return Err(format!(
+                            "fixture line {line_number}: invalid INITIAL_COST_BITS"
+                        ));
+                    }
+                    expected_initial_cost_bits = Some(parse_u64(fields[1], "initial cost bits")?);
+                }
+                "CAMERA_COUNT" | "POSE_COUNT" | "LANDMARK_COUNT" | "OBSERVATION_COUNT" => {
+                    if fields.len() != 2 {
+                        return Err(format!("fixture line {line_number}: invalid count"));
+                    }
+                    let count = parse_usize(fields[1], "fixture count")?;
+                    let cap = match fields[0] {
+                        "CAMERA_COUNT" => MAX_CAMERAS,
+                        "POSE_COUNT" => MAX_VARIABLE_POSES + 1,
+                        "LANDMARK_COUNT" => MAX_LANDMARKS,
+                        "OBSERVATION_COUNT" => MAX_OBSERVATIONS,
+                        _ => unreachable!(),
+                    };
+                    if count > cap {
+                        return Err(format!(
+                            "fixture line {line_number}: {} exceeds cap {cap}",
+                            fields[0]
+                        ));
+                    }
+                    if expected_counts
+                        .insert(fields[0].to_owned(), count)
+                        .is_some()
+                    {
+                        return Err(format!("fixture line {line_number}: duplicate count"));
+                    }
+                }
+                "CAMERA" => {
+                    if fields.len() < 6 {
+                        return Err(format!("fixture line {line_number}: short camera"));
+                    }
+                    if cameras.len() >= MAX_CAMERAS {
+                        return Err(format!("fixture line {line_number}: camera cap exceeded"));
+                    }
+                    let id = parse_u64(fields[1], "camera id")?;
+                    let model = CameraModel::from_colmap_name(fields[2]);
+                    if matches!(model, CameraModel::Unknown(_)) {
+                        return Err(format!("fixture line {line_number}: unknown camera model"));
+                    }
+                    let width = fields[3]
+                        .parse::<u32>()
+                        .map_err(|error| format!("fixture line {line_number}: width: {error}"))?;
+                    let height = fields[4]
+                        .parse::<u32>()
+                        .map_err(|error| format!("fixture line {line_number}: height: {error}"))?;
+                    let parameter_count = parse_usize(fields[5], "camera parameter count")?;
+                    if parameter_count > 16 {
+                        return Err(format!(
+                            "fixture line {line_number}: camera parameter cap exceeded"
+                        ));
+                    }
+                    if fields.len() != 6 + parameter_count {
+                        return Err(format!(
+                            "fixture line {line_number}: camera parameter count mismatch"
+                        ));
+                    }
+                    let params = fields[6..]
+                        .iter()
+                        .map(|token| parse_f64(token, "camera parameter"))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if cameras
+                        .insert(
+                            id,
+                            Camera {
+                                id,
+                                model,
+                                width,
+                                height,
+                                params,
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(format!("fixture line {line_number}: duplicate camera"));
+                    }
+                }
+                "POSE" => {
+                    if fields.len() != 9 {
+                        return Err(format!("fixture line {line_number}: invalid pose"));
+                    }
+                    if poses.len() > MAX_VARIABLE_POSES {
+                        return Err(format!("fixture line {line_number}: pose cap exceeded"));
+                    }
+                    let id = parse_u64(fields[1], "pose id")?;
+                    let pose = Pose {
+                        world_to_camera: parse_se3(&fields, 2, "pose")?,
+                    };
+                    if poses.insert(id, pose).is_some() {
+                        return Err(format!("fixture line {line_number}: duplicate pose"));
+                    }
+                }
+                "FIXED_POSE" => {
+                    if fields.len() != 2 {
+                        return Err(format!("fixture line {line_number}: invalid fixed pose"));
+                    }
+                    if !fixed_poses.insert(parse_u64(fields[1], "fixed pose id")?) {
+                        return Err(format!("fixture line {line_number}: duplicate fixed pose"));
+                    }
+                }
+                "LANDMARK" => {
+                    if fields.len() != 5 {
+                        return Err(format!("fixture line {line_number}: invalid landmark"));
+                    }
+                    if landmarks.len() >= MAX_LANDMARKS {
+                        return Err(format!("fixture line {line_number}: landmark cap exceeded"));
+                    }
+                    let id = parse_u64(fields[1], "landmark id")?;
+                    let point = Point3::new(
+                        parse_f64(fields[2], "landmark x")?,
+                        parse_f64(fields[3], "landmark y")?,
+                        parse_f64(fields[4], "landmark z")?,
+                    );
+                    if landmarks.insert(id, point).is_some() {
+                        return Err(format!("fixture line {line_number}: duplicate landmark"));
+                    }
+                }
+                "RIG_OBSERVATION" => {
+                    if fields.len() != 13 {
+                        return Err(format!(
+                            "fixture line {line_number}: invalid rig observation"
+                        ));
+                    }
+                    if rig_observations.len() >= MAX_OBSERVATIONS {
+                        return Err(format!(
+                            "fixture line {line_number}: observation cap exceeded"
+                        ));
+                    }
+                    let frame_id = parse_u64(fields[1], "observation frame id")?;
+                    let landmark_id = parse_u64(fields[2], "observation landmark id")?;
+                    let xy = Point2::new(
+                        parse_f64(fields[3], "observation x")?,
+                        parse_f64(fields[4], "observation y")?,
+                    );
+                    let camera_id = parse_u64(fields[5], "observation camera id")?;
+                    let sensor_from_rig = parse_se3(&fields, 6, "sensor extrinsic")?;
+                    rig_observations.push((frame_id, landmark_id, xy, camera_id, sensor_from_rig));
+                }
+                "END" => {
+                    if fields.len() != 1 || saw_end {
+                        return Err(format!("fixture line {line_number}: invalid END"));
+                    }
+                    saw_end = true;
+                }
+                other => {
+                    return Err(format!(
+                        "fixture line {line_number}: unknown record {other:?}"
+                    ));
+                }
+            }
+        }
+        if !saw_header || !saw_end {
+            return Err("fixture is missing header or END".to_owned());
+        }
+        let expected_initial_cost =
+            expected_initial_cost.ok_or_else(|| "fixture is missing INITIAL_COST".to_owned())?;
+        let expected_initial_cost_bits = expected_initial_cost_bits
+            .ok_or_else(|| "fixture is missing INITIAL_COST_BITS".to_owned())?;
+        for key in [
+            "SOURCE_SHA256",
+            "SOURCE_SHA256_CAMERAS",
+            "SOURCE_SHA256_IMAGES",
+            "SOURCE_SHA256_POINTS",
+            "SOURCE_SHA256_MANIFEST",
+        ] {
+            if !source_hashes.contains_key(key) {
+                return Err(format!("fixture is missing {key}"));
+            }
+        }
+        if cameras.is_empty()
+            || poses.is_empty()
+            || landmarks.is_empty()
+            || rig_observations.is_empty()
+        {
+            return Err("fixture has no BA records".to_owned());
+        }
+        if fixed_poses.len() != 1 || !fixed_poses.iter().all(|id| poses.contains_key(id)) {
+            return Err("fixture fixed pose set is invalid".to_owned());
+        }
+        let first_camera = cameras
+            .values()
+            .next()
+            .cloned()
+            .ok_or_else(|| "fixture has no camera".to_owned())?;
+        let mut ba = BundleAdjustment::new(first_camera);
+        for (id, pose) in poses {
+            ba.add_pose(id, pose);
+        }
+        for id in fixed_poses {
+            ba.fix_pose(id);
+        }
+        for (id, point) in landmarks {
+            ba.add_landmark(id, point);
+        }
+        for (frame_id, landmark_id, xy, camera_id, sensor_from_rig) in rig_observations {
+            let camera = cameras
+                .get(&camera_id)
+                .cloned()
+                .ok_or_else(|| format!("observation references unknown camera {camera_id}"))?;
+            if !ba.poses.contains_key(&frame_id) {
+                return Err(format!("observation references unknown pose {frame_id}"));
+            }
+            if !ba.landmarks.contains_key(&landmark_id) {
+                return Err(format!(
+                    "observation references unknown landmark {landmark_id}"
+                ));
+            }
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: frame_id,
+                landmark_id,
+                xy,
+                camera,
+                sensor_from_rig,
+            });
+        }
+        let expected = [
+            ("CAMERA_COUNT", cameras.len()),
+            ("POSE_COUNT", ba.poses.len()),
+            ("LANDMARK_COUNT", ba.landmarks.len()),
+            ("OBSERVATION_COUNT", ba.rig_observations.len()),
+        ];
+        for (key, actual) in expected {
+            if expected_counts.get(key).copied() != Some(actual) {
+                return Err(format!("fixture {key} does not match records"));
+            }
+        }
+        let actual_initial_cost = ba.cost();
+        if !actual_initial_cost.is_finite()
+            || actual_initial_cost.to_bits() != expected_initial_cost_bits
+            || actual_initial_cost.to_bits() != expected_initial_cost.to_bits()
+        {
+            return Err(format!(
+                "fixture initial cost bit mismatch: expected {} ({expected_initial_cost:.17e}), actual {} ({actual_initial_cost:.17e})",
+                expected_initial_cost_bits,
+                actual_initial_cost.to_bits(),
+            ));
+        }
+        Ok(OracleFixture {
+            source_hashes,
+            initial_cost: expected_initial_cost,
+            initial_cost_bits: expected_initial_cost_bits,
+            ba,
+        })
+    }
+
+    fn variable_indices(ba: &BundleAdjustment) -> (BTreeMap<u64, usize>, BTreeMap<u64, usize>) {
+        let pose_index = ba
+            .poses
+            .keys()
+            .copied()
+            .filter(|id| !ba.fixed_poses.contains(id))
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        let landmark_index = ba
+            .landmarks
+            .keys()
+            .copied()
+            .filter(|id| !ba.fixed_landmarks.contains(id))
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        (pose_index, landmark_index)
+    }
+
+    fn observation_count(ba: &BundleAdjustment) -> usize {
+        ba.observations.len()
+            + ba.stereo_observations.len()
+            + ba.general_stereo_observations.len()
+            + ba.rig_observations.len()
+    }
+
+    fn cross_pair_work(system: &NormalEquationsBa) -> Result<usize, String> {
+        system
+            .landmarks
+            .iter()
+            .try_fold(0_usize, |total, landmark| {
+                let pairs = landmark
+                    .cross
+                    .len()
+                    .checked_mul(landmark.cross.len())
+                    .ok_or_else(|| "cross-pair work overflows".to_owned())?;
+                total
+                    .checked_add(pairs)
+                    .ok_or_else(|| "cross-pair work overflows".to_owned())
+            })
+    }
+
+    fn check_caps(
+        pose_blocks: usize,
+        landmarks: usize,
+        observations: usize,
+        cross_pairs: usize,
+    ) -> Result<usize, String> {
+        if pose_blocks > MAX_VARIABLE_POSES {
+            return Err(format!("oracle variable-pose cap exceeded: {pose_blocks}"));
+        }
+        if landmarks > MAX_LANDMARKS {
+            return Err(format!("oracle landmark cap exceeded: {landmarks}"));
+        }
+        if observations > MAX_OBSERVATIONS {
+            return Err(format!("oracle observation cap exceeded: {observations}"));
+        }
+        if cross_pairs > MAX_CROSS_PAIR_WORK {
+            return Err(format!("oracle cross-pair cap exceeded: {cross_pairs}"));
+        }
+        let dimension = pose_blocks
+            .checked_mul(6)
+            .ok_or_else(|| "oracle Schur dimension overflows".to_owned())?;
+        if dimension > MAX_SCHUR_SCALARS {
+            return Err(format!("oracle Schur dimension cap exceeded: {dimension}"));
+        }
+        Ok(dimension)
+    }
+
+    fn build_oracle_system(
+        ba: &BundleAdjustment,
+    ) -> Result<(NormalEquationsBa, usize, usize, usize), String> {
+        if ba.observations.is_empty()
+            && ba.stereo_observations.is_empty()
+            && ba.general_stereo_observations.is_empty()
+            && ba.rig_observations.is_empty()
+        {
+            return Err("oracle requires visual observations".to_owned());
+        }
+        if ba.velocities.is_empty()
+            && ba.biases.is_empty()
+            && ba.imu_factors.is_empty()
+            && ba.bias_random_walk_factors.is_empty()
+            && ba.gravity_prior.is_none()
+            && ba.per_pose_gravity_prior.is_none()
+            && ba.position_prior.is_none()
+            && ba.pairwise_pose_factors.is_empty()
+            && ba.navigation_state_prior.is_none()
+        {
+            // Pure-visual eligibility is intentionally explicit.  The empty
+            // branch is only a guard; all actual work follows below.
+        } else {
+            return Err("oracle only accepts pure visual input".to_owned());
+        }
+        let se3_is_finite = |transform: &SE3| {
+            transform
+                .rotation
+                .quaternion()
+                .coords
+                .iter()
+                .all(|value| value.is_finite())
+                && transform.translation.iter().all(|value| value.is_finite())
+        };
+        if !ba
+            .poses
+            .values()
+            .all(|pose| se3_is_finite(&pose.world_to_camera))
+            || !ba
+                .landmarks
+                .values()
+                .all(|point| point.coords.iter().all(|v| v.is_finite()))
+        {
+            return Err("oracle input pose or landmark is non-finite".to_owned());
+        }
+        for observation in &ba.rig_observations {
+            if !matches!(
+                observation.camera.model,
+                CameraModel::Pinhole | CameraModel::SimplePinhole
+            ) {
+                return Err("oracle requires distortion-free pinhole cameras".to_owned());
+            }
+            if observation
+                .camera
+                .radial_distortion()
+                .is_some_and(|(k1, k2)| k1 != 0.0 || k2 != 0.0)
+            {
+                return Err("oracle rejects nonzero camera distortion".to_owned());
+            }
+            let Some(intrinsics) = observation.camera.intrinsics() else {
+                return Err("oracle camera has no pinhole intrinsics".to_owned());
+            };
+            if ![intrinsics.0, intrinsics.1, intrinsics.2, intrinsics.3]
+                .iter()
+                .all(|value| value.is_finite())
+            {
+                return Err("oracle camera intrinsics are non-finite".to_owned());
+            }
+            if !se3_is_finite(&observation.sensor_from_rig) {
+                return Err("oracle sensor extrinsic is non-finite".to_owned());
+            }
+        }
+        let intrinsics = ba
+            .camera
+            .intrinsics()
+            .ok_or_else(|| "oracle camera has no pinhole intrinsics".to_owned())?;
+        let (pose_index, landmark_index) = variable_indices(ba);
+        if pose_index.is_empty() {
+            return Err("oracle requires at least one variable pose".to_owned());
+        }
+        let mut system = build_normal_equations(
+            ba,
+            &intrinsics,
+            &pose_index,
+            &landmark_index,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &RobustKernel::None,
+            None,
+            false,
+            true,
+        );
+        constrain_fixed_pose_rotations(&ba.fixed_pose_rotations, &pose_index, &mut system);
+        let observations = observation_count(ba);
+        let pairs = cross_pair_work(&system)?;
+        check_caps(pose_index.len(), landmark_index.len(), observations, pairs)?;
+        Ok((system, pose_index.len(), landmark_index.len(), observations))
+    }
+
+    fn explicit_schur_rhs(
+        system: &NormalEquationsBa,
+        lambda: f64,
+    ) -> Result<(DMatrix<f64>, DVector<f64>, usize), String> {
+        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+            return Err("oracle requires pose-diagonal system".to_owned());
+        };
+        let dimension = diagonal.len() * 6;
+        let mut schur = DMatrix::zeros(dimension, dimension);
+        for (pose, block) in diagonal.iter().enumerate() {
+            let mut damped = *block;
+            for component in 0..6 {
+                damped[(component, component)] += lambda;
+            }
+            schur
+                .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
+                .copy_from(&damped);
+        }
+        let mut rhs = -&system.b_p;
+        let mut singular_landmarks = 0;
+        for landmark in &system.landmarks {
+            let mut h_ll = landmark.h_ll;
+            for component in 0..3 {
+                h_ll[(component, component)] += lambda;
+            }
+            let Some(inverse) = h_ll.try_inverse() else {
+                singular_landmarks += 1;
+                continue;
+            };
+            for (pose, cross) in &landmark.cross {
+                let update: Vector6<f64> = cross * inverse * landmark.b_l;
+                for component in 0..6 {
+                    rhs[pose * 6 + component] += update[component];
+                }
+                for (other_pose, other_cross) in &landmark.cross {
+                    let block: Matrix6<f64> = cross * inverse * other_cross.transpose();
+                    for row in 0..6 {
+                        for column in 0..6 {
+                            schur[(pose * 6 + row, other_pose * 6 + column)] -=
+                                block[(row, column)];
+                        }
+                    }
+                }
+            }
+        }
+        if !schur.iter().all(|value| value.is_finite())
+            || !rhs.iter().all(|value| value.is_finite())
+        {
+            return Err("oracle explicit Schur is non-finite".to_owned());
+        }
+        Ok((schur, rhs, singular_landmarks))
+    }
+
+    fn schur_asymmetry(matrix: &DMatrix<f64>) -> f64 {
+        let mut max_difference: f64 = 0.0;
+        for row in 0..matrix.nrows() {
+            for column in (row + 1)..matrix.ncols() {
+                max_difference =
+                    max_difference.max((matrix[(row, column)] - matrix[(column, row)]).abs());
+            }
+        }
+        max_difference
+    }
+
+    fn mirror_lower_triangle(matrix: &mut DMatrix<f64>) {
+        for row in 0..matrix.nrows() {
+            for column in (row + 1)..matrix.ncols() {
+                matrix[(row, column)] = matrix[(column, row)];
+            }
+        }
+    }
+
+    fn predicted_decrease(
+        system: &NormalEquationsBa,
+        lambda: f64,
+        delta_pose: &DVector<f64>,
+        delta_landmarks: &DVector<f64>,
+    ) -> Result<PredictedDecrease, String> {
+        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+            return Err("predicted-decrease oracle requires pose blocks".to_owned());
+        };
+        if delta_pose.len() != diagonal.len() * 6
+            || delta_landmarks.len() != system.landmarks.len() * 3
+        {
+            return Err("predicted-decrease delta dimensions mismatch".to_owned());
+        }
+        let mut gradient_dot = system.b_p.dot(delta_pose);
+        let mut hessian_quadratic = 0.0;
+        let mut delta_squared = delta_pose.norm_squared();
+        for (pose, block) in diagonal.iter().enumerate() {
+            let delta: Vector6<f64> = delta_pose.fixed_rows::<6>(pose * 6).into_owned();
+            hessian_quadratic += delta.dot(&(block * delta));
+        }
+        for (landmark_index, landmark) in system.landmarks.iter().enumerate() {
+            let delta: Vector3<f64> = delta_landmarks
+                .fixed_rows::<3>(landmark_index * 3)
+                .into_owned();
+            gradient_dot += landmark.b_l.dot(&delta);
+            hessian_quadratic += delta.dot(&(landmark.h_ll * delta));
+            delta_squared += delta.norm_squared();
+            for (pose, cross) in &landmark.cross {
+                let pose_delta: Vector6<f64> = delta_pose.fixed_rows::<6>(pose * 6).into_owned();
+                hessian_quadratic += 2.0 * pose_delta.dot(&(cross * delta));
+            }
+        }
+        let damped_quadratic = hessian_quadratic + lambda * delta_squared;
+        let half_damped = -gradient_dot - 0.5 * damped_quadratic;
+        let squared_damped = -2.0 * gradient_dot - damped_quadratic;
+        let squared_undamped = -2.0 * gradient_dot - hessian_quadratic;
+        let values = [half_damped, squared_damped, squared_undamped];
+        if !values.iter().all(|value| value.is_finite()) {
+            return Err("predicted decrease is non-finite".to_owned());
+        }
+        Ok(PredictedDecrease {
+            half_damped,
+            squared_damped,
+            squared_undamped,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn feasibility(
+        ba: &BundleAdjustment,
+        system: &NormalEquationsBa,
+        lambda: f64,
+        schur: &DMatrix<f64>,
+        rhs: &DVector<f64>,
+        delta_pose: &DVector<f64>,
+        delta_landmarks: &DVector<f64>,
+        implicit_pose_true_residual: Option<f64>,
+    ) -> Feasibility {
+        let finite = delta_pose.iter().all(|value| value.is_finite())
+            && delta_landmarks.iter().all(|value| value.is_finite());
+        let pose_residual = rhs - schur * delta_pose;
+        let pose_true_residual = pose_residual.norm();
+        let mut max_landmark = 0.0_f64;
+        for (index, landmark) in system.landmarks.iter().enumerate() {
+            let delta_l: Vector3<f64> = delta_landmarks.fixed_rows::<3>(index * 3).into_owned();
+            let mut h_ll = landmark.h_ll;
+            for component in 0..3 {
+                h_ll[(component, component)] += lambda;
+            }
+            if h_ll.try_inverse().is_none() {
+                continue;
+            }
+            let mut residual = h_ll * delta_l + landmark.b_l;
+            for (pose, cross) in &landmark.cross {
+                let delta_p: Vector6<f64> = delta_pose.fixed_rows::<6>(pose * 6).into_owned();
+                residual += cross.transpose() * delta_p;
+            }
+            max_landmark = max_landmark.max(residual.norm());
+        }
+        let (pose_index, landmark_index) = variable_indices(ba);
+        let mut geometry_cost = 0.0_f64;
+        let mut geometry_max_error = 0.0_f64;
+        let mut geometry_observation_count = 0_usize;
+        let mut geometry_invalid_observations = 0_usize;
+        let mut geometry_nonpositive_depth = 0_usize;
+        for observation in &ba.rig_observations {
+            let Some(pose) = ba.poses.get(&observation.keyframe_id) else {
+                geometry_invalid_observations += 1;
+                continue;
+            };
+            let Some(point) = ba.landmarks.get(&observation.landmark_id) else {
+                geometry_invalid_observations += 1;
+                continue;
+            };
+            let mut updated_pose = pose.world_to_camera.clone();
+            if let Some(&index) = pose_index.get(&observation.keyframe_id) {
+                let xi: Vector6<f64> = delta_pose.fixed_rows::<6>(index * 6).into_owned();
+                if xi.iter().all(|value| value.is_finite()) {
+                    updated_pose = updated_pose.compose(&SE3::exp(&xi));
+                } else {
+                    geometry_invalid_observations += 1;
+                    continue;
+                }
+            }
+            let mut updated_point = *point;
+            if let Some(&index) = landmark_index.get(&observation.landmark_id) {
+                let delta: Vector3<f64> = delta_landmarks.fixed_rows::<3>(index * 3).into_owned();
+                if delta.iter().all(|value| value.is_finite()) {
+                    updated_point = Point3::from(point.coords + delta);
+                } else {
+                    geometry_invalid_observations += 1;
+                    continue;
+                }
+            }
+            let point_camera = observation
+                .sensor_from_rig
+                .compose(&updated_pose)
+                .transform_point(&updated_point);
+            if !point_camera.z.is_finite() || point_camera.z <= 0.0 {
+                geometry_nonpositive_depth += 1;
+                geometry_invalid_observations += 1;
+                continue;
+            }
+            let Some(projected) = observation.camera.project(&point_camera) else {
+                geometry_invalid_observations += 1;
+                continue;
+            };
+            let residual = projected - observation.xy;
+            let squared = residual.norm_squared();
+            if !point_camera.coords.iter().all(|value| value.is_finite())
+                || !projected.coords.iter().all(|value| value.is_finite())
+                || !squared.is_finite()
+            {
+                geometry_invalid_observations += 1;
+                continue;
+            }
+            let error = squared.sqrt();
+            if !error.is_finite() {
+                geometry_invalid_observations += 1;
+                continue;
+            }
+            geometry_observation_count += 1;
+            geometry_cost += squared;
+            geometry_max_error = geometry_max_error.max(error);
+        }
+        let geometry_rms_error = if geometry_observation_count == 0 {
+            f64::NAN
+        } else {
+            (geometry_cost / geometry_observation_count as f64).sqrt()
+        };
+        let geometry_feasible = geometry_observation_count > 0
+            && geometry_invalid_observations == 0
+            && geometry_cost.is_finite()
+            && geometry_rms_error.is_finite()
+            && geometry_max_error.is_finite();
+        Feasibility {
+            finite,
+            pose_true_residual,
+            implicit_pose_true_residual,
+            max_landmark_backsub_residual: max_landmark,
+            geometry_observation_count,
+            geometry_invalid_observations,
+            geometry_nonpositive_depth,
+            geometry_cost,
+            geometry_rms_error,
+            geometry_max_error,
+            geometry_feasible,
+            feasible: finite
+                && pose_true_residual.is_finite()
+                && max_landmark.is_finite()
+                && geometry_feasible,
+        }
+    }
+
+    fn schur_action_scales(
+        system: &NormalEquationsBa,
+        lambda: f64,
+        x: &DVector<f64>,
+    ) -> Result<(f64, f64, f64), String> {
+        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+            return Err("Schur scale oracle requires pose blocks".to_owned());
+        };
+        if x.len() != diagonal.len() * 6 {
+            return Err("Schur scale probe has the wrong dimension".to_owned());
+        }
+        let mut base = DVector::<f64>::zeros(x.len());
+        for (pose, block) in diagonal.iter().enumerate() {
+            let mut damped = *block;
+            for component in 0..6 {
+                damped[(component, component)] += lambda;
+            }
+            let value: Vector6<f64> = damped * x.fixed_rows::<6>(pose * 6).into_owned();
+            base.fixed_rows_mut::<6>(pose * 6).copy_from(&value);
+        }
+        let mut eliminated = DVector::<f64>::zeros(x.len());
+        for landmark in &system.landmarks {
+            let mut h_ll = landmark.h_ll;
+            for component in 0..3 {
+                h_ll[(component, component)] += lambda;
+            }
+            let Some(inverse) = h_ll.try_inverse() else {
+                continue;
+            };
+            let mut projected = Vector3::zeros();
+            for (pose, cross) in &landmark.cross {
+                let x_pose: Vector6<f64> = x.fixed_rows::<6>(pose * 6).into_owned();
+                projected += cross.transpose() * x_pose;
+            }
+            let reduced = inverse * projected;
+            for (pose, cross) in &landmark.cross {
+                let value: Vector6<f64> = cross * reduced;
+                for component in 0..6 {
+                    eliminated[pose * 6 + component] += value[component];
+                }
+            }
+        }
+        let base_norm = base.norm();
+        let eliminated_norm = eliminated.norm();
+        let arithmetic_scale = (base_norm + eliminated_norm).max(1.0);
+        if ![base_norm, eliminated_norm, arithmetic_scale]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err("Schur arithmetic scale is non-finite".to_owned());
+        }
+        Ok((base_norm, eliminated_norm, arithmetic_scale))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn oracle_failure_reports(
+        lambda: f64,
+        pose_blocks: usize,
+        landmark_count: usize,
+        observation_count: usize,
+        dimension: usize,
+        singular_landmarks: usize,
+        raw_schur_asymmetry: Option<f64>,
+        schur_base_action_norm: Option<f64>,
+        schur_eliminated_action_norm: Option<f64>,
+        schur_arithmetic_scale: Option<f64>,
+        status: String,
+    ) -> Vec<OracleCaseReport> {
+        [128_usize, 512_usize]
+            .into_iter()
+            .map(|pcg_max_iterations| OracleCaseReport {
+                lambda,
+                pcg_max_iterations,
+                pose_blocks,
+                landmark_count,
+                observation_count,
+                schur_dimension: dimension,
+                singular_landmarks,
+                raw_schur_asymmetry,
+                schur_base_action_norm,
+                schur_eliminated_action_norm,
+                schur_arithmetic_scale,
+                operator_raw_action_error: None,
+                operator_raw_action_relative_error: None,
+                operator_lower_action_error: None,
+                operator_lower_action_relative_error: None,
+                operator_rhs_error: None,
+                direct_explicit_pose_error: None,
+                direct_explicit_landmark_error: None,
+                direct_feasibility: None,
+                explicit_feasibility: None,
+                direct_prediction: None,
+                explicit_prediction: None,
+                pcg_status: status.clone(),
+                pcg_iterations: None,
+                pcg_true_residual: None,
+                pcg_target: None,
+                matrix_free_pose_error: None,
+                matrix_free_landmark_error: None,
+                matrix_free_feasibility: None,
+                matrix_free_prediction: None,
+            })
+            .collect()
+    }
+
+    fn run_oracle(ba: &BundleAdjustment) -> Result<Vec<OracleCaseReport>, String> {
+        let (system, pose_blocks, landmark_count, observation_count) = build_oracle_system(ba)?;
+        let CameraHessian::PoseDiagonal(diagonal) = &system.h_pp else {
+            return Err("oracle system did not retain pose blocks".to_owned());
+        };
+        let mut reports = Vec::new();
+        for lambda in [1.0e-4, 1.0e10] {
+            let (raw_schur, explicit_rhs, singular_landmarks) =
+                match explicit_schur_rhs(&system, lambda) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        reports.extend(oracle_failure_reports(
+                            lambda,
+                            pose_blocks,
+                            landmark_count,
+                            observation_count,
+                            pose_blocks * 6,
+                            0,
+                            None,
+                            None,
+                            None,
+                            None,
+                            format!("oracle_failure:explicit_schur:{error}"),
+                        ));
+                        continue;
+                    }
+                };
+            let raw_asymmetry = schur_asymmetry(&raw_schur);
+            let dimension = raw_schur.nrows();
+            let probe = DVector::from_iterator(
+                dimension,
+                (0..dimension)
+                    .map(|index| 0.001 * ((index % 17) as f64 - 8.0) + 0.00001 * index as f64),
+            );
+            let mut lower_schur = raw_schur.clone();
+            mirror_lower_triangle(&mut lower_schur);
+            let lower_action = &lower_schur * &probe;
+            let raw_action = &raw_schur * &probe;
+            let scale_metrics = schur_action_scales(&system, lambda, &probe).ok();
+            let schur_base_action_norm = scale_metrics.map(|metrics| metrics.0);
+            let schur_eliminated_action_norm = scale_metrics.map(|metrics| metrics.1);
+            let schur_arithmetic_scale = scale_metrics.map(|metrics| metrics.2);
+            let mut solve_failures = Vec::new();
+            let explicit_pose = match solve_normal_equations(&lower_schur, &explicit_rhs) {
+                Ok(solution) => Some(solution),
+                Err(error) => {
+                    solve_failures.push(format!("explicit_schur_factor:{error:?}"));
+                    None
+                }
+            };
+            let explicit_operator =
+                match implicit_schur::ImplicitSchurOperator::new(&system, lambda) {
+                    Ok(operator) => operator,
+                    Err(error) => {
+                        reports.extend(oracle_failure_reports(
+                            lambda,
+                            pose_blocks,
+                            landmark_count,
+                            observation_count,
+                            dimension,
+                            singular_landmarks,
+                            Some(raw_asymmetry),
+                            schur_base_action_norm,
+                            schur_eliminated_action_norm,
+                            schur_arithmetic_scale,
+                            format!("oracle_failure:implicit_operator:{error:?}"),
+                        ));
+                        continue;
+                    }
+                };
+            let operator_action = match explicit_operator.apply(&probe) {
+                Ok(action) => action,
+                Err(error) => {
+                    reports.extend(oracle_failure_reports(
+                        lambda,
+                        pose_blocks,
+                        landmark_count,
+                        observation_count,
+                        dimension,
+                        singular_landmarks,
+                        Some(raw_asymmetry),
+                        schur_base_action_norm,
+                        schur_eliminated_action_norm,
+                        schur_arithmetic_scale,
+                        format!("oracle_failure:implicit_apply:{error:?}"),
+                    ));
+                    continue;
+                }
+            };
+            let operator_rhs_error = (explicit_operator.rhs() - &explicit_rhs).norm();
+            let operator_raw_action_error = (&operator_action - &raw_action).norm();
+            let operator_lower_action_error = (&operator_action - &lower_action).norm();
+            let operator_raw_action_relative_error =
+                schur_arithmetic_scale.map(|scale| operator_raw_action_error / scale);
+            let operator_lower_action_relative_error =
+                schur_arithmetic_scale.map(|scale| operator_lower_action_error / scale);
+            let mut direct_cache = None;
+            let direct_solution = match solve_step_pose_blocks(
+                &system,
+                diagonal.clone(),
+                pose_blocks,
+                landmark_count,
+                lambda,
+                &mut direct_cache,
+            ) {
+                Ok(solution) => Some(solution),
+                Err(error) => {
+                    solve_failures.push(format!("direct_schur_factor:{error:?}"));
+                    None
+                }
+            };
+            let direct_pose = direct_solution.as_ref().map(|solution| &solution.0);
+            let direct_landmarks = direct_solution.as_ref().map(|solution| &solution.1);
+            let explicit_landmarks = explicit_pose
+                .as_ref()
+                .and_then(|pose| explicit_operator.complete_delta(pose).ok());
+            let direct_implicit_true_residual = direct_pose.and_then(|pose| {
+                explicit_operator
+                    .apply(pose)
+                    .ok()
+                    .map(|applied| (explicit_operator.rhs() - applied).norm())
+            });
+            let explicit_implicit_true_residual = explicit_pose.as_ref().and_then(|pose| {
+                explicit_operator
+                    .apply(pose)
+                    .ok()
+                    .map(|applied| (explicit_operator.rhs() - applied).norm())
+            });
+            let direct_feasibility = match (direct_pose, direct_landmarks) {
+                (Some(pose), Some(landmarks)) => Some(feasibility(
+                    ba,
+                    &system,
+                    lambda,
+                    &lower_schur,
+                    &explicit_rhs,
+                    pose,
+                    landmarks,
+                    direct_implicit_true_residual,
+                )),
+                _ => None,
+            };
+            let explicit_feasibility = match (explicit_pose.as_ref(), explicit_landmarks.as_ref()) {
+                (Some(pose), Some(landmarks)) => Some(feasibility(
+                    ba,
+                    &system,
+                    lambda,
+                    &lower_schur,
+                    &explicit_rhs,
+                    pose,
+                    landmarks,
+                    explicit_implicit_true_residual,
+                )),
+                _ => None,
+            };
+            let direct_prediction = match (direct_pose, direct_landmarks) {
+                (Some(pose), Some(landmarks)) => {
+                    predicted_decrease(&system, lambda, pose, landmarks).ok()
+                }
+                _ => None,
+            };
+            let explicit_prediction = match (explicit_pose.as_ref(), explicit_landmarks.as_ref()) {
+                (Some(pose), Some(landmarks)) => {
+                    predicted_decrease(&system, lambda, pose, landmarks).ok()
+                }
+                _ => None,
+            };
+            let direct_explicit_pose_error = match (direct_pose, explicit_pose.as_ref()) {
+                (Some(direct), Some(explicit)) => Some((direct - explicit).norm()),
+                _ => None,
+            };
+            let direct_explicit_landmark_error =
+                match (direct_landmarks, explicit_landmarks.as_ref()) {
+                    (Some(direct), Some(explicit)) => Some((direct - explicit).norm()),
+                    _ => None,
+                };
+            for pcg_max_iterations in [128_usize, 512_usize] {
+                let pcg_result = explicit_operator.solve_pcg(
+                    explicit_operator.rhs(),
+                    implicit_schur::PcgOptions {
+                        max_iterations: pcg_max_iterations,
+                        relative_tolerance: ORACLE_PC_TOLERANCE,
+                        absolute_tolerance: ORACLE_PC_TOLERANCE,
+                    },
+                );
+                let (
+                    pcg_status,
+                    pcg_iterations,
+                    pcg_true_residual,
+                    pcg_target,
+                    matrix_free_pose_error,
+                    matrix_free_landmark_error,
+                    matrix_free_feasibility,
+                    matrix_free_prediction,
+                ) = match pcg_result {
+                    Ok(result) => match explicit_operator.apply(&result.solution) {
+                        Err(error) => (
+                            format!("failure:recheck_true_residual:{error:?}"),
+                            Some(result.iterations),
+                            None,
+                            Some(result.target),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        Ok(applied) => {
+                            let true_residual = explicit_operator.rhs() - applied;
+                            match explicit_operator.complete_delta(&result.solution) {
+                                Err(error) => (
+                                    format!("failure:landmark_backsub:{error:?}"),
+                                    Some(result.iterations),
+                                    Some(true_residual.norm()),
+                                    Some(result.target),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                Ok(matrix_free_landmarks) => {
+                                    let feasibility = feasibility(
+                                        ba,
+                                        &system,
+                                        lambda,
+                                        &lower_schur,
+                                        &explicit_rhs,
+                                        &result.solution,
+                                        &matrix_free_landmarks,
+                                        Some(true_residual.norm()),
+                                    );
+                                    match predicted_decrease(
+                                        &system,
+                                        lambda,
+                                        &result.solution,
+                                        &matrix_free_landmarks,
+                                    ) {
+                                        Err(error) => (
+                                            format!("failure:prediction:{error}"),
+                                            Some(result.iterations),
+                                            Some(true_residual.norm()),
+                                            Some(result.target),
+                                            explicit_pose
+                                                .as_ref()
+                                                .map(|pose| (&result.solution - pose).norm()),
+                                            explicit_landmarks.as_ref().map(|landmarks| {
+                                                (&matrix_free_landmarks - landmarks).norm()
+                                            }),
+                                            Some(feasibility),
+                                            None,
+                                        ),
+                                        Ok(prediction) => (
+                                            "success".to_owned(),
+                                            Some(result.iterations),
+                                            Some(true_residual.norm()),
+                                            Some(result.target),
+                                            explicit_pose
+                                                .as_ref()
+                                                .map(|pose| (&result.solution - pose).norm()),
+                                            explicit_landmarks.as_ref().map(|landmarks| {
+                                                (&matrix_free_landmarks - landmarks).norm()
+                                            }),
+                                            Some(feasibility),
+                                            Some(prediction),
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        let (iterations, residual, target) = error.diagnostics();
+                        (
+                            format!("failure:{error:?}"),
+                            iterations,
+                            residual,
+                            target,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                };
+                let pcg_status = if solve_failures.is_empty() {
+                    pcg_status
+                } else {
+                    format!("{};pcg={}", solve_failures.join(","), pcg_status)
+                };
+                reports.push(OracleCaseReport {
+                    lambda,
+                    pcg_max_iterations,
+                    pose_blocks,
+                    landmark_count,
+                    observation_count,
+                    schur_dimension: dimension,
+                    singular_landmarks,
+                    raw_schur_asymmetry: Some(raw_asymmetry),
+                    schur_base_action_norm,
+                    schur_eliminated_action_norm,
+                    schur_arithmetic_scale,
+                    operator_raw_action_error: Some(operator_raw_action_error),
+                    operator_raw_action_relative_error,
+                    operator_lower_action_error: Some(operator_lower_action_error),
+                    operator_lower_action_relative_error,
+                    operator_rhs_error: Some(operator_rhs_error),
+                    direct_explicit_pose_error,
+                    direct_explicit_landmark_error,
+                    direct_feasibility: direct_feasibility.clone(),
+                    explicit_feasibility: explicit_feasibility.clone(),
+                    direct_prediction: direct_prediction.clone(),
+                    explicit_prediction: explicit_prediction.clone(),
+                    pcg_status,
+                    pcg_iterations,
+                    pcg_true_residual,
+                    pcg_target,
+                    matrix_free_pose_error,
+                    matrix_free_landmark_error,
+                    matrix_free_feasibility,
+                    matrix_free_prediction,
+                });
+            }
+        }
+        Ok(reports)
+    }
+
+    fn synthetic_rig_problem() -> BundleAdjustment {
+        let camera = Camera::pinhole(1, 640, 480, 420.0, 418.0, 320.0, 240.0);
+        let sensor_one = SE3::new(
+            nalgebra::UnitQuaternion::from_euler_angles(0.01, -0.02, 0.03),
+            Vector3::new(0.2, -0.01, 0.02),
+        );
+        let truth_poses = [
+            Pose::identity(),
+            Pose::from_world_to_camera(
+                nalgebra::UnitQuaternion::from_euler_angles(0.01, -0.015, 0.02),
+                Vector3::new(-0.18, 0.01, 0.03),
+            ),
+        ];
+        let mut ba = BundleAdjustment::new(camera.clone());
+        ba.add_pose(0, truth_poses[0].clone());
+        ba.add_pose(
+            1,
+            Pose::from_world_to_camera(
+                nalgebra::UnitQuaternion::from_euler_angles(0.013, -0.012, 0.018),
+                Vector3::new(-0.20, 0.02, 0.04),
+            ),
+        );
+        ba.fix_pose(0);
+        for id in 0..8_u64 {
+            let truth = Point3::new(
+                -0.8 + 0.23 * id as f64,
+                -0.4 + 0.11 * (id % 4) as f64,
+                4.0 + 0.3 * id as f64,
+            );
+            ba.add_landmark(
+                id,
+                Point3::from(truth.coords + Vector3::new(0.004, -0.003, 0.006)),
+            );
+            for (frame_id, pose) in truth_poses.iter().enumerate() {
+                for sensor_from_rig in [SE3::identity(), sensor_one.clone()] {
+                    let sensor_pose = sensor_from_rig.compose(&pose.world_to_camera);
+                    let xy = camera
+                        .project(&sensor_pose.transform_point(&truth))
+                        .expect("synthetic rig point must project");
+                    ba.add_rig_observation(BaRigObservation {
+                        keyframe_id: frame_id as u64,
+                        landmark_id: id,
+                        xy,
+                        camera: camera.clone(),
+                        sensor_from_rig,
+                    });
+                }
+            }
+        }
+        ba
+    }
+
+    #[test]
+    fn synthetic_oracle_compares_both_damping_values_and_coefficients() {
+        let reports = run_oracle(&synthetic_rig_problem()).unwrap();
+        assert_eq!(reports.len(), 4);
+        for report in reports {
+            assert!(report.raw_schur_asymmetry.unwrap().is_finite());
+            assert!(report.operator_rhs_error.unwrap() < 1.0e-8);
+            assert!(report.operator_raw_action_relative_error.unwrap() < 1.0e-8);
+            assert!(
+                report.operator_lower_action_error.unwrap().is_finite(),
+                "lower-mirrored operator comparison must remain finite: {report:?}"
+            );
+            assert!(report.direct_explicit_pose_error.unwrap() < 1.0e-7);
+            assert!(report.direct_explicit_landmark_error.unwrap() < 1.0e-7);
+            let direct_feasibility = report
+                .direct_feasibility
+                .as_ref()
+                .expect("synthetic direct arm should succeed");
+            let explicit_feasibility = report
+                .explicit_feasibility
+                .as_ref()
+                .expect("synthetic explicit arm should succeed");
+            assert!(direct_feasibility.feasible);
+            assert!(explicit_feasibility.feasible);
+            assert!(direct_feasibility.geometry_feasible);
+            assert!(explicit_feasibility.geometry_feasible);
+            assert_eq!(direct_feasibility.geometry_invalid_observations, 0);
+            assert_eq!(explicit_feasibility.geometry_invalid_observations, 0);
+            assert!(direct_feasibility
+                .implicit_pose_true_residual
+                .is_some_and(f64::is_finite));
+            assert!(explicit_feasibility
+                .implicit_pose_true_residual
+                .is_some_and(f64::is_finite));
+            let direct_prediction = report
+                .direct_prediction
+                .as_ref()
+                .expect("synthetic direct prediction should succeed");
+            let explicit_prediction = report
+                .explicit_prediction
+                .as_ref()
+                .expect("synthetic explicit prediction should succeed");
+            assert!(
+                (direct_prediction.squared_damped - 2.0 * direct_prediction.half_damped).abs()
+                    < 1.0e-9
+            );
+            assert!(
+                (explicit_prediction.squared_damped - 2.0 * explicit_prediction.half_damped).abs()
+                    < 1.0e-9
+            );
+            if let Some(prediction) = report.matrix_free_prediction {
+                assert!((prediction.squared_damped - 2.0 * prediction.half_damped).abs() < 1.0e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn predicted_decrease_matches_independent_squared_cost_fixture() {
+        let mut cross = Matrix6x3::zeros();
+        for index in 0..3 {
+            cross[(index, index)] = 0.5;
+        }
+        let mut h_pp = Matrix6::identity();
+        h_pp *= 2.0;
+        let mut h_ll = Matrix3::identity();
+        h_ll *= 3.0;
+        let system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![h_pp]),
+            b_p: DVector::from_element(6, 1.0),
+            landmarks: vec![LandmarkBlock {
+                h_ll,
+                b_l: Vector3::from_element(2.0),
+                cross: vec![(0, cross)],
+            }],
+        };
+        let delta_pose = DVector::from_element(6, 0.1);
+        let delta_landmark = DVector::from_element(3, -0.2);
+        let prediction = predicted_decrease(&system, 0.5, &delta_pose, &delta_landmark).unwrap();
+        assert!((prediction.squared_undamped - 0.78).abs() < 1.0e-12);
+        assert!((prediction.half_damped - 0.345).abs() < 1.0e-12);
+        assert!((prediction.squared_damped - 0.69).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn fixture_quaternion_reader_preserves_serialized_bits() {
+        let values = [
+            0.9238795325112867_f64,
+            0.0_f64,
+            0.3826834323650898_f64,
+            0.0_f64,
+            0.125_f64,
+            -0.25_f64,
+            0.5_f64,
+        ];
+        let serialized = values
+            .iter()
+            .map(|value| format!("{value:.17e}"))
+            .collect::<Vec<_>>();
+        let fields = serialized.iter().map(String::as_str).collect::<Vec<_>>();
+        let parsed = parse_se3(&fields, 0, "bit-roundtrip").unwrap();
+        let quaternion = parsed.rotation.quaternion();
+        assert_eq!(quaternion.w.to_bits(), values[0].to_bits());
+        assert_eq!(quaternion.i.to_bits(), values[1].to_bits());
+        assert_eq!(quaternion.j.to_bits(), values[2].to_bits());
+        assert_eq!(quaternion.k.to_bits(), values[3].to_bits());
+        assert_eq!(parsed.translation.x.to_bits(), values[4].to_bits());
+        assert_eq!(parsed.translation.y.to_bits(), values[5].to_bits());
+        assert_eq!(parsed.translation.z.to_bits(), values[6].to_bits());
+
+        let near_unit = [
+            1.0 + f64::EPSILON,
+            -0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+        ];
+        let serialized = near_unit
+            .iter()
+            .map(|value| format!("{value:.17e}"))
+            .collect::<Vec<_>>();
+        let fields = serialized.iter().map(String::as_str).collect::<Vec<_>>();
+        let parsed = parse_se3(&fields, 0, "near-unit-bit-roundtrip").unwrap();
+        let quaternion = parsed.rotation.quaternion();
+        assert_eq!(quaternion.w.to_bits(), near_unit[0].to_bits());
+        assert_eq!(quaternion.i.to_bits(), near_unit[1].to_bits());
+    }
+
+    #[test]
+    fn fixture_reader_rejects_bad_order_and_oversized_header() {
+        let base =
+            std::env::temp_dir().join(format!("visloc-ba-oracle-parser-{}", std::process::id()));
+        let _ = std::fs::remove_file(&base);
+        std::fs::write(&base, "END\n").unwrap();
+        let error = parse_fixture(&base).unwrap_err();
+        assert!(error.contains("header must be the first record"));
+        std::fs::write(&base, "VISLOC_BA_ORACLE_FIXTURE 1\nPOSE_COUNT 514\nEND\n").unwrap();
+        let error = parse_fixture(&base).unwrap_err();
+        assert!(error.contains("exceeds cap"));
+        std::fs::write(&base, "VISLOC_BA_ORACLE_FIXTURE 1\nEND\nPOSE_COUNT 1\n").unwrap();
+        let error = parse_fixture(&base).unwrap_err();
+        assert!(error.contains("records after END"));
+        let _ = std::fs::remove_file(base);
+    }
+
+    #[test]
+    fn fixture_reader_roundtrips_initial_cost_bits() {
+        let path = std::env::temp_dir().join(format!(
+            "visloc-ba-oracle-valid-parser-{}",
+            std::process::id()
+        ));
+        let hash = "0".repeat(64);
+        let fixture = format!(
+            "VISLOC_BA_ORACLE_FIXTURE 1\nSOURCE_SHA256 {hash}\nSOURCE_SHA256_CAMERAS {hash}\nSOURCE_SHA256_IMAGES {hash}\nSOURCE_SHA256_POINTS {hash}\nSOURCE_SHA256_MANIFEST {hash}\nINITIAL_COST 0.00000000000000000e+00\nINITIAL_COST_BITS 0\nCAMERA_COUNT 1\nPOSE_COUNT 1\nLANDMARK_COUNT 1\nOBSERVATION_COUNT 1\nCAMERA 1 PINHOLE 10 10 4 2 2 0 0\nPOSE 0 1 0 0 0 0 0 0\nFIXED_POSE 0\nLANDMARK 0 0 0 2\nRIG_OBSERVATION 0 0 0 0 1 1 0 0 0 0 0 0\nEND\n"
+        );
+        std::fs::write(&path, fixture).unwrap();
+        let parsed = parse_fixture(&path).unwrap();
+        assert_eq!(parsed.initial_cost.to_bits(), 0);
+        assert_eq!(parsed.initial_cost_bits, 0);
+        assert_eq!(parsed.ba.cost().to_bits(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oracle_caps_reject_before_dense_dimension_allocation() {
+        assert!(check_caps(512, 8_192, 262_144, MAX_CROSS_PAIR_WORK).is_ok());
+        assert!(check_caps(513, 1, 1, 1).is_err());
+        assert!(check_caps(1, 8_193, 1, 1).is_err());
+        assert!(check_caps(1, 1, 262_145, 1).is_err());
+        assert!(check_caps(1, 1, 1, MAX_CROSS_PAIR_WORK + 1).is_err());
+        assert!(check_caps(513, 1, 1, 1).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly exported frozen 1k fixture and source hash"]
+    fn ignored_real_fixture_runs_bounded_damping_oracle() {
+        let path = env::var_os("VISLOC_MATRIX_FREE_ORACLE_FIXTURE")
+            .expect("VISLOC_MATRIX_FREE_ORACLE_FIXTURE is required; fixture absence is failure");
+        let fixture = parse_fixture(Path::new(&path)).unwrap();
+        let expected_hash = env::var("VISLOC_MATRIX_FREE_ORACLE_EXPECTED_SOURCE_SHA256")
+            .expect("VISLOC_MATRIX_FREE_ORACLE_EXPECTED_SOURCE_SHA256 is required");
+        assert_eq!(
+            fixture.source_hashes["SOURCE_SHA256"], expected_hash,
+            "fixture source hash does not match the requested frozen input"
+        );
+        let reports = run_oracle(&fixture.ba).unwrap();
+        assert_eq!(reports.len(), 4);
+        println!(
+            "matrix_free_oracle_input_cost={:.17e} bits={}",
+            fixture.initial_cost, fixture.initial_cost_bits
+        );
+        for report in reports {
+            println!("matrix_free_oracle {report:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod visual_jacobian_audit_tests {
     use super::*;
     use nalgebra::UnitQuaternion;

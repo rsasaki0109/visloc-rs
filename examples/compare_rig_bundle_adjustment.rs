@@ -8,11 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use nalgebra::{Point2, Point3, Quaternion, UnitQuaternion, Vector3};
+use sha2::{Digest, Sha256};
 use visloc_rs::io::colmap::parse_cameras_txt;
 use visloc_rs::slam::{
     BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaOptions,
@@ -21,7 +22,9 @@ use visloc_rs::slam::{
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N]";
+    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N]\n\
+    or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
+    --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
 const FIXED_POSE_TOLERANCE_M: f64 = 1.0e-12;
 const FIXED_POSE_TOLERANCE_DEG: f64 = 1.0e-12;
@@ -35,6 +38,11 @@ const MAX_PCG_ITERATIONS: usize = 128;
 const PCG_TOLERANCE: f64 = 1.0e-12;
 const BA_MAX_ITERATIONS: usize = 20;
 const BA_INITIAL_LAMBDA: f64 = 1.0e-4;
+const ORACLE_MAX_VARIABLE_POSES: usize = 512;
+const ORACLE_MAX_LANDMARKS: usize = 8_192;
+const ORACLE_MAX_OBSERVATIONS: usize = 262_144;
+const ORACLE_MAX_SCHUR_SCALARS: usize = 3_072;
+const ORACLE_MAX_CROSS_PAIR_WORK: usize = 64_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SolverArm {
@@ -65,9 +73,10 @@ impl SolverArm {
 struct Args {
     model: PathBuf,
     rig_manifest: PathBuf,
-    solver: SolverArm,
-    out_dir: PathBuf,
+    solver: Option<SolverArm>,
+    out_dir: Option<PathBuf>,
     pcg_max_iterations: usize,
+    oracle_fixture_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +191,7 @@ where
     let mut rig_manifest = None;
     let mut solver = None;
     let mut out_dir = None;
+    let mut oracle_fixture_out = None;
     let mut pcg_max_iterations = MAX_PCG_ITERATIONS;
     let mut pcg_seen = false;
     while let Some(flag) = values.next() {
@@ -202,6 +212,16 @@ where
             if pcg_max_iterations == 0 {
                 return Err(format!("{flag} must be positive\n{USAGE}"));
             }
+            continue;
+        }
+        if flag == "--export-oracle-fixture" {
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires a value\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires a value, got {value:?}\n{USAGE}"));
+            }
+            set_path(&mut oracle_fixture_out, &flag, value)?;
             continue;
         }
         let slot = match flag.as_str() {
@@ -230,14 +250,26 @@ where
             }
         }
     }
+    if oracle_fixture_out.is_some() && (solver.is_some() || out_dir.is_some() || pcg_seen) {
+        return Err(format!(
+            "--export-oracle-fixture is a standalone operation; do not combine it with \
+             --solver, --out-dir or --pcg-max-iterations\n{USAGE}"
+        ));
+    }
+    if oracle_fixture_out.is_none() && (solver.is_none() || out_dir.is_none()) {
+        return Err(format!(
+            "--solver and --out-dir are required unless --export-oracle-fixture is used\n{USAGE}"
+        ));
+    }
     let args = Args {
         model: model.ok_or_else(|| format!("--model is required\n{USAGE}"))?,
         rig_manifest: rig_manifest.ok_or_else(|| format!("--rig-manifest is required\n{USAGE}"))?,
-        solver: solver.ok_or_else(|| format!("--solver is required\n{USAGE}"))?,
-        out_dir: out_dir.ok_or_else(|| format!("--out-dir is required\n{USAGE}"))?,
+        solver,
+        out_dir,
         pcg_max_iterations,
+        oracle_fixture_out,
     };
-    if args.solver == SolverArm::Direct && pcg_seen {
+    if args.solver == Some(SolverArm::Direct) && pcg_seen {
         return Err(format!(
             "--pcg-max-iterations is only valid for matrix-free\n{USAGE}"
         ));
@@ -266,9 +298,44 @@ fn run(args: &Args) -> Result<(), String> {
     let manifest = parse_rig_manifest(&args.rig_manifest)?;
     let source = load_source_model(&args.model, &manifest)?;
     validate_source_model(&source, &manifest)?;
-    prepare_output_path(&args.out_dir, &args.model, &args.rig_manifest)?;
+    if args.oracle_fixture_out.is_none() {
+        let out_dir = args
+            .out_dir
+            .as_deref()
+            .ok_or_else(|| "--out-dir is required for solver mode".to_owned())?;
+        prepare_output_path(out_dir, &args.model, &args.rig_manifest)?;
+    }
 
     let mut prepared = build_problem(&source, &manifest)?;
+    if let Some(fixture_path) = &args.oracle_fixture_out {
+        let source_hashes = hash_source_inputs(&args.model, &args.rig_manifest)?;
+        export_oracle_fixture(
+            fixture_path,
+            &args.model,
+            &args.rig_manifest,
+            &source_hashes,
+            &prepared.ba,
+        )?;
+        let initial_cost = prepared.ba.cost();
+        println!(
+            "oracle_fixture={} source_sha256={} initial_cost={:.17e} initial_cost_bits={} poses={} landmarks={} rig_observations={}",
+            fixture_path.display(),
+            source_hashes.combined,
+            initial_cost,
+            initial_cost.to_bits(),
+            prepared.ba.poses.len(),
+            prepared.ba.landmarks.len(),
+            prepared.ba.rig_observations.len(),
+        );
+        return Ok(());
+    }
+    let solver = args
+        .solver
+        .ok_or_else(|| "--solver is required for solver mode".to_owned())?;
+    let out_dir = args
+        .out_dir
+        .as_deref()
+        .ok_or_else(|| "--out-dir is required for solver mode".to_owned())?;
     let initial_cost = prepared.ba.cost();
     if !initial_cost.is_finite() {
         return Err("initial BA cost is non-finite".to_owned());
@@ -284,7 +351,7 @@ fn run(args: &Args) -> Result<(), String> {
         ..BaConfig::default()
     };
     let solver_started = Instant::now();
-    let optimization = match args.solver {
+    let optimization = match solver {
         SolverArm::Direct => {
             let result = prepared
                 .ba
@@ -319,10 +386,10 @@ fn run(args: &Args) -> Result<(), String> {
     if !final_cost.is_finite() {
         return Err("final BA cost is non-finite".to_owned());
     }
-    publish_model(&args.out_dir, &source, &manifest, &prepared)?;
+    publish_model(out_dir, &source, &manifest, &prepared)?;
     let total_seconds = total_started.elapsed().as_secs_f64();
     let summary = RunSummary {
-        solver: args.solver,
+        solver,
         initial_cost,
         final_cost,
         iterations,
@@ -345,7 +412,7 @@ fn run(args: &Args) -> Result<(), String> {
         PCG_TOLERANCE,
         summary.solver_seconds,
         summary.total_seconds,
-        args.out_dir.display(),
+        out_dir.display(),
     );
     Ok(())
 }
@@ -368,10 +435,12 @@ fn validate_input_paths(args: &Args) -> Result<(), String> {
             return Err(format!("model is missing {file}: {}", args.model.display()));
         }
     }
-    if paths_overlap(&args.out_dir, &args.model)?
-        || paths_overlap(&args.out_dir, &args.rig_manifest)?
-    {
-        return Err("--out-dir overlaps an input path; refusing to publish".to_owned());
+    if let Some(fixture) = &args.oracle_fixture_out {
+        validate_fixture_output_path(fixture, &args.model, &args.rig_manifest)?;
+    } else if let Some(out_dir) = &args.out_dir {
+        if paths_overlap(out_dir, &args.model)? || paths_overlap(out_dir, &args.rig_manifest)? {
+            return Err("--out-dir overlaps an input path; refusing to publish".to_owned());
+        }
     }
     Ok(())
 }
@@ -419,6 +488,367 @@ fn paths_overlap(first: &Path, second: &Path) -> Result<bool, String> {
     let first = resolved_path(first)?;
     let second = resolved_path(second)?;
     Ok(first == second || first.starts_with(&second) || second.starts_with(&first))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceHashes {
+    cameras: String,
+    images: String,
+    points: String,
+    manifest: String,
+    combined: String,
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("read source hash input {}: {error}", path.display()))?;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read source hash input {}: {error}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_source_inputs(model_dir: &Path, rig_manifest: &Path) -> Result<SourceHashes, String> {
+    let cameras = hash_file(&model_dir.join("cameras.txt"))?;
+    let images = hash_file(&model_dir.join("images.txt"))?;
+    let points = hash_file(&model_dir.join("points3D.txt"))?;
+    let manifest = hash_file(rig_manifest)?;
+    let mut combined_hasher = Sha256::new();
+    for (label, digest) in [
+        ("cameras.txt", &cameras),
+        ("images.txt", &images),
+        ("points3D.txt", &points),
+        ("rig-manifest", &manifest),
+    ] {
+        combined_hasher.update(label.as_bytes());
+        combined_hasher.update([0_u8]);
+        combined_hasher.update(digest.as_bytes());
+        combined_hasher.update([0xff_u8]);
+    }
+    Ok(SourceHashes {
+        cameras,
+        images,
+        points,
+        manifest,
+        combined: format!("{:x}", combined_hasher.finalize()),
+    })
+}
+
+fn validate_fixture_output_path(
+    fixture: &Path,
+    model_dir: &Path,
+    rig_manifest: &Path,
+) -> Result<(), String> {
+    if paths_overlap(fixture, model_dir)? || paths_overlap(fixture, rig_manifest)? {
+        return Err("fixture output overlaps an input path".to_owned());
+    }
+    let parent = fixture
+        .parent()
+        .ok_or_else(|| format!("fixture output has no parent: {}", fixture.display()))?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|error| {
+        format!(
+            "fixture output parent is not an existing directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(format!(
+            "fixture output parent is not a real directory: {}",
+            parent.display()
+        ));
+    }
+    match fs::symlink_metadata(fixture) {
+        Ok(metadata) => Err(format!(
+            "fixture output already exists (including symlink): {} ({})",
+            fixture.display(),
+            if metadata.file_type().is_symlink() {
+                "symlink"
+            } else {
+                "path"
+            }
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "inspect fixture output {}: {error}",
+            fixture.display()
+        )),
+    }
+}
+
+fn camera_model_name(model: &CameraModel) -> Result<&'static str, String> {
+    match model {
+        CameraModel::Pinhole => Ok("PINHOLE"),
+        CameraModel::SimplePinhole => Ok("SIMPLE_PINHOLE"),
+        CameraModel::SimpleRadial => Ok("SIMPLE_RADIAL"),
+        CameraModel::Radial => Ok("RADIAL"),
+        CameraModel::OpenCv => Ok("OPENCV"),
+        CameraModel::Unknown(name) => Err(format!(
+            "oracle fixture cannot encode unknown camera model {name:?}"
+        )),
+    }
+}
+
+fn write_se3<W: Write>(writer: &mut W, transform: &SE3) -> Result<(), String> {
+    let quaternion = transform.rotation.quaternion();
+    let values = [
+        quaternion.w,
+        quaternion.i,
+        quaternion.j,
+        quaternion.k,
+        transform.translation.x,
+        transform.translation.y,
+        transform.translation.z,
+    ];
+    if !values.iter().all(|value| value.is_finite()) {
+        return Err("oracle fixture encountered non-finite SE3".to_owned());
+    }
+    for value in values {
+        write!(writer, " {:.17e}", value).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn validate_oracle_fixture_caps(ba: &BundleAdjustment) -> Result<(), String> {
+    let variable_poses = ba.poses.len().saturating_sub(ba.fixed_poses.len());
+    let variable_landmarks = ba.landmarks.len().saturating_sub(ba.fixed_landmarks.len());
+    let observations = ba.rig_observations.len();
+    let dimension = variable_poses
+        .checked_mul(6)
+        .ok_or_else(|| "oracle fixture Schur dimension overflows".to_owned())?;
+    if variable_poses > ORACLE_MAX_VARIABLE_POSES {
+        return Err(format!(
+            "oracle fixture variable-pose cap exceeded: {variable_poses}"
+        ));
+    }
+    if variable_landmarks > ORACLE_MAX_LANDMARKS {
+        return Err(format!(
+            "oracle fixture landmark cap exceeded: {variable_landmarks}"
+        ));
+    }
+    if observations > ORACLE_MAX_OBSERVATIONS {
+        return Err(format!(
+            "oracle fixture observation cap exceeded: {observations}"
+        ));
+    }
+    if dimension > ORACLE_MAX_SCHUR_SCALARS {
+        return Err(format!(
+            "oracle fixture Schur dimension cap exceeded: {dimension}"
+        ));
+    }
+    let mut per_landmark = BTreeMap::<u64, usize>::new();
+    for observation in &ba.rig_observations {
+        let count = per_landmark.entry(observation.landmark_id).or_default();
+        *count = (*count)
+            .checked_add(1)
+            .ok_or_else(|| "oracle fixture cross-pair count overflows".to_owned())?;
+    }
+    let cross_pairs = per_landmark
+        .into_values()
+        .try_fold(0_usize, |total, count| {
+            let pairs = count
+                .checked_mul(count)
+                .ok_or_else(|| "oracle fixture cross-pair count overflows".to_owned())?;
+            total
+                .checked_add(pairs)
+                .ok_or_else(|| "oracle fixture cross-pair count overflows".to_owned())
+        })?;
+    if cross_pairs > ORACLE_MAX_CROSS_PAIR_WORK {
+        return Err(format!(
+            "oracle fixture cross-pair cap exceeded: {cross_pairs}"
+        ));
+    }
+    Ok(())
+}
+
+fn export_oracle_fixture(
+    fixture: &Path,
+    model_dir: &Path,
+    rig_manifest: &Path,
+    source_hashes: &SourceHashes,
+    ba: &BundleAdjustment,
+) -> Result<(), String> {
+    if !ba.observations.is_empty()
+        || !ba.stereo_observations.is_empty()
+        || !ba.general_stereo_observations.is_empty()
+        || ba.stereo_baseline.is_some()
+        || ba.gravity_prior.is_some()
+        || ba.per_pose_gravity_prior.is_some()
+        || ba.position_prior.is_some()
+        || !ba.pairwise_pose_factors.is_empty()
+        || !ba.velocities.is_empty()
+        || !ba.biases.is_empty()
+        || !ba.imu_factors.is_empty()
+        || !ba.bias_random_walk_factors.is_empty()
+        || ba.navigation_state_prior.is_some()
+    {
+        return Err("oracle fixture requires pure rig-visual BA input".to_owned());
+    }
+    if ba.poses.is_empty() || ba.landmarks.is_empty() || ba.rig_observations.is_empty() {
+        return Err("oracle fixture requires poses, landmarks and rig observations".to_owned());
+    }
+    validate_oracle_fixture_caps(ba)?;
+    for hash in [
+        &source_hashes.cameras,
+        &source_hashes.images,
+        &source_hashes.points,
+        &source_hashes.manifest,
+        &source_hashes.combined,
+    ] {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid source SHA256 for oracle fixture".to_owned());
+        }
+    }
+    validate_fixture_output_path(fixture, model_dir, rig_manifest)?;
+
+    let parent = fixture.parent().expect("validated fixture parent");
+    let file_name = fixture
+        .file_name()
+        .ok_or_else(|| format!("fixture output has no filename: {}", fixture.display()))?
+        .to_string_lossy();
+    let staging = parent.join(format!(".{file_name}.staging-{}", std::process::id()));
+    let mut owns_staging = false;
+    let result = (|| {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .map_err(|error| format!("create fixture staging {}: {error}", staging.display()))?;
+        owns_staging = true;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "VISLOC_BA_ORACLE_FIXTURE 1").map_err(|error| error.to_string())?;
+        writeln!(writer, "SOURCE_SHA256 {}", source_hashes.combined)
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "SOURCE_SHA256_CAMERAS {}", source_hashes.cameras)
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "SOURCE_SHA256_IMAGES {}", source_hashes.images)
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "SOURCE_SHA256_POINTS {}", source_hashes.points)
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "SOURCE_SHA256_MANIFEST {}", source_hashes.manifest)
+            .map_err(|error| error.to_string())?;
+        let initial_cost = ba.cost();
+        if !initial_cost.is_finite() {
+            return Err("oracle fixture initial cost is non-finite".to_owned());
+        }
+        writeln!(writer, "INITIAL_COST {:.17e}", initial_cost)
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "INITIAL_COST_BITS {}", initial_cost.to_bits())
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "CAMERA_COUNT {}", {
+            let mut ids = BTreeSet::new();
+            for observation in &ba.rig_observations {
+                ids.insert(observation.camera.id);
+            }
+            ids.len()
+        })
+        .map_err(|error| error.to_string())?;
+        writeln!(writer, "POSE_COUNT {}", ba.poses.len()).map_err(|error| error.to_string())?;
+        writeln!(writer, "LANDMARK_COUNT {}", ba.landmarks.len())
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "OBSERVATION_COUNT {}", ba.rig_observations.len())
+            .map_err(|error| error.to_string())?;
+
+        let mut cameras = BTreeMap::<u64, Camera>::new();
+        for observation in &ba.rig_observations {
+            if let Some(previous) =
+                cameras.insert(observation.camera.id, observation.camera.clone())
+            {
+                if previous != observation.camera {
+                    return Err(format!(
+                        "camera id {} has inconsistent fixture records",
+                        observation.camera.id
+                    ));
+                }
+            }
+        }
+        for camera in cameras.values() {
+            let model = camera_model_name(&camera.model)?;
+            if !camera.params.iter().all(|value| value.is_finite()) {
+                return Err(format!("camera {} has non-finite parameters", camera.id));
+            }
+            write!(
+                writer,
+                "CAMERA {} {} {} {} {}",
+                camera.id,
+                model,
+                camera.width,
+                camera.height,
+                camera.params.len()
+            )
+            .map_err(|error| error.to_string())?;
+            for value in &camera.params {
+                write!(writer, " {:.17e}", value).map_err(|error| error.to_string())?;
+            }
+            writeln!(writer).map_err(|error| error.to_string())?;
+        }
+        for (id, pose) in &ba.poses {
+            write!(writer, "POSE {id}").map_err(|error| error.to_string())?;
+            write_se3(&mut writer, &pose.world_to_camera)?;
+            writeln!(writer).map_err(|error| error.to_string())?;
+        }
+        for id in &ba.fixed_poses {
+            writeln!(writer, "FIXED_POSE {id}").map_err(|error| error.to_string())?;
+        }
+        for (id, point) in &ba.landmarks {
+            if !point.coords.iter().all(|value| value.is_finite()) {
+                return Err(format!("landmark {id} has non-finite coordinates"));
+            }
+            writeln!(
+                writer,
+                "LANDMARK {id} {:.17e} {:.17e} {:.17e}",
+                point.x, point.y, point.z
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        for observation in &ba.rig_observations {
+            if !observation.xy.x.is_finite() || !observation.xy.y.is_finite() {
+                return Err("rig observation has non-finite pixel coordinates".to_owned());
+            }
+            write!(
+                writer,
+                "RIG_OBSERVATION {} {} {:.17e} {:.17e} {}",
+                observation.keyframe_id,
+                observation.landmark_id,
+                observation.xy.x,
+                observation.xy.y,
+                observation.camera.id
+            )
+            .map_err(|error| error.to_string())?;
+            write_se3(&mut writer, &observation.sensor_from_rig)?;
+            writeln!(writer).map_err(|error| error.to_string())?;
+        }
+        writeln!(writer, "END").map_err(|error| error.to_string())?;
+        writer
+            .flush()
+            .map_err(|error| format!("flush fixture staging: {error}"))?;
+        writer
+            .into_inner()
+            .map_err(|error| format!("finish fixture staging: {error}"))?
+            .sync_all()
+            .map_err(|error| format!("sync fixture staging: {error}"))?;
+        // A hard link is a no-clobber publication on the same filesystem:
+        // unlike rename, it cannot replace a sentinel or a concurrently
+        // created destination.  The staging file is removed only after the
+        // final link is known to exist.
+        fs::hard_link(&staging, fixture)
+            .map_err(|error| format!("publish oracle fixture {}: {error}", fixture.display()))?;
+        fs::remove_file(&staging)
+            .map_err(|error| format!("remove fixture staging {}: {error}", staging.display()))?;
+        owns_staging = false;
+        Ok(())
+    })();
+    if result.is_err() && owns_staging {
+        let _ = fs::remove_file(&staging);
+    }
+    result
 }
 
 fn prepare_output_path(out_dir: &Path, model: &Path, manifest: &Path) -> Result<(), String> {
@@ -1635,7 +2065,7 @@ mod tests {
             .into_iter()
             .map(str::to_owned),
         );
-        assert_eq!(args.unwrap().solver, SolverArm::Direct);
+        assert_eq!(args.unwrap().solver, Some(SolverArm::Direct));
         let error = parse_args(
             [
                 "compare",
@@ -1655,6 +2085,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("only valid for matrix-free"));
+    }
+
+    #[test]
+    fn parses_standalone_oracle_fixture_export() {
+        let args = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.solver, None);
+        assert_eq!(args.out_dir, None);
+        assert_eq!(args.oracle_fixture_out, Some(PathBuf::from("fixture.txt")));
+        let error = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--export-oracle-fixture",
+                "fixture.txt",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(error.contains("standalone operation"));
     }
 
     #[test]
@@ -1931,6 +2401,65 @@ mod tests {
                     .starts_with(&staging_prefix)
             });
         assert!(!leftovers);
+    }
+
+    #[test]
+    fn oracle_fixture_export_is_no_clobber_and_stream_roundtrip_safe() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc-compare-oracle-export-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("model")).unwrap();
+        fs::write(root.join("manifest.txt"), "manifest").unwrap();
+        let (source, manifest) = publication_fixture();
+        validate_source_model(&source, &manifest).unwrap();
+        let prepared = build_problem(&source, &manifest).unwrap();
+        let hashes = SourceHashes {
+            cameras: "a".repeat(64),
+            images: "b".repeat(64),
+            points: "c".repeat(64),
+            manifest: "d".repeat(64),
+            combined: "e".repeat(64),
+        };
+        let fixture = root.join("oracle.txt");
+        export_oracle_fixture(
+            &fixture,
+            &root.join("model"),
+            &root.join("manifest.txt"),
+            &hashes,
+            &prepared.ba,
+        )
+        .unwrap();
+        let text = fs::read_to_string(&fixture).unwrap();
+        assert!(text.contains("VISLOC_BA_ORACLE_FIXTURE 1\n"));
+        assert!(text.contains(&format!("SOURCE_SHA256 {}\n", hashes.combined)));
+        assert!(text.contains("INITIAL_COST "));
+        assert!(text.contains("INITIAL_COST_BITS "));
+        assert!(text.contains("POSE 0 "));
+        assert!(text.contains("RIG_OBSERVATION 0 7"));
+        let original = text.clone();
+        assert!(export_oracle_fixture(
+            &fixture,
+            &root.join("model"),
+            &root.join("manifest.txt"),
+            &hashes,
+            &prepared.ba,
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&fixture).unwrap(), original);
+        let staging_prefix = ".oracle.txt.staging-";
+        let leftovers = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(staging_prefix)
+            });
+        assert!(!leftovers);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
