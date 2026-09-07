@@ -1624,7 +1624,12 @@ same zero-nonprojectable rho contract as PR #86. The new opt-in entry must
 reject initially nonprojectable input before mutation. A finite candidate
 with invalid/nonpositive prediction or unavailable rho is an explicit
 candidate rejection with rollback, not a fabricated linear failure. Existing
-cost/feasibility gates remain necessary. Log actual solve lambda separately
+cost/feasibility gates remain necessary. Require strictly positive finite rho
+for acceptance: division of a positive finite decrease by a large prediction
+can underflow to zero and must reject, not reach an accepted-update assertion.
+For linear failures, uncomputed candidate cost/feasibility gates and the
+post-candidate nonprojectable count are unavailable, not fabricated values.
+Log actual solve lambda separately
 from the next lambda; retain finite bounds and bounded termination.
 
 Compute only the prediction scalar from borrowed blocks and deltas, after
