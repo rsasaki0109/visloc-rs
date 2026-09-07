@@ -438,23 +438,44 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
-    println!(
-        "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
-        summary.solver.as_str(),
-        summary.initial_cost,
-        summary.final_cost,
-        summary.iterations,
-        summary.converged,
-        source.images.len(),
-        manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
-        source.points.len(),
-        source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
-        args.pcg_max_iterations,
-        PCG_TOLERANCE,
-        summary.solver_seconds,
-        summary.total_seconds,
-        out_dir.display(),
-    );
+    if args.pcg_relative_tolerance_explicit {
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
+            source.points.len(),
+            source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else {
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
+            source.points.len(),
+            source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            args.pcg_max_iterations,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    }
     Ok(())
 }
 
