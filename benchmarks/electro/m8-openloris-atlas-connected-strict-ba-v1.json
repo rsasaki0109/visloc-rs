@@ -18,6 +18,17 @@
       "changed_pose_images": 840
     },
     "tail_final_six_files_byte_identical_to_boundary_repair_v1": true,
+    "reproducible_observation_transition_audit": {
+      "script": "scripts/audit_colmap_observation_filter.py",
+      "script_sha256": "b5c55dbc563a127a7037d7c456d32ddabc8a445dd97c171fc6b1f012029d42dd",
+      "main": {"images": 8988, "points": 319144, "observations": 1327687, "changed_pose_images": 840, "removed_observations": 0, "removed_points": 0},
+      "tail": {"images": 1010, "points": 34650, "observations": 125633, "changed_pose_images": 0, "removed_observations": 0, "removed_points": 0},
+      "image_identity_camera_assignment_keypoint_coordinates_and_order_unchanged": true,
+      "observation_addition_track_merge_or_split": false,
+      "supported_image_sets_unchanged": true,
+      "main_report": "observation-transition-main.json",
+      "tail_report": "observation-transition-tail.json"
+    },
     "gt_used_for_mapping_or_selection": false,
     "scoring_alignment_changed": false
   },
@@ -83,7 +94,9 @@
     "main_images": "6e4853c880a942b50a443d02f903a9f23de2bea17108e6115cf497b9039d093f",
     "main_points": "06f5ce2cd6e3cfab7e1e75b345a211f3cd5f48cb6a7033f2ba1e5c823e948448",
     "score_json": "9c978879f0de92d245dc4283a651872fffade71ce8a7bc5cf21550d9a42becf0",
-    "independent_audit_json": "2124f7e0e906b54b34c8fd2efef3b1694d0629a22dc2802c66eb68efae332917"
+    "independent_audit_json": "2124f7e0e906b54b34c8fd2efef3b1694d0629a22dc2802c66eb68efae332917",
+    "observation_transition_main_json": "287a7638e4b0251aa606baa2a47dd28d8aa0a3b61e64921fba9808ed451ce88d",
+    "observation_transition_tail_json": "c57fe5d20bef6d7f35180ddb73a19157345f7b0681f9129c58535a40a619a96d"
   },
   "decision": "Do not promote strict BA. Test a separately named post-BA filtering arm, preserving pre-filter full-observation cost checks, explicit removal accounting, support sets and component connectivity. Keep boundary-repair-v1 as the connected refinement baseline and retain all original M8-M10 acceptance gates."
 }
