@@ -10259,6 +10259,11 @@ mod matrix_free_ba_api_tests {
         let adaptive_anchor_pose = rig_adaptive.poses[&0].clone();
         let adaptive_fixed_rotation = rig_adaptive.poses[&1].world_to_camera.rotation;
         let adaptive_fixed_landmark = rig_adaptive.landmarks[&0];
+        let adaptive_extrinsics: Vec<SE3> = rig_adaptive
+            .rig_observations
+            .iter()
+            .map(|observation| observation.sensor_from_rig.clone())
+            .collect();
         let adaptive_result = rig_adaptive
             .optimize_matrix_free_column_scaled_adaptive(
                 &matrix_free_config(),
@@ -10277,6 +10282,14 @@ mod matrix_free_ba_api_tests {
             adaptive_fixed_rotation
         );
         assert_eq!(rig_adaptive.landmarks[&0], adaptive_fixed_landmark);
+        assert_eq!(
+            rig_adaptive
+                .rig_observations
+                .iter()
+                .map(|observation| observation.sensor_from_rig.clone())
+                .collect::<Vec<_>>(),
+            adaptive_extrinsics
+        );
     }
 
     #[test]
@@ -10526,6 +10539,11 @@ mod matrix_free_ba_api_tests {
             && stats.nonprojectable_after.is_none()
             && !stats.accepted
             && stats.reason == "linear_failure"));
+        assert!(result.adaptive_iterations.iter().all(|stats| {
+            let expected =
+                (stats.solve_lambda * config.lambda_increase_factor).min(config.max_lambda);
+            stats.next_lambda == expected
+        }));
         assert!(result
             .adaptive_iterations
             .windows(2)
