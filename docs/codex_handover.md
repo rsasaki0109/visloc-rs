@@ -73,8 +73,22 @@
 > 元の3ファイルhash、全支持・連結性・校正、RMSE/p95 0.026703/0.041346 mの
 > 再採点一致まで確認済み。driver/A/Bは未実施。名前・全keypoint identityを
 > 保持するpost-map比較driverが次段階で、10k global runにはまだ進みません。
+> PR #78は最終CI8項目（run 34112509926）通過後、`552f79b`へmergeし旧branchを整理済み。
+> 現在は `feat/m8-matrix-free-rig-ba-comparison`。1k用single-arm driverを実装中で、
+> direct/matrix-freeを別プロセス・同一入力・全観測保持・frame 0のみ固定で測定します。
+> 初期設定は両者20 LM反復/λ1e-4/robustなし/serial、PCGは既定128反復/tol1e-12。
+> 元画像名・全keypoint・track identityを維持し、保存ERRORは投影から再計算します。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
+> PR #79でdriverを `c810be9` に実装し10テスト通過、1k比較は実行済みです。
+> 同一条件の再実行はモデル3ファイル・数値trace一致、全観測/支持/校正を維持。
+> ただしPCG128は20回中3回しかstepを受理せず、上限512でも最終モデルは同じ。
+> directとの数値同等性は未達なので10kには非昇格です。
+> [比較記録](../benchmarks/electro/m8-openloris-matrix-free-rig-ba-comparison-v1.json)。
+> `parallel=false`とは別にdirect内部Rayonが動くため、`RAYON_NUM_THREADS=1`の
+> controlも各2回計測。次は同じ初期normal system/λ1e-4と1e10で作用素・真残差を
+> explicit/directと照合し、桁落ち/再帰残差のずれと収束不足を切り分けます。
+> ログのλは拒否時だけ増加後の値なので、LM0のsolve λは1e-4です。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

@@ -44,7 +44,7 @@ No global run or quality improvement is assumed from this option;
 see the [solver-memory audit and primary references](openloris_atlas_bounded_ba.md).
 
 PR #77 closed this private gate as `0460c9c` after all eight final CI checks
-passed. The next branch, `feat/m8-matrix-free-ba-entry`, implements an additive
+passed. PR #78 implements an additive
 runtime entry point and separate solver diagnostics while retaining the default
 LM path. A frozen post-mapping 1k input has been revalidated: 1,000 supported
 images, 500 connected supported rig frames, 4,716 points and 130,900 observations,
@@ -64,6 +64,25 @@ tests. Metric stereo/rig fixtures fix a pose but no point; the physical baseline
 anchors their scale. This closes an integration gate, not the 1k experiment or
 the outstanding M8 trajectory/resource gates. See
 [runtime API evidence](../benchmarks/electro/m8-openloris-matrix-free-ba-entry-v1.json).
+PR #78 passed all eight final-head CI checks and merged as `552f79b`; its old
+branch is removed. The current branch, `feat/m8-matrix-free-rig-ba-comparison`,
+implements the single-arm, identity-preserving 1k post-map driver. Separate
+processes compare direct BA with default 128-iteration PCG under the same
+20-iteration LM configuration and fixed frame 0, without filtering observations.
+The [frozen experiment contract](openloris_atlas_bounded_ba.md#frozen-1k-post-map-experiment-contract)
+separates solver agreement, trajectory quality and resource accounting.
+The driver is now implemented (`c810be9`), with ten tests and independently
+repeated same-input runs. All source observation identities/support and fixed
+calibration remain intact. However, PCG accepts only 3/20 LM steps; raising its
+budget from 128 to 512 does not change the final model. The
+[measured comparison](../benchmarks/electro/m8-openloris-matrix-free-rig-ba-comparison-v1.json)
+therefore **fails the direct-agreement gate and is not promoted to 10k**.
+Explicit `RAYON_NUM_THREADS=1` controls are recorded separately because the
+existing direct block solver has independent internal threading. Next compare
+explicit/implicit actions and true residuals on the same initial normal system
+at damping `1e-4` and `1e10`; do not relax tolerances or claim equivalent-work
+acceleration from the shorter failed-PCG run. PR #79 packages the driver and
+diagnostic evidence, not a solver-performance promotion.
 
 ## Historical M7 baseline
 

@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "date": "2026-09-07",
-  "status": "comparison_input_revalidated_no_candidate_run",
+  "status": "comparison_input_revalidated_comparison_recorded_separately",
+  "subsequent_comparison_evidence": "benchmarks/electro/m8-openloris-matrix-free-rig-ba-comparison-v1.json",
   "purpose": "Same-input post-mapping direct versus implicit BA gate before connected-atlas 10k experiments; not a mapper or native E2E timing result",
   "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
   "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
@@ -34,6 +35,18 @@
     "track_connected_component_sizes": [500],
     "track_connected_component_frame_ranges": [[0, 499]]
   },
+  "independent_cross_sensor_track_audit": {
+    "method": "Resolve image names through the rig manifest, then inspect every original point track; no image-ID-to-frame inference",
+    "total_tracks": 4716,
+    "cross_sensor_tracks": 174,
+    "tracks_with_same_frame_stereo": 136,
+    "frames_supported_by_cross_sensor_tracks": 459,
+    "cross_sensor_only_largest_frame_component": 459,
+    "cross_sensor_only_isolated_frames": 41,
+    "full_track_graph_components": 1,
+    "used_as_a_filter": false,
+    "proves_full_numerical_rank_or_conditioning": false
+  },
   "independent_input_trajectory_rescore": {
     "scorer": "scripts/score_openloris_model.py",
     "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
@@ -62,7 +75,7 @@
     "same_damping_and_robust_loss": true,
     "gt_used_only_for_post_solve_scoring": true,
     "native_mapper_input_equivalent_to_connected_10k_atlas": false,
-    "driver_and_exact_options": "not implemented or run yet; freeze before A/B",
+    "driver_and_exact_options": "Implemented in c810be9; exact options and measured non-promoted A/B are recorded in subsequent_comparison_evidence",
     "stored_point_error_note": "This historical writer does not provide accurate track-mean ERROR. Use recomputed projection errors, not stored ERROR, for this input and A/B.",
     "geometry_gate_note": "The frozen 1k input has track means above 2 px; do not silently filter it to the later atlas-specific 2 px track threshold. Retain the same observation set and report the original baseline metrics."
   }

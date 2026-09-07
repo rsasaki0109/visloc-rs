@@ -1,0 +1,772 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "measured_not_promoted_pcg_true_residual_and_direct_agreement_gate_failed",
+  "purpose": "Same-input post-mapping direct versus implicit BA diagnostic; no mapper/native E2E or 10k performance claim",
+  "branch": "feat/m8-matrix-free-rig-ba-comparison",
+  "pull_request": "https://github.com/rsasaki0109/visloc-rs/pull/79",
+  "implementation_commit": "c810be96dfd08846fcf5da0062fcd28e0c1ce84f",
+  "source": "examples/compare_rig_bundle_adjustment.rs",
+  "source_sha256": "196dcd293e42bf036f30894efa75969418061320d7da5d3eddf3d0b57dade23c",
+  "binary_sha256": "9e2d4b8daaef3047f7140a523024feb61d8cad5c3f8d0f6413e51d8bcbad71e5",
+  "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+  "input_evidence": "benchmarks/electro/m8-openloris-matrix-free-1k-input-v1.json",
+  "input_model_hashes_rechecked_after_all_runs": true,
+  "audit_provenance": {
+    "geometry_script": "scripts/audit_colmap_pinhole_model.py",
+    "geometry_sha256": "79370647e9acd9a1fc9334502ea900c161c550d06d4e523efaf8abb250f1dc54",
+    "observation_script": "scripts/audit_colmap_observation_filter.py",
+    "observation_sha256": "b5c55dbc563a127a7037d7c456d32ddabc8a445dd97c171fc6b1f012029d42dd",
+    "strict_identity_method": "Independent read-only Python row-by-row zip_longest comparison: camera bytes; image ID/camera/name/order and all POINTS2D tokens; point ID/RGB/track tail tokens/order; counts and finite ERROR. Camera centres/rotation matrices and XYZ are compared numerically; frame membership is resolved by image name through the rig manifest.",
+    "filter_auditor_changed_pose_images_note": "This field compares textual pose headers, so it reports 1000 despite only 998 numerically changed camera poses. Independent numerical checks verify frame 0 unchanged within rounding."
+  },
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1",
+  "configuration": {
+    "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+    "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "lm_max_iterations": 20,
+    "initial_lambda": 0.0001,
+    "lambda_increase_factor": 10,
+    "lambda_decrease_factor": 0.1,
+    "min_lambda": 1e-9,
+    "max_lambda": 1000000000000,
+    "step_tolerance": 1e-7,
+    "cost_tolerance": 1e-9,
+    "relative_cost_tolerance": null,
+    "robust_kernel": "None",
+    "refine_intrinsics": false,
+    "refine_distortion": false,
+    "ba_parallel": false,
+    "linear_solver_config": "Sparse; explicit matrix-free entry always uses implicit PCG",
+    "fixed_pose_ids": [
+      0
+    ],
+    "fixed_landmark_ids": [],
+    "observation_order": "Original points3D file order, then original track pair order",
+    "input_observations_removed": 0,
+    "pcg_relative_tolerance": 1e-12,
+    "pcg_absolute_tolerance": 1e-12,
+    "pcg_max_iterations_arms": [
+      128,
+      512
+    ],
+    "gt_passed_to_optimizer": false
+  },
+  "accounting": {
+    "scope": "Whole-process post-map BA: input loading, validation, BA construction, solve, staged publication. Pure solve time also recorded.",
+    "timing_command": "[RAYON_NUM_THREADS=1] /usr/bin/time -v -o ARTIFACT_ROOT/ARM.time target/release/examples/compare_rig_bundle_adjustment --model MODEL --rig-manifest RIG --solver direct|matrix-free [--pcg-max-iterations 512] --out-dir ARTIFACT_ROOT/ARM > ARTIFACT_ROOT/ARM.log 2>&1",
+    "runs_executed_serially": true,
+    "concurrent_project_build_or_benchmark": false,
+    "input_cache": "warm/reused; no cache dropping",
+    "host": "shared machine; unrelated pre-existing CPU-bound python process left untouched; substantial timing variation observed",
+    "automatic_direct_observed_live_process_threads": 9,
+    "automatic_direct_cpu_percent": [
+      180,
+      183
+    ],
+    "single_thread_controls": "RAYON_NUM_THREADS=1 explicitly; BaConfig::parallel=false alone does not disable block Cholesky internal Rayon workers",
+    "all_full_logs_identical": false,
+    "full_log_note": "Timing and output paths differ; compare numerical trace and model hashes separately",
+    "performance_promotion": false
+  },
+  "runs": [
+    {
+      "arm": "direct-1",
+      "rayon_num_threads": "unset",
+      "solver": "direct",
+      "pcg_max_iterations": null,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 117496.0317308232,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 5,
+      "pcg_success": null,
+      "pcg_failure_types": null,
+      "solver_seconds": 47.193496,
+      "driver_total_seconds": 47.447266,
+      "whole_process_wall_seconds": 47.46,
+      "whole_process_peak_rss_kib": 167268,
+      "user_seconds": 81.8,
+      "system_seconds": 3.95,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "fe3082f1d4681601a4ac71d88b77d7368706c94b182b20263edec6c27ae023f6",
+        "points3D.txt": "3be8daf16b3bb074886f916288311f8573d877019209b5c07394c2efc84bce17"
+      },
+      "log_sha256": "b70b5a2652223bae0b6d386f6a78ddfab0047762acb8620a6c191573c24a4340",
+      "time_sha256": "7582ed0bd7a77a7954bef4a4da395098e4bcbc723161b11238c01a190472770d",
+      "numerical_trace_sha256": "55998fe3afe2a71e0746e52442508c29f7a1605f7f8e396f043540394c82cea7"
+    },
+    {
+      "arm": "matrix-free-128-1",
+      "rayon_num_threads": "unset",
+      "solver": "matrix-free",
+      "pcg_max_iterations": 128,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 126419.0824771856,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 3,
+      "pcg_success": 3,
+      "pcg_failure_types": {
+        "MaxIterations": 12,
+        "ResidualCheckFailed": 5,
+        "NonPositiveCurvature": 0
+      },
+      "solver_seconds": 6.46293,
+      "driver_total_seconds": 6.696365,
+      "whole_process_wall_seconds": 6.7,
+      "whole_process_peak_rss_kib": 84364,
+      "user_seconds": 6.66,
+      "system_seconds": 0.04,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "ddc08052cbaf700dfe1c40595b531148e05788554a384c36029163a66a997a91",
+      "time_sha256": "c59b2687d3fc77340b393218a344c28c9180575c11b231aa86af25c9e21cb196",
+      "numerical_trace_sha256": "5e5d1b50e06e21206a46e063cf5fdaefb52f75a3478efa5e1f4bc1c36798a33b"
+    },
+    {
+      "arm": "direct-2",
+      "rayon_num_threads": "unset",
+      "solver": "direct",
+      "pcg_max_iterations": null,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 117496.0317308232,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 5,
+      "pcg_success": null,
+      "pcg_failure_types": null,
+      "solver_seconds": 44.724421,
+      "driver_total_seconds": 44.962518,
+      "whole_process_wall_seconds": 44.99,
+      "whole_process_peak_rss_kib": 166668,
+      "user_seconds": 78.97,
+      "system_seconds": 3.67,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "fe3082f1d4681601a4ac71d88b77d7368706c94b182b20263edec6c27ae023f6",
+        "points3D.txt": "3be8daf16b3bb074886f916288311f8573d877019209b5c07394c2efc84bce17"
+      },
+      "log_sha256": "754d4975208e354f72358e98078f5019d14486992fe0c59923c0b3bc863b244f",
+      "time_sha256": "6c51a1d3f1c6b2c798f3af32b9963c5af751d716cfba71026700eceb424b4619",
+      "numerical_trace_sha256": "55998fe3afe2a71e0746e52442508c29f7a1605f7f8e396f043540394c82cea7"
+    },
+    {
+      "arm": "matrix-free-128-2",
+      "rayon_num_threads": "unset",
+      "solver": "matrix-free",
+      "pcg_max_iterations": 128,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 126419.0824771856,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 3,
+      "pcg_success": 3,
+      "pcg_failure_types": {
+        "MaxIterations": 12,
+        "ResidualCheckFailed": 5,
+        "NonPositiveCurvature": 0
+      },
+      "solver_seconds": 6.225902,
+      "driver_total_seconds": 6.457662,
+      "whole_process_wall_seconds": 6.46,
+      "whole_process_peak_rss_kib": 84336,
+      "user_seconds": 6.43,
+      "system_seconds": 0.03,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "7cd878f81ab16549271f343c6ea95ef1eb848dbe1d6db71681093b8d124861c8",
+      "time_sha256": "17543d0bc1b643103769d99ea8f413a69a7753c09ab3c0a735ee287ffe7d0023",
+      "numerical_trace_sha256": "5e5d1b50e06e21206a46e063cf5fdaefb52f75a3478efa5e1f4bc1c36798a33b"
+    },
+    {
+      "arm": "direct-serial-1",
+      "rayon_num_threads": "1",
+      "solver": "direct",
+      "pcg_max_iterations": null,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 117496.0330739301,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 5,
+      "pcg_success": null,
+      "pcg_failure_types": null,
+      "solver_seconds": 45.294126,
+      "driver_total_seconds": 45.525994,
+      "whole_process_wall_seconds": 45.54,
+      "whole_process_peak_rss_kib": 161736,
+      "user_seconds": 45.31,
+      "system_seconds": 0.22,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+        "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+      },
+      "log_sha256": "238b4253e2037ec22147772ce05e3011bac968135e62e49357f5f07afba5a2b8",
+      "time_sha256": "5b2187362392e3375b7c3a1da3679144a35b28d478e89130e068226417d88f34",
+      "numerical_trace_sha256": "4f6cd9e9ef78e9809aaeaf6373f2cad0fedbf3b8af7a74694b40b652bdb6d76f"
+    },
+    {
+      "arm": "matrix-free-128-serial-1",
+      "rayon_num_threads": "1",
+      "solver": "matrix-free",
+      "pcg_max_iterations": 128,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 126419.0824771856,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 3,
+      "pcg_success": 3,
+      "pcg_failure_types": {
+        "MaxIterations": 12,
+        "ResidualCheckFailed": 5,
+        "NonPositiveCurvature": 0
+      },
+      "solver_seconds": 6.1951,
+      "driver_total_seconds": 6.4188,
+      "whole_process_wall_seconds": 6.43,
+      "whole_process_peak_rss_kib": 84644,
+      "user_seconds": 6.39,
+      "system_seconds": 0.03,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "947f48847a051823ec55e2533f716d6bec714bb69426d6f86f8b67482f2d7cb9",
+      "time_sha256": "cb1cd6f5ffe4948415d81835263692ede4ab97abdac8f00cac920fde4ba792c5",
+      "numerical_trace_sha256": "5e5d1b50e06e21206a46e063cf5fdaefb52f75a3478efa5e1f4bc1c36798a33b"
+    },
+    {
+      "arm": "matrix-free-512-serial-1",
+      "rayon_num_threads": "1",
+      "solver": "matrix-free",
+      "pcg_max_iterations": 512,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 126419.0824771856,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 3,
+      "pcg_success": 3,
+      "pcg_failure_types": {
+        "MaxIterations": 10,
+        "ResidualCheckFailed": 7,
+        "NonPositiveCurvature": 0
+      },
+      "solver_seconds": 17.300523,
+      "driver_total_seconds": 17.524334,
+      "whole_process_wall_seconds": 17.53,
+      "whole_process_peak_rss_kib": 84516,
+      "user_seconds": 17.49,
+      "system_seconds": 0.04,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "8c1785475764e9b64ac49294fe0c6767e71556f9615b087b68f239d0a3e682b7",
+      "time_sha256": "6fc47cf51f0c2ec6eb160a2083a5b9a0391cd17752a3abbfd5bac2e39f7f243e",
+      "numerical_trace_sha256": "f20a99399ef88cc7f84ee6d9889b2dfd8d33f05c253a3e8b948306f2a71e628d"
+    },
+    {
+      "arm": "direct-serial-2",
+      "rayon_num_threads": "1",
+      "solver": "direct",
+      "pcg_max_iterations": null,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 117496.0330739301,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 5,
+      "pcg_success": null,
+      "pcg_failure_types": null,
+      "solver_seconds": 57.046187,
+      "driver_total_seconds": 57.328605,
+      "whole_process_wall_seconds": 57.34,
+      "whole_process_peak_rss_kib": 161780,
+      "user_seconds": 57.1,
+      "system_seconds": 0.22,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+        "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+      },
+      "log_sha256": "fbd5dc2dffda00e66d500f9b7c4115d24d45c90ee131be158e223c528b388bcf",
+      "time_sha256": "ad38a17bf6cdc5a5d9d70782bafc1c0e41cc4d790a1685f92d09206869794266",
+      "numerical_trace_sha256": "4f6cd9e9ef78e9809aaeaf6373f2cad0fedbf3b8af7a74694b40b652bdb6d76f"
+    },
+    {
+      "arm": "matrix-free-128-serial-2",
+      "rayon_num_threads": "1",
+      "solver": "matrix-free",
+      "pcg_max_iterations": 128,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 126419.0824771856,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 3,
+      "pcg_success": 3,
+      "pcg_failure_types": {
+        "MaxIterations": 12,
+        "ResidualCheckFailed": 5,
+        "NonPositiveCurvature": 0
+      },
+      "solver_seconds": 7.802972,
+      "driver_total_seconds": 8.078276,
+      "whole_process_wall_seconds": 8.08,
+      "whole_process_peak_rss_kib": 84692,
+      "user_seconds": 8.03,
+      "system_seconds": 0.04,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "af33c3b2654bb005b3cdc82281faa1c0c113c50c945f744daf109ce7d90ce22b",
+      "time_sha256": "d2a26af4093b18a138d99e2d66854da1f41f42296085352cb32a0c5fb77452eb",
+      "numerical_trace_sha256": "5e5d1b50e06e21206a46e063cf5fdaefb52f75a3478efa5e1f4bc1c36798a33b"
+    },
+    {
+      "arm": "matrix-free-512-serial-2",
+      "rayon_num_threads": "1",
+      "solver": "matrix-free",
+      "pcg_max_iterations": 512,
+      "initial_cost": 126510.3987573094,
+      "final_cost": 126419.0824771856,
+      "lm_iterations": 20,
+      "converged": false,
+      "lm_accepted": 3,
+      "pcg_success": 3,
+      "pcg_failure_types": {
+        "MaxIterations": 10,
+        "ResidualCheckFailed": 7,
+        "NonPositiveCurvature": 0
+      },
+      "solver_seconds": 20.617406,
+      "driver_total_seconds": 20.890416,
+      "whole_process_wall_seconds": 20.9,
+      "whole_process_peak_rss_kib": 84436,
+      "user_seconds": 20.84,
+      "system_seconds": 0.05,
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "63cb189e76be42f6923e94ebf29f165481dd6da6fe1f73adf6f6ba682653c4e5",
+      "time_sha256": "7d5480bab0ebe1870873f8fadeaf9e16e491d5281afd16e2175c852b30ece213",
+      "numerical_trace_sha256": "f20a99399ef88cc7f84ee6d9889b2dfd8d33f05c253a3e8b948306f2a71e628d"
+    }
+  ],
+  "independent_audits": {
+    "direct-1": {
+      "geometry": {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/direct-1",
+        "image_poses": 1000,
+        "supported_images": 1000,
+        "unsupported_image_ids": [],
+        "landmarks": 4716,
+        "observations": 130900,
+        "mean_reprojection_px": 0.6892603699917079,
+        "observation_weighted_mean_reprojection_px": 0.6892603699917079,
+        "point_weighted_mean_reprojection_px": 0.7498344840945027,
+        "max_track_mean_reprojection_px": 3.4057637099510023,
+        "max_reprojection_px": 4.937790276433839,
+        "max_stored_mean_difference_px": 1.4646700560727588e-8,
+        "nonpositive_depth_observations": 0,
+        "tracks_with_multiple_keypoints_in_one_image": 0,
+        "excess_same_image_track_observations": 0,
+        "bidirectional_references_valid": true,
+        "rig": {
+          "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+          "rig_frames": 500,
+          "supported_rig_frames": 500,
+          "unsupported_rig_frame_ids": [],
+          "max_inferred_rig_center_disagreement_m": 3.968428966356483e-15,
+          "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+          "fixed_sensor_extrinsics_valid": true,
+          "track_connected_components": 1,
+          "track_connected_component_sizes": [
+            500
+          ],
+          "track_connected_component_frame_ranges": [
+            [
+              0,
+              499
+            ]
+          ]
+        }
+      },
+      "identity": {
+        "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+        "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/direct-1",
+        "cameras_byte_exact": true,
+        "image_identity_and_order_exact": true,
+        "full_points2d_tokens_exact": true,
+        "point_ids_rgb_track_tokens_and_order_exact": true,
+        "images": 1000,
+        "keypoints": 361170,
+        "landmarks": 4716,
+        "observations": 130900,
+        "numerically_changed_image_poses": 998,
+        "max_camera_center_delta_m": 0.003435544646753794,
+        "max_camera_rotation_matrix_delta_frobenius": 0.00349583778475701,
+        "max_landmark_delta_m": 0.0426090704839863,
+        "fixed_frame_camera_center_delta_m": 7.713637039264346e-13,
+        "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9406908357248486e-12,
+        "output_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "fe3082f1d4681601a4ac71d88b77d7368706c94b182b20263edec6c27ae023f6",
+          "points3D.txt": "3be8daf16b3bb074886f916288311f8573d877019209b5c07394c2efc84bce17"
+        }
+      },
+      "observation_filter_audit": {
+        "images": 1000,
+        "changed_pose_images": 1000,
+        "observations_before": 130900,
+        "observations_after": 130900,
+        "removed_observations": 0,
+        "supported_images_before": 1000,
+        "supported_images_after": 1000,
+        "points_before": 4716,
+        "points_after": 4716,
+        "removed_points": 0,
+        "deletion_only_identity_and_image_support_valid": true
+      },
+      "trajectory": {
+        "registered_images": 1000,
+        "gt_scored_images": 308,
+        "models": 1,
+        "rmse_m": 0.02651852040864341,
+        "p95_m": 0.04098909692131043,
+        "median_m": 0.023919897098057523,
+        "max_m": 0.08102542629860622,
+        "sim3_scale": 1.1168833055488654,
+        "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+        "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+        "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+        "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+      }
+    },
+    "direct-serial-1": {
+      "geometry": {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/direct-serial-1",
+        "image_poses": 1000,
+        "supported_images": 1000,
+        "unsupported_image_ids": [],
+        "landmarks": 4716,
+        "observations": 130900,
+        "mean_reprojection_px": 0.6892603543319799,
+        "observation_weighted_mean_reprojection_px": 0.6892603543319799,
+        "point_weighted_mean_reprojection_px": 0.7498344863813009,
+        "max_track_mean_reprojection_px": 3.40576377483283,
+        "max_reprojection_px": 4.937791375261053,
+        "max_stored_mean_difference_px": 1.357510621708552e-9,
+        "nonpositive_depth_observations": 0,
+        "tracks_with_multiple_keypoints_in_one_image": 0,
+        "excess_same_image_track_observations": 0,
+        "bidirectional_references_valid": true,
+        "rig": {
+          "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+          "rig_frames": 500,
+          "supported_rig_frames": 500,
+          "unsupported_rig_frame_ids": [],
+          "max_inferred_rig_center_disagreement_m": 3.8735455602220786e-15,
+          "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+          "fixed_sensor_extrinsics_valid": true,
+          "track_connected_components": 1,
+          "track_connected_component_sizes": [
+            500
+          ],
+          "track_connected_component_frame_ranges": [
+            [
+              0,
+              499
+            ]
+          ]
+        }
+      },
+      "identity": {
+        "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+        "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/direct-serial-1",
+        "cameras_byte_exact": true,
+        "image_identity_and_order_exact": true,
+        "full_points2d_tokens_exact": true,
+        "point_ids_rgb_track_tokens_and_order_exact": true,
+        "images": 1000,
+        "keypoints": 361170,
+        "landmarks": 4716,
+        "observations": 130900,
+        "numerically_changed_image_poses": 998,
+        "max_camera_center_delta_m": 0.0034355700862467083,
+        "max_camera_rotation_matrix_delta_frobenius": 0.0034958471069869465,
+        "max_landmark_delta_m": 0.04260913017134739,
+        "fixed_frame_camera_center_delta_m": 7.713637039264346e-13,
+        "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9406908357248486e-12,
+        "output_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+          "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+        }
+      },
+      "observation_filter_audit": {
+        "images": 1000,
+        "changed_pose_images": 1000,
+        "observations_before": 130900,
+        "observations_after": 130900,
+        "removed_observations": 0,
+        "supported_images_before": 1000,
+        "supported_images_after": 1000,
+        "points_before": 4716,
+        "points_after": 4716,
+        "removed_points": 0,
+        "deletion_only_identity_and_image_support_valid": true
+      },
+      "trajectory": {
+        "registered_images": 1000,
+        "gt_scored_images": 308,
+        "models": 1,
+        "rmse_m": 0.026518520743846325,
+        "p95_m": 0.04098909824472861,
+        "median_m": 0.02391989749616276,
+        "max_m": 0.0810254275753117,
+        "sim3_scale": 1.1168833040035575,
+        "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+        "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+        "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+        "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+      }
+    },
+    "matrix-free-128-1": {
+      "geometry": {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/matrix-free-128-1",
+        "image_poses": 1000,
+        "supported_images": 1000,
+        "unsupported_image_ids": [],
+        "landmarks": 4716,
+        "observations": 130900,
+        "mean_reprojection_px": 0.7203140719241329,
+        "observation_weighted_mean_reprojection_px": 0.7203140719241329,
+        "point_weighted_mean_reprojection_px": 0.764180124125914,
+        "max_track_mean_reprojection_px": 3.5601354391089965,
+        "max_reprojection_px": 3.997840133744877,
+        "max_stored_mean_difference_px": 5.22418471329833e-11,
+        "nonpositive_depth_observations": 0,
+        "tracks_with_multiple_keypoints_in_one_image": 0,
+        "excess_same_image_track_observations": 0,
+        "bidirectional_references_valid": true,
+        "rig": {
+          "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+          "rig_frames": 500,
+          "supported_rig_frames": 500,
+          "unsupported_rig_frame_ids": [],
+          "max_inferred_rig_center_disagreement_m": 4.110189335222113e-15,
+          "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+          "fixed_sensor_extrinsics_valid": true,
+          "track_connected_components": 1,
+          "track_connected_component_sizes": [
+            500
+          ],
+          "track_connected_component_frame_ranges": [
+            [
+              0,
+              499
+            ]
+          ]
+        }
+      },
+      "identity": {
+        "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+        "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/matrix-free-128-1",
+        "cameras_byte_exact": true,
+        "image_identity_and_order_exact": true,
+        "full_points2d_tokens_exact": true,
+        "point_ids_rgb_track_tokens_and_order_exact": true,
+        "images": 1000,
+        "keypoints": 361170,
+        "landmarks": 4716,
+        "observations": 130900,
+        "numerically_changed_image_poses": 998,
+        "max_camera_center_delta_m": 0.000024330631313432282,
+        "max_camera_rotation_matrix_delta_frobenius": 0.000015827411447039907,
+        "max_landmark_delta_m": 0.00004738311618585106,
+        "fixed_frame_camera_center_delta_m": 7.713637039264346e-13,
+        "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9406908357248486e-12,
+        "output_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+          "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+        }
+      },
+      "observation_filter_audit": {
+        "images": 1000,
+        "changed_pose_images": 1000,
+        "observations_before": 130900,
+        "observations_after": 130900,
+        "removed_observations": 0,
+        "supported_images_before": 1000,
+        "supported_images_after": 1000,
+        "points_before": 4716,
+        "points_after": 4716,
+        "removed_points": 0,
+        "deletion_only_identity_and_image_support_valid": true
+      },
+      "trajectory": {
+        "registered_images": 1000,
+        "gt_scored_images": 308,
+        "models": 1,
+        "rmse_m": 0.026702677828534166,
+        "p95_m": 0.04134738254716512,
+        "median_m": 0.024096743743815156,
+        "max_m": 0.0804587860151056,
+        "sim3_scale": 1.1176073748449953,
+        "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+        "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+        "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+        "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+      }
+    }
+  },
+  "repeated_runs": [
+    {
+      "first": "direct-1",
+      "repeat": "direct-2",
+      "all_three_model_files_byte_exact": true,
+      "numerical_trace_exact_excluding_summary_time_path": true
+    },
+    {
+      "first": "matrix-free-128-1",
+      "repeat": "matrix-free-128-2",
+      "all_three_model_files_byte_exact": true,
+      "numerical_trace_exact_excluding_summary_time_path": true
+    },
+    {
+      "first": "direct-serial-1",
+      "repeat": "direct-serial-2",
+      "all_three_model_files_byte_exact": true,
+      "numerical_trace_exact_excluding_summary_time_path": true
+    },
+    {
+      "first": "matrix-free-128-serial-1",
+      "repeat": "matrix-free-128-serial-2",
+      "all_three_model_files_byte_exact": true,
+      "numerical_trace_exact_excluding_summary_time_path": true
+    },
+    {
+      "first": "matrix-free-512-serial-1",
+      "repeat": "matrix-free-512-serial-2",
+      "all_three_model_files_byte_exact": true,
+      "numerical_trace_exact_excluding_summary_time_path": true
+    }
+  ],
+  "direct_serial_versus_matrix_free_state_difference": {
+    "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/direct-serial-1",
+    "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-ba-v1/matrix-free-128-serial-1",
+    "cameras_byte_exact": true,
+    "image_identity_and_order_exact": true,
+    "full_points2d_tokens_exact": true,
+    "point_ids_rgb_track_tokens_and_order_exact": true,
+    "images": 1000,
+    "keypoints": 361170,
+    "landmarks": 4716,
+    "observations": 130900,
+    "numerically_changed_image_poses": 998,
+    "max_camera_center_delta_m": 0.0034420425376687,
+    "max_camera_rotation_matrix_delta_frobenius": 0.0034843973897545066,
+    "max_landmark_delta_m": 0.04260591680779627,
+    "fixed_frame_camera_center_delta_m": 0,
+    "fixed_frame_camera_rotation_matrix_delta_frobenius": 0,
+    "output_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+      "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+    }
+  },
+  "conclusions": {
+    "initial_cost_equal_all_arms": true,
+    "all_original_identity_support_calibration_and_components_preserved": true,
+    "same_condition_repeat_models_and_numerical_traces_exact": true,
+    "direct_automatic_vs_single_thread_bit_exact": false,
+    "matrix_free_128_512_and_thread_control_output_models_exact": true,
+    "nonlinear_convergence": false,
+    "matrix_free_matches_direct": false,
+    "pcg_budget_512_improves_final_model": false,
+    "single_thread_direct_max_observation_error_regresses_from_input": true,
+    "promoted_to_10k": false,
+    "colmap_1k_reference": {
+      "rmse_m": 0.027968541677842282,
+      "p95_m": 0.042266006958647205,
+      "note": "All current 1k trajectory scores are below this frozen reference, but this does not close solver-agreement, maximum-observation-error, 10k or pipeline performance gates."
+    },
+    "readme_memory_before_after_table_added": false
+  },
+  "memory_contract": {
+    "driver_whole_model_clones": false,
+    "whole_output_string_and_full_output_reparse": false,
+    "connectivity_state": "O(frames) union-find, not pose-pair adjacency",
+    "reverse_track_identity_state": "Per-image boolean vector over original keypoints",
+    "remaining_linear_duplicates": [
+      "Source parsed keypoints and original POINTS2D row text",
+      "Source parsed track refs and original track tokens",
+      "Source plus BA observations; camera/extrinsic data cloned per BA rig observation",
+      "LM rollback copies of poses/landmarks and implicit solver workspace"
+    ],
+    "input_loader": "One text file at a time; text plus parsed form coexist transiently. Not a fully streaming input parser.",
+    "complexity_note": "BTreeMap lookups and per-track sorting remain; no claim of strictly linear total runtime. Direct arm retains its existing explicit Schur/factor storage."
+  },
+  "next_gate": {
+    "change_scope": "Separate numerical-diagnostic PR; no additional iteration-budget sweep or tolerance relaxation",
+    "same_input_state_lambdas": [
+      0.0001,
+      10000000000
+    ],
+    "lambda_log_semantics": "Existing BaIterationStats.lambda records post-increase lambda on rejected steps, but solve lambda on accepted steps. LM0 solve uses 1e-4, not its logged rejection value 1e-3. MF makes no updates before LM14, so both diagnostic lambdas can use the original state.",
+    "compare": [
+      "Implicit action/RHS against explicit reduced Schur on the exact same assembled normal equations",
+      "True reduced residual for both direct and PCG deltas, including unreduced arithmetic scale",
+      "Pose/landmark step, predicted decrease and feasibility"
+    ],
+    "hypotheses_not_yet_proven": [
+      "Ill-conditioning and insufficient PCG convergence",
+      "Recursive residual drift and cancellation in implicit action or residual evaluation",
+      "Potential numerical disagreement between explicit and implicit paths"
+    ],
+    "fallback_forbidden": [
+      "Relaxing true-residual tolerance to hide failure",
+      "Accepting recursive residual alone",
+      "Dense/direct fallback in candidate",
+      "10k run before 1k diagnostic gate"
+    ]
+  },
+  "validation": {
+    "example_tests": 10,
+    "independent_example_rerun_passed": true,
+    "targeted_clippy_warnings_denied": true,
+    "format_check": true,
+    "python_openloris_tests": 23,
+    "python_colmap_auditor_tests": 23,
+    "docs_links_pass": true,
+    "implementation_ci_run": 34116147600,
+    "implementation_ci_all_eight_checks_passed": true,
+    "implementation_ci_rust_seconds": 207,
+    "ci_status": "implementation CI passed; pending final evidence-head CI"
+  },
+  "build": {
+    "command": "cargo build --release --example compare_rig_bundle_adjustment",
+    "features": [
+      "default"
+    ],
+    "default_feature_set_empty": true,
+    "rustflags": [],
+    "profile_fingerprint": "2040997289075261528",
+    "explicit_profile_override_in_command": false,
+    "note": "Fingerprint verifies features/rustflags/profile hash; historical inherited CARGO_PROFILE_RELEASE_* environment is not separately archived."
+  }
+}
