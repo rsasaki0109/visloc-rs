@@ -1204,6 +1204,15 @@ observation-based unsupported-frame recovery, then bounded refinement, with
 unchanged calibration and reprojection gates. See the
 [landmark integration record](openloris_atlas_landmark_integration.md).
 
+The subsequent default-off recovery pilot triangulates anchors without the
+target frame and recovers frame 4493 with 10 final landmark supports. It restores
+all 4,999 supplied rig frames across the two gauges; RMSE/p95 are still
+0.391465/0.643175 m and fail the frozen trajectory gates. After acceptance-test
+and allocation review, the next quality boundary is bounded observation-based
+pose/landmark refinement, preserving calibration, supported registration and
+all reprojection gates. See
+[recovery evidence](../benchmarks/electro/m8-openloris-atlas-recovery-v1.json).
+
 Freeze the M8 quality champion before performance edits.
 
 ### Exact-output performance work accepted during M8 diagnosis (2026-09-03)
