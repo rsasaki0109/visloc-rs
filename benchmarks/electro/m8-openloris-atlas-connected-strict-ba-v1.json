@@ -68,6 +68,7 @@
     "both_trajectory_gates_pass": false
   },
   "verification": {
+    "ci": {"run_id": 34092294392, "head_commit": "d15d7ba", "checks_passed": 8, "rust_duration": "4m33s"},
     "example_tests_passed": 34,
     "slam_library_tests_passed": 645,
     "example_and_slam_library_clippy_warnings_denied": "pass",

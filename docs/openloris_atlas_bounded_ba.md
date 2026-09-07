@@ -286,6 +286,11 @@ supported image/frame sets and no component split. Stage only sparse candidate
 updates and removal IDs, apply in place only after all gates pass, and validate
 the entire model before publishing. No GT-based selection or threshold sweep.
 
+Rebuilding connectivity scans the model for each candidate. This has bounded
+extra state, but is not a claim of linear total runtime: window count and
+global graph scans can multiply. Measure the validation cost before deciding
+how to optimize it; do not weaken the connectivity check to hide that cost.
+
 This isolates filtering, inspired by the upstream local-BA/filter ordering and
 existing visloc rig filtering. It does not reproduce COLMAP's complete
 merge/completion policy or establish a quality improvement before measurement.
