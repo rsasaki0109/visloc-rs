@@ -35,6 +35,20 @@ class ModelAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reference mismatch"):
             AUDIT.audit(self.root)
 
+    def test_point_and_observation_weighted_means_differ(self):
+        (self.root / "images.txt").write_text(
+            "1 1 0 0 0 0 0 0 1 a.png\n0 0 1 3 0 2\n"
+            "2 1 0 0 0 -1 0 0 1 b.png\n-2 0 1 1 0 2\n"
+            "3 1 0 0 0 -2 0 0 1 c.png\n-1 0 2\n")
+        (self.root / "points3D.txt").write_text(
+            "1 0 0 5 255 255 255 0 1 0 2 0\n"
+            "2 0 0 5 255 255 255 3 1 1 2 1 3 0\n")
+        report = AUDIT.audit(self.root)
+        self.assertAlmostEqual(report["observation_weighted_mean_reprojection_px"], 1.8)
+        self.assertAlmostEqual(report["mean_reprojection_px"], 1.8)
+        self.assertAlmostEqual(report["point_weighted_mean_reprojection_px"], 1.5)
+        self.assertAlmostEqual(report["max_track_mean_reprojection_px"], 3.0)
+
     def test_orphan_image_reference_required(self):
         path = self.root / "images.txt"
         path.write_text(path.read_text().replace("c.png\n\n", "c.png\n0 0 9\n"))

@@ -1335,7 +1335,7 @@ progress.
 
 The separately named, default-off filtering arm improves the connected 10k
 model to **0.388993 m RMSE / 0.638173 m p95**, with mean reprojection error
-0.580644 px. The p95 gate passes, but the frozen COLMAP RMSE gate
+0.581744 px (observation-weighted). The p95 gate passes, but the frozen COLMAP RMSE gate
 (0.384307 m) still fails. No full parity or speed claim follows from this pilot.
 
 Independent audits preserve 9,998 poses, 9,997 supported images, all 4,999

@@ -338,7 +338,10 @@ track merge/split, keypoint identity change or loss of supported images.
 The independent geometry auditor confirms all 4,999 supported rig frames, one
 4,494-frame main graph and one 505-frame tail graph, fixed calibration,
 bidirectional references and positive depth. The final model has 352,837 points
-and 1,438,880 observations, with mean reprojection error 0.580644 px.
+and 1,438,880 observations, with observation-weighted mean reprojection error
+0.581744 px. The earlier 0.580644 px display incorrectly weighted the component
+observation means by point counts; it is superseded, without changing the
+frozen COLMAP observation-weighted gate or any trajectory result.
 
 With unchanged scoring, RMSE/p95 improve from 0.391075/0.643107 m to
 **0.388993/0.638173 m**. Only p95 meets the frozen COLMAP gates

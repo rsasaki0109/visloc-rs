@@ -21,7 +21,7 @@
 > [有界BAの検証契約](openloris_atlas_bounded_ba.md)を参照してください。
 >
 > [10k filtering試走](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json)
-> はRMSE/p95が0.388993/0.638173 m、平均再投影0.580644 pxへ改善。
+> はRMSE/p95が0.388993/0.638173 m、観測数重み付き平均再投影0.581744 pxへ改善。
 > p95だけがCOLMAP基準を満たし、RMSEはまだ未達です。独立監査で
 > 957点・14,440観測の削除数一致、全支持/連結性維持を確認しました。
 > 両成分のBA直前checkpointと、filter OFFの主成分strict出力も全6ファイル一致。

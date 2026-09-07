@@ -34,7 +34,7 @@ and **0.9030 px** mean reprojection error. visloc's 10k quality work is still
 in progress: an experimental observation-backed atlas matches its connected
 rig-frame counts. Its latest bounded refinement reaches **0.3890 m RMSE /
 0.6382 m p95**: p95 meets the frozen control, but RMSE still misses the target.
-Mean reprojection error is **0.5806 px**, with all 4,999 supported rig frames
+Observation-weighted mean reprojection error is **0.5817 px**, with all 4,999 supported rig frames
 preserved. No 10k speed win at equivalent quality is claimed. See the
 [frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
 and [experimental refinement evidence](benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
