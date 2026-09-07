@@ -9,6 +9,12 @@
 > 既存COLMAP imageはありますがhost pycolmapもcontainer python3もありません。
 > 新規インストールや条件の近似は行っていません。全体goalは未完了です。
 
+> README図修正（2026-09-08）: `695ed47` でCDF注記を正しいhigher/leftへ直し、
+> 曲線外へ移動。median/p95列もカード内へ収めました。旧assetは元generatorで再現一致、
+> 新PNGは2回＋root独立生成で一致。GIFは旧版とbyte一致の24 frameです。
+> 曲線/軌跡領域のRGB画素一致と9入力ファイルのhashをroot確認済み。
+> [生成証跡](../benchmarks/electro/readme-cdf-annotation-v1.json)。性能値・README本文は不変。
+
 > 最新実測（2026-09-08）: Luna Maxのadaptive scaled LMを `005dbcc` の認証済み
 > binaryで7本測定。`75df6e5` / `7e25dee` はtest-only補強で再buildなし。
 > 新方式は1kでPCG20/20成功・LM15/20受理、25.83 / 25.54 s、peak RSS
