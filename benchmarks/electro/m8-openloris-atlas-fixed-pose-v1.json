@@ -77,6 +77,23 @@
     "release_build": true,
     "independent_output_projection_audit": true
   },
+  "main_component_repeat": {
+    "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/fixed-pose-repeat/component-000",
+    "archived_baseline_binary_reused": true,
+    "process_wall_s": 10.92,
+    "peak_rss_kib": 508320,
+    "byte_identical_files": ["cameras.txt", "images.txt", "points3D.txt", "image_support.tsv", "frame_support.tsv", "integration_summary.tsv"],
+    "scope": "Main-component reproducibility check only; not a three-run mapper or E2E comparison"
+  },
+  "comparison_support_audit": {
+    "script": "scripts/audit_colmap_pinhole_model.py",
+    "colmap_supported_images": 9996,
+    "colmap_supported_rig_frames": 4999,
+    "colmap_unsupported_image_ids_by_component": [[4494], [9495]],
+    "colmap_tracks_with_multiple_keypoints_in_one_image": [14593, 1325],
+    "colmap_excess_same_image_track_observations": [51707, 4562],
+    "note": "COLMAP's unsupported individual images belong to distinct rig frames with support from their other sensor. Atlas loses both sensors of one rig frame. Same-image distinct keypoints are reported, not confused with invalid duplicate observation references. Frozen acceptance gates remain unchanged."
+  },
   "decision": "Not promoted: frame 4493 loses all 14 source observations, and fixed trajectory still misses both COLMAP ATE gates. Low mean reprojection alone is insufficient.",
   "limitations": [
     "Integration-only resource measurement excludes source window mapping and frontend phases",
