@@ -5234,6 +5234,132 @@ mod lm_step_quality_tests {
     }
 
     #[test]
+    fn adaptive_prediction_matches_full_normal_with_rig_crosses_and_fixed_rotation() {
+        let mut system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![
+                Matrix6::from_diagonal(&Vector6::from_row_slice(&[4.0, 5.0, 6.0, 7.0, 8.0, 9.0])),
+                Matrix6::from_diagonal(&Vector6::from_row_slice(&[
+                    10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                ])),
+            ]),
+            b_p: DVector::from_row_slice(&[
+                1.0, -2.0, 3.0, -4.0, 5.0, -6.0, -1.5, 2.5, -3.5, 0.0, 0.0, 0.0,
+            ]),
+            landmarks: vec![
+                LandmarkBlock {
+                    h_ll: Matrix3::from_diagonal(&Vector3::new(3.0, 4.0, 5.0)),
+                    b_l: Vector3::new(0.25, -0.5, 0.75),
+                    cross: vec![
+                        (
+                            0,
+                            Matrix6x3::from_fn(|row, column| {
+                                if row == column {
+                                    0.2
+                                } else if row == column + 3 {
+                                    -0.1
+                                } else {
+                                    0.0
+                                }
+                            }),
+                        ),
+                        (
+                            0,
+                            Matrix6x3::from_fn(
+                                |row, column| {
+                                    if row == column {
+                                        -0.05
+                                    } else {
+                                        0.0
+                                    }
+                                },
+                            ),
+                        ),
+                        (
+                            1,
+                            Matrix6x3::from_fn(
+                                |row, column| {
+                                    if row == column + 3 {
+                                        0.08
+                                    } else {
+                                        0.0
+                                    }
+                                },
+                            ),
+                        ),
+                    ],
+                },
+                LandmarkBlock {
+                    h_ll: Matrix3::from_diagonal(&Vector3::new(6.0, 7.0, 8.0)),
+                    b_l: Vector3::new(-0.4, 0.6, -0.8),
+                    cross: vec![
+                        (
+                            1,
+                            Matrix6x3::from_fn(
+                                |row, column| {
+                                    if row == column {
+                                        -0.12
+                                    } else {
+                                        0.0
+                                    }
+                                },
+                            ),
+                        ),
+                        (
+                            0,
+                            Matrix6x3::from_fn(
+                                |row, column| {
+                                    if row == column + 3 {
+                                        0.07
+                                    } else {
+                                        0.0
+                                    }
+                                },
+                            ),
+                        ),
+                    ],
+                },
+            ],
+        };
+        constrain_fixed_pose_rotations(
+            &BTreeSet::from([20_u64]),
+            &BTreeMap::from([(10_u64, 0_usize), (20_u64, 1_usize)]),
+            &mut system,
+        );
+        let before = full_normal(&system);
+        let (full_h, full_b) = full_normal(&system);
+        let lambda = 0.5;
+        let damped = &full_h + lambda * DMatrix::<f64>::identity(18, 18);
+        let solved = damped
+            .lu()
+            .solve(&(-full_b.clone()))
+            .expect("multi-pose prediction fixture should solve");
+        let perturbation = DVector::from_row_slice(&[
+            0.003, -0.002, 0.001, -0.0015, 0.0025, -0.001, 0.0012, -0.0018, 0.0009, 0.0, 0.0, 0.0,
+            0.0017, -0.0011, 0.0008, -0.0014, 0.0006, -0.0009,
+        ]);
+        let delta = solved + perturbation;
+        let delta_poses = delta.rows(0, 12).into_owned();
+        let delta_landmarks = delta.rows(12, 6).into_owned();
+        let expected_prediction = -2.0 * full_b.dot(&delta) - delta.dot(&(&full_h * &delta));
+        let prediction = matrix_free_undamped_prediction(&system, &delta_poses, &delta_landmarks)
+            .expect("adaptive prediction fixture should be finite");
+        let quality = quality_coordinate_metrics(
+            &system,
+            lambda,
+            &delta_poses,
+            &delta_landmarks,
+            MatrixFreeQualityCoordinate::Current,
+        )
+        .expect("quality fixture should be finite");
+        assert_close(prediction, expected_prediction);
+        assert_close(
+            quality.predicted_undamped_squared_decrease,
+            expected_prediction,
+        );
+        assert_eq!(before, full_normal(&system));
+    }
+
+    #[test]
     fn componentwise_eta_is_invariant_under_positive_column_scaling() {
         let original = synthetic_system();
         let mut scaled = synthetic_system();
@@ -10140,6 +10266,11 @@ mod matrix_free_ba_api_tests {
             )
             .unwrap();
         assert!(adaptive_result.ba.final_cost.is_finite());
+        assert!(adaptive_result
+            .ba
+            .iterations
+            .iter()
+            .any(|iteration| iteration.step_accepted));
         assert_eq!(rig_adaptive.poses[&0], adaptive_anchor_pose);
         assert_eq!(
             rig_adaptive.poses[&1].world_to_camera.rotation,
@@ -10366,6 +10497,47 @@ mod matrix_free_ba_api_tests {
     }
 
     #[test]
+    fn adaptive_damping_linear_failure_rolls_back_and_records_none_candidate_metrics() {
+        let mut problem = make_problem();
+        let before = problem.clone();
+        let mut config = matrix_free_config();
+        config.max_iterations = 3;
+        let result = problem
+            .optimize_matrix_free_column_scaled_adaptive(
+                &config,
+                MatrixFreeBaColumnScalingOptions {
+                    pcg: MatrixFreeBaOptions {
+                        max_pcg_iterations: 1,
+                        pcg_relative_tolerance: 0.0,
+                        pcg_absolute_tolerance: 1.0e-30,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(problem, before);
+        assert_eq!(result.adaptive_iterations.len(), config.max_iterations);
+        assert!(result.adaptive_iterations.iter().all(|stats| stats
+            .predicted_undamped_squared_decrease
+            .is_none()
+            && stats.actual_cost_decrease.is_none()
+            && stats.rho.is_none()
+            && stats.cost_gate.is_none()
+            && stats.feasibility_gate.is_none()
+            && stats.nonprojectable_after.is_none()
+            && !stats.accepted
+            && stats.reason == "linear_failure"));
+        assert!(result
+            .adaptive_iterations
+            .windows(2)
+            .all(|pair| pair[1].solve_lambda == pair[0].next_lambda));
+        assert!(result
+            .ba
+            .matrix_free_iterations
+            .iter()
+            .all(|stats| stats.pcg_failure.is_some()));
+    }
+
+    #[test]
     fn adaptive_damping_rejects_nonpositive_rho_without_panic() {
         let decision =
             adaptive_step_decision(Some(Ok(f64::MAX)), f64::from_bits(1), 0.0, 0, 0, true, true);
@@ -10387,6 +10559,47 @@ mod matrix_free_ba_api_tests {
         assert!((moderate_rho - 1.125).abs() < 1.0e-15);
         let bounded = adaptive_accepted_lambda(1.0e6, 2.0, 1.0e-6, 10.0).unwrap();
         assert_eq!(bounded, 10.0);
+        assert_eq!(
+            adaptive_accepted_lambda(1.0e-12, 1.0e-300, 1.0e-6, 1.0e6).unwrap(),
+            1.0e-6
+        );
+        assert_eq!(
+            adaptive_accepted_lambda(1.0, f64::MAX, 1.0e-6, 1.0e6).unwrap(),
+            1.0 / 3.0
+        );
+
+        let cost_rejected = adaptive_step_decision(Some(Ok(1.0)), 2.0, 3.0, 0, 0, false, true);
+        assert!(!cost_rejected.accepted);
+        assert_eq!(cost_rejected.reason, "candidate_rejected_cost_gate");
+        let feasibility_rejected =
+            adaptive_step_decision(Some(Ok(1.0)), 2.0, 1.0, 0, 1, true, false);
+        assert!(!feasibility_rejected.accepted);
+        assert_eq!(
+            feasibility_rejected.reason,
+            "candidate_rejected_feasibility_gate"
+        );
+        let nonpositive_prediction =
+            adaptive_step_decision(Some(Ok(0.0)), 2.0, 1.0, 0, 0, true, true);
+        assert!(!nonpositive_prediction.accepted);
+        assert_eq!(nonpositive_prediction.rho, None);
+        assert_eq!(
+            nonpositive_prediction.reason,
+            "candidate_rejected_rho:prediction_nonpositive_or_nonfinite"
+        );
+        let infinite_prediction =
+            adaptive_step_decision(Some(Ok(f64::INFINITY)), 2.0, 1.0, 0, 0, true, true);
+        assert!(!infinite_prediction.accepted);
+        assert_eq!(
+            infinite_prediction.reason,
+            "candidate_rejected_prediction:adaptive prediction is non-finite"
+        );
+        let overflowed_cost_difference =
+            adaptive_step_decision(Some(Ok(1.0)), f64::MAX, -f64::MAX, 0, 0, true, true);
+        assert!(!overflowed_cost_difference.accepted);
+        assert_eq!(
+            overflowed_cost_difference.reason,
+            "candidate_rejected_rho:actual_cost_decrease_nonfinite"
+        );
 
         let rejected = adaptive_step_decision(
             Some(Err("adaptive prediction is non-finite")),
