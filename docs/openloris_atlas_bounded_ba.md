@@ -1210,3 +1210,35 @@ cross-sensor observations; metric observations are present, without proving
 full rank. Excluding the selected anchor's observations gives 1,313,303 /
 124,955 cross entries and sums of squared per-point cross counts 40,517,191 /
 3,124,173. These are work/storage inventory, not a dense allocation plan.
+
+### Bounded PCG residual restart: 1k result (2026-09-08)
+
+[Nine-run evidence](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json)
+uses implementation `ca67e80`, explicit restart limit 0/1 and the unchanged
+512-total-iteration budget. True residual failure can restart once, but never
+extends the budget or bypasses the nonlinear acceptance/depth checks. The
+default remains restart-off; existing API shapes and the LM loop are retained.
+
+At relative tolerance 1e-8, restart increases successful linear solves from
+3 to 5 and accepted LM steps from 3 to 4. Seven restarts produce cost
+118070.232073 versus 118070.554369 without restart, and GT RMSE
+0.02660802754 versus 0.02660805517 m: the trajectory improvement is negligible.
+The recovered linear solve at LM8 is still rejected by LM; the trace alone
+does not establish the exact rejection reason. Maximum individual reprojection
+also rises slightly, from 4.840089 to 4.840263 px. Direct remains better in
+cost and trajectory RMSE, so this is not an equivalent-quality speed result.
+
+Restart-on repeats have identical model files and all 60 numerical/diagnostic
+trace rows. Legacy relative/direct repeats are also exact; explicit restart 0
+matches the legacy model and LM/PCG trace. Under strict 1e-12 tolerance,
+seven restarts leave the final model byte-identical to strict restart-off.
+All 1,000 supported images, 500 supported frames, 4,716 points, 130,900
+observations and 361,170 full keypoints are retained, with one connected
+frame graph, fixed calibration and no nonpositive depths.
+
+Restart-on wall times are 24.00/20.82 s, relative-off 23.71/20.21 s and
+direct 56.01/44.67 s on the shared host; these are local single-thread BA
+processes, not mapper/native end-to-end measurements. This implementation
+does not promote the 10k or README performance claims. The next experiment
+is the actual two-component atlas with the explicit boundary/anchor policy,
+not further tuning solely to reproduce the internal direct backend.

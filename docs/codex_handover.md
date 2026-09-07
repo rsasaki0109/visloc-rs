@@ -1,5 +1,13 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新追記（2026-09-08）: `feat/m8-bounded-pcg-residual-restart` の
+> `ca67e80` で上限1回・総反復数を延長しないPCG再開を実装し、1kの9本を測定済み。
+> [証跡](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json)。
+> 相対許容誤差1e-8では線形成功3→5、LM受理3→4だが、RMSE改善は約2.76e-8 mで
+> ごく小さい。strict設定では再開7回でも最終モデルは従来と同一。10k/README非昇格。
+> 次は実atlas両成分を、共有rig支持を維持する明示オプション・元IDの固定anchorで
+> 2 GiB仮想アドレス上限内で実行する。M8–M10のCOLMAP比較・E2E・各規模ゲートは未完了。
+
 > 現在の引き継ぎ先（2026-09-07）:
 > [OpenLORIS M8–M10計画](openloris_m8_m10_plan.md) と
 > [rig-atlas診断記録](openloris_rig_atlas_diagnostic.md)。以下は9月1日時点の

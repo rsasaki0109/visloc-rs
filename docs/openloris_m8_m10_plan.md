@@ -135,6 +135,16 @@ reveals a driver-boundary rejection before BA: a known observation-free sensor
 image belongs to an otherwise observed calibrated rig frame. Preserve that
 image; explicitly support this case and a nonzero tail anchor in a separate
 driver mode before running both components. The pilot is not a solver RSS pass.
+The bounded-restart implementation `ca67e80` now has a
+[nine-run 1k comparison](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json).
+Relative restart improves accepted LM steps 3 to 4, but RMSE changes by only
+2.76e-8 m; strict restart leaves the final model exactly unchanged. Repeated
+models and traces match. These results do not establish equivalent-quality
+speed or 10k improvement. Driver extension `c2eeb70` adds explicit shared-rig
+unsupported-sensor retention and an existing fixed-frame ID; 17 example tests
+pass and the default 1k model/40 numerical rows match the previous driver.
+Next measure both original atlas components under the explicit resource cap,
+without dropping observations, renumbering frames or changing calibration.
 
 ## Historical M7 baseline
 
