@@ -32,11 +32,12 @@ and output hashes are in
 registers **9,998/10,000 images** with **0.3843 m ATE RMSE**, **0.6387 m p95**,
 and **0.9030 px** mean reprojection error. visloc's 10k quality work is still
 in progress: an experimental observation-backed atlas matches its connected
-rig-frame counts, but **0.3911 m RMSE / 0.6431 m p95** still miss the trajectory
-targets. No
-10k speed win at equivalent quality is claimed. See the
+rig-frame counts. Its latest bounded refinement reaches **0.3890 m RMSE /
+0.6382 m p95**: p95 meets the frozen control, but RMSE still misses the target.
+Mean reprojection error is **0.5806 px**, with all 4,999 supported rig frames
+preserved. No 10k speed win at equivalent quality is claimed. See the
 [frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
-and [M8–M10 comparison plan](docs/openloris_m8_m10_plan.md).
+and [experimental refinement evidence](benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
 
 ## 10,008-image real-world SfM scale validation
 

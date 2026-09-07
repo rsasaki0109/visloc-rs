@@ -1,6 +1,9 @@
 # Bounded observation-based atlas refinement
 
-Status: first strict BA policy measured and rejected for trajectory regression.
+Status: strict BA was rejected for trajectory regression; the separately named
+filtering arm improves RMSE/p95 to 0.388993/0.638173 m, passing only the frozen
+p95 gate. RMSE and the full M8–M10 objective remain unmet. See the latest result
+at the end of this document; earlier sections preserve the experiment history.
 The [recovery foundation](openloris_atlas_landmark_integration.md) is merged as
 [PR #71](https://github.com/rsasaki0109/visloc-rs/pull/71), after all eight CI
 checks passed. Its RMSE/p95 remain above the frozen COLMAP acceptance gates.
@@ -319,5 +322,33 @@ fixed-rig and frame-connectivity checks.
 The transition auditor's seven tests and the geometry auditor's thirteen tests
 pass. Applied to the frozen connected strict control, it independently confirms
 8,988 main image rows, 319,144 points and 1,327,687 observations unchanged, with
-840 changed pose rows and zero removed observations or points. Filtering-mode
-results still require measurement.
+840 changed pose rows and zero removed observations or points.
+
+### First connected filtering result
+
+Implementation `be09d1a` passes 44 example tests and 20 independent Python auditor
+tests. Both pre-BA checkpoints match the frozen repair baseline across all six
+files; filter-OFF main output also matches the frozen connected strict BA output.
+
+All 150 main and 17 tail windows are accepted, including the previously rejected
+windows starting at 1950 and 1980. Main filtering removes 922 points / 13,788
+observations; tail filtering removes 35 points / 652 observations. The independent
+transition auditor reproduces these exact counts, with no added observations,
+track merge/split, keypoint identity change or loss of supported images.
+The independent geometry auditor confirms all 4,999 supported rig frames, one
+4,494-frame main graph and one 505-frame tail graph, fixed calibration,
+bidirectional references and positive depth. The final model has 352,837 points
+and 1,438,880 observations, with mean reprojection error 0.580644 px.
+
+With unchanged scoring, RMSE/p95 improve from 0.391075/0.643107 m to
+**0.388993/0.638173 m**. Only p95 meets the frozen COLMAP gates
+(0.384307/0.638669 m). This is an improved experimental refinement candidate,
+not a production promotion or proof of full COLMAP parity.
+
+Main/tail pilots take 201.84/15.60 s with peak RSS 525,236/77,684 KiB. They include
+integration/recovery/repair/checkpoint/refinement, run on a shared machine with
+overlapping control/repeat jobs, and are **not** mapper/native-E2E comparisons.
+Both components repeat byte-for-byte across all six output files; the tail
+repeat omits checkpoint writing and still matches. All eight CI checks pass
+for implementation `be09d1a` (run 34094029224). Hashes, exact counts and scope are in
+[filtered BA evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).

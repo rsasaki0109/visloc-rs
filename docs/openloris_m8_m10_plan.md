@@ -1331,6 +1331,27 @@ progress.
    docs. Run full CI, squash-merge each PR, delete merged remote/local topic
    branches, and finish on clean `main`.
 
+## Connected filtered BA checkpoint (2026-09-07)
+
+The separately named, default-off filtering arm improves the connected 10k
+model to **0.388993 m RMSE / 0.638173 m p95**, with mean reprojection error
+0.580644 px. The p95 gate passes, but the frozen COLMAP RMSE gate
+(0.384307 m) still fails. No full parity or speed claim follows from this pilot.
+
+Independent audits preserve 9,998 poses, 9,997 supported images, all 4,999
+supported rig frames and the connected 4,494/505-frame graphs. The 957-point /
+14,440-observation deletion ledger matches the serialized outputs exactly.
+Both input checkpoints and the strict filter-OFF control match their frozen
+baselines; main and tail repeats are byte-identical across six output files.
+All 44 example tests, 20 independent auditor tests and eight implementation CI
+checks pass. Details and reproducible hashes are in
+[filtered BA evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
+
+Finish PR #73 final CI/merge, then use observation/solver diagnostics to choose
+the next GT-free, bounded refinement step. Do not select thresholds or mapping
+actions using ground truth. Mapper/native-E2E performance, tier nonregression,
+restart and 100k I/O requirements remain unchanged and incomplete.
+
 ## Stop conditions
 
 - Do not launch a larger tier after an input/hash/calibration mismatch.

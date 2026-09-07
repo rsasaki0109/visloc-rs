@@ -12,16 +12,21 @@
 >
 > [同一入力のstrict BA](../benchmarks/electro/m8-openloris-atlas-connected-strict-ba-v1.json)
 > はBA直前checkpointの全6ファイル一致を確認しましたが、RMSE/p95が
-> 0.391408/0.643460 mに悪化したため非昇格。現在はDraft PR #73
-> (`feat/m8-connected-atlas-refinement`) で、既定OFFの
-> `--joint-rig-ba-filter-observations` を実装・レビュー中です。
+> 0.391408/0.643460 mに悪化したため非昇格。PR #73
+> (`feat/m8-connected-atlas-refinement`) の既定OFFの
+> `--joint-rig-ba-filter-observations` は実装と44テストが完了しました。
 > 除去前の全観測costと、同じ残存観測集合での前後costを別々に検査し、
 > 支持画像・フレームと連結性を維持します。変更する局所候補だけを保持し、
 > 削除した観測・trackを明示的に数えます。詳細は
 > [有界BAの検証契約](openloris_atlas_bounded_ba.md)を参照してください。
 >
-> 次の順序は、削除・拒否・rollbackのテスト、既定OFFでのstrict出力一致、
-> 同一checkpointからの10k試走、独立した幾何/連結性監査と軌跡評価、再実行一致です。
+> [10k filtering試走](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json)
+> はRMSE/p95が0.388993/0.638173 m、平均再投影0.580644 pxへ改善。
+> p95だけがCOLMAP基準を満たし、RMSEはまだ未達です。独立監査で
+> 957点・14,440観測の削除数一致、全支持/連結性維持を確認しました。
+> 両成分のBA直前checkpointと、filter OFFの主成分strict出力も全6ファイル一致。
+> 両成分の再実行も各6ファイル一致、実装コミットのCIは8項目通過。
+> 次はPR #73の最終CI/mergeと、GT非使用の次の精度改善の検討です。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 
