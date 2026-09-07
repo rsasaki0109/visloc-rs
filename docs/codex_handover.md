@@ -73,6 +73,11 @@
 > 元の3ファイルhash、全支持・連結性・校正、RMSE/p95 0.026703/0.041346 mの
 > 再採点一致まで確認済み。driver/A/Bは未実施。名前・全keypoint identityを
 > 保持するpost-map比較driverが次段階で、10k global runにはまだ進みません。
+> PR #78は最終CI8項目（run 34112509926）通過後、`552f79b`へmergeし旧branchを整理済み。
+> 現在は `feat/m8-matrix-free-rig-ba-comparison`。1k用single-arm driverを実装中で、
+> direct/matrix-freeを別プロセス・同一入力・全観測保持・frame 0のみ固定で測定します。
+> 初期設定は両者20 LM反復/λ1e-4/robustなし/serial、PCGは既定128反復/tol1e-12。
+> 元画像名・全keypoint・track identityを維持し、保存ERRORは投影から再計算します。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 

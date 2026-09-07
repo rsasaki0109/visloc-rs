@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "date": "2026-09-07",
-  "status": "runtime_integration_local_gate_passed_final_ci_pending",
+  "status": "runtime_integration_gate_passed_and_merged_real_model_AB_pending",
   "implementation_commit": "1d7427fb1cb7a65c60b38d7231d9ed1fbaf2863e",
   "metric_fixture_commits": [
     "2d77ae95b1aefb66f17d67ef4c466d881f5a26b6",
@@ -48,7 +48,15 @@
     "docs_links": "passed",
     "registry_validate": "189 files passed",
     "registry_generated_docs": "up to date",
-    "exact_head_CI": "pending before merge"
+    "exact_head_CI": {
+      "head": "b29cc030b47dfe2d01bbbc44f590086434c13133",
+      "run": 34112509926,
+      "checks_passed": 8,
+      "rust_job_seconds": 269,
+      "merge_commit": "552f79b11f7e81329f3720db261be1dec7003c30",
+      "merged_at": "2026-09-07T10:44:19Z",
+      "local_and_remote_branch_removed": true
+    }
   },
   "coverage": {
     "mono": "Fixed pose and a truth-position fixed point anchor scale; compare both variable pose matrices and variable points against direct Sparse BA, final cost and exact repeat state/trace",

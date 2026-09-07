@@ -34,6 +34,18 @@
     "track_connected_component_sizes": [500],
     "track_connected_component_frame_ranges": [[0, 499]]
   },
+  "independent_cross_sensor_track_audit": {
+    "method": "Resolve image names through the rig manifest, then inspect every original point track; no image-ID-to-frame inference",
+    "total_tracks": 4716,
+    "cross_sensor_tracks": 174,
+    "tracks_with_same_frame_stereo": 136,
+    "frames_supported_by_cross_sensor_tracks": 459,
+    "cross_sensor_only_largest_frame_component": 459,
+    "cross_sensor_only_isolated_frames": 41,
+    "full_track_graph_components": 1,
+    "used_as_a_filter": false,
+    "proves_full_numerical_rank_or_conditioning": false
+  },
   "independent_input_trajectory_rescore": {
     "scorer": "scripts/score_openloris_model.py",
     "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
