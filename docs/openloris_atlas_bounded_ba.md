@@ -615,11 +615,12 @@ rerun by the reviewer. A hand-computable two-pose fixture checks zero/nonzero
 damping against the full 15-by-15 normal system, including same-pose sensor
 cross terms. The rig matvec tolerance uses the magnitudes of the unreduced and
 eliminated terms so cancellation does not hide the floating-point scale.
-Clippy, formatting and 46 relevant Python tests pass. PR #77 final-head CI is
-pending; [numerical evidence](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)
+Clippy, formatting and 46 relevant Python tests pass. PR #77 passed all eight
+final-head CI checks (run 34108930129), merged as `0460c9c`, and its old branch
+was removed; [numerical evidence](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)
 records scope and limitations. No production or 10k performance claim follows.
 
-#### Next integration gate (not implemented by this prototype)
+#### Integration gate (in progress on `feat/m8-matrix-free-ba-entry`)
 
 After the private numerical gate and CI, expose an additive, opt-in pure-visual
 entry point with separate iterative options. Keep existing public enum variants,

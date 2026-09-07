@@ -56,7 +56,15 @@
     "benchmark_registry_validate": "189 files passed",
     "benchmark_registry_check_generated": "passed"
   },
-  "final_head_ci": "pending; see pull request exact-head checks before merge",
+  "final_head_ci": {
+    "head": "36fe70043adfb3a215a1e007657b5ef7782c1346",
+    "run": 34108930129,
+    "checks_passed": 8,
+    "rust_job_seconds": 214,
+    "merge_commit": "0460c9ca07af63e5ce0d592d05a763b1b9b21d9a",
+    "merged_at": "2026-09-07T10:02:05Z",
+    "local_and_remote_feature_branch_removed": true
+  },
   "readme_scoring_clarification": "One Sim(3) alignment per component, then pooled GT-scored image errors for RMSE and p95, not averages of component metrics. Scorer source and frozen comparison values unchanged; aggregation regression test added.",
   "limits": {
     "global_or_10k_experiment_run": false,

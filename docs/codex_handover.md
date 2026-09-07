@@ -60,7 +60,10 @@
 > `469ee9a`＋`8a1485a`の試作10テストを含むBA 21テスト、clippy/fmt、関連Python
 > 46テストが通過。手計算fixtureとfull 15×15連立系も独立照合済みです。
 > [数値検証記録](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)。
-> PR #77の最終head CI確認とmergeが次のcheckpointです。
+> PR #77は最終head CI8項目通過（run 34108930129）後、`0460c9c`へmerge済み。
+> 旧branchも整理済み。現在は `feat/m8-matrix-free-ba-entry` で追加の選択式APIを
+> 実装中です。既定solver/API互換性を保ち、組立前の適格性検査、有限で正のLM設定、
+> 真の残差と失敗理由の診断、更新拒否を共通LM処理に組み込みます。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 
