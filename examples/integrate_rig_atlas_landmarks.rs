@@ -27,7 +27,7 @@ use visloc_rs::vision::pnp::{
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
-const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba [--pre-ba-out-dir PATH]]\n    [--joint-rig-ba-filter-observations]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
+const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba [--pre-ba-out-dir PATH]]\n    [--joint-rig-ba-filter-observations [--joint-rig-ba-preserve-optimized-points]]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
 const XY_TOLERANCE_PX: f64 = 1.0e-9;
 const INTRINSIC_TOLERANCE: f64 = 1.0e-8;
 const MIN_TRACK_OBSERVATIONS: usize = 2;
@@ -69,6 +69,7 @@ struct Args {
     recover_zero_support_frames: bool,
     joint_rig_ba: bool,
     joint_rig_ba_filter_observations: bool,
+    joint_rig_ba_preserve_optimized_points: bool,
     diagnose_cross_boundary_pnp: bool,
     diagnostic_left_max_frame: Option<u64>,
     repair_cross_boundary: bool,
@@ -275,10 +276,45 @@ struct JointRigBaFilteringSummary {
     removed_tracks: usize,
     retriangulated_tracks: usize,
     removed_reason_counts: BTreeMap<FilterObservationReason, usize>,
+    /// These are selected-landmark events accumulated over windows, not
+    /// unique global point counts.
+    raw_preserved_tracks: usize,
+    dlt_attempted_tracks: usize,
+    raw_fallback_reason_counts: BTreeMap<RawPointFallbackReason, usize>,
     full_pre_ba_cost: f64,
     full_post_ba_cost: f64,
     retained_pre_ba_cost: f64,
     retained_post_filter_cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RawPointFallbackReason {
+    ObservationKeysChanged,
+    TooFewObservations,
+    NonFinite,
+    NoObservableParallax,
+    ParallaxCheckFailed,
+    NonPositiveDepth,
+    ProjectionFailure,
+    MeanOverMax,
+    MaxOverMax,
+}
+
+impl std::fmt::Display for RawPointFallbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::ObservationKeysChanged => "observations-changed",
+            Self::TooFewObservations => "too-few-observations",
+            Self::NonFinite => "nonfinite",
+            Self::NoObservableParallax => "no-observable-parallax",
+            Self::ParallaxCheckFailed => "parallax-check-failed",
+            Self::NonPositiveDepth => "nonpositive-depth",
+            Self::ProjectionFailure => "projection-failure",
+            Self::MeanOverMax => "mean-over-max",
+            Self::MaxOverMax => "max-over-max",
+        };
+        f.write_str(label)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -349,6 +385,7 @@ where
     let mut recover_zero_support_frames = false;
     let mut joint_rig_ba = false;
     let mut joint_rig_ba_filter_observations = false;
+    let mut joint_rig_ba_preserve_optimized_points = false;
     let mut diagnose_cross_boundary_pnp = false;
     let mut diagnostic_left_max_frame = None;
     let mut repair_cross_boundary = false;
@@ -376,6 +413,13 @@ where
                 return Err(format!("duplicate argument {flag}\n{USAGE}"));
             }
             joint_rig_ba_filter_observations = true;
+            continue;
+        }
+        if flag == "--joint-rig-ba-preserve-optimized-points" {
+            if joint_rig_ba_preserve_optimized_points {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            joint_rig_ba_preserve_optimized_points = true;
             continue;
         }
         if flag == "--pre-ba-out-dir" {
@@ -493,6 +537,12 @@ where
             "--joint-rig-ba-filter-observations requires --joint-rig-ba\n{USAGE}"
         ));
     }
+    if joint_rig_ba_preserve_optimized_points && !(joint_rig_ba && joint_rig_ba_filter_observations)
+    {
+        return Err(format!(
+            "--joint-rig-ba-preserve-optimized-points requires --joint-rig-ba and --joint-rig-ba-filter-observations\n{USAGE}"
+        ));
+    }
     Ok(Args {
         rig_manifest: rig_manifest.ok_or_else(|| format!("--rig-manifest is required\n{USAGE}"))?,
         nodes_tsv: nodes_tsv.ok_or_else(|| format!("--nodes-tsv is required\n{USAGE}"))?,
@@ -502,6 +552,7 @@ where
         recover_zero_support_frames,
         joint_rig_ba,
         joint_rig_ba_filter_observations,
+        joint_rig_ba_preserve_optimized_points,
         diagnose_cross_boundary_pnp,
         diagnostic_left_max_frame,
         repair_cross_boundary,
@@ -781,33 +832,59 @@ fn run(args: &Args) -> Result<(), String> {
             );
         }
         if args.joint_rig_ba_filter_observations {
-            let summary = run_joint_rig_ba_filtering(
+            let summary = run_joint_rig_ba_filtering_with_policy(
                 &manifest,
                 &mut store,
                 &mut global_images,
                 &cameras,
                 &mut landmarks,
+                args.joint_rig_ba_preserve_optimized_points,
             )?;
             validate_output_cameras(&manifest, &global_images, &cameras)?;
-            println!(
-                "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
-                summary.windows_considered,
-                summary.windows_accepted,
-                summary.windows_skipped,
-                summary.selected_landmarks,
-                summary.selected_observations,
-                summary.max_referenced_frames,
-                summary.max_free_frames,
-                summary.max_iterations,
-                summary.converged_windows,
-                summary.removed_observations,
-                summary.removed_tracks,
-                summary.retriangulated_tracks,
-                summary.full_pre_ba_cost,
-                summary.full_post_ba_cost,
-                summary.retained_pre_ba_cost,
-                summary.retained_post_filter_cost,
-            );
+            if args.joint_rig_ba_preserve_optimized_points {
+                println!(
+                    "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} raw_preserved_tracks={} dlt_attempted_tracks={} raw_fallback_reasons={} raw_counts_are_window_events=true full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
+                    summary.windows_considered,
+                    summary.windows_accepted,
+                    summary.windows_skipped,
+                    summary.selected_landmarks,
+                    summary.selected_observations,
+                    summary.max_referenced_frames,
+                    summary.max_free_frames,
+                    summary.max_iterations,
+                    summary.converged_windows,
+                    summary.removed_observations,
+                    summary.removed_tracks,
+                    summary.retriangulated_tracks,
+                    summary.raw_preserved_tracks,
+                    summary.dlt_attempted_tracks,
+                    format_raw_fallback_reason_counts(&summary.raw_fallback_reason_counts),
+                    summary.full_pre_ba_cost,
+                    summary.full_post_ba_cost,
+                    summary.retained_pre_ba_cost,
+                    summary.retained_post_filter_cost,
+                );
+            } else {
+                println!(
+                    "joint_rig_ba_filter_observations windows_considered={} windows_accepted={} windows_skipped={} selected_landmarks={} selected_observations={} max_referenced_frames={} max_free_frames={} max_iterations={} converged_windows={} removed_observations={} removed_tracks={} retriangulated_tracks={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9}",
+                    summary.windows_considered,
+                    summary.windows_accepted,
+                    summary.windows_skipped,
+                    summary.selected_landmarks,
+                    summary.selected_observations,
+                    summary.max_referenced_frames,
+                    summary.max_free_frames,
+                    summary.max_iterations,
+                    summary.converged_windows,
+                    summary.removed_observations,
+                    summary.removed_tracks,
+                    summary.retriangulated_tracks,
+                    summary.full_pre_ba_cost,
+                    summary.full_post_ba_cost,
+                    summary.retained_pre_ba_cost,
+                    summary.retained_post_filter_cost,
+                );
+            }
         } else {
             let summary = run_joint_rig_ba(
                 &manifest,
@@ -4046,6 +4123,9 @@ struct JointRigBaFilteringCandidate {
     retained_pre_ba_cost: f64,
     retained_post_filter_cost: f64,
     retriangulated_tracks: usize,
+    raw_preserved_tracks: usize,
+    dlt_attempted_tracks: usize,
+    raw_fallback_reason_counts: BTreeMap<RawPointFallbackReason, usize>,
     iterations: usize,
     converged: bool,
 }
@@ -4599,6 +4679,91 @@ fn classify_filter_observation(
     Ok(error)
 }
 
+/// Keep a raw BA point only when filtering left its complete original key set
+/// intact and the point passes the same bounded geometric gates as DLT.  The
+/// caller falls back to the historical DLT path for every error here; this
+/// helper never changes observation ownership or filtering decisions.
+fn retain_raw_ba_point_if_valid(
+    candidate: &LandmarkOutput,
+    expected_observations: &[ObservationKey],
+    observations: &BTreeMap<ObservationKey, ObservationState>,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    pose_overrides: &BTreeMap<u64, Pose>,
+) -> Result<LandmarkOutput, RawPointFallbackReason> {
+    if candidate.observations != expected_observations {
+        return Err(RawPointFallbackReason::ObservationKeysChanged);
+    }
+    if candidate.observations.len() < MIN_TRACK_OBSERVATIONS {
+        return Err(RawPointFallbackReason::TooFewObservations);
+    }
+    if !candidate
+        .position
+        .coords
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(RawPointFallbackReason::NonFinite);
+    }
+    let sample = bounded_sample(&candidate.observations, MAX_DLT_OBSERVATIONS);
+    match has_observable_parallax(&sample, observations, images, cameras, pose_overrides) {
+        Ok(true) => {}
+        Ok(false) => return Err(RawPointFallbackReason::NoObservableParallax),
+        Err(_) => return Err(RawPointFallbackReason::ParallaxCheckFailed),
+    }
+
+    let mut errors = Vec::with_capacity(candidate.observations.len());
+    for key in &candidate.observations {
+        let Some(image) = images.get(&key.global_image_id) else {
+            return Err(RawPointFallbackReason::ProjectionFailure);
+        };
+        let Some(camera) = cameras.get(&image.atlas.camera_id) else {
+            return Err(RawPointFallbackReason::ProjectionFailure);
+        };
+        let Some(observation) = observations.get(key) else {
+            return Err(RawPointFallbackReason::ProjectionFailure);
+        };
+        if !observation.xy.coords.iter().all(|value| value.is_finite()) {
+            return Err(RawPointFallbackReason::NonFinite);
+        }
+        let point_camera =
+            pose_for_image(image, pose_overrides).transform_world_point(&candidate.position);
+        if !point_camera.coords.iter().all(|value| value.is_finite()) {
+            return Err(RawPointFallbackReason::NonFinite);
+        }
+        if point_camera.z <= 0.0 {
+            return Err(RawPointFallbackReason::NonPositiveDepth);
+        }
+        let Some(projected) = camera.project(&point_camera) else {
+            return Err(RawPointFallbackReason::ProjectionFailure);
+        };
+        let error = (projected - observation.xy).norm();
+        if !error.is_finite() {
+            return Err(RawPointFallbackReason::NonFinite);
+        }
+        errors.push(error);
+    }
+    let mean_error = errors.iter().sum::<f64>() / errors.len() as f64;
+    let squared_sum = errors.iter().map(|error| error * error).sum::<f64>();
+    let rms_error = (squared_sum / errors.len() as f64).sqrt();
+    let max_error = errors.iter().copied().fold(0.0, f64::max);
+    if !mean_error.is_finite() || !rms_error.is_finite() || !max_error.is_finite() {
+        return Err(RawPointFallbackReason::NonFinite);
+    }
+    if mean_error > MAX_MEAN_REPROJECTION_PX {
+        return Err(RawPointFallbackReason::MeanOverMax);
+    }
+    if max_error > MAX_REPROJECTION_PX {
+        return Err(RawPointFallbackReason::MaxOverMax);
+    }
+    let mut retained = candidate.clone();
+    retained.errors = errors;
+    retained.mean_error = mean_error;
+    retained.rms_error = rms_error;
+    retained.max_error = max_error;
+    Ok(retained)
+}
+
 fn cost_for_landmark_keys(
     position: &Point3<f64>,
     keys: &[ObservationKey],
@@ -4684,6 +4849,7 @@ fn joint_ba_window_counts(
     ))
 }
 
+#[cfg(test)]
 fn build_joint_rig_ba_filter_candidate(
     manifest: &RigManifest,
     store: &TrackStore,
@@ -4692,6 +4858,29 @@ fn build_joint_rig_ba_filter_candidate(
     landmarks: &[LandmarkOutput],
     active_frames: &BTreeSet<u64>,
     baseline_connectivity: &SupportConnectivity,
+) -> Result<JointRigBaFilteringCandidate, JointRigBaSkip> {
+    build_joint_rig_ba_filter_candidate_with_policy(
+        manifest,
+        store,
+        images,
+        cameras,
+        landmarks,
+        active_frames,
+        baseline_connectivity,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_joint_rig_ba_filter_candidate_with_policy(
+    manifest: &RigManifest,
+    store: &TrackStore,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    active_frames: &BTreeSet<u64>,
+    baseline_connectivity: &SupportConnectivity,
+    preserve_optimized_points: bool,
 ) -> Result<JointRigBaFilteringCandidate, JointRigBaSkip> {
     let selected = selected_landmarks_for_frames(landmarks, active_frames, images)
         .map_err(JointRigBaSkip::Invalid)?;
@@ -4742,6 +4931,9 @@ fn build_joint_rig_ba_filter_candidate(
     let mut retained_pre_ba_cost = 0.0;
     let mut retained_post_filter_cost = 0.0;
     let mut retriangulated_tracks = 0;
+    let mut raw_preserved_tracks = 0;
+    let mut dlt_attempted_tracks = 0;
+    let mut raw_fallback_reason_counts = BTreeMap::new();
     for index in &selected {
         let old = landmarks.get(*index).ok_or_else(|| {
             JointRigBaSkip::Invalid("selected landmark index is invalid".to_owned())
@@ -4749,6 +4941,16 @@ fn build_joint_rig_ba_filter_candidate(
         let candidate = raw.landmark_updates.get(index).ok_or_else(|| {
             JointRigBaSkip::Invalid(format!("raw BA omitted selected landmark {index}"))
         })?;
+        let raw_gate_result = preserve_optimized_points.then(|| {
+            retain_raw_ba_point_if_valid(
+                candidate,
+                &old.observations,
+                &store.observations,
+                images,
+                cameras,
+                &raw.pose_overrides,
+            )
+        });
         let mut retained = Vec::with_capacity(candidate.observations.len());
         for key in &candidate.observations {
             match classify_filter_observation(
@@ -4766,6 +4968,11 @@ fn build_joint_rig_ba_filter_candidate(
             }
         }
         if retained.len() < MIN_TRACK_OBSERVATIONS {
+            if preserve_optimized_points {
+                if let Some(Err(reason)) = raw_gate_result {
+                    *raw_fallback_reason_counts.entry(reason).or_default() += 1;
+                }
+            }
             removed_track_ids.insert(old.track_id);
             for key in &old.observations {
                 removed_observations
@@ -4775,6 +4982,45 @@ fn build_joint_rig_ba_filter_candidate(
             continue;
         }
 
+        if preserve_optimized_points {
+            let raw_result = raw_gate_result
+                .expect("raw gate result is present when optimized points are enabled");
+            match (retained == old.observations, raw_result) {
+                (true, Ok(raw_landmark)) => {
+                    retained_pre_ba_cost += cost_for_landmark_keys(
+                        &old.position,
+                        &retained,
+                        &store.observations,
+                        images,
+                        cameras,
+                        &BTreeMap::new(),
+                    )
+                    .map_err(JointRigBaSkip::Invalid)?;
+                    retained_post_filter_cost += cost_for_landmark_keys(
+                        &raw_landmark.position,
+                        &retained,
+                        &store.observations,
+                        images,
+                        cameras,
+                        &raw.pose_overrides,
+                    )
+                    .map_err(JointRigBaSkip::Invalid)?;
+                    raw_preserved_tracks += 1;
+                    landmark_updates.insert(*index, raw_landmark);
+                    continue;
+                }
+                (false, Ok(_)) => {
+                    *raw_fallback_reason_counts
+                        .entry(RawPointFallbackReason::ObservationKeysChanged)
+                        .or_default() += 1;
+                }
+                (_, Err(reason)) => {
+                    *raw_fallback_reason_counts.entry(reason).or_default() += 1;
+                }
+            }
+        }
+
+        dlt_attempted_tracks += 1;
         let refined_track = GlobalTrack {
             observations: retained.clone(),
         };
@@ -4855,6 +5101,9 @@ fn build_joint_rig_ba_filter_candidate(
         retained_pre_ba_cost,
         retained_post_filter_cost,
         retriangulated_tracks,
+        raw_preserved_tracks,
+        dlt_attempted_tracks,
+        raw_fallback_reason_counts,
         iterations: raw.iterations,
         converged: raw.converged,
     })
@@ -4918,6 +5167,17 @@ fn filter_reason_counts(
 }
 
 fn format_filter_reason_counts(counts: &BTreeMap<FilterObservationReason, usize>) -> String {
+    counts
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_raw_fallback_reason_counts(counts: &BTreeMap<RawPointFallbackReason, usize>) -> String {
+    if counts.is_empty() {
+        return "none".to_owned();
+    }
     counts
         .iter()
         .map(|(reason, count)| format!("{reason}={count}"))
@@ -5225,12 +5485,24 @@ fn validate_filtered_model(
     Ok(())
 }
 
+#[cfg(test)]
 fn run_joint_rig_ba_filtering(
     manifest: &RigManifest,
     store: &mut TrackStore,
     images: &mut BTreeMap<u64, GlobalImage>,
     cameras: &BTreeMap<u64, Camera>,
     landmarks: &mut Vec<LandmarkOutput>,
+) -> Result<JointRigBaFilteringSummary, String> {
+    run_joint_rig_ba_filtering_with_policy(manifest, store, images, cameras, landmarks, false)
+}
+
+fn run_joint_rig_ba_filtering_with_policy(
+    manifest: &RigManifest,
+    store: &mut TrackStore,
+    images: &mut BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &mut Vec<LandmarkOutput>,
+    preserve_optimized_points: bool,
 ) -> Result<JointRigBaFilteringSummary, String> {
     let baseline_connectivity =
         support_connectivity_for_landmarks(landmarks, &BTreeMap::new(), &BTreeSet::new(), images)?;
@@ -5257,7 +5529,7 @@ fn run_joint_rig_ba_filtering(
             summary.max_referenced_frames = summary.max_referenced_frames.max(*referenced_count);
             summary.max_free_frames = summary.max_free_frames.max(*free_count);
         }
-        match build_joint_rig_ba_filter_candidate(
+        match build_joint_rig_ba_filter_candidate_with_policy(
             manifest,
             store,
             images,
@@ -5265,6 +5537,7 @@ fn run_joint_rig_ba_filtering(
             landmarks,
             &active_frames,
             &baseline_connectivity,
+            preserve_optimized_points,
         ) {
             Ok(candidate) => {
                 let reason_counts = filter_reason_counts(&candidate.removed_observations);
@@ -5277,6 +5550,8 @@ fn run_joint_rig_ba_filtering(
                 summary.removed_observations += candidate.removed_observations.len();
                 summary.removed_tracks += candidate.removed_track_ids.len();
                 summary.retriangulated_tracks += candidate.retriangulated_tracks;
+                summary.raw_preserved_tracks += candidate.raw_preserved_tracks;
+                summary.dlt_attempted_tracks += candidate.dlt_attempted_tracks;
                 summary.full_pre_ba_cost += candidate.full_pre_ba_cost;
                 summary.full_post_ba_cost += candidate.full_post_ba_cost;
                 summary.retained_pre_ba_cost += candidate.retained_pre_ba_cost;
@@ -5284,41 +5559,86 @@ fn run_joint_rig_ba_filtering(
                 for (reason, count) in &reason_counts {
                     *summary.removed_reason_counts.entry(*reason).or_default() += *count;
                 }
-                println!(
-                    "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} removed_observations={} removed_tracks={} retriangulated_tracks={} reasons={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9} iterations={} converged={}",
-                    active_frames.first().copied().unwrap_or_default(),
-                    active_frames.last().copied().unwrap_or_default(),
-                    active_frames.len(),
-                    candidate.selected_landmarks,
-                    candidate.selected_observations,
-                    candidate.referenced_frames,
-                    candidate.free_frames,
-                    candidate.removed_observations.len(),
-                    candidate.removed_track_ids.len(),
-                    candidate.retriangulated_tracks,
-                    format_filter_reason_counts(&reason_counts),
-                    candidate.full_pre_ba_cost,
-                    candidate.full_post_ba_cost,
-                    candidate.retained_pre_ba_cost,
-                    candidate.retained_post_filter_cost,
-                    candidate.iterations,
-                    candidate.converged,
-                );
+                for (reason, count) in &candidate.raw_fallback_reason_counts {
+                    *summary
+                        .raw_fallback_reason_counts
+                        .entry(*reason)
+                        .or_default() += *count;
+                }
+                if preserve_optimized_points {
+                    println!(
+                        "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} removed_observations={} removed_tracks={} retriangulated_tracks={} raw_preserved_tracks={} dlt_attempted_tracks={} raw_fallback_reasons={} raw_counts_are_window_events=true reasons={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9} iterations={} converged={}",
+                        active_frames.first().copied().unwrap_or_default(),
+                        active_frames.last().copied().unwrap_or_default(),
+                        active_frames.len(),
+                        candidate.selected_landmarks,
+                        candidate.selected_observations,
+                        candidate.referenced_frames,
+                        candidate.free_frames,
+                        candidate.removed_observations.len(),
+                        candidate.removed_track_ids.len(),
+                        candidate.retriangulated_tracks,
+                        candidate.raw_preserved_tracks,
+                        candidate.dlt_attempted_tracks,
+                        format_raw_fallback_reason_counts(&candidate.raw_fallback_reason_counts),
+                        format_filter_reason_counts(&reason_counts),
+                        candidate.full_pre_ba_cost,
+                        candidate.full_post_ba_cost,
+                        candidate.retained_pre_ba_cost,
+                        candidate.retained_post_filter_cost,
+                        candidate.iterations,
+                        candidate.converged,
+                    );
+                } else {
+                    println!(
+                        "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=accepted selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} removed_observations={} removed_tracks={} retriangulated_tracks={} reasons={} full_pre_ba_cost={:.9} full_post_ba_cost={:.9} retained_pre_ba_cost={:.9} retained_post_filter_cost={:.9} iterations={} converged={}",
+                        active_frames.first().copied().unwrap_or_default(),
+                        active_frames.last().copied().unwrap_or_default(),
+                        active_frames.len(),
+                        candidate.selected_landmarks,
+                        candidate.selected_observations,
+                        candidate.referenced_frames,
+                        candidate.free_frames,
+                        candidate.removed_observations.len(),
+                        candidate.removed_track_ids.len(),
+                        candidate.retriangulated_tracks,
+                        format_filter_reason_counts(&reason_counts),
+                        candidate.full_pre_ba_cost,
+                        candidate.full_post_ba_cost,
+                        candidate.retained_pre_ba_cost,
+                        candidate.retained_post_filter_cost,
+                        candidate.iterations,
+                        candidate.converged,
+                    );
+                }
             }
             Err(reason) => {
                 summary.windows_skipped += 1;
                 let (selected_count, observation_count, referenced_count, free_count) =
                     window_counts.unwrap_or_default();
-                println!(
-                    "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} reason={reason}",
-                    active_frames.first().copied().unwrap_or_default(),
-                    active_frames.last().copied().unwrap_or_default(),
-                    active_frames.len(),
-                    selected_count,
-                    observation_count,
-                    referenced_count,
-                    free_count,
-                );
+                if preserve_optimized_points {
+                    println!(
+                        "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} raw_preserved_tracks=0 dlt_attempted_tracks=0 raw_fallback_reasons=none raw_counts_are_window_events=true reason={reason}",
+                        active_frames.first().copied().unwrap_or_default(),
+                        active_frames.last().copied().unwrap_or_default(),
+                        active_frames.len(),
+                        selected_count,
+                        observation_count,
+                        referenced_count,
+                        free_count,
+                    );
+                } else {
+                    println!(
+                        "joint_rig_ba_filter_window start_frame={} end_frame={} active_frames={} status=skipped selected_landmarks={} selected_observations={} referenced_frames={} free_frames={} reason={reason}",
+                        active_frames.first().copied().unwrap_or_default(),
+                        active_frames.last().copied().unwrap_or_default(),
+                        active_frames.len(),
+                        selected_count,
+                        observation_count,
+                        referenced_count,
+                        free_count,
+                    );
+                }
             }
         }
     }
@@ -6637,6 +6957,7 @@ mod tests {
         assert!(!args.recover_zero_support_frames);
         assert!(!args.joint_rig_ba);
         assert!(!args.joint_rig_ba_filter_observations);
+        assert!(!args.joint_rig_ba_preserve_optimized_points);
         assert_eq!(args.pre_ba_out_dir, None);
         assert!(!args.diagnose_cross_boundary_pnp);
         assert_eq!(args.diagnostic_left_max_frame, None);
@@ -6701,6 +7022,22 @@ mod tests {
         ])
         .unwrap();
         assert!(args.joint_rig_ba_filter_observations);
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba".to_owned(),
+            "--joint-rig-ba-filter-observations".to_owned(),
+            "--joint-rig-ba-preserve-optimized-points".to_owned(),
+        ])
+        .unwrap();
+        assert!(args.joint_rig_ba_preserve_optimized_points);
         let error = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -6715,6 +7052,20 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("requires --joint-rig-ba"));
+        let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba-preserve-optimized-points".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --joint-rig-ba and --joint-rig-ba-filter-observations"));
         let args = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -6925,6 +7276,7 @@ mod tests {
             recover_zero_support_frames: false,
             joint_rig_ba: true,
             joint_rig_ba_filter_observations: false,
+            joint_rig_ba_preserve_optimized_points: false,
             diagnose_cross_boundary_pnp: false,
             diagnostic_left_max_frame: None,
             repair_cross_boundary: false,
@@ -7025,6 +7377,9 @@ mod tests {
             retained_pre_ba_cost: 0.0,
             retained_post_filter_cost: 0.0,
             retriangulated_tracks: 0,
+            raw_preserved_tracks: 0,
+            dlt_attempted_tracks: 0,
+            raw_fallback_reason_counts: BTreeMap::new(),
             iterations: 0,
             converged: true,
         };
@@ -7080,6 +7435,9 @@ mod tests {
             retained_pre_ba_cost: 0.0,
             retained_post_filter_cost: 0.0,
             retriangulated_tracks: 1,
+            raw_preserved_tracks: 0,
+            dlt_attempted_tracks: 1,
+            raw_fallback_reason_counts: BTreeMap::new(),
             iterations: 0,
             converged: true,
         };
@@ -7113,6 +7471,9 @@ mod tests {
             retained_pre_ba_cost: 0.0,
             retained_post_filter_cost: 0.0,
             retriangulated_tracks: 0,
+            raw_preserved_tracks: 0,
+            dlt_attempted_tracks: 0,
+            raw_fallback_reason_counts: BTreeMap::new(),
             iterations: 0,
             converged: false,
         };
@@ -7185,6 +7546,36 @@ mod tests {
     }
 
     #[test]
+    fn optimized_point_policy_is_flag_dependent_and_deterministic() {
+        let (manifest, store, images, cameras, landmarks, active) = joint_ba_fixture();
+        let baseline = support_connectivity_for_landmarks(
+            &landmarks,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &images,
+        )
+        .unwrap();
+        let disabled = build_joint_rig_ba_filter_candidate(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline,
+        )
+        .unwrap();
+        assert_eq!(disabled.raw_preserved_tracks, 0);
+        assert_eq!(disabled.raw_fallback_reason_counts, BTreeMap::new());
+
+        let enabled = build_joint_rig_ba_filter_candidate_with_policy(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline, true,
+        )
+        .unwrap();
+        let enabled_again = build_joint_rig_ba_filter_candidate_with_policy(
+            &manifest, &store, &images, &cameras, &landmarks, &active, &baseline, true,
+        )
+        .unwrap();
+        assert_eq!(enabled, enabled_again);
+        assert!(enabled.raw_preserved_tracks > 0);
+        assert!(enabled.dlt_attempted_tracks < enabled.selected_landmarks);
+    }
+
+    #[test]
     fn filtered_observation_depth_and_cost_gates_are_explicit() {
         let (_manifest, store, images, cameras, landmarks, _active) = joint_ba_fixture();
         let landmark = &landmarks[0];
@@ -7207,6 +7598,123 @@ mod tests {
         assert_eq!(error, FilterObservationReason::BehindCamera);
         assert!(cost_non_increasing(10.0, 10.0 + 1.0e-9));
         assert!(!cost_non_increasing(10.0, 10.1));
+    }
+
+    #[test]
+    fn optimized_raw_point_is_retained_only_with_complete_valid_keys_and_metrics() {
+        let (_manifest, store, images, cameras, landmarks, _active) = joint_ba_fixture();
+        let track = &store.tracks[landmarks[0].track_id];
+        let dlt = triangulate_track(
+            landmarks[0].track_id,
+            track,
+            &store.observations,
+            &images,
+            &cameras,
+        )
+        .unwrap();
+        let mut raw = dlt.clone();
+        raw.position += Vector3::new(1.0e-4, -1.0e-4, 2.0e-4);
+        let retained = retain_raw_ba_point_if_valid(
+            &raw,
+            &raw.observations,
+            &store.observations,
+            &images,
+            &cameras,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(retained.position, raw.position);
+        assert_ne!(retained.position, dlt.position);
+        assert_eq!(retained.observations, raw.observations);
+        assert!(retained.mean_error <= MAX_MEAN_REPROJECTION_PX);
+        assert!(retained.max_error <= MAX_REPROJECTION_PX);
+        assert_eq!(retained.errors.len(), retained.observations.len());
+
+        let changed_keys = raw.observations[..raw.observations.len() - 1].to_vec();
+        assert_eq!(
+            retain_raw_ba_point_if_valid(
+                &raw,
+                &changed_keys,
+                &store.observations,
+                &images,
+                &cameras,
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            RawPointFallbackReason::ObservationKeysChanged
+        );
+    }
+
+    #[test]
+    fn optimized_raw_point_rejects_parallax_depth_and_mean_gates() {
+        let (_manifest, store, images, cameras, landmarks, _active) = joint_ba_fixture();
+        let raw = triangulate_track(
+            landmarks[0].track_id,
+            &store.tracks[landmarks[0].track_id],
+            &store.observations,
+            &images,
+            &cameras,
+        )
+        .unwrap();
+
+        let duplicate_key = raw.observations[0];
+        let mut no_parallax = raw.clone();
+        no_parallax.observations = vec![duplicate_key, duplicate_key];
+        assert_eq!(
+            retain_raw_ba_point_if_valid(
+                &no_parallax,
+                &no_parallax.observations,
+                &store.observations,
+                &images,
+                &cameras,
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            RawPointFallbackReason::NoObservableParallax
+        );
+
+        let mut behind = raw.clone();
+        let first_image = &images[&raw.observations[0].global_image_id];
+        behind.position = first_image
+            .atlas
+            .pose
+            .camera_to_world()
+            .transform_point(&Point3::new(0.0, 0.0, -1.0));
+        assert_eq!(
+            retain_raw_ba_point_if_valid(
+                &behind,
+                &behind.observations,
+                &store.observations,
+                &images,
+                &cameras,
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            RawPointFallbackReason::NonPositiveDepth
+        );
+
+        let mut shifted_observations = store.observations.clone();
+        for key in &raw.observations {
+            let image = &images[&key.global_image_id];
+            let camera = &cameras[&image.atlas.camera_id];
+            let projected = camera
+                .project(&image.atlas.pose.transform_world_point(&raw.position))
+                .unwrap();
+            shifted_observations.get_mut(key).unwrap().xy =
+                Point2::new(projected.x + 2.5, projected.y);
+        }
+        assert_eq!(
+            retain_raw_ba_point_if_valid(
+                &raw,
+                &raw.observations,
+                &shifted_observations,
+                &images,
+                &cameras,
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            RawPointFallbackReason::MeanOverMax
+        );
     }
 
     #[test]

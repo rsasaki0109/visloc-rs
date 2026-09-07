@@ -158,6 +158,8 @@ def audit(model, rig_manifest=None):
     point_ids = set()
     errors_sum = 0.0
     maximum = 0.0
+    point_means_sum = 0.0
+    maximum_point_mean = 0.0
     stored_difference = 0.0
     behind = 0
     same_image_tracks = 0
@@ -199,6 +201,9 @@ def audit(model, rig_manifest=None):
             point_errors.append(error)
             support[image_id] += 1
         point_sum = math.fsum(point_errors)
+        point_mean = point_sum / len(point_errors)
+        point_means_sum += point_mean
+        maximum_point_mean = max(maximum_point_mean, point_mean)
         excess = len(point_errors) - len(track_images)
         same_image_tracks += int(excess > 0)
         same_image_excess += excess
@@ -217,6 +222,9 @@ def audit(model, rig_manifest=None):
             "unsupported_image_ids": sorted(i for i, n in support.items() if not n),
             "landmarks": len(point_ids), "observations": len(seen),
             "mean_reprojection_px": errors_sum/len(seen),
+            "observation_weighted_mean_reprojection_px": errors_sum/len(seen),
+            "point_weighted_mean_reprojection_px": point_means_sum/len(point_ids),
+            "max_track_mean_reprojection_px": maximum_point_mean,
             "max_reprojection_px": maximum,
             "max_stored_mean_difference_px": stored_difference,
             "nonpositive_depth_observations": behind,

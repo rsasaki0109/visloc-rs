@@ -1335,7 +1335,7 @@ progress.
 
 The separately named, default-off filtering arm improves the connected 10k
 model to **0.388993 m RMSE / 0.638173 m p95**, with mean reprojection error
-0.580644 px. The p95 gate passes, but the frozen COLMAP RMSE gate
+0.581744 px (observation-weighted). The p95 gate passes, but the frozen COLMAP RMSE gate
 (0.384307 m) still fails. No full parity or speed claim follows from this pilot.
 
 Independent audits preserve 9,998 poses, 9,997 supported images, all 4,999
@@ -1347,10 +1347,20 @@ All 44 example tests, 20 independent auditor tests and eight implementation CI
 checks pass. Details and reproducible hashes are in
 [filtered BA evidence](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
 
-Finish PR #73 final CI/merge, then use observation/solver diagnostics to choose
-the next GT-free, bounded refinement step. Do not select thresholds or mapping
-actions using ground truth. Mapper/native-E2E performance, tier nonregression,
+PR #73 final CI/merge and branch cleanup are complete (`07a4104`). The next
+controlled arm preserves raw BA point positions only when observation keys are
+unchanged and every existing geometry gate passes; other points retain the
+current DLT path. See the [exact comparison contract](openloris_atlas_bounded_ba.md).
+Do not select thresholds or mapping actions using ground truth.
+Mapper/native-E2E performance, tier nonregression,
 restart and 100k I/O requirements remain unchanged and incomplete.
+
+The point-retention arm is now measured and rejected: unchanged checkpoints,
+default-OFF equality, full support/connectivity and exact repeats pass, but
+RMSE/p95 worsen to 0.389420/0.639357 m. Its slightly lower 0.580628 px
+observation-weighted reprojection and far fewer DLT calls do not close the
+trajectory gap. Preserve the filtering baseline and the
+[negative evidence](../benchmarks/electro/m8-openloris-atlas-connected-preserved-ba-v1.json).
 
 ## Stop conditions
 

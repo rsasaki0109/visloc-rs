@@ -21,12 +21,16 @@
 > [有界BAの検証契約](openloris_atlas_bounded_ba.md)を参照してください。
 >
 > [10k filtering試走](../benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json)
-> はRMSE/p95が0.388993/0.638173 m、平均再投影0.580644 pxへ改善。
+> はRMSE/p95が0.388993/0.638173 m、観測数重み付き平均再投影0.581744 pxへ改善。
 > p95だけがCOLMAP基準を満たし、RMSEはまだ未達です。独立監査で
 > 957点・14,440観測の削除数一致、全支持/連結性維持を確認しました。
 > 両成分のBA直前checkpointと、filter OFFの主成分strict出力も全6ファイル一致。
 > 両成分の再実行も各6ファイル一致、実装コミットのCIは8項目通過。
-> 次はPR #73の最終CI/mergeと、GT非使用の次の精度改善の検討です。
+> PR #73は最終CI8項目通過後、`07a4104`へsquash merge済み。旧branchも整理済みです。
+> `feat/m8-preserve-optimized-atlas-points`（PR #74）の点保持モードも同一入力で測定済み。
+> 全支持/連結性・再実行一致を満たしますが、RMSE/p95は0.389420/0.639357 mへ
+> 悪化したため非昇格です。47 example tests / 21 auditor testsが通過。
+> 現在はPR #74の証拠整理と最終CI/mergeを進めています。
 > この局所処理の時間をmapper全体やnative E2Eの高速化実績とは扱いません。
 > 10k精度、高速化、省メモリ、各規模の非回帰とM9/M10の最終条件は維持します。
 
