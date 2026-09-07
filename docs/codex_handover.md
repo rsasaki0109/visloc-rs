@@ -5,8 +5,12 @@
 > [証跡](../benchmarks/electro/m8-openloris-bounded-pcg-restart-v1.json)。
 > 相対許容誤差1e-8では線形成功3→5、LM受理3→4だが、RMSE改善は約2.76e-8 mで
 > ごく小さい。strict設定では再開7回でも最終モデルは従来と同一。10k/README非昇格。
-> 次は実atlas両成分を、共有rig支持を維持する明示オプション・元IDの固定anchorで
-> 2 GiB仮想アドレス上限内で実行する。M8–M10のCOLMAP比較・E2E・各規模ゲートは未完了。
+> `c2eeb70` の明示的な共有rig支持・元ID固定anchor対応で、実atlas両成分も完走。
+> [6本の証跡](../benchmarks/electro/m8-openloris-matrix-free-atlas-policy-v1.json)。
+> 主成分peak RSS約1.03 GiB、再実行のモデル・数値trace一致。合算RMSE/p95は
+> 0.388720/0.638174 m、平均再投影0.579509 px。COLMAPのRMSEにはまだ未達。
+> 再開あり/なしの最終モデルは同一。主成分の前処理block正定値性失敗が次の診断対象。
+> M8–M10のCOLMAP比較・E2E・各規模ゲートは未完了。
 
 > 現在の引き継ぎ先（2026-09-07）:
 > [OpenLORIS M8–M10計画](openloris_m8_m10_plan.md) と

@@ -143,8 +143,14 @@ models and traces match. These results do not establish equivalent-quality
 speed or 10k improvement. Driver extension `c2eeb70` adds explicit shared-rig
 unsupported-sensor retention and an existing fixed-frame ID; 17 example tests
 pass and the default 1k model/40 numerical rows match the previous driver.
-Next measure both original atlas components under the explicit resource cap,
-without dropping observations, renumbering frames or changing calibration.
+The [actual two-component comparison](../benchmarks/electro/m8-openloris-matrix-free-atlas-policy-v1.json)
+now completes under the cap, with main peak RSS about 1.03 GiB and identical
+repeat models/traces. Pooled RMSE/p95 is 0.388720/0.638174 m, reprojection
+0.579509 px, preserving all original support/identity/calibration. Restart
+does not change either final model. COLMAP's RMSE gate still fails. Next
+diagnose the main component's failed Schur preconditioner block using only
+bounded local state; do not discard observations or claim mapper/E2E speed
+from these local BA process times. Production defaults and README stay unchanged.
 
 ## Historical M7 baseline
 

@@ -1242,3 +1242,47 @@ processes, not mapper/native end-to-end measurements. This implementation
 does not promote the 10k or README performance claims. The next experiment
 is the actual two-component atlas with the explicit boundary/anchor policy,
 not further tuning solely to reproduce the internal direct backend.
+
+### Actual two-component matrix-free BA (2026-09-08)
+
+[Six-run evidence and independent audits](../benchmarks/electro/m8-openloris-matrix-free-atlas-policy-v1.json).
+Driver `c2eeb70` preserves the original main/tail anchors 0/4495 and retains
+the known unsupported main sensor image only through explicit shared-rig
+support policy. The 17 example tests and a fresh default-policy 1k run pass;
+the latter's three model files and 40 LM/PCG rows match the previous driver.
+Both actual components now complete under the 2 GiB virtual-address-space
+cap, CPU 900 s cap, disabled core dumps and one Rayon thread.
+
+| Same 10k evaluation | Registered images | Pooled GT RMSE / p95 (m) | Observation-weighted reprojection (px) |
+|---|---:|---:|---:|
+| Frozen COLMAP | 9,998 | 0.384307 / 0.638669 | 0.903003 |
+| Retained filtered atlas input | 9,998 | 0.388993 / 0.638173 | 0.581744 |
+| Matrix-free post-map BA | 9,998 | 0.388720 / 0.638174 | 0.579509 |
+
+GT is used only for post-mapping scoring with one Sim(3) per original
+component and pooled errors from 9,306 scored images. All 9,997 supported
+images, 4,999 supported frames, 352,837 points and 1,438,880 observations
+remain. Full keypoint, point/track identity, calibration and original fixed
+anchors pass independent checks; no nonpositive depths appear. The tail's
+maximum individual reprojection rises to 4.097846 px and maximum track mean
+to 2.239294 px, so this is not universal per-observation nonregression.
+
+Main restart-off takes 88.75 s and 1,079,880 KiB peak RSS; tail takes
+41.40 s and 109,036 KiB. These are separate serial local BA processes, not
+the full mapper or native pipeline, and cannot be compared to COLMAP's
+mapper time as a speedup. Main accepts only 1 of 18 LM trials and stops at
+the existing maximum-damping boundary; tail accepts 8 of 20. Main's first
+nine trials reject `NonSpdPreconditioner(191)`, followed by two curvature
+failures. The number 191 is a variable-pose slot, not a source frame ID.
+
+Enabling one bounded restart performs four restarts on main and zero on tail.
+Both final models are byte-identical to restart-off: no 10k quality benefit
+from restart. Restart-on repeats match all six model files and both components'
+LM/PCG/restart traces exactly. Main repeats take 93.85/93.64 s and tail
+41.81/41.12 s; main peak RSS is 1,079,764/1,079,724 KiB. The slightly
+improved atlas still fails COLMAP's RMSE gate.
+Keep the production defaults and README claims unchanged. Next isolate the
+failed main preconditioner block using bounded diagnostics (slot/frame mapping,
+actual solve damping, 6x6 block spectrum and local subtraction norms), without
+dropping observations, adding a dense global matrix or claiming a cause from
+support/depth range alone.
