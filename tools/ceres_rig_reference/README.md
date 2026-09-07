@@ -51,3 +51,26 @@ Do not enlarge it to the 10k atlas or interpret evaluator timing as BA,
 mapper or end-to-end performance. See the
 [frozen reference contract](../../docs/openloris_atlas_bounded_ba.md#frozen-ceres-reference-contract-2026-09-08)
 for the initial-parity gate and predeclared next-stage solve conditions.
+
+The separate Python publisher consumes a validated state and writes a new
+identity-preserving text model. It is a post-solve bridge, not part of the
+Ceres solve or the production mapper:
+
+```sh
+python3 tools/ceres_rig_reference/publish_model.py \
+  --fixture /path/to/input.fixture \
+  --state /path/to/solve.state \
+  --model /path/to/source/model \
+  --rig-manifest /path/to/rig-manifest.txt \
+  --out-dir /path/to/new/model
+```
+
+All five source SHA256 fields in the fixture and state are checked against
+the three source COLMAP files and the rig manifest. The publisher preserves
+camera bytes, image/keypoint and point/track identity and order, composes
+`T_sensor<-rig * T_rig<-world`, and recomputes each point's mean pixel error
+from every observation. It rejects nonpositive depth, changed support,
+changed fixed pose, cost/count mismatches, symlink/overlapping inputs, and
+existing output paths. Publication is staged and no-clobber; failed
+validation does not publish a partial model. The bounded caps are inherited
+from the fixture (512 poses, 8,192 points, 262,144 observations).
