@@ -801,13 +801,24 @@ The exporter/fixture is a proposed implementation mechanism, not yet built.
 
 Before any explicit Schur allocation, cap variable poses at 512, points at
 8,192, observations at 262,144, scalar dimension at 3,072 and pre-count the
-cross-pair work against an explicit bound. A real-input test must fail clearly
+cross-pair work against a 64,000,000-pair bound with checked arithmetic.
+The frozen 1k input has 130,677 variable-pose cross blocks and
+`sum(cross_length²) = 28,556,575` (maximum track cross length 891), counting
+multiple sensor blocks for the same frame separately. A real-input test must fail clearly
 when its requested fixture is missing or over cap, not report an empty passing
 measurement. Reuse one initial normal system across the two damping values;
 keep only the small pose-diagonal copy needed by the mutating direct path.
 Record arithmetic scales and check the existing gradient/RHS sign and the
 objective's factor of two before reporting predicted reduction. No claim that
 the direct step itself meets the PCG residual target is made before measuring it.
+
+The direct implementation factors its lower-triangle Schur storage. Report
+raw explicit Schur asymmetry and distinguish its full matvec from the
+lower-mirrored symmetric matrix actually used by factorization. For the
+current unrobust cost `sum(||r||²)`, assembly stores `b = Jᵀr` and `H = JᵀJ`:
+the undamped linearized cost reduction is `-2 bᵀδ - δᵀHδ`. A half-cost damped
+quadratic prediction is a different quantity and must be labeled accordingly.
+Test these signs and factors independently on small systems.
 
 Primary-source context for the next diagnosis (checked 2026-09-07):
 
