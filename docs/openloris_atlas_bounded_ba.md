@@ -1090,3 +1090,80 @@ retroactive pass of the strict oracle. Keep LM settings, observations and
 physical calibration fixed; audit full support, depth, identity, recomputed
 reprojection and post-only GT trajectory, plus repeated wall/RSS, before any
 10k promotion. Local BA timing alone cannot support a COLMAP end-to-end claim.
+
+### Explicit relative-tolerance nonlinear 1k result (2026-09-07)
+
+[Evidence](../benchmarks/electro/m8-openloris-relative-pcg-tolerance-v1.json)
+records implementation `7b6056a`, the same release binary for six serial
+processes, and independent audits of the three unique models. The example
+accepts `--pcg-relative-tolerance 1e-8` only for matrix-free optimization and
+logs actual relative/absolute values both before solving and in its summary.
+The initial exploratory summary mislabeled its tolerance; its artifacts are
+retained separately, and all comparisons were rerun after the logging fix.
+Default summary and numerical behavior remain unchanged. Cholesky is not
+used by any of these nonlinear runs.
+
+| Fixed-input 1k BA arm | Final squared cost | Mean reprojection px | GT RMSE / p95 m | Wall s (two runs) | Peak KiB (two runs) |
+|---|---:|---:|---:|---|---|
+| Direct, serial | 117,496.033 | 0.689260 | 0.026519 / 0.040989 | 45.49 / 45.37 | 161,692 / 161,932 |
+| MF512, relative `1e-12` | 126,419.082 | 0.720314 | 0.026703 / 0.041347 | 17.81 / 18.30 | 84,568 / 84,400 |
+| MF512, relative `1e-8` | 118,070.554 | 0.691589 | 0.026608 / 0.041100 | 20.19 / 20.29 | 84,564 / 84,564 |
+
+Both PCG arms retain absolute `1e-12` and total cap 512; all arms retain the
+same 20 LM iterations and initial cost 126,510.3987573094. Relative `1e-8`
+first accepts LM9 at solve damping `1e5`, versus strict LM14 at `1e10`, but
+still accepts only three steps (direct five). None reports nonlinear
+convergence. Relative `1e-8` improves the listed quality measures over strict,
+but does not match direct. Its maximum observation error 4.840089 px also
+exceeds input 3.999569 px and strict 3.997840 px (direct 4.937791 px). Do not
+describe this as universal reprojection non-regression.
+
+All models retain 1,000 supported images, 500 supported rig frames, 4,716
+landmarks, 130,900 observations and 361,170 full keypoints. Camera bytes,
+image identity/order/POINTS2D and point IDs/RGB/track order remain exact;
+fixed calibration, one connected frame component and positive depths pass.
+GT uses the same 308 associated images, only after optimization. The new
+model's stored ERROR differs from recomputed track means by at most
+`5.91e-9` px. Its maximum centre/landmark differences from direct remain
+0.001098 / 0.019274 m, not numerical equivalence.
+
+Each repeated arm has identical model hashes and numerical traces. New
+direct and strict controls also match PR #79 model bytes and traces; input
+hashes are unchanged. These warm-cache shared-host times include loading,
+validation, solve and publication, not frontend/mapping/atlas construction.
+The local time and memory advantage is measured at different final quality;
+it is not an equivalent-quality speedup or a COLMAP end-to-end result. The
+frozen COLMAP 1k RMSE/p95 is 0.027969 / 0.042266 m, but being below that local
+reference does not establish the outstanding 10k gate. README is unchanged.
+
+#### Next bounded candidate: true-residual restart
+
+The new arm still has ten `MaxIterations` and seven `ResidualCheckFailed`
+attempts. For example, LM12 has recursive residual `0.001371` but true
+residual `0.116403`; LM13 has `0.001045` versus `0.103147`. The existing
+classical PCG immediately rejects after such a failed final check. A
+separately disabled-by-default candidate can reuse that true residual,
+restart with `r=b-Ax`, `z=M^-1 r`, `rho=r^T z`, `p=z`, and continue only
+within the original total 512-iteration budget. Start with at most one
+restart; never reset the iteration count, accept an unchecked iterate,
+change physical damping, add dense fallback, or retain an iteration history.
+Reuse O(N) vectors and measure actual allocations/RSS. Preserve existing
+public struct shapes and default behavior.
+
+[Greenbaum's analysis](https://epubs.siam.org/doi/10.1137/S0895479895284944)
+supports the finite-precision residual-gap diagnosis.
+[Van der Vorst and Ye](https://epubs.siam.org/doi/10.1137/S1064827599353865)
+study error-bound-guided replacement that limits perturbation of Krylov
+recurrences. The proposed single event-triggered restart is an engineering
+hypothesis, not a reproduction or guarantee of their scheme. Restart drops
+accumulated conjugacy and may slow or stagnate; it does not directly address
+the ten iteration-limit failures. [PETSc's manual](https://petsc.org/release/manual/ksp/)
+also distinguishes estimated residual monitoring from explicit `b-Ax`
+monitoring and warns that the latter adds work.
+
+First test disabled-path exactness, fixed total iteration/restart bounds,
+finite/curvature failures, zero RHS and a controlled residual-gap fixture.
+Then compare frozen real systems and full nonlinear 1k quality/resources
+with explicit restart counters. A reduction in recheck failures alone is
+not sufficient for promotion; retain direct/strict controls and all geometry,
+identity and GT gates. No restart implementation is included in this result.

@@ -119,6 +119,13 @@ Next compare an explicitly configured production general-inverse PCG512 arm
 nonlinear controls. This separately labeled policy must earn trajectory,
 reprojection and resource quality, not retroactively pass the strict oracle.
 No new 10k or README claim is authorized by the diagnostic result alone.
+The explicit-tolerance nonlinear comparison is now measured (`7b6056a`):
+[six serial runs and audits](../benchmarks/electro/m8-openloris-relative-pcg-tolerance-v1.json).
+Relative `1e-8` improves cost and GT error over strict but remains worse than
+direct; repeats are exact and all identities/support/calibration/depth remain
+valid. No equivalent-quality speedup or 10k promotion. Next test one bounded,
+event-triggered true-residual restart within the original PCG iteration cap,
+as a separate default-off arm; see the [detailed contract](openloris_atlas_bounded_ba.md).
 
 ## Historical M7 baseline
 
