@@ -872,16 +872,45 @@ class ExclusiveFileBuffer final : public std::streambuf {
   char buffer_[64 * 1024]{};
 };
 
+void WriteExclusiveTextFile(const fs::path& path, std::string_view contents) {
+  const int file_descriptor =
+      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  if (file_descriptor < 0) {
+    throw FixtureError("cannot exclusively create self-test file " +
+                       path.string() + ": " + std::strerror(errno));
+  }
+  std::size_t written_total = 0;
+  while (written_total < contents.size()) {
+    const ssize_t written = ::write(
+        file_descriptor, contents.data() + written_total,
+        contents.size() - written_total);
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    if (written <= 0) {
+      const int saved_errno = errno;
+      ::close(file_descriptor);
+      std::error_code cleanup_error;
+      fs::remove(path, cleanup_error);
+      throw FixtureError("cannot write self-test file " + path.string() +
+                         ": " + std::strerror(saved_errno));
+    }
+    written_total += static_cast<std::size_t>(written);
+  }
+  if (::close(file_descriptor) != 0) {
+    const int saved_errno = errno;
+    std::error_code cleanup_error;
+    fs::remove(path, cleanup_error);
+    throw FixtureError("cannot close self-test file " + path.string() +
+                       ": " + std::strerror(saved_errno));
+  }
+}
+
 EvaluationSummary EvaluateToFile(const Fixture& fixture,
                                  const fs::path& fixture_path,
                                  const fs::path& output_path) {
   ValidateOutputPath(fixture_path, output_path);
   const fs::path staging = MakeStagingPath(output_path);
-  std::error_code error;
-  if (fs::symlink_status(staging, error).type() != fs::file_type::not_found ||
-      error) {
-    throw FixtureError("evaluation staging path already exists");
-  }
   bool owns_staging = false;
   std::optional<EvaluationSummary> summary;
   try {
@@ -902,7 +931,8 @@ EvaluationSummary EvaluateToFile(const Fixture& fixture,
       }
     }
     // A hard link publishes without replacing a path that appeared after the
-    // preflight.  The fixture and dump are required to share a filesystem.
+    // preflight.  The staging file and output must share a filesystem.
+    std::error_code error;
     fs::create_hard_link(staging, output_path, error);
     if (error) {
       throw FixtureError("cannot publish evaluation output without overwrite: " +
@@ -979,6 +1009,124 @@ void RunSelfTests() {
       summary.squared_cost != 0.0 ||
       dump.str().find("OBSERVATION 1 0 1 2") == std::string::npos) {
     throw FixtureError("self-test valid fixture evaluation mismatch");
+  }
+
+  // Exercise the full exclusive staging/publication path with a missing
+  // staging path.  In particular, symlink_status on a missing path may carry
+  // ENOENT in its error_code; O_EXCL is the authoritative race-safe check.
+  {
+    std::error_code temp_error;
+    const fs::path temp_directory = fs::temp_directory_path(temp_error);
+    if (temp_error) {
+      throw FixtureError("self-test cannot find temporary directory: " +
+                         temp_error.message());
+    }
+    const auto stamp =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string prefix =
+        "ceres-rig-reference-self-test-" + std::to_string(::getpid()) + "-" +
+        std::to_string(static_cast<long long>(stamp));
+    std::string directory_template =
+        (temp_directory / (prefix + "-XXXXXX")).string();
+    std::vector<char> directory_buffer(directory_template.begin(),
+                                        directory_template.end());
+    directory_buffer.push_back('\0');
+    char* directory_name = ::mkdtemp(directory_buffer.data());
+    if (directory_name == nullptr) {
+      throw FixtureError("self-test cannot create private temporary directory: " +
+                         std::string(std::strerror(errno)));
+    }
+    const fs::path owned_directory(directory_name);
+    const fs::path fixture_path = owned_directory / "input.fixture";
+    const fs::path output_path = owned_directory / "evaluation.dump";
+    try {
+      WriteExclusiveTextFile(fixture_path, valid);
+      std::ifstream persisted_input(fixture_path, std::ios::binary);
+      if (!persisted_input) {
+        throw FixtureError("self-test cannot reopen synthetic fixture");
+      }
+      const Fixture persisted_fixture =
+          ParseFixture(persisted_input, fixture_path.string());
+      const EvaluationSummary file_summary =
+          EvaluateToFile(persisted_fixture, fixture_path, output_path);
+      if (file_summary.observation_count != 2 ||
+          file_summary.positive_depth_count != 2 ||
+          file_summary.squared_cost != 0.0) {
+        throw FixtureError("self-test EvaluateToFile summary mismatch");
+      }
+      std::error_code output_error;
+      const fs::file_status output_status =
+          fs::symlink_status(output_path, output_error);
+      if (output_error || !fs::is_regular_file(output_status) ||
+          fs::is_symlink(output_status)) {
+        throw FixtureError("self-test EvaluateToFile output is not a regular file");
+      }
+      std::ifstream output_input(output_path, std::ios::binary);
+      std::ostringstream output_contents;
+      output_contents << output_input.rdbuf();
+      if (!output_input.is_open() || output_input.bad() || output_input.fail() ||
+          output_contents.str().find("SUMMARY_OBSERVATIONS 2") ==
+              std::string::npos ||
+          output_contents.str().find("SUMMARY_SQUARED_COST_BITS 0") ==
+              std::string::npos) {
+        throw FixtureError("self-test EvaluateToFile output mismatch");
+      }
+      const std::string published_output = output_contents.str();
+      bool existing_rejected = false;
+      try {
+        (void)EvaluateToFile(persisted_fixture, fixture_path, output_path);
+      } catch (const FixtureError& error) {
+        if (std::string(error.what()).find("output path already exists") ==
+            std::string::npos) {
+          throw FixtureError("self-test existing-output error mismatch: " +
+                             std::string(error.what()));
+        }
+        existing_rejected = true;
+      }
+      if (!existing_rejected) {
+        throw FixtureError("self-test expected existing output rejection");
+      }
+      std::ifstream unchanged_input(output_path, std::ios::binary);
+      std::ostringstream unchanged_output;
+      unchanged_output << unchanged_input.rdbuf();
+      if (!unchanged_input.is_open() || unchanged_input.bad() ||
+          unchanged_input.fail() || unchanged_output.str() != published_output) {
+        throw FixtureError("self-test existing output was modified");
+      }
+
+      const fs::path dangling_path = owned_directory / "dangling.dump";
+      std::error_code symlink_error;
+      fs::create_symlink(owned_directory / "missing-target", dangling_path,
+                         symlink_error);
+      if (symlink_error) {
+        throw FixtureError("self-test cannot create dangling output symlink: " +
+                           symlink_error.message());
+      }
+      bool symlink_rejected = false;
+      try {
+        (void)EvaluateToFile(persisted_fixture, fixture_path, dangling_path);
+      } catch (const FixtureError& error) {
+        if (std::string(error.what()).find("output path already exists") ==
+            std::string::npos) {
+          throw FixtureError("self-test symlink-output error mismatch: " +
+                             std::string(error.what()));
+        }
+        symlink_rejected = true;
+      }
+      if (!symlink_rejected) {
+        throw FixtureError("self-test expected dangling symlink rejection");
+      }
+    } catch (...) {
+      std::error_code cleanup_error;
+      fs::remove_all(owned_directory, cleanup_error);
+      throw;
+    }
+    std::error_code cleanup_error;
+    fs::remove_all(owned_directory, cleanup_error);
+    if (cleanup_error) {
+      throw FixtureError("self-test cannot remove private temporary directory: " +
+                         cleanup_error.message());
+    }
   }
 
   std::string bad_depth = valid;
