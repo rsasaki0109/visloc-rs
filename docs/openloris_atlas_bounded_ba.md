@@ -1286,3 +1286,34 @@ failed main preconditioner block using bounded diagnostics (slot/frame mapping,
 actual solve damping, 6x6 block spectrum and local subtraction norms), without
 dropping observations, adding a dense global matrix or claiming a cause from
 support/depth range alone.
+
+### Local Schur-block diagnostic contract (2026-09-08)
+
+PR #83 merged as `a71f40a` after eight final-head CI checks and independent
+artifact review. Continue on `feat/m8-local-schur-block-diagnostic` with an
+explicit, default-off diagnostic of variable-pose slot 191 (source frame 192).
+Keep the actual solver arithmetic and acceptance unchanged. Record only this
+6x6 block, its damped pose diagonal, local elimination norms, finite/asymmetry
+checks and the largest contributing landmark's 3x3 block/inverse and 6x3 cross
+block. No full normal-system clone, global dense matrix or history bank.
+Label actual solve damping and the chosen triangular interpretation used for
+spectral checks; never repair a block in the diagnostic path.
+
+Independent source-image geometry inspection finds 417 incident tracks and
+614 observations at frame 192. Point 13921 has two observations (image 386,
+keypoint 80; image 390, keypoint 89), with target depth about 1.82e-6 m versus
+0.431 m for the next closest point. Its two camera centers are 0.319 mm apart.
+These source-image calculations are not bit-identical to production rig-normal
+assembly; the actual block dump must establish the numerical effect. Do not
+remove the point solely because it is near a camera.
+
+Choose the next opt-in numerical experiment from the measured failure, not
+from another tolerance sweep. Distinguish preconditioning, damping and coordinate
+scaling: Ceres documents camera-block `JACOBI` separately from `SCHUR_JACOBI`,
+uses a diagonal metric for its LM trust region, and supports Jacobian-column
+scaling. These are different mechanisms, not interchangeable settings.
+[Ceres solver reference](https://ceres-solver.readthedocs.io/latest/nnls_solving.html).
+Changing the damping metric would be a separately labeled behavioral policy,
+not an exact-output coordinate rewrite. Any candidate must earn 1k/actual-atlas
+quality, true-residual, resource and repeatability gates; the user's final
+COLMAP mapper/native-E2E and scale requirements stay unchanged.
