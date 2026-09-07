@@ -43,6 +43,19 @@ anchored small-system/1k comparison precedes any connected-atlas global run.
 No global run or quality improvement is assumed from this option;
 see the [solver-memory audit and primary references](openloris_atlas_bounded_ba.md).
 
+PR #77 closed this private gate as `0460c9c` after all eight final CI checks
+passed. The next branch, `feat/m8-matrix-free-ba-entry`, implements an additive
+runtime entry point and separate solver diagnostics while retaining the default
+LM path. A frozen post-mapping 1k input has been revalidated: 1,000 supported
+images, 500 connected supported rig frames, 4,716 points and 130,900 observations,
+with matching original hashes and fixed-rig geometry. This is preparation,
+**not an executed solver A/B**. See the
+[1k input contract](../benchmarks/electro/m8-openloris-matrix-free-1k-input-v1.json).
+Its exact observation set must not be silently filtered to the later atlas's
+stricter per-track threshold. Recompute projection errors rather than trusting
+the historical writer's point ERROR column, and preserve original image names
+and keypoint indices when loading and publishing comparison models.
+
 ## Historical M7 baseline
 
 | Evidence | Current result | Consequence |
