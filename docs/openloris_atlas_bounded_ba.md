@@ -808,3 +808,20 @@ keep only the small pose-diagonal copy needed by the mutating direct path.
 Record arithmetic scales and check the existing gradient/RHS sign and the
 objective's factor of two before reporting predicted reduction. No claim that
 the direct step itself meets the PCG residual target is made before measuring it.
+
+Primary-source context for the next diagnosis (checked 2026-09-07):
+
+- [Ceres nonlinear least-squares documentation](https://ceres-solver.readthedocs.io/latest/nnls_solving.html)
+  describes inexact LM for iterative solves and enables Jacobian-column scaling
+  by default. Its `eta` stopping rule uses quadratic-model progress, not this
+  prototype's fixed `1e-12` true-residual rule. These are not interchangeable
+  tolerances. Scaling or an inexact policy could be a later controlled arm,
+  not a silent reinterpretation of the current failed gate. Distinguish an
+  equivalent change of linear coordinates from changing the physical-coordinate
+  LM damping metric; neither permits scaling fixed rig extrinsics.
+- [PETSc KSPPIPECGRR](https://petsc.org/main/manualpages/KSP/KSPPIPECGRR/)
+  uses residual replacement to improve robustness of pipelined CG. That is a
+  specific recurrence, not the classical PCG implemented here. It motivates
+  measuring recursive/true residual gaps, but does not establish that residual
+  replacement alone fixes this input or justify adopting its update rule
+  without a separate numerical test.
