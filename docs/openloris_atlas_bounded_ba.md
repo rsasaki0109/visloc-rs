@@ -1413,3 +1413,91 @@ COLMAP's 10k RMSE gate remains 0.3843065335 m; the previous unscaled policy
 scores 0.3887199838 m. A local BA improvement alone does not establish
 mapper-only/native-E2E speed or the remaining tier, restart and 100k I/O
 gates. Keep README comparison claims unchanged until their scope is verified.
+
+### Initial column-scaled 1k result (2026-09-08)
+
+The opt-in policy is implemented in `99d899b`. Final release binary SHA256 is
+`a8d7330cf4233081c50c4e5b0e8df26735dd3e713dabaae33681f026e9cd80ef`.
+Same-binary legacy and direct controls preserve their previous model files
+and numerical traces. Two scaled runs preserve all image/keypoint/point/track
+identities, fixed anchor and calibration, with no nonpositive depths; their
+three model files and LM/PCG/scaling traces match exactly.
+
+| 1k local BA arm | Wall seconds | Peak RSS KiB | Final squared cost | Accepted LM steps |
+|---|---:|---:|---:|---:|
+| Legacy matrix-free | 24.21 | 84,656 | 118,070.554369 | 3/20 |
+| Legacy direct | 55.76 | 161,776 | 117,496.033074 | 5/20 |
+| Column-scaled, run 1 | 28.39 | 84,592 | 113,754.040510 | 10/20 |
+| Column-scaled, run 2 | 28.33 | 84,764 | 113,754.040510 | 10/20 |
+
+Scaled PCG succeeds in all 20 solves, but this does not imply better trajectory
+accuracy. Post-only GT RMSE/p95 is **0.028550/0.043791 m**, worse than legacy
+matrix-free 0.026608/0.041100 m and COLMAP 0.027969/0.042266 m. Mean
+observation reprojection improves to 0.675819 px, while maximum reprojection
+is 5.098235 px and maximum track mean is 3.170287 px. All 1,000 supported
+images, 500 supported frames, 4,716 points and 130,900 observations remain.
+
+The policy therefore fails the 1k quality gate and is **not promoted**. The
+fixed-policy actual-atlas runs remain diagnostic measurements, not promotion
+or permission to tune against GT. They test whether the main component's
+numerical failure and the 2 GiB resource constraint are addressed. Shared-host
+local-stage times do not establish mapper-only or native-E2E speed.
+
+### Initial actual-atlas column-scaled result (2026-09-08)
+
+The same final binary completes both original components under the fixed
+2 GiB address-space cap. Main wall time is 342.46 s with peak RSS 1,090,964
+KiB; tail is 37.69 s / 110,512 KiB. Main accepts 10/20 LM steps, with 10
+PCG successes and 10 iteration-cap failures, and no non-SPD-preconditioner,
+curvature or true-residual-check failures. Tail accepts 11/20, with seven
+iteration-cap and two true-residual-check failures. Neither arm reports LM
+convergence. At every main iteration the original diagonal is inside the
+fixed bounds, so neither clamp is used.
+
+Independent audits preserve all 9,998 images, 5,085,072 full keypoints,
+352,837 points and 1,438,880 observations, all original identities, camera
+calibration and anchors 0/4495. All 9,997 supported images and 4,999 supported
+frames remain in the original 4,494/505-frame components, with zero
+nonpositive-depth observations. The mean observation reprojection is
+0.562992 px; main/tail maximum errors are 4.427287/4.091211 px and maximum
+track means are 2.395166/2.204463 px. Report these tails separately from the
+improved mean; the original input's filtering limits are not a newly invented
+universal post-BA gate.
+
+Post-only pooled RMSE/p95 is **0.387518/0.635967 m**, improved from the
+previous unscaled 0.388720/0.638174 m, but still above COLMAP's RMSE
+0.384307 m. Main and tail component RMSE are 0.409907 and 0.059373 m;
+the tail regresses from 0.058738 m. Combined with the 1k regression, this
+does not qualify for default or mapper promotion. Repeated atlas runs and
+diagnostic-output compatibility checks are still in progress at this checkpoint.
+
+The [completed measurements](../benchmarks/electro/m8-openloris-column-scaled-lm-v1.json)
+also include the second runs: main 343.31 s / 1,090,912 KiB and tail 38.36 s /
+110,488 KiB. Both have byte-exact model files and LM/PCG/scaling traces versus
+their first run. A same-binary legacy main diagnostic control (88.04 s /
+1,081,380 KiB) preserves PR #84's model, numerical/restart traces and all 18
+raw diagnostic lines. The scaled 1k debug control (28.17 s / 84,636 KiB)
+preserves its OFF model/numerical/scaling traces and labels all 20 local dumps
+as scaled coefficients. Debug timings are separate from OFF-arm comparisons.
+The three pre-final pilot runs are retained externally and explicitly excluded
+from final-binary comparisons because per-launch binary identity was not
+independently certified during the rebuild. Raw coefficients remain external.
+
+The main trace alternates failed solves at actual lambda 1e-4 (512 PCG
+iterations) with accepted solves at 1e-3 (237–272 iterations). Rejected LM
+rows report the post-increase lambda, so their printed 1e-3 must not be
+mistaken for actual solve damping. This repeated work is a measured remaining
+cost, not justification for a GT-selected damping sweep.
+
+Before selecting another policy, a bounded diagnostic can record actual
+solve damping, each policy's normalized physical-equation residual/backward
+error, and undamped predicted versus actual objective decrease. Raw norms
+in scaled and physical coordinates are not directly comparable. Ceres uses
+step quality to adapt the trust region and supports inexact iterative LM;
+its implementation supplies a quadratic-progress tolerance rather than the
+same fixed residual tolerance used here. See the
+[Ceres solving reference](https://ceres-solver.readthedocs.io/latest/nnls_solving.html)
+and [LM strategy source](https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/levenberg_marquardt_strategy.cc)
+(reviewed 2026-09-08). These motivate a diagnostic, not a claim that adaptive
+LM or looser solves will cure the observed 1k trajectory regression. Keep
+GT post-only, all observations, bounded memory and defaults unchanged.

@@ -1,5 +1,17 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新実測（2026-09-08）: 列スケーリング＋scaled LMは `99d899b` に実装済み。
+> 1kは2回ともPCG20/20成功・LM10/20受理・モデル/数値trace一致ですが、
+> RMSE/p95が0.028550/0.043791 mへ悪化し非昇格です。
+> 10k初回は主成分342.46 s / 1,090,964 KiB、末尾37.69 s / 110,512 KiBで完走。
+> 合算RMSE/p95は0.387518/0.635967 m、平均再投影0.562992 px。
+> 全identity・支持・校正・正深度を維持しましたが、COLMAP RMSE 0.384307 mに未達。
+> 両成分の再実行もモデル・LM/PCG/scaling trace完全一致。主成分343.31 s、末尾38.36 s。
+> 旧診断18行dumpのbyte一致、新scaled診断の座標表示とON/OFF結果一致も確認済み。
+> [測定証跡](../benchmarks/electro/m8-openloris-column-scaled-lm-v1.json)。
+> BA46件＋CLI18件、Python46件、clippy/fmtが通過。PR/CIへ進みます。
+> 既定solver/READMEは変更しません。M8–M10の最終条件は未達のままです。
+
 > 最新追記（2026-09-08）: PR #84は最終head `fe4a710` のCI8項目
 > （run `34140417320`）通過後、`c49e542`へmerge済み。旧branchも整理済み。
 > 続行branchは `feat/m8-column-scaled-lm`。Luna Maxで明示的な列スケーリングと
