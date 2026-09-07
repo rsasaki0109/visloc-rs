@@ -27,7 +27,7 @@ use visloc_rs::vision::pnp::{
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
-const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
+const USAGE: &str = "usage: integrate_rig_atlas_landmarks\n    --rig-manifest PATH --nodes-tsv PATH --atlas-dir PATH --out-dir PATH\n    [--recover-zero-support-frames] [--joint-rig-ba [--pre-ba-out-dir PATH]]\n    [--diagnose-cross-boundary-pnp --diagnostic-left-max-frame FRAME]\n    [--repair-cross-boundary --repair-left-max-frame FRAME]";
 const XY_TOLERANCE_PX: f64 = 1.0e-9;
 const INTRINSIC_TOLERANCE: f64 = 1.0e-8;
 const MIN_TRACK_OBSERVATIONS: usize = 2;
@@ -65,6 +65,7 @@ struct Args {
     nodes_tsv: PathBuf,
     atlas_dir: PathBuf,
     out_dir: PathBuf,
+    pre_ba_out_dir: Option<PathBuf>,
     recover_zero_support_frames: bool,
     joint_rig_ba: bool,
     diagnose_cross_boundary_pnp: bool,
@@ -298,6 +299,7 @@ where
     let mut nodes_tsv = None;
     let mut atlas_dir = None;
     let mut out_dir = None;
+    let mut pre_ba_out_dir = None;
     let mut recover_zero_support_frames = false;
     let mut joint_rig_ba = false;
     let mut diagnose_cross_boundary_pnp = false;
@@ -320,6 +322,19 @@ where
                 return Err(format!("duplicate argument {flag}\n{USAGE}"));
             }
             joint_rig_ba = true;
+            continue;
+        }
+        if flag == "--pre-ba-out-dir" {
+            if pre_ba_out_dir.is_some() {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires PATH\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires PATH, got {value:?}\n{USAGE}"));
+            }
+            pre_ba_out_dir = Some(PathBuf::from(value));
             continue;
         }
         if flag == "--diagnose-cross-boundary-pnp" {
@@ -416,16 +431,15 @@ where
             "--diagnose-cross-boundary-pnp and --repair-cross-boundary are mutually exclusive\n{USAGE}"
         ));
     }
-    if repair_cross_boundary && joint_rig_ba {
-        return Err(format!(
-            "--repair-cross-boundary cannot be combined with joint BA\n{USAGE}"
-        ));
+    if pre_ba_out_dir.is_some() && !joint_rig_ba {
+        return Err(format!("--pre-ba-out-dir requires --joint-rig-ba\n{USAGE}"));
     }
     Ok(Args {
         rig_manifest: rig_manifest.ok_or_else(|| format!("--rig-manifest is required\n{USAGE}"))?,
         nodes_tsv: nodes_tsv.ok_or_else(|| format!("--nodes-tsv is required\n{USAGE}"))?,
         atlas_dir: atlas_dir.ok_or_else(|| format!("--atlas-dir is required\n{USAGE}"))?,
         out_dir: out_dir.ok_or_else(|| format!("--out-dir is required\n{USAGE}"))?,
+        pre_ba_out_dir,
         recover_zero_support_frames,
         joint_rig_ba,
         diagnose_cross_boundary_pnp,
@@ -435,9 +449,113 @@ where
     })
 }
 
+fn resolved_comparison_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("resolve current directory: {error}"))?
+            .join(path)
+    };
+    let mut probe = absolute;
+    let mut missing = Vec::new();
+    let base = loop {
+        match fs::canonicalize(&probe) {
+            Ok(path) => break path,
+            Err(error) => {
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot resolve path {:?}: {error}", path));
+                };
+                missing.push(name.to_os_string());
+                if !probe.pop() {
+                    return Err(format!("cannot resolve path {:?}: {error}", path));
+                }
+            }
+        }
+    };
+    let mut resolved = base;
+    for component in missing.iter().rev() {
+        if component == "." {
+            continue;
+        }
+        if component == ".." {
+            resolved.pop();
+        } else {
+            resolved.push(component);
+        }
+    }
+    Ok(resolved)
+}
+
+fn paths_overlap(first: &Path, second: &Path) -> Result<bool, String> {
+    let first = resolved_comparison_path(first)?;
+    let second = resolved_comparison_path(second)?;
+    Ok(first == second || first.starts_with(&second) || second.starts_with(&first))
+}
+
+fn validate_write_destinations(args: &Args, nodes: &[NodeSpec]) -> Result<(), String> {
+    let mut destinations = vec![("--out-dir", args.out_dir.as_path())];
+    if let Some(path) = args.pre_ba_out_dir.as_deref() {
+        destinations.push(("--pre-ba-out-dir", path));
+    }
+    let mut inputs = vec![
+        ("--rig-manifest", args.rig_manifest.as_path()),
+        ("--nodes-tsv", args.nodes_tsv.as_path()),
+        ("--atlas-dir", args.atlas_dir.as_path()),
+    ];
+    inputs.extend(
+        nodes
+            .iter()
+            .map(|node| ("node images.txt", node.images_txt.as_path())),
+    );
+    for (index, (destination_name, destination)) in destinations.iter().enumerate() {
+        for (other_name, other) in destinations.iter().skip(index + 1) {
+            if paths_overlap(destination, other)? {
+                return Err(format!(
+                    "{destination_name} {:?} overlaps {other_name} {:?}; refusing ambiguous output destinations",
+                    destination, other
+                ));
+            }
+        }
+        for (input_name, input) in &inputs {
+            if paths_overlap(destination, input)? {
+                return Err(format!(
+                    "{destination_name} {:?} overlaps input {input_name} {:?}; refusing to write input data",
+                    destination, input
+                ));
+            }
+        }
+    }
+    if let Some(path) = args.pre_ba_out_dir.as_deref() {
+        if path.exists() {
+            if !path.is_dir() {
+                return Err(format!(
+                    "--pre-ba-out-dir {:?} exists but is not a directory",
+                    path
+                ));
+            }
+            let mut entries = fs::read_dir(path)
+                .map_err(|error| format!("read --pre-ba-out-dir {}: {error}", path.display()))?;
+            if entries
+                .next()
+                .transpose()
+                .map_err(|error| format!("inspect --pre-ba-out-dir {}: {error}", path.display()))?
+                .is_some()
+            {
+                return Err(format!(
+                    "--pre-ba-out-dir {:?} must be new or empty; refusing to overwrite an existing checkpoint",
+                    path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run(args: &Args) -> Result<(), String> {
     let manifest = parse_rig_manifest(&args.rig_manifest)?;
     let nodes = parse_node_specs(&args.nodes_tsv)?;
+    validate_write_destinations(args, &nodes)?;
     let atlas_images = parse_atlas_images(&args.atlas_dir, &manifest)?;
     let mut cameras = BTreeMap::<u64, Camera>::new();
     let mut global_images = atlas_images
@@ -582,6 +700,26 @@ fn run(args: &Args) -> Result<(), String> {
         );
     }
     if args.joint_rig_ba {
+        if let Some(pre_ba_out_dir) = args.pre_ba_out_dir.as_deref() {
+            require_nonempty_landmarks(&landmarks, landmark_observation_count(&landmarks))?;
+            stats.output_landmarks = landmarks.len();
+            stats.output_observations = landmark_observation_count(&landmarks);
+            let support = write_model_canonical(
+                pre_ba_out_dir,
+                &global_images,
+                &cameras,
+                &landmarks,
+                &stats,
+            )?;
+            println!(
+                "pre_ba_checkpoint out_dir={} landmarks={} observations={} supported_images={} supported_frames={}",
+                pre_ba_out_dir.display(),
+                stats.output_landmarks,
+                stats.output_observations,
+                support.supported_image_count,
+                support.supported_frame_count,
+            );
+        }
         let summary = run_joint_rig_ba(
             &manifest,
             &store,
@@ -4293,6 +4431,31 @@ fn has_observable_parallax(
     Ok(false)
 }
 
+fn landmark_observation_count(landmarks: &[LandmarkOutput]) -> usize {
+    landmarks
+        .iter()
+        .map(|landmark| landmark.observations.len())
+        .sum()
+}
+
+fn canonical_landmark_indices(landmarks: &[LandmarkOutput]) -> Vec<usize> {
+    let mut indices = (0..landmarks.len()).collect::<Vec<_>>();
+    indices.sort_by_key(|index| {
+        (
+            landmarks[*index]
+                .observations
+                .first()
+                .copied()
+                .unwrap_or(ObservationKey {
+                    global_image_id: u64::MAX,
+                    keypoint_index: usize::MAX,
+                }),
+            landmarks[*index].track_id,
+        )
+    });
+    indices
+}
+
 fn write_model(
     out_dir: &Path,
     images: &BTreeMap<u64, GlobalImage>,
@@ -4300,8 +4463,38 @@ fn write_model(
     landmarks: &[LandmarkOutput],
     stats: &IngestStats,
 ) -> Result<SupportSummary, String> {
+    write_model_ordered(out_dir, images, cameras, landmarks, stats, false)
+}
+
+fn write_model_canonical(
+    out_dir: &Path,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    stats: &IngestStats,
+) -> Result<SupportSummary, String> {
+    write_model_ordered(out_dir, images, cameras, landmarks, stats, true)
+}
+
+fn write_model_ordered(
+    out_dir: &Path,
+    images: &BTreeMap<u64, GlobalImage>,
+    cameras: &BTreeMap<u64, Camera>,
+    landmarks: &[LandmarkOutput],
+    stats: &IngestStats,
+    canonical_order: bool,
+) -> Result<SupportSummary, String> {
     fs::create_dir_all(out_dir)
         .map_err(|error| format!("create output {}: {error}", out_dir.display()))?;
+    let indices = if canonical_order {
+        canonical_landmark_indices(landmarks)
+    } else {
+        (0..landmarks.len()).collect::<Vec<_>>()
+    };
+    let ordered_landmarks = indices
+        .iter()
+        .map(|index| &landmarks[*index])
+        .collect::<Vec<_>>();
     let used_cameras = images
         .values()
         .map(|image| image.atlas.camera_id)
@@ -4327,7 +4520,7 @@ fn write_model(
     let mut point_ids = BTreeMap::<ObservationKey, u64>::new();
     let mut points_text =
         String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[] as IMAGE_ID POINT2D_IDX\n");
-    for (index, landmark) in landmarks.iter().enumerate() {
+    for (index, landmark) in ordered_landmarks.iter().enumerate() {
         let point_id = index as u64 + 1;
         for key in &landmark.observations {
             if point_ids.insert(*key, point_id).is_some() {
@@ -5416,6 +5609,7 @@ mod tests {
         .unwrap();
         assert!(!args.recover_zero_support_frames);
         assert!(!args.joint_rig_ba);
+        assert_eq!(args.pre_ba_out_dir, None);
         assert!(!args.diagnose_cross_boundary_pnp);
         assert_eq!(args.diagnostic_left_max_frame, None);
         assert!(!args.repair_cross_boundary);
@@ -5435,7 +5629,7 @@ mod tests {
         .unwrap();
         assert!(args.recover_zero_support_frames);
         assert!(!args.joint_rig_ba);
-        let error = parse_args([
+        let duplicate_error = parse_args([
             "example".to_owned(),
             "--recover-zero-support-frames".to_owned(),
             "--recover-zero-support-frames".to_owned(),
@@ -5449,7 +5643,7 @@ mod tests {
             "o".to_owned(),
         ])
         .unwrap_err();
-        assert!(error.contains("duplicate argument"));
+        assert!(duplicate_error.contains("duplicate argument"));
         let args = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -5464,7 +5658,38 @@ mod tests {
         ])
         .unwrap();
         assert!(args.joint_rig_ba);
+        let args = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--joint-rig-ba".to_owned(),
+            "--pre-ba-out-dir".to_owned(),
+            "checkpoint".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(args.pre_ba_out_dir, Some(PathBuf::from("checkpoint")));
         let error = parse_args([
+            "example".to_owned(),
+            "--rig-manifest".to_owned(),
+            "r".to_owned(),
+            "--nodes-tsv".to_owned(),
+            "n".to_owned(),
+            "--atlas-dir".to_owned(),
+            "a".to_owned(),
+            "--out-dir".to_owned(),
+            "o".to_owned(),
+            "--pre-ba-out-dir".to_owned(),
+            "checkpoint".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --joint-rig-ba"));
+        let duplicate_error = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
             "r".to_owned(),
@@ -5478,7 +5703,7 @@ mod tests {
             "--joint-rig-ba".to_owned(),
         ])
         .unwrap_err();
-        assert!(error.contains("duplicate argument"));
+        assert!(duplicate_error.contains("duplicate argument"));
 
         let args = parse_args([
             "example".to_owned(),
@@ -5575,7 +5800,7 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("requires --repair-cross-boundary"));
-        let error = parse_args([
+        let args = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
             "r".to_owned(),
@@ -5590,8 +5815,9 @@ mod tests {
             "1999".to_owned(),
             "--joint-rig-ba".to_owned(),
         ])
-        .unwrap_err();
-        assert!(error.contains("cannot be combined with joint BA"));
+        .unwrap();
+        assert!(args.repair_cross_boundary);
+        assert!(args.joint_rig_ba);
         let error = parse_args([
             "example".to_owned(),
             "--rig-manifest".to_owned(),
@@ -5611,6 +5837,65 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn pre_ba_order_view_is_canonical_without_mutating_ba_order() {
+        let (_manifest, _store, _images, _cameras, mut landmarks, _active) = joint_ba_fixture();
+        landmarks.reverse();
+        let before = landmarks.clone();
+        let indices = canonical_landmark_indices(&landmarks);
+        assert_eq!(indices.len(), landmarks.len());
+        assert_eq!(indices, (0..landmarks.len()).rev().collect::<Vec<_>>());
+        assert_eq!(landmarks, before);
+    }
+
+    #[test]
+    fn output_and_checkpoint_ancestor_collision_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_integrate_checkpoint_paths_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let args = Args {
+            rig_manifest: root.join("manifest.tsv"),
+            nodes_tsv: root.join("nodes.tsv"),
+            atlas_dir: root.join("atlas"),
+            out_dir: root.join("out"),
+            pre_ba_out_dir: Some(root.join("out/checkpoint")),
+            recover_zero_support_frames: false,
+            joint_rig_ba: true,
+            diagnose_cross_boundary_pnp: false,
+            diagnostic_left_max_frame: None,
+            repair_cross_boundary: false,
+            repair_left_max_frame: None,
+        };
+        let nodes = vec![NodeSpec {
+            node_id: 1,
+            window_start: 0,
+            images_txt: root.join("source/images.txt"),
+        }];
+        let error = validate_write_destinations(&args, &nodes).unwrap_err();
+        assert!(error.contains("ambiguous output destinations"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_comparison_resolves_symlink_before_parent_dir() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "visloc_integrate_checkpoint_symlink_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("real")).unwrap();
+        symlink(root.join("real"), root.join("link")).unwrap();
+        assert!(paths_overlap(&root.join("link/../real"), &root.join("real")).unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
