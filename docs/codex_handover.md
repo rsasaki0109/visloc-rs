@@ -110,6 +110,20 @@
 > implicit512は9.079e-4。dense参照解も同基準未達で、前処理だけが原因とは断定できません。
 > 次は物理座標・dampingを変えず、3x3 landmarkブロックのCholesky構成を別armで比較。
 > 現1e-12は診断baselineで、ユーザーの最終目的は精度・速度・省メモリです。
+> PR #81は最終CI8項目（run 34125303050）通過後、`06ca2e1`へmergeし旧branch整理済み。
+> 現在は `feat/m8-cholesky-landmark-elimination`。同じ物理damping・観測集合で
+> landmark eliminationの構成だけを変えるA/Bは `05500bf` に実装し2回の数値一致を確認。
+> [証跡](../benchmarks/electro/m8-openloris-cholesky-landmark-elimination-v1.json)。
+> general inverseの実測非対称性は0。Choleskyもλ1e5で真残差1.215e-5 > 7.363e-7で失敗し、
+> test-onlyのまま非昇格です。次はexampleで停止条件を明示し、production general inverseの
+> PCG512 relative1e-8 / absolute1e-12を、既存strict設定・directと1k全最適化で比較します。
+> これは別設定armであり旧strict gateの合格扱いにはしません。10k・README昇格は未実施。
+> relative設定は `7b6056a` で実装・表示修正し、同一binaryで3 arm各2回の計測完了。
+> [結果](../benchmarks/electro/m8-openloris-relative-pcg-tolerance-v1.json): 新設定cost118070.554、
+> RMSE/p95 0.026608/0.041100 m、20.19/20.29 s、84,564 KiB。directより精度は未達。
+> 全支持・identity・depth・calibration保持、各repeat完全一致、旧direct/strictもPR #79一致。
+> 次候補はtrue residual再確認失敗時だけ最大1回restartする別arm（総512反復内）。
+> まだ未実装。デフォルト変更・N²状態・反復上限のリセットは行いません。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

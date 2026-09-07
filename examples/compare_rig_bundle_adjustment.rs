@@ -22,7 +22,7 @@ use visloc_rs::slam::{
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N]\n\
+    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N] [--pcg-relative-tolerance X]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -69,13 +69,15 @@ impl SolverArm {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Args {
     model: PathBuf,
     rig_manifest: PathBuf,
     solver: Option<SolverArm>,
     out_dir: Option<PathBuf>,
     pcg_max_iterations: usize,
+    pcg_relative_tolerance: f64,
+    pcg_relative_tolerance_explicit: bool,
     oracle_fixture_out: Option<PathBuf>,
 }
 
@@ -194,6 +196,8 @@ where
     let mut oracle_fixture_out = None;
     let mut pcg_max_iterations = MAX_PCG_ITERATIONS;
     let mut pcg_seen = false;
+    let mut pcg_relative_tolerance = PCG_TOLERANCE;
+    let mut pcg_relative_seen = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -211,6 +215,32 @@ where
                 .map_err(|error| format!("{flag} requires a positive integer: {error}\n{USAGE}"))?;
             if pcg_max_iterations == 0 {
                 return Err(format!("{flag} must be positive\n{USAGE}"));
+            }
+            continue;
+        }
+        if flag == "--pcg-relative-tolerance" {
+            if pcg_relative_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            pcg_relative_seen = true;
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires a positive finite value\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!(
+                    "{flag} requires a positive finite value, got {value:?}\n{USAGE}"
+                ));
+            }
+            pcg_relative_tolerance = value.parse::<f64>().map_err(|error| {
+                format!("{flag} requires a positive finite value: {error}\n{USAGE}")
+            })?;
+            if !pcg_relative_tolerance.is_finite()
+                || pcg_relative_tolerance <= 0.0
+                || pcg_relative_tolerance >= 1.0
+            {
+                return Err(format!(
+                    "{flag} must be finite, positive, and less than 1\n{USAGE}"
+                ));
             }
             continue;
         }
@@ -250,10 +280,12 @@ where
             }
         }
     }
-    if oracle_fixture_out.is_some() && (solver.is_some() || out_dir.is_some() || pcg_seen) {
+    if oracle_fixture_out.is_some()
+        && (solver.is_some() || out_dir.is_some() || pcg_seen || pcg_relative_seen)
+    {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
-             --solver, --out-dir or --pcg-max-iterations\n{USAGE}"
+             --solver, --out-dir, --pcg-max-iterations or --pcg-relative-tolerance\n{USAGE}"
         ));
     }
     if oracle_fixture_out.is_none() && (solver.is_none() || out_dir.is_none()) {
@@ -267,11 +299,13 @@ where
         solver,
         out_dir,
         pcg_max_iterations,
+        pcg_relative_tolerance,
+        pcg_relative_tolerance_explicit: pcg_relative_seen,
         oracle_fixture_out,
     };
-    if args.solver == Some(SolverArm::Direct) && pcg_seen {
+    if args.solver == Some(SolverArm::Direct) && (pcg_seen || pcg_relative_seen) {
         return Err(format!(
-            "--pcg-max-iterations is only valid for matrix-free\n{USAGE}"
+            "PCG options are only valid for matrix-free\n{USAGE}"
         ));
     }
     Ok(args)
@@ -351,6 +385,13 @@ fn run(args: &Args) -> Result<(), String> {
         ..BaConfig::default()
     };
     let solver_started = Instant::now();
+    if solver == SolverArm::MatrixFree && args.pcg_relative_tolerance_explicit {
+        println!(
+            "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e}",
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+        );
+    }
     let optimization = match solver {
         SolverArm::Direct => {
             let result = prepared
@@ -362,7 +403,7 @@ fn run(args: &Args) -> Result<(), String> {
         SolverArm::MatrixFree => {
             let options = MatrixFreeBaOptions {
                 max_pcg_iterations: args.pcg_max_iterations,
-                pcg_relative_tolerance: PCG_TOLERANCE,
+                pcg_relative_tolerance: args.pcg_relative_tolerance,
                 pcg_absolute_tolerance: PCG_TOLERANCE,
             };
             let result = prepared
@@ -397,23 +438,44 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
-    println!(
-        "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
-        summary.solver.as_str(),
-        summary.initial_cost,
-        summary.final_cost,
-        summary.iterations,
-        summary.converged,
-        source.images.len(),
-        manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
-        source.points.len(),
-        source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
-        args.pcg_max_iterations,
-        PCG_TOLERANCE,
-        summary.solver_seconds,
-        summary.total_seconds,
-        out_dir.display(),
-    );
+    if args.pcg_relative_tolerance_explicit {
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
+            source.points.len(),
+            source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else {
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
+            source.points.len(),
+            source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            args.pcg_max_iterations,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    }
     Ok(())
 }
 
@@ -2085,6 +2147,156 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("only valid for matrix-free"));
+    }
+
+    #[test]
+    fn parses_matrix_free_relative_tolerance_and_preserves_default() {
+        let explicit = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(explicit.pcg_relative_tolerance, 1.0e-8);
+        assert!(explicit.pcg_relative_tolerance_explicit);
+
+        let default = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(default.pcg_relative_tolerance, PCG_TOLERANCE);
+        assert!(!default.pcg_relative_tolerance_explicit);
+    }
+
+    #[test]
+    fn rejects_invalid_duplicate_and_wrong_arm_relative_tolerance() {
+        for invalid in ["0", "-1", "1", "NaN", "inf", "-inf"] {
+            let error = parse_args(
+                [
+                    "compare",
+                    "--model",
+                    "model",
+                    "--rig-manifest",
+                    "rig.txt",
+                    "--solver",
+                    "matrix-free",
+                    "--out-dir",
+                    "out",
+                    "--pcg-relative-tolerance",
+                    invalid,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("pcg-relative-tolerance"),
+                "invalid={invalid:?} error={error}"
+            );
+        }
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-relative-tolerance",
+                "1e-8",
+                "--pcg-relative-tolerance",
+                "1e-7",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let missing = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-relative-tolerance",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(missing.contains("requires a positive finite value"));
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("only valid for matrix-free"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
     }
 
     #[test]

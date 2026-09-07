@@ -1,0 +1,749 @@
+{
+  "schema_version": 1,
+  "experiment": "m8-openloris-relative-pcg-tolerance-v1",
+  "date": "2026-09-07",
+  "status": "measured_improved_over_strict_but_not_direct_equivalent_no_10k_promotion",
+  "implementation_commit": "7b6056ab0568fcf9cc41f780ca6089cb72052a4f",
+  "earlier_flag_commit": "5c933d6f55580b0299519eba29310c64d0f33fc6",
+  "source": "examples/compare_rig_bundle_adjustment.rs",
+  "source_sha256": "16993280d5a58c7f8ccd4d51a12d70eea60d48cb9d088a892caff00b34818c6a",
+  "binary": {
+    "path": "target/release/examples/compare_rig_bundle_adjustment",
+    "sha256": "9eb784dc5ce56cf4c051adc87145680af4ef148f743c2bf80fe5431678732ff2",
+    "build_command": "cargo build --release --example compare_rig_bundle_adjustment",
+    "rustc": "1.94.0 (4a4ef493e 2026-03-02)"
+  },
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1",
+  "input_evidence": "m8-openloris-matrix-free-1k-input-v1.json",
+  "baseline_evidence": "m8-openloris-matrix-free-rig-ba-comparison-v1.json",
+  "preceding_diagnostic": "m8-openloris-cholesky-landmark-elimination-v1.json",
+  "configuration": {
+    "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+    "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "lm_max_iterations": 20,
+    "initial_lambda": 0.0001,
+    "lambda_increase_factor": 10,
+    "lambda_decrease_factor": 0.1,
+    "min_lambda": 1e-9,
+    "max_lambda": 1000000000000,
+    "step_tolerance": 1e-7,
+    "cost_tolerance": 1e-9,
+    "relative_cost_tolerance": null,
+    "robust_kernel": "None",
+    "refine_intrinsics": false,
+    "refine_distortion": false,
+    "ba_parallel": false,
+    "linear_solver_config": "Sparse; explicit matrix-free entry always uses implicit PCG",
+    "fixed_pose_ids": [
+      0
+    ],
+    "fixed_landmark_ids": [],
+    "observation_order": "Original points3D file order, then original track pair order",
+    "input_observations_removed": 0,
+    "pcg_absolute_tolerance": 1e-12,
+    "pcg_max_iterations_arms": [
+      512
+    ],
+    "gt_passed_to_optimizer": false,
+    "pcg_relative_tolerance_arms": [
+      1e-12,
+      1e-8
+    ],
+    "rayon_num_threads": 1
+  },
+  "accounting": {
+    "scope": "Whole-process post-map BA including load, validation, solve and staged text publication; solver time separately logged. Excludes frontend, mapping and atlas construction.",
+    "run_order": [
+      "matrix-free-512-rel1e8-v2-1",
+      "direct-v2-1",
+      "matrix-free-512-strict-v2-1",
+      "matrix-free-512-rel1e8-v2-2",
+      "direct-v2-2",
+      "matrix-free-512-strict-v2-2"
+    ],
+    "serial_processes": true,
+    "concurrent_project_build_or_benchmark": false,
+    "host": "Shared host with unrelated long-lived CPU tasks; warm/reused inputs, no cache dropping. Two repetitions, no statistical confidence or E2E claim.",
+    "timing_command": "RAYON_NUM_THREADS=1 /usr/bin/time -v -o ROOT/ARM.time target/release/examples/compare_rig_bundle_adjustment --model MODEL --rig-manifest RIG --solver direct|matrix-free --out-dir ROOT/ARM/model [--pcg-max-iterations 512] [--pcg-relative-tolerance 1e-8] > ROOT/ARM.log 2>&1",
+    "default_solver_and_tolerances_unchanged": true,
+    "cholesky_used_in_nonlinear_runs": false,
+    "readme_changed": false
+  },
+  "runs": [
+    {
+      "arm": "matrix-free-512-rel1e8-v2-1",
+      "summary": {
+        "solver": "matrix-free",
+        "initial_cost": "1.265103987573094e5",
+        "final_cost": "1.180705543689159e5",
+        "lm_iterations": "20",
+        "converged": "false",
+        "source_images": "1000",
+        "source_frames": "500",
+        "source_landmarks": "4716",
+        "source_observations": "130900",
+        "fixed_pose": "0",
+        "fixed_landmarks": "0",
+        "pcg_max_iterations": "512",
+        "pcg_relative_tolerance": "1.00000000000000002e-8",
+        "pcg_absolute_tolerance": "9.99999999999999980e-13",
+        "solver_seconds": "19.948862",
+        "total_seconds": "20.179719",
+        "out": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-rel1e8-v2-1/model"
+      },
+      "wall_seconds": 20.19,
+      "peak_rss_kib": 84564,
+      "exit_status": 0,
+      "accepted_lm": 3,
+      "successful_pcg": 3,
+      "pcg_failure_counts": {
+        "MaxIterations": 10,
+        "ResidualCheckFailed": 7,
+        "NonPositiveCurvature": 0
+      },
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "dfc2dba4c21f4d5f31ffd8ac40f405c17476e4251ec630cd9806668e81252425",
+        "points3D.txt": "86242e11eb98dd920eda04af59f17c6fab4d79f257cbd7679421281e03a43e10"
+      },
+      "log_sha256": "14b5633a4e73e285ec9a1871d95aa8cef7dd3187e0000cd1c83e57ce223f62ce",
+      "time_sha256": "9ffae61a2f8b48e8e66556fe13be9b891dd3ed432b1f25cafc6e1e5ad21e55a8"
+    },
+    {
+      "arm": "direct-v2-1",
+      "summary": {
+        "solver": "direct",
+        "initial_cost": "1.265103987573094e5",
+        "final_cost": "1.174960330739301e5",
+        "lm_iterations": "20",
+        "converged": "false",
+        "source_images": "1000",
+        "source_frames": "500",
+        "source_landmarks": "4716",
+        "source_observations": "130900",
+        "fixed_pose": "0",
+        "fixed_landmarks": "0",
+        "pcg_max_iterations": "128",
+        "pcg_tolerance": "1.0e-12",
+        "solver_seconds": "45.254083",
+        "total_seconds": "45.473137",
+        "out": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/direct-v2-1/model"
+      },
+      "wall_seconds": 45.49,
+      "peak_rss_kib": 161692,
+      "exit_status": 0,
+      "accepted_lm": 5,
+      "successful_pcg": 0,
+      "pcg_failure_counts": {
+        "MaxIterations": 0,
+        "ResidualCheckFailed": 0,
+        "NonPositiveCurvature": 0
+      },
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+        "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+      },
+      "log_sha256": "a4dab9f44baaee9e67e3e77fb30e5234b67942566a7ff08526f08c15b35c5957",
+      "time_sha256": "e7651fd3a53b1ee8f112597d0aa7b924aa7ab794add2598a03758d89933d1220"
+    },
+    {
+      "arm": "matrix-free-512-strict-v2-1",
+      "summary": {
+        "solver": "matrix-free",
+        "initial_cost": "1.265103987573094e5",
+        "final_cost": "1.264190824771856e5",
+        "lm_iterations": "20",
+        "converged": "false",
+        "source_images": "1000",
+        "source_frames": "500",
+        "source_landmarks": "4716",
+        "source_observations": "130900",
+        "fixed_pose": "0",
+        "fixed_landmarks": "0",
+        "pcg_max_iterations": "512",
+        "pcg_tolerance": "1.0e-12",
+        "solver_seconds": "17.587501",
+        "total_seconds": "17.809432",
+        "out": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-strict-v2-1/model"
+      },
+      "wall_seconds": 17.81,
+      "peak_rss_kib": 84568,
+      "exit_status": 0,
+      "accepted_lm": 3,
+      "successful_pcg": 3,
+      "pcg_failure_counts": {
+        "MaxIterations": 10,
+        "ResidualCheckFailed": 7,
+        "NonPositiveCurvature": 0
+      },
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "c440ecf29af54fc3c5a8e4d5db9009fa0cf7796cf9e29570ae8d320a8d86cfb4",
+      "time_sha256": "5891350185bb98347e96c75bc78f1a34f1a53011d14c1f74e8a66ce820d4f365"
+    },
+    {
+      "arm": "matrix-free-512-rel1e8-v2-2",
+      "summary": {
+        "solver": "matrix-free",
+        "initial_cost": "1.265103987573094e5",
+        "final_cost": "1.180705543689159e5",
+        "lm_iterations": "20",
+        "converged": "false",
+        "source_images": "1000",
+        "source_frames": "500",
+        "source_landmarks": "4716",
+        "source_observations": "130900",
+        "fixed_pose": "0",
+        "fixed_landmarks": "0",
+        "pcg_max_iterations": "512",
+        "pcg_relative_tolerance": "1.00000000000000002e-8",
+        "pcg_absolute_tolerance": "9.99999999999999980e-13",
+        "solver_seconds": "20.057566",
+        "total_seconds": "20.282478",
+        "out": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-rel1e8-v2-2/model"
+      },
+      "wall_seconds": 20.29,
+      "peak_rss_kib": 84564,
+      "exit_status": 0,
+      "accepted_lm": 3,
+      "successful_pcg": 3,
+      "pcg_failure_counts": {
+        "MaxIterations": 10,
+        "ResidualCheckFailed": 7,
+        "NonPositiveCurvature": 0
+      },
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "dfc2dba4c21f4d5f31ffd8ac40f405c17476e4251ec630cd9806668e81252425",
+        "points3D.txt": "86242e11eb98dd920eda04af59f17c6fab4d79f257cbd7679421281e03a43e10"
+      },
+      "log_sha256": "3d1706c602dc47c93e8686b117d6298465c142585ad20595f0ddce2112d6589c",
+      "time_sha256": "86c58520d3ba10dc2e4416e66c8ce50aae8ea5f7f93f6381088cc2d119ce3546"
+    },
+    {
+      "arm": "direct-v2-2",
+      "summary": {
+        "solver": "direct",
+        "initial_cost": "1.265103987573094e5",
+        "final_cost": "1.174960330739301e5",
+        "lm_iterations": "20",
+        "converged": "false",
+        "source_images": "1000",
+        "source_frames": "500",
+        "source_landmarks": "4716",
+        "source_observations": "130900",
+        "fixed_pose": "0",
+        "fixed_landmarks": "0",
+        "pcg_max_iterations": "128",
+        "pcg_tolerance": "1.0e-12",
+        "solver_seconds": "45.128237",
+        "total_seconds": "45.354299",
+        "out": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/direct-v2-2/model"
+      },
+      "wall_seconds": 45.37,
+      "peak_rss_kib": 161932,
+      "exit_status": 0,
+      "accepted_lm": 5,
+      "successful_pcg": 0,
+      "pcg_failure_counts": {
+        "MaxIterations": 0,
+        "ResidualCheckFailed": 0,
+        "NonPositiveCurvature": 0
+      },
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+        "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+      },
+      "log_sha256": "f42c00f6bf724afeb19106b8ed014c78279e31126f51930bcbd477c6e3494d05",
+      "time_sha256": "46fd43ba723eb093633d448b4c660a4aa2d09af483bd7279463e950a4ee3a729"
+    },
+    {
+      "arm": "matrix-free-512-strict-v2-2",
+      "summary": {
+        "solver": "matrix-free",
+        "initial_cost": "1.265103987573094e5",
+        "final_cost": "1.264190824771856e5",
+        "lm_iterations": "20",
+        "converged": "false",
+        "source_images": "1000",
+        "source_frames": "500",
+        "source_landmarks": "4716",
+        "source_observations": "130900",
+        "fixed_pose": "0",
+        "fixed_landmarks": "0",
+        "pcg_max_iterations": "512",
+        "pcg_tolerance": "1.0e-12",
+        "solver_seconds": "18.069048",
+        "total_seconds": "18.290045",
+        "out": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-strict-v2-2/model"
+      },
+      "wall_seconds": 18.3,
+      "peak_rss_kib": 84400,
+      "exit_status": 0,
+      "accepted_lm": 3,
+      "successful_pcg": 3,
+      "pcg_failure_counts": {
+        "MaxIterations": 10,
+        "ResidualCheckFailed": 7,
+        "NonPositiveCurvature": 0
+      },
+      "output_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "log_sha256": "23ad34adf75c85bc8d6ee0bc7fae2d80ee74cebb65ed54e6910f6611088ccab5",
+      "time_sha256": "4c6f1a731035a0ee08ddb26239316beb8630aa7752f514944947a9f89e53fb63"
+    }
+  ],
+  "unique_numerical_traces": {
+    "matrix-free-512-rel1e8-v2-1": [
+      "lm_trace solver=matrix-free iteration=0 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e-3 accepted=false",
+      "lm_trace solver=matrix-free iteration=1 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e-2 accepted=false",
+      "lm_trace solver=matrix-free iteration=2 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e-1 accepted=false",
+      "lm_trace solver=matrix-free iteration=3 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e0 accepted=false",
+      "lm_trace solver=matrix-free iteration=4 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e1 accepted=false",
+      "lm_trace solver=matrix-free iteration=5 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e2 accepted=false",
+      "lm_trace solver=matrix-free iteration=6 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e3 accepted=false",
+      "lm_trace solver=matrix-free iteration=7 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e4 accepted=false",
+      "lm_trace solver=matrix-free iteration=8 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e5 accepted=false",
+      "lm_trace solver=matrix-free iteration=9 cost_before=1.265103987573094e5 cost_after=1.180844045450868e5 pose_step=4.224871206904906e-3 landmark_step=2.631544399717766e-2 lambda=1.000000000000000e5 accepted=true",
+      "lm_trace solver=matrix-free iteration=10 cost_before=1.180844045450868e5 cost_after=1.180844045450868e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e5 accepted=false",
+      "lm_trace solver=matrix-free iteration=11 cost_before=1.180844045450868e5 cost_after=1.180844045450868e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e6 accepted=false",
+      "lm_trace solver=matrix-free iteration=12 cost_before=1.180844045450868e5 cost_after=1.180844045450868e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e7 accepted=false",
+      "lm_trace solver=matrix-free iteration=13 cost_before=1.180844045450868e5 cost_after=1.180844045450868e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e8 accepted=false",
+      "lm_trace solver=matrix-free iteration=14 cost_before=1.180844045450868e5 cost_after=1.180844045450868e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e9 accepted=false",
+      "lm_trace solver=matrix-free iteration=15 cost_before=1.180844045450868e5 cost_after=1.180844045450868e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "lm_trace solver=matrix-free iteration=16 cost_before=1.180844045450868e5 cost_after=1.180705732385068e5 pose_step=1.915888014496327e-7 landmark_step=3.714249122399901e-7 lambda=1.000000000000000e10 accepted=true",
+      "lm_trace solver=matrix-free iteration=17 cost_before=1.180705732385068e5 cost_after=1.180705732385068e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "lm_trace solver=matrix-free iteration=18 cost_before=1.180705732385068e5 cost_after=1.180705543689159e5 pose_step=1.132389546225329e-7 landmark_step=3.696489205215167e-7 lambda=1.000000000000000e10 accepted=true",
+      "lm_trace solver=matrix-free iteration=19 cost_before=1.180705543689159e5 cost_after=1.180705543689159e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "pcg_trace solver=matrix-free iteration=0 pcg_iterations=512 residual=3.183459481943091e2 target=7.354716589947665e-3 failure=MaxIterations { iterations: 512, recursive_norm: 318.34634181495545, residual_norm: 318.3459481943091, target: 0.007354716589947665 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=1 pcg_iterations=512 residual=2.844788866066306e2 target=7.354098809332720e-3 failure=MaxIterations { iterations: 512, recursive_norm: 284.47890916139613, residual_norm: 284.4788866066306, target: 0.00735409880933272 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=2 pcg_iterations=512 residual=2.169265982217514e2 target=7.354410841836482e-3 failure=MaxIterations { iterations: 512, recursive_norm: 216.92485350372925, residual_norm: 216.92659822175145, target: 0.007354410841836482 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=3 pcg_iterations=512 residual=1.705613019339233e1 target=7.354387668322976e-3 failure=MaxIterations { iterations: 512, recursive_norm: 17.056026567242803, residual_norm: 17.056130193392327, target: 0.0073543876683229755 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=4 pcg_iterations=512 residual=5.991331616682434e0 target=7.355181943007929e-3 failure=MaxIterations { iterations: 512, recursive_norm: 5.990926086468494, residual_norm: 5.991331616682434, target: 0.007355181943007929 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=5 pcg_iterations=512 residual=6.229435210169789e2 target=7.360127322637582e-3 failure=MaxIterations { iterations: 512, recursive_norm: 622.943795690782, residual_norm: 622.9435210169789, target: 0.007360127322637582 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=6 pcg_iterations=512 residual=3.555112520606723e1 target=7.365750907511965e-3 failure=MaxIterations { iterations: 512, recursive_norm: 35.551112473132186, residual_norm: 35.55112520606723, target: 0.007365750907511965 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=7 pcg_iterations=512 residual=3.237583323469034e-1 target=7.370199471449998e-3 failure=MaxIterations { iterations: 512, recursive_norm: 0.3237785392035484, residual_norm: 0.32375833234690343, target: 0.007370199471449998 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=8 pcg_iterations=421 residual=8.727104293979233e-3 target=7.370397691026571e-3 failure=ResidualCheckFailed { iterations: 421, recursive_norm: 0.005504151043863519, true_norm: 0.008727104293979233, target: 0.007370397691026571 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=9 pcg_iterations=319 residual=3.364104038915995e-3 target=7.363379620295508e-3 failure=none max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=10 pcg_iterations=512 residual=1.902124975725595e1 target=1.548074619934223e-3 failure=MaxIterations { iterations: 512, recursive_norm: 5.283437810753204, residual_norm: 19.02124975725595, target: 0.001548074619934223 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=11 pcg_iterations=512 residual=5.934134241791719e0 target=1.506266137372246e-3 failure=MaxIterations { iterations: 512, recursive_norm: 0.11583186588125434, residual_norm: 5.934134241791719, target: 0.0015062661373722456 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=12 pcg_iterations=484 residual=1.164026433164512e-1 target=1.490407389686785e-3 failure=ResidualCheckFailed { iterations: 484, recursive_norm: 0.001371141421110788, true_norm: 0.1164026433164512, target: 0.0014904073896867848 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=13 pcg_iterations=173 residual=1.031472513450191e-1 target=1.501194134780440e-3 failure=ResidualCheckFailed { iterations: 173, recursive_norm: 0.001044713939624864, true_norm: 0.10314725134501913, target: 0.00150119413478044 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=14 pcg_iterations=76 residual=7.728860967583072e-3 target=1.543479459527550e-3 failure=ResidualCheckFailed { iterations: 76, recursive_norm: 0.001312922052227743, true_norm: 0.0077288609675830715, target: 0.0015434794595275496 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=15 pcg_iterations=32 residual=3.712745750302771e-3 target=1.925905037137261e-3 failure=ResidualCheckFailed { iterations: 32, recursive_norm: 0.001745285813219318, true_norm: 0.003712745750302771, target: 0.0019259050371372615 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=16 pcg_iterations=20 residual=3.511705759773503e-4 target=2.334287731529428e-3 failure=none max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=17 pcg_iterations=37 residual=4.229258545182997e-4 target=5.072650850162920e-5 failure=ResidualCheckFailed { iterations: 37, recursive_norm: 3.877415458963732e-5, true_norm: 0.0004229258545182997, target: 5.07265085016292e-5 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=18 pcg_iterations=20 residual=4.173163838559329e-5 target=5.362289663263277e-5 failure=none max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=19 pcg_iterations=34 residual=4.360039251364158e-5 target=4.158790590164419e-5 failure=ResidualCheckFailed { iterations: 34, recursive_norm: 2.2217701853429952e-5, true_norm: 4.360039251364158e-5, target: 4.158790590164419e-5 } max_pcg_iterations=512"
+    ],
+    "direct-v2-1": [
+      "lm_trace solver=direct iteration=0 cost_before=1.265103987573094e5 cost_after=1.180487562191261e5 pose_step=4.539863504482840e-2 landmark_step=9.543853282311060e2 lambda=1.000000000000000e-3 accepted=false",
+      "lm_trace solver=direct iteration=1 cost_before=1.265103987573094e5 cost_after=1.180398342196572e5 pose_step=4.525615867988825e-2 landmark_step=1.921394697101112e2 lambda=1.000000000000000e-2 accepted=false",
+      "lm_trace solver=direct iteration=2 cost_before=1.265103987573094e5 cost_after=1.256582579826467e5 pose_step=4.422410463690069e-2 landmark_step=2.616518820743931e1 lambda=1.000000000000000e-1 accepted=false",
+      "lm_trace solver=direct iteration=3 cost_before=1.265103987573094e5 cost_after=1.205806612989509e5 pose_step=4.213959723166222e-2 landmark_step=1.429394158145234e1 lambda=1.000000000000000e0 accepted=false",
+      "lm_trace solver=direct iteration=4 cost_before=1.265103987573094e5 cost_after=1.159073791020013e5 pose_step=3.680777736735848e-2 landmark_step=2.581527574433523e0 lambda=1.000000000000000e1 accepted=false",
+      "lm_trace solver=direct iteration=5 cost_before=1.265103987573094e5 cost_after=1.146413621556863e5 pose_step=2.483729149732559e-2 landmark_step=1.294432568328994e0 lambda=1.000000000000000e2 accepted=false",
+      "lm_trace solver=direct iteration=6 cost_before=1.265103987573094e5 cost_after=1.149267972713589e5 pose_step=1.648982300583549e-2 landmark_step=3.756511262902025e-1 lambda=1.000000000000000e3 accepted=false",
+      "lm_trace solver=direct iteration=7 cost_before=1.265103987573094e5 cost_after=1.162868502582037e5 pose_step=1.170108298126295e-2 landmark_step=2.131042068973718e-1 lambda=1.000000000000000e4 accepted=false",
+      "lm_trace solver=direct iteration=8 cost_before=1.265103987573094e5 cost_after=1.167856301155864e5 pose_step=7.011114571557374e-3 landmark_step=9.516736448089731e-2 lambda=1.000000000000000e5 accepted=false",
+      "lm_trace solver=direct iteration=9 cost_before=1.265103987573094e5 cost_after=1.180844047208355e5 pose_step=4.224871200904737e-3 landmark_step=2.631544396998766e-2 lambda=1.000000000000000e5 accepted=true",
+      "lm_trace solver=direct iteration=10 cost_before=1.180844047208355e5 cost_after=1.166783656404518e5 pose_step=4.935727643026278e-3 landmark_step=8.753038594263313e-2 lambda=1.000000000000000e5 accepted=false",
+      "lm_trace solver=direct iteration=11 cost_before=1.180844047208355e5 cost_after=1.175911937289642e5 pose_step=1.370245093610298e-3 landmark_step=1.493247846520461e-2 lambda=1.000000000000000e5 accepted=true",
+      "lm_trace solver=direct iteration=12 cost_before=1.175911937289642e5 cost_after=1.166084491111593e5 pose_step=4.000120376280353e-3 landmark_step=8.078352147541841e-2 lambda=1.000000000000000e5 accepted=false",
+      "lm_trace solver=direct iteration=13 cost_before=1.175911937289642e5 cost_after=1.173456715827083e5 pose_step=9.695098810938158e-4 landmark_step=1.357564066994452e-2 lambda=1.000000000000000e6 accepted=false",
+      "lm_trace solver=direct iteration=14 cost_before=1.175911937289642e5 cost_after=1.175564729990976e5 pose_step=1.278517036264812e-4 landmark_step=1.462150029192773e-3 lambda=1.000000000000000e6 accepted=true",
+      "lm_trace solver=direct iteration=15 cost_before=1.175564729990976e5 cost_after=1.173246173211333e5 pose_step=9.355473714641711e-4 landmark_step=1.344603569926753e-2 lambda=1.000000000000000e6 accepted=false",
+      "lm_trace solver=direct iteration=16 cost_before=1.175564729990976e5 cost_after=1.175251522203322e5 pose_step=1.206931845915765e-4 landmark_step=1.447323667142439e-3 lambda=1.000000000000000e6 accepted=true",
+      "lm_trace solver=direct iteration=17 cost_before=1.175251522203322e5 cost_after=1.173044403491726e5 pose_step=9.056791024117453e-4 landmark_step=1.331867453835742e-2 lambda=1.000000000000000e6 accepted=false",
+      "lm_trace solver=direct iteration=18 cost_before=1.175251522203322e5 cost_after=1.174960330739301e5 pose_step=1.149602830621804e-4 landmark_step=1.432876110685110e-3 lambda=1.000000000000000e6 accepted=true",
+      "lm_trace solver=direct iteration=19 cost_before=1.174960330739301e5 cost_after=1.172850424966106e5 pose_step=8.788071185599755e-4 landmark_step=1.319342534520128e-2 lambda=1.000000000000000e6 accepted=false",
+      "pcg_trace solver=direct status=not-applicable"
+    ],
+    "matrix-free-512-strict-v2-1": [
+      "lm_trace solver=matrix-free iteration=0 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e-3 accepted=false",
+      "lm_trace solver=matrix-free iteration=1 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e-2 accepted=false",
+      "lm_trace solver=matrix-free iteration=2 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e-1 accepted=false",
+      "lm_trace solver=matrix-free iteration=3 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e0 accepted=false",
+      "lm_trace solver=matrix-free iteration=4 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e1 accepted=false",
+      "lm_trace solver=matrix-free iteration=5 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e2 accepted=false",
+      "lm_trace solver=matrix-free iteration=6 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e3 accepted=false",
+      "lm_trace solver=matrix-free iteration=7 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e4 accepted=false",
+      "lm_trace solver=matrix-free iteration=8 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e5 accepted=false",
+      "lm_trace solver=matrix-free iteration=9 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e6 accepted=false",
+      "lm_trace solver=matrix-free iteration=10 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e7 accepted=false",
+      "lm_trace solver=matrix-free iteration=11 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e8 accepted=false",
+      "lm_trace solver=matrix-free iteration=12 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e9 accepted=false",
+      "lm_trace solver=matrix-free iteration=13 cost_before=1.265103987573094e5 cost_after=1.265103987573094e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "lm_trace solver=matrix-free iteration=14 cost_before=1.265103987573094e5 cost_after=1.264774281344812e5 pose_step=8.681684126820639e-6 landmark_step=1.595127480032178e-5 lambda=1.000000000000000e10 accepted=true",
+      "lm_trace solver=matrix-free iteration=15 cost_before=1.264774281344812e5 cost_after=1.264774281344812e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "lm_trace solver=matrix-free iteration=16 cost_before=1.264774281344812e5 cost_after=1.264477773308437e5 pose_step=8.096669795783534e-6 landmark_step=1.579383665620511e-5 lambda=1.000000000000000e10 accepted=true",
+      "lm_trace solver=matrix-free iteration=17 cost_before=1.264477773308437e5 cost_after=1.264477773308437e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "lm_trace solver=matrix-free iteration=18 cost_before=1.264477773308437e5 cost_after=1.264190824771856e5 pose_step=7.563038766157636e-6 landmark_step=1.563800812369709e-5 lambda=1.000000000000000e10 accepted=true",
+      "lm_trace solver=matrix-free iteration=19 cost_before=1.264190824771856e5 cost_after=1.264190824771856e5 pose_step=0.000000000000000e0 landmark_step=0.000000000000000e0 lambda=1.000000000000000e10 accepted=false",
+      "pcg_trace solver=matrix-free iteration=0 pcg_iterations=512 residual=3.183459481943091e2 target=7.354716589947665e-7 failure=MaxIterations { iterations: 512, recursive_norm: 318.34634181495545, residual_norm: 318.3459481943091, target: 7.354716589947665e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=1 pcg_iterations=512 residual=2.844788866066306e2 target=7.354098809332719e-7 failure=MaxIterations { iterations: 512, recursive_norm: 284.47890916139613, residual_norm: 284.4788866066306, target: 7.354098809332719e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=2 pcg_iterations=512 residual=2.169265982217514e2 target=7.354410841836482e-7 failure=MaxIterations { iterations: 512, recursive_norm: 216.92485350372925, residual_norm: 216.92659822175145, target: 7.354410841836482e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=3 pcg_iterations=512 residual=1.705613019339233e1 target=7.354387668322975e-7 failure=MaxIterations { iterations: 512, recursive_norm: 17.056026567242803, residual_norm: 17.056130193392327, target: 7.354387668322975e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=4 pcg_iterations=512 residual=5.991331616682434e0 target=7.355181943007929e-7 failure=MaxIterations { iterations: 512, recursive_norm: 5.990926086468494, residual_norm: 5.991331616682434, target: 7.355181943007929e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=5 pcg_iterations=512 residual=6.229435210169789e2 target=7.360127322637582e-7 failure=MaxIterations { iterations: 512, recursive_norm: 622.943795690782, residual_norm: 622.9435210169789, target: 7.360127322637582e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=6 pcg_iterations=512 residual=3.555112520606723e1 target=7.365750907511965e-7 failure=MaxIterations { iterations: 512, recursive_norm: 35.551112473132186, residual_norm: 35.55112520606723, target: 7.365750907511965e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=7 pcg_iterations=512 residual=3.237583323469034e-1 target=7.370199471449997e-7 failure=MaxIterations { iterations: 512, recursive_norm: 0.3237785392035484, residual_norm: 0.32375833234690343, target: 7.370199471449997e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=8 pcg_iterations=512 residual=1.882516574781104e-3 target=7.370397691026571e-7 failure=MaxIterations { iterations: 512, recursive_norm: 0.0005685723201100786, residual_norm: 0.0018825165747811039, target: 7.370397691026571e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=9 pcg_iterations=512 residual=9.078640699610080e-4 target=7.363379620295508e-7 failure=MaxIterations { iterations: 512, recursive_norm: 4.633822922386621e-6, residual_norm: 0.000907864069961008, target: 7.363379620295508e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=10 pcg_iterations=375 residual=1.347520099264624e-3 target=7.356678741550637e-7 failure=ResidualCheckFailed { iterations: 375, recursive_norm: 6.94099001274054e-7, true_norm: 0.001347520099264624, target: 7.356678741550637e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=11 pcg_iterations=179 residual=2.946754161815764e-4 target=7.366138428285797e-7 failure=ResidualCheckFailed { iterations: 179, recursive_norm: 6.027435734645563e-7, true_norm: 0.0002946754161815764, target: 7.366138428285797e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=12 pcg_iterations=99 residual=8.662572316726888e-5 target=7.375210125720625e-7 failure=ResidualCheckFailed { iterations: 99, recursive_norm: 4.935331585454053e-7, true_norm: 8.662572316726888e-5, target: 7.375210125720625e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=13 pcg_iterations=43 residual=1.297911489722349e-5 target=7.377609206732811e-7 failure=ResidualCheckFailed { iterations: 43, recursive_norm: 4.977964122022111e-7, true_norm: 1.2979114897223494e-5, target: 7.377609206732811e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=14 pcg_iterations=22 residual=5.639331821966476e-7 target=7.377914999757461e-7 failure=none max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=15 pcg_iterations=44 residual=1.237003450702291e-5 target=3.128890921393035e-7 failure=ResidualCheckFailed { iterations: 44, recursive_norm: 1.709251592964516e-7, true_norm: 1.2370034507022906e-5, target: 3.1288909213930355e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=16 pcg_iterations=22 residual=2.373982700608563e-7 target=3.129915475197834e-7 failure=none max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=17 pcg_iterations=45 residual=1.432440121007402e-5 target=3.058033388754850e-7 failure=ResidualCheckFailed { iterations: 45, recursive_norm: 5.029446703792583e-8, true_norm: 1.4324401210074021e-5, target: 3.05803338875485e-7 } max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=18 pcg_iterations=22 residual=1.465141450675378e-7 target=3.058711641361349e-7 failure=none max_pcg_iterations=512",
+      "pcg_trace solver=matrix-free iteration=19 pcg_iterations=44 residual=6.755746401541811e-6 target=2.996034286711816e-7 failure=ResidualCheckFailed { iterations: 44, recursive_norm: 8.962558343168729e-8, true_norm: 6.755746401541811e-6, target: 2.9960342867118155e-7 } max_pcg_iterations=512"
+    ]
+  },
+  "repeat_checks": [
+    {
+      "first": "matrix-free-512-rel1e8-v2-1",
+      "repeat": "matrix-free-512-rel1e8-v2-2",
+      "all_three_model_hashes_exact": true,
+      "all_numerical_trace_lines_exact": true
+    },
+    {
+      "first": "direct-v2-1",
+      "repeat": "direct-v2-2",
+      "all_three_model_hashes_exact": true,
+      "all_numerical_trace_lines_exact": true
+    },
+    {
+      "first": "matrix-free-512-strict-v2-1",
+      "repeat": "matrix-free-512-strict-v2-2",
+      "all_three_model_hashes_exact": true,
+      "all_numerical_trace_lines_exact": true
+    }
+  ],
+  "legacy_checks": {
+    "direct_model_and_all_lm_lines_exact_with_pr79_direct_serial_1": true,
+    "strict_model_and_all_lm_pcg_lines_exact_with_pr79_matrix_free_512_serial_1": true,
+    "default_summary_layout_unchanged": true,
+    "final_input_four_source_hashes_rechecked": true
+  },
+  "audit_provenance": {
+    "geometry_script": "scripts/audit_colmap_pinhole_model.py",
+    "geometry_sha256": "79370647e9acd9a1fc9334502ea900c161c550d06d4e523efaf8abb250f1dc54",
+    "strict_identity_method": "Independent read-only Python row-by-row zip_longest comparison: camera bytes; image ID/camera/name/order and all POINTS2D tokens; point ID/RGB/track tail tokens/order; counts and finite ERROR. Camera centres/rotation matrices and XYZ are compared numerically; frame membership is resolved by image name through the rig manifest.",
+    "scorer": "scripts/score_openloris_model.py",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "repeats": "Audit each unique model; repeat models have all three hashes equal."
+  },
+  "independent_audits": {
+    "matrix-free-512-rel1e8-v2-1": {
+      "geometry": {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-rel1e8-v2-1/model",
+        "image_poses": 1000,
+        "supported_images": 1000,
+        "unsupported_image_ids": [],
+        "landmarks": 4716,
+        "observations": 130900,
+        "mean_reprojection_px": 0.691588658326868,
+        "observation_weighted_mean_reprojection_px": 0.691588658326868,
+        "point_weighted_mean_reprojection_px": 0.7506696077477801,
+        "max_track_mean_reprojection_px": 3.443407941715984,
+        "max_reprojection_px": 4.84008923981911,
+        "max_stored_mean_difference_px": 5.90660026228082e-9,
+        "nonpositive_depth_observations": 0,
+        "tracks_with_multiple_keypoints_in_one_image": 0,
+        "excess_same_image_track_observations": 0,
+        "bidirectional_references_valid": true,
+        "rig": {
+          "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+          "rig_frames": 500,
+          "supported_rig_frames": 500,
+          "unsupported_rig_frame_ids": [],
+          "max_inferred_rig_center_disagreement_m": 3.694445030094784e-15,
+          "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+          "fixed_sensor_extrinsics_valid": true,
+          "track_connected_components": 1,
+          "track_connected_component_sizes": [
+            500
+          ],
+          "track_connected_component_frame_ranges": [
+            [
+              0,
+              499
+            ]
+          ]
+        }
+      },
+      "identity": {
+        "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+        "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-rel1e8-v2-1/model",
+        "cameras_byte_exact": true,
+        "image_identity_and_order_exact": true,
+        "full_points2d_tokens_exact": true,
+        "point_ids_rgb_track_tokens_and_order_exact": true,
+        "images": 1000,
+        "keypoints": 361170,
+        "landmarks": 4716,
+        "observations": 130900,
+        "numerically_changed_image_poses": 998,
+        "max_camera_center_delta_m": 0.0029604113979699075,
+        "max_camera_rotation_matrix_delta_frobenius": 0.0027812854564264475,
+        "max_landmark_delta_m": 0.02631599674450293,
+        "fixed_frame_camera_center_delta_m": 7.713637039264346e-13,
+        "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9406908357248486e-12,
+        "output_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "dfc2dba4c21f4d5f31ffd8ac40f405c17476e4251ec630cd9806668e81252425",
+          "points3D.txt": "86242e11eb98dd920eda04af59f17c6fab4d79f257cbd7679421281e03a43e10"
+        }
+      },
+      "trajectory": {
+        "rmse_m": 0.026608055174816774,
+        "p95_m": 0.04109998478546261,
+        "max_m": 0.08094213975864564,
+        "registered": 1000,
+        "gt_scored": 308,
+        "sim3_scale": 1.117173288626517,
+        "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+        "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+        "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+        "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+        "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+        "max_gap_seconds": 0.1,
+        "alignment": "one Sim3 for the sole component; GT post-only"
+      }
+    },
+    "direct-v2-1": {
+      "geometry": {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/direct-v2-1/model",
+        "image_poses": 1000,
+        "supported_images": 1000,
+        "unsupported_image_ids": [],
+        "landmarks": 4716,
+        "observations": 130900,
+        "mean_reprojection_px": 0.6892603543319799,
+        "observation_weighted_mean_reprojection_px": 0.6892603543319799,
+        "point_weighted_mean_reprojection_px": 0.7498344863813009,
+        "max_track_mean_reprojection_px": 3.40576377483283,
+        "max_reprojection_px": 4.937791375261053,
+        "max_stored_mean_difference_px": 1.357510621708552e-9,
+        "nonpositive_depth_observations": 0,
+        "tracks_with_multiple_keypoints_in_one_image": 0,
+        "excess_same_image_track_observations": 0,
+        "bidirectional_references_valid": true,
+        "rig": {
+          "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+          "rig_frames": 500,
+          "supported_rig_frames": 500,
+          "unsupported_rig_frame_ids": [],
+          "max_inferred_rig_center_disagreement_m": 3.8735455602220786e-15,
+          "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+          "fixed_sensor_extrinsics_valid": true,
+          "track_connected_components": 1,
+          "track_connected_component_sizes": [
+            500
+          ],
+          "track_connected_component_frame_ranges": [
+            [
+              0,
+              499
+            ]
+          ]
+        }
+      },
+      "identity": {
+        "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+        "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/direct-v2-1/model",
+        "cameras_byte_exact": true,
+        "image_identity_and_order_exact": true,
+        "full_points2d_tokens_exact": true,
+        "point_ids_rgb_track_tokens_and_order_exact": true,
+        "images": 1000,
+        "keypoints": 361170,
+        "landmarks": 4716,
+        "observations": 130900,
+        "numerically_changed_image_poses": 998,
+        "max_camera_center_delta_m": 0.0034355700862467083,
+        "max_camera_rotation_matrix_delta_frobenius": 0.0034958471069869465,
+        "max_landmark_delta_m": 0.04260913017134739,
+        "fixed_frame_camera_center_delta_m": 7.713637039264346e-13,
+        "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9406908357248486e-12,
+        "output_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+          "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+        }
+      },
+      "trajectory": {
+        "rmse_m": 0.026518520743846325,
+        "p95_m": 0.04098909824472861,
+        "max_m": 0.0810254275753117,
+        "registered": 1000,
+        "gt_scored": 308,
+        "sim3_scale": 1.1168833040035575,
+        "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+        "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+        "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+        "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+        "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+        "max_gap_seconds": 0.1,
+        "alignment": "one Sim3 for the sole component; GT post-only"
+      }
+    },
+    "matrix-free-512-strict-v2-1": {
+      "geometry": {
+        "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-strict-v2-1/model",
+        "image_poses": 1000,
+        "supported_images": 1000,
+        "unsupported_image_ids": [],
+        "landmarks": 4716,
+        "observations": 130900,
+        "mean_reprojection_px": 0.7203140719241329,
+        "observation_weighted_mean_reprojection_px": 0.7203140719241329,
+        "point_weighted_mean_reprojection_px": 0.764180124125914,
+        "max_track_mean_reprojection_px": 3.5601354391089965,
+        "max_reprojection_px": 3.997840133744877,
+        "max_stored_mean_difference_px": 5.22418471329833e-11,
+        "nonpositive_depth_observations": 0,
+        "tracks_with_multiple_keypoints_in_one_image": 0,
+        "excess_same_image_track_observations": 0,
+        "bidirectional_references_valid": true,
+        "rig": {
+          "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+          "rig_frames": 500,
+          "supported_rig_frames": 500,
+          "unsupported_rig_frame_ids": [],
+          "max_inferred_rig_center_disagreement_m": 4.110189335222113e-15,
+          "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+          "fixed_sensor_extrinsics_valid": true,
+          "track_connected_components": 1,
+          "track_connected_component_sizes": [
+            500
+          ],
+          "track_connected_component_frame_ranges": [
+            [
+              0,
+              499
+            ]
+          ]
+        }
+      },
+      "identity": {
+        "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+        "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-strict-v2-1/model",
+        "cameras_byte_exact": true,
+        "image_identity_and_order_exact": true,
+        "full_points2d_tokens_exact": true,
+        "point_ids_rgb_track_tokens_and_order_exact": true,
+        "images": 1000,
+        "keypoints": 361170,
+        "landmarks": 4716,
+        "observations": 130900,
+        "numerically_changed_image_poses": 998,
+        "max_camera_center_delta_m": 0.000024330631313432282,
+        "max_camera_rotation_matrix_delta_frobenius": 0.000015827411447039907,
+        "max_landmark_delta_m": 0.00004738311618585106,
+        "fixed_frame_camera_center_delta_m": 7.713637039264346e-13,
+        "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9406908357248486e-12,
+        "output_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+          "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+        }
+      },
+      "trajectory": {
+        "rmse_m": 0.026702677828534166,
+        "p95_m": 0.04134738254716512,
+        "max_m": 0.0804587860151056,
+        "registered": 1000,
+        "gt_scored": 308,
+        "sim3_scale": 1.1176073748449953,
+        "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+        "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+        "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+        "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+        "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+        "max_gap_seconds": 0.1,
+        "alignment": "one Sim3 for the sole component; GT post-only"
+      }
+    }
+  },
+  "direct_vs_relative_delta": {
+    "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/direct-v2-1/model",
+    "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-relative-pcg-tolerance-v1/matrix-free-512-rel1e8-v2-1/model",
+    "cameras_byte_exact": true,
+    "image_identity_and_order_exact": true,
+    "full_points2d_tokens_exact": true,
+    "point_ids_rgb_track_tokens_and_order_exact": true,
+    "images": 1000,
+    "keypoints": 361170,
+    "landmarks": 4716,
+    "observations": 130900,
+    "numerically_changed_image_poses": 998,
+    "max_camera_center_delta_m": 0.001097629707302096,
+    "max_camera_rotation_matrix_delta_frobenius": 0.0007575211981974536,
+    "max_landmark_delta_m": 0.01927448120429396,
+    "fixed_frame_camera_center_delta_m": 0,
+    "fixed_frame_camera_rotation_matrix_delta_frobenius": 0,
+    "output_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "dfc2dba4c21f4d5f31ffd8ac40f405c17476e4251ec630cd9806668e81252425",
+      "points3D.txt": "86242e11eb98dd920eda04af59f17c6fab4d79f257cbd7679421281e03a43e10"
+    }
+  },
+  "exploratory_pre_summary_fix": {
+    "arm": "matrix-free-512-rel1e8-1",
+    "implementation_commit": "5c933d6f55580b0299519eba29310c64d0f33fc6",
+    "binary_sha256": "f7f81dd86d2ec4ee6a4bb2730d534508acbd3e177cc3fc4fa165707b28920be9",
+    "wall_seconds": 24.27,
+    "peak_rss_kib": 84248,
+    "numerical_trace_and_three_model_bytes_exact_with_v2": true,
+    "note": "Initial configuration correctly recorded relative1e-8/absolute1e-12, but final legacy pcg_tolerance field misleadingly said1e-12. Fixed explicit summary and reran all six comparison processes with the new binary; this exploratory timing excluded from v2 comparison.",
+    "artifact_hashes": {
+      "matrix-free-512-rel1e8-1.log": "3103c450317b6f5672a2aa084ade1d697d1330a5e29f0951fae7fd0294b7be43",
+      "matrix-free-512-rel1e8-1.time": "9ba7e4fa0fa1e14504971735570fa8e5e506dc756005bd7269467687cb45edec"
+    }
+  },
+  "interpretation": [
+    "Relative1e-8 first accepts LM9 at solve lambda1e5 instead of strict LM14 at1e10. Both candidates still accept only3/20 LM steps; direct accepts5/20, all converged=false.",
+    "Relative arm improves cost, observation-mean reprojection and GT RMSE/p95 over strict, but remains worse than direct on those measures. Maximum observation error4.84009px exceeds frozen input3.99957px and strict3.99784px; it is not a universal reprojection non-regression.",
+    "All1000 images/500 frames,4716 points,130900 observations,361170 keypoints, fixed rig calibration and one connected frame component preserved; no nonpositive depths. Stored point ERROR independently agrees with recomputed means within5.91e-9px.",
+    "Same-host v2 relative wall20.19/20.29s, direct45.49/45.37s; peakRSS84564/84564 versus161692/161932KiB. Different final quality: no equivalent-quality speedup or COLMAP end-to-end claim.",
+    "The relative arm has10 MaxIterations and7 ResidualCheckFailed attempts. Tolerance change alone does not solve the finite-precision/convergence problem; strict gate remains failed and unchanged.",
+    "All three arms are below frozen COLMAP1k RMSE0.027968541677842282 and p950.042266006958647205, but this local1k post-map comparison neither establishes10k quality nor includes comparable mapper/E2E cost."
+  ],
+  "next_candidate": {
+    "status": "planned_not_implemented",
+    "name": "bounded event-triggered classical PCG residual restart",
+    "trigger": "Only recursive convergence with failing recomputed true residual; never accept without passing true residual.",
+    "mechanism": "Replace r by b-Ax and restart p=M^-1 r with recomputed rho; at most one restart within the original total512 iteration budget, no reset or extension. Keep failed steps discarded and all finite/curvature checks.",
+    "scope": "Separate default-off arm; preserve old API struct shapes and default behavior. First test same frozen systems, then full nonlinear A/B, not a10k shortcut.",
+    "memory": "Reuse existing O(N) Krylov vectors; no pose-pair matrix or history bank. Audit real allocation/RSS rather than assume scalar-only overhead.",
+    "limits": "Restart discards accumulated conjugacy and can stagnate or slow convergence. It does not directly repair MaxIterations or guarantee an attainable true-residual target.",
+    "references": [
+      "https://epubs.siam.org/doi/10.1137/S0895479895284944",
+      "https://epubs.siam.org/doi/10.1137/S1064827599353865",
+      "https://petsc.org/release/manual/ksp/"
+    ],
+    "reference_scope": "Papers support residual-gap diagnosis and controlled replacement; one event-triggered restart is an engineering hypothesis, not a reproduction of the error-bound-guided published scheme."
+  },
+  "validation": {
+    "example_tests_passed": 14,
+    "real_oracle_tests_passed": 10,
+    "real_oracle_tests_ignored": 1,
+    "python_tests_passed": 46,
+    "targeted_example_and_lib_tests_clippy_clean": true,
+    "fmt_clean": true,
+    "registry_files_validated": 189,
+    "generated_readme_claims_unchanged": true
+  }
+}

@@ -107,6 +107,25 @@ Cholesky-based damped landmark elimination with the current small general
 inverse, before any nonlinear/10k promotion. Scaling and a separately defined
 inexact policy remain available: the diagnostic tolerance is not a substitute
 for the user's actual quality, speed and memory requirements.
+PR #81 passed all eight final-head checks (run `34125303050`, head `7b4b6cb`),
+merged as `06ca2e1`, and its topic branches were removed. The next controlled
+arm is on `feat/m8-cholesky-landmark-elimination`.
+Its test-only implementation `05500bf` has now been measured twice with all
+seventeen numerical lines identical; [evidence](../benchmarks/electro/m8-openloris-cholesky-landmark-elimination-v1.json).
+General inverse asymmetry is zero. Cholesky improves several residuals but
+still fails the useful `1e5` damping true-residual check; it is not promoted.
+Next compare an explicitly configured production general-inverse PCG512 arm
+(relative `1e-8`, absolute `1e-12`) against unchanged strict and direct 1k
+nonlinear controls. This separately labeled policy must earn trajectory,
+reprojection and resource quality, not retroactively pass the strict oracle.
+No new 10k or README claim is authorized by the diagnostic result alone.
+The explicit-tolerance nonlinear comparison is now measured (`7b6056a`):
+[six serial runs and audits](../benchmarks/electro/m8-openloris-relative-pcg-tolerance-v1.json).
+Relative `1e-8` improves cost and GT error over strict but remains worse than
+direct; repeats are exact and all identities/support/calibration/depth remain
+valid. No equivalent-quality speedup or 10k promotion. Next test one bounded,
+event-triggered true-residual restart within the original PCG iteration cap,
+as a separate default-off arm; see the [detailed contract](openloris_atlas_bounded_ba.md).
 
 ## Historical M7 baseline
 
