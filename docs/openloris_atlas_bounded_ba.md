@@ -620,7 +620,7 @@ final-head CI checks (run 34108930129), merged as `0460c9c`, and its old branch
 was removed; [numerical evidence](../benchmarks/electro/m8-openloris-implicit-schur-prototype-v1.json)
 records scope and limitations. No production or 10k performance claim follows.
 
-#### Integration gate (in progress on `feat/m8-matrix-free-ba-entry`)
+#### Integration gate (runtime API merged in PR #78; real-model comparison pending)
 
 After the private numerical gate and CI, expose an additive, opt-in pure-visual
 entry point with separate iterative options. Keep existing public enum variants,
@@ -681,3 +681,44 @@ The [frozen 1k input](../benchmarks/electro/m8-openloris-matrix-free-1k-input-v1
 has been independently hash-checked, geometry-audited and trajectory-rescored.
 Its direct/implicit experiment driver and measured A/B are still outstanding;
 input preparation and API unit tests do not constitute a real-model comparison.
+
+#### Frozen 1k post-map experiment contract
+
+The comparison driver on `feat/m8-matrix-free-rig-ba-comparison` runs one solver
+per process on the same immutable model. It resolves image names through the
+rig manifest, derives body poses from sensor 0 and checks the other sensor
+poses against the fixed calibration. The source has 500 rig frames, 1,000
+supported images, 4,716 landmarks and 130,900 observations in one connected
+frame component. Its 174 cross-sensor tracks include 136 with same-frame
+stereo; this is evidence of metric observations, not a numerical-rank proof.
+
+Both arms fix frame 0 only, retain all landmarks and observations, and use
+20 LM iterations, initial damping `1e-4`, no robust loss, fixed intrinsics and
+distortion, and serial execution. The candidate starts with 128 PCG iterations
+and relative/absolute tolerances `1e-12`. Any later iteration-budget arm must
+be separately labeled and justified by the recorded true linear residuals;
+do not silently loosen tolerances or fall back to a direct solve.
+
+Preserve image IDs/names/order, full POINTS2D coordinates/index/point IDs,
+point IDs/RGB and track pair order. Only poses, XYZ and recomputed per-track
+arithmetic mean ERROR may change; copy cameras byte-for-byte. The historical
+source ERROR is not reliable, so audit reprojection directly. Its maximum
+track mean exceeds the later atlas-specific 2 px threshold: do not import that
+filter into this all-observations comparison. Publish through a staging
+directory into a new or empty non-overlapping output, and stream output rows
+without constructing and reparsing another whole model.
+
+Require identical initial nonlinear cost between arms. Independently audit
+the output identities, bidirectional tracks, positive depths, rig calibration,
+image/frame support and connected component. Score the same 308 GT-associated
+images afterward using the frozen scorer and calibration; GT is never passed
+to optimization. Numerical agreement with direct BA, improvement over the
+input, and the COLMAP trajectory gate are separate results.
+
+Record pure solve time separately from whole-process elapsed time and peak
+RSS, including loading, validation, problem assembly and publication in the
+latter. Run arms serially with no concurrent project build or benchmark;
+record the shared-machine limitation. These are **post-mapping BA** costs,
+not mapper-only or native end-to-end costs. Repeated runs must reproduce the
+model and numerical trace, excluding timing/path fields. No 10k experiment or
+performance promotion follows until the actual 1k results have been reviewed.
