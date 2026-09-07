@@ -7103,7 +7103,7 @@ mod matrix_free_ba_api_tests {
                     < 1.0e-5
             );
         }
-        for id in 1..8 {
+        for id in 0..8 {
             assert!((rig_direct.landmarks[&id].coords - rig.landmarks[&id].coords).norm() < 1.0e-5);
         }
         assert_eq!(
