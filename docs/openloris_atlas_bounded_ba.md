@@ -100,6 +100,29 @@ uses existing GeneralizedPnP on bounded per-frame candidates, independently
 checks cross-track recovery and loss of existing support, and does not publish
 new poses automatically. GT remains evaluation-only.
 
+### Resection diagnostic acceptance contract
+
+This is a candidate audit, not a replacement mapper or an accepted recovery.
+Use the existing generalized-rig RANSAC with seed 7, 4,096 iterations and
+4 px inlier threshold. Count distinct landmark tracks, not camera observations:
+the same point seen by both sensors does not count twice toward the six-point
+minimum. Construct anchors only from the left-side observations, excluding
+every target-side pose from anchor triangulation.
+
+For every candidate, report separately:
+
+- Crossing tracks whose **entire original observation set** passes unchanged
+  triangulation gates with the candidate pose.
+- Tracks passing only on the left-plus-target subset. This is partial support,
+  not evidence of full-track recovery.
+- Existing retained tracks/observations that would violate geometry or lose
+  support, including support loss in other frames sharing those tracks.
+
+Keep fixed sensor extrinsics, explicit resource caps, deterministic ordering
+and one candidate pose at a time. Do not update model poses or silently prune
+observations. Synthetic tests must cover duplicate-sensor inlier counting,
+left-only anchors, failed geometry and unchanged diagnostic input state.
+
 For subsequent policy design, the upstream
 [COLMAP local BA implementation](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)
 refines a local bundle, completes/merges tracks, then filters observations.
