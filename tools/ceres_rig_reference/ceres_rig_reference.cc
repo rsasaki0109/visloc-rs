@@ -994,7 +994,7 @@ void RunSelfTests() {
     try {
       (void)Evaluate(bad_fixture, bad_dump);
     } catch (const FixtureError& error) {
-      if (std::string(error.what()).find("nonfinite or nonpositive depth") ==
+      if (std::string(error.what()).find("Ceres transform rejected a nonfinite or nonpositive-depth") ==
           std::string::npos) {
         throw FixtureError("self-test bad-depth error mismatch: " +
                            std::string(error.what()));
