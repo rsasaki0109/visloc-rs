@@ -12,6 +12,11 @@
     "checkpoint_changes_ba_input_order": false,
     "without_checkpoint_main_six_files_byte_identical_to_with_checkpoint": true,
     "default_flag_off_six_files_byte_identical_to_fixed_pose_v1": true,
+    "independent_main_observation_identity_audit": {
+      "all_image_keypoint_rows_byte_identical": 8988,
+      "all_point_ids_colors_and_track_rows_unchanged": 319144,
+      "changed_pose_images": 840
+    },
     "tail_final_six_files_byte_identical_to_boundary_repair_v1": true,
     "gt_used_for_mapping_or_selection": false,
     "scoring_alignment_changed": false
