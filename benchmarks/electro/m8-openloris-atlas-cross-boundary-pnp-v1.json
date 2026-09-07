@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "diagnostic_only_not_adopted",
+  "implementation_commit": "f1eac8c",
+  "source_sha256": "86a62822af5a2dec1f9032e09f118762d0b56034a9135a4a7d45c7f68f483386",
+  "binary_sha256": "c54f7b96210f35fef2013ede39f356551892142f5ea905d7787a39a4b9e5fe56",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/cross-boundary-pnp-v1",
+  "pilot_log": "visloc-m8-cross-boundary-pnp-20260907-v3.log",
+  "pilot_log_sha256": "7772fd7833e1648b32a413edbeee006581ac568a0bf07e25ff475b38ed0dd803",
+  "input": {
+    "atlas": "../atlas-l-newest/component-000",
+    "nodes": "../nodes.tsv",
+    "baseline": "Fixed-pose integration before frame 4493 recovery; this diagnostic runs before recovery and rejects simultaneous recovery/BA flags.",
+    "boundary_left_max_frame": 1999,
+    "gt_used": false
+  },
+  "policy": {
+    "solver": "Existing GeneralizedPnPRansac",
+    "ransac_seed": 7,
+    "ransac_iterations": 4096,
+    "inlier_threshold_px": 4,
+    "minimum_distinct_inlier_tracks": 6,
+    "caps": {"cross_tracks": 4096, "cross_observations": 262144, "candidate_frames": 16384, "correspondences_per_frame": 4096},
+    "anchors": "Left-only DLT with existing min-two, positive-depth, mean <= 2 px, max <= 4 px gates; no target-side poses used in anchor construction.",
+    "candidate_application": "One right-side rig frame at a time, diagnostic only; fixed sensor extrinsics recomposed. No pose propagation, automatic adoption, model output or observation pruning."
+  },
+  "counts": {
+    "cross_tracks": 31,
+    "left_dlt_pass": 14,
+    "right_dlt_pass": 16,
+    "both_sides_dlt_pass": 7,
+    "candidate_frames": 142,
+    "pnp_reports": 13,
+    "frames_with_six_distinct_inlier_tracks": 10,
+    "successful_frame_ids": [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2011],
+    "left_plus_target_attempts": 80,
+    "left_plus_target_successes": 79,
+    "full_cross_track_attempts": 80,
+    "full_cross_track_successes": 2,
+    "affected_existing_landmark_checks": 834,
+    "fixed_xyz_gate_failures": 834,
+    "full_observation_retriangulation_failures": 152,
+    "cap_skips": 0,
+    "counting_note": "Attempts, successes and existing-landmark failures are summed over independent per-frame candidates; they are not unique track counts in a simultaneously updated model."
+  },
+  "candidate_frame_2000": {
+    "distinct_inlier_tracks": 10,
+    "left_plus_target_successes": 10,
+    "full_cross_track_successes": 2,
+    "affected_existing_landmarks": 66,
+    "fixed_xyz_gate_failures": 66,
+    "full_observation_retriangulation_failures": 5,
+    "connected_model_demonstrated": false
+  },
+  "verification": {
+    "example_tests_passed": 27,
+    "example_clippy_warnings_denied": "pass",
+    "independent_repeat": {
+      "diagnostic_rows_byte_identical": true,
+      "diagnostic_log_sha256": "c4130a2205480ae9bd64079ae94c5920f480045d41eee6e82971c175a25b7d05",
+      "output_model_directory_created": false,
+      "default_flag_off_six_files_byte_identical_to_fixed_pose_v1": true,
+      "default_control_directory": "default-control",
+      "shared_machine_concurrent_runs_not_for_performance": true
+    },
+    "full_workspace_local_tests": "Attempt stopped by filesystem capacity; not a pass. Root subsequently removed only regenerable visloc-slam dev build artifacts with cargo clean --profile dev -p visloc-slam, recovering 7.3 GiB.",
+    "pilot_wall_s": 8.20,
+    "pilot_peak_rss_kib": 304536,
+    "timing_note": "Use the archived /usr/bin/time wall value, not CPU time or an earlier run. Shared-machine integration/diagnostic-only pilot; not a mapper/E2E speed claim."
+  },
+  "decision": "Do not adopt the pose candidates. Next audit the hypothetical frame/landmark graph and support after adding full-cross successes and excluding failed existing tracks; two new cross tracks may merely move the split to the next frame. Keep the frozen COLMAP quality target and original scoring alignment."
+}

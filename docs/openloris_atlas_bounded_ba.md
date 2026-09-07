@@ -123,6 +123,43 @@ and one candidate pose at a time. Do not update model poses or silently prune
 observations. Synthetic tests must cover duplicate-sensor inlier counting,
 left-only anchors, failed geometry and unchanged diagnostic input state.
 
+### Measured resection result
+
+The default-off diagnostic passes 27 example tests and Clippy. Of 142 candidate
+frames, 10 yield at least six distinct inlier tracks. Across these independent
+candidates, left-plus-target triangulation succeeds in 79 of 80 attempts, but
+full original crossing tracks succeed in only 2 of 80. Both successes occur
+for frame 2000. Its candidate also causes 5 of 66 existing touching tracks to
+fail full-observation re-triangulation (all 66 fail if their XYZ remains fixed).
+No pose is adopted. These are per-candidate counts, not a simultaneous model.
+
+The next audit must check whether adding those 2 full tracks and excluding the
+5 failed tracks actually joins the main graph or merely moves the cut to
+2000/2001. It must count image/frame support losses, including other frames
+sharing the failed tracks, without writing a modified model.
+
+The archived pilot took 8.20 s at 304,536 KiB peak RSS. Independent repetition
+produces byte-identical diagnostic rows and no model directory. With the flag
+off, all six model/support/summary files remain byte-identical to fixed-pose
+integration. These are diagnostic-only shared-machine runs, not COLMAP speed
+results. Local full-workspace testing hit disk capacity; it is not recorded as
+a pass. Only regenerable dev build artifacts were cleaned afterward.
+See [resection evidence](../benchmarks/electro/m8-openloris-atlas-cross-boundary-pnp-v1.json).
+
+Reproduce without GT or a model write:
+
+```bash
+cargo run --release --example integrate_rig_atlas_landmarks -- \
+  --rig-manifest "$RIG_MANIFEST" --nodes-tsv "$ATLAS_INPUT/nodes.tsv" \
+  --atlas-dir "$ATLAS_INPUT/atlas-l-newest/component-000" \
+  --out-dir "$ATLAS_INPUT/diagnostic-unused-output" \
+  --diagnose-cross-boundary-pnp --diagnostic-left-max-frame 1999
+```
+
+Here `ATLAS_INPUT` is the artifact parent recorded in the evidence, and
+`RIG_MANIFEST` is the frozen 10k S/F manifest. The current CLI still requires
+`--out-dir`, but diagnostic mode returns before creating or writing it.
+
 For subsequent policy design, the upstream
 [COLMAP local BA implementation](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)
 refines a local bundle, completes/merges tracks, then filters observations.
