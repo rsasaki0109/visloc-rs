@@ -1,5 +1,16 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Ceres参照の採点完了（2026-09-08）: publisher `90672d4` をroot独立6テスト後に
+> 実行し、出力2回の3ファイルbyte一致、全identity/校正/anchor/正深度/1成分を確認。
+> 全1,000画像・500支持frame・4,716点・130,900観測・361,170 keypointを保持。
+> post-only GT（308画像、同条件の再採点一致）はRMSE/p95 **0.029571/0.044943 m**で悪化。
+> cost113473.879982/平均再投影0.674902 pxは改善しても軌跡改善にはつながりませんでした。
+> [最終証跡](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json)。
+> 独立Ceresでも同じ傾向を示すため、次は観測目的関数/幾何/観測可能性の条件を調べます。
+> 唯一原因の断定やGT選択の減衰sweepはしません。Luna Maxが一次資料の研究レビュー中。
+> draft PR #89は最終証跡/CI/merge確認へ。C++/測定binaryは変更せず保持。
+> 以下の「publisher/GT未完了」は各時点の履歴です。全体M8–M10 goalは未完了のままです。
+
 > Ceres 1k実行完了（2026-09-08）: Luna Maxの`1f31335`をroot独立認証。
 > self-test/微分再検証通過、初期130,900残差dumpは監査済みcheckpointとbyte一致。
 > 固定条件の実solveを1回実行し77.45 s / peak RSS305,072 KiBでexit0。

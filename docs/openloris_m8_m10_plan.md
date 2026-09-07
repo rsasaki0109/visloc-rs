@@ -82,9 +82,17 @@ original model/manifest. The initial full squared cost is 126510.39875730907
 versus the frozen 126510.39875730938. This verifies initial values, **not**
 the derivatives, manifold, optimizer or final model publication.
 
-The next gate is synthetic AutoDiff/tangent-Jacobian agreement and an actual
-fixed-anchor ProductManifold solve, before the single predeclared real-data
-solve. No Ceres solve or new performance claim has occurred at this checkpoint.
+Synthetic AutoDiff/tangent-Jacobian agreement, an actual fixed-anchor
+ProductManifold test and the subsequent frozen solve/publication have now completed:
+[final Ceres diagnostic](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json).
+The fixed 20-iteration run stops at its iteration limit, with full cost
+113473.879982 and mean reprojection 0.674902 px, but post-only RMSE/p95
+0.029571/0.044943 m regress. Full support/identity/calibration/anchor and
+positive-depth checks pass; two publications and repeated scores agree.
+This independent reference also demonstrates that lower cost does not imply
+better trajectory on this observation set. Do not promote or tune against GT.
+Next, predeclare a bounded read-only observation/geometry diagnostic, informed
+by primary sources, before selecting another implementation candidate.
 
 ## Current checkpoint (2026-09-07)
 

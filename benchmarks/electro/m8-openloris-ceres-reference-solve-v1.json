@@ -1,6 +1,398 @@
 {
   "schema_version": 1,
-  "status": "solve_and_independent_state_geometry_pass_model_publication_and_gt_pending",
+  "status": "diagnostic_complete_lower_cost_but_worse_trajectory_no_promotion",
+  "publication": {
+  "publisher_commit": "90672d484b45db27f6e1522874b27509ea30a0a0",
+  "publisher_sha256": "1075b7c0b1c47f5907cc624ac2048f544a981f9fc2aa1360e2f23e81e051c84a",
+  "tests_sha256": "b1b9a605c0fac7372aa8df6980085adf5497e008f26bffc5a826a8ec71c3c61d",
+  "root_tests": {
+    "publisher": 6,
+    "geometry_auditor": 14,
+    "scorer": 8,
+    "all_pass": true
+  },
+  "command": "python3 tools/ceres_rig_reference/publish_model.py --fixture /home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1/input.fixture --state /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/solve-1f31335-v1.state --model /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1",
+  "exit_code": 0,
+  "repeat_command": "python3 tools/ceres_rig_reference/publish_model.py --fixture /home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1/input.fixture --state /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/solve-1f31335-v1.state --model /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-repeat-v1",
+  "repeat_exit_code": 0,
+  "repeat_audit": {
+    "publication_repeat_byte_exact": true,
+    "output_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "b1e0ad7daf331bfaa19e0ec13d9b9ff505a10afa1bcf23e719bdc01728209b01",
+      "points3D.txt": "892f72acb977c25d075ba40b1b95531aa8051698c9600a492e9849faac2d1395"
+    }
+  },
+  "geometry_command": "python3 scripts/audit_colmap_pinhole_model.py /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1 --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+  "geometry": [
+    {
+      "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1",
+      "image_poses": 1000,
+      "supported_images": 1000,
+      "unsupported_image_ids": [],
+      "landmarks": 4716,
+      "observations": 130900,
+      "mean_reprojection_px": 0.6749016424131126,
+      "observation_weighted_mean_reprojection_px": 0.6749016424131126,
+      "point_weighted_mean_reprojection_px": 0.7367342283192885,
+      "max_track_mean_reprojection_px": 3.1651853221226,
+      "max_reprojection_px": 5.103062118096585,
+      "max_stored_mean_difference_px": 1.2081570038022585e-10,
+      "nonpositive_depth_observations": 0,
+      "tracks_with_multiple_keypoints_in_one_image": 0,
+      "excess_same_image_track_observations": 0,
+      "bidirectional_references_valid": true,
+      "rig": {
+        "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+        "rig_frames": 500,
+        "supported_rig_frames": 500,
+        "unsupported_rig_frame_ids": [],
+        "max_inferred_rig_center_disagreement_m": 1.570093416991868e-15,
+        "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+        "fixed_sensor_extrinsics_valid": true,
+        "track_connected_components": 1,
+        "track_connected_component_sizes": [
+          500
+        ],
+        "track_connected_component_frame_ranges": [
+          [
+            0,
+            499
+          ]
+        ]
+      }
+    }
+  ],
+  "identity_audit_program": "import sys,json,itertools,hashlib\nfrom pathlib import Path\nimport numpy as np\nsys.path.insert(0, \"scripts\")\nfrom audit_colmap_pinhole_model import rotation\nbefore,after,rig=map(Path,sys.argv[1:4])\nfixed_frame_id=int(sys.argv[4])\nassignments={}\nfor line in rig.read_text().splitlines():\n    tokens=line.split()\n    if tokens and tokens[0]==\"F\":\n        assignments[tokens[2]]=(int(tokens[1]),int(tokens[3]))\ndef image_rows(path):\n    with path.open() as f:\n        for line in f:\n            if not line.strip() or line.lstrip().startswith(\"#\"): continue\n            header=line.split()\n            points=next(f).split()\n            yield header,points\ndef point_rows(path):\n    with path.open() as f:\n        for line in f:\n            if line.strip() and not line.lstrip().startswith(\"#\"): yield line.split()\nassert (before/\"cameras.txt\").read_bytes()==(after/\"cameras.txt\").read_bytes()\nimages=points=observations=keypoints=0\nfixed_center=fixed_rotation=0.0\nfixed_images_checked=0\nmax_center=max_rotation=max_xyz=0.0\nchanged_poses=0\nfor old,new in itertools.zip_longest(image_rows(before/\"images.txt\"),image_rows(after/\"images.txt\")):\n    assert old is not None and new is not None\n    a,ka=old;b,kb=new\n    assert (a[0],a[8],a[9])==(b[0],b[8],b[9])\n    assert ka==kb\n    ra=np.array(rotation(a[1:5]))\n    rb=np.array(rotation(b[1:5]))\n    ta=np.array(list(map(float,a[5:8])));tb=np.array(list(map(float,b[5:8])))\n    center=float(np.linalg.norm(-ra.T@ta+rb.T@tb))\n    rotation_frob=float(np.linalg.norm(ra-rb))\n    max_center=max(max_center,center);max_rotation=max(max_rotation,rotation_frob)\n    changed_poses+=center>1e-10 or rotation_frob>1e-10\n    if assignments[a[9]][0]==fixed_frame_id:\n        fixed_images_checked+=1\n        fixed_center=max(fixed_center,center);fixed_rotation=max(fixed_rotation,rotation_frob)\n    images+=1;keypoints+=len(ka)//3\nfor a,b in itertools.zip_longest(point_rows(before/\"points3D.txt\"),point_rows(after/\"points3D.txt\")):\n    assert a is not None and b is not None\n    assert a[0]==b[0] and a[4:7]==b[4:7] and a[8:]==b[8:]\n    assert float(b[7])>=0 and np.isfinite(float(b[7]))\n    max_xyz=max(max_xyz,float(np.linalg.norm(np.array(list(map(float,a[1:4])))-np.array(list(map(float,b[1:4]))))))\n    points+=1;observations+=(len(a)-8)//2\nassert fixed_images_checked>0\nassert fixed_center<1e-10 and fixed_rotation<1e-10\nprint(json.dumps(dict(before=str(before),after=str(after),fixed_frame_id=fixed_frame_id,fixed_images_checked=fixed_images_checked,cameras_byte_exact=True,image_identity_and_order_exact=True,full_points2d_tokens_exact=True,point_ids_rgb_track_tokens_and_order_exact=True,images=images,keypoints=keypoints,landmarks=points,observations=observations,numerically_changed_image_poses=changed_poses,max_camera_center_delta_m=max_center,max_camera_rotation_matrix_delta_frobenius=max_rotation,max_landmark_delta_m=max_xyz,fixed_frame_camera_center_delta_m=fixed_center,fixed_frame_camera_rotation_matrix_delta_frobenius=fixed_rotation,output_sha256={name:hashlib.sha256((after/name).read_bytes()).hexdigest() for name in (\"cameras.txt\",\"images.txt\",\"points3D.txt\")}),indent=2))\n",
+  "identity_command": "python3 - /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1 /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt 0 <<'PY'\nimport sys,json,itertools,hashlib\nfrom pathlib import Path\nimport numpy as np\nsys.path.insert(0, \"scripts\")\nfrom audit_colmap_pinhole_model import rotation\nbefore,after,rig=map(Path,sys.argv[1:4])\nfixed_frame_id=int(sys.argv[4])\nassignments={}\nfor line in rig.read_text().splitlines():\n    tokens=line.split()\n    if tokens and tokens[0]==\"F\":\n        assignments[tokens[2]]=(int(tokens[1]),int(tokens[3]))\ndef image_rows(path):\n    with path.open() as f:\n        for line in f:\n            if not line.strip() or line.lstrip().startswith(\"#\"): continue\n            header=line.split()\n            points=next(f).split()\n            yield header,points\ndef point_rows(path):\n    with path.open() as f:\n        for line in f:\n            if line.strip() and not line.lstrip().startswith(\"#\"): yield line.split()\nassert (before/\"cameras.txt\").read_bytes()==(after/\"cameras.txt\").read_bytes()\nimages=points=observations=keypoints=0\nfixed_center=fixed_rotation=0.0\nfixed_images_checked=0\nmax_center=max_rotation=max_xyz=0.0\nchanged_poses=0\nfor old,new in itertools.zip_longest(image_rows(before/\"images.txt\"),image_rows(after/\"images.txt\")):\n    assert old is not None and new is not None\n    a,ka=old;b,kb=new\n    assert (a[0],a[8],a[9])==(b[0],b[8],b[9])\n    assert ka==kb\n    ra=np.array(rotation(a[1:5]))\n    rb=np.array(rotation(b[1:5]))\n    ta=np.array(list(map(float,a[5:8])));tb=np.array(list(map(float,b[5:8])))\n    center=float(np.linalg.norm(-ra.T@ta+rb.T@tb))\n    rotation_frob=float(np.linalg.norm(ra-rb))\n    max_center=max(max_center,center);max_rotation=max(max_rotation,rotation_frob)\n    changed_poses+=center>1e-10 or rotation_frob>1e-10\n    if assignments[a[9]][0]==fixed_frame_id:\n        fixed_images_checked+=1\n        fixed_center=max(fixed_center,center);fixed_rotation=max(fixed_rotation,rotation_frob)\n    images+=1;keypoints+=len(ka)//3\nfor a,b in itertools.zip_longest(point_rows(before/\"points3D.txt\"),point_rows(after/\"points3D.txt\")):\n    assert a is not None and b is not None\n    assert a[0]==b[0] and a[4:7]==b[4:7] and a[8:]==b[8:]\n    assert float(b[7])>=0 and np.isfinite(float(b[7]))\n    max_xyz=max(max_xyz,float(np.linalg.norm(np.array(list(map(float,a[1:4])))-np.array(list(map(float,b[1:4]))))))\n    points+=1;observations+=(len(a)-8)//2\nassert fixed_images_checked>0\nassert fixed_center<1e-10 and fixed_rotation<1e-10\nprint(json.dumps(dict(before=str(before),after=str(after),fixed_frame_id=fixed_frame_id,fixed_images_checked=fixed_images_checked,cameras_byte_exact=True,image_identity_and_order_exact=True,full_points2d_tokens_exact=True,point_ids_rgb_track_tokens_and_order_exact=True,images=images,keypoints=keypoints,landmarks=points,observations=observations,numerically_changed_image_poses=changed_poses,max_camera_center_delta_m=max_center,max_camera_rotation_matrix_delta_frobenius=max_rotation,max_landmark_delta_m=max_xyz,fixed_frame_camera_center_delta_m=fixed_center,fixed_frame_camera_rotation_matrix_delta_frobenius=fixed_rotation,output_sha256={name:hashlib.sha256((after/name).read_bytes()).hexdigest() for name in (\"cameras.txt\",\"images.txt\",\"points3D.txt\")}),indent=2))\n\nPY",
+  "identity": {
+    "before": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+    "after": "/home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1",
+    "fixed_frame_id": 0,
+    "fixed_images_checked": 2,
+    "cameras_byte_exact": true,
+    "image_identity_and_order_exact": true,
+    "full_points2d_tokens_exact": true,
+    "point_ids_rgb_track_tokens_and_order_exact": true,
+    "images": 1000,
+    "keypoints": 361170,
+    "landmarks": 4716,
+    "observations": 130900,
+    "numerically_changed_image_poses": 998,
+    "max_camera_center_delta_m": 0.029427894289752538,
+    "max_camera_rotation_matrix_delta_frobenius": 0.006282699083107044,
+    "max_landmark_delta_m": 231.0010731177303,
+    "fixed_frame_camera_center_delta_m": 7.712104109143317e-13,
+    "fixed_frame_camera_rotation_matrix_delta_frobenius": 1.9415296989266426e-12,
+    "output_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "b1e0ad7daf331bfaa19e0ec13d9b9ff505a10afa1bcf23e719bdc01728209b01",
+      "points3D.txt": "892f72acb977c25d075ba40b1b95531aa8051698c9600a492e9849faac2d1395"
+    }
+  },
+  "post_only_score_command": "python3 scripts/score_openloris_model.py --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1/images.txt --manifest /home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json --ground-truth /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+  "post_only_score": {
+    "component_weighted_max_m": 0.0862751510055209,
+    "component_weighted_median_m": 0.027189209330814958,
+    "component_weighted_p95_m": 0.044942773270696346,
+    "component_weighted_rmse_m": 0.029570618218785726,
+    "components": [
+      {
+        "gt_scored": 308,
+        "images_txt": "/home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1/images.txt",
+        "images_txt_sha256": "b1e0ad7daf331bfaa19e0ec13d9b9ff505a10afa1bcf23e719bdc01728209b01",
+        "max_m": 0.0862751510055209,
+        "median_m": 0.027189209330814958,
+        "p95_m": 0.044942773270696346,
+        "reference_extent_m": 1.9718678959594034,
+        "registered": 1000,
+        "relative_rmse": 0.014996247101227983,
+        "rmse_m": 0.029570618218785726,
+        "sim3_scale": 1.1237465260705948,
+        "trajectory_segments": [
+          {
+            "images": 32,
+            "max_m": 0.03545515116242494,
+            "median_m": 0.032532470422338124,
+            "p95_m": 0.03516634897574308,
+            "rmse_m": 0.032549459563118374,
+            "segment": 0,
+            "timestamp_end": 1560000015.556828,
+            "timestamp_start": 1560000015.056853
+          },
+          {
+            "images": 30,
+            "max_m": 0.03585312464992961,
+            "median_m": 0.03215575880136103,
+            "p95_m": 0.035776847876919184,
+            "rmse_m": 0.03288462484925072,
+            "segment": 1,
+            "timestamp_end": 1560000016.056906,
+            "timestamp_start": 1560000015.590162
+          },
+          {
+            "images": 32,
+            "max_m": 0.028966450313473297,
+            "median_m": 0.01344413254225698,
+            "p95_m": 0.02687535943858889,
+            "rmse_m": 0.015896195858448002,
+            "segment": 2,
+            "timestamp_end": 1560000016.590147,
+            "timestamp_start": 1560000016.09024
+          },
+          {
+            "images": 30,
+            "max_m": 0.030797903890835636,
+            "median_m": 0.014582642656770896,
+            "p95_m": 0.029448359859908825,
+            "rmse_m": 0.01843090202631331,
+            "segment": 3,
+            "timestamp_end": 1560000017.09023,
+            "timestamp_start": 1560000016.623481
+          },
+          {
+            "images": 30,
+            "max_m": 0.045276961637125655,
+            "median_m": 0.04031919295888847,
+            "p95_m": 0.044022047247572554,
+            "rmse_m": 0.03982951566914699,
+            "segment": 4,
+            "timestamp_end": 1560000017.590167,
+            "timestamp_start": 1560000017.123563
+          },
+          {
+            "images": 32,
+            "max_m": 0.045411544170837544,
+            "median_m": 0.03832080979858023,
+            "p95_m": 0.043292419374437924,
+            "rmse_m": 0.037515189035289026,
+            "segment": 5,
+            "timestamp_end": 1560000018.123552,
+            "timestamp_start": 1560000017.623501
+          },
+          {
+            "images": 30,
+            "max_m": 0.02927170963949759,
+            "median_m": 0.020439818837229107,
+            "p95_m": 0.026984003776670852,
+            "rmse_m": 0.02079080367205863,
+            "segment": 6,
+            "timestamp_end": 1560000018.623534,
+            "timestamp_start": 1560000018.156885
+          },
+          {
+            "images": 30,
+            "max_m": 0.04025362018589524,
+            "median_m": 0.009856623373185915,
+            "p95_m": 0.029912798733196074,
+            "rmse_m": 0.015395005549922835,
+            "segment": 7,
+            "timestamp_end": 1560000019.123582,
+            "timestamp_start": 1560000018.656868
+          },
+          {
+            "images": 32,
+            "max_m": 0.0862751510055209,
+            "median_m": 0.015453186424544692,
+            "p95_m": 0.07351424589634731,
+            "rmse_m": 0.03861291867022551,
+            "segment": 8,
+            "timestamp_end": 1560000019.666914,
+            "timestamp_start": 1560000019.156915
+          },
+          {
+            "images": 30,
+            "max_m": 0.05868154724751609,
+            "median_m": 0.02321263674020725,
+            "p95_m": 0.048662470740453746,
+            "rmse_m": 0.028450649692351,
+            "segment": 9,
+            "timestamp_end": 1560000020.166894,
+            "timestamp_start": 1560000019.700247
+          }
+        ]
+      }
+    ],
+    "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "gt_interpolated_images": 308,
+    "gt_scored_images": 308,
+    "image_aliases": null,
+    "image_aliases_sha256": null,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+    "manifest_images": 1000,
+    "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "max_interpolation_gap_seconds": 0.1,
+    "models": 1,
+    "registered_images": 1000,
+    "schema": "visloc_openloris_model_score_v1",
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "trajectory_segments": [
+      {
+        "images": 32,
+        "max_m": 0.03545515116242494,
+        "median_m": 0.032532470422338124,
+        "p95_m": 0.03516634897574308,
+        "rmse_m": 0.032549459563118374,
+        "segment": 0,
+        "timestamp_end": 1560000015.556828,
+        "timestamp_start": 1560000015.056853
+      },
+      {
+        "images": 30,
+        "max_m": 0.03585312464992961,
+        "median_m": 0.03215575880136103,
+        "p95_m": 0.035776847876919184,
+        "rmse_m": 0.03288462484925072,
+        "segment": 1,
+        "timestamp_end": 1560000016.056906,
+        "timestamp_start": 1560000015.590162
+      },
+      {
+        "images": 32,
+        "max_m": 0.028966450313473297,
+        "median_m": 0.01344413254225698,
+        "p95_m": 0.02687535943858889,
+        "rmse_m": 0.015896195858448002,
+        "segment": 2,
+        "timestamp_end": 1560000016.590147,
+        "timestamp_start": 1560000016.09024
+      },
+      {
+        "images": 30,
+        "max_m": 0.030797903890835636,
+        "median_m": 0.014582642656770896,
+        "p95_m": 0.029448359859908825,
+        "rmse_m": 0.01843090202631331,
+        "segment": 3,
+        "timestamp_end": 1560000017.09023,
+        "timestamp_start": 1560000016.623481
+      },
+      {
+        "images": 30,
+        "max_m": 0.045276961637125655,
+        "median_m": 0.04031919295888847,
+        "p95_m": 0.044022047247572554,
+        "rmse_m": 0.03982951566914699,
+        "segment": 4,
+        "timestamp_end": 1560000017.590167,
+        "timestamp_start": 1560000017.123563
+      },
+      {
+        "images": 32,
+        "max_m": 0.045411544170837544,
+        "median_m": 0.03832080979858023,
+        "p95_m": 0.043292419374437924,
+        "rmse_m": 0.037515189035289026,
+        "segment": 5,
+        "timestamp_end": 1560000018.123552,
+        "timestamp_start": 1560000017.623501
+      },
+      {
+        "images": 30,
+        "max_m": 0.02927170963949759,
+        "median_m": 0.020439818837229107,
+        "p95_m": 0.026984003776670852,
+        "rmse_m": 0.02079080367205863,
+        "segment": 6,
+        "timestamp_end": 1560000018.623534,
+        "timestamp_start": 1560000018.156885
+      },
+      {
+        "images": 30,
+        "max_m": 0.04025362018589524,
+        "median_m": 0.009856623373185915,
+        "p95_m": 0.029912798733196074,
+        "rmse_m": 0.015395005549922835,
+        "segment": 7,
+        "timestamp_end": 1560000019.123582,
+        "timestamp_start": 1560000018.656868
+      },
+      {
+        "images": 32,
+        "max_m": 0.0862751510055209,
+        "median_m": 0.015453186424544692,
+        "p95_m": 0.07351424589634731,
+        "rmse_m": 0.03861291867022551,
+        "segment": 8,
+        "timestamp_end": 1560000019.666914,
+        "timestamp_start": 1560000019.156915
+      },
+      {
+        "images": 30,
+        "max_m": 0.05868154724751609,
+        "median_m": 0.02321263674020725,
+        "p95_m": 0.048662470740453746,
+        "rmse_m": 0.028450649692351,
+        "segment": 9,
+        "timestamp_end": 1560000020.166894,
+        "timestamp_start": 1560000019.700247
+      }
+    ],
+    "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+  },
+  "score_repeat_exact": true,
+  "input_fixture_and_solve_state_hashes_unchanged": true,
+  "partial_failure_test_command": "python3 - <<'PY'\nimport sys,os,json\nfrom unittest.mock import patch\nsys.path.insert(0,'tests')\nimport test_publish_ceres_rig_reference as T\nc=T.PublisherFixtureTests();c.setUp(); real_link=os.link;calls=[]\ndef injected_link(src,dst,*args,**kwargs):\n calls.append(str(dst))\n if len(calls)==2:\n  (c.out/'unrelated-sentinel').write_text('must survive')\n  raise OSError('injected second-link failure')\n return real_link(src,dst,*args,**kwargs)\ntry:\n try:\n  with patch.object(T.PUBLISH.os,'link',side_effect=injected_link):\n   T.PUBLISH.publish_model(fixture_path=c.fixture,state_path=c.state,model_path=c.model,rig_manifest_path=c.manifest,out_dir=c.out)\n except OSError as e:\n  assert 'injected second-link' in str(e)\n else: raise AssertionError('injected failure did not fail')\n assert len(calls)==2\n assert (c.out/'unrelated-sentinel').read_text()=='must survive'\n assert sorted(p.name for p in c.out.iterdir())==['unrelated-sentinel']\n assert not list(c.root.glob('.published.staging-*'))\n print(json.dumps({'partial_link_failure':'PASS','unrelated_file_preserved':True,'owned_links_removed':True,'owned_staging_removed':True,'real_data_touched':False}))\nfinally: c.doCleanups()\nPY",
+  "partial_failure_test_result": {
+    "chunk_id": "98e38f",
+    "wall_time_seconds": 0.000004938,
+    "exit_code": 0,
+    "original_token_count": 39,
+    "output": "{\"partial_link_failure\": \"PASS\", \"unrelated_file_preserved\": true, \"owned_links_removed\": true, \"owned_staging_removed\": true, \"real_data_touched\": false}\n"
+  }
+},
+  "outcome": {
+  "comparators": {
+    "legacy_mf": {
+      "rmse_m": 0.026608055174816774,
+      "p95_m": 0.04109998478546261,
+      "mean_reprojection_px": 0.691588658326868,
+      "final_cost": 118070.5543689159
+    },
+    "direct": {
+      "rmse_m": 0.026518520743846325,
+      "p95_m": 0.04098909824472861,
+      "mean_reprojection_px": 0.6892603543319799,
+      "final_cost": 117496.0330739301
+    },
+    "fixed_scaled": {
+      "rmse_m": 0.028550248776360986,
+      "p95_m": 0.04379086349022452,
+      "mean_reprojection_px": 0.6758189411170804,
+      "final_cost": 113754.0405096607
+    },
+    "colmap": {
+      "rmse_m": 0.027968541677842282,
+      "p95_m": 0.042266006958647205,
+      "mean_reprojection_px": 0.8102073187543721
+    },
+    "adaptive": {
+      "rmse_m": 0.029189799321945858,
+      "p95_m": 0.04452086135562256,
+      "mean_reprojection_px": 0.6751532530207774,
+      "final_cost": 113550.2193390116
+    }
+  },
+  "comparator_evidence": "m8-openloris-adaptive-scaled-lm-v1.json",
+  "colmap_scope": "Existing mapper model uses a different point/observation set; not the frozen Ceres objective control.",
+  "common_full_cost": 113473.87998203756,
+  "rmse_m": 0.029570618218785726,
+  "p95_m": 0.044942773270696346,
+  "mean_observation_error_px": 0.6749016424131126,
+  "legacy_trajectory_nonregression_pass": false,
+  "adaptive_trajectory_nonregression_pass": false,
+  "interpretation": "An independently checked Ceres optimizer also lowers the same objective while trajectory worsens. This supports investigating observation/objective/observability conditions rather than presuming a visloc-only solver defect. One nonconverged nonconvex run does not identify a unique cause.",
+  "next": "Primary-source review and a bounded GT-free diagnostic of observation/geometry hypotheses; no damping/tolerance sweep.",
+  "atlas_executed": false,
+  "production_default_promoted": false,
+  "readme_performance_promoted": false,
+  "full_goal_complete": false,
+  "repeat_scope": "Publication and scoring repeated; only one real Ceres optimization configuration/run was executed."
+},
   "certificate": {
     "source_commit": "1f31335932e5fb619b4af429c2c5d49f470f3891",
     "source_sha256": "d24d972e64ea018d5a51e37cbe4687239d6559f159c842e92991251dafb7d9cf",
@@ -586,7 +978,7 @@
     "scope": "solve checkpoint, not the pending publisher or final PR head"
   },
   "limitations": [
-    "No publication/GT audit yet; no trajectory quality conclusion.",
+    "Published model passes full identity/geometry checks, but post-only trajectory RMSE/p95 regress; no quality promotion.",
     "Not a COLMAP native mapper/E2E benchmark or overall speed claim.",
     "Ceres successful_steps=14 includes initial iteration 0: actual accepted updates13, rejected7.",
     "All 130900 final observations have independently checked positive depth; no observations were removed.",

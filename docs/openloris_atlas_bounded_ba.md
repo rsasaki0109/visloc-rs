@@ -1803,3 +1803,47 @@ to accommodate a candidate. Stage output in an owned private directory;
 reject any existing destination, symlink or source overlap, and never remove
 an unowned path when publication fails. This is a separate post-solve tool,
 not part of the measured Ceres optimization time; report phase timing clearly.
+
+### Frozen Ceres result: lower cost, worse trajectory (2026-09-08)
+
+The [reference evidence](../benchmarks/electro/m8-openloris-ceres-reference-solve-v1.json)
+records one certified Ceres solve at `1f31335`, followed by the strict model
+publisher at `90672d4`. Root rebuilt and checked derivatives independently;
+all initial residual/depth rows byte-match the earlier audited checkpoint.
+The process took 77.45 s and 305,072 KiB peak RSS, including fixture evaluation
+and state output but excluding model publication, scoring and mapping. Ceres
+reports 76.776 s internally and stops at the 20-iteration limit with a usable
+state (`NO_CONVERGENCE`), not a demonstrated converged optimum. Its successful
+count of 14 includes iteration zero: 13 actual updates were accepted, seven
+rejected. No second real solve or parameter sweep was run.
+
+The following arms use the same frozen initial state and observations, but
+different documented solver policies; historical Rust figures come from the
+linked PR #85/#87 evidence, not new benchmark runs:
+
+| Frozen 1k arm | Full squared cost | RMSE (m) | p95 (m) | Mean observation error (px) |
+| --- | ---: | ---: | ---: | ---: |
+| Legacy matrix-free | 118070.554369 | 0.026608 | 0.041100 | 0.691589 |
+| Rust direct | 117496.033074 | 0.026519 | 0.040989 | 0.689260 |
+| Fixed column-scaled | 113754.040510 | 0.028550 | 0.043791 | 0.675819 |
+| Adaptive column-scaled | 113550.219339 | 0.029190 | 0.044521 | 0.675153 |
+| Standalone Ceres | 113473.879982 | 0.029571 | 0.044943 | 0.674902 |
+
+Both publications of the same Ceres state are byte-identical. Independent
+audits retain all 1,000 supported images, 500 supported rig frames in one
+component, 4,716 points, 130,900 observations and 361,170 keypoints, full
+identity/order, exact camera bytes and fixed calibration/anchor. Every final
+observation has positive depth. Maximum landmark motion is 231.001 m and
+maximum camera-centre motion 0.029428 m; maximum observation error is
+5.103062 px. These are reported separately from the mean. GT was consumed
+only after publication audits; the same 308 images were scored and the
+repeat score is identical.
+
+An independent optimizer also lowers this objective while worsening the
+trajectory. That supports investigating the observation objective and
+geometric observability, but neither identifies a unique cause nor proves
+that a different objective would improve accuracy. The existing COLMAP mapper
+has a different point/observation set and is not this frozen objective control.
+No atlas/default/README promotion follows. The next step is a bounded,
+GT-free diagnosis of which input geometry and track populations carry cost
+reduction and state motion, with its metric and work cap fixed before use.
