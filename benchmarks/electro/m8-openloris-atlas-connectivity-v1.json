@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "additional_quality_deficit_confirmed",
+  "method": "Union rig frames sharing a retained landmark. Include every model frame as a vertex, including unsupported isolated frames. Camera-to-frame assignments use the frozen S/F manifest for atlas output and explicit COLMAP frames.txt DATA_IDS for the control; never infer COLMAP frames from image-ID arithmetic.",
+  "atlas_recovery": {
+    "main_model": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/recovery-v2/component-000",
+    "main_supported_frames": 4494,
+    "main_track_components": 2,
+    "main_component_sizes": [2494, 2000],
+    "main_component_frame_ranges": [[2000, 4493], [0, 1999]],
+    "tail_supported_frames": 505,
+    "tail_track_components": 1,
+    "tail_component_sizes": [505],
+    "total_model_files": 2,
+    "total_rig_track_components": 3
+  },
+  "atlas_joint_ba_v1": {
+    "main_track_components": 2,
+    "main_component_sizes": [2494, 2000],
+    "tail_model_byte_identical_to_recovery": true
+  },
+  "colmap_control": {
+    "model_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/models-text",
+    "main_supported_frames": 4494,
+    "main_track_components": 1,
+    "main_component_sizes": [4494],
+    "tail_supported_frames": 505,
+    "tail_track_components": 1,
+    "tail_component_sizes": [505],
+    "main_frames_sha256": "113b3c8f60ba243a4a7c969ffae998dcbbe343933f744590aa0d2d3e542cb6c2",
+    "tail_frames_sha256": "654e2543896e8b39b28b22eede9174c59a18017b7e770dd1b8e9cd81d3af85a6"
+  },
+  "verification": {
+    "reusable_atlas_auditor": "scripts/audit_colmap_pinhole_model.py --rig-manifest RIG_MANIFEST MODEL...",
+    "auditor_tests_passed": 13,
+    "supported_but_disconnected_fixture_test": true
+  },
+  "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. Diagnose source tracks and integration rejection across frame 1999/2000 before further BA policy changes. Do not change the scoring alignment or relax the target to hide this split."
+}

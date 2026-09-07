@@ -89,12 +89,37 @@ def audit_rig(images, identities, support, manifest):
         frame_support[frame] = frame_support.get(frame, 0) + support[image_id]
     if max_center > 1e-4 or max_angle > 1e-3:
         raise ValueError("fixed sensor extrinsics violated by serialized poses")
+    parent = {frame: frame for frame in frame_support}
+
+    def find(frame):
+        while parent[frame] != frame:
+            parent[frame] = parent[parent[frame]]
+            frame = parent[frame]
+        return frame
+
+    first_frame_for_point = {}
+    for image_id, (name, _) in identities.items():
+        frame, _ = assignments[name]
+        for _, point_id in images[image_id][3]:
+            if point_id == -1:
+                continue
+            first = first_frame_for_point.setdefault(point_id, frame)
+            parent[find(frame)] = find(first)
+    groups = {}
+    for frame in parent:
+        groups.setdefault(find(frame), []).append(frame)
+    components = sorted((sorted(group) for group in groups.values()),
+                        key=lambda group: (-len(group), group[0]))
     return {"rig_manifest": str(manifest), "rig_frames": len(frame_support),
             "supported_rig_frames": sum(n > 0 for n in frame_support.values()),
             "unsupported_rig_frame_ids": sorted(i for i, n in frame_support.items() if not n),
             "max_inferred_rig_center_disagreement_m": max_center,
             "max_inferred_rig_rotation_disagreement_deg": max_angle,
-            "fixed_sensor_extrinsics_valid": True}
+            "fixed_sensor_extrinsics_valid": True,
+            "track_connected_components": len(components),
+            "track_connected_component_sizes": [len(group) for group in components],
+            "track_connected_component_frame_ranges": [[group[0], group[-1]]
+                                                        for group in components]}
 
 
 def audit(model, rig_manifest=None):

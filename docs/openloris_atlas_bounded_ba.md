@@ -62,3 +62,22 @@ exact hashes are in
 The next decision must examine rejected observations and existing post-BA
 filter/retriangulation behavior, not treat lower residual cost as trajectory
 success or loosen the frozen COLMAP target.
+
+## Connectivity changes the next diagnostic
+
+An independent rig-frame/landmark graph audit finds two disconnected groups
+inside the atlas main file: frames 0–1999 and 2000–4493. The tail is one group.
+COLMAP's explicit frame assignments and tracks yield one 4,494-frame main
+group and one 505-frame tail group. Thus all 4,999 frames having observations
+and being published in two files is not enough to establish connectivity parity.
+The first BA policy preserves this split. Before changing BA filtering, trace
+which source tracks cross frame 1999/2000 and where integration loses them.
+See [connectivity evidence](../benchmarks/electro/m8-openloris-atlas-connectivity-v1.json).
+
+For subsequent policy design, the upstream
+[COLMAP local BA implementation](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)
+refines a local bundle, completes/merges tracks, then filters observations.
+That is different from rejecting a whole window when any track exceeds a
+gate. The existing visloc `filter_positioned_track_observations` likewise
+filters observations after BA. These are references for a future controlled
+experiment, not evidence that filtering alone will recover missing connectivity.

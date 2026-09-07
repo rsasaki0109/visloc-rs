@@ -80,7 +80,21 @@ class ModelAuditTests(unittest.TestCase):
         self.assertEqual(report["rig_frames"], 2)
         self.assertEqual(report["supported_rig_frames"], 1)
         self.assertEqual(report["unsupported_rig_frame_ids"], [20])
+        self.assertEqual(report["track_connected_component_sizes"], [1, 1])
         self.assertAlmostEqual(report["max_inferred_rig_center_disagreement_m"], 0)
+
+    def test_supported_frames_can_still_be_track_disconnected(self):
+        manifest = self.rig_manifest()
+        manifest.write_text(manifest.read_text() + "F 30 d.png 0\n")
+        path = self.root / "images.txt"
+        path.write_text(path.read_text().replace("c.png\n\n", "c.png\n-4 0 2\n")
+                        + "4 1 0 0 0 -3 0 0 1 d.png\n-6 0 2\n")
+        path = self.root / "points3D.txt"
+        path.write_text(path.read_text() + "2 0 0 5 255 255 255 0 3 0 4 0\n")
+        report = AUDIT.audit(self.root, manifest)["rig"]
+        self.assertEqual(report["supported_rig_frames"], 3)
+        self.assertEqual(report["track_connected_components"], 2)
+        self.assertEqual(report["track_connected_component_sizes"], [2, 1])
 
     def test_changed_stereo_baseline_rejected(self):
         manifest = self.rig_manifest()

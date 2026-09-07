@@ -11,6 +11,10 @@
 > 続くGT非使用のpose回復pilotでframe 4493は10点の支持を取り戻しました。
 > 全体RMSE/p95は0.391465/0.643175 mで未達のため、次は回復処理の
 > 受理条件テストと省メモリ化を固め、観測ベースの有界な最適化へ進みます。
+> その後、厳格な局所BAはRMSE/p95が0.391797/0.643537 mに悪化し非昇格。
+> [連結性監査](../benchmarks/electro/m8-openloris-atlas-connectivity-v1.json)では
+> 主成分内がframe 1999/2000で分断（2,000＋2,494フレーム）していました。
+> 現在の優先作業は、この境界を跨ぐsource trackと統合時の観測消失の診断です。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
