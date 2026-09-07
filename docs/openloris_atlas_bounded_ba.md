@@ -521,6 +521,17 @@ index or extra whole-model copy. Verify complete output equality and measure
 time/RSS before claiming a gain. Removing duplicate scans does not eliminate
 the remaining per-window global scan or prove linear total runtime.
 
+The selection-reuse implementation `1eacc08` passes 51 example tests and 23
+independent auditor tests. In six serial, warm-input, shared-machine main-
+component runs, baseline wall times are 172.69/172.80/169.48 s and candidate
+times are 154.39/156.84/152.09 s. Medians are **172.69 → 154.39 s (10.6% less
+time)**, with essentially unchanged RSS medians of 525,232/525,036 KiB.
+All six model files and complete logs match across every run. No task benchmark
+or build overlaps these measurements. Other-mode regression checks remain in
+progress. This measures integration/recovery/repair/filtering/publication only,
+not the source-window mapper, atlas construction, frontend or native E2E.
+See [selection reuse evidence](../benchmarks/electro/m8-openloris-atlas-selected-scan-reuse-v1.json).
+
 ### Read-only solver-memory audit (not a selected next implementation)
 
 The current pure-visual sparse path in `pipelines/slam/src/bundle.rs`,
@@ -543,3 +554,14 @@ criteria, singular/low-parallax handling, deterministic LM acceptance, fixed
 rig calibration and correct component gauges. Whole-process peak RSS and time
 still need measurement. This audit identifies a memory option; it does not
 authorize an unbounded global solve or replace the outstanding quality gate.
+
+Primary references checked for this option: [Ceres' iterative Schur
+documentation](https://ceres-solver.readthedocs.io/latest/nnls_solving.html#iterative-schur)
+describes CG applied to the reduced camera system through implicit matrix-vector
+products; `SCHUR_JACOBI` uses its block diagonal as a preconditioner.
+[Agarwal et al., Bundle Adjustment in the Large, Eq. 12](https://homes.cs.washington.edu/~sagarwal/bal.pdf)
+derives the implicit product and analyzes the diagonal preconditioner's storage.
+These sources motivate an operator-level comparison, not a prediction that
+global refinement will improve this dataset's trajectory. A future experiment
+must retain identical observations, calibration, damping and GT-free acceptance
+before attributing any change to the solver.

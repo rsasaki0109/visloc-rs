@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "date": "2026-09-07",
-  "status": "serial_repeats_and_mode_regressions_in_progress",
+  "status": "serial_speed_gain_verified_mode_regressions_in_progress",
   "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/selected-scan-reuse-v1",
   "baseline": {
     "implementation_commit": "c99c381",
@@ -35,8 +35,17 @@
     {"label": "baseline-main-1", "wall_s": 172.69, "peak_rss_kib": 525052, "six_files_match_frozen_filtering_main": true},
     {"label": "baseline-main-2", "wall_s": 172.80, "peak_rss_kib": 525268, "six_files_and_complete_log_match_baseline_main_1": true},
     {"label": "candidate-main-1", "wall_s": 154.39, "peak_rss_kib": 524984, "six_files_and_complete_log_match_baseline_main_1": true},
-    {"label": "baseline-main-3", "wall_s": 169.48, "peak_rss_kib": 525232, "six_files_and_complete_log_match_baseline_main_1": true}
+    {"label": "baseline-main-3", "wall_s": 169.48, "peak_rss_kib": 525232, "six_files_and_complete_log_match_baseline_main_1": true},
+    {"label": "candidate-main-2", "wall_s": 156.84, "peak_rss_kib": 525036, "six_files_and_complete_log_match_baseline_main_1": true},
+    {"label": "candidate-main-3", "wall_s": 152.09, "peak_rss_kib": 525080, "six_files_and_complete_log_match_baseline_main_1": true}
   ],
+  "serial_main_result": {
+    "baseline_median_wall_s": 172.69,
+    "candidate_median_wall_s": 154.39,
+    "baseline_median_peak_rss_kib": 525232,
+    "candidate_median_peak_rss_kib": 525036,
+    "interpretation": "10.6 percent lower median wall time in this local main-component processing stage; no material RSS change. All model files and full logs are byte-identical across all six runs. Not a full-mapper/native-E2E or COLMAP speed claim."
+  },
   "verification": {
     "example_tests_default": 51,
     "example_tests_no_default": 51,
@@ -47,5 +56,5 @@
     "implementation_ci": {"run_id": 34102096800, "head_commit": "1eacc08", "checks_passed": 8, "rust_duration": "3m42s"},
     "final_ci_status": "not_yet_run"
   },
-  "decision": "Do not claim a measured gain until serial repeats and regression checks complete. Byte-identical output preserves the prior experimental quality result; it does not close the outstanding COLMAP RMSE gate or full M8-M10 objective."
+  "decision": "Serial main-component timing gain is verified; merge remains gated on other-mode regressions and final CI. Byte-identical output preserves the prior experimental quality result; it does not close the outstanding COLMAP RMSE gate or full M8-M10 objective."
 }
