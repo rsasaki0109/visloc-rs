@@ -6,6 +6,8 @@
 // the parsed state after the evaluate-only contract has been independently
 // checked.
 
+#include <ceres/ceres.h>
+#include <ceres/rotation.h>
 #include <ceres/version.h>
 
 #include <Eigen/Core>
@@ -26,6 +28,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -34,6 +37,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -106,6 +112,8 @@ struct Fixture {
 
 struct EvaluationSummary {
   double squared_cost = 0.0;
+  double eigen_squared_cost = 0.0;
+  double max_ceres_eigen_residual_abs_diff = 0.0;
   std::size_t observation_count = 0;
   std::size_t positive_depth_count = 0;
   double minimum_depth = std::numeric_limits<double>::infinity();
@@ -118,6 +126,105 @@ struct Cli {
   fs::path fixture;
   fs::path dump;
 };
+
+// This is the single residual functor shared by evaluate-only and the future
+// Ceres solve path.  Pose parameters are [qw, qx, qy, qz, tx, ty, tz], matching
+// the fixture and the Rust exporter.  The two fixed sensor parameters are
+// captured by value and are never optimization blocks.
+struct RigReprojectionCost {
+  std::array<double, 4> intrinsics{};
+  Eigen::Vector2d observed = Eigen::Vector2d::Zero();
+  Eigen::Quaterniond sensor_from_rig_rotation = Eigen::Quaterniond::Identity();
+  Eigen::Vector3d sensor_from_rig_translation = Eigen::Vector3d::Zero();
+
+  template <typename T>
+  bool operator()(const T* const pose,
+                  const T* const point_world,
+                  T* residuals) const {
+    T point_rig[3];
+    ceres::QuaternionRotatePoint(pose, point_world, point_rig);
+    point_rig[0] += T(pose[4]);
+    point_rig[1] += T(pose[5]);
+    point_rig[2] += T(pose[6]);
+
+    const T sensor_rotation[4] = {
+        T(sensor_from_rig_rotation.w()),
+        T(sensor_from_rig_rotation.x()),
+        T(sensor_from_rig_rotation.y()),
+        T(sensor_from_rig_rotation.z()),
+    };
+    T point_sensor[3];
+    ceres::QuaternionRotatePoint(sensor_rotation, point_rig, point_sensor);
+    point_sensor[0] += T(sensor_from_rig_translation.x());
+    point_sensor[1] += T(sensor_from_rig_translation.y());
+    point_sensor[2] += T(sensor_from_rig_translation.z());
+    if (!ceres::IsFinite(point_sensor[0]) ||
+        !ceres::IsFinite(point_sensor[1]) ||
+        !ceres::IsFinite(point_sensor[2]) || !(point_sensor[2] > T(0))) {
+      return false;
+    }
+
+    residuals[0] = T(intrinsics[0]) * point_sensor[0] / point_sensor[2] +
+                   T(intrinsics[2]) - T(observed.x());
+    residuals[1] = T(intrinsics[1]) * point_sensor[1] / point_sensor[2] +
+                   T(intrinsics[3]) - T(observed.y());
+    return ceres::IsFinite(residuals[0]) && ceres::IsFinite(residuals[1]);
+  }
+};
+
+using RigReprojectionCostFunction =
+    ceres::AutoDiffCostFunction<RigReprojectionCost, 2, 7, 3>;
+
+Eigen::Vector3d TransformPoint(const Pose& pose,
+                               const Observation& observation,
+                               const Landmark& landmark);
+
+std::unique_ptr<ceres::CostFunction> MakeRigReprojectionCost(
+    const Camera& camera,
+    const Observation& observation) {
+  auto* functor = new RigReprojectionCost;
+  functor->intrinsics = camera.intrinsics;
+  functor->observed = observation.xy;
+  functor->sensor_from_rig_rotation = observation.sensor_from_rig_rotation;
+  functor->sensor_from_rig_translation = observation.sensor_from_rig_translation;
+  return std::unique_ptr<ceres::CostFunction>(
+      new RigReprojectionCostFunction(functor));
+}
+
+struct CeresObservationEvaluation {
+  Eigen::Vector2d residual = Eigen::Vector2d::Zero();
+  double depth = 0.0;
+};
+
+CeresObservationEvaluation EvaluateWithCeres(const Pose& pose,
+                                             const Observation& observation,
+                                             const Landmark& landmark,
+                                             const Camera& camera) {
+  const std::unique_ptr<ceres::CostFunction> cost =
+      MakeRigReprojectionCost(camera, observation);
+  const Eigen::Quaterniond& rotation = pose.rotation;
+  const double pose_parameters[7] = {
+      rotation.w(), rotation.x(), rotation.y(), rotation.z(),
+      pose.translation.x(), pose.translation.y(), pose.translation.z(),
+  };
+  const double point_parameters[3] = {
+      landmark.position.x(), landmark.position.y(), landmark.position.z(),
+  };
+  const double* parameters[] = {pose_parameters, point_parameters};
+  double residual[2] = {0.0, 0.0};
+  if (!cost->Evaluate(parameters, residual, nullptr) ||
+      !std::isfinite(residual[0]) || !std::isfinite(residual[1])) {
+    throw FixtureError("Ceres AutoDiff rejected a nonfinite or nonpositive-depth "
+                       "observation");
+  }
+  CeresObservationEvaluation result;
+  result.residual = Eigen::Vector2d(residual[0], residual[1]);
+  result.depth = TransformPoint(pose, observation, landmark).z();
+  if (!std::isfinite(result.depth) || !(result.depth > 0.0)) {
+    throw FixtureError("Ceres AutoDiff accepted an invalid depth");
+  }
+  return result;
+}
 
 std::string Trim(const std::string& input) {
   const std::size_t first = input.find_first_not_of(" \t\r\n");
@@ -321,7 +428,7 @@ Fixture ParseFixture(std::istream& input, const std::string& source_name) {
     }
     ++line_number;
     const std::vector<std::string> fields = Split(line);
-    RequireFieldCount(fields, 9, line_number, "CAMERA");
+    RequireFieldCount(fields, 10, line_number, "CAMERA");
     if (fields[0] != "CAMERA" || fields[2] != "PINHOLE" || fields[5] != "4") {
       Fail(line_number, "only PINHOLE cameras with four parameters are accepted");
     }
@@ -568,29 +675,47 @@ EvaluationSummary Evaluate(const Fixture& fixture, std::ostream& dump) {
       throw FixtureError("evaluate-only rejected nonfinite or nonpositive depth at "
                          "observation " + std::to_string(index));
     }
-    const double predicted_x = camera.intrinsics[0] * point_sensor.x() /
-                                   point_sensor.z() + camera.intrinsics[2];
-    const double predicted_y = camera.intrinsics[1] * point_sensor.y() /
-                                   point_sensor.z() + camera.intrinsics[3];
-    const double residual_x = predicted_x - observation.xy.x();
-    const double residual_y = predicted_y - observation.xy.y();
-    const double squared_cost = residual_x * residual_x + residual_y * residual_y;
-    if (!std::isfinite(predicted_x) || !std::isfinite(predicted_y) ||
-        !std::isfinite(residual_x) || !std::isfinite(residual_y) ||
-        !std::isfinite(squared_cost)) {
+    const double eigen_predicted_x = camera.intrinsics[0] * point_sensor.x() /
+                                         point_sensor.z() + camera.intrinsics[2];
+    const double eigen_predicted_y = camera.intrinsics[1] * point_sensor.y() /
+                                         point_sensor.z() + camera.intrinsics[3];
+    const Eigen::Vector2d eigen_residual(
+        eigen_predicted_x - observation.xy.x(),
+        eigen_predicted_y - observation.xy.y());
+    const double eigen_squared_cost = eigen_residual.squaredNorm();
+    if (!eigen_residual.allFinite() || !std::isfinite(eigen_squared_cost)) {
       throw FixtureError("evaluate-only rejected nonfinite projection at observation " +
                          std::to_string(index));
     }
+    const CeresObservationEvaluation ceres =
+        EvaluateWithCeres(pose, observation, landmark, camera);
+    const Eigen::Vector2d residual_difference = ceres.residual - eigen_residual;
+    const double max_difference = residual_difference.cwiseAbs().maxCoeff();
+    if (!std::isfinite(max_difference)) {
+      throw FixtureError("evaluate-only residual parity is nonfinite at observation " +
+                         std::to_string(index));
+    }
+    summary.max_ceres_eigen_residual_abs_diff = std::max(
+        summary.max_ceres_eigen_residual_abs_diff, max_difference);
+    const double squared_cost = ceres.residual.squaredNorm();
+    if (!std::isfinite(squared_cost)) {
+      throw FixtureError("evaluate-only Ceres squared cost overflowed at observation " +
+                         std::to_string(index));
+    }
     summary.squared_cost += squared_cost;
+    summary.eigen_squared_cost += eigen_squared_cost;
     if (!std::isfinite(summary.squared_cost)) {
       throw FixtureError("evaluate-only squared cost overflowed");
     }
+    if (!std::isfinite(summary.eigen_squared_cost)) {
+      throw FixtureError("evaluate-only Eigen squared cost overflowed");
+    }
     ++summary.positive_depth_count;
-    summary.minimum_depth = std::min(summary.minimum_depth, point_sensor.z());
-    summary.maximum_depth = std::max(summary.maximum_depth, point_sensor.z());
+    summary.minimum_depth = std::min(summary.minimum_depth, ceres.depth);
+    summary.maximum_depth = std::max(summary.maximum_depth, ceres.depth);
     dump << "OBSERVATION " << index << ' ' << observation.frame_id << ' '
          << observation.landmark_id << ' ' << observation.camera_id << ' '
-         << residual_x << ' ' << residual_y << ' ' << point_sensor.z() << ' '
+         << ceres.residual.x() << ' ' << ceres.residual.y() << ' ' << ceres.depth << ' '
          << squared_cost << '\n';
   }
   dump << "SUMMARY_OBSERVATIONS " << summary.observation_count << '\n'
@@ -598,6 +723,9 @@ EvaluationSummary Evaluate(const Fixture& fixture, std::ostream& dump) {
        << "SUMMARY_SQUARED_COST " << std::setprecision(17)
        << summary.squared_cost << '\n'
        << "SUMMARY_SQUARED_COST_BITS " << DoubleBits(summary.squared_cost) << '\n'
+       << "SUMMARY_EIGEN_SQUARED_COST " << summary.eigen_squared_cost << '\n'
+       << "SUMMARY_CERES_EIGEN_MAX_RESIDUAL_ABS_DIFF "
+       << summary.max_ceres_eigen_residual_abs_diff << '\n'
        << "SUMMARY_MIN_DEPTH " << summary.minimum_depth << '\n'
        << "SUMMARY_MAX_DEPTH " << summary.maximum_depth << '\n';
   return summary;
@@ -657,6 +785,61 @@ fs::path MakeStagingPath(const fs::path& output) {
           std::to_string(static_cast<long long>(stamp)));
 }
 
+class ExclusiveFileBuffer final : public std::streambuf {
+ public:
+  explicit ExclusiveFileBuffer(int file_descriptor) : file_descriptor_(file_descriptor) {
+    setp(buffer_, buffer_ + sizeof(buffer_));
+  }
+
+  ExclusiveFileBuffer(const ExclusiveFileBuffer&) = delete;
+  ExclusiveFileBuffer& operator=(const ExclusiveFileBuffer&) = delete;
+
+  ~ExclusiveFileBuffer() override {
+    sync();
+    if (file_descriptor_ >= 0) {
+      ::close(file_descriptor_);
+      file_descriptor_ = -1;
+    }
+  }
+
+ protected:
+  int_type overflow(int_type character = traits_type::eof()) override {
+    if (!FlushBuffer()) {
+      return traits_type::eof();
+    }
+    if (!traits_type::eq_int_type(character, traits_type::eof())) {
+      *pptr() = traits_type::to_char_type(character);
+      pbump(1);
+    }
+    return traits_type::not_eof(character);
+  }
+
+  int sync() override { return FlushBuffer() ? 0 : -1; }
+
+ private:
+  bool FlushBuffer() {
+    const char* data = pbase();
+    std::ptrdiff_t remaining = pptr() - pbase();
+    while (remaining > 0) {
+      const ssize_t written = ::write(file_descriptor_, data,
+                                      static_cast<std::size_t>(remaining));
+      if (written < 0 && errno == EINTR) {
+        continue;
+      }
+      if (written <= 0) {
+        return false;
+      }
+      data += written;
+      remaining -= written;
+    }
+    setp(buffer_, buffer_ + sizeof(buffer_));
+    return true;
+  }
+
+  int file_descriptor_ = -1;
+  char buffer_[64 * 1024]{};
+};
+
 EvaluationSummary EvaluateToFile(const Fixture& fixture,
                                  const fs::path& fixture_path,
                                  const fs::path& output_path) {
@@ -670,12 +853,16 @@ EvaluationSummary EvaluateToFile(const Fixture& fixture,
   bool owns_staging = false;
   std::optional<EvaluationSummary> summary;
   try {
+    const int file_descriptor =
+        ::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (file_descriptor < 0) {
+      throw FixtureError("cannot exclusively create evaluation staging file: " +
+                         std::string(std::strerror(errno)));
+    }
+    owns_staging = true;
     {
-      std::ofstream output(staging, std::ios::binary | std::ios::out);
-      if (!output) {
-        throw FixtureError("cannot create evaluation staging file");
-      }
-      owns_staging = true;
+      ExclusiveFileBuffer buffer(file_descriptor);
+      std::ostream output(&buffer);
       summary = Evaluate(fixture, output);
       output.flush();
       if (!output) {
@@ -730,8 +917,8 @@ std::string SyntheticFixture() {
           << "POSE 0 1 0 0 0 0 0 0\n"
           << "FIXED_POSE 0\n"
           << "LANDMARK 1 0 0 2\n"
-          << "RIG_OBSERVATION 0 1 0 0 1 1 0 0 0 0 0 0 0\n"
-          << "RIG_OBSERVATION 0 1 -2.5 0 2 1 0 0 0 -0.5 0 0 0\n"
+          << "RIG_OBSERVATION 0 1 0 0 1 1 0 0 0 0 0 0\n"
+          << "RIG_OBSERVATION 0 1 -2.5 0 2 1 0 0 0 -0.5 0 0\n"
           << "END\n";
   return fixture.str();
 }
@@ -771,13 +958,19 @@ void RunSelfTests() {
     std::istringstream bad_input(bad_depth);
     const Fixture bad_fixture = ParseFixture(bad_input, "bad-depth");
     std::ostringstream bad_dump;
+    bool rejected = false;
     try {
       (void)Evaluate(bad_fixture, bad_dump);
     } catch (const FixtureError& error) {
       if (std::string(error.what()).find("nonfinite or nonpositive depth") ==
           std::string::npos) {
-        throw;
+        throw FixtureError("self-test bad-depth error mismatch: " +
+                           std::string(error.what()));
       }
+      rejected = true;
+    }
+    if (!rejected) {
+      throw FixtureError("self-test expected negative depth rejection");
     }
   }
 
@@ -790,10 +983,10 @@ void RunSelfTests() {
 
   std::string unknown_landmark = valid;
   const std::string old_observation =
-      "RIG_OBSERVATION 0 1 0 0 1 1 0 0 0 0 0 0 0";
+      "RIG_OBSERVATION 0 1 0 0 1 1 0 0 0 0 0 0";
   const std::size_t observation_position = unknown_landmark.find(old_observation);
   unknown_landmark.replace(observation_position, old_observation.size(),
-                           "RIG_OBSERVATION 0 99 0 0 1 1 0 0 0 0 0 0 0");
+                           "RIG_OBSERVATION 0 99 0 0 1 1 0 0 0 0 0 0");
   ExpectFailure(unknown_landmark, "unknown landmark");
 
   std::string nonfinite = valid;
@@ -802,7 +995,7 @@ void RunSelfTests() {
                     "LANDMARK 1 nan 0 2");
   ExpectFailure(nonfinite, "invalid finite landmark x");
 
-  std::string trailing = valid + "RIG_OBSERVATION 0 1 0 0 1 1 0 0 0 0 0 0 0\n";
+  std::string trailing = valid + "RIG_OBSERVATION 0 1 0 0 1 1 0 0 0 0 0 0\n";
   ExpectFailure(trailing, "records after END");
 }
 
@@ -901,6 +1094,9 @@ int main(int argc, char** argv) {
               << " declared_initial_cost=" << fixture.declared_initial_cost
               << " evaluated_squared_cost=" << summary.squared_cost
               << " evaluated_cost_bits=" << DoubleBits(summary.squared_cost)
+              << " eigen_squared_cost=" << summary.eigen_squared_cost
+              << " ceres_eigen_max_residual_abs_diff="
+              << summary.max_ceres_eigen_residual_abs_diff
               << " cost_delta=" << absolute_delta
               << " min_depth=" << summary.minimum_depth
               << " max_depth=" << summary.maximum_depth
