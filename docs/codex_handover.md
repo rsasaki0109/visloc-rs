@@ -124,6 +124,10 @@
 > 全支持・identity・depth・calibration保持、各repeat完全一致、旧direct/strictもPR #79一致。
 > 次候補はtrue residual再確認失敗時だけ最大1回restartする別arm（総512反復内）。
 > まだ未実装。デフォルト変更・N²状態・反復上限のリセットは行いません。
+> PR #82は最終head `cd226dd` のCI全8項目（run 34130693082）通過後、
+> `35df35f`へmerge済み。旧local/remote branchも削除しました。
+> 続きは `feat/m8-bounded-pcg-residual-restart`。まず既定OFFの回復機構を
+> 同じ総反復上限で実装・検証し、1k nonlinearのdirect/strict/relative controlと比較します。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

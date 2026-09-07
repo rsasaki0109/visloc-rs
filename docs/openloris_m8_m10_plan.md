@@ -126,6 +126,10 @@ direct; repeats are exact and all identities/support/calibration/depth remain
 valid. No equivalent-quality speedup or 10k promotion. Next test one bounded,
 event-triggered true-residual restart within the original PCG iteration cap,
 as a separate default-off arm; see the [detailed contract](openloris_atlas_bounded_ba.md).
+PR #82 passed all eight final-head checks (run `34130693082`, head `cd226dd`)
+and merged as `35df35f`; local and remote topic branches were removed.
+Continuation branch: `feat/m8-bounded-pcg-residual-restart`. The full 10k,
+scale/restart/100k and comparable mapper/native-E2E gates remain open.
 
 ## Historical M7 baseline
 
