@@ -17,12 +17,12 @@ use sha2::{Digest, Sha256};
 use visloc_rs::io::colmap::parse_cameras_txt;
 use visloc_rs::slam::{
     BaConfig, BaRigObservation, BundleAdjustment, LinearSolver, MatrixFreeBaOptions,
-    MatrixFreeBaResult, RobustKernel,
+    MatrixFreeBaRestartOptions, MatrixFreeBaRestartResult, MatrixFreeBaResult, RobustKernel,
 };
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N] [--pcg-relative-tolerance X]\n\
+    --solver direct|matrix-free --out-dir PATH [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -78,6 +78,8 @@ struct Args {
     pcg_max_iterations: usize,
     pcg_relative_tolerance: f64,
     pcg_relative_tolerance_explicit: bool,
+    pcg_max_restarts: usize,
+    pcg_max_restarts_explicit: bool,
     oracle_fixture_out: Option<PathBuf>,
 }
 
@@ -170,6 +172,7 @@ struct RunSummary {
 enum OptimizationResult {
     Direct(visloc_rs::slam::BaResult),
     MatrixFree(MatrixFreeBaResult),
+    MatrixFreeRestart(MatrixFreeBaRestartResult),
 }
 
 fn main() {
@@ -198,6 +201,8 @@ where
     let mut pcg_seen = false;
     let mut pcg_relative_tolerance = PCG_TOLERANCE;
     let mut pcg_relative_seen = false;
+    let mut pcg_max_restarts = 0;
+    let mut pcg_restarts_seen = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -244,6 +249,25 @@ where
             }
             continue;
         }
+        if flag == "--pcg-max-restarts" {
+            if pcg_restarts_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            pcg_restarts_seen = true;
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires 0 or 1\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires 0 or 1, got {value:?}\n{USAGE}"));
+            }
+            pcg_max_restarts = value
+                .parse::<usize>()
+                .map_err(|error| format!("{flag} requires 0 or 1: {error}\n{USAGE}"))?;
+            if pcg_max_restarts > 1 {
+                return Err(format!("{flag} must be 0 or 1\n{USAGE}"));
+            }
+            continue;
+        }
         if flag == "--export-oracle-fixture" {
             let value = values
                 .next()
@@ -281,11 +305,16 @@ where
         }
     }
     if oracle_fixture_out.is_some()
-        && (solver.is_some() || out_dir.is_some() || pcg_seen || pcg_relative_seen)
+        && (solver.is_some()
+            || out_dir.is_some()
+            || pcg_seen
+            || pcg_relative_seen
+            || pcg_restarts_seen)
     {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
-             --solver, --out-dir, --pcg-max-iterations or --pcg-relative-tolerance\n{USAGE}"
+             --solver, --out-dir, --pcg-max-iterations, --pcg-relative-tolerance or \
+             --pcg-max-restarts\n{USAGE}"
         ));
     }
     if oracle_fixture_out.is_none() && (solver.is_none() || out_dir.is_none()) {
@@ -301,9 +330,13 @@ where
         pcg_max_iterations,
         pcg_relative_tolerance,
         pcg_relative_tolerance_explicit: pcg_relative_seen,
+        pcg_max_restarts,
+        pcg_max_restarts_explicit: pcg_restarts_seen,
         oracle_fixture_out,
     };
-    if args.solver == Some(SolverArm::Direct) && (pcg_seen || pcg_relative_seen) {
+    if args.solver == Some(SolverArm::Direct)
+        && (pcg_seen || pcg_relative_seen || pcg_restarts_seen)
+    {
         return Err(format!(
             "PCG options are only valid for matrix-free\n{USAGE}"
         ));
@@ -385,7 +418,14 @@ fn run(args: &Args) -> Result<(), String> {
         ..BaConfig::default()
     };
     let solver_started = Instant::now();
-    if solver == SolverArm::MatrixFree && args.pcg_relative_tolerance_explicit {
+    if solver == SolverArm::MatrixFree && args.pcg_max_restarts_explicit {
+        println!(
+            "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e} max_restarts_per_solve={}",
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            args.pcg_max_restarts,
+        );
+    } else if solver == SolverArm::MatrixFree && args.pcg_relative_tolerance_explicit {
         println!(
             "pcg_configuration solver=matrix-free relative_tolerance={:.17e} absolute_tolerance={:.17e}",
             args.pcg_relative_tolerance,
@@ -406,11 +446,25 @@ fn run(args: &Args) -> Result<(), String> {
                 pcg_relative_tolerance: args.pcg_relative_tolerance,
                 pcg_absolute_tolerance: PCG_TOLERANCE,
             };
-            let result = prepared
-                .ba
-                .optimize_matrix_free(&config, options)
-                .map_err(|error| format!("matrix-free BA failed: {error}"))?;
-            OptimizationResult::MatrixFree(result)
+            if args.pcg_max_restarts_explicit {
+                let result = prepared
+                    .ba
+                    .optimize_matrix_free_with_restart(
+                        &config,
+                        options,
+                        MatrixFreeBaRestartOptions {
+                            max_restarts_per_solve: args.pcg_max_restarts,
+                        },
+                    )
+                    .map_err(|error| format!("matrix-free BA failed: {error}"))?;
+                OptimizationResult::MatrixFreeRestart(result)
+            } else {
+                let result = prepared
+                    .ba
+                    .optimize_matrix_free(&config, options)
+                    .map_err(|error| format!("matrix-free BA failed: {error}"))?;
+                OptimizationResult::MatrixFree(result)
+            }
         }
     };
     let solver_seconds = solver_started.elapsed().as_secs_f64();
@@ -422,6 +476,14 @@ fn run(args: &Args) -> Result<(), String> {
         OptimizationResult::MatrixFree(result) => {
             print_matrix_free_trace(result, args.pcg_max_iterations);
             (result.final_cost, result.iterations.len(), result.converged)
+        }
+        OptimizationResult::MatrixFreeRestart(result) => {
+            print_matrix_free_restart_trace(result, args.pcg_max_iterations);
+            (
+                result.ba.final_cost,
+                result.ba.iterations.len(),
+                result.ba.converged,
+            )
         }
     };
     if !final_cost.is_finite() {
@@ -438,7 +500,42 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
-    if args.pcg_relative_tolerance_explicit {
+    if args.pcg_max_restarts_explicit {
+        let total_rechecks = result_restart_rechecks(&optimization);
+        let total_failed_rechecks = result_restart_failed_rechecks(&optimization);
+        let total_restarts = result_restart_count(&optimization);
+        println!(
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts={} pcg_true_residual_rechecks={} pcg_failed_true_residual_rechecks={} pcg_restarts={} solver_seconds={:.6} total_seconds={:.6} out={}",
+            summary.solver.as_str(),
+            summary.initial_cost,
+            summary.final_cost,
+            summary.iterations,
+            summary.converged,
+            source.images.len(),
+            manifest
+                .assignments
+                .values()
+                .map(|assignment| assignment.frame_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            source.points.len(),
+            source
+                .points
+                .iter()
+                .map(|point| point.observations.len())
+                .sum::<usize>(),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            args.pcg_max_restarts,
+            total_rechecks,
+            total_failed_rechecks,
+            total_restarts,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else if args.pcg_relative_tolerance_explicit {
         println!(
             "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
             summary.solver.as_str(),
@@ -2024,6 +2121,54 @@ fn print_matrix_free_trace(result: &MatrixFreeBaResult, max_pcg_iterations: usiz
     }
 }
 
+fn print_matrix_free_restart_trace(result: &MatrixFreeBaRestartResult, max_pcg_iterations: usize) {
+    print_matrix_free_trace(&result.ba, max_pcg_iterations);
+    for iteration in &result.restart_iterations {
+        println!(
+            "pcg_restart_trace solver=matrix-free iteration={} pcg_iterations={} true_residual_rechecks={} failed_true_residual_rechecks={} restarts={} terminal_failure={}",
+            iteration.iteration,
+            option_usize(iteration.pcg_iterations),
+            iteration.true_residual_rechecks,
+            iteration.failed_true_residual_rechecks,
+            iteration.restarts,
+            iteration.terminal_failure.as_deref().unwrap_or("none"),
+        );
+    }
+}
+
+fn result_restart_rechecks(result: &OptimizationResult) -> usize {
+    match result {
+        OptimizationResult::MatrixFreeRestart(result) => result
+            .restart_iterations
+            .iter()
+            .map(|stats| stats.true_residual_rechecks)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn result_restart_failed_rechecks(result: &OptimizationResult) -> usize {
+    match result {
+        OptimizationResult::MatrixFreeRestart(result) => result
+            .restart_iterations
+            .iter()
+            .map(|stats| stats.failed_true_residual_rechecks)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn result_restart_count(result: &OptimizationResult) -> usize {
+    match result {
+        OptimizationResult::MatrixFreeRestart(result) => result
+            .restart_iterations
+            .iter()
+            .map(|stats| stats.restarts)
+            .sum(),
+        _ => 0,
+    }
+}
+
 fn option_usize(value: Option<usize>) -> String {
     value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
 }
@@ -2190,6 +2335,136 @@ mod tests {
         .unwrap();
         assert_eq!(default.pcg_relative_tolerance, PCG_TOLERANCE);
         assert!(!default.pcg_relative_tolerance_explicit);
+        assert_eq!(default.pcg_max_restarts, 0);
+        assert!(!default.pcg_max_restarts_explicit);
+    }
+
+    #[test]
+    fn parses_bounded_pcg_restarts_only_for_matrix_free() {
+        let explicit = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(explicit.pcg_max_restarts, 1);
+        assert!(explicit.pcg_max_restarts_explicit);
+
+        for invalid in ["-1", "2", "NaN", "inf"] {
+            let error = parse_args(
+                [
+                    "compare",
+                    "--model",
+                    "model",
+                    "--rig-manifest",
+                    "rig.txt",
+                    "--solver",
+                    "matrix-free",
+                    "--out-dir",
+                    "out",
+                    "--pcg-max-restarts",
+                    invalid,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("pcg-max-restarts"),
+                "invalid={invalid:?} error={error}"
+            );
+        }
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+                "1",
+                "--pcg-max-restarts",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let missing = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(missing.contains("requires 0 or 1"));
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("only valid for matrix-free"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--pcg-max-restarts",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
     }
 
     #[test]

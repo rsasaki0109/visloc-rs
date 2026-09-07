@@ -17,7 +17,8 @@ pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
     BaResult, BaRigObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
     BundleAdjustmentRefiner, GravityPrior, MatrixFreeBaError, MatrixFreeBaIterationStats,
-    MatrixFreeBaOptions, MatrixFreeBaResult, NavigationStatePrior, PairwisePoseFactor,
+    MatrixFreeBaOptions, MatrixFreeBaRestartIterationStats, MatrixFreeBaRestartOptions,
+    MatrixFreeBaRestartResult, MatrixFreeBaResult, NavigationStatePrior, PairwisePoseFactor,
     PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
 };
 

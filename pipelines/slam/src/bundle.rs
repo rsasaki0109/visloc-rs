@@ -1506,7 +1506,57 @@ impl BundleAdjustment {
         options: MatrixFreeBaOptions,
     ) -> Result<MatrixFreeBaResult, MatrixFreeBaError> {
         self.validate_matrix_free_entry(config, options)?;
-        let mut backend = BaSolveBackend::MatrixFree(MatrixFreeRuntime::new(options));
+        let (result, runtime) =
+            self.run_matrix_free_backend(config, MatrixFreeRuntime::new(options))?;
+        Ok(MatrixFreeBaResult {
+            initial_cost: result.initial_cost,
+            final_cost: result.final_cost,
+            iterations: result.iterations,
+            matrix_free_iterations: runtime.iterations,
+            converged: result.converged,
+        })
+    }
+
+    /// Run the matrix-free backend with a bounded true-residual restart policy.
+    ///
+    /// This is an additive diagnostic entry point.  The existing
+    /// [`Self::optimize_matrix_free`] path remains the default and does not
+    /// allocate restart diagnostics.  A restart is allowed at most once per
+    /// reduced linear solve and never resets the total PCG iteration count.
+    pub fn optimize_matrix_free_with_restart(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+        restart: MatrixFreeBaRestartOptions,
+    ) -> Result<MatrixFreeBaRestartResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options)?;
+        if restart.max_restarts_per_solve > 1 {
+            return Err(MatrixFreeBaError::InvalidConfiguration(
+                "max_restarts_per_solve must be 0 or 1",
+            ));
+        }
+        let (result, runtime) = self.run_matrix_free_backend(
+            config,
+            MatrixFreeRuntime::with_restart(options, restart.max_restarts_per_solve),
+        )?;
+        Ok(MatrixFreeBaRestartResult {
+            ba: MatrixFreeBaResult {
+                initial_cost: result.initial_cost,
+                final_cost: result.final_cost,
+                iterations: result.iterations,
+                matrix_free_iterations: runtime.iterations,
+                converged: result.converged,
+            },
+            restart_iterations: runtime.restart_iterations.unwrap_or_default(),
+        })
+    }
+
+    fn run_matrix_free_backend(
+        &mut self,
+        config: &BaConfig,
+        runtime: MatrixFreeRuntime,
+    ) -> Result<(BaResult, MatrixFreeRuntime), MatrixFreeBaError> {
+        let mut backend = BaSolveBackend::MatrixFree(runtime);
         let result = self
             .optimize_weighted_backend(config, None, &mut backend)
             .map_err(|error| {
@@ -1520,13 +1570,7 @@ impl BundleAdjustment {
         let BaSolveBackend::MatrixFree(runtime) = backend else {
             unreachable!("matrix-free entry installs the matrix-free backend");
         };
-        Ok(MatrixFreeBaResult {
-            initial_cost: result.initial_cost,
-            final_cost: result.final_cost,
-            iterations: result.iterations,
-            matrix_free_iterations: runtime.iterations,
-            converged: result.converged,
-        })
+        Ok((result, runtime))
     }
 
     fn validate_matrix_free_entry(
@@ -2646,11 +2690,25 @@ impl BundleAdjustment {
                     &mut block_symbolic_cache,
                 ),
                 BaSolveBackend::MatrixFree(runtime) => {
-                    match solve_matrix_free_step(&system, lambda, runtime.options) {
-                        Ok((delta_poses, delta_landmarks, mut diagnostics)) => {
-                            diagnostics.iteration = iteration;
-                            runtime.iterations.push(diagnostics);
-                            Ok((delta_poses, delta_landmarks))
+                    match solve_matrix_free_step(
+                        &system,
+                        lambda,
+                        runtime.options,
+                        runtime.restart_limit,
+                        runtime.restart_iterations.is_some(),
+                    ) {
+                        Ok(mut outcome) => {
+                            outcome.diagnostics.iteration = iteration;
+                            runtime.iterations.push(outcome.diagnostics);
+                            if let Some(mut restart_diagnostics) = outcome.restart_diagnostics {
+                                restart_diagnostics.iteration = iteration;
+                                runtime
+                                    .restart_iterations
+                                    .as_mut()
+                                    .expect("restart diagnostics are enabled")
+                                    .push(restart_diagnostics);
+                            }
+                            Ok((outcome.delta_poses, outcome.delta_landmarks))
                         }
                         Err(error) => {
                             runtime.iterations.push(MatrixFreeBaIterationStats {
@@ -2660,6 +2718,14 @@ impl BundleAdjustment {
                                 pcg_target: error.pcg_target,
                                 pcg_failure: Some(error.diagnostic.clone()),
                             });
+                            if let Some(mut restart_diagnostics) = error.restart_diagnostics {
+                                restart_diagnostics.iteration = iteration;
+                                runtime
+                                    .restart_iterations
+                                    .as_mut()
+                                    .expect("restart diagnostics are enabled")
+                                    .push(restart_diagnostics);
+                            }
                             runtime.failure = Some(MatrixFreeBaError::LinearSolve {
                                 iteration,
                                 diagnostic: error.diagnostic,
@@ -3014,6 +3080,40 @@ pub struct MatrixFreeBaResult {
     pub converged: bool,
 }
 
+/// Additive options for the bounded true-residual restart diagnostic.
+///
+/// `max_restarts_per_solve` is intentionally limited to zero or one.  The
+/// PCG iteration budget in [`MatrixFreeBaOptions`] is global to each reduced
+/// solve and is never reset by a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MatrixFreeBaRestartOptions {
+    pub max_restarts_per_solve: usize,
+}
+
+/// Per-LM-iteration diagnostics for the bounded restart entry point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaRestartIterationStats {
+    pub iteration: usize,
+    /// Total alpha iterations used by this PCG solve.  This value is never
+    /// reset when a residual restart occurs.
+    pub pcg_iterations: Option<usize>,
+    /// Number of explicit true-residual checks performed.
+    pub true_residual_rechecks: usize,
+    /// Number of those checks whose norm exceeded the configured target.  This
+    /// includes checks at the iteration cap; it is not a count of
+    /// restart-eligible checks.
+    pub failed_true_residual_rechecks: usize,
+    pub restarts: usize,
+    pub terminal_failure: Option<String>,
+}
+
+/// Result of [`BundleAdjustment::optimize_matrix_free_with_restart`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaRestartResult {
+    pub ba: MatrixFreeBaResult,
+    pub restart_iterations: Vec<MatrixFreeBaRestartIterationStats>,
+}
+
 /// Failure from the opt-in matrix-free pure-visual BA entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatrixFreeBaError {
@@ -3064,6 +3164,8 @@ enum BaSolveBackend {
 struct MatrixFreeRuntime {
     options: MatrixFreeBaOptions,
     iterations: Vec<MatrixFreeBaIterationStats>,
+    restart_limit: usize,
+    restart_iterations: Option<Vec<MatrixFreeBaRestartIterationStats>>,
     failure: Option<MatrixFreeBaError>,
 }
 
@@ -3072,6 +3174,18 @@ impl MatrixFreeRuntime {
         Self {
             options,
             iterations: Vec::new(),
+            restart_limit: 0,
+            restart_iterations: None,
+            failure: None,
+        }
+    }
+
+    fn with_restart(options: MatrixFreeBaOptions, restart_limit: usize) -> Self {
+        Self {
+            options,
+            iterations: Vec::new(),
+            restart_limit,
+            restart_iterations: Some(Vec::new()),
             failure: None,
         }
     }
@@ -4568,18 +4682,33 @@ fn constrain_fixed_pose_rotations(
     }
 }
 
+struct MatrixFreeStepOutcome {
+    delta_poses: DVector<f64>,
+    delta_landmarks: DVector<f64>,
+    diagnostics: MatrixFreeBaIterationStats,
+    restart_diagnostics: Option<MatrixFreeBaRestartIterationStats>,
+}
+
 struct MatrixFreeStepError {
     diagnostic: String,
     pcg_iterations: Option<usize>,
     pcg_residual_norm: Option<f64>,
     pcg_target: Option<f64>,
+    restart_diagnostics: Option<MatrixFreeBaRestartIterationStats>,
 }
 
+// This private error carries the optional per-solve restart diagnostic along
+// with the existing textual PCG failure.  Keeping it inline avoids an
+// allocation on the successful/default path; the large-error lint is not an
+// API concern here.
+#[allow(clippy::result_large_err)]
 fn solve_matrix_free_step(
     system: &NormalEquationsBa,
     lambda: f64,
     options: MatrixFreeBaOptions,
-) -> Result<(DVector<f64>, DVector<f64>, MatrixFreeBaIterationStats), MatrixFreeStepError> {
+    restart_limit: usize,
+    collect_restart_diagnostics: bool,
+) -> Result<MatrixFreeStepOutcome, MatrixFreeStepError> {
     let to_step_error = |error: implicit_schur::ImplicitSchurError| {
         let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
         MatrixFreeStepError {
@@ -4587,6 +4716,16 @@ fn solve_matrix_free_step(
             pcg_iterations,
             pcg_residual_norm,
             pcg_target,
+            restart_diagnostics: collect_restart_diagnostics.then(|| {
+                MatrixFreeBaRestartIterationStats {
+                    iteration: 0,
+                    pcg_iterations,
+                    true_residual_rechecks: 0,
+                    failed_true_residual_rechecks: 0,
+                    restarts: 0,
+                    terminal_failure: Some(format!("{error:?}")),
+                }
+            }),
         }
     };
     let operator =
@@ -4596,23 +4735,63 @@ fn solve_matrix_free_step(
         relative_tolerance: options.pcg_relative_tolerance,
         absolute_tolerance: options.pcg_absolute_tolerance,
     };
-    let pcg = operator
-        .solve_pcg(operator.rhs(), pcg_options)
-        .map_err(to_step_error)?;
-    let delta_landmarks = operator
-        .complete_delta(&pcg.solution)
-        .map_err(to_step_error)?;
-    Ok((
-        pcg.solution,
+    let (pcg, restart_diagnostics) = if restart_limit == 0 && !collect_restart_diagnostics {
+        (
+            operator
+                .solve_pcg(operator.rhs(), pcg_options)
+                .map_err(to_step_error)?,
+            None,
+        )
+    } else {
+        let run = operator
+            .solve_pcg_with_restart(operator.rhs(), pcg_options, restart_limit)
+            .map_err(|failure| {
+                let implicit_schur::PcgSolveFailure { error, diagnostics } = failure;
+                let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
+                MatrixFreeStepError {
+                    diagnostic: format!("{error:?}"),
+                    pcg_iterations,
+                    pcg_residual_norm,
+                    pcg_target,
+                    restart_diagnostics: Some(MatrixFreeBaRestartIterationStats {
+                        iteration: 0,
+                        pcg_iterations: diagnostics.pcg_iterations,
+                        true_residual_rechecks: diagnostics.true_residual_rechecks,
+                        failed_true_residual_rechecks: diagnostics.failed_true_residual_rechecks,
+                        restarts: diagnostics.restarts,
+                        terminal_failure: Some(format!("{error:?}")),
+                    }),
+                }
+            })?;
+        (run.result, Some(run.diagnostics))
+    };
+    let delta_landmarks = operator.complete_delta(&pcg.solution).map_err(|error| {
+        if let Some(diagnostics) = restart_diagnostics {
+            let mut restart_diagnostics: MatrixFreeBaRestartIterationStats = diagnostics.into();
+            restart_diagnostics.terminal_failure = Some(format!("{error:?}"));
+            MatrixFreeStepError {
+                diagnostic: format!("{error:?}"),
+                pcg_iterations: Some(pcg.iterations),
+                pcg_residual_norm: Some(pcg.residual_norm),
+                pcg_target: Some(pcg.target),
+                restart_diagnostics: Some(restart_diagnostics),
+            }
+        } else {
+            to_step_error(error)
+        }
+    })?;
+    Ok(MatrixFreeStepOutcome {
+        delta_poses: pcg.solution,
         delta_landmarks,
-        MatrixFreeBaIterationStats {
+        diagnostics: MatrixFreeBaIterationStats {
             iteration: 0,
             pcg_iterations: Some(pcg.iterations),
             pcg_residual_norm: Some(pcg.residual_norm),
             pcg_target: Some(pcg.target),
             pcg_failure: None,
         },
-    ))
+        restart_diagnostics: restart_diagnostics.map(Into::into),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5859,6 +6038,39 @@ mod implicit_schur {
         pub(super) target: f64,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub(super) struct PcgRunDiagnostics {
+        pub(super) pcg_iterations: Option<usize>,
+        pub(super) true_residual_rechecks: usize,
+        pub(super) failed_true_residual_rechecks: usize,
+        pub(super) restarts: usize,
+    }
+
+    impl From<PcgRunDiagnostics> for MatrixFreeBaRestartIterationStats {
+        fn from(value: PcgRunDiagnostics) -> Self {
+            Self {
+                iteration: 0,
+                pcg_iterations: value.pcg_iterations,
+                true_residual_rechecks: value.true_residual_rechecks,
+                failed_true_residual_rechecks: value.failed_true_residual_rechecks,
+                restarts: value.restarts,
+                terminal_failure: None,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(super) struct PcgSolveFailure {
+        pub(super) error: ImplicitSchurError,
+        pub(super) diagnostics: PcgRunDiagnostics,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) struct PcgRun {
+        pub(super) result: PcgResult,
+        pub(super) diagnostics: PcgRunDiagnostics,
+    }
+
     /// A pure-visual Schur operator over the six-dimensional pose blocks.
     ///
     /// `landmarks` and their cross blocks are borrowed from
@@ -6113,21 +6325,81 @@ mod implicit_schur {
             rhs: &DVector<f64>,
             options: PcgOptions,
         ) -> Result<PcgResult, ImplicitSchurError> {
+            self.solve_pcg_with_restart(rhs, options, 0)
+                .map(|run| run.result)
+                .map_err(|failure| failure.error)
+        }
+
+        pub(super) fn solve_pcg_with_restart(
+            &self,
+            rhs: &DVector<f64>,
+            options: PcgOptions,
+            max_restarts: usize,
+        ) -> Result<PcgRun, PcgSolveFailure> {
+            self.solve_pcg_with_restart_hook(rhs, options, max_restarts, |_, residual, norm| {
+                Ok((residual, norm))
+            })
+        }
+
+        #[cfg(test)]
+        pub(super) fn solve_pcg_with_injected_recursive_residual_for_test(
+            &self,
+            rhs: &DVector<f64>,
+            options: PcgOptions,
+            max_restarts: usize,
+        ) -> Result<PcgRun, PcgSolveFailure> {
+            let mut inject_once = true;
+            self.solve_pcg_with_restart_hook(
+                rhs,
+                options,
+                max_restarts,
+                move |check, residual, norm| {
+                    if check == 1 && inject_once {
+                        inject_once = false;
+                        // This test-only hook emulates recursive residual
+                        // cancellation after the first alpha update.  The subsequent true
+                        // residual check still computes b-Ax from the
+                        // operator, so no true residual or norm is forged.
+                        return Ok((DVector::zeros(residual.len()), 0.0));
+                    }
+                    Ok((residual, norm))
+                },
+            )
+        }
+
+        fn solve_pcg_with_restart_hook<F>(
+            &self,
+            rhs: &DVector<f64>,
+            options: PcgOptions,
+            max_restarts: usize,
+            mut recursive_residual_adjustment: F,
+        ) -> Result<PcgRun, PcgSolveFailure>
+        where
+            F: FnMut(usize, DVector<f64>, f64) -> Result<(DVector<f64>, f64), ImplicitSchurError>,
+        {
+            let mut diagnostics = PcgRunDiagnostics::default();
+            let fail = |error, diagnostics| PcgSolveFailure { error, diagnostics };
             if rhs.len() != self.dimension() {
-                return Err(ImplicitSchurError::DimensionMismatch {
-                    expected: self.dimension(),
-                    actual: rhs.len(),
-                });
+                return Err(fail(
+                    ImplicitSchurError::DimensionMismatch {
+                        expected: self.dimension(),
+                        actual: rhs.len(),
+                    },
+                    diagnostics,
+                ));
             }
             if !rhs.iter().all(|value| value.is_finite()) {
-                return Err(ImplicitSchurError::NonFinite("PCG right hand side"));
+                return Err(fail(
+                    ImplicitSchurError::NonFinite("PCG right hand side"),
+                    diagnostics,
+                ));
             }
             if !options.relative_tolerance.is_finite()
                 || options.relative_tolerance < 0.0
                 || !options.absolute_tolerance.is_finite()
                 || options.absolute_tolerance < 0.0
             {
-                return Err(ImplicitSchurError::InvalidTolerance);
+                return Err(fail(ImplicitSchurError::InvalidTolerance, diagnostics));
             }
             // A converged zero-RHS or positively damped system only proves a
             // numerical linear solve.  It does not prove that the model's
@@ -6138,81 +6410,172 @@ mod implicit_schur {
                 .absolute_tolerance
                 .max(options.relative_tolerance * rhs_norm);
             if !target.is_finite() {
-                return Err(ImplicitSchurError::NonFinite("PCG target"));
+                return Err(fail(
+                    ImplicitSchurError::NonFinite("PCG target"),
+                    diagnostics,
+                ));
             }
             let mut solution = DVector::zeros(self.dimension());
             let mut residual = rhs.clone();
             let mut residual_norm = residual.norm();
             if !residual_norm.is_finite() {
-                return Err(ImplicitSchurError::NonFinite("initial residual"));
+                return Err(fail(
+                    ImplicitSchurError::NonFinite("initial residual"),
+                    diagnostics,
+                ));
             }
+            // The solve has passed input/target validation.  Recording zero
+            // explicitly makes zero-RHS and zero-budget outcomes distinct
+            // from failures that occurred before a PCG iteration began.
+            diagnostics.pcg_iterations = Some(0);
             if residual_norm <= target {
-                return self.checked_result(rhs, solution, 0, residual_norm, target);
+                diagnostics.true_residual_rechecks += 1;
+                let (true_residual, true_norm) = self
+                    .true_residual(rhs, &solution)
+                    .map_err(|error| fail(error, diagnostics))?;
+                if true_norm <= target {
+                    return Ok(PcgRun {
+                        result: PcgResult {
+                            solution,
+                            iterations: 0,
+                            residual_norm: true_norm,
+                            target,
+                        },
+                        diagnostics,
+                    });
+                }
+                diagnostics.failed_true_residual_rechecks += 1;
+                if max_restarts == 0 || options.max_iterations == 0 {
+                    return Err(fail(
+                        ImplicitSchurError::ResidualCheckFailed {
+                            iterations: 0,
+                            recursive_norm: residual_norm,
+                            true_norm,
+                            target,
+                        },
+                        diagnostics,
+                    ));
+                }
+                residual = true_residual;
+                residual_norm = true_norm;
+                diagnostics.restarts = 1;
             }
             if options.max_iterations == 0 {
-                return Err(ImplicitSchurError::MaxIterations {
-                    iterations: 0,
-                    recursive_norm: residual_norm,
-                    residual_norm,
-                    target,
-                });
+                return Err(fail(
+                    ImplicitSchurError::MaxIterations {
+                        iterations: 0,
+                        recursive_norm: residual_norm,
+                        residual_norm,
+                        target,
+                    },
+                    diagnostics,
+                ));
             }
 
-            let mut preconditioned = self.apply_preconditioner(&residual)?;
-            let mut direction = preconditioned.clone();
-            let mut rho = residual.dot(&preconditioned);
-            if !rho.is_finite() || rho <= 0.0 {
-                return Err(ImplicitSchurError::NonPositiveCurvature);
-            }
+            let (mut direction, mut rho) = self
+                .restart_direction(&residual)
+                .map_err(|error| fail(error, diagnostics))?;
 
             for iteration in 1..=options.max_iterations {
-                let applied = self.apply(&direction)?;
+                let applied = self
+                    .apply(&direction)
+                    .map_err(|error| fail(error, diagnostics))?;
                 let curvature = direction.dot(&applied);
                 if !curvature.is_finite() || curvature <= 0.0 {
-                    return Err(ImplicitSchurError::NonPositiveCurvature);
+                    return Err(fail(ImplicitSchurError::NonPositiveCurvature, diagnostics));
                 }
                 let alpha = rho / curvature;
                 if !alpha.is_finite() {
-                    return Err(ImplicitSchurError::NonFinite("PCG step"));
+                    return Err(fail(ImplicitSchurError::NonFinite("PCG step"), diagnostics));
                 }
                 solution += alpha * &direction;
                 residual -= alpha * applied;
                 residual_norm = residual.norm();
+                (residual, residual_norm) =
+                    recursive_residual_adjustment(iteration, residual, residual_norm)
+                        .map_err(|error| fail(error, diagnostics))?;
+                diagnostics.pcg_iterations = Some(iteration);
                 if !solution.iter().all(|value| value.is_finite()) || !residual_norm.is_finite() {
-                    return Err(ImplicitSchurError::NonFinite("PCG iterate"));
+                    return Err(fail(
+                        ImplicitSchurError::NonFinite("PCG iterate"),
+                        diagnostics,
+                    ));
                 }
                 if residual_norm <= target {
-                    return self.checked_result(rhs, solution, iteration, residual_norm, target);
-                }
-                if iteration == options.max_iterations {
-                    let true_residual = rhs - &self.apply(&solution)?;
-                    let true_norm = true_residual.norm();
-                    if !true_norm.is_finite() {
-                        return Err(ImplicitSchurError::NonFinite("true PCG residual"));
-                    }
+                    diagnostics.true_residual_rechecks += 1;
+                    let (true_residual, true_norm) = self
+                        .true_residual(rhs, &solution)
+                        .map_err(|error| fail(error, diagnostics))?;
                     if true_norm <= target {
-                        return Ok(PcgResult {
-                            solution,
-                            iterations: iteration,
-                            residual_norm: true_norm,
-                            target,
+                        return Ok(PcgRun {
+                            result: PcgResult {
+                                solution,
+                                iterations: iteration,
+                                residual_norm: true_norm,
+                                target,
+                            },
+                            diagnostics,
                         });
                     }
-                    return Err(ImplicitSchurError::MaxIterations {
-                        iterations: iteration,
-                        recursive_norm: residual_norm,
-                        residual_norm: true_norm,
-                        target,
-                    });
+                    diagnostics.failed_true_residual_rechecks += 1;
+                    if diagnostics.restarts < max_restarts && iteration < options.max_iterations {
+                        residual = true_residual;
+                        (direction, rho) = self
+                            .restart_direction(&residual)
+                            .map_err(|error| fail(error, diagnostics))?;
+                        diagnostics.restarts += 1;
+                        continue;
+                    }
+                    return Err(fail(
+                        ImplicitSchurError::ResidualCheckFailed {
+                            iterations: iteration,
+                            recursive_norm: residual_norm,
+                            true_norm,
+                            target,
+                        },
+                        diagnostics,
+                    ));
                 }
-                preconditioned = self.apply_preconditioner(&residual)?;
+                if iteration == options.max_iterations {
+                    diagnostics.true_residual_rechecks += 1;
+                    let (_, true_norm) = self
+                        .true_residual(rhs, &solution)
+                        .map_err(|error| fail(error, diagnostics))?;
+                    if true_norm <= target {
+                        return Ok(PcgRun {
+                            result: PcgResult {
+                                solution,
+                                iterations: iteration,
+                                residual_norm: true_norm,
+                                target,
+                            },
+                            diagnostics,
+                        });
+                    }
+                    diagnostics.failed_true_residual_rechecks += 1;
+                    return Err(fail(
+                        ImplicitSchurError::MaxIterations {
+                            iterations: iteration,
+                            recursive_norm: residual_norm,
+                            residual_norm: true_norm,
+                            target,
+                        },
+                        diagnostics,
+                    ));
+                }
+                let preconditioned = self
+                    .apply_preconditioner(&residual)
+                    .map_err(|error| fail(error, diagnostics))?;
                 let next_rho = residual.dot(&preconditioned);
                 if !next_rho.is_finite() || next_rho <= 0.0 {
-                    return Err(ImplicitSchurError::NonPositiveCurvature);
+                    return Err(fail(ImplicitSchurError::NonPositiveCurvature, diagnostics));
                 }
                 let beta = next_rho / rho;
                 if !beta.is_finite() {
-                    return Err(ImplicitSchurError::NonFinite("PCG direction"));
+                    return Err(fail(
+                        ImplicitSchurError::NonFinite("PCG direction"),
+                        diagnostics,
+                    ));
                 }
                 direction = &preconditioned + beta * direction;
                 rho = next_rho;
@@ -6220,6 +6583,32 @@ mod implicit_schur {
             unreachable!("the max-iteration branch returns above");
         }
 
+        fn restart_direction(
+            &self,
+            residual: &DVector<f64>,
+        ) -> Result<(DVector<f64>, f64), ImplicitSchurError> {
+            let preconditioned = self.apply_preconditioner(residual)?;
+            let rho = residual.dot(&preconditioned);
+            if !rho.is_finite() || rho <= 0.0 {
+                return Err(ImplicitSchurError::NonPositiveCurvature);
+            }
+            Ok((preconditioned, rho))
+        }
+
+        fn true_residual(
+            &self,
+            rhs: &DVector<f64>,
+            solution: &DVector<f64>,
+        ) -> Result<(DVector<f64>, f64), ImplicitSchurError> {
+            let true_residual = rhs - &self.apply(solution)?;
+            let true_norm = true_residual.norm();
+            if !true_norm.is_finite() {
+                return Err(ImplicitSchurError::NonFinite("true PCG residual"));
+            }
+            Ok((true_residual, true_norm))
+        }
+
+        #[cfg(test)]
         fn checked_result(
             &self,
             rhs: &DVector<f64>,
@@ -6228,12 +6617,7 @@ mod implicit_schur {
             recursive_norm: f64,
             target: f64,
         ) -> Result<PcgResult, ImplicitSchurError> {
-            let applied = self.apply(&solution)?;
-            let true_residual = rhs - &applied;
-            let true_norm = true_residual.norm();
-            if !true_norm.is_finite() {
-                return Err(ImplicitSchurError::NonFinite("true PCG residual"));
-            }
+            let (_, true_norm) = self.true_residual(rhs, &solution)?;
             if true_norm > target {
                 return Err(ImplicitSchurError::ResidualCheckFailed {
                     iterations,
@@ -6777,6 +7161,21 @@ mod implicit_schur {
                 ),
                 Err(ImplicitSchurError::NonFinite("PCG target"))
             ));
+            let invalid_restart = operator
+                .solve_pcg_with_restart(
+                    operator.rhs(),
+                    PcgOptions {
+                        relative_tolerance: f64::NAN,
+                        ..PcgOptions::default()
+                    },
+                    1,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                invalid_restart.error,
+                ImplicitSchurError::InvalidTolerance
+            ));
+            assert_eq!(invalid_restart.diagnostics.pcg_iterations, None);
         }
 
         #[test]
@@ -6823,6 +7222,18 @@ mod implicit_schur {
                 .unwrap();
             assert_eq!(zero_result.iterations, 0);
             assert_eq!(zero_result.residual_norm, 0.0);
+            let zero_restart = operator
+                .solve_pcg_with_restart(
+                    &zero,
+                    PcgOptions {
+                        max_iterations: 0,
+                        ..PcgOptions::default()
+                    },
+                    1,
+                )
+                .unwrap();
+            assert_eq!(zero_restart.diagnostics.pcg_iterations, Some(0));
+            assert_eq!(zero_restart.diagnostics.restarts, 0);
 
             let limited = operator.solve_pcg(
                 operator.rhs(),
@@ -6835,6 +7246,21 @@ mod implicit_schur {
                 limited,
                 Err(ImplicitSchurError::MaxIterations { .. })
             ));
+            let limited_restart = operator
+                .solve_pcg_with_restart(
+                    operator.rhs(),
+                    PcgOptions {
+                        max_iterations: 0,
+                        ..PcgOptions::default()
+                    },
+                    1,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                limited_restart.error,
+                ImplicitSchurError::MaxIterations { .. }
+            ));
+            assert_eq!(limited_restart.diagnostics.pcg_iterations, Some(0));
 
             let bad_solution = DVector::zeros(operator.dimension());
             assert!(matches!(
@@ -6883,6 +7309,68 @@ mod implicit_schur {
                 indefinite_operator.solve_pcg(&negative_eigenvector, PcgOptions::default()),
                 Err(ImplicitSchurError::NonPositiveCurvature)
             ));
+            let curvature_restart = indefinite_operator
+                .solve_pcg_with_restart(&negative_eigenvector, PcgOptions::default(), 1)
+                .unwrap_err();
+            assert!(matches!(
+                curvature_restart.error,
+                ImplicitSchurError::NonPositiveCurvature
+            ));
+            assert_eq!(curvature_restart.diagnostics.pcg_iterations, Some(0));
+            assert_eq!(curvature_restart.diagnostics.restarts, 0);
+        }
+
+        #[test]
+        fn injected_recursive_residual_gap_restarts_once_without_resetting_budget() {
+            let system = synthetic_system();
+            let operator = ImplicitSchurOperator::new(&system, 0.25).unwrap();
+            let options = PcgOptions {
+                max_iterations: 32,
+                // The test-only hook reports a deterministic zero
+                // recursive residual after the first alpha update.  The
+                // following honest b-Ax check forces restart.
+                relative_tolerance: 1.0e-12,
+                absolute_tolerance: 1.0e-12,
+            };
+            let no_restart = operator
+                .solve_pcg_with_injected_recursive_residual_for_test(operator.rhs(), options, 0)
+                .unwrap_err();
+            assert!(matches!(
+                no_restart.error,
+                ImplicitSchurError::ResidualCheckFailed { iterations: 1, .. }
+            ));
+            assert_eq!(no_restart.diagnostics.pcg_iterations, Some(1));
+            assert_eq!(no_restart.diagnostics.restarts, 0);
+
+            let mut capped_options = options;
+            capped_options.max_iterations = 1;
+            let capped = operator
+                .solve_pcg_with_injected_recursive_residual_for_test(
+                    operator.rhs(),
+                    capped_options,
+                    1,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                capped.error,
+                ImplicitSchurError::ResidualCheckFailed { iterations: 1, .. }
+            ));
+            assert_eq!(capped.diagnostics.pcg_iterations, Some(1));
+            assert_eq!(capped.diagnostics.restarts, 0);
+
+            let run = operator
+                .solve_pcg_with_injected_recursive_residual_for_test(operator.rhs(), options, 1)
+                .expect("one injected recursive residual gap should be recoverable");
+            assert_eq!(run.diagnostics.restarts, 1);
+            assert_eq!(run.diagnostics.failed_true_residual_rechecks, 1);
+            assert!(run.diagnostics.true_residual_rechecks >= 2);
+            assert!(run.diagnostics.pcg_iterations.unwrap() <= 32);
+            assert!(run.result.residual_norm <= run.result.target);
+
+            let repeat = operator
+                .solve_pcg_with_injected_recursive_residual_for_test(operator.rhs(), options, 1)
+                .expect("the injected restart must be deterministic");
+            assert_eq!(run, repeat);
         }
 
         #[test]
@@ -7247,6 +7735,82 @@ mod matrix_free_ba_api_tests {
         assert_eq!(result.iterations.len(), 3);
         assert!(result.iterations[0].lambda < result.iterations[1].lambda);
         assert!(result.iterations[1].lambda < result.iterations[2].lambda);
+    }
+
+    #[test]
+    fn matrix_free_restart_zero_matches_default_result_and_state() {
+        let problem = make_problem();
+        let config = matrix_free_config();
+        let mut default_path = problem.clone();
+        let mut restart_path = problem;
+        let default_result = default_path
+            .optimize_matrix_free(&config, MatrixFreeBaOptions::default())
+            .unwrap();
+        let restart_result = restart_path
+            .optimize_matrix_free_with_restart(
+                &config,
+                MatrixFreeBaOptions::default(),
+                MatrixFreeBaRestartOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(default_result, restart_result.ba);
+        assert_eq!(default_path, restart_path);
+        assert_eq!(
+            restart_result.restart_iterations.len(),
+            restart_result.ba.matrix_free_iterations.len()
+        );
+        assert!(restart_result
+            .restart_iterations
+            .iter()
+            .all(|stats| stats.restarts <= 1 && stats.terminal_failure.is_none()));
+    }
+
+    #[test]
+    fn matrix_free_restart_limit_rejects_without_mutation() {
+        let mut problem = make_problem();
+        let before = problem.clone();
+        let result = problem.optimize_matrix_free_with_restart(
+            &matrix_free_config(),
+            MatrixFreeBaOptions::default(),
+            MatrixFreeBaRestartOptions {
+                max_restarts_per_solve: 2,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(MatrixFreeBaError::InvalidConfiguration(_))
+        ));
+        assert_eq!(problem, before);
+    }
+
+    #[test]
+    fn matrix_free_restart_failure_records_bounded_stats_and_rolls_back() {
+        let mut problem = make_problem();
+        let before = problem.clone();
+        let mut config = matrix_free_config();
+        config.max_iterations = 3;
+        let result = problem
+            .optimize_matrix_free_with_restart(
+                &config,
+                MatrixFreeBaOptions {
+                    max_pcg_iterations: 1,
+                    pcg_relative_tolerance: 0.0,
+                    pcg_absolute_tolerance: 1.0e-30,
+                },
+                MatrixFreeBaRestartOptions {
+                    max_restarts_per_solve: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(problem, before);
+        assert_eq!(result.restart_iterations.len(), config.max_iterations);
+        assert!(result.restart_iterations.iter().all(|stats| {
+            stats.pcg_iterations == Some(1)
+                && stats.true_residual_rechecks >= 1
+                && stats.failed_true_residual_rechecks >= 1
+                && stats.restarts == 0
+                && stats.terminal_failure.is_some()
+        }));
     }
 }
 
