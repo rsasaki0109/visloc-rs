@@ -107,6 +107,7 @@ struct SchurBlockDebugContext<'a> {
     iteration: usize,
     pose_slot: usize,
     frame_id: Option<u64>,
+    scaled_coordinates: bool,
     landmark_index: &'a BTreeMap<u64, usize>,
 }
 
@@ -145,21 +146,40 @@ fn matrix_free_schur_debug_context<'a>(
     pose_index: &'a BTreeMap<u64, usize>,
     landmark_index: &'a BTreeMap<u64, usize>,
     iteration: usize,
+    scaled_coordinates: bool,
 ) -> Option<SchurBlockDebugContext<'a>> {
     let pose_slot = ba_schur_debug_slot()?;
-    Some(schur_debug_context_for_slot(
+    Some(schur_debug_context_for_slot_with_coordinates(
         pose_index,
         landmark_index,
         iteration,
         pose_slot,
+        scaled_coordinates,
     ))
 }
 
+#[cfg(test)]
 fn schur_debug_context_for_slot<'a>(
     pose_index: &'a BTreeMap<u64, usize>,
     landmark_index: &'a BTreeMap<u64, usize>,
     iteration: usize,
     pose_slot: usize,
+) -> SchurBlockDebugContext<'a> {
+    schur_debug_context_for_slot_with_coordinates(
+        pose_index,
+        landmark_index,
+        iteration,
+        pose_slot,
+        false,
+    )
+}
+
+fn schur_debug_context_for_slot_with_coordinates<'a>(
+    pose_index: &'a BTreeMap<u64, usize>,
+    landmark_index: &'a BTreeMap<u64, usize>,
+    iteration: usize,
+    pose_slot: usize,
+    scaled_coordinates: bool,
 ) -> SchurBlockDebugContext<'a> {
     let frame_id = pose_index
         .iter()
@@ -168,6 +188,7 @@ fn schur_debug_context_for_slot<'a>(
         iteration,
         pose_slot,
         frame_id,
+        scaled_coordinates,
         landmark_index,
     }
 }
@@ -429,10 +450,19 @@ fn emit_schur_block_debug(
     let max_hll_inverse = counts
         .max_hll_inverse
         .map_or_else(|| "none".to_owned(), |inverse| format_matrix3(&inverse));
+    // Keep the legacy diagnostic byte-for-byte stable.  The coordinate and
+    // damping labels are meaningful only for the opt-in scaled system; an
+    // empty annotation leaves the old `finite=... solver_...` token sequence
+    // unchanged.
+    let coordinate_annotation = if context.scaled_coordinates {
+        " coordinate_system=scaled damping_metric=identity"
+    } else {
+        ""
+    };
     eprintln!(
         concat!(
             "sfm-debug-ba-schur-block iteration={} slot={} frame_id={} lambda={:.17e} ",
-            "finite={} solver_symmetric_interpretation=lower_triangle ",
+            "finite={}{} solver_symmetric_interpretation=lower_triangle ",
             "hpp_lambda={} schur_block={} elimination_norm={:.17e} ",
             "schur_asymmetry={:.17e} lower_min_eigen={:?} upper_min_eigen={:?} ",
             "lower_min_cholesky_radicand={:?} upper_min_cholesky_radicand={:?} ",
@@ -447,6 +477,7 @@ fn emit_schur_block_debug(
         frame,
         lambda,
         finite,
+        coordinate_annotation,
         format_matrix6(h_pp_lambda),
         format_matrix6(schur_block),
         elimination_norm,
@@ -1970,6 +2001,32 @@ impl BundleAdjustment {
         })
     }
 
+    /// Run matrix-free BA with explicit column equilibration and scaled LM
+    /// damping.  This is a separate opt-in policy: the legacy matrix-free
+    /// entry point keeps scalar `lambda * I` damping and its exact arithmetic.
+    /// The returned PCG residuals are measured in the scaled coordinates.
+    pub fn optimize_matrix_free_column_scaled(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaColumnScalingOptions,
+    ) -> Result<MatrixFreeBaColumnScalingResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options.pcg)?;
+        let (result, runtime) = self.run_matrix_free_column_scaled_backend(
+            config,
+            MatrixFreeRuntime::with_column_scaling(options.pcg),
+        )?;
+        Ok(MatrixFreeBaColumnScalingResult {
+            ba: MatrixFreeBaResult {
+                initial_cost: result.initial_cost,
+                final_cost: result.final_cost,
+                iterations: result.iterations,
+                matrix_free_iterations: runtime.iterations,
+                converged: result.converged,
+            },
+            scaling_iterations: runtime.column_scaling_iterations.unwrap_or_default(),
+        })
+    }
+
     /// Run the matrix-free backend with a bounded true-residual restart policy.
     ///
     /// This is an additive diagnostic entry point.  The existing
@@ -2009,19 +2066,44 @@ impl BundleAdjustment {
         config: &BaConfig,
         runtime: MatrixFreeRuntime,
     ) -> Result<(BaResult, MatrixFreeRuntime), MatrixFreeBaError> {
-        let mut backend = BaSolveBackend::MatrixFree(runtime);
+        self.run_matrix_free_backend_variant(config, BaSolveBackend::MatrixFree(runtime))
+    }
+
+    fn run_matrix_free_column_scaled_backend(
+        &mut self,
+        config: &BaConfig,
+        runtime: MatrixFreeRuntime,
+    ) -> Result<(BaResult, MatrixFreeRuntime), MatrixFreeBaError> {
+        self.run_matrix_free_backend_variant(
+            config,
+            BaSolveBackend::MatrixFreeColumnScaled(runtime),
+        )
+    }
+
+    fn run_matrix_free_backend_variant(
+        &mut self,
+        config: &BaConfig,
+        mut backend: BaSolveBackend,
+    ) -> Result<(BaResult, MatrixFreeRuntime), MatrixFreeBaError> {
         let result = self
             .optimize_weighted_backend(config, None, &mut backend)
             .map_err(|error| {
-                if let BaSolveBackend::MatrixFree(runtime) = &backend {
-                    if let Some(failure) = &runtime.failure {
-                        return failure.clone();
-                    }
+                let runtime = match &backend {
+                    BaSolveBackend::MatrixFree(runtime)
+                    | BaSolveBackend::MatrixFreeColumnScaled(runtime) => runtime,
+                    BaSolveBackend::Legacy => return MatrixFreeBaError::Ba(error),
+                };
+                if let Some(failure) = &runtime.failure {
+                    return failure.clone();
                 }
                 MatrixFreeBaError::Ba(error)
             })?;
-        let BaSolveBackend::MatrixFree(runtime) = backend else {
-            unreachable!("matrix-free entry installs the matrix-free backend");
+        let runtime = match backend {
+            BaSolveBackend::MatrixFree(runtime)
+            | BaSolveBackend::MatrixFreeColumnScaled(runtime) => runtime,
+            BaSolveBackend::Legacy => {
+                unreachable!("matrix-free entry installs a matrix-free backend")
+            }
         };
         Ok((result, runtime))
     }
@@ -3102,8 +3184,10 @@ impl BundleAdjustment {
         let mut block_symbolic_cache = None;
 
         for iteration in 0..config.max_iterations {
-            let prefer_pose_blocks = matches!(backend, BaSolveBackend::MatrixFree(_))
-                || config.linear_solver == LinearSolver::Sparse;
+            let prefer_pose_blocks = matches!(
+                backend,
+                BaSolveBackend::MatrixFree(_) | BaSolveBackend::MatrixFreeColumnScaled(_)
+            ) || config.linear_solver == LinearSolver::Sparse;
             let mut system = build_normal_equations(
                 self,
                 &intrinsics,
@@ -3142,17 +3226,50 @@ impl BundleAdjustment {
                     config.parallel,
                     &mut block_symbolic_cache,
                 ),
-                BaSolveBackend::MatrixFree(runtime) => {
-                    let schur_debug_context =
-                        matrix_free_schur_debug_context(&pose_index, &landmark_index, iteration);
-                    match solve_matrix_free_step(
-                        &system,
-                        lambda,
-                        runtime.options,
-                        runtime.restart_limit,
-                        runtime.restart_iterations.is_some(),
-                        schur_debug_context,
-                    ) {
+                BaSolveBackend::MatrixFree(runtime)
+                | BaSolveBackend::MatrixFreeColumnScaled(runtime) => {
+                    let column_scaled = runtime.column_scaling_iterations.is_some();
+                    let scaling_result = if column_scaled {
+                        match column_equilibrate_normal_system(&mut system) {
+                            Ok(mut state) => {
+                                state.stats.iteration = iteration;
+                                runtime
+                                    .column_scaling_iterations
+                                    .as_mut()
+                                    .expect("column scaling diagnostics are enabled")
+                                    .push(state.stats);
+                                Ok(Some(state))
+                            }
+                            Err(error) => Err(MatrixFreeStepError {
+                                diagnostic: format!("column scaling failed: {error}"),
+                                pcg_iterations: None,
+                                pcg_residual_norm: None,
+                                pcg_target: None,
+                                restart_diagnostics: None,
+                            }),
+                        }
+                    } else {
+                        Ok(None)
+                    };
+                    let schur_debug_context = matrix_free_schur_debug_context(
+                        &pose_index,
+                        &landmark_index,
+                        iteration,
+                        column_scaled,
+                    );
+                    let solve_result = match scaling_result {
+                        Err(error) => Err(error),
+                        Ok(scaling_state) => solve_matrix_free_step(
+                            &system,
+                            lambda,
+                            runtime.options,
+                            runtime.restart_limit,
+                            runtime.restart_iterations.is_some(),
+                            scaling_state.as_ref(),
+                            schur_debug_context,
+                        ),
+                    };
+                    match solve_result {
                         Ok(mut outcome) => {
                             outcome.diagnostics.iteration = iteration;
                             runtime.iterations.push(outcome.diagnostics);
@@ -3516,6 +3633,16 @@ impl Default for MatrixFreeBaOptions {
     }
 }
 
+/// Options for the opt-in column-equilibrated matrix-free entry point.
+///
+/// The diagonal bounds are deliberately private fixed policy constants.  The
+/// nested PCG options reuse the existing matrix-free option shape without
+/// changing its defaults or adding a scaling switch to the legacy API.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MatrixFreeBaColumnScalingOptions {
+    pub pcg: MatrixFreeBaOptions,
+}
+
 /// Per-LM-iteration diagnostics returned by [`BundleAdjustment::optimize_matrix_free`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatrixFreeBaIterationStats {
@@ -3534,6 +3661,29 @@ pub struct MatrixFreeBaResult {
     pub iterations: Vec<BaIterationStats>,
     pub matrix_free_iterations: Vec<MatrixFreeBaIterationStats>,
     pub converged: bool,
+}
+
+/// Scalar accounting for one normal-system equilibration.  PCG residuals in
+/// the nested [`MatrixFreeBaResult`] are in scaled coordinates; physical pose
+/// and landmark step norms remain in its ordinary LM iteration statistics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatrixFreeBaColumnScalingIterationStats {
+    pub iteration: usize,
+    /// Minimum of the clamped normal-equation diagonal values `d_j`, not of
+    /// the transforms `1/sqrt(d_j)`.
+    pub minimum_diagonal: f64,
+    /// Maximum of the clamped normal-equation diagonal values `d_j`, not of
+    /// the transforms `1/sqrt(d_j)`.
+    pub maximum_diagonal: f64,
+    pub clamped_to_minimum: usize,
+    pub clamped_to_maximum: usize,
+}
+
+/// Result of the opt-in column-equilibrated matrix-free BA run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixFreeBaColumnScalingResult {
+    pub ba: MatrixFreeBaResult,
+    pub scaling_iterations: Vec<MatrixFreeBaColumnScalingIterationStats>,
 }
 
 /// Additive options for the bounded true-residual restart diagnostic.
@@ -3609,12 +3759,464 @@ impl std::fmt::Display for MatrixFreeBaError {
 
 impl std::error::Error for MatrixFreeBaError {}
 
+const COLUMN_SCALING_MIN_DIAGONAL: f64 = 1.0e-6;
+const COLUMN_SCALING_MAX_DIAGONAL: f64 = 1.0e32;
+
+#[derive(Debug)]
+struct ColumnEquilibrationState {
+    pose_transforms: Vec<Vector6<f64>>,
+    landmark_transforms: Vec<Vector3<f64>>,
+    stats: MatrixFreeBaColumnScalingIterationStats,
+}
+
+impl ColumnEquilibrationState {
+    fn unscale_deltas(
+        &self,
+        delta_poses: &mut DVector<f64>,
+        delta_landmarks: &mut DVector<f64>,
+    ) -> Result<(), &'static str> {
+        let expected_pose = self.pose_transforms.len() * 6;
+        let expected_landmark = self.landmark_transforms.len() * 3;
+        if delta_poses.len() != expected_pose || delta_landmarks.len() != expected_landmark {
+            return Err("scaled delta dimensions do not match the normal system");
+        }
+        for (pose, transform) in self.pose_transforms.iter().enumerate() {
+            for component in 0..6 {
+                let index = pose * 6 + component;
+                let value = delta_poses[index] * transform[component];
+                if !value.is_finite() {
+                    return Err("unscaled pose delta is non-finite");
+                }
+                delta_poses[index] = value;
+            }
+        }
+        for (landmark, transform) in self.landmark_transforms.iter().enumerate() {
+            for component in 0..3 {
+                let index = landmark * 3 + component;
+                let value = delta_landmarks[index] * transform[component];
+                if !value.is_finite() {
+                    return Err("unscaled landmark delta is non-finite");
+                }
+                delta_landmarks[index] = value;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn column_scaling_transform(
+    diagonal: f64,
+    minimum: &mut f64,
+    maximum: &mut f64,
+    clamped_to_minimum: &mut usize,
+    clamped_to_maximum: &mut usize,
+) -> Result<f64, &'static str> {
+    if !diagonal.is_finite() {
+        return Err("normal diagonal is non-finite");
+    }
+    if diagonal < 0.0 {
+        return Err("normal diagonal is negative");
+    }
+    let clamped = diagonal.clamp(COLUMN_SCALING_MIN_DIAGONAL, COLUMN_SCALING_MAX_DIAGONAL);
+    if clamped == COLUMN_SCALING_MIN_DIAGONAL && diagonal < COLUMN_SCALING_MIN_DIAGONAL {
+        *clamped_to_minimum += 1;
+    }
+    if clamped == COLUMN_SCALING_MAX_DIAGONAL && diagonal > COLUMN_SCALING_MAX_DIAGONAL {
+        *clamped_to_maximum += 1;
+    }
+    *minimum = minimum.min(clamped);
+    *maximum = maximum.max(clamped);
+    let transform = clamped.sqrt().recip();
+    if !transform.is_finite() {
+        return Err("column scaling transform is non-finite");
+    }
+    Ok(transform)
+}
+
+fn column_equilibrate_normal_system(
+    system: &mut NormalEquationsBa,
+) -> Result<ColumnEquilibrationState, &'static str> {
+    let pose_transforms = match &system.h_pp {
+        CameraHessian::PoseDiagonal(blocks) => {
+            if blocks.is_empty() || system.b_p.len() != blocks.len() * 6 {
+                return Err("pose diagonal dimensions are invalid");
+            }
+            let mut transforms = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                let mut transform = Vector6::zeros();
+                for component in 0..6 {
+                    // The actual aggregate statistics are computed below in
+                    // one pass over both pose and landmark columns.
+                    transform[component] = block[(component, component)];
+                }
+                transforms.push(transform);
+            }
+            transforms
+        }
+        CameraHessian::Dense(_) => {
+            return Err("column scaling requires pose-diagonal normal equations");
+        }
+    };
+
+    let mut minimum = f64::INFINITY;
+    let mut maximum = 0.0;
+    let mut clamped_to_minimum = 0;
+    let mut clamped_to_maximum = 0;
+    let pose_transforms = pose_transforms
+        .into_iter()
+        .map(|diagonal| {
+            let mut transform = Vector6::zeros();
+            for component in 0..6 {
+                transform[component] = column_scaling_transform(
+                    diagonal[component],
+                    &mut minimum,
+                    &mut maximum,
+                    &mut clamped_to_minimum,
+                    &mut clamped_to_maximum,
+                )?;
+            }
+            Ok(transform)
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+
+    let mut landmark_transforms = Vec::with_capacity(system.landmarks.len());
+    for landmark in &system.landmarks {
+        let mut transform = Vector3::zeros();
+        for component in 0..3 {
+            transform[component] = column_scaling_transform(
+                landmark.h_ll[(component, component)],
+                &mut minimum,
+                &mut maximum,
+                &mut clamped_to_minimum,
+                &mut clamped_to_maximum,
+            )?;
+        }
+        landmark_transforms.push(transform);
+    }
+
+    let scale_block6 = |block: &mut Matrix6<f64>, transform: &Vector6<f64>| {
+        for row in 0..6 {
+            for column in 0..6 {
+                let value = block[(row, column)] * transform[row] * transform[column];
+                if !value.is_finite() {
+                    return Err("scaled pose Hessian is non-finite");
+                }
+                block[(row, column)] = value;
+            }
+        }
+        Ok(())
+    };
+    let CameraHessian::PoseDiagonal(blocks) = &mut system.h_pp else {
+        unreachable!("pose diagonal was checked above");
+    };
+    for (pose, block) in blocks.iter_mut().enumerate() {
+        scale_block6(block, &pose_transforms[pose])?;
+        for (component, transform) in pose_transforms[pose].iter().enumerate() {
+            let index = pose * 6 + component;
+            let value = system.b_p[index] * transform;
+            if !value.is_finite() {
+                return Err("scaled pose gradient is non-finite");
+            }
+            system.b_p[index] = value;
+        }
+    }
+
+    for (landmark_index, landmark) in system.landmarks.iter_mut().enumerate() {
+        let transform = landmark_transforms[landmark_index];
+        for row in 0..3 {
+            for column in 0..3 {
+                let value = landmark.h_ll[(row, column)] * transform[row] * transform[column];
+                if !value.is_finite() {
+                    return Err("scaled landmark Hessian is non-finite");
+                }
+                landmark.h_ll[(row, column)] = value;
+            }
+            let value = landmark.b_l[row] * transform[row];
+            if !value.is_finite() {
+                return Err("scaled landmark gradient is non-finite");
+            }
+            landmark.b_l[row] = value;
+        }
+        for (pose, cross) in &mut landmark.cross {
+            let Some(pose_transform) = pose_transforms.get(*pose) else {
+                return Err("landmark cross pose index is invalid");
+            };
+            for row in 0..6 {
+                for column in 0..3 {
+                    let value = cross[(row, column)] * pose_transform[row] * transform[column];
+                    if !value.is_finite() {
+                        return Err("scaled landmark cross is non-finite");
+                    }
+                    cross[(row, column)] = value;
+                }
+            }
+        }
+    }
+
+    Ok(ColumnEquilibrationState {
+        pose_transforms,
+        landmark_transforms,
+        stats: MatrixFreeBaColumnScalingIterationStats {
+            iteration: 0,
+            minimum_diagonal: minimum,
+            maximum_diagonal: maximum,
+            clamped_to_minimum,
+            clamped_to_maximum,
+        },
+    })
+}
+
+#[cfg(test)]
+mod column_scaling_tests {
+    use super::*;
+
+    fn synthetic_system() -> NormalEquationsBa {
+        let h_pp = Matrix6::from_diagonal(&Vector6::from_row_slice(&[
+            4.0, 9.0, 16.0, 25.0, 36.0, 49.0,
+        ]));
+        let h_ll = Matrix3::from_diagonal(&Vector3::from_row_slice(&[4.0, 9.0, 16.0]));
+        let cross_a = Matrix6x3::from_fn(|row, column| {
+            if row == column {
+                0.25
+            } else if row == column + 3 {
+                -0.125
+            } else {
+                0.0
+            }
+        });
+        let cross_b = Matrix6x3::from_fn(|row, column| if row == column { -0.0625 } else { 0.0 });
+        NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![h_pp]),
+            b_p: DVector::from_row_slice(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0]),
+            landmarks: vec![LandmarkBlock {
+                h_ll,
+                b_l: Vector3::new(0.5, -0.75, 1.25),
+                // Two entries for the same pose model two sensors observing
+                // one landmark.  The transform must touch both entries.
+                cross: vec![(0, cross_a), (0, cross_b)],
+            }],
+        }
+    }
+
+    fn full_normal(system: &NormalEquationsBa) -> (DMatrix<f64>, DVector<f64>) {
+        let CameraHessian::PoseDiagonal(pose_blocks) = &system.h_pp else {
+            panic!("synthetic system must use pose blocks");
+        };
+        let pose_count = pose_blocks.len();
+        let landmark_count = system.landmarks.len();
+        let dimension = pose_count * 6 + landmark_count * 3;
+        let mut h = DMatrix::zeros(dimension, dimension);
+        let mut b = DVector::zeros(dimension);
+        for (pose, block) in pose_blocks.iter().enumerate() {
+            for row in 0..6 {
+                b[pose * 6 + row] = system.b_p[pose * 6 + row];
+                for column in 0..6 {
+                    h[(pose * 6 + row, pose * 6 + column)] = block[(row, column)];
+                }
+            }
+        }
+        for (landmark_index, landmark) in system.landmarks.iter().enumerate() {
+            let offset = pose_count * 6 + landmark_index * 3;
+            for row in 0..3 {
+                b[offset + row] = landmark.b_l[row];
+                for column in 0..3 {
+                    h[(offset + row, offset + column)] = landmark.h_ll[(row, column)];
+                }
+            }
+            for (pose, cross) in &landmark.cross {
+                for row in 0..6 {
+                    for column in 0..3 {
+                        h[(pose * 6 + row, offset + column)] += cross[(row, column)];
+                        h[(offset + column, pose * 6 + row)] += cross[(row, column)];
+                    }
+                }
+            }
+        }
+        (h, b)
+    }
+
+    fn diagonal_damping(system: &NormalEquationsBa) -> DVector<f64> {
+        let (h, _) = full_normal(system);
+        DVector::from_iterator(
+            h.nrows(),
+            h.diagonal()
+                .iter()
+                .map(|value| value.clamp(COLUMN_SCALING_MIN_DIAGONAL, COLUMN_SCALING_MAX_DIAGONAL)),
+        )
+    }
+
+    #[test]
+    fn scaled_system_matches_h_plus_lambda_diagonal_damping() {
+        let mut original = synthetic_system();
+        let (full_h, full_b) = full_normal(&original);
+        let damping_diagonal = diagonal_damping(&original);
+        let lambda = 0.25;
+
+        let state = column_equilibrate_normal_system(&mut original).unwrap();
+        assert_eq!(state.stats.minimum_diagonal, 4.0);
+        assert_eq!(state.stats.maximum_diagonal, 49.0);
+        assert_eq!(state.stats.clamped_to_minimum, 0);
+        assert_eq!(state.stats.clamped_to_maximum, 0);
+
+        let (scaled_h, scaled_b) = full_normal(&original);
+        let scaled_solution: DVector<f64> = (scaled_h + lambda * DMatrix::<f64>::identity(9, 9))
+            .lu()
+            .solve(&(-scaled_b))
+            .expect("scaled synthetic system should solve");
+        let mut scaled_pose = DVector::from_iterator(6, scaled_solution.rows(0, 6).iter().copied());
+        let mut scaled_landmarks =
+            DVector::from_iterator(3, scaled_solution.rows(6, 3).iter().copied());
+        state
+            .unscale_deltas(&mut scaled_pose, &mut scaled_landmarks)
+            .unwrap();
+        let mut physical_solution = DVector::zeros(9);
+        physical_solution.rows_mut(0, 6).copy_from(&scaled_pose);
+        physical_solution
+            .rows_mut(6, 3)
+            .copy_from(&scaled_landmarks);
+
+        let mut damped_h = full_h;
+        for index in 0..9 {
+            damped_h[(index, index)] += lambda * damping_diagonal[index];
+        }
+        let expected = damped_h
+            .lu()
+            .solve(&(-full_b))
+            .expect("physical synthetic system should solve");
+        assert!((physical_solution - expected).norm() < 1.0e-12);
+    }
+
+    #[test]
+    fn matrix_free_scaled_step_matches_the_diagonally_damped_full_system() {
+        let mut scaled = synthetic_system();
+        let (full_h, full_b) = full_normal(&scaled);
+        let damping_diagonal = diagonal_damping(&scaled);
+        let state = column_equilibrate_normal_system(&mut scaled).unwrap();
+        let lambda = 0.25;
+
+        // Exercise the same Schur/PCG/back-substitution path used by the
+        // production opt-in entry point.  The assertion below is against the
+        // independently assembled full system, rather than against another
+        // call to the scaled operator.
+        let outcome = match solve_matrix_free_step(
+            &scaled,
+            lambda,
+            MatrixFreeBaOptions {
+                max_pcg_iterations: 128,
+                pcg_relative_tolerance: 1.0e-10,
+                pcg_absolute_tolerance: 1.0e-12,
+            },
+            0,
+            false,
+            Some(&state),
+            None,
+        ) {
+            Ok(outcome) => outcome,
+            Err(_) => panic!("scaled synthetic matrix-free solve should succeed"),
+        };
+        assert!(outcome.diagnostics.pcg_failure.is_none());
+
+        let mut damped_h = full_h;
+        for index in 0..damped_h.nrows() {
+            damped_h[(index, index)] += lambda * damping_diagonal[index];
+        }
+        let expected = damped_h
+            .lu()
+            .solve(&(-full_b))
+            .expect("physical synthetic system should solve");
+        let mut actual = DVector::zeros(9);
+        actual.rows_mut(0, 6).copy_from(&outcome.delta_poses);
+        actual.rows_mut(6, 3).copy_from(&outcome.delta_landmarks);
+        assert!((actual - expected).norm() < 1.0e-8);
+    }
+
+    #[test]
+    fn scaling_preserves_fixed_rotation_identity_and_rejects_bad_diagonals() {
+        let mut fixed = synthetic_system();
+        let pose_index = BTreeMap::from([(7_u64, 0_usize)]);
+        let fixed_rotations = BTreeSet::from([7_u64]);
+        constrain_fixed_pose_rotations(&fixed_rotations, &pose_index, &mut fixed);
+        let state = column_equilibrate_normal_system(&mut fixed).unwrap();
+        assert_eq!(state.pose_transforms[0][3], 1.0);
+        assert_eq!(state.pose_transforms[0][4], 1.0);
+        assert_eq!(state.pose_transforms[0][5], 1.0);
+        let CameraHessian::PoseDiagonal(blocks) = fixed.h_pp else {
+            panic!("fixed synthetic system must use pose blocks");
+        };
+        for component in 3..6 {
+            assert_eq!(blocks[0][(component, component)], 1.0);
+        }
+
+        let mut clamped = synthetic_system();
+        if let CameraHessian::PoseDiagonal(blocks) = &mut clamped.h_pp {
+            blocks[0][(0, 0)] = 0.0;
+            blocks[0][(1, 1)] = 1.0e40;
+        }
+        let clamped_state = column_equilibrate_normal_system(&mut clamped).unwrap();
+        assert_eq!(clamped_state.stats.minimum_diagonal, 1.0e-6);
+        assert_eq!(clamped_state.stats.maximum_diagonal, 1.0e32);
+        assert!(clamped_state.stats.clamped_to_minimum >= 1);
+        assert!(clamped_state.stats.clamped_to_maximum >= 1);
+
+        let mut negative = synthetic_system();
+        if let CameraHessian::PoseDiagonal(blocks) = &mut negative.h_pp {
+            blocks[0][(0, 0)] = -1.0;
+        }
+        assert!(column_equilibrate_normal_system(&mut negative)
+            .unwrap_err()
+            .contains("negative"));
+
+        let mut nonfinite = synthetic_system();
+        nonfinite.landmarks[0].h_ll[(1, 1)] = f64::NAN;
+        assert!(column_equilibrate_normal_system(&mut nonfinite)
+            .unwrap_err()
+            .contains("non-finite"));
+
+        let mut nonfinite_offdiag = synthetic_system();
+        if let CameraHessian::PoseDiagonal(blocks) = &mut nonfinite_offdiag.h_pp {
+            blocks[0][(0, 1)] = f64::NAN;
+        }
+        assert!(column_equilibrate_normal_system(&mut nonfinite_offdiag)
+            .unwrap_err()
+            .contains("pose Hessian"));
+
+        let mut nonfinite_pose_gradient = synthetic_system();
+        nonfinite_pose_gradient.b_p[0] = f64::NAN;
+        assert!(
+            column_equilibrate_normal_system(&mut nonfinite_pose_gradient)
+                .unwrap_err()
+                .contains("pose gradient")
+        );
+
+        let mut nonfinite_cross = synthetic_system();
+        nonfinite_cross.landmarks[0].cross[0].1[(0, 0)] = f64::NAN;
+        assert!(column_equilibrate_normal_system(&mut nonfinite_cross)
+            .unwrap_err()
+            .contains("landmark cross"));
+
+        let state = column_equilibrate_normal_system(&mut synthetic_system()).unwrap();
+        let mut wrong_pose = DVector::zeros(1);
+        let mut valid_landmarks = DVector::zeros(3);
+        assert!(state
+            .unscale_deltas(&mut wrong_pose, &mut valid_landmarks)
+            .unwrap_err()
+            .contains("dimensions"));
+        let mut nonfinite_pose = DVector::from_element(6, f64::NAN);
+        let mut valid_landmarks = DVector::zeros(3);
+        assert!(state
+            .unscale_deltas(&mut nonfinite_pose, &mut valid_landmarks)
+            .unwrap_err()
+            .contains("non-finite"));
+    }
+}
+
 /// Internal dispatch state for the shared LM loop.  The legacy variant is
 /// deliberately the default path; the matrix-free variant is only installed
 /// by [`BundleAdjustment::optimize_matrix_free`].
 enum BaSolveBackend {
     Legacy,
     MatrixFree(MatrixFreeRuntime),
+    MatrixFreeColumnScaled(MatrixFreeRuntime),
 }
 
 struct MatrixFreeRuntime {
@@ -3622,6 +4224,7 @@ struct MatrixFreeRuntime {
     iterations: Vec<MatrixFreeBaIterationStats>,
     restart_limit: usize,
     restart_iterations: Option<Vec<MatrixFreeBaRestartIterationStats>>,
+    column_scaling_iterations: Option<Vec<MatrixFreeBaColumnScalingIterationStats>>,
     failure: Option<MatrixFreeBaError>,
 }
 
@@ -3632,6 +4235,7 @@ impl MatrixFreeRuntime {
             iterations: Vec::new(),
             restart_limit: 0,
             restart_iterations: None,
+            column_scaling_iterations: None,
             failure: None,
         }
     }
@@ -3642,6 +4246,18 @@ impl MatrixFreeRuntime {
             iterations: Vec::new(),
             restart_limit,
             restart_iterations: Some(Vec::new()),
+            column_scaling_iterations: None,
+            failure: None,
+        }
+    }
+
+    fn with_column_scaling(options: MatrixFreeBaOptions) -> Self {
+        Self {
+            options,
+            iterations: Vec::new(),
+            restart_limit: 0,
+            restart_iterations: None,
+            column_scaling_iterations: Some(Vec::new()),
             failure: None,
         }
     }
@@ -5164,6 +5780,7 @@ fn solve_matrix_free_step(
     options: MatrixFreeBaOptions,
     restart_limit: usize,
     collect_restart_diagnostics: bool,
+    scaling_state: Option<&ColumnEquilibrationState>,
     schur_debug_context: Option<SchurBlockDebugContext<'_>>,
 ) -> Result<MatrixFreeStepOutcome, MatrixFreeStepError> {
     let to_step_error = |error: implicit_schur::ImplicitSchurError| {
@@ -5227,7 +5844,8 @@ fn solve_matrix_free_step(
             })?;
         (run.result, Some(run.diagnostics))
     };
-    let delta_landmarks = operator.complete_delta(&pcg.solution).map_err(|error| {
+    let mut delta_poses = pcg.solution;
+    let mut delta_landmarks = operator.complete_delta(&delta_poses).map_err(|error| {
         if let Some(diagnostics) = restart_diagnostics {
             let mut restart_diagnostics: MatrixFreeBaRestartIterationStats = diagnostics.into();
             restart_diagnostics.terminal_failure = Some(format!("{error:?}"));
@@ -5242,8 +5860,24 @@ fn solve_matrix_free_step(
             to_step_error(error)
         }
     })?;
+    if let Some(scaling_state) = scaling_state {
+        if let Err(error) = scaling_state.unscale_deltas(&mut delta_poses, &mut delta_landmarks) {
+            let restart_diagnostics = restart_diagnostics.map(|diagnostics| {
+                let mut stats: MatrixFreeBaRestartIterationStats = diagnostics.into();
+                stats.terminal_failure = Some(format!("column scaling unscale failed: {error}"));
+                stats
+            });
+            return Err(MatrixFreeStepError {
+                diagnostic: format!("column scaling unscale failed: {error}"),
+                pcg_iterations: Some(pcg.iterations),
+                pcg_residual_norm: Some(pcg.residual_norm),
+                pcg_target: Some(pcg.target),
+                restart_diagnostics,
+            });
+        }
+    }
     Ok(MatrixFreeStepOutcome {
-        delta_poses: pcg.solution,
+        delta_poses,
         delta_landmarks,
         diagnostics: MatrixFreeBaIterationStats {
             iteration: 0,
@@ -8060,6 +8694,20 @@ mod matrix_free_ba_api_tests {
         for id in 1..8 {
             rig.landmarks.get_mut(&id).unwrap().coords.z += 0.015;
         }
+        let mut rig_scaled = rig.clone();
+        rig_scaled.fixed_landmarks.insert(0);
+        // Keep the gauge anchor pose fixed through `fixed_poses`, while
+        // constraining the rotation of a genuinely variable pose so the
+        // scaled path exercises the identity rotation rows.
+        rig_scaled.fixed_pose_rotations.insert(1);
+        let anchor_rig_pose = rig_scaled.poses[&0].clone();
+        let fixed_rig_rotation = rig_scaled.poses[&1].world_to_camera.rotation;
+        let fixed_rig_landmark = rig_scaled.landmarks[&0];
+        let scaled_extrinsics: Vec<SE3> = rig_scaled
+            .rig_observations
+            .iter()
+            .map(|observation| observation.sensor_from_rig.clone())
+            .collect();
         let mut rig_direct = rig.clone();
         let rig_direct_result = rig_direct.optimize(&matrix_free_config()).unwrap();
         let rig_result = rig
@@ -8086,6 +8734,35 @@ mod matrix_free_ba_api_tests {
                 .collect::<Vec<_>>(),
             rig_before_extrinsics
         );
+
+        let scaled_result = rig_scaled
+            .optimize_matrix_free_column_scaled(
+                &matrix_free_config(),
+                MatrixFreeBaColumnScalingOptions::default(),
+            )
+            .unwrap();
+        assert!(scaled_result.ba.final_cost.is_finite());
+        assert!(scaled_result.ba.final_cost <= scaled_result.ba.initial_cost);
+        assert!(scaled_result
+            .ba
+            .iterations
+            .iter()
+            .any(|iteration| iteration.step_accepted));
+        assert_eq!(rig_scaled.poses[&0], anchor_rig_pose);
+        assert_eq!(
+            rig_scaled.poses[&1].world_to_camera.rotation,
+            fixed_rig_rotation
+        );
+        assert_eq!(rig_scaled.landmarks[&0], fixed_rig_landmark);
+        assert_eq!(
+            rig_scaled
+                .rig_observations
+                .iter()
+                .map(|observation| observation.sensor_from_rig.clone())
+                .collect::<Vec<_>>(),
+            scaled_extrinsics
+        );
+        assert!(!scaled_result.scaling_iterations.is_empty());
     }
 
     #[test]
@@ -8220,6 +8897,53 @@ mod matrix_free_ba_api_tests {
         assert_eq!(result.iterations.len(), 3);
         assert!(result.iterations[0].lambda < result.iterations[1].lambda);
         assert!(result.iterations[1].lambda < result.iterations[2].lambda);
+    }
+
+    #[test]
+    fn matrix_free_column_scaled_is_deterministic_and_rolls_back_failed_steps() {
+        let problem = make_problem();
+        let config = matrix_free_config();
+        let mut first = problem.clone();
+        let mut second = problem.clone();
+        let first_result = first
+            .optimize_matrix_free_column_scaled(
+                &config,
+                MatrixFreeBaColumnScalingOptions::default(),
+            )
+            .unwrap();
+        let second_result = second
+            .optimize_matrix_free_column_scaled(
+                &config,
+                MatrixFreeBaColumnScalingOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(first_result, second_result);
+        assert_eq!(first, second);
+        assert!(!first_result.scaling_iterations.is_empty());
+
+        let mut failed = make_problem();
+        let before = failed.clone();
+        let mut failure_config = matrix_free_config();
+        failure_config.max_iterations = 3;
+        let failure_result = failed
+            .optimize_matrix_free_column_scaled(
+                &failure_config,
+                MatrixFreeBaColumnScalingOptions {
+                    pcg: MatrixFreeBaOptions {
+                        max_pcg_iterations: 1,
+                        pcg_relative_tolerance: 0.0,
+                        pcg_absolute_tolerance: 1.0e-30,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(failed, before);
+        assert_eq!(failure_result.ba.iterations.len(), 3);
+        assert!(failure_result
+            .ba
+            .matrix_free_iterations
+            .iter()
+            .all(|iteration| iteration.pcg_failure.is_some()));
     }
 
     #[test]

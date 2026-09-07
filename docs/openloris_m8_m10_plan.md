@@ -162,6 +162,27 @@ linear-size scale vectors. See the formula and full-normal/1k/atlas gates in
 the [bounded BA record](openloris_atlas_bounded_ba.md). The diagnostic itself
 does not improve quality or close the M8–M10 goal.
 
+PR #84 is merged as `c49e542` after eight final-head CI checks (run
+`34140417320`), with its branch removed. The active implementation branch is
+`feat/m8-column-scaled-lm`. It adds an explicit policy, preserving defaults,
+with fixed diagonal bounds 1e-6/1e32 and physical-coordinate LM acceptance.
+Use fixed-budget same-input 1k controls followed by both actual atlas
+components twice under the 2 GiB cap. No scaled results or README promotion
+are claimed yet; the detailed contract is in the bounded BA record above.
+
+The subsequent [column-scaled measurements](../benchmarks/electro/m8-openloris-column-scaled-lm-v1.json)
+use `99d899b`. Both atlas components complete twice under the cap, with exact
+repeat model/numerical traces and all support/identity/calibration/depth checks.
+Main wall time is 342.46/343.31 s, peak RSS 1,090,964/1,090,912 KiB; tail
+is 37.69/38.36 s. The main's non-SPD/curvature/true-residual failures disappear,
+but 10/20 solves still hit the PCG cap. Pooled RMSE improves to 0.387518 m
+but misses COLMAP's 0.384307 m, and 1k RMSE regresses to 0.028550 m.
+**No default/mapper/README promotion.** Record actual damping and normalized
+physical-system accuracy plus predicted/actual step quality before choosing
+another numerical policy; do not tune a tolerance or damping sweep against GT.
+This is not a mapper-only or native-E2E speed result. See the bounded BA
+record for primary Ceres references and the observed repeated failed work.
+
 ## Historical M7 baseline
 
 | Evidence | Current result | Consequence |
