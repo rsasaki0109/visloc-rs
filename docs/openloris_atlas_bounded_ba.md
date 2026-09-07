@@ -969,3 +969,57 @@ is excluded from columns but its observation rows remain. Maximum track length
 is 893 observations. This is a hypothetical storage warning, **not** measured
 RootBA memory or a lower bound for implicit/streamed QR. Do not select that
 naive layout for the 10k implementation.
+
+### Explicit-PCG isolation results (2026-09-07)
+
+[Evidence](../benchmarks/electro/m8-openloris-explicit-pcg-isolation-v1.json)
+records implementation `cb14bdc`. Both arms use the same normal system, RHS,
+existing block-Jacobi preconditioner and stopping rule. The original four-case
+oracle is assembled separately first and reproduces all PR #80 numerical lines
+exactly. The new isolation system is then assembled once for all six cases.
+
+| Damping | Cap | Explicit lower-PCG true residual | Implicit-PCG true residual | Outcome |
+|---|---:|---:|---:|---|
+| `1e-4` | 128 | 5,614.69 | 41,263.7 | both hit cap |
+| `1e-4` | 512 | 0.0355111 | 318.346 | both hit cap |
+| `1e5` | 128 | 1,411.68 | 1,673.76 | both hit cap |
+| `1e5` | 512 | `8.947e-7` | `9.079e-4` | explicit recheck fails at 316; implicit hits cap |
+| `1e10` | 128 / 512 | `3.336e-8` | `5.639e-7` | explicit 23 / implicit 22 iterations, both pass |
+
+Targets are approximately `7.35e-7` to `7.38e-7`. At the useful `1e5` damping,
+explicit recursive residual reaches `7.537e-8`, but its true residual exceeds
+the target, so rejection is correct under this baseline contract. The dense
+reference itself has lower/implicit residuals `2.143e-6` / `0.002572` there.
+This does not prove the target is mathematically unattainable. It does show
+that replacing the operator with an explicit matrix is not sufficient to pass
+the current gate, and that both failures cannot be attributed solely to the
+preconditioner. Failed iterates are discarded, so their cross-operator
+residuals, deltas and trial geometry are unavailable, not zero.
+
+At high damping, the explicit solution also passes the implicit-action recheck
+(`1.275e-7`); its pose/landmark delta differences from the implicit solution are
+`2.09e-17` / `9.92e-18`. All 130,900 trial observations remain valid and trial
+geometry cost is unchanged from PR #80. Two serial release executions reproduce
+all eleven numerical lines exactly. Whole diagnostic process wall times are
+45.02 / 44.77 s and peak RSS 346,196 / 346,148 KiB; these include reference
+factorizations and repeated arms, are from a shared host, and are not solver
+speed or production memory results. No new model or README claim is promoted.
+
+The next bounded improvement candidate is a test-only damped-landmark-block
+Cholesky construction versus the current general 3x3 inverse, used consistently
+by the implicit action, explicit reference and preconditioner. First measure
+the input-block and inverse asymmetry; do not assume it is nonzero. Keep
+physical coordinates, damping, observations, caps and stopping rule unchanged,
+then compare actual residuals, convergence and valid-step quality. A win here
+must still pass a full nonlinear 1k comparison before production promotion.
+
+[Ceres' Schur implementation](https://ceres-solver.googlesource.com/ceres-solver/+/master/internal/ceres/schur_eliminator.h)
+discusses Cholesky inversion for SPD landmark blocks but uses a general inverse
+in its small fixed-size specialization for speed. Thus it supports considering
+the stability/speed tradeoff, not claiming that Cholesky is always faster or
+that the existing inverse is inherently incorrect. Separately labeled
+coordinate scaling or an inexact LM policy remain options after this A/B;
+the fixed `1e-12` rule is a diagnostic baseline, not the user's ultimate goal.
+Any changed policy must retain honest true-residual reporting and demonstrate
+the requested trajectory/reprojection/resource quality, not merely report more
+linear solves as successful.

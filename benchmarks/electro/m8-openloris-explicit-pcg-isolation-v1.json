@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "experiment": "m8-openloris-explicit-pcg-isolation-v1",
+  "date": "2026-09-07",
+  "status": "diagnostic_complete_no_quality_or_speed_promotion",
+  "implementation_commit": "cb14bdce460fbbf39bb28a794aeffe82bab4e951",
+  "source_sha256": {
+    "pipelines/slam/src/bundle.rs": "4c79baf15880d26c10844bcca8bf8b774b7b0ad1a84bbf9a0760191d6396290f"
+  },
+  "binary": {
+    "path": "target/release/deps/visloc_slam-033870405c01cac5",
+    "sha256": "702181caa906e813a69869706d229b5029c2e0ebc3b6af00da0f9f7ebcc0cd61",
+    "build_command": "cargo test --release -p visloc-slam --lib matrix_free_real_oracle_tests --no-run",
+    "rustc": "1.94.0 (4a4ef493e 2026-03-02)"
+  },
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-explicit-pcg-isolation-v1",
+  "input": {
+    "baseline_evidence": "m8-openloris-real-normal-system-oracle-v1.json",
+    "fixture": "/home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1/input.fixture",
+    "fixture_sha256": "a71ef3401ea6d75a06f18ded0d475ad48fd929202a64fecaeaa790ee964da1ea",
+    "combined_source_sha256": "ecb825c37e2aed47adef6b20e0d362544c56e37238861d5bcf80ed80cb915829",
+    "initial_cost": 126510.39875730938,
+    "initial_cost_bits": "4683430141614839853",
+    "poses": 500,
+    "variable_poses": 499,
+    "landmarks": 4716,
+    "observations": 130900,
+    "scalar_dimension": 2994,
+    "fixed_pose": 0,
+    "observations_removed": 0,
+    "ground_truth_used": false
+  },
+  "execution": {
+    "rayon_num_threads": 1,
+    "ignored_test": "bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle",
+    "arguments": [
+      "--exact",
+      "--ignored",
+      "--nocapture"
+    ],
+    "relative_tolerance": 1e-12,
+    "absolute_tolerance": 1e-12,
+    "zero_initial_iterate": true,
+    "matched_preconditioner": "Both arms call the same ImplicitSchurOperator::apply_preconditioner on the same operator instance.",
+    "normal_assembly": "The legacy four-case oracle and new six-case isolation each assemble their own initial normal system sequentially. All six isolation cases share one normal system; the implicit/explicit pair shares RHS and preconditioner. No simultaneous full BA clone.",
+    "storage": "Same bounded caps as PR80. Each isolation damping materializes raw Schur once, then mirrors its lower triangle in place; explicit matvec borrows it. Dense solve may allocate its factorization. Production remains matrix-free.",
+    "failed_iterate_policy": "No failed iterate retained or applied; failure delta, geometry and cross-operator residual fields are null rather than fabricated.",
+    "recurrence_validation": "Synthetic success and failure cases compare callback-PCG results exactly with production implicit PCG. Real isolation implicit arm directly calls production PCG.",
+    "both_runs_exactly_one_test_passed": true,
+    "production_solver_and_api_unchanged": true
+  },
+  "practical_damping_control": {
+    "lambda": 100000,
+    "reason": "PR79 direct serial runs both reject LM0..8 and first accept LM9 at solve lambda=1e5. Initial model is therefore unchanged.",
+    "direct_trial_cost": 118084.4047208355,
+    "implicit_128_and_512_failure_diagnostics_match_pr79_lm9": true
+  },
+  "reports": [
+    {
+      "lambda": 0.0001,
+      "pcg_max_iterations": 128,
+      "status": "failure:MaxIterations { iterations: 128, recursive_norm: 5614.685150147594, residual_norm: 5614.685150144676, target: 7.354716589947665e-7 }",
+      "iterations": 128,
+      "recursive_residual": 5614.685150147594,
+      "lower_true_residual": 5614.685150144676,
+      "implicit_true_residual": null,
+      "target": 7.354716589947665e-7,
+      "dense_lower_true_residual": 0.000004919094885193126,
+      "dense_implicit_true_residual": 0.016225321613743043,
+      "pose_error_vs_dense": null,
+      "landmark_error_vs_dense": null,
+      "implicit_pcg_status": "failure:MaxIterations { iterations: 128, recursive_norm: 41263.72612053205, residual_norm: 41263.7264460946, target: 7.354716589947665e-7 }",
+      "implicit_pcg_iterations": 128,
+      "implicit_pcg_true_residual": 41263.7264460946,
+      "implicit_pcg_target": 7.354716589947665e-7,
+      "explicit_vs_implicit_pose_error": null,
+      "explicit_vs_implicit_landmark_error": null,
+      "feasibility": null,
+      "prediction": null
+    },
+    {
+      "lambda": 0.0001,
+      "pcg_max_iterations": 512,
+      "status": "failure:MaxIterations { iterations: 512, recursive_norm: 0.03551121035436136, residual_norm: 0.0355110880209856, target: 7.354716589947665e-7 }",
+      "iterations": 512,
+      "recursive_residual": 0.03551121035436136,
+      "lower_true_residual": 0.0355110880209856,
+      "implicit_true_residual": null,
+      "target": 7.354716589947665e-7,
+      "dense_lower_true_residual": 0.000004919094885193126,
+      "dense_implicit_true_residual": 0.016225321613743043,
+      "pose_error_vs_dense": null,
+      "landmark_error_vs_dense": null,
+      "implicit_pcg_status": "failure:MaxIterations { iterations: 512, recursive_norm: 318.34634181495545, residual_norm: 318.3459481943091, target: 7.354716589947665e-7 }",
+      "implicit_pcg_iterations": 512,
+      "implicit_pcg_true_residual": 318.3459481943091,
+      "implicit_pcg_target": 7.354716589947665e-7,
+      "explicit_vs_implicit_pose_error": null,
+      "explicit_vs_implicit_landmark_error": null,
+      "feasibility": null,
+      "prediction": null
+    },
+    {
+      "lambda": 100000,
+      "pcg_max_iterations": 128,
+      "status": "failure:MaxIterations { iterations: 128, recursive_norm: 1411.6841560913065, residual_norm: 1411.6841560871692, target: 7.363379620295508e-7 }",
+      "iterations": 128,
+      "recursive_residual": 1411.6841560913065,
+      "lower_true_residual": 1411.6841560871692,
+      "implicit_true_residual": null,
+      "target": 7.363379620295508e-7,
+      "dense_lower_true_residual": 0.000002143103419796261,
+      "dense_implicit_true_residual": 0.002572261272662248,
+      "pose_error_vs_dense": null,
+      "landmark_error_vs_dense": null,
+      "implicit_pcg_status": "failure:MaxIterations { iterations: 128, recursive_norm: 1673.762060680569, residual_norm: 1673.7620609788628, target: 7.363379620295508e-7 }",
+      "implicit_pcg_iterations": 128,
+      "implicit_pcg_true_residual": 1673.7620609788628,
+      "implicit_pcg_target": 7.363379620295508e-7,
+      "explicit_vs_implicit_pose_error": null,
+      "explicit_vs_implicit_landmark_error": null,
+      "feasibility": null,
+      "prediction": null
+    },
+    {
+      "lambda": 100000,
+      "pcg_max_iterations": 512,
+      "status": "failure:ResidualCheckFailed { iterations: 316, recursive_norm: 7.537022014962387e-8, true_norm: 8.94701210815861e-7, target: 7.363379620295508e-7 }",
+      "iterations": 316,
+      "recursive_residual": 7.537022014962387e-8,
+      "lower_true_residual": 8.94701210815861e-7,
+      "implicit_true_residual": null,
+      "target": 7.363379620295508e-7,
+      "dense_lower_true_residual": 0.000002143103419796261,
+      "dense_implicit_true_residual": 0.002572261272662248,
+      "pose_error_vs_dense": null,
+      "landmark_error_vs_dense": null,
+      "implicit_pcg_status": "failure:MaxIterations { iterations: 512, recursive_norm: 4.633822922386621e-6, residual_norm: 0.000907864069961008, target: 7.363379620295508e-7 }",
+      "implicit_pcg_iterations": 512,
+      "implicit_pcg_true_residual": 0.000907864069961008,
+      "implicit_pcg_target": 7.363379620295508e-7,
+      "explicit_vs_implicit_pose_error": null,
+      "explicit_vs_implicit_landmark_error": null,
+      "feasibility": null,
+      "prediction": null
+    },
+    {
+      "lambda": 10000000000,
+      "pcg_max_iterations": 128,
+      "status": "success_lower_pcg",
+      "iterations": 23,
+      "recursive_residual": null,
+      "lower_true_residual": 3.335572318726032e-8,
+      "implicit_true_residual": 1.2746686061017883e-7,
+      "target": 7.377914999757461e-7,
+      "dense_lower_true_residual": 6.4945806084734065e-9,
+      "dense_implicit_true_residual": 1.28800155078187e-7,
+      "pose_error_vs_dense": 6.62946019847548e-19,
+      "landmark_error_vs_dense": 2.0556738867015618e-19,
+      "implicit_pcg_status": "success",
+      "implicit_pcg_iterations": 22,
+      "implicit_pcg_true_residual": 5.639331821966476e-7,
+      "implicit_pcg_target": 7.377914999757461e-7,
+      "explicit_vs_implicit_pose_error": 2.088742323214711e-17,
+      "explicit_vs_implicit_landmark_error": 9.918305796957192e-18,
+      "feasibility": {
+        "finite": true,
+        "pose_true_residual": 3.335572318726032e-8,
+        "implicit_pose_true_residual": 1.2746686061017883e-7,
+        "max_landmark_backsub_residual": 5.474058784210968e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "prediction": {
+        "half_damped": 8.783279833568201,
+        "squared_damped": 17.566559667136403,
+        "squared_undamped": 32.970815975305435
+      }
+    },
+    {
+      "lambda": 10000000000,
+      "pcg_max_iterations": 512,
+      "status": "success_lower_pcg",
+      "iterations": 23,
+      "recursive_residual": null,
+      "lower_true_residual": 3.335572318726032e-8,
+      "implicit_true_residual": 1.2746686061017883e-7,
+      "target": 7.377914999757461e-7,
+      "dense_lower_true_residual": 6.4945806084734065e-9,
+      "dense_implicit_true_residual": 1.28800155078187e-7,
+      "pose_error_vs_dense": 6.62946019847548e-19,
+      "landmark_error_vs_dense": 2.0556738867015618e-19,
+      "implicit_pcg_status": "success",
+      "implicit_pcg_iterations": 22,
+      "implicit_pcg_true_residual": 5.639331821966476e-7,
+      "implicit_pcg_target": 7.377914999757461e-7,
+      "explicit_vs_implicit_pose_error": 2.088742323214711e-17,
+      "explicit_vs_implicit_landmark_error": 9.918305796957192e-18,
+      "feasibility": {
+        "finite": true,
+        "pose_true_residual": 3.335572318726032e-8,
+        "implicit_pose_true_residual": 1.2746686061017883e-7,
+        "max_landmark_backsub_residual": 5.474058784210968e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "prediction": {
+        "half_damped": 8.783279833568201,
+        "squared_damped": 17.566559667136403,
+        "squared_undamped": 32.970815975305435
+      }
+    }
+  ],
+  "repeats": {
+    "all_eleven_numerical_lines_identical": true,
+    "old_initial_cost_and_four_reports_match_pr80_exactly": true,
+    "wall_seconds": [
+      45.02,
+      44.77
+    ],
+    "peak_rss_kib": [
+      346196,
+      346148
+    ],
+    "scope": "Whole combined diagnostic process, not separate solver timings or production memory measurement. Warm shared host; unrelated cc1plus was observed during first run. No own concurrent builds.",
+    "files": {
+      "isolation-1.log": {
+        "sha256": "a0ea442e92a68f8ea639a5e6cddf02345d9cc6e1d7034d4660c846103f8d23bf",
+        "bytes": 17895,
+        "text": null
+      },
+      "isolation-1.time": {
+        "sha256": "72d787198c88226f8e406fe2fec1b7c346ce9ac5bebf86fdad7eb7c572779e6d",
+        "bytes": 888,
+        "text": "\tCommand being timed: \"target/release/deps/visloc_slam-033870405c01cac5 bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle --exact --ignored --nocapture\"\n\tUser time (seconds): 44.53\n\tSystem time (seconds): 0.47\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:45.02\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 346196\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 246404\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 248\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 48\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      "isolation-2.log": {
+        "sha256": "d4ac1a082145913be32c38aa2f3994750d393e9c376b60fc043d8352a5cf09c7",
+        "bytes": 17895,
+        "text": null
+      },
+      "isolation-2.time": {
+        "sha256": "e69e718365edc3143daa489e4faf9913037f1b07656fa6dcf049b802bf2255d7",
+        "bytes": 888,
+        "text": "\tCommand being timed: \"target/release/deps/visloc_slam-033870405c01cac5 bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle --exact --ignored --nocapture\"\n\tUser time (seconds): 44.36\n\tSystem time (seconds): 0.40\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:44.77\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 346148\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 246405\n\tVoluntary context switches: 3\n\tInvoluntary context switches: 143\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 48\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      }
+    }
+  },
+  "interpretation": [
+    "At low damping both PCGs fail, but the explicit lower representation progresses much further by 512 iterations. Failure of both does not isolate preconditioning as the sole cause.",
+    "At practical lambda=1e5 the explicit PCG recursively crosses target at iteration316 but fails true-residual recheck (8.947e-7 versus7.363e-7). The implicit arm remains at9.079e-4 after512.",
+    "At lambda=1e5 dense reference residual is2.143e-6 in lower representation and0.002572 in implicit representation. Neither proves attainment of the fixed true-residual target; this does not mathematically prove that target is unattainable.",
+    "At high damping explicit and implicit PCG succeed at23 and22 iterations, agree closely and preserve valid trial geometry.",
+    "Same preconditioner and recurrence do not eliminate representation/roundoff effects. Residuals from different finite-precision actions are not interchangeable.",
+    "No low/intermediate-damping explicit trial geometry is available because failed iterates are intentionally discarded; no full-objective quality claim is made.",
+    "The fixed1e-12 rule is a baseline diagnostic contract, not the user goal itself. A separately labeled stability or inexact-policy arm can be evaluated without rewriting this baseline; quality and resource gates still apply."
+  ],
+  "validation": {
+  "root_library_oracle_tests_passed": 7,
+  "ignored_real_input_test": 1,
+  "root_example_tests_passed": 12,
+  "root_python_tests_passed": 46,
+  "root_library_clippy_warnings_denied": true,
+  "root_cargo_fmt_check": true,
+  "docs_links": true,
+  "registry_json_files_validated": 189,
+  "generated_benchmark_docs_current": true,
+  "fixture_sha256_rechecked_after_runs": true
+},
+  "next_gate": "Test-only A/B: general inverse versus symmetry-audited Cholesky construction of the damped 3x3 landmark blocks, used consistently in implicit action, explicit reference and preconditioner. Preserve physical damping and observations; measure before selecting a nonlinear production arm."
+}
