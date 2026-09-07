@@ -218,3 +218,38 @@ foundation, **not** the M8 quality champion. Continue observation-based
 refinement on this connected real model, preserving the original scoring
 alignment and reporting any observation filtering. Full hashes and controls:
 [boundary-repair evidence](../benchmarks/electro/m8-openloris-atlas-boundary-repair-v1.json).
+
+## Next controlled experiment: strict BA on the connected model
+
+PR #72 is merged at `bd07922798ac54d21d14a5bfc5ec544e947faffe`; its final
+head passed all eight CI checks. The next experiment must separate the effect
+of the repaired connectivity from any change to BA filtering or loss function.
+
+Use one process: source integration → unsupported-frame recovery → boundary
+repair → existing strict bounded BA. Do not feed repaired poses back through
+source integration as an apparent BA-only input: doing so rebuilds tracks and
+may change the observation set before optimization.
+
+An optional pre-BA checkpoint must serialize the repaired in-memory state
+through the existing writer and match all six frozen `boundary-repair-v1`
+model/support/summary files byte-for-byte. Serialization order must not change
+BA's variable or observation order. Keep only a small ordered reference/index
+view, not a complete candidate model, and release writer buffers before BA.
+Reject overlapping input/checkpoint/final destinations and do not overwrite
+an existing nonempty checkpoint.
+
+First retain the exact strict BA policy: 60-frame windows, stride 30, 20
+iterations, fixed calibration, full selected tracks and outside-window anchors,
+the existing resource caps, independently recomputed non-increasing cost,
+and unchanged positive-depth/min-two/mean-2-px/max-4-px gates. No filtering or
+threshold sweep belongs in this control. Check observation identities,
+support, component membership and fixed rig geometry after serialization;
+score only afterward with the unchanged original model alignment.
+
+If strict BA still rejects useful windows, a separately named filtering arm
+may follow the existing SfM filter/re-triangulation ordering. It must retain
+the non-increasing **full pre-filter observation** cost gate, explicitly count
+every removed observation/track, preserve supported image/frame sets and
+prevent component splits. That arm is not implemented or accepted by this
+plan alone. Both trajectory gates and the full M8–M10 performance/nonregression
+requirements remain open.
