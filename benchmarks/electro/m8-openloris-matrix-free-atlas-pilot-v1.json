@@ -74,7 +74,40 @@
         ],
         "selected_frame": []
       }
-    ]
+    ],
+    "independent_point_track_inventory": [
+      {
+        "component": "component-000",
+        "fixed_frame_id": 0,
+        "points": 318222,
+        "observations": 1313899,
+        "free_cross_entries": 1313303,
+        "sum_free_cross_len_squared": 40517191,
+        "max_track_length": 716,
+        "cross_sensor_tracks": 281927,
+        "tracks_with_same_frame_stereo": 281079,
+        "min_observation_depth_m": 0.0000018217814077292616,
+        "max_observation_depth_m": 14900.749682097221
+      },
+      {
+        "component": "component-001",
+        "fixed_frame_id": 4495,
+        "points": 34615,
+        "observations": 124981,
+        "free_cross_entries": 124955,
+        "sum_free_cross_len_squared": 3124173,
+        "max_track_length": 252,
+        "cross_sensor_tracks": 31022,
+        "tracks_with_same_frame_stereo": 30995,
+        "min_observation_depth_m": 0.015132880404370552,
+        "max_observation_depth_m": 39.074860109895056
+      }
+    ],
+    "tail_manifest_prepared": {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-matrix-free-atlas-pilot-v1/component-001-rig-manifest.txt",
+      "sha256": "cbbdd020c6310dbf8b1ca65fed34270098ecd778c9fff756379559d80c707e12",
+      "derivation": "Same exact source image-name membership selection; preserve frameIDs4495..4999 and all sensor calibration."
+    }
   },
   "limits": {
     "address_space_bytes": 2147483648,
@@ -97,7 +130,8 @@
     "The source's8987 supported images out of8988 poses is known and unchanged; all4494 rig frames have observations. Image8987/sensor0/frame4493 has0 observations, while image8988/sensor1 in the same calibrated rig frame has10.",
     "The1k driver intentionally requires every image to have landmark support and a fixed frame0; it rejects this existing atlas boundary before constructing/solving BA. The tail uses frameIDs4495..4999 and also needs explicit anchor selection.",
     "No image/observation was dropped, no ID was relabeled, no threshold was silently bypassed, and neither source model nor calibration changed.",
-    "407032KiB is only parse/preflight process peak, not solver peak or a2GiB10k pass. No timing/quality/README promotion."
+    "407032KiB is only parse/preflight process peak, not solver peak or a2GiB10k pass. No timing/quality/README promotion.",
+    "Independent per-track depth scan finds main-component positive depths from1.8218e-6 to14900.75m; this large physical range is a conditioning clue, not a Hessian condition estimate or permission to remove observations. Both components contain many same-frame cross-sensor tracks; this supports metric observations but is not a full-rank proof."
   ],
   "next_driver_contract": {
     "status": "planned_separate_from_current_restart_algorithm",

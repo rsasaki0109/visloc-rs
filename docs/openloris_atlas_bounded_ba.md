@@ -1201,3 +1201,12 @@ post-only alignment. Direct-BA numerical agreement remains a diagnostic;
 the ultimate advancement gate is measured COLMAP quality and resources,
 not perfect agreement with one internal backend. The unsupported-image
 boundary and anchor extension are not yet implemented in this pilot.
+
+An independent streaming point/track scan also finds main-component positive
+depths from `1.8218e-6` to 14,900.75 m (tail 0.01513 to 39.07486 m). This is
+a conditioning clue, not a measured Hessian condition number or permission
+to remove points. Main/tail have 281,079 / 30,995 tracks with same-frame
+cross-sensor observations; metric observations are present, without proving
+full rank. Excluding the selected anchor's observations gives 1,313,303 /
+124,955 cross entries and sums of squared per-point cross counts 40,517,191 /
+3,124,173. These are work/storage inventory, not a dense allocation plan.
