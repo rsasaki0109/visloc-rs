@@ -927,6 +927,15 @@ and trial geometry separately from failed numerical trials. Retain both damping
 values and the previous oracle report as controls. Reuse the existing bounded
 matrix and fixture, not an additional model clone or a new production dense path.
 
+Include `lambda=1e5` in the new isolation report in addition to the two endpoint
+controls. The frozen PR #79 `direct-serial-1.log` rejects LM0 through LM8 and
+first accepts LM9 at solve damping `1e5`, with trial cost
+118,084.4047208355. Thus this third damping also uses the unchanged initial
+model and tests a step that actually improved the baseline optimizer, rather
+than only a geometrically invalid low-damping step and a tiny high-damping
+step. Preserve the original four-case oracle report for direct comparison;
+the isolation report has six cases (three damping values, two iteration caps).
+
 If both representations stall, investigate preconditioning and conditioning;
 if only the implicit representation stalls, prioritize accumulation and
 symmetry. These are hypotheses to refine with the measured residuals, not a
