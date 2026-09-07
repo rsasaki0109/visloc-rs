@@ -70,6 +70,7 @@
 //! through call sites that have nothing to do with this optimizer).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::ops::{Index, IndexMut};
 
 use nalgebra::{
@@ -96,6 +97,458 @@ use crate::{solve_normal_equations, LinearSolver, PoseGraphError, RobustKernel};
 fn ba_step_debug_enabled() -> bool {
     std::env::var_os("VISLOC_SFM_DEBUG_BA").is_some()
         && std::env::var_os("VISLOC_SFM_DEBUG_BA_STEPS").is_some()
+}
+
+/// Context for the opt-in local Schur-block diagnostic.  This is deliberately
+/// private and borrowed: the normal solver does not retain a pose/landmark
+/// history or any diagnostic records.
+#[derive(Debug, Clone, Copy)]
+struct SchurBlockDebugContext<'a> {
+    iteration: usize,
+    pose_slot: usize,
+    frame_id: Option<u64>,
+    landmark_index: &'a BTreeMap<u64, usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SchurBlockDebugCounts {
+    local_landmarks: usize,
+    valid_hll: usize,
+    singular_hll: usize,
+    cross_entries: usize,
+    same_pose_groups: usize,
+    same_pose_extra_cross_entries: usize,
+    max_elimination_norm: Option<f64>,
+    max_elimination_landmark: Option<usize>,
+    max_hll_inverse_residual: Option<f64>,
+    max_elimination_cross: Option<Matrix6x3<f64>>,
+    max_hll: Option<Matrix3<f64>>,
+    max_hll_inverse: Option<Matrix3<f64>>,
+    nonfinite_elimination: bool,
+    nonfinite_hll_inverse_residual: bool,
+}
+
+/// The slot is intentionally selected through an explicit diagnostic
+/// environment variable.  The existing two debug flags remain a required
+/// gate, so setting only the slot cannot perturb normal BA.
+fn ba_schur_debug_slot() -> Option<usize> {
+    if !ba_step_debug_enabled() {
+        return None;
+    }
+    std::env::var("VISLOC_SFM_DEBUG_BA_SCHUR_SLOT")
+        .ok()?
+        .parse::<usize>()
+        .ok()
+}
+
+fn matrix_free_schur_debug_context<'a>(
+    pose_index: &'a BTreeMap<u64, usize>,
+    landmark_index: &'a BTreeMap<u64, usize>,
+    iteration: usize,
+) -> Option<SchurBlockDebugContext<'a>> {
+    let pose_slot = ba_schur_debug_slot()?;
+    Some(schur_debug_context_for_slot(
+        pose_index,
+        landmark_index,
+        iteration,
+        pose_slot,
+    ))
+}
+
+fn schur_debug_context_for_slot<'a>(
+    pose_index: &'a BTreeMap<u64, usize>,
+    landmark_index: &'a BTreeMap<u64, usize>,
+    iteration: usize,
+    pose_slot: usize,
+) -> SchurBlockDebugContext<'a> {
+    let frame_id = pose_index
+        .iter()
+        .find_map(|(id, slot)| (*slot == pose_slot).then_some(*id));
+    SchurBlockDebugContext {
+        iteration,
+        pose_slot,
+        frame_id,
+        landmark_index,
+    }
+}
+
+fn finite_matrix6(matrix: &Matrix6<f64>) -> bool {
+    matrix.iter().all(|value| value.is_finite())
+}
+
+fn symmetric_from_lower(matrix: &Matrix6<f64>) -> Matrix6<f64> {
+    let mut symmetric = *matrix;
+    for row in 0..6 {
+        for column in (row + 1)..6 {
+            symmetric[(row, column)] = matrix[(column, row)];
+        }
+    }
+    symmetric
+}
+
+fn symmetric_from_upper(matrix: &Matrix6<f64>) -> Matrix6<f64> {
+    let mut symmetric = *matrix;
+    for row in 0..6 {
+        for column in (row + 1)..6 {
+            symmetric[(column, row)] = matrix[(row, column)];
+        }
+    }
+    symmetric
+}
+
+fn matrix6_asymmetry(matrix: &Matrix6<f64>) -> f64 {
+    let mut maximum = 0.0_f64;
+    for row in 0..6 {
+        for column in (row + 1)..6 {
+            maximum = maximum.max((matrix[(row, column)] - matrix[(column, row)]).abs());
+        }
+    }
+    maximum
+}
+
+fn matrix6_min_eigenvalue(matrix: &Matrix6<f64>) -> Option<f64> {
+    if !finite_matrix6(matrix) {
+        return None;
+    }
+    // Never let a diagnostic eigensolve run indefinitely on a pathological
+    // block.  The production Cholesky result remains the acceptance decision.
+    let eigenvalues =
+        nalgebra::linalg::SymmetricEigen::try_new(*matrix, f64::EPSILON, 1024)?.eigenvalues;
+    let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    minimum.is_finite().then_some(minimum)
+}
+
+/// Return the smallest diagonal radicand (before its square root) of a
+/// lower-triangle Cholesky factorization. This is a diagnostic-only scalar
+/// 6x6 routine; the production factorization remains `Matrix6::cholesky` and
+/// is not replaced or symmetrized by this audit.
+fn matrix6_min_lower_cholesky_pivot(matrix: &Matrix6<f64>) -> Option<f64> {
+    if !finite_matrix6(matrix) {
+        return None;
+    }
+    let mut lower = Matrix6::zeros();
+    let mut minimum = f64::INFINITY;
+    for row in 0..6 {
+        let mut pivot = matrix[(row, row)];
+        for column in 0..row {
+            pivot -= lower[(row, column)] * lower[(row, column)];
+        }
+        if !pivot.is_finite() || pivot <= 0.0 {
+            return None;
+        }
+        minimum = minimum.min(pivot);
+        lower[(row, row)] = pivot.sqrt();
+        for next_row in (row + 1)..6 {
+            let mut value = matrix[(next_row, row)];
+            for column in 0..row {
+                value -= lower[(next_row, column)] * lower[(row, column)];
+            }
+            lower[(next_row, row)] = value / lower[(row, row)];
+        }
+    }
+    minimum.is_finite().then_some(minimum)
+}
+
+fn format_matrix6(matrix: &Matrix6<f64>) -> String {
+    let mut output = String::with_capacity(6 * 6 * 20 + 1);
+    output.push('[');
+    for row in 0..6 {
+        if row != 0 {
+            output.push(';');
+        }
+        for column in 0..6 {
+            if column != 0 {
+                output.push(',');
+            }
+            write!(&mut output, "{:.17e}", matrix[(row, column)])
+                .expect("writing a String cannot fail");
+        }
+    }
+    output.push(']');
+    output
+}
+
+fn format_matrix6x3(matrix: &Matrix6x3<f64>) -> String {
+    let mut output = String::with_capacity(6 * 3 * 20 + 1);
+    output.push('[');
+    for row in 0..6 {
+        if row != 0 {
+            output.push(';');
+        }
+        for column in 0..3 {
+            if column != 0 {
+                output.push(',');
+            }
+            write!(&mut output, "{:.17e}", matrix[(row, column)])
+                .expect("writing a String cannot fail");
+        }
+    }
+    output.push(']');
+    output
+}
+
+fn format_matrix3(matrix: &Matrix3<f64>) -> String {
+    let mut output = String::with_capacity(3 * 3 * 20 + 1);
+    output.push('[');
+    for row in 0..3 {
+        if row != 0 {
+            output.push(';');
+        }
+        for column in 0..3 {
+            if column != 0 {
+                output.push(',');
+            }
+            write!(&mut output, "{:.17e}", matrix[(row, column)])
+                .expect("writing a String cannot fail");
+        }
+    }
+    output.push(']');
+    output
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SchurBlockDebugMetrics {
+    finite: bool,
+    asymmetry: f64,
+    lower_min_eigenvalue: Option<f64>,
+    upper_min_eigenvalue: Option<f64>,
+    lower_min_cholesky_radicand: Option<f64>,
+    upper_min_cholesky_radicand: Option<f64>,
+}
+
+fn inspect_schur_block(matrix: &Matrix6<f64>) -> SchurBlockDebugMetrics {
+    let finite = finite_matrix6(matrix);
+    let lower = symmetric_from_lower(matrix);
+    let upper = symmetric_from_upper(matrix);
+    SchurBlockDebugMetrics {
+        finite,
+        asymmetry: matrix6_asymmetry(matrix),
+        lower_min_eigenvalue: matrix6_min_eigenvalue(&lower),
+        upper_min_eigenvalue: matrix6_min_eigenvalue(&upper),
+        lower_min_cholesky_radicand: matrix6_min_lower_cholesky_pivot(&lower),
+        upper_min_cholesky_radicand: matrix6_min_lower_cholesky_pivot(&upper),
+    }
+}
+
+fn collect_schur_block_debug_counts(
+    system: &NormalEquationsBa,
+    h_ll_inverse: &[Option<Matrix3<f64>>],
+    lambda: f64,
+    pose_slot: usize,
+) -> SchurBlockDebugCounts {
+    let mut counts = SchurBlockDebugCounts::default();
+    for (landmark_index, (landmark, inverse)) in
+        system.landmarks.iter().zip(h_ll_inverse).enumerate()
+    {
+        let mut same_pose_cross = Matrix6x3::zeros();
+        let mut cross_entries = 0_usize;
+        for (pose, cross) in &landmark.cross {
+            if *pose == pose_slot {
+                cross_entries += 1;
+                same_pose_cross += cross;
+            }
+        }
+        if cross_entries == 0 {
+            continue;
+        }
+        counts.local_landmarks += 1;
+        counts.cross_entries += cross_entries;
+        if cross_entries > 1 {
+            counts.same_pose_groups += 1;
+            counts.same_pose_extra_cross_entries += cross_entries - 1;
+        }
+        let Some(inverse) = inverse else {
+            counts.singular_hll += 1;
+            continue;
+        };
+        counts.valid_hll += 1;
+        let elimination = same_pose_cross * inverse * same_pose_cross.transpose();
+        let elimination_norm = elimination.norm();
+        if !elimination_norm.is_finite() {
+            counts.nonfinite_elimination = true;
+            continue;
+        }
+        let mut h_ll = landmark.h_ll;
+        for component in 0..3 {
+            h_ll[(component, component)] += lambda;
+        }
+        let inverse_residual = (h_ll * inverse - Matrix3::identity()).norm();
+        if !inverse_residual.is_finite() {
+            counts.nonfinite_hll_inverse_residual = true;
+        }
+        if counts
+            .max_elimination_norm
+            .is_none_or(|maximum| elimination_norm > maximum)
+        {
+            counts.max_elimination_norm = Some(elimination_norm);
+            counts.max_elimination_landmark = Some(landmark_index);
+            counts.max_hll_inverse_residual = Some(inverse_residual);
+            counts.max_elimination_cross = Some(same_pose_cross);
+            counts.max_hll = Some(h_ll);
+            counts.max_hll_inverse = Some(*inverse);
+        }
+    }
+    counts
+}
+
+fn emit_schur_block_debug(
+    context: SchurBlockDebugContext<'_>,
+    lambda: f64,
+    h_pp_lambda: &Matrix6<f64>,
+    schur_block: &Matrix6<f64>,
+    counts: SchurBlockDebugCounts,
+) {
+    let h_pp_metrics = inspect_schur_block(h_pp_lambda);
+    let schur_metrics = inspect_schur_block(schur_block);
+    let elimination = *h_pp_lambda - *schur_block;
+    let elimination_norm = elimination.norm();
+    let finite = h_pp_metrics.finite
+        && schur_metrics.finite
+        && elimination_norm.is_finite()
+        && !counts.nonfinite_elimination
+        && !counts.nonfinite_hll_inverse_residual;
+    let landmark_id = counts.max_elimination_landmark.and_then(|index| {
+        context
+            .landmark_index
+            .iter()
+            .find_map(|(id, mapped)| (*mapped == index).then_some(*id))
+    });
+    let frame = context
+        .frame_id
+        .map_or_else(|| "none".to_owned(), |id| id.to_string());
+    let max_landmark = counts
+        .max_elimination_landmark
+        .map_or_else(|| "none".to_owned(), |index| index.to_string());
+    let max_landmark_id = landmark_id.map_or_else(|| "none".to_owned(), |id| id.to_string());
+    let max_cross = counts
+        .max_elimination_cross
+        .map_or_else(|| "none".to_owned(), |cross| format_matrix6x3(&cross));
+    let max_hll = counts
+        .max_hll
+        .map_or_else(|| "none".to_owned(), |hll| format_matrix3(&hll));
+    let max_hll_inverse = counts
+        .max_hll_inverse
+        .map_or_else(|| "none".to_owned(), |inverse| format_matrix3(&inverse));
+    eprintln!(
+        concat!(
+            "sfm-debug-ba-schur-block iteration={} slot={} frame_id={} lambda={:.17e} ",
+            "finite={} solver_symmetric_interpretation=lower_triangle ",
+            "hpp_lambda={} schur_block={} elimination_norm={:.17e} ",
+            "schur_asymmetry={:.17e} lower_min_eigen={:?} upper_min_eigen={:?} ",
+            "lower_min_cholesky_radicand={:?} upper_min_cholesky_radicand={:?} ",
+            "local_landmarks={} valid_hll={} singular_hll={} cross_entries={} ",
+            "same_pose_groups={} same_pose_extra_cross_entries={} ",
+            "max_elimination_norm={:?} max_elimination_landmark={} ",
+            "max_elimination_point_id={} max_hll_inverse_residual={:?} ",
+            "max_elimination_cross={} max_hll={} max_hll_inverse={}"
+        ),
+        context.iteration,
+        context.pose_slot,
+        frame,
+        lambda,
+        finite,
+        format_matrix6(h_pp_lambda),
+        format_matrix6(schur_block),
+        elimination_norm,
+        schur_metrics.asymmetry,
+        schur_metrics.lower_min_eigenvalue,
+        schur_metrics.upper_min_eigenvalue,
+        schur_metrics.lower_min_cholesky_radicand,
+        schur_metrics.upper_min_cholesky_radicand,
+        counts.local_landmarks,
+        counts.valid_hll,
+        counts.singular_hll,
+        counts.cross_entries,
+        counts.same_pose_groups,
+        counts.same_pose_extra_cross_entries,
+        counts.max_elimination_norm,
+        max_landmark,
+        max_landmark_id,
+        counts.max_hll_inverse_residual,
+        max_cross,
+        max_hll,
+        max_hll_inverse,
+    );
+}
+
+#[cfg(test)]
+mod schur_block_debug_tests {
+    use super::*;
+
+    #[test]
+    fn local_block_metrics_distinguish_spd_non_spd_nonfinite_and_asymmetry() {
+        let spd = Matrix6::from_diagonal(&Vector6::from_element(2.0));
+        let spd_metrics = inspect_schur_block(&spd);
+        assert!(spd_metrics.finite);
+        assert_eq!(spd_metrics.asymmetry, 0.0);
+        assert_eq!(spd_metrics.lower_min_eigenvalue, Some(2.0));
+        assert_eq!(spd_metrics.upper_min_eigenvalue, Some(2.0));
+        assert_eq!(spd_metrics.lower_min_cholesky_radicand, Some(2.0));
+        assert_eq!(spd_metrics.upper_min_cholesky_radicand, Some(2.0));
+
+        let mut non_spd = spd;
+        non_spd[(0, 0)] = -1.0;
+        let non_spd_metrics = inspect_schur_block(&non_spd);
+        assert!(non_spd_metrics.finite);
+        assert!(non_spd_metrics.lower_min_eigenvalue.unwrap() < 0.0);
+        assert_eq!(non_spd_metrics.lower_min_cholesky_radicand, None);
+
+        let mut nonfinite = spd;
+        nonfinite[(0, 0)] = f64::NAN;
+        let nonfinite_metrics = inspect_schur_block(&nonfinite);
+        assert!(!nonfinite_metrics.finite);
+        assert_eq!(nonfinite_metrics.lower_min_eigenvalue, None);
+        assert_eq!(nonfinite_metrics.upper_min_cholesky_radicand, None);
+
+        let mut asymmetric = spd;
+        asymmetric[(0, 1)] = 3.0;
+        asymmetric[(1, 0)] = 2.0;
+        let asymmetric_metrics = inspect_schur_block(&asymmetric);
+        assert_eq!(asymmetric_metrics.asymmetry, 1.0);
+        assert!(asymmetric_metrics.lower_min_eigenvalue.is_some());
+        assert!(asymmetric_metrics.upper_min_eigenvalue.is_some());
+        assert_ne!(
+            asymmetric_metrics.lower_min_eigenvalue,
+            asymmetric_metrics.upper_min_eigenvalue
+        );
+    }
+
+    #[test]
+    fn debug_context_maps_variable_slot_after_fixed_pose_and_counts_rig_crosses() {
+        let pose_index = BTreeMap::from([(10_u64, 0_usize), (20_u64, 1_usize)]);
+        let landmark_index = BTreeMap::from([(42_u64, 0_usize)]);
+        // Use the pure mapping helper.  The environment-gated wrapper is not
+        // exercised here so tests remain independent under the parallel test
+        // runner.
+        let context = schur_debug_context_for_slot(&pose_index, &landmark_index, 7, 1);
+        assert_eq!(context.iteration, 7);
+        assert_eq!(context.pose_slot, 1);
+        assert_eq!(context.frame_id, Some(20));
+
+        let cross = Matrix6x3::from_fn(|row, column| if row == column { 1.0 } else { 0.0 });
+        let system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![Matrix6::identity(); 2]),
+            b_p: DVector::zeros(12),
+            landmarks: vec![LandmarkBlock {
+                h_ll: Matrix3::identity(),
+                b_l: Vector3::zeros(),
+                cross: vec![(1, cross), (1, cross)],
+            }],
+        };
+        let h_ll_inverse = (system.landmarks[0].h_ll + 0.25 * Matrix3::<f64>::identity())
+            .try_inverse()
+            .unwrap();
+        let counts = collect_schur_block_debug_counts(&system, &[Some(h_ll_inverse)], 0.25, 1);
+        assert_eq!(counts.local_landmarks, 1);
+        assert_eq!(counts.valid_hll, 1);
+        assert_eq!(counts.singular_hll, 0);
+        assert_eq!(counts.cross_entries, 2);
+        assert_eq!(counts.same_pose_groups, 1);
+        assert_eq!(counts.same_pose_extra_cross_entries, 1);
+        assert_eq!(counts.max_elimination_landmark, Some(0));
+        assert!(counts.max_hll_inverse_residual.unwrap() < 1.0e-12);
+        assert_eq!(context.landmark_index.get(&42), Some(&0));
+    }
 }
 
 #[cfg(test)]
@@ -2690,12 +3143,15 @@ impl BundleAdjustment {
                     &mut block_symbolic_cache,
                 ),
                 BaSolveBackend::MatrixFree(runtime) => {
+                    let schur_debug_context =
+                        matrix_free_schur_debug_context(&pose_index, &landmark_index, iteration);
                     match solve_matrix_free_step(
                         &system,
                         lambda,
                         runtime.options,
                         runtime.restart_limit,
                         runtime.restart_iterations.is_some(),
+                        schur_debug_context,
                     ) {
                         Ok(mut outcome) => {
                             outcome.diagnostics.iteration = iteration;
@@ -4708,6 +5164,7 @@ fn solve_matrix_free_step(
     options: MatrixFreeBaOptions,
     restart_limit: usize,
     collect_restart_diagnostics: bool,
+    schur_debug_context: Option<SchurBlockDebugContext<'_>>,
 ) -> Result<MatrixFreeStepOutcome, MatrixFreeStepError> {
     let to_step_error = |error: implicit_schur::ImplicitSchurError| {
         let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
@@ -4728,8 +5185,13 @@ fn solve_matrix_free_step(
             }),
         }
     };
-    let operator =
-        implicit_schur::ImplicitSchurOperator::new(system, lambda).map_err(to_step_error)?;
+    let operator = match schur_debug_context {
+        Some(context) => {
+            implicit_schur::ImplicitSchurOperator::new_with_debug(system, lambda, Some(context))
+        }
+        None => implicit_schur::ImplicitSchurOperator::new(system, lambda),
+    }
+    .map_err(to_step_error)?;
     let pcg_options = implicit_schur::PcgOptions {
         max_iterations: options.max_pcg_iterations,
         relative_tolerance: options.pcg_relative_tolerance,
@@ -6092,6 +6554,14 @@ mod implicit_schur {
             system: &'a NormalEquationsBa,
             lambda: f64,
         ) -> Result<Self, ImplicitSchurError> {
+            Self::new_with_debug(system, lambda, None)
+        }
+
+        pub(super) fn new_with_debug(
+            system: &'a NormalEquationsBa,
+            lambda: f64,
+            debug: Option<SchurBlockDebugContext<'_>>,
+        ) -> Result<Self, ImplicitSchurError> {
             if !lambda.is_finite() || lambda < 0.0 {
                 return Err(ImplicitSchurError::InvalidLambda);
             }
@@ -6208,6 +6678,21 @@ mod implicit_schur {
                     preconditioner[pose] -= cross * inverse * cross.transpose();
                 }
             }
+
+            if let Some(context) = debug {
+                if context.pose_slot < preconditioner.len() {
+                    let counts = collect_schur_block_debug_counts(
+                        system,
+                        &h_ll_inverse,
+                        lambda,
+                        context.pose_slot,
+                    );
+                    let h_pp_lambda = &damped_diagonal[context.pose_slot];
+                    let schur_block = &preconditioner[context.pose_slot];
+                    emit_schur_block_debug(context, lambda, h_pp_lambda, schur_block, counts);
+                }
+            }
+
             if !preconditioner
                 .iter()
                 .flat_map(|block| block.iter())
