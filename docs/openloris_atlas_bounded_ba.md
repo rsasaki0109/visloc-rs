@@ -494,6 +494,17 @@ COLMAP comparison table; do not replace it with a cherry-picked p95 result.
 
 ### Subsequent output-preserving performance candidate
 
+Two-sweep PR #75 merged as `0989877` after all eight final CI checks passed
+(run 34100723331); its old local/remote branch is removed. Work proceeds on
+`perf/m8-reuse-atlas-window-selection`. The archived baseline executable is
+`selected-scan-reuse-v1/baseline-integrate_rig_atlas_landmarks` under the frozen
+atlas artifact root (same binary SHA as the two-sweep evidence). Default
+one-sweep main run `baseline-main-1` takes 172.69 s / 525,052 KiB and matches
+all six frozen filtering files. No other task benchmark overlapped this run,
+but the machine is shared. Do not treat this single baseline as a speed gain.
+Compare multiple serial runs before/after, verify outputs and per-window logs,
+and retain mapper/native-E2E scope limitations.
+
 Keep this separate from the two-sweep quality experiment. Code inspection of
 the normal filtering-window path finds three calls to
 `selected_landmarks_for_frames`: window-count diagnostics, filtering candidate
