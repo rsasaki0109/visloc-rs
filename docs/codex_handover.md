@@ -94,6 +94,14 @@
 > 公開API/既定経路の変更や10k実行はまだ行いません。入力depthの独立確認では最小
 > 0.000110933 m、最大5,207 mの観測があり、スケール差は診断の手掛かりです。
 > これを理由に観測を除去したり、PCG失敗の原因を断定したりはしません。
+> 実normal系oracleは `3e50dc5` に実装し、1kの2回実行で全診断数値が一致。
+> [実測記録](../benchmarks/electro/m8-openloris-real-normal-system-oracle-v1.json)。
+> 低λではdirect自身のimplicit真残差も0.01848で基準7.35e-7を超え、
+> PCG128/512も未収束。高λでは22反復で成功しdirectと一致します。
+> 低λのtrialは880観測が非正深度なので部分costを改善実績と扱いません。
+> 既存direct/MF CLIのモデル3ファイル・数値traceはPR #79と一致。
+> 次は同じpreconditionerでexplicit lower-Schur PCGとimplicit PCGを比べ、
+> 蓄積誤差と収束性を切り分けます。閾値変更・10k昇格はまだ行いません。
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`

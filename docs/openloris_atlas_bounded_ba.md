@@ -797,7 +797,8 @@ selected approach. If private test code needs an interchange input, prefer an
 explicit example-only export of bounded pose/point/observation records linked
 to the frozen source hashes, preserving every observation and its order; do
 not export a normal matrix or duplicate the complete source model in memory.
-The exporter/fixture is a proposed implementation mechanism, not yet built.
+The exporter/fixture was subsequently implemented in `3e50dc5`; measured results
+are recorded below.
 
 Before any explicit Schur allocation, cap variable poses at 512, points at
 8,192, observations at 262,144, scalar dimension at 3,072 and pre-count the
@@ -836,3 +837,67 @@ Primary-source context for the next diagnosis (checked 2026-09-07):
   measuring recursive/true residual gaps, but does not establish that residual
   replacement alone fixes this input or justify adopting its update rule
   without a separate numerical test.
+
+### Frozen 1k real normal-system oracle (2026-09-07)
+
+[Machine-readable evidence](../benchmarks/electro/m8-openloris-real-normal-system-oracle-v1.json)
+records the bounded private oracle implemented in `3e50dc5`. The standalone
+example export is additive; normal solver CLI behavior and the public library
+API are unchanged. Example usage (the output file must not already exist):
+
+```bash
+cargo build --release --example compare_rig_bundle_adjustment
+target/release/examples/compare_rig_bundle_adjustment \
+  --model "$MODEL" --rig-manifest "$RIG_MANIFEST" \
+  --export-oracle-fixture "$EXISTING_OUTPUT_DIR/input.fixture"
+cargo test --release -p visloc-slam --lib matrix_free_real_oracle_tests --no-run
+# Set both variables to the exported fixture and its printed combined source hash.
+RAYON_NUM_THREADS=1 \
+VISLOC_MATRIX_FREE_ORACLE_FIXTURE="$EXISTING_OUTPUT_DIR/input.fixture" \
+VISLOC_MATRIX_FREE_ORACLE_EXPECTED_SOURCE_SHA256="$SOURCE_SHA256" \
+cargo test --release -p visloc-slam --lib \
+  bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle \
+  -- --exact --ignored --nocapture
+```
+
+The 30,587,925-byte fixture preserves all 130,900 observations in source-track
+order, all 4,716 landmarks, name-to-rig mapping, fixed sensor extrinsics and
+fixed pose 0. Independent checks verified source/combined hashes, observation
+identity and coordinates, point coordinates and initial-cost bits
+`4683430141614839853` (126,510.39875730938). No observation was removed.
+The same initial normal system has 499 free pose blocks / scalar dimension 2,994.
+
+| Initial solve damping | PCG 128 / 512 | Direct step residual: lower / implicit | Trial geometry |
+|---|---|---|---|
+| `1e-4` | both fail; true residual 41,263.7 / 318.346 against `7.35e-7` | `2.75e-6` / `0.01848` | 880 nonpositive-depth observations |
+| `1e10` | both succeed at 22 iterations; `5.64e-7` against `7.38e-7` | `3.02e-9` / `4.49e-7` | all 130,900 valid |
+
+At low damping, sparse direct and explicit lower-mirrored Schur agree to
+`1.02e-10` in pose-delta norm and `1.78e-8` in landmark-delta norm, but **the
+direct solution itself does not meet the implicit residual target**. The raw
+Schur asymmetry and different accumulation orders matter to further diagnosis;
+this does not establish one sole cause of PCG failure. The deterministic probe's
+raw/lower action errors are 0.18767 / 0.13604. Their ratios of about `1e-13`
+use the **unreduced** arithmetic scale (`9.94e11`), not final `Sx` or solution
+accuracy. PCG recursive and true residuals are close at these low-damping
+iteration limits, so residual replacement alone is not established as a fix.
+
+At high damping, matrix-free/explicit pose-delta difference is `2.09e-17` and
+all trial costs are 126,477.42813448103. Low-damping trial geometry cost/RMS
+exclude 880 invalid observations and must not be called full-objective
+improvements. Reported feasibility means finite and valid geometry, not that
+the PCG residual target passed. Prediction fields distinguish half-cost damped,
+squared-cost damped and squared-cost undamped reductions.
+
+Two serial release runs produced identical numerical reports (16.84 / 16.62 s;
+346,084 / 346,020 KiB peak RSS). These are whole **diagnostic** processes with
+explicit matrices, not production solver speed/memory results. Both existing
+direct and matrix-free CLI regression runs preserved all three model files
+byte-for-byte and the numerical trace against PR #79. No README performance
+claim or 10k promotion follows from this diagnostic.
+
+Next compare test-only PCG on the lower-mirrored explicit Schur against the
+implicit action, with the same input, damping, block-Jacobi preconditioner,
+128/512 limits and true-residual rule. This isolates accumulation from
+convergence/preconditioning before selecting scaling or a different
+preconditioner. Preserve the baseline and do not silently relax its tolerance.

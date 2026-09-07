@@ -87,6 +87,14 @@ PR #79 passed all eight final-head checks (run 34116769919), merged as
 `42bf86f`, and its old branch was removed. The next branch is
 `feat/m8-real-normal-system-oracle`: test-only diagnostics with an explicit
 small-system allocation cap, no production API/default change, and no 10k run.
+The oracle is now implemented (`3e50dc5`) and measured twice with identical
+numerical reports; [evidence](../benchmarks/electro/m8-openloris-real-normal-system-oracle-v1.json).
+At `1e-4`, even the direct step fails the implicit residual target and has 880
+invalid-depth trial observations; PCG 128/512 fail. At `1e10`, PCG converges in
+22 iterations and agrees with direct/explicit. Existing CLI model bytes and
+numerical traces are unchanged. Next isolate accumulation versus convergence
+with explicit lower-Schur PCG using the same preconditioner and stopping rule;
+this is a diagnostic gate, not a tolerance relaxation or a 10k promotion.
 
 ## Historical M7 baseline
 

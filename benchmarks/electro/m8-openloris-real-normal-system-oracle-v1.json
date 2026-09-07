@@ -1,0 +1,470 @@
+{
+  "schema_version": 1,
+  "experiment": "m8-openloris-real-normal-system-oracle-v1",
+  "date": "2026-09-07",
+  "status": "diagnostic_complete_not_quality_or_speed_promotion",
+  "implementation_commit": "3e50dc5ae6a2ac68a66d7b74f7dea3c27df3ca93",
+  "source_sha256": {
+    "examples/compare_rig_bundle_adjustment.rs": "8135b678993880b2e946bfccdc6d98656c7ee2a8dfe531b17fbbd22cde205f2a",
+    "pipelines/slam/src/bundle.rs": "474a5238a43932876ccba24e247d7d849d39df815f8f9df218cf48dcf4e6823c"
+  },
+  "binaries": {
+    "release_example_sha256": "3479143f08c452c3973961d13dc9139cf3a04a77f24d7e6e998e728af8f20354",
+    "release_lib_test_path": "target/release/deps/visloc_slam-033870405c01cac5",
+    "release_lib_test_sha256": "178cc1b64dca7b0099d3bf89ded1e5bb66dbbe0181d30b758b754f1eaf5c566e"
+  },
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1",
+  "input": {
+    "baseline_evidence": "m8-openloris-matrix-free-rig-ba-comparison-v1.json",
+    "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+    "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "combined_sha256": "ecb825c37e2aed47adef6b20e0d362544c56e37238861d5bcf80ed80cb915829",
+    "combined_hash_encoding": "SHA256 over ordered label UTF8, NUL, lowercase hex file SHA256 ASCII, 0xff; labels cameras.txt, images.txt, points3D.txt, rig-manifest",
+    "fixture": "input.fixture",
+    "fixture_sha256": "a71ef3401ea6d75a06f18ded0d475ad48fd929202a64fecaeaa790ee964da1ea",
+    "fixture_bytes": 30587925,
+    "initial_cost": 126510.39875730938,
+    "initial_cost_bits": "4683430141614839853",
+    "poses": 500,
+    "variable_poses": 499,
+    "landmarks": 4716,
+    "observations": 130900,
+    "fixed_pose": 0,
+    "schur_dimension": 2994,
+    "cross_blocks": 130677,
+    "cross_pair_work": 28556575
+  },
+  "audit": {
+    "source_file_and_combined_hashes_independently_verified": true,
+    "fixture_cost_roundtrip_bits_verified": true,
+    "source_cost_matches_previous_printed_precision": true,
+    "all_130900_observation_ids_xy_camera_and_source_track_order_verified": true,
+    "frame_mapping": "image name -> rig manifest (never image ID inference)",
+    "all_4716_landmarks_equal_source": true,
+    "all_sensor_extrinsics_equal_manifest": true,
+    "filtering": false,
+    "ground_truth_in_optimizer": false
+  },
+  "execution": {
+    "rayon_num_threads": 1,
+    "release": true,
+    "ignored_test": "bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle",
+    "test_arguments": [
+      "--exact",
+      "--ignored",
+      "--nocapture"
+    ],
+    "env": [
+      "VISLOC_MATRIX_FREE_ORACLE_FIXTURE=<artifact_root>/input.fixture",
+      "VISLOC_MATRIX_FREE_ORACLE_EXPECTED_SOURCE_SHA256=<input.combined_sha256>"
+    ],
+    "both_runs_exactly_one_test_passed": true,
+    "one_initial_normal_system_per_run": true,
+    "pcg_relative_tolerance": 1e-12,
+    "pcg_absolute_tolerance": 1e-12,
+    "normal_system_reused_for_all_cases": true,
+    "no_production_solver_or_public_api_change": true
+  },
+  "caps": {
+    "variable_pose_blocks": 512,
+    "total_poses": 513,
+    "landmarks": 8192,
+    "observations": 262144,
+    "schur_dimension": 3072,
+    "cross_pair_work": 64000000,
+    "scope": "Explicit dense matrices exist only in bounded cfg(test) oracle; not a production or 10k execution path."
+  },
+  "reports": [
+    {
+      "lambda": 0.0001,
+      "pcg_max_iterations": 128,
+      "pose_blocks": 499,
+      "landmark_count": 4716,
+      "observation_count": 130900,
+      "schur_dimension": 2994,
+      "singular_landmarks": 0,
+      "raw_schur_asymmetry": 2.5,
+      "schur_base_action_norm": 497074506588.21185,
+      "schur_eliminated_action_norm": 496920297300.87494,
+      "schur_arithmetic_scale": 993994803889.0868,
+      "operator_raw_action_error": 0.18766986108875738,
+      "operator_raw_action_relative_error": 1.8880366411824645e-13,
+      "operator_lower_action_error": 0.13604259781144346,
+      "operator_lower_action_relative_error": 1.3686449595024596e-13,
+      "operator_rhs_error": 0,
+      "direct_explicit_pose_error": 1.0238849112498438e-10,
+      "direct_explicit_landmark_error": 1.7809226090588427e-8,
+      "direct_feasibility": {
+        "finite": true,
+        "pose_true_residual": 0.0000027539870190289396,
+        "implicit_pose_true_residual": 0.01848082089914065,
+        "max_landmark_backsub_residual": 0.019034750569830294,
+        "geometry_observation_count": 130020,
+        "geometry_invalid_observations": 880,
+        "geometry_nonpositive_depth": 880,
+        "geometry_cost": 118048.75621912605,
+        "geometry_rms_error": 0.9528523885424591,
+        "geometry_max_error": 21.940591649548654,
+        "geometry_feasible": false,
+        "feasible": false
+      },
+      "explicit_feasibility": {
+        "finite": true,
+        "pose_true_residual": 0.000004919094885193126,
+        "implicit_pose_true_residual": 0.016225321613743043,
+        "max_landmark_backsub_residual": 0.008911541938941529,
+        "geometry_observation_count": 130020,
+        "geometry_invalid_observations": 880,
+        "geometry_nonpositive_depth": 880,
+        "geometry_cost": 118048.75623107003,
+        "geometry_rms_error": 0.9528523885906631,
+        "geometry_max_error": 21.940591652336,
+        "geometry_feasible": false,
+        "feasible": false
+      },
+      "direct_prediction": {
+        "half_damped": 6427.184101361952,
+        "squared_damped": 12854.368202723905,
+        "squared_undamped": 12971.211031021008
+      },
+      "explicit_prediction": {
+        "half_damped": 6427.184101137311,
+        "squared_damped": 12854.368202274622,
+        "squared_undamped": 12971.21103057123
+      },
+      "pcg_status": "failure:MaxIterations { iterations: 128, recursive_norm: 41263.72612053205, residual_norm: 41263.7264460946, target: 7.354716589947665e-7 }",
+      "pcg_iterations": 128,
+      "pcg_true_residual": 41263.7264460946,
+      "pcg_target": 7.354716589947665e-7,
+      "matrix_free_pose_error": null,
+      "matrix_free_landmark_error": null,
+      "matrix_free_feasibility": null,
+      "matrix_free_prediction": null
+    },
+    {
+      "lambda": 0.0001,
+      "pcg_max_iterations": 512,
+      "pose_blocks": 499,
+      "landmark_count": 4716,
+      "observation_count": 130900,
+      "schur_dimension": 2994,
+      "singular_landmarks": 0,
+      "raw_schur_asymmetry": 2.5,
+      "schur_base_action_norm": 497074506588.21185,
+      "schur_eliminated_action_norm": 496920297300.87494,
+      "schur_arithmetic_scale": 993994803889.0868,
+      "operator_raw_action_error": 0.18766986108875738,
+      "operator_raw_action_relative_error": 1.8880366411824645e-13,
+      "operator_lower_action_error": 0.13604259781144346,
+      "operator_lower_action_relative_error": 1.3686449595024596e-13,
+      "operator_rhs_error": 0,
+      "direct_explicit_pose_error": 1.0238849112498438e-10,
+      "direct_explicit_landmark_error": 1.7809226090588427e-8,
+      "direct_feasibility": {
+        "finite": true,
+        "pose_true_residual": 0.0000027539870190289396,
+        "implicit_pose_true_residual": 0.01848082089914065,
+        "max_landmark_backsub_residual": 0.019034750569830294,
+        "geometry_observation_count": 130020,
+        "geometry_invalid_observations": 880,
+        "geometry_nonpositive_depth": 880,
+        "geometry_cost": 118048.75621912605,
+        "geometry_rms_error": 0.9528523885424591,
+        "geometry_max_error": 21.940591649548654,
+        "geometry_feasible": false,
+        "feasible": false
+      },
+      "explicit_feasibility": {
+        "finite": true,
+        "pose_true_residual": 0.000004919094885193126,
+        "implicit_pose_true_residual": 0.016225321613743043,
+        "max_landmark_backsub_residual": 0.008911541938941529,
+        "geometry_observation_count": 130020,
+        "geometry_invalid_observations": 880,
+        "geometry_nonpositive_depth": 880,
+        "geometry_cost": 118048.75623107003,
+        "geometry_rms_error": 0.9528523885906631,
+        "geometry_max_error": 21.940591652336,
+        "geometry_feasible": false,
+        "feasible": false
+      },
+      "direct_prediction": {
+        "half_damped": 6427.184101361952,
+        "squared_damped": 12854.368202723905,
+        "squared_undamped": 12971.211031021008
+      },
+      "explicit_prediction": {
+        "half_damped": 6427.184101137311,
+        "squared_damped": 12854.368202274622,
+        "squared_undamped": 12971.21103057123
+      },
+      "pcg_status": "failure:MaxIterations { iterations: 512, recursive_norm: 318.34634181495545, residual_norm: 318.3459481943091, target: 7.354716589947665e-7 }",
+      "pcg_iterations": 512,
+      "pcg_true_residual": 318.3459481943091,
+      "pcg_target": 7.354716589947665e-7,
+      "matrix_free_pose_error": null,
+      "matrix_free_landmark_error": null,
+      "matrix_free_feasibility": null,
+      "matrix_free_prediction": null
+    },
+    {
+      "lambda": 10000000000,
+      "pcg_max_iterations": 128,
+      "pose_blocks": 499,
+      "landmark_count": 4716,
+      "observation_count": 130900,
+      "schur_dimension": 2994,
+      "singular_landmarks": 0,
+      "raw_schur_asymmetry": 0.46875,
+      "schur_base_action_norm": 497479792884.8528,
+      "schur_eliminated_action_norm": 475496352280.0941,
+      "schur_arithmetic_scale": 972976145164.9469,
+      "operator_raw_action_error": 0.019453946118937877,
+      "operator_raw_action_relative_error": 1.9994268323649274e-14,
+      "operator_lower_action_error": 0.013092988309381425,
+      "operator_lower_action_relative_error": 1.3456638556294507e-14,
+      "operator_rhs_error": 0,
+      "direct_explicit_pose_error": 4.549768906850898e-19,
+      "direct_explicit_landmark_error": 1.5044895800209034e-19,
+      "direct_feasibility": {
+        "finite": true,
+        "pose_true_residual": 3.0228983518717446e-9,
+        "implicit_pose_true_residual": 4.49208180588725e-7,
+        "max_landmark_backsub_residual": 6.548595739904808e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "explicit_feasibility": {
+        "finite": true,
+        "pose_true_residual": 6.4945806084734065e-9,
+        "implicit_pose_true_residual": 1.28800155078187e-7,
+        "max_landmark_backsub_residual": 4.3788258908908216e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "direct_prediction": {
+        "half_damped": 8.7832798335682,
+        "squared_damped": 17.5665596671364,
+        "squared_undamped": 32.97081597530542
+      },
+      "explicit_prediction": {
+        "half_damped": 8.783279833568203,
+        "squared_damped": 17.566559667136406,
+        "squared_undamped": 32.97081597530531
+      },
+      "pcg_status": "success",
+      "pcg_iterations": 22,
+      "pcg_true_residual": 5.639331821966476e-7,
+      "pcg_target": 7.377914999757461e-7,
+      "matrix_free_pose_error": 2.0919877485600968e-17,
+      "matrix_free_landmark_error": 9.871189290876146e-18,
+      "matrix_free_feasibility": {
+        "finite": true,
+        "pose_true_residual": 5.248398232638574e-7,
+        "implicit_pose_true_residual": 5.639331821966476e-7,
+        "max_landmark_backsub_residual": 2.469834459723764e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "matrix_free_prediction": {
+        "half_damped": 8.783279833568196,
+        "squared_damped": 17.566559667136392,
+        "squared_undamped": 32.97081597530536
+      }
+    },
+    {
+      "lambda": 10000000000,
+      "pcg_max_iterations": 512,
+      "pose_blocks": 499,
+      "landmark_count": 4716,
+      "observation_count": 130900,
+      "schur_dimension": 2994,
+      "singular_landmarks": 0,
+      "raw_schur_asymmetry": 0.46875,
+      "schur_base_action_norm": 497479792884.8528,
+      "schur_eliminated_action_norm": 475496352280.0941,
+      "schur_arithmetic_scale": 972976145164.9469,
+      "operator_raw_action_error": 0.019453946118937877,
+      "operator_raw_action_relative_error": 1.9994268323649274e-14,
+      "operator_lower_action_error": 0.013092988309381425,
+      "operator_lower_action_relative_error": 1.3456638556294507e-14,
+      "operator_rhs_error": 0,
+      "direct_explicit_pose_error": 4.549768906850898e-19,
+      "direct_explicit_landmark_error": 1.5044895800209034e-19,
+      "direct_feasibility": {
+        "finite": true,
+        "pose_true_residual": 3.0228983518717446e-9,
+        "implicit_pose_true_residual": 4.49208180588725e-7,
+        "max_landmark_backsub_residual": 6.548595739904808e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "explicit_feasibility": {
+        "finite": true,
+        "pose_true_residual": 6.4945806084734065e-9,
+        "implicit_pose_true_residual": 1.28800155078187e-7,
+        "max_landmark_backsub_residual": 4.3788258908908216e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "direct_prediction": {
+        "half_damped": 8.7832798335682,
+        "squared_damped": 17.5665596671364,
+        "squared_undamped": 32.97081597530542
+      },
+      "explicit_prediction": {
+        "half_damped": 8.783279833568203,
+        "squared_damped": 17.566559667136406,
+        "squared_undamped": 32.97081597530531
+      },
+      "pcg_status": "success",
+      "pcg_iterations": 22,
+      "pcg_true_residual": 5.639331821966476e-7,
+      "pcg_target": 7.377914999757461e-7,
+      "matrix_free_pose_error": 2.0919877485600968e-17,
+      "matrix_free_landmark_error": 9.871189290876146e-18,
+      "matrix_free_feasibility": {
+        "finite": true,
+        "pose_true_residual": 5.248398232638574e-7,
+        "implicit_pose_true_residual": 5.639331821966476e-7,
+        "max_landmark_backsub_residual": 2.469834459723764e-7,
+        "geometry_observation_count": 130900,
+        "geometry_invalid_observations": 0,
+        "geometry_nonpositive_depth": 0,
+        "geometry_cost": 126477.42813448103,
+        "geometry_rms_error": 0.9829619111005349,
+        "geometry_max_error": 3.9989838349986138,
+        "geometry_feasible": true,
+        "feasible": true
+      },
+      "matrix_free_prediction": {
+        "half_damped": 8.783279833568196,
+        "squared_damped": 17.566559667136392,
+        "squared_undamped": 32.97081597530536
+      }
+    }
+  ],
+  "repeats": {
+    "numerical_report_lines_identical": true,
+    "wall_seconds": [
+      16.84,
+      16.62
+    ],
+    "peak_rss_kib": [
+      346084,
+      346020
+    ],
+    "scope": "Whole diagnostic test process, including explicit matrix/factorization. Shared warm host; not a solver speed or production memory comparison.",
+    "files": {
+      "oracle-1.log": {
+        "sha256": "1d6677eb5774d35bbb1d3bc3ad3ec13db985fe5ca396e69ebdd90aaa0f52a0c8",
+        "bytes": 10907,
+        "text": null
+      },
+      "oracle-1.time": {
+        "sha256": "f8b9350ed1af8db34ef376bca592383facda524737d1ef719ad01ee3ba8a920c",
+        "bytes": 888,
+        "text": "\tCommand being timed: \"target/release/deps/visloc_slam-033870405c01cac5 bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle --exact --ignored --nocapture\"\n\tUser time (seconds): 16.60\n\tSystem time (seconds): 0.23\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:16.84\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 346084\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 141173\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 101\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 24\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      "oracle-2.log": {
+        "sha256": "187dc8593263fae08e0b99bdc4ced43a949061ac3e95d1de1b703702498b0d3d",
+        "bytes": 10907,
+        "text": null
+      },
+      "oracle-2.time": {
+        "sha256": "18a5d460239b6cebf0a54182449947c326511e819ed7f7fbd316d3513f4c5164",
+        "bytes": 888,
+        "text": "\tCommand being timed: \"target/release/deps/visloc_slam-033870405c01cac5 bundle::matrix_free_real_oracle_tests::ignored_real_fixture_runs_bounded_damping_oracle --exact --ignored --nocapture\"\n\tUser time (seconds): 16.40\n\tSystem time (seconds): 0.21\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:16.62\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 346020\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 141171\n\tVoluntary context switches: 3\n\tInvoluntary context switches: 106\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 24\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      }
+    }
+  },
+  "legacy_regression": [
+    {
+      "arm": "direct-regression",
+      "baseline": "direct-serial-1",
+      "all_three_model_files_byte_identical": true,
+      "numerical_trace_identical_excluding_time_and_output_path": true,
+      "model_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "7b5445164e61442b6e1c60128ac4a72b5d192dc550b09b4fb5f076c623659e06",
+        "points3D.txt": "ee82a3ad583b96179a8310f6e75224125ef83eda60ceab481304c59a7e43b8f5"
+      },
+      "summary": "solver=direct initial_cost=1.265103987573094e5 final_cost=1.174960330739301e5 lm_iterations=20 converged=false source_images=1000 source_frames=500 source_landmarks=4716 source_observations=130900 fixed_pose=0 fixed_landmarks=0 pcg_max_iterations=128 pcg_tolerance=1.0e-12 solver_seconds=44.891018 total_seconds=45.127503 out=/home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1/direct-regression"
+    },
+    {
+      "arm": "matrix-free-regression",
+      "baseline": "matrix-free-128-serial-1",
+      "all_three_model_files_byte_identical": true,
+      "numerical_trace_identical_excluding_time_and_output_path": true,
+      "model_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "95fb935b9e9eb4ad61bfea1d7ab94ca4ecf08521b455619944c31cd4beafe284",
+        "points3D.txt": "f69b84ef240e2a1eb5167e8df71941b9f3f154d20ef21870f610303e2ef9f8fc"
+      },
+      "summary": "solver=matrix-free initial_cost=1.265103987573094e5 final_cost=1.264190824771856e5 lm_iterations=20 converged=false source_images=1000 source_frames=500 source_landmarks=4716 source_observations=130900 fixed_pose=0 fixed_landmarks=0 pcg_max_iterations=128 pcg_tolerance=1.0e-12 solver_seconds=6.357005 total_seconds=6.581804 out=/home/sasaki/datasets/openloris/corridor1-1-m8-real-normal-system-oracle-v1/matrix-free-regression"
+    }
+  ],
+  "interpretation": [
+    "At lambda=1e-4 sparse direct and explicit lower-mirrored Schur steps agree closely, but neither meets the implicit true-residual target. Direct lower residual also exceeds that target.",
+    "Raw/lower action errors divided by unreduced arithmetic scale are not relative errors of final Schur action or solution accuracy. One deterministic probe is not proof of operator correctness.",
+    "Low-lambda PCG fails at both iteration caps. Recursive/true residuals are close at those endpoints; residual replacement alone is not established as the remedy.",
+    "The low-lambda direct/explicit trials have 880 nonpositive-depth observations. Their geometry cost and RMS cover only valid observations and cannot be treated as full-objective improvements.",
+    "At lambda=1e10 both PCG caps stop at 22 iterations and agree with direct/explicit steps and full trial cost. This does not prove agreement across the LM trajectory or at 10k.",
+    "Feasibility flags mean finite and valid geometry, not satisfaction of the PCG residual target.",
+    "No threshold relaxation, fallback, filtering, scaling, README performance promotion or 10k run was performed."
+  ],
+  "next_gate": "Test-only explicit lower-Schur PCG versus implicit PCG on the same fixture, damping, block-Jacobi preconditioner, iteration caps and true-residual rule; distinguish convergence/preconditioning from action accumulation before changing production policy.",
+  "validation": {
+  "root_library_oracle_tests": {
+    "passed": 6,
+    "ignored_real_fixture": 1
+  },
+  "root_example_tests_passed": 12,
+  "root_python_tests_passed": 46,
+  "root_library_and_example_clippy_warnings_denied": true,
+  "root_cargo_fmt_check": true,
+  "docs_links": true,
+  "registry_files_validated": 189,
+  "generated_benchmark_docs_current": true,
+  "git_diff_check": true,
+  "agent_reported_release_builds_passed": true
+},
+  "metric_conventions": {
+  "raw_schur_asymmetry": "Maximum absolute off-diagonal element difference |S_ij-S_ji|; not a Frobenius or spectral norm.",
+  "delta_errors": "Euclidean norms over concatenated deltas; pose combines rotation and translation coordinates, not a metre-only physical pose error.",
+  "geometry_rms_error": "sqrt(sum(valid observation squared pixel residual)/valid observation count); not arithmetic mean reprojection error.",
+  "action_relative_errors": "Absolute action difference norm divided by sum of base-action norm and per-landmark eliminated-action norms, not by final Schur-action norm.",
+  "pcg_true_residual": "Euclidean norm of rhs minus implicit action; lower-Schur residual separately reported.",
+  "initial_cost_bits": "Decimal u64 string to avoid JSON consumer integer rounding."
+}
+}
