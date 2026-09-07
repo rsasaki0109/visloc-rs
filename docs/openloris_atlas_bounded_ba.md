@@ -1286,3 +1286,81 @@ failed main preconditioner block using bounded diagnostics (slot/frame mapping,
 actual solve damping, 6x6 block spectrum and local subtraction norms), without
 dropping observations, adding a dense global matrix or claiming a cause from
 support/depth range alone.
+
+### Local Schur-block diagnostic contract (2026-09-08)
+
+PR #83 merged as `a71f40a` after eight final-head CI checks and independent
+artifact review. Continue on `feat/m8-local-schur-block-diagnostic` with an
+explicit, default-off diagnostic of variable-pose slot 191 (source frame 192).
+Keep the actual solver arithmetic and acceptance unchanged. Record only this
+6x6 block, its damped pose diagonal, local elimination norms, finite/asymmetry
+checks and the largest contributing landmark's 3x3 block/inverse and 6x3 cross
+block. No full normal-system clone, global dense matrix or history bank.
+Label actual solve damping and the chosen triangular interpretation used for
+spectral checks; never repair a block in the diagnostic path.
+
+Independent source-image geometry inspection finds 417 incident tracks and
+614 observations at frame 192. Point 13921 has two observations (image 386,
+keypoint 80; image 390, keypoint 89), with target depth about 1.82e-6 m versus
+0.431 m for the next closest point. Its two camera centers are 0.319 mm apart.
+These source-image calculations are not bit-identical to production rig-normal
+assembly; the actual block dump must establish the numerical effect. Do not
+remove the point solely because it is near a camera.
+
+Choose the next opt-in numerical experiment from the measured failure, not
+from another tolerance sweep. Distinguish preconditioning, damping and coordinate
+scaling: Ceres documents camera-block `JACOBI` separately from `SCHUR_JACOBI`,
+uses a diagonal metric for its LM trust region, and supports Jacobian-column
+scaling. These are different mechanisms, not interchangeable settings.
+[Ceres solver reference](https://ceres-solver.readthedocs.io/latest/nnls_solving.html).
+Changing the damping metric would be a separately labeled behavioral policy,
+not an exact-output coordinate rewrite. Any candidate must earn 1k/actual-atlas
+quality, true-residual, resource and repeatability gates; the user's final
+COLMAP mapper/native-E2E and scale requirements stay unchanged.
+
+### Local Schur-block measurements (2026-09-08)
+
+[Measured evidence](../benchmarks/electro/m8-openloris-local-schur-block-diagnostic-v1.json)
+uses `bd3291a`. Two diagnostic main-component runs have identical 18-line
+block dumps, final model files and LM/PCG/restart traces. The main OFF control
+and the fresh 1k OFF control also match PR #83's corresponding outputs and
+numerical traces. Main ON wall times are 74.11/73.77 s, OFF 74.50 s; peak RSS
+is 1,080,176/1,080,324/1,080,000 KiB. Shared-host timings are not evidence of
+a speed improvement from diagnostics. All runs retain the previous model.
+
+Point 13921 is the largest local elimination contributor at every solve
+damping. At initial damping, the damped pose block norm is 4.8575e16 and its
+Schur block norm 1.4762e12. The block's asymmetry is 4.01e6, large compared
+with its weakest eigenvalues despite being small compared with its norm.
+
+| Actual solve damping | Selected block lower-triangle minimum eigenvalue | Full solve result |
+|---:|---:|---|
+| 1e-4 | -1.037e7 | Non-SPD preconditioner |
+| 1e4 | -7.868e5 | Non-SPD preconditioner |
+| 1e5 | 9.302e6 | Nonpositive PCG curvature |
+| 1e7 | 1.723e7 | PCG iteration cap |
+| 1e11 (LM15) | 1.000e11 | Only accepted LM update |
+
+An independent 80-digit Decimal calculation on the round-trip binary64 dump
+confirms a negative lower-triangle LDL pivot at the initial damping. Correcting
+only the largest contributor's stored inverse coefficient error gives a local
+correction proxy of norm 3.34495e7 and positive proxy pivots there. However,
+the proxy remains indefinite at damping 1, 100 and 1000. This is not a full
+high-precision Schur reconstruction: assembly and product/subtraction rounding
+remain. Neither inverse replacement alone nor selected-block SPD is sufficient
+evidence that the global solver will converge. Raw coefficients and model
+coordinates remain in the external audit artifact, with its digest recorded.
+
+The next candidate is explicit column equilibration plus identity LM damping
+in scaled coordinates: choose positive, bounded `d_j` from the original
+normal diagonal, let `T = diag(1/sqrt(d_j))`, solve
+`(T H T + lambda I) delta_hat = -T b`, and return `delta = T delta_hat`.
+This changes physical damping to `lambda diag(d)`, so it is a behavioral
+policy, not an exact-output rewrite of the old `lambda I` solve. Transform
+pose, point, cross and RHS blocks consistently in the iteration-local normal
+system; retain only linear-size scale vectors and restore physical step units
+before LM acceptance/convergence checks. Specify finite clamping bounds and
+label scaled PCG residual units. Small full-normal tests precede fixed-budget
+1k and both-component atlas A/B; observations, calibration, depth gates and
+the final COLMAP/mapper/E2E requirements are unchanged. This policy is not
+implemented or promoted by the diagnostic result.
