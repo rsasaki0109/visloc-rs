@@ -959,3 +959,13 @@ is a reference, not a dependency added here. Our inference is that such a
 representation may merit a bounded experiment if accumulation is limiting;
 its reported BAL results do not prove a win for this calibrated rig or justify
 replacing the current linear-storage design without a track-length memory audit.
+
+An independent frozen-fixture count illustrates that constraint: storing a
+naive dense `2 * observation_count` by `6 * unique_free_pose_count` camera
+Jacobian for every landmark would require 232,363,908 f64 entries,
+1,858,911,264 bytes (1.731 GiB), already at 1k and before damping, RHS or
+workspace. Same-frame sensor observations share pose columns; fixed pose 0
+is excluded from columns but its observation rows remain. Maximum track length
+is 893 observations. This is a hypothetical storage warning, **not** measured
+RootBA memory or a lower bound for implicit/streamed QR. Do not select that
+naive layout for the 10k implementation.
