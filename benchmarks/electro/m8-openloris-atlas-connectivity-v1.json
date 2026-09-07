@@ -36,5 +36,18 @@
     "auditor_tests_passed": 13,
     "supported_but_disconnected_fixture_test": true
   },
+  "pose_boundary_diagnostic": {
+    "model": "atlas_recovery.main_model above",
+    "sensor": "Manifest reference sensor cam1 (identity sensor-from-rig)",
+    "frame_end_range": [1951, 2049],
+    "median_adjacent_center_step_m": 0.027915125234510067,
+    "adjacent_steps": [
+      {"from": 1997, "to": 1998, "center_m": 0.2609062903030281, "rotation_deg": 4.832581870983271},
+      {"from": 1999, "to": 2000, "center_m": 0.8618493534440352, "rotation_deg": 1.6588763952468872},
+      {"from": 2022, "to": 2023, "center_m": 0.9000796974438824, "rotation_deg": 1.0744514825908493}
+    ],
+    "gt_used": false,
+    "interpretation": "Pose discontinuities coincide with the lost connectivity boundary and a nearby interval; source geometry and pose-owner provenance must establish cause before any correction is selected."
+  },
   "decision": "All 4,999 atlas frames have observation support, but two output files do not prove the same landmark connectivity as COLMAP. Diagnose source tracks and integration rejection across frame 1999/2000 before further BA policy changes. Do not change the scoring alignment or relax the target to hide this split."
 }
