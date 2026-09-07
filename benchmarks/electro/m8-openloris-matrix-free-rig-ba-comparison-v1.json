@@ -5,6 +5,9 @@
   "purpose": "Same-input post-mapping direct versus implicit BA diagnostic; no mapper/native E2E or 10k performance claim",
   "branch": "feat/m8-matrix-free-rig-ba-comparison",
   "pull_request": "https://github.com/rsasaki0109/visloc-rs/pull/79",
+  "merge_commit": "42bf86f955fa5ff681f0272faeb887cfbb87df65",
+  "merged_at": "2026-09-07T11:32:55Z",
+  "old_local_and_remote_branch_removed": true,
   "implementation_commit": "c810be96dfd08846fcf5da0062fcd28e0c1ce84f",
   "source": "examples/compare_rig_bundle_adjustment.rs",
   "source_sha256": "196dcd293e42bf036f30894efa75969418061320d7da5d3eddf3d0b57dade23c",
@@ -756,7 +759,11 @@
     "implementation_ci_run": 34116147600,
     "implementation_ci_all_eight_checks_passed": true,
     "implementation_ci_rust_seconds": 207,
-    "ci_status": "implementation CI passed; pending final evidence-head CI"
+    "final_ci_run": 34116769919,
+    "final_ci_head": "5f9899099dcd26513aa7b184fb664c6f0a888481",
+    "final_ci_all_eight_checks_passed": true,
+    "final_ci_rust_seconds": 243,
+    "ci_status": "final-head CI passed; merged and old branch removed"
   },
   "build": {
     "command": "cargo build --release --example compare_rig_bundle_adjustment",
