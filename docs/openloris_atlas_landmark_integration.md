@@ -59,6 +59,25 @@ trajectory-accuracy gate; bounded observation-based refinement is still needed.
 
 ## Reproduce
 
+### Unsupported-frame recovery pilot
+
+The default-off `--recover-zero-support-frames` pilot recovered frame 4493
+without relaxing triangulation gates. Excluding the target frame leaves 12
+valid anchor points; deterministic calibrated PnP accepts 10 inliers. Final
+retriangulation retains 10 target landmarks and adds 124 total observations.
+Only the target frame's two sensor poses change. The boundary centre step
+becomes 0.057975 m, and all 4,494 main-component rig frames regain support.
+
+Using the unchanged tail component gives 4,999 supported rig frames and 9,997
+supported individual images across 9,998 pose rows. RMSE/p95 improve only to
+0.391465/0.643175 m, still above COLMAP's frozen limits. Main-component mean
+reprojection is 0.643293 px, with valid bidirectional references and no
+nonpositive-depth observations. Integration/recovery alone took 10.69 s and
+561,888 KiB peak RSS in this pilot; this is not a complete mapper speed claim.
+See [recovery evidence](../benchmarks/electro/m8-openloris-atlas-recovery-v1.json).
+
+### Baseline command
+
 ```bash
 cargo build --release --example integrate_rig_atlas_landmarks
 atlas_root=/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1

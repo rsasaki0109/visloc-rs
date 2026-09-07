@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "status": "rig_support_recovered_trajectory_gate_still_open",
+  "baseline_evidence": "m8-openloris-atlas-fixed-pose-v1.json",
+  "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/recovery-v1",
+  "code": {
+    "example_source_sha256": "7099eeafe963b3099d83c23df8f8959d7a2b68e2046fa56f087d3f335fb504dc",
+    "archived_release_binary_sha256": "3769695f4b3192d211c16ae990a3a333e3ea093533219ab6ebd893b14ed434c5",
+    "uncommitted_at_measurement": true
+  },
+  "policy": {
+    "flag": "--recover-zero-support-frames",
+    "default_off": true,
+    "anchor_frames": "Only initially observation-supported frames; exclude every initially unsupported frame",
+    "pnp_iterations": 4096,
+    "pnp_seed": 7,
+    "pnp_threshold_px": 4.0,
+    "minimum_final_target_landmarks": 6,
+    "minimum_final_target_observations": 6,
+    "triangulation_gates_unchanged": true,
+    "fixed_sensor_extrinsics": true,
+    "gt_used_for_mapping": false
+  },
+  "recovery": {
+    "frame_id": 4493,
+    "candidate_tracks": 14,
+    "valid_leave_target_out_anchors": 12,
+    "pnp_inliers": 10,
+    "pnp_mean_px_rounded": 1.118227,
+    "pnp_max_px_rounded": 2.274841,
+    "added_landmarks": 10,
+    "added_observations": 124,
+    "target_landmarks": 10,
+    "target_observations": 10,
+    "previous_frame_center_step_m": 0.05797521929764684,
+    "changed_pose_names": ["cam1_008986.png", "cam2_008987.png"],
+    "other_main_component_poses_byte_identical": true
+  },
+  "main_component": {
+    "pose_rows": 8988,
+    "supported_images": 8987,
+    "supported_rig_frames": 4494,
+    "landmarks": 319147,
+    "observations": 1327696,
+    "independent_mean_reprojection_px": 0.643292944161992,
+    "independent_max_reprojection_px": 3.9997751583746717,
+    "bidirectional_references_valid": true,
+    "nonpositive_depth_observations": 0,
+    "same_image_conflicting_tracks": 0,
+    "wall_s": 10.69,
+    "peak_rss_kib": 561888,
+    "images_sha256": "cbdd94ac8072f2328eabed7b29c1de99ef13d4cbdf2e2bddc237a7d048b28997",
+    "points3D_sha256": "e38c35ce5b5ea20811d993d024752e540263667759b6fbecf68b66e1a131b077"
+  },
+  "aggregate_score": {
+    "tail_model": "Reused unchanged fixed-pose-v1/component-001",
+    "pose_rows": 9998,
+    "supported_images": 9997,
+    "supported_rig_frames": 4999,
+    "component_weighted_rmse_m": 0.3914648883821796,
+    "component_weighted_p95_m": 0.6431750449115206,
+    "colmap_rmse_gate_m": 0.3843065335437528,
+    "colmap_p95_gate_m": 0.6386693943260212,
+    "trajectory_gate_pass": false
+  },
+  "limitations": [
+    "Single integration/recovery run, not mapper-only or native E2E performance evidence",
+    "Follow-up acceptance tests and allocation improvements are still in progress",
+    "Tail component reused, not rerun with the recovery flag in this measurement"
+  ]
+}
