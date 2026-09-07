@@ -94,6 +94,14 @@
     "candidate_lookup": "Existing observation index ranges for target images, not a full track scan per frame",
     "pose_update": "Sparse pose overrides applied in place; no whole image/keypoint clone"
   },
+  "integration": {
+    "pull_request": "https://github.com/rsasaki0109/visloc-rs/pull/71",
+    "ci_run": "https://github.com/rsasaki0109/visloc-rs/actions/runs/34083759411",
+    "ci_head": "65f7aec51494dd7a4256eed82b524fb553e7bb0b",
+    "checks_passed": 8,
+    "merged_at": "2026-09-07T04:42:15Z",
+    "squash_commit": "4896e9d663c6394a3452090b96548c75e573baaa"
+  },
   "limitations": [
     "Integration/recovery measurements are not mapper-only or native E2E performance evidence",
     "Trajectory gates remain open; bounded observation-based BA is not implemented in this evidence"
