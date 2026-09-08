@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Tier再検証: PR #100はCI9項目通過後 `d72bfdd` へmerge、旧branch整理済み。
+> 現branch `test/m8-rig-ann-tier-validation`。rig-aware dense ANN 2.5kでLegacy/policy2反復は過去モデルbytes一致。
+> 全2500画像/1250frame、独立GT RMSE/p95 0.133927/0.237364 m。各211 BAはすべて直接法、QR0。
+> mapper36.36/36.55 s対Legacy35.53 s、速度改善主張なし。証跡 `m8-openloris-bounded-native-2500-ann-v1.json`。
+> 次は5k入力契約の確認。独立したdense5kスナップショットはまだ見つからず、10kのsliceを使う場合は
+> mapper-only派生入力と明記し、5k native E2Eとは区別する。全goal未達。
+
 > 境界PnP: PR #99はCI9項目通過後 `28bf0e2` へmerge、旧branch整理済み。
 > 現branch `diag/m8-boundary-pnp`。build `015ab1b` の診断モデルはLegacy bytes一致。
 > frame612/613は25/29対応・2sensorで推定失敗。DLT候補26/11、central report各2は得られるが、
