@@ -3315,19 +3315,27 @@ impl BundleAdjustment {
                 backend,
                 BaSolveBackend::MatrixFree(_) | BaSolveBackend::MatrixFreeColumnScaled(_)
             ) || config.linear_solver == LinearSolver::Sparse;
-            let mut system = build_normal_equations(
-                self,
-                &intrinsics,
-                &pose_index,
-                &landmark_index,
-                &velocity_index,
-                &bias_index,
-                &kernel,
-                gnc_weights,
-                config.parallel,
-                prefer_pose_blocks,
-            );
-            constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, &mut system);
+            let use_landmark_qr = false;
+            #[cfg(test)]
+            let use_landmark_qr = use_landmark_qr
+                || matches!(&backend, BaSolveBackend::MatrixFree(runtime) if runtime.landmark_qr);
+            let mut system = (!use_landmark_qr).then(|| {
+                build_normal_equations(
+                    self,
+                    &intrinsics,
+                    &pose_index,
+                    &landmark_index,
+                    &velocity_index,
+                    &bias_index,
+                    &kernel,
+                    gnc_weights,
+                    config.parallel,
+                    prefer_pose_blocks,
+                )
+            });
+            if let Some(system) = &mut system {
+                constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, system);
+            }
             log_process_memory("ba-after-normal-equations");
 
             // Build the reduced (Schur-complement) camera system. λ is added
@@ -3347,7 +3355,7 @@ impl BundleAdjustment {
 
             let solve_result = match backend {
                 BaSolveBackend::Legacy => solve_step(
-                    &mut system,
+                    system.as_mut().expect("legacy normal system"),
                     pose_index.len(),
                     landmark_index.len(),
                     velocity_index.len(),
@@ -3362,7 +3370,9 @@ impl BundleAdjustment {
                 | BaSolveBackend::MatrixFreeColumnScaled(runtime) => {
                     let column_scaled = runtime.column_scaling_iterations.is_some();
                     let scaling_result = if column_scaled {
-                        match column_equilibrate_normal_system(&mut system) {
+                        match column_equilibrate_normal_system(
+                            system.as_mut().expect("scaled normal system"),
+                        ) {
                             Ok(mut state) => {
                                 state.stats.iteration = iteration;
                                 runtime
@@ -3391,8 +3401,16 @@ impl BundleAdjustment {
                     );
                     let solve_result = match scaling_result {
                         Err(error) => Err(error),
+                        #[cfg(test)]
+                        Ok(_) if runtime.landmark_qr => solve_rig_qr_step(
+                            self,
+                            config,
+                            lambda,
+                            runtime.options,
+                            &landmark_index,
+                        ),
                         Ok(scaling_state) => solve_matrix_free_step(
-                            &system,
+                            system.as_ref().expect("Schur normal system"),
                             lambda,
                             runtime.options,
                             runtime.restart_limit,
@@ -5650,6 +5668,8 @@ enum BaSolveBackend {
 }
 
 struct MatrixFreeRuntime {
+    #[cfg(test)]
+    landmark_qr: bool,
     cluster8: bool,
     options: MatrixFreeBaOptions,
     iterations: Vec<MatrixFreeBaIterationStats>,
@@ -5664,6 +5684,8 @@ struct MatrixFreeRuntime {
 impl MatrixFreeRuntime {
     fn new(options: MatrixFreeBaOptions) -> Self {
         Self {
+            #[cfg(test)]
+            landmark_qr: false,
             cluster8: false,
             options,
             iterations: Vec::new(),
@@ -5678,6 +5700,8 @@ impl MatrixFreeRuntime {
 
     fn with_restart(options: MatrixFreeBaOptions, restart_limit: usize) -> Self {
         Self {
+            #[cfg(test)]
+            landmark_qr: false,
             cluster8: false,
             options,
             iterations: Vec::new(),
@@ -5692,6 +5716,8 @@ impl MatrixFreeRuntime {
 
     fn with_column_scaling(options: MatrixFreeBaOptions) -> Self {
         Self {
+            #[cfg(test)]
+            landmark_qr: false,
             cluster8: false,
             options,
             iterations: Vec::new(),
@@ -5706,6 +5732,8 @@ impl MatrixFreeRuntime {
 
     fn with_column_scaling_adaptive(options: MatrixFreeBaOptions) -> Self {
         Self {
+            #[cfg(test)]
+            landmark_qr: false,
             cluster8: false,
             options,
             iterations: Vec::new(),
@@ -8384,6 +8412,72 @@ fn general_stereo_residual_jacobians(
     Some((residual, j_pose, j_landmark))
 }
 
+#[cfg(test)]
+#[allow(clippy::result_large_err)] // Same diagnostic payload as the existing linear-step boundary.
+fn solve_rig_qr_step(
+    ba: &BundleAdjustment,
+    config: &BaConfig,
+    lambda: f64,
+    options: MatrixFreeBaOptions,
+    landmark_index: &BTreeMap<u64, usize>,
+) -> Result<MatrixFreeStepOutcome, MatrixFreeStepError> {
+    let failure = |diagnostic: String| MatrixFreeStepError {
+        diagnostic,
+        pcg_iterations: None,
+        pcg_residual_norm: None,
+        pcg_target: None,
+        restart_diagnostics: None,
+    };
+    let qr = RigQrLinearization::new(ba, config, lambda).map_err(failure)?;
+    let pcg = qr
+        .solve(implicit_schur::PcgOptions {
+            max_iterations: options.max_pcg_iterations,
+            relative_tolerance: options.pcg_relative_tolerance,
+            absolute_tolerance: options.pcg_absolute_tolerance,
+        })
+        .map_err(|error| {
+            let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
+            MatrixFreeStepError {
+                diagnostic: format!("{error:?}"),
+                pcg_iterations,
+                pcg_residual_norm,
+                pcg_target,
+                restart_diagnostics: None,
+            }
+        })?;
+    // Unobserved variable landmarks have only damping and hence a zero step.
+    // The caller's complete layout is authoritative, not the observed-track list.
+    let mut delta_landmarks = DVector::zeros(3 * landmark_index.len());
+    let mut scratch = Vec::new();
+    for (id, block) in &qr.blocks {
+        if let Some(delta) = block
+            .back_substitute(pcg.solution.as_slice(), &mut scratch)
+            .map_err(|e| failure(e.into()))?
+        {
+            let slot = landmark_index
+                .get(id)
+                .ok_or_else(|| failure("QR landmark layout mismatch".into()))?;
+            delta_landmarks
+                .fixed_rows_mut::<3>(slot * 3)
+                .copy_from(&Vector3::from(delta));
+        }
+    }
+    Ok(MatrixFreeStepOutcome {
+        delta_poses: pcg.solution,
+        delta_landmarks,
+        diagnostics: MatrixFreeBaIterationStats {
+            iteration: 0,
+            pcg_iterations: Some(pcg.iterations),
+            pcg_residual_norm: Some(pcg.residual_norm),
+            pcg_target: Some(pcg.target),
+            pcg_failure: None,
+        },
+        restart_diagnostics: None,
+        adaptive_prediction: None,
+        quality: None,
+    })
+}
+
 /// Staged native adapter: reuses the actual rig Jacobians and robust kernel.
 /// It is compiled only in tests until solver/preconditioner integration is ready.
 #[cfg(test)]
@@ -10952,6 +11046,56 @@ mod matrix_free_ba_api_tests {
             }
         }
         assert_eq!(rig, original);
+        let mut nonlinear_config = matrix_free_config();
+        nonlinear_config.initial_lambda = Some(100.0);
+        nonlinear_config.max_iterations = 3;
+        let mut a = rig.clone();
+        let mut b = rig.clone();
+        // A landmark absent from every observation must retain its XYZ.
+        a.landmarks.insert(u64::MAX, Point3::new(1.0, 2.0, 3.0));
+        b.landmarks = a.landmarks.clone();
+        let run = |problem: &mut BundleAdjustment| {
+            let mut runtime = MatrixFreeRuntime::new(MatrixFreeBaOptions::default());
+            runtime.landmark_qr = true;
+            problem
+                .run_matrix_free_backend(&nonlinear_config, runtime)
+                .unwrap()
+        };
+        let (result, runtime) = run(&mut a);
+        let (repeat, repeated_runtime) = run(&mut b);
+        assert!(result.final_cost < result.initial_cost);
+        assert_eq!(result.final_cost, repeat.final_cost);
+        assert_eq!(a, b);
+        assert_eq!(runtime.iterations, repeated_runtime.iterations);
+        assert!(runtime.iterations.iter().any(|s| s.pcg_failure.is_none()));
+        assert_eq!(a.poses[&0], rig.poses[&0]);
+        assert_eq!(
+            a.poses[&1].world_to_camera.rotation,
+            rig.poses[&1].world_to_camera.rotation
+        );
+        assert_eq!(a.landmarks[&0], rig.landmarks[&0]);
+        assert_eq!(a.landmarks[&u64::MAX], Point3::new(1.0, 2.0, 3.0));
+        assert_eq!(a.rig_observations, rig.rig_observations);
+        let mut failed = rig.clone();
+        let mut runtime = MatrixFreeRuntime::new(MatrixFreeBaOptions {
+            max_pcg_iterations: 1,
+            pcg_relative_tolerance: 0.0,
+            pcg_absolute_tolerance: 1e-30,
+        });
+        runtime.landmark_qr = true;
+        let (rejected, runtime) = failed
+            .run_matrix_free_backend(&nonlinear_config, runtime)
+            .unwrap();
+        assert_eq!(failed, rig);
+        assert_eq!(runtime.iterations.len(), 3);
+        assert!(runtime
+            .iterations
+            .iter()
+            .all(|s| s.pcg_failure.is_some() && s.pcg_iterations == Some(1)));
+        assert!(rejected
+            .iterations
+            .windows(2)
+            .all(|s| s[0].lambda < s[1].lambda));
         let config = matrix_free_config();
         assert!(RigQrLinearization::new(&rig, &config, 0.0).is_err());
         rig.rig_observations[0].landmark_id = u64::MAX;

@@ -75,7 +75,18 @@ The adapter now connects to the existing test PCG recurrence with the unchanged
 128-iteration budget and relative/absolute tolerances of 1e-12. The rig fixture
 checks independently recomputed true residuals, agreement with the direct step,
 exact repeated results and failure with a zero iteration budget; no direct
-fallback is installed. This remains a test solver, not nonlinear integration.
+fallback is installed. This remains a test-only solver.
+
+The shared LM loop now has a test-only QR dispatch. It skips normal-equation
+assembly entirely for that arm, uses the caller's complete landmark layout
+when recovering point updates, and then uses unchanged step acceptance,
+rollback and lambda updates. Unobserved variable landmarks receive zero
+updates. The fixture runs three nonlinear iterations twice and checks cost
+decrease, exact repeatability, fixed pose/rotation/point, an unobserved point
+and observation preservation. A one-iteration PCG budget with a deliberately
+unattainable residual target checks unchanged state and three recorded LM
+failures with increasing damping. This exercises the actual LM loop, but
+does not provide a production/native selector or real-data quality evidence.
 
 Its block-Jacobi preconditioner retains one inverse 6×6 block per variable pose
 (36P scalars). Construction accumulates pose diagonals and one landmark's
