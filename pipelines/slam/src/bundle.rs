@@ -8384,6 +8384,122 @@ fn general_stereo_residual_jacobians(
     Some((residual, j_pose, j_landmark))
 }
 
+/// Staged native adapter: reuses the actual rig Jacobians and robust kernel.
+/// It is compiled only in tests until solver/preconditioner integration is ready.
+#[cfg(test)]
+struct RigQrLinearization {
+    pose_index: BTreeMap<u64, usize>,
+    blocks: Vec<(u64, crate::landmark_qr::ReducedLandmark)>,
+    pose_diagonal: Vec<f64>,
+    observation_rows: usize,
+}
+
+#[cfg(test)]
+impl RigQrLinearization {
+    fn new(ba: &BundleAdjustment, config: &BaConfig, lambda: f64) -> Result<Self, String> {
+        ba.validate_matrix_free_entry(config, MatrixFreeBaOptions::default())
+            .map_err(|e| e.to_string())?;
+        if ba.rig_observations.is_empty()
+            || !ba.observations.is_empty()
+            || !ba.stereo_observations.is_empty()
+            || !ba.general_stereo_observations.is_empty()
+            || !lambda.is_finite()
+            || lambda <= 0.0
+        {
+            return Err("QR adapter requires pure rig observations and positive damping".into());
+        }
+        let pose_index: BTreeMap<_, _> = ba
+            .poses
+            .keys()
+            .filter(|id| !ba.fixed_poses.contains(id))
+            .enumerate()
+            .map(|(slot, id)| (*id, slot))
+            .collect();
+        let mut pose_diagonal = vec![lambda; pose_index.len() * 6];
+        for id in &ba.fixed_pose_rotations {
+            if let Some(slot) = pose_index.get(id) {
+                pose_diagonal[slot * 6 + 3..slot * 6 + 6].fill(1.0 + lambda);
+            }
+        }
+        let mut rows: BTreeMap<u64, Vec<crate::landmark_qr::WeightedRow>> = BTreeMap::new();
+        for obs in &ba.rig_observations {
+            let pose = ba.poses.get(&obs.keyframe_id).ok_or("missing rig pose")?;
+            let point = ba
+                .landmarks
+                .get(&obs.landmark_id)
+                .ok_or("missing rig landmark")?;
+            let (residual, jp, jl) =
+                rig_residual_jacobians(obs, pose, point).ok_or("nonprojectable rig row")?;
+            let weight = config.robust_kernel.weight(residual.norm_squared());
+            if !weight.is_finite() || weight < 0.0 {
+                return Err("invalid rig weight".into());
+            }
+            let scale = weight.sqrt();
+            for r in 0..2 {
+                rows.entry(obs.landmark_id)
+                    .or_default()
+                    .push(crate::landmark_qr::WeightedRow {
+                        pose: pose_index.get(&obs.keyframe_id).copied(),
+                        pose_jacobian: std::array::from_fn(|c| {
+                            if c >= 3 && ba.fixed_pose_rotations.contains(&obs.keyframe_id) {
+                                0.0
+                            } else {
+                                scale * jp[(r, c)]
+                            }
+                        }),
+                        landmark_jacobian: std::array::from_fn(|c| scale * jl[(r, c)]),
+                        residual: scale * residual[r],
+                    });
+            }
+        }
+        let observation_rows = rows.values().map(Vec::len).sum();
+        let blocks = rows
+            .into_iter()
+            .map(|(id, rows)| {
+                crate::landmark_qr::ReducedLandmark::new(
+                    rows,
+                    pose_index.len(),
+                    !ba.fixed_landmarks.contains(&id),
+                    lambda,
+                )
+                .map(|block| (id, block))
+                .map_err(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            pose_index,
+            blocks,
+            pose_diagonal,
+            observation_rows,
+        })
+    }
+
+    fn apply(&self, x: &[f64]) -> Result<Vec<f64>, &'static str> {
+        if x.len() != self.pose_diagonal.len() || !x.iter().all(|v| v.is_finite()) {
+            return Err("invalid QR pose vector");
+        }
+        let mut out: Vec<_> = x
+            .iter()
+            .zip(&self.pose_diagonal)
+            .map(|(x, d)| x * d)
+            .collect();
+        let mut scratch = Vec::new();
+        for (_, block) in &self.blocks {
+            block.normal_add(x, &mut out, &mut scratch)?;
+        }
+        Ok(out)
+    }
+
+    fn rhs(&self) -> Result<Vec<f64>, &'static str> {
+        let mut out = vec![0.0; self.pose_diagonal.len()];
+        let mut scratch = Vec::new();
+        for (_, block) in &self.blocks {
+            block.rhs_add(&mut out, &mut scratch)?;
+        }
+        Ok(out)
+    }
+}
+
 fn rig_residual_jacobians(
     observation: &BaRigObservation,
     pose: &Pose,
@@ -10637,6 +10753,125 @@ mod matrix_free_ba_api_tests {
                 .collect::<Vec<_>>(),
             adaptive_extrinsics
         );
+    }
+
+    #[test]
+    fn rig_qr_adapter_matches_existing_weighted_assembly_and_full_step() {
+        let mut rig = make_problem();
+        rig.fixed_landmarks.clear();
+        rig.fixed_landmarks.insert(0);
+        rig.fixed_pose_rotations.insert(1);
+        let observations = std::mem::take(&mut rig.observations);
+        for (index, obs) in observations.into_iter().enumerate() {
+            for extrinsic in [
+                SE3::identity(),
+                SE3::new(
+                    UnitQuaternion::from_euler_angles(0.02, -0.03, 0.01),
+                    Vector3::new(0.2, 0.01, -0.02),
+                ),
+            ] {
+                let sensor_pose = extrinsic.compose(&rig.poses[&obs.keyframe_id].world_to_camera);
+                let mut xy = rig
+                    .camera
+                    .project(&sensor_pose.transform_point(&rig.landmarks[&obs.landmark_id]))
+                    .unwrap();
+                xy.x += if index % 5 == 0 { 20.0 } else { 0.2 };
+                xy.y -= 0.3;
+                rig.rig_observations.push(BaRigObservation {
+                    keyframe_id: obs.keyframe_id,
+                    landmark_id: obs.landmark_id,
+                    xy,
+                    camera: rig.camera.clone(),
+                    sensor_from_rig: extrinsic,
+                });
+            }
+        }
+        let original = rig.clone();
+        for kernel in [RobustKernel::None, RobustKernel::Huber { delta: 6.0 }] {
+            let config = BaConfig {
+                robust_kernel: kernel,
+                ..matrix_free_config()
+            };
+            for lambda in [0.5, 100.0] {
+                let qr = RigQrLinearization::new(&rig, &config, lambda).unwrap();
+                assert_eq!(qr.observation_rows, 2 * rig.rig_observations.len());
+                let landmarks: BTreeMap<_, _> = rig
+                    .landmarks
+                    .keys()
+                    .filter(|id| !rig.fixed_landmarks.contains(id))
+                    .enumerate()
+                    .map(|(slot, id)| (*id, slot))
+                    .collect();
+                let build = || {
+                    let mut s = build_normal_equations(
+                        &rig,
+                        &rig.camera.intrinsics().unwrap(),
+                        &qr.pose_index,
+                        &landmarks,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                        &config.robust_kernel,
+                        None,
+                        false,
+                        true,
+                    );
+                    constrain_fixed_pose_rotations(
+                        &rig.fixed_pose_rotations,
+                        &qr.pose_index,
+                        &mut s,
+                    );
+                    s
+                };
+                let system = build();
+                let schur = implicit_schur::ImplicitSchurOperator::new(&system, lambda).unwrap();
+                let rhs = DVector::from_vec(qr.rhs().unwrap());
+                assert!((&rhs - schur.rhs()).norm() < 1e-9 * (1.0 + schur.rhs().norm()));
+                let n = qr.pose_index.len() * 6;
+                let mut matrix = DMatrix::zeros(n, n);
+                for col in 0..n {
+                    let mut x = DVector::zeros(n);
+                    x[col] = 1.0;
+                    let actual = DVector::from_vec(qr.apply(x.as_slice()).unwrap());
+                    let expected = schur.apply(&x).unwrap();
+                    assert!((&actual - &expected).norm() < 1e-9 * (1.0 + expected.norm()));
+                    matrix.column_mut(col).copy_from(&actual);
+                }
+                let dx = matrix.cholesky().unwrap().solve(&rhs);
+                let mut direct_system = build();
+                let direct = solve_step(
+                    &mut direct_system,
+                    qr.pose_index.len(),
+                    landmarks.len(),
+                    0,
+                    0,
+                    lambda,
+                    LinearSolver::Sparse,
+                    false,
+                    &mut None,
+                )
+                .unwrap();
+                assert!((&dx - &direct.0).norm() < 1e-8 * (1.0 + direct.0.norm()));
+                let mut scratch = Vec::new();
+                for (id, block) in &qr.blocks {
+                    let point = block.back_substitute(dx.as_slice(), &mut scratch).unwrap();
+                    if let Some(slot) = landmarks.get(id) {
+                        assert!(
+                            (Vector3::from(point.unwrap()) - direct.1.fixed_rows::<3>(slot * 3))
+                                .norm()
+                                < 1e-8 * (1.0 + direct.1.norm())
+                        );
+                    } else {
+                        assert!(point.is_none());
+                    }
+                }
+                assert!(qr.apply(&[f64::NAN],).is_err());
+            }
+        }
+        assert_eq!(rig, original);
+        let config = matrix_free_config();
+        assert!(RigQrLinearization::new(&rig, &config, 0.0).is_err());
+        rig.rig_observations[0].landmark_id = u64::MAX;
+        assert!(RigQrLinearization::new(&rig, &config, 0.5).is_err());
     }
 
     #[test]

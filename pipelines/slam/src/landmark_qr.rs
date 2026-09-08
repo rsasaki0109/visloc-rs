@@ -89,11 +89,11 @@ impl LandmarkQr {
 }
 
 #[derive(Clone, Debug)]
-struct WeightedRow {
-    pose: Option<usize>,
-    pose_jacobian: [f64; 6],
-    landmark_jacobian: [f64; 3],
-    residual: f64,
+pub(crate) struct WeightedRow {
+    pub(crate) pose: Option<usize>,
+    pub(crate) pose_jacobian: [f64; 6],
+    pub(crate) landmark_jacobian: [f64; 3],
+    pub(crate) residual: f64,
 }
 
 #[derive(Debug)]
@@ -106,14 +106,14 @@ struct PoseRow {
 /// One landmark's reduced operator. Inputs are already robust-weighted;
 /// repeated sensors and fixed-pose rows remain distinct and in input order.
 #[derive(Debug)]
-struct ReducedLandmark {
+pub(crate) struct ReducedLandmark {
     rows: Vec<PoseRow>,
     qr: Option<LandmarkQr>,
     pose_dimension: usize,
 }
 
 impl ReducedLandmark {
-    fn new(
+    pub(crate) fn new(
         rows: Vec<WeightedRow>,
         poses: usize,
         variable: bool,
@@ -234,7 +234,7 @@ impl ReducedLandmark {
 
     /// Add A^T A x using one reusable longest-track buffer. Global pose LM
     /// damping is added once by the caller, not once per landmark.
-    fn normal_add(
+    pub(crate) fn normal_add(
         &self,
         x: &[f64],
         out: &mut [f64],
@@ -249,7 +249,11 @@ impl ReducedLandmark {
         self.scatter(scratch, out, 1.0)
     }
 
-    fn rhs_add(&self, out: &mut [f64], scratch: &mut Vec<f64>) -> Result<(), &'static str> {
+    pub(crate) fn rhs_add(
+        &self,
+        out: &mut [f64],
+        scratch: &mut Vec<f64>,
+    ) -> Result<(), &'static str> {
         self.prepare(scratch);
         for (value, row) in scratch.iter_mut().zip(&self.rows) {
             *value = row.residual;
@@ -262,7 +266,7 @@ impl ReducedLandmark {
         self.scatter(scratch, out, -1.0)
     }
 
-    fn back_substitute(
+    pub(crate) fn back_substitute(
         &self,
         x: &[f64],
         scratch: &mut Vec<f64>,

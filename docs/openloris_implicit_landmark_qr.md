@@ -55,14 +55,29 @@ a rank-revealing undamped pseudoinverse implementation.
 
 ## Required next steps before native comparison
 
-1. Connect the tested sparse-row action/adjoint/RHS to the actual native rig
-   linearization. Verify observation order, repeated rig sensors, fixed
-   poses/rotations and robust square-root weights against existing assembly.
-   The synthetic preweighted-row test alone does not prove that adapter.
-2. Assemble the multi-landmark operator and shared pose damping, with a
-   bounded preconditioner and matched RHS/full-step tests. Audit
+The test-only `RigQrLinearization` adapter now reuses the actual
+`rig_residual_jacobians` function and `RobustKernel::weight`. It preserves two
+rows per rig observation and applies square-root weights before elimination.
+Fixed pose rows remain in point elimination; fixed points bypass it. Fixed
+rotation columns are zeroed and get the same identity diagonal as existing
+assembly, in addition to shared pose damping applied once globally.
+
+A new adapter test compares multi-landmark action, RHS and recovered pose /
+point step against existing weighted normal assembly and direct Schur solve.
+It covers None and Huber6, lambda 0.5 and 100, repeated sensors with rotated
+extrinsics, fixed anchor/rotation/point and unchanged input state. Missing
+references, nonpositive damping and invalid action dimensions reject. The
+adapter rejects unprojectable rows rather than silently dropping them; this
+eligibility restriction must remain explicit during nonlinear integration.
+All six kernel/adapter tests and test-inclusive clippy pass.
+
+1. Connect the assembled multi-landmark action to the iterative solver.
+   Preserve total PCG budget and honest residual stopping; do not add another
+   public policy before the bounded linear solve is validated.
+2. Add a bounded preconditioner and matched iterative/full-step tests. Audit
    O(observations + poses + landmarks) retained storage and longest-track
-   scratch; prohibit all-pose pair enumeration and global Q.
+   scratch; prohibit all-pose pair enumeration, global Q, and retaining a
+   duplicate full normal system just to obtain a preconditioner.
 3. Integrate only after the linear kernel checks, keeping existing damping,
    loss and native acceptance gates. Define eligibility for positive damping
    and rank-deficient cases explicitly; no silent legacy fallback.

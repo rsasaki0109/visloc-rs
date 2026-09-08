@@ -5,7 +5,9 @@
 > 疎pose行の作用/随伴/右辺/normal action/点逆代入も追加、5テスト/clippy通過。
 > native接続・実データ・性能改善は未検証。
 > [設計と次の実装手順](openloris_implicit_landmark_qr.md)。全Q/密なトラックJacobianは作らない。
-> 次は実際のrig線形化adapterと複数点operatorを接続し、固定pose・校正・loss/dampingと線形保持量を検証する。
+> rig線形化adapter/複数点operatorもtest-only接続済み。既存Jacobian/Huber重みを再利用し、
+> 固定pose/rotation/点、回転付きsensor、None/Huber6と減衰0.5/100で旧normal/direct stepと一致。
+> 次は反復solverと境界付き前処理へ接続。前処理のためにfull normal systemを二重保持しない。
 > サブエージェントは使用しない。goal全体は未達。
 
 > Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。
