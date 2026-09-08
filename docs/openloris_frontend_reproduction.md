@@ -246,6 +246,26 @@ claims.
 
 ## Extraction and storage preflights
 
+For the future continuous executor, `scripts/measure_native_scope.py` wraps a
+command in an **already configured dedicated** cgroup v2 scope:
+
+```sh
+systemd-run --user --scope --property=MemoryMax=2G --property=MemorySwapMax=0 \
+  python3 scripts/measure_native_scope.py --report NEW_REPORT.json \
+  --timeout 3600 -- COMMAND ARGUMENTS
+```
+
+It rejects different limits or initial unrelated scope members, samples aggregate
+RSS every 50 ms (including the monitor), and records cgroup `memory.peak` and
+before/after `memory.events`. Charged cache/kernel memory makes the cgroup value
+different from RSS; shared mappings can be counted repeatedly in summed RSS.
+Short peaks between samples may be missed. The cgroup is the hard limit, not the
+sampler. A timeout kills the owned command process group; leftover descendants
+or new OOM events prevent success. Commands must not escape the scope/session.
+A small 32 MiB allocation probe exited zero; a sleeping child hit its deadline
+and returned failure. These are launcher checks, not SfM resource evidence.
+The runner still needs the complete extraction-to-atlas DAG and restart protocol.
+
 The 2026-09-09 post-full-runner preflight found 8,914,128,896 bytes free on
 the dataset filesystem. Fresh base, dense (including loci) and adaptive banks
 alone require 8,332,098,526 logical bytes, leaving only 582,030,370 bytes before
