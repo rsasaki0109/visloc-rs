@@ -29,6 +29,8 @@ def main():
                         help='JSON object mapping every recipe input placeholder to an existing path')
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--validate-only', action='store_true',
+                        help='Validate inputs and print the bound command without creating output')
     args = parser.parse_args()
     evidence_root = Path(__file__).resolve().parents[1] / 'benchmarks/electro'
     stage = next(item for item in build(evidence_root)['stages'] if item['id'] == args.stage)
@@ -57,10 +59,16 @@ def main():
             if digest != sha(reference):
                 raise ValueError(f'Input differs from frozen reference: {flag}')
             inputs[placeholder] = {'path': str(path), 'sha256': digest}
-    output.mkdir()
-    (output / 'admissions').mkdir()
     report = {'status': 'running', 'stage': args.stage, 'command': command,
               'inputs': inputs, 'recipe': stage, 'scope': 'Single bound admission only; not native E2E.'}
+    if output.exists():
+        raise ValueError('Output must be a new path')
+    if args.validate_only:
+        report['status'] = 'input-validation-pass-not-executed'
+        print(json.dumps(report, indent=2))
+        return 0
+    output.mkdir()
+    (output / 'admissions').mkdir()
     report_path = output / 'report.json'
     report_path.write_text(json.dumps(report, indent=2) + '\n')
     started = time.monotonic()

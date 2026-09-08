@@ -1,0 +1,7 @@
+{
+  "prefix_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-prefix-supplement-replay-v1/output.vps",
+  "adaptive_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-merge-replay-v1/verified-merged.vps",
+  "adaptive_features": "/home/sasaki/datasets/openloris/corridor1-1-m8-linked-adaptive-bank-v2/features",
+  "prefix_registration_components": "/home/sasaki/datasets/openloris/corridor1-1-m8-prefix-registration-bound-v1/model/retrieval-components.txt",
+  "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt"
+}
