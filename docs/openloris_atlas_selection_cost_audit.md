@@ -248,3 +248,11 @@ model hashes agree; wall38.74s, peak RSS340220KiB. Evidence:
 `m8-openloris-source-spec-250x500-v1.json`. Coverage is now7 of21 unique
 execution outputs, with5 recorded-command replays and2 new-spec reproductions.
 Fourteen remain; this does not close full atlas or native E2E gates.
+
+Both multi-component executions also reproduce under the new common policy:
+start3000/count500 produces nodes12/13 with all six model files exact in
+23.27s/340168KiB; start4250/count500 produces nodes18/19 with all six exact
+in29.82s/340092KiB. Each duration belongs to one execution, not each component.
+Evidence: source-spec-3000/4250-v1 JSONs. Coverage is9 of21 executions and
+11 of23 retained model nodes;12 executions remain. No historical argv or
+full-pipeline success is inferred from these new-policy reproductions.
