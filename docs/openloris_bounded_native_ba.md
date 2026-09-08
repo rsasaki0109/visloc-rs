@@ -60,6 +60,12 @@ hypothesis history, does not change RNG draws/scoring/refinement, and requires
 native byte-parity verification before interpreting measured output. Six
 generalized-related tests pass. This is diagnostic instrumentation, not a fix.
 
+Measured `015ab1b` is model-byte-exact to Legacy. Frame 612 generates 26 DLT
+hypotheses and two central reports; frame 613 generates 11 and two. Both best
+pooled scores have only five inliers against six required. Candidate generation
+is not absent; investigate 2D/3D consistency or independently verified support
+without lowering the acceptance threshold. [Audit](../benchmarks/electro/m8-openloris-2500-pnp-hypotheses-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
