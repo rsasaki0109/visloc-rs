@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`perf/shared-envelope-read-cache`（PR125の子）。
+現作業branchは`test/shared-worker-parity`。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -81,6 +81,16 @@ SharedSnapshotWriter/SharedPairChunkを追加し、persistent workerの明示sha
 証跡`m8-shared-writer-scaling-v1.json`、外部root`corridor1-1-m8-shared-writer-stress-v1`。
 session92952はexit0完了。空き約11GiB。次はborrowed reader、restart、実worker parity。
 現branchはcacheとprepared writerをまとめてPR化。全goal未達。
+
+更新: PR126はhead`e3312fd`でCI9成功後`70f221d69ce4ac53a9d08b701ae421ba2ea7afed`へmerge。
+実workerの8-shard probeを開始。`scripts/probe_shared_match_worker.py`で10k dense特徴の
+全manifestと候補hashを検証し、全scheduleから等間隔8 shardを共有形式で再matching。
+完了後`compare_verified_pair_snapshots`で従来shardの全レコードと比較する。
+現在exec session55995、worker PID3573965で稼働確認（elapsed2:16/CPU2:15、RSS451512KiB）。
+出力root`/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-probe-v1`。
+まだ完了/一致とは判定していない。初期全10k特徴読込・検証中。timeout1800秒。
+同sessionをpollし、観測timeoutだけで再起動しない。稼働中は同時build/性能測定を避ける。
+Python43 tests/比較example Clippy通過。PR126旧branch整理とprobe結果の記録が次。
 
 ### 以前の状態（上記を優先）
 
