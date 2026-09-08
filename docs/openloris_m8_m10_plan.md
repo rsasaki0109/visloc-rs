@@ -28,13 +28,13 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
 
 ### Remaining execution order
 
-1. Finish CI/merge for runner dependency binding and the actual runner restart
-   evidence. Reject any missing envelope on resume; keep shared output opt-in
-   until full runner integration is exercised.
-2. Exercise the real 10k dense schedule through the Python runner, including
-   its index/recovery/merge path. Use the already verified feature bank; do not
-   conflate this with extraction or candidate generation. Require full shard
-   record and merged-file parity, and validate completed-resume behavior.
+1. Runner dependency binding and actual runner restart evidence are merged
+   (PR130/131). Shared output remains opt-in.
+2. Full10k Python runner validation now passes: all 2,500 bound shards match
+   every legacy record, merged bytes match, and completed-resume does not rerun
+   the matching worker or change prior chunks. See
+   `m8-full-native-shared-runner-v1.json`; finish its PR CI/merge. This is retained
+   feature/candidate validation, not full pipeline extraction or restart.
 3. Assemble one executable, version-pinned native DAG covering base and dense
    extraction, retrieval, adaptive selection, matching, repair/targeted
    selection, source mapping and atlas integration. The dense bank also supplies
