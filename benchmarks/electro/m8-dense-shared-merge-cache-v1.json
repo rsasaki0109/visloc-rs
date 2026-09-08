@@ -1,0 +1,26 @@
+{
+  "status": "full-merged-byte-parity-pass",
+  "binary_sha256": "c5c88d648cf4fc8112b1a2e572ca637e3250e5c3a7c440101783dae8a21e7860",
+  "shards": 2500,
+  "output_sha256_both_formats": "02cd6475098453cb6cf93761ff990ea31acba86217b715dfaf43660f3af0f05c",
+  "shared": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-shared-merge-cache-v1/report.json",
+    "time_report_sha256": "74c1fc7cd130d482a7d160bd823781305dd25bd1f561274691bdaa71693176d1",
+    "wall_seconds": 10.54,
+    "user_seconds": 9.82,
+    "system_seconds": 0.71,
+    "peak_rss_kib": 16644
+  },
+  "legacy": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-legacy-merge-cache-v1/report.json",
+    "time_report_sha256": "21f73f18752c97429420ae8a52f85397d373467bd873b564088f5abe347b292a",
+    "wall_seconds": 13.95,
+    "user_seconds": 12.74,
+    "system_seconds": 1.20,
+    "peak_rss_kib": 16832
+  },
+  "rayon_num_threads": 1,
+  "malloc_arena_max": "1",
+  "scope": "Same binary, one sequential run per input format, warm filesystem cache. Not repeated speed evidence, not an uncached-shared A/B, not E2E or full-pipeline memory.",
+  "cache_contract": "One envelope per merge pass. Validate on initial load, before eviction and at pass completion. Clear between passes. Standalone reads remain uncached. Decoding and snapshot ownership still repeat O(N) envelope work per shard."
+}

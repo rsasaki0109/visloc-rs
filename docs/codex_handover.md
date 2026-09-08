@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`feat/shared-snapshot-envelope`。
+現作業branchは`perf/shared-envelope-read-cache`（PR125の子）。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -61,6 +61,16 @@ Python43 tests通過。全goal未達。PR123旧branch整理と現branchのPRが�
 lib15/example64 testsとClippy通過。現形式は読書きごとにenvelopeを再検証するため
 I/O/CPUのN²解消は未達。次はbounded cache、強制中断/同時publication、worker実出力と
 100k stress。変換session79247はexit0完了。全goal未達。
+
+更新: PR125初回CIはlib testの不要cloneによるClippy警告1件で失敗。
+修正head`3b3464a`をpush済み、子branchへrebase済み。mergeは最終CI待ち。
+mergeの各passに1-entry envelope cacheを実装、load/eviction/終了時検証・pass間破棄。
+lib17 tests（並行8 writer/キャッシュeviction・変更検出を含む）通過。
+実dense2500 shardのshared/legacy入力を同binaryで統合、双方全SHA一致。
+shared10.54s/16644KiB（単発warm-cache、E2Eではない）。証跡shared-merge-cache-v1。
+両実行session58380/10776はexit0完了。standalone readはuncached。
+writer側とdecoded envelopeの反復CPU処理は未解消。次はprepared writer/borrowed envelope、
+強制中断restartとworker実出力/100k。全goal未達。空き約14GiB。
 
 ### 以前の状態（上記を優先）
 

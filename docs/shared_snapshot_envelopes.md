@@ -33,9 +33,24 @@ the batch converter itself does not yet resume partially completed conversions.
 
 ## Remaining work
 
-This format removes repeated envelope storage, but currently reads and validates
-the shared envelope for every chunk. Add a bounded, explicit reader/writer
-envelope cache before claiming linear metadata I/O/CPU. Verify concurrent
-publication, forced-interruption restart, real persistent-worker output parity,
+The streaming merger now uses a one-entry envelope cache per pass. It validates
+on first load, before eviction, and at pass completion; caches are not retained
+between passes. A change fails the merge before output publication. Standalone
+reads remain uncached. The cache assumes immutable inputs within each pass and
+uses the validated bytes consistently; it is not an instantaneous file watcher.
+Memory is bounded to one serialized envelope, not one per shard. Alternating
+different envelopes can still cause misses; normal same-bank shards share one.
+
+All 2,500 real dense shards merge to the exact retained legacy output SHA with
+both shared and legacy input formats. Single warm-cache measurements were
+10.54 s / 16,644 KiB for shared input; these are not repeated speed evidence or
+an uncached-shared A/B. See `m8-dense-shared-merge-cache-v1.json`.
+Eight concurrent writers also pass the unit test with exactly one envelope and
+eight valid chunks. Missing/changed envelopes and cache eviction are tested.
+
+This does not eliminate repeated envelope decoding/owned Snapshot construction,
+nor writer-side envelope serialization/validation. Add prepared writer/borrowed
+envelope interfaces before claiming linear metadata CPU. Verify
+forced-interruption restart, real persistent-worker output parity,
 and 100k scaling before switching the native runner default. Full E2E, trajectory
 quality and whole-pipeline memory gates remain separate.
