@@ -66,6 +66,16 @@ not sufficient. These are observed rejection mechanisms, not proof of a unique
 cause of trajectory regression. Debug timing is not performance evidence.
 [Exact commands and diagnostic audit](../benchmarks/electro/m8-openloris-native-qr-diagnostic-v1.json).
 
+Legacy control qualification: its unchanged debug model is champion-byte-exact,
+yet 462 of its 476 rejected candidates also fail feasibility (353 with cost
+decrease), versus QR's 452 of 471. The first three rejected-step log lines
+are identical; the next differs only in printed cost precision. Feasibility
+rejection is therefore not QR-specific and does not by itself explain the
+trajectory regression. The next comparison needs a shared pre-step BA state,
+not aggregate counts from already-divergent nonlinear paths. No threshold or
+observation change is justified by this audit.
+[Legacy/QR rejection evidence](../benchmarks/electro/m8-openloris-legacy-qr-rejections-v1.json).
+
 Implementation-stage status (superseded by the measured result above):
 default-off native `--ba-backend matrix-free-qr` implemented. Kernel,
 shared LM and native fixed-state tests pass; real-data quality/performance
