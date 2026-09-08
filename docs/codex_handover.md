@@ -143,6 +143,9 @@ runner tests21件/scripts tests43件通過。欠落/改変/未記録依存・完
 次はPR129最終CI/merge、現branchのPR、新runner実行とresume検証、全E2E/品質改善。
 測定プロセスなし。全goal未達。
 
+更新: PR129はhead`ecd3819`でCI9成功後`7fe9e7d885bb0d22f16721ef35cb5aabbd4aef23`へmerge。
+旧branchをremote/local整理、現branchをmainへrebase済み。
+
 ### 以前の状態（上記を優先）
 
 PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
