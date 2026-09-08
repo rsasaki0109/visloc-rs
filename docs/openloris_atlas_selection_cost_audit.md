@@ -344,3 +344,14 @@ entries; null is not zero cost. Report and summary hashes are recorded in
 This is a partial historical ledger audit, not an E2E total. Continuous replay
 still needs feature extraction, selection/merging, candidate construction,
 all snapshot overlays, and the reproduced mapper stages under one timed run.
+
+The dense256x2 extraction stage has eight saved timed commands. Their image
+directories contain10000 names in total,10000 unique names, no duplicates,
+and all targets currently exist. The commands use SIFT256/two orientations,
+RootSIFT and the recorded COLMAP/VLFeat compatibility flags with stream export.
+Report hashes, input membership digests and per-shard resource lines are in
+`m8-openloris-extraction-shard-audit-v1.json`.
+This recovers extraction settings and file membership, not image-content
+identity, historical binary/concurrency or whole-process-tree peak RSS.
+No extraction has been rerun in this audit; do not sum per-shard walls into
+an E2E result or take their maximum RSS as simultaneous pipeline RSS.

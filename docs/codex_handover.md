@@ -58,6 +58,8 @@
 > frontend-ledger-audit-v1.json追加。targeted7の448行は1worker53.59秒、adaptive32の2188行も1worker272.62秒。
 > worker時間をshard数倍しない。両summaryは特徴抽出除外、candidate/mapping nullでE2E未完。
 > 次は抽出/選択merge/候補/overlay生成の依存を連続実行仕様へ。空き約672MiBに注意。
+> extraction-shard-audit-v1.json: dense256x2抽出8コマンド記録、10000画像名重複なし/全target存在。
+> 内容hash/元binary/同時実行メモリは未証明。extract再実行なし。8wall単純合算/最大RSSでE2Eとしない。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
