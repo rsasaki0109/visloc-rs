@@ -206,3 +206,13 @@ Evidence: `m8-openloris-source-replay-1950-v1.json` and
 `m8-openloris-source-replay-3200-v1.json`. This brings coverage to3 of21
 source executions, not full E2E. Historical elapsed times are not used as
 matched speed controls. No measured process remains running after these runs.
+
+All five sources with recorded sibling commands now reproduce exactly:
+250-start750-frame window takes51.39s/340160KiB, and4200-start500-frame window
+takes43.92s/340228KiB. Each matches all historical model files. The4200 replay
+retains the recorded `VISLOC_DEFERRED_DEBUG=1`; its timing is not a clean
+non-debug speed comparison. Evidence is in source-replay-250/4200-v1 JSONs.
+The remaining16 executions lack commands in the bounded location audited;
+do not infer their flags or claim all-source reproducibility. Next either
+recover an authoritative launch record or specify a new source pipeline
+explicitly and validate its full output independently of historical provenance.
