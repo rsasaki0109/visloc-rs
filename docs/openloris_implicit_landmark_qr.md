@@ -1,5 +1,28 @@
 # Implicit landmark QR — staged implementation
 
+## Follow-up: bounded validation work
+
+On `perf/m8-qr-validation-scans`, full pose-vector finite checks are moved out
+of each landmark's action/scatter into the global operator boundary. Each
+track still checks its computed rows and updated output coordinates. This
+removes O(landmarks × poses) validation scans, preserving arithmetic order;
+the retained memory layout and solver/LM policy are unchanged. Tests cover
+NaN in a fixed-rotation coordinate, overflow in the global damping action,
+and nonfinite values in a touched long-track coordinate. Seven QR tests and
+test-inclusive clippy pass. Native byte parity and timing are not yet measured;
+this does not repair the rejected trajectory result by itself.
+
+Measured follow-up: release `c7c3d8b` (rebased unchanged patch `4072e05`)
+produces exact prior Legacy/QR model bytes. QR mapper is 13.117345 / 12.589078 s,
+versus an additional old-QR-binary control at 19.352382 s; paired Legacy is
+4.597046 s. QR retains 51 failures and 166 accepted steps. This is a limited
+serial diagnostic improvement, not an accepted three-repeat performance gate:
+QR remains slower than Legacy and retains the failed trajectory. No larger
+tier or README claim follows. [Evidence](../benchmarks/electro/m8-openloris-qr-validation-v1.json).
+
+Parent PR #96 passed all nine CI jobs (`34192298439`) and merged as `bcbe2d5`;
+its local/remote branch was removed. This follow-up branch remains unmerged.
+
 ## Native 1k result — rejected (2026-09-08)
 
 Release `f62f09b` completed in 56.62 s. Same-binary Legacy reproduces all three
@@ -42,6 +65,16 @@ Thus 452 candidate steps fail feasibility: better linear convergence alone is
 not sufficient. These are observed rejection mechanisms, not proof of a unique
 cause of trajectory regression. Debug timing is not performance evidence.
 [Exact commands and diagnostic audit](../benchmarks/electro/m8-openloris-native-qr-diagnostic-v1.json).
+
+Legacy control qualification: its unchanged debug model is champion-byte-exact,
+yet 462 of its 476 rejected candidates also fail feasibility (353 with cost
+decrease), versus QR's 452 of 471. The first three rejected-step log lines
+are identical; the next differs only in printed cost precision. Feasibility
+rejection is therefore not QR-specific and does not by itself explain the
+trajectory regression. The next comparison needs a shared pre-step BA state,
+not aggregate counts from already-divergent nonlinear paths. No threshold or
+observation change is justified by this audit.
+[Legacy/QR rejection evidence](../benchmarks/electro/m8-openloris-legacy-qr-rejections-v1.json).
 
 Implementation-stage status (superseded by the measured result above):
 default-off native `--ba-backend matrix-free-qr` implemented. Kernel,

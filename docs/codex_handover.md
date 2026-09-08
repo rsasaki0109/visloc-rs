@@ -1,5 +1,11 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> QR follow-up: PR #96はCI9項目通過後 `bcbe2d5` へmerge、旧branch整理済み。
+> 現branch `perf/m8-qr-validation-scans`、重複全pose検査を除去 (`4072e05`, build `c7c3d8b`)。
+> Legacy/QRモデルは変更前bytes一致。QR12.59/13.12 s対旧QR対照19.35 s、Legacy4.60 s。
+> 速度は改善したが品質未達・Legacyより遅い。証跡 `m8-openloris-qr-validation-v1.json`。
+> このfollow-upのPR/CI/mergeは未完了、全体goalも未達。サブエージェントは使用しない。
+
 > QR核の実装開始（2026-09-08）: PR #95はCI9項目通過後 `2f383f2` にmerge、旧branch整理済み。
 > 現branch `feat/m8-implicit-landmark-qr`。3本のHouseholderベクトルによる点消去核をtest-only実装。
 > 疎pose行の作用/随伴/右辺/normal action/点逆代入も追加、5テスト/clippy通過。

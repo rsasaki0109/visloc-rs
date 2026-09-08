@@ -8622,6 +8622,9 @@ impl RigQrLinearization {
         for (_, block) in &self.blocks {
             block.normal_add(x, &mut out, &mut scratch)?;
         }
+        if !out.iter().all(|v| v.is_finite()) {
+            return Err("nonfinite QR normal action");
+        }
         Ok(out)
     }
 
@@ -8630,6 +8633,9 @@ impl RigQrLinearization {
         let mut scratch = Vec::new();
         for (_, block) in &self.blocks {
             block.rhs_add(&mut out, &mut scratch)?;
+        }
+        if !out.iter().all(|v| v.is_finite()) {
+            return Err("nonfinite QR right hand side");
         }
         Ok(out)
     }
@@ -11234,6 +11240,13 @@ mod matrix_free_ba_api_tests {
                     }
                 }
                 assert!(qr.apply(&[f64::NAN],).is_err());
+                // Global validation must also cover unused/fixed-rotation
+                // coordinates after per-track full-vector scans are removed.
+                let mut invalid = vec![0.0; n];
+                invalid[3] = f64::NAN;
+                assert!(qr.apply(&invalid).is_err());
+                invalid[3] = f64::MAX;
+                assert!(qr.apply(&invalid).is_err());
             }
         }
         assert_eq!(rig, original);

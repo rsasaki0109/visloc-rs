@@ -1,0 +1,40 @@
+{
+  "schema": "m8-openloris-legacy-qr-rejections-v1",
+  "legacy_binary_commit": "c7c3d8badf1d75dc1869527f04ee0f04c14bc03d",
+  "qr_binary_commit": "f62f09b4c5039583df4ca439c0bb2fdaea4731df",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1/legacy-debug\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1/legacy-debug.time\nenv -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_BA_STEPS=1 VISLOC_SFM_DEBUG_BA_LM_QUALITY=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1/legacy-debug.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1/rig-c7c3d8b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1/legacy-debug/model > /home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1/legacy-debug.log 2>&1",
+  "audit_program": "import json,re,collections\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-qr-validation-v1\")\nfor name in [\"cameras.txt\",\"images.txt\",\"points3D.txt\"]:\n assert (root/\"legacy-debug/model\"/name).read_bytes()==(root/\"legacy/model\"/name).read_bytes()\npaths={\"legacy\":root/\"legacy-debug.log\",\"qr\":Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-native-qr-v1/qr-debug-quality.log\")}\nout={}; sequences={}\nfor arm,path in paths.items():\n text=path.read_text(); rows=[s for s in text.splitlines() if s.startswith(\"sfm-debug-ba-step-detail:\")]\n counts=collections.Counter(re.search(r\"cost_gate=(\\w+) feasibility_gate=(\\w+)\",s).groups() for s in rows)\n sequences[arm]=rows\n out[arm]={\"rejected_details\":len(rows),\"gates\":{str(k):v for k,v in counts.items()}}\nprefix=0\nfor a,b in zip(sequences[\"legacy\"],sequences[\"qr\"]):\n if a!=b:break\n prefix+=1\nprint(json.dumps({\"legacy_debug_model_exact\":True,\"counts\":out,\"identical_rejection_log_prefix\":prefix,\"first_different_rejection\":{a:s[prefix] if len(s)>prefix else None for a,s in sequences.items()}}))\n",
+  "audit": {
+    "legacy_debug_model_exact": true,
+    "counts": {
+      "legacy": {
+        "rejected_details": 476,
+        "gates": {
+          "('true', 'false')": 353,
+          "('false', 'false')": 109,
+          "('false', 'true')": 14
+        }
+      },
+      "qr": {
+        "rejected_details": 471,
+        "gates": {
+          "('true', 'false')": 326,
+          "('false', 'false')": 126,
+          "('false', 'true')": 19
+        }
+      }
+    },
+    "identical_rejection_log_prefix": 3,
+    "first_different_rejection": {
+      "legacy": "sfm-debug-ba-step-detail: poses=39 landmarks=53 iteration=5 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->6 cost=7.008408278e2->6.588514671e2 lambda=1.000e-3",
+      "qr": "sfm-debug-ba-step-detail: poses=39 landmarks=53 iteration=5 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->6 cost=7.008408279e2->6.588514671e2 lambda=1.000e-3"
+    }
+  },
+  "limitations": [
+    "Legacy debug is byte-identical to the champion control; QR debug parity is certified in m8-openloris-native-qr-diagnostic-v1.json.",
+    "462 Legacy versus 452 QR candidate steps fail feasibility. Such rejection is not QR-specific and is not sufficient to explain trajectory regression.",
+    "The first log difference is a rounded cost difference, not proven first state divergence.",
+    "Aggregates compare different nonlinear paths, not identical frozen BA systems. Next diagnostic must capture a shared pre-step state before comparing linear solutions.",
+    "No acceptance/tolerance/observation changes follow from these counts; debug timing is not performance evidence."
+  ]
+}
