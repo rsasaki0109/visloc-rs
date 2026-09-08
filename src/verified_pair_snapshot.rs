@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const SCHEMA_VERSION: u32 = 1;
 
 mod shared;
-pub use shared::write_shared_atomic;
+pub use shared::{write_shared_atomic, SharedPairChunk, SharedSnapshotWriter};
 
 const MAGIC: &[u8] = b"VISLOC-VERIFIED-PAIR-SNAPSHOT\0";
 const MAX_VECTOR_ITEMS: usize = 50_000_000;
@@ -1686,6 +1686,43 @@ mod tests {
             "visloc_verified_pair_snapshot_{tag}_{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn prepared_shared_writer_preserves_chunks_and_rejects_wrong_directory() {
+        let root = temp_path("prepared_shared");
+        std::fs::create_dir(&root).unwrap();
+        let snapshot = sample();
+        let writer = super::SharedSnapshotWriter::new(&root, &snapshot).unwrap();
+        for index in 0..3 {
+            let path = root.join(format!("{index}.vps"));
+            writer
+                .write_chunk(
+                    &path,
+                    super::SharedPairChunk {
+                        pair_order_hash: snapshot.pair_order_hash,
+                        unordered_edge_hash: snapshot.unordered_edge_hash,
+                        accepted_match_count: snapshot.accepted_match_count,
+                        pairs: &snapshot.pairs,
+                    },
+                )
+                .unwrap();
+            assert_eq!(read(&path).unwrap(), snapshot);
+        }
+        assert!(writer
+            .write_chunk(
+                &root.join("elsewhere/0.vps"),
+                super::SharedPairChunk {
+                    pair_order_hash: 0,
+                    unordered_edge_hash: 0,
+                    accepted_match_count: 0,
+                    pairs: &[],
+                }
+            )
+            .is_err());
+        writer.finish().unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 4);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

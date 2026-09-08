@@ -8710,6 +8710,33 @@ fn write_verified_pair_snapshot_with_validation(
     feature_validation: Option<&SnapshotFeatureValidation>,
     atomic: bool,
 ) -> Result<(), String> {
+    let snapshot = snapshot_for_export(
+        image_names,
+        features,
+        camera,
+        pairwise,
+        metadata_by_pair,
+        args,
+        feature_validation,
+    )?;
+    if args.shared_snapshot_envelope {
+        verified_pair_snapshot::write_shared_atomic(path, &snapshot)
+    } else if atomic {
+        verified_pair_snapshot::write_atomic(path, &snapshot)
+    } else {
+        verified_pair_snapshot::write(path, &snapshot)
+    }
+}
+
+fn snapshot_for_export(
+    image_names: &[String],
+    features: &[FeatureSet],
+    camera: &Camera,
+    pairwise: &[PairwiseMatches],
+    metadata_by_pair: &HashMap<(usize, usize), SnapshotPairMetadata>,
+    args: &Args,
+    feature_validation: Option<&SnapshotFeatureValidation>,
+) -> Result<VerifiedPairSnapshot, String> {
     let feature_counts: Vec<u64> = feature_validation
         .map(|validation| {
             validation
@@ -8768,13 +8795,7 @@ fn write_verified_pair_snapshot_with_validation(
             .sum::<usize>() as u64,
         pairs: records,
     };
-    if args.shared_snapshot_envelope {
-        verified_pair_snapshot::write_shared_atomic(path, &snapshot)
-    } else if atomic {
-        verified_pair_snapshot::write_atomic(path, &snapshot)
-    } else {
-        verified_pair_snapshot::write(path, &snapshot)
-    }
+    Ok(snapshot)
 }
 
 fn vector_from_bits(bits: Option<[u64; 3]>) -> Option<Vector3<f64>> {
@@ -9060,6 +9081,35 @@ fn run_persistent_match_worker(
     let mut stream_resident_rows = 0usize;
     let mut stream_peak_resident_rows = 0usize;
     let mut stream_peak_resident_images = 0usize;
+    let shared_writer = if args.shared_snapshot_envelope {
+        let first = plan
+            .shards
+            .first()
+            .ok_or("shared snapshot worker requires a shard")?;
+        let path = plan.root.join(&first.snapshot_path);
+        let directory = path.parent().ok_or("shared snapshot directory missing")?;
+        if plan
+            .shards
+            .iter()
+            .any(|shard| plan.root.join(&shard.snapshot_path).parent() != Some(directory))
+        {
+            return Err("shared snapshot worker requires one output directory".into());
+        }
+        let envelope = snapshot_for_export(
+            image_names,
+            features,
+            camera,
+            &[],
+            &HashMap::new(),
+            args,
+            Some(feature_validation),
+        )?;
+        Some(verified_pair_snapshot::SharedSnapshotWriter::new(
+            directory, &envelope,
+        )?)
+    } else {
+        None
+    };
     for shard in &plan.shards {
         let candidate_path = plan.root.join(&shard.candidate_path);
         let (candidates, _candidate_metadata) = parse_persistent_candidate_manifest(
@@ -9139,16 +9189,43 @@ fn run_persistent_match_worker(
         let ordered_hash = ordered_pairwise_edge_hash(&pairwise);
         let unordered_hash = edge_hash_after;
         let snapshot_path = plan.root.join(&shard.snapshot_path);
-        write_verified_pair_snapshot_atomic(
-            &snapshot_path,
-            image_names,
-            features,
-            camera,
-            &pairwise,
-            &metadata,
-            args,
-            feature_validation,
-        )?;
+        if let Some(writer) = &shared_writer {
+            let records = pairwise
+                .iter()
+                .map(|pair| {
+                    let key = (
+                        pair.image_i.min(pair.image_j),
+                        pair.image_i.max(pair.image_j),
+                    );
+                    snapshot_pair_record(
+                        pair,
+                        metadata
+                            .get(&key)
+                            .filter(|metadata| snapshot_metadata_matches_pair(pair, metadata)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            writer.write_chunk(
+                &snapshot_path,
+                verified_pair_snapshot::SharedPairChunk {
+                    pair_order_hash: ordered_hash,
+                    unordered_edge_hash: unordered_hash,
+                    accepted_match_count: accepted as u64,
+                    pairs: &records,
+                },
+            )?;
+        } else {
+            write_verified_pair_snapshot_atomic(
+                &snapshot_path,
+                image_names,
+                features,
+                camera,
+                &pairwise,
+                &metadata,
+                args,
+                feature_validation,
+            )?;
+        }
         let elapsed = started.elapsed().as_secs_f64();
         writeln!(
             stdout,
@@ -9182,6 +9259,9 @@ fn run_persistent_match_worker(
             stream_stamps[image] = None;
         }
         trim_process_allocator();
+    }
+    if let Some(writer) = &shared_writer {
+        writer.finish()?;
     }
     if stream_sources.is_some() {
         writeln!(

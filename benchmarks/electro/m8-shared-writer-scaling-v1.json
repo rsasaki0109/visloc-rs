@@ -1,0 +1,15 @@
+{
+  "status": "synthetic-writer-scaling-pass",
+  "binary_sha256": "1b701ca799ac1562c6a7fdadd9c76b93b8c98f42f5afe4614895a302086291c2",
+  "external_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-writer-stress-v1",
+  "seed": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-matching-replay-v1/matches/verified-000000.vps",
+  "recipe": "stress_shared_snapshot_writer SEED_SNAPSHOT IMAGE_COUNT NEW_OUTPUT_DIRECTORY",
+  "measurements": [
+    {"images": 1000, "pairs": 999, "chunks": 32, "directory_bytes": 20012094, "wall_seconds": 0.07, "peak_rss_kib": 4388, "exit_code": 0},
+    {"images": 10000, "pairs": 9999, "chunks": 313, "directory_bytes": 200292475, "wall_seconds": 0.72, "peak_rss_kib": 5184, "exit_code": 0},
+    {"images": 100000, "pairs": 99999, "chunks": 3125, "directory_bytes": 2003096487, "wall_seconds": 8.86, "peak_rss_kib": 19324, "exit_code": 0}
+  ],
+  "time_report_sha256_100000": "70762bc0ea6df6bab2d7ca6484d68bfb161e6d9c87dc785ac2eebc70ff3d9326",
+  "scope": "Prepared writer I/O only. Repeats one real pair payload on synthetic adjacent image IDs; manifests and pair hashes are synthetic placeholders. Not matching, mapping, quality, restart, or full100k SfM. Full output readback is not part of this timed writer test.",
+  "remaining": "Shared decoding still reconstructs owned N-image envelopes per shard. Optimize borrowed-envelope reading and verify forced restart and real worker output parity."
+}

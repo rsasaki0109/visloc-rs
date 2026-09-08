@@ -48,9 +48,22 @@ an uncached-shared A/B. See `m8-dense-shared-merge-cache-v1.json`.
 Eight concurrent writers also pass the unit test with exactly one envelope and
 eight valid chunks. Missing/changed envelopes and cache eviction are tested.
 
-This does not eliminate repeated envelope decoding/owned Snapshot construction,
-nor writer-side envelope serialization/validation. Add prepared writer/borrowed
-envelope interfaces before claiming linear metadata CPU. Verify
+`SharedSnapshotWriter` now prepares an envelope once and accepts only shard-local
+`SharedPairChunk` records afterward. The opt-in persistent worker uses this API
+and requires a single output directory. It validates the immutable envelope at
+preparation and at batch completion; image-index bounds and pair encoding are
+checked on each write. Standalone `write_shared_atomic` remains a convenience
+wrapper that prepares and validates for each call.
+
+The synthetic writer stress spans 1k/10k/100k image envelopes with adjacent-image
+pairs copied from one seed payload. Output sizes are 20,012,094 / 200,292,475 /
+2,003,096,487 bytes. The 100k write completed in 8.86 s, peak 19,324 KiB, with
+3,125 chunks. This is writer-only scaling, not matching, mapping, or full output
+readback. The synthetic manifest/pair hashes do not represent real input banks.
+See `m8-shared-writer-scaling-v1.json` and `stress_shared_snapshot_writer`.
+
+This does not eliminate repeated envelope decoding/owned Snapshot construction.
+Add borrowed-envelope reading before claiming linear metadata CPU. Verify
 forced-interruption restart, real persistent-worker output parity,
 and 100k scaling before switching the native runner default. Full E2E, trajectory
 quality and whole-pipeline memory gates remain separate.
