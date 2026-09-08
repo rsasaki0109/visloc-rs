@@ -109,3 +109,11 @@ Legacy. Off wall is54.58/74.53s and on is53.07/64.05s; ranges overlap and
 substantial run variation precludes a stable general speedup claim. Peak RSS
 is722484/722936KiB off and722808/722860KiB on, with no reduction established.
 All four logs and resource reports are retained in the same evidence artifact.
+
+First full10k pair: all six model files match retained Legacy for both policies,
+but candidate wall112.67s is slower than control102.32s. Peak RSS is1274380KiB
+on versus1274584KiB off (both below2GiB, no meaningful reduction established).
+Do not extrapolate smaller-tier speed observations to10k. Repeats remain pending.
+Parity preserves the failing9936-image/4968-frame baseline, not COLMAP-quality
+success. Frontend is excluded. Full evidence and pending commands are in
+`benchmarks/electro/m8-openloris-10000-retry-reuse-v1.json`.

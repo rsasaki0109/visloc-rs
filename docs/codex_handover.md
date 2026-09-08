@@ -23,6 +23,10 @@
 > 現時点で実行中の測定なし。5k独立frontend/E2Eは未検証。
 > 5k反復も完了、全4run過去Legacyモデルbytes一致。OFF54.58/74.53秒、ON53.07/64.05秒。
 > 時間範囲が重なり変動大、安定高速化は未証明。RSSほぼ横ばい。次は10k、測定稼働なし。
+> 完全10k初回control/candidate-aもexit0、全6モデルファイル過去Legacyと完全一致。
+> OFF102.32秒/RSS1274584KiB、ON112.67秒/RSS1274380KiB。候補が遅い、反復未実行。
+> `m8-openloris-10000-retry-reuse-v1.json`に全コマンド/結果。candidate-b/control-repeatが次。
+> 保存binaryは引き続きrig-0466499。測定稼働なし。9936画像基準の品質未達も不変。
 
 > 最新: `perf/m8-stream-connectivity-unions`。PR108/109/110は最終headのCI9件成功後merge済み。
 > main最新merge `14d9b50661e2df6d8eb0c1743e815adfa6d62f9d`（PR110）。
