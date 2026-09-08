@@ -52,6 +52,30 @@ memory improvement is assumed. Verify fixed XYZ before and after optimization
 and after serialization; preserve source coordinates if formatting would
 otherwise alter fixed values.
 
+The frozen list is
+[m8-openloris-weak-angle-fixed-landmarks-v1.txt](../benchmarks/electro/m8-openloris-weak-angle-fixed-landmarks-v1.txt),
+SHA-256 `a5b12954dd0a2f6c21d41ad5150c5012cc797059b193be95181cae2d8773feb2`.
+Its format is `SOURCE_SHA256 <combined hash>`, then `COUNT <N>`, then strictly
+ascending `LANDMARK <u64>` rows. Blank lines and full-line comments are allowed;
+the file is capped at 64 KiB and the declared count at 8,192. Hash mismatch,
+unknown/duplicate IDs, malformed rows and count mismatch must fail before
+creating solver output. This opt-in is restricted to adaptive column-scaled
+matrix-free mode; fixture export and other solver combinations reject it.
+
+After binary certification, the intervention adds only the list option to
+the adaptive control command (paths below are placeholders, not a run record):
+
+```bash
+target/release/examples/compare_rig_bundle_adjustment \
+  --model /path/to/frozen-1k/model \
+  --rig-manifest /path/to/frozen-1k/rig-manifest.txt \
+  --solver matrix-free --matrix-free-column-scaling \
+  --matrix-free-adaptive-damping \
+  --pcg-max-iterations 512 --pcg-relative-tolerance 1e-8 \
+  --fixed-landmark-ids benchmarks/electro/m8-openloris-weak-angle-fixed-landmarks-v1.txt \
+  --out-dir /path/to/new-intervention/model
+```
+
 ## Runs and decision gates
 
 After review and scoped tests, certify one binary. Run serially: unchanged
