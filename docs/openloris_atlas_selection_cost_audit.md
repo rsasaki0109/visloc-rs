@@ -126,3 +126,9 @@ state. The old implementation remains a test oracle.64 variants of deletions,
 replacement tracks, reversed observations and duplicate keys compare exactly;
 unknown-image errors also agree. All52 example tests pass. No measured speedup
 is claimed yet: repeat both retained components and verify model bytes/RSS.
+
+Compact candidate tail: all six model files equal the historical output;
+connectivity0.10246s versus preceding control0.31470s, wall12.15s versus14.46s,
+RSS77916 versus77848KiB. These are single-run observations, not a certified
+overall speedup or memory reduction. Main and controlled repeats remain pending.
+Evidence: `benchmarks/electro/m8-openloris-compact-connectivity-v1.json`.
