@@ -1,5 +1,13 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 現branch `test/m8-strong-boundary-10k`。旧strong30/deferred8/direct2/s1/rot5条件をtimeログから復元。
+> manifest/snapshot/visloc pose-prior2ファイルSHA確認済み。契約 `m8-openloris-strong-boundary-contract-v1.json`。
+> 同binary `rig-7d99e07` の `strong-boundary-10k/control` をsession29185で実行中。
+> 360秒上限・単一thread、完走後旧モデルbytes確認→boundary flagのみ追加したcandidate-a/b。
+> 事前モデル生成コストは別途必要、native E2Eと混同しない。入力やthreshold変更なし。
+> 容量確保のため直前10k boundary-bモデルをbytes一致したboundary-aへhardlink化。
+> パス/内容保持、既存出力を上書きしない。空き約395MB（今回対照開始前）。
+
 > 10k mapper-only対照 `tier-10000-boundary/boundary-control` はexit0、過去Legacy全成分bytes一致。
 > 9936画像/4968frame、RMSE/p95 0.878064/1.485271m、mapper117.426119秒、VmHWM1274076KiB。
 > boundary-aはexit0、9936画像/4968frame、RMSE/p95 0.858292/1.473066mでCOLMAP基準未達。
