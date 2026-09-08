@@ -1,0 +1,15 @@
+{
+  "schema": "m8-durable-measurement-preflight-v1",
+  "status": "short-detached-probe-pass-long-probe-pending",
+  "short_service": "visloc-measure-durable-probe-v1.service",
+  "short_report": "/home/sasaki/datasets/openloris/m8-durable-measure-probe-v1.json",
+  "short_service_result": "success",
+  "short_service_main_exit_status": 0,
+  "short_measurement_status": "pass",
+  "short_sampled_aggregate_peak_rss_kib": 56900,
+  "short_cgroup_memory_peak_bytes": 45182976,
+  "long_service": "visloc-durable-long-probe-v1.service",
+  "long_artifact_root": "/home/sasaki/datasets/openloris/m8-durable-long-probe-v1",
+  "long_status_at_recording": "active/running; main PID 3712593 verified live",
+  "scope": "Launcher lifecycle only. Not long-duration completion, SfM RSS, continuous E2E or root-cause proof for the earlier missing scope ledger."
+}
