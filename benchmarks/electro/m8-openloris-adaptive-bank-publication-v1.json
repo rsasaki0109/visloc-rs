@@ -1,0 +1,20 @@
+{
+  "status": "publication-and-completed-resume-pass",
+  "implementation_commit": "3713ace",
+  "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-bank-publication-v1",
+  "command": "python3 scripts/merge_sift_supplements.py --base /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/features256 --supplement /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/supplement-features --selection /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/selection.json --output /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-bank-publication-v1/features",
+  "resume_command_policy": "Same command with --resume; sequential after publication and independent full-bank SHA-256 comparison.",
+  "publication": {"exit_status": 0, "files": 10000, "written": 10000, "reused": 0, "wall_seconds": 9.21, "peak_rss_kib": 20512},
+  "completed_resume": {"exit_status": 0, "files": 10000, "written": 0, "reused": 10000, "wall_seconds": 5.85, "peak_rss_kib": 23224},
+  "inventory_sha256_both": "c8d22b395f172b9326837ea220e916617e2929856ea45d2c7e44ec5bda43e6f1",
+  "independent_reference_audit": {
+    "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features",
+    "method": "Exact directory-entry membership and SHA-256 of every complete file, read in 1 MiB chunks.",
+    "files": 10000, "missing": [], "extra": [], "mismatches": []
+  },
+  "limitations": [
+    "Completed-run resume, not forced-interruption recovery or power-loss durability.",
+    "Phase-only timings with retained inputs; not native E2E or a COLMAP speed comparison.",
+    "Publication does not yet provide a bank-level completion marker."
+  ]
+}
