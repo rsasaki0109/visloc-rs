@@ -1144,6 +1144,7 @@ def build_persistent_match_command(
     min_matches: int = 30,
     match_ratio: float = 0.8,
     stream_match_features: bool = False,
+    shared_snapshot_envelope: bool = False,
 ) -> list[str]:
     """Build the single-process frozen NN/full persistent worker command."""
 
@@ -1178,6 +1179,8 @@ def build_persistent_match_command(
         command.extend(["--images-dir", str(images_dir)])
     if stream_match_features:
         command.append("--stream-match-features")
+    if shared_snapshot_envelope:
+        command.append("--shared-snapshot-envelope")
     return command
 
 
@@ -1583,6 +1586,33 @@ def write_persistent_match_worker_plan(
     return plan_path
 
 
+def snapshot_envelope_binding(snapshot_path: Path, cache=None):
+    """Bind shared chunks to their immutable envelope; legacy snapshots need none."""
+    magic = b"VISLOC-PAIR-CHUNK-V1\0"
+    try:
+        with snapshot_path.open('rb') as stream:
+            if stream.read(len(magic)) != magic:
+                return None
+            digest = stream.read(32)
+    except OSError as error:
+        raise ValidationError(f'Cannot read snapshot binding: {snapshot_path}: {error}') from error
+    if len(digest) != 32:
+        raise ValidationError('Truncated shared snapshot envelope binding')
+    expected = digest.hex()
+    name = f'envelope-{expected}.vpe'
+    path = snapshot_path.parent / name
+    key = path.resolve()
+    if cache is None or key not in cache:
+        actual = sha256_file(path)
+        if cache is not None:
+            cache[key] = actual
+    else:
+        actual = cache[key]
+    if actual != expected:
+        raise ValidationError('Shared snapshot envelope hash mismatch')
+    return {'path': name, 'sha256': expected}
+
+
 def validate_match_index(
     index_path: Path,
     candidate_index_path: Path,
@@ -1601,6 +1631,7 @@ def validate_match_index(
     shards = index.get("shards")
     if not isinstance(shards, list) or len(shards) != len(candidate["shards"]):
         raise ValidationError("match index shard list does not match candidate index")
+    envelope_cache = {}
     for expected_id, (entry, candidate_entry) in enumerate(zip(shards, candidate["shards"])):
         if not isinstance(entry, dict) or entry.get("id") != expected_id:
             raise ValidationError(f"match index shard {expected_id} is malformed")
@@ -1619,6 +1650,9 @@ def validate_match_index(
             actual_hash = sha256_file(snapshot_path)
             if actual_hash != expected_hash:
                 raise ValidationError(f"match shard {expected_id} snapshot hash mismatch")
+            binding = snapshot_envelope_binding(snapshot_path, envelope_cache)
+            if entry.get('snapshot_envelope') != binding:
+                raise ValidationError(f"match shard {expected_id} envelope binding mismatch")
     return {"index": index, "index_sha256": sha256_file(index_path), "candidate": candidate}
 
 
@@ -1859,6 +1893,7 @@ def _apply_persistent_match_completions(
     if not isinstance(plan_path, str) or not plan_path:
         raise ValidationError("persistent worker validation omitted plan path")
     plan_root = Path(plan_path).resolve().parent
+    envelope_cache = {}
     for completion in completions:
         shard_id = completion["shard_id"]
         if shard_id in seen:
@@ -1881,6 +1916,11 @@ def _apply_persistent_match_completions(
             raise ValidationError(f"persistent worker shard {shard_id} verified pair count exceeds candidates")
         snapshot_path = plan_root / completion["snapshot_path"]
         actual_hash = sha256_file(snapshot_path)
+        binding = snapshot_envelope_binding(snapshot_path, envelope_cache)
+        if binding is not None:
+            entry['snapshot_envelope'] = binding
+        else:
+            entry.pop('snapshot_envelope', None)
         entry.update(
             {
                 "status": "complete",
@@ -1983,6 +2023,7 @@ def run_persistent_matcher(
     match_ratio: float = 0.8,
     resume: bool = True,
     stream_match_features: bool = False,
+    shared_snapshot_envelope: bool = False,
 ) -> dict[str, Any]:
     """Run all pending shards through one Rust feature-bank process."""
 
@@ -2026,6 +2067,7 @@ def run_persistent_matcher(
         min_matches=min_matches,
         match_ratio=match_ratio,
         stream_match_features=stream_match_features,
+        shared_snapshot_envelope=shared_snapshot_envelope,
     )
     timing_path = root.parent / "timing" / "persistent-match.time.txt"
     log_path = root / "persistent-match.log"
@@ -2068,6 +2110,7 @@ def run_persistent_matcher(
     persistent_worker = {
         "mode": "persistent-stream-v1" if stream_match_features else "persistent-v1",
         "stream_match_features": stream_match_features,
+        "shared_snapshot_envelope": shared_snapshot_envelope,
         "plan": str(plan_path.resolve()),
         "plan_sha256": sha256_file(plan_path),
         "elapsed_s": worker_elapsed,
@@ -2218,6 +2261,8 @@ def _parser() -> argparse.ArgumentParser:
         help="hydrate and cache only descriptors needed by each persistent match shard",
     )
     parser.add_argument("--min-pnp-inliers", type=int, default=12)
+    parser.add_argument('--shared-snapshot-envelope', action='store_true',
+                        help='use shared-envelope chunks in the persistent matching worker')
     parser.add_argument("--max-mapper-matches-per-pair", type=int)
     parser.add_argument(
         "--snapshot-keypoints-only",
@@ -2262,6 +2307,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValidationError("--persistent-matcher is only valid with --match or --run")
         if args.stream_match_features and not args.persistent_matcher:
             raise ValidationError("--stream-match-features requires --persistent-matcher")
+        if args.shared_snapshot_envelope and not args.persistent_matcher:
+            raise ValidationError('--shared-snapshot-envelope requires --persistent-matcher')
         if args.rig_frame_manifest is not None:
             if args.pair_source != "temporal-pyramid":
                 raise ValidationError("--rig-frame-manifest requires --pair-source temporal-pyramid")
@@ -2433,6 +2480,7 @@ def main(argv: list[str] | None = None) -> int:
                 resume=not args.no_resume,
                 persistent_matcher=args.persistent_matcher,
                 stream_match_features=args.stream_match_features,
+                shared_snapshot_envelope=args.shared_snapshot_envelope,
                 feature_manifest_path=feature_manifest_path,
             )
             persistent_worker_measurement = match_result.get("persistent_worker")

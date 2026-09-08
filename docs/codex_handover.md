@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`test/shared-snapshot-readback`（PR128の子）。
+現作業branchは`feat/runner-shared-snapshot-bindings`（PR129の子）。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -133,6 +133,15 @@ native runnerでの共有形式とrestart統合、全抽出E2E/COLMAP品質改�
 
 更新: PR128はhead`7ee56a2`でCI9成功後`4b51e97a84f3c9d99e70086a8ba20ec9dfe8151c`へmerge、
 旧branchはremote/local整理済み。現branchはmainへrebase済み。Python43 testsも通過。
+
+更新: native runnerへ--shared-snapshot-envelope（persistentのみ）を追加。
+completed chunkには参照envelopeのfilename/SHAを記録し、resume/merge index検証で
+本体と参照の両方を確認。completion log回収も同じ経路。検証call内で共通envelopeは1回hash。
+runner tests21件/scripts tests43件通過。欠落/改変/未記録依存・完了記録・既定OFFを検証。
+実worker既存2500出力へbinding helper適用、全件同一envelope1個を確認。
+証跡`m8-runner-envelope-bindings-v1.json`。新runner経由の実行/強制中断はまだ未検証。
+次はPR129最終CI/merge、現branchのPR、新runner実行とresume検証、全E2E/品質改善。
+測定プロセスなし。全goal未達。
 
 ### 以前の状態（上記を優先）
 

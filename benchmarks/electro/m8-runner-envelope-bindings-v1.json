@@ -1,0 +1,9 @@
+{
+  "status": "real-worker-envelope-binding-audit-pass",
+  "source": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-full-v1/matches",
+  "shards": 2500,
+  "bound_shards": 2500,
+  "envelope_cache_entries": 1,
+  "envelope_sha256": "2c9273dbc3f298ed47319243b80560dc38d7f7a0325958984a31ba876f6c52b3",
+  "scope": "Read-only application of the native runner binding helper to existing real worker output. Not a fresh runner execution or runner SIGKILL/resume test. Payload correctness was established separately by full worker parity."
+}
