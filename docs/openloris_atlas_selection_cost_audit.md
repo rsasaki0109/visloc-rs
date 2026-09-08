@@ -330,3 +330,17 @@ programs are in `m8-openloris-regenerated-integration-v1.json`.
 This verifies the staged chain from regenerated sources through stitching
 and refinement. It is not a continuous frontend-to-output run, and exact
 parity preserves the failing COLMAP RMSE gate rather than closing it.
+
+## Frontend ledger audit before continuous E2E
+
+The targeted7 summary has448 match-shard rows referencing one persistent
+worker report (53.59s wall); the adaptive32 summary has2188 rows referencing
+one report (272.62s wall). Whole-worker duration must be counted once per
+execution, not once per shard. Both summaries explicitly exclude extraction
+from feature-manifest validation and have null candidate-generation/mapping
+entries; null is not zero cost. Report and summary hashes are recorded in
+`m8-openloris-frontend-ledger-audit-v1.json`.
+
+This is a partial historical ledger audit, not an E2E total. Continuous replay
+still needs feature extraction, selection/merging, candidate construction,
+all snapshot overlays, and the reproduced mapper stages under one timed run.

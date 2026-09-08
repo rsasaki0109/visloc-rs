@@ -55,6 +55,9 @@
 > tail11.03秒/78120KiB、main146.73秒/525196KiB。regenerated-integration-v1.json参照。
 > 保存integrate-b23a6a4使用、trace ON。frontend除外の段階再現で、連続E2Eではない。
 > 次は連続pipeline計測と品質課題。既存RMSE未達不変。同じsource再実行の繰返し不要。測定稼働なし。
+> frontend-ledger-audit-v1.json追加。targeted7の448行は1worker53.59秒、adaptive32の2188行も1worker272.62秒。
+> worker時間をshard数倍しない。両summaryは特徴抽出除外、candidate/mapping nullでE2E未完。
+> 次は抽出/選択merge/候補/overlay生成の依存を連続実行仕様へ。空き約672MiBに注意。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
