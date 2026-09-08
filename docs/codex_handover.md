@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+更新: PR116はhead`bef08e15b40e1e020584fc3fd83fc56447964ed6`のCI9件成功後、
+`75fea9aba77507862e503fb090395cd5e602bf3d`へsquash merge、旧branch整理済み。
+現branchは`feat/m8-adaptive-bank-publication`。
+実10kバンク書き出しは全ファイル一致、completed resumeは全件検証・再利用。
+completed bankのresumeをSIGKILL後、再resumeも全件一致。新規10k書き出し中断は未検証。
+小規模同期SIGKILLテストは部分stagingを残して再開成功、一時ファイルはbank外に保持。
+合成100kは書き出し・resume・全内容一致。全試験peak528516KiB、別プロセスresume単独45388KiB。
+差の原因未確定。SfM全体の100k/E2E/quality gate完了とは扱わない。
+出力は外部`corridor1-1-m8-adaptive-bank-publication-v1`と`synthetic-sift-bank-100k-v1`。
+大規模出力前にdisk空きを再確認。既存入力・証跡を削除しない。
+次の主要課題はペア追加レシピの再現とnative E2E、未達の10k軌跡品質改善。
+
 - branch: `test/m8-extraction-replay-preflight`。サブエージェントは使わない。
 - 抽出session37896は終了コード0で完了。再poll・再起動不要。
   1,250画像/2,500 feature+loci files/585,615,663 bytesが保存済み出力と完全一致。
