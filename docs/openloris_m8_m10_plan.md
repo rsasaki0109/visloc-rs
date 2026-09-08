@@ -133,6 +133,18 @@ one concrete integration that advances speed/memory while preserving the
 accuracy gate; do not substitute another local parameter-diagnostic ladder
 for the remaining native/tier/restart/100k outcome requirements.
 
+PR #92 merged as `ece2b71` after all nine checks on `8cda545`
+(run `34184156416`). The next
+[native rig integration contract](openloris_native_rig_matrix_free.md)
+targets the calibrated-rig mapper's common BA dispatch, not the monocular
+mapper. Its default-off selector preserves caller losses and observation
+policy and explicitly handles zero-pose landmark-only solves without a large
+Schur fallback. Root's current-main native 1k replay exactly reproduces the
+historical champion's three model files and post-only RMSE/p95. The
+[input/control certificate](../benchmarks/electro/m8-openloris-native-rig-matrix-free-preflight-v1.json)
+is frozen before candidate runs. Native matrix-free implementation, A/B and
+all larger outcome gates remain incomplete; small-window speedup is unproven.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,
