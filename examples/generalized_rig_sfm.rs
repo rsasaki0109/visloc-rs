@@ -125,6 +125,7 @@ struct Args {
     ba_huber_delta: f64,
     ba_backend: RigBaBackend,
     ba_anchor_disconnected_components: bool,
+    ba_fixed_boundary_observations: bool,
     structure_refinement_iterations: usize,
     preview_rig_correspondence_csr: bool,
     preview_pair_confidence_conflicts: bool,
@@ -248,6 +249,7 @@ fn parse_args() -> Result<Args, String> {
     let mut ba_huber_delta = 6.0;
     let mut ba_backend = defaults.ba_backend;
     let mut ba_anchor_disconnected_components = defaults.ba_anchor_disconnected_components;
+    let mut ba_fixed_boundary_observations = defaults.ba_fixed_boundary_observations;
     let mut ba_backend_seen = false;
     let mut structure_refinement_iterations = defaults.structure_refinement_iterations;
     let mut preview_rig_correspondence_csr = false;
@@ -560,6 +562,7 @@ fn parse_args() -> Result<Args, String> {
                 ba_backend = parse_ba_backend(&value()?)?;
             }
             "--ba-anchor-disconnected-components" => ba_anchor_disconnected_components = true,
+            "--ba-fixed-boundary-observations" => ba_fixed_boundary_observations = true,
             "--structure-refinement-iterations" => {
                 structure_refinement_iterations =
                     value()?.parse().map_err(|error| format!("{error}"))?
@@ -620,6 +623,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
                     "[--ba-backend legacy|matrix-free|matrix-free-cluster8|matrix-free-cluster8-restart1|matrix-free-qr|bounded-direct64-qr] ",
                     "[--ba-anchor-disconnected-components] ",
+                    "[--ba-fixed-boundary-observations] ",
                     "[--structure-refinement-iterations 5] ",
                     "[--metric-anchored-cycle-tracks|--metric-temporal-cycle-tracks|",
                     "--metric-sparse-cycle-tracks|",
@@ -912,6 +916,7 @@ fn parse_args() -> Result<Args, String> {
         ba_huber_delta,
         ba_backend,
         ba_anchor_disconnected_components,
+        ba_fixed_boundary_observations,
         structure_refinement_iterations,
         preview_rig_correspondence_csr,
         preview_pair_confidence_conflicts,
@@ -1692,6 +1697,7 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         final_ba_min_pose_observations: args.final_ba_min_pose_observations,
         ba_backend: args.ba_backend,
         ba_anchor_disconnected_components: args.ba_anchor_disconnected_components,
+        ba_fixed_boundary_observations: args.ba_fixed_boundary_observations,
         structure_refinement_iterations: args.structure_refinement_iterations,
         dynamic_correspondence_tracking: args.dynamic_correspondence_tracking,
         ba_config: visloc_rs::BaConfig {
