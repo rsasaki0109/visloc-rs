@@ -12,8 +12,13 @@ validation and merge preflight reject missing, changed, or unrecorded envelope
 dependencies. Within one validation call, each immutable envelope is hashed
 once. The Rust reader separately validates payload checksums and bindings.
 Defaults remain legacy; mixed legacy/shared completed shards can be read.
-This runner integration is unit-tested; a fresh real runner interruption test
-is still required, separately from the converter SIGKILL test below.
+`stress_native_shared_restart.py` now tests the actual CLI runner with 128 real
+feature files and 988 local candidate pairs (124 shards). The runner/worker
+process group was SIGKILLed after eight completed shards; resume ran only the
+remaining 116. All 124 chunks and the merged snapshot match uninterrupted control
+bytes, prior chunks are unchanged, and all complete index entries bind their
+envelopes. Evidence: `m8-native-shared-restart-v2.json`. This covers matching and
+merge restart, not extraction, mapper restart, full10k or continuous E2E.
 
 Each directory stores immutable `envelope-<sha256>.vpe` files and pair chunks.
 The envelope is the exact v1 payload prefix through verifier configuration;

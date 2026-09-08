@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`feat/runner-shared-snapshot-bindings`（PR129の子）。
+現作業branchは`test/native-runner-shared-restart`（PR130の子）。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -145,6 +145,17 @@ runner tests21件/scripts tests43件通過。欠落/改変/未記録依存・完
 
 更新: PR129はhead`ecd3819`でCI9成功後`7fe9e7d885bb0d22f16721ef35cb5aabbd4aef23`へmerge。
 旧branchをremote/local整理、現branchをmainへrebase済み。
+
+更新: 実native runner restart試験のv1がmatching前にTypeErrorで停止。
+run_match_shardsへのshared_snapshot_envelope引数転送漏れをPR130で修正し、
+dispatch回帰test追加。head`e63a1fd`をpush、子branchへrebase済み。最終CI待ち。
+v2試験はpass。128実特徴画像/988候補/124 shardをcontrolと中断系で実行。
+専用runner+worker process groupを8 shard完了時にSIGKILL(-9)、再開workerは残り116のみ。
+全124 shard/統合snapshotがcontrol全bytes一致、既存8ファイル不変、全indexにenvelope binding。
+証跡`m8-native-shared-restart-v2.json`、外部root同名。session7249はexit0完了。
+v1失敗logも保存、session29544はexit1完了。再poll/再起動不要。
+runner tests22通過。次はPR130最終CI/mergeと現branchのPR、全10k runner/E2E・品質改善。
+これはmatching+merge restartで、抽出・mapper・全10k restartではない。全goal未達。
 
 ### 以前の状態（上記を優先）
 

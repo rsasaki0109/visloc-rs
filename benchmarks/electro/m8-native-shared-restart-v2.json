@@ -1,0 +1,20 @@
+{
+  "status": "native-matching-merge-runner-sigkill-resume-parity-pass",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-shared-restart-v2/report.json",
+  "recipe": "python3 scripts/stress_native_shared_restart.py --binary SFM_BINARY --merge-binary MERGE_BINARY --output NEW_ROOT",
+  "binary_sha256": "b02f85ecce56074e000d77a6bbd63242b3d0f568294f9c22fcc9a2dc4ca01c50",
+  "merge_binary_sha256": "d85410b5b1a63eed6105450c44468aab5b772b74a62db7c63d30562a70e8d661",
+  "images": 128,
+  "candidate_pairs": 988,
+  "shards": 124,
+  "interrupted_exit_code": -9,
+  "completed_before_resume": 8,
+  "resumed_worker_shards": 116,
+  "complete_index_entries": 124,
+  "entries_with_envelope_binding": 124,
+  "prior_chunks_unchanged": true,
+  "all_shards_byte_equal": true,
+  "control_and_resumed_merged_sha256": "3148fd727c015d126da52b4febdf3fc9b9abbc6253302d4e3a1a4d0105fe79a0",
+  "scope": "Actual CLI runner with retained real features: prepare, matching, merge, partial process-group SIGKILL and resume. Not extraction, mapper restart, full10k, trajectory quality, or continuous E2E.",
+  "first_attempt": "v1 failed before matching because match dispatch lacked the shared_snapshot_envelope keyword. Fixed in PR130 head e63a1fd with a focused dispatch regression test; v1 failure logs retained."
+}
