@@ -1,0 +1,14 @@
+{
+  "schema": "m8-full-base-extraction-v2",
+  "status": "full-feature-parity-pass-resource-ledger-incomplete",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-base-extraction-v2",
+  "report_sha256": "99d41ed0f9588927adfee17eec9f6a75f0d9c0dec74b9758beb0858bd54a46b0",
+  "image_count": 10000,
+  "worker_exit_codes": [0, 0, 0, 0, 0, 0],
+  "all_feature_membership_and_bytes_equal": true,
+  "scope_report": "/home/sasaki/datasets/openloris/m8-full-base-extraction-scope-v2.json",
+  "scope_report_terminal": false,
+  "resource_limitation": "Scope report remained running after all processes and the cgroup disappeared. Final aggregate RSS, memory.peak and memory.events are unavailable. Cause not yet established. Earlier live observations confirmed the configured 2 GiB/no-swap limit and zero OOM counters, but are not a complete final resource ledger.",
+  "next": "Validate a durable detached service launcher with persisted output and terminal measurements before any long measured run. Do not label this run an aggregate RSS pass or infer a complete peak from worker peaks.",
+  "scope": "Full base extraction parity only. No full dense extraction, continuous native E2E, speedup or COLMAP quality claim."
+}
