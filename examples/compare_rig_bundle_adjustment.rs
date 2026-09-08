@@ -23,7 +23,7 @@ use visloc_rs::slam::{
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--fixed-landmark-ids PATH] [--matrix-free-column-scaling] [--matrix-free-adaptive-damping] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
+    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--fixed-landmark-ids PATH] [--matrix-free-column-scaling] [--matrix-free-adaptive-damping] [--huber-loss-3px] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -39,6 +39,7 @@ const MAX_PCG_ITERATIONS: usize = 128;
 const PCG_TOLERANCE: f64 = 1.0e-12;
 const ADAPTIVE_PCG_MAX_ITERATIONS: usize = 512;
 const ADAPTIVE_PCG_RELATIVE_TOLERANCE: f64 = 1.0e-8;
+const HUBER_LOSS_3PX_DELTA: f64 = 3.0;
 const BA_MAX_ITERATIONS: usize = 20;
 const BA_INITIAL_LAMBDA: f64 = 1.0e-4;
 const ORACLE_MAX_VARIABLE_POSES: usize = 512;
@@ -92,6 +93,7 @@ struct Args {
     fixed_landmark_ids: Option<PathBuf>,
     matrix_free_column_scaling: bool,
     matrix_free_adaptive_damping: bool,
+    huber_loss_3px: bool,
     oracle_fixture_out: Option<PathBuf>,
 }
 
@@ -170,6 +172,19 @@ struct PreparedProblem {
     ba: BundleAdjustment,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HuberReprojectionStats {
+    raw_cost: f64,
+    robust_cost: f64,
+    residual_norm_sum: f64,
+    max_residual_norm: f64,
+    valid_observations: usize,
+    nonprojectable_observations: usize,
+    robustified_observations: usize,
+    weight_sum: f64,
+    minimum_weight: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct RunSummary {
     solver: SolverArm,
@@ -227,6 +242,8 @@ where
     let mut matrix_free_column_scaling_seen = false;
     let mut matrix_free_adaptive_damping = false;
     let mut matrix_free_adaptive_damping_seen = false;
+    let mut huber_loss_3px = false;
+    let mut huber_loss_seen = false;
     while let Some(flag) = values.next() {
         if flag == "-h" || flag == "--help" {
             return Err(USAGE.to_owned());
@@ -301,6 +318,14 @@ where
             }
             matrix_free_adaptive_damping_seen = true;
             matrix_free_adaptive_damping = true;
+            continue;
+        }
+        if flag == "--huber-loss-3px" {
+            if huber_loss_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            huber_loss_seen = true;
+            huber_loss_3px = true;
             continue;
         }
         if flag == "--pcg-relative-tolerance" {
@@ -394,12 +419,13 @@ where
             || allow_unsupported_seen
             || fixed_landmark_ids_seen
             || matrix_free_column_scaling_seen
-            || matrix_free_adaptive_damping_seen)
+            || matrix_free_adaptive_damping_seen
+            || huber_loss_seen)
     {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
              --solver, --out-dir, --fixed-frame-id, --allow-unsupported-sensor-images, --fixed-landmark-ids, \
-             --matrix-free-column-scaling, --matrix-free-adaptive-damping, --pcg-max-iterations, --pcg-relative-tolerance or \
+             --matrix-free-column-scaling, --matrix-free-adaptive-damping, --huber-loss-3px, --pcg-max-iterations, --pcg-relative-tolerance or \
              --pcg-max-restarts\n{USAGE}"
         ));
     }
@@ -425,6 +451,7 @@ where
         fixed_landmark_ids,
         matrix_free_column_scaling,
         matrix_free_adaptive_damping,
+        huber_loss_3px,
         oracle_fixture_out,
     };
     if args.solver == Some(SolverArm::Direct) && matrix_free_column_scaling_seen {
@@ -463,11 +490,25 @@ where
             "adaptive damping requires PCG max_iterations=512, relative_tolerance=1e-8, and max_restarts=0\n{USAGE}"
         ));
     }
+    if huber_loss_3px
+        && !(args.solver == Some(SolverArm::MatrixFree)
+            && matrix_free_column_scaling
+            && matrix_free_adaptive_damping)
+    {
+        return Err(format!(
+            "--huber-loss-3px requires matrix-free column-scaled adaptive mode\n{USAGE}"
+        ));
+    }
     if args.fixed_landmark_ids.is_some()
         && !(args.solver == Some(SolverArm::MatrixFree) && matrix_free_adaptive_damping)
     {
         return Err(format!(
             "--fixed-landmark-ids requires --solver matrix-free --matrix-free-column-scaling --matrix-free-adaptive-damping\n{USAGE}"
+        ));
+    }
+    if huber_loss_3px && args.fixed_landmark_ids.is_some() {
+        return Err(format!(
+            "--huber-loss-3px cannot be combined with --fixed-landmark-ids\n{USAGE}"
         ));
     }
     Ok(args)
@@ -556,7 +597,31 @@ fn run(args: &Args) -> Result<(), String> {
         .out_dir
         .as_deref()
         .ok_or_else(|| "--out-dir is required for solver mode".to_owned())?;
-    let initial_cost = prepared.ba.cost();
+    let huber_kernel = args.huber_loss_3px.then_some(RobustKernel::Huber {
+        delta: HUBER_LOSS_3PX_DELTA,
+    });
+    let huber_source_hashes = if args.huber_loss_3px {
+        Some(hash_source_inputs(&args.model, &args.rig_manifest)?)
+    } else {
+        None
+    };
+    let huber_initial_stats = if let Some(kernel) = &huber_kernel {
+        let stats = stream_huber_reprojection_stats(&prepared.ba, kernel)?;
+        ensure_huber_initially_eligible(&stats)?;
+        ensure_huber_cost_matches(
+            "initial",
+            stats.robust_cost,
+            prepared.ba.robust_cost(kernel),
+        )?;
+        ensure_huber_cost_matches("initial raw", stats.raw_cost, prepared.ba.cost())?;
+        print_huber_reprojection_stats("initial", &stats, prepared.ba.rig_observations.len());
+        Some(stats)
+    } else {
+        None
+    };
+    let initial_cost = huber_initial_stats
+        .as_ref()
+        .map_or_else(|| prepared.ba.cost(), |stats| stats.robust_cost);
     if !initial_cost.is_finite() {
         return Err("initial BA cost is non-finite".to_owned());
     }
@@ -564,7 +629,7 @@ fn run(args: &Args) -> Result<(), String> {
         max_iterations: BA_MAX_ITERATIONS,
         initial_lambda: Some(BA_INITIAL_LAMBDA),
         linear_solver: LinearSolver::Sparse,
-        robust_kernel: RobustKernel::None,
+        robust_kernel: huber_kernel.unwrap_or(RobustKernel::None),
         refine_intrinsics: false,
         refine_distortion: false,
         parallel: false,
@@ -603,11 +668,31 @@ fn run(args: &Args) -> Result<(), String> {
         );
     }
     if args.matrix_free_adaptive_damping {
+        if args.huber_loss_3px {
+            println!(
+                "adaptive_damping_configuration solver=matrix-free-column-scaled-adaptive policy=accepted_rho_cubic_min_factor[1/3] prediction_coordinates=scaled prediction=weighted_irls_surrogate same_observation_gate=true lm_acceptance_cost=robust_huber pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0",
+                ADAPTIVE_PCG_MAX_ITERATIONS,
+                ADAPTIVE_PCG_RELATIVE_TOLERANCE,
+                PCG_TOLERANCE,
+            );
+        } else {
+            println!(
+                "adaptive_damping_configuration solver=matrix-free-column-scaled-adaptive policy=accepted_rho_cubic_min_factor[1/3] prediction_coordinates=scaled prediction=undamped_squared_cost same_observation_gate=true pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0",
+                ADAPTIVE_PCG_MAX_ITERATIONS,
+                ADAPTIVE_PCG_RELATIVE_TOLERANCE,
+                PCG_TOLERANCE,
+            );
+        }
+    }
+    if args.huber_loss_3px {
+        let source_hashes = huber_source_hashes
+            .as_ref()
+            .expect("Huber mode computes source hashes before solving");
         println!(
-            "adaptive_damping_configuration solver=matrix-free-column-scaled-adaptive policy=accepted_rho_cubic_min_factor[1/3] prediction_coordinates=scaled prediction=undamped_squared_cost same_observation_gate=true pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0",
-            ADAPTIVE_PCG_MAX_ITERATIONS,
-            ADAPTIVE_PCG_RELATIVE_TOLERANCE,
-            PCG_TOLERANCE,
+            "huber_loss_configuration solver=matrix-free-column-scaled-adaptive delta_px={:.17e} raw_objective=sum_squared robust_objective=sum_huber_rho robustified_weight=huber_derivative lm_acceptance_cost=robust_huber source_sha256={} combined_source_sha256={}",
+            HUBER_LOSS_3PX_DELTA,
+            source_hashes.combined,
+            source_hashes.combined,
         );
     }
     if solver == SolverArm::MatrixFree && args.pcg_max_restarts_explicit {
@@ -719,6 +804,49 @@ fn run(args: &Args) -> Result<(), String> {
     if !final_cost.is_finite() {
         return Err("final BA cost is non-finite".to_owned());
     }
+    let huber_final_stats = if let Some(kernel) = &huber_kernel {
+        let stats = stream_huber_reprojection_stats(&prepared.ba, kernel)?;
+        ensure_huber_cost_matches("final", stats.robust_cost, final_cost)?;
+        ensure_huber_cost_matches(
+            "final streamed",
+            stats.robust_cost,
+            prepared.ba.robust_cost(kernel),
+        )?;
+        ensure_huber_cost_matches("final raw", stats.raw_cost, prepared.ba.cost())?;
+        if stats.nonprojectable_observations != 0 {
+            return Err(format!(
+                "Huber candidate produced nonprojectable observations: {}",
+                stats.nonprojectable_observations
+            ));
+        }
+        let accepted_steps = match &optimization {
+            OptimizationResult::MatrixFreeAdaptive(result) => result
+                .ba
+                .iterations
+                .iter()
+                .filter(|iteration| iteration.step_accepted)
+                .count(),
+            _ => 0,
+        };
+        if accepted_steps == 0 {
+            return Err("Huber candidate accepted no LM steps".to_owned());
+        }
+        let initial = huber_initial_stats
+            .as_ref()
+            .expect("Huber final stats require initial stats");
+        let increase = stats.robust_cost - initial.robust_cost;
+        let tolerance = 1.0e-8 + 1.0e-12 * initial.robust_cost.abs().max(1.0);
+        if !increase.is_finite() || increase > tolerance {
+            return Err(format!(
+                "Huber robust objective increased: initial={:.17e} final={:.17e}",
+                initial.robust_cost, stats.robust_cost
+            ));
+        }
+        print_huber_reprojection_stats("final", &stats, prepared.ba.rig_observations.len());
+        Some(stats)
+    } else {
+        None
+    };
     if let Some(snapshot) = &fixed_landmark_snapshot {
         ensure_fixed_landmarks_unchanged(&prepared.ba, snapshot)?;
     }
@@ -748,7 +876,84 @@ fn run(args: &Args) -> Result<(), String> {
     } else {
         summary.solver.as_str()
     };
-    if args.matrix_free_adaptive_damping {
+    if args.huber_loss_3px {
+        let initial = huber_initial_stats
+            .as_ref()
+            .expect("Huber summary requires initial stats");
+        let final_stats = huber_final_stats
+            .as_ref()
+            .expect("Huber summary requires final stats");
+        let accepted_steps = match &optimization {
+            OptimizationResult::MatrixFreeAdaptive(result) => result
+                .ba
+                .iterations
+                .iter()
+                .filter(|iteration| iteration.step_accepted)
+                .count(),
+            _ => 0,
+        };
+        let source_hashes = huber_source_hashes
+            .as_ref()
+            .expect("Huber summary requires source hashes");
+        println!(
+            "solver={} cost_objective=robust_huber_3px raw_objective=sum_squared lm_trace_cost=robust_huber delta_px={:.17e} initial_cost={:.15e} final_cost={:.15e} initial_raw_cost={:.15e} final_raw_cost={:.15e} initial_robust_cost={:.15e} final_robust_cost={:.15e} initial_raw_mean_px={:.15e} final_raw_mean_px={:.15e} initial_raw_rmse_px={:.15e} final_raw_rmse_px={:.15e} initial_max_residual_px={:.15e} final_max_residual_px={:.15e} initial_valid_observations={} final_valid_observations={} initial_nonprojectable_observations={} final_nonprojectable_observations={} initial_robustified_observations={} final_robustified_observations={} initial_minimum_weight={} final_minimum_weight={} initial_weight_sum={:.15e} final_weight_sum={:.15e} accepted_lm_steps={} lm_iterations={} converged={} source_sha256={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks={} allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 adaptive_damping=true solver_seconds={:.6} total_seconds={:.6} out={}",
+            solver_name,
+            HUBER_LOSS_3PX_DELTA,
+            summary.initial_cost,
+            summary.final_cost,
+            initial.raw_cost,
+            final_stats.raw_cost,
+            initial.robust_cost,
+            final_stats.robust_cost,
+            initial.residual_norm_sum / initial.valid_observations.max(1) as f64,
+            final_stats.residual_norm_sum / final_stats.valid_observations.max(1) as f64,
+            (initial.raw_cost / initial.valid_observations.max(1) as f64).sqrt(),
+            (final_stats.raw_cost / final_stats.valid_observations.max(1) as f64).sqrt(),
+            initial.max_residual_norm,
+            final_stats.max_residual_norm,
+            initial.valid_observations,
+            final_stats.valid_observations,
+            initial.nonprojectable_observations,
+            final_stats.nonprojectable_observations,
+            initial.robustified_observations,
+            final_stats.robustified_observations,
+            initial
+                .minimum_weight
+                .map_or_else(|| "none".to_owned(), |value| format!("{value:.17e}")),
+            final_stats
+                .minimum_weight
+                .map_or_else(|| "none".to_owned(), |value| format!("{value:.17e}")),
+            initial.weight_sum,
+            final_stats.weight_sum,
+            accepted_steps,
+            summary.iterations,
+            summary.converged,
+            source_hashes.combined,
+            source.images.len(),
+            manifest
+                .assignments
+                .values()
+                .map(|assignment| assignment.frame_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            source.points.len(),
+            source
+                .points
+                .iter()
+                .map(|point| point.observations.len())
+                .sum::<usize>(),
+            args.fixed_frame_id,
+            fixed_landmark_count,
+            args.allow_unsupported_sensor_images,
+            source_supported_image_count(&source),
+            args.pcg_max_iterations,
+            args.pcg_relative_tolerance,
+            PCG_TOLERANCE,
+            summary.solver_seconds,
+            summary.total_seconds,
+            out_dir.display(),
+        );
+    } else if args.matrix_free_adaptive_damping {
         let adaptive_iterations = match &optimization {
             OptimizationResult::MatrixFreeAdaptive(result) => result.adaptive_iterations.len(),
             _ => 0,
@@ -2805,6 +3010,151 @@ fn write_model_files(
     Ok(())
 }
 
+fn stream_huber_reprojection_stats(
+    ba: &BundleAdjustment,
+    kernel: &RobustKernel,
+) -> Result<HuberReprojectionStats, String> {
+    let mut stats = HuberReprojectionStats {
+        raw_cost: 0.0,
+        robust_cost: 0.0,
+        residual_norm_sum: 0.0,
+        max_residual_norm: 0.0,
+        valid_observations: 0,
+        nonprojectable_observations: 0,
+        robustified_observations: 0,
+        weight_sum: 0.0,
+        minimum_weight: None,
+    };
+    for observation in &ba.rig_observations {
+        let Some(pose) = ba.poses.get(&observation.keyframe_id) else {
+            stats.nonprojectable_observations += 1;
+            continue;
+        };
+        let Some(point) = ba.landmarks.get(&observation.landmark_id) else {
+            stats.nonprojectable_observations += 1;
+            continue;
+        };
+        let Some((fx, fy, cx, cy)) = observation.camera.intrinsics() else {
+            stats.nonprojectable_observations += 1;
+            continue;
+        };
+        let point_rig = pose.transform_world_point(point);
+        let point_sensor = observation.sensor_from_rig.transform_point(&point_rig);
+        let coordinates_finite = point_sensor.coords.iter().all(|value| value.is_finite());
+        if !coordinates_finite || point_sensor.z <= MIN_DEPTH_M {
+            stats.nonprojectable_observations += 1;
+            continue;
+        }
+        let predicted = Point2::new(
+            fx * point_sensor.x / point_sensor.z + cx,
+            fy * point_sensor.y / point_sensor.z + cy,
+        );
+        if !predicted.coords.iter().all(|value| value.is_finite()) {
+            stats.nonprojectable_observations += 1;
+            continue;
+        }
+        let residual = predicted - observation.xy;
+        let squared = residual.norm_squared();
+        let norm = squared.sqrt();
+        if !squared.is_finite() || !norm.is_finite() {
+            return Err(format!(
+                "non-finite Huber reprojection residual for frame {} landmark {}",
+                observation.keyframe_id, observation.landmark_id
+            ));
+        }
+        let robust = kernel.cost(squared);
+        let weight = kernel.weight(squared);
+        if !robust.is_finite() || !weight.is_finite() || weight < 0.0 {
+            return Err(format!(
+                "non-finite Huber cost/weight for frame {} landmark {}",
+                observation.keyframe_id, observation.landmark_id
+            ));
+        }
+        stats.raw_cost += squared;
+        stats.robust_cost += robust;
+        stats.residual_norm_sum += norm;
+        stats.weight_sum += weight;
+        if !stats.raw_cost.is_finite()
+            || !stats.robust_cost.is_finite()
+            || !stats.residual_norm_sum.is_finite()
+            || !stats.weight_sum.is_finite()
+        {
+            return Err("Huber reprojection scalar accumulation overflowed".to_owned());
+        }
+        stats.max_residual_norm = stats.max_residual_norm.max(norm);
+        stats.minimum_weight = Some(
+            stats
+                .minimum_weight
+                .map_or(weight, |minimum| minimum.min(weight)),
+        );
+        if weight < 1.0 {
+            stats.robustified_observations += 1;
+        }
+        stats.valid_observations += 1;
+    }
+    Ok(stats)
+}
+
+fn ensure_huber_cost_matches(label: &str, observed: f64, reported: f64) -> Result<(), String> {
+    if !observed.is_finite() || !reported.is_finite() {
+        return Err(format!("{label} Huber cost is non-finite"));
+    }
+    let difference = (observed - reported).abs();
+    let scale = observed.abs().max(reported.abs()).max(1.0);
+    if !difference.is_finite() || difference > 1.0e-8 + 1.0e-12 * scale {
+        return Err(format!(
+            "{label} Huber cost mismatch: streamed={observed:.17e} solver={reported:.17e}"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_huber_initially_eligible(stats: &HuberReprojectionStats) -> Result<(), String> {
+    if stats.nonprojectable_observations != 0 {
+        return Err(format!(
+            "Huber candidate requires all observations projectable; nonprojectable_observations={}",
+            stats.nonprojectable_observations
+        ));
+    }
+    if stats.valid_observations == 0 {
+        return Err("Huber candidate has no valid observations".to_owned());
+    }
+    if !stats.raw_cost.is_finite() || !stats.robust_cost.is_finite() {
+        return Err("Huber candidate initial cost is non-finite".to_owned());
+    }
+    Ok(())
+}
+
+fn print_huber_reprojection_stats(
+    phase: &str,
+    stats: &HuberReprojectionStats,
+    total_observations: usize,
+) {
+    let raw_mean = stats.raw_cost / stats.valid_observations.max(1) as f64;
+    let raw_rmse = raw_mean.sqrt();
+    let raw_mean_px = stats.residual_norm_sum / stats.valid_observations.max(1) as f64;
+    println!(
+        "huber_reprojection_stats phase={} objective_raw=sum_squared objective_robust=sum_huber_rho delta_px={:.17e} raw_cost={:.17e} robust_cost={:.17e} raw_mean_squared={:.17e} raw_mean_px={:.17e} raw_rmse_px={:.17e} residual_norm_sum_px={:.17e} max_residual_px={:.17e} valid_observations={} nonprojectable_observations={} total_observations={} robustified_observations={} minimum_weight={} weight_sum={:.17e}",
+        phase,
+        HUBER_LOSS_3PX_DELTA,
+        stats.raw_cost,
+        stats.robust_cost,
+        raw_mean,
+        raw_mean_px,
+        raw_rmse,
+        stats.residual_norm_sum,
+        stats.max_residual_norm,
+        stats.valid_observations,
+        stats.nonprojectable_observations,
+        total_observations,
+        stats.robustified_observations,
+        stats
+            .minimum_weight
+            .map_or_else(|| "none".to_owned(), |value| format!("{value:.17e}")),
+        stats.weight_sum,
+    );
+}
+
 fn print_direct_trace(result: &visloc_rs::slam::BaResult) {
     for iteration in &result.iterations {
         println!(
@@ -3094,6 +3444,13 @@ fn parse_f64(value: &str, label: &str, path: &Path, line: usize) -> Result<f64, 
 mod tests {
     use super::*;
 
+    fn assert_close(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual:.17e} expected={expected:.17e} tolerance={tolerance:.3e}"
+        );
+    }
+
     #[test]
     fn parses_solver_and_rejects_pcg_for_direct() {
         let args = parse_args(
@@ -3182,6 +3539,7 @@ mod tests {
         assert!(!default.allow_unsupported_sensor_images_explicit);
         assert!(!default.matrix_free_column_scaling);
         assert!(!default.matrix_free_adaptive_damping);
+        assert!(!default.huber_loss_3px);
     }
 
     #[test]
@@ -3469,6 +3827,143 @@ mod tests {
                 "--export-oracle-fixture",
                 "fixture.txt",
                 "--matrix-free-adaptive-damping",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
+    }
+
+    #[test]
+    fn parses_huber_loss_only_for_adaptive_column_scaled_matrix_free() {
+        let args = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--huber-loss-3px",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(args.huber_loss_3px);
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--huber-loss-3px",
+                "--huber-loss-3px",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+
+        let missing_adaptive = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--huber-loss-3px",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(missing_adaptive.contains("requires matrix-free column-scaled adaptive mode"));
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--huber-loss-3px",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("requires matrix-free column-scaled adaptive mode"));
+
+        let fixed_landmark = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--huber-loss-3px",
+                "--fixed-landmark-ids",
+                "frozen.txt",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(fixed_landmark.contains("cannot be combined"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--huber-loss-3px",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -4315,6 +4810,145 @@ mod tests {
             sensor_zero_image_by_frame: BTreeMap::from([(0, 0)]),
         };
         (source, manifest)
+    }
+
+    #[test]
+    fn huber_stats_match_boundary_outlier_and_all_rig_observations() {
+        let (source, manifest) = publication_fixture();
+        let mut prepared = build_problem(&source, &manifest).unwrap();
+        let kernel = RobustKernel::Huber {
+            delta: HUBER_LOSS_3PX_DELTA,
+        };
+        let baseline = stream_huber_reprojection_stats(&prepared.ba, &kernel).unwrap();
+        assert_eq!(baseline.valid_observations, 2);
+        assert_eq!(baseline.nonprojectable_observations, 0);
+        assert_eq!(baseline.robustified_observations, 0);
+        assert_close(baseline.raw_cost, 0.0, 1.0e-12);
+        assert_close(
+            baseline.robust_cost,
+            prepared.ba.robust_cost(&kernel),
+            1.0e-12,
+        );
+
+        // Exactly delta is still in the quadratic branch.
+        prepared.ba.rig_observations[0].xy = Point2::new(-3.0, 0.0);
+        let boundary = stream_huber_reprojection_stats(&prepared.ba, &kernel).unwrap();
+        assert_eq!(
+            boundary.valid_observations,
+            prepared.ba.rig_observations.len()
+        );
+        assert_eq!(boundary.robustified_observations, 0);
+        assert_close(boundary.raw_cost, 9.0, 1.0e-12);
+        assert_close(boundary.robust_cost, 9.0, 1.0e-12);
+        assert_close(boundary.weight_sum, 2.0, 1.0e-12);
+        assert_close(boundary.minimum_weight.unwrap(), 1.0, 1.0e-12);
+
+        // A 5px residual is linearized with rho=2*delta*sqrt(s)-delta²
+        // and rho'=delta/sqrt(s), while the second observation remains exact.
+        prepared.ba.rig_observations[0].xy = Point2::new(-5.0, 0.0);
+        let outlier = stream_huber_reprojection_stats(&prepared.ba, &kernel).unwrap();
+        assert_eq!(
+            outlier.valid_observations,
+            prepared.ba.rig_observations.len()
+        );
+        assert_eq!(outlier.robustified_observations, 1);
+        assert_close(outlier.raw_cost, 25.0, 1.0e-12);
+        assert_close(outlier.robust_cost, 21.0, 1.0e-12);
+        assert_close(outlier.minimum_weight.unwrap(), 0.6, 1.0e-12);
+        assert_close(outlier.weight_sum, 1.6, 1.0e-12);
+        assert_close(
+            outlier.robust_cost,
+            prepared.ba.robust_cost(&kernel),
+            1.0e-12,
+        );
+        ensure_huber_initially_eligible(&outlier).unwrap();
+    }
+
+    #[test]
+    fn huber_stats_reject_nonprojectable_initial_candidate() {
+        let (source, manifest) = publication_fixture();
+        let mut prepared = build_problem(&source, &manifest).unwrap();
+        prepared.ba.landmarks.insert(7, Point3::new(0.0, 0.0, -2.0));
+        let kernel = RobustKernel::Huber {
+            delta: HUBER_LOSS_3PX_DELTA,
+        };
+        let stats = stream_huber_reprojection_stats(&prepared.ba, &kernel).unwrap();
+        assert_eq!(stats.valid_observations, 0);
+        assert_eq!(stats.nonprojectable_observations, 2);
+        let error = ensure_huber_initially_eligible(&stats).unwrap_err();
+        assert!(error.contains("nonprojectable_observations=2"));
+    }
+
+    #[test]
+    fn huber_adaptive_uses_robust_cost_and_preserves_rig_observations() {
+        let (source, manifest) = publication_fixture();
+        let mut prepared = build_problem(&source, &manifest).unwrap();
+        prepared.ba.add_pose(1, Pose::identity());
+        let extra_observations = prepared.ba.rig_observations.clone();
+        for mut observation in extra_observations {
+            observation.keyframe_id = 1;
+            prepared.ba.add_rig_observation(observation);
+        }
+        prepared.ba.rig_observations[0].xy = Point2::new(-5.0, 0.0);
+        let kernel = RobustKernel::Huber {
+            delta: HUBER_LOSS_3PX_DELTA,
+        };
+        let initial_stats = stream_huber_reprojection_stats(&prepared.ba, &kernel).unwrap();
+        ensure_huber_initially_eligible(&initial_stats).unwrap();
+        let initial_observation_count = prepared.ba.rig_observations.len();
+        let initial_extrinsics: Vec<SE3> = prepared
+            .ba
+            .rig_observations
+            .iter()
+            .map(|observation| observation.sensor_from_rig.clone())
+            .collect();
+        let anchor = prepared.ba.poses[&0].clone();
+        let config = BaConfig {
+            max_iterations: BA_MAX_ITERATIONS,
+            initial_lambda: Some(BA_INITIAL_LAMBDA),
+            linear_solver: LinearSolver::Sparse,
+            robust_kernel: kernel,
+            refine_intrinsics: false,
+            refine_distortion: false,
+            parallel: false,
+            ..BaConfig::default()
+        };
+        let result = prepared
+            .ba
+            .optimize_matrix_free_column_scaled_adaptive(
+                &config,
+                MatrixFreeBaColumnScalingOptions {
+                    pcg: MatrixFreeBaOptions {
+                        max_pcg_iterations: ADAPTIVE_PCG_MAX_ITERATIONS,
+                        pcg_relative_tolerance: ADAPTIVE_PCG_RELATIVE_TOLERANCE,
+                        pcg_absolute_tolerance: PCG_TOLERANCE,
+                    },
+                },
+            )
+            .unwrap();
+        assert_close(result.ba.initial_cost, initial_stats.robust_cost, 1.0e-10);
+        assert!(result
+            .ba
+            .iterations
+            .iter()
+            .any(|iteration| iteration.step_accepted));
+        assert!(result.ba.iterations.iter().any(|iteration| {
+            iteration.step_accepted && iteration.cost_after < iteration.cost_before
+        }));
+        let final_stats = stream_huber_reprojection_stats(&prepared.ba, &kernel).unwrap();
+        assert_eq!(final_stats.valid_observations, initial_observation_count);
+        assert_eq!(final_stats.nonprojectable_observations, 0);
+        assert_close(result.ba.final_cost, final_stats.robust_cost, 1.0e-10);
+        assert_eq!(prepared.ba.poses[&0], anchor);
+        assert_eq!(
+            prepared
+                .ba
+                .rig_observations
+                .iter()
+                .map(|observation| observation.sensor_from_rig.clone())
+                .collect::<Vec<_>>(),
+            initial_extrinsics
+        );
     }
 
     fn write_publication_inputs(
