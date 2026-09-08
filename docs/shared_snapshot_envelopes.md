@@ -33,9 +33,37 @@ the batch converter itself does not yet resume partially completed conversions.
 
 ## Remaining work
 
-This format removes repeated envelope storage, but currently reads and validates
-the shared envelope for every chunk. Add a bounded, explicit reader/writer
-envelope cache before claiming linear metadata I/O/CPU. Verify concurrent
-publication, forced-interruption restart, real persistent-worker output parity,
+The streaming merger now uses a one-entry envelope cache per pass. It validates
+on first load, before eviction, and at pass completion; caches are not retained
+between passes. A change fails the merge before output publication. Standalone
+reads remain uncached. The cache assumes immutable inputs within each pass and
+uses the validated bytes consistently; it is not an instantaneous file watcher.
+Memory is bounded to one serialized envelope, not one per shard. Alternating
+different envelopes can still cause misses; normal same-bank shards share one.
+
+All 2,500 real dense shards merge to the exact retained legacy output SHA with
+both shared and legacy input formats. Single warm-cache measurements were
+10.54 s / 16,644 KiB for shared input; these are not repeated speed evidence or
+an uncached-shared A/B. See `m8-dense-shared-merge-cache-v1.json`.
+Eight concurrent writers also pass the unit test with exactly one envelope and
+eight valid chunks. Missing/changed envelopes and cache eviction are tested.
+
+`SharedSnapshotWriter` now prepares an envelope once and accepts only shard-local
+`SharedPairChunk` records afterward. The opt-in persistent worker uses this API
+and requires a single output directory. It validates the immutable envelope at
+preparation and at batch completion; image-index bounds and pair encoding are
+checked on each write. Standalone `write_shared_atomic` remains a convenience
+wrapper that prepares and validates for each call.
+
+The synthetic writer stress spans 1k/10k/100k image envelopes with adjacent-image
+pairs copied from one seed payload. Output sizes are 20,012,094 / 200,292,475 /
+2,003,096,487 bytes. The 100k write completed in 8.86 s, peak 19,324 KiB, with
+3,125 chunks. This is writer-only scaling, not matching, mapping, or full output
+readback. The synthetic manifest/pair hashes do not represent real input banks.
+See `m8-shared-writer-scaling-v1.json` and `stress_shared_snapshot_writer`.
+
+This does not eliminate repeated envelope decoding/owned Snapshot construction.
+Add borrowed-envelope reading before claiming linear metadata CPU. Verify
+forced-interruption restart, real persistent-worker output parity,
 and 100k scaling before switching the native runner default. Full E2E, trajectory
 quality and whole-pipeline memory gates remain separate.
