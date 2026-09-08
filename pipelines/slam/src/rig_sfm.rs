@@ -5033,6 +5033,28 @@ fn run_rig_bundle_adjustment(
             );
         }
     }
+    // Diagnostic only: compare within one solve against its fixed anchor.
+    // Stream scalar records without retaining pose histories or pair graphs.
+    if std::env::var_os("VISLOC_SFM_TRACE_BA_POSE_MOTION").is_some() {
+        if let (Some(before_anchor), Some(after_anchor)) = (
+            frame_poses[anchor_frame_index].as_ref(),
+            problem.poses.get(&(anchor_frame_index as u64)),
+        ) {
+            for (&id, refined) in &problem.poses {
+                if let Some(original) = frame_poses[id as usize].as_ref() {
+                    let before = (original.camera_center_world()
+                        - before_anchor.camera_center_world())
+                    .norm();
+                    let after =
+                        (refined.camera_center_world() - after_anchor.camera_center_world()).norm();
+                    eprintln!(
+                        "rig-ba-pose-motion: frame={id} anchor={anchor_frame_index} fixed={} anchor_distance_before={before:.17e} anchor_distance_after={after:.17e}",
+                        problem.fixed_poses.contains(&id),
+                    );
+                }
+            }
+        }
+    }
     for (frame, pose) in frame_poses.iter_mut().enumerate() {
         let Some(reference_pose) = problem.poses.get(&(frame as u64)) else {
             continue;

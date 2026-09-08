@@ -1,0 +1,109 @@
+{
+  "schema": "m8-openloris-5000-registration-diagnostic-v1",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/support-debug\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/support-debug.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES VISLOC_SFM_TRACE_REGISTRATION=1 VISLOC_SFM_TEMPORAL_SUPPORT_BIN_FRAMES=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/support-debug.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-b011cde --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --frame-range-start 0 --frame-range-count 2500 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/support-debug/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/support-debug.log 2>&1",
+  "audit_program": "import json,re\nfrom pathlib import Path\nimport numpy as np\nfrom scripts.score_openloris_model import load_model_centres\nb=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice\")\ncentres=load_model_centres(b/\"legacy/model/component-000/images.txt\")\nrows=[]\nfor line in (b/\"support-debug.log\").read_text().splitlines():\n if not line.startswith(\"rig-registration-trace:\"): continue\n v=dict(re.findall(r\"(\\w+)=([^ ]+)\",line)); f=int(v[\"frame\"])\n if f not in {791,1068,1070,1071,1072,1416}: continue\n initial=np.array([float(v[k]) for k in (\"cx\",\"cy\",\"cz\")])\n final=centres[f\"cam1_{2*f:06d}.png\"]\n rows.append(dict(frame=f,support=int(v[\"support\"]),inliers=int(v[\"inliers\"]),initial_center=initial.tolist(),final_center=final.tolist(),displacement_m=float(np.linalg.norm(initial-final))))\nprint(json.dumps(rows,indent=2))\n\nimport hashlib\nassert \"Exit status: 0\" in (b/\"support-debug.time\").read_text()\nfor n in (\"cameras.txt\",\"images.txt\",\"points3D.txt\"):\n assert (b/\"legacy/model/component-000\"/n).read_bytes()==(b/\"support-debug/model/component-000\"/n).read_bytes(),n\n",
+  "model_exact_to_legacy": true,
+  "result": [
+    {
+      "frame": 791,
+      "support": 57,
+      "inliers": 48,
+      "initial_center": [
+        -1.0980148472759503,
+        0.1529340971763723,
+        0.9509074188409685
+      ],
+      "final_center": [
+        -1.9245049695540937,
+        0.13713115221918565,
+        1.0452155356999482
+      ],
+      "displacement_m": 0.8320034111697783
+    },
+    {
+      "frame": 1072,
+      "support": 31,
+      "inliers": 14,
+      "initial_center": [
+        -4.482383251722142,
+        -0.11362240801346452,
+        1.0303054000377214
+      ],
+      "final_center": [
+        4.688050406999565,
+        1.707621773707088,
+        4.935519241214398
+      ],
+      "displacement_m": 10.132348148567777
+    },
+    {
+      "frame": 1070,
+      "support": 28,
+      "inliers": 16,
+      "initial_center": [
+        -4.417368547857115,
+        -0.07289175232069661,
+        1.099986141795119
+      ],
+      "final_center": [
+        4.733600951359056,
+        1.7189082089753107,
+        4.943133490918397
+      ],
+      "displacement_m": 10.085661675069133
+    },
+    {
+      "frame": 1416,
+      "support": 32,
+      "inliers": 26,
+      "initial_center": [
+        -12.477105103198177,
+        -0.5452552028792977,
+        -0.5532656290281182
+      ],
+      "final_center": [
+        -14.016121374872162,
+        -1.225588745907337,
+        4.750889527067518
+      ],
+      "displacement_m": 5.5646641169240665
+    },
+    {
+      "frame": 1068,
+      "support": 27,
+      "inliers": 14,
+      "initial_center": [
+        4.768776828229134,
+        1.7500930335285925,
+        4.946988494575845
+      ],
+      "final_center": [
+        -11.755907416020346,
+        -0.8113039364126886,
+        -2.876019536874911
+      ],
+      "displacement_m": 18.46145710581682
+    },
+    {
+      "frame": 1071,
+      "support": 27,
+      "inliers": 11,
+      "initial_center": [
+        -3.394615741653432,
+        0.4206382690583085,
+        1.173829340673655
+      ],
+      "final_center": [
+        -11.790604415728097,
+        -0.8339675212465617,
+        -2.8210495490159135
+      ],
+      "displacement_m": 9.382202238682767
+    }
+  ],
+  "limitations": [
+    "Registration-to-final displacements are in mapper coordinates, not GT errors.",
+    "Intervening BA can change the common gauge; these displacements alone do not identify a failing BA call.",
+    "No geometry thresholds, repair settings, or model outputs changed."
+  ]
+}
