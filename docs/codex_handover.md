@@ -41,6 +41,10 @@
 > 残り2750/3500/3750/4000/4500。source-spec-2500-v1.json。測定稼働なし。
 > 2750/3500も全モデル過去一致。36.87秒/32.05秒、RSS339964/340184KiB。
 > 計18/21実行・20/23node。残り3750/4000/4500。測定稼働なし。全goal未達。
+> 3750/4000/4500も全モデル過去一致。21実行すべての出力再生成完了（保存argv5、新仕様16）。
+> 各source-replay/source-spec証跡の計21ファイルのold/new hash map一致を集計確認。
+> 次は再生成パスをatlas nodesへ束ねる。offset/component membership保持、alignment/integration再実行。
+> 孤立run時間合計を連続E2Eとしない。品質/E2E/restart/100k未達。測定稼働なし。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。

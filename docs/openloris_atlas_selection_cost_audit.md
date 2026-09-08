@@ -290,3 +290,19 @@ Starts2750 and3500 (500 frames each) also match all retained model files:
 source-spec-2750/3500-v1 JSONs are authoritative). Coverage is18 of21
 execution outputs,20 of23 nodes; starts3750/4000/4500 remain. These results
 retain frontend inputs and do not close full-pipeline or quality gates.
+
+## All source execution outputs reproduced
+
+The final3750/4000/4500 windows match all historical model files, taking
+19.33s/340160KiB,21.64s/340192KiB and43.56s/340124KiB respectively.
+The21 source-replay/source-spec evidence files all have identical old/new
+model hash maps. This covers every producing execution for the23 retained
+atlas nodes. Five use recorded historical commands with the saved new binary;
+sixteen use the explicitly specified common policy and verified input ranges.
+Historical binary/environment provenance is not implied for either category.
+
+Next bind regenerated source paths into the unchanged atlas node manifest,
+preserving its offsets and component membership, then replay alignment and
+integration. These isolated source measurements are not one continuous
+native E2E run and must not be summed into a claimed pipeline wall result.
+Frontend, final quality gates, restart and100k validation remain open.
