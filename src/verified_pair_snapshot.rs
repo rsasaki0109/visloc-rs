@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+mod shared;
+pub use shared::write_shared_atomic;
+
 const MAGIC: &[u8] = b"VISLOC-VERIFIED-PAIR-SNAPSHOT\0";
 const MAX_VECTOR_ITEMS: usize = 50_000_000;
 
@@ -1507,6 +1510,9 @@ fn read_with_retention(
     let mut magic = vec![0; MAGIC.len()];
     file.read_exact(&mut magic)
         .map_err(|error| format!("read {} header: {error}", path.display()))?;
+    if magic.starts_with(shared::MAGIC) {
+        return shared::read(path, retain_audit_streams, mapper_match_limit);
+    }
     if magic != MAGIC {
         return Err(format!(
             "{} is not a verified-pair snapshot (bad magic or truncated header)",
@@ -1667,6 +1673,75 @@ mod tests {
             "visloc_verified_pair_snapshot_{tag}_{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn shared_chunks_round_trip_reuse_envelope_and_merge() {
+        let root = temp_path("shared_roundtrip");
+        std::fs::create_dir(&root).unwrap();
+        let snapshot = sample();
+        let first = root.join("first.vps");
+        let second = root.join("second.vps");
+        super::write_shared_atomic(&first, &snapshot).unwrap();
+        super::write_shared_atomic(&second, &snapshot).unwrap();
+        assert_eq!(read(&first).unwrap(), snapshot);
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
+        let legacy = root.join("legacy.vps");
+        write(&legacy, &snapshot).unwrap();
+        assert_eq!(
+            read_mapper_compact(&first).unwrap(),
+            read_mapper_compact(&legacy).unwrap()
+        );
+        assert_eq!(
+            read_mapper_compact_capped(&first, 1).unwrap(),
+            read_mapper_compact_capped(&legacy, 1).unwrap()
+        );
+        let merged_shared = root.join("merged_shared.vps");
+        let merged_legacy = root.join("merged_legacy.vps");
+        merge_files_atomic(&merged_shared, &[first.clone()]).unwrap();
+        merge_files_atomic(&merged_legacy, &[legacy]).unwrap();
+        assert_eq!(
+            std::fs::read(merged_shared).unwrap(),
+            std::fs::read(merged_legacy).unwrap()
+        );
+        // Retry publication produces exactly the same complete bytes.
+        super::write_shared_atomic(&first, &snapshot).unwrap();
+        assert_eq!(read(&first).unwrap(), snapshot);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_chunks_reject_corruption_and_missing_envelope() {
+        let root = temp_path("shared_corruption");
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("chunk.vps");
+        super::write_shared_atomic(&path, &sample()).unwrap();
+        let envelope = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "vpe"))
+            .unwrap();
+        let original = std::fs::read(&envelope).unwrap();
+        std::fs::write(&envelope, b"corrupt").unwrap();
+        assert!(read(&path).unwrap_err().contains("SHA-256"));
+        assert!(super::write_shared_atomic(&path, &sample())
+            .unwrap_err()
+            .contains("mismatch"));
+        std::fs::remove_file(&envelope).unwrap();
+        assert!(read(&path).unwrap_err().contains("read shared envelope"));
+        std::fs::write(&envelope, original).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read(&path).unwrap_err().contains("checksum"));
+        std::fs::write(&path, &bytes[..last]).unwrap();
+        assert!(read(&path).unwrap_err().contains("length"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
