@@ -8,6 +8,7 @@
   "acceptance": "Exit zero; compare every feature/loci file and exact file membership to retained dense output; record wall/RSS without claiming whole-pipeline performance.",
   "limitations": [
     "One of eight shards, not full10k extraction or native E2E.",
-    "Saved new binary, recorded historical extractor flags, explicitly fixed thread count."
+    "Saved new binary, recorded historical extractor flags, explicitly fixed thread count.",
+    "Concurrent host CPU work observed at 653/1250 images: cc1plus PIDs 3272681 and 3272698 each reported 100% CPU, and python3 PID 3685631 reported 99.8%. Ownership and causal timing impact are unverified; no unrelated process was stopped. Treat this run as output-reproduction evidence, not an isolated speed-comparison sample."
   ]
 }
