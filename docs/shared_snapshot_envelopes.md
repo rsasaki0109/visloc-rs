@@ -46,6 +46,11 @@ by that comparison utility; the probe enforces candidate membership separately.
 Use `--shards 2500` to cover the entire retained dense schedule. This is matching
 parity, not extraction or continuous native E2E.
 
+The first eight-shard probe passed: IDs 0, 357, 714, 1071, 1428, 1785, 2142,
+2499, covering 256 candidate pairs with the full 10k feature bank. Exact output
+membership and every decoded snapshot record match the retained legacy shards.
+Worker peak RSS was 451,184 KiB. Evidence: `m8-shared-worker-probe-v1.json`.
+
 ## Remaining work
 
 The streaming merger now uses a one-entry envelope cache per pass. It validates

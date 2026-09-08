@@ -92,6 +92,15 @@ session92952はexit0完了。空き約11GiB。次はborrowed reader、restart、
 同sessionをpollし、観測timeoutだけで再起動しない。稼働中は同時build/性能測定を避ける。
 Python43 tests/比較example Clippy通過。PR126旧branch整理とprobe結果の記録が次。
 
+更新: PR126旧branchはremote/local整理済み。8-shard probe session55995はexit0完了、
+出力membershipと全Snapshotレコードが従来8 shardと一致。peak451184KiB。
+証跡`m8-shared-worker-probe-v1.json`。保存binaryはprobe rootのsfm-b02f85e/compare-1180dc1。
+続いて全2500 shard/80000候補の共有形式workerを開始、exec session60175。
+出力root`/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-full-v1`、timeout1800秒。
+全件の終了/一致は未判定。完了後report.jsonのexit/membership/比較を確認する。
+同sessionをpollし、観測timeoutで再起動しない。保存binary使用、同時build/測定なし。
+全goal未達。full worker後もborrowed reader/restart/抽出E2E/COLMAP品質は残る。
+
 ### 以前の状態（上記を優先）
 
 PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
