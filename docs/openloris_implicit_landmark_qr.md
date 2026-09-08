@@ -12,6 +12,17 @@ and nonfinite values in a touched long-track coordinate. Seven QR tests and
 test-inclusive clippy pass. Native byte parity and timing are not yet measured;
 this does not repair the rejected trajectory result by itself.
 
+Measured follow-up: release `c7c3d8b` (rebased unchanged patch `4072e05`)
+produces exact prior Legacy/QR model bytes. QR mapper is 13.117345 / 12.589078 s,
+versus an additional old-QR-binary control at 19.352382 s; paired Legacy is
+4.597046 s. QR retains 51 failures and 166 accepted steps. This is a limited
+serial diagnostic improvement, not an accepted three-repeat performance gate:
+QR remains slower than Legacy and retains the failed trajectory. No larger
+tier or README claim follows. [Evidence](../benchmarks/electro/m8-openloris-qr-validation-v1.json).
+
+Parent PR #96 passed all nine CI jobs (`34192298439`) and merged as `bcbe2d5`;
+its local/remote branch was removed. This follow-up branch remains unmerged.
+
 ## Native 1k result — rejected (2026-09-08)
 
 Release `f62f09b` completed in 56.62 s. Same-binary Legacy reproduces all three
