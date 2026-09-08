@@ -7,7 +7,9 @@
 整理記録のPR121（head`8b05461`、CI9成功）は
 `fdf94400e98f80b2cb81c45c86b0441a7977d6e9`へmerge、旧branch整理済み。
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
-へmerge、旧branch整理済み。現作業branchは`fix/streamed-retrieval-empty-vocabulary`。
+へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
+`d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
+現作業branchは`test/m8-base-extraction-parity-probe`。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -36,6 +38,19 @@ PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac
   2GiB仮想メモリ制限下でexit1・期待診断・出力なし、1.00s/102,892KiB。
   通常の100k SfM/共有metadataの容量保証ではない。64 example tests通過。
   全goalは未達。READMEに未検証の高速化/品質改善を追加しない。
+
+更新: base抽出の4画像probeは完了。両カメラの時系列に散らした4画像・584特徴が
+保存済みbaseと全bytes一致。scriptは`probe_openloris_base_extraction.py`、
+証跡は`m8-openloris-base-extraction-probe-v1.json`。実行session64673はexit0完了。
+全10k抽出/E2Eではない。Python40 tests/py_compile通過。大規模抽出前に容量を確認し、
+base/Dを別レシピで処理する。
+
+更新: dense snapshot全2500の構造監査完了。総1,294,392,088 bytes中
+共通envelope777,135,000 bytes、重複分776,824,146 bytes。全envelope SHA一致。
+固定ペア数shardに全画像metadataを反復するため、O(N) shardでO(N²)保存/I/Oになる。
+次は共有envelope+内容IDに結びつくpair chunkの設計・実装、v1互換/restart検証。
+証跡`m8-dense-snapshot-envelope-audit-v1.json`。監査script自身はpayload checksumを検証しない。
+Python43 tests通過。全goal未達。PR123旧branch整理と現branchのPRが次。
 
 ### 以前の状態（上記を優先）
 
