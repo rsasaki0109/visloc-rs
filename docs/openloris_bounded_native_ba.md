@@ -95,6 +95,19 @@ paired current-binary Legacy/policy check before adding a recovery mechanism.
 This is a different input contract from sparse7n and requires separate evidence;
 historical full registration does not prove current policy success.
 
+## Rig-aware 2.5k ANN nonregression result
+
+Same-binary Legacy and both bounded-policy repeats now reproduce that historical
+model exactly. Independent geometry confirms all 2,500 supported images / 1,250
+frames in one component, 200,975 positive-depth observations and valid rig
+extrinsics. Recomputed RMSE/p95 are 0.133927164 / 0.237363878 m, raw mean
+reprojection 0.788548738 px. Each policy run selects direct on all 211 calls,
+QR on zero. Mapper: Legacy 35.525600 s, policy 36.547695 / 36.360079 s; peak
+RSS: 412,868 / 412,888 / 412,832 KiB. This passes historical native-model
+nonregression, not speedup or a new COLMAP gate. Large-QR quality remains open;
+the image-tier size must not be confused with the BA variable-pose count.
+[Complete commands, hashes and independent audits](../benchmarks/electro/m8-openloris-bounded-native-2500-ann-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
