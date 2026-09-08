@@ -239,6 +239,18 @@ before releasing any newly generated intermediate. Retained evidence stays
 protected; using retained feature banks would change a cold extraction-inclusive
 measurement into a resumed/replay measurement. Recheck free space at launch.
 
+`merge_sift_supplements.py --hardlink-unselected` is an opt-in storage primitive
+for newly generated immutable banks on the same filesystem. Unselected files
+share their base inode; selected files still use independent atomic publication.
+Default behavior remains independent copies. Cross-device linking fails without
+silently copying, and source symlinks are rejected for new links. Never edit either
+bank in place: this mode is not independent backup storage. Resume compares bytes
+against current inputs, so an externally pinned base manifest must be validated
+to detect mutations that would affect both links. No input file is deleted.
+Unit tests cover copy/link inventory equality, selected-file independence, resume
+and cross-device failure; real10k linked-bank parity and peak-DAG disk accounting
+remain required before this is used in a measured continuous run.
+
 ### Snapshot storage audit
 
 `scripts/audit_snapshot_envelopes.py` measured the 2,500 dense matching snapshots:
