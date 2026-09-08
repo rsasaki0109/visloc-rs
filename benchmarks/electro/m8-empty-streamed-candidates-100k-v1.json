@@ -1,0 +1,27 @@
+{
+  "status": "empty-vocabulary-cli-rejection-pass",
+  "binary": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-frontend-binaries-v1/streamed-candidate-guard-v2",
+  "binary_sha256": "4d8e5aa5385efe39af8c45f8dfc4a6b5e08854bef7d05ab8b6aa720bb36ce2b4",
+  "build_recipe": "CARGO_INCREMENTAL=0 cargo build --locked --release --example unordered_sfm_demo --jobs 2",
+  "stress_recipe": "python3 scripts/stress_empty_streamed_candidates.py --binary SAVED_BINARY --root NEW_FIXTURE_ROOT --images 100000",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-empty-streamed-candidates-100k-v2/report.json",
+  "images": 100000,
+  "feature_files": 100000,
+  "local_descriptors": 0,
+  "candidate_budget": 700000,
+  "address_space_limit_bytes": 2147483648,
+  "core_dumps_disabled": true,
+  "expected_exit_status": 1,
+  "actual_exit_status": 1,
+  "required_diagnostic": "refusing exhaustive fallback",
+  "candidate_manifest_exists": false,
+  "wall_seconds": 1.0025213829940185,
+  "peak_rss_kib": 102892,
+  "rayon_num_threads": 8,
+  "malloc_arena_max": "1",
+  "limits": [
+    "Measures only the empty-feature candidate CLI subprocess, not fixture generation or full100k SfM.",
+    "An address-space cap is a safety backstop; passing requires the explicit vocabulary diagnostic and ordinary exit1, not timeout, allocation failure or signal termination.",
+    "Shared-envelope artifact scaling and full native E2E remain separate requirements."
+  ]
+}

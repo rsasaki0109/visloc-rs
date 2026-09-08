@@ -224,7 +224,21 @@ Do not sum them into a continuous E2E claim. External-bank I/O is not unchanged
 from historical runs. Full extraction, continuous E2E and the COLMAP quality gate
 remain open. Legacy v1 diagnostic shard reproduction is not proof of N²-free
 artifact growth: audit shared-envelope storage in the final runner before 100k
-claims. Also, the current streamed candidate path still falls back to
-`all_pairs(image_names.len())` when vocabulary construction returns no globals;
-the nonempty-vocabulary replays do not exercise or close that degenerate-input
-memory hazard.
+claims.
+
+## Empty vocabulary safety
+
+Streamed candidate export now rejects a missing/empty appearance vocabulary
+before candidate construction. It no longer calls `all_pairs(N)` in that case:
+the candidate budget would only have been applied after the quadratic allocation.
+The error explicitly says `refusing exhaustive fallback`; no candidate manifest
+is published. Nonempty descriptor data keeps the same retrieval functions and
+borrowed global descriptors, with the batch/streamed equality test preserved.
+
+`scripts/stress_empty_streamed_candidates.py` exercised the real CLI with 100,000
+empty feature files and calibrated image entries under a 2 GiB address-space cap
+and a timeout. It rejected normally (exit 1 and the required diagnostic), emitted
+no candidate manifest, took 1.00 s and peaked at 102,892 KiB RSS. Evidence:
+`m8-empty-streamed-candidates-100k-v1.json`. This is an invalid-input safety gate,
+not a 100k reconstruction, nonempty 100k retrieval benchmark, whole-pipeline
+memory bound or quality result.
