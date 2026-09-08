@@ -11,9 +11,11 @@ import subprocess
 import time
 
 from benchmark_electro import (
+    candidate_image_manifest_sha256,
     parse_candidate_manifest_with_metadata,
     validate_feature_manifest,
     write_candidate_manifest,
+    write_candidate_shard_v2,
 )
 from replay_native_candidates import sha
 
@@ -35,7 +37,7 @@ def same_candidate_schedule(native_plan, adaptive_plan):
 def main():
     base = Path('/home/sasaki/datasets/openloris')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--variant', choices=['native', 'adaptive', 'targeted7'], default='native')
+    parser.add_argument('--variant', choices=['native', 'adaptive', 'targeted7', 'dense'], default='native')
     parser.add_argument('--candidate-root', type=Path,
                         default=base / 'corridor1-1-m8-native-candidates-replay-v1')
     parser.add_argument('--binary', type=Path,
@@ -48,6 +50,8 @@ def main():
                  base / 'corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline')
     if args.variant == 'targeted7':
         reference = base / 'corridor1-1-m8-targeted7-dense256-v1'
+    elif args.variant == 'dense':
+        reference = base / 'corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1'
     candidate_root = args.candidate_root.resolve(strict=True)
     output = base / f'corridor1-1-m8-{args.variant}-matching-replay-v1'
     binary = args.binary.resolve(strict=True)
@@ -57,11 +61,13 @@ def main():
     if not candidate_ok or sha(binary) != expected_binary:
         raise RuntimeError('Candidate replay or frozen binary prerequisite failed')
     candidates = candidate_root / 'candidates.txt'
-    candidate_reference = reference if args.variant == 'targeted7' else native_reference
+    candidate_reference = reference if args.variant in ('targeted7', 'dense') else native_reference
     if sha(candidates) != sha(candidate_reference / 'candidates.txt'):
         raise RuntimeError('Candidate contents changed')
     names, pairs, metadata = parse_candidate_manifest_with_metadata(candidates)
     expected_pairs = 14319 if args.variant == 'targeted7' else 70000
+    if args.variant == 'dense':
+        expected_pairs = 80000
     if len(names) != 10000 or len(pairs) != expected_pairs:
         raise RuntimeError('Unexpected candidate envelope')
     output.mkdir()
@@ -69,23 +75,35 @@ def main():
     (output / 'matches').mkdir()
     # Use the recorded plan as a frozen schedule, not retained match outputs.
     plan = (reference / 'match-worker.plan').read_text()
-    if args.variant != 'targeted7' and not same_candidate_schedule((native_reference / 'match-worker.plan').read_text(), plan):
+    if args.variant in ('native', 'adaptive') and not same_candidate_schedule((native_reference / 'match-worker.plan').read_text(), plan):
         raise RuntimeError('Adaptive schedule differs from reproduced native candidates')
     shard_rows = [line.split() for line in plan.splitlines() if line.startswith('shard ')]
     if len(shard_rows) != (expected_pairs + 31) // 32:
         raise RuntimeError('Unexpected shard count')
+    source_hash = sha(candidates)
+    image_hash = candidate_image_manifest_sha256(names)
+    is_v2 = plan.splitlines()[0] == 'visloc_match_worker_plan_v2'
+    if is_v2 and (f'candidate_source_sha256 {source_hash}' not in plan.splitlines()
+                  or f'image_manifest_sha256 {image_hash}' not in plan.splitlines()):
+        raise RuntimeError('V2 plan source/image binding differs')
     for index, fields in enumerate(shard_rows):
         expected_candidate = f'candidates/candidate-{index:06d}.txt'
         expected_snapshot = f'matches/verified-{index:06d}.vps'
         if len(fields) != 5 or fields[1:4] != [str(index), expected_candidate, expected_snapshot]:
             raise RuntimeError('Unexpected shard order or unsafe paths')
         destination = output / expected_candidate
-        write_candidate_manifest(destination, names, pairs[index * 32:(index + 1) * 32],
-                                 metadata=metadata)
+        shard_pairs = pairs[index * 32:(index + 1) * 32]
+        if is_v2:
+            write_candidate_shard_v2(destination, len(names), source_hash, image_hash,
+                                     shard_pairs, metadata=metadata)
+        else:
+            write_candidate_manifest(destination, names, shard_pairs, metadata=metadata)
         if sha(destination) != fields[4]:
             raise RuntimeError(f'Regenerated shard differs: {index}')
     features = (base / 'corridor1-1-m5/tiers/tier-10000/features256' if args.variant == 'native'
                 else base / 'corridor1-1-m8-adaptive-bank-publication-v1/features')
+    if args.variant == 'dense':
+        features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
     validate_feature_manifest(reference / 'features.json', features)
     if f'feature_manifest_sha256 {sha(reference / "features.json")}' not in plan.splitlines():
         raise RuntimeError('Plan does not bind the validated feature manifest')
@@ -94,6 +112,8 @@ def main():
     first_line = timing.read_text().splitlines()[0]
     command = shlex.split(shlex.split(first_line.split('Command being timed: ', 1)[1])[0])
     command[0] = str(binary)
+    if args.variant == 'dense' and '--stream-match-features' not in command:
+        raise RuntimeError('Dense replay requires the recorded streaming matcher recipe')
     for flag, path in [('--persistent-match-worker-plan', output / 'match-worker.plan'),
                        ('--features-dir', features),
                        ('--out-colmap', output / 'matches/unused-model-persistent')]:
@@ -101,6 +121,7 @@ def main():
     invocation = ['/usr/bin/time', '-v', '-o', str(output / 'time.txt'),
                   'timeout', '--signal=TERM', '--kill-after=10s', '1800s', *command]
     report = {'status': 'running', 'command': invocation, 'rayon_num_threads': 4,
+              'malloc_arena_max': '1', 'candidate_shard_format': 'v2' if is_v2 else 'v1',
               'variant': args.variant, 'features_resolved': str(features.resolve()),
               'binary_sha256': expected_binary, 'candidate_sha256': sha(candidates),
               'plan_sha256': sha(output / 'match-worker.plan'),
@@ -110,7 +131,7 @@ def main():
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     started = time.monotonic()
     with (output / 'run.log').open('w') as log:
-        result = subprocess.run(invocation, env=dict(os.environ, RAYON_NUM_THREADS='4'),
+        result = subprocess.run(invocation, env=dict(os.environ, RAYON_NUM_THREADS='4', MALLOC_ARENA_MAX='1'),
                                 stdout=log, stderr=subprocess.STDOUT)
     report.update(exit_code=result.returncode, wall_seconds=time.monotonic() - started)
     differences = []

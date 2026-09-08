@@ -1,0 +1,28 @@
+{
+  "status": "complete-target-selection-and-candidate-reproduction-pass",
+  "recipe": "python3 scripts/replay_targeted_selection.py",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-selection-replay-v1/report.json",
+  "recovered_recipe": "m8-openloris-targeted-selection-recovered-command-v1.json",
+  "binary_sha256": "3d744ced8b2b09cbaba26bf963e9ac31c5293538b1a8bbbee62621ccfdd70c34",
+  "input_reproduced_snapshot_sha256": "ac93b28daf92b9bb4a621b9687087abbf906a1bc78cca0d8f4ea9688a1ba7a8d",
+  "deferred_registration_pair_prefix": 59961,
+  "rayon_num_threads": 8,
+  "malloc_arena_max": "1",
+  "exit_status": 0,
+  "wall_seconds": 160.02483767992817,
+  "peak_rss_kib": 976540,
+  "registered_frames": 4993,
+  "registered_images": 9986,
+  "target_frames": [1999, 3264, 3266, 3267, 4493, 4494, 4495],
+  "component_manifest_output_and_reference_sha256": "275c356833ba13d8061ea3624bddc82e75a7f974a0fd9bb78fe56c87b0167169",
+  "derived_candidate_output": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-derived-candidates-replay-v1/candidates.txt",
+  "derived_candidate_output_and_reference_sha256": "14ac996b591a3d98c9be97d5c3c0aa47b04c93c48c551b2556353729c6895a4f",
+  "all_model_files_identical": false,
+  "different_model_files": ["component-000/images.txt", "component-000/points3D.txt", "components.tsv"],
+  "limitations": [
+    "The downstream selector consumes registration membership, not this intermediate model's poses or points.",
+    "Registration manifest and derived candidates are byte-identical; the intermediate mapper's full model is not.",
+    "Reuses previously reproduced repair admission and adaptive bank; separate stages are not a continuous E2E measurement.",
+    "No GT is read by the mapper or target selector. No final quality improvement claim."
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "status": "complete-dense-matching-and-merge-byte-reproduction-pass",
+  "candidate_evidence": "m8-openloris-dense-candidates-replay-v1.json",
+  "matching": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-matching-replay-v1/report.json",
+    "binary_sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34",
+    "source_commit": "3ae253a0af909042fe0cfbdb08e8d50733b79375",
+    "plan_sha256": "cb8005bd13fa6f490123efeaa0b36f0d3e0a0890309c641d34964e1cfc010d2a",
+    "feature_manifest_sha256": "9a58c1dd0699e72ed52149096cf17e85ee894ffaaf9d55772a1eb6b1c3d95ce2",
+    "candidate_format": "v2",
+    "regenerated_candidate_shards": 2500,
+    "byte_identical_reference_snapshots": 2500,
+    "snapshot_inventory_sha256": "76c94fbd27815583b7e5a02a8a840957272533e00004c8d2b42b2533809846ba",
+    "stream_match_features": true,
+    "min_matches": 30,
+    "rayon_num_threads": 4,
+    "malloc_arena_max": "1",
+    "exit_status": 0,
+    "wall_seconds": 557.3490417619469,
+    "peak_rss_kib": 451676
+  },
+  "merge": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-merge-replay-v1/report.json",
+    "binary_sha256": "f726c044973a21725296011bf08a49daed2b510813bce449e5f1c6fc8b95cd36",
+    "source_commit": "e136ae635c4f71d345242435d15b2be723cdab5c",
+    "build_command": "CARGO_INCREMENTAL=0 cargo build --locked --release --example merge_verified_pair_snapshots --jobs 2",
+    "implementation": "merge_files_atomic; sequential snapshot validation and streaming output",
+    "rayon_num_threads": 1,
+    "malloc_arena_max": "1",
+    "exit_status": 0,
+    "wall_seconds": 11.888814274105243,
+    "peak_rss_kib": 18188,
+    "output_and_reference_sha256": "02cd6475098453cb6cf93761ff990ea31acba86217b715dfaf43660f3af0f05c"
+  },
+  "limitations": [
+    "Retained dense feature bank is the extraction input boundary, not a fresh complete10k extraction.",
+    "Stages were timed separately. RSS values do not measure whole-pipeline peak or file-cache usage.",
+    "No COLMAP speedup, quality improvement, continuous E2E or 100k SfM claim."
+  ]
+}

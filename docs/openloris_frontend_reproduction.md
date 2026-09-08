@@ -7,8 +7,9 @@ COLMAP trajectory-quality gate.
 The native base branch has now also been regenerated from retained base features:
 candidate manifest, all matching shards and the merged snapshot are byte-identical
 to their references. Adaptive matching/merge and targeted7 candidate/matching/merge
-have also been reproduced. Target selection and dense-overlay reproduction remain
-open; this is not full input-image-to-model execution.
+have also been reproduced. Dense candidate/matching/merge and the registration
+manifest consumed by target selection are now reproduced too. This is still not
+full input-image-to-model execution or a continuous E2E measurement.
 
 ```text
 base features → native-rig-runner verified snapshot ─────┐
@@ -20,7 +21,8 @@ base + supplemental features → adaptive matching ───────┤
                                                        ↓ registration list
 adaptive matching + prefix snapshot ─────────→ repair admission
                                                        ↓
-targeted7 matching ──────────────────────────→ novel-pair admission
+repair admission → deferred registration → missing-frame targets
+missing-frame targets → targeted7 candidates → matching → novel-pair admission
                                                        ↓
                                              atlas source mapping
 ```
@@ -46,9 +48,8 @@ Likewise, the `long128` directory's `verified-goodbase-repair19.vps` is byte-ide
 to the adaptive control-prefix repair snapshot. Its directory name alone does
 not require long128 matching in this chain.
 
-Next, recover the preceding registration/selection recipe for targeted7 and
-reproduce the separate dense deferred overlay. Preserve their exact feature
-indices and pair order. Freeze the complete executable recipe, run it as one
+Next, reproduce both full feature extractions and assemble the complete executable
+recipe. Preserve exact feature indices and pair order, run it as one
 process tree with wall/RSS accounting, and evaluate the unchanged COLMAP gates.
 The earlier 1,250-image extraction and synthetic bank-only 100k tests do not
 close full10k extraction, whole-pipeline restart or full SfM100k I/O gates.
@@ -159,11 +160,71 @@ then the merge command with `--variant targeted7`. All 14,319 candidate pairs,
 448 match shards and the complete 265-pair merged snapshot match the references.
 See `m8-openloris-targeted7-frontend-replay-v1.json`.
 
-The seven target IDs remain frozen inputs. Three retained deferred-repair19
-models have exactly this unregistered frame set, but this alone does not identify
-or reproduce the historical selector. Do not omit its preceding mapping cost.
+The initial targeted replay used frozen target IDs. Its preceding mapping command
+was subsequently recovered from a completed same-thread execution event dated
+2026-09-02T23:34:18.633Z. It uses the repair19 snapshot and
+`--deferred-registration-pair-prefix 59961`, not a dense-overlay input. See
+`m8-openloris-targeted-selection-recovered-command-v1.json`.
+
+```sh
+python3 scripts/replay_targeted_selection.py
+python3 scripts/build_targeted_rig_candidates.py \
+  --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt \
+  --selection-json /home/sasaki/datasets/openloris/corridor1-1-m8-targeted-selection-replay-v1/selection.json \
+  --max-frame-gap 256 \
+  --output-directory /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-derived-candidates-replay-v1
+```
+
+The new mapper run exited zero in 160.02 s with peak RSS 976,540 KiB. Its full
+registration manifest is byte-identical, and the seven unregistered frames are
+derived without GT. The resulting candidate file is also byte-identical. Three
+other intermediate model files differ (main images, main points, components.tsv);
+this is **selection-boundary reproduction, not whole-model byte reproduction**.
+The downstream selector consumes only registration membership, not these poses
+or points. Do not omit the required mapping cost. Evidence:
+`m8-openloris-targeted-selection-replay-v1.json`.
+
+## Dense overlay frontend
+
+```sh
+python3 scripts/replay_native_candidates.py --variant dense
+python3 scripts/replay_native_matching.py --variant dense \
+  --candidate-root /home/sasaki/datasets/openloris/corridor1-1-m8-dense-candidates-replay-v1
+python3 scripts/replay_native_merge.py --variant dense \
+  --binary /home/sasaki/datasets/openloris/corridor1-1-m8-native-frontend-binaries-v1/merge-e136ae6 \
+  --binary-sha256 f726c044973a21725296011bf08a49daed2b510813bce449e5f1c6fc8b95cd36
+```
+
+The dense branch uses score-descending fill, topK128, minimum frame gap128,
+budget80,000, and LSH8/auto9/6. Its candidate manifest is byte-identical.
+All 2,500 v2 candidate shards were regenerated and hash-verified. The recorded
+streaming matcher recipe (min30) produced byte-identical snapshots, and the
+current `merge_files_atomic` implementation produced a byte-identical final
+snapshot with peak RSS18,188 KiB. This last number is merge-only, not pipeline
+RSS. See `m8-openloris-dense-candidates-replay-v1.json` and
+`m8-openloris-dense-frontend-replay-v1.json`.
+
+## Avoid duplicate supplemental extraction
+
+Every one of the 692 selected supplemental feature files is byte-identical to
+the corresponding file in the dense bank (231,393,842 bytes compared). Passing
+the dense directory directly as `merge_sift_supplements.py --supplement` and
+validating against the completed adaptive bank reproduced all 10,000 expected
+file hashes; zero files were written. Thus a continuous recipe can compute the
+dense bank once and use its selected subset for adaptive construction. Evidence:
+`m8-openloris-dense-supplement-reuse-audit-v1.json`. This is content/recipe
+equivalence, not a measured E2E speedup or whole-pipeline memory reduction.
+
+The base bank is a different extraction recipe (SIFT256, one orientation,
+contrast0.02, no compatible-detector flags), so it cannot be replaced by the
+dense bank. Both full extractions still need fresh input-image execution.
 
 All timings cover their respective subprocess, not preparation or validation.
 Do not sum them into a continuous E2E claim. External-bank I/O is not unchanged
-from historical runs. Full extraction, target selection, the dense-overlay branch,
-continuous E2E and the COLMAP quality gate remain open.
+from historical runs. Full extraction, continuous E2E and the COLMAP quality gate
+remain open. Legacy v1 diagnostic shard reproduction is not proof of N²-free
+artifact growth: audit shared-envelope storage in the final runner before 100k
+claims. Also, the current streamed candidate path still falls back to
+`all_pairs(image_names.len())` when vocabulary construction returns no globals;
+the nonempty-vocabulary replays do not exercise or close that degenerate-input
+memory hazard.
