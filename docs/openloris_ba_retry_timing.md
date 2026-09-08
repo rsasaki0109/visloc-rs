@@ -103,3 +103,9 @@ The difference is small and repetitions remain pending; do not infer a robust
 speedup or memory reduction. This uses a prefix of the10k frontend, not an
 independent5k end-to-end run. Completed and pending commands are distinguished
 in `benchmarks/electro/m8-openloris-5000-retry-reuse-v1.json`.
+
+Both5k repeats have now completed with every model file exactly matching
+Legacy. Off wall is54.58/74.53s and on is53.07/64.05s; ranges overlap and
+substantial run variation precludes a stable general speedup claim. Peak RSS
+is722484/722936KiB off and722808/722860KiB on, with no reduction established.
+All four logs and resource reports are retained in the same evidence artifact.
