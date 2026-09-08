@@ -9589,7 +9589,7 @@ mod tests {
         };
         let selection_config = RigSfmConfig {
             local_ba_covisibility: true,
-            ..config.clone()
+            ..config
         };
         let index = image_track_index(features.len(), &tracks);
         let select = |order: &[usize],
@@ -9627,7 +9627,7 @@ mod tests {
         }
         let metric_config = RigSfmConfig {
             ba_metric_tracks_only: true,
-            ..selection_config.clone()
+            ..selection_config
         };
         assert!(select(&[0, 1], &image_poses, &nonmetric, &metric_config)
             .0
