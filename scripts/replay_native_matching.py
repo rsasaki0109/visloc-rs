@@ -13,7 +13,6 @@ import time
 from benchmark_electro import (
     candidate_image_manifest_sha256,
     parse_candidate_manifest_with_metadata,
-    validate_feature_manifest,
     write_candidate_manifest,
     write_candidate_shard_v2,
 )
@@ -73,9 +72,6 @@ def main():
         expected_pairs = 80000
     if len(names) != 10000 or len(pairs) != expected_pairs:
         raise RuntimeError('Unexpected candidate envelope')
-    output.mkdir()
-    (output / 'candidates').mkdir()
-    (output / 'matches').mkdir()
     # Use the recorded plan as a frozen schedule, not retained match outputs.
     plan = (reference / 'match-worker.plan').read_text()
     if args.variant in ('native', 'adaptive') and not same_candidate_schedule((native_reference / 'match-worker.plan').read_text(), plan):
@@ -89,6 +85,17 @@ def main():
     if is_v2 and (f'candidate_source_sha256 {source_hash}' not in plan.splitlines()
                   or f'image_manifest_sha256 {image_hash}' not in plan.splitlines()):
         raise RuntimeError('V2 plan source/image binding differs')
+    features = (base / 'corridor1-1-m5/tiers/tier-10000/features256' if args.variant == 'native'
+                else base / 'corridor1-1-m8-adaptive-bank-publication-v1/features')
+    if args.variant == 'dense':
+        features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
+    _, features = bind_feature_input(['sfm', '--features-dir', str(features)],
+                                    reference / 'features.json', args.features_dir)
+    if f'feature_manifest_sha256 {sha(reference / "features.json")}' not in plan.splitlines():
+        raise RuntimeError('Plan does not bind the validated feature manifest')
+    output.mkdir()
+    (output / 'candidates').mkdir()
+    (output / 'matches').mkdir()
     for index, fields in enumerate(shard_rows):
         expected_candidate = f'candidates/candidate-{index:06d}.txt'
         expected_snapshot = f'matches/verified-{index:06d}.vps'
@@ -103,15 +110,6 @@ def main():
             write_candidate_manifest(destination, names, shard_pairs, metadata=metadata)
         if sha(destination) != fields[4]:
             raise RuntimeError(f'Regenerated shard differs: {index}')
-    features = (base / 'corridor1-1-m5/tiers/tier-10000/features256' if args.variant == 'native'
-                else base / 'corridor1-1-m8-adaptive-bank-publication-v1/features')
-    if args.variant == 'dense':
-        features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
-    if args.features_dir is not None:
-        features = args.features_dir.resolve(strict=True)
-    validate_feature_manifest(reference / 'features.json', features)
-    if f'feature_manifest_sha256 {sha(reference / "features.json")}' not in plan.splitlines():
-        raise RuntimeError('Plan does not bind the validated feature manifest')
     shutil.copy2(reference / 'match-worker.plan', output / 'match-worker.plan')
     timing = reference / 'timing/persistent-match.time.txt'
     first_line = timing.read_text().splitlines()[0]
@@ -123,7 +121,6 @@ def main():
                        ('--features-dir', features),
                        ('--out-colmap', output / 'matches/unused-model-persistent')]:
         command[command.index(flag) + 1] = str(path)
-    command, features = bind_feature_input(command, reference / 'features.json', features)
     invocation = ['/usr/bin/time', '-v', '-o', str(output / 'time.txt'),
                   'timeout', '--signal=TERM', '--kill-after=10s', '1800s', *command]
     report = {'status': 'running', 'command': invocation, 'rayon_num_threads': 4,
