@@ -1,6 +1,6 @@
 # Frozen weak-angle landmark intervention
 
-Status: predeclared experiment, not a production policy. No intervention run yet.
+Status: experiment completed; failed quality gate, no production promotion.
 
 ## Question and limits
 
@@ -97,3 +97,45 @@ Failure stops this candidate before atlas/10k; do not relax thresholds or
 expand the fixed population. Success only permits a separately predeclared
 larger-scale test, not default or README promotion. Native mapper/E2E speed,
 10k accuracy/RSS, scale tiers, restart and 100k I/O remain full-goal gates.
+
+## Result (2026-09-08): fixed XYZ worsens trajectory
+
+The [four-run evidence](../benchmarks/electro/m8-openloris-weak-angle-fixed-landmarks-v1.json)
+uses certified driver `5a8f135` (binary SHA
+`67075f00ab9016492135a562fcf0842770cc6544ed7c6d5b25fc603a62262962`).
+Root independently passed all 24 driver tests and the existing adaptive rig
+fixed-landmark regression. Only the driver changed; the BA library is unchanged.
+
+Both option-absent controls reproduce the previous three model-file hashes
+and numerical traces exactly (40 legacy / 82 adaptive rows). The two fixed39
+runs also match all three model files and 83 numerical/policy rows. Every
+selected XYZ remains bit-exact after serialization. Independent audits retain
+all 1,000 supported images, 500 supported rig frames in one component, 4,716
+points, 130,900 positive-depth observations and 361,170 keypoints, with full
+identity/order, camera bytes, sensor calibration and anchor preservation.
+
+| Arm | Full squared cost | Mean reprojection (px) | RMSE (m) | p95 (m) |
+| --- | ---: | ---: | ---: | ---: |
+| Legacy control | 118070.554369 | 0.691589 | 0.026608 | 0.041100 |
+| Adaptive control | 113550.219339 | 0.675153 | 0.029190 | 0.044521 |
+| Adaptive + fixed39 | 114456.971954 | 0.677436 | 0.030217 | 0.045693 |
+
+Control quality figures are the earlier scores for byte-identical models.
+Candidate GT scoring was performed only after geometry/identity/fixed-XYZ and
+repeat audits, using the same 308 images; repeating the score agrees exactly.
+An independent serialized-model cost calculation gives 114456.97195430986,
+within 5.68e-10 of the solver result. All source/list hashes remain unchanged.
+
+The candidate accepts 15 of 20 LM updates, with 16 successful PCG solves;
+iteration-limited output is not a proved converged optimum. Candidate/repeat
+process wall times are 26.26 / 27.09 s and peak RSS 84,596 / 84,884 KiB.
+Same-build legacy/adaptive controls take 19.85 / 22.04 s and 84,620 / 84,892 KiB.
+These are post-input BA process measurements, not native mapper/E2E results.
+Timing variation for byte-identical controls is not a new speedup claim.
+
+Maximum point movement falls from adaptive's 230.771 m to 32.592 m, but maximum
+camera-centre movement rises from 0.026326 m to 0.032667 m and trajectory quality
+worsens. Reducing large XYZ changes is therefore insufficient here. Reject this
+specific hard-XYZ constraint: do not expand the fixed set, relax the gate, or
+run it on atlas/10k. This neither identifies a unique cause nor rules out every
+possible treatment of weak geometry. Defaults and README remain unchanged.

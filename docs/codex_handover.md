@@ -1,5 +1,16 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 固定39点A/B完了（2026-09-08）: `5a8f135`をroot独立24driverテスト＋既存rig固定点テスト後に
+> release build。legacy/adaptive対照は過去モデル・数値trace一致。fixed39反復も3ファイル/83行一致。
+> 全支持/identity/校正/anchor/正深度と固定39 XYZ bit一致を維持したが、post-only GT308画像は
+> RMSE/p95 **0.030217/0.045693 m**でlegacy/adaptive双方より悪化。非昇格・atlas未実行。
+> 点移動最大32.592 mへ縮小しても軌跡は改善せず、このhard XYZ固定案は棄却。
+> 候補26.26/27.09 s、peak RSS84,596/84,884 KiB。native mapper/E2E時間ではありません。
+> [結果](openloris_weak_angle_fixed_landmarks.md)、
+> [全4本の証跡](../benchmarks/electro/m8-openloris-weak-angle-fixed-landmarks-v1.json)。
+> 次はCI/PR/merge確認。Luna Maxは既存robust BA実験の有無を一次資料・repo証跡から調査中
+> （編集/solveなし）。固定点数や閾値のsweepはしません。全体goalは未完了です。
+
 > 続行（2026-09-08）: PR #90はhead `b00d693` のCI9項目
 > （run `34179534033`）通過後、`1090b97`へmerge済み。旧branch整理済み。
 > ユーザーの復旧連絡後、Luna Maxのtoolアクセス復旧を確認しました。

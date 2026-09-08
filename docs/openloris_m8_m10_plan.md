@@ -108,7 +108,11 @@ tool access. The [next predeclared intervention](openloris_weak_angle_fixed_land
 tests adaptive LM with only the 39 initial weak-angle landmarks fixed, against
 the unchanged adaptive control and legacy quality thresholds. Membership is
 independently verified and source-hash-bound before implementation/measurement;
-all observations remain active. No intervention result or promotion is claimed.
+all observations remain active. The intervention has now completed: all
+identity/support/calibration/anchor/fixed-XYZ and repeat checks pass, but RMSE/p95
+0.030217/0.045693 m regress against both controls. Smaller landmark movement
+did not improve trajectory. Reject this hard-XYZ candidate without threshold
+expansion or atlas execution; keep native E2E and all remaining goal gates open.
 
 ## Current checkpoint (2026-09-07)
 
