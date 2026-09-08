@@ -75,3 +75,70 @@ initial-only membership, positive-depth and identity failures, caps before pair
 execution, cost-increase/decrease separation and deterministic output.
 Real output must reconcile with the existing independent cost audit and repeat
 exactly excluding wall/RSS metadata. No model files are written.
+
+## CLI and implementation checkpoint
+
+Implementation `5300634` uses the existing strict model parser after bounded
+preflight, and the independent model auditor's normalized rotation convention
+for both projection and camera centres. Inputs must remain stable regular files:
+pre/post hashes detect observed mutation, but this is not a race-safe snapshot
+reader. Do not run it against models being written concurrently.
+
+```bash
+python3 scripts/audit_ba_geometry_bins.py \
+  --initial-model /path/to/frozen-1k-initial/model \
+  --candidate-model /path/to/already-audited-1k-candidate/model \
+  --candidate-label legacy
+```
+
+JSON is emitted on stdout only. The CLI additionally requires the frozen
+130,900 observations, W2=28,705,634 and 14,287,367 pairs in both inputs;
+the Python API permits small synthetic fixtures for tests. Counts alone are
+not provenance: compare output file hashes with the
+[frozen input certificate](../benchmarks/electro/m8-openloris-observation-geometry-preflight-v1.json).
+Runtime metadata is excluded only when checking deterministic repeats.
+
+Root re-ran 11 diagnostic tests, six publisher tests and 14 independent model
+auditor tests after Luna Max implementation. Initial review caught and fixed
+the PINHOLE row-layout check, invalid synthetic track references and a
+tautological bin-total check before any real diagnostic run.
+
+## Result (2026-09-08): large point motion is localized, cost reduction is not
+
+The [five-run evidence](../benchmarks/electro/m8-openloris-observation-geometry-v1.json)
+records initial self-control, legacy, adaptive, Ceres and a Ceres diagnostic
+repeat. All exit successfully in 19.53–21.29 s with peak RSS
+220,860–221,040 KiB (about 216 MiB); this is diagnostic-only process cost,
+not optimizer or mapper timing. The repeat report is exact after removing
+runtime metadata. All 12 input model files remain hash-identical.
+
+Root independently recomputed every track's bin using a minimum-absolute-dot
+calculation and camera centres from a linear solve. All 16 populations match:
+4,716 points, 130,900 observations, 1,000 images, 361,170 keypoints. The initial
+self-comparison has exactly zero cost change and motion. Candidate costs
+match earlier evidence within 7.3e-10; the serialized initial model differs
+from the original rig fixture by 7.44e-7, while its mean error agrees.
+
+The fixed angle-below-0.1-degree group has 39 points (0.83%) and 949
+observations (0.72%). These are descriptive sums of displacement, not a sum
+of trajectory errors or an influence measure:
+
+| Existing arm | All-point displacement sum (m) | Below-0.1° displacement sum (m) | Share of displacement | Share of net cost reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Legacy | 3.148973 | 0.032029 | 1.02% | -0.26% |
+| Adaptive | 886.053895 | 636.707437 | 71.86% | 6.28% |
+| Ceres | 1020.052384 | 749.779231 | 73.50% | 6.54% |
+
+The legacy group's negative cost-reduction share means its cost increased;
+the evidence keeps increases and decreases separate. Conversely, tracks of
+length at least 17 contain 83.80% of observations and account for 88.06% /
+87.77% of adaptive / Ceres net cost reduction. Their large absolute contribution
+must be interpreted alongside this large observation share.
+
+Thus weak-angle tracks explain much of the landmark displacement, but not
+most of the objective reduction. This does not establish that freezing,
+dropping or reweighting those points would repair trajectory accuracy. Do
+not promote a new solver, discard support or change the predeclared bins.
+Any intervention needs a separately fixed hypothesis and support/quality
+non-regression test; GT must remain post-only. Native E2E and the full 10k
+quality goal remain unmet.

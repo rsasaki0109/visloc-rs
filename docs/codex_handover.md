@@ -1,5 +1,16 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 観測幾何診断完了（2026-09-08）: Luna Maxの`5300634`をrootレビュー・31関連テスト後、
+> 初期/legacy/adaptive/Ceres/Ceres反復の5本で実行。19.53–21.29 s、peak RSS約216 MiB。
+> 全16群の点数/観測数を別計算法でも確認。Ceres反復はruntime以外一致、全入力hash不変。
+> 角度0.1°未満の39点にadaptive/Ceresの点移動量71.86%/73.50%が集中する一方、
+> net cost改善の寄与は6.28%/6.54%。軌跡悪化の原因や除去/固定の有効性は未証明。
+> [結果と限界](openloris_observation_geometry_diagnostic.md)、
+> [全証跡](../benchmarks/electro/m8-openloris-observation-geometry-v1.json)。
+> Luna Maxはコード/テストstage後に利用上限で停止。rootが既存実装をcommit・監査・測定。
+> 次の新規実装は、Luna Max復旧またはユーザーによる別モデル作業の指定が必要です。
+> 現PRの証跡/CI/mergeはroot担当で続行。全体goalは未完了です。
+
 > 続行（2026-09-08）: PR #89は最終head `24c6814` のCI9項目
 > （run `34160530991`）通過後、`7e917df`へsquash merge済み。旧local/remote branch整理済み。
 > 現在は `feat/m8-observation-geometry-diagnostic`。

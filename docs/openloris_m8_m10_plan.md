@@ -94,6 +94,15 @@ better trajectory on this observation set. Do not promote or tune against GT.
 Next, predeclare a bounded read-only observation/geometry diagnostic, informed
 by primary sources, before selecting another implementation candidate.
 
+That [predeclared diagnostic](openloris_observation_geometry_diagnostic.md) has
+now completed on the existing 1k outputs. Weak-angle points carry most landmark
+motion but only a small part of cost reduction; independent population and
+repeat checks pass. This is not a causal trajectory diagnosis or evidence to
+drop/freeze points. A next intervention must retain support and pass the same
+post-only quality gates. Luna Max hit its usage limit after producing the
+diagnostic implementation; further implementation requires its availability
+or an explicit user model choice. The full M8–M10 goal is unchanged.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,
