@@ -228,6 +228,17 @@ claims.
 
 ## Extraction and storage preflights
 
+The 2026-09-09 post-full-runner preflight found 8,914,128,896 bytes free on
+the dataset filesystem. Fresh base, dense (including loci) and adaptive banks
+alone require 8,332,098,526 logical bytes, leaving only 582,030,370 bytes before
+matching outputs, models, allocation overhead and temporary files. Do not launch
+an all-banks-retained cold run under that observation. See
+`m8-native-e2e-storage-preflight-v1.json`. This is not a complete peak-storage
+estimate: the executable DAG must establish last consumers and resume dependencies
+before releasing any newly generated intermediate. Retained evidence stays
+protected; using retained feature banks would change a cold extraction-inclusive
+measurement into a resumed/replay measurement. Recheck free space at launch.
+
 ### Snapshot storage audit
 
 `scripts/audit_snapshot_envelopes.py` measured the 2,500 dense matching snapshots:

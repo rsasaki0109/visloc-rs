@@ -1,0 +1,17 @@
+{
+  "schema": "m8-native-e2e-storage-preflight-v1",
+  "date": "2026-09-09",
+  "status": "do-not-launch-all-banks-retained",
+  "dataset_root": "/home/sasaki/datasets/openloris",
+  "measurement": "Sum st_size of immediate regular files (following bank symlinks); filesystem free from shutil.disk_usage(dataset_root). Logical bytes, not allocated blocks or a complete DAG peak estimate.",
+  "banks": {
+    "corridor1-1-m5/tiers/tier-10000/features256": {"files": 10000, "bytes": 1689203490},
+    "corridor1-1-m8-dense256x2-full10k-v2/features": {"files": 20000, "bytes": 4724000399},
+    "corridor1-1-m8-adaptive-bank-publication-v1/features": {"files": 10000, "bytes": 1918894637}
+  },
+  "feature_banks_only_bytes": 8332098526,
+  "root_free_bytes_at_observation": 8914128896,
+  "remaining_before_matching_models_and_temporary_files": 582030370,
+  "decision": "Do not launch continuous extraction yet. Assemble artifact lifetimes and peak storage requirements first. Existing evidence is protected. This observation does not authorize deleting banks or silently using retained features in a cold E2E run.",
+  "next": "Version-pin the complete execution DAG; identify last consumers of newly generated artifacts, keep resume dependencies explicit, and recheck actual free space before launch. A sampled process-tree RSS monitor is not a hard memory cap."
+}
