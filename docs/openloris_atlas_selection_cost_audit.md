@@ -273,3 +273,9 @@ and27.68s/340188KiB. The2000 directory contains only component-001 in both
 old and new outputs; do not assume a component-000 directory must exist.
 Evidence: source-spec-1500/2000-v1 JSONs. Coverage is14 of21 executions,
 16 of23 atlas nodes. Seven executions and excluded E2E phases remain.
+
+The2250-start750-frame source also matches all retained model bytes under
+the new common policy:51.56s wall,340088KiB peak RSS. Evidence:
+`m8-openloris-source-spec-2250x750-v1.json`. Coverage is15 of21 executions
+and17 of23 nodes. Six executions remain; unchanged quality and retained
+frontend inputs do not establish COLMAP or native E2E success.
