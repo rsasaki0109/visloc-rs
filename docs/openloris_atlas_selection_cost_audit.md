@@ -172,3 +172,20 @@ of the same producing executions, not separate mapping runs. Deduplicating
 by producing log yields21 executions and627.123191s, not678.765732s.
 The evidence preserves the raw node sum and adds explicit execution groups so
 the double count is auditable. Neither subtotal is a native E2E measurement.
+
+## Source command coverage audit
+
+A bounded follow-up rechecks all21 producing log hashes successfully and
+looks for sibling time records containing a recorded command. Only5 of21
+executions have such records. These are candidate provenance, not certified
+replay commands: each must still be bound to the producing model, binary and
+environment. The other16 lack command records in this checked location;
+this does not prove records are absent everywhere. See
+`benchmarks/electro/m8-openloris-source-command-coverage-v1.json` for the exact
+search scope, files, hashes and raw command lines.
+
+Do not call the historical627.123191s subtotal reproducible E2E. A future
+source replay must explicitly save argv, environment policy, immutable binary
+and input hashes, output hashes, exit status, wall and RSS for every unique
+execution, then include frontend and atlas alignment/integration phases.
+Do not silently guess historical flags to make a parity claim.
