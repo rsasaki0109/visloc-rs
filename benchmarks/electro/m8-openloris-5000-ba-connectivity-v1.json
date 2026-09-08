@@ -1,0 +1,388 @@
+{
+  "schema": "m8-openloris-5000-ba-connectivity-v1",
+  "build_commit": "4fbb952b600d36bc312c04f97c076f0a3ee1c7f8",
+  "binary_sha256": "a2b1523fccf956ca912ba051043e186dc0f7a95e2ce70a041cfb2851079b2fb0",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-connectivity-debug\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-connectivity-debug.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES VISLOC_SFM_TRACE_BA_CONNECTIVITY=1 VISLOC_SFM_TRACE_BA_POSE_MOTION=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-connectivity-debug.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-4fbb952 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --frame-range-start 0 --frame-range-count 2500 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-connectivity-debug/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-connectivity-debug.log 2>&1",
+  "audit_program": "import json,re,hashlib\nfrom pathlib import Path\nb=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice\")\nassert \"Exit status: 0\" in (b/\"ba-connectivity-debug.time\").read_text()\nhashes={}\nfor n in (\"cameras.txt\",\"images.txt\",\"points3D.txt\"):\n data=(b/\"ba-connectivity-debug/model/component-000\"/n).read_bytes()\n assert data==(b/\"legacy/model/component-000\"/n).read_bytes(),n\n hashes[n]=hashlib.sha256(data).hexdigest()\nstate={}; rows=[]\nfor line in (b/\"ba-connectivity-debug.log\").read_text().splitlines():\n if not line.startswith((\"rig-ba-connectivity:\",\"rig-ba-pose-motion:\")): continue\n v=dict(re.findall(r\"(\\w+)=([^ ]+)\",line)); key=(int(v[\"frame\"]),int(v[\"anchor\"]))\n if line.startswith(\"rig-ba-connectivity:\"):\n  state[key]=v[\"connected_to_fixed\"]==\"true\"\n else:\n  assert key in state\n  before=float(v[\"anchor_distance_before\"]); after=float(v[\"anchor_distance_after\"])\n  rows.append(dict(frame=key[0],anchor=key[1],connected=state[key],fixed=v[\"fixed\"]==\"true\",before_m=before,after_m=after,delta_m=after-before))\nrows.sort(key=lambda r:abs(r[\"delta_m\"]),reverse=True)\nprint(json.dumps(dict(model_sha256=hashes,records=len(rows),unconnected_records=sum(not r[\"connected\"] for r in rows),top20=rows[:20],unconnected_top20=[r for r in rows if not r[\"connected\"]][:20],fixed_max_delta=max((abs(r[\"delta_m\"]) for r in rows if r[\"fixed\"]),default=0)),indent=2))\n",
+  "model_exact_to_legacy": true,
+  "result": {
+    "model_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "ae3ccbe3d67c90b5793e0fcdcdd1d98609f3e0434516b9182f1bfe2e15d5c24b",
+      "points3D.txt": "165da10b52e54637f6c1db926ea0b4d6d7cf89bb11de02e68a07f0a952d595b2"
+    },
+    "records": 20000,
+    "unconnected_records": 306,
+    "top20": [
+      {
+        "frame": 1068,
+        "anchor": 1497,
+        "connected": false,
+        "fixed": false,
+        "before_m": 20.402023070321057,
+        "after_m": 10.549949318254983,
+        "delta_m": -9.852073752066074
+      },
+      {
+        "frame": 1070,
+        "anchor": 1414,
+        "connected": false,
+        "fixed": false,
+        "before_m": 9.257700743930144,
+        "after_m": 18.15578419594678,
+        "delta_m": 8.898083452016635
+      },
+      {
+        "frame": 1072,
+        "anchor": 1414,
+        "connected": false,
+        "fixed": false,
+        "before_m": 9.215972386513604,
+        "after_m": 18.10864885976597,
+        "delta_m": 8.892676473252367
+      },
+      {
+        "frame": 1071,
+        "anchor": 1505,
+        "connected": false,
+        "fixed": false,
+        "before_m": 11.695081012275438,
+        "after_m": 5.743255778398281,
+        "delta_m": -5.951825233877156
+      },
+      {
+        "frame": 1068,
+        "anchor": 1505,
+        "connected": false,
+        "fixed": false,
+        "before_m": 10.771384486963232,
+        "after_m": 5.9014997955210085,
+        "delta_m": -4.869884691442223
+      },
+      {
+        "frame": 1416,
+        "anchor": 1469,
+        "connected": true,
+        "fixed": false,
+        "before_m": 2.4492096812613418,
+        "after_m": 4.319578096286057,
+        "delta_m": 1.8703684150247155
+      },
+      {
+        "frame": 1416,
+        "anchor": 1497,
+        "connected": true,
+        "fixed": false,
+        "before_m": 2.180118291423177,
+        "after_m": 3.94594443392009,
+        "delta_m": 1.765826142496913
+      },
+      {
+        "frame": 1416,
+        "anchor": 1439,
+        "connected": true,
+        "fixed": false,
+        "before_m": 4.088346524875338,
+        "after_m": 5.561675286204834,
+        "delta_m": 1.4733287613294959
+      },
+      {
+        "frame": 1068,
+        "anchor": 1520,
+        "connected": false,
+        "fixed": false,
+        "before_m": 6.308161198240103,
+        "after_m": 4.943785913419117,
+        "delta_m": -1.3643752848209854
+      },
+      {
+        "frame": 1071,
+        "anchor": 1520,
+        "connected": false,
+        "fixed": false,
+        "before_m": 6.149557834858433,
+        "after_m": 4.891603606505427,
+        "delta_m": -1.2579542283530056
+      },
+      {
+        "frame": 1071,
+        "anchor": 1522,
+        "connected": false,
+        "fixed": false,
+        "before_m": 4.944887628733865,
+        "after_m": 3.8387122428643523,
+        "delta_m": -1.1061753858695123
+      },
+      {
+        "frame": 1068,
+        "anchor": 1522,
+        "connected": false,
+        "fixed": false,
+        "before_m": 4.996947314696256,
+        "after_m": 3.8967694818597844,
+        "delta_m": -1.1001778328364717
+      },
+      {
+        "frame": 1084,
+        "anchor": 1080,
+        "connected": true,
+        "fixed": false,
+        "before_m": 1.0394444361403896,
+        "after_m": 0.07702862813785091,
+        "delta_m": -0.9624158080025387
+      },
+      {
+        "frame": 1416,
+        "anchor": 1410,
+        "connected": true,
+        "fixed": false,
+        "before_m": 2.7221682770734708,
+        "after_m": 1.7797522616047743,
+        "delta_m": -0.9424160154686965
+      },
+      {
+        "frame": 774,
+        "anchor": 1382,
+        "connected": false,
+        "fixed": false,
+        "before_m": 10.3395889769679,
+        "after_m": 11.264293160394455,
+        "delta_m": 0.9247041834265559
+      },
+      {
+        "frame": 774,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 11.528690104246994,
+        "after_m": 12.41240466433836,
+        "delta_m": 0.8837145600913665
+      },
+      {
+        "frame": 1111,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 6.568483184403725,
+        "after_m": 7.344328493937348,
+        "delta_m": 0.7758453095336231
+      },
+      {
+        "frame": 1072,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.507979825797051,
+        "after_m": 8.27565827926188,
+        "delta_m": 0.7676784534648284
+      },
+      {
+        "frame": 1073,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.520529751536383,
+        "after_m": 8.2598092822258,
+        "delta_m": 0.7392795306894175
+      },
+      {
+        "frame": 1075,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.474621946239451,
+        "after_m": 8.213489678649797,
+        "delta_m": 0.7388677324103456
+      }
+    ],
+    "unconnected_top20": [
+      {
+        "frame": 1068,
+        "anchor": 1497,
+        "connected": false,
+        "fixed": false,
+        "before_m": 20.402023070321057,
+        "after_m": 10.549949318254983,
+        "delta_m": -9.852073752066074
+      },
+      {
+        "frame": 1070,
+        "anchor": 1414,
+        "connected": false,
+        "fixed": false,
+        "before_m": 9.257700743930144,
+        "after_m": 18.15578419594678,
+        "delta_m": 8.898083452016635
+      },
+      {
+        "frame": 1072,
+        "anchor": 1414,
+        "connected": false,
+        "fixed": false,
+        "before_m": 9.215972386513604,
+        "after_m": 18.10864885976597,
+        "delta_m": 8.892676473252367
+      },
+      {
+        "frame": 1071,
+        "anchor": 1505,
+        "connected": false,
+        "fixed": false,
+        "before_m": 11.695081012275438,
+        "after_m": 5.743255778398281,
+        "delta_m": -5.951825233877156
+      },
+      {
+        "frame": 1068,
+        "anchor": 1505,
+        "connected": false,
+        "fixed": false,
+        "before_m": 10.771384486963232,
+        "after_m": 5.9014997955210085,
+        "delta_m": -4.869884691442223
+      },
+      {
+        "frame": 1068,
+        "anchor": 1520,
+        "connected": false,
+        "fixed": false,
+        "before_m": 6.308161198240103,
+        "after_m": 4.943785913419117,
+        "delta_m": -1.3643752848209854
+      },
+      {
+        "frame": 1071,
+        "anchor": 1520,
+        "connected": false,
+        "fixed": false,
+        "before_m": 6.149557834858433,
+        "after_m": 4.891603606505427,
+        "delta_m": -1.2579542283530056
+      },
+      {
+        "frame": 1071,
+        "anchor": 1522,
+        "connected": false,
+        "fixed": false,
+        "before_m": 4.944887628733865,
+        "after_m": 3.8387122428643523,
+        "delta_m": -1.1061753858695123
+      },
+      {
+        "frame": 1068,
+        "anchor": 1522,
+        "connected": false,
+        "fixed": false,
+        "before_m": 4.996947314696256,
+        "after_m": 3.8967694818597844,
+        "delta_m": -1.1001778328364717
+      },
+      {
+        "frame": 774,
+        "anchor": 1382,
+        "connected": false,
+        "fixed": false,
+        "before_m": 10.3395889769679,
+        "after_m": 11.264293160394455,
+        "delta_m": 0.9247041834265559
+      },
+      {
+        "frame": 774,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 11.528690104246994,
+        "after_m": 12.41240466433836,
+        "delta_m": 0.8837145600913665
+      },
+      {
+        "frame": 1111,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 6.568483184403725,
+        "after_m": 7.344328493937348,
+        "delta_m": 0.7758453095336231
+      },
+      {
+        "frame": 1072,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.507979825797051,
+        "after_m": 8.27565827926188,
+        "delta_m": 0.7676784534648284
+      },
+      {
+        "frame": 1073,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.520529751536383,
+        "after_m": 8.2598092822258,
+        "delta_m": 0.7392795306894175
+      },
+      {
+        "frame": 1075,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.474621946239451,
+        "after_m": 8.213489678649797,
+        "delta_m": 0.7388677324103456
+      },
+      {
+        "frame": 1070,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.58722133207498,
+        "after_m": 8.32476741647635,
+        "delta_m": 0.7375460844013695
+      },
+      {
+        "frame": 1066,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.666911663536408,
+        "after_m": 8.404119375290193,
+        "delta_m": 0.7372077117537854
+      },
+      {
+        "frame": 1069,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.608176305080815,
+        "after_m": 8.345377488862104,
+        "delta_m": 0.7372011837812886
+      },
+      {
+        "frame": 1067,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.650464654304663,
+        "after_m": 8.38757314601857,
+        "delta_m": 0.7371084917139061
+      },
+      {
+        "frame": 1084,
+        "anchor": 1392,
+        "connected": false,
+        "fixed": false,
+        "before_m": 7.275697723260553,
+        "after_m": 8.011397221979443,
+        "delta_m": 0.7356994987188905
+      }
+    ],
+    "fixed_max_delta": 0
+  },
+  "limits": [
+    "Reachability uses only the actual accepted BA observations, not final tracks or raw pair connectivity.",
+    "The five largest anchor-distance changes are disconnected from every fixed pose. This does not establish that anchoring alone repairs global trajectory quality.",
+    "Frame 1416 deforms despite connectivity; connected geometry conditioning remains a separate concern.",
+    "Diagnostic timing and RSS are not certified performance results."
+  ]
+}

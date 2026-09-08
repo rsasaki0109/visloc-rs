@@ -4681,6 +4681,35 @@ fn run_windowed_final_ba(
     Ok(aggregate)
 }
 
+fn rig_ba_anchor_reachable(
+    observations: impl IntoIterator<Item = (u64, u64)>,
+    fixed: impl IntoIterator<Item = u64>,
+) -> BTreeSet<u64> {
+    // A landmark star preserves connectivity without a pose-pair clique.
+    // Storage is O(observations + landmarks + poses), never O(poses squared).
+    let mut first = BTreeMap::new();
+    let mut edges: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (pose, landmark) in observations {
+        let representative = *first.entry(landmark).or_insert(pose);
+        if pose != representative {
+            edges.entry(pose).or_default().push(representative);
+            edges.entry(representative).or_default().push(pose);
+        }
+    }
+    let mut reached: BTreeSet<_> = fixed.into_iter().collect();
+    let mut pending: Vec<_> = reached.iter().copied().collect();
+    while let Some(pose) = pending.pop() {
+        if let Some(neighbors) = edges.get(&pose) {
+            for &neighbor in neighbors {
+                if reached.insert(neighbor) {
+                    pending.push(neighbor);
+                }
+            }
+        }
+    }
+    reached
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_rig_bundle_adjustment(
     rig: &GeneralizedCameraRig,
@@ -4788,6 +4817,21 @@ fn run_rig_bundle_adjustment(
         }
     }
     let mut matrix_free_report = None;
+    if std::env::var_os("VISLOC_SFM_TRACE_BA_CONNECTIVITY").is_some() {
+        let reached = rig_ba_anchor_reachable(
+            problem
+                .rig_observations
+                .iter()
+                .map(|o| (o.keyframe_id, o.landmark_id)),
+            problem.fixed_poses.iter().copied(),
+        );
+        for id in problem.poses.keys() {
+            eprintln!(
+                "rig-ba-connectivity: frame={id} anchor={anchor_frame_index} fixed={} connected_to_fixed={}",
+                problem.fixed_poses.contains(id), reached.contains(id),
+            );
+        }
+    }
     // Scalar-only context for pairing native windows with existing LM debug
     // records. No state copy, solve-policy change, or global pair graph.
     if std::env::var_os("VISLOC_SFM_DEBUG_BA").is_some()
@@ -9076,6 +9120,30 @@ mod tests {
     #[test]
     fn qr_native_preserves_fixed_state_and_rollback() {
         check_fixed_rotation_backend(RigBaBackend::MatrixFreeQr);
+    }
+
+    #[test]
+    fn ba_anchor_connectivity_uses_landmark_paths_not_stereo_support_alone() {
+        let observations = [
+            (0, 10),
+            (1, 10),
+            (1, 11),
+            (2, 11),
+            (3, 12),
+            (3, 12),
+            (4, 13),
+            (5, 13),
+        ];
+        assert_eq!(
+            rig_ba_anchor_reachable(observations, [0]),
+            BTreeSet::from([0, 1, 2])
+        );
+        assert_eq!(
+            rig_ba_anchor_reachable(observations, [0, 4]),
+            BTreeSet::from([0, 1, 2, 4, 5])
+        );
+        assert!(rig_ba_anchor_reachable(observations, []).is_empty());
+        assert_eq!(rig_ba_anchor_reachable([], [7]), BTreeSet::from([7]));
     }
 
     #[test]
