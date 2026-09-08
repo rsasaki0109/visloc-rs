@@ -1,0 +1,21 @@
+{
+  "status": "four-image-byte-parity-pass",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-base-extraction-probe-v1/report.json",
+  "recipe": "python3 scripts/probe_openloris_base_extraction.py --output NEW_PROBE_DIRECTORY",
+  "binary_sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34",
+  "reference_recipe_sha256": "d4d6097f92f0c9ac19dee0795b9418af824c36889a5f3dac5e967f6df34f3dc2",
+  "images": ["cam1_000000.png", "cam1_006666.png", "cam2_003333.png", "cam2_009999.png"],
+  "feature_sha256": {
+    "cam1_000000_features.txt": "eb7d3e54c46e09f56b7cb35607786492542517a990a8a0902bc09d146f0fdc76",
+    "cam1_006666_features.txt": "a06b9b6f753721bb1e0fde3bdbaa90fa583342e9af6ef0fecc3a6ec9a4565754",
+    "cam2_003333_features.txt": "dcb734f19ce780fb445d6f907be383d4fc1394c96d62e93814d31920f06dd507",
+    "cam2_009999_features.txt": "247508ff145a570592b777ebf279cedfb1c669c96a3aec813d8a38cf705bf5c4"
+  },
+  "keypoints": 584,
+  "exit_code": 0,
+  "peak_rss_kib": 271872,
+  "rayon_num_threads": 8,
+  "malloc_arena_max": "1",
+  "time_report_sha256": "484fd15f69fa7c8d830431c4bee3ca6341b95f095967a6989f492007c69a3646",
+  "scope": "Four raw images only, not full10k extraction, a speed comparison, or continuous native E2E. Base recipe is distinct from dense extraction."
+}

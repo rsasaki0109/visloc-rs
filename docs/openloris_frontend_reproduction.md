@@ -226,6 +226,16 @@ remain open. Legacy v1 diagnostic shard reproduction is not proof of N²-free
 artifact growth: audit shared-envelope storage in the final runner before 100k
 claims.
 
+## Base extraction preflight
+
+The base extraction preflight also passed on four raw images spread across both
+cameras and the sequence (`cam1_000000`, `cam1_006666`, `cam2_003333`,
+`cam2_009999`). `scripts/probe_openloris_base_extraction.py` replays the recorded
+base SIFT recipe with the frozen image-capable extractor; all four feature files
+(584 keypoints) match the retained base bank byte-for-byte. Evidence:
+`m8-openloris-base-extraction-probe-v1.json`. This does not establish full10k
+extraction parity or E2E performance.
+
 ## Empty vocabulary safety
 
 Streamed candidate export now rejects a missing/empty appearance vocabulary
