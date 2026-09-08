@@ -1,5 +1,42 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 10k mapper-only検証を開始: `tier-10000-boundary/boundary-control` session40844実行中。
+> 同じ `rig-7d99e07`/完全10k入力、frame sliceなし、各run上限360秒、単一thread。
+> 入力5000frame/10000画像/64862pairs/7551021 capped matches、初期VmHWM547620KiB。
+> 完走後対照を採点しboundary-a/bへ。native E2Eではなく、登録不足も隠さず記録する。
+
+> PR105 https://github.com/rsasaki0109/visloc-rs/pull/105 はhead `aa3938c`、CI34200559679実行中。
+> 同じbinary `rig-7d99e07` の独立dense ANN2.5k対照を開始。
+> `tier-2500-ann/boundary-control` はexit0・Legacy bytes一致、mapper36.262899秒。
+> boundary-aはexit0、全2500画像、RMSE/p95 0.067853/0.134449m、再投影0.778608pxで改善。
+> 支持/正深度/固定rig正常、track成分1250frame一つ。mapper50.634806秒で対照より遅い。
+> boundary-bもexit0・反復bytes一致。mapper50.635/50.016秒対control36.263秒。
+> 証跡 `m8-openloris-2500-fixed-boundary-v1.json`。次は10k。
+> 容量確保: 5k legacyと完全一致したpolicy-a/b、support-debug、ba-motion-debug、
+> ba-connectivity-debug、anchored-control、boundary-controlの3モデルファイルをhardlink化。
+> パス/bytes不変、入力データ変更なし。これらの既存出力は上書きせず新規run名を使用する。
+> 全goal未達。ディスク空き約327MB（対照開始前）、10k前に再確認する。
+
+> PR104はhead `109705c` のCI9成功後 `1f98c5c` にmerge（成分固定は既定OFF維持）。
+> 現branch `feat/m8-fixed-boundary-ba`、build source `7d99e07dbdbc95bc72d2e28805a75e51dbcd7270`。
+> `--ba-fixed-boundary-observations` を既定OFF追加。窓内usable観測を持つtrackのみ、
+> 窓外usable観測を固定body poseとしてBAへ含める。成分固定と組み合わせずLegacy対照で測る。
+> 窓内1観測+窓外1観測の採用、固定pose/観測不変、窓外のみtrack除外テスト通過。
+> clippy/CLI check通過。release45.41秒、保存binary `rig-7d99e07`。
+> SHA256 `d87194e92b472b9d74fd8d2e43d41faad5766f330afc3a6e9155c41816277d72`。
+> 5k `tier-5000-slice/boundary-control` はexit0、Legacy bytes一致、mapper53.399406秒。
+> boundary-aはexit0、全5000画像、RMSE/p95 0.164335/0.271032m、再投影0.819133pxで対照より改善。
+> track成分2500frame一つ、支持/正深度/固定rig正常。mapper83.156035秒で対照53.399406秒より遅い。
+> boundary-bもexit0、候補反復bytes一致。mapper83.156/91.705秒、RSS724532/724796KiB。
+> 成分固定OFF。証跡 `m8-openloris-5000-fixed-boundary-v1.json`。
+> 1k control/candidate-a/bはexit0、control Legacy bytes一致、候補反復bytes一致。
+> RMSE/p95 0.022320/0.035799m、再投影0.627506px、全1000画像・幾何正常で既存品質gate通過。
+> mapper5.575/5.557秒対control4.099秒。証跡 `m8-openloris-1000-fixed-boundary-v1.json`。
+> 次は独立dense ANN2.5kと10k、native E2Eは依然未検証。
+> 反復確認後、独立tier非回帰/10k品質へ。5kだけで全goal達成やCOLMAP優越を主張しない。
+> 実ソルバーのpose_indexはfixed pose除外をコード確認。追加観測/固定poseのRSSは未測定。
+> [契約](openloris_fixed_boundary_ba.md)。5k残存singleton1616は二乗誤差2.134%のみ。
+
 > PR103はhead `9f7cfeb` CI9成功後 `a82a4bb` にmerge、旧branch整理済み。
 > 現branch `feat/m8-ba-component-anchors`。既定OFFの
 > `--ba-anchor-disconnected-components` は既存固定poseのない各BA成分の最小frame IDを固定。

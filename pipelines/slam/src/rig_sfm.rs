@@ -240,6 +240,8 @@ pub struct RigSfmConfig {
     /// Fix the lowest frame ID in each BA observation component lacking a
     /// fixed pose. Removes its rigid gauge, not every possible degeneracy.
     pub ba_anchor_disconnected_components: bool,
+    /// Retain eligible outside observations of active tracks with fixed poses.
+    pub ba_fixed_boundary_observations: bool,
     pub ba_config: BaConfig,
     pub local_ba_every: usize,
     pub local_ba_window_size: usize,
@@ -315,6 +317,7 @@ impl Default for RigSfmConfig {
             final_bundle_adjustment: true,
             ba_backend: RigBaBackend::Legacy,
             ba_anchor_disconnected_components: false,
+            ba_fixed_boundary_observations: false,
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
                 robust_kernel: RobustKernel::Huber { delta: 6.0 },
@@ -4801,12 +4804,14 @@ fn run_rig_bundle_adjustment(
             continue;
         };
         let mut observations = Vec::new();
+        let mut has_active_observation = false;
         for &(image, keypoint) in &track.observations {
             let Some(pose) = image_poses[image].as_ref() else {
                 continue;
             };
             let (frame, sensor_index) = image_assignment[image];
-            if !active_frames.contains(&frame) {
+            let active = active_frames.contains(&frame);
+            if !active && (!config.ba_fixed_boundary_observations || frame_poses[frame].is_none()) {
                 continue;
             }
             let sensor = &rig.sensors()[sensor_index];
@@ -4818,7 +4823,11 @@ fn run_rig_bundle_adjustment(
                     (projected - pixel).norm() <= 2.0 * config.max_reprojection_error_px
                 });
             if usable {
-                observations_per_frame[frame] += 1;
+                has_active_observation |= active;
+                // Preserve the historical counter path when disabled.
+                if !config.ba_fixed_boundary_observations {
+                    observations_per_frame[frame] += 1;
+                }
                 observations.push(BaRigObservation {
                     keyframe_id: frame as u64,
                     landmark_id: track_index as u64,
@@ -4828,12 +4837,25 @@ fn run_rig_bundle_adjustment(
                 });
             }
         }
-        if observations.len() < 2 {
+        if observations.len() < 2 || !has_active_observation {
             continue;
         }
         problem.add_landmark(track_index as u64, position);
         visual_observations += observations.len();
         for observation in observations {
+            if config.ba_fixed_boundary_observations {
+                let frame = observation.keyframe_id as usize;
+                observations_per_frame[frame] += 1;
+                if !active_frames.contains(&frame) {
+                    if !problem.poses.contains_key(&observation.keyframe_id) {
+                        problem.add_pose(
+                            observation.keyframe_id,
+                            frame_poses[frame].as_ref().unwrap().clone(),
+                        );
+                    }
+                    problem.fix_pose(observation.keyframe_id);
+                }
+            }
             problem.add_rig_observation(observation);
         }
     }
@@ -9242,17 +9264,27 @@ mod tests {
     }
 
     fn check_fixed_rotation_backend(backend: RigBaBackend) {
-        check_fixed_rotation_backend_with_component_anchors(backend, false);
+        check_fixed_rotation_backend_with_component_anchors(backend, false, false);
     }
 
     #[test]
     fn component_anchoring_native_preserves_fixed_state_and_rollback() {
-        check_fixed_rotation_backend_with_component_anchors(RigBaBackend::BoundedDirect64Qr, true);
+        check_fixed_rotation_backend_with_component_anchors(
+            RigBaBackend::BoundedDirect64Qr,
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn fixed_boundary_keeps_single_active_observations_and_external_poses_fixed() {
+        check_fixed_rotation_backend_with_component_anchors(RigBaBackend::Legacy, false, true);
     }
 
     fn check_fixed_rotation_backend_with_component_anchors(
         backend: RigBaBackend,
         component_anchors: bool,
+        boundary_test: bool,
     ) {
         let rig = GeneralizedCameraRig::new(vec![
             RigSensor {
@@ -9386,6 +9418,73 @@ mod tests {
             parallel: false,
             ..BaConfig::default()
         };
+        if boundary_test {
+            let mut outside_only = tracks[0].clone();
+            outside_only.observations.retain(|&(image, _)| image < 2);
+            let outside_position = outside_only.position;
+            // One sensor observation per frame: without the boundary each
+            // track has only one active row and must be excluded.
+            for track in &mut tracks {
+                track.observations.retain(|&(image, _)| image % 2 == 0);
+            }
+            tracks.push(outside_only);
+            let before_poses = frame_poses.clone();
+            let before_images = image_poses.clone();
+            let before_observations: Vec<_> =
+                tracks.iter().map(|t| t.observations.clone()).collect();
+            let active = HashSet::from([1]);
+            assert!(run_rig_bundle_adjustment(
+                &rig,
+                &features,
+                &image_assignment,
+                &config,
+                &active,
+                1,
+                &ba_config,
+                0,
+                &[],
+                false,
+                &mut frame_poses,
+                &mut image_poses,
+                &mut tracks,
+            )
+            .unwrap()
+            .is_none());
+            let boundary_config = RigSfmConfig {
+                ba_fixed_boundary_observations: true,
+                ..config
+            };
+            let stats = run_rig_bundle_adjustment(
+                &rig,
+                &features,
+                &image_assignment,
+                &boundary_config,
+                &active,
+                1,
+                &ba_config,
+                0,
+                &[],
+                false,
+                &mut frame_poses,
+                &mut image_poses,
+                &mut tracks,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(stats.observations, world_points.len() * 2);
+            assert_eq!(tracks.last().unwrap().position, outside_position);
+            assert!(stats.final_cost <= stats.initial_cost);
+            assert_eq!(frame_poses, before_poses);
+            assert_eq!(image_poses, before_images);
+            assert_eq!(
+                tracks
+                    .iter()
+                    .map(|t| t.observations.clone())
+                    .collect::<Vec<_>>(),
+                before_observations
+            );
+            return;
+        }
         let direct_frame_poses_before = frame_poses.clone();
         let direct_observations_before = tracks
             .iter()

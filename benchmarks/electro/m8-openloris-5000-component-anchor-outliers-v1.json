@@ -1,0 +1,160 @@
+{
+  "schema": "m8-openloris-5000-component-anchor-outliers-v1",
+  "audit_program": "import json\nfrom pathlib import Path\nfrom scripts import score_openloris_model as s\nroot=Path(\"/home/sasaki/datasets/openloris\")\nbase=root/\"corridor1-1-m8-bounded-native-v1/tier-5000-slice\"\nmanifest=s.load_manifest(root/\"corridor1-1-m5/manifests/tier-5000.json\")\ngt=root/\"official-groundtruth/calibration/corridor1-1\"\nref=s.interpolate_camera_centres(manifest,s.load_ground_truth(gt/\"groundtruth.txt\"),s.load_camera_extrinsics(gt/\"trans_matrix.yaml\"),max_gap_seconds=0.1)\nmetrics,errors,names=s.score_component(base/\"component-a/model/component-000/images.txt\",ref)\nframes={}\nfor line in (base/\"rig-manifest-5000.txt\").read_text().splitlines():\n f=line.split()\n if f and f[0]==\"F\": frames[f[2]]=int(f[1])\nisolated={1616}\nrows=[dict(name=n,frame=frames[n],error_m=float(e),isolated=frames[n] in isolated) for n,e in zip(names,errors)]\nrows.sort(key=lambda r:r[\"error_m\"],reverse=True)\ntotal=sum(r[\"error_m\"]**2 for r in rows)\nprint(json.dumps(dict(metrics=metrics,top20=rows[:20],isolated=[r for r in rows if r[\"isolated\"]],isolated_squared_error_fraction=sum(r[\"error_m\"]**2 for r in rows if r[\"isolated\"])/total),indent=2))\n",
+  "result": {
+    "metrics": {
+      "images_txt": "/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/component-a/model/component-000/images.txt",
+      "images_txt_sha256": "d774c57603f4abeba4ffd757083d15030e9cdfc97629a6b581ad8c7ffd31e16a",
+      "registered": 5000,
+      "gt_scored": 4308,
+      "sim3_scale": 0.9938441026262718,
+      "rmse_m": 0.2612838426865665,
+      "median_m": 0.20503839478868358,
+      "p95_m": 0.4908657808368514,
+      "max_m": 1.7734574749905712,
+      "reference_extent_m": 38.74424995549824,
+      "relative_rmse": 0.0067438095455887755
+    },
+    "top20": [
+      {
+        "name": "cam2_003233.png",
+        "frame": 1616,
+        "error_m": 1.7734574749905712,
+        "isolated": true
+      },
+      {
+        "name": "cam1_003232.png",
+        "frame": 1616,
+        "error_m": 1.7698282374732621,
+        "isolated": true
+      },
+      {
+        "name": "cam1_004996.png",
+        "frame": 2498,
+        "error_m": 0.7270466868474564,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004998.png",
+        "frame": 2499,
+        "error_m": 0.7253122148550093,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004992.png",
+        "frame": 2496,
+        "error_m": 0.7249667809414118,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004994.png",
+        "frame": 2497,
+        "error_m": 0.7245807270270198,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004997.png",
+        "frame": 2498,
+        "error_m": 0.7240926571250271,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004999.png",
+        "frame": 2499,
+        "error_m": 0.7223580164813184,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004993.png",
+        "frame": 2496,
+        "error_m": 0.7220473904569293,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004995.png",
+        "frame": 2497,
+        "error_m": 0.7215854824766018,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004990.png",
+        "frame": 2495,
+        "error_m": 0.7197650765120431,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004991.png",
+        "frame": 2495,
+        "error_m": 0.7167721350597285,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004986.png",
+        "frame": 2493,
+        "error_m": 0.7154158322547338,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004984.png",
+        "frame": 2492,
+        "error_m": 0.713574989444891,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004988.png",
+        "frame": 2494,
+        "error_m": 0.7130226817278641,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004987.png",
+        "frame": 2493,
+        "error_m": 0.7124904418051662,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004985.png",
+        "frame": 2492,
+        "error_m": 0.7107492526373789,
+        "isolated": false
+      },
+      {
+        "name": "cam2_004989.png",
+        "frame": 2494,
+        "error_m": 0.7100770293162243,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004982.png",
+        "frame": 2491,
+        "error_m": 0.7091318432994911,
+        "isolated": false
+      },
+      {
+        "name": "cam1_004976.png",
+        "frame": 2488,
+        "error_m": 0.7074353871779874,
+        "isolated": false
+      }
+    ],
+    "isolated": [
+      {
+        "name": "cam2_003233.png",
+        "frame": 1616,
+        "error_m": 1.7734574749905712,
+        "isolated": true
+      },
+      {
+        "name": "cam1_003232.png",
+        "frame": 1616,
+        "error_m": 1.7698282374732621,
+        "isolated": true
+      }
+    ],
+    "isolated_squared_error_fraction": 0.02134430421795285
+  },
+  "limits": [
+    "GT diagnosis only, unchanged whole-model alignment.",
+    "Singleton 1616 contributes only 2.134% of squared error; targeting it alone is not an adequate global-quality plan."
+  ]
+}
