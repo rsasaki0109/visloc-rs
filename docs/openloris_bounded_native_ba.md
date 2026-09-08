@@ -34,6 +34,16 @@ overlapping classification). Pair connectivity is not metric-track or PnP
 support. Investigate boundary 3D/track support rather than assuming a disconnected
 input graph. [Audit and limitations](../benchmarks/electro/m8-openloris-2500-sparse7n-connectivity-v1.json).
 
+Boundary audit: the 37 crossing pairs contain 998 accepted pair matches, all
+same-camera temporal edges. Matching their registered endpoints to exported
+3D associations gives frame 612 eight feature/point associations per sensor,
+and frame 613 ten per sensor. These are final-model associations before
+conflict handling and geometry verification, not the in-loop PnP cache or
+guaranteed inliers. Therefore neither zero raw connectivity nor missing a
+camera alone explains this boundary. Inspect actual registration rejection
+at 612/613 before changing thresholds or enabling recovery.
+[Pair/3D association audit](../benchmarks/electro/m8-openloris-2500-boundary-support-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
