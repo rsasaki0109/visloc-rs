@@ -103,6 +103,17 @@ pub enum RigBaBackend {
     MatrixFreeCluster8Restart1,
     /// Experimental compact landmark QR with bounded pose-block Jacobi PCG.
     MatrixFreeQr,
+    /// Choose the direct backend before solving at <=64 variable poses;
+    /// larger systems use compact QR, never a failure-triggered fallback.
+    BoundedDirect64Qr,
+}
+
+fn select_bounded_rig_backend(requested: RigBaBackend, variable_poses: usize) -> RigBaBackend {
+    match requested {
+        RigBaBackend::BoundedDirect64Qr if variable_poses <= 64 => RigBaBackend::Legacy,
+        RigBaBackend::BoundedDirect64Qr => RigBaBackend::MatrixFreeQr,
+        other => other,
+    }
 }
 
 /// Conservative controls for generalized-rig incremental reconstruction.
@@ -4795,7 +4806,29 @@ fn run_rig_bundle_adjustment(
             anchor_frame_index, fix_active_rotations,
         );
     }
-    let (initial_cost, final_cost, iterations, converged) = match config.ba_backend {
+    let selected_backend = select_bounded_rig_backend(
+        config.ba_backend,
+        problem
+            .poses
+            .keys()
+            .filter(|id| !problem.fixed_poses.contains(id))
+            .count(),
+    );
+    if config.ba_backend == RigBaBackend::BoundedDirect64Qr {
+        let validation = if problem
+            .poses
+            .keys()
+            .any(|id| !problem.fixed_poses.contains(id))
+        {
+            problem.validate_matrix_free_entry(ba_config, MatrixFreeBaOptions::default())
+        } else {
+            problem.validate_matrix_free_landmark_only(ba_config, MatrixFreeBaOptions::default())
+        };
+        validation.map_err(|error| RigSfmError::BundleAdjustment(error.to_string()))?;
+        eprintln!("rig-ba-policy: requested=bounded-direct64-qr selected={selected_backend:?} direct_pose_cap=64");
+    }
+    let (initial_cost, final_cost, iterations, converged) = match selected_backend {
+        RigBaBackend::BoundedDirect64Qr => unreachable!("bounded policy resolves before solve"),
         RigBaBackend::Legacy => {
             // Keep the historical call and caller-provided BaConfig entirely
             // unchanged when the new selector is absent.
@@ -4865,7 +4898,7 @@ fn run_rig_bundle_adjustment(
                     result.converged,
                 )
             } else if has_variable_pose {
-                let result = match config.ba_backend {
+                let result = match selected_backend {
                     RigBaBackend::MatrixFreeQr => problem.optimize_rig_qr(
                         ba_config, MatrixFreeBaOptions::default()),
                     RigBaBackend::MatrixFreeCluster8Restart1 => problem.optimize_matrix_free_cluster8_with_restart(
@@ -4889,7 +4922,7 @@ fn run_rig_bundle_adjustment(
                         RigSfmError::BundleAdjustment(error.to_string())
                     })?;
                 matrix_free_report = Some((
-                    if config.ba_backend == RigBaBackend::MatrixFreeQr {
+                    if selected_backend == RigBaBackend::MatrixFreeQr {
                         "matrix-free-qr"
                     } else if config.ba_backend == RigBaBackend::MatrixFreeCluster8Restart1 {
                         "matrix-free-cluster8-restart1"
@@ -9021,6 +9054,27 @@ mod tests {
     #[test]
     fn qr_native_preserves_fixed_state_and_rollback() {
         check_fixed_rotation_backend(RigBaBackend::MatrixFreeQr);
+    }
+
+    #[test]
+    fn bounded_policy_selects_before_solve_and_preserves_fixed_state() {
+        for n in [0, 1, 63, 64] {
+            assert_eq!(
+                select_bounded_rig_backend(RigBaBackend::BoundedDirect64Qr, n),
+                RigBaBackend::Legacy
+            );
+        }
+        for n in [65, 10000, usize::MAX] {
+            assert_eq!(
+                select_bounded_rig_backend(RigBaBackend::BoundedDirect64Qr, n),
+                RigBaBackend::MatrixFreeQr
+            );
+        }
+        assert_eq!(
+            select_bounded_rig_backend(RigBaBackend::Legacy, 10000),
+            RigBaBackend::Legacy
+        );
+        check_fixed_rotation_backend(RigBaBackend::BoundedDirect64Qr);
     }
 
     fn check_fixed_rotation_backend(backend: RigBaBackend) {

@@ -1,0 +1,983 @@
+{
+  "schema": "m8-openloris-2500-boundary-support-v1",
+  "pair_audit_program": "import csv,json,collections\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n\")\nnames={int(r[\"image_index\"]):r[\"image_name\"] for r in csv.DictReader((root/\"images.tsv\").open(),delimiter=\"\\t\")}\ndef frame(i):return int(names[i].split(\"_\")[1].split(\".\")[0])//2\nrows=[]\nfor r in csv.DictReader((root/\"pairs.tsv\").open(),delimiter=\"\\t\"):\n i,j=int(r[\"image_i\"]),int(r[\"image_j\"])\n if (frame(i)<=611)!=(frame(j)<=611):\n  rows.append(dict(i=i,j=j,name_i=names[i],name_j=names[j],frame_i=frame(i),frame_j=frame(j),accepted=int(r[\"accepted_matches\"]),e_inliers=int(r[\"e_inliers\"])))\nprint(json.dumps({\"crossing_pairs\":rows,\"unregistered_endpoints\":sorted({max(r[\"frame_i\"],r[\"frame_j\"]) for r in rows}),\"accepted_matches\":sum(r[\"accepted\"] for r in rows)}))\n",
+  "pair_audit": {
+    "crossing_pairs": [
+      {
+        "i": 604,
+        "j": 612,
+        "name_i": "cam1_001208.png",
+        "name_j": "cam1_001224.png",
+        "frame_i": 604,
+        "frame_j": 612,
+        "accepted": 22,
+        "e_inliers": 22
+      },
+      {
+        "i": 605,
+        "j": 613,
+        "name_i": "cam1_001210.png",
+        "name_j": "cam1_001226.png",
+        "frame_i": 605,
+        "frame_j": 613,
+        "accepted": 26,
+        "e_inliers": 23
+      },
+      {
+        "i": 606,
+        "j": 614,
+        "name_i": "cam1_001212.png",
+        "name_j": "cam1_001228.png",
+        "frame_i": 606,
+        "frame_j": 614,
+        "accepted": 28,
+        "e_inliers": 24
+      },
+      {
+        "i": 607,
+        "j": 615,
+        "name_i": "cam1_001214.png",
+        "name_j": "cam1_001230.png",
+        "frame_i": 607,
+        "frame_j": 615,
+        "accepted": 18,
+        "e_inliers": 17
+      },
+      {
+        "i": 608,
+        "j": 612,
+        "name_i": "cam1_001216.png",
+        "name_j": "cam1_001224.png",
+        "frame_i": 608,
+        "frame_j": 612,
+        "accepted": 29,
+        "e_inliers": 29
+      },
+      {
+        "i": 608,
+        "j": 616,
+        "name_i": "cam1_001216.png",
+        "name_j": "cam1_001232.png",
+        "frame_i": 608,
+        "frame_j": 616,
+        "accepted": 22,
+        "e_inliers": 21
+      },
+      {
+        "i": 609,
+        "j": 613,
+        "name_i": "cam1_001218.png",
+        "name_j": "cam1_001226.png",
+        "frame_i": 609,
+        "frame_j": 613,
+        "accepted": 33,
+        "e_inliers": 31
+      },
+      {
+        "i": 609,
+        "j": 617,
+        "name_i": "cam1_001218.png",
+        "name_j": "cam1_001234.png",
+        "frame_i": 609,
+        "frame_j": 617,
+        "accepted": 26,
+        "e_inliers": 26
+      },
+      {
+        "i": 610,
+        "j": 612,
+        "name_i": "cam1_001220.png",
+        "name_j": "cam1_001224.png",
+        "frame_i": 610,
+        "frame_j": 612,
+        "accepted": 28,
+        "e_inliers": 28
+      },
+      {
+        "i": 610,
+        "j": 614,
+        "name_i": "cam1_001220.png",
+        "name_j": "cam1_001228.png",
+        "frame_i": 610,
+        "frame_j": 614,
+        "accepted": 28,
+        "e_inliers": 26
+      },
+      {
+        "i": 610,
+        "j": 618,
+        "name_i": "cam1_001220.png",
+        "name_j": "cam1_001236.png",
+        "frame_i": 610,
+        "frame_j": 618,
+        "accepted": 17,
+        "e_inliers": 16
+      },
+      {
+        "i": 611,
+        "j": 612,
+        "name_i": "cam1_001222.png",
+        "name_j": "cam1_001224.png",
+        "frame_i": 611,
+        "frame_j": 612,
+        "accepted": 40,
+        "e_inliers": 39
+      },
+      {
+        "i": 611,
+        "j": 613,
+        "name_i": "cam1_001222.png",
+        "name_j": "cam1_001226.png",
+        "frame_i": 611,
+        "frame_j": 613,
+        "accepted": 36,
+        "e_inliers": 33
+      },
+      {
+        "i": 611,
+        "j": 615,
+        "name_i": "cam1_001222.png",
+        "name_j": "cam1_001230.png",
+        "frame_i": 611,
+        "frame_j": 615,
+        "accepted": 21,
+        "e_inliers": 20
+      },
+      {
+        "i": 611,
+        "j": 619,
+        "name_i": "cam1_001222.png",
+        "name_j": "cam1_001238.png",
+        "frame_i": 611,
+        "frame_j": 619,
+        "accepted": 21,
+        "e_inliers": 21
+      },
+      {
+        "i": 1848,
+        "j": 1864,
+        "name_i": "cam2_001197.png",
+        "name_j": "cam2_001229.png",
+        "frame_i": 598,
+        "frame_j": 614,
+        "accepted": 15,
+        "e_inliers": 14
+      },
+      {
+        "i": 1849,
+        "j": 1865,
+        "name_i": "cam2_001199.png",
+        "name_j": "cam2_001231.png",
+        "frame_i": 599,
+        "frame_j": 615,
+        "accepted": 15,
+        "e_inliers": 13
+      },
+      {
+        "i": 1852,
+        "j": 1868,
+        "name_i": "cam2_001205.png",
+        "name_j": "cam2_001237.png",
+        "frame_i": 602,
+        "frame_j": 618,
+        "accepted": 19,
+        "e_inliers": 17
+      },
+      {
+        "i": 1853,
+        "j": 1869,
+        "name_i": "cam2_001207.png",
+        "name_j": "cam2_001239.png",
+        "frame_i": 603,
+        "frame_j": 619,
+        "accepted": 17,
+        "e_inliers": 16
+      },
+      {
+        "i": 1854,
+        "j": 1862,
+        "name_i": "cam2_001209.png",
+        "name_j": "cam2_001225.png",
+        "frame_i": 604,
+        "frame_j": 612,
+        "accepted": 23,
+        "e_inliers": 23
+      },
+      {
+        "i": 1854,
+        "j": 1870,
+        "name_i": "cam2_001209.png",
+        "name_j": "cam2_001241.png",
+        "frame_i": 604,
+        "frame_j": 620,
+        "accepted": 16,
+        "e_inliers": 12
+      },
+      {
+        "i": 1855,
+        "j": 1863,
+        "name_i": "cam2_001211.png",
+        "name_j": "cam2_001227.png",
+        "frame_i": 605,
+        "frame_j": 613,
+        "accepted": 30,
+        "e_inliers": 30
+      },
+      {
+        "i": 1855,
+        "j": 1871,
+        "name_i": "cam2_001211.png",
+        "name_j": "cam2_001243.png",
+        "frame_i": 605,
+        "frame_j": 621,
+        "accepted": 16,
+        "e_inliers": 15
+      },
+      {
+        "i": 1856,
+        "j": 1864,
+        "name_i": "cam2_001213.png",
+        "name_j": "cam2_001229.png",
+        "frame_i": 606,
+        "frame_j": 614,
+        "accepted": 33,
+        "e_inliers": 30
+      },
+      {
+        "i": 1857,
+        "j": 1865,
+        "name_i": "cam2_001215.png",
+        "name_j": "cam2_001231.png",
+        "frame_i": 607,
+        "frame_j": 615,
+        "accepted": 22,
+        "e_inliers": 20
+      },
+      {
+        "i": 1857,
+        "j": 1873,
+        "name_i": "cam2_001215.png",
+        "name_j": "cam2_001247.png",
+        "frame_i": 607,
+        "frame_j": 623,
+        "accepted": 15,
+        "e_inliers": 13
+      },
+      {
+        "i": 1858,
+        "j": 1862,
+        "name_i": "cam2_001217.png",
+        "name_j": "cam2_001225.png",
+        "frame_i": 608,
+        "frame_j": 612,
+        "accepted": 34,
+        "e_inliers": 32
+      },
+      {
+        "i": 1858,
+        "j": 1866,
+        "name_i": "cam2_001217.png",
+        "name_j": "cam2_001233.png",
+        "frame_i": 608,
+        "frame_j": 616,
+        "accepted": 30,
+        "e_inliers": 30
+      },
+      {
+        "i": 1859,
+        "j": 1863,
+        "name_i": "cam2_001219.png",
+        "name_j": "cam2_001227.png",
+        "frame_i": 609,
+        "frame_j": 613,
+        "accepted": 34,
+        "e_inliers": 34
+      },
+      {
+        "i": 1859,
+        "j": 1867,
+        "name_i": "cam2_001219.png",
+        "name_j": "cam2_001235.png",
+        "frame_i": 609,
+        "frame_j": 617,
+        "accepted": 25,
+        "e_inliers": 25
+      },
+      {
+        "i": 1860,
+        "j": 1862,
+        "name_i": "cam2_001221.png",
+        "name_j": "cam2_001225.png",
+        "frame_i": 610,
+        "frame_j": 612,
+        "accepted": 34,
+        "e_inliers": 34
+      },
+      {
+        "i": 1860,
+        "j": 1864,
+        "name_i": "cam2_001221.png",
+        "name_j": "cam2_001229.png",
+        "frame_i": 610,
+        "frame_j": 614,
+        "accepted": 30,
+        "e_inliers": 30
+      },
+      {
+        "i": 1860,
+        "j": 1868,
+        "name_i": "cam2_001221.png",
+        "name_j": "cam2_001237.png",
+        "frame_i": 610,
+        "frame_j": 618,
+        "accepted": 29,
+        "e_inliers": 29
+      },
+      {
+        "i": 1861,
+        "j": 1862,
+        "name_i": "cam2_001223.png",
+        "name_j": "cam2_001225.png",
+        "frame_i": 611,
+        "frame_j": 612,
+        "accepted": 51,
+        "e_inliers": 49
+      },
+      {
+        "i": 1861,
+        "j": 1863,
+        "name_i": "cam2_001223.png",
+        "name_j": "cam2_001227.png",
+        "frame_i": 611,
+        "frame_j": 613,
+        "accepted": 49,
+        "e_inliers": 49
+      },
+      {
+        "i": 1861,
+        "j": 1865,
+        "name_i": "cam2_001223.png",
+        "name_j": "cam2_001231.png",
+        "frame_i": 611,
+        "frame_j": 615,
+        "accepted": 38,
+        "e_inliers": 38
+      },
+      {
+        "i": 1861,
+        "j": 1869,
+        "name_i": "cam2_001223.png",
+        "name_j": "cam2_001239.png",
+        "frame_i": 611,
+        "frame_j": 619,
+        "accepted": 28,
+        "e_inliers": 27
+      }
+    ],
+    "unregistered_endpoints": [
+      612,
+      613,
+      614,
+      615,
+      616,
+      617,
+      618,
+      619,
+      620,
+      621,
+      623
+    ],
+    "accepted_matches": 998
+  },
+  "landmark_audit_program": "import json,subprocess,collections\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n\")\nobservations={}\nwith (root/\"legacy/model/images.txt\").open() as f:\n for line in f:\n  if not line.strip() or line.startswith(\"#\"):continue\n  header=line.split(); xy=next(f).split()\n  observations[header[9]]=[int(xy[i]) for i in range(2,len(xy),3)]\npairs=[{\"i\":604,\"j\":612,\"name_i\":\"cam1_001208.png\",\"name_j\":\"cam1_001224.png\",\"frame_i\":604,\"frame_j\":612,\"accepted\":22,\"e_inliers\":22},{\"i\":605,\"j\":613,\"name_i\":\"cam1_001210.png\",\"name_j\":\"cam1_001226.png\",\"frame_i\":605,\"frame_j\":613,\"accepted\":26,\"e_inliers\":23},{\"i\":606,\"j\":614,\"name_i\":\"cam1_001212.png\",\"name_j\":\"cam1_001228.png\",\"frame_i\":606,\"frame_j\":614,\"accepted\":28,\"e_inliers\":24},{\"i\":607,\"j\":615,\"name_i\":\"cam1_001214.png\",\"name_j\":\"cam1_001230.png\",\"frame_i\":607,\"frame_j\":615,\"accepted\":18,\"e_inliers\":17},{\"i\":608,\"j\":612,\"name_i\":\"cam1_001216.png\",\"name_j\":\"cam1_001224.png\",\"frame_i\":608,\"frame_j\":612,\"accepted\":29,\"e_inliers\":29},{\"i\":608,\"j\":616,\"name_i\":\"cam1_001216.png\",\"name_j\":\"cam1_001232.png\",\"frame_i\":608,\"frame_j\":616,\"accepted\":22,\"e_inliers\":21},{\"i\":609,\"j\":613,\"name_i\":\"cam1_001218.png\",\"name_j\":\"cam1_001226.png\",\"frame_i\":609,\"frame_j\":613,\"accepted\":33,\"e_inliers\":31},{\"i\":609,\"j\":617,\"name_i\":\"cam1_001218.png\",\"name_j\":\"cam1_001234.png\",\"frame_i\":609,\"frame_j\":617,\"accepted\":26,\"e_inliers\":26},{\"i\":610,\"j\":612,\"name_i\":\"cam1_001220.png\",\"name_j\":\"cam1_001224.png\",\"frame_i\":610,\"frame_j\":612,\"accepted\":28,\"e_inliers\":28},{\"i\":610,\"j\":614,\"name_i\":\"cam1_001220.png\",\"name_j\":\"cam1_001228.png\",\"frame_i\":610,\"frame_j\":614,\"accepted\":28,\"e_inliers\":26},{\"i\":610,\"j\":618,\"name_i\":\"cam1_001220.png\",\"name_j\":\"cam1_001236.png\",\"frame_i\":610,\"frame_j\":618,\"accepted\":17,\"e_inliers\":16},{\"i\":611,\"j\":612,\"name_i\":\"cam1_001222.png\",\"name_j\":\"cam1_001224.png\",\"frame_i\":611,\"frame_j\":612,\"accepted\":40,\"e_inliers\":39},{\"i\":611,\"j\":613,\"name_i\":\"cam1_001222.png\",\"name_j\":\"cam1_001226.png\",\"frame_i\":611,\"frame_j\":613,\"accepted\":36,\"e_inliers\":33},{\"i\":611,\"j\":615,\"name_i\":\"cam1_001222.png\",\"name_j\":\"cam1_001230.png\",\"frame_i\":611,\"frame_j\":615,\"accepted\":21,\"e_inliers\":20},{\"i\":611,\"j\":619,\"name_i\":\"cam1_001222.png\",\"name_j\":\"cam1_001238.png\",\"frame_i\":611,\"frame_j\":619,\"accepted\":21,\"e_inliers\":21},{\"i\":1848,\"j\":1864,\"name_i\":\"cam2_001197.png\",\"name_j\":\"cam2_001229.png\",\"frame_i\":598,\"frame_j\":614,\"accepted\":15,\"e_inliers\":14},{\"i\":1849,\"j\":1865,\"name_i\":\"cam2_001199.png\",\"name_j\":\"cam2_001231.png\",\"frame_i\":599,\"frame_j\":615,\"accepted\":15,\"e_inliers\":13},{\"i\":1852,\"j\":1868,\"name_i\":\"cam2_001205.png\",\"name_j\":\"cam2_001237.png\",\"frame_i\":602,\"frame_j\":618,\"accepted\":19,\"e_inliers\":17},{\"i\":1853,\"j\":1869,\"name_i\":\"cam2_001207.png\",\"name_j\":\"cam2_001239.png\",\"frame_i\":603,\"frame_j\":619,\"accepted\":17,\"e_inliers\":16},{\"i\":1854,\"j\":1862,\"name_i\":\"cam2_001209.png\",\"name_j\":\"cam2_001225.png\",\"frame_i\":604,\"frame_j\":612,\"accepted\":23,\"e_inliers\":23},{\"i\":1854,\"j\":1870,\"name_i\":\"cam2_001209.png\",\"name_j\":\"cam2_001241.png\",\"frame_i\":604,\"frame_j\":620,\"accepted\":16,\"e_inliers\":12},{\"i\":1855,\"j\":1863,\"name_i\":\"cam2_001211.png\",\"name_j\":\"cam2_001227.png\",\"frame_i\":605,\"frame_j\":613,\"accepted\":30,\"e_inliers\":30},{\"i\":1855,\"j\":1871,\"name_i\":\"cam2_001211.png\",\"name_j\":\"cam2_001243.png\",\"frame_i\":605,\"frame_j\":621,\"accepted\":16,\"e_inliers\":15},{\"i\":1856,\"j\":1864,\"name_i\":\"cam2_001213.png\",\"name_j\":\"cam2_001229.png\",\"frame_i\":606,\"frame_j\":614,\"accepted\":33,\"e_inliers\":30},{\"i\":1857,\"j\":1865,\"name_i\":\"cam2_001215.png\",\"name_j\":\"cam2_001231.png\",\"frame_i\":607,\"frame_j\":615,\"accepted\":22,\"e_inliers\":20},{\"i\":1857,\"j\":1873,\"name_i\":\"cam2_001215.png\",\"name_j\":\"cam2_001247.png\",\"frame_i\":607,\"frame_j\":623,\"accepted\":15,\"e_inliers\":13},{\"i\":1858,\"j\":1862,\"name_i\":\"cam2_001217.png\",\"name_j\":\"cam2_001225.png\",\"frame_i\":608,\"frame_j\":612,\"accepted\":34,\"e_inliers\":32},{\"i\":1858,\"j\":1866,\"name_i\":\"cam2_001217.png\",\"name_j\":\"cam2_001233.png\",\"frame_i\":608,\"frame_j\":616,\"accepted\":30,\"e_inliers\":30},{\"i\":1859,\"j\":1863,\"name_i\":\"cam2_001219.png\",\"name_j\":\"cam2_001227.png\",\"frame_i\":609,\"frame_j\":613,\"accepted\":34,\"e_inliers\":34},{\"i\":1859,\"j\":1867,\"name_i\":\"cam2_001219.png\",\"name_j\":\"cam2_001235.png\",\"frame_i\":609,\"frame_j\":617,\"accepted\":25,\"e_inliers\":25},{\"i\":1860,\"j\":1862,\"name_i\":\"cam2_001221.png\",\"name_j\":\"cam2_001225.png\",\"frame_i\":610,\"frame_j\":612,\"accepted\":34,\"e_inliers\":34},{\"i\":1860,\"j\":1864,\"name_i\":\"cam2_001221.png\",\"name_j\":\"cam2_001229.png\",\"frame_i\":610,\"frame_j\":614,\"accepted\":30,\"e_inliers\":30},{\"i\":1860,\"j\":1868,\"name_i\":\"cam2_001221.png\",\"name_j\":\"cam2_001237.png\",\"frame_i\":610,\"frame_j\":618,\"accepted\":29,\"e_inliers\":29},{\"i\":1861,\"j\":1862,\"name_i\":\"cam2_001223.png\",\"name_j\":\"cam2_001225.png\",\"frame_i\":611,\"frame_j\":612,\"accepted\":51,\"e_inliers\":49},{\"i\":1861,\"j\":1863,\"name_i\":\"cam2_001223.png\",\"name_j\":\"cam2_001227.png\",\"frame_i\":611,\"frame_j\":613,\"accepted\":49,\"e_inliers\":49},{\"i\":1861,\"j\":1865,\"name_i\":\"cam2_001223.png\",\"name_j\":\"cam2_001231.png\",\"frame_i\":611,\"frame_j\":615,\"accepted\":38,\"e_inliers\":38},{\"i\":1861,\"j\":1869,\"name_i\":\"cam2_001223.png\",\"name_j\":\"cam2_001239.png\",\"frame_i\":611,\"frame_j\":619,\"accepted\":28,\"e_inliers\":27}]\nsupport=collections.defaultdict(set);counts=[]\nfor pair in pairs:\n output=subprocess.check_output([\"target/release/examples/inspect_verified_pair_snapshot\",\"--snapshot\",\"/home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/pipeline-sparse7n/mapping/verified-merged.vps\",\"--pair-matches\",str(pair[\"i\"])+\",\"+str(pair[\"j\"])],text=True)\n hits=0\n for line in output.splitlines():\n  fields=line.split()\n  if len(fields)!=2 or not all(s.isdigit() for s in fields):continue\n  i,j=map(int,fields)\n  point=observations[pair[\"name_i\"]][i]\n  if point>=0:\n   hits+=1\n   support[(pair[\"frame_j\"],pair[\"name_j\"].split(\"_\")[0])].add((j,point))\n counts.append(dict(pair=pair,final_model_3d_matches=hits))\nprint(json.dumps({\"pairs\":counts,\"target_support\":[{\"frame\":f,\"sensor\":s,\"distinct_feature_point_associations\":len(v)} for (f,s),v in sorted(support.items())],\"note\":\"Final exported landmark associations, not the in-loop PnP cache; no geometry validation or conflict resolution for these candidate associations.\"}))\n",
+  "landmark_audit": {
+    "pairs": [
+      {
+        "pair": {
+          "i": 604,
+          "j": 612,
+          "name_i": "cam1_001208.png",
+          "name_j": "cam1_001224.png",
+          "frame_i": 604,
+          "frame_j": 612,
+          "accepted": 22,
+          "e_inliers": 22
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 605,
+          "j": 613,
+          "name_i": "cam1_001210.png",
+          "name_j": "cam1_001226.png",
+          "frame_i": 605,
+          "frame_j": 613,
+          "accepted": 26,
+          "e_inliers": 23
+        },
+        "final_model_3d_matches": 7
+      },
+      {
+        "pair": {
+          "i": 606,
+          "j": 614,
+          "name_i": "cam1_001212.png",
+          "name_j": "cam1_001228.png",
+          "frame_i": 606,
+          "frame_j": 614,
+          "accepted": 28,
+          "e_inliers": 24
+        },
+        "final_model_3d_matches": 4
+      },
+      {
+        "pair": {
+          "i": 607,
+          "j": 615,
+          "name_i": "cam1_001214.png",
+          "name_j": "cam1_001230.png",
+          "frame_i": 607,
+          "frame_j": 615,
+          "accepted": 18,
+          "e_inliers": 17
+        },
+        "final_model_3d_matches": 0
+      },
+      {
+        "pair": {
+          "i": 608,
+          "j": 612,
+          "name_i": "cam1_001216.png",
+          "name_j": "cam1_001224.png",
+          "frame_i": 608,
+          "frame_j": 612,
+          "accepted": 29,
+          "e_inliers": 29
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 608,
+          "j": 616,
+          "name_i": "cam1_001216.png",
+          "name_j": "cam1_001232.png",
+          "frame_i": 608,
+          "frame_j": 616,
+          "accepted": 22,
+          "e_inliers": 21
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 609,
+          "j": 613,
+          "name_i": "cam1_001218.png",
+          "name_j": "cam1_001226.png",
+          "frame_i": 609,
+          "frame_j": 613,
+          "accepted": 33,
+          "e_inliers": 31
+        },
+        "final_model_3d_matches": 5
+      },
+      {
+        "pair": {
+          "i": 609,
+          "j": 617,
+          "name_i": "cam1_001218.png",
+          "name_j": "cam1_001234.png",
+          "frame_i": 609,
+          "frame_j": 617,
+          "accepted": 26,
+          "e_inliers": 26
+        },
+        "final_model_3d_matches": 4
+      },
+      {
+        "pair": {
+          "i": 610,
+          "j": 612,
+          "name_i": "cam1_001220.png",
+          "name_j": "cam1_001224.png",
+          "frame_i": 610,
+          "frame_j": 612,
+          "accepted": 28,
+          "e_inliers": 28
+        },
+        "final_model_3d_matches": 5
+      },
+      {
+        "pair": {
+          "i": 610,
+          "j": 614,
+          "name_i": "cam1_001220.png",
+          "name_j": "cam1_001228.png",
+          "frame_i": 610,
+          "frame_j": 614,
+          "accepted": 28,
+          "e_inliers": 26
+        },
+        "final_model_3d_matches": 4
+      },
+      {
+        "pair": {
+          "i": 610,
+          "j": 618,
+          "name_i": "cam1_001220.png",
+          "name_j": "cam1_001236.png",
+          "frame_i": 610,
+          "frame_j": 618,
+          "accepted": 17,
+          "e_inliers": 16
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 611,
+          "j": 612,
+          "name_i": "cam1_001222.png",
+          "name_j": "cam1_001224.png",
+          "frame_i": 611,
+          "frame_j": 612,
+          "accepted": 40,
+          "e_inliers": 39
+        },
+        "final_model_3d_matches": 3
+      },
+      {
+        "pair": {
+          "i": 611,
+          "j": 613,
+          "name_i": "cam1_001222.png",
+          "name_j": "cam1_001226.png",
+          "frame_i": 611,
+          "frame_j": 613,
+          "accepted": 36,
+          "e_inliers": 33
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 611,
+          "j": 615,
+          "name_i": "cam1_001222.png",
+          "name_j": "cam1_001230.png",
+          "frame_i": 611,
+          "frame_j": 615,
+          "accepted": 21,
+          "e_inliers": 20
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 611,
+          "j": 619,
+          "name_i": "cam1_001222.png",
+          "name_j": "cam1_001238.png",
+          "frame_i": 611,
+          "frame_j": 619,
+          "accepted": 21,
+          "e_inliers": 21
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 1848,
+          "j": 1864,
+          "name_i": "cam2_001197.png",
+          "name_j": "cam2_001229.png",
+          "frame_i": 598,
+          "frame_j": 614,
+          "accepted": 15,
+          "e_inliers": 14
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 1849,
+          "j": 1865,
+          "name_i": "cam2_001199.png",
+          "name_j": "cam2_001231.png",
+          "frame_i": 599,
+          "frame_j": 615,
+          "accepted": 15,
+          "e_inliers": 13
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 1852,
+          "j": 1868,
+          "name_i": "cam2_001205.png",
+          "name_j": "cam2_001237.png",
+          "frame_i": 602,
+          "frame_j": 618,
+          "accepted": 19,
+          "e_inliers": 17
+        },
+        "final_model_3d_matches": 3
+      },
+      {
+        "pair": {
+          "i": 1853,
+          "j": 1869,
+          "name_i": "cam2_001207.png",
+          "name_j": "cam2_001239.png",
+          "frame_i": 603,
+          "frame_j": 619,
+          "accepted": 17,
+          "e_inliers": 16
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 1854,
+          "j": 1862,
+          "name_i": "cam2_001209.png",
+          "name_j": "cam2_001225.png",
+          "frame_i": 604,
+          "frame_j": 612,
+          "accepted": 23,
+          "e_inliers": 23
+        },
+        "final_model_3d_matches": 5
+      },
+      {
+        "pair": {
+          "i": 1854,
+          "j": 1870,
+          "name_i": "cam2_001209.png",
+          "name_j": "cam2_001241.png",
+          "frame_i": 604,
+          "frame_j": 620,
+          "accepted": 16,
+          "e_inliers": 12
+        },
+        "final_model_3d_matches": 3
+      },
+      {
+        "pair": {
+          "i": 1855,
+          "j": 1863,
+          "name_i": "cam2_001211.png",
+          "name_j": "cam2_001227.png",
+          "frame_i": 605,
+          "frame_j": 613,
+          "accepted": 30,
+          "e_inliers": 30
+        },
+        "final_model_3d_matches": 6
+      },
+      {
+        "pair": {
+          "i": 1855,
+          "j": 1871,
+          "name_i": "cam2_001211.png",
+          "name_j": "cam2_001243.png",
+          "frame_i": 605,
+          "frame_j": 621,
+          "accepted": 16,
+          "e_inliers": 15
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 1856,
+          "j": 1864,
+          "name_i": "cam2_001213.png",
+          "name_j": "cam2_001229.png",
+          "frame_i": 606,
+          "frame_j": 614,
+          "accepted": 33,
+          "e_inliers": 30
+        },
+        "final_model_3d_matches": 6
+      },
+      {
+        "pair": {
+          "i": 1857,
+          "j": 1865,
+          "name_i": "cam2_001215.png",
+          "name_j": "cam2_001231.png",
+          "frame_i": 607,
+          "frame_j": 615,
+          "accepted": 22,
+          "e_inliers": 20
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 1857,
+          "j": 1873,
+          "name_i": "cam2_001215.png",
+          "name_j": "cam2_001247.png",
+          "frame_i": 607,
+          "frame_j": 623,
+          "accepted": 15,
+          "e_inliers": 13
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 1858,
+          "j": 1862,
+          "name_i": "cam2_001217.png",
+          "name_j": "cam2_001225.png",
+          "frame_i": 608,
+          "frame_j": 612,
+          "accepted": 34,
+          "e_inliers": 32
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 1858,
+          "j": 1866,
+          "name_i": "cam2_001217.png",
+          "name_j": "cam2_001233.png",
+          "frame_i": 608,
+          "frame_j": 616,
+          "accepted": 30,
+          "e_inliers": 30
+        },
+        "final_model_3d_matches": 4
+      },
+      {
+        "pair": {
+          "i": 1859,
+          "j": 1863,
+          "name_i": "cam2_001219.png",
+          "name_j": "cam2_001227.png",
+          "frame_i": 609,
+          "frame_j": 613,
+          "accepted": 34,
+          "e_inliers": 34
+        },
+        "final_model_3d_matches": 8
+      },
+      {
+        "pair": {
+          "i": 1859,
+          "j": 1867,
+          "name_i": "cam2_001219.png",
+          "name_j": "cam2_001235.png",
+          "frame_i": 609,
+          "frame_j": 617,
+          "accepted": 25,
+          "e_inliers": 25
+        },
+        "final_model_3d_matches": 3
+      },
+      {
+        "pair": {
+          "i": 1860,
+          "j": 1862,
+          "name_i": "cam2_001221.png",
+          "name_j": "cam2_001225.png",
+          "frame_i": 610,
+          "frame_j": 612,
+          "accepted": 34,
+          "e_inliers": 34
+        },
+        "final_model_3d_matches": 3
+      },
+      {
+        "pair": {
+          "i": 1860,
+          "j": 1864,
+          "name_i": "cam2_001221.png",
+          "name_j": "cam2_001229.png",
+          "frame_i": 610,
+          "frame_j": 614,
+          "accepted": 30,
+          "e_inliers": 30
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 1860,
+          "j": 1868,
+          "name_i": "cam2_001221.png",
+          "name_j": "cam2_001237.png",
+          "frame_i": 610,
+          "frame_j": 618,
+          "accepted": 29,
+          "e_inliers": 29
+        },
+        "final_model_3d_matches": 4
+      },
+      {
+        "pair": {
+          "i": 1861,
+          "j": 1862,
+          "name_i": "cam2_001223.png",
+          "name_j": "cam2_001225.png",
+          "frame_i": 611,
+          "frame_j": 612,
+          "accepted": 51,
+          "e_inliers": 49
+        },
+        "final_model_3d_matches": 2
+      },
+      {
+        "pair": {
+          "i": 1861,
+          "j": 1863,
+          "name_i": "cam2_001223.png",
+          "name_j": "cam2_001227.png",
+          "frame_i": 611,
+          "frame_j": 613,
+          "accepted": 49,
+          "e_inliers": 49
+        },
+        "final_model_3d_matches": 1
+      },
+      {
+        "pair": {
+          "i": 1861,
+          "j": 1865,
+          "name_i": "cam2_001223.png",
+          "name_j": "cam2_001231.png",
+          "frame_i": 611,
+          "frame_j": 615,
+          "accepted": 38,
+          "e_inliers": 38
+        },
+        "final_model_3d_matches": 4
+      },
+      {
+        "pair": {
+          "i": 1861,
+          "j": 1869,
+          "name_i": "cam2_001223.png",
+          "name_j": "cam2_001239.png",
+          "frame_i": 611,
+          "frame_j": 619,
+          "accepted": 28,
+          "e_inliers": 27
+        },
+        "final_model_3d_matches": 1
+      }
+    ],
+    "target_support": [
+      {
+        "frame": 612,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 8
+      },
+      {
+        "frame": 612,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 8
+      },
+      {
+        "frame": 613,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 10
+      },
+      {
+        "frame": 613,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 10
+      },
+      {
+        "frame": 614,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 5
+      },
+      {
+        "frame": 614,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 8
+      },
+      {
+        "frame": 615,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 1
+      },
+      {
+        "frame": 615,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 5
+      },
+      {
+        "frame": 616,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 1
+      },
+      {
+        "frame": 616,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 4
+      },
+      {
+        "frame": 617,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 4
+      },
+      {
+        "frame": 617,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 3
+      },
+      {
+        "frame": 618,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 2
+      },
+      {
+        "frame": 618,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 7
+      },
+      {
+        "frame": 619,
+        "sensor": "cam1",
+        "distinct_feature_point_associations": 1
+      },
+      {
+        "frame": 619,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 3
+      },
+      {
+        "frame": 620,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 3
+      },
+      {
+        "frame": 621,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 1
+      },
+      {
+        "frame": 623,
+        "sensor": "cam2",
+        "distinct_feature_point_associations": 2
+      }
+    ],
+    "note": "Final exported landmark associations, not the in-loop PnP cache; no geometry validation or conflict resolution for these candidate associations."
+  },
+  "limitations": [
+    "All 37 crossing pairs connect same-camera temporal images; both cameras contribute to frame 612.",
+    "998 accepted pair correspondences are not 998 independent 3D correspondences.",
+    "Frame 612 has 8 final-model feature/point associations per sensor and frame 613 has 10 per sensor before conflict handling and geometric verification.",
+    "Exported final 3D associations are not the mapper's in-loop cache. These counts do not prove PnP eligibility, inlier quality or registrability.",
+    "Next inspect in-loop rejection at frames 612/613 before enabling recovery or changing thresholds. No solver or registration-policy changes in this diagnostic."
+  ]
+}
