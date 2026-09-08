@@ -1,5 +1,17 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> PR105 https://github.com/rsasaki0109/visloc-rs/pull/105 はhead `aa3938c`、CI34200559679実行中。
+> 同じbinary `rig-7d99e07` の独立dense ANN2.5k対照を開始。
+> `tier-2500-ann/boundary-control` はexit0・Legacy bytes一致、mapper36.262899秒。
+> boundary-aはexit0、全2500画像、RMSE/p95 0.067853/0.134449m、再投影0.778608pxで改善。
+> 支持/正深度/固定rig正常、track成分1250frame一つ。mapper50.634806秒で対照より遅い。
+> boundary-bもexit0・反復bytes一致。mapper50.635/50.016秒対control36.263秒。
+> 証跡 `m8-openloris-2500-fixed-boundary-v1.json`。次は10k。
+> 容量確保: 5k legacyと完全一致したpolicy-a/b、support-debug、ba-motion-debug、
+> ba-connectivity-debug、anchored-control、boundary-controlの3モデルファイルをhardlink化。
+> パス/bytes不変、入力データ変更なし。これらの既存出力は上書きせず新規run名を使用する。
+> 全goal未達。ディスク空き約327MB（対照開始前）、10k前に再確認する。
+
 > PR104はhead `109705c` のCI9成功後 `1f98c5c` にmerge（成分固定は既定OFF維持）。
 > 現branch `feat/m8-fixed-boundary-ba`、build source `7d99e07dbdbc95bc72d2e28805a75e51dbcd7270`。
 > `--ba-fixed-boundary-observations` を既定OFF追加。窓内usable観測を持つtrackのみ、
