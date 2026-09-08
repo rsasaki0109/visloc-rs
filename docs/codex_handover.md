@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`perf/borrowed-snapshot-envelope`。
+現作業branchは`test/shared-snapshot-readback`（PR128の子）。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -119,6 +119,17 @@ borrowed envelope実装はlib19/example64 tests、tests込みClippy、Python43 t
 次はこのbranchのPR/CI/merge、100k読取・強制中断restart。全E2E/軌跡品質は未達。
 常駐画像metadataをArcで共有、同一envelopeを再解析/再比較しない。公開owned APIは維持。
 測定プロセスなし、空き約10GiB。全goal未達。
+
+更新: PR128 head`7ee56a2`はCI8成功/rust実行中。100k structural readbackを実施し、
+全3125 shard/99999 pairs/30599694 matches検証、envelope load1回、8.79s/20524KiB。
+1k/10kもpass。validate_files API/validate_snapshot_shards example追加。
+チェックサム/raw-inlier関係/画像ID/ペア重複/件数を検証。外部bankと宣言edge hashの検証ではない。
+変換converterに明示--resumeを追加。実子プロセスを253 shard時にSIGKILL(-9)して再開、
+全2500のdecodedレコードが元と一致、既存253ファイルも全bytes不変。session81409完了。
+これは変換batch restartのみ、worker/mapper/full E2E restartではない。
+証跡shared-readback-scaling-v1/shared-snapshot-restart-v1。lib20 tests/Clippy通過。
+readback session37522も完了。測定稼働なし。次はPR128最終CI/merge、現branchのPR、
+native runnerでの共有形式とrestart統合、全抽出E2E/COLMAP品質改善。全goal未達。
 
 ### 以前の状態（上記を優先）
 

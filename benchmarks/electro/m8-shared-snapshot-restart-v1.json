@@ -1,0 +1,12 @@
+{
+  "status": "partial-conversion-sigkill-resume-pass",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-snapshot-restart-v1/report.json",
+  "binary_sha256": "05cf9e2ad3880ea4ef5b2a4fb097a68165541fbbeced7bf1ecf478335923e21c",
+  "interrupted_exit_code": -9,
+  "completed_before_resume": 253,
+  "expected_shards": 2500,
+  "final_shards": 2500,
+  "resume_exit_code": 0,
+  "prior_chunks_byte_unchanged": true,
+  "scope": "Actual child-process SIGKILL during partial dense snapshot conversion. Resume compares all decoded output records against source. Not a guaranteed interruption inside a particular file write, power-loss durability, matching-worker resume, mapper restart, or continuous native E2E."
+}

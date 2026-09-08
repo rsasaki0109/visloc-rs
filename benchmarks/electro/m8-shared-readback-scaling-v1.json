@@ -1,0 +1,13 @@
+{
+  "status": "synthetic-structural-readback-pass",
+  "binary_sha256": "680b6539cb397a49be946831ad7002a13f0c77c797e8015396e2d2953c6d5db2",
+  "external_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-writer-stress-v1",
+  "recipe": "validate_snapshot_shards DIRECTORY",
+  "measurements": [
+    {"images": 1000, "shards": 32, "pairs": 999, "accepted_matches": 305694, "envelope_loads": 1, "wall_seconds": 0.08, "peak_rss_kib": 4296},
+    {"images": 10000, "shards": 313, "pairs": 9999, "accepted_matches": 3059694, "envelope_loads": 1, "wall_seconds": 0.82, "peak_rss_kib": 6008},
+    {"images": 100000, "shards": 3125, "pairs": 99999, "accepted_matches": 30599694, "envelope_loads": 1, "wall_seconds": 8.79, "peak_rss_kib": 20524}
+  ],
+  "time_report_sha256_100000": "80a11f7ddd6def579d3590168213243399c86450c277a5e172b49b4a5689d11d",
+  "scope": "All shard payload checksums, raw/inlier relationships, envelope compatibility, image IDs, disjoint edges, and accepted counts checked. Synthetic fixture; external feature banks and declared pair-order/edge hashes are not validated. Not full100k SfM, quality, or E2E."
+}
