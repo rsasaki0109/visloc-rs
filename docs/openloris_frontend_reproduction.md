@@ -412,8 +412,14 @@ thread as in the earlier successful replay, and requires exact full model and
 registration membership/hash parity with that replay. The default targeted
 stage retains its eight-thread recipe and registration/target-selection gate.
 Both stages hash-check their respective snapshot input and validate the adaptive
-feature manifest. The new prefix invocation is not yet executed; this adapter
-does not by itself assemble or measure the complete native DAG.
+feature manifest. The new prefix invocation is running under
+`visloc-prefix-registration-bound-v1.service` using the linked adaptive bank,
+with output at
+`/home/sasaki/datasets/openloris/corridor1-1-m8-prefix-registration-bound-v1`
+and measurement at
+`/home/sasaki/datasets/openloris/m8-prefix-registration-bound-measurement-v1`.
+No terminal parity/resource result is available yet. This adapter does not by
+itself assemble or measure the complete native DAG.
 
 `--variant targeted7` binds the retained 14,319 targeted candidate pairs to the
 adaptive bank and recorded min-matches 12 / ratio 0.8 settings. It requires all
