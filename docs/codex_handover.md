@@ -1,5 +1,20 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新: `perf/m8-stream-connectivity-unions`。PR108/109/110は最終headのCI9件成功後merge済み。
+> main最新merge `14d9b50661e2df6d8eb0c1743e815adfa6d62f9d`（PR110）。
+> atlas内訳計測で主成分164.04秒、solver87.06秒、連結性27.33秒、出力6ファイル過去一致。
+> `m8-openloris-atlas-inner-timing-v1.json`参照。精度改善/mapper/E2E成功ではない。
+> 連結性検査を画像・frameフラグと逐次unionへ変更。旧実装oracle64変種一致、全52テスト/clippy成功。
+> 保存binary `corridor1-1-m8-compact-connectivity-v1/integrate-2c024cf` SHA256
+> `04314afeb4a280f411a5ad48e8a1f97ef8a8d0b2f17b68099278b0d68f720a16`。
+> tailはexit0、全6ファイル過去一致。連結性0.10246秒対前回0.31470秒、RSS77916KiB。
+> mainはsession80093実行中。完走確認後、candidate main-repeat→control-main-repeatを順番に測る。
+> 正確なコマンドを `m8-openloris-compact-connectivity-v1.json` のrepeat_commandsに凍結済み。
+> 同時build/測定禁止、既存出力上書き禁止。全goal未達。
+> 容量対応で再生成可能な`target/debug/incremental`約4.9GiBのみ
+> `/dev/shm/visloc-atlas-build-cache.RcnQnI/incremental`へ退避。入力/証跡は保持。
+> 以降buildは`CARGO_INCREMENTAL=0`。空き約3.4GiB、tmpfs退避は再起動で消えるcacheのみ。
+
 > 最新: `feat/m8-covisibility-local-ba`。PR107は最終head6914606のCI9件成功後
 > `f7ab2ca`へmerge。共視選択を既定OFFの`--local-ba-covisibility`として追加。
 > rig_sfm39テスト、CLI check、lib clippy通過。release source9d7868b、57.05秒。
