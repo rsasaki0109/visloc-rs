@@ -124,3 +124,13 @@ matching Legacy in every run. RSS off1274584/1274644KiB versus on1274380/1274444
 does not establish meaningful memory reduction. Do not promote this policy as
 a10k speedup; keep default off. Smaller-tier observations do not override this
 negative result. The retained quality baseline still fails COLMAP gates.
+
+A bounded traced diagnostic pair confirms that reuse works:2722 post-rejection
+assembly events total4.4798s off versus0.00105s on, with matching phase counts
+and all six model hashes unchanged. Linear solve remains roughly31–32s total.
+Traced wall is101.10s off versus98.68s on, inconsistent with the earlier
+untraced slowdown. Do not pool the two instrumentation conditions or claim
+an allocator/cache cause: the earlier slowdown is not localized by this pair.
+The assembly opportunity is only about4.4% of this control wall. Keep default
+off; stable representative benefit and COLMAP-quality success are unproven.
+See `benchmarks/electro/m8-openloris-10000-retry-phase-v1.json`.

@@ -1,0 +1,114 @@
+{
+  "schema": "m8-openloris-10000-retry-phase-v1",
+  "status": "assembly-reuse-confirmed-overall-performance-inconsistent-default-off",
+  "commands": {
+    "control": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/control\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/control.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES RAYON_NUM_THREADS=1 VISLOC_BA_TRACE_PHASE_TIMING=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/control.time timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/control/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/control.log 2>&1",
+    "candidate": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/candidate\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/candidate.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES RAYON_NUM_THREADS=1 VISLOC_BA_TRACE_PHASE_TIMING=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/candidate.time timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --ba-reuse-rejected-pose-diagonal --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/candidate/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/candidate.log 2>&1"
+  },
+  "build_commit": "0466499811cfab0375c91ea602d9e37e226af30c",
+  "binary_sha256": "3d744ced8b2b09cbaba26bf963e9ac31c5293538b1a8bbbee62621ccfdd70c34",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,hashlib,json,re,collections\nroot=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1')\nold=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control/model')\ndef hashes(p):\n return {str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(p.rglob('*.txt')) if f.name in ['cameras.txt','images.txt','points3D.txt']}\nbaseline=hashes(old)\nassert len(baseline)==6\nout={}\nfor name in ['control','candidate']:\n log=(root/(name+'.log')).read_text(); phases={}\n for phase,seconds,rejected in re.findall(r'ba-phase-timing: iteration=\\d+ phase=(\\S+) seconds=(\\S+) after_rejection=(\\S+)',log):\n  key=phase+'/'+rejected\n  entry=phases.setdefault(key,{'events':0,'seconds':0.0})\n  entry['events']+=1;entry['seconds']+=float(seconds)\n h=hashes(root/name/'model')\n out[name]={'hashes':h,'legacy_exact':h==baseline,'phases':phases,'log_sha256':hashlib.sha256(log.encode()).hexdigest(),'time_output':(root/(name+'.time')).read_text()}\nprint(json.dumps(out))\nPY",
+  "audit": {
+    "control": {
+      "hashes": {
+        "component-000/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "component-000/images.txt": "ac10bf06ce2753d7d5473d07c2ded7f075c1ae79ea5fe3d9756b6d8503293673",
+        "component-000/points3D.txt": "575e09765b53e72b8b50a9f0300b77bc1a868269e569343db8db2cf99407ce43",
+        "component-001/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "component-001/images.txt": "caafb1dccc9d28be4588db96b989cf341799773b9238ada9fa11cf072d5ecaa0",
+        "component-001/points3D.txt": "4193187ba800fadbf44e6064be18a9523c1e90baef2967dc182f59ce8e18b72a"
+      },
+      "legacy_exact": true,
+      "phases": {
+        "normal_equations/false": {
+          "events": 3934,
+          "seconds": 6.367576548000009
+        },
+        "rollback_snapshot/false": {
+          "events": 3934,
+          "seconds": 0.05483471900000006
+        },
+        "linear_solve/false": {
+          "events": 3934,
+          "seconds": 17.011033079000015
+        },
+        "tentative_update_and_cost/false": {
+          "events": 3891,
+          "seconds": 6.065163897000006
+        },
+        "normal_equations/true": {
+          "events": 2722,
+          "seconds": 4.479799620000006
+        },
+        "rollback_snapshot/true": {
+          "events": 2722,
+          "seconds": 0.035624983000000054
+        },
+        "linear_solve/true": {
+          "events": 2722,
+          "seconds": 14.064177650000012
+        },
+        "tentative_update_and_cost/true": {
+          "events": 2709,
+          "seconds": 4.360463194999997
+        }
+      },
+      "log_sha256": "679c4c56ee6bab1168d01977fd07f27de4c8763b074b42af230716843ef37f5e",
+      "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/control/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10\"\n\tUser time (seconds): 99.54\n\tSystem time (seconds): 1.42\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 1:41.10\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 1274548\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 383613\n\tVoluntary context switches: 14\n\tInvoluntary context switches: 403\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 198160\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+    },
+    "candidate": {
+      "hashes": {
+        "component-000/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "component-000/images.txt": "ac10bf06ce2753d7d5473d07c2ded7f075c1ae79ea5fe3d9756b6d8503293673",
+        "component-000/points3D.txt": "575e09765b53e72b8b50a9f0300b77bc1a868269e569343db8db2cf99407ce43",
+        "component-001/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "component-001/images.txt": "caafb1dccc9d28be4588db96b989cf341799773b9238ada9fa11cf072d5ecaa0",
+        "component-001/points3D.txt": "4193187ba800fadbf44e6064be18a9523c1e90baef2967dc182f59ce8e18b72a"
+      },
+      "legacy_exact": true,
+      "phases": {
+        "normal_equations/false": {
+          "events": 3934,
+          "seconds": 6.438011524999993
+        },
+        "rollback_snapshot/false": {
+          "events": 3934,
+          "seconds": 0.05601207199999997
+        },
+        "linear_solve/false": {
+          "events": 3934,
+          "seconds": 17.315537953999982
+        },
+        "tentative_update_and_cost/false": {
+          "events": 3891,
+          "seconds": 6.1588866089999925
+        },
+        "normal_equations/true": {
+          "events": 2722,
+          "seconds": 0.0010455949999999992
+        },
+        "rollback_snapshot/true": {
+          "events": 2722,
+          "seconds": 0.04517366500000012
+        },
+        "linear_solve/true": {
+          "events": 2722,
+          "seconds": 14.439360841999983
+        },
+        "tentative_update_and_cost/true": {
+          "events": 2709,
+          "seconds": 4.404380598999991
+        }
+      },
+      "log_sha256": "12d88cb8f9893fdad913878e9a5e5bdd32abf58b186faefa15471e0276abf087",
+      "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --ba-reuse-rejected-pose-diagonal --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-10000-phase-v1/candidate/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10\"\n\tUser time (seconds): 97.18\n\tSystem time (seconds): 1.48\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 1:38.68\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 1274524\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 383585\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 697\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 198160\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+    }
+  },
+  "interpretation": [
+    "Post-rejection assembly reduces from 4.4798s to 0.00105s for 2722 events; event counts match and all model hashes match Legacy.",
+    "This traced pair wall is 101.10s OFF versus 98.68s ON, unlike earlier untraced repeats. Do not pool tracing-on/off runs.",
+    "Linear solve remains ~31-32s across all iterations; assembly savings alone are only about 4.4% of this control wall.",
+    "Earlier slowdown is not localized by this evidence. No proven allocator/cache cause; keep default off pending stable representative benefit.",
+    "COLMAP quality and native E2E objectives remain unmet."
+  ]
+}
