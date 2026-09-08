@@ -1,5 +1,73 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新: `diag/m8-source-command-coverage`。PR114は最終head26f755aのCI9件成功後
+> `da96845c943f5889543b5ba8929079a0d2f2a982`へsquash merge済み。再利用は既定OFF。
+> 親branch整理済み、現branchはmainへrebase。サブエージェントは使わない。
+> source21実行のログSHAは全一致。兄弟time記録にコマンドがあるのは5件。
+> 証跡 `m8-openloris-source-command-coverage-v1.json`。他の場所の記録は未探索。
+> 記録済み650開始/500frame窓をrig-0466499で新規出力先へ再実行し、過去3モデルbytes一致。
+> wall36.60秒、RSS340100KiB。証跡 `m8-openloris-source-replay-650-v1.json`。
+> 残り20実行とfrontend/atlas alignment/integrationの一体的再現は未完。測定プロセスなし。
+> 次の再実行は保存コマンドのある1950/3200/250/4200窓から、毎回新しい出力先を使う。
+> 過去の不明flagsを推定した場合は過去再現と称さず、新規仕様として分ける。全goal未達。
+> 1950/3200開始500frameも再実行完了、各3モデルbytes過去一致。30.25秒/22.48秒。
+> RSS340220/340224KiB。証跡source-replay-1950/3200-v1。3/21実行を確認済み。
+> 次は記録のある250開始750frameと4200開始500frame。測定稼働なし。
+> 上記2件も完了、全モデルbytes過去一致。250:51.39秒/340160KiB、4200:43.92秒/340228KiB。
+> 4200は保存コマンドのVISLOC_DEFERRED_DEBUG=1保持。5/21実行を再現、測定稼働なし。
+> 残り16は調査済み兄弟timeファイルにコマンドなし。推定flagsを過去再現と称さない。
+> 追加M8スクリプト探索では起動記録未発見。新仕様として650窓flagsの開始位置だけ0へ変更。
+> source0全3モデルbytes過去一致、79.58秒/340288KiB。source-spec-0-v1.json参照。
+> 過去argv復元ではない。計6ソース出力再生成（うち5件は保存argv由来）。測定稼働なし。
+> source-execution-inventory-v1.jsonで全21実行/23nodeの入力start/countをログ/timeから確定。
+> atlas window_startと入力startは別（node21は500表記だが入力250開始750frame）。
+> 12/13と18/19は同一実行の別成分。残り15実行はこのinventoryで新仕様を組み全成分検証へ。
+> 新仕様250開始500frameも過去3モデルbytes一致、38.74秒/340220KiB。
+> source-spec-250x500-v1.json。計7/21実行出力を再生成、残り14、測定稼働なし。
+> 新仕様3000/4250の複数成分窓も全6files過去一致。23.27秒/29.82秒、RSS340168/340092KiB。
+> node12/13、18/19それぞれ1実行として計上。計9/21実行・11/23nodeを再生成。
+> source-spec-3000/4250-v1.json。残り12実行、測定稼働なし。
+> source-spec-750-v1も全モデル過去一致、39.63秒/340224KiB。計10/21実行、12/23node。
+> 残り11実行。次は1000/1250/1500/2000/2250wide750/2500/2750/3500/3750/4000/4500。
+> 入力rangeはinventoryで確認。測定稼働なし。品質/E2E未達。
+> source-spec-1000/1250-v1も各3モデル過去一致、35.01秒/28.16秒。
+> 計12/21実行・14/23node。残り1500/2000/2250wide750/2500/2750/3500/3750/4000/4500。
+> 測定稼働なし。過去argvでなく新共通仕様の出力一致。全goal未達。
+> 1500/2000窓も過去bytes一致、27.33秒/27.68秒。2000はcomponent-001のみ（旧/新とも）。
+> 計14/21実行・16/23node。残り2250wide750/2500/2750/3500/3750/4000/4500。測定稼働なし。
+> 2250x750も過去モデル一致、51.56秒/340088KiB。計15/21実行・17/23node。
+> 残り2500/2750/3500/3750/4000/4500。source-spec-2250x750-v1.json。測定稼働なし。
+> 2500窓も過去モデル一致、37.28秒/340056KiB。計16/21実行・18/23node。
+> 残り2750/3500/3750/4000/4500。source-spec-2500-v1.json。測定稼働なし。
+> 2750/3500も全モデル過去一致。36.87秒/32.05秒、RSS339964/340184KiB。
+> 計18/21実行・20/23node。残り3750/4000/4500。測定稼働なし。全goal未達。
+> 3750/4000/4500も全モデル過去一致。21実行すべての出力再生成完了（保存argv5、新仕様16）。
+> 各source-replay/source-spec証跡の計21ファイルのold/new hash map一致を集計確認。
+> 次は再生成パスをatlas nodesへ束ねる。offset/component membership保持、alignment/integration再実行。
+> 孤立run時間合計を連続E2Eとしない。品質/E2E/restart/100k未達。測定稼働なし。
+> regenerated-nodes-v1.tsv/json作成。23nodeのID/offset/順序/成分保持、再生成先へパスのみ置換。
+> 計69モデルファイルを既存atlas sourceと再照合し全SHA一致。alignment/integrationは未実行。
+> nodes元SHA69b3f668...。空き約962MiB、新規大出力前に確認。測定稼働なし。
+> regenerated-atlas-v1/stitch-cfe11c6でL/traversal/newest再実行、2成分imagesが既存atlas完全一致。
+> 1.21秒/36924KiB。証跡m8-openloris-regenerated-atlas-v1.json。次は再生成atlasでintegration/BA。
+> 出力root `/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas`。測定稼働なし。
+> 再生成nodes+atlasからtail/main integration+filtered BA完了。全12pre/postモデルfiles過去一致。
+> tail11.03秒/78120KiB、main146.73秒/525196KiB。regenerated-integration-v1.json参照。
+> 保存integrate-b23a6a4使用、trace ON。frontend除外の段階再現で、連続E2Eではない。
+> 次は連続pipeline計測と品質課題。既存RMSE未達不変。同じsource再実行の繰返し不要。測定稼働なし。
+> frontend-ledger-audit-v1.json追加。targeted7の448行は1worker53.59秒、adaptive32の2188行も1worker272.62秒。
+> worker時間をshard数倍しない。両summaryは特徴抽出除外、candidate/mapping nullでE2E未完。
+> 次は抽出/選択merge/候補/overlay生成の依存を連続実行仕様へ。空き約672MiBに注意。
+> extraction-shard-audit-v1.json: dense256x2抽出8コマンド記録、10000画像名重複なし/全target存在。
+> 内容hash/元binary/同時実行メモリは未証明。extract再実行なし。8wall単純合算/最大RSSでE2Eとしない。
+> extraction-content-audit-v1で10000画像/2999280260bytesを全SHA+size照合、欠落/余分/不一致0。
+> manifest SHAa3458a3a...はCOLMAP10k frozen契約と一致。入力画像同一性のみ確定、抽出出力/E2E未達。
+> extraction-resume-pilot-v1: cam1_000000の抽出feature/loci過去bytes一致（377kp）。resume初期化後hit確認。
+> 保存extract-3ae253a SHA8cfa9c53...、image-io build。1画像pilotのみ、10k/restart全体成功ではない。
+> full特徴4.5GiBに対し空き669MiB時点。全抽出未着手、既存証跡保持。測定稼働なし。
+> extraction-resume-corrupt-v1: private copyのfeature hash記録を0へ変更。resumeは無効判定→再抽出。
+> feature/loci/sidecar全3filesが元pilotと完全一致。元証跡変更なし。1画像破損復旧のみ、全restart未達。
+
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
 > BA再試行の単一所有normal system再利用を既定OFFで実装。CLIは

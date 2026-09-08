@@ -1,0 +1,264 @@
+{
+  "schema": "m8-openloris-regenerated-nodes-v1",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,json,re,hashlib\nbase=pathlib.Path('benchmarks/electro');mapping={}\nfor f in sorted(list(base.glob('m8-openloris-source-spec-*-v1.json'))+list(base.glob('m8-openloris-source-replay-*-v1.json'))):\n e=json.loads(f.read_text());p=e['audit_program']\n old=re.search(r\"old=pathlib.Path\\('([^']+)'\\)\",p).group(1)\n root=re.search(r\"root=pathlib.Path\\('([^']+)'\\)\",p).group(1)\n assert old not in mapping\n mapping[old]=(pathlib.Path(root)/'model',str(f))\ninventory=json.loads((base/'m8-openloris-source-execution-inventory-v1.json').read_text())['audit']['executions']\nby_node={str(n):(row['original_models'][str(n)],row['log']) for row in inventory for n in row['nodes']}\nsource=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/nodes.tsv')\nout=[];rows=[]\nfor line in source.read_text().splitlines():\n if not line or line.startswith('#'):out.append(line);continue\n node,offset,image=line.split('\\t')\n original,log=by_node[node];op=pathlib.Path(original);oldroot=op.parent.parent\n newroot,evidence=mapping[str(oldroot)];newimage=newroot/op.relative_to(oldroot)\n hashes={}\n for name in ['cameras.txt','images.txt','points3D.txt']:\n  a=newimage.parent/name;b=pathlib.Path(image).parent/name\n  ha=hashlib.sha256(a.read_bytes()).hexdigest();hb=hashlib.sha256(b.read_bytes()).hexdigest()\n  assert ha==hb,(node,name)\n  hashes[name]=ha\n out.append('\\t'.join([node,offset,str(newimage)]))\n rows.append({'node':int(node),'offset':int(offset),'images':str(newimage),'evidence':evidence,'hashes':hashes})\nassert len(rows)==23 and len(mapping)==21\nprint(json.dumps({'nodes_tsv':'\\n'.join(out)+'\\n','rows':rows,'original_nodes_sha256':hashlib.sha256(source.read_bytes()).hexdigest()}))\nPY",
+  "audit": {
+    "nodes_tsv": "# node_id\twindow_start\timages_txt\n0\t0\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-0-v1/model/component-000/images.txt\n1\t250\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-250x500-v1/model/component-000/images.txt\n21\t500\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-250-v1/model/component-000/images.txt\n3\t750\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-750-v1/model/component-000/images.txt\n4\t1000\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-1000-v1/model/component-000/images.txt\n5\t1250\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-1250-v1/model/component-000/images.txt\n6\t1500\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-1500-v1/model/component-000/images.txt\n25\t1950\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-1950-v1/model/component-000/images.txt\n8\t2000\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2000-v1/model/component-001/images.txt\n9\t2250\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2250x750-v1/model/component-000/images.txt\n10\t2500\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2500-v1/model/component-000/images.txt\n11\t2750\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2750-v1/model/component-000/images.txt\n12\t3000\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3000-v1/model/component-000/images.txt\n13\t3000\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3000-v1/model/component-001/images.txt\n26\t3200\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-3200-v1/model/component-000/images.txt\n15\t3500\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3500-v1/model/component-000/images.txt\n16\t3750\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3750-v1/model/component-000/images.txt\n17\t4000\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4000-v1/model/component-000/images.txt\n18\t4250\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4250-v1/model/component-000/images.txt\n19\t4250\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4250-v1/model/component-001/images.txt\n20\t4500\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4500-v1/model/component-000/images.txt\n27\t4200\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-4200-v1/model/component-000/images.txt\n28\t650\t/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-650-v1/model/component-000/images.txt\n",
+    "rows": [
+      {
+        "node": 0,
+        "offset": 0,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-0-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-0-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "7e79adb335e928f2fbabd8b9da205188bbff3cb6c8e3cc6a6e156da87dd018f1",
+          "points3D.txt": "35e18349c197821cb8b111e7449b07b3994cb10e67172750f88d1acebf78834e"
+        }
+      },
+      {
+        "node": 1,
+        "offset": 250,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-250x500-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-250x500-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "de38333b1c88cff9307fa7c917cb57880d709a20490cefc60b18366147998764",
+          "points3D.txt": "667241214e335f873ca0bc111b0e9b0fe880da8288f7d834fa130c201a3896ed"
+        }
+      },
+      {
+        "node": 21,
+        "offset": 500,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-250-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-replay-250-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "2c5aca654f86a20bed8d2a6e21040ce349e2739895b2c3181414537fd8be1e82",
+          "points3D.txt": "108755dc299903637b45f3646f2fc62d5e8aa8c0443b91366cad72d65ca5851d"
+        }
+      },
+      {
+        "node": 3,
+        "offset": 750,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-750-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-750-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "9ab3c0335c06d5ea3240f55006c8423632f82fb23a52e4a13dd523f0c699fccd",
+          "points3D.txt": "9a3f8a0167c9c301341afea6ac7ca43e6a272feaeaf1facbd13d52ad37047546"
+        }
+      },
+      {
+        "node": 4,
+        "offset": 1000,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-1000-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-1000-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "6b2697561bf364ee7d145fef2ecc1d3cd2dee7a437e49f568a14c5690ce9ab6a",
+          "points3D.txt": "72d112550cb085ee91fc4f259816762e7bf4558a280cfac634a65247ca1ced7a"
+        }
+      },
+      {
+        "node": 5,
+        "offset": 1250,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-1250-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-1250-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "ee48dad26f66a05906de85ae3df30c2a33d7231b3541408ef41937789102cad5",
+          "points3D.txt": "5c109dedfa1a4256814f89869d1a15bb3412f08003b4be7302f3ecbdc56240e7"
+        }
+      },
+      {
+        "node": 6,
+        "offset": 1500,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-1500-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-1500-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "86bfcb505c4cf23099b06b27dcad39804b1aa34fd0d5ba329b638757aa7a92aa",
+          "points3D.txt": "3456727bda4086066a3bf77ceca21e167dae85dc5aa1c47a7d254d2d28427b2b"
+        }
+      },
+      {
+        "node": 25,
+        "offset": 1950,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-1950-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-replay-1950-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "8cca2ea74975fd3946ddc0af2c79a27ab68fb0a41033ddf5113787e62db1602b",
+          "points3D.txt": "b415814029620307b76a69719d12d19742baa1e05d06c5a81674b1296b70b74a"
+        }
+      },
+      {
+        "node": 8,
+        "offset": 2000,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2000-v1/model/component-001/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-2000-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "309a48ab92e43add43366a623084344b9294b03e02528423c27615dc24dc65bc",
+          "points3D.txt": "64b9065292c2b20c647a980b948ab4fc78df1b051ffdd31adcf176e9ef1f5d11"
+        }
+      },
+      {
+        "node": 9,
+        "offset": 2250,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2250x750-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-2250x750-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "b602dfa6b5dd728a539e697c070cd8c981f2ab65eba0bcfd886f557fd6ffac77",
+          "points3D.txt": "cf200e913dedb3b0c1b8b13f436f820ed8ff335be4be5de6b67f7ab8ecf1d2c6"
+        }
+      },
+      {
+        "node": 10,
+        "offset": 2500,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2500-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-2500-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "826129599d9b3acba4ff39c80950a31800ee2e8484801facd8833c4031150ecb",
+          "points3D.txt": "6fb6cc666ea45ea9059c2d9eb6607f3ffd6adf5818ebe26c418f24a872a8db66"
+        }
+      },
+      {
+        "node": 11,
+        "offset": 2750,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-2750-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-2750-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "bb742a043bc900e10cc10a5ef9e5ce8e4c332be07b908786559be7525e0b7f55",
+          "points3D.txt": "e177e2ddbdebab868dee3e828d7762dff86ae66b617f8a435c04175f5514d766"
+        }
+      },
+      {
+        "node": 12,
+        "offset": 3000,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3000-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-3000-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "204f974062ce8bcc8c61f3d7cf35ca47efbe6a025bf2aa73913442ac937dd70b",
+          "points3D.txt": "68e71969062ae98c915c91d6c42328a0450e846e54fc762cd27a09642c305f3c"
+        }
+      },
+      {
+        "node": 13,
+        "offset": 3000,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3000-v1/model/component-001/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-3000-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "c9c66e35c1c82415fa3dd3c0bca8dc316bfdc9c83cf4eb001d14e4106dc691be",
+          "points3D.txt": "bdd147263e28525af7386a90b3bfb28067ddb92fb1fccc17ff41029388edfe85"
+        }
+      },
+      {
+        "node": 26,
+        "offset": 3200,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-3200-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-replay-3200-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "71595bf93e6bc75ef29dceca8cc226afd1d6539958b0e22f7311aa9b82ab1cda",
+          "points3D.txt": "4da6c2abf6666489deea4e3da368865aeb31ff8c91820153f5a6b2233ec8df95"
+        }
+      },
+      {
+        "node": 15,
+        "offset": 3500,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3500-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-3500-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "644b8778a6e3d2b4f86df06010d0b9af8904349125e924995154857d5d173aaa",
+          "points3D.txt": "d4aa9426d3be092f6d0a7545a72920a77a8706b653b81f7310c7378cde816580"
+        }
+      },
+      {
+        "node": 16,
+        "offset": 3750,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-3750-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-3750-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "b0231e971ed90dea9f9653503f55b3eb2a5168ddf32dfd77e2f8899905990478",
+          "points3D.txt": "0936dade632bf81916d1da7077f3ed34d04fbb7ac8fb81b040b630663a7aadb3"
+        }
+      },
+      {
+        "node": 17,
+        "offset": 4000,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4000-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-4000-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "f7525e618122ce1a138df0032b3061a823dc72ab1612af0d8082b0c37fd18ed7",
+          "points3D.txt": "55d526cdd35edc5c433d54785483293c668c4b8be5d2050a330b31b955cba9fb"
+        }
+      },
+      {
+        "node": 18,
+        "offset": 4250,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4250-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-4250-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "1e1236bde84b5d483b42f8afe349606f98fed5b2cd8520d482abf1ffc18b6672",
+          "points3D.txt": "9807e21b22d251dec911994eb4c6b73696177ea0f26aedc6cc22a6e8430ebd93"
+        }
+      },
+      {
+        "node": 19,
+        "offset": 4250,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4250-v1/model/component-001/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-4250-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "d38ca28d8861bdf11ecaea7b159cc7378f9bff289c3fe95a1ad2d24d3cfe8d04",
+          "points3D.txt": "63984915e673b06695a8e5f86b70f3f55533c5c322c7a6038fe1312d032ff09c"
+        }
+      },
+      {
+        "node": 20,
+        "offset": 4500,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-spec-4500-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-spec-4500-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "ecee05b0d25a510aab1091012d1f4e061346ad46b4f232dc5174dc1d58ae3f73",
+          "points3D.txt": "290d4821c712451a08cd2f72e9429888c36d57bbc94913463d38d695b8601611"
+        }
+      },
+      {
+        "node": 27,
+        "offset": 4200,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-4200-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-replay-4200-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "7f0324faa11d4510abfdf40c5befeb192b9d55c8b9003fc38c7384cd9cc062e5",
+          "points3D.txt": "8e5828247cef977f33883af308293c4795fe531dd2945a97f8804fca1ed8c5cf"
+        }
+      },
+      {
+        "node": 28,
+        "offset": 650,
+        "images": "/home/sasaki/datasets/openloris/corridor1-1-m8-source-replay-650-v1/model/component-000/images.txt",
+        "evidence": "benchmarks/electro/m8-openloris-source-replay-650-v1.json",
+        "hashes": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "4571fb55bcfae41e8a944940c59a7992a61a38ad9fee582a03255b5cce4194ca",
+          "points3D.txt": "7a7cd6bdd535468dd50c0c2228c3348c1351a8f731d79988f4055554db9c15c3"
+        }
+      }
+    ],
+    "original_nodes_sha256": "69b3f668b43e2410a4d0518f0df9a5d6d65493444eb68b18c8721bac4307bc13"
+  },
+  "scope": "Path-only replacement with node IDs, offsets, ordering and component identity preserved. All 69 model files checked against retained atlas sources. Alignment/integration not yet rerun; no E2E success."
+}

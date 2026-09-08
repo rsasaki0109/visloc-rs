@@ -1,0 +1,137 @@
+{
+  "schema": "m8-openloris-extraction-shard-audit-v1",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,hashlib,json,shlex,collections\nroot=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing')\nrows=[];names=collections.Counter()\nfor report in sorted(root.glob('shard-*.time.txt')):\n raw=report.read_text();line=next(l.strip() for l in raw.splitlines() if 'Command being timed:' in l)\n argv=shlex.split(line.split('Command being timed: \"',1)[1][:-1])\n images=pathlib.Path(argv[argv.index('--images-dir')+1]);files=sorted(p for p in images.iterdir() if p.suffix.lower() in ['.png','.jpg','.jpeg'])\n for p in files:names[p.name]+=1\n entries=[{'name':p.name,'resolved':str(p.resolve()),'exists':p.is_file()} for p in files]\n digest=hashlib.sha256(json.dumps(entries,sort_keys=True).encode()).hexdigest()\n rows.append({'report':str(report),'report_sha256':hashlib.sha256(report.read_bytes()).hexdigest(),'recorded_command':line,'images_dir':str(images),'images':len(files),'all_targets_exist':all(r['exists'] for r in entries),'name_target_manifest_sha256':digest,'time_lines':[l.strip() for l in raw.splitlines() if any(k in l for k in ['Elapsed (wall','Maximum resident','Percent of CPU','Exit status'])]})\nprint(json.dumps({'shards':rows,'total_images':sum(names.values()),'unique_names':len(names),'duplicate_names':[n for n,c in names.items() if c>1]}))\nPY",
+  "audit": {
+    "shards": [
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-0.time.txt",
+        "report_sha256": "1e0abdee18da8f306dec216906333370b14b724c6e78e901fab63187b8f1568d",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-0 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-0\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-0",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "148656eaa071582b107d05a656a73d55e95e4e2c701535413242027d9267d6e1",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:01",
+          "Maximum resident set size (kbytes): 284024",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-1.time.txt",
+        "report_sha256": "09f4c2902f758d1f81f8e8b181103f10a532384d01b39e058a4c7ba281622b58",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-1 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-1\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-1",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "9692ae8b17cccf15ccee2f1c0c716c6d6f8536a2e94c97e735da5d0c02b545a4",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:02",
+          "Maximum resident set size (kbytes): 282728",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-2.time.txt",
+        "report_sha256": "ceebb9c6ca90fcaf0389c6f027d85afeeea6fed95da9d528f805b5823ca2c4ff",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-2 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-2\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-2",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "5e98281f0417a9fc04860d80956e35526868905d50c0d26afacb26820d3361d8",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:34",
+          "Maximum resident set size (kbytes): 283660",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-3.time.txt",
+        "report_sha256": "8689b3bd45e6c097f15646fcab7c0f9b96a66fad5d20c0980ba02ffa3c37e763",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-3 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-3\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-3",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "3b7862503c6cd939105684a37c521dd823025a488c21bf7ad9370078292353e4",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:13",
+          "Maximum resident set size (kbytes): 283808",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-4.time.txt",
+        "report_sha256": "9bf3473264dd03fc7a856df933bface66f4bc73983ce61eb7d660d26746af3af",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-4 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-4\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-4",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "683f1629c59625ea51b3016b3c4255a46e8fda27c3a0bd8756154a13ca81a65c",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:43:44",
+          "Maximum resident set size (kbytes): 283828",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-5.time.txt",
+        "report_sha256": "b698976c920fdd3661613068a79473bc8549301ee4f5e34fa0de8f9faa6e8942",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-5 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-5\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-5",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "1a389b43dd3acb3ed3a861116f92163ee35a2f592da5e77e22d0425241a071a9",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:31",
+          "Maximum resident set size (kbytes): 282016",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-6.time.txt",
+        "report_sha256": "4ee887a0b4a57dfa62939739461412d50a56145673d14e89d134976b4564d1d2",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-6 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-6\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-6",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "f6a27f7b180530649884ef8a6cd2b486825db8578805baa9087261b0392edf21",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:45",
+          "Maximum resident set size (kbytes): 281956",
+          "Exit status: 0"
+        ]
+      },
+      {
+        "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/timing/shard-7.time.txt",
+        "report_sha256": "c744d1aa01d3b93d98c2cbef4319c194e8346e63e3a3a5d49b0fbec9e70068c4",
+        "recorded_command": "Command being timed: \"target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-7 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/unused-model/shard-7\"",
+        "images_dir": "/home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-7",
+        "images": 1250,
+        "all_targets_exist": true,
+        "name_target_manifest_sha256": "e1231d74b98f5b4bdbec29e5fea1a07e2c71662a0c2510ba9bbd21c37ddd87c5",
+        "time_lines": [
+          "Percent of CPU this job got: 73%",
+          "Elapsed (wall clock) time (h:mm:ss or m:ss): 2:44:32",
+          "Maximum resident set size (kbytes): 281676",
+          "Exit status: 0"
+        ]
+      }
+    ],
+    "total_images": 10000,
+    "unique_names": 10000,
+    "duplicate_names": []
+  },
+  "limitations": [
+    "Image target membership and existence checked; image content hashes and raw dataset/calibration equivalence still require certification.",
+    "Historical commands identify extractor settings, not immutable historical executable or process concurrency.",
+    "Per-shard wall/RSS cannot establish whole-pipeline wall or simultaneous aggregate RSS.",
+    "No extraction rerun performed by this audit."
+  ]
+}

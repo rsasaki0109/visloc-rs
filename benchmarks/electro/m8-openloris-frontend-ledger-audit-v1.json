@@ -1,0 +1,59 @@
+{
+  "schema": "m8-openloris-frontend-ledger-audit-v1",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,json,hashlib\nroot=pathlib.Path('/home/sasaki/datasets/openloris')\nout={}\nfor rel in ['corridor1-1-m8-targeted7-dense256-v1/summary.json','corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/summary.json']:\n p=root/rel;e=json.loads(p.read_text());ledger=e['phase_ledger'];groups={}\n for row in ledger.get('match_shards',[]):\n  key=row.get('report')\n  g=groups.setdefault(key,{'references':0,'worker_elapsed_s':[]})\n  g['references']+=1\n  if row.get('worker_elapsed_s') not in g['worker_elapsed_s']:g['worker_elapsed_s'].append(row.get('worker_elapsed_s'))\n for key,g in groups.items():\n  if key:\n   q=pathlib.Path(key);g['sha256']=hashlib.sha256(q.read_bytes()).hexdigest()\n   g['time_lines']=[s.strip() for s in q.read_text().splitlines() if any(v in s for v in ['Elapsed (wall','Maximum resident','Exit status'])]\n out[rel]={'summary_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'feature_manifest_validation':ledger.get('feature_manifest_validation'),'candidate_generation':ledger.get('candidate_generation'),'mapping':ledger.get('mapping'),'match_shard_rows':len(ledger.get('match_shards',[])),'unique_report_groups':groups}\nprint(json.dumps(out))\nPY",
+  "audit": {
+    "corridor1-1-m8-targeted7-dense256-v1/summary.json": {
+      "summary_sha256": "9824df4684574cecc373a4f40a51f7f2e1dca54484868eae151a0f4f11642885",
+      "feature_manifest_validation": {
+        "elapsed_s": 3.2474274580017664,
+        "feature_extraction_included": false
+      },
+      "candidate_generation": null,
+      "mapping": null,
+      "match_shard_rows": 448,
+      "unique_report_groups": {
+        "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/timing/persistent-match.time.txt": {
+          "references": 448,
+          "worker_elapsed_s": [
+            53.59653679304756
+          ],
+          "sha256": "eac4c5cdcffd37d42623cbbf8def8fe271a11ff445ae52fb9f76908af5b4a15e",
+          "time_lines": [
+            "Elapsed (wall clock) time (h:mm:ss or m:ss): 0:53.59",
+            "Maximum resident set size (kbytes): 977628",
+            "Exit status: 0"
+          ]
+        }
+      }
+    },
+    "corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/summary.json": {
+      "summary_sha256": "58a6408669d2d6d498246a85e7402fd82413aeac333d0e06e935e049bddb47a5",
+      "feature_manifest_validation": {
+        "elapsed_s": 3.309638503997121,
+        "feature_extraction_included": false
+      },
+      "candidate_generation": null,
+      "mapping": null,
+      "match_shard_rows": 2188,
+      "unique_report_groups": {
+        "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/timing/persistent-match.time.txt": {
+          "references": 2188,
+          "worker_elapsed_s": [
+            272.6237095600227
+          ],
+          "sha256": "0c85949b43fa042606620c5e998dc6d749f2072763ed444f0df0b86d752c5ec1",
+          "time_lines": [
+            "Elapsed (wall clock) time (h:mm:ss or m:ss): 4:32.62",
+            "Maximum resident set size (kbytes): 979060",
+            "Exit status: 0"
+          ]
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Historical worker reports can be referenced by multiple shard rows: do not sum duplicate whole-worker durations.",
+    "Feature extraction is explicitly excluded from manifest validation. Candidate generation and mapping null are missing/not included, not zero cost.",
+    "This bounded audit is not a full frontend dependency reconstruction or continuous E2E measurement."
+  ]
+}

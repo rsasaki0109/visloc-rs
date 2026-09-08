@@ -1,0 +1,95 @@
+{
+  "schema": "m8-openloris-regenerated-integration-v1",
+  "status": "both-components-pre-and-post-ba-exact-parity",
+  "binary_sha256": "c013184d39d70947f52b6b17ef79c290fe50899b4277a682a477ca063098c172",
+  "commands": {
+    "tail": "set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail.time'\nenv VISLOC_BA_TRACE_PHASE_TIMING=1 RAYON_NUM_THREADS=1 VISLOC_ATLAS_TRACE_WINDOW_TIMING=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-ba-retry-timing-v1/integrate-b23a6a4' '--rig-manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--nodes-tsv' '/home/sasaki/workspace/visloc-rs/benchmarks/electro/m8-openloris-regenerated-nodes-v1.tsv' '--atlas-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas/component-001' '--out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail/model' '--pre-ba-out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail/pre-ba' '--recover-zero-support-frames' '--repair-cross-boundary' '--repair-left-max-frame' '1999' '--joint-rig-ba' '--joint-rig-ba-filter-observations' > '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail.log' 2>&1",
+    "main": "set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main.time'\nenv VISLOC_BA_TRACE_PHASE_TIMING=1 RAYON_NUM_THREADS=1 VISLOC_ATLAS_TRACE_WINDOW_TIMING=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-ba-retry-timing-v1/integrate-b23a6a4' '--rig-manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--nodes-tsv' '/home/sasaki/workspace/visloc-rs/benchmarks/electro/m8-openloris-regenerated-nodes-v1.tsv' '--atlas-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas/component-000' '--out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main/model' '--pre-ba-out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main/pre-ba' '--recover-zero-support-frames' '--repair-cross-boundary' '--repair-left-max-frame' '1999' '--joint-rig-ba' '--joint-rig-ba-filter-observations' > '/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main.log' 2>&1"
+  },
+  "audit_programs": {
+    "tail": "python3 - <<'PY'\nimport pathlib,json,hashlib\nroot=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1')\nold=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1')\nrows={}\nfor phase,prior in [('model','component-001'),('pre-ba','pre-ba-001')]:\n for name in ['cameras.txt','images.txt','points3D.txt']:\n  a=hashlib.sha256((root/'tail'/phase/name).read_bytes()).hexdigest()\n  b=hashlib.sha256((old/prior/name).read_bytes()).hexdigest()\n  rows[phase+'/'+name]={'new':a,'old':b,'exact':a==b}\nprint(json.dumps({'files':rows,'all_exact':all(r['exact'] for r in rows.values()),'time':(root/'tail.time').read_text(),'log_sha256':hashlib.sha256((root/'tail.log').read_bytes()).hexdigest()}))\nPY",
+    "main": "python3 - <<'PY'\nimport pathlib,json,hashlib\nroot=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1')\nold=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1')\nrows={}\nfor phase,prior in [('model','component-000'),('pre-ba','pre-ba-000')]:\n for name in ['cameras.txt','images.txt','points3D.txt']:\n  a=hashlib.sha256((root/'main'/phase/name).read_bytes()).hexdigest()\n  b=hashlib.sha256((old/prior/name).read_bytes()).hexdigest()\n  rows[phase+'/'+name]={'new':a,'old':b,'exact':a==b}\nprint(json.dumps({'files':rows,'all_exact':all(r['exact'] for r in rows.values()),'time':(root/'main.time').read_text(),'log_sha256':hashlib.sha256((root/'main.log').read_bytes()).hexdigest()}))\nPY"
+  },
+  "audits": {
+    "tail": {
+      "files": {
+        "model/cameras.txt": {
+          "new": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "old": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "exact": true
+        },
+        "model/images.txt": {
+          "new": "761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd",
+          "old": "761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd",
+          "exact": true
+        },
+        "model/points3D.txt": {
+          "new": "931100c5151f008ced6cc2e7492658134931b805c4eab60fa3c6de87ec7d3d4f",
+          "old": "931100c5151f008ced6cc2e7492658134931b805c4eab60fa3c6de87ec7d3d4f",
+          "exact": true
+        },
+        "pre-ba/cameras.txt": {
+          "new": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "old": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "exact": true
+        },
+        "pre-ba/images.txt": {
+          "new": "96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff",
+          "old": "96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff",
+          "exact": true
+        },
+        "pre-ba/points3D.txt": {
+          "new": "33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c",
+          "old": "33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c",
+          "exact": true
+        }
+      },
+      "all_exact": true,
+      "time": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-ba-retry-timing-v1/integrate-b23a6a4 --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --nodes-tsv /home/sasaki/workspace/visloc-rs/benchmarks/electro/m8-openloris-regenerated-nodes-v1.tsv --atlas-dir /home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas/component-001 --out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail/model --pre-ba-out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/tail/pre-ba --recover-zero-support-frames --repair-cross-boundary --repair-left-max-frame 1999 --joint-rig-ba --joint-rig-ba-filter-observations\"\n\tUser time (seconds): 10.91\n\tSystem time (seconds): 0.11\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:11.03\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 78120\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 25265\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 60\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 53328\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+      "log_sha256": "b7c7c0993b65bf05cda8b32ec2d3dd56ee0f4d44dfda3de5fb5a24735cc4f4d4"
+    },
+    "main": {
+      "files": {
+        "model/cameras.txt": {
+          "new": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "old": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "exact": true
+        },
+        "model/images.txt": {
+          "new": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+          "old": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+          "exact": true
+        },
+        "model/points3D.txt": {
+          "new": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14",
+          "old": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14",
+          "exact": true
+        },
+        "pre-ba/cameras.txt": {
+          "new": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "old": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "exact": true
+        },
+        "pre-ba/images.txt": {
+          "new": "046c7c6ed8c3ccc0a0c972b610bcf162df88347531bdae95aeb2d994f338d0c8",
+          "old": "046c7c6ed8c3ccc0a0c972b610bcf162df88347531bdae95aeb2d994f338d0c8",
+          "exact": true
+        },
+        "pre-ba/points3D.txt": {
+          "new": "a9b4e5055da4604733a4734ba95a374531fc1190edf472477713c4b75293dfef",
+          "old": "a9b4e5055da4604733a4734ba95a374531fc1190edf472477713c4b75293dfef",
+          "exact": true
+        }
+      },
+      "all_exact": true,
+      "time": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-ba-retry-timing-v1/integrate-b23a6a4 --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --nodes-tsv /home/sasaki/workspace/visloc-rs/benchmarks/electro/m8-openloris-regenerated-nodes-v1.tsv --atlas-dir /home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas/component-000 --out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main/model --pre-ba-out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/main/pre-ba --recover-zero-support-frames --repair-cross-boundary --repair-left-max-frame 1999 --joint-rig-ba --joint-rig-ba-filter-observations\"\n\tUser time (seconds): 145.76\n\tSystem time (seconds): 0.71\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 2:26.73\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 525196\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 254986\n\tVoluntary context switches: 8\n\tInvoluntary context switches: 824\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 554184\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+      "log_sha256": "f2f3d3e5d647d56cf3b3218dbd61f52feb30f5f66c617cfdcd48cfb2bfa6d8f1"
+    }
+  },
+  "limitations": [
+    "All 12 pre/post model files compared against retained connected-filtered baseline.",
+    "Sources, stitching and integration separately replayed, with retained frontend; not continuous native E2E.",
+    "Exact output parity preserves the failing COLMAP RMSE baseline; no quality improvement.",
+    "Tracing enabled. Do not pool stage timings with untraced E2E performance measurements."
+  ]
+}

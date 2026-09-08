@@ -1,0 +1,221 @@
+{
+  "schema": "m8-openloris-source-command-coverage-v1",
+  "audit_program": "python3 - <<'PY'\nimport json,pathlib,hashlib,re\ne=json.loads(pathlib.Path('benchmarks/electro/m8-openloris-atlas-source-cost-v1.json').read_text())\ngroups={}\nfor node,row in e['complete_audit']['matched_nodes'].items():\n g=groups.setdefault(row['log'],{'nodes':[],'log_sha256':row['log_sha256']})\n g['nodes'].append(node)\nfor log,g in groups.items():\n p=pathlib.Path(log)\n g['log_hash_valid']=hashlib.sha256(p.read_bytes()).hexdigest()==g['log_sha256']\n candidates=sorted(set(p.parent.glob('*time*')))\n g['command_records']=[]\n for f in candidates:\n  if not f.is_file():continue\n  s=f.read_text(errors='replace')\n  lines=[l.strip() for l in s.splitlines() if 'Command being timed:' in l]\n  if lines:g['command_records'].append({'path':str(f),'sha256':hashlib.sha256(f.read_bytes()).hexdigest(),'lines':lines})\nprint(json.dumps({'executions':groups,'total':len(groups),'with_time_command':sum(bool(g['command_records']) for g in groups.values()),'limitation':'Sibling time records are candidate provenance only, not yet bound to producing log/binary/env. No inferred commands or native E2E success.'}))\nPY",
+  "audit": {
+    "executions": {
+      "/tmp/visloc-m8-hierarchical-500x250/window-0000/mapper.log": {
+        "nodes": [
+          "0"
+        ],
+        "log_sha256": "18de183255dbfdbd31c657ba228273889bca133d3a34900f0256acababd6a17e",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-0250/mapper.log": {
+        "nodes": [
+          "1"
+        ],
+        "log_sha256": "28ca37ef67ceaf0cf8b77dc948f0ed313e21d8e43964c4c41b44ae05768981a7",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-0750/mapper.log": {
+        "nodes": [
+          "3"
+        ],
+        "log_sha256": "9dd0e54418bd04145061de0316152db253b13070db2111e76ab06651e0b8cec6",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-1000/mapper.log": {
+        "nodes": [
+          "4"
+        ],
+        "log_sha256": "4336f8c2ac651ab5ded33ba64bfcfcefc54df0e6865892a0ad04c2ed342701ea",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-1250/mapper.log": {
+        "nodes": [
+          "5"
+        ],
+        "log_sha256": "d819c6cc47e9393ca4c85bef4b1e26561414c5928aa6e2d2865ec411879370ef",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-1500/mapper.log": {
+        "nodes": [
+          "6"
+        ],
+        "log_sha256": "f5269242a42ff54dbb9338c2e69b529733286f3687d304b859c42f2c2201b2e3",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-2000/mapper.log": {
+        "nodes": [
+          "8"
+        ],
+        "log_sha256": "d929764c7fab3a8183b4a34965c84235241d20b5401f1414286ac62d116fbc4f",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-2250-wide750/mapper.log": {
+        "nodes": [
+          "9"
+        ],
+        "log_sha256": "87daeb8c617ee57e900bd321223791b921b94f12beeac490f0dd44b3ea42d25a",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-2500/mapper.log": {
+        "nodes": [
+          "10"
+        ],
+        "log_sha256": "fc8c9086cca048e34b7e04a04c8c29d452a9040eae0a78f0ce4c3320d257a4ce",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-2750/mapper.log": {
+        "nodes": [
+          "11"
+        ],
+        "log_sha256": "c837ebe7fb3cd919dfade63af5ee08cb7442dfcc1ca5257997810430c05fa55b",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-3000/mapper.log": {
+        "nodes": [
+          "12",
+          "13"
+        ],
+        "log_sha256": "ba70596506e7a74d32d23dc21cf60b93b3cee345944ad816ee8a2ee2120eb5dd",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-3500/mapper.log": {
+        "nodes": [
+          "15"
+        ],
+        "log_sha256": "fcc376f8197ad41f9b23ed05e019180fe906182b8ff6c64deea132e86c133cfb",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-3750/mapper.log": {
+        "nodes": [
+          "16"
+        ],
+        "log_sha256": "5144b7a98a52a06ed68dfb95c873de4f45c8a1f3aba9ec26e0648721315528b1",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-4000/mapper.log": {
+        "nodes": [
+          "17"
+        ],
+        "log_sha256": "7e47587c0b79e4d05fa08f1f681f337adf093e3e9f03f9394e2c11660d336685",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-4250/mapper.log": {
+        "nodes": [
+          "18",
+          "19"
+        ],
+        "log_sha256": "4e17981e380fdc9a87655fad72c0d6469a33515ab7c4dd5c1a53ec0fa8fa4a60",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-4500/mapper.log": {
+        "nodes": [
+          "20"
+        ],
+        "log_sha256": "72a60d3207fe358067490c8aea5c4759878270666bd6779de3b0421e3ac0b0bc",
+        "log_hash_valid": true,
+        "command_records": []
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-0250-wide750/mapper.log": {
+        "nodes": [
+          "21"
+        ],
+        "log_sha256": "6392367acc3dc931e4e1c8f423de2158da15c6e8057b883e0493a5e5e94a3554",
+        "log_hash_valid": true,
+        "command_records": [
+          {
+            "path": "/tmp/visloc-m8-hierarchical-500x250/window-0250-wide750/time.txt",
+            "sha256": "0bda038ee3038f760b40bb9a14640cd5a5ad12c53adf8ade90743f096d358af4",
+            "lines": [
+              "Command being timed: \"target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --out-colmap /tmp/visloc-m8-hierarchical-500x250/window-0250-wide750/model --max-models 2 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --deferred-registration-pair-prefix 59961 --deferred-registration-min-pnp-sensors 1 --deferred-registration-min-pnp-inliers 6 --deferred-registration-pnp-iterations 4096 --deferred-registration-max-interpolation-gap 2 --retriangulate-deferred-tracks-after-registration --max-matches-per-pair 256 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --final-ba-passes 2 --final-ba-window 60 --final-ba-fix-window-ends --final-ba-min-pose-observations 32 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --repair-isolated-pose-outliers --final-filter-refinement-passes 2 --frame-range-start 250 --frame-range-count 750\""
+            ]
+          }
+        ]
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-1950-shift500/mapper.log": {
+        "nodes": [
+          "25"
+        ],
+        "log_sha256": "7dca42a127c93769b81ef251426020ece1139cb0a6bb8dbc619fa696d2921eb2",
+        "log_hash_valid": true,
+        "command_records": [
+          {
+            "path": "/tmp/visloc-m8-hierarchical-500x250/window-1950-shift500/time.txt",
+            "sha256": "0f671c13e5418b7f8b59b9a2ba4f5503178becc42f29d4c8dd5c5ae1c0b4cd37",
+            "lines": [
+              "Command being timed: \"target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --out-colmap /tmp/visloc-m8-hierarchical-500x250/window-1950-shift500/model --max-models 2 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --deferred-registration-pair-prefix 59961 --deferred-registration-min-pnp-sensors 1 --deferred-registration-min-pnp-inliers 6 --deferred-registration-pnp-iterations 4096 --deferred-registration-max-interpolation-gap 2 --retriangulate-deferred-tracks-after-registration --max-matches-per-pair 256 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --final-ba-passes 2 --final-ba-window 60 --final-ba-fix-window-ends --final-ba-min-pose-observations 32 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --repair-isolated-pose-outliers --final-filter-refinement-passes 2 --frame-range-start 1950 --frame-range-count 500\""
+            ]
+          }
+        ]
+      },
+      "/tmp/visloc-m8-hierarchical-500x250/window-3200-shift500/mapper.log": {
+        "nodes": [
+          "26"
+        ],
+        "log_sha256": "8fd6fd8f49e1608082e47b2a311d0e09b2975290a962630febd839264fd8fb74",
+        "log_hash_valid": true,
+        "command_records": [
+          {
+            "path": "/tmp/visloc-m8-hierarchical-500x250/window-3200-shift500/time.txt",
+            "sha256": "e8235f9ec6d8e2b948d971f5a459ec66c06c1b574e7532c903c6a609798d2ff2",
+            "lines": [
+              "Command being timed: \"target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --out-colmap /tmp/visloc-m8-hierarchical-500x250/window-3200-shift500/model --max-models 2 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --deferred-registration-pair-prefix 59961 --deferred-registration-min-pnp-sensors 1 --deferred-registration-min-pnp-inliers 6 --deferred-registration-pnp-iterations 4096 --deferred-registration-max-interpolation-gap 2 --retriangulate-deferred-tracks-after-registration --max-matches-per-pair 256 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --final-ba-passes 2 --final-ba-window 60 --final-ba-fix-window-ends --final-ba-min-pose-observations 32 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --repair-isolated-pose-outliers --final-filter-refinement-passes 2 --frame-range-start 3200 --frame-range-count 500\""
+            ]
+          }
+        ]
+      },
+      "/tmp/visloc-m8-boundary-window-4200-debug.AqO1ao/mapper.log": {
+        "nodes": [
+          "27"
+        ],
+        "log_sha256": "55d818e94fdf797a8156160bfcf671ab4937cc1e8a4c443856da3b03fb9eb505",
+        "log_hash_valid": true,
+        "command_records": [
+          {
+            "path": "/tmp/visloc-m8-boundary-window-4200-debug.AqO1ao/time.txt",
+            "sha256": "a836015dad6d457ba3eb94353ad129ecc5946d8239310f888f064190280948a2",
+            "lines": [
+              "Command being timed: \"env VISLOC_DEFERRED_DEBUG=1 target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --out-colmap /tmp/visloc-m8-boundary-window-4200-debug.AqO1ao/model --max-models 2 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --deferred-registration-pair-prefix 59961 --deferred-registration-min-pnp-sensors 1 --deferred-registration-min-pnp-inliers 6 --deferred-registration-pnp-iterations 4096 --deferred-registration-max-interpolation-gap 2 --retriangulate-deferred-tracks-after-registration --max-matches-per-pair 256 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --final-ba-passes 2 --final-ba-window 60 --final-ba-fix-window-ends --final-ba-min-pose-observations 32 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --repair-isolated-pose-outliers --final-filter-refinement-passes 2 --frame-range-start 4200 --frame-range-count 500\""
+            ]
+          }
+        ]
+      },
+      "/tmp/visloc-m8-window-650.hSRTGo/mapper.log": {
+        "nodes": [
+          "28"
+        ],
+        "log_sha256": "244447e53525ec0c7b936647e5886316a511920f5d7b4677cc4b3d411f6731ec",
+        "log_hash_valid": true,
+        "command_records": [
+          {
+            "path": "/tmp/visloc-m8-window-650.hSRTGo/time.txt",
+            "sha256": "6f9b525f89ca6d8148e3f202d8939c599cacc09190977f61a18db003178e7a4b",
+            "lines": [
+              "Command being timed: \"target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --append-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps --deferred-overlay-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --deferred-overlay-min-temporal-frame-gap 32 --deferred-overlay-max-frame-gap 128 --out-colmap /tmp/visloc-m8-window-650.hSRTGo/model --max-models 2 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --deferred-registration-pair-prefix 59961 --deferred-registration-min-pnp-sensors 1 --deferred-registration-min-pnp-inliers 6 --deferred-registration-pnp-iterations 4096 --deferred-registration-max-interpolation-gap 2 --retriangulate-deferred-tracks-after-registration --max-matches-per-pair 256 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --final-ba-passes 2 --final-ba-window 60 --final-ba-fix-window-ends --final-ba-min-pose-observations 32 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --repair-isolated-pose-outliers --final-filter-refinement-passes 2 --frame-range-start 650 --frame-range-count 500\""
+            ]
+          }
+        ]
+      }
+    },
+    "total": 21,
+    "with_time_command": 5,
+    "limitation": "Sibling time records are candidate provenance only, not yet bound to producing log/binary/env. No inferred commands or native E2E success."
+  }
+}
