@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`test/m8-base-extraction-parity-probe`。
+現作業branchは`feat/shared-snapshot-envelope`。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -51,6 +51,16 @@ base/Dを別レシピで処理する。
 次は共有envelope+内容IDに結びつくpair chunkの設計・実装、v1互換/restart検証。
 証跡`m8-dense-snapshot-envelope-audit-v1.json`。監査script自身はpayload checksumを検証しない。
 Python43 tests通過。全goal未達。PR123旧branch整理と現branchのPRが次。
+
+更新: PR123旧branch整理済み、probe/監査PR124は最終head`9e4f0d4`でCI9成功後
+`e5ec9d6b29c625937e79e507ac3374318f4e1d8b`へmerge済み。
+共有snapshot形式を実装。明示flag `--shared-snapshot-envelope`のみ、既定v1は変更なし。
+実dense2500 shard/64862 pairsを変換し全Snapshotレコード一致。
+保存量1,294,392,088→517,615,442 bytes（envelope1個）。変換検証16.90s/7820KiB。
+証跡`m8-dense-shared-snapshot-parity-v1.json`、設計/制約`docs/shared_snapshot_envelopes.md`。
+lib15/example64 testsとClippy通過。現形式は読書きごとにenvelopeを再検証するため
+I/O/CPUのN²解消は未達。次はbounded cache、強制中断/同時publication、worker実出力と
+100k stress。変換session79247はexit0完了。全goal未達。
 
 ### 以前の状態（上記を優先）
 

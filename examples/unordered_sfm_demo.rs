@@ -243,6 +243,9 @@
 //! default and is forced for snapshot replay unless a policy is explicitly
 //! requested.
 //!
+//! `--shared-snapshot-envelope` opts exported snapshots into compact pair chunks
+//! with a content-addressed `.vpe` envelope in the same directory. Copy both
+//! chunks and envelopes together; legacy snapshot import remains supported.
 //! `--export-verified-pairs-snapshot PATH` writes a lossless, versioned
 //! snapshot of the accepted pair/match stream after verification and all
 //! configured stream-order transforms.  `--import-verified-pairs-snapshot
@@ -2087,6 +2090,8 @@ struct Args {
     /// Export the exact post-verification pair/match stream to a checksummed
     /// versioned snapshot.  Default None; does not alter reconstruction.
     export_verified_pairs_snapshot: Option<PathBuf>,
+    /// Store one content-addressed envelope alongside compact pair chunks.
+    shared_snapshot_envelope: bool,
     /// Import a checksummed verified-pair snapshot and bypass matching and
     /// verification.  The loaded image/feature manifest and camera must match.
     import_verified_pairs_snapshot: Option<PathBuf>,
@@ -4815,6 +4820,7 @@ where
     let mut sift_stream_resume = false;
     let mut import_verified_pairs_file: Option<PathBuf> = None;
     let mut export_verified_pairs_snapshot: Option<PathBuf> = None;
+    let mut shared_snapshot_envelope = false;
     let mut import_verified_pairs_snapshot: Option<PathBuf> = None;
     let mut snapshot_keypoints_only = false;
     let mut export_verified_pairs_only = false;
@@ -5593,6 +5599,7 @@ where
                 a.remove(i + 1);
                 import_verified_pairs_snapshot = Some(PathBuf::from(raw));
             }
+            "--shared-snapshot-envelope" => shared_snapshot_envelope = true,
             "--snapshot-keypoints-only" => snapshot_keypoints_only = true,
             "--export-verified-pairs-only" => export_verified_pairs_only = true,
             "--persistent-match-worker-plan" => {
@@ -6528,6 +6535,7 @@ where
         sift_stream_resume,
         import_verified_pairs_file,
         export_verified_pairs_snapshot,
+        shared_snapshot_envelope,
         import_verified_pairs_snapshot,
         snapshot_keypoints_only,
         export_verified_pairs_only,
@@ -8760,7 +8768,9 @@ fn write_verified_pair_snapshot_with_validation(
             .sum::<usize>() as u64,
         pairs: records,
     };
-    if atomic {
+    if args.shared_snapshot_envelope {
+        verified_pair_snapshot::write_shared_atomic(path, &snapshot)
+    } else if atomic {
         verified_pair_snapshot::write_atomic(path, &snapshot)
     } else {
         verified_pair_snapshot::write(path, &snapshot)

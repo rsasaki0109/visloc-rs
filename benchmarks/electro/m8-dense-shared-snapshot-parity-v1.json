@@ -1,0 +1,17 @@
+{
+  "status": "all-shard-record-parity-pass",
+  "source": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-matching-replay-v1/matches",
+  "output": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-shared-snapshots-v1",
+  "recipe": "target/release/examples/compact_verified_pair_snapshots SOURCE NEW_OUTPUT",
+  "binary_sha256": "1686226789dffe4c41e8961ad88e920ca7fc87ade1e3dab7048492d1635fa64f",
+  "shards": 2500,
+  "pairs": 64862,
+  "shared_envelopes": 1,
+  "legacy_bytes": 1294392088,
+  "shared_directory_bytes": 517615442,
+  "wall_seconds": 16.90,
+  "peak_rss_kib": 7820,
+  "exit_code": 0,
+  "validation": "Each source and output was checksum-decoded by Rust and compared with full Snapshot equality, preserving all pair records and floating-point bits.",
+  "scope": "Conversion plus verification only, not a matching/E2E speed comparison. Reader/writer envelope caching, forced restart, concurrent publication, and 100k stress remain open."
+}
