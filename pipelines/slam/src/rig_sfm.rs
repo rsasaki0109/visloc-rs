@@ -245,6 +245,8 @@ pub struct RigSfmConfig {
     pub ba_config: BaConfig,
     pub local_ba_every: usize,
     pub local_ba_window_size: usize,
+    /// Select bounded neighbors sharing usable landmarks instead of recent frames.
+    pub local_ba_covisibility: bool,
     pub local_ba_iterations: usize,
     pub final_ba_passes: usize,
     pub final_ba_window_size: usize,
@@ -326,6 +328,7 @@ impl Default for RigSfmConfig {
             },
             local_ba_every: 10,
             local_ba_window_size: 40,
+            local_ba_covisibility: false,
             local_ba_iterations: 8,
             final_ba_passes: 2,
             final_ba_window_size: 60,
@@ -595,6 +598,119 @@ struct WorkingTrack {
     observations: Vec<(usize, usize)>,
     position: Option<Point3<f64>>,
     metric_anchored: bool,
+}
+
+/// Visit only indexed incident tracks; never materialize a frame-pair graph.
+fn covisible_local_frames(
+    newest: usize,
+    cap: usize,
+    incident_tracks: impl IntoIterator<Item = usize>,
+    tracks: &[WorkingTrack],
+    image_assignment: &[(usize, usize)],
+    mut usable: impl FnMut(usize, usize, &WorkingTrack) -> bool,
+) -> HashSet<usize> {
+    if cap < 2 {
+        return HashSet::new();
+    }
+    let mut seen_tracks = HashSet::new();
+    let mut counts = HashMap::<usize, usize>::new();
+    let mut frames = HashSet::new();
+    for id in incident_tracks {
+        if !seen_tracks.insert(id) {
+            continue;
+        }
+        let track = &tracks[id];
+        if track.position.is_none() {
+            continue;
+        }
+        frames.clear();
+        for &(image, keypoint) in &track.observations {
+            if usable(image, keypoint, track) {
+                frames.insert(image_assignment[image].0);
+            }
+        }
+        if !frames.remove(&newest) {
+            continue;
+        }
+        for &frame in &frames {
+            *counts.entry(frame).or_default() += 1;
+        }
+    }
+    // The heap root is the worst retained candidate: low count, then high ID.
+    let mut best = BinaryHeap::new();
+    for (frame, count) in counts {
+        best.push(Reverse((count, Reverse(frame))));
+        if best.len() > cap - 1 {
+            best.pop();
+        }
+    }
+    if best.is_empty() {
+        return HashSet::new();
+    }
+    let mut selected = best
+        .into_iter()
+        .map(|Reverse((_, Reverse(frame)))| frame)
+        .collect::<HashSet<_>>();
+    selected.insert(newest);
+    selected
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_local_ba_frames(
+    rig: &GeneralizedCameraRig,
+    frames: &[RigFrame],
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    image_tracks: &[Vec<(usize, usize)>],
+    image_poses: &[Option<Pose>],
+    tracks: &[WorkingTrack],
+    registration_order: &[usize],
+    config: &RigSfmConfig,
+) -> (HashSet<usize>, usize) {
+    let start = registration_order
+        .len()
+        .saturating_sub(config.local_ba_window_size);
+    if !config.local_ba_covisibility {
+        return (
+            registration_order[start..].iter().copied().collect(),
+            registration_order[start],
+        );
+    }
+    let newest = *registration_order
+        .last()
+        .expect("local BA requires registration");
+    let active = covisible_local_frames(
+        newest,
+        config.local_ba_window_size,
+        frames[newest]
+            .images
+            .iter()
+            .flat_map(|image| image_tracks[image.image_index].iter().map(|&(_, id)| id)),
+        tracks,
+        image_assignment,
+        |image, keypoint, track| {
+            if config.ba_metric_tracks_only && !track.metric_anchored {
+                return false;
+            }
+            let Some(pose) = &image_poses[image] else {
+                return false;
+            };
+            let sensor = &rig.sensors()[image_assignment[image].1];
+            sensor
+                .camera
+                .project(&pose.transform_world_point(&track.position.unwrap()))
+                .is_some_and(|pixel| {
+                    (pixel - features[image].keypoints[keypoint]).norm()
+                        <= 2.0 * config.max_reprojection_error_px
+                })
+        },
+    );
+    let anchor = registration_order
+        .iter()
+        .copied()
+        .find(|frame| active.contains(frame))
+        .unwrap_or(newest);
+    (active, anchor)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1092,34 +1208,38 @@ pub fn incremental_rig_sfm(
                 && config.local_ba_window_size >= 2
                 && registration_order.len() % config.local_ba_every == 0
             {
-                let start = registration_order
-                    .len()
-                    .saturating_sub(config.local_ba_window_size);
-                let active_frames = registration_order[start..]
-                    .iter()
-                    .copied()
-                    .collect::<HashSet<_>>();
-                let anchor = registration_order[start];
+                let (active_frames, anchor) = select_local_ba_frames(
+                    rig,
+                    frames,
+                    features,
+                    &image_assignment,
+                    &image_tracks,
+                    &image_poses,
+                    &tracks,
+                    &registration_order,
+                    config,
+                );
                 let local_ba_config = BaConfig {
                     max_iterations: config.local_ba_iterations,
                     ..config.ba_config
                 };
-                if run_rig_bundle_adjustment(
-                    rig,
-                    features,
-                    &image_assignment,
-                    config,
-                    &active_frames,
-                    anchor,
-                    &local_ba_config,
-                    0,
-                    &[],
-                    false,
-                    &mut frame_poses,
-                    &mut image_poses,
-                    &mut tracks,
-                )?
-                .is_some()
+                if !active_frames.is_empty()
+                    && run_rig_bundle_adjustment(
+                        rig,
+                        features,
+                        &image_assignment,
+                        config,
+                        &active_frames,
+                        anchor,
+                        &local_ba_config,
+                        0,
+                        &[],
+                        false,
+                        &mut frame_poses,
+                        &mut image_poses,
+                        &mut tracks,
+                    )?
+                    .is_some()
                 {
                     work.local_ba_runs += 1;
                     if config.ba_metric_tracks_only {
@@ -2765,34 +2885,38 @@ fn dynamic_grow_from_seed(
             && config.local_ba_window_size >= 2
             && registration_order.len() % config.local_ba_every == 0
         {
-            let start = registration_order
-                .len()
-                .saturating_sub(config.local_ba_window_size);
-            let active_frames = registration_order[start..]
-                .iter()
-                .copied()
-                .collect::<HashSet<_>>();
-            let anchor = registration_order[start];
+            let (active_frames, anchor) = select_local_ba_frames(
+                rig,
+                frames,
+                features,
+                image_assignment,
+                &image_tracks,
+                &image_poses,
+                &tracks,
+                &registration_order,
+                config,
+            );
             let local_ba_config = BaConfig {
                 max_iterations: config.local_ba_iterations,
                 ..config.ba_config
             };
-            if run_rig_bundle_adjustment(
-                rig,
-                features,
-                image_assignment,
-                config,
-                &active_frames,
-                anchor,
-                &local_ba_config,
-                0,
-                &[],
-                false,
-                &mut frame_poses,
-                &mut image_poses,
-                &mut tracks,
-            )?
-            .is_some()
+            if !active_frames.is_empty()
+                && run_rig_bundle_adjustment(
+                    rig,
+                    features,
+                    image_assignment,
+                    config,
+                    &active_frames,
+                    anchor,
+                    &local_ba_config,
+                    0,
+                    &[],
+                    false,
+                    &mut frame_poses,
+                    &mut image_poses,
+                    &mut tracks,
+                )?
+                .is_some()
             {
                 work.local_ba_runs += 1;
                 let affected_tracks = active_frames
@@ -7347,6 +7471,59 @@ mod tests {
     use visloc_vision::pnp::RigSensor;
 
     use super::*;
+
+    #[test]
+    fn covisibility_deduplicates_stereo_votes_and_selects_deterministically() {
+        let assignments = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (3, 0)];
+        let track = |images: &[usize]| WorkingTrack {
+            observations: images.iter().map(|&image| (image, 0)).collect(),
+            position: Some(Point3::new(0.0, 0.0, 1.0)),
+            metric_anchored: true,
+        };
+        let tracks = vec![track(&[0, 1, 2, 3, 4]), track(&[0, 4]), track(&[5])];
+        let selected =
+            covisible_local_frames(0, 2, [0, 0, 1, 2], &tracks, &assignments, |_, _, _| true);
+        assert_eq!(selected, HashSet::from([0, 2]));
+        assert_eq!(
+            selected,
+            covisible_local_frames(0, 2, [2, 1, 0], &tracks, &assignments, |_, _, _| true)
+        );
+        assert_eq!(
+            covisible_local_frames(0, 2, [0], &tracks, &assignments, |_, _, _| true),
+            HashSet::from([0, 1])
+        );
+        assert!(
+            covisible_local_frames(0, 40, [0, 1], &tracks, &assignments, |image, _, _| image
+                > 1)
+            .is_empty()
+        );
+        for cap in [0, 1] {
+            assert!(
+                covisible_local_frames(0, cap, [0, 1], &tracks, &assignments, |_, _, _| true)
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn covisibility_long_track_keeps_bounded_window() {
+        let assignments = (0..100_000).map(|frame| (frame, 0)).collect::<Vec<_>>();
+        let mut tracks = vec![WorkingTrack {
+            observations: (0..100_000).map(|image| (image, 0)).collect(),
+            position: Some(Point3::new(0.0, 0.0, 1.0)),
+            metric_anchored: true,
+        }];
+        let selected =
+            covisible_local_frames(99_999, 40, [0], &tracks, &assignments, |_, _, _| true);
+        assert_eq!(selected.len(), 40);
+        assert!(selected.contains(&99_999));
+        assert!((0..39).all(|frame| selected.contains(&frame)));
+        tracks[0].position = None;
+        assert!(
+            covisible_local_frames(99_999, 40, [0], &tracks, &assignments, |_, _, _| true)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn registration_trace_line_formats_camera_center_precisely() {

@@ -1,6 +1,11 @@
 # Bounded covisibility local BA experiment
 
-Status: design frozen before measurement, not implemented or promoted.
+Status: opt-in implementation added, not benchmarked or promoted.
+`--local-ba-covisibility` selects the same helper in legacy and dynamic paths.
+Initial selector tests cover stereo deduplication, ties, input order, caps,
+unusable/unpositioned tracks and a100k-frame long track. CLI check passes.
+Remaining tests include native fixed-state behavior, oldest selected anchor and
+metric-only integration; all model parity and performance gates remain open.
 
 ## Evidence and hypothesis
 
@@ -77,3 +82,5 @@ Disk preflight is mandatory before build and each run: current filesystem has
 under100MiB available. Preserve input datasets and prior evidence. Reclaim only
 verified duplicate experiment output storage or obtain additional capacity;
 never overwrite existing hardlinked model outputs.
+The strong-boundary candidate-b six model files were rechecked with `cmp` and
+hardlinked to candidate-a, recovering about100MiB while preserving paths/bytes.
