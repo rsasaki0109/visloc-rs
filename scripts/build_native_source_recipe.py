@@ -59,7 +59,8 @@ def build(evidence_root):
     if len(paths) != 21:
         raise ValueError('Expected exactly 21 source executions')
     executions = [compile_execution(path) for path in paths]
-    bindings = json.loads((evidence_root / 'm8-openloris-regenerated-nodes-v1.json').read_text())['audit']['rows']
+    binding_bytes = (evidence_root / 'm8-openloris-regenerated-nodes-v1.json').read_bytes()
+    bindings = json.loads(binding_bytes)['audit']['rows']
     by_evidence = {row['evidence']: row for row in executions}
     nodes = []
     for row in bindings:
@@ -73,6 +74,7 @@ def build(evidence_root):
     if len(nodes) != 23 or len({row['node'] for row in nodes}) != 23:
         raise ValueError('Expected 23 unique atlas nodes')
     return {'schema': 'native-source-recipe-v1', 'executions': executions, 'nodes': nodes,
+            'node_evidence_sha256': hashlib.sha256(binding_bytes).hexdigest(),
             'scope': 'Non-executing source-mapping templates only. Bind and validate newly generated inputs, binary hash, environment and resource limits before execution. Not a complete E2E DAG or a passing quality result.'}
 
 

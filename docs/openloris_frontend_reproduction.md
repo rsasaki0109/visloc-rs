@@ -54,6 +54,24 @@ process tree with wall/RSS accounting, and evaluate the unchanged COLMAP gates.
 The earlier 1,250-image extraction and synthetic bank-only 100k tests do not
 close full10k extraction, whole-pipeline restart or full SfM100k I/O gates.
 
+The source-mapping portion can now be compiled without executing shell snippets:
+
+```sh
+python3 scripts/build_native_source_recipe.py
+```
+
+This emits 21 argv templates and 23 atlas node bindings from the successful
+source reproduction evidence. Binary/source identities, evidence hashes,
+timeouts and expected model hashes are retained. Node model hashes must agree
+with their producing source evidence. The source4200 debug environment is
+preserved explicitly; apply environment removals before overrides. All five
+input path flags and the output directory become named placeholders; an
+unconverted absolute argv path is rejected. This is a recipe compiler, not a
+runner: it does not validate a live binary, extract features, execute mapping,
+enforce RSS, or establish input provenance. The future executor must bind inputs
+to outputs of the same cold run and verify them before launch. Expected model
+hashes are post-execution comparison data, never reconstruction inputs.
+
 Disk cleanup on 2026-09-09 restored about 21 GiB of root free space before the
 next replay. Do not silently move measured outputs to memory-backed storage or
 discard retained evidence to obtain a pass.
