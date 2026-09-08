@@ -117,3 +117,10 @@ Do not extrapolate smaller-tier speed observations to10k. Repeats remain pending
 Parity preserves the failing9936-image/4968-frame baseline, not COLMAP-quality
 success. Frontend is excluded. Full evidence and pending commands are in
 `benchmarks/electro/m8-openloris-10000-retry-reuse-v1.json`.
+
+Full10k repetitions complete: off102.32/99.99s versus on112.67/113.79s.
+Both candidate runs are slower than both controls, despite all six model files
+matching Legacy in every run. RSS off1274584/1274644KiB versus on1274380/1274444KiB
+does not establish meaningful memory reduction. Do not promote this policy as
+a10k speedup; keep default off. Smaller-tier observations do not override this
+negative result. The retained quality baseline still fails COLMAP gates.

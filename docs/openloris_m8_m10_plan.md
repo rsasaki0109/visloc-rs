@@ -34,6 +34,13 @@ proof. Synthetic parity now explicitly requires rejected→accepted→rejected
 transitions and full iteration/final-state equality. Next verify5k/10k parity/resources,
 then revisit unresolved accuracy and full-pipeline gates without promoting
 this experimental policy prematurely.
+Update: derived5k repeats match model bytes but wall ranges overlap. Full10k
+also matches all model bytes in four runs, but ON112.67/113.79s is slower than
+OFF102.32/99.99s. RSS is essentially unchanged (~1.22GiB). Keep reuse default
+off: this candidate does not meet the10k speed objective. Do not spend further
+unchanged tier replays on it; examine the overhead only with a bounded diagnosis,
+and retain unresolved quality/native-E2E work as the critical path. See
+`m8-openloris-10000-retry-reuse-v1.json` for the negative evidence.
 Do not replace the unresolved quality work with cache tuning: the retained
 atlas still fails the frozen COLMAP RMSE gate, and no final-tier/restart/100k
 or README performance promotion follows from these phase optimizations.

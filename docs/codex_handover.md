@@ -27,6 +27,9 @@
 > OFF102.32秒/RSS1274584KiB、ON112.67秒/RSS1274380KiB。候補が遅い、反復未実行。
 > `m8-openloris-10000-retry-reuse-v1.json`に全コマンド/結果。candidate-b/control-repeatが次。
 > 保存binaryは引き続きrig-0466499。測定稼働なし。9936画像基準の品質未達も不変。
+> 10k反復完了: OFF102.32/99.99秒、ON112.67/113.79秒。全4run全6モデルbytes過去一致。
+> 候補2回とも対照より遅い。既定OFF維持、同条件の追加反復は不要。品質/E2E未達。
+> 証跡と計画更新済み。測定プロセスなし。次はPR整理と限定的な遅延原因診断/品質課題。
 
 > 最新: `perf/m8-stream-connectivity-unions`。PR108/109/110は最終headのCI9件成功後merge済み。
 > main最新merge `14d9b50661e2df6d8eb0c1743e815adfa6d62f9d`（PR110）。
