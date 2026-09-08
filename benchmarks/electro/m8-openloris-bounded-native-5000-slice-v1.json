@@ -68,6 +68,6 @@
     "Derived prefix of full 10k snapshot, not independent 5k native end-to-end.",
     "420 direct selections and zero QR selections per policy run; large QR quality remains untested here.",
     "Timing is not a certified speedup or COLMAP comparison.",
-    "Independent geometry audit pending; trajectory outliers require diagnosis without GT-guided threshold tuning."
+    "Independent geometry audit passes support/depth/fixed extrinsics, but final track components have 2495/2/2/1 frames; investigate trajectory outliers without GT-guided threshold tuning."
   ]
 }
