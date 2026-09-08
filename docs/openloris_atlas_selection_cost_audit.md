@@ -111,3 +111,50 @@ Any reuse experiment must first measure rejected-step assembly cost, preserve
 the LM iteration/acceptance trace exactly, limit additional state to an explicit
 bounded representation, and invalidate after accepted updates. Do not implement
 a blanket clone cache or alter damping to obtain more accepted steps.
+
+## Compact connectivity candidate
+
+The candidate replaces per-observation supported-set insertion with image/frame
+boolean flags, plus one image-to-compact-slot lookup. It unions each track's
+frames as observations are visited, removing per-track temporary tree sets.
+Duplicate observations merely repeat an idempotent union. Internal DSU roots
+can differ, but component IDs are assigned by ascending supported frame order,
+so the public support sets and component mapping must remain identical.
+All candidate observations are still visited; support-loss/split gates remain.
+Temporary extra state is O(images + frames), never frame-pair or landmark-pair
+state. The old implementation remains a test oracle.64 variants of deletions,
+replacement tracks, reversed observations and duplicate keys compare exactly;
+unknown-image errors also agree. All52 example tests pass. No measured speedup
+is claimed yet: repeat both retained components and verify model bytes/RSS.
+
+Compact candidate tail: all six model files equal the historical output;
+connectivity0.10246s versus preceding control0.31470s, wall12.15s versus14.46s,
+RSS77916 versus77848KiB. These are single-run observations, not a certified
+overall speedup or memory reduction. Main also preserves all six model files:
+connectivity9.55577s versus27.32571s, wall151.46s versus164.04s,
+RSS524744 versus525228KiB. Candidate main repeat is running, followed by the
+retained control repeat. Do not infer improved trajectory: model bytes match
+the still-RMSE-failing atlas baseline exactly.
+Evidence: `benchmarks/electro/m8-openloris-compact-connectivity-v1.json`.
+
+Serial repeats are complete and all six model files in every run match the
+historical models. Main connectivity: control27.33/31.70s, compact9.56/10.47s;
+main wall: control164.04/185.19s, compact151.46/158.84s. Tail connectivity:
+control0.315/0.240s, compact0.102/0.106s. Tail wall variation is larger than
+the isolated saving (control repeat10.69s is faster overall than compact's
+first12.15s), so do not claim uniform whole-pipeline speed improvement.
+The repeated phase reduction supports this equivalent-result optimization;
+it does not establish lower trajectory error, generalization, a memory-saving
+claim, or native end-to-end COLMAP superiority.
+
+## Upstream cost is not zero
+
+Read-only provenance audit matches21 of23 retained source-window models to
+the old shifted-bridge manifest, including all three model-file hashes per
+node. Their logged mapper durations sum to628.665215s. Nodes27 and28 are not
+in that manifest and remain unresolved. This is a historical mapper subtotal,
+not serial wall or native E2E: frontend, the two missing sources, alignment,
+integration/refinement, publication and possible overlap accounting remain.
+Evidence: `benchmarks/electro/m8-openloris-atlas-source-cost-v1.json`.
+Do not compare the compact integration's151–159s directly against COLMAP's
+complete mapper as though saved source windows were free.

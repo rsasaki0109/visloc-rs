@@ -2521,6 +2521,80 @@ fn support_connectivity_for_landmarks(
         .map(|(index, frame_id)| (*frame_id, index))
         .collect::<BTreeMap<_, _>>();
     let mut dsu = DiagnosticDsu::new(frame_ids.len());
+    // Compact per-image lookup and flags avoid repeated tree insertions for
+    // every observation. No landmark incidence or frame-pair graph is retained.
+    let image_slots = images
+        .iter()
+        .enumerate()
+        .map(|(slot, (&id, image))| (id, (slot, frame_indices[&image.atlas.frame_id])))
+        .collect::<BTreeMap<_, _>>();
+    let mut image_supported = vec![false; images.len()];
+    let mut frame_supported = vec![false; frame_ids.len()];
+    for (index, baseline) in baseline_landmarks.iter().enumerate() {
+        if removed_track_ids.contains(&baseline.track_id) {
+            continue;
+        }
+        let keys = replacements
+            .get(&index)
+            .map(|landmark| landmark.observations.as_slice())
+            .unwrap_or(&baseline.observations);
+        let mut first_frame = None;
+        for key in keys {
+            let &(image_slot, frame_slot) = image_slots
+                .get(&key.global_image_id)
+                .ok_or_else(|| "connectivity track references unknown image".to_owned())?;
+            image_supported[image_slot] = true;
+            frame_supported[frame_slot] = true;
+            if let Some(first) = first_frame {
+                dsu.union(first, frame_slot);
+            } else {
+                first_frame = Some(frame_slot);
+            }
+        }
+    }
+    let supported_images = images
+        .keys()
+        .enumerate()
+        .filter_map(|(slot, &id)| image_supported[slot].then_some(id))
+        .collect();
+    let supported_frames = frame_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &id)| frame_supported[slot].then_some(id))
+        .collect::<BTreeSet<_>>();
+    let mut root_to_component = BTreeMap::<usize, usize>::new();
+    let mut frame_components = BTreeMap::new();
+    for frame_id in &supported_frames {
+        let frame_index = *frame_indices
+            .get(frame_id)
+            .ok_or_else(|| "supported connectivity frame index is missing".to_owned())?;
+        let root = dsu.find(frame_index);
+        let next = root_to_component.len();
+        let component = *root_to_component.entry(root).or_insert(next);
+        frame_components.insert(*frame_id, component);
+    }
+    Ok(SupportConnectivity {
+        supported_images,
+        supported_frames,
+        component_count: root_to_component.len(),
+        frame_components,
+    })
+}
+
+#[cfg(test)]
+fn support_connectivity_reference(
+    baseline_landmarks: &[LandmarkOutput],
+    replacements: &BTreeMap<usize, LandmarkOutput>,
+    removed_track_ids: &BTreeSet<usize>,
+    images: &BTreeMap<u64, GlobalImage>,
+) -> Result<SupportConnectivity, String> {
+    let frame_ids = diagnostic_frame_ids(images);
+    let frame_indices = frame_ids
+        .iter()
+        .enumerate()
+        .map(|(index, frame_id)| (*frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut dsu = DiagnosticDsu::new(frame_ids.len());
     let mut supported_images = BTreeSet::new();
     let mut supported_frames = BTreeSet::new();
     for (index, baseline) in baseline_landmarks.iter().enumerate() {
@@ -8404,6 +8478,56 @@ mod tests {
             .all(|track| track.observations.len() == 6));
         assert!(first.2 <= JOINT_BA_MAX_REFERENCED_FRAMES);
         assert!(first.3 <= JOINT_BA_MAX_FREE_FRAMES);
+    }
+
+    #[test]
+    fn compact_connectivity_matches_tree_reference_under_deletions_and_permutations() {
+        let (_, _, images, _, landmarks, _) = joint_ba_fixture();
+        for mask in 0..64usize {
+            let mut varied = landmarks.clone();
+            for (index, landmark) in varied.iter_mut().enumerate() {
+                landmark
+                    .observations
+                    .retain(|key| ((key.global_image_id as usize + index) & mask) == 0);
+                if mask % 2 == 0 {
+                    landmark.observations.reverse();
+                }
+                if let Some(key) = landmark.observations.first().copied() {
+                    landmark.observations.push(key);
+                }
+            }
+            let removed = varied
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| (i + mask) % 5 == 0)
+                .map(|(_, l)| l.track_id)
+                .collect::<BTreeSet<_>>();
+            let replacements = varied
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 == 0)
+                .map(|(i, l)| {
+                    let mut l = l.clone();
+                    l.observations.truncate(1);
+                    (i, l)
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                support_connectivity_for_landmarks(&varied, &replacements, &removed, &images),
+                support_connectivity_reference(&varied, &replacements, &removed, &images)
+            );
+        }
+        let mut malformed = landmarks.clone();
+        malformed[0].observations[0].global_image_id = u64::MAX;
+        assert_eq!(
+            support_connectivity_for_landmarks(
+                &malformed,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &images
+            ),
+            support_connectivity_reference(&malformed, &BTreeMap::new(), &BTreeSet::new(), &images)
+        );
     }
 
     #[test]
