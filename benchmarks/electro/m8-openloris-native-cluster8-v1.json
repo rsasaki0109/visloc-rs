@@ -1,0 +1,446 @@
+{
+  "schema": "visloc_native_cluster8_result_v1",
+  "status": "failed_native_quality_not_promoted",
+  "certificate": {
+    "schema": "visloc_native_cluster8_certificate_v1",
+    "commit": "8ba580c35f21ed76d20092a7fe4d076f10af7b48",
+    "binary_sha256": "c045aef8315b954231a29d0e223ade9918c2b27c6f8911776a4101318e0a133f",
+    "bundle_sha256": "92fefe6906b17a8fdeaef5e603d958cb9521130962608e9d185f5f047680d685",
+    "rig_source_sha256": "1d87da85f705727f5215a3ce3e54988780a859a4c71641b963b4d0624e025610",
+    "driver_sha256": "87886a4396e62a0611572e6915ceb92b8ac03b2af06350a28d0d7016127b08d3",
+    "feature_tree_sha256": "4de9d6ae8da31d77fab32fee09507a9aee1d8bcf10312255f5ef065a31055e5d",
+    "rig_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "build_command": "cargo build --release --example generalized_rig_sfm",
+    "build_exit": 0,
+    "build_seconds": 47.11,
+    "before_runs": true,
+    "root_rig_tests_passed": 30
+  },
+  "commands": {
+    "legacy": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy.time\nenv -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy/model > /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy.log 2>&1",
+    "strict": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict.time\nenv -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --ba-backend matrix-free --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict/model > /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict.log 2>&1",
+    "cluster8-a": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a.time\nenv -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --ba-backend matrix-free-cluster8 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model > /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a.log 2>&1",
+    "cluster8-b": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b.time\nenv -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --ba-backend matrix-free-cluster8 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b/model > /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b.log 2>&1"
+  },
+  "audit": {
+    "runs": {
+      "legacy": {
+        "wall_seconds": 4.87,
+        "mapper_seconds": 4.302785,
+        "peak_rss_kib": 81948,
+        "backend_calls": 0,
+        "backend_iterations": 0,
+        "accepted_steps": 0,
+        "linear_failures": 0,
+        "zero_accepted_calls": 0,
+        "used_backends": [],
+        "model_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+          "points3D.txt": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af"
+        },
+        "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62372 KiB\nrig-replay BA: observations=120217 cost=267541.992667814->121458.389207945 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2658 observations=27716 mean_reprojection_px=0.671637382 seed_frame=26 mapper_seconds=4.302785 total_seconds=4.854039 VmHWM_KiB=82108 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=39217 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=29751 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2607 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy/model\n",
+        "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/legacy/model\"\n\tUser time (seconds): 4.77\n\tSystem time (seconds): 0.09\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:04.87\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 81948\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23487\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 7\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7288\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      "strict": {
+        "wall_seconds": 6.59,
+        "mapper_seconds": 6.047962,
+        "peak_rss_kib": 82448,
+        "backend_calls": 86,
+        "backend_iterations": 688,
+        "accepted_steps": 71,
+        "linear_failures": 589,
+        "zero_accepted_calls": 52,
+        "used_backends": [
+          "matrix-free"
+        ],
+        "model_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "b26c183d752e4c8a3d5a0fb3ea067b7881ccb2f626f6bb663d813b74aeb56750",
+          "points3D.txt": "cc8d1327f493bf154ee39d602709d1c90fda012f79e3e80cf737b3f45199c1ec"
+        },
+        "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62408 KiB\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=5 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=2 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=2 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=4 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=7 pcg_failures=1\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=2 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=1 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-replay BA: observations=123045 cost=317975.898557338->235126.310879321 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2796 observations=28039 mean_reprojection_px=0.725010589 seed_frame=26 mapper_seconds=6.047962 total_seconds=6.580931 VmHWM_KiB=82448 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=38285 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=30077 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2732 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict/model\n",
+        "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --ba-backend matrix-free --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/strict/model\"\n\tUser time (seconds): 6.51\n\tSystem time (seconds): 0.07\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:06.59\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 82448\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23597\n\tVoluntary context switches: 3\n\tInvoluntary context switches: 13\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7336\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      "cluster8-a": {
+        "wall_seconds": 6.85,
+        "mapper_seconds": 6.283087,
+        "peak_rss_kib": 82476,
+        "backend_calls": 86,
+        "backend_iterations": 688,
+        "accepted_steps": 59,
+        "linear_failures": 587,
+        "zero_accepted_calls": 54,
+        "used_backends": [
+          "matrix-free-cluster8"
+        ],
+        "model_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "ae68dd9d76f9605478e147b3547ea7043e4fd04563408eb1756dc244c8295939",
+          "points3D.txt": "49ca22e21cb12569e373e8d2d01dda797a8dd0d3a92ee276a3bad58b5d2b3553"
+        },
+        "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62364 KiB\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=7 pcg_failures=1\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=4 pcg_failures=4\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=2\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=1\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-replay BA: observations=125957 cost=387953.984485529->356783.042164478 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2880 observations=28825 mean_reprojection_px=0.760114340 seed_frame=26 mapper_seconds=6.283087 total_seconds=6.837440 VmHWM_KiB=82520 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=37947 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=30528 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2845 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model\n",
+        "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --ba-backend matrix-free-cluster8 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model\"\n\tUser time (seconds): 6.74\n\tSystem time (seconds): 0.10\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:06.85\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 82476\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23620\n\tVoluntary context switches: 3\n\tInvoluntary context switches: 10\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7360\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      "cluster8-b": {
+        "wall_seconds": 7.01,
+        "mapper_seconds": 6.454014,
+        "peak_rss_kib": 82492,
+        "backend_calls": 86,
+        "backend_iterations": 688,
+        "accepted_steps": 59,
+        "linear_failures": 587,
+        "zero_accepted_calls": 54,
+        "used_backends": [
+          "matrix-free-cluster8"
+        ],
+        "model_sha256": {
+          "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+          "images.txt": "ae68dd9d76f9605478e147b3547ea7043e4fd04563408eb1756dc244c8295939",
+          "points3D.txt": "49ca22e21cb12569e373e8d2d01dda797a8dd0d3a92ee276a3bad58b5d2b3553"
+        },
+        "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62404 KiB\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=8 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=7 pcg_failures=1\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=4 pcg_failures=4\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=5\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=6\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=2 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=2\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=1\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=0\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=3\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=1 pcg_failures=7\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-ba-backend: requested=matrix-free used=matrix-free-cluster8 eligibility=eligible iterations=8 accepted=0 pcg_failures=8\nrig-replay BA: observations=125957 cost=387953.984485529->356783.042164478 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2880 observations=28825 mean_reprojection_px=0.760114340 seed_frame=26 mapper_seconds=6.454014 total_seconds=7.008314 VmHWM_KiB=82616 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=37947 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=30528 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2845 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b/model\n",
+        "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/rig-8ba580c --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --ba-backend matrix-free-cluster8 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b/model\"\n\tUser time (seconds): 6.92\n\tSystem time (seconds): 0.09\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:07.01\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 82492\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23618\n\tVoluntary context switches: 3\n\tInvoluntary context switches: 28\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7360\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      }
+    },
+    "controls_exact_to_PR93": true,
+    "repeat_model_bytes_exact": true,
+    "image_identity_ordered_xy_and_calibration_exact": true
+  },
+  "audit_program": "import json,hashlib,re\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1\")\nold=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-native-rig-matrix-free-v1\")\ndef identities(model):\n out={}\n with (model/\"images.txt\").open() as stream:\n  for line in stream:\n   if not line.strip() or line.startswith(\"#\"):continue\n   row=line.split(); fields=next(stream).split()\n   assert len(row)==10 and len(fields)%3==0 and row[0] not in out\n   out[row[0]]=(row[8:],tuple((fields[i],fields[i+1]) for i in range(0,len(fields),3)))\n return out\nreference=identities(root/\"legacy/model\")\nout={}\nfor arm in (\"legacy\",\"strict\",\"cluster8-a\",\"cluster8-b\"):\n model=root/arm/\"model\"; log=(root/(arm+\".log\")).read_text();timing=(root/(arm+\".time\")).read_text()\n assert \"Exit status: 0\" in timing\n assert identities(model)==reference\n assert (model/\"cameras.txt\").read_bytes()==(root/\"legacy/model/cameras.txt\").read_bytes()\n rows=re.findall(r\"rig-ba-backend: requested=matrix-free used=([^ ]+) eligibility=eligible iterations=(\\d+) accepted=(\\d+) pcg_failures=(\\d+)\",log)\n parts=list(map(float,re.search(r\"Elapsed \\(wall clock\\) time \\(h:mm:ss or m:ss\\):\\s*(\\S+)\",timing)[1].split(\":\")));wall=0\n for part in parts:wall=wall*60+part\n out[arm]=dict(wall_seconds=wall,mapper_seconds=float(re.search(r\"mapper_seconds=([0-9.]+)\",log)[1]),peak_rss_kib=int(re.search(r\"Maximum resident set size \\(kbytes\\):\\s*(\\d+)\",timing)[1]),backend_calls=len(rows),backend_iterations=sum(int(r[1]) for r in rows),accepted_steps=sum(int(r[2]) for r in rows),linear_failures=sum(int(r[3]) for r in rows),zero_accepted_calls=sum(int(r[2])==0 for r in rows),used_backends=sorted(set(r[0] for r in rows)),model_sha256={name:hashlib.sha256((model/name).read_bytes()).hexdigest() for name in (\"cameras.txt\",\"images.txt\",\"points3D.txt\")},log=log,time_output=timing)\nassert out[\"cluster8-a\"][\"model_sha256\"]==out[\"cluster8-b\"][\"model_sha256\"]\nfor arm,previous in [(\"legacy\",\"candidate-legacy\"),(\"strict\",\"matrix-free-a\")]:\n for name in (\"cameras.txt\",\"images.txt\",\"points3D.txt\"):\n  assert (root/arm/\"model\"/name).read_bytes()==(old/previous/\"model\"/name).read_bytes()\nprint(json.dumps(dict(runs=out,controls_exact_to_PR93=True,repeat_model_bytes_exact=True,image_identity_ordered_xy_and_calibration_exact=True)))\n",
+  "geometry": [
+    {
+      "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model",
+      "image_poses": 1000,
+      "supported_images": 1000,
+      "unsupported_image_ids": [],
+      "landmarks": 2880,
+      "observations": 28825,
+      "mean_reprojection_px": 0.7601143400352897,
+      "observation_weighted_mean_reprojection_px": 0.7601143400352897,
+      "point_weighted_mean_reprojection_px": 0.7876806979356039,
+      "max_track_mean_reprojection_px": 3.77723303204491,
+      "max_reprojection_px": 3.9990124926960617,
+      "max_stored_mean_difference_px": 3.77723303204491,
+      "nonpositive_depth_observations": 0,
+      "tracks_with_multiple_keypoints_in_one_image": 0,
+      "excess_same_image_track_observations": 0,
+      "bidirectional_references_valid": true,
+      "rig": {
+        "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+        "rig_frames": 500,
+        "supported_rig_frames": 500,
+        "unsupported_rig_frame_ids": [],
+        "max_inferred_rig_center_disagreement_m": 3.372159047155424e-12,
+        "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+        "fixed_sensor_extrinsics_valid": true,
+        "track_connected_components": 1,
+        "track_connected_component_sizes": [
+          500
+        ],
+        "track_connected_component_frame_ranges": [
+          [
+            0,
+            499
+          ]
+        ]
+      }
+    },
+    {
+      "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-b/model",
+      "image_poses": 1000,
+      "supported_images": 1000,
+      "unsupported_image_ids": [],
+      "landmarks": 2880,
+      "observations": 28825,
+      "mean_reprojection_px": 0.7601143400352897,
+      "observation_weighted_mean_reprojection_px": 0.7601143400352897,
+      "point_weighted_mean_reprojection_px": 0.7876806979356039,
+      "max_track_mean_reprojection_px": 3.77723303204491,
+      "max_reprojection_px": 3.9990124926960617,
+      "max_stored_mean_difference_px": 3.77723303204491,
+      "nonpositive_depth_observations": 0,
+      "tracks_with_multiple_keypoints_in_one_image": 0,
+      "excess_same_image_track_observations": 0,
+      "bidirectional_references_valid": true,
+      "rig": {
+        "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+        "rig_frames": 500,
+        "supported_rig_frames": 500,
+        "unsupported_rig_frame_ids": [],
+        "max_inferred_rig_center_disagreement_m": 3.372159047155424e-12,
+        "max_inferred_rig_rotation_disagreement_deg": 0.0000012074182697257333,
+        "fixed_sensor_extrinsics_valid": true,
+        "track_connected_components": 1,
+        "track_connected_component_sizes": [
+          500
+        ],
+        "track_connected_component_frame_ranges": [
+          [
+            0,
+            499
+          ]
+        ]
+      }
+    }
+  ],
+  "geometry_command": "python3 scripts/audit_colmap_pinhole_model.py /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+  "score": {
+    "component_weighted_max_m": 0.6514682051673274,
+    "component_weighted_median_m": 0.14770108066384274,
+    "component_weighted_p95_m": 0.43240014340297955,
+    "component_weighted_rmse_m": 0.22373758589168238,
+    "components": [
+      {
+        "gt_scored": 308,
+        "images_txt": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model/images.txt",
+        "images_txt_sha256": "ae68dd9d76f9605478e147b3547ea7043e4fd04563408eb1756dc244c8295939",
+        "max_m": 0.6514682051673274,
+        "median_m": 0.14770108066384274,
+        "p95_m": 0.43240014340297955,
+        "reference_extent_m": 1.9718678959594034,
+        "registered": 1000,
+        "relative_rmse": 0.11346479464985856,
+        "rmse_m": 0.22373758589168238,
+        "sim3_scale": 1.8404137845458641,
+        "trajectory_segments": [
+          {
+            "images": 32,
+            "max_m": 0.14945115336731374,
+            "median_m": 0.14218839334042052,
+            "p95_m": 0.14837256806730648,
+            "rmse_m": 0.14119686980454807,
+            "segment": 0,
+            "timestamp_end": 1560000015.556828,
+            "timestamp_start": 1560000015.056853
+          },
+          {
+            "images": 30,
+            "max_m": 0.1378671547422958,
+            "median_m": 0.1354084186783506,
+            "p95_m": 0.1374018198377176,
+            "rmse_m": 0.13385819702482882,
+            "segment": 1,
+            "timestamp_end": 1560000016.056906,
+            "timestamp_start": 1560000015.590162
+          },
+          {
+            "images": 32,
+            "max_m": 0.11850143470428433,
+            "median_m": 0.06296376275822999,
+            "p95_m": 0.11262004950204009,
+            "rmse_m": 0.07152341863407984,
+            "segment": 2,
+            "timestamp_end": 1560000016.590147,
+            "timestamp_start": 1560000016.09024
+          },
+          {
+            "images": 30,
+            "max_m": 0.1768249851264915,
+            "median_m": 0.09727647344544925,
+            "p95_m": 0.16024932672914144,
+            "rmse_m": 0.10911545126481817,
+            "segment": 3,
+            "timestamp_end": 1560000017.09023,
+            "timestamp_start": 1560000016.623481
+          },
+          {
+            "images": 30,
+            "max_m": 0.26779212109174383,
+            "median_m": 0.22910354157708052,
+            "p95_m": 0.2630343887292521,
+            "rmse_m": 0.22634164399553047,
+            "segment": 4,
+            "timestamp_end": 1560000017.590167,
+            "timestamp_start": 1560000017.123563
+          },
+          {
+            "images": 32,
+            "max_m": 0.29508254036479103,
+            "median_m": 0.27590422374786816,
+            "p95_m": 0.29218777071740154,
+            "rmse_m": 0.2754570692112095,
+            "segment": 5,
+            "timestamp_end": 1560000018.123552,
+            "timestamp_start": 1560000017.623501
+          },
+          {
+            "images": 30,
+            "max_m": 0.2716360423358669,
+            "median_m": 0.23108012554029148,
+            "p95_m": 0.26558046133132457,
+            "rmse_m": 0.22980011043024837,
+            "segment": 6,
+            "timestamp_end": 1560000018.623534,
+            "timestamp_start": 1560000018.156885
+          },
+          {
+            "images": 30,
+            "max_m": 0.19718923061436328,
+            "median_m": 0.07576799083680585,
+            "p95_m": 0.18465265801847222,
+            "rmse_m": 0.10419640304266035,
+            "segment": 7,
+            "timestamp_end": 1560000019.123582,
+            "timestamp_start": 1560000018.656868
+          },
+          {
+            "images": 32,
+            "max_m": 0.36064211262441226,
+            "median_m": 0.1759417370438333,
+            "p95_m": 0.33988083156493304,
+            "rmse_m": 0.2131763797187341,
+            "segment": 8,
+            "timestamp_end": 1560000019.666914,
+            "timestamp_start": 1560000019.156915
+          },
+          {
+            "images": 30,
+            "max_m": 0.6514682051673274,
+            "median_m": 0.44077552407094056,
+            "p95_m": 0.6080522522116295,
+            "rmse_m": 0.4616093294731376,
+            "segment": 9,
+            "timestamp_end": 1560000020.166894,
+            "timestamp_start": 1560000019.700247
+          }
+        ]
+      }
+    ],
+    "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "gt_interpolated_images": 308,
+    "gt_scored_images": 308,
+    "image_aliases": null,
+    "image_aliases_sha256": null,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+    "manifest_images": 1000,
+    "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "max_interpolation_gap_seconds": 0.1,
+    "models": 1,
+    "registered_images": 1000,
+    "schema": "visloc_openloris_model_score_v1",
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "trajectory_segments": [
+      {
+        "images": 32,
+        "max_m": 0.14945115336731374,
+        "median_m": 0.14218839334042052,
+        "p95_m": 0.14837256806730648,
+        "rmse_m": 0.14119686980454807,
+        "segment": 0,
+        "timestamp_end": 1560000015.556828,
+        "timestamp_start": 1560000015.056853
+      },
+      {
+        "images": 30,
+        "max_m": 0.1378671547422958,
+        "median_m": 0.1354084186783506,
+        "p95_m": 0.1374018198377176,
+        "rmse_m": 0.13385819702482882,
+        "segment": 1,
+        "timestamp_end": 1560000016.056906,
+        "timestamp_start": 1560000015.590162
+      },
+      {
+        "images": 32,
+        "max_m": 0.11850143470428433,
+        "median_m": 0.06296376275822999,
+        "p95_m": 0.11262004950204009,
+        "rmse_m": 0.07152341863407984,
+        "segment": 2,
+        "timestamp_end": 1560000016.590147,
+        "timestamp_start": 1560000016.09024
+      },
+      {
+        "images": 30,
+        "max_m": 0.1768249851264915,
+        "median_m": 0.09727647344544925,
+        "p95_m": 0.16024932672914144,
+        "rmse_m": 0.10911545126481817,
+        "segment": 3,
+        "timestamp_end": 1560000017.09023,
+        "timestamp_start": 1560000016.623481
+      },
+      {
+        "images": 30,
+        "max_m": 0.26779212109174383,
+        "median_m": 0.22910354157708052,
+        "p95_m": 0.2630343887292521,
+        "rmse_m": 0.22634164399553047,
+        "segment": 4,
+        "timestamp_end": 1560000017.590167,
+        "timestamp_start": 1560000017.123563
+      },
+      {
+        "images": 32,
+        "max_m": 0.29508254036479103,
+        "median_m": 0.27590422374786816,
+        "p95_m": 0.29218777071740154,
+        "rmse_m": 0.2754570692112095,
+        "segment": 5,
+        "timestamp_end": 1560000018.123552,
+        "timestamp_start": 1560000017.623501
+      },
+      {
+        "images": 30,
+        "max_m": 0.2716360423358669,
+        "median_m": 0.23108012554029148,
+        "p95_m": 0.26558046133132457,
+        "rmse_m": 0.22980011043024837,
+        "segment": 6,
+        "timestamp_end": 1560000018.623534,
+        "timestamp_start": 1560000018.156885
+      },
+      {
+        "images": 30,
+        "max_m": 0.19718923061436328,
+        "median_m": 0.07576799083680585,
+        "p95_m": 0.18465265801847222,
+        "rmse_m": 0.10419640304266035,
+        "segment": 7,
+        "timestamp_end": 1560000019.123582,
+        "timestamp_start": 1560000018.656868
+      },
+      {
+        "images": 32,
+        "max_m": 0.36064211262441226,
+        "median_m": 0.1759417370438333,
+        "p95_m": 0.33988083156493304,
+        "rmse_m": 0.2131763797187341,
+        "segment": 8,
+        "timestamp_end": 1560000019.666914,
+        "timestamp_start": 1560000019.156915
+      },
+      {
+        "images": 30,
+        "max_m": 0.6514682051673274,
+        "median_m": 0.44077552407094056,
+        "p95_m": 0.6080522522116295,
+        "rmse_m": 0.4616093294731376,
+        "segment": 9,
+        "timestamp_end": 1560000020.166894,
+        "timestamp_start": 1560000019.700247
+      }
+    ],
+    "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+  },
+  "score_command": "python3 scripts/score_openloris_model.py --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-native-cluster8-v1/cluster8-a/model/images.txt --manifest /home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json --ground-truth /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+  "gates": {
+    "rmse_max_m": 0.02269532080131782,
+    "p95_max_m": 0.03777877644562742,
+    "raw_mean_max_px": 0.6716373819326764
+  },
+  "interpretation": [
+    "Both old backend outputs are byte-exact to PR93; new candidate is deterministic across two runs.",
+    "All native quality limits fail. Registration/support/calibration/depth/ordered keypoints pass; track memberships and geometry change.",
+    "Linear failures change from589 to587, while accepted steps fall71 to59 and zero-accepted calls increase52 to54. These are separate native trajectories, not a same-linear-system causal comparison.",
+    "No speedup or RSS reduction demonstrated. Single controls/two candidates are correctness runs, not the three-unloaded-repeat performance gate.",
+    "No cluster-size/PCG/loss sweep, 10k rollout, default promotion or README performance claim. Native E2E and full M8–M10 objective remain incomplete.",
+    "Only arm a was GT-scored after geometry audit. Arm b model bytes are exact; no separate GT invocation claimed."
+  ]
+}

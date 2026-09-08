@@ -214,5 +214,29 @@ Five scoped tests pass: principal-Schur equivalence with repeated sensors,
 17-pose long-track/partial-cluster storage bounds, indefinite-cluster rejection,
 API anchor/observation/repeat checks, and native fixed-rotation/landmark-only/
 rollback behavior. Related rig/API/example tests and scoped clippy pass.
-Release certification and the same-input native 1k quality/repeat comparison
-are still pending. Do not promote this implementation based on synthetic tests.
+Release `8ba580c` and the same-input native 1k comparison are complete.
+Both same-binary controls reproduce PR #93 model files exactly; the two
+cluster8 output models also match each other byte-for-byte.
+
+| Metric | Legacy | Strict matrix-free | Cluster8 |
+| --- | ---: | ---: | ---: |
+| Supported images / frames | 1000 / 500 | 1000 / 500 | 1000 / 500 |
+| RMSE (m) | 0.0226953 | 0.1402194 | 0.2237376 |
+| p95 (m) | 0.0377788 | 0.2345797 | 0.4324001 |
+| Raw mean reprojection (px) | 0.6716374 | 0.7250106 | 0.7601143 |
+| Mapper seconds | 4.302785 | 6.047962 | 6.283087 / 6.454014 |
+| Process seconds | 4.87 | 6.59 | 6.85 / 7.01 |
+| External RSS (KiB) | 81948 | 82448 | 82476 / 82492 |
+
+Cluster8 fails all native quality gates despite preserving calibration,
+positive depth, ordered image/keypoint identity and connected support.
+It yields 2880 landmarks / 28825 observations. Linear-step failures decrease
+only from 589 to 587, accepted steps fall from 71 to 59, and zero-accepted
+calls increase from 52 to 54. Each backend changes subsequent mapper state;
+these aggregate counts are not a controlled same-linear-system comparison.
+
+The bounded-memory construction remains a tested implementation property,
+not evidence of lower process RSS or improved native accuracy/speed.
+No three-run performance gate, cluster-size sweep or 10k promotion follows.
+Keep Legacy default and README performance claims unchanged.
+[Certificate, all commands and independent audits](../benchmarks/electro/m8-openloris-native-cluster8-v1.json).
