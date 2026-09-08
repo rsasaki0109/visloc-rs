@@ -371,3 +371,10 @@ reports a verified resumed hit and preserves both file hashes. See
 interruption/corruption recovery, or the pipeline restart gate. Full new dense
 output needs about4.5GiB versus less than1GiB available; no large extraction
 has been launched and existing evidence is retained.
+
+The one-image corruption pilot copies that cache into a separate private
+directory and sets its manifest feature hash to zero. Resume rejects the
+invalid completion sidecar and re-extracts, rather than reporting a resumed
+hit. Feature, loci and repaired sidecar SHA256 all match the untouched original
+pilot. See `m8-openloris-extraction-resume-corrupt-v1.json`. This tests one
+hash-mismatch recovery path, not crash interruption or the full restart gate.

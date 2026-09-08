@@ -1,0 +1,32 @@
+{
+  "schema": "m8-openloris-extraction-resume-corrupt-v1",
+  "fault": "Private copy of pilot cache only: manifest feature_fnv1a64 changed from 25ab30f999491cf2 to 0000000000000000 before invocation. Original evidence untouched.",
+  "command": "set -Ce\nenv RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/recovery.time timeout 120s /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/images --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/unused-model --sift-stream-resume >/home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/recovery.log 2>&1",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,hashlib,json\nroot=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1')\nold=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/features')\nfiles={}\nfor n in ['cam1_000000_features.txt','cam1_000000_loci.txt','cam1_000000_sift_stream_manifest.txt']:\n a=hashlib.sha256((root/'features'/n).read_bytes()).hexdigest();b=hashlib.sha256((old/n).read_bytes()).hexdigest()\n files[n]={'new':a,'original':b,'exact':a==b}\nlog=(root/'recovery.log').read_text()\nprint(json.dumps({'files':files,'log':log,'resumed': '(resumed)' in log,'time':(root/'recovery.time').read_text()}))\nPY",
+  "audit": {
+    "files": {
+      "cam1_000000_features.txt": {
+        "new": "89683927517261252231d619838b23bf4dc8f6589b077f27afc2df2a13bfc481",
+        "original": "89683927517261252231d619838b23bf4dc8f6589b077f27afc2df2a13bfc481",
+        "exact": true
+      },
+      "cam1_000000_loci.txt": {
+        "new": "81bfa55952924c0c8509fd0d261d9c3faea238cf61a668aac97ec6169a3a84dc",
+        "original": "81bfa55952924c0c8509fd0d261d9c3faea238cf61a668aac97ec6169a3a84dc",
+        "exact": true
+      },
+      "cam1_000000_sift_stream_manifest.txt": {
+        "new": "c8549f6a634244b45da918767c7f545cee782082cf6983ba1c7589e8b8a27a17",
+        "original": "c8549f6a634244b45da918767c7f545cee782082cf6983ba1c7589e8b8a27a17",
+        "exact": true
+      }
+    },
+    "log": "sift-stream: extracting 1 image(s) (output=\"/home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/features\", calibration=true, resume=true, dsp=false, contrast=0.02, vlfeat_detector=true)\nsift-stream: [1/1] cam1_000000.png has no valid completion sidecar; re-extracting\nsift-stream: [1/1] cam1_000000.png -> 377 kp in 2.3s\nstreaming SIFT export complete: 1 image(s), 377 keypoints -> /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/features\n",
+    "resumed": false,
+    "time": "\tCommand being timed: \"timeout 120s /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/images --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-corrupt-v1/unused-model --sift-stream-resume\"\n\tUser time (seconds): 2.15\n\tSystem time (seconds): 0.13\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:02.28\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 278092\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 97921\n\tVoluntary context switches: 3\n\tInvoluntary context switches: 15\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 1032\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+  },
+  "limitations": [
+    "One-image output-hash mismatch invalidation; not interrupted whole pipeline or 10k restart certification.",
+    "Recovery should re-extract rather than accept cached output. Repaired files and sidecar are compared to original pilot."
+  ]
+}

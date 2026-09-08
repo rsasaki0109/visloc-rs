@@ -65,6 +65,8 @@
 > extraction-resume-pilot-v1: cam1_000000の抽出feature/loci過去bytes一致（377kp）。resume初期化後hit確認。
 > 保存extract-3ae253a SHA8cfa9c53...、image-io build。1画像pilotのみ、10k/restart全体成功ではない。
 > full特徴4.5GiBに対し空き669MiB時点。全抽出未着手、既存証跡保持。測定稼働なし。
+> extraction-resume-corrupt-v1: private copyのfeature hash記録を0へ変更。resumeは無効判定→再抽出。
+> feature/loci/sidecar全3filesが元pilotと完全一致。元証跡変更なし。1画像破損復旧のみ、全restart未達。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
