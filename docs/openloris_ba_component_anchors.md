@@ -1,4 +1,19 @@
-# Native BA component anchoring — unmeasured candidate
+# Native BA component anchoring — mixed quality, not promoted
+
+## First paired 5k result
+
+Same-binary control matches historical Legacy bytes. Both candidate repeats
+match exactly and register all 5,000 images, adding 39 component anchors each.
+RMSE improves 0.477216 → 0.261284 m and maximum 10.094671 → 1.773457 m.
+However p95 worsens 0.478983 → 0.490866 m and raw mean reprojection worsens
+0.831377 → 0.837364 px. This does not pass an all-quality nonregression gate.
+Every image has support; depth and fixed rig calibration are valid. Published
+track components change from 2495/2/2/1 frames to 2499/1 (singleton 1616).
+Mapper seconds: control 53.417580, candidates 53.641363 / 62.541108.
+No speedup, large-tier or native-E2E claim. Keep default off; do not select
+alternative anchors or thresholds using GT. Diagnose remaining geometric
+weakness before extending or promoting this arm.
+[Commands, repeat audit and independent scores](../benchmarks/electro/m8-openloris-5000-component-anchors-v1.json).
 
 The certified 5k diagnostic found 306/20,000 pose/solve records without any
 path to a fixed pose through actual BA observations. The five largest

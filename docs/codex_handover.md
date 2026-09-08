@@ -1,5 +1,19 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> PR103はhead `9f7cfeb` CI9成功後 `a82a4bb` にmerge、旧branch整理済み。
+> 現branch `feat/m8-ba-component-anchors`。既定OFFの
+> `--ba-anchor-disconnected-components` は既存固定poseのない各BA成分の最小frame IDを固定。
+> 選択順不変/既存anchor保持/単独poseテストと有効時native固定状態/rollbackテスト通過。
+> clippy/CLI check通過。build `36eb02159f88211fd2e57db75a43d9cadbb494ca`、release52.95秒。
+> binary SHA256 `779c6295f5cf62503790da530b9da3c3a1afcf3735e903fed9799501cb49db2b`。
+> 5k対照 `tier-5000-slice/anchored-control` はexit0、Legacy bytes一致、mapper53.417580秒。
+> 候補component-aはexit0、全5000画像。RMSE0.261284/最大1.773457 mへ改善するが、
+> p950.490866 m/再投影0.837364 pxは対照より悪化。全品質gate未達、既定化なし。
+> track成分2499/1、孤立frame1616。支持/正深度/固定rig正常。component-bもexit0、反復bytes一致。
+> 各追加anchor39。mapper53.641/62.541秒対control53.418秒で高速化主張なし。
+> 証跡 `m8-openloris-5000-component-anchors-v1.json`。次は品質の残差要因を調べる。
+> [設計と検証契約](openloris_ba_component_anchors.md)。既存mono scale/弱い幾何は別問題。
+
 > 現branch `diag/m8-ba-anchor-connectivity`、親PR102はCI実行中。
 > build `4fbb952b600d36bc312c04f97c076f0a3ee1c7f8` に既定OFFの
 > `VISLOC_SFM_TRACE_BA_CONNECTIVITY` を追加。実際のBA採用観測のlandmark-starで
