@@ -38,7 +38,7 @@ def select(frames, counts, threshold, halo):
         "policy": {"frame_halo": halo, "min_sensor_rows_lt": threshold},
         "base_frames": len(seeds), "selected_frames": len(selected),
         "selected_images": sum(len(frames[frame]) for frame in selected),
-        "image_names": sorted(name for frame in selected for name in frames[frame]),
+        "image_names": [name for frame in selected for name in frames[frame]],
     }
 
 

@@ -11,6 +11,11 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SelectionTests(unittest.TestCase):
+    def test_retains_frame_then_manifest_sensor_order(self):
+        result = MODULE.select({1: ["cam1_b", "cam2_b"], 0: ["cam1_a", "cam2_a"]},
+                               dict.fromkeys(["cam1_a", "cam2_a", "cam1_b", "cam2_b"], 0), 32, 0)
+        self.assertEqual(result["image_names"], ["cam1_a", "cam2_a", "cam1_b", "cam2_b"])
+
     def test_manifest_sensor_membership_and_filename_collisions(self):
         declarations = "S 0 " + "1 " * 14 + "\nS 1 " + "1 " * 14 + "\n"
         valid = declarations + "F 0 a.png 0\nF 0 b.png 1\n"
