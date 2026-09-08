@@ -103,6 +103,7 @@ def main():
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=10)
+                report['exit_code'] = process.returncode
             raise
         finally:
             report.update(wall_seconds=time.monotonic() - start,

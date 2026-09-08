@@ -1,0 +1,9 @@
+{
+  "schema": "m8-native-scope-measurement-probes-v1",
+  "status": "probe-expectations-pass",
+  "artifact_root": "/home/sasaki/datasets/openloris",
+  "normal": {"report": "m8-native-scope-measure-probe-v1.json", "status": "pass", "exit_code": 0, "sampled_aggregate_peak_rss_kib": 56588, "cgroup_memory_peak_bytes": 44490752},
+  "nonzero": {"report": "m8-native-scope-nonzero-probe-v1.json", "status": "fail", "exit_code": 7},
+  "timeout": {"report": "m8-native-scope-timeout-probe-v2.json", "status": "fail", "exit_code": -9},
+  "scope": "Real dedicated systemd user scopes with MemoryMax=2G and MemorySwapMax=0. Small Python commands only, not SfM, OOM injection, full pipeline restart or performance comparison. Timeout v1 omitted the killed child's exit code; v2 records it."
+}
