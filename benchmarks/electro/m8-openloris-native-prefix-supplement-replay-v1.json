@@ -1,0 +1,22 @@
+{
+  "status": "complete-snapshot-byte-reproduction-pass",
+  "binary_sha256": "883a6ad7b21e34de9309cb71e35fe7750547df34d3ffe8c92b59921625247af5",
+  "command": "target/release/examples/admit_verified_bridge_snapshot --base-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-native-rig-runner-10k-v1/mapping/verified-merged.vps --augmented-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-merged.vps --base-features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/features256 --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --include-prefix-supplements --output /home/sasaki/datasets/openloris/corridor1-1-m8-native-prefix-supplement-replay-v1/output.vps",
+  "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-bridges-prefix-supplements.vps",
+  "output_and_reference_sha256": "fbcd111cd193fd59a3311c99208de6fe30c2c334f0b088ba7798aeff69dffe6f",
+  "exit_status": 0,
+  "wall_seconds": 3.23,
+  "peak_rss_kib": 665020,
+  "base_pairs": 58530,
+  "admitted_pairs": 1431,
+  "admitted_matches": 89150,
+  "supplemented_pairs": 764,
+  "supplemented_matches": 70910,
+  "output_pairs": 59961,
+  "output_matches": 3337520,
+  "limitations": [
+    "New reproduction command, not a recovered historical invocation.",
+    "Retained native-runner and adaptive matching snapshots are inputs; their producers remain upstream dependencies.",
+    "Individual stage reproduction, not a continuous E2E measurement or quality improvement."
+  ]
+}
