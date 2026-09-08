@@ -1,5 +1,10 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 10k mapper-only検証を開始: `tier-10000-boundary/boundary-control` session40844実行中。
+> 同じ `rig-7d99e07`/完全10k入力、frame sliceなし、各run上限360秒、単一thread。
+> 入力5000frame/10000画像/64862pairs/7551021 capped matches、初期VmHWM547620KiB。
+> 完走後対照を採点しboundary-a/bへ。native E2Eではなく、登録不足も隠さず記録する。
+
 > PR105 https://github.com/rsasaki0109/visloc-rs/pull/105 はhead `aa3938c`、CI34200559679実行中。
 > 同じbinary `rig-7d99e07` の独立dense ANN2.5k対照を開始。
 > `tier-2500-ann/boundary-control` はexit0・Legacy bytes一致、mapper36.262899秒。

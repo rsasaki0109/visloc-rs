@@ -13,6 +13,15 @@ on a derived 5k mapper-only slice, not a speedup or native E2E certificate.
 Independent tier nonregression and 10k remain to be checked.
 [Evidence](../benchmarks/electro/m8-openloris-5000-fixed-boundary-v1.json).
 
+Independent 1k and 2.5k mapper checks are now complete with exact candidate
+repeatability and full registration. 1k RMSE/p95/reprojection:
+0.022320/0.035799 m / 0.627506 px. 2.5k: 0.067853/0.134449 m /
+0.778608 px, improving the paired control 0.133927/0.237364 m /
+0.788549 px. Both geometry audits pass. 2.5k mapper is 50.635/50.016 s
+versus control 36.263 s: no Legacy speedup. 10k and native E2E remain open.
+[1k evidence](../benchmarks/electro/m8-openloris-1000-fixed-boundary-v1.json),
+[2.5k evidence](../benchmarks/electro/m8-openloris-2500-fixed-boundary-v1.json).
+
 Component anchoring improved 5k RMSE but worsened p95/reprojection. The
 remaining singleton 1616 explains only 2.134% of squared trajectory error;
 do not tune isolated-pose repairs or anchors against GT.
