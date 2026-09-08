@@ -11,6 +11,14 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-08)
 
+Bounded covisibility local-window selection is opt-in and fails the frozen1k
+quality gate: repeated RMSE0.025216m and reprojection0.703792px. All1000 images
+and500 rig frames are supported, with positive depths, valid fixed rig and one
+connected track component. Default-off output matches Legacy exactly. Do not
+promote this policy or run larger tiers unchanged. See
+[contract](openloris_covisibility_local_ba.md) and
+[evidence](../benchmarks/electro/m8-openloris-1000-covisibility-v1.json).
+
 Fixed-boundary observations are implemented default-off (PR105 merged) and
 tested on same-binary controls. 1k/independent2.5k/derived5k pass registration,
 trajectory and reprojection nonregression with exact two-run model equality.

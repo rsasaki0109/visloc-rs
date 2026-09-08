@@ -1,6 +1,8 @@
 {
   "schema": "m8-openloris-1000-covisibility-v1",
   "status": "repeated-quality-regression-not-promoted",
+  "geometry_command": "python3 scripts/audit_colmap_pinhole_model.py /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+  "geometry": [{"model":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model","image_poses":1000,"supported_images":1000,"unsupported_image_ids":[],"landmarks":2763,"observations":28898,"mean_reprojection_px":0.7037923837204834,"observation_weighted_mean_reprojection_px":0.7037923837204834,"point_weighted_mean_reprojection_px":0.7173899673965904,"max_track_mean_reprojection_px":3.4075767045554626,"max_reprojection_px":3.9951611319315514,"max_stored_mean_difference_px":3.4075767045554626,"nonpositive_depth_observations":0,"tracks_with_multiple_keypoints_in_one_image":0,"excess_same_image_track_observations":0,"bidirectional_references_valid":true,"rig":{"rig_manifest":"/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt","rig_frames":500,"supported_rig_frames":500,"unsupported_rig_frame_ids":[],"max_inferred_rig_center_disagreement_m":3.2625801586147356e-12,"max_inferred_rig_rotation_disagreement_deg":0.0000012074182697257333,"fixed_sensor_extrinsics_valid":true,"track_connected_components":1,"track_connected_component_sizes":[500],"track_connected_component_frame_ranges":[[0,499]]}}],
   "build_commit": "9d7868bf44b19cccbcaa6503c1018cf9867956f0",
   "binary_sha256": "3dc9d3f9302c73bc58a218cd3ca0239450e877fad0bb9a4998ca596bc2dfcc79",
   "commands": {

@@ -1,5 +1,18 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新: `feat/m8-covisibility-local-ba`。PR107は最終head6914606のCI9件成功後
+> `f7ab2ca`へmerge。共視選択を既定OFFの`--local-ba-covisibility`として追加。
+> rig_sfm39テスト、CLI check、lib clippy通過。release source9d7868b、57.05秒。
+> 保存binary `corridor1-1-m8-bounded-native-v1/rig-9d7868b` SHA256
+> `3dc9d3f9302c73bc58a218cd3ca0239450e877fad0bb9a4998ca596bc2dfcc79`。
+> `covisibility-1k/control`はLegacy全3ファイル一致。candidate-a/bも全3ファイル一致。
+> 1000画像/500frameすべて支持あり、正深度/固定rig/双方向参照正常、連結成分1。
+> ただしRMSE0.025216mと再投影0.703792pxは既存gateを超えるため不採用。
+> 証跡 `m8-openloris-1000-covisibility-v1.json`。このまま上位tierへ進めない。
+> 全goal未達。支持欠落やrig破損が今回の品質低下を説明する証拠はない。
+> strong-boundary候補bをaへ全6ファイルcmp後hardlink化済み、パス/bytes保持。
+> 空き約119MiB。新規run名を使い、既存hardlinkモデルは上書き禁止。
+
 > 現branch `test/m8-strong-boundary-10k`。旧strong30/deferred8/direct2/s1/rot5条件をtimeログから復元。
 > manifest/snapshot/visloc pose-prior2ファイルSHA確認済み。契約 `m8-openloris-strong-boundary-contract-v1.json`。
 > 同binary `rig-7d99e07` の `strong-boundary-10k/control` はexit0、過去9998画像モデル全成分bytes一致。
