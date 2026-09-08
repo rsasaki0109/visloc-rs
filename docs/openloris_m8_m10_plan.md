@@ -33,7 +33,7 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
 2. Full10k Python runner validation now passes: all 2,500 bound shards match
    every legacy record, merged bytes match, and completed-resume does not rerun
    the matching worker or change prior chunks. See
-   `m8-full-native-shared-runner-v1.json`; finish its PR CI/merge. This is retained
+   `m8-full-native-shared-runner-v1.json` (PR132 merged). This is retained
    feature/candidate validation, not full pipeline extraction or restart.
 3. Assemble one executable, version-pinned native DAG covering base and dense
    extraction, retrieval, adaptive selection, matching, repair/targeted
@@ -43,6 +43,19 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
    Measure a continuous cold run and a separately labelled resumed run, not a
    sum of historical phase times. Four-image base and one dense extraction
    shard parity are preflights, not full extraction completion.
+   Current building blocks: PR133's opt-in immutable adaptive bank sharing
+   passed full10k parity/resume with 9,308 shared files and 692 independent files;
+   PR134's compiler binds 21 source commands to 23 atlas nodes. Dedicated cgroup
+   configuration/child inheritance and small command measurement probes pass,
+   but are not SfM memory evidence. Explicit feature/output binding adapters
+   preserve historical replay checks; they do not make the legacy shard format
+   suitable for the final no-quadratic-I/O claim. Remaining implementation is a
+   single executor that creates both feature banks from raw images, generates
+   candidates, uses shared matching, performs admissions/source mapping/atlas,
+   and records stage dependencies for resume. It must also budget simultaneous
+   live artifacts and recheck free space; the earlier 8.33 GB all-copy bank
+   footprint nearly exhausted the available disk. Do not replace this executor
+   with more unchanged isolated source replays or summed historical timings.
 4. Address the still-failing trajectory gate on that reproducible pipeline.
    Reuse prior negative evidence: unchanged weak-angle freezing, Huber loss,
    fixed-boundary, and retry-cache experiments are not new candidates. Declare
