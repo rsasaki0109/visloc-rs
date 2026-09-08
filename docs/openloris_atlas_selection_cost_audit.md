@@ -267,3 +267,9 @@ the new common policy. Wall/RSS:35.01s/340064KiB and28.16s/340084KiB.
 See source-spec-1000/1250-v1 JSONs. Coverage is12 of21 execution outputs
 (14 of23 retained nodes). Nine source executions and all excluded E2E phases
 remain; source replay parity is not a quality improvement.
+
+Starts1500/2000 also reproduce retained model bytes exactly:27.33s/340220KiB
+and27.68s/340188KiB. The2000 directory contains only component-001 in both
+old and new outputs; do not assume a component-000 directory must exist.
+Evidence: source-spec-1500/2000-v1 JSONs. Coverage is14 of21 executions,
+16 of23 atlas nodes. Seven executions and excluded E2E phases remain.
