@@ -6,8 +6,32 @@ variants remain distinct. No all-image descriptor bank or pair matrix is built.
 """
 
 import math
+import os
+from pathlib import Path
+import tempfile
 
 HEADER = b"# visloc adaptive feature bank: legacy prefix + spatially novel compatible supplement\n"
+
+
+def publish_file(destination, chunks):
+    """Publish complete bytes without overwriting an existing destination.
+
+    A same-directory temporary file is fsynced then hard-linked atomically to
+    the destination (link fails if it exists). A crash can leave an unreferenced
+    temporary file, never a partially written destination. This primitive does
+    not implement bank-level completion or restart validation.
+    """
+    destination = Path(destination)
+    descriptor, temporary = tempfile.mkstemp(prefix=".sift-merge-", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            for chunk in chunks:
+                stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, destination)
+    finally:
+        os.unlink(temporary)
 
 
 def feature_rows(lines):

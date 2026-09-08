@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 
 SPEC = importlib.util.spec_from_file_location(
     "merge_sift_supplements", Path(__file__).resolve().parents[1] / "merge_sift_supplements.py")
@@ -9,6 +10,25 @@ SPEC.loader.exec_module(MODULE)
 
 
 class MergeTests(unittest.TestCase):
+    def test_publication_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "features.txt"
+            MODULE.publish_file(destination, [b"first", b"second"])
+            self.assertEqual(destination.read_bytes(), b"firstsecond")
+            with self.assertRaises(FileExistsError):
+                MODULE.publish_file(destination, [b"replacement"])
+            self.assertEqual(destination.read_bytes(), b"firstsecond")
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+
+    def test_failed_generation_publishes_nothing(self):
+        def broken():
+            yield b"partial"
+            raise ValueError("invalid later input")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                MODULE.publish_file(Path(directory) / "features.txt", broken())
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_preserves_prefix_and_supplement_variants(self):
         base = [b"# header\n", b"0 0 base\n"]
         additions = [b"1 0 boundary\n", b"1.01 0 first\n", b"1.01 0 second\n"]
