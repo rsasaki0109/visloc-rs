@@ -12,7 +12,10 @@
 > track成分2500frame一つ、支持/正深度/固定rig正常。mapper83.156035秒で対照53.399406秒より遅い。
 > boundary-bもexit0、候補反復bytes一致。mapper83.156/91.705秒、RSS724532/724796KiB。
 > 成分固定OFF。証跡 `m8-openloris-5000-fixed-boundary-v1.json`。
-> 1k `boundary-1k/control` はsession63512実行中。完走後candidate-a/bを逐次実行する。
+> 1k control/candidate-a/bはexit0、control Legacy bytes一致、候補反復bytes一致。
+> RMSE/p95 0.022320/0.035799m、再投影0.627506px、全1000画像・幾何正常で既存品質gate通過。
+> mapper5.575/5.557秒対control4.099秒。証跡 `m8-openloris-1000-fixed-boundary-v1.json`。
+> 次は独立dense ANN2.5kと10k、native E2Eは依然未検証。
 > 反復確認後、独立tier非回帰/10k品質へ。5kだけで全goal達成やCOLMAP優越を主張しない。
 > 実ソルバーのpose_indexはfixed pose除外をコード確認。追加観測/固定poseのRSSは未測定。
 > [契約](openloris_fixed_boundary_ba.md)。5k残存singleton1616は二乗誤差2.134%のみ。
