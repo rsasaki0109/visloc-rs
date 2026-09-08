@@ -241,3 +241,10 @@ source650 flags with the verified per-execution ranges, but must validate
 every output component against its retained model and record mismatches.
 Do not tune flags against GT or relabel new-policy reproduction as recovery
 of historical argv. Run each unique execution only once per replay pass.
+
+The new common policy also reproduces the250-start500-frame source exactly
+(distinct from the previously replayed250-start750-frame source). All three
+model hashes agree; wall38.74s, peak RSS340220KiB. Evidence:
+`m8-openloris-source-spec-250x500-v1.json`. Coverage is now7 of21 unique
+execution outputs, with5 recorded-command replays and2 new-spec reproductions.
+Fourteen remain; this does not close full atlas or native E2E gates.

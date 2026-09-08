@@ -22,6 +22,8 @@
 > source-execution-inventory-v1.jsonで全21実行/23nodeの入力start/countをログ/timeから確定。
 > atlas window_startと入力startは別（node21は500表記だが入力250開始750frame）。
 > 12/13と18/19は同一実行の別成分。残り15実行はこのinventoryで新仕様を組み全成分検証へ。
+> 新仕様250開始500frameも過去3モデルbytes一致、38.74秒/340220KiB。
+> source-spec-250x500-v1.json。計7/21実行出力を再生成、残り14、測定稼働なし。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
