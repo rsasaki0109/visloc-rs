@@ -1,5 +1,24 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> QR核の実装開始（2026-09-08）: PR #95はCI9項目通過後 `2f383f2` にmerge、旧branch整理済み。
+> 現branch `feat/m8-implicit-landmark-qr`。3本のHouseholderベクトルによる点消去核をtest-only実装。
+> 疎pose行の作用/随伴/右辺/normal action/点逆代入も追加、5テスト/clippy通過。
+> native接続・実データ・性能改善は未検証。
+> [設計と次の実装手順](openloris_implicit_landmark_qr.md)。全Q/密なトラックJacobianは作らない。
+> rig線形化adapter/複数点operatorもtest-only接続済み。既存Jacobian/Huber重みを再利用し、
+> 固定pose/rotation/点、回転付きsensor、None/Huber6と減衰0.5/100で旧normal/direct stepと一致。
+> test PCG接続・poseごと6×6前処理も実装。6関連テスト通過、真の残差/直接解/反復一致を確認。
+> 前処理はfull normal systemを二重保持しないが、normal-form減算の数値限界は残る。
+> 共通LMループへtest-only接続済み。QR時は旧normal assemblyをスキップ。
+> 3非線形反復のcost低下/反復一致/固定条件と、強制PCG失敗時の状態保持・lambda増加を検証。
+> production/native selector `--ba-backend matrix-free-qr` をdefault-off追加。
+> QR7テスト（native固定状態/rollback含む）通過。実データ品質・性能は未証明。
+> release `f62f09b`、同一binary Legacyはchampion bytes一致、QR2反復もbytes一致。
+> QRは再投影0.660774 pxで合格だがRMSE/p95 0.044781/0.064069 mで失敗。
+> mapper18.80/19.88 sはLegacy4.06 sより遅い。51/688線形失敗、accepted166。
+> evidence `m8-openloris-native-qr-v1.json`保存。大規模展開/既定化なし、PR/CI/merge未完了。
+> サブエージェントは使用しない。goal全体は未達。
+
 > Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。
 > `db9b7f0`のscalar contextで両debugモデルはPR94 bytes一致。strict初回失敗40pose、cluster8は30pose。
 > cluster8は残差チェック530/反復上限57（strict296/293）。単なる小窓→大窓のメモリ問題ではない。

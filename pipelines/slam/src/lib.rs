@@ -12,6 +12,8 @@
 //! from 2D reprojection residuals.
 
 pub mod bundle;
+// Experimental, explicitly selected square-root landmark elimination.
+mod landmark_qr;
 mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
