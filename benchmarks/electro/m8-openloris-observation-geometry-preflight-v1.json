@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "status": "preflight_verified_implementation_pending",
+  "contract_commit": "529a833",
+  "source_evidence": [
+    "m8-openloris-adaptive-scaled-lm-v1.json",
+    "m8-openloris-ceres-reference-solve-v1.json"
+  ],
+  "source_files": {
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model/images.txt": "90773af9546ea351f9610721eab2ccac7b6d55f9c0638fd7ce596942012610d6",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model/points3D.txt": "8850f161ac44f76ef6d512f8c1739493970849a380f6a232c82e3006a33f346a"
+  },
+  "candidates": [
+    {
+      "arm": "one-k-legacy-1",
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-scaled-lm-v1/one-k-legacy-1/model",
+      "sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "dfc2dba4c21f4d5f31ffd8ac40f405c17476e4251ec630cd9806668e81252425",
+        "points3D.txt": "86242e11eb98dd920eda04af59f17c6fab4d79f257cbd7679421281e03a43e10"
+      }
+    },
+    {
+      "arm": "one-k-adaptive-1",
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-scaled-lm-v1/one-k-adaptive-1/model",
+      "sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "5f06ca8c42e6aba0a557ad18dc73175467a6b535de04c6e156dfc55ad5af96c3",
+        "points3D.txt": "11d61d0e53e58c6eba2e3465e08ae0d5743ae5ded0cc63b3a4f37c4cffc75be0"
+      }
+    },
+    {
+      "arm": "ceres",
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-ceres-reference-v1/model-1f31335-v1",
+      "sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "b1e0ad7daf331bfaa19e0ec13d9b9ff505a10afa1bcf23e719bdc01728209b01",
+        "points3D.txt": "892f72acb977c25d075ba40b1b95531aa8051698c9600a492e9849faac2d1395"
+      }
+    }
+  ],
+  "input_hashes_verified": true,
+  "independent_awk_counts": {
+    "points": 4716,
+    "observations": 130900,
+    "sum_squared_track_lengths": 28705634,
+    "pair_count": 14287367,
+    "max_track_length": 893
+  },
+  "count_method": "awk: skip comment/empty rows; k=(NF-8)/2 per points3D row; sum k, k*k, k*(k-1)/2; no pair traversal",
+  "sum_squared_track_lengths_cap": 64000000,
+  "run_plan": [
+    "initial self-control",
+    "legacy",
+    "adaptive",
+    "ceres",
+    "ceres exact repeat"
+  ],
+  "limitations": [
+    "Preflight only; implementation has not yet been independently reviewed or run on real models.",
+    "No GT consumption, solver rerun or model mutation.",
+    "This is not a mapper or native E2E benchmark."
+  ]
+}
