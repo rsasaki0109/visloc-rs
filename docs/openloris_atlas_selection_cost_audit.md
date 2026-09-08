@@ -47,8 +47,14 @@ remain explicit in the M8–M10 plan.
 First retained-tail replay completes in10.78s with peak77828KiB and all six
 pre-BA/final model files byte-identical to the old run. Selection totals0.0643s
 (about0.6% of wall), versus6.4076s for combined build/solve/validation.
-Thus selection is not the tail's dominant cost. Do not extrapolate this fraction
-to the main component; that replay is still running. Evidence:
+Main also completes with all six files byte-identical:185.59s wall,
+525248KiB peak RSS,8.8369s selection (4.76% of wall),153.8248s combined
+build/solve/validation,5.2928s application and0.6831s final validation.
+Thus selection is not dominant in either measured component. Even removing
+selection entirely would save under5% of this main replay. Prioritize separating
+the combined phase into solver, retriangulation and connectivity costs before
+adding an incidence index. Do not remove validation or change numerical policy
+on this timing evidence. Evidence:
 `benchmarks/electro/m8-openloris-atlas-timing-v1.json`.
 
 `VISLOC_ATLAS_TRACE_WINDOW_TIMING=1` enables stderr-only timers in the filtering
