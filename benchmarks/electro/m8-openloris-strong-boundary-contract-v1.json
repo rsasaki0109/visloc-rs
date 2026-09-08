@@ -1,0 +1,63 @@
+{
+  "schema": "m8-openloris-strong-boundary-contract-v1",
+  "commands": {"control":"set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/control'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/control.time'\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_TRACE_BA_CONNECTIVITY -u VISLOC_SFM_TRACE_BA_POSE_MOTION RAYON_NUM_THREADS=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/control.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-7d99e07' '--manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--features-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features' '--snapshot' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-minmatches8-v1/mapping/verified-merged.vps' '--out-colmap' '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/control/model' '--max-models' '2' '--min-model-frames' '10' '--max-matches-per-pair' '256' '--legacy-union-find-tracks' '--recover-metric-conflict-tracks' '--structure-min-pair-matches' '30' '--direct-stereo-pnp-max-frame-gap' '2' '--direct-stereo-min-pnp-sensors' '1' '--deferred-long-pair-min-frame-gap' '128' '--structure-long-min-e-inliers' '1' '--long-pair-pose-prior-images' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-000/images.txt' '--long-pair-pose-prior-images' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-001/images.txt' '--structure-long-max-rotation-disagreement-deg' '5' '--deferred-registration-min-pnp-sensors' '1' '--deferred-registration-min-pnp-inliers' '6' '--deferred-registration-pnp-iterations' '4096' '--deferred-registration-max-interpolation-gap' '2' > '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/control.log' 2>&1","candidate-a":"set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-a'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-a.time'\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_TRACE_BA_CONNECTIVITY -u VISLOC_SFM_TRACE_BA_POSE_MOTION RAYON_NUM_THREADS=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-a.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-7d99e07' '--manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--features-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features' '--snapshot' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-minmatches8-v1/mapping/verified-merged.vps' '--out-colmap' '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-a/model' '--max-models' '2' '--min-model-frames' '10' '--max-matches-per-pair' '256' '--legacy-union-find-tracks' '--recover-metric-conflict-tracks' '--structure-min-pair-matches' '30' '--direct-stereo-pnp-max-frame-gap' '2' '--direct-stereo-min-pnp-sensors' '1' '--deferred-long-pair-min-frame-gap' '128' '--structure-long-min-e-inliers' '1' '--long-pair-pose-prior-images' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-000/images.txt' '--long-pair-pose-prior-images' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-001/images.txt' '--structure-long-max-rotation-disagreement-deg' '5' '--deferred-registration-min-pnp-sensors' '1' '--deferred-registration-min-pnp-inliers' '6' '--deferred-registration-pnp-iterations' '4096' '--deferred-registration-max-interpolation-gap' '2' '--ba-fixed-boundary-observations' > '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-a.log' 2>&1","candidate-b":"set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-b'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-b.time'\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_TRACE_BA_CONNECTIVITY -u VISLOC_SFM_TRACE_BA_POSE_MOTION RAYON_NUM_THREADS=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-b.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-7d99e07' '--manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--features-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features' '--snapshot' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-minmatches8-v1/mapping/verified-merged.vps' '--out-colmap' '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-b/model' '--max-models' '2' '--min-model-frames' '10' '--max-matches-per-pair' '256' '--legacy-union-find-tracks' '--recover-metric-conflict-tracks' '--structure-min-pair-matches' '30' '--direct-stereo-pnp-max-frame-gap' '2' '--direct-stereo-min-pnp-sensors' '1' '--deferred-long-pair-min-frame-gap' '128' '--structure-long-min-e-inliers' '1' '--long-pair-pose-prior-images' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-000/images.txt' '--long-pair-pose-prior-images' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-001/images.txt' '--structure-long-max-rotation-disagreement-deg' '5' '--deferred-registration-min-pnp-sensors' '1' '--deferred-registration-min-pnp-inliers' '6' '--deferred-registration-pnp-iterations' '4096' '--deferred-registration-max-interpolation-gap' '2' '--ba-fixed-boundary-observations' > '/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/strong-boundary-10k/candidate-b.log' 2>&1"},
+  "source": {
+    "args": [
+      "target/release/examples/generalized_rig_sfm",
+      "--manifest",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt",
+      "--features-dir",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features",
+      "--snapshot",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-minmatches8-v1/mapping/verified-merged.vps",
+      "--out-colmap",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-minmatches8-v1/rig-strong30-deferred8-direct2-s1-cap256-rot5-metric-recover-v1",
+      "--max-models",
+      "2",
+      "--min-model-frames",
+      "10",
+      "--max-matches-per-pair",
+      "256",
+      "--legacy-union-find-tracks",
+      "--recover-metric-conflict-tracks",
+      "--structure-min-pair-matches",
+      "30",
+      "--direct-stereo-pnp-max-frame-gap",
+      "2",
+      "--direct-stereo-min-pnp-sensors",
+      "1",
+      "--deferred-long-pair-min-frame-gap",
+      "128",
+      "--structure-long-min-e-inliers",
+      "1",
+      "--long-pair-pose-prior-images",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-000/images.txt",
+      "--long-pair-pose-prior-images",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-001/images.txt",
+      "--structure-long-max-rotation-disagreement-deg",
+      "5",
+      "--deferred-registration-min-pnp-sensors",
+      "1",
+      "--deferred-registration-min-pnp-inliers",
+      "6",
+      "--deferred-registration-pnp-iterations",
+      "4096",
+      "--deferred-registration-max-interpolation-gap",
+      "2"
+    ],
+    "input_sha256": {
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-minmatches8-v1/mapping/verified-merged.vps": "01137f6ca189c0d54eb59940a7eadccd9cde775b4e472db303b2934de4ff408a",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-000/images.txt": "23418b4ba93ab06b5a701dd08ba4cb41b87455323975b17ec6c71df959f53364",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/rig-legacy-cap256-trackgap32-v1/component-001/images.txt": "2e9e3171ffdff51fc2d7d4c346fa5d3d64dae11e91beee4d7302e5ab20cf8ff5"
+    }
+  },
+  "build_commit": "7d99e07dbdbc95bc72d2e28805a75e51dbcd7270",
+  "contract": [
+    "Same retained strong/deferred/rotation-prior settings; no threshold sweep.",
+    "Compare same-binary control with boundary flag only, component anchoring OFF.",
+    "360s per run, single-thread; certify control equality before candidate.",
+    "Prior model costs must be charged separately for native E2E; this is mapper-only.",
+    "No claim that the old pipeline passes trajectory gates."
+  ]
+}
