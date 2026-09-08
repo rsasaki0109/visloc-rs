@@ -10,7 +10,8 @@ import subprocess
 import sys
 import time
 
-from replay_native_candidates import sha
+from replay_native_candidates import sha, bind_feature_input
+from native_matching_recipe import flags_from_timing
 
 
 def main():
@@ -19,6 +20,8 @@ def main():
     parser.add_argument('--merge-binary', type=Path, required=True)
     parser.add_argument('--compare-binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--variant', choices=['dense', 'native'], default='dense')
+    parser.add_argument('--features-dir', type=Path)
     args = parser.parse_args()
     if not sys.platform.startswith('linux'):
         parser.error('Linux process-group timeout handling required')
@@ -38,20 +41,36 @@ def main():
     candidates = base / 'corridor1-1-m8-dense-candidates-replay-v1/candidates.txt'
     reference = base / 'corridor1-1-m8-dense-matching-replay-v1/matches'
     reference_merged = base / 'corridor1-1-m8-dense-merge-replay-v1/verified-merged.vps'
+    recipe = base / 'corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1'
+    features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
+    shard_count = 2500
+    policy = ['--retrieval-topk', '128', '--retrieval-min-frame-gap', '128', '--candidate-budget', '80000']
+    if args.variant == 'native':
+        candidates = base / 'corridor1-1-m8-native-candidates-legacy-replay-v1/candidates.txt'
+        reference = base / 'corridor1-1-m8-native-matching-replay-v1/matches'
+        reference_merged = base / 'corridor1-1-m8-native-merge-replay-v1/verified-merged.vps'
+        recipe = base / 'corridor1-1-m8-native-rig-runner-10k-v1'
+        features = base / 'corridor1-1-m5/tiers/tier-10000/features256'
+        shard_count = 2188
+        policy = ['--retrieval-topk', '32', '--candidate-budget', '70000', '--rig-frame-manifest',
+                  str(base / 'corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt')]
+    _, features = bind_feature_input(['sfm', '--features-dir', str(features)],
+                                    recipe / 'features.json', args.features_dir)
     runner = Path(__file__).resolve().with_name('benchmark_electro.py')
     runner_hash = sha(runner)
-    common = [sys.executable, str(runner), '--features-dir', str(base / 'corridor1-1-m8-dense256x2-full10k-v2/features'),
+    common = [sys.executable, str(runner), '--features-dir', str(features),
               '--calibration-dir', str(base / 'corridor1-1-m5/tiers/tier-10000/calibration'),
               '--artifact-root', str(root / 'run'), '--candidate-manifest', str(candidates),
               '--binary', binaries['sfm']['path'], '--merge-binary', binaries['merge']['path'],
               '--pairs-per-shard', '32', '--pair-source', 'temporal-pyramid',
-              '--temporal-pyramid-max-offset', '32', '--retrieval-topk', '128',
-              '--retrieval-min-frame-gap', '128', '--candidate-budget', '80000']
+              '--temporal-pyramid-max-offset', '32', *policy,
+              *flags_from_timing(recipe / 'timing/persistent-match.time.txt')]
     match = [*common, '--match', '--persistent-matcher', '--stream-match-features',
              '--shared-snapshot-envelope', '--resume']
-    report = {'status': 'running', 'binaries': binaries, 'runner_sha256': runner_hash,
+    report = {'status': 'running', 'variant': args.variant, 'features_resolved': str(features),
+              'binaries': binaries, 'runner_sha256': runner_hash,
               'candidate_sha256': sha(candidates), 'reference_merged_sha256': sha(reference_merged),
-              'phases': {}, 'scope': 'Retained10k features/candidates through Python matching+merge runner. No extraction, candidate generation, mapping, quality or native E2E claim.'}
+              'phases': {}, 'scope': 'Manifest-validated10k features and retained candidates through Python matching+merge runner. No extraction, candidate generation, mapping, quality or native E2E timing claim.'}
 
     def save():
         (root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -81,7 +100,7 @@ def main():
         run('match', match)
         outputs = root / 'run/matches'
         index = json.loads((outputs / 'index.json').read_text())
-        if len(index['shards']) != 2500 or any(entry['status'] != 'complete' or not entry.get('snapshot_envelope') for entry in index['shards']):
+        if len(index['shards']) != shard_count or any(entry['status'] != 'complete' or not entry.get('snapshot_envelope') for entry in index['shards']):
             raise RuntimeError('Incomplete or unbound match index')
         expected = {path.name for path in reference.glob('*.vps')}
         paths = sorted(outputs.glob('*.vps'))
