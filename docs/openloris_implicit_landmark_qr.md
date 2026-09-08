@@ -1,5 +1,17 @@
 # Implicit landmark QR — staged implementation
 
+## Follow-up: bounded validation work
+
+On `perf/m8-qr-validation-scans`, full pose-vector finite checks are moved out
+of each landmark's action/scatter into the global operator boundary. Each
+track still checks its computed rows and updated output coordinates. This
+removes O(landmarks × poses) validation scans, preserving arithmetic order;
+the retained memory layout and solver/LM policy are unchanged. Tests cover
+NaN in a fixed-rotation coordinate, overflow in the global damping action,
+and nonfinite values in a touched long-track coordinate. Seven QR tests and
+test-inclusive clippy pass. Native byte parity and timing are not yet measured;
+this does not repair the rejected trajectory result by itself.
+
 ## Native 1k result — rejected (2026-09-08)
 
 Release `f62f09b` completed in 56.62 s. Same-binary Legacy reproduces all three

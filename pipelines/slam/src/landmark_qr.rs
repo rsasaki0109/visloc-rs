@@ -238,7 +238,9 @@ impl ReducedLandmark {
     }
 
     fn pose_action(&self, x: &[f64], scratch: &mut Vec<f64>) -> Result<(), &'static str> {
-        if x.len() != self.pose_dimension || !x.iter().all(|v| v.is_finite()) {
+        // Global finiteness is checked once by the multi-landmark caller.
+        // This block checks only its own computed rows, not every pose slot.
+        if x.len() != self.pose_dimension {
             return Err("invalid pose vector");
         }
         self.prepare(scratch);
@@ -270,18 +272,18 @@ impl ReducedLandmark {
     }
 
     fn scatter(&self, values: &[f64], out: &mut [f64], sign: f64) -> Result<(), &'static str> {
-        if out.len() != self.pose_dimension || !out.iter().all(|v| v.is_finite()) {
+        if out.len() != self.pose_dimension {
             return Err("invalid adjoint output");
         }
         for (value, row) in values.iter().zip(&self.rows) {
             if let Some(p) = row.pose {
                 for (dst, j) in out[p * 6..p * 6 + 6].iter_mut().zip(row.jacobian) {
                     *dst += sign * value * j;
+                    if !dst.is_finite() {
+                        return Err("nonfinite adjoint");
+                    }
                 }
             }
-        }
-        if !out.iter().all(|v| v.is_finite()) {
-            return Err("nonfinite adjoint");
         }
         Ok(())
     }
@@ -563,6 +565,9 @@ fn sparse_qr_long_track_has_no_pose_pair_storage_and_validates_inputs() {
     );
     assert_eq!(scratch.len(), n + 3);
     assert!(block.apply(&[0.0; 6], &mut scratch).is_err());
+    let mut invalid = vec![0.0; 60000];
+    invalid[0] = f64::NAN;
+    assert!(block.apply(&invalid, &mut scratch).is_err());
     assert!(ReducedLandmark::new(vec![row.clone()], 0, true, 0.5).is_err());
     assert!(ReducedLandmark::new(vec![row], 1, true, 0.0).is_err());
 }
