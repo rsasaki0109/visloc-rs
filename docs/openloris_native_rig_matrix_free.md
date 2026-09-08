@@ -240,3 +240,31 @@ not evidence of lower process RSS or improved native accuracy/speed.
 No three-run performance gate, cluster-size sweep or 10k promotion follows.
 Keep Legacy default and README performance claims unchanged.
 [Certificate, all commands and independent audits](../benchmarks/electro/m8-openloris-native-cluster8-v1.json).
+
+## Native window context and next bounded decision
+
+Scalar debug context at `db9b7f0` links each native BA call to its pose,
+landmark and observation counts, frame bounds and anchor. Both debug replays
+produce exactly the corresponding PR #94 model files; no performance or
+new GT measurement is claimed. Strict first fails at call 4 (40 poses,
+39 variable, 52 landmarks, 1209 observations); cluster8 first fails at
+call 3 (30 poses, 29 variable, 47 landmarks, 966 observations). The early
+frame bounds are 2..89: registration-order windows are not necessarily
+consecutive frames, so fixed slot clusters are only a temporal approximation.
+
+Failure classification exposes a distinction hidden by the aggregate counts:
+strict has 296 residual-check / 293 iteration-limit failures; cluster8 has
+530 residual-check / 57 iteration-limit failures. The native states differ,
+so these are not matched linear systems and do not prove a unique cause.
+[All 86 calls per arm and exact-output audit](../benchmarks/electro/m8-openloris-native-ba-context-v1.json).
+
+The next single predeclared arm is cluster8 plus **one existing true-residual
+restart**, within the same total 128 PCG iterations and unchanged relative /
+absolute 1e-12 criterion. This is not another cap/tolerance sweep: the new
+cluster-specific failure mix supplies the reason to test the combination.
+Retain exact operator/RHS, Huber6/native loss, scalar damping, observation
+selection and fixed-pose guards. Check the total iteration bound and
+restart=0 equivalence before a paired native replay. Compare against the
+same-binary cluster8 and Legacy controls, with the existing RMSE/p95/raw-mean
+gates, geometry/identity/repeat checks. No extra restart limit, cluster size
+or GT-driven tuning follows a failure. This candidate is not implemented.
