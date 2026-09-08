@@ -52,6 +52,14 @@ in addition to DLT. Next distinguish hypothesis failure from insufficient
 pooled inliers internally, without relaxing gates or adding duplicate P3P.
 [In-loop boundary evidence](../benchmarks/electro/m8-openloris-2500-boundary-pnp-v1.json).
 
+`VISLOC_SFM_DEBUG_PNP_HYPOTHESES` now enables one scalar summary per eligible
+generalized-PnP call: successful DLT hypothesis count, successful central
+sensor reports (not the internal number of P3P roots), best pooled inliers,
+minimum sample support and prior presence. It retains no correspondence or
+hypothesis history, does not change RNG draws/scoring/refinement, and requires
+native byte-parity verification before interpreting measured output. Six
+generalized-related tests pass. This is diagnostic instrumentation, not a fix.
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements

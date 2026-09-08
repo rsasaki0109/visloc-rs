@@ -414,6 +414,8 @@ impl GeneralizedPnPRansac {
         let mut rng = SmallRng::seed_from_u64(self.seed);
         let mut indices = (0..correspondences.len()).collect::<Vec<_>>();
         let mut required_iterations = self.iterations;
+        let mut dlt_hypotheses = 0usize;
+        let mut central_hypotheses = 0usize;
         for iteration in 0..self.iterations {
             indices.shuffle(&mut rng);
             let sample = indices
@@ -424,6 +426,7 @@ impl GeneralizedPnPRansac {
             let Some(pose) = self.pose_estimator.estimate_pose(rig, &sample) else {
                 continue;
             };
+            dlt_hypotheses += 1;
             let score = score_pose(rig, &pose, correspondences, self.reprojection_threshold);
             if score.is_better_than(&best_score) {
                 best_pose = Some(pose);
@@ -482,6 +485,7 @@ impl GeneralizedPnPRansac {
             else {
                 continue;
             };
+            central_hypotheses += 1;
             let world_to_rig = rig.sensors()[sensor_index]
                 .sensor_from_rig
                 .inverse()
@@ -496,6 +500,12 @@ impl GeneralizedPnPRansac {
             }
         }
 
+        if std::env::var_os("VISLOC_SFM_DEBUG_PNP_HYPOTHESES").is_some() {
+            eprintln!(
+                "generalized-pnp-hypotheses: correspondences={} dlt_hypotheses={dlt_hypotheses} central_reports={central_hypotheses} pooled_inliers={} required={sample_size} prior={}",
+                correspondences.len(), best_score.inliers.len(), pose_prior.is_some(),
+            );
+        }
         if best_score.inliers.len() < sample_size {
             return None;
         }
