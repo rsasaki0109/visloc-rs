@@ -35,6 +35,11 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
    the matching worker or change prior chunks. See
    `m8-full-native-shared-runner-v1.json` (PR132 merged). This is retained
    feature/candidate validation, not full pipeline extraction or restart.
+   Native matching also passes on the regenerated full10k base bank: all 2,188
+   shared shards match legacy records, merged bytes and completed resume pass,
+   and the detached service has a terminal resource report. See
+   `m8-native-shared-full-v1.json`. Retained candidates remain outside generation
+   timing; this does not close the continuous pipeline gate.
 3. Assemble one executable, version-pinned native DAG covering base and dense
    extraction, retrieval, adaptive selection, matching, repair/targeted
    selection, source mapping and atlas integration. The dense bank also supplies

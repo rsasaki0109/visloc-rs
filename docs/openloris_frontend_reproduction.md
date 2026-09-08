@@ -402,6 +402,20 @@ See `m8-dense-parallel-preflight-v1.json`. Full10k dense execution is not yet do
 The base parity result covers only its 10,000 feature files: new base loci
 sidecars have no retained reference and are not covered by that comparison.
 
+## Full native shared matching on regenerated base features
+
+`m8-native-shared-full-v1.json` records a successful terminal detached service
+and measurement report. All 2,188 shards from 70,000 retained candidates match
+the legacy decoded records; merged bytes match, and completed resume leaves
+shards and worker log unchanged. Inputs are the regenerated full10k base bank.
+Matching plus merge took 327.79 s. The complete measured validation command
+(including prepare, comparison and completed resume) took 367.40 s with sampled
+aggregate peak RSS 276,100 KiB. Cgroup memory reached its 2 GiB cap with 1,462
+max events and no OOM events; this includes cache/kernel memory, not just RSS.
+This is neither an extraction/retrieval/mapping measurement nor proof of a
+speedup or improved trajectory quality. The long-duration durability probe is
+still a separate pending gate.
+
 ## Empty vocabulary safety
 
 Streamed candidate export now rejects a missing/empty appearance vocabulary
