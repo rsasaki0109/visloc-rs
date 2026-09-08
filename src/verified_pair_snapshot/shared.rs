@@ -6,7 +6,7 @@ use std::sync::Arc;
 struct CachedEnvelope {
     path: PathBuf,
     digest: [u8; 32],
-    bytes: Arc<[u8]>,
+    decoded: Arc<Snapshot>,
 }
 
 /// One-entry cache scoped to a single immutable-input merge pass. Revalidate
@@ -38,22 +38,35 @@ impl EnvelopeCache {
         Ok(())
     }
 
-    fn get(&mut self, path: PathBuf, digest: [u8; 32]) -> Result<Arc<[u8]>, String> {
+    fn get(&mut self, path: PathBuf, digest: [u8; 32]) -> Result<Arc<Snapshot>, String> {
         if let Some(entry) = &self.entry {
             if entry.path == path && entry.digest == digest {
-                return Ok(Arc::clone(&entry.bytes));
+                return Ok(Arc::clone(&entry.decoded));
             }
         }
         self.finish()?;
-        let bytes = load_envelope(&path, &digest)?;
+        let decoded = decode_envelope(load_envelope(&path, &digest)?)?;
         self.loads += 1;
         self.entry = Some(CachedEnvelope {
             path,
             digest,
-            bytes: Arc::clone(&bytes),
+            decoded: Arc::clone(&decoded),
         });
-        Ok(bytes)
+        Ok(decoded)
     }
+}
+
+fn decode_envelope(bytes: Arc<[u8]>) -> Result<Arc<Snapshot>, String> {
+    let length = (bytes.len() as u64)
+        .checked_add(32)
+        .ok_or("shared envelope size overflow")?;
+    decode_payload(
+        std::io::Cursor::new(bytes).chain(std::io::Cursor::new([0u8; 32])),
+        length,
+        true,
+        None,
+    )
+    .map(Arc::new)
 }
 
 fn load_envelope(path: &Path, digest: &[u8; 32]) -> Result<Arc<[u8]>, String> {
@@ -226,6 +239,15 @@ pub(super) fn read(
     cap: Option<usize>,
     cache: Option<&mut EnvelopeCache>,
 ) -> Result<Snapshot, String> {
+    read_merge(path, retain, cap, cache).map(MergeSnapshot::into_owned)
+}
+
+pub(super) fn read_merge(
+    path: &Path,
+    retain: bool,
+    cap: Option<usize>,
+    cache: Option<&mut EnvelopeCache>,
+) -> Result<MergeSnapshot, String> {
     let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let length = file.metadata().map_err(|error| error.to_string())?.len();
     let header_len = MAGIC.len() as u64 + 32 + 8;
@@ -247,7 +269,7 @@ pub(super) fn read(
     let envelope_path = envelope_path(parent(path), &digest);
     let envelope = match cache {
         Some(cache) => cache.get(envelope_path, digest)?,
-        None => load_envelope(&envelope_path, &digest)?,
+        None => decode_envelope(load_envelope(&envelope_path, &digest)?)?,
     };
     let mut remaining = suffix_len;
     let mut checksum = 0xcbf29ce484222325u64;
@@ -273,13 +295,13 @@ pub(super) fn read(
     }
     file.seek(SeekFrom::Start(header_len))
         .map_err(|error| error.to_string())?;
-    let payload_len = (envelope.len() as u64)
-        .checked_add(suffix_len)
-        .ok_or("shared payload size overflow")?;
-    decode_payload(
-        std::io::Cursor::new(envelope).chain(BufReader::new(file.take(suffix_len))),
-        payload_len,
-        retain,
-        cap,
-    )
+    let mut reader = Reader::new(BufReader::new(file.take(suffix_len)), suffix_len);
+    let chunk = decode_pair_payload(&mut reader, retain, cap)?;
+    Ok(MergeSnapshot {
+        envelope,
+        pairs: chunk.pairs,
+        pair_order_hash: chunk.pair_order_hash,
+        unordered_edge_hash: chunk.unordered_edge_hash,
+        accepted_match_count: chunk.accepted_match_count,
+    })
 }

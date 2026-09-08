@@ -229,6 +229,72 @@ struct MergePairIndex {
     encoded_hash: u64,
 }
 
+struct MergeSnapshot {
+    envelope: std::sync::Arc<Snapshot>,
+    pairs: Vec<PairRecord>,
+    pair_order_hash: u64,
+    unordered_edge_hash: u64,
+    accepted_match_count: u64,
+}
+
+impl std::ops::Deref for MergeSnapshot {
+    type Target = Snapshot;
+    fn deref(&self) -> &Snapshot {
+        &self.envelope
+    }
+}
+
+impl MergeSnapshot {
+    fn from_owned(mut snapshot: Snapshot) -> Self {
+        let pairs = std::mem::take(&mut snapshot.pairs);
+        Self {
+            pairs,
+            pair_order_hash: snapshot.pair_order_hash,
+            unordered_edge_hash: snapshot.unordered_edge_hash,
+            accepted_match_count: snapshot.accepted_match_count,
+            envelope: std::sync::Arc::new(snapshot),
+        }
+    }
+
+    fn into_owned(self) -> Snapshot {
+        let mut snapshot = std::sync::Arc::try_unwrap(self.envelope)
+            .unwrap_or_else(|envelope| (*envelope).clone());
+        snapshot.pairs = self.pairs;
+        snapshot.pair_order_hash = self.pair_order_hash;
+        snapshot.unordered_edge_hash = self.unordered_edge_hash;
+        snapshot.accepted_match_count = self.accepted_match_count;
+        snapshot
+    }
+}
+
+fn read_for_merge(path: &Path, cache: &mut shared::EnvelopeCache) -> Result<MergeSnapshot, String> {
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut magic = vec![0; shared::MAGIC.len()];
+    file.read_exact(&mut magic)
+        .map_err(|error| error.to_string())?;
+    if magic == shared::MAGIC {
+        shared::read_merge(path, true, None, Some(cache))
+    } else {
+        read(path).map(MergeSnapshot::from_owned)
+    }
+}
+
+fn validate_cached_merge_envelope(
+    index: usize,
+    snapshot: &MergeSnapshot,
+    first: &Snapshot,
+    previous: &mut Option<std::sync::Arc<Snapshot>>,
+) -> Result<(), String> {
+    if !previous
+        .as_ref()
+        .is_some_and(|old| std::sync::Arc::ptr_eq(old, &snapshot.envelope))
+    {
+        validate_merge_envelope(index, snapshot, first)?;
+        *previous = Some(std::sync::Arc::clone(&snapshot.envelope));
+    }
+    Ok(())
+}
+
 fn snapshot_envelope(snapshot: &Snapshot) -> Snapshot {
     let effective_config = format!("verified-pair-export-v1;{}", snapshot.verifier_config);
     Snapshot {
@@ -467,9 +533,10 @@ fn write_streamed_merge_temp(
         let mut encoded_pair_bytes = 0u64;
         let mut accepted_match_count = 0u64;
         let mut envelope_cache = shared::EnvelopeCache::default();
+        let mut previous_envelope = None;
         for (shard_index, path) in input_paths.iter().enumerate() {
-            let snapshot = read_with_cache(path, true, None, Some(&mut envelope_cache))?;
-            validate_merge_envelope(shard_index, &snapshot, first)?;
+            let snapshot = read_for_merge(path, &mut envelope_cache)?;
+            validate_cached_merge_envelope(shard_index, &snapshot, first, &mut previous_envelope)?;
             for pair in &snapshot.pairs {
                 let expected = expected_pairs.get(pair_cursor).ok_or_else(|| {
                     format!("merge input shard {shard_index} contains an unexpected pair")
@@ -641,13 +708,20 @@ pub fn merge_files_atomic<P: AsRef<Path>>(output: &Path, inputs: &[P]) -> Result
     let mut pair_payload_bytes = 0u64;
     let mut accepted_match_count = 0u64;
     let mut envelope_cache = shared::EnvelopeCache::default();
+    let mut previous_envelope = None;
     for (shard_index, path) in input_paths.iter().enumerate() {
-        let snapshot = read_with_cache(path, true, None, Some(&mut envelope_cache))?;
+        let snapshot = read_for_merge(path, &mut envelope_cache)?;
         if let Some(first_snapshot) = first.as_ref() {
-            validate_merge_envelope(shard_index, &snapshot, first_snapshot)?;
+            validate_cached_merge_envelope(
+                shard_index,
+                &snapshot,
+                first_snapshot,
+                &mut previous_envelope,
+            )?;
         } else {
             validate_snapshot_envelope(&snapshot)?;
             first = Some(snapshot_envelope(&snapshot));
+            previous_envelope = Some(std::sync::Arc::clone(&snapshot.envelope));
         }
         let image_count = first
             .as_ref()
@@ -1192,6 +1266,39 @@ fn decode_payload<R: Read>(
     let effective_config = reader.string("effective config")?;
     let verifier_config_hash = reader.u64()?;
     let verifier_config = reader.string("verifier config")?;
+    let chunk = decode_pair_payload(&mut reader, retain_audit_streams, mapper_match_limit)?;
+    Ok(Snapshot {
+        schema_version,
+        image_names,
+        image_manifest_hash,
+        feature_manifest_hash,
+        feature_counts,
+        width,
+        height,
+        intrinsics_bits,
+        effective_config_hash,
+        effective_config,
+        verifier_config_hash,
+        verifier_config,
+        pair_order_hash: chunk.pair_order_hash,
+        unordered_edge_hash: chunk.unordered_edge_hash,
+        accepted_match_count: chunk.accepted_match_count,
+        pairs: chunk.pairs,
+    })
+}
+
+struct DecodedPairs {
+    pair_order_hash: u64,
+    unordered_edge_hash: u64,
+    accepted_match_count: u64,
+    pairs: Vec<PairRecord>,
+}
+
+fn decode_pair_payload<R: Read>(
+    reader: &mut Reader<R>,
+    retain_audit_streams: bool,
+    mapper_match_limit: Option<usize>,
+) -> Result<DecodedPairs, String> {
     let pair_order_hash = reader.u64()?;
     let unordered_edge_hash = reader.u64()?;
     let accepted_match_count = reader.u64()?;
@@ -1328,19 +1435,7 @@ fn decode_payload<R: Read>(
     let accepted_match_count = mapper_match_limit.map_or(accepted_match_count, |_| {
         pairs.iter().map(|pair| pair.matches.len() as u64).sum()
     });
-    Ok(Snapshot {
-        schema_version,
-        image_names,
-        image_manifest_hash,
-        feature_manifest_hash,
-        feature_counts,
-        width,
-        height,
-        intrinsics_bits,
-        effective_config_hash,
-        effective_config,
-        verifier_config_hash,
-        verifier_config,
+    Ok(DecodedPairs {
         pair_order_hash,
         unordered_edge_hash,
         accepted_match_count,
@@ -1686,6 +1781,35 @@ mod tests {
             "visloc_verified_pair_snapshot_{tag}_{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn merge_reader_borrows_one_decoded_envelope_and_rejects_mismatches() {
+        let root = temp_path("borrowed_envelope");
+        std::fs::create_dir(&root).unwrap();
+        let snapshot = sample();
+        let first_path = root.join("first.vps");
+        super::write_shared_atomic(&first_path, &snapshot).unwrap();
+        let mut cache = super::shared::EnvelopeCache::default();
+        let first = super::read_for_merge(&first_path, &mut cache).unwrap();
+        let second = super::read_for_merge(&first_path, &mut cache).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first.envelope, &second.envelope));
+        assert_eq!(cache.loads, 1);
+        assert_eq!(first.into_owned(), snapshot);
+        assert_eq!(second.into_owned(), snapshot);
+        cache.finish().unwrap();
+
+        let mut other = sample();
+        other.feature_manifest_hash += 1;
+        let second_path = root.join("second.vps");
+        super::write_shared_atomic(&second_path, &other).unwrap();
+        let output = root.join("merged.vps");
+        std::fs::write(&output, b"prior-output").unwrap();
+        assert!(merge_files_atomic(&output, &[first_path, second_path])
+            .unwrap_err()
+            .contains("manifest"));
+        assert_eq!(std::fs::read(&output).unwrap(), b"prior-output");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,0 +1,22 @@
+{
+  "status": "all-real-worker-shards-full-record-parity-pass",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-full-v1/report.json",
+  "binary_sha256": "b02f85ecce56074e000d77a6bbd63242b3d0f568294f9c22fcc9a2dc4ca01c50",
+  "compare_binary_sha256": "1180dc17ec811c5a5ceb1a90ae893a4c668354e8e95b2eefcd6508b610af55d9",
+  "shards": 2500,
+  "candidate_pairs": 80000,
+  "feature_images": 10000,
+  "plan_sha256": "cb8005bd13fa6f490123efeaa0b36f0d3e0a0890309c641d34964e1cfc010d2a",
+  "reference_plan_sha256": "cb8005bd13fa6f490123efeaa0b36f0d3e0a0890309c641d34964e1cfc010d2a",
+  "feature_manifest_sha256": "9a58c1dd0699e72ed52149096cf17e85ee894ffaaf9d55772a1eb6b1c3d95ce2",
+  "membership_matches": true,
+  "worker_exit_code": 0,
+  "comparison_exit_code": 0,
+  "wall_seconds": 594.68,
+  "peak_rss_kib": 451060,
+  "rayon_num_threads": 4,
+  "malloc_arena_max": "1",
+  "time_report_sha256": "70d62f3839490019a8fbcf8bf69b5cb8518938e9c0567628e212cb4cc60dcb27",
+  "scope": "All2500 dense matching shards using the retained full10k feature bank. Exact output membership and every decoded record match legacy reference. Not extraction, restart, continuous E2E, or COLMAP quality.",
+  "timing_limit": "This single run does not establish a matching speedup; the previous legacy replay measured 557.35s under a different run history. Shared storage reduction and parity are the demonstrated outcomes."
+}

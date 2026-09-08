@@ -9,7 +9,7 @@
 PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
 へmerge、旧branch整理済み。空語彙修正はPR123（head`ee0fa5a`）、CI9成功後
 `d5e465e41d776f01d5b197683dc5b9613f823a14`へmerge済み。
-現作業branchは`test/shared-worker-parity`。
+現作業branchは`perf/borrowed-snapshot-envelope`。
 サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
@@ -100,6 +100,25 @@ Python43 tests/比較example Clippy通過。PR126旧branch整理とprobe結果�
 全件の終了/一致は未判定。完了後report.jsonのexit/membership/比較を確認する。
 同sessionをpollし、観測timeoutで再起動しない。保存binary使用、同時build/測定なし。
 全goal未達。full worker後もborrowed reader/restart/抽出E2E/COLMAP品質は残る。
+
+更新: PR127はhead`d5b0386`でCI9成功後`a5d51961e6e8eb5d6bce7e2623aa3f30fd58759e`へmerge。
+full workerは同session60175/PID3577312で継続、直近1803/2500 shard（elapsed7:41）。
+完了後の全出力比較は未確認。保存binary実行中、別build/測定はしない。
+新branchでborrowed envelope readerを準備中（src/verified_pair_snapshot.rsとshared.rs）。
+pair decoderを分離、解析済みenvelopeをArcで共有し、同一Arcのmetadata再比較を省く。
+公開Snapshot API/v1形式は維持。参照共有と不一致拒否のテスト追加、まだ未build/未test。
+このWIPは今回のagent変更。worker終了後にlib/example test・tests込みClippyを実行してから
+実dense merge全SHA一致と100k読取を確認する。PR127旧branch整理も次。全goal未達。
+
+更新: full worker session60175はexit0完了。全2500 shardのmembership/全レコードが従来一致。
+worker594.68s/451060KiB（以前legacy557.35sより速いとは示せない、単発/別run履歴）。
+証跡`m8-shared-worker-full-v1.json`。保存binaryと出力保持。再起動/poll不要。
+borrowed envelope実装はlib19/example64 tests、tests込みClippy、Python43 tests通過。
+新worker全2500 shardをborrowed readerでmergeし最終SHA02cd6475...全一致。
+8.19s/16256KiB、証跡`m8-dense-borrowed-merge-v1.json`。session94712もexit0完了。
+次はこのbranchのPR/CI/merge、100k読取・強制中断restart。全E2E/軌跡品質は未達。
+常駐画像metadataをArcで共有、同一envelopeを再解析/再比較しない。公開owned APIは維持。
+測定プロセスなし、空き約10GiB。全goal未達。
 
 ### 以前の状態（上記を優先）
 
