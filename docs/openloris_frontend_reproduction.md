@@ -104,6 +104,15 @@ every resulting snapshot with the corresponding reference snapshot. These are
 diagnostic stage replays, not a continuous E2E runner or portable demo commands.
 Matching deliberately excludes snapshot merging and downstream reconstruction.
 
+Candidate replay now also accepts `--features-dir EXPLICIT_BANK --output
+NEW_CANDIDATE_DIRECTORY` for connection to an enclosing run. `--output` and
+`--output-name` are mutually exclusive. Both the default and explicit feature
+bank must validate against the frozen variant's manifest before output creation;
+the resolved bank and manifest hash are recorded. The final candidate comparison
+is unchanged. Binding a path is not proof that extraction ran: the enclosing
+executor must separately establish that provenance. This adapter does not yet
+connect extraction, all matching variants, admission and atlas execution.
+
 The external replay directories are
 `corridor1-1-m8-native-candidates-legacy-replay-v1` and
 `corridor1-1-m8-native-matching-replay-v1` under the OpenLORIS dataset root.
