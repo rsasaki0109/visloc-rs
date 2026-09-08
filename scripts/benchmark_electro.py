@@ -1671,6 +1671,7 @@ def run_match_shards(
     resume: bool = True,
     persistent_matcher: bool = False,
     stream_match_features: bool = False,
+    shared_snapshot_envelope: bool = False,
     feature_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run pending match shards, updating the index only after hash checks."""
@@ -1694,8 +1695,11 @@ def run_match_shards(
             match_ratio=match_ratio,
             resume=resume,
             stream_match_features=stream_match_features,
+            shared_snapshot_envelope=shared_snapshot_envelope,
         )
 
+    if shared_snapshot_envelope:
+        raise ValidationError('shared snapshot envelopes require the persistent matcher')
     if stream_match_features:
         raise ValidationError("streamed match features require the persistent matcher")
 

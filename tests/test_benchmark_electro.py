@@ -61,6 +61,17 @@ class ElectroBenchmarkTests(unittest.TestCase):
         self.assertNotIn('--shared-snapshot-envelope', benchmark.build_persistent_match_command(Path('worker'), **kwargs))
         self.assertIn('--shared-snapshot-envelope', benchmark.build_persistent_match_command(Path('worker'), shared_snapshot_envelope=True, **kwargs))
 
+    def test_match_dispatch_forwards_shared_snapshot_flag(self):
+        kwargs = dict(binary=Path('worker'), features_dir=Path('features'), calibration_dir=Path('calibration'),
+                      feature_manifest_path=Path('features.json'), shared_snapshot_envelope=True)
+        with mock.patch.object(benchmark, 'run_persistent_matcher', return_value={'ok': True}) as worker:
+            result = benchmark.run_match_shards(Path('candidate-index'), Path('match-index'),
+                                                persistent_matcher=True, **kwargs)
+            self.assertTrue(result['ok'])
+            self.assertTrue(worker.call_args.kwargs['shared_snapshot_envelope'])
+        with self.assertRaisesRegex(benchmark.ValidationError, 'persistent matcher'):
+            benchmark.run_match_shards(Path('candidate-index'), Path('match-index'), **kwargs)
+
     def test_shared_completion_records_dependency_before_marking_complete(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
