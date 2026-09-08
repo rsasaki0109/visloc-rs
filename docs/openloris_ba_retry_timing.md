@@ -67,8 +67,8 @@ dispatch remains unchanged. Native CLI integration is available through
 fixture passes fixed-state checks with and without external boundary observations.
 Its matrix-free-only unsupported-calibration rollback assertion is not applied
 to Legacy, which supports that configuration. This is not evidence of cache-hit
-coverage or rejected-step rollback in that fixture. Reject→accept→reject-specific
-coverage and real-input resource/parity gates remain pending. The existing39
+coverage or rejected-step rollback in that native fixture. The separate synthetic
+transition test is described below; larger-tier resource/parity gates remain pending. The existing39
 native tests passed before this additional enabled fixture.
 
 The first real-input1k replay uses one saved release binary at source0466499,
@@ -78,7 +78,7 @@ Wall times are3.73/3.94s off and3.44/3.48s on; peak RSS is81944/81968KiB off
 and82008/82200KiB on. The two candidate observations are faster but memory
 is not reduced. These are mapper replays with retained frontend inputs,
 not native E2E or a COLMAP comparison. The policy remains default off pending
-larger-tier parity/resource tests and explicit invalidation transition coverage.
+larger-tier parity/resource tests (transition coverage is recorded below).
 See `benchmarks/electro/m8-openloris-1000-retry-reuse-v1.json` for commands,
 binary hash, full logs, resource reports and output hashes.
 
@@ -88,3 +88,11 @@ peak RSS is412748/413244KiB off and412980/413008KiB on. Candidate wall is lower
 in both observations; RSS overlaps. No memory reduction or COLMAP/native E2E
 claim follows. Commands and exact audit program are frozen in
 `benchmarks/electro/m8-openloris-2500-retry-reuse-v1.json`.
+
+Transition coverage is now explicit: the synthetic parity test requires a
+consecutive rejected→accepted→rejected triple, in addition to consecutive
+rejections, before asserting equality of every public iteration statistic and
+the complete final problem state. This passes with default sparse damping;
+no benchmark input or solver setting was tuned to manufacture the transition.
+This closes the previously pending transition fixture requirement, not the
+larger-tier, full-pipeline or memory-reduction gates.

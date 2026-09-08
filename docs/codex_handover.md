@@ -15,6 +15,8 @@
 > 全モデル3ファイルが過去Legacy対照と完全一致。wall OFF38.50/37.69秒、ON35.63/36.16秒。
 > RSS OFF412748/413244KiB、ON412980/413008KiB。省メモリ/10k/E2E優越は未証明。
 > 証跡 `m8-openloris-2500-retry-reuse-v1.json`。測定プロセスはすべて終了。
+> 合成parityテストに連続「棄却→受理→再棄却」の必須assertを追加し通過。
+> ON/OFFの全反復統計・最終状態一致も通過。次は5k/10k。実装既定OFFを維持。
 
 > 最新: `perf/m8-stream-connectivity-unions`。PR108/109/110は最終headのCI9件成功後merge済み。
 > main最新merge `14d9b50661e2df6d8eb0c1743e815adfa6d62f9d`（PR110）。

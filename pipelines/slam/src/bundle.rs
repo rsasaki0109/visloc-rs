@@ -10914,6 +10914,17 @@ mod matrix_free_ba_api_tests {
             })
             .unwrap();
         assert!(expected.iterations.iter().any(|step| step.step_accepted));
+        assert!(
+            expected.iterations.windows(3).any(|steps| {
+                !steps[0].step_accepted && steps[1].step_accepted && !steps[2].step_accepted
+            }),
+            "fixture must exercise rejection, acceptance and renewed rejection: {:?}",
+            expected
+                .iterations
+                .iter()
+                .map(|s| s.step_accepted)
+                .collect::<Vec<_>>()
+        );
         assert!(expected
             .iterations
             .windows(2)

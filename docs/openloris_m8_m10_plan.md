@@ -30,7 +30,8 @@ The default-off implementation now has repeated same-binary1k and independent
 2.5k mapper replay evidence: all model files match Legacy exactly.1k wall is
 3.73/3.94s off versus3.44/3.48s on;2.5k is38.50/37.69s versus35.63/36.16s.
 RSS does not show a reduction. These observed improvements are not10k or E2E
-proof. Next verify cache invalidation transitions and5k/10k parity/resources,
+proof. Synthetic parity now explicitly requires rejected→accepted→rejected
+transitions and full iteration/final-state equality. Next verify5k/10k parity/resources,
 then revisit unresolved accuracy and full-pipeline gates without promoting
 this experimental policy prematurely.
 Do not replace the unresolved quality work with cache tuning: the retained
