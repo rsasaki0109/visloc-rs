@@ -2028,6 +2028,35 @@ impl BundleAdjustment {
         self.validate_matrix_free_entry_with_pose_requirement(config, options, false)
     }
 
+    /// Experimental bounded QR elimination for calibrated, projectable rig rows.
+    pub(crate) fn optimize_rig_qr(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+    ) -> Result<MatrixFreeBaResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options)?;
+        if self.rig_observations.is_empty()
+            || !self.observations.is_empty()
+            || !self.stereo_observations.is_empty()
+            || !self.general_stereo_observations.is_empty()
+            || self.nonprojectable_observation_count() != 0
+        {
+            return Err(MatrixFreeBaError::Ineligible(
+                "QR requires pure projectable rig observations",
+            ));
+        }
+        let mut runtime = MatrixFreeRuntime::new(options);
+        runtime.landmark_qr = true;
+        let (result, runtime) = self.run_matrix_free_backend(config, runtime)?;
+        Ok(MatrixFreeBaResult {
+            initial_cost: result.initial_cost,
+            final_cost: result.final_cost,
+            iterations: result.iterations,
+            matrix_free_iterations: runtime.iterations,
+            converged: result.converged,
+        })
+    }
+
     /// Experimental bounded eight-pose preconditioner for native rig BA.
     /// The exact operator, stopping criterion and LM policy are unchanged.
     pub(crate) fn optimize_matrix_free_cluster8(
@@ -3315,10 +3344,8 @@ impl BundleAdjustment {
                 backend,
                 BaSolveBackend::MatrixFree(_) | BaSolveBackend::MatrixFreeColumnScaled(_)
             ) || config.linear_solver == LinearSolver::Sparse;
-            let use_landmark_qr = false;
-            #[cfg(test)]
-            let use_landmark_qr = use_landmark_qr
-                || matches!(&backend, BaSolveBackend::MatrixFree(runtime) if runtime.landmark_qr);
+            let use_landmark_qr =
+                matches!(&backend, BaSolveBackend::MatrixFree(runtime) if runtime.landmark_qr);
             let mut system = (!use_landmark_qr).then(|| {
                 build_normal_equations(
                     self,
@@ -3401,7 +3428,6 @@ impl BundleAdjustment {
                     );
                     let solve_result = match scaling_result {
                         Err(error) => Err(error),
-                        #[cfg(test)]
                         Ok(_) if runtime.landmark_qr => solve_rig_qr_step(
                             self,
                             config,
@@ -5668,7 +5694,6 @@ enum BaSolveBackend {
 }
 
 struct MatrixFreeRuntime {
-    #[cfg(test)]
     landmark_qr: bool,
     cluster8: bool,
     options: MatrixFreeBaOptions,
@@ -5684,7 +5709,6 @@ struct MatrixFreeRuntime {
 impl MatrixFreeRuntime {
     fn new(options: MatrixFreeBaOptions) -> Self {
         Self {
-            #[cfg(test)]
             landmark_qr: false,
             cluster8: false,
             options,
@@ -5700,7 +5724,6 @@ impl MatrixFreeRuntime {
 
     fn with_restart(options: MatrixFreeBaOptions, restart_limit: usize) -> Self {
         Self {
-            #[cfg(test)]
             landmark_qr: false,
             cluster8: false,
             options,
@@ -5716,7 +5739,6 @@ impl MatrixFreeRuntime {
 
     fn with_column_scaling(options: MatrixFreeBaOptions) -> Self {
         Self {
-            #[cfg(test)]
             landmark_qr: false,
             cluster8: false,
             options,
@@ -5732,7 +5754,6 @@ impl MatrixFreeRuntime {
 
     fn with_column_scaling_adaptive(options: MatrixFreeBaOptions) -> Self {
         Self {
-            #[cfg(test)]
             landmark_qr: false,
             cluster8: false,
             options,
@@ -8412,7 +8433,6 @@ fn general_stereo_residual_jacobians(
     Some((residual, j_pose, j_landmark))
 }
 
-#[cfg(test)]
 #[allow(clippy::result_large_err)] // Same diagnostic payload as the existing linear-step boundary.
 fn solve_rig_qr_step(
     ba: &BundleAdjustment,
@@ -8478,18 +8498,17 @@ fn solve_rig_qr_step(
     })
 }
 
-/// Staged native adapter: reuses the actual rig Jacobians and robust kernel.
-/// It is compiled only in tests until solver/preconditioner integration is ready.
-#[cfg(test)]
+/// Bounded rig QR adapter: reuses the actual rig Jacobians and robust kernel.
 struct RigQrLinearization {
+    #[cfg(test)]
     pose_index: BTreeMap<u64, usize>,
     blocks: Vec<(u64, crate::landmark_qr::ReducedLandmark)>,
     pose_diagonal: Vec<f64>,
+    #[cfg(test)]
     observation_rows: usize,
     preconditioner: Vec<Matrix6<f64>>,
 }
 
-#[cfg(test)]
 impl RigQrLinearization {
     fn new(ba: &BundleAdjustment, config: &BaConfig, lambda: f64) -> Result<Self, String> {
         ba.validate_matrix_free_entry(config, MatrixFreeBaOptions::default())
@@ -8547,6 +8566,7 @@ impl RigQrLinearization {
                     });
             }
         }
+        #[cfg(test)]
         let observation_rows = rows.values().map(Vec::len).sum();
         let mut preconditioner: Vec<_> = pose_diagonal
             .chunks_exact(6)
@@ -8579,9 +8599,11 @@ impl RigQrLinearization {
             }
         }
         Ok(Self {
+            #[cfg(test)]
             pose_index,
             blocks,
             pose_diagonal,
+            #[cfg(test)]
             observation_rows,
             preconditioner,
         })
@@ -8643,7 +8665,7 @@ impl RigQrLinearization {
             self.rhs()
                 .map_err(implicit_schur::ImplicitSchurError::NonFinite)?,
         );
-        matrix_free_real_oracle_tests::solve_test_pcg(
+        solve_qr_pcg(
             &rhs,
             rhs.len(),
             options,
@@ -8655,6 +8677,175 @@ impl RigQrLinearization {
             |r| self.precondition(r),
         )
     }
+}
+
+fn checked_qr_pcg_result<Apply>(
+    rhs: &DVector<f64>,
+    solution: DVector<f64>,
+    iterations: usize,
+    recursive_norm: f64,
+    target: f64,
+    apply: &mut Apply,
+) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError>
+where
+    Apply: FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
+{
+    let applied = apply(&solution)?;
+    let true_residual = rhs - &applied;
+    let true_norm = true_residual.norm();
+    if !true_norm.is_finite() {
+        return Err(implicit_schur::ImplicitSchurError::NonFinite(
+            "true PCG residual",
+        ));
+    }
+    if true_norm > target {
+        return Err(implicit_schur::ImplicitSchurError::ResidualCheckFailed {
+            iterations,
+            recursive_norm,
+            true_norm,
+            target,
+        });
+    }
+    Ok(implicit_schur::PcgResult {
+        solution,
+        iterations,
+        residual_norm: true_norm,
+        target,
+    })
+}
+
+/// Generic QR PCG recurrence, originally audited against the implicit
+/// operator.  The callbacks make it possible to run the exact recurrence
+/// against either the implicit action or a borrowed explicit lower-Schur
+/// matrix. The existing Schur solver remains unchanged.
+fn solve_qr_pcg<Apply, Preconditioner>(
+    rhs: &DVector<f64>,
+    dimension: usize,
+    options: implicit_schur::PcgOptions,
+    mut apply: Apply,
+    mut apply_preconditioner: Preconditioner,
+) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError>
+where
+    Apply: FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
+    Preconditioner:
+        FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
+{
+    if rhs.len() != dimension {
+        return Err(implicit_schur::ImplicitSchurError::DimensionMismatch {
+            expected: dimension,
+            actual: rhs.len(),
+        });
+    }
+    if !rhs.iter().all(|value| value.is_finite()) {
+        return Err(implicit_schur::ImplicitSchurError::NonFinite(
+            "PCG right hand side",
+        ));
+    }
+    if !options.relative_tolerance.is_finite()
+        || options.relative_tolerance < 0.0
+        || !options.absolute_tolerance.is_finite()
+        || options.absolute_tolerance < 0.0
+    {
+        return Err(implicit_schur::ImplicitSchurError::InvalidTolerance);
+    }
+    let rhs_norm = rhs.norm();
+    let target = options
+        .absolute_tolerance
+        .max(options.relative_tolerance * rhs_norm);
+    if !target.is_finite() {
+        return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG target"));
+    }
+    let mut solution = DVector::zeros(dimension);
+    let mut residual = rhs.clone();
+    let mut residual_norm = residual.norm();
+    if !residual_norm.is_finite() {
+        return Err(implicit_schur::ImplicitSchurError::NonFinite(
+            "initial residual",
+        ));
+    }
+    if residual_norm <= target {
+        return checked_qr_pcg_result(rhs, solution, 0, residual_norm, target, &mut apply);
+    }
+    if options.max_iterations == 0 {
+        return Err(implicit_schur::ImplicitSchurError::MaxIterations {
+            iterations: 0,
+            recursive_norm: residual_norm,
+            residual_norm,
+            target,
+        });
+    }
+
+    let mut preconditioned = apply_preconditioner(&residual)?;
+    let mut direction = preconditioned.clone();
+    let mut rho = residual.dot(&preconditioned);
+    if !rho.is_finite() || rho <= 0.0 {
+        return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
+    }
+
+    for iteration in 1..=options.max_iterations {
+        let applied = apply(&direction)?;
+        let curvature = direction.dot(&applied);
+        if !curvature.is_finite() || curvature <= 0.0 {
+            return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
+        }
+        let alpha = rho / curvature;
+        if !alpha.is_finite() {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG step"));
+        }
+        solution += alpha * &direction;
+        residual -= alpha * applied;
+        residual_norm = residual.norm();
+        if !solution.iter().all(|value| value.is_finite()) || !residual_norm.is_finite() {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG iterate"));
+        }
+        if residual_norm <= target {
+            return checked_qr_pcg_result(
+                rhs,
+                solution,
+                iteration,
+                residual_norm,
+                target,
+                &mut apply,
+            );
+        }
+        if iteration == options.max_iterations {
+            let true_residual = rhs - &apply(&solution)?;
+            let true_norm = true_residual.norm();
+            if !true_norm.is_finite() {
+                return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                    "true PCG residual",
+                ));
+            }
+            if true_norm <= target {
+                return Ok(implicit_schur::PcgResult {
+                    solution,
+                    iterations: iteration,
+                    residual_norm: true_norm,
+                    target,
+                });
+            }
+            return Err(implicit_schur::ImplicitSchurError::MaxIterations {
+                iterations: iteration,
+                recursive_norm: residual_norm,
+                residual_norm: true_norm,
+                target,
+            });
+        }
+        preconditioned = apply_preconditioner(&residual)?;
+        let next_rho = residual.dot(&preconditioned);
+        if !next_rho.is_finite() || next_rho <= 0.0 {
+            return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
+        }
+        let beta = next_rho / rho;
+        if !beta.is_finite() {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "PCG direction",
+            ));
+        }
+        direction = &preconditioned + beta * direction;
+        rho = next_rho;
+    }
+    unreachable!("the max-iteration branch returns above");
 }
 
 fn rig_residual_jacobians(
@@ -11054,6 +11245,10 @@ mod matrix_free_ba_api_tests {
         // A landmark absent from every observation must retain its XYZ.
         a.landmarks.insert(u64::MAX, Point3::new(1.0, 2.0, 3.0));
         b.landmarks = a.landmarks.clone();
+        let mut native_entry = a.clone();
+        let native_result = native_entry
+            .optimize_rig_qr(&nonlinear_config, MatrixFreeBaOptions::default())
+            .unwrap();
         let run = |problem: &mut BundleAdjustment| {
             let mut runtime = MatrixFreeRuntime::new(MatrixFreeBaOptions::default());
             runtime.landmark_qr = true;
@@ -11066,6 +11261,8 @@ mod matrix_free_ba_api_tests {
         assert!(result.final_cost < result.initial_cost);
         assert_eq!(result.final_cost, repeat.final_cost);
         assert_eq!(a, b);
+        assert_eq!(a, native_entry);
+        assert_eq!(result.final_cost, native_result.final_cost);
         assert_eq!(runtime.iterations, repeated_runtime.iterations);
         assert!(runtime.iterations.iter().any(|s| s.pcg_failure.is_none()));
         assert_eq!(a.poses[&0], rig.poses[&0]);
@@ -11097,6 +11294,12 @@ mod matrix_free_ba_api_tests {
             .windows(2)
             .all(|s| s[0].lambda < s[1].lambda));
         let config = matrix_free_config();
+        let mut mono = make_problem();
+        let before = mono.clone();
+        assert!(mono
+            .optimize_rig_qr(&config, MatrixFreeBaOptions::default())
+            .is_err());
+        assert_eq!(mono, before);
         assert!(RigQrLinearization::new(&rig, &config, 0.0).is_err());
         rig.rig_observations[0].landmark_id = u64::MAX;
         assert!(RigQrLinearization::new(&rig, &config, 0.5).is_err());
@@ -12876,174 +13079,7 @@ mod matrix_free_real_oracle_tests {
         Ok(output)
     }
 
-    fn checked_test_pcg_result<Apply>(
-        rhs: &DVector<f64>,
-        solution: DVector<f64>,
-        iterations: usize,
-        recursive_norm: f64,
-        target: f64,
-        apply: &mut Apply,
-    ) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError>
-    where
-        Apply: FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
-    {
-        let applied = apply(&solution)?;
-        let true_residual = rhs - &applied;
-        let true_norm = true_residual.norm();
-        if !true_norm.is_finite() {
-            return Err(implicit_schur::ImplicitSchurError::NonFinite(
-                "true PCG residual",
-            ));
-        }
-        if true_norm > target {
-            return Err(implicit_schur::ImplicitSchurError::ResidualCheckFailed {
-                iterations,
-                recursive_norm,
-                true_norm,
-                target,
-            });
-        }
-        Ok(implicit_schur::PcgResult {
-            solution,
-            iterations,
-            residual_norm: true_norm,
-            target,
-        })
-    }
-
-    /// Test-only generic PCG recurrence copied from the production implicit
-    /// operator.  The callbacks make it possible to run the exact recurrence
-    /// against either the implicit action or a borrowed explicit lower-Schur
-    /// matrix, while keeping the production solver/API untouched.
-    pub(super) fn solve_test_pcg<Apply, Preconditioner>(
-        rhs: &DVector<f64>,
-        dimension: usize,
-        options: implicit_schur::PcgOptions,
-        mut apply: Apply,
-        mut apply_preconditioner: Preconditioner,
-    ) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError>
-    where
-        Apply: FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
-        Preconditioner:
-            FnMut(&DVector<f64>) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError>,
-    {
-        if rhs.len() != dimension {
-            return Err(implicit_schur::ImplicitSchurError::DimensionMismatch {
-                expected: dimension,
-                actual: rhs.len(),
-            });
-        }
-        if !rhs.iter().all(|value| value.is_finite()) {
-            return Err(implicit_schur::ImplicitSchurError::NonFinite(
-                "PCG right hand side",
-            ));
-        }
-        if !options.relative_tolerance.is_finite()
-            || options.relative_tolerance < 0.0
-            || !options.absolute_tolerance.is_finite()
-            || options.absolute_tolerance < 0.0
-        {
-            return Err(implicit_schur::ImplicitSchurError::InvalidTolerance);
-        }
-        let rhs_norm = rhs.norm();
-        let target = options
-            .absolute_tolerance
-            .max(options.relative_tolerance * rhs_norm);
-        if !target.is_finite() {
-            return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG target"));
-        }
-        let mut solution = DVector::zeros(dimension);
-        let mut residual = rhs.clone();
-        let mut residual_norm = residual.norm();
-        if !residual_norm.is_finite() {
-            return Err(implicit_schur::ImplicitSchurError::NonFinite(
-                "initial residual",
-            ));
-        }
-        if residual_norm <= target {
-            return checked_test_pcg_result(rhs, solution, 0, residual_norm, target, &mut apply);
-        }
-        if options.max_iterations == 0 {
-            return Err(implicit_schur::ImplicitSchurError::MaxIterations {
-                iterations: 0,
-                recursive_norm: residual_norm,
-                residual_norm,
-                target,
-            });
-        }
-
-        let mut preconditioned = apply_preconditioner(&residual)?;
-        let mut direction = preconditioned.clone();
-        let mut rho = residual.dot(&preconditioned);
-        if !rho.is_finite() || rho <= 0.0 {
-            return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
-        }
-
-        for iteration in 1..=options.max_iterations {
-            let applied = apply(&direction)?;
-            let curvature = direction.dot(&applied);
-            if !curvature.is_finite() || curvature <= 0.0 {
-                return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
-            }
-            let alpha = rho / curvature;
-            if !alpha.is_finite() {
-                return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG step"));
-            }
-            solution += alpha * &direction;
-            residual -= alpha * applied;
-            residual_norm = residual.norm();
-            if !solution.iter().all(|value| value.is_finite()) || !residual_norm.is_finite() {
-                return Err(implicit_schur::ImplicitSchurError::NonFinite("PCG iterate"));
-            }
-            if residual_norm <= target {
-                return checked_test_pcg_result(
-                    rhs,
-                    solution,
-                    iteration,
-                    residual_norm,
-                    target,
-                    &mut apply,
-                );
-            }
-            if iteration == options.max_iterations {
-                let true_residual = rhs - &apply(&solution)?;
-                let true_norm = true_residual.norm();
-                if !true_norm.is_finite() {
-                    return Err(implicit_schur::ImplicitSchurError::NonFinite(
-                        "true PCG residual",
-                    ));
-                }
-                if true_norm <= target {
-                    return Ok(implicit_schur::PcgResult {
-                        solution,
-                        iterations: iteration,
-                        residual_norm: true_norm,
-                        target,
-                    });
-                }
-                return Err(implicit_schur::ImplicitSchurError::MaxIterations {
-                    iterations: iteration,
-                    recursive_norm: residual_norm,
-                    residual_norm: true_norm,
-                    target,
-                });
-            }
-            preconditioned = apply_preconditioner(&residual)?;
-            let next_rho = residual.dot(&preconditioned);
-            if !next_rho.is_finite() || next_rho <= 0.0 {
-                return Err(implicit_schur::ImplicitSchurError::NonPositiveCurvature);
-            }
-            let beta = next_rho / rho;
-            if !beta.is_finite() {
-                return Err(implicit_schur::ImplicitSchurError::NonFinite(
-                    "PCG direction",
-                ));
-            }
-            direction = &preconditioned + beta * direction;
-            rho = next_rho;
-        }
-        unreachable!("the max-iteration branch returns above");
-    }
+    use super::solve_qr_pcg as solve_test_pcg;
 
     struct CholeskyPcgArmOutcome {
         report: CholeskyPcgArmReport,

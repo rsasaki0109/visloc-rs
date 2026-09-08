@@ -116,6 +116,7 @@ pub(crate) struct ReducedLandmark {
 }
 
 impl ReducedLandmark {
+    #[cfg(test)]
     pub(crate) fn new(
         rows: Vec<WeightedRow>,
         poses: usize,
@@ -257,6 +258,7 @@ impl ReducedLandmark {
         Ok(())
     }
 
+    #[cfg(test)]
     fn apply<'a>(&self, x: &[f64], scratch: &'a mut Vec<f64>) -> Result<&'a [f64], &'static str> {
         self.pose_action(x, scratch)?;
         if let Some(qr) = &self.qr {
@@ -284,6 +286,7 @@ impl ReducedLandmark {
         Ok(())
     }
 
+    #[cfg(test)]
     fn adjoint_add(
         &self,
         y: &[f64],

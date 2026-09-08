@@ -1,7 +1,31 @@
 # Implicit landmark QR — staged implementation
 
-Status: compact elimination and sparse pose-row kernels tested; not a native BA backend or a
-quality/performance improvement. M8–M10 remains incomplete.
+Status: default-off native `--ba-backend matrix-free-qr` implemented. Kernel,
+shared LM and native fixed-state tests pass; real-data quality/performance
+is not yet measured. M8–M10 remains incomplete.
+
+## Native integration status
+
+The former test-only kernel and generic PCG recurrence now compile in normal
+builds. The existing Schur PCG is unchanged; its oracle tests reuse the QR
+recurrence to check parity. `optimize_rig_qr` validates the usual matrix-free
+contract plus pure, initially projectable rig observations before mutation.
+Positive damping remains required. Per-iteration unprojectable rows or failed
+factorizations become explicit failed linear steps, not dropped observations
+or a legacy fallback. PCG remains 128 iterations, 1e-12 relative/absolute,
+no restarts. Native all-pose-fixed windows retain the existing explicit
+landmark-only/no-variable dispatch, not a pose Schur fallback.
+
+The native selector is default-off. Tests exercise the production entry,
+native fixed rotations/points/observations and rollback, strict CLI parsing,
+and rejection of monocular input without mutation. The shared LM QR arm does
+not assemble a duplicate normal system. No native dataset run, timing or RSS
+claim follows from these tests. Next: certify the release binary and run the
+unchanged 1k Legacy control and two QR repeats, then independently audit the
+existing identity/geometry/trajectory gates before any larger-tier promotion.
+
+The staged descriptions below document the implementation sequence; their
+test-only status is superseded by this native integration section.
 
 ## Reason and references
 

@@ -101,6 +101,8 @@ pub enum RigBaBackend {
     MatrixFreeCluster8,
     /// Cluster8 with one true-residual restart inside the same PCG budget.
     MatrixFreeCluster8Restart1,
+    /// Experimental compact landmark QR with bounded pose-block Jacobi PCG.
+    MatrixFreeQr,
 }
 
 /// Conservative controls for generalized-rig incremental reconstruction.
@@ -4809,7 +4811,8 @@ fn run_rig_bundle_adjustment(
         }
         RigBaBackend::MatrixFreeStrict
         | RigBaBackend::MatrixFreeCluster8
-        | RigBaBackend::MatrixFreeCluster8Restart1 => {
+        | RigBaBackend::MatrixFreeCluster8Restart1
+        | RigBaBackend::MatrixFreeQr => {
             let has_variable_pose = problem
                 .poses
                 .keys()
@@ -4863,6 +4866,8 @@ fn run_rig_bundle_adjustment(
                 )
             } else if has_variable_pose {
                 let result = match config.ba_backend {
+                    RigBaBackend::MatrixFreeQr => problem.optimize_rig_qr(
+                        ba_config, MatrixFreeBaOptions::default()),
                     RigBaBackend::MatrixFreeCluster8Restart1 => problem.optimize_matrix_free_cluster8_with_restart(
                         ba_config, MatrixFreeBaOptions::default(), MatrixFreeBaRestartOptions { max_restarts_per_solve: 1 })
                         .map(|result| {
@@ -4884,7 +4889,9 @@ fn run_rig_bundle_adjustment(
                         RigSfmError::BundleAdjustment(error.to_string())
                     })?;
                 matrix_free_report = Some((
-                    if config.ba_backend == RigBaBackend::MatrixFreeCluster8Restart1 {
+                    if config.ba_backend == RigBaBackend::MatrixFreeQr {
+                        "matrix-free-qr"
+                    } else if config.ba_backend == RigBaBackend::MatrixFreeCluster8Restart1 {
                         "matrix-free-cluster8-restart1"
                     } else if config.ba_backend == RigBaBackend::MatrixFreeCluster8 {
                         "matrix-free-cluster8"
@@ -9009,6 +9016,11 @@ mod tests {
     #[test]
     fn cluster8_restart_native_preserves_fixed_state_and_rollback() {
         check_fixed_rotation_backend(RigBaBackend::MatrixFreeCluster8Restart1);
+    }
+
+    #[test]
+    fn qr_native_preserves_fixed_state_and_rollback() {
+        check_fixed_rotation_backend(RigBaBackend::MatrixFreeQr);
     }
 
     fn check_fixed_rotation_backend(backend: RigBaBackend) {

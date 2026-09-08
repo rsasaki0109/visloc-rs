@@ -11,7 +11,9 @@
 > 前処理はfull normal systemを二重保持しないが、normal-form減算の数値限界は残る。
 > 共通LMループへtest-only接続済み。QR時は旧normal assemblyをスキップ。
 > 3非線形反復のcost低下/反復一致/固定条件と、強制PCG失敗時の状態保持・lambda増加を検証。
-> 次はtest-only制限を外すproduction/native統合。実データ品質・性能は未証明。
+> production/native selector `--ba-backend matrix-free-qr` をdefault-off追加。
+> QR7テスト（native固定状態/rollback含む）通過。実データ品質・性能は未証明。
+> 次はrelease認証と1k同一binary Legacy対照・QR2反復、独立品質監査。合格まで大規模展開なし。
 > サブエージェントは使用しない。goal全体は未達。
 
 > Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。
