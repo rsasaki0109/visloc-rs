@@ -31,6 +31,26 @@ The converter retains one input/output shard at a time. It does not replace or
 delete inputs and refuses an existing destination. The writer supports retry;
 the batch converter itself does not yet resume partially completed conversions.
 
+## Real worker parity probe
+
+`scripts/probe_shared_match_worker.py --binary SFM_BINARY --compare-binary
+COMPARE_BINARY --output NEW_DIRECTORY --shards 8` uses the retained dense
+candidate plan and feature bank, selecting evenly spaced shard IDs. It preserves
+the full image order and upstream candidate-index binding, but generates a subset
+plan with the selected pair/shard counts. Input candidate hashes and the full
+feature manifest are checked before running the worker with
+`--shared-snapshot-envelope`. Output membership must match exactly, and
+`compare_verified_pair_snapshots` checks full decoded record equality against
+each corresponding legacy shard. Reference-only shards are intentionally allowed
+by that comparison utility; the probe enforces candidate membership separately.
+Use `--shards 2500` to cover the entire retained dense schedule. This is matching
+parity, not extraction or continuous native E2E.
+
+The first eight-shard probe passed: IDs 0, 357, 714, 1071, 1428, 1785, 2142,
+2499, covering 256 candidate pairs with the full 10k feature bank. Exact output
+membership and every decoded snapshot record match the retained legacy shards.
+Worker peak RSS was 451,184 KiB. Evidence: `m8-shared-worker-probe-v1.json`.
+
 ## Remaining work
 
 The streaming merger now uses a one-entry envelope cache per pass. It validates

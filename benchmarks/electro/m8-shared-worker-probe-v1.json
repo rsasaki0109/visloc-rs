@@ -1,0 +1,18 @@
+{
+  "status": "selected-real-worker-shards-full-record-parity-pass",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-probe-v1/report.json",
+  "binary_sha256": "b02f85ecce56074e000d77a6bbd63242b3d0f568294f9c22fcc9a2dc4ca01c50",
+  "compare_binary_sha256": "1180dc17ec811c5a5ceb1a90ae893a4c668354e8e95b2eefcd6508b610af55d9",
+  "shard_ids": [0, 357, 714, 1071, 1428, 1785, 2142, 2499],
+  "candidate_pairs": 256,
+  "feature_images": 10000,
+  "plan_sha256": "007ac7326102f5cdb02bcb17a0b79a9a420caad82a8c2cb16f95eeb92f5fdb94",
+  "reference_plan_sha256": "cb8005bd13fa6f490123efeaa0b36f0d3e0a0890309c641d34964e1cfc010d2a",
+  "feature_manifest_sha256": "9a58c1dd0699e72ed52149096cf17e85ee894ffaaf9d55772a1eb6b1c3d95ce2",
+  "membership_matches": true,
+  "worker_exit_code": 0,
+  "comparison_exit_code": 0,
+  "peak_rss_kib": 451184,
+  "time_report_sha256": "501723694c8d5b082a0486d8379ae9bac34e0faa206b39db6e138c48b65f13e0",
+  "scope": "Eight spread-out real matching shards using the full retained 10k feature bank. Every decoded output record matches its legacy reference. Not all2500-shard matching, extraction, restart, or continuous E2E."
+}
