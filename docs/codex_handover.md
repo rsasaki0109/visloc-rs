@@ -6,7 +6,9 @@
 `09e79b8dae067521ee8b8be342c1373c68e090c8`へmerge、旧branch整理済み。
 整理記録のPR121（head`8b05461`、CI9成功）は
 `fdf94400e98f80b2cb81c45c86b0441a7977d6e9`へmerge、旧branch整理済み。
-現作業branchは`diag/m8-dense-frontend-replay`。サブエージェントは使わない。
+PR122（head`506510e`、CI9成功）は`8ca18505b11ad871ef1329be44d2b5a5328a4bac`
+へmerge、旧branch整理済み。現作業branchは`fix/streamed-retrieval-empty-vocabulary`。
+サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
   70,000候補・2,188 matching shards・merged snapshotが全bytes一致。
@@ -29,8 +31,10 @@
   整理ログと検証付き重複削除scriptはPR121経由でmainへ。元データ・検証ログは保持。
 - 次: この変更のPR/CI/merge、base抽出の小規模一致probeと全10k抽出・
   continuous E2E・未達のCOLMAP軌跡品質改善。phase時間の和をE2Eとしない。
-  100k前に共有metadataを含むartifact増加率を監査する。vocabなし時のstreamed候補生成には
-  現状all_pairs(N) fallbackがあり、N²メモリ危険分岐はまだ閉じていない。
+  100k前に共有metadataを含むartifact増加率を監査する。vocabなし時のstreamed候補生成の
+  all_pairs(N) fallbackを削除し、明示エラーで停止するよう変更。100k空特徴の実CLIは
+  2GiB仮想メモリ制限下でexit1・期待診断・出力なし、1.00s/102,892KiB。
+  通常の100k SfM/共有metadataの容量保証ではない。64 example tests通過。
   全goalは未達。READMEに未検証の高速化/品質改善を追加しない。
 
 ### 以前の状態（上記を優先）

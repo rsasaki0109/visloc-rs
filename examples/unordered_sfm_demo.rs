@@ -9865,6 +9865,15 @@ struct StreamedVladGlobals {
     sampled_descriptors: usize,
 }
 
+impl StreamedVladGlobals {
+    fn appearance_globals(&self) -> Result<&[Vec<f32>], &'static str> {
+        self.globals
+            .as_deref()
+            .filter(|globals| !globals.is_empty())
+            .ok_or("streamed candidate export requires a nonempty appearance vocabulary; refusing exhaustive fallback")
+    }
+}
+
 fn count_feature_rows(path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
     Ok(std::fs::read_to_string(path)?
         .lines()
@@ -16294,34 +16303,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.vocab_size,
         )?;
         log_process_memory("example-after-streamed-vlad-globals");
-        let retrieval = if let Some(globals) = streamed.globals.as_deref() {
-            match args.retrieval_backend {
-                RetrievalBackend::Exact => {
-                    candidate_pairs_vlad_scored_from_globals(globals, args.retrieval_topk, false)
-                }
-                RetrievalBackend::Lsh => {
-                    let bits = effective_ann_bits(args.ann_bits, globals.len());
-                    if args.ann_probes > bits {
-                        return Err(format!(
-                            "--ann-probes {} exceeds effective --ann-bits {bits}",
-                            args.ann_probes
-                        )
-                        .into());
-                    }
-                    candidate_pairs_vlad_lsh_scored(
-                        globals,
-                        args.retrieval_topk,
-                        args.ann_tables,
-                        bits,
-                        args.ann_probes,
-                    )
-                }
+        // A missing vocabulary must not allocate N*(N-1)/2 pairs before the
+        // temporal-pyramid budget is applied. Fail closed instead.
+        let globals = streamed.appearance_globals()?;
+        let retrieval = match args.retrieval_backend {
+            RetrievalBackend::Exact => {
+                candidate_pairs_vlad_scored_from_globals(globals, args.retrieval_topk, false)
             }
-        } else {
-            all_pairs(image_names.len())
-                .into_iter()
-                .map(|pair| (pair, 0.0))
-                .collect()
+            RetrievalBackend::Lsh => {
+                let bits = effective_ann_bits(args.ann_bits, globals.len());
+                if args.ann_probes > bits {
+                    return Err(format!(
+                        "--ann-probes {} exceeds effective --ann-bits {bits}",
+                        args.ann_probes
+                    )
+                    .into());
+                }
+                candidate_pairs_vlad_lsh_scored(
+                    globals,
+                    args.retrieval_topk,
+                    args.ann_tables,
+                    bits,
+                    args.ann_probes,
+                )
+            }
         };
         let generated = candidate_pairs_temporal_pyramid_from_retrieval(
             &image_names,
@@ -18723,6 +18728,42 @@ mod diagnose_cli_tests {
     }
 
     #[test]
+    fn streamed_vlad_missing_vocabulary_refuses_exhaustive_fallback() {
+        for globals in [None, Some(Vec::new())] {
+            let streamed = super::StreamedVladGlobals {
+                globals,
+                total_descriptors: 0,
+                sampled_descriptors: 0,
+            };
+            assert!(streamed
+                .appearance_globals()
+                .unwrap_err()
+                .contains("refusing exhaustive fallback"));
+        }
+    }
+
+    #[test]
+    fn streamed_vlad_empty_feature_files_refuse_exhaustive_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("visloc_empty_streamed_vlad_{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let files = vec!["a_features.txt".to_owned(), "b_features.txt".to_owned()];
+        for file in &files {
+            std::fs::write(root.join(file), b"").unwrap();
+        }
+        let rig = PerImageCameras::new(
+            (0..files.len())
+                .map(|image| Camera::pinhole(image as u64, 100, 100, 50.0, 50.0, 50.0, 50.0))
+                .collect(),
+        )
+        .unwrap();
+        let streamed = stream_vlad_globals_from_feature_files(&root, &files, &rig, 3).unwrap();
+        assert_eq!(streamed.total_descriptors, 0);
+        assert!(streamed.appearance_globals().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streamed_vlad_globals_preserve_batch_candidate_pairs() {
         let root = std::env::temp_dir().join(format!(
             "visloc_streamed_vlad_candidates_{}",
@@ -18759,7 +18800,7 @@ mod diagnose_cli_tests {
         assert_eq!(streamed.total_descriptors, 20);
         assert_eq!(streamed.sampled_descriptors, 20);
         let streamed_pairs = candidate_pairs_vlad_scored_from_globals(
-            streamed.globals.as_deref().unwrap(),
+            streamed.appearance_globals().unwrap(),
             2,
             false,
         );
