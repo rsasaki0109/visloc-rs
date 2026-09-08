@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen native/adaptive/dense schedule through matching and completed resume."""
+"""Frozen frontend matching schedules through shared output and completed resume."""
 import argparse
 import json
 import os
@@ -30,7 +30,7 @@ def main():
     parser.add_argument('--merge-binary', type=Path, required=True)
     parser.add_argument('--compare-binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--variant', choices=['dense', 'native', 'adaptive'], default='dense')
+    parser.add_argument('--variant', choices=['dense', 'native', 'adaptive', 'targeted7'], default='dense')
     parser.add_argument('--features-dir', type=Path)
     parser.add_argument('--candidate-manifest', type=Path,
                         help='Regenerated candidate file; must match frozen reference bytes')
@@ -75,6 +75,15 @@ def main():
             if not same_candidate_schedule((native_recipe / 'match-worker.plan').read_text(),
                                            (recipe / 'match-worker.plan').read_text()):
                 raise RuntimeError('Adaptive schedule differs from native candidates')
+    if args.variant == 'targeted7':
+        recipe = base / 'corridor1-1-m8-targeted7-dense256-v1'
+        candidates = recipe / 'candidates.txt'
+        reference = base / 'corridor1-1-m8-targeted7-matching-replay-v1/matches'
+        reference_merged = base / 'corridor1-1-m8-targeted7-merge-replay-v1/verified-merged.vps'
+        features = base / 'corridor1-1-m8-linked-adaptive-bank-v2/features'
+        shard_count = 448
+        # Candidates are supplied explicitly; these flags do not regenerate them.
+        policy = ['--candidate-budget', '14319']
     _, features = bind_feature_input(['sfm', '--features-dir', str(features)],
                                     recipe / 'features.json', args.features_dir)
     candidates, candidate_hash = bind_candidates(candidates, args.candidate_manifest)

@@ -404,6 +404,17 @@ sidecars have no retained reference and are not covered by that comparison.
 
 ## Full native shared matching on regenerated base features
 
+`--variant targeted7` binds the retained 14,319 targeted candidate pairs to the
+adaptive bank and recorded min-matches 12 / ratio 0.8 settings. It requires all
+448 shared shards to match replayed legacy records, the frozen merged digest,
+and unchanged completed-resume outputs. Candidate generation and target
+selection remain outside this harness. The input manifest and candidate digest
+preflight passes; full execution is pending under
+`visloc-targeted-shared-full-v1.service`, with output at
+`/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-shared-full-v1` and
+measurement at
+`/home/sasaki/datasets/openloris/m8-targeted-shared-full-measurement-v1`.
+
 The runner also accepts `--variant adaptive`, preserving the native candidate
 schedule and adaptive matching thresholds. Its default bank is the validated
 immutable linked adaptive bank; `--features-dir` can bind a newly built bank.
