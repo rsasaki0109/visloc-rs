@@ -352,7 +352,12 @@ image set is split into disjoint balanced partitions, with one Rayon thread per
 worker. Each worker writes distinct feature filenames and its own log/timing;
 the harness compares the complete combined feature membership and hashes after
 all workers exit. Four-image/two-worker parity passed. Full10k six-worker replay
-is still awaiting terminal evidence in `corridor1-1-m8-full-base-extraction-v2`.
+now passes every feature hash and exact membership, with all six workers exiting
+zero, in `corridor1-1-m8-full-base-extraction-v2`. However, the outer scope report
+remained `running` after the processes/cgroup disappeared: final aggregate RSS
+and cgroup counters were not recovered. This closes full base feature parity,
+not the resource ledger. See `m8-full-base-extraction-v2.json`; validate durable
+detached service measurement before the next long measured run.
 The earlier single-worker v1 was deliberately interrupted, not completed or
 reused as a speed baseline. See `m8-full-base-extraction-transition-v1.json`.
 Use the dedicated 2 GiB scope wrapper for aggregate measurement/enforcement;
