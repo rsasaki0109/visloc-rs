@@ -1,0 +1,27 @@
+{
+  "status": "complete-file-alias-verified",
+  "paths": [
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-control-prefix-repair19.vps",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-long128-component-ann80k-v1/mapping/verified-goodbase-repair19.vps"
+  ],
+  "sha256_both": "ac93b28daf92b9bb4a621b9687087abbf906a1bc78cca0d8f4ea9688a1ba7a8d",
+  "pairs": 60134,
+  "accepted_correspondences": 3348547,
+  "pair_order_hash": "4dad0aafb0da8cdb",
+  "related_adaptive_snapshots": {
+    "verified-bridges-prefix-supplements-repair19.vps": {
+      "pairs": 60134, "accepted_correspondences": 3348547,
+      "pair_order_hash": "155eee41f04e2fcb",
+      "unordered_edge_hash": "abcc1542232c857d"
+    },
+    "verified-bridges-prefix-supplements.vps": {
+      "pairs": 59961, "accepted_correspondences": 3337520,
+      "pair_order_hash": "59770e42e7e8d68b"
+    }
+  },
+  "next_action": "Recover adaptive repair admission and control-prefix ordering; the long128 directory name alone does not imply its retrieval/matching is a required producer of these identical bytes.",
+  "limitations": [
+    "Related repair snapshot shares counts and unordered-edge hash, but correspondence content and exact reordering have not been verified.",
+    "Alias equality does not establish the historical copy operation or upstream repair recipe."
+  ]
+}

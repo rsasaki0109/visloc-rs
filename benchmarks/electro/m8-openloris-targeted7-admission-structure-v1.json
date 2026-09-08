@@ -1,0 +1,21 @@
+{
+  "status": "pair-summary-order-reproduced-not-full-snapshot",
+  "base": "/home/sasaki/datasets/openloris/corridor1-1-m8-long128-component-ann80k-v1/mapping/verified-goodbase-repair19.vps",
+  "addition": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-merged.vps",
+  "output": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps",
+  "inspection": "inspect_verified_pair_snapshot --snapshot PATH --pairs-tsv TSV; compare ordered TSV rows including all reported match/inlier counts",
+  "base_pairs": 60134,
+  "addition_pairs": 265,
+  "output_pairs": 60347,
+  "base_prefix_rows_equal": true,
+  "addition_overlap_with_base": 52,
+  "novel_addition_count": 213,
+  "output_tail_equals_novel_addition_order": true,
+  "missing_base_edges": 0,
+  "novel_accepted_sum": 4158,
+  "limitations": [
+    "TSV summary equality does not verify individual correspondence indices, poses or snapshot envelope bytes.",
+    "This supports append-only novel-pair admission as a reconstruction hypothesis, not recovery of the historical invocation.",
+    "Base repair19 generation remains an upstream dependency."
+  ]
+}
