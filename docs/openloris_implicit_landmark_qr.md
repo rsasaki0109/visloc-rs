@@ -31,6 +31,18 @@ failures from nonlinear path differences and account for QR operator cost before
 another native candidate; reducing failure counts alone is not the objective.
 PR/CI/merge for this branch remains pending.
 
+### Unchanged-binary rejection diagnosis
+
+Both context-only and detailed-residual debug replays reproduce all normal QR
+model bytes. The 51 linear failures comprise 45 `MaxIterations` and six
+`ResidualCheckFailed`. Of 471 rejected candidate steps, 326 reduce cost but
+fail feasibility, 126 fail both gates, and 19 fail cost only. Together with
+166 accepted steps and 51 linear failures this accounts for all 688 iterations.
+Thus 452 candidate steps fail feasibility: better linear convergence alone is
+not sufficient. These are observed rejection mechanisms, not proof of a unique
+cause of trajectory regression. Debug timing is not performance evidence.
+[Exact commands and diagnostic audit](../benchmarks/electro/m8-openloris-native-qr-diagnostic-v1.json).
+
 Implementation-stage status (superseded by the measured result above):
 default-off native `--ba-backend matrix-free-qr` implemented. Kernel,
 shared LM and native fixed-state tests pass; real-data quality/performance
