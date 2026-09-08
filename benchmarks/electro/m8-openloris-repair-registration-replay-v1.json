@@ -1,0 +1,10 @@
+{
+  "status": "running-unverified",
+  "session": 78386,
+  "recorded_command_source": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-adaptive32-halo8-bridges-supp-pair-confidence-finalfix32-v1/mapper.time.txt",
+  "binary": "/home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499",
+  "output_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-repair-registration-replay-v1",
+  "replay_changes": ["saved newer binary", "fresh output root", "RAYON_NUM_THREADS=1", "600-second timeout with TERM and 10-second kill grace"],
+  "acceptance": "Exit zero, compare model component membership and every cameras/images/points3D file; separately compare retrieval-components used by repair selection.",
+  "limitations": ["Not historical binary identity or continuous native E2E."]
+}
