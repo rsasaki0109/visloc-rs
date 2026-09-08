@@ -46,6 +46,11 @@ test. The atlas integrator's separate capped BA is not changed in this PR.
   partial solver state into mapper poses/tracks. No extra full-model clone,
   synthetic anchor, dense fallback, public `LinearSolver` variant or `BaConfig`
   change. Existing public rig APIs are re-exported consistently.
+- Reuse the matrix-free validator for the zero-pose path through a minimal
+  crate-private entry: only the requirement for a variable pose differs.
+  Do not duplicate or weaken camera, loss, LM or factor eligibility checks.
+  Successful eligibility/backend logs follow validation; a rejected request
+  must not first be logged as an eligible successful dispatch.
 
 ## Correctness and first native comparison
 
