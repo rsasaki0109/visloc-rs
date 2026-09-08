@@ -158,3 +158,10 @@ integration/refinement, publication and possible overlap accounting remain.
 Evidence: `benchmarks/electro/m8-openloris-atlas-source-cost-v1.json`.
 Do not compare the compact integration's151–159s directly against COLMAP's
 complete mapper as though saved source windows were free.
+
+Follow-up resolves nodes27/28 through
+`/tmp/visloc-m8-seam650-nodes-20260907.tsv`. All23 retained source models now
+match their original three files exactly. Added mapper times22.431005s and
+27.669512s bring the historical mapper subtotal to678.765732s. This closes
+source-model provenance, not native E2E accounting: alignment, frontend and
+other excluded costs still require a reproducible phase ledger and replay.
