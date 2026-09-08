@@ -1,5 +1,14 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 続行（2026-09-08）: PR #92は最終head `8cda545`のCI9項目
+> （run `34184156416`）通過後、`ece2b71`へmerge。旧branch整理済み。
+> 現在 `feat/m8-native-rig-matrix-free`。次は[事前契約](openloris_native_rig_matrix_free.md)
+> に沿って、既存rig mapperの共通BA呼び出しに明示的matrix-free選択を接続します。
+> monocular経路への置き換えや別の局所BAパラメータ診断ではありません。
+> 小窓では高速化が未証明のため、従来設定と同じnative入力から品質・時間を比較します。
+> Huber6等のcaller設定は維持し、全pose固定時は明示的zero-pose landmark-only経路。
+> 大きなSchurへの暗黙fallbackなし。実装・native A/Bはまだ未完了です。
+
 > Frozen Huber BA完了（2026-09-08）: Luna Max `c026f40`をroot独立28テストと
 > clippy後にrelease認証。4本ともexit0、None対照はPR #91のモデル/trace一致、
 > Huber反復も3ファイル/85行一致。全identity/支持/校正/anchor/正深度を保持。
