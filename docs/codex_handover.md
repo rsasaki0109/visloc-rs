@@ -2,6 +2,16 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
+現branch `diag/m8-pair-admission-recovery`。targeted7追加とrepair19修復・順序を
+既存ツールで再生成しsnapshot全bytes一致（証跡targeted7-admission-replay-v1、
+repair19-order-replay-v1、repair19-admission-replay-v1）。中間登録結果と修復前snapshotは未再生成。
+disk空き89MiBまで低下したため、cargo/rustc稼働なしを確認し、再生成可能な
+`target/release/deps`と`target/doc`を `/dev/shm/visloc-regenerable-cache.D87DLG/`へ退避。
+移動後空き576MiB。実行バイナリ・入力・計測出力は移動/削除していない。
+tmpfsは再起動で消える。次のbuildは依存cache再生成が必要なので容量を再確認する。
+全10k再抽出や新バンク一式の追加保存容量は依然不足。全goal未達。
+
 更新: PR116はhead`bef08e15b40e1e020584fc3fd83fc56447964ed6`のCI9件成功後、
 `75fea9aba77507862e503fb090395cd5e602bf3d`へsquash merge、旧branch整理済み。
 現branchは`feat/m8-adaptive-bank-publication`。
