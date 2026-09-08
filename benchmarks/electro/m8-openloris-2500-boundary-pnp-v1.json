@@ -1,0 +1,19 @@
+{
+  "schema": "m8-openloris-2500-boundary-pnp-v1",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-debug\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-debug.time\nenv -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY VISLOC_SFM_DEBUG=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-debug.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-b011cde --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/pipeline-sparse7n/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-debug/model > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-debug.log 2>&1",
+  "audit_program": "import json\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n\")\nassert \"Exit status: 0\" in (root/\"pnp-debug.time\").read_text()\nfor name in [\"cameras.txt\",\"images.txt\",\"points3D.txt\"]:\n assert (root/\"pnp-debug/model\"/name).read_bytes()==(root/\"legacy/model\"/name).read_bytes()\nlines=[s for s in (root/\"pnp-debug.log\").read_text().splitlines() if \"frame=612 \" in s or \"frame=613 \" in s]\nprint(json.dumps({\"debug_model_exact\":True,\"boundary_registration_attempts\":lines}))\n",
+  "audit": {
+    "debug_model_exact": true,
+    "boundary_registration_attempts": [
+      "rig-sfm-debug: frame=613 support=29 sensors=2 pnp=estimation-failed",
+      "rig-sfm-debug: frame=612 support=25 sensors=2 pnp=estimation-failed"
+    ]
+  },
+  "interpretation": [
+    "Actual in-loop counts differ from final-model associations: frame 612 has 25 cached correspondences, frame 613 has 29, both across two sensors.",
+    "Both fail inside GeneralizedPnPRansac, before mapper-level inlier-count acceptance. Merely lowering mapper sensor-count gate is not supported.",
+    "Current generalized estimator already tries DLT and per-sensor P3P hypotheses scored across the rig; do not duplicate that path as a proposed fix.",
+    "Need hypothesis-generation and pooled-inlier diagnostics to distinguish degenerate samples from inconsistent 2D/3D geometry. No thresholds changed.",
+    "Model-byte parity establishes observational debug mode only; no quality or performance claim."
+  ]
+}

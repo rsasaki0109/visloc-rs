@@ -44,6 +44,14 @@ camera alone explains this boundary. Inspect actual registration rejection
 at 612/613 before changing thresholds or enabling recovery.
 [Pair/3D association audit](../benchmarks/electro/m8-openloris-2500-boundary-support-v1.json).
 
+Actual registration debug (same certified binary, model-byte-exact) reports
+frame 612 with 25 correspondences / two sensors and frame 613 with 29 / two
+sensors; both return `pnp=estimation-failed`, not the mapper's sensor or inlier
+gate. The generalized estimator already includes per-sensor P3P hypotheses
+in addition to DLT. Next distinguish hypothesis failure from insufficient
+pooled inliers internally, without relaxing gates or adding duplicate P3P.
+[In-loop boundary evidence](../benchmarks/electro/m8-openloris-2500-boundary-pnp-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
