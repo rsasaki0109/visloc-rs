@@ -20,6 +20,18 @@ bytes, prior chunks are unchanged, and all complete index entries bind their
 envelopes. Evidence: `m8-native-shared-restart-v2.json`. This covers matching and
 merge restart, not extraction, mapper restart, full10k or continuous E2E.
 
+`scripts/replay_full_shared_runner.py --binary SFM_BINARY --merge-binary
+MERGE_BINARY --compare-binary COMPARE_BINARY --output NEW_DIRECTORY` exercises
+the complete retained dense schedule through Python prepare, matching and merge,
+then completed-resume. It freezes copied binaries and the runner source hash,
+requires all 2,500 bound index entries and full decoded shard parity, and checks
+the merged file against the frozen reference. Completed-resume must preserve
+shard hashes/mtimes and the worker log; merge may run again. Reports and phase
+logs remain in the fresh output directory, including failures. The harness is
+Linux-only and uses the local OpenLORIS fixture paths; it is not a portable demo.
+Its addition is not a passing result: inspect the terminal report before claiming
+validation. Extraction, candidate generation, mapping and E2E remain out of scope.
+
 Each directory stores immutable `envelope-<sha256>.vpe` files and pair chunks.
 The envelope is the exact v1 payload prefix through verifier configuration;
 the chunk contains the four shard-specific counters/hashes and encoded pairs.
