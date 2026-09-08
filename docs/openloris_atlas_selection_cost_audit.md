@@ -279,3 +279,8 @@ the new common policy:51.56s wall,340088KiB peak RSS. Evidence:
 `m8-openloris-source-spec-2250x750-v1.json`. Coverage is15 of21 executions
 and17 of23 nodes. Six executions remain; unchanged quality and retained
 frontend inputs do not establish COLMAP or native E2E success.
+
+Start2500/count500 reproduces all retained model files:37.28s wall,
+340056KiB peak RSS. Evidence: `m8-openloris-source-spec-2500-v1.json`.
+Coverage is16 of21 execution outputs (18 of23 nodes); five source executions
+and excluded full-pipeline phases remain. This is new-policy output parity.
