@@ -10,6 +10,29 @@ SPEC.loader.exec_module(MODULE)
 
 
 class MergeTests(unittest.TestCase):
+    def test_bank_resume_verifies_existing_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base, supplement, output = [root / n for n in ("base", "supplement", "output")]
+            base.mkdir()
+            supplement.mkdir()
+            (base / "a_features.txt").write_bytes(b"0 0 base\n")
+            (base / "b_features.txt").write_bytes(b"1 1 unchanged\n")
+            (supplement / "a_features.txt").write_bytes(b"2 2 added\n")
+            selection = {"image_names": ["a.png"]}
+            first = MODULE.write_bank(base, supplement, selection, output)
+            second = MODULE.write_bank(base, supplement, selection, output, True)
+            self.assertEqual(first["inventory_sha256"], second["inventory_sha256"])
+            self.assertEqual(second["reused"], 2)
+            self.assertEqual(second["written"], 0)
+            (output / "b_features.txt").unlink()
+            partial = MODULE.write_bank(base, supplement, selection, output, True)
+            self.assertEqual((partial["reused"], partial["written"]), (1, 1))
+            (output / "b_features.txt").write_bytes(b"1 1 Unchanged\n")
+            with self.assertRaisesRegex(ValueError, "differs"):
+                MODULE.write_bank(base, supplement, selection, output, True)
+            self.assertEqual((output / "b_features.txt").read_bytes(), b"1 1 Unchanged\n")
+
     def test_publication_never_overwrites(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "features.txt"
