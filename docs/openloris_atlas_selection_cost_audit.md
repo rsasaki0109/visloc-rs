@@ -261,3 +261,9 @@ Start750/count500 also reproduces all retained model files under the same
 new common policy:39.63s wall,340224KiB peak RSS. See
 `m8-openloris-source-spec-750-v1.json`. Coverage is10 of21 execution outputs
 (12 of23 retained nodes), leaving11 executions; frontend/E2E remains excluded.
+
+Starts1000 and1250 (500 frames each) reproduce all model files exactly under
+the new common policy. Wall/RSS:35.01s/340064KiB and28.16s/340084KiB.
+See source-spec-1000/1250-v1 JSONs. Coverage is12 of21 execution outputs
+(14 of23 retained nodes). Nine source executions and all excluded E2E phases
+remain; source replay parity is not a quality improvement.
