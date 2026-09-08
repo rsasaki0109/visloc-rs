@@ -12,6 +12,19 @@ The >64 QR branch is entirely untested by these native runs; larger-tier
 quality, end-to-end and memory gates remain open.
 [Commands and exact-byte audit](../benchmarks/electro/m8-openloris-bounded-native-1k-v1.json).
 
+## 2.5k paired check on existing sparse7n input
+
+The existing M5 sparse7n snapshot was held identical across Legacy and two
+policy runs; it differs from the 1k ANN input, so this is only a within-tier
+BA comparison. Models are byte-identical, but only 1,224/2,500 images and
+612/1,250 frames register. Each policy run selects direct on all 103 calls;
+zero calls exercise large QR. Mapper times are 5.879777 s Legacy versus
+6.028910 / 6.042272 s policy, peak RSS 158,472 / 158,628 / 158,612 KiB.
+This is nonregression of an insufficient-coverage result, not a successful
+tier gate, speedup, COLMAP comparison or large-QR quality test. Diagnose the
+input graph / unregistered coverage before claiming larger-tier progress.
+[Exact commands and audit](../benchmarks/electro/m8-openloris-bounded-native-2500-sparse7n-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
