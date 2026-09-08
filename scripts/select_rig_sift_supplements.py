@@ -42,18 +42,22 @@ def select(frames, counts, threshold, halo):
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rig-manifest", type=Path, required=True)
-    parser.add_argument("--features-dir", type=Path, required=True)
-    parser.add_argument("--min-sensor-rows-lt", type=int, required=True)
-    parser.add_argument("--frame-halo", type=int, required=True)
-    args = parser.parse_args()
-    raw = args.rig_manifest.read_bytes()
+def parse_frames(raw):
     frames = {}
     sensors = set()
+    declared = set()
+    names = set()
+    stems = set()
     for line in raw.decode().splitlines():
         fields = line.split()
+        if fields and fields[0] == "S":
+            if len(fields) != 16:
+                raise ValueError("malformed S row")
+            sensor = int(fields[1])
+            if sensor < 0 or sensor in declared:
+                raise ValueError("invalid or duplicate sensor declaration")
+            declared.add(sensor)
+            continue
         if not fields or fields[0] != "F":
             continue
         if len(fields) != 4:
@@ -63,10 +67,33 @@ def main():
             raise ValueError("invalid or duplicate frame/sensor")
         if Path(name).name != name or name in (".", ".."):
             raise ValueError("image names must be basenames")
+        if name in names or Path(name).stem in stems:
+            raise ValueError("duplicate image or colliding feature filename")
+        names.add(name)
+        stems.add(Path(name).stem)
         sensors.add((frame, sensor))
         frames.setdefault(frame, []).append(name)
     if not frames:
         raise ValueError("no rig frames")
+    by_frame = {frame: set() for frame in frames}
+    for frame, sensor in sensors:
+        by_frame[frame].add(sensor)
+    if not declared or any(value != declared for value in by_frame.values()):
+        raise ValueError("each frame must contain exactly the declared sensors")
+    return frames
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rig-manifest", type=Path, required=True)
+    parser.add_argument("--features-dir", type=Path, required=True)
+    parser.add_argument("--min-sensor-rows-lt", type=int, required=True)
+    parser.add_argument("--frame-halo", type=int, required=True)
+    args = parser.parse_args()
+    if args.min_sensor_rows_lt < 0 or args.frame_halo < 0:
+        parser.error("threshold and halo must be nonnegative")
+    raw = args.rig_manifest.read_bytes()
+    frames = parse_frames(raw)
     counts = {}
     for names in frames.values():
         for name in names:

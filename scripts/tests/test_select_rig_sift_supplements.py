@@ -11,6 +11,21 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SelectionTests(unittest.TestCase):
+    def test_manifest_sensor_membership_and_filename_collisions(self):
+        declarations = "S 0 " + "1 " * 14 + "\nS 1 " + "1 " * 14 + "\n"
+        valid = declarations + "F 0 a.png 0\nF 0 b.png 1\n"
+        self.assertEqual(MODULE.parse_frames(valid.encode()), {0: ["a.png", "b.png"]})
+        for rows in (
+            "F 0 a.png 0\n",  # Missing sensor must not look like sufficient support.
+            "F 0 a.png 0\nF 0 b.png 2\n",
+            "F 0 a.png 0\nF 0 a.jpg 1\n",
+            "F 0 a.png 0\nF 0 ../b.png 1\n",
+            "F 0 a.png 0\nF 0 b.png 0\n",
+        ):
+            with self.subTest(rows=rows):
+                with self.assertRaises(ValueError):
+                    MODULE.parse_frames((declarations + rows).encode())
+
     def test_strict_threshold_and_ordinal_halo(self):
         frames = {10: ["a", "b"], 20: ["c", "d"], 40: ["e", "f"], 90: ["g", "h"]}
         counts = dict.fromkeys("abcdefgh", 32)
