@@ -409,11 +409,15 @@ adaptive bank and recorded min-matches 12 / ratio 0.8 settings. It requires all
 448 shared shards to match replayed legacy records, the frozen merged digest,
 and unchanged completed-resume outputs. Candidate generation and target
 selection remain outside this harness. The input manifest and candidate digest
-preflight passes; full execution is pending under
+preflight passes; full execution and terminal measurement now pass under
 `visloc-targeted-shared-full-v1.service`, with output at
 `/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-shared-full-v1` and
 measurement at
 `/home/sasaki/datasets/openloris/m8-targeted-shared-full-measurement-v1`.
+All 448 shards match, merged bytes match, and completed resume is unchanged.
+Matching plus merge took 96.22 s; the full validation command took 112.78 s
+with sampled aggregate peak RSS 217,480 KiB and no memory-limit/OOM events.
+See `m8-targeted-shared-full-v1.json`. This is not a pipeline speedup claim.
 
 The runner also accepts `--variant adaptive`, preserving the native candidate
 schedule and adaptive matching thresholds. Its default bank is the validated
