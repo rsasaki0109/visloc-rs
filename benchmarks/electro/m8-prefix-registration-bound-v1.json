@@ -21,5 +21,6 @@
   "memory_max_events_delta": 0,
   "oom_events_delta": 0,
   "oom_kill_events_delta": 0,
+  "metadata_correction": "The retained raw report inherited recovered_command_event_utc from the targeted stage. That field is not prefix provenance; it is removed for future prefix runs. The command, stage, hashes and measured parity remain authoritative.",
   "scope": "Bound prefix-registration adapter on retained prefix snapshot and validated linked adaptive features. All model file membership/hashes and derived repair targets equal the prior replay. Sampled RSS includes monitor and can double-count shared pages or miss inter-sample peaks; cgroup peak is not RSS. Not a cold native DAG, final model quality result, COLMAP comparison or speedup claim."
 }

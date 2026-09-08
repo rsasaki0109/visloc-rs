@@ -12,6 +12,18 @@ from replay_native_candidates import sha, bind_feature_input
 from select_rig_sift_supplements import parse_frames
 
 
+def mapper_command(stage, binary, rig, features, output, snapshot):
+    if stage not in ('prefix', 'targeted'):
+        raise ValueError('Unknown registration stage')
+    command = [str(binary), '--manifest', str(rig), '--features-dir', str(features),
+               '--snapshot', str(snapshot), '--out-colmap', str(output / 'model'),
+               '--max-models', '10', '--pair-confidence-tracks',
+               '--final-ba-min-pose-observations', '32']
+    if stage == 'targeted':
+        command += ['--deferred-registration-pair-prefix', '59961']
+    return command, 1 if stage == 'prefix' else 8
+
+
 def unregistered_frames(frames, components):
     known = {name for members in frames.values() for name in members}
     registered = set()
@@ -69,20 +81,15 @@ def main():
                       else 'corridor1-1-m8-targeted-selection-replay-v1')
     output = (args.output or base / default_output).resolve()
     output.mkdir()
-    command = [str(binary), '--manifest', str(rig), '--features-dir', str(features),
-               '--snapshot', str(snapshot), '--out-colmap', str(output / 'model'),
-               '--max-models', '10', '--pair-confidence-tracks',
-               '--final-ba-min-pose-observations', '32']
-    if not prefix:
-        command += ['--deferred-registration-pair-prefix', '59961']
-    threads = 1 if prefix else 8
+    command, threads = mapper_command(args.stage, binary, rig, features, output, snapshot)
     invocation = ['/usr/bin/time', '-v', '-o', str(output / 'time.txt'),
                   'timeout', '--foreground', '--signal=TERM', '--kill-after=10s', '600s', *command]
     report = {'status': 'running', 'stage': args.stage, 'command': invocation,
               'binary_sha256': sha(binary), 'snapshot_sha256': sha(snapshot),
               'rig_manifest_sha256': sha(rig), 'features_resolved': str(features.resolve()),
-              'rayon_num_threads': threads, 'malloc_arena_max': '1',
-              'recovered_command_event_utc': '2026-09-02T23:34:18.633Z'}
+              'rayon_num_threads': threads, 'malloc_arena_max': '1'}
+    if not prefix:
+        report['recovered_command_event_utc'] = '2026-09-02T23:34:18.633Z'
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     started = time.monotonic()
     with (output / 'run.log').open('w') as log:
