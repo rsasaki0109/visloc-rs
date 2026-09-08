@@ -10,7 +10,9 @@
 > tailはexit0、全6ファイル過去一致。連結性0.10246秒対前回0.31470秒、RSS77916KiB。
 > mainもexit0・全6ファイル過去一致。連結性9.55577秒対27.32571秒、総151.46秒対164.04秒。
 > RSS524744KiB対525228KiB。候補main-repeatもexit0・全6ファイル過去一致。
-> 反復連結性10.46799秒、総158.84秒、RSS514832KiB。control-main-repeatはsession31849実行中。
+> 全反復完了。main候補連結性9.56/10.47秒対control27.33/31.70秒、総151.46/158.84対164.04/185.19秒。
+> tailも全6ファイル一致、候補連結性0.102/0.106秒対control0.315/0.240秒。
+> tail全体時間には変動があり一律短縮を主張しない。全モデル過去一致、全goal精度未達は変わらない。
 > Draft PR111作成済み。古いplan/m8-fixed-boundary-baは内容がmainに保持されていることを確認して削除。
 > 正確なコマンドを `m8-openloris-compact-connectivity-v1.json` のrepeat_commandsに凍結済み。
 > 同時build/測定禁止、既存出力上書き禁止。全goal未達。

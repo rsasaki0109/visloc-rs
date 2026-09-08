@@ -137,6 +137,16 @@ retained control repeat. Do not infer improved trajectory: model bytes match
 the still-RMSE-failing atlas baseline exactly.
 Evidence: `benchmarks/electro/m8-openloris-compact-connectivity-v1.json`.
 
+Serial repeats are complete and all six model files in every run match the
+historical models. Main connectivity: control27.33/31.70s, compact9.56/10.47s;
+main wall: control164.04/185.19s, compact151.46/158.84s. Tail connectivity:
+control0.315/0.240s, compact0.102/0.106s. Tail wall variation is larger than
+the isolated saving (control repeat10.69s is faster overall than compact's
+first12.15s), so do not claim uniform whole-pipeline speed improvement.
+The repeated phase reduction supports this equivalent-result optimization;
+it does not establish lower trajectory error, generalization, a memory-saving
+claim, or native end-to-end COLMAP superiority.
+
 ## Upstream cost is not zero
 
 Read-only provenance audit matches21 of23 retained source-window models to
