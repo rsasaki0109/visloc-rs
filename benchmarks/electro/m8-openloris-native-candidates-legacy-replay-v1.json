@@ -1,0 +1,25 @@
+{
+  "status": "complete-candidate-byte-reproduction-pass",
+  "source_commit": "a7ff5ff47b561556ba20a0afdb40417ec9413120",
+  "binary_sha256": "8eeee5c2f8b39de6575c2308e89cba11b96d38d66d1ae3d51ab6ce0d61d43e79",
+  "build_evidence": "m8-openloris-native-frontend-legacy-build-v1.json",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-candidates-legacy-replay-v1/report.json",
+  "recipe_document": "docs/openloris_frontend_reproduction.md",
+  "exit_status": 0,
+  "wall_seconds": 583.1972788820276,
+  "peak_rss_kib": 354312,
+  "user_seconds": 631.04,
+  "system_seconds": 71.87,
+  "rayon_num_threads": 8,
+  "images": 10000,
+  "candidate_pairs": 70000,
+  "local_descriptors": 1427634,
+  "vocabulary_samples": 40790,
+  "output_and_reference_sha256": "fca2fce1056e08966ed4d3c0a48781cf546ad5c70a6f6f86c39c365205da5716",
+  "lsh": {"tables": 8, "bits": 9, "probes": 9, "mean_pool": 1517.0, "max_pool": 1910, "exact_fallback_queries": 0},
+  "limitations": [
+    "Candidate generation only, from retained base feature files; not native E2E.",
+    "Rebuilt historical source reproduces the saved manifest; original executable identity was not recovered.",
+    "No quality improvement or speedup claim; the modern score-fill candidate policy is different."
+  ]
+}

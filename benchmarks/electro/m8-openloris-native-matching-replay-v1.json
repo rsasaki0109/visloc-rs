@@ -1,0 +1,23 @@
+{
+  "status": "complete-matching-shards-byte-reproduction-pass",
+  "source_commit": "a7ff5ff47b561556ba20a0afdb40417ec9413120",
+  "binary_sha256": "8eeee5c2f8b39de6575c2308e89cba11b96d38d66d1ae3d51ab6ce0d61d43e79",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-matching-replay-v1/report.json",
+  "recipe_document": "docs/openloris_frontend_reproduction.md",
+  "candidate_sha256": "fca2fce1056e08966ed4d3c0a48781cf546ad5c70a6f6f86c39c365205da5716",
+  "plan_sha256": "624e8c431cbde31faf8d1ab1590160dc40ad5711a568449df28b378428f47e01",
+  "feature_manifest_sha256": "74c66d3d7641c8d349953bba0b0e89843174699d40e31ee003f56adfef0dcdb8",
+  "regenerated_candidate_shards": 2188,
+  "byte_identical_match_snapshots": 2188,
+  "different_or_missing_snapshots": [],
+  "extra_snapshots": [],
+  "exit_status": 0,
+  "wall_seconds": 209.93730997294188,
+  "peak_rss_kib": 869812,
+  "rayon_num_threads": 4,
+  "limitations": [
+    "Inputs are replayed candidates and hash-validated retained base features; the recorded plan is a frozen schedule.",
+    "Measured wall/RSS covers matching subprocess, not preparation, validation, merge or native E2E.",
+    "No speedup or quality improvement claim."
+  ]
+}
