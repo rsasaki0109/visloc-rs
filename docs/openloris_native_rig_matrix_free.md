@@ -153,3 +153,90 @@ linear-solve failures before proposing a bounded, separately predeclared
 policy; full native E2E and remaining M8–M10 gates stay open.
 
 [Candidate certificate, commands, logs and independent audits](../benchmarks/electro/m8-openloris-native-rig-matrix-free-v1.json).
+
+## Fixed-profile linear failure classification
+
+After PR #93 merged (`3136b20`), one replay of the same certified binary and
+inputs enabled existing BA/step/LM-quality debug output only. Solver settings
+and thread count stayed unchanged. All three model files exactly match the
+non-debug candidate; debug timing is not a performance measurement.
+
+All 589 reported failed linear steps classify as **296 ResidualCheckFailed**
+and **293 MaxIterations**. Residual-check failures used 46–128 iterations;
+their true residual / target ratios range from 1.003329 to 1130.530454.
+All iteration-limit failures used 128 iterations, with true residual / target
+from 1.262194 to 20,774,208,042.164658. The two variants name the true residual
+field differently (`true_norm` versus `residual_norm`); do not omit the latter
+when reporting all-failure ranges. There were no
+reported non-SPD, curvature, nonfinite or back-substitution failures.
+The aggregate field named `pcg_failures` can include other linear-step
+failures in general; this diagnostic establishes its actual contents here.
+
+This narrows the immediate issue to stopping-residual reliability and bounded
+convergence. It does not prove an incorrect operator or that raising iteration
+limits / relaxing tolerances would recover quality. Compare existing restart
+evidence before selecting one new native policy; no sweep or gate change.
+[Classification, every failure record and read-only audit](../benchmarks/electro/m8-openloris-native-linear-failure-diagnostic-v1.json).
+
+### Memory constraint on the next preconditioner
+
+Do not construct the entire pose-pair Schur sparsity graph for IC(0): one
+landmark visible in P poses can induce P(P-1)/2 blocks. Keeping only the
+lower triangle or calling the pattern sparse does not bound it below O(P²).
+The current implicit operator retains cross blocks, not an already-built
+pose-pair graph; constructing that graph would undo the central memory saving.
+
+[Ceres' preconditioner documentation](https://github.com/ceres-solver/ceres-solver/blob/master/docs/source/nnls_solving.rst)
+describes Schur block-Jacobi and visibility-cluster alternatives, including
+the cost of clustering. A possible next arm is **fixed-size cluster Jacobi**:
+at most eight consecutive variable-pose slots per cluster, no global
+visibility graph, cross-cluster Schur blocks omitted only from the
+preconditioner, exact implicit action/RHS retained. This is a bounded
+temporal approximation, not Ceres' visibility clustering implementation.
+For fixed cluster size K, factor storage is O(PK), with local matrices at
+most 6K × 6K. Group repeated rig-sensor cross blocks before forming local
+Schur blocks. Do not enumerate all pairs of a long track before filtering.
+
+Before implementation, verify the construction's O(observations × K) bound,
+SPD handling and exact action/anchor tests. Keep PCG128, both tolerances
+1e-12, loss, damping and all native quality gates unchanged. A failed factor
+must fail explicitly, never fall back to a global direct solve. No improvement
+is claimed until the native 1k comparison passes.
+
+The default-off `matrix-free-cluster8` native selector is now implemented.
+The operator action/RHS and scalar PCG/LM settings are unchanged. Construction
+uses per-pose scratch reset only for touched slots, aggregates repeated sensor
+rows, and loops over pairs only inside an at-most-eight-pose cluster. Local
+Cholesky inversion uses at most 48 × 48 workspace; no full-model clone or
+global pose-pair graph is added. Non-SPD clusters return a linear-step error.
+
+Five scoped tests pass: principal-Schur equivalence with repeated sensors,
+17-pose long-track/partial-cluster storage bounds, indefinite-cluster rejection,
+API anchor/observation/repeat checks, and native fixed-rotation/landmark-only/
+rollback behavior. Related rig/API/example tests and scoped clippy pass.
+Release `8ba580c` and the same-input native 1k comparison are complete.
+Both same-binary controls reproduce PR #93 model files exactly; the two
+cluster8 output models also match each other byte-for-byte.
+
+| Metric | Legacy | Strict matrix-free | Cluster8 |
+| --- | ---: | ---: | ---: |
+| Supported images / frames | 1000 / 500 | 1000 / 500 | 1000 / 500 |
+| RMSE (m) | 0.0226953 | 0.1402194 | 0.2237376 |
+| p95 (m) | 0.0377788 | 0.2345797 | 0.4324001 |
+| Raw mean reprojection (px) | 0.6716374 | 0.7250106 | 0.7601143 |
+| Mapper seconds | 4.302785 | 6.047962 | 6.283087 / 6.454014 |
+| Process seconds | 4.87 | 6.59 | 6.85 / 7.01 |
+| External RSS (KiB) | 81948 | 82448 | 82476 / 82492 |
+
+Cluster8 fails all native quality gates despite preserving calibration,
+positive depth, ordered image/keypoint identity and connected support.
+It yields 2880 landmarks / 28825 observations. Linear-step failures decrease
+only from 589 to 587, accepted steps fall from 71 to 59, and zero-accepted
+calls increase from 52 to 54. Each backend changes subsequent mapper state;
+these aggregate counts are not a controlled same-linear-system comparison.
+
+The bounded-memory construction remains a tested implementation property,
+not evidence of lower process RSS or improved native accuracy/speed.
+No three-run performance gate, cluster-size sweep or 10k promotion follows.
+Keep Legacy default and README performance claims unchanged.
+[Certificate, all commands and independent audits](../benchmarks/electro/m8-openloris-native-cluster8-v1.json).

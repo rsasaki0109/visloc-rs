@@ -1,5 +1,16 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 直接作業へ移行（2026-09-08）: ユーザー希望により以後サブエージェントへ依頼しない。
+> PR #93はCI9項目通過後 `3136b20` にmerge、旧branch整理済み。
+> 設定不変のdebug replayで589線形失敗を分類: ResidualCheckFailed296、MaxIterations293。
+> debug出力モデルは通常MF出力と全bytes一致。残差比はvariant別fieldを区別して記録。
+> [診断とメモリ制約](openloris_native_rig_matrix_free.md#fixed-profile-linear-failure-classification)。
+> 全pose-pair graphを作るIC(0)案は最悪O(N²)のため採らない。
+> 固定上限8 poseのcluster Jacobiをdefault-off実装、新規5テスト通過。未採用、許容誤差/品質基準は維持。
+> 現branch `docs/m8-native-linear-failure-diagnosis`。release `8ba580c`、同一binary Legacy/strict対照bytes一致。
+> cluster8反復もbytes一致だがRMSE/p95 0.223738/0.432400 m、raw mean0.760114 pxで不合格。
+> 線形失敗587/688、accepted59。clusterサイズsweep/10k展開/既定化なし。PR/CI/merge未完了。
+
 > Native rig matrix-free検証（2026-09-08）: Luna Max実装 `0298e0c`、
 > root独立rig29/API15テスト通過。同一binaryのLegacyは既存championと全モデルbytes一致。
 > MFの2反復もbytes一致、1000画像/500frame支持・校正・正深度・xy順序は保持。
