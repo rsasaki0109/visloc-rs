@@ -1,6 +1,7 @@
 # Frozen-observation Huber BA experiment
 
-Status: predeclared, not measured. One candidate; no loss-scale sweep.
+Status: measured; failed the predeclared quality gate. No atlas/default
+promotion and no loss-scale sweep.
 
 ## Hypothesis and source boundary
 
@@ -86,3 +87,59 @@ the same candidate's bounded atlas assessment, not automatic native rollout.
 Local BA timing excludes frontend, window mapping and atlas construction;
 it cannot establish COLMAP mapper/native-E2E superiority. Full M8–M10 tier,
 restart, 100k I/O and README comparison gates remain open.
+
+## Measured result (2026-09-08)
+
+Implementation `c026f40` changes only the comparison driver. Luna Max's
+28 example tests and example-only clippy passed; root independently repeated
+both, plus the existing library Huber derivative and matrix-free rig tests.
+The certified release binary SHA is
+`cdbdf63466e9cca7940014d20605ec9485c566f184a86ac7c11dd5476fea23f3`.
+All four processes exit zero after 20 iterations (`converged=false`).
+
+| Arm | Wall s | Peak RSS KiB | Accepted LM | Raw squared cost | Huber-3 cost |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Legacy None | 19.84 | 84,652 | 3 | 118070.554369 | 117471.290968 |
+| Adaptive None | 22.26 | 84,856 | 15 | 113550.219339 | 112906.086062 |
+| Adaptive Huber-3 | 22.00 | 85,156 | 13 | 113816.998930 | 112892.143080 |
+| Huber-3 repeat | 22.43 | 85,108 | 13 | same | same |
+
+The two controls reproduce PR #91's three model files and numerical traces
+exactly (40/82 rows). Huber repeat reproduces its three model files and 85
+numerical/policy rows exactly. The control Huber costs above are independent
+evaluations of their byte-identical prior outputs, not their optimized loss.
+No timing difference between these two adaptive arms is claimed significant.
+
+Independent audits retain all 1,000 supported images, 500 supported frames,
+4,716 points, 130,900 observations and 361,170 keypoints in one component.
+Image/point/track/POINTS2D identities and order, cameras and fixed rig/anchor
+are unchanged. All observations have positive depth. Independent final raw
+and robust cost differ from the driver by only 6.55e-10 and 5.68e-10.
+Initial/final downweighted counts are 1,984/1,617 and minimum weights
+0.750081/0.543071. Downweighting never removes a residual.
+
+Post-only GT scoring uses the unchanged 308-image set and agrees on repeat:
+
+| Quality metric | Legacy limit | Huber-3 | Gate |
+| --- | ---: | ---: | --- |
+| Trajectory RMSE m | 0.026608055 | 0.028822200 | fail |
+| Trajectory p95 m | 0.041099985 | 0.044018261 | fail |
+| Raw mean reprojection px | 0.691588658 | 0.673262240 | pass |
+
+The candidate slightly improves trajectory over adaptive None
+(0.029190/0.044521 m), but still fails both legacy trajectory limits.
+Raw reprojection RMSE/p95/max are 0.932468/1.991369/5.524140 px;
+its raw squared cost rises relative to adaptive None even though mean and
+p95 decrease. Lower robust loss is not evidence of lower raw squared loss
+or a passing trajectory. Maximum point motion is 221.120 m, and maximum
+camera-centre motion is 0.024035 m; neither substitutes for GT accuracy.
+
+Reject the candidate without another scale or atlas run. Library/default
+solver and README performance claims remain unchanged. Native mapper/E2E,
+10k COLMAP parity, tier/restart and 100k I/O gates are still open.
+
+[Preflight and independent input accounting](../benchmarks/electro/m8-openloris-frozen-huber-ba-preflight-v1.json)
+and [all four runs, commands, hashes and audits](../benchmarks/electro/m8-openloris-frozen-huber-ba-v1.json)
+record the completed experiment. Full logs remain under the certified local
+artifact root named there; the evidence stores their hashes and a reproducible
+compact trace auditor rather than duplicating every control trace.

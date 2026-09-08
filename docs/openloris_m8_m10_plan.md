@@ -123,6 +123,16 @@ exact-input test. Record raw and robust objectives separately, preserve the
 same quality gates, and do not promote or sweep if it fails. The opt-in adds
 only streaming scalar diagnostics; quantile auditing stays outside timed BA.
 
+That [four-run Huber experiment](../benchmarks/electro/m8-openloris-frozen-huber-ba-v1.json)
+is complete. All identity/support/calibration/anchor/depth and repeat gates
+pass, but trajectory RMSE/p95 0.028822/0.044018 m fail the legacy limits.
+Mean reprojection 0.673262 px passes. The 22.00/22.43-second, roughly 83-MiB
+local BA runs are not native E2E measurements. Reject without a loss-scale
+sweep or atlas/default promotion. Next, audit the actual native SfM entry for
+one concrete integration that advances speed/memory while preserving the
+accuracy gate; do not substitute another local parameter-diagnostic ladder
+for the remaining native/tier/restart/100k outcome requirements.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,
