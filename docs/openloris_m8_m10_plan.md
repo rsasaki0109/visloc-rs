@@ -23,7 +23,9 @@ PR112 resolves all23 source-model components and corrects duplicated run costs:
 native E2E; frontend, alignment and complete reproducible accounting remain.
 The [BA retry diagnostic](openloris_ba_retry_timing.md) now measures potential
 repeated assembly without adding a matrix cache. Tail output is byte-identical;
-its22 post-rejection assemblies cost0.14784s. Main measurement is running.
+its22 post-rejection assemblies cost0.14784s. Main also matches all model files;
+1004 post-rejection assemblies cost12.0536s of164.03s wall. Bounded single-owner
+reuse is a candidate, not an achieved speedup; no dense cache is justified.
 Do not replace the unresolved quality work with cache tuning: the retained
 atlas still fails the frozen COLMAP RMSE gate, and no final-tier/restart/100k
 or README performance promotion follows from these phase optimizations.

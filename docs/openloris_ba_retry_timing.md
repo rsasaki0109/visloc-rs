@@ -35,7 +35,7 @@ First tail replay: all six pre-BA/final files match the retained historical
 model. There are240 normal-equation events not following rejection (1.2082s)
 and22 following rejection (0.14784s). The latter is the measured assembly work
 a perfect rejected-state cache could avoid in this replay, before cache costs.
-It is not enough evidence to add a large retained system. Main is running.
+It is not enough evidence to add a large retained system; see main results below.
 Commands, timing and model hashes:
 `benchmarks/electro/m8-openloris-ba-retry-timing-v1.json`.
 
