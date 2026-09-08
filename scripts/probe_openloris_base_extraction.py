@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import shutil
 
 from benchmark_electro import parse_gnu_time
 from replay_native_candidates import sha
@@ -14,6 +15,8 @@ from replay_native_candidates import sha
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--all-images', action='store_true',
+                        help='Run the full frozen 10k base bank instead of four spread-out images')
     args = parser.parse_args()
     base = Path('/home/sasaki/datasets/openloris')
     source = base / 'corridor1-1-m5'
@@ -27,11 +30,16 @@ def main():
     images = sorted((source / 'images').glob('*.png'))
     if len(images) < 4:
         raise RuntimeError('Raw image bank missing')
-    selected = [images[index * (len(images) - 1) // 3] for index in range(4)]
+    if args.all_images and len(images) != 10000:
+        raise RuntimeError('Full base replay requires exactly 10000 raw images')
+    selected = images if args.all_images else [images[index * (len(images) - 1) // 3] for index in range(4)]
     reference = source / 'tiers/tier-10000/features256'
     expected = {image.stem + '_features.txt': sha(reference / (image.stem + '_features.txt'))
                 for image in selected}
     output = args.output.resolve()
+    required = sum((reference / name).stat().st_size for name in expected) + 1024**3
+    if shutil.disk_usage(output.parent).free < required:
+        raise RuntimeError('Insufficient disk for expected base bank plus 1 GiB reserve')
     output.mkdir()  # Never overwrite an existing probe.
     inputs = output / 'images'
     inputs.mkdir()
@@ -43,12 +51,14 @@ def main():
                        ('--out-colmap', output / 'unused-model')]:
         command[command.index(flag) + 1] = str(path)
     invocation = ['/usr/bin/time', '-v', '-o', str(output / 'time.txt'),
-                  'timeout', '--signal=TERM', '--kill-after=10s', '300s', *command]
+                  'timeout', '--signal=TERM', '--kill-after=10s',
+                  '21600s' if args.all_images else '300s', *command]
     report = {'status': 'running', 'command': invocation, 'binary_sha256': binary_sha,
               'recipe_sha256': sha(recipe), 'reference_feature_sha256': expected,
               'image_sha256': {image.name: sha(image) for image in selected},
               'rayon_num_threads': 8, 'malloc_arena_max': '1',
-              'scope': 'Four-image base extraction parity only; not full10k or E2E.'}
+              'image_count': len(selected),
+              'scope': 'Base extraction parity only; full10k when --all-images is explicit. Not dense extraction, continuous E2E or a speedup claim.'}
     report_path = output / 'report.json'
     report_path.write_text(json.dumps(report, indent=2) + '\n')
     with (output / 'run.log').open('w') as log:
@@ -59,7 +69,8 @@ def main():
                   measurement=parse_gnu_time(output / 'time.txt'),
                   status='pass' if result.returncode == 0 and actual == expected else 'fail')
     report_path.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps(report, indent=2))
+    print(json.dumps({key: value for key, value in report.items()
+                      if key not in ('image_sha256', 'reference_feature_sha256', 'output_feature_sha256')}, indent=2))
     return 0 if report['status'] == 'pass' else 1
 
 
