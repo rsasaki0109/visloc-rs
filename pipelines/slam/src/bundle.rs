@@ -10356,7 +10356,7 @@ mod matrix_free_ba_api_tests {
         assert_eq!(a.observations, original.observations);
         assert!(result.final_cost < result.initial_cost);
         let mut invalid = original.clone();
-        let mut bad = config.clone();
+        let mut bad = config;
         bad.refine_intrinsics = true;
         assert!(invalid
             .optimize_matrix_free_cluster8(&bad, options)
