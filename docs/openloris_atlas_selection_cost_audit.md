@@ -111,3 +111,18 @@ Any reuse experiment must first measure rejected-step assembly cost, preserve
 the LM iteration/acceptance trace exactly, limit additional state to an explicit
 bounded representation, and invalidate after accepted updates. Do not implement
 a blanket clone cache or alter damping to obtain more accepted steps.
+
+## Compact connectivity candidate
+
+The candidate replaces per-observation supported-set insertion with image/frame
+boolean flags, plus one image-to-compact-slot lookup. It unions each track's
+frames as observations are visited, removing per-track temporary tree sets.
+Duplicate observations merely repeat an idempotent union. Internal DSU roots
+can differ, but component IDs are assigned by ascending supported frame order,
+so the public support sets and component mapping must remain identical.
+All candidate observations are still visited; support-loss/split gates remain.
+Temporary extra state is O(images + frames), never frame-pair or landmark-pair
+state. The old implementation remains a test oracle.64 variants of deletions,
+replacement tracks, reversed observations and duplicate keys compare exactly;
+unknown-image errors also agree. All52 example tests pass. No measured speedup
+is claimed yet: repeat both retained components and verify model bytes/RSS.
