@@ -1,5 +1,18 @@
 # Fixed boundary observations for native BA — implementation contract
 
+## Full 10k outcome: not sufficient
+
+Both repeats exit successfully and all component models match exactly.
+Registration remains 9,936/10,000 images (missing frames 4492–4523).
+RMSE/p95 0.858292/1.473066 m fail the frozen COLMAP target
+0.384307/0.638669 m. Mean reprojection improves to 0.791517 px; both
+models are track-connected internally with valid support/depth/calibration.
+Mapper time is 180.291/163.331 s versus Legacy117.426 s; RSS is
+1,276,928/1,276,600 KiB, below 2 GiB. This is not an overall COLMAP
+success or native E2E result. Preserve the small-tier improvement evidence
+without hiding 10k registration and trajectory failures.
+[Full commands, model hashes and scores](../benchmarks/electro/m8-openloris-10000-fixed-boundary-v1.json).
+
 ## 5k paired result
 
 Both candidate repeats produce identical models with all 5,000 images and
