@@ -1,6 +1,68 @@
 //! Content-addressed envelope storage. Legacy v1 payload encoding is unchanged.
 use super::*;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+struct CachedEnvelope {
+    path: PathBuf,
+    digest: [u8; 32],
+    bytes: Arc<[u8]>,
+}
+
+/// One-entry cache scoped to a single immutable-input merge pass. Revalidate
+/// before eviction and before accepting the pass, never across merge passes.
+#[derive(Default)]
+pub(super) struct EnvelopeCache {
+    entry: Option<CachedEnvelope>,
+    pub(super) loads: usize,
+}
+
+impl EnvelopeCache {
+    pub(super) fn finish(&mut self) -> Result<(), String> {
+        if let Some(entry) = self.entry.take() {
+            let mut file = std::fs::File::open(&entry.path)
+                .map_err(|error| format!("revalidate shared envelope: {error}"))?;
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            if hasher.finalize()[..] != entry.digest {
+                return Err("shared envelope changed during cached merge pass".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn get(&mut self, path: PathBuf, digest: [u8; 32]) -> Result<Arc<[u8]>, String> {
+        if let Some(entry) = &self.entry {
+            if entry.path == path && entry.digest == digest {
+                return Ok(Arc::clone(&entry.bytes));
+            }
+        }
+        self.finish()?;
+        let bytes = load_envelope(&path, &digest)?;
+        self.loads += 1;
+        self.entry = Some(CachedEnvelope {
+            path,
+            digest,
+            bytes: Arc::clone(&bytes),
+        });
+        Ok(bytes)
+    }
+}
+
+fn load_envelope(path: &Path, digest: &[u8; 32]) -> Result<Arc<[u8]>, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read shared envelope: {error}"))?;
+    if Sha256::digest(&bytes)[..] != *digest {
+        return Err("shared envelope SHA-256 mismatch".to_owned());
+    }
+    Ok(bytes.into())
+}
 
 pub(super) const MAGIC: &[u8] = b"VISLOC-PAIR-CHUNK-V1\0";
 
@@ -91,7 +153,12 @@ pub fn write_shared_atomic(path: &Path, snapshot: &Snapshot) -> Result<(), Strin
     std::fs::rename(&temporary.path, path).map_err(|error| format!("publish chunk: {error}"))
 }
 
-pub(super) fn read(path: &Path, retain: bool, cap: Option<usize>) -> Result<Snapshot, String> {
+pub(super) fn read(
+    path: &Path,
+    retain: bool,
+    cap: Option<usize>,
+    cache: Option<&mut EnvelopeCache>,
+) -> Result<Snapshot, String> {
     let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let length = file.metadata().map_err(|error| error.to_string())?.len();
     let header_len = MAGIC.len() as u64 + 32 + 8;
@@ -110,11 +177,11 @@ pub(super) fn read(path: &Path, retain: bool, cap: Option<usize>) -> Result<Snap
     {
         return Err("shared chunk length mismatch".to_owned());
     }
-    let envelope = std::fs::read(envelope_path(parent(path), &digest))
-        .map_err(|error| format!("read shared envelope: {error}"))?;
-    if Sha256::digest(&envelope)[..] != digest {
-        return Err("shared envelope SHA-256 mismatch".to_owned());
-    }
+    let envelope_path = envelope_path(parent(path), &digest);
+    let envelope = match cache {
+        Some(cache) => cache.get(envelope_path, digest)?,
+        None => load_envelope(&envelope_path, &digest)?,
+    };
     let mut remaining = suffix_len;
     let mut checksum = 0xcbf29ce484222325u64;
     for byte in &digest {

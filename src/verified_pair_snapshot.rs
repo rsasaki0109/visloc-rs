@@ -466,8 +466,9 @@ fn write_streamed_merge_temp(
         let mut pair_cursor = 0usize;
         let mut encoded_pair_bytes = 0u64;
         let mut accepted_match_count = 0u64;
+        let mut envelope_cache = shared::EnvelopeCache::default();
         for (shard_index, path) in input_paths.iter().enumerate() {
-            let snapshot = read(path)?;
+            let snapshot = read_with_cache(path, true, None, Some(&mut envelope_cache))?;
             validate_merge_envelope(shard_index, &snapshot, first)?;
             for pair in &snapshot.pairs {
                 let expected = expected_pairs.get(pair_cursor).ok_or_else(|| {
@@ -500,6 +501,7 @@ fn write_streamed_merge_temp(
                 pair_cursor += 1;
             }
         }
+        envelope_cache.finish()?;
         if pair_cursor != expected_pairs.len() {
             return Err(format!(
                 "merge inputs contain {pair_cursor} pairs but validation found {}",
@@ -638,8 +640,9 @@ pub fn merge_files_atomic<P: AsRef<Path>>(output: &Path, inputs: &[P]) -> Result
     let mut pair_count = 0u64;
     let mut pair_payload_bytes = 0u64;
     let mut accepted_match_count = 0u64;
+    let mut envelope_cache = shared::EnvelopeCache::default();
     for (shard_index, path) in input_paths.iter().enumerate() {
-        let snapshot = read(path)?;
+        let snapshot = read_with_cache(path, true, None, Some(&mut envelope_cache))?;
         if let Some(first_snapshot) = first.as_ref() {
             validate_merge_envelope(shard_index, &snapshot, first_snapshot)?;
         } else {
@@ -704,6 +707,7 @@ pub fn merge_files_atomic<P: AsRef<Path>>(output: &Path, inputs: &[P]) -> Result
             });
         }
     }
+    envelope_cache.finish()?;
     edge_writer
         .flush()
         .map_err(|error| format!("flush merge edge spool {}: {error}", edge_path.display()))?;
@@ -1494,6 +1498,15 @@ fn read_with_retention(
     retain_audit_streams: bool,
     mapper_match_limit: Option<usize>,
 ) -> Result<Snapshot, String> {
+    read_with_cache(path, retain_audit_streams, mapper_match_limit, None)
+}
+
+fn read_with_cache(
+    path: &Path,
+    retain_audit_streams: bool,
+    mapper_match_limit: Option<usize>,
+    cache: Option<&mut shared::EnvelopeCache>,
+) -> Result<Snapshot, String> {
     let header_len = MAGIC.len() + 4 + 8;
     let mut file =
         std::fs::File::open(path).map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -1511,7 +1524,7 @@ fn read_with_retention(
     file.read_exact(&mut magic)
         .map_err(|error| format!("read {} header: {error}", path.display()))?;
     if magic.starts_with(shared::MAGIC) {
-        return shared::read(path, retain_audit_streams, mapper_match_limit);
+        return shared::read(path, retain_audit_streams, mapper_match_limit, cache);
     }
     if magic != MAGIC {
         return Err(format!(
@@ -1673,6 +1686,63 @@ mod tests {
             "visloc_verified_pair_snapshot_{tag}_{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn shared_envelope_cache_is_bounded_and_revalidates_changes() {
+        let root = temp_path("shared_cache");
+        std::fs::create_dir(&root).unwrap();
+        let snapshot = sample();
+        let path = root.join("first.vps");
+        super::write_shared_atomic(&path, &snapshot).unwrap();
+        let mut cache = super::shared::EnvelopeCache::default();
+        for _ in 0..8 {
+            assert_eq!(
+                super::read_with_cache(&path, true, None, Some(&mut cache)).unwrap(),
+                snapshot
+            );
+        }
+        assert_eq!(cache.loads, 1);
+        let mut other = snapshot.clone();
+        other.image_manifest_hash += 1;
+        let second = root.join("second.vps");
+        super::write_shared_atomic(&second, &other).unwrap();
+        assert_eq!(
+            super::read_with_cache(&second, true, None, Some(&mut cache)).unwrap(),
+            other
+        );
+        assert_eq!(cache.loads, 2);
+        assert_eq!(
+            super::read_with_cache(&path, true, None, Some(&mut cache)).unwrap(),
+            snapshot
+        );
+        assert_eq!(cache.loads, 3); // Previous envelope was evicted, not accumulated.
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "vpe") {
+                std::fs::write(path, b"corrupt").unwrap();
+            }
+        }
+        assert!(cache.finish().unwrap_err().contains("changed"));
+        assert!(super::read_with_cache(&path, true, None, Some(&mut cache)).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_envelope_concurrent_publication_is_exact() {
+        let root = temp_path("shared_concurrent");
+        std::fs::create_dir(&root).unwrap();
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let path = root.join(format!("{index}.vps"));
+                scope.spawn(move || super::write_shared_atomic(&path, &sample()).unwrap());
+            }
+        });
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 9);
+        for index in 0..8 {
+            assert_eq!(read(&root.join(format!("{index}.vps"))).unwrap(), sample());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
