@@ -11,6 +11,31 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-08)
 
+Fixed-boundary observations are implemented default-off (PR105 merged) and
+tested on same-binary controls. 1k/independent2.5k/derived5k pass registration,
+trajectory and reprojection nonregression with exact two-run model equality.
+Mapper is slower than Legacy. The full10k result (PR106 merged) repeats
+exactly but registers only9936 images and has RMSE0.858292m, missing COLMAP.
+See [tier evidence and limitations](openloris_fixed_boundary_ba.md).
+
+The retained strong/deferred recovery pipeline was reproduced exactly at
+9998 registered images before adding the boundary flag. Its first candidate
+keeps registration but regresses RMSE0.637290→0.775847m; do not promote this
+combination. Both control and candidate have30 unsupported camera images
+and11 unsupported rig frames. Candidate repeat is still running; do not
+claim its repeatability until audited.
+[Contract](../benchmarks/electro/m8-openloris-strong-boundary-contract-v1.json),
+[current result](../benchmarks/electro/m8-openloris-strong-boundary-result-v1.json).
+
+Separate the remaining requirements: pose rows are not observation-supported
+registration; lower reprojection is not lower trajectory error; mapper-only
+with saved priors is not native E2E. All-tier final nonregression, restart,
+100k I/O and the final same-condition COLMAP comparison remain open. Do not
+update README with superiority claims. No new GT-based threshold, damping,
+anchor or observation-admission sweep follows from these failed results.
+
+## Earlier solver checkpoint (historical)
+
 PR #85's opt-in column-scaled LM completes bounded atlas BA but regresses
 the 1k trajectory and still misses 10k COLMAP RMSE. The subsequent
 [step-quality diagnostic](../benchmarks/electro/m8-openloris-lm-step-quality-v1.json)
