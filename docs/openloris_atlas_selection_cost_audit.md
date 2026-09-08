@@ -88,7 +88,11 @@ acceptance remain unchanged. New full-input model parity is still required.
 The inner-timing tail replay preserves all six old model files. Wall14.46s,
 peak77848KiB; solver6.9542s, build0.1957s, conversion/cost0.3180s,
 filter/retriangulation0.8739s, connectivity0.3147s. The nested outer phase is
-8.6698s. Main is still running; do not extrapolate tail phase shares. Single-run
+8.6698s. Main completes in164.04s with peak525228KiB and all six model files
+byte-identical. Main solver87.0614s (53.1% wall), connectivity27.3257s (16.7%),
+filter/retriangulation10.4504s, build3.4788s and conversion/cost4.2847s.
+Both solver and connectivity merit investigation; keep the connectivity gate
+intact. These measurements do not establish a speed improvement. Single-run
 wall differs from the earlier10.78s trace; neither regression nor speedup is
 established without a controlled repeat. Evidence:
 `benchmarks/electro/m8-openloris-atlas-inner-timing-v1.json`.
