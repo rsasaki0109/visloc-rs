@@ -9,31 +9,40 @@ import time
 
 from benchmark_electro import build_merge_command, parse_gnu_time
 from replay_native_candidates import sha
+from replay_native_matching import snapshot_inventory
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--variant', choices=['native', 'adaptive', 'targeted7'], default='native')
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--binary-sha256', required=True)
     args = parser.parse_args()
     base = Path('/home/sasaki/datasets/openloris')
-    reference = base / 'corridor1-1-m8-native-rig-runner-10k-v1'
-    matching = base / 'corridor1-1-m8-native-matching-replay-v1'
+    reference = (base / 'corridor1-1-m8-native-rig-runner-10k-v1' if args.variant == 'native'
+                 else base / 'corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline')
+    if args.variant == 'targeted7':
+        reference = base / 'corridor1-1-m8-targeted7-dense256-v1'
+    matching = base / f'corridor1-1-m8-{args.variant}-matching-replay-v1'
     report_path = matching / 'report.json'
     report = json.loads(report_path.read_text())
-    if report['status'] != 'pass' or sha(args.binary) != args.binary_sha256:
+    accepted_status = 'complete-awaiting-merge-comparison' if args.variant == 'adaptive' else 'pass'
+    if report['status'] != accepted_status or report['exit_code'] != 0 or sha(args.binary) != args.binary_sha256:
         raise RuntimeError('Matching replay or merge binary prerequisite failed')
-    expected_names = {f'verified-{index:06d}.vps' for index in range(2188)}
+    expected_count = 448 if args.variant == 'targeted7' else 2188
+    expected_names = {f'verified-{index:06d}.vps' for index in range(expected_count)}
     actual_names = {path.name for path in (matching / 'matches').glob('*.vps')}
     if actual_names != expected_names:
         raise RuntimeError('Snapshot membership differs')
+    if args.variant == 'adaptive' and snapshot_inventory(matching / 'matches', expected_names) != report.get('snapshot_inventory_sha256'):
+        raise RuntimeError('Adaptive snapshot bytes changed after matching')
     snapshots = []
     for name in sorted(expected_names):
         path = matching / 'matches' / name
-        if sha(path) != sha(reference / 'matches' / name):
+        if args.variant != 'adaptive' and sha(path) != sha(reference / 'matches' / name):
             raise RuntimeError(f'Snapshot changed: {name}')
         snapshots.append(path)
-    output = base / 'corridor1-1-m8-native-merge-replay-v1'
+    output = base / f'corridor1-1-m8-{args.variant}-merge-replay-v1'
     output.mkdir()
     destination = output / 'verified-merged.vps'
     command = build_merge_command(args.binary.resolve(), destination, snapshots)
@@ -47,12 +56,13 @@ def main():
     expected = sha(reference / 'mapping/verified-merged.vps')
     actual = sha(destination) if destination.exists() else None
     report = {'status': 'pass' if result.returncode == 0 and actual == expected else 'fail',
+              'variant': args.variant,
               'exit_code': result.returncode, 'wall_seconds': elapsed,
               'binary': str(args.binary.resolve()), 'binary_sha256': args.binary_sha256,
               'matching_report_sha256': sha(report_path), 'snapshot_count': len(snapshots),
               'output_sha256': actual, 'reference_sha256': expected,
               'measurement': parse_gnu_time(output / 'time.txt'),
-              'scope': 'merge of reproduced native matching shards only; not E2E'}
+              'scope': 'merge of freshly generated matching shards only; not E2E'}
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2), flush=True)
     return 0 if report['status'] == 'pass' else 1

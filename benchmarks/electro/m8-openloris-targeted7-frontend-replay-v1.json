@@ -1,0 +1,36 @@
+{
+  "status": "complete-targeted7-frontend-byte-reproduction-pass-from-frozen-targets",
+  "source_commit": "a7ff5ff47b561556ba20a0afdb40417ec9413120",
+  "target_frames": [1999, 3264, 3266, 3267, 4493, 4494, 4495],
+  "max_frame_gap": 256,
+  "candidate_recipe": "scripts/build_targeted_rig_candidates.py: all sensor combinations incident to a target within inclusive numeric frame gap; canonical pair deduplication and sorting",
+  "candidate_pairs": 14319,
+  "candidate_output_and_reference_sha256": "14ac996b591a3d98c9be97d5c3c0aa47b04c93c48c551b2556353729c6895a4f",
+  "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-bank-publication-v1/features",
+  "feature_manifest_sha256": "406e2e82ea1faa57747465d2adfc95e645ad5e40cd1e301dbb4a70e285be9a0f",
+  "matching": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-matching-replay-v1/report.json",
+    "exit_status": 0,
+    "wall_seconds": 62.94877364998683,
+    "peak_rss_kib": 977232,
+    "rayon_num_threads": 4,
+    "regenerated_candidate_shards": 448,
+    "byte_identical_reference_snapshots": 448,
+    "snapshot_inventory_sha256": "b9af89ee8b9e5e7bd0cfd5d4f8a0d24dee52f0ae8ba72c6724eab6ca50a8567c"
+  },
+  "merge": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-merge-replay-v1/report.json",
+    "exit_status": 0,
+    "wall_seconds": 0.6797075249487534,
+    "peak_rss_kib": 309148,
+    "pairs": 265,
+    "accepted_correspondences": 5336,
+    "output_and_reference_sha256": "5c21537b2d95b85e04739c97ccdf59b2d3837e435f688909114d8ac07e74eba1"
+  },
+  "limitations": [
+    "Seven target IDs are frozen inputs, not yet derived by replaying the preceding registration stage.",
+    "Three retained deferred-repair19 models have exactly these missing frame IDs; set equality alone does not identify the historical selector or mapping command.",
+    "Uses the regenerated adaptive bank on external storage; no unchanged-I/O speed comparison.",
+    "Separate stages, not continuous E2E, extraction closure or quality improvement."
+  ]
+}

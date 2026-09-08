@@ -2,7 +2,30 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
-最新: PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
+最新（2026-09-09）: PR118は`0b7f999`へmerge済み。PR119はhead
+`dd9c94c46723ef290fd524a0426cc27e919fef26`のCI9成功を確認し、
+`7568377c1aa46c208996b924f44c358cc7b65021`へsquash merge、旧branch整理済み。
+現作業branchは`diag/m8-adaptive-frontend-replay`。サブエージェントは使わない。
+
+- native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
+  70,000候補・2,188 matching shards・merged snapshotが全bytes一致。
+  score順fillへの仕様変更を確認した。旧版への本番ロールバックではない。
+- adaptiveはnativeと同じ候補計画。再生成済みバンクからmatching/mergeを実行し、
+  61,286ペアのmerged snapshotが全bytes一致。元の個別shardがないため比較は統合境界。
+- targeted7は指定7 frame/±256から14,319候補を生成し全bytes一致。
+  matching448 shard・265ペアの統合snapshotも一致。7 frame選定の前段mappingは未再現。
+- 新規証跡と具体的コマンドは`docs/openloris_frontend_reproduction.md`。
+  adaptive/targetedでは退避済みの再生成バンク（外部ext4）を使用。過去と同一I/Oではない。
+- 許可済み整理で空き約21 GiBを確保し、新規replay後は約18 GiB。
+  整理ログと検証付き重複削除scriptはlocal branch `chore/replay-storage-cleanup`
+  （`8b05461`、未PR）に保存。元データ・検証ログは保持。
+- 次: この変更のPR/CI/merge、target選定前段とdense overlayの再現、全10k抽出・
+  continuous E2E・未達のCOLMAP軌跡品質改善。phase時間の和をE2Eとしない。
+  全goalは未達。READMEに未検証の高速化/品質改善を追加しない。
+
+### 以前の状態（上記を優先）
+
+PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
 現branch `diag/m8-pair-admission-recovery`。targeted7追加とrepair19修復・順序を
 既存ツールで再生成しsnapshot全bytes一致（証跡targeted7-admission-replay-v1、
 repair19-order-replay-v1、repair19-admission-replay-v1）。中間登録結果と修復前snapshotは未再生成。
