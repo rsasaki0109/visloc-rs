@@ -157,6 +157,15 @@ v1失敗logも保存、session29544はexit1完了。再poll/再起動不要。
 runner tests22通過。次はPR130最終CI/mergeと現branchのPR、全10k runner/E2E・品質改善。
 これはmatching+merge restartで、抽出・mapper・全10k restartではない。全goal未達。
 
+更新: PR130修正head`e63a1fd`はCI9成功後`9e270c8250d7f7c0ddd4e52522657cb564aa9b37`へmerge。
+旧branchをremote/local整理し、現branchをmainへrebase済み。実restart証跡と更新計画をPR化。
+`docs/openloris_m8_m10_plan.md`最新checkpointを09-09へ更新し、既に失敗した品質候補の
+再試験を避け、全10k Python runner→連続native DAG→未達軌跡品質→最終tier行列の順を明示。
+次は既存dense10k候補/特徴を新artifact rootでrunner prepare/match/merge/completed-resume。
+候補はv2、shared snapshotは明示ON。初期入力は凍結済みなので抽出/E2E達成としない。
+Python runnerの--prepareはpersistent flag禁止なのでprepareとmatchを別CLIにする。
+測定プロセスなし。全goal未達。
+
 ### 以前の状態（上記を優先）
 
 PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
