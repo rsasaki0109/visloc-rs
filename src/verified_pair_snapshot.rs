@@ -1702,7 +1702,7 @@ mod tests {
         );
         let merged_shared = root.join("merged_shared.vps");
         let merged_legacy = root.join("merged_legacy.vps");
-        merge_files_atomic(&merged_shared, &[first.clone()]).unwrap();
+        merge_files_atomic(&merged_shared, std::slice::from_ref(&first)).unwrap();
         merge_files_atomic(&merged_legacy, &[legacy]).unwrap();
         assert_eq!(
             std::fs::read(merged_shared).unwrap(),
