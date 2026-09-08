@@ -1,0 +1,21 @@
+{
+  "status": "complete-snapshot-byte-reproduction-pass",
+  "source_commit": "916be88",
+  "binary_sha256": "883a6ad7b21e34de9309cb71e35fe7750547df34d3ffe8c92b59921625247af5",
+  "command": "target/release/examples/admit_verified_bridge_snapshot --base-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-long128-component-ann80k-v1/mapping/verified-goodbase-repair19.vps --augmented-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-merged.vps --base-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --include-all-new-pairs --output /home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-admission-replay-v1/output.vps",
+  "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted7-dense256-v1/mapping/verified-base-repair19-targeted7.vps",
+  "output_and_reference_sha256": "c9b30f7f7c29257e79dda6fe9b479924917b1e875d351085768b19af1e476857",
+  "exit_status": 0,
+  "wall_seconds": 2.53,
+  "peak_rss_kib": 376444,
+  "base_pairs": 60134,
+  "admitted_pairs": 213,
+  "admitted_matches": 4158,
+  "output_pairs": 60347,
+  "output_matches": 3352705,
+  "limitations": [
+    "Newly specified reproduction command, not a recovered historical invocation.",
+    "Retained base repair19 and targeted7 matching snapshot are inputs; upstream generation is not included.",
+    "Single phase, not native E2E performance or quality improvement."
+  ]
+}
