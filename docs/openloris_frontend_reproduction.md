@@ -221,6 +221,16 @@ The downstream selector consumes only registration membership, not these poses
 or points. Do not omit the required mapping cost. Evidence:
 `m8-openloris-targeted-selection-replay-v1.json`.
 
+`replay_targeted_selection.py` now accepts `--features-dir`, `--snapshot` and
+`--output` so this required mapper can consume an enclosing run's repair output.
+It retains the frozen repair snapshot hash and exact adaptive feature validation;
+existing output directories are rejected. These options have not yet been used
+in a continuous cold run. The three admission commands can separately be emitted
+as non-executing templates with `python3 scripts/build_native_admission_recipe.py`.
+The repair template explicitly requires the intermediate mapper's generated
+registration components. Binary/evidence/output hashes are retained, but live
+input provenance and resource enforcement are responsibilities of the executor.
+
 ## Dense overlay frontend
 
 ```sh
