@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen native/dense schedule through prepare/match/merge/completed resume."""
+"""Frozen native/adaptive/dense schedule through matching and completed resume."""
 import argparse
 import json
 import os
@@ -12,6 +12,7 @@ import time
 
 from replay_native_candidates import sha, bind_feature_input
 from native_matching_recipe import flags_from_timing
+from replay_native_matching import same_candidate_schedule
 
 
 def bind_candidates(reference, override=None):
@@ -29,7 +30,7 @@ def main():
     parser.add_argument('--merge-binary', type=Path, required=True)
     parser.add_argument('--compare-binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--variant', choices=['dense', 'native'], default='dense')
+    parser.add_argument('--variant', choices=['dense', 'native', 'adaptive'], default='dense')
     parser.add_argument('--features-dir', type=Path)
     parser.add_argument('--candidate-manifest', type=Path,
                         help='Regenerated candidate file; must match frozen reference bytes')
@@ -56,7 +57,7 @@ def main():
     features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
     shard_count = 2500
     policy = ['--retrieval-topk', '128', '--retrieval-min-frame-gap', '128', '--candidate-budget', '80000']
-    if args.variant == 'native':
+    if args.variant in ('native', 'adaptive'):
         candidates = base / 'corridor1-1-m8-native-candidates-legacy-replay-v1/candidates.txt'
         reference = base / 'corridor1-1-m8-native-matching-replay-v1/matches'
         reference_merged = base / 'corridor1-1-m8-native-merge-replay-v1/verified-merged.vps'
@@ -65,6 +66,15 @@ def main():
         shard_count = 2188
         policy = ['--retrieval-topk', '32', '--candidate-budget', '70000', '--rig-frame-manifest',
                   str(base / 'corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt')]
+        if args.variant == 'adaptive':
+            reference = base / 'corridor1-1-m8-adaptive-matching-replay-v1/matches'
+            reference_merged = base / 'corridor1-1-m8-adaptive-merge-replay-v1/verified-merged.vps'
+            recipe = base / 'corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline'
+            features = base / 'corridor1-1-m8-linked-adaptive-bank-v2/features'
+            native_recipe = base / 'corridor1-1-m8-native-rig-runner-10k-v1'
+            if not same_candidate_schedule((native_recipe / 'match-worker.plan').read_text(),
+                                           (recipe / 'match-worker.plan').read_text()):
+                raise RuntimeError('Adaptive schedule differs from native candidates')
     _, features = bind_feature_input(['sfm', '--features-dir', str(features)],
                                     recipe / 'features.json', args.features_dir)
     candidates, candidate_hash = bind_candidates(candidates, args.candidate_manifest)

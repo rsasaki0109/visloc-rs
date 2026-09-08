@@ -404,6 +404,15 @@ sidecars have no retained reference and are not covered by that comparison.
 
 ## Full native shared matching on regenerated base features
 
+The runner also accepts `--variant adaptive`, preserving the native candidate
+schedule and adaptive matching thresholds. Its default bank is the validated
+immutable linked adaptive bank; `--features-dir` can bind a newly built bank.
+Preflight verified the full bank manifest/membership, native/adaptive schedule
+equality, 2,188 replay reference shards and the frozen merged reference digest.
+Adaptive shared matching itself has not yet been executed. Its per-shard
+reference is the independently replayed legacy output, not the missing original
+adaptive shards; final merged bytes must still match the frozen snapshot.
+
 `replay_full_shared_runner.py --candidate-manifest PATH` can consume a newly
 generated candidate file, but rejects bytes differing from the frozen variant
 reference. It records the resolved input and digest and rechecks the digest
