@@ -41,3 +41,33 @@ connectivity validation just to improve a timing number.
 This work can reduce unchanged-objective overhead. It cannot itself fix the
 remaining trajectory error or establish native end-to-end parity. Those gates
 remain explicit in the M8–M10 plan.
+
+## Diagnostic implementation
+
+First retained-tail replay completes in10.78s with peak77828KiB and all six
+pre-BA/final model files byte-identical to the old run. Selection totals0.0643s
+(about0.6% of wall), versus6.4076s for combined build/solve/validation.
+Main also completes with all six files byte-identical:185.59s wall,
+525248KiB peak RSS,8.8369s selection (4.76% of wall),153.8248s combined
+build/solve/validation,5.2928s application and0.6831s final validation.
+Thus selection is not dominant in either measured component. Even removing
+selection entirely would save under5% of this main replay. Prioritize separating
+the combined phase into solver, retriangulation and connectivity costs before
+adding an incidence index. Do not remove validation or change numerical policy
+on this timing evidence. Evidence:
+`benchmarks/electro/m8-openloris-atlas-timing-v1.json`.
+
+`VISLOC_ATLAS_TRACE_WINDOW_TIMING=1` enables stderr-only timers in the filtering
+runner for selection, counts, combined build/solve/validation, application,
+baseline connectivity and final validation. No timer is started when disabled.
+The combined phase deliberately does not claim solver-only timing. Trace I/O
+is outside reported phase intervals; their sum is not end-to-end wall time.
+Benchmark both actual components with identical inputs and compare model bytes
+before treating this instrumentation as behavior-preserving evidence.
+
+Build preflight found the filesystem full. Only regenerable workspace
+`target/debug/incremental` cache (about4.9GiB) was moved to
+`/dev/shm/visloc-atlas-build-cache.RcnQnI/incremental`; source and experiment
+artifacts are unchanged. This tmpfs backup is not durable across reboot and
+is not experiment evidence. Continue diagnostic builds with
+`CARGO_INCREMENTAL=0` to avoid immediately refilling the disk.
