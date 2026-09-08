@@ -199,7 +199,7 @@ pub use visloc_slam::{
     PerPoseGravityPrior, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig, PoseGraph,
     PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep,
     PoseGraphParseError, PoseGraphSe3Config, PoseGraphSe3IterationStats, PoseGraphSe3Result,
-    PositionPrior, PositionPriorObservation, ReconstructedLandmark, RigBaStats,
+    PositionPrior, PositionPriorObservation, ReconstructedLandmark, RigBaBackend, RigBaStats,
     RigCorrespondenceBuild, RigCorrespondenceBuildError, RigCorrespondenceCsr,
     RigCorrespondenceCsrBuilder, RigCorrespondencePreviewStats, RigFrame, RigFrameImage,
     RigObservationId, RigSfmConfig, RigSfmError, RigSfmResult, RigSfmWorkStats, RigTrackBuilder,

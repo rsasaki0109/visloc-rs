@@ -32,8 +32,8 @@ use visloc_rs::{
     metric_temporal_quadrilateral_tracks_in_frame_gap, umeyama_similarity_transform,
     write_colmap_reconstruction_for_3dgs_with_cameras, Camera, FeatureSet, GeneralizedCameraRig,
     GlobalSfmEdge, LinearSolver, PairwiseMatches, Pose, PoseGraph, PoseGraphEdge,
-    PoseGraphEdgeKind, RigFrame, RigFrameImage, RigSensor, RigSfmConfig, RigSfmError, RigSfmResult,
-    RigTrackBuilder, RobustKernel, SE3,
+    PoseGraphEdgeKind, RigBaBackend, RigFrame, RigFrameImage, RigSensor, RigSfmConfig, RigSfmError,
+    RigSfmResult, RigTrackBuilder, RobustKernel, SE3,
 };
 
 #[derive(Debug)]
@@ -123,10 +123,21 @@ struct Args {
     ba_metric_tracks_only: bool,
     final_ba_min_pose_observations: usize,
     ba_huber_delta: f64,
+    ba_backend: RigBaBackend,
     structure_refinement_iterations: usize,
     preview_rig_correspondence_csr: bool,
     preview_pair_confidence_conflicts: bool,
     dynamic_correspondence_tracking: bool,
+}
+
+fn parse_ba_backend(value: &str) -> Result<RigBaBackend, String> {
+    match value {
+        "legacy" => Ok(RigBaBackend::Legacy),
+        "matrix-free" => Ok(RigBaBackend::MatrixFreeStrict),
+        other => Err(format!(
+            "--ba-backend must be legacy or matrix-free, got {other}"
+        )),
+    }
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -230,6 +241,8 @@ fn parse_args() -> Result<Args, String> {
     let mut ba_metric_tracks_only = defaults.ba_metric_tracks_only;
     let mut final_ba_min_pose_observations = defaults.final_ba_min_pose_observations;
     let mut ba_huber_delta = 6.0;
+    let mut ba_backend = defaults.ba_backend;
+    let mut ba_backend_seen = false;
     let mut structure_refinement_iterations = defaults.structure_refinement_iterations;
     let mut preview_rig_correspondence_csr = false;
     let mut preview_pair_confidence_conflicts = false;
@@ -533,6 +546,13 @@ fn parse_args() -> Result<Args, String> {
             "--ba-huber-delta" => {
                 ba_huber_delta = value()?.parse().map_err(|error| format!("{error}"))?
             }
+            "--ba-backend" => {
+                if ba_backend_seen {
+                    return Err("--ba-backend may be provided only once".into());
+                }
+                ba_backend_seen = true;
+                ba_backend = parse_ba_backend(&value()?)?;
+            }
             "--structure-refinement-iterations" => {
                 structure_refinement_iterations =
                     value()?.parse().map_err(|error| format!("{error}"))?
@@ -591,6 +611,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--max-track-frame-gap 0] ",
                     "[--local-ba-every 10] [--local-ba-window 40] ",
                     "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
+                    "[--ba-backend legacy|matrix-free] ",
                     "[--structure-refinement-iterations 5] ",
                     "[--metric-anchored-cycle-tracks|--metric-temporal-cycle-tracks|",
                     "--metric-sparse-cycle-tracks|",
@@ -881,6 +902,7 @@ fn parse_args() -> Result<Args, String> {
         ba_metric_tracks_only,
         final_ba_min_pose_observations,
         ba_huber_delta,
+        ba_backend,
         structure_refinement_iterations,
         preview_rig_correspondence_csr,
         preview_pair_confidence_conflicts,
@@ -1659,6 +1681,7 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         paired_pose_jump_max_closure_ratio: args.paired_pose_jump_max_closure_ratio,
         ba_metric_tracks_only: args.ba_metric_tracks_only,
         final_ba_min_pose_observations: args.final_ba_min_pose_observations,
+        ba_backend: args.ba_backend,
         structure_refinement_iterations: args.structure_refinement_iterations,
         dynamic_correspondence_tracking: args.dynamic_correspondence_tracking,
         ba_config: visloc_rs::BaConfig {
@@ -3686,6 +3709,17 @@ mod tests {
             validate_frame_range_compatibility(false, Some(4), true),
             Ok(())
         );
+    }
+
+    #[test]
+    fn parses_native_ba_backend_selector_strictly() {
+        assert_eq!(parse_ba_backend("legacy"), Ok(RigBaBackend::Legacy));
+        assert_eq!(
+            parse_ba_backend("matrix-free"),
+            Ok(RigBaBackend::MatrixFreeStrict)
+        );
+        assert!(parse_ba_backend("matrix_free").is_err());
+        assert!(parse_ba_backend("sparse").is_err());
     }
 
     #[test]

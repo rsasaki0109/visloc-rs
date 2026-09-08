@@ -2010,6 +2010,24 @@ impl BundleAdjustment {
         })
     }
 
+    /// Validate the same pure-visual matrix-free contract for a bounded
+    /// landmark-only problem.  Native rig BA uses this only when every pose is
+    /// fixed, so the reduced pose system has dimension zero; it does not
+    /// expose a public solver mode or alter the ordinary matrix-free entry
+    /// point.
+    pub(crate) fn validate_matrix_free_landmark_only(
+        &self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+    ) -> Result<(), MatrixFreeBaError> {
+        if self.poses.keys().any(|id| !self.fixed_poses.contains(id)) {
+            return Err(MatrixFreeBaError::Ineligible(
+                "landmark-only matrix-free dispatch requires all poses fixed",
+            ));
+        }
+        self.validate_matrix_free_entry_with_pose_requirement(config, options, false)
+    }
+
     /// Run matrix-free BA with explicit column equilibration and scaled LM
     /// damping.  This is a separate opt-in policy: the legacy matrix-free
     /// entry point keeps scalar `lambda * I` damping and its exact arithmetic.
@@ -2160,6 +2178,15 @@ impl BundleAdjustment {
         config: &BaConfig,
         options: MatrixFreeBaOptions,
     ) -> Result<(), MatrixFreeBaError> {
+        self.validate_matrix_free_entry_with_pose_requirement(config, options, true)
+    }
+
+    fn validate_matrix_free_entry_with_pose_requirement(
+        &self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+        require_variable_pose: bool,
+    ) -> Result<(), MatrixFreeBaError> {
         if config.refine_intrinsics || config.refine_distortion {
             return Err(MatrixFreeBaError::Ineligible(
                 "intrinsics/distortion refinement is not supported",
@@ -2284,7 +2311,7 @@ impl BundleAdjustment {
         if self.landmarks.is_empty() {
             return Err(MatrixFreeBaError::Ba(BaError::NoLandmarks));
         }
-        if !self.poses.keys().any(|id| !self.fixed_poses.contains(id)) {
+        if require_variable_pose && !self.poses.keys().any(|id| !self.fixed_poses.contains(id)) {
             return Err(MatrixFreeBaError::Ineligible(
                 "matrix-free backend requires a variable pose",
             ));
@@ -10316,6 +10343,23 @@ mod matrix_free_ba_api_tests {
         assert!(matches!(
             bad_config.optimize_matrix_free(&config, MatrixFreeBaOptions::default()),
             Err(MatrixFreeBaError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn landmark_only_validation_rejects_variable_pose() {
+        let problem = make_problem();
+        let error = problem
+            .validate_matrix_free_landmark_only(
+                &matrix_free_config(),
+                MatrixFreeBaOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MatrixFreeBaError::Ineligible(
+                "landmark-only matrix-free dispatch requires all poses fixed"
+            )
         ));
     }
 
