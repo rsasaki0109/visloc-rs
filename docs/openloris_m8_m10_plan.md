@@ -22,8 +22,9 @@ The retained strong/deferred recovery pipeline was reproduced exactly at
 9998 registered images before adding the boundary flag. Its first candidate
 keeps registration but regresses RMSE0.637290→0.775847m; do not promote this
 combination. Both control and candidate have30 unsupported camera images
-and11 unsupported rig frames. Candidate repeat is still running; do not
-claim its repeatability until audited.
+and11 unsupported rig frames. Both candidates exit zero and all six model
+files have identical SHA256 hashes. Mapper283.673/260.672s is also slower
+than control155.999s. This combination is rejected, not promoted.
 [Contract](../benchmarks/electro/m8-openloris-strong-boundary-contract-v1.json),
 [current result](../benchmarks/electro/m8-openloris-strong-boundary-result-v1.json).
 

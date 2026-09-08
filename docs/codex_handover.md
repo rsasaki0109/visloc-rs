@@ -6,8 +6,10 @@
 > structure/deferred分割ログも過去先頭行と一致。candidate-aはexit0、9998画像を維持。
 > ただしRMSE/p95 0.775847/1.313240mは対照0.637290/1.170177mより悪化、不採用。
 > mapper283.672706秒、VmHWM1480176KiB。主成分2画像/後半28画像は支持なし、後半11frame支持なし。
-> candidate-bはsession25863実行中。証跡 `m8-openloris-strong-boundary-result-v1.json`。
-> 登録数だけで品質達成とはしない。次は旧対照の支持監査も比較し、既存atlas evidenceへ戻って整理する。
+> candidate-bもexit0、両成分の3モデルファイルSHAがcandidate-aと完全一致。
+> mapper260.671910秒、RSS1481112KiB。証跡 `m8-openloris-strong-boundary-result-v1.json`。
+> 対照にも同じ30画像/11frameの支持欠落あり。boundaryによる新規欠落ではない。
+> 精度と時間が悪化したため不採用。次は局所BA窓の共視ベース選択を単独要因として設計する。
 > 360秒上限・単一thread、完走後旧モデルbytes確認→boundary flagのみ追加したcandidate-a/b。
 > 事前モデル生成コストは別途必要、native E2Eと混同しない。入力やthreshold変更なし。
 > 容量確保のため直前10k boundary-bモデルをbytes一致したboundary-aへhardlink化。
