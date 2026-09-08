@@ -44,6 +44,13 @@ remain explicit in the M8–M10 plan.
 
 ## Diagnostic implementation
 
+First retained-tail replay completes in10.78s with peak77828KiB and all six
+pre-BA/final model files byte-identical to the old run. Selection totals0.0643s
+(about0.6% of wall), versus6.4076s for combined build/solve/validation.
+Thus selection is not the tail's dominant cost. Do not extrapolate this fraction
+to the main component; that replay is still running. Evidence:
+`benchmarks/electro/m8-openloris-atlas-timing-v1.json`.
+
 `VISLOC_ATLAS_TRACE_WINDOW_TIMING=1` enables stderr-only timers in the filtering
 runner for selection, counts, combined build/solve/validation, application,
 baseline connectivity and final validation. No timer is started when disabled.

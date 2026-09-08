@@ -1,0 +1,307 @@
+{
+  "schema": "m8-openloris-atlas-timing-v1",
+  "status": "tail-parity-confirmed-main-running",
+  "tail_audit_program": "import pathlib,hashlib,json,re\nroot=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1')\nold=pathlib.Path('/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1')\ntime=(root/'tail.time').read_text();assert 'Exit status: 0' in time\nhashes={}\nfor folder,ref in [('model','component-001'),('pre-ba','pre-ba-001')]:\n for name in ['cameras.txt','images.txt','points3D.txt']:\n  p=root/'tail'/folder/name\n  assert p.read_bytes()==(old/ref/name).read_bytes(),str(p)\n  hashes[folder+'/'+name]=hashlib.sha256(p.read_bytes()).hexdigest()\nphases={}\nfor line in (root/'tail.log').read_text().splitlines():\n if line.startswith(('atlas-window-timing:','atlas-pass-timing:')):\n  d=dict(re.findall(r'(\\w+)=([^ ]+)',line))\n  phases[d['phase']]=phases.get(d['phase'],0)+float(d['seconds'])\nprint(json.dumps({'hashes':hashes,'phase_seconds':phases,'time_log':time}))\n",
+  "tail_audit": {"hashes":{"model/cameras.txt":"65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e","model/images.txt":"761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd","model/points3D.txt":"931100c5151f008ced6cc2e7492658134931b805c4eab60fa3c6de87ec7d3d4f","pre-ba/cameras.txt":"65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e","pre-ba/images.txt":"96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff","pre-ba/points3D.txt":"33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c"},"phase_seconds":{"baseline_connectivity":0.012946952,"selection":0.064323637,"counts":0.016900639999999998,"build_solve_validate":6.407630224,"apply":0.19395371599999997,"final_validation":0.041451951},"time_log":"\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/integrate-e1094aa --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --nodes-tsv /home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/nodes.tsv --atlas-dir /home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/atlas-l-newest/component-001 --out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail/model --pre-ba-out-dir /home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail/pre-ba --recover-zero-support-frames --repair-cross-boundary --repair-left-max-frame 1999 --joint-rig-ba --joint-rig-ba-filter-observations\"\n\tUser time (seconds): 10.70\n\tSystem time (seconds): 0.08\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:10.78\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 77828\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 25267\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 34\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 53040\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"},
+  "build_commit": "e1094aa",
+  "binary_sha256": "4788e60c2318dcb90681d9cc83e0c6b5c318270de3fb27c7f09762f29e2987e0",
+  "input_hashes": {
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/nodes.tsv": {
+      "bytes": 2334,
+      "sha256": "69b3f668b43e2410a4d0518f0df9a5d6d65493444eb68b18c8721bac4307bc13"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt": {
+      "bytes": 248302,
+      "sha256": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-0/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-0/images.txt": {
+      "bytes": 12939273,
+      "sha256": "7e79adb335e928f2fbabd8b9da205188bbff3cb6c8e3cc6a6e156da87dd018f1"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-0/points3D.txt": {
+      "bytes": 5471766,
+      "sha256": "35e18349c197821cb8b111e7449b07b3994cb10e67172750f88d1acebf78834e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-1/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-1/images.txt": {
+      "bytes": 12258312,
+      "sha256": "de38333b1c88cff9307fa7c917cb57880d709a20490cefc60b18366147998764"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-1/points3D.txt": {
+      "bytes": 6201449,
+      "sha256": "667241214e335f873ca0bc111b0e9b0fe880da8288f7d834fa130c201a3896ed"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-21/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-21/images.txt": {
+      "bytes": 17918447,
+      "sha256": "2c5aca654f86a20bed8d2a6e21040ce349e2739895b2c3181414537fd8be1e82"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-21/points3D.txt": {
+      "bytes": 8138819,
+      "sha256": "108755dc299903637b45f3646f2fc62d5e8aa8c0443b91366cad72d65ca5851d"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-3/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-3/images.txt": {
+      "bytes": 11823962,
+      "sha256": "9ab3c0335c06d5ea3240f55006c8423632f82fb23a52e4a13dd523f0c699fccd"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-3/points3D.txt": {
+      "bytes": 3911238,
+      "sha256": "9a3f8a0167c9c301341afea6ac7ca43e6a272feaeaf1facbd13d52ad37047546"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-4/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-4/images.txt": {
+      "bytes": 11740960,
+      "sha256": "6b2697561bf364ee7d145fef2ecc1d3cd2dee7a437e49f568a14c5690ce9ab6a"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-4/points3D.txt": {
+      "bytes": 3753261,
+      "sha256": "72d112550cb085ee91fc4f259816762e7bf4558a280cfac634a65247ca1ced7a"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-5/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-5/images.txt": {
+      "bytes": 10911973,
+      "sha256": "ee48dad26f66a05906de85ae3df30c2a33d7231b3541408ef41937789102cad5"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-5/points3D.txt": {
+      "bytes": 3092156,
+      "sha256": "5c109dedfa1a4256814f89869d1a15bb3412f08003b4be7302f3ecbdc56240e7"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-6/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-6/images.txt": {
+      "bytes": 12041701,
+      "sha256": "86bfcb505c4cf23099b06b27dcad39804b1aa34fd0d5ba329b638757aa7a92aa"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-6/points3D.txt": {
+      "bytes": 3165979,
+      "sha256": "3456727bda4086066a3bf77ceca21e167dae85dc5aa1c47a7d254d2d28427b2b"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-25/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-25/images.txt": {
+      "bytes": 11537694,
+      "sha256": "8cca2ea74975fd3946ddc0af2c79a27ab68fb0a41033ddf5113787e62db1602b"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-25/points3D.txt": {
+      "bytes": 2698241,
+      "sha256": "b415814029620307b76a69719d12d19742baa1e05d06c5a81674b1296b70b74a"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-8/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-8/images.txt": {
+      "bytes": 10510569,
+      "sha256": "309a48ab92e43add43366a623084344b9294b03e02528423c27615dc24dc65bc"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-8/points3D.txt": {
+      "bytes": 2412596,
+      "sha256": "64b9065292c2b20c647a980b948ab4fc78df1b051ffdd31adcf176e9ef1f5d11"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-9/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-9/images.txt": {
+      "bytes": 17330149,
+      "sha256": "b602dfa6b5dd728a539e697c070cd8c981f2ab65eba0bcfd886f557fd6ffac77"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-9/points3D.txt": {
+      "bytes": 4173999,
+      "sha256": "cf200e913dedb3b0c1b8b13f436f820ed8ff335be4be5de6b67f7ab8ecf1d2c6"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-10/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-10/images.txt": {
+      "bytes": 12006321,
+      "sha256": "826129599d9b3acba4ff39c80950a31800ee2e8484801facd8833c4031150ecb"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-10/points3D.txt": {
+      "bytes": 3172631,
+      "sha256": "6fb6cc666ea45ea9059c2d9eb6607f3ffd6adf5818ebe26c418f24a872a8db66"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-11/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-11/images.txt": {
+      "bytes": 10496791,
+      "sha256": "bb742a043bc900e10cc10a5ef9e5ce8e4c332be07b908786559be7525e0b7f55"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-11/points3D.txt": {
+      "bytes": 2854000,
+      "sha256": "e177e2ddbdebab868dee3e828d7762dff86ae66b617f8a435c04175f5514d766"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-12/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-12/images.txt": {
+      "bytes": 5283454,
+      "sha256": "204f974062ce8bcc8c61f3d7cf35ca47efbe6a025bf2aa73913442ac937dd70b"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-12/points3D.txt": {
+      "bytes": 1413038,
+      "sha256": "68e71969062ae98c915c91d6c42328a0450e846e54fc762cd27a09642c305f3c"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-13/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-13/images.txt": {
+      "bytes": 4969424,
+      "sha256": "c9c66e35c1c82415fa3dd3c0bca8dc316bfdc9c83cf4eb001d14e4106dc691be"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-13/points3D.txt": {
+      "bytes": 1416646,
+      "sha256": "bdd147263e28525af7386a90b3bfb28067ddb92fb1fccc17ff41029388edfe85"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-26/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-26/images.txt": {
+      "bytes": 11007058,
+      "sha256": "71595bf93e6bc75ef29dceca8cc226afd1d6539958b0e22f7311aa9b82ab1cda"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-26/points3D.txt": {
+      "bytes": 2846315,
+      "sha256": "4da6c2abf6666489deea4e3da368865aeb31ff8c91820153f5a6b2233ec8df95"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-15/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-15/images.txt": {
+      "bytes": 10561882,
+      "sha256": "644b8778a6e3d2b4f86df06010d0b9af8904349125e924995154857d5d173aaa"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-15/points3D.txt": {
+      "bytes": 2849257,
+      "sha256": "d4aa9426d3be092f6d0a7545a72920a77a8706b653b81f7310c7378cde816580"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-16/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-16/images.txt": {
+      "bytes": 10348392,
+      "sha256": "b0231e971ed90dea9f9653503f55b3eb2a5168ddf32dfd77e2f8899905990478"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-16/points3D.txt": {
+      "bytes": 3184757,
+      "sha256": "0936dade632bf81916d1da7077f3ed34d04fbb7ac8fb81b040b630663a7aadb3"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-17/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-17/images.txt": {
+      "bytes": 10797173,
+      "sha256": "f7525e618122ce1a138df0032b3061a823dc72ab1612af0d8082b0c37fd18ed7"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-17/points3D.txt": {
+      "bytes": 3970547,
+      "sha256": "55d526cdd35edc5c433d54785483293c668c4b8be5d2050a330b31b955cba9fb"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-18/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-18/images.txt": {
+      "bytes": 5692350,
+      "sha256": "1e1236bde84b5d483b42f8afe349606f98fed5b2cd8520d482abf1ffc18b6672"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-18/points3D.txt": {
+      "bytes": 2209094,
+      "sha256": "9807e21b22d251dec911994eb4c6b73696177ea0f26aedc6cc22a6e8430ebd93"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-19/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-19/images.txt": {
+      "bytes": 4553369,
+      "sha256": "d38ca28d8861bdf11ecaea7b159cc7378f9bff289c3fe95a1ad2d24d3cfe8d04"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-19/points3D.txt": {
+      "bytes": 1761417,
+      "sha256": "63984915e673b06695a8e5f86b70f3f55533c5c322c7a6038fe1312d032ff09c"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-20/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-20/images.txt": {
+      "bytes": 9672070,
+      "sha256": "ecee05b0d25a510aab1091012d1f4e061346ad46b4f232dc5174dc1d58ae3f73"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-20/points3D.txt": {
+      "bytes": 3267796,
+      "sha256": "290d4821c712451a08cd2f72e9429888c36d57bbc94913463d38d695b8601611"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-27/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-27/images.txt": {
+      "bytes": 6627384,
+      "sha256": "7f0324faa11d4510abfdf40c5befeb192b9d55c8b9003fc38c7384cd9cc062e5"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-27/points3D.txt": {
+      "bytes": 2659665,
+      "sha256": "8e5828247cef977f33883af308293c4795fe531dd2945a97f8804fca1ed8c5cf"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-28/cameras.txt": {
+      "bytes": 188,
+      "sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-28/images.txt": {
+      "bytes": 11295923,
+      "sha256": "4571fb55bcfae41e8a944940c59a7992a61a38ad9fee582a03255b5cce4194ca"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/sources/node-28/points3D.txt": {
+      "bytes": 3905772,
+      "sha256": "7a7cd6bdd535468dd50c0c2228c3348c1351a8f731d79988f4055554db9c15c3"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/atlas-l-newest/component-000/images.txt": {
+      "bytes": 1380996,
+      "sha256": "a26a3a4444dd73be2e707d5c89c3ebce845fd92a34eb8c18a0d2e6833e489ed3"
+    },
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/atlas-l-newest/component-001/images.txt": {
+      "bytes": 155030,
+      "sha256": "44005eeee990cb8b1fb10f9e253d64d789e9f66b0e99502dd4e530f579f77ca0"
+    }
+  },
+  "commands": {
+    "tail": "set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail.time'\nenv RAYON_NUM_THREADS=1 VISLOC_ATLAS_TRACE_WINDOW_TIMING=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/integrate-e1094aa' '--rig-manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--nodes-tsv' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/nodes.tsv' '--atlas-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/atlas-l-newest/component-001' '--out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail/model' '--pre-ba-out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail/pre-ba' '--recover-zero-support-frames' '--repair-cross-boundary' '--repair-left-max-frame' '1999' '--joint-rig-ba' '--joint-rig-ba-filter-observations' > '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/tail.log' 2>&1",
+    "main": "set -Ce\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/main'\ntest ! -e '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/main.time'\nenv RAYON_NUM_THREADS=1 VISLOC_ATLAS_TRACE_WINDOW_TIMING=1 /usr/bin/time -v -o '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/main.time' timeout --signal=TERM --kill-after=10s 360s '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/integrate-e1094aa' '--rig-manifest' '/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt' '--nodes-tsv' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/nodes.tsv' '--atlas-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-landmarks-v1/atlas-l-newest/component-000' '--out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/main/model' '--pre-ba-out-dir' '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/main/pre-ba' '--recover-zero-support-frames' '--repair-cross-boundary' '--repair-left-max-frame' '1999' '--joint-rig-ba' '--joint-rig-ba-filter-observations' > '/home/sasaki/datasets/openloris/corridor1-1-m8-atlas-timing-v1/main.log' 2>&1"
+  },
+  "scope": "Integration/recovery/repair/filtered BA with retained source windows, not mapper or native E2E. Need output parity before interpreting timing."
+}
