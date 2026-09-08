@@ -1,0 +1,377 @@
+{
+  "schema": "m8-openloris-source-execution-inventory-v1",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,json,re,hashlib,shlex\nbase=pathlib.Path('benchmarks/electro')\ncost=json.loads((base/'m8-openloris-atlas-source-cost-v1.json').read_text())\ncoverage=json.loads((base/'m8-openloris-source-command-coverage-v1.json').read_text())['audit']['executions']\nrows=[]\nfor log,g in cost['execution_deduplicated_accounting']['by_log'].items():\n p=pathlib.Path(log);raw=p.read_bytes();s=raw.decode()\n assert hashlib.sha256(raw).hexdigest()==g['log_sha256']\n ranges=re.findall(r'rig-replay frame range: start=(\\d+) count=(\\d+)',s)\n source='mapper-log'\n if not ranges:\n  for record in coverage[log]['command_records']:\n   for line in record['lines']:\n    tokens=shlex.split(line.split('Command being timed: \"',1)[1][:-1])\n    if '--frame-range-start' in tokens and '--frame-range-count' in tokens:\n     ranges.append((tokens[tokens.index('--frame-range-start')+1],tokens[tokens.index('--frame-range-count')+1]))\n     source='recorded-time-command'\n ranges=sorted(set((int(a),int(b)) for a,b in ranges))\n rows.append({'log':log,'log_sha256':g['log_sha256'],'nodes':g['nodes'],'input_ranges':ranges,'range_source':source if ranges else None,'original_models':{str(n):cost['complete_audit']['matched_nodes'][str(n)]['images'] for n in g['nodes']}})\nprint(json.dumps({'executions':rows,'execution_count':len(rows),'node_count':sum(len(r['nodes']) for r in rows),'unknown_ranges':[r['log'] for r in rows if len(r['input_ranges'])!=1]}))\nPY",
+  "audit": {
+    "executions": [
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-0000/mapper.log",
+        "log_sha256": "18de183255dbfdbd31c657ba228273889bca133d3a34900f0256acababd6a17e",
+        "nodes": [
+          0
+        ],
+        "input_ranges": [
+          [
+            0,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "0": "/tmp/visloc-m8-hierarchical-500x250/window-0000/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-0250/mapper.log",
+        "log_sha256": "28ca37ef67ceaf0cf8b77dc948f0ed313e21d8e43964c4c41b44ae05768981a7",
+        "nodes": [
+          1
+        ],
+        "input_ranges": [
+          [
+            250,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "1": "/tmp/visloc-m8-hierarchical-500x250/window-0250/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-0750/mapper.log",
+        "log_sha256": "9dd0e54418bd04145061de0316152db253b13070db2111e76ab06651e0b8cec6",
+        "nodes": [
+          3
+        ],
+        "input_ranges": [
+          [
+            750,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "3": "/tmp/visloc-m8-hierarchical-500x250/window-0750/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-1000/mapper.log",
+        "log_sha256": "4336f8c2ac651ab5ded33ba64bfcfcefc54df0e6865892a0ad04c2ed342701ea",
+        "nodes": [
+          4
+        ],
+        "input_ranges": [
+          [
+            1000,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "4": "/tmp/visloc-m8-hierarchical-500x250/window-1000/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-1250/mapper.log",
+        "log_sha256": "d819c6cc47e9393ca4c85bef4b1e26561414c5928aa6e2d2865ec411879370ef",
+        "nodes": [
+          5
+        ],
+        "input_ranges": [
+          [
+            1250,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "5": "/tmp/visloc-m8-hierarchical-500x250/window-1250/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-1500/mapper.log",
+        "log_sha256": "f5269242a42ff54dbb9338c2e69b529733286f3687d304b859c42f2c2201b2e3",
+        "nodes": [
+          6
+        ],
+        "input_ranges": [
+          [
+            1500,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "6": "/tmp/visloc-m8-hierarchical-500x250/window-1500/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-2000/mapper.log",
+        "log_sha256": "d929764c7fab3a8183b4a34965c84235241d20b5401f1414286ac62d116fbc4f",
+        "nodes": [
+          8
+        ],
+        "input_ranges": [
+          [
+            2000,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "8": "/tmp/visloc-m8-hierarchical-500x250/window-2000/model/component-001/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-2250-wide750/mapper.log",
+        "log_sha256": "87daeb8c617ee57e900bd321223791b921b94f12beeac490f0dd44b3ea42d25a",
+        "nodes": [
+          9
+        ],
+        "input_ranges": [
+          [
+            2250,
+            750
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "9": "/tmp/visloc-m8-hierarchical-500x250/window-2250-wide750/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-2500/mapper.log",
+        "log_sha256": "fc8c9086cca048e34b7e04a04c8c29d452a9040eae0a78f0ce4c3320d257a4ce",
+        "nodes": [
+          10
+        ],
+        "input_ranges": [
+          [
+            2500,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "10": "/tmp/visloc-m8-hierarchical-500x250/window-2500/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-2750/mapper.log",
+        "log_sha256": "c837ebe7fb3cd919dfade63af5ee08cb7442dfcc1ca5257997810430c05fa55b",
+        "nodes": [
+          11
+        ],
+        "input_ranges": [
+          [
+            2750,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "11": "/tmp/visloc-m8-hierarchical-500x250/window-2750/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-3000/mapper.log",
+        "log_sha256": "ba70596506e7a74d32d23dc21cf60b93b3cee345944ad816ee8a2ee2120eb5dd",
+        "nodes": [
+          12,
+          13
+        ],
+        "input_ranges": [
+          [
+            3000,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "12": "/tmp/visloc-m8-hierarchical-500x250/window-3000/model/component-000/images.txt",
+          "13": "/tmp/visloc-m8-hierarchical-500x250/window-3000/model/component-001/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-3500/mapper.log",
+        "log_sha256": "fcc376f8197ad41f9b23ed05e019180fe906182b8ff6c64deea132e86c133cfb",
+        "nodes": [
+          15
+        ],
+        "input_ranges": [
+          [
+            3500,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "15": "/tmp/visloc-m8-hierarchical-500x250/window-3500/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-3750/mapper.log",
+        "log_sha256": "5144b7a98a52a06ed68dfb95c873de4f45c8a1f3aba9ec26e0648721315528b1",
+        "nodes": [
+          16
+        ],
+        "input_ranges": [
+          [
+            3750,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "16": "/tmp/visloc-m8-hierarchical-500x250/window-3750/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-4000/mapper.log",
+        "log_sha256": "7e47587c0b79e4d05fa08f1f681f337adf093e3e9f03f9394e2c11660d336685",
+        "nodes": [
+          17
+        ],
+        "input_ranges": [
+          [
+            4000,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "17": "/tmp/visloc-m8-hierarchical-500x250/window-4000/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-4250/mapper.log",
+        "log_sha256": "4e17981e380fdc9a87655fad72c0d6469a33515ab7c4dd5c1a53ec0fa8fa4a60",
+        "nodes": [
+          18,
+          19
+        ],
+        "input_ranges": [
+          [
+            4250,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "18": "/tmp/visloc-m8-hierarchical-500x250/window-4250/model/component-000/images.txt",
+          "19": "/tmp/visloc-m8-hierarchical-500x250/window-4250/model/component-001/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-4500/mapper.log",
+        "log_sha256": "72a60d3207fe358067490c8aea5c4759878270666bd6779de3b0421e3ac0b0bc",
+        "nodes": [
+          20
+        ],
+        "input_ranges": [
+          [
+            4500,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "20": "/tmp/visloc-m8-hierarchical-500x250/window-4500/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-0250-wide750/mapper.log",
+        "log_sha256": "6392367acc3dc931e4e1c8f423de2158da15c6e8057b883e0493a5e5e94a3554",
+        "nodes": [
+          21
+        ],
+        "input_ranges": [
+          [
+            250,
+            750
+          ]
+        ],
+        "range_source": "recorded-time-command",
+        "original_models": {
+          "21": "/tmp/visloc-m8-hierarchical-500x250/window-0250-wide750/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-1950-shift500/mapper.log",
+        "log_sha256": "7dca42a127c93769b81ef251426020ece1139cb0a6bb8dbc619fa696d2921eb2",
+        "nodes": [
+          25
+        ],
+        "input_ranges": [
+          [
+            1950,
+            500
+          ]
+        ],
+        "range_source": "recorded-time-command",
+        "original_models": {
+          "25": "/tmp/visloc-m8-hierarchical-500x250/window-1950-shift500/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-hierarchical-500x250/window-3200-shift500/mapper.log",
+        "log_sha256": "8fd6fd8f49e1608082e47b2a311d0e09b2975290a962630febd839264fd8fb74",
+        "nodes": [
+          26
+        ],
+        "input_ranges": [
+          [
+            3200,
+            500
+          ]
+        ],
+        "range_source": "recorded-time-command",
+        "original_models": {
+          "26": "/tmp/visloc-m8-hierarchical-500x250/window-3200-shift500/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-boundary-window-4200-debug.AqO1ao/mapper.log",
+        "log_sha256": "55d818e94fdf797a8156160bfcf671ab4937cc1e8a4c443856da3b03fb9eb505",
+        "nodes": [
+          27
+        ],
+        "input_ranges": [
+          [
+            4200,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "27": "/tmp/visloc-m8-boundary-window-4200-debug.AqO1ao/model/component-000/images.txt"
+        }
+      },
+      {
+        "log": "/tmp/visloc-m8-window-650.hSRTGo/mapper.log",
+        "log_sha256": "244447e53525ec0c7b936647e5886316a511920f5d7b4677cc4b3d411f6731ec",
+        "nodes": [
+          28
+        ],
+        "input_ranges": [
+          [
+            650,
+            500
+          ]
+        ],
+        "range_source": "mapper-log",
+        "original_models": {
+          "28": "/tmp/visloc-m8-window-650.hSRTGo/model/component-000/images.txt"
+        }
+      }
+    ],
+    "execution_count": 21,
+    "node_count": 23,
+    "unknown_ranges": []
+  },
+  "limitations": [
+    "Input ranges come only from verified mapper logs or recorded time commands, not atlas node window_start or directory-name inference.",
+    "Range recovery does not recover all mapper flags or historical executable/environment.",
+    "Unknown ranges must be resolved or explicitly specified as new policy before replay."
+  ]
+}

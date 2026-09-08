@@ -225,3 +225,19 @@ This is not a recovered historical command. It completes in79.58s with
 files. Evidence: `m8-openloris-source-spec-0-v1.json`. Thus six source outputs
 are now reproducible under recorded new executions, only five of which start
 from recorded historical argv. No frontend or full-atlas quality gate closes.
+
+## Execution inventory for remaining sources
+
+`m8-openloris-source-execution-inventory-v1.json` groups all23 retained model
+nodes into21 producing executions and resolves every input start/count from
+the verified mapper log or recorded time command. No directory-name inference
+is used. Atlas node `window_start` must not be substituted for the input start:
+for example node21 has atlas value500 but comes from the250-start750-frame
+execution. Nodes12/13 and18/19 each share one producing run.
+
+This inventory closes input-range ambiguity, not the missing mapper flags.
+For the15 remaining outputs, a new explicitly recorded policy may reuse the
+source650 flags with the verified per-execution ranges, but must validate
+every output component against its retained model and record mismatches.
+Do not tune flags against GT or relabel new-policy reproduction as recovery
+of historical argv. Run each unique execution only once per replay pass.

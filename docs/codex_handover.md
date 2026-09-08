@@ -19,6 +19,9 @@
 > 追加M8スクリプト探索では起動記録未発見。新仕様として650窓flagsの開始位置だけ0へ変更。
 > source0全3モデルbytes過去一致、79.58秒/340288KiB。source-spec-0-v1.json参照。
 > 過去argv復元ではない。計6ソース出力再生成（うち5件は保存argv由来）。測定稼働なし。
+> source-execution-inventory-v1.jsonで全21実行/23nodeの入力start/countをログ/timeから確定。
+> atlas window_startと入力startは別（node21は500表記だが入力250開始750frame）。
+> 12/13と18/19は同一実行の別成分。残り15実行はこのinventoryで新仕様を組み全成分検証へ。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
