@@ -70,3 +70,14 @@ to Legacy, which supports that configuration. This is not evidence of cache-hit
 coverage or rejected-step rollback in that fixture. Reject→accept→reject-specific
 coverage and real-input resource/parity gates remain pending. The existing39
 native tests passed before this additional enabled fixture.
+
+The first real-input1k replay uses one saved release binary at source0466499,
+with only the reuse flag changed. Control, candidate-a, candidate-b and
+control-repeat all match the retained Legacy cameras/images/points3D bytes.
+Wall times are3.73/3.94s off and3.44/3.48s on; peak RSS is81944/81968KiB off
+and82008/82200KiB on. The two candidate observations are faster but memory
+is not reduced. These are mapper replays with retained frontend inputs,
+not native E2E or a COLMAP comparison. The policy remains default off pending
+larger-tier parity/resource tests and explicit invalidation transition coverage.
+See `benchmarks/electro/m8-openloris-1000-retry-reuse-v1.json` for commands,
+binary hash, full logs, resource reports and output hashes.
