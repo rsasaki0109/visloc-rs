@@ -6,6 +6,7 @@
   "image_count": 10000,
   "worker_exit_codes": [0, 0, 0, 0, 0, 0],
   "all_feature_membership_and_bytes_equal": true,
+  "comparison_boundary": "10000 *_features.txt files. The new extractor also emitted 10000 *_loci.txt sidecars, absent from the retained base bank; those sidecars are not covered by the parity claim.",
   "scope_report": "/home/sasaki/datasets/openloris/m8-full-base-extraction-scope-v2.json",
   "scope_report_terminal": false,
   "resource_limitation": "Scope report remained running after all processes and the cgroup disappeared. Final aggregate RSS, memory.peak and memory.events are unavailable. Cause not yet established. Earlier live observations confirmed the configured 2 GiB/no-swap limit and zero OOM counters, but are not a complete final resource ledger.",

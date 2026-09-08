@@ -393,6 +393,15 @@ not summed. GNU timeout uses `--foreground` so workers remain in the command
 process group for wrapper timeout cleanup. This remains base extraction only,
 not dense extraction or continuous E2E.
 
+`--variant dense` reuses the same partitioned harness with the already reproduced
+dense extraction recipe, retaining its two orientations, RootSIFT and compatible
+detector/descriptor/orientation/output-order/grayscale flags. Its reference check
+includes both `_features.txt` and `_loci.txt`: four spread-out images/two workers
+match all eight files, and the detached measurement service exited successfully.
+See `m8-dense-parallel-preflight-v1.json`. Full10k dense execution is not yet done.
+The base parity result covers only its 10,000 feature files: new base loci
+sidecars have no retained reference and are not covered by that comparison.
+
 ## Empty vocabulary safety
 
 Streamed candidate export now rejects a missing/empty appearance vocabulary

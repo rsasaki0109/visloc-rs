@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--all-images', action='store_true',
                         help='Run the full frozen 10k base bank instead of four spread-out images')
     parser.add_argument('--workers', type=int, default=1)
+    parser.add_argument('--variant', choices=['base', 'dense'], default='base')
     args = parser.parse_args()
     base = Path('/home/sasaki/datasets/openloris')
     source = base / 'corridor1-1-m5'
@@ -35,8 +36,14 @@ def main():
     if binary_sha != '8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34':
         raise RuntimeError('Frozen extractor changed')
     recipe = source / 'feature-extract/timing/shard-0.time.txt'
+    if args.variant == 'dense':
+        recipe = base / 'corridor1-1-m8-extraction-shard0-replay-v1/extract.time'
     command = shlex.split(shlex.split(recipe.read_text().splitlines()[0].split(
         'Command being timed: ', 1)[1])[0])
+    if args.variant == 'dense':
+        if command[:4] != ['timeout', '--signal=TERM', '--kill-after=10s', '3600s']:
+            raise RuntimeError('Unexpected dense extraction recipe wrapper')
+        command = command[4:]
     images = sorted((source / 'images').glob('*.png'))
     if len(images) < 4:
         raise RuntimeError('Raw image bank missing')
@@ -45,8 +52,12 @@ def main():
     selected = images if args.all_images else [images[index * (len(images) - 1) // 3] for index in range(4)]
     partitions = partition_images(selected, args.workers)
     reference = source / 'tiers/tier-10000/features256'
-    expected = {image.stem + '_features.txt': sha(reference / (image.stem + '_features.txt'))
-                for image in selected}
+    suffixes = ['_features.txt']
+    if args.variant == 'dense':
+        reference = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
+        suffixes.append('_loci.txt')
+    expected = {image.stem + suffix: sha(reference / (image.stem + suffix))
+                for image in selected for suffix in suffixes}
     output = args.output.resolve()
     required = sum((reference / name).stat().st_size for name in expected) + 1024**3
     if shutil.disk_usage(output.parent).free < required:
@@ -78,8 +89,8 @@ def main():
               'image_sha256': {image.name: sha(image) for image in selected},
               'rayon_num_threads': int(threads), 'malloc_arena_max': '1',
               'worker_commands': invocations, 'workers': args.workers,
-              'image_count': len(selected),
-              'scope': 'Base extraction parity only; full10k when --all-images is explicit. Not dense extraction, continuous E2E or a speedup claim.'}
+              'image_count': len(selected), 'variant': args.variant,
+              'scope': 'Selected variant extraction parity only; full10k when --all-images is explicit. Not continuous E2E or a speedup claim.'}
     report_path = output / 'report.json'
     report_path.write_text(json.dumps(report, indent=2) + '\n')
     def run_worker(item):
@@ -89,7 +100,8 @@ def main():
                 env=dict(os.environ, RAYON_NUM_THREADS=threads, MALLOC_ARENA_MAX='1')).returncode
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         codes = list(pool.map(run_worker, enumerate(invocations)))
-    actual = {path.name: sha(path) for path in (output / 'features').glob('*_features.txt')}
+    actual = {path.name: sha(path) for path in (output / 'features').iterdir()
+              if any(path.name.endswith(suffix) for suffix in suffixes)}
     report.update(exit_code=0 if all(code == 0 for code in codes) else 1,
                   worker_exit_codes=codes, output_feature_sha256=actual,
                   worker_measurements=[parse_gnu_time(output / f'time-{index}.txt') for index in range(args.workers)],
