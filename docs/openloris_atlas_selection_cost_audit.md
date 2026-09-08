@@ -71,3 +71,16 @@ Build preflight found the filesystem full. Only regenerable workspace
 artifacts are unchanged. This tmpfs backup is not durable across reboot and
 is not experiment evidence. Continue diagnostic builds with
 `CARGO_INCREMENTAL=0` to avoid immediately refilling the disk.
+
+## Inner-phase diagnostic
+
+The same environment flag additionally emits `atlas-inner-timing` for
+`problem_build`, `solver`, `output_conversion_and_costs`,
+`filter_retriangulate_costs`, `candidate_connectivity` and
+`candidate_pose_validation`. These are nested inside the previously measured
+combined phase; do not add them to that outer duration when summing work.
+The final phase reports on scope exit, including early rejection, so a timing
+line alone does not certify acceptance. Pair with existing window status logs.
+The active-frame start identifies windows; repeated passes must be separated
+using log order and the outer pass field. Numerical settings and support/cost
+acceptance remain unchanged. New full-input model parity is still required.
