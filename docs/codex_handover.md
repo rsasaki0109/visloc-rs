@@ -1,5 +1,43 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+## 現在の状態（以下の過去ログより優先）
+
+- branch: `test/m8-extraction-replay-preflight`。サブエージェントは使わない。
+- 抽出session37896は終了コード0で完了。再poll・再起動不要。
+  1,250画像/2,500 feature+loci files/585,615,663 bytesが保存済み出力と完全一致。
+  51:00.39、peak283,612KiB。他CPU負荷を観測したため単独速度比較には使わない。
+- 追加画像選択は692画像の順序を含むJSON全項目が一致。
+  結合は元特徴のみを距離判定対象にして1px以内を除外し、追加特徴同士は除去しない。
+  全10,000 feature filesの生成hashが一致（変更692、元と同一9,308）。
+  base/adaptiveバンクにlociはない。新規バンク書き出し・restartは未実装/未検証。
+- 証跡: extraction-shard0-replay-v1、supplement-selection-replay-v1、
+  adaptive-bank-replay-audit-v1（`benchmarks/electro/m8-openloris-*.json`）。
+- 次: このbranchのPR/最終CI、追加特徴バンクの安全な書き出し、
+  ペア追加の入力・順序・モード再現、continuous native E2E。
+  10k atlas RMSEのCOLMAP基準未達は未解決。M8–M10全goalは未完了。
+
+## 過去の作業ログ（稼働状態は上記で上書き）
+
+> PR115は最終headc09875aのCI9成功確認後、bbaa344d7d94c099ae8bfcbebba6f2668761d93bへmerge済み。
+> 旧branch削除、test/m8-extraction-replay-preflightはmainへrebase済み。
+> 抽出session37896は継続中（直近50/1250）。saved binaryなのでgit更新は実行内容へ影響しない。
+> 同handleをpoll、観測timeoutで再実行しない。同時build/測定禁止。全goal未達。
+
+> 稼働中: extraction-shard0-replay-v1、exec session37896。1250画像/8threads/3600秒上限。
+> 出力 `/home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1`、extract.log/time。
+> 直近18/1250画像を出力、同handleをpollして継続確認。観測timeoutで再起動しない。
+> 期待出力585615663bytes、開始free4184961024bytes。抽出binaryは保存extract-3ae253a。
+> 完了後全feature/loci membership/hash比較して証跡JSON更新。1/8shardで全10k/E2E成功ではない。
+> 同時build/追加測定は行わない。PR115はheadc09875a CI8成功/rust稼働を最終確認。
+
+> 最新作業branch `test/m8-extraction-replay-preflight`（PR115の子）。PR115最終headc09875aは
+> CI8件成功、rust1件実行中のため未merge。親へ追加pushしてCIを再起動しない。
+> 容量対応: 再生成可能な`target/debug`約3.3GiBを
+> `/dev/shm/visloc-debug-cache.drbnfQ/debug`へ退避。移動完了、disk空き約3.9GiB。
+> 入力/証跡/release/保存binary変更なし。tmpfsは再起動で消えるためcache以外を置かない。
+> ローカルcargo/rustc稼働なしを確認して移動。以降debug buildは再生成が必要、CARGO_INCREMENTAL=0維持。
+> 全特徴4.5GiBの追加保存には依然不足。大規模抽出開始前に容量/出力方針を確定する。全goal未達。
+
 > 最新: `diag/m8-source-command-coverage`。PR114は最終head26f755aのCI9件成功後
 > `da96845c943f5889543b5ba8929079a0d2f2a982`へsquash merge済み。再利用は既定OFF。
 > 親branch整理済み、現branchはmainへrebase。サブエージェントは使わない。

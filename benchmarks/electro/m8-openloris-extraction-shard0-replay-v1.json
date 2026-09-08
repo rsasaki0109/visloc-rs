@@ -1,0 +1,33 @@
+{
+  "schema": "m8-openloris-extraction-shard0-replay-v1",
+  "status": "completed-output-reproduction-pass",
+  "result": {
+    "exit_status": 0,
+    "wall_seconds": 3060.39,
+    "peak_rss_kib": 283612,
+    "keypoints": 431030,
+    "audit": {
+      "actual_entries": 2500,
+      "expected_files": 2500,
+      "extra": [],
+      "images": 1250,
+      "inventory_sha256": "0bd4ccdd8f71aefaea53ff911924cb816d24dffd5356745a274b6b1f831288e9",
+      "mismatches": [],
+      "missing": [],
+      "missing_reference": [],
+      "passed": true,
+      "replay_bytes": 585615663
+    },
+    "audit_command": "python3 scripts/audit_sift_replay.py --images /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-0 --reference /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --replay /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/features --expected-images 1250"
+  },
+  "command": "set -Ce\nmkdir /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1\nenv RAYON_NUM_THREADS=8 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/extract.time timeout --signal=TERM --kill-after=10s 3600s /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-0 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/unused-model >/home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/extract.log 2>&1",
+  "binary_sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34",
+  "threads": 8,
+  "expected_images": 1250,
+  "acceptance": "Exit zero; compare every feature/loci file and exact file membership to retained dense output; record wall/RSS without claiming whole-pipeline performance.",
+  "limitations": [
+    "One of eight shards, not full10k extraction or native E2E.",
+    "Saved new binary, recorded historical extractor flags, explicitly fixed thread count.",
+    "Concurrent host CPU work observed at 653/1250 images: cc1plus PIDs 3272681 and 3272698 each reported 100% CPU, and python3 PID 3685631 reported 99.8%. Ownership and causal timing impact are unverified; no unrelated process was stopped. Treat this run as output-reproduction evidence, not an isolated speed-comparison sample."
+  ]
+}

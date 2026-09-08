@@ -1,0 +1,17 @@
+{
+  "status": "all-json-fields-equal",
+  "command": "python3 scripts/select_rig_sift_supplements.py --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/features256 --min-sensor-rows-lt 32 --frame-halo 8",
+  "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/selection.json",
+  "reference_sha256": "fc0e26c55a75bab87ebf6b15187ea4666876e5de076c6961aa05ed8b4c018b57",
+  "comparison": "json.loads(stdout) == json.loads(reference.read_text()); assertion passed after subprocess exit zero",
+  "base_frames": 221,
+  "selected_frames": 346,
+  "selected_images": 692,
+  "ordered_image_names_newline_terminated_sha256": "372af1119184468698abd6a3e5f4b6a8fb2e9a9bbad159b0fbeb51730bb21f4c",
+  "initial_difference": "Membership and all counts matched, but global lexical sorting differed from retained frame/manifest ordering. Preserve frame/manifest order; a regression test covers interleaved camera names.",
+  "limitations": [
+    "Selection reproduction only, not supplemental extraction, spatial merge, matching or native E2E.",
+    "Uses retained base features; their extraction is not included.",
+    "JSON field equality, not serialized JSON byte equality."
+  ]
+}

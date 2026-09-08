@@ -1,0 +1,27 @@
+{
+  "status": "all-10000-feature-files-reproduced-in-memory",
+  "implementation_commit": "34fec72",
+  "base": "/home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/features256",
+  "supplement": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/supplement-features",
+  "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features",
+  "selection": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/selection.json",
+  "method": "For each selected image, SHA-256 over HEADER followed by merged_rows(base, supplement) compared with the complete retained file hash. For each unselected image, compare complete base/reference file hashes. Compare exact directory-entry membership. Hash reads use 1 MiB chunks; merge retains only one image's base coordinates.",
+  "processed_feature_files": 10000,
+  "selected_images": 692,
+  "unchanged_images": 9308,
+  "missing": [],
+  "extra": [],
+  "hash_mismatches": [],
+  "base_loci_files": 0,
+  "adaptive_loci_files": 0,
+  "policy_disambiguation": {
+    "base_only_distance_reference": {"added_rows": 180924, "mismatching_selected_images": 0},
+    "base_plus_admitted_distance_reference": {"added_rows": 155780, "mismatching_selected_images": 691}
+  },
+  "limitations": [
+    "Retained supplemental descriptors are inputs, not re-extracted in this audit.",
+    "Output bytes were regenerated into streaming hashes, not published as a new bank; atomic output publication and restart remain untested.",
+    "No loci files exist in the base or adaptive reference bank. This does not prove downstream orientation metadata is unnecessary.",
+    "No continuous native E2E or speed-comparison claim."
+  ]
+}
