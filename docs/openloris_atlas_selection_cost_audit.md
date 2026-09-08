@@ -355,3 +355,10 @@ This recovers extraction settings and file membership, not image-content
 identity, historical binary/concurrency or whole-process-tree peak RSS.
 No extraction has been rerun in this audit; do not sum per-shard walls into
 an E2E result or take their maximum RSS as simultaneous pipeline RSS.
+
+Content verification now binds the extraction inputs to the COLMAP-frozen
+tier manifest SHA a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c.
+All10000 image SHA256 values and sizes match (2999280260 bytes total), with
+no missing/extra names or content mismatches. See
+`m8-openloris-extraction-content-audit-v1.json`. This closes current input-image
+identity, not calibration interpretation, extraction output parity or E2E timing.

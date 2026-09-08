@@ -60,6 +60,8 @@
 > 次は抽出/選択merge/候補/overlay生成の依存を連続実行仕様へ。空き約672MiBに注意。
 > extraction-shard-audit-v1.json: dense256x2抽出8コマンド記録、10000画像名重複なし/全target存在。
 > 内容hash/元binary/同時実行メモリは未証明。extract再実行なし。8wall単純合算/最大RSSでE2Eとしない。
+> extraction-content-audit-v1で10000画像/2999280260bytesを全SHA+size照合、欠落/余分/不一致0。
+> manifest SHAa3458a3a...はCOLMAP10k frozen契約と一致。入力画像同一性のみ確定、抽出出力/E2E未達。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。

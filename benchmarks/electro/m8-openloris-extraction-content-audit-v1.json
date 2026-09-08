@@ -1,0 +1,17 @@
+{
+  "schema": "m8-openloris-extraction-content-audit-v1",
+  "audit_program": "python3 - <<'PY'\nimport pathlib,json,hashlib\nbase=pathlib.Path('/home/sasaki/datasets/openloris')\nmanifest=base/'corridor1-1-m5/manifests/tier-10000.json'\nraw=manifest.read_bytes();digest=hashlib.sha256(raw).hexdigest()\nfrozen=json.loads(pathlib.Path('benchmarks/electro/m8-openloris-colmap-10k-control.json').read_text())\nassert digest==frozen['frozen_contract']['tier_manifest_sha256']\nexpected={r['name']:r for r in json.loads(raw)['images']}\nshards=json.loads(pathlib.Path('benchmarks/electro/m8-openloris-extraction-shard-audit-v1.json').read_text())['audit']['shards']\nseen=set();bad=[];total=0\nfor shard in shards:\n for p in sorted(pathlib.Path(shard['images_dir']).iterdir()):\n  if p.suffix.lower() not in ['.png','.jpg','.jpeg']:continue\n  assert p.name not in seen\n  seen.add(p.name);r=expected.get(p.name);h=hashlib.sha256()\n  with p.open('rb') as f:\n   for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)\n  size=p.stat().st_size;total+=size\n  if r is None or h.hexdigest()!=r['sha256'] or size!=r['bytes']:bad.append(p.name)\nprint(json.dumps({'manifest_sha256':digest,'bound_to_colmap_frozen_manifest':True,'checked_images':len(seen),'checked_bytes':total,'mismatches':bad,'missing':sorted(set(expected)-seen),'extra':sorted(seen-set(expected))}))\nPY",
+  "audit": {
+    "manifest_sha256": "a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c",
+    "bound_to_colmap_frozen_manifest": true,
+    "checked_images": 10000,
+    "checked_bytes": 2999280260,
+    "mismatches": [],
+    "missing": [],
+    "extra": []
+  },
+  "limitations": [
+    "Certifies current extraction input bytes against the tier manifest SHA frozen in COLMAP control.",
+    "Does not certify extraction output equivalence, calibration interpretation, runtime settings or end-to-end performance."
+  ]
+}
