@@ -1,5 +1,36 @@
 # Implicit landmark QR — staged implementation
 
+## Shared-state diagnostic under development
+
+Branch `diag/m8-qr-shared-state` adds an opt-in
+`VISLOC_SFM_DEBUG_QR_SHARED_STATE=1` shadow solve on the Legacy path. At each
+eligible pre-step state it computes QR with the same observations, robust
+weights and lambda, reports pose/point delta differences and PCG status, then
+uses only the original Legacy delta. It does not change the acceptance policy.
+The comparison is restricted to pure rig/no-GNC states with at most 60 variable
+poses, 64 total poses, 1,024 total landmarks and 20,000 rig observations.
+Other states are not compared. Duplicate diagnostic storage is bounded by
+these caps; this mode must never be used for timing or RSS performance claims.
+Native model-byte parity and diagnostic coverage remain to be checked before
+interpreting its output. PR #97's separate validation-speedup CI is pending.
+
+Follow-up verification: PR #97 merged as `ee3764e` after all nine CI jobs.
+The shadow dimension predicate is now independently tested at all exact caps,
+one above each cap, zero observations and usize maximum. Eight QR tests and
+test-inclusive clippy pass. This predicate extraction preserves the recorded
+native diagnostic's eligibility rules; the release evidence remains tied to
+its original build commit, not to the later test-only verification claim.
+
+Measured at `0cd9ec4`: all 688 steps were compared and the actual output is
+champion-byte-exact. QR succeeded on 571 shared states; maximum normalized
+pose/point delta differences are 3.083e-6 / 3.537e-6, using denominator
+`1 + norm(legacy_delta)`. It failed on 117 states (114 iteration limit,
+three true-residual checks), unlike the 51 failures on its separately evolved
+native path. Small successful-step differences do not guarantee identical LM
+decisions. This directs attention to unavailable steps on the reference path,
+without proving unique causality or justifying tolerance/acceptance changes.
+[Shared-state evidence](../benchmarks/electro/m8-openloris-qr-shared-state-v1.json).
+
 ## Follow-up: bounded validation work
 
 On `perf/m8-qr-validation-scans`, full pose-vector finite checks are moved out
