@@ -71,3 +71,43 @@ Build preflight found the filesystem full. Only regenerable workspace
 artifacts are unchanged. This tmpfs backup is not durable across reboot and
 is not experiment evidence. Continue diagnostic builds with
 `CARGO_INCREMENTAL=0` to avoid immediately refilling the disk.
+
+## Inner-phase diagnostic
+
+The same environment flag additionally emits `atlas-inner-timing` for
+`problem_build`, `solver`, `output_conversion_and_costs`,
+`filter_retriangulate_costs`, `candidate_connectivity` and
+`candidate_pose_validation`. These are nested inside the previously measured
+combined phase; do not add them to that outer duration when summing work.
+The final phase reports on scope exit, including early rejection, so a timing
+line alone does not certify acceptance. Pair with existing window status logs.
+The active-frame start identifies windows; repeated passes must be separated
+using log order and the outer pass field. Numerical settings and support/cost
+acceptance remain unchanged. New full-input model parity is still required.
+
+The inner-timing tail replay preserves all six old model files. Wall14.46s,
+peak77848KiB; solver6.9542s, build0.1957s, conversion/cost0.3180s,
+filter/retriangulation0.8739s, connectivity0.3147s. The nested outer phase is
+8.6698s. Main completes in164.04s with peak525228KiB and all six model files
+byte-identical. Main solver87.0614s (53.1% wall), connectivity27.3257s (16.7%),
+filter/retriangulation10.4504s, build3.4788s and conversion/cost4.2847s.
+Both solver and connectivity merit investigation; keep the connectivity gate
+intact. These measurements do not establish a speed improvement. Single-run
+wall differs from the earlier10.78s trace; neither regression nor speedup is
+established without a controlled repeat. Evidence:
+`benchmarks/electro/m8-openloris-atlas-inner-timing-v1.json`.
+
+## Solver ownership check before further optimization
+
+Source inspection of `BundleAdjustment::optimize_weighted_backend` shows normal
+equations rebuilt at each LM iteration, including after an exactly rolled-back
+rejection. Reusing an unchanged linearization is a candidate for investigation,
+not a measured win. `solve_step` currently moves `system.h_pp` out with
+`mem::replace` for both pose-diagonal and dense branches. Retaining that consumed
+system without restoring the original Hessian is incorrect. Copying a dense
+Hessian to enable caching would reverse an existing memory optimization.
+Column equilibration also mutates the system and needs a separate contract.
+Any reuse experiment must first measure rejected-step assembly cost, preserve
+the LM iteration/acceptance trace exactly, limit additional state to an explicit
+bounded representation, and invalidate after accepted updates. Do not implement
+a blanket clone cache or alter damping to obtain more accepted steps.

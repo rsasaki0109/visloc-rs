@@ -4470,6 +4470,49 @@ fn build_joint_rig_ba_window_raw(
     )
 }
 
+struct AtlasInnerTimer {
+    started: Option<std::time::Instant>,
+    frame: Option<u64>,
+    phase: &'static str,
+}
+
+impl AtlasInnerTimer {
+    fn new(active_frames: &BTreeSet<u64>, phase: &'static str) -> Self {
+        Self {
+            started: std::env::var_os("VISLOC_ATLAS_TRACE_WINDOW_TIMING")
+                .is_some()
+                .then(std::time::Instant::now),
+            frame: active_frames.first().copied(),
+            phase,
+        }
+    }
+
+    fn report(&self) {
+        if let Some(started) = self.started {
+            eprintln!(
+                "atlas-inner-timing: start_frame={:?} phase={} seconds={:.9}",
+                self.frame,
+                self.phase,
+                started.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    fn next(&mut self, phase: &'static str) {
+        self.report();
+        self.phase = phase;
+        if self.started.is_some() {
+            self.started = Some(std::time::Instant::now());
+        }
+    }
+}
+
+impl Drop for AtlasInnerTimer {
+    fn drop(&mut self) {
+        self.report();
+    }
+}
+
 fn build_joint_rig_ba_window_raw_with_selected(
     manifest: &RigManifest,
     store: &TrackStore,
@@ -4479,6 +4522,7 @@ fn build_joint_rig_ba_window_raw_with_selected(
     active_frames: &BTreeSet<u64>,
     selected: &[usize],
 ) -> Result<JointRigBaWindowUpdate, JointRigBaSkip> {
+    let mut timer = AtlasInnerTimer::new(active_frames, "problem_build");
     if selected.len() > JOINT_BA_MAX_LANDMARKS {
         return Err(JointRigBaSkip::LandmarkCap {
             count: selected.len(),
@@ -4601,6 +4645,7 @@ fn build_joint_rig_ba_window_raw_with_selected(
             "initial BA cost is non-finite".to_owned(),
         ));
     }
+    timer.next("solver");
     let result = ba
         .optimize(&BaConfig {
             max_iterations: JOINT_BA_MAX_ITERATIONS,
@@ -4613,6 +4658,7 @@ fn build_joint_rig_ba_window_raw_with_selected(
             ..BaConfig::default()
         })
         .map_err(|error| JointRigBaSkip::Invalid(format!("bundle adjustment failed: {error}")))?;
+    timer.next("output_conversion_and_costs");
     let solver_initial_cost = result.initial_cost;
     let solver_final_cost = result.final_cost;
     if !solver_initial_cost.is_finite() || !solver_final_cost.is_finite() {
@@ -5052,6 +5098,7 @@ fn build_joint_rig_ba_filter_candidate_with_selected(
         active_frames,
         selected,
     )?;
+    let mut timer = AtlasInnerTimer::new(active_frames, "filter_retriangulate_costs");
     if raw.landmark_updates.len() != selected.len() {
         return Err(JointRigBaSkip::Invalid(
             "raw BA candidate omitted a selected landmark".to_owned(),
@@ -5238,6 +5285,7 @@ fn build_joint_rig_ba_filter_candidate_with_selected(
     )
     .map_err(JointRigBaSkip::Invalid)?;
 
+    timer.next("candidate_connectivity");
     let candidate_connectivity = support_connectivity_for_landmarks(
         landmarks,
         &landmark_updates,
@@ -5251,6 +5299,7 @@ fn build_joint_rig_ba_filter_candidate_with_selected(
                 .to_owned(),
         ));
     }
+    timer.next("candidate_pose_validation");
     validate_candidate_pose_overrides(manifest, images, &raw.pose_overrides)
         .map_err(JointRigBaSkip::Invalid)?;
     Ok(JointRigBaFilteringCandidate {
