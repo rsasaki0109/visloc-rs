@@ -380,6 +380,16 @@ pilot. See `m8-openloris-extraction-resume-corrupt-v1.json`. This tests one
 hash-mismatch recovery path, not crash interruption or the full restart gate.
 # Frontend recipe recovery: remaining dependency checks
 
+Update: `select_rig_sift_supplements.py` now reproduces all fields of the
+retained selection JSON, including frame/manifest image order. The merge
+primitive in `merge_sift_supplements.py` reproduces the complete bytes of all
+692 changed feature files into streaming hashes; the other 9,308 files match
+the base bank. Exact 10,000-entry membership also matches. See
+`m8-openloris-supplement-selection-replay-v1.json` and
+`m8-openloris-adaptive-bank-replay-audit-v1.json`. Neither the base nor the
+adaptive bank contains loci files. New-bank publication, supplemental
+extraction and downstream admission reproduction are still outstanding.
+
 The retained `corridor1-1-m8-adaptive32-halo8-10k-v1/selection.json`
 records `min_sensor_rows_lt: 32`, `frame_halo: 8`, 221 base frames,
 346 selected frames and 692 image names. Its `merge.json` records
