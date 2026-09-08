@@ -4,6 +4,17 @@
 persistent worker shards) into a compact, lossless representation. Default
 exports remain legacy v1. Snapshot readers and the streaming merger accept both.
 
+The Python native runner (`scripts/benchmark_electro.py`) also accepts
+`--shared-snapshot-envelope` with `--persistent-matcher`. It forwards the flag
+and records each completed chunk's `snapshot_envelope` filename/SHA-256 alongside
+the chunk hash. Completion recovery uses the same binding path. Resume/index
+validation and merge preflight reject missing, changed, or unrecorded envelope
+dependencies. Within one validation call, each immutable envelope is hashed
+once. The Rust reader separately validates payload checksums and bindings.
+Defaults remain legacy; mixed legacy/shared completed shards can be read.
+This runner integration is unit-tested; a fresh real runner interruption test
+is still required, separately from the converter SIGKILL test below.
+
 Each directory stores immutable `envelope-<sha256>.vpe` files and pair chunks.
 The envelope is the exact v1 payload prefix through verifier configuration;
 the chunk contains the four shard-specific counters/hashes and encoded pairs.

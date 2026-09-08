@@ -20,6 +20,78 @@ SPEC.loader.exec_module(benchmark)
 
 
 class ElectroBenchmarkTests(unittest.TestCase):
+    def test_shared_snapshot_dependencies_are_bound_and_revalidated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _, _ = self._candidate(root)
+            benchmark.split_candidate_manifest(source, root / 'candidates', 2)
+            candidates = root / 'candidates/index.json'
+            benchmark.prepare_match_index(candidates, root / 'matches')
+            index_path = root / 'matches/index.json'
+            index = json.loads(index_path.read_text())
+            envelope = root / 'matches/envelope.tmp'
+            envelope.write_bytes(b'shared metadata fixture')
+            digest = benchmark.sha256_file(envelope)
+            bound = envelope.with_name(f'envelope-{digest}.vpe')
+            envelope.rename(bound)
+            for entry in index['shards']:
+                path = index_path.parent / entry['snapshot_path']
+                path.write_bytes(b'VISLOC-PAIR-CHUNK-V1\0' + bytes.fromhex(digest))
+                entry.update(status='complete', snapshot_sha256=benchmark.sha256_file(path),
+                             snapshot_envelope={'path': bound.name, 'sha256': digest})
+            benchmark.atomic_json(index_path, index)
+            with mock.patch.object(benchmark, 'sha256_file', wraps=benchmark.sha256_file) as hashes:
+                benchmark.validate_match_index(index_path, candidates, require_complete=True)
+                self.assertEqual(sum(call.args[0] == bound for call in hashes.call_args_list), 1)
+            del index['shards'][0]['snapshot_envelope']
+            benchmark.atomic_json(index_path, index)
+            with self.assertRaisesRegex(benchmark.ValidationError, 'binding mismatch'):
+                benchmark.validate_match_index(index_path, candidates)
+            index['shards'][0]['snapshot_envelope'] = {'path': bound.name, 'sha256': digest}
+            benchmark.atomic_json(index_path, index)
+            bound.write_bytes(b'corrupt')
+            with self.assertRaisesRegex(benchmark.ValidationError, 'envelope hash mismatch'):
+                benchmark.validate_match_index(index_path, candidates)
+            bound.unlink()
+            with self.assertRaises(benchmark.ValidationError):
+                benchmark.validate_match_index(index_path, candidates)
+
+    def test_shared_worker_command_is_opt_in(self):
+        kwargs = dict(features_dir=Path('features'), calibration_dir=Path('calibration'), plan=Path('plan'))
+        self.assertNotIn('--shared-snapshot-envelope', benchmark.build_persistent_match_command(Path('worker'), **kwargs))
+        self.assertIn('--shared-snapshot-envelope', benchmark.build_persistent_match_command(Path('worker'), shared_snapshot_envelope=True, **kwargs))
+
+    def test_match_dispatch_forwards_shared_snapshot_flag(self):
+        kwargs = dict(binary=Path('worker'), features_dir=Path('features'), calibration_dir=Path('calibration'),
+                      feature_manifest_path=Path('features.json'), shared_snapshot_envelope=True)
+        with mock.patch.object(benchmark, 'run_persistent_matcher', return_value={'ok': True}) as worker:
+            result = benchmark.run_match_shards(Path('candidate-index'), Path('match-index'),
+                                                persistent_matcher=True, **kwargs)
+            self.assertTrue(result['ok'])
+            self.assertTrue(worker.call_args.kwargs['shared_snapshot_envelope'])
+        with self.assertRaisesRegex(benchmark.ValidationError, 'persistent matcher'):
+            benchmark.run_match_shards(Path('candidate-index'), Path('match-index'), **kwargs)
+
+    def test_shared_completion_records_dependency_before_marking_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            envelope = root / 'metadata'
+            envelope.write_bytes(b'envelope')
+            digest = benchmark.sha256_file(envelope)
+            envelope.rename(root / f'envelope-{digest}.vpe')
+            snapshot = root / 'chunk.vps'
+            snapshot.write_bytes(b'VISLOC-PAIR-CHUNK-V1\0' + bytes.fromhex(digest))
+            shard = {'id': 0, 'candidate_path': 'candidate.txt', 'snapshot_path': 'chunk.vps', 'candidate_sha256': 'a' * 64}
+            index = {'shards': [{**shard, 'status': 'running'}]}
+            validation = {'plan': {'shards': [shard]}, 'plan_path': str(root / 'plan'),
+                          'candidate': {'shards': [{'pair_count': 1}]}}
+            completion = {**shard, 'shard_id': 0, 'candidate_pairs': 1, 'pairs': 1,
+                          'accepted': 3, 'elapsed_s': 0.1, 'ordered_edge_fnv1a64': '0' * 16,
+                          'unordered_edge_fnv1a64': '0' * 16}
+            benchmark._apply_persistent_match_completions(index, validation, [completion], require_all=True)
+            self.assertEqual(index['shards'][0]['status'], 'complete')
+            self.assertEqual(index['shards'][0]['snapshot_envelope']['sha256'], digest)
+
     def _candidate(self, root: Path) -> tuple[Path, list[str], list[tuple[int, int]]]:
         names = [f"{index:06d}.png" for index in range(5)]
         pairs = [(0, 1), (0, 2), (1, 2), (1, 3), (2, 4)]
