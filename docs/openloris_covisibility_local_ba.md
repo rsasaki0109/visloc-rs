@@ -1,11 +1,19 @@
 # Bounded covisibility local BA experiment
 
-Status: opt-in implementation added, not benchmarked or promoted.
+Status: opt-in implementation fails1k quality gates; not promoted.
+Same-binary default-off control matches Legacy exactly. Two candidate runs
+produce identical model files and register1000 images, but RMSE0.025216m
+exceeds0.022695m and reprojection0.703792px exceeds0.671637px.
+See [repeat evidence](../benchmarks/electro/m8-openloris-1000-covisibility-v1.json).
+Do not advance this unchanged policy to larger tiers or tune thresholds on GT.
 `--local-ba-covisibility` selects the same helper in legacy and dynamic paths.
 Initial selector tests cover stereo deduplication, ties, input order, caps,
 unusable/unpositioned tracks and a100k-frame long track. CLI check passes.
-Remaining tests include native fixed-state behavior, oldest selected anchor and
-metric-only integration; all model parity and performance gates remain open.
+The native fixed-state fixtures now obtain their active set through the selector
+and check oldest selected anchor, unregistered observations, metric-only filtering
+and default-off selection. All39 rig_sfm tests pass, including fixed-state and
+rollback tests. Default parity and repeatability pass; quality fails. Larger-tier
+and native E2E gates remain open, not implied by these tests.
 
 ## Evidence and hypothesis
 

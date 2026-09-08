@@ -1,0 +1,296 @@
+{
+  "schema": "m8-openloris-1000-covisibility-v1",
+  "status": "repeated-quality-regression-not-promoted",
+  "build_commit": "9d7868bf44b19cccbcaa6503c1018cf9867956f0",
+  "binary_sha256": "3dc9d3f9302c73bc58a218cd3ca0239450e877fad0bb9a4998ca596bc2dfcc79",
+  "commands": {
+    "control": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control.time\nenv -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-9d7868b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control/model > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control.log 2>&1",
+    "candidate-a": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a.time\nenv -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-9d7868b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --local-ba-covisibility --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a.log 2>&1",
+    "candidate-b": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b.time\nenv -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-9d7868b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --local-ba-covisibility --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b/model > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b.log 2>&1"
+  },
+  "audit_command": "python3 - <<'PY'\nimport json\np=json.load(open('benchmarks/electro/m8-openloris-1000-fixed-boundary-v1.json'))['audit_program'].replace('boundary-1k','covisibility-1k')\nexec(p)\nPY",
+  "runs": {
+    "control": {
+      "model_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+        "points3D.txt": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af"
+      },
+      "mapper_seconds": 3.333572,
+      "peak_rss_kib": 81860,
+      "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62380 KiB\nrig-replay BA: observations=120217 cost=267541.992667814->121458.389207945 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2658 observations=27716 mean_reprojection_px=0.671637382 seed_frame=26 mapper_seconds=3.333572 total_seconds=3.776279 VmHWM_KiB=82228 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=39217 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=29751 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2607 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control/model\n",
+      "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-9d7868b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/control/model\"\n\tUser time (seconds): 3.69\n\tSystem time (seconds): 0.08\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:03.78\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 81860\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23493\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 29\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7288\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+    },
+    "candidate-a": {
+      "model_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "cfbaa266a18ac69411c9ef45c60b5bd17850c583606bf18e0d74bd5c0b55faf9",
+        "points3D.txt": "32564480f3c3c6d5611ea452452f557e51730d89b627851f13ec9de2949110cd"
+      },
+      "mapper_seconds": 4.018558,
+      "peak_rss_kib": 82552,
+      "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62460 KiB\nrig-replay BA: observations=124533 cost=247973.930922620->129079.547193989 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2763 observations=28898 mean_reprojection_px=0.703792384 seed_frame=26 mapper_seconds=4.018558 total_seconds=4.527399 VmHWM_KiB=82748 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=37978 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=30342 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2730 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model\n",
+      "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-9d7868b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --local-ba-covisibility --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model\"\n\tUser time (seconds): 4.44\n\tSystem time (seconds): 0.08\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:04.53\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 82552\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23629\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 21\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7320\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+    },
+    "candidate-b": {
+      "model_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "cfbaa266a18ac69411c9ef45c60b5bd17850c583606bf18e0d74bd5c0b55faf9",
+        "points3D.txt": "32564480f3c3c6d5611ea452452f557e51730d89b627851f13ec9de2949110cd"
+      },
+      "mapper_seconds": 3.881393,
+      "peak_rss_kib": 82440,
+      "log": "rig-replay input: frames=500 images=1000 pairs=6869 matches=661428 keypoints=256000 VmHWM=62432 KiB\nrig-replay BA: observations=124533 cost=247973.930922620->129079.547193989 iterations=288 converged=false\nrig-replay result: registered_frames=500/500 registered_images=1000/1000 tracks=2763 observations=28898 mean_reprojection_px=0.703792384 seed_frame=26 mapper_seconds=3.881393 total_seconds=4.361079 VmHWM_KiB=82848 track_components=11211 conflicting_track_edges=1123 retained_track_observations=57088 triangulation_attempts=37978 robust_triangulation_tracks=0 robust_triangulation_pruned_observations=0 robust_triangulation_majority_rejections=0 cache_insertions=30342 pnp_attempts=499 pnp_insufficient_sensors=0 pnp_estimation_failures=0 pnp_inlier_rejections=0 pnp_registrations=499 dynamic_activated_rows=0 dynamic_activated_edges=0 dynamic_track_creates=0 dynamic_track_continues=0 dynamic_owner_conflicts=0 dynamic_same_image_conflicts=0 dynamic_geometry_rejections=0 dynamic_observation_lookup_entries=0 dynamic_pnp_graph_insertions=0 dynamic_bootstrap_legacy_tracks=0 dynamic_bootstrap_candidates=0 dynamic_bootstrap_seed_support=0 dynamic_bootstrap_seed_pairs=0 dynamic_bootstrap_seed_landmarks=0 dynamic_bootstrap_direct_fallbacks=0 direct_bridge_pair_visits=0 direct_bridge_correspondences=0 direct_bridge_registrations=0 motion_bridge_pair_visits=0 motion_bridge_estimation_failures=0 motion_bridge_rotation_rejections=0 motion_bridge_registrations=0 deferred_pair_visits=0 deferred_correspondences=0 deferred_pnp_attempts=0 deferred_pnp_estimation_failures=0 deferred_pnp_inlier_rejections=0 deferred_registrations=0 deferred_interpolation_registrations=0 deferred_observations_attached=0 deferred_retriangulated_tracks=0 deferred_retriangulated_observations=0 unregistered_zero_support=0 unregistered_below_pnp_support=0 unregistered_eligible_pnp=0 unregistered_below_sensors=0 max_unregistered_support=0 local_ba_runs=50 ba_retriangulated_tracks=0 ba_requeued_frames=0 structure_refined_tracks=2730 geometry_recovered_tracks=0 geometry_recovered_observations=0 track_completion_passes=0 track_completion_pair_visits=0 track_completion_observations=0 track_completion_reprojection_rejections=0 final_filter_refinement_passes=0 final_filter_refinement_pruned_observations=0 isolated_pose_repair_passes=0 isolated_pose_repairs=0 paired_pose_jump_repairs=0 paired_pose_jump_repaired_frames=0 out=/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b/model\n",
+      "time_output": "\tCommand being timed: \"timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-9d7868b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-1000/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m6/tier-1000-lsh6t8/mapping/verified-merged.vps --local-ba-covisibility --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-b/model\"\n\tUser time (seconds): 4.26\n\tSystem time (seconds): 0.09\n\tPercent of CPU this job got: 99%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:04.37\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 82440\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 23628\n\tVoluntary context switches: 4\n\tInvoluntary context switches: 41\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 7320\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+    }
+  },
+  "score_command": "python3 scripts/score_openloris_model.py --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model/images.txt --manifest /home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json --ground-truth /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+  "score": {
+    "component_weighted_max_m": 0.07202738615835552,
+    "component_weighted_median_m": 0.023250711940511225,
+    "component_weighted_p95_m": 0.037302368282162233,
+    "component_weighted_rmse_m": 0.02521553018080179,
+    "components": [
+      {
+        "gt_scored": 308,
+        "images_txt": "/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/covisibility-1k/candidate-a/model/images.txt",
+        "images_txt_sha256": "cfbaa266a18ac69411c9ef45c60b5bd17850c583606bf18e0d74bd5c0b55faf9",
+        "max_m": 0.07202738615835552,
+        "median_m": 0.023250711940511225,
+        "p95_m": 0.037302368282162233,
+        "reference_extent_m": 1.9718678959594034,
+        "registered": 1000,
+        "relative_rmse": 0.012787636652775509,
+        "rmse_m": 0.02521553018080179,
+        "sim3_scale": 1.3608132814221663,
+        "trajectory_segments": [
+          {
+            "images": 32,
+            "max_m": 0.029312244736700674,
+            "median_m": 0.02564245943086249,
+            "p95_m": 0.027651455311632996,
+            "rmse_m": 0.025520428769782187,
+            "segment": 0,
+            "timestamp_end": 1560000015.556828,
+            "timestamp_start": 1560000015.056853
+          },
+          {
+            "images": 30,
+            "max_m": 0.030612054376478515,
+            "median_m": 0.02540451226706118,
+            "p95_m": 0.029989181745311504,
+            "rmse_m": 0.0250812828354952,
+            "segment": 1,
+            "timestamp_end": 1560000016.056906,
+            "timestamp_start": 1560000015.590162
+          },
+          {
+            "images": 32,
+            "max_m": 0.02786563814138815,
+            "median_m": 0.016624024800202895,
+            "p95_m": 0.02333559592574333,
+            "rmse_m": 0.0175535450943242,
+            "segment": 2,
+            "timestamp_end": 1560000016.590147,
+            "timestamp_start": 1560000016.09024
+          },
+          {
+            "images": 30,
+            "max_m": 0.032961111621066165,
+            "median_m": 0.02412102918951664,
+            "p95_m": 0.028867875236901045,
+            "rmse_m": 0.023829465232525673,
+            "segment": 3,
+            "timestamp_end": 1560000017.09023,
+            "timestamp_start": 1560000016.623481
+          },
+          {
+            "images": 30,
+            "max_m": 0.03682308976705602,
+            "median_m": 0.031861192014089296,
+            "p95_m": 0.03599227647379792,
+            "rmse_m": 0.031269418206462125,
+            "segment": 4,
+            "timestamp_end": 1560000017.590167,
+            "timestamp_start": 1560000017.123563
+          },
+          {
+            "images": 32,
+            "max_m": 0.03756044132875792,
+            "median_m": 0.022145257566943015,
+            "p95_m": 0.03453045553238497,
+            "rmse_m": 0.024795132576776704,
+            "segment": 5,
+            "timestamp_end": 1560000018.123552,
+            "timestamp_start": 1560000017.623501
+          },
+          {
+            "images": 30,
+            "max_m": 0.025955219931424526,
+            "median_m": 0.015519327696614897,
+            "p95_m": 0.024517522394394052,
+            "rmse_m": 0.015880007416959396,
+            "segment": 6,
+            "timestamp_end": 1560000018.623534,
+            "timestamp_start": 1560000018.156885
+          },
+          {
+            "images": 30,
+            "max_m": 0.04416287552195437,
+            "median_m": 0.019257148362300695,
+            "p95_m": 0.03915929680337226,
+            "rmse_m": 0.024393993751903383,
+            "segment": 7,
+            "timestamp_end": 1560000019.123582,
+            "timestamp_start": 1560000018.656868
+          },
+          {
+            "images": 32,
+            "max_m": 0.07202738615835552,
+            "median_m": 0.027112074396820562,
+            "p95_m": 0.06448414462134418,
+            "rmse_m": 0.03683323666987334,
+            "segment": 8,
+            "timestamp_end": 1560000019.666914,
+            "timestamp_start": 1560000019.156915
+          },
+          {
+            "images": 30,
+            "max_m": 0.03184295817453498,
+            "median_m": 0.01817512301375976,
+            "p95_m": 0.029496736913539077,
+            "rmse_m": 0.01948207738849432,
+            "segment": 9,
+            "timestamp_end": 1560000020.166894,
+            "timestamp_start": 1560000019.700247
+          }
+        ]
+      }
+    ],
+    "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "gt_interpolated_images": 308,
+    "gt_scored_images": 308,
+    "image_aliases": null,
+    "image_aliases_sha256": null,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-1000.json",
+    "manifest_images": 1000,
+    "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "max_interpolation_gap_seconds": 0.1,
+    "models": 1,
+    "registered_images": 1000,
+    "schema": "visloc_openloris_model_score_v1",
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "trajectory_segments": [
+      {
+        "images": 32,
+        "max_m": 0.029312244736700674,
+        "median_m": 0.02564245943086249,
+        "p95_m": 0.027651455311632996,
+        "rmse_m": 0.025520428769782187,
+        "segment": 0,
+        "timestamp_end": 1560000015.556828,
+        "timestamp_start": 1560000015.056853
+      },
+      {
+        "images": 30,
+        "max_m": 0.030612054376478515,
+        "median_m": 0.02540451226706118,
+        "p95_m": 0.029989181745311504,
+        "rmse_m": 0.0250812828354952,
+        "segment": 1,
+        "timestamp_end": 1560000016.056906,
+        "timestamp_start": 1560000015.590162
+      },
+      {
+        "images": 32,
+        "max_m": 0.02786563814138815,
+        "median_m": 0.016624024800202895,
+        "p95_m": 0.02333559592574333,
+        "rmse_m": 0.0175535450943242,
+        "segment": 2,
+        "timestamp_end": 1560000016.590147,
+        "timestamp_start": 1560000016.09024
+      },
+      {
+        "images": 30,
+        "max_m": 0.032961111621066165,
+        "median_m": 0.02412102918951664,
+        "p95_m": 0.028867875236901045,
+        "rmse_m": 0.023829465232525673,
+        "segment": 3,
+        "timestamp_end": 1560000017.09023,
+        "timestamp_start": 1560000016.623481
+      },
+      {
+        "images": 30,
+        "max_m": 0.03682308976705602,
+        "median_m": 0.031861192014089296,
+        "p95_m": 0.03599227647379792,
+        "rmse_m": 0.031269418206462125,
+        "segment": 4,
+        "timestamp_end": 1560000017.590167,
+        "timestamp_start": 1560000017.123563
+      },
+      {
+        "images": 32,
+        "max_m": 0.03756044132875792,
+        "median_m": 0.022145257566943015,
+        "p95_m": 0.03453045553238497,
+        "rmse_m": 0.024795132576776704,
+        "segment": 5,
+        "timestamp_end": 1560000018.123552,
+        "timestamp_start": 1560000017.623501
+      },
+      {
+        "images": 30,
+        "max_m": 0.025955219931424526,
+        "median_m": 0.015519327696614897,
+        "p95_m": 0.024517522394394052,
+        "rmse_m": 0.015880007416959396,
+        "segment": 6,
+        "timestamp_end": 1560000018.623534,
+        "timestamp_start": 1560000018.156885
+      },
+      {
+        "images": 30,
+        "max_m": 0.04416287552195437,
+        "median_m": 0.019257148362300695,
+        "p95_m": 0.03915929680337226,
+        "rmse_m": 0.024393993751903383,
+        "segment": 7,
+        "timestamp_end": 1560000019.123582,
+        "timestamp_start": 1560000018.656868
+      },
+      {
+        "images": 32,
+        "max_m": 0.07202738615835552,
+        "median_m": 0.027112074396820562,
+        "p95_m": 0.06448414462134418,
+        "rmse_m": 0.03683323666987334,
+        "segment": 8,
+        "timestamp_end": 1560000019.666914,
+        "timestamp_start": 1560000019.156915
+      },
+      {
+        "images": 30,
+        "max_m": 0.03184295817453498,
+        "median_m": 0.01817512301375976,
+        "p95_m": 0.029496736913539077,
+        "rmse_m": 0.01948207738849432,
+        "segment": 9,
+        "timestamp_end": 1560000020.166894,
+        "timestamp_start": 1560000019.700247
+      }
+    ],
+    "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+  },
+  "limits": [
+    "Mapper-only1k; not native E2E or10k proof.",
+    "RMSE0.02521553018080179 exceeds frozen0.02269532080131782; reprojection0.703792384 exceeds0.6716373819326764. Reject unchanged policy; no larger-tier promotion.",
+    "Default-off control exactly matches retained legacy model; candidate repeats match all three model files."
+  ]
+}
