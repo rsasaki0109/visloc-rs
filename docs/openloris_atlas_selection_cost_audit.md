@@ -84,3 +84,11 @@ line alone does not certify acceptance. Pair with existing window status logs.
 The active-frame start identifies windows; repeated passes must be separated
 using log order and the outer pass field. Numerical settings and support/cost
 acceptance remain unchanged. New full-input model parity is still required.
+
+The inner-timing tail replay preserves all six old model files. Wall14.46s,
+peak77848KiB; solver6.9542s, build0.1957s, conversion/cost0.3180s,
+filter/retriangulation0.8739s, connectivity0.3147s. The nested outer phase is
+8.6698s. Main is still running; do not extrapolate tail phase shares. Single-run
+wall differs from the earlier10.78s trace; neither regression nor speedup is
+established without a controlled repeat. Evidence:
+`benchmarks/electro/m8-openloris-atlas-inner-timing-v1.json`.
