@@ -114,6 +114,15 @@ identity/support/calibration/anchor/fixed-XYZ and repeat checks pass, but RMSE/p
 did not improve trajectory. Reject this hard-XYZ candidate without threshold
 expansion or atlas execution; keep native E2E and all remaining goal gates open.
 
+PR #91 merged as `e169527` after all nine checks on `b2a012f`
+(run `34182134711`). The next [frozen Huber BA contract](openloris_frozen_huber_ba.md)
+keeps every observation and all XYZ variable, using the existing 3 px loss
+setting rather than selecting a scale from GT. Prior robust-triangulation and
+Huber-1 experiments changed observation populations and do not constitute this
+exact-input test. Record raw and robust objectives separately, preserve the
+same quality gates, and do not promote or sweep if it fails. The opt-in adds
+only streaming scalar diagnostics; quantile auditing stays outside timed BA.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,

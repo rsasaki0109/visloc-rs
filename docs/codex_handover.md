@@ -1,5 +1,14 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 続行（2026-09-08）: PR #91はhead `b2a012f`のCI9項目
+> （run `34182134711`）通過後、`e169527`へsquash merge。旧branch整理済み。
+> 現在は `feat/m8-frozen-huber-ba`。次の[事前契約](openloris_frozen_huber_ba.md)を
+> `9de6fe8`で固定し、Luna Maxがdriver-only Huber-3 opt-inを実装中。
+> 同一130,900観測・全XYZ可変のrobust BAは、過去の観測集合を変える
+> robust triangulation/Huber-1実験とは区別します。尺度sweep・GT調整なし。
+> rootの初期モデル独立集計で3 px超は1,984観測（約1.52%）、最小重み0.750081。
+> 影響範囲は限定的で改善は未証明。実solveは未実施、全体goalは未完了です。
+
 > 固定39点A/B完了（2026-09-08）: `5a8f135`をroot独立24driverテスト＋既存rig固定点テスト後に
 > release build。legacy/adaptive対照は過去モデル・数値trace一致。fixed39反復も3ファイル/83行一致。
 > 全支持/identity/校正/anchor/正深度と固定39 XYZ bit一致を維持したが、post-only GT308画像は
