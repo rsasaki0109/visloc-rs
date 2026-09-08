@@ -1,0 +1,30 @@
+{
+  "schema": "m8-openloris-2500-central-pnp-v1",
+  "commit": "a70cc26013bc49841ed73d92a6c3aafc8fe9d3d9",
+  "binary_sha256": "3dbe54ef8c81e5e6ff29a90158ad23bf48b3eca2105545023aa8c94d0b0f9d67",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-central\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-central.time\nenv -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY VISLOC_SFM_DEBUG_PNP_HYPOTHESES=1 VISLOC_SFM_DEBUG=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-central.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-a70cc26 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/pipeline-sparse7n/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-central/model > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-central.log 2>&1",
+  "audit_program": "import json\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n\")\nassert \"Exit status: 0\" in (root/\"pnp-central.time\").read_text()\nfor name in [\"cameras.txt\",\"images.txt\",\"points3D.txt\"]:\n assert (root/\"pnp-central/model\"/name).read_bytes()==(root/\"legacy/model\"/name).read_bytes()\nlines=(root/\"pnp-central.log\").read_text().splitlines()\nout=[lines[i-3:i+1] for i,s in enumerate(lines) if \"frame=612 \" in s or \"frame=613 \" in s]\nprint(json.dumps({\"model_bytes_exact\":True,\"boundary\":out}))\n",
+  "audit": {
+    "model_bytes_exact": true,
+    "boundary": [
+      [
+        "generalized-pnp-central: sensor=0 correspondences=13 central_inliers=5 pooled_inliers=5 own_sensor_inliers=5",
+        "generalized-pnp-central: sensor=1 correspondences=16 central_inliers=5 pooled_inliers=5 own_sensor_inliers=5",
+        "generalized-pnp-hypotheses: correspondences=29 dlt_hypotheses=11 central_reports=2 pooled_inliers=5 required=6 prior=false",
+        "rig-sfm-debug: frame=613 support=29 sensors=2 pnp=estimation-failed"
+      ],
+      [
+        "generalized-pnp-central: sensor=0 correspondences=11 central_inliers=5 pooled_inliers=5 own_sensor_inliers=5",
+        "generalized-pnp-central: sensor=1 correspondences=14 central_inliers=5 pooled_inliers=5 own_sensor_inliers=5",
+        "generalized-pnp-hypotheses: correspondences=25 dlt_hypotheses=26 central_reports=2 pooled_inliers=5 required=6 prior=false",
+        "rig-sfm-debug: frame=612 support=25 sensors=2 pnp=estimation-failed"
+      ]
+    ]
+  },
+  "interpretation": [
+    "Each central report has only five inliers, all in its own sensor and none in the other sensor.",
+    "This does not support a claim that strong central estimates disagree only because of rig conversion; it also does not uniquely identify the geometric cause.",
+    "Native debug output is Legacy-byte-exact. Sampling, thresholds and updates unchanged.",
+    "Next investigate map correspondence consistency or independently triangulated stereo support without weakening acceptance. No default or quality promotion."
+  ]
+}

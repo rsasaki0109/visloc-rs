@@ -73,6 +73,14 @@ sensors without changing sampling or choosing a different hypothesis.
 Native validation of these additional fields remains pending; the recorded
 `015ab1b` result above predates them.
 
+Native verification at `a70cc26` is Legacy-byte-exact. For both frames 612/613,
+each sensor's central report has five inliers; pooling retains the same five
+own-sensor inliers and gains zero from the other sensor. Central fits are
+already weak, rather than strong single-camera poses only disagreeing after
+rig conversion. Investigate map correspondence consistency or independently
+triangulated stereo support; do not lower the six-inlier requirement.
+[Central/pooled evidence](../benchmarks/electro/m8-openloris-2500-central-pnp-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
