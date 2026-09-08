@@ -1,0 +1,16 @@
+{
+  "schema": "m8-dense-parallel-preflight-v1",
+  "status": "four-image-eight-file-parity-and-measurement-pass",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-parallel-preflight-v1",
+  "report_sha256": "5a948c45992c6687746be352e24fa5e353858bfc57bd8a40132b205a17847113",
+  "measurement_root": "/home/sasaki/datasets/openloris/m8-dense-small-measurement-v1",
+  "measurement_sha256": "ed0064569aab874770bfba8df2fecc4844d02b2d4ac7e903f6fe9c5fcbcbe5d7",
+  "images": 4,
+  "workers": 2,
+  "feature_and_loci_files": 8,
+  "worker_exit_codes": [0, 0],
+  "service_exit_status": 0,
+  "measurement_status": "pass",
+  "sampled_aggregate_peak_rss_kib": 616340,
+  "scope": "Dense recipe preflight only; not full10k dense extraction, long-duration durability, continuous E2E, speedup or quality evidence."
+}
