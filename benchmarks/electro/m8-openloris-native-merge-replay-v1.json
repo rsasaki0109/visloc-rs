@@ -1,0 +1,21 @@
+{
+  "status": "complete-merged-snapshot-byte-reproduction-pass",
+  "source_commit": "a7ff5ff47b561556ba20a0afdb40417ec9413120",
+  "build_command": "CARGO_INCREMENTAL=0 cargo build --locked --release --example merge_verified_pair_snapshots --jobs 2",
+  "binary_sha256": "34840984753c39c23fb30506cc20631b48d69ab4319afdee719f73283b4faa16",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-merge-replay-v1/report.json",
+  "matching_report_sha256": "1759060d43bac930a9d785d354d203326bb68f1c2af50fcd08649a317981ac0f",
+  "snapshot_count": 2188,
+  "pairs": 58530,
+  "accepted_correspondences": 3177460,
+  "output_and_reference_sha256": "ada96b24a29bea87cfe95853959b8915d3265b940d438b849a587dffd1401276",
+  "exit_status": 0,
+  "wall_seconds": 4.586889068013988,
+  "peak_rss_kib": 1843928,
+  "rayon_num_threads": 1,
+  "limitations": [
+    "Merge of independently reproduced matching shards; retained reference snapshots are used only for comparison.",
+    "Native candidate/matching/merge stages were separate timed subprocesses, not a continuous native E2E measurement.",
+    "Adaptive, targeted and dense overlay matching producers and full extraction remain separate upstream work."
+  ]
+}

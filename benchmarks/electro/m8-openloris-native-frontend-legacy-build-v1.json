@@ -1,0 +1,16 @@
+{
+  "status": "build-complete-not-replay-result",
+  "source_commit": "a7ff5ff47b561556ba20a0afdb40417ec9413120",
+  "source_worktree_clean": true,
+  "build_command": "CARGO_INCREMENTAL=0 cargo build --locked --release --example unordered_sfm_demo --jobs 2",
+  "build_exit_status": 0,
+  "cargo_reported_build_duration_seconds": 111,
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo_lock_sha256": "a16cf470d271a0dd087ecf5e5d8ab73da91ae11dd18ced08aad42a3525378424",
+  "binary": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-frontend-binaries-v1/candidates-a7ff5ff",
+  "binary_sha256": "8eeee5c2f8b39de6575c2308e89cba11b96d38d66d1ae3d51ab6ce0d61d43e79",
+  "limitations": [
+    "Rebuilt from retained historical source, not the original historical executable.",
+    "The source date and pre-score-fill policy match the retained candidate recipe, but this build alone proves no output equality."
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "status": "candidate-byte-reproduction-fail",
+  "source_commit": "3ae253a0af909042fe0cfbdb08e8d50733b79375",
+  "binary_sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34",
+  "recipe": "scripts/replay_native_candidates.py (default arguments)",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-candidates-replay-v1/report.json",
+  "exit_status": 0,
+  "wall_seconds": 528.7530037719989,
+  "peak_rss_kib": 361952,
+  "rayon_num_threads": 8,
+  "images": 10000,
+  "reference_pairs": 70000,
+  "output_pairs": 70000,
+  "common_pairs": 66239,
+  "reference_only_pairs": 3761,
+  "output_only_pairs": 3761,
+  "image_order_equal": true,
+  "reference_sha256": "fca2fce1056e08966ed4d3c0a48781cf546ad5c70a6f6f86c39c365205da5716",
+  "output_sha256": "9effd52f35e56f2a765b27466e13f6cfce9c7e99745a9fa961851b15ae068856",
+  "diagnosis": "The saved modern extractor also executes the newer global-score-desc-v1 retrieval fill policy. Historical a7ff5ff preserves producer pair order. Commit 67ead5e introduces score-based filling; this is a policy-version mismatch hypothesis pending historical replay, not mere metadata drift.",
+  "limitations": [
+    "Matching was not launched because candidate equality failed.",
+    "No COLMAP speedup, E2E, or quality claim."
+  ]
+}
