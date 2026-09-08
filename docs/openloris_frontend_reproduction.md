@@ -228,6 +228,35 @@ claims.
 
 ## Extraction and storage preflights
 
+The 2026-09-09 post-full-runner preflight found 8,914,128,896 bytes free on
+the dataset filesystem. Fresh base, dense (including loci) and adaptive banks
+alone require 8,332,098,526 logical bytes, leaving only 582,030,370 bytes before
+matching outputs, models, allocation overhead and temporary files. Do not launch
+an all-banks-retained cold run under that observation. See
+`m8-native-e2e-storage-preflight-v1.json`. This is not a complete peak-storage
+estimate: the executable DAG must establish last consumers and resume dependencies
+before releasing any newly generated intermediate. Retained evidence stays
+protected; using retained feature banks would change a cold extraction-inclusive
+measurement into a resumed/replay measurement. Recheck free space at launch.
+
+`merge_sift_supplements.py --hardlink-unselected` is an opt-in storage primitive
+for newly generated immutable banks on the same filesystem. Unselected files
+share their base inode; selected files still use independent atomic publication.
+Default behavior remains independent copies. Cross-device linking fails without
+silently copying, and source symlinks are rejected for new links. Never edit either
+bank in place: this mode is not independent backup storage. Resume compares bytes
+against current inputs, so an externally pinned base manifest must be validated
+to detect mutations that would affect both links. No input file is deleted.
+Unit tests cover copy/link inventory equality, selected-file independence, resume
+and cross-device failure. The real10k probe now passes: 9,308 shared files and
+692 independent selected files exactly match the retained adaptive bank; base
+bytes are unchanged and resume reuses all10k. Newly allocated regular file blocks
+total 257,925,120 bytes, excluding directories/metadata/logs. Evidence:
+`m8-linked-adaptive-bank-v2.json`. The initial v1 correctly rejected source
+symlinks; v2 checks the tier's exact membership and resolves every entry to the
+common real base directory before using it. Peak-DAG disk accounting remains
+required before a measured continuous run; this is not extraction or E2E proof.
+
 ### Snapshot storage audit
 
 `scripts/audit_snapshot_envelopes.py` measured the 2,500 dense matching snapshots:

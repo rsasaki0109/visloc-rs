@@ -85,7 +85,7 @@ def bank_chunks(base, supplement, selected):
             yield from iter(lambda: stream.read(1024 * 1024), b"")
 
 
-def write_bank(base, supplement, selection, output, resume=False):
+def write_bank(base, supplement, selection, output, resume=False, hardlink_unselected=False):
     names = selection["image_names"]
     if len(names) != len(set(names)):
         raise ValueError("duplicate selected image")
@@ -134,7 +134,17 @@ def write_bank(base, supplement, selection, output, resume=False):
             # Keep orphaned staging files outside the bank after SIGKILL.
             # Hard-link publication requires the parent and bank to share a
             # filesystem; EXDEV fails closed without publishing partial bytes.
-            publish_file(destination, measured(), staging_directory=output.parent)
+            if hardlink_unselected and name not in selected:
+                source = base / name
+                if source.is_symlink() or not source.is_file():
+                    raise ValueError(f"hardlink source must be a regular nonsymlink file: {name}")
+                for _ in measured():
+                    pass
+                # Opt-in immutable-bank contract: never modify either link in
+                # place. EXDEV fails closed; do not silently copy across disks.
+                os.link(source, destination)
+            else:
+                publish_file(destination, measured(), staging_directory=output.parent)
             written += 1
         inventory.update(f"{name}\t{size}\t{hasher.hexdigest()}\n".encode())
     return {"files": len(expected), "written": written, "reused": reused,
@@ -146,9 +156,12 @@ def main():
     for flag in ("base", "supplement", "selection", "output"):
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--hardlink-unselected", action="store_true",
+                        help="Share unchanged base files on the same filesystem; both banks must remain immutable")
     args = parser.parse_args()
     result = write_bank(args.base, args.supplement,
-                        json.loads(args.selection.read_text()), args.output, args.resume)
+                        json.loads(args.selection.read_text()), args.output, args.resume,
+                        args.hardlink_unselected)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

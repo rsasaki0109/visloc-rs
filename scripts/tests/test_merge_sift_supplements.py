@@ -5,6 +5,8 @@ import tempfile
 import subprocess
 import sys
 import os
+import errno
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
     "merge_sift_supplements", Path(__file__).resolve().parents[1] / "merge_sift_supplements.py")
@@ -13,6 +15,41 @@ SPEC.loader.exec_module(MODULE)
 
 
 class MergeTests(unittest.TestCase):
+    def test_hardlink_failure_does_not_fallback_or_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base, supplement = root / "base", root / "supplement"
+            base.mkdir()
+            supplement.mkdir()
+            (base / "a_features.txt").write_bytes(b"0 0 base\n")
+            with patch.object(MODULE.os, "link", side_effect=OSError(errno.EXDEV, "cross-device")):
+                with self.assertRaises(OSError):
+                    MODULE.write_bank(base, supplement, {"image_names": []}, root / "out",
+                                      hardlink_unselected=True)
+            self.assertEqual(list((root / "out").iterdir()), [])
+
+    def test_opt_in_hardlinks_preserve_inventory_and_selected_independence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base, supplement = root / "base", root / "supplement"
+            base.mkdir()
+            supplement.mkdir()
+            (base / "a_features.txt").write_bytes(b"0 0 base\n")
+            (base / "b_features.txt").write_bytes(b"1 1 unchanged\n")
+            (supplement / "a_features.txt").write_bytes(b"2 2 novel\n")
+            selection = {"image_names": ["a.png"]}
+            control = MODULE.write_bank(base, supplement, selection, root / "copy")
+            linked = MODULE.write_bank(base, supplement, selection, root / "linked",
+                                       hardlink_unselected=True)
+            self.assertEqual(control["inventory_sha256"], linked["inventory_sha256"])
+            self.assertTrue(os.path.samefile(base / "b_features.txt", root / "linked/b_features.txt"))
+            self.assertFalse(os.path.samefile(base / "b_features.txt", root / "copy/b_features.txt"))
+            self.assertFalse(os.path.samefile(base / "a_features.txt", root / "linked/a_features.txt"))
+            resumed = MODULE.write_bank(base, supplement, selection, root / "linked",
+                                        resume=True, hardlink_unselected=True)
+            self.assertEqual(resumed["reused"], 2)
+            self.assertEqual(resumed["inventory_sha256"], control["inventory_sha256"])
+
     @unittest.skipIf(os.name == "nt", "POSIX SIGKILL recovery test")
     def test_sigkill_staging_does_not_block_bank_resume(self):
         with tempfile.TemporaryDirectory() as directory:
