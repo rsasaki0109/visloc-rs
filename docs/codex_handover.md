@@ -45,6 +45,9 @@
 > 各source-replay/source-spec証跡の計21ファイルのold/new hash map一致を集計確認。
 > 次は再生成パスをatlas nodesへ束ねる。offset/component membership保持、alignment/integration再実行。
 > 孤立run時間合計を連続E2Eとしない。品質/E2E/restart/100k未達。測定稼働なし。
+> regenerated-nodes-v1.tsv/json作成。23nodeのID/offset/順序/成分保持、再生成先へパスのみ置換。
+> 計69モデルファイルを既存atlas sourceと再照合し全SHA一致。alignment/integrationは未実行。
+> nodes元SHA69b3f668...。空き約962MiB、新規大出力前に確認。測定稼働なし。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。

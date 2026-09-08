@@ -306,3 +306,12 @@ preserving its offsets and component membership, then replay alignment and
 integration. These isolated source measurements are not one continuous
 native E2E run and must not be summed into a claimed pipeline wall result.
 Frontend, final quality gates, restart and100k validation remain open.
+
+The regenerated node manifest is now materialized as
+`benchmarks/electro/m8-openloris-regenerated-nodes-v1.tsv`. A read-only binding
+audit preserves all23 node IDs, offsets, order and source component identities
+and compares each regenerated camera/image/point file against the retained
+atlas source: all69 file hashes match. The JSON sidecar records the complete
+audit program, original manifest hash, per-node source evidence and hashes.
+Only paths change. Alignment/integration with this manifest remains pending;
+the path binding is not a completed pipeline replay.
