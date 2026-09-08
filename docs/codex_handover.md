@@ -51,6 +51,10 @@
 > regenerated-atlas-v1/stitch-cfe11c6でL/traversal/newest再実行、2成分imagesが既存atlas完全一致。
 > 1.21秒/36924KiB。証跡m8-openloris-regenerated-atlas-v1.json。次は再生成atlasでintegration/BA。
 > 出力root `/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas`。測定稼働なし。
+> 再生成nodes+atlasからtail/main integration+filtered BA完了。全12pre/postモデルfiles過去一致。
+> tail11.03秒/78120KiB、main146.73秒/525196KiB。regenerated-integration-v1.json参照。
+> 保存integrate-b23a6a4使用、trace ON。frontend除外の段階再現で、連続E2Eではない。
+> 次は連続pipeline計測と品質課題。既存RMSE未達不変。同じsource再実行の繰返し不要。測定稼働なし。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。

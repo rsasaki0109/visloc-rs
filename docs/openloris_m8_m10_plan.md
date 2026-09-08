@@ -11,6 +11,16 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-08)
 
+All21 producing source executions have now regenerated their retained outputs
+(five recorded-command replays, sixteen explicit new-policy reproductions).
+All23 node bindings/69 source files match, followed by exact two-component
+trajectory stitching and all12 pre/post-BA model files matching the retained
+connected-filtered atlas. See regenerated-nodes, regenerated-atlas and
+regenerated-integration evidence JSONs. This closes staged output reproduction,
+not historical environment provenance, continuous native E2E or the failing
+COLMAP RMSE gate. Next measure a continuous reproducible pipeline with frontend
+accounting and address quality; do not repeat unchanged source windows again.
+
 Equivalent-result atlas connectivity optimization is merged (PR111, final-head
 CI9 passed). Main connectivity time is27.33/31.70s for control versus9.56/10.47s
 for compact flags/streamed unions; every pre-BA/final model file matches in

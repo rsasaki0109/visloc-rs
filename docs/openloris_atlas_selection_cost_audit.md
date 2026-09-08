@@ -321,3 +321,12 @@ and newest ownership. Both images.txt files match retained atlas-l-newest
 exactly. Wall1.21s, peak RSS36924KiB; saved binary SHA and command are in
 `m8-openloris-regenerated-atlas-v1.json`. This closes the path-only stitch
 replay, not landmark integration, BA, quality improvement or native E2E.
+
+Integration and filtered joint BA using regenerated nodes and regenerated
+atlas now complete for both components. Tail11.03s/78120KiB, main146.73s/
+525196KiB; all12 pre-BA/final camera/image/point files match the retained
+connected-filtered baseline exactly. Commands, saved binary SHA and audit
+programs are in `m8-openloris-regenerated-integration-v1.json`.
+This verifies the staged chain from regenerated sources through stitching
+and refinement. It is not a continuous frontend-to-output run, and exact
+parity preserves the failing COLMAP RMSE gate rather than closing it.
