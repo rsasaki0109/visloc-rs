@@ -284,3 +284,9 @@ Start2500/count500 reproduces all retained model files:37.28s wall,
 340056KiB peak RSS. Evidence: `m8-openloris-source-spec-2500-v1.json`.
 Coverage is16 of21 execution outputs (18 of23 nodes); five source executions
 and excluded full-pipeline phases remain. This is new-policy output parity.
+
+Starts2750 and3500 (500 frames each) also match all retained model files:
+36.87s/339964KiB and32.05s/340184KiB respectively (resource reports in
+source-spec-2750/3500-v1 JSONs are authoritative). Coverage is18 of21
+execution outputs,20 of23 nodes; starts3750/4000/4500 remain. These results
+retain frontend inputs and do not close full-pipeline or quality gates.
