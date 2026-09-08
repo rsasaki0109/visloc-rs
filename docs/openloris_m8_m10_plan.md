@@ -9,7 +9,53 @@ time and peak RSS in both mapper-only and native end-to-end comparisons.
 This plan is outcome-gated. ANN retrieval, bridge discovery, track repair, and
 BA changes are possible means, not milestone success by themselves.
 
-## Latest checkpoint (2026-09-08)
+## Latest checkpoint (2026-09-09)
+
+The shared-snapshot path now has complete dense worker parity on the retained
+10k feature bank: all 2,500 shards/80,000 candidates reproduce every legacy
+snapshot record. Borrowed-envelope merge reproduces the complete frozen merged
+file. Synthetic 1k/10k/100k writer and structural readback checks pass; the 100k
+reader loads the envelope once. Actual 128-image native matching+merge runner
+SIGKILL/resume passes against uninterrupted control, running only the remaining
+116 of 124 shards. See `docs/shared_snapshot_envelopes.md` and the full-worker,
+borrowed-merge, readback-scaling and native-shared-restart-v2 evidence JSONs.
+
+These results close specific storage/reader/restart gaps, **not** M8–M10.
+The full worker took 594.68 s versus a previous legacy replay's 557.35 s under
+a different run history; there is no demonstrated matching speedup. Neither
+synthetic 100k I/O nor the 128-image restart establishes full100k SfM or full10k
+pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
+
+### Remaining execution order
+
+1. Finish CI/merge for runner dependency binding and the actual runner restart
+   evidence. Reject any missing envelope on resume; keep shared output opt-in
+   until full runner integration is exercised.
+2. Exercise the real 10k dense schedule through the Python runner, including
+   its index/recovery/merge path. Use the already verified feature bank; do not
+   conflate this with extraction or candidate generation. Require full shard
+   record and merged-file parity, and validate completed-resume behavior.
+3. Assemble one executable, version-pinned native DAG covering base and dense
+   extraction, retrieval, adaptive selection, matching, repair/targeted
+   selection, source mapping and atlas integration. The dense bank also supplies
+   supplemental features; do not extract those 692 images twice. Preflight disk
+   space and an aggregate process-tree memory cap before launching extraction.
+   Measure a continuous cold run and a separately labelled resumed run, not a
+   sum of historical phase times. Four-image base and one dense extraction
+   shard parity are preflights, not full extraction completion.
+4. Address the still-failing trajectory gate on that reproducible pipeline.
+   Reuse prior negative evidence: unchanged weak-angle freezing, Huber loss,
+   fixed-boundary, and retry-cache experiments are not new candidates. Declare
+   a concrete non-GT geometric hypothesis and fixed acceptance criteria before
+   another intervention; score GT only after model publication. Do not infer
+   trajectory quality from lower reprojection cost.
+5. Only the final candidate receives the complete 1k/2.5k/5k/10k repeated
+   quality/resource matrix, full pipeline restart checks and same-condition
+   COLMAP comparison. README promotion follows those results, not these
+   infrastructure checkpoints; preserve the requested visual COLMAP comparison
+   and omit a memory-before/after table.
+
+## Previous checkpoint (2026-09-08)
 
 All21 producing source executions have now regenerated their retained outputs
 (five recorded-command replays, sixteen explicit new-policy reproductions).
