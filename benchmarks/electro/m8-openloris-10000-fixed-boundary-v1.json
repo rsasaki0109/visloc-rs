@@ -1,0 +1,402 @@
+{
+  "schema": "m8-openloris-10000-fixed-boundary-v1",
+  "status": "candidate-first-run-fails-colmap-quality-repeat-running",
+  "candidate_score_command": "python3 scripts/score_openloris_model.py --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-000/images.txt --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-001/images.txt --manifest /home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-10000.json --ground-truth /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+  "candidate_score": {"component_weighted_max_m":1.8757505859644128,"component_weighted_median_m":0.7383989448041997,"component_weighted_p95_m":1.4730664663570021,"component_weighted_rmse_m":0.8582924148516995,"components":[{"gt_scored":8292,"images_txt":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-000/images.txt","images_txt_sha256":"490f03ad35be5ea6efcbfe74e9f255bbe23b578741b687b1ee3cb8d14bca5a12","max_m":1.8757505859644128,"median_m":0.8124433251662062,"p95_m":1.4783088622418292,"reference_extent_m":82.80652019292377,"registered":8984,"relative_rmse":0.010942123468102239,"rmse_m":0.9060791679148731,"sim3_scale":0.9957779091127601,"trajectory_segments":[{"images":830,"max_m":1.1815827907552017,"median_m":1.0214472094953715,"p95_m":1.1707877845515702,"rmse_m":1.0561664845795478,"segment":0,"timestamp_end":1560000028.866907,"timestamp_start":1560000015.056853},{"images":830,"max_m":0.9845830168083066,"median_m":0.8422860407488748,"p95_m":0.9349839550654941,"rmse_m":0.8423552765358006,"segment":1,"timestamp_end":1560000042.680301,"timestamp_start":1560000028.90024},{"images":828,"max_m":0.74535133880661,"median_m":0.4978306510016748,"p95_m":0.7276462913339473,"rmse_m":0.5052034926271233,"segment":2,"timestamp_end":1560000056.480417,"timestamp_start":1560000042.713634},{"images":830,"max_m":1.0225819757399963,"median_m":0.5771258719535566,"p95_m":0.9937004429775962,"rmse_m":0.6208164467931049,"segment":3,"timestamp_end":1560000070.323732,"timestamp_start":1560000056.51375},{"images":828,"max_m":1.5000964815320863,"median_m":1.4014093578698952,"p95_m":1.4894630403728224,"rmse_m":1.3453920294915211,"segment":4,"timestamp_end":1560000084.138681,"timestamp_start":1560000070.357066},{"images":830,"max_m":1.325400431219505,"median_m":1.0493562569426573,"p95_m":1.281499164941594,"rmse_m":1.0395254923542931,"segment":5,"timestamp_end":1560000097.973922,"timestamp_start":1560000084.172084},{"images":828,"max_m":0.7255276680315303,"median_m":0.5561432824277706,"p95_m":0.6995832581981184,"rmse_m":0.5882005460437414,"segment":6,"timestamp_end":1560000111.767139,"timestamp_start":1560000098.007232},{"images":830,"max_m":0.753457582010437,"median_m":0.5169905608565183,"p95_m":0.7446392162959424,"rmse_m":0.5181267896474622,"segment":7,"timestamp_end":1560000125.580602,"timestamp_start":1560000111.800472},{"images":828,"max_m":0.9681794550185021,"median_m":0.37912606644520475,"p95_m":0.9274120490124445,"rmse_m":0.5186555487557574,"segment":8,"timestamp_end":1560000139.400562,"timestamp_start":1560000125.613881},{"images":830,"max_m":1.8757505859644128,"median_m":1.3609446721056222,"p95_m":1.8287390100660859,"rmse_m":1.4030376301925085,"segment":9,"timestamp_end":1560000153.24286,"timestamp_start":1560000139.433895}]},{"gt_scored":952,"images_txt":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-001/images.txt","images_txt_sha256":"07654a93e2c041d885dda66e3295dd57ee0895adc7956ae941e971a7cbab0bb0","max_m":0.1201925123163589,"median_m":0.025423650362611187,"p95_m":0.11357039666577243,"reference_extent_m":12.020686795789949,"registered":952,"relative_rmse":0.003978725195409496,"rmse_m":0.04782700942053571,"sim3_scale":0.9818276007481263,"trajectory_segments":[{"images":96,"max_m":0.1201925123163589,"median_m":0.10213640405162885,"p95_m":0.11837808202178526,"rmse_m":0.09580618592498001,"segment":0,"timestamp_end":1560000155.906088,"timestamp_start":1560000154.34085},{"images":96,"max_m":0.11744356587829882,"median_m":0.029586005075566073,"p95_m":0.11526869637511408,"rmse_m":0.05572878965767952,"segment":1,"timestamp_end":1560000157.504884,"timestamp_start":1560000155.939398},{"images":94,"max_m":0.025893868731564296,"median_m":0.021175690488651963,"p95_m":0.025054272752874737,"rmse_m":0.021252568863384884,"segment":2,"timestamp_end":1560000159.068428,"timestamp_start":1560000157.538195},{"images":96,"max_m":0.03639215028574239,"median_m":0.030253014086891822,"p95_m":0.03494321903214268,"rmse_m":0.029449038778564834,"segment":3,"timestamp_end":1560000160.666915,"timestamp_start":1560000159.101622},{"images":94,"max_m":0.11805325131203163,"median_m":0.06567769297455382,"p95_m":0.11609238364133269,"rmse_m":0.07902500772861312,"segment":4,"timestamp_end":1560000162.233876,"timestamp_start":1560000160.700248},{"images":96,"max_m":0.053533150405174444,"median_m":0.00978306386538489,"p95_m":0.032408274047369554,"rmse_m":0.016597483622084925,"segment":5,"timestamp_end":1560000163.833827,"timestamp_start":1560000162.26721},{"images":94,"max_m":0.045111908982739875,"median_m":0.0313501471021716,"p95_m":0.04268828427381986,"rmse_m":0.030106179152027283,"segment":6,"timestamp_end":1560000165.390484,"timestamp_start":1560000163.86716},{"images":96,"max_m":0.06018858263248698,"median_m":0.029030014731689216,"p95_m":0.05438690919411987,"rmse_m":0.032241467780751494,"segment":7,"timestamp_end":1560000166.990483,"timestamp_start":1560000165.423818},{"images":94,"max_m":0.04645592745638611,"median_m":0.02102939047339259,"p95_m":0.036572048437116714,"rmse_m":0.023544606912491037,"segment":8,"timestamp_end":1560000168.557211,"timestamp_start":1560000167.023816},{"images":96,"max_m":0.02805250107014452,"median_m":0.013469991193080948,"p95_m":0.024270202528850753,"rmse_m":0.015147365788435861,"segment":9,"timestamp_end":1560000170.157182,"timestamp_start":1560000168.590545}]}],"ground_truth":"/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt","ground_truth_sha256":"8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d","ground_truth_used_only_for_post_mapping_score":true,"gt_interpolated_images":9308,"gt_scored_images":9244,"image_aliases":null,"image_aliases_sha256":null,"manifest":"/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-10000.json","manifest_images":10000,"manifest_sha256":"a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c","max_interpolation_gap_seconds":0.1,"models":2,"registered_images":9936,"schema":"visloc_openloris_model_score_v1","score_convention":"per-component Sim(3), image-weighted aggregate","scorer_sha256":"c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0","trajectory_segments":[{"images":926,"max_m":1.1815827907552017,"median_m":1.0105490477785277,"p95_m":1.1694816885229997,"rmse_m":1.0441483444613262,"segment":0,"timestamp_end":1560000030.457009,"timestamp_start":1560000015.056853},{"images":924,"max_m":0.8976917803403872,"median_m":0.8237144158948255,"p95_m":0.8794667474956999,"rmse_m":0.8058000511462309,"segment":1,"timestamp_end":1560000045.846986,"timestamp_start":1560000030.490342},{"images":924,"max_m":0.6708007187598081,"median_m":0.30991393940673173,"p95_m":0.6413874796548259,"rmse_m":0.37640441542867925,"segment":2,"timestamp_end":1560000061.247041,"timestamp_start":1560000045.880319},{"images":924,"max_m":1.475622348921381,"median_m":0.9371961284602226,"p95_m":1.456766122643549,"rmse_m":0.974172114708157,"segment":3,"timestamp_end":1560000076.667128,"timestamp_start":1560000061.280375},{"images":924,"max_m":1.5000964815320863,"median_m":1.3175662878390422,"p95_m":1.48836411317983,"rmse_m":1.3029955295882663,"segment":4,"timestamp_end":1560000092.075457,"timestamp_start":1560000076.700462},{"images":924,"max_m":0.9713889034564377,"median_m":0.6537587625983605,"p95_m":0.9283700520144246,"rmse_m":0.6933779356871729,"segment":5,"timestamp_end":1560000107.467155,"timestamp_start":1560000092.108778},{"images":926,"max_m":0.753457582010437,"median_m":0.5911482381190583,"p95_m":0.7425020479885437,"rmse_m":0.5813506616316673,"segment":6,"timestamp_end":1560000122.880544,"timestamp_start":1560000107.500489},{"images":924,"max_m":0.8909353644807051,"median_m":0.25537636752990744,"p95_m":0.8121022609467388,"rmse_m":0.4320001386214583,"segment":7,"timestamp_end":1560000138.30052,"timestamp_start":1560000122.913877},{"images":924,"max_m":1.8757505859644128,"median_m":1.3127379593482957,"p95_m":1.8219647946223452,"rmse_m":1.3532568319693348,"segment":8,"timestamp_end":1560000154.773823,"timestamp_start":1560000138.333854},{"images":924,"max_m":0.11864040634333319,"median_m":0.025042885238285392,"p95_m":0.11238783361809537,"rmse_m":0.0451463536435392,"segment":9,"timestamp_end":1560000170.157182,"timestamp_start":1560000154.807122}],"transform_matrix":"/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml","transform_matrix_sha256":"aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"},
+  "candidate_geometry_command": "python3 scripts/audit_colmap_pinhole_model.py /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-000 /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-001 --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt",
+  "candidate_geometry": [{"model":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-000","image_poses":8984,"supported_images":8984,"unsupported_image_ids":[],"landmarks":66892,"observations":540496,"mean_reprojection_px":0.8021851518316984,"observation_weighted_mean_reprojection_px":0.8021851518316984,"point_weighted_mean_reprojection_px":0.756527279444709,"max_track_mean_reprojection_px":3.9217596177688785,"max_reprojection_px":3.999865648929323,"max_stored_mean_difference_px":3.9217596177688785,"nonpositive_depth_observations":0,"tracks_with_multiple_keypoints_in_one_image":0,"excess_same_image_track_observations":0,"bidirectional_references_valid":true,"rig":{"rig_manifest":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt","rig_frames":4492,"supported_rig_frames":4492,"unsupported_rig_frame_ids":[],"max_inferred_rig_center_disagreement_m":1.9785636112130117e-10,"max_inferred_rig_rotation_disagreement_deg":0.0000017075472925031877,"fixed_sensor_extrinsics_valid":true,"track_connected_components":1,"track_connected_component_sizes":[4492],"track_connected_component_frame_ranges":[[0,4491]]}},{"model":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model/component-001","image_poses":952,"supported_images":952,"unsupported_image_ids":[],"landmarks":7255,"observations":44893,"mean_reprojection_px":0.6630744548892173,"observation_weighted_mean_reprojection_px":0.6630744548892173,"point_weighted_mean_reprojection_px":0.6896882770919877,"max_track_mean_reprojection_px":3.914152710305385,"max_reprojection_px":3.9981972056931046,"max_stored_mean_difference_px":3.914152710305385,"nonpositive_depth_observations":0,"tracks_with_multiple_keypoints_in_one_image":0,"excess_same_image_track_observations":0,"bidirectional_references_valid":true,"rig":{"rig_manifest":"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt","rig_frames":476,"supported_rig_frames":476,"unsupported_rig_frame_ids":[],"max_inferred_rig_center_disagreement_m":1.9537193786701724e-11,"max_inferred_rig_rotation_disagreement_deg":0.0000012074182697257333,"fixed_sensor_extrinsics_valid":true,"track_connected_components":1,"track_connected_component_sizes":[476],"track_connected_component_frame_ranges":[[4524,4999]]}}],
+  "colmap_acceptance_reference": {
+    "evidence": "benchmarks/electro/m8-openloris-colmap-10k-control.json",
+    "minimum_registered_images": 9998,
+    "minimum_registered_frames": 4999,
+    "minimum_largest_component_frames": 4494,
+    "maximum_components": 2,
+    "maximum_rmse_m": 0.3843065335437528,
+    "maximum_p95_m": 0.6386693943260212,
+    "maximum_mean_reprojection_px": 0.9030031518617252,
+    "mapper_seconds_must_be_less_than": 16663.880327857,
+    "maximum_peak_rss_kib": 2097152,
+    "comparison_contract_and_native_e2e_still_require_separate_audit": true
+  },
+  "build_commit": "7d99e07dbdbc95bc72d2e28805a75e51dbcd7270",
+  "binary_sha256": "d87194e92b472b9d74fd8d2e43d41faad5766f330afc3a6e9155c41816277d72",
+  "commands": {
+    "boundary-control": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control.time timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-7d99e07 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control.log 2>&1",
+    "boundary-a": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a.time timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-7d99e07 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --ba-fixed-boundary-observations --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-a.log 2>&1",
+    "boundary-b": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-b\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-b.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-b.time timeout --signal=TERM --kill-after=10s 360s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-7d99e07 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --ba-fixed-boundary-observations --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-b/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-b.log 2>&1"
+  },
+  "control_score_command": "python3 scripts/score_openloris_model.py --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control/model/component-000/images.txt --model-images /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control/model/component-001/images.txt --manifest /home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-10000.json --ground-truth /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix /home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+  "control_score": {
+    "component_weighted_max_m": 5.625144317026891,
+    "component_weighted_median_m": 0.6416913705942626,
+    "component_weighted_p95_m": 1.4852709962357342,
+    "component_weighted_rmse_m": 0.8780638409006788,
+    "components": [
+      {
+        "gt_scored": 8292,
+        "images_txt": "/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control/model/component-000/images.txt",
+        "images_txt_sha256": "ac10bf06ce2753d7d5473d07c2ded7f075c1ae79ea5fe3d9756b6d8503293673",
+        "max_m": 5.625144317026891,
+        "median_m": 0.6075074814641087,
+        "p95_m": 1.4507106069610698,
+        "reference_extent_m": 82.80652019292377,
+        "registered": 8984,
+        "relative_rmse": 0.009955952960461182,
+        "rmse_m": 0.824417819860228,
+        "sim3_scale": 0.9891548097945522,
+        "trajectory_segments": [
+          {
+            "images": 830,
+            "max_m": 1.2402355180834979,
+            "median_m": 1.1208461811143486,
+            "p95_m": 1.2368716851652242,
+            "rmse_m": 1.1074984925022262,
+            "segment": 0,
+            "timestamp_end": 1560000028.866907,
+            "timestamp_start": 1560000015.056853
+          },
+          {
+            "images": 830,
+            "max_m": 0.9471701377079931,
+            "median_m": 0.7190023642585675,
+            "p95_m": 0.8833162701064882,
+            "rmse_m": 0.7172452417909877,
+            "segment": 1,
+            "timestamp_end": 1560000042.680301,
+            "timestamp_start": 1560000028.90024
+          },
+          {
+            "images": 828,
+            "max_m": 1.1633275120297704,
+            "median_m": 0.2942479149174292,
+            "p95_m": 0.4912141456993896,
+            "rmse_m": 0.3388212077743853,
+            "segment": 2,
+            "timestamp_end": 1560000056.480417,
+            "timestamp_start": 1560000042.713634
+          },
+          {
+            "images": 830,
+            "max_m": 1.3247890607502177,
+            "median_m": 0.8942035552201033,
+            "p95_m": 1.2870959124751093,
+            "rmse_m": 0.9061232704058123,
+            "segment": 3,
+            "timestamp_end": 1560000070.323732,
+            "timestamp_start": 1560000056.51375
+          },
+          {
+            "images": 828,
+            "max_m": 1.5904132985001527,
+            "median_m": 1.4506764632830516,
+            "p95_m": 1.5654508013302642,
+            "rmse_m": 1.438381443029621,
+            "segment": 4,
+            "timestamp_end": 1560000084.138681,
+            "timestamp_start": 1560000070.357066
+          },
+          {
+            "images": 830,
+            "max_m": 1.2101818179558481,
+            "median_m": 0.7245537044637747,
+            "p95_m": 1.1354385259392747,
+            "rmse_m": 0.7821219556422644,
+            "segment": 5,
+            "timestamp_end": 1560000097.973922,
+            "timestamp_start": 1560000084.172084
+          },
+          {
+            "images": 828,
+            "max_m": 0.5065270052204369,
+            "median_m": 0.43806581949611745,
+            "p95_m": 0.49181447405826145,
+            "rmse_m": 0.42218566383549483,
+            "segment": 6,
+            "timestamp_end": 1560000111.767139,
+            "timestamp_start": 1560000098.007232
+          },
+          {
+            "images": 830,
+            "max_m": 5.625144317026891,
+            "median_m": 0.528363965255289,
+            "p95_m": 0.5743417030895788,
+            "rmse_m": 0.5892485146329017,
+            "segment": 7,
+            "timestamp_end": 1560000125.580602,
+            "timestamp_start": 1560000111.800472
+          },
+          {
+            "images": 828,
+            "max_m": 0.5555210586475658,
+            "median_m": 0.4366045307836601,
+            "p95_m": 0.5462405087033695,
+            "rmse_m": 0.44342652441752267,
+            "segment": 8,
+            "timestamp_end": 1560000139.400562,
+            "timestamp_start": 1560000125.613881
+          },
+          {
+            "images": 830,
+            "max_m": 1.3487830649523498,
+            "median_m": 0.7553351000510684,
+            "p95_m": 1.2799146043725123,
+            "rmse_m": 0.846564442768775,
+            "segment": 9,
+            "timestamp_end": 1560000153.24286,
+            "timestamp_start": 1560000139.433895
+          }
+        ]
+      },
+      {
+        "gt_scored": 952,
+        "images_txt": "/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-10000-boundary/boundary-control/model/component-001/images.txt",
+        "images_txt_sha256": "caafb1dccc9d28be4588db96b989cf341799773b9238ada9fa11cf072d5ecaa0",
+        "max_m": 4.62766492043576,
+        "median_m": 0.9608015153043872,
+        "p95_m": 2.2864208034237845,
+        "reference_extent_m": 12.020686795789949,
+        "registered": 952,
+        "relative_rmse": 0.10412042128911485,
+        "rmse_m": 1.2515989733621495,
+        "sim3_scale": 1.4863600032949151,
+        "trajectory_segments": [
+          {
+            "images": 96,
+            "max_m": 0.8094422221289276,
+            "median_m": 0.6598703296860935,
+            "p95_m": 0.7975996482277938,
+            "rmse_m": 0.6393867236749804,
+            "segment": 0,
+            "timestamp_end": 1560000155.906088,
+            "timestamp_start": 1560000154.34085
+          },
+          {
+            "images": 96,
+            "max_m": 1.2013467815880146,
+            "median_m": 0.9749740132032123,
+            "p95_m": 1.1856176837060943,
+            "rmse_m": 0.9768175595632635,
+            "segment": 1,
+            "timestamp_end": 1560000157.504884,
+            "timestamp_start": 1560000155.939398
+          },
+          {
+            "images": 94,
+            "max_m": 1.6387577055149076,
+            "median_m": 1.3826043158312178,
+            "p95_m": 1.6142289890736012,
+            "rmse_m": 1.365083883453848,
+            "segment": 2,
+            "timestamp_end": 1560000159.068428,
+            "timestamp_start": 1560000157.538195
+          },
+          {
+            "images": 96,
+            "max_m": 1.5166098371490886,
+            "median_m": 1.2053241463057076,
+            "p95_m": 1.489389370833659,
+            "rmse_m": 1.2218150347924261,
+            "segment": 3,
+            "timestamp_end": 1560000160.666915,
+            "timestamp_start": 1560000159.101622
+          },
+          {
+            "images": 94,
+            "max_m": 4.62766492043576,
+            "median_m": 1.570167945840855,
+            "p95_m": 4.608945951685478,
+            "rmse_m": 2.0888108810463866,
+            "segment": 4,
+            "timestamp_end": 1560000162.233876,
+            "timestamp_start": 1560000160.700248
+          },
+          {
+            "images": 96,
+            "max_m": 2.403238973586818,
+            "median_m": 2.0408038717740906,
+            "p95_m": 2.3713507264821274,
+            "rmse_m": 2.0392466065405928,
+            "segment": 5,
+            "timestamp_end": 1560000163.833827,
+            "timestamp_start": 1560000162.26721
+          },
+          {
+            "images": 94,
+            "max_m": 1.6495179453067792,
+            "median_m": 1.2790567942273148,
+            "p95_m": 1.5995955013339906,
+            "rmse_m": 1.2862287153186607,
+            "segment": 6,
+            "timestamp_end": 1560000165.390484,
+            "timestamp_start": 1560000163.86716
+          },
+          {
+            "images": 96,
+            "max_m": 0.9283579465442321,
+            "median_m": 0.5521051920645899,
+            "p95_m": 0.8813547450262499,
+            "rmse_m": 0.601791072310223,
+            "segment": 7,
+            "timestamp_end": 1560000166.990483,
+            "timestamp_start": 1560000165.423818
+          },
+          {
+            "images": 94,
+            "max_m": 0.42450738292016243,
+            "median_m": 0.22694025355879616,
+            "p95_m": 0.3942736523342281,
+            "rmse_m": 0.26371703974907823,
+            "segment": 8,
+            "timestamp_end": 1560000168.557211,
+            "timestamp_start": 1560000167.023816
+          },
+          {
+            "images": 96,
+            "max_m": 0.9570845487844669,
+            "median_m": 0.5544689029187535,
+            "p95_m": 0.9131865760651222,
+            "rmse_m": 0.6108019064792424,
+            "segment": 9,
+            "timestamp_end": 1560000170.157182,
+            "timestamp_start": 1560000168.590545
+          }
+        ]
+      }
+    ],
+    "ground_truth": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/groundtruth.txt",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "gt_interpolated_images": 9308,
+    "gt_scored_images": 9244,
+    "image_aliases": null,
+    "image_aliases_sha256": null,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m5/manifests/tier-10000.json",
+    "manifest_images": 10000,
+    "manifest_sha256": "a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c",
+    "max_interpolation_gap_seconds": 0.1,
+    "models": 2,
+    "registered_images": 9936,
+    "schema": "visloc_openloris_model_score_v1",
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "trajectory_segments": [
+      {
+        "images": 926,
+        "max_m": 1.2402355180834979,
+        "median_m": 1.0925410889308975,
+        "p95_m": 1.2357270977989954,
+        "rmse_m": 1.0863101108981337,
+        "segment": 0,
+        "timestamp_end": 1560000030.457009,
+        "timestamp_start": 1560000015.056853
+      },
+      {
+        "images": 924,
+        "max_m": 0.8301761078481921,
+        "median_m": 0.7013302588097893,
+        "p95_m": 0.7933516136164431,
+        "rmse_m": 0.6522410272973511,
+        "segment": 1,
+        "timestamp_end": 1560000045.846986,
+        "timestamp_start": 1560000030.490342
+      },
+      {
+        "images": 924,
+        "max_m": 1.1633275120297704,
+        "median_m": 0.3156469297942995,
+        "p95_m": 0.6425460065499519,
+        "rmse_m": 0.38520182378324624,
+        "segment": 2,
+        "timestamp_end": 1560000061.247041,
+        "timestamp_start": 1560000045.880319
+      },
+      {
+        "images": 924,
+        "max_m": 1.5904132985001527,
+        "median_m": 1.233323757473987,
+        "p95_m": 1.5632194186482493,
+        "rmse_m": 1.239690713787957,
+        "segment": 3,
+        "timestamp_end": 1560000076.667128,
+        "timestamp_start": 1560000061.280375
+      },
+      {
+        "images": 924,
+        "max_m": 1.528170972540747,
+        "median_m": 1.1942257668960266,
+        "p95_m": 1.498698170160931,
+        "rmse_m": 1.1798205510269482,
+        "segment": 4,
+        "timestamp_end": 1560000092.075457,
+        "timestamp_start": 1560000076.700462
+      },
+      {
+        "images": 924,
+        "max_m": 0.6385416673710306,
+        "median_m": 0.4558961247839215,
+        "p95_m": 0.5978616731731972,
+        "rmse_m": 0.4736949843246874,
+        "segment": 5,
+        "timestamp_end": 1560000107.467155,
+        "timestamp_start": 1560000092.108778
+      },
+      {
+        "images": 926,
+        "max_m": 5.625144317026891,
+        "median_m": 0.5191735835611155,
+        "p95_m": 0.5740556156535118,
+        "rmse_m": 0.5761216309156508,
+        "segment": 6,
+        "timestamp_end": 1560000122.880544,
+        "timestamp_start": 1560000107.500489
+      },
+      {
+        "images": 924,
+        "max_m": 0.5458377819958703,
+        "median_m": 0.44147819443100556,
+        "p95_m": 0.5223613278566509,
+        "rmse_m": 0.43805566171265037,
+        "segment": 7,
+        "timestamp_end": 1560000138.30052,
+        "timestamp_start": 1560000122.913877
+      },
+      {
+        "images": 924,
+        "max_m": 1.3487830649523498,
+        "median_m": 0.7160833687363395,
+        "p95_m": 1.2573831601665133,
+        "rmse_m": 0.8190711062042683,
+        "segment": 8,
+        "timestamp_end": 1560000154.773823,
+        "timestamp_start": 1560000138.333854
+      },
+      {
+        "images": 924,
+        "max_m": 4.62766492043576,
+        "median_m": 0.9894853250669119,
+        "p95_m": 2.2997218705857865,
+        "rmse_m": 1.2681776950154564,
+        "segment": 9,
+        "timestamp_end": 1560000170.157182,
+        "timestamp_start": 1560000154.807122
+      }
+    ],
+    "transform_matrix": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+  },
+  "control": {
+    "registered_images": 9936,
+    "registered_frames": 4968,
+    "models": 2,
+    "mapper_seconds": 117.426119,
+    "vmhwm_kib": 1274076,
+    "mean_reprojection_px": 0.811234565,
+    "exact_to_historical_legacy_all_components": true
+  },
+  "limits": [
+    "First candidate exits zero: 9936 images, RMSE0.858292m, p951.473066m; fails COLMAP registration and trajectory gates. Second repeat is live.",
+    "Historical Legacy equality verified for cameras/images/points in both components.",
+    "Full 10k input, mapper-only; no native end-to-end certificate.",
+    "Control remains below COLMAP registration and trajectory goal."
+  ]
+}

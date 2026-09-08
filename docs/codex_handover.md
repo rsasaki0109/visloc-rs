@@ -1,6 +1,11 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
-> 10k mapper-only検証を開始: `tier-10000-boundary/boundary-control` session40844実行中。
+> 10k mapper-only対照 `tier-10000-boundary/boundary-control` はexit0、過去Legacy全成分bytes一致。
+> 9936画像/4968frame、RMSE/p95 0.878064/1.485271m、mapper117.426119秒、VmHWM1274076KiB。
+> boundary-aはexit0、9936画像/4968frame、RMSE/p95 0.858292/1.473066mでCOLMAP基準未達。
+> 再投影0.791517px、mapper180.290904秒、VmHWM1276928KiB。支持/正深度/固定rig正常。
+> 最終track成分は各model内で連結（frame0..4491と4524..4999）、欠落4492..4523の32frame。
+> boundary-bはsession7277実行中。証跡 `m8-openloris-10000-fixed-boundary-v1.json` は候補1回目まで。
 > 同じ `rig-7d99e07`/完全10k入力、frame sliceなし、各run上限360秒、単一thread。
 > 入力5000frame/10000画像/64862pairs/7551021 capped matches、初期VmHWM547620KiB。
 > 完走後対照を採点しboundary-a/bへ。native E2Eではなく、登録不足も隠さず記録する。
