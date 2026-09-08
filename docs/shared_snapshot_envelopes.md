@@ -28,8 +28,26 @@ cargo run --locked --release --example compact_verified_pair_snapshots -- INPUT_
 ```
 
 The converter retains one input/output shard at a time. It does not replace or
-delete inputs and refuses an existing destination. The writer supports retry;
-the batch converter itself does not yet resume partially completed conversions.
+delete inputs and refuses an existing destination unless `--resume` is explicit.
+Resume requires that directory to exist, rejects unexpected `.vps` files, and
+validates every existing output against its source before accepting it. Missing
+chunks are written atomically; existing corrupt chunks fail instead of being
+silently replaced. Interrupted temporary files are not treated as complete chunks.
+
+`stress_shared_snapshot_restart.py` confirmed SIGKILL during a real partial
+conversion with 253 published chunks. Resume completed all 2,500 shards with full
+decoded-record equality and all previously published chunk bytes unchanged.
+This tests partial-batch process interruption, not a guaranteed mid-file kill,
+power-loss durability, matching-worker resume, or mapper restart. Evidence:
+`m8-shared-snapshot-restart-v1.json`.
+
+`validate_snapshot_shards DIRECTORY` performs bounded structural readback using
+the shared reader. It checks payload checksums, raw/inlier relationships,
+compatible envelopes, image IDs, disjoint pair membership, and accepted counts.
+It does not recompute declared edge/order hashes or bind external feature banks.
+All 100k synthetic output chunks passed (3,125 shards, 99,999 pairs), with one
+envelope load, 8.79 s and peak 20,524 KiB. 1k/10k runs also passed. This is not
+full100k SfM or quality evidence; see `m8-shared-readback-scaling-v1.json`.
 
 ## Real worker parity probe
 

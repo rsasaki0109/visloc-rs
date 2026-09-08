@@ -295,6 +295,64 @@ fn validate_cached_merge_envelope(
     Ok(())
 }
 
+/// Bounded-memory structural readback statistics, not reconstruction quality.
+#[derive(Debug, PartialEq)]
+pub struct ReadbackSummary {
+    pub images: usize,
+    pub shards: usize,
+    pub pairs: usize,
+    pub accepted_matches: u64,
+    pub envelope_loads: usize,
+}
+
+/// Read and validate all shard payload checksums, raw/inlier relationships,
+/// compatible envelopes, image indices and disjoint pair membership. Retains
+/// one shard and O(pair count) edge keys. Does not validate external feature
+/// banks or recompute the declared pair-order/unordered-edge hashes.
+pub fn validate_files<P: AsRef<Path>>(inputs: &[P]) -> Result<ReadbackSummary, String> {
+    if inputs.is_empty() {
+        return Err("cannot validate an empty snapshot list".to_owned());
+    }
+    let mut cache = shared::EnvelopeCache::default();
+    let mut previous = None;
+    let mut first = None;
+    let mut edges = std::collections::HashSet::new();
+    let mut accepted_matches = 0u64;
+    for (index, path) in inputs.iter().enumerate() {
+        let snapshot = read_for_merge(path.as_ref(), &mut cache)?;
+        if let Some(envelope) = &first {
+            validate_cached_merge_envelope(index, &snapshot, envelope, &mut previous)?;
+        } else {
+            first = Some(snapshot_envelope(&snapshot));
+            previous = Some(std::sync::Arc::clone(&snapshot.envelope));
+        }
+        let mut shard_matches = 0u64;
+        for pair in &snapshot.pairs {
+            let edge = validate_merge_pair(pair, snapshot.image_names.len())?;
+            if !edges.insert(edge) {
+                return Err(format!("snapshot shards overlap at pair {edge:?}"));
+            }
+            shard_matches = shard_matches
+                .checked_add(pair.matches.len() as u64)
+                .ok_or("snapshot match count overflow")?;
+        }
+        if shard_matches != snapshot.accepted_match_count {
+            return Err("snapshot accepted-match count mismatch".to_owned());
+        }
+        accepted_matches = accepted_matches
+            .checked_add(shard_matches)
+            .ok_or("snapshot match count overflow")?;
+    }
+    cache.finish()?;
+    Ok(ReadbackSummary {
+        images: first.unwrap().image_names.len(),
+        shards: inputs.len(),
+        pairs: edges.len(),
+        accepted_matches,
+        envelope_loads: cache.loads,
+    })
+}
+
 fn snapshot_envelope(snapshot: &Snapshot) -> Snapshot {
     let effective_config = format!("verified-pair-export-v1;{}", snapshot.verifier_config);
     Snapshot {
@@ -1781,6 +1839,36 @@ mod tests {
             "visloc_verified_pair_snapshot_{tag}_{}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn readback_checks_counts_and_overlaps() {
+        let root = temp_path("readback");
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("one.vps");
+        let mut snapshot = sample();
+        super::write_shared_atomic(&path, &snapshot).unwrap();
+        let summary = super::validate_files(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(
+            summary,
+            super::ReadbackSummary {
+                images: 2,
+                shards: 1,
+                pairs: 1,
+                accepted_matches: 2,
+                envelope_loads: 1
+            }
+        );
+        assert!(super::validate_files(&[&path, &path])
+            .unwrap_err()
+            .contains("overlap"));
+        snapshot.accepted_match_count += 1;
+        super::write_shared_atomic(&path, &snapshot).unwrap();
+        assert!(super::validate_files(std::slice::from_ref(&path))
+            .unwrap_err()
+            .contains("count mismatch"));
+        assert!(super::validate_files::<PathBuf>(&[]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
