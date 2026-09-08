@@ -48,6 +48,9 @@
 > regenerated-nodes-v1.tsv/json作成。23nodeのID/offset/順序/成分保持、再生成先へパスのみ置換。
 > 計69モデルファイルを既存atlas sourceと再照合し全SHA一致。alignment/integrationは未実行。
 > nodes元SHA69b3f668...。空き約962MiB、新規大出力前に確認。測定稼働なし。
+> regenerated-atlas-v1/stitch-cfe11c6でL/traversal/newest再実行、2成分imagesが既存atlas完全一致。
+> 1.21秒/36924KiB。証跡m8-openloris-regenerated-atlas-v1.json。次は再生成atlasでintegration/BA。
+> 出力root `/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/atlas`。測定稼働なし。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。

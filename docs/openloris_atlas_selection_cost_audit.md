@@ -315,3 +315,9 @@ atlas source: all69 file hashes match. The JSON sidecar records the complete
 audit program, original manifest hash, per-node source evidence and hashes.
 Only paths change. Alignment/integration with this manifest remains pending;
 the path binding is not a completed pipeline replay.
+
+Regenerated-source trajectory stitching now completes with armL, traversal
+and newest ownership. Both images.txt files match retained atlas-l-newest
+exactly. Wall1.21s, peak RSS36924KiB; saved binary SHA and command are in
+`m8-openloris-regenerated-atlas-v1.json`. This closes the path-only stitch
+replay, not landmark integration, BA, quality improvement or native E2E.
