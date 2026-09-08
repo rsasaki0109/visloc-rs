@@ -14,6 +14,16 @@ these caps; this mode must never be used for timing or RSS performance claims.
 Native model-byte parity and diagnostic coverage remain to be checked before
 interpreting its output. PR #97's separate validation-speedup CI is pending.
 
+Measured at `0cd9ec4`: all 688 steps were compared and the actual output is
+champion-byte-exact. QR succeeded on 571 shared states; maximum normalized
+pose/point delta differences are 3.083e-6 / 3.537e-6, using denominator
+`1 + norm(legacy_delta)`. It failed on 117 states (114 iteration limit,
+three true-residual checks), unlike the 51 failures on its separately evolved
+native path. Small successful-step differences do not guarantee identical LM
+decisions. This directs attention to unavailable steps on the reference path,
+without proving unique causality or justifying tolerance/acceptance changes.
+[Shared-state evidence](../benchmarks/electro/m8-openloris-qr-shared-state-v1.json).
+
 ## Follow-up: bounded validation work
 
 On `perf/m8-qr-validation-scans`, full pose-vector finite checks are moved out
