@@ -136,3 +136,15 @@ RSS524744 versus525228KiB. Candidate main repeat is running, followed by the
 retained control repeat. Do not infer improved trajectory: model bytes match
 the still-RMSE-failing atlas baseline exactly.
 Evidence: `benchmarks/electro/m8-openloris-compact-connectivity-v1.json`.
+
+## Upstream cost is not zero
+
+Read-only provenance audit matches21 of23 retained source-window models to
+the old shifted-bridge manifest, including all three model-file hashes per
+node. Their logged mapper durations sum to628.665215s. Nodes27 and28 are not
+in that manifest and remain unresolved. This is a historical mapper subtotal,
+not serial wall or native E2E: frontend, the two missing sources, alignment,
+integration/refinement, publication and possible overlap accounting remain.
+Evidence: `benchmarks/electro/m8-openloris-atlas-source-cost-v1.json`.
+Do not compare the compact integration's151–159s directly against COLMAP's
+complete mapper as though saved source windows were free.
