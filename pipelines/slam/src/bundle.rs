@@ -8392,6 +8392,7 @@ struct RigQrLinearization {
     blocks: Vec<(u64, crate::landmark_qr::ReducedLandmark)>,
     pose_diagonal: Vec<f64>,
     observation_rows: usize,
+    preconditioner: Vec<Matrix6<f64>>,
 }
 
 #[cfg(test)]
@@ -8453,24 +8454,42 @@ impl RigQrLinearization {
             }
         }
         let observation_rows = rows.values().map(Vec::len).sum();
+        let mut preconditioner: Vec<_> = pose_diagonal
+            .chunks_exact(6)
+            .map(|d| Matrix6::from_diagonal(&Vector6::from_column_slice(d)))
+            .collect();
         let blocks = rows
             .into_iter()
             .map(|(id, rows)| {
-                crate::landmark_qr::ReducedLandmark::new(
+                crate::landmark_qr::ReducedLandmark::new_accumulating_diagonal(
                     rows,
                     pose_index.len(),
                     !ba.fixed_landmarks.contains(&id),
                     lambda,
+                    &mut preconditioner,
                 )
                 .map(|block| (id, block))
                 .map_err(str::to_owned)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        for block in &mut preconditioner {
+            if !block.iter().all(|v| v.is_finite()) {
+                return Err("nonfinite QR preconditioner".into());
+            }
+            *block = block
+                .cholesky()
+                .ok_or("non-SPD QR preconditioner")?
+                .inverse();
+            if !block.iter().all(|v| v.is_finite()) {
+                return Err("nonfinite QR preconditioner inverse".into());
+            }
+        }
         Ok(Self {
             pose_index,
             blocks,
             pose_diagonal,
             observation_rows,
+            preconditioner,
         })
     }
 
@@ -8497,6 +8516,50 @@ impl RigQrLinearization {
             block.rhs_add(&mut out, &mut scratch)?;
         }
         Ok(out)
+    }
+
+    fn precondition(
+        &self,
+        residual: &DVector<f64>,
+    ) -> Result<DVector<f64>, implicit_schur::ImplicitSchurError> {
+        if residual.len() != self.pose_diagonal.len() {
+            return Err(implicit_schur::ImplicitSchurError::DimensionMismatch {
+                expected: self.pose_diagonal.len(),
+                actual: residual.len(),
+            });
+        }
+        let mut out = DVector::zeros(residual.len());
+        for (slot, inverse) in self.preconditioner.iter().enumerate() {
+            out.fixed_rows_mut::<6>(slot * 6)
+                .copy_from(&(inverse * residual.fixed_rows::<6>(slot * 6)));
+        }
+        if !out.iter().all(|v| v.is_finite()) {
+            return Err(implicit_schur::ImplicitSchurError::NonFinite(
+                "QR preconditioner action",
+            ));
+        }
+        Ok(out)
+    }
+
+    fn solve(
+        &self,
+        options: implicit_schur::PcgOptions,
+    ) -> Result<implicit_schur::PcgResult, implicit_schur::ImplicitSchurError> {
+        let rhs = DVector::from_vec(
+            self.rhs()
+                .map_err(implicit_schur::ImplicitSchurError::NonFinite)?,
+        );
+        matrix_free_real_oracle_tests::solve_test_pcg(
+            &rhs,
+            rhs.len(),
+            options,
+            |x| {
+                self.apply(x.as_slice())
+                    .map(DVector::from_vec)
+                    .map_err(implicit_schur::ImplicitSchurError::NonFinite)
+            },
+            |r| self.precondition(r),
+        )
     }
 }
 
@@ -10837,6 +10900,27 @@ mod matrix_free_ba_api_tests {
                     matrix.column_mut(col).copy_from(&actual);
                 }
                 let dx = matrix.cholesky().unwrap().solve(&rhs);
+                assert_eq!(qr.preconditioner.len(), qr.pose_index.len());
+                let probe = DVector::from_fn(n, |i, _| (i as f64 + 0.25).sin());
+                let expected = schur.apply_preconditioner(&probe).unwrap();
+                assert!(
+                    (qr.precondition(&probe).unwrap() - &expected).norm()
+                        < 1e-9 * (1.0 + expected.norm())
+                );
+                assert!(qr.precondition(&DVector::zeros(n + 1)).is_err());
+                let options = implicit_schur::PcgOptions::default();
+                let iterative = qr.solve(options).unwrap();
+                let true_residual =
+                    &rhs - DVector::from_vec(qr.apply(iterative.solution.as_slice()).unwrap());
+                assert!(true_residual.norm() <= iterative.target);
+                assert!((&iterative.solution - &dx).norm() < 1e-8 * (1.0 + dx.norm()));
+                assert_eq!(iterative, qr.solve(options).unwrap());
+                assert!(qr
+                    .solve(implicit_schur::PcgOptions {
+                        max_iterations: 0,
+                        ..options
+                    })
+                    .is_err());
                 let mut direct_system = build();
                 let direct = solve_step(
                     &mut direct_system,
@@ -12687,7 +12771,7 @@ mod matrix_free_real_oracle_tests {
     /// operator.  The callbacks make it possible to run the exact recurrence
     /// against either the implicit action or a borrowed explicit lower-Schur
     /// matrix, while keeping the production solver/API untouched.
-    fn solve_test_pcg<Apply, Preconditioner>(
+    pub(super) fn solve_test_pcg<Apply, Preconditioner>(
         rhs: &DVector<f64>,
         dimension: usize,
         options: implicit_schur::PcgOptions,

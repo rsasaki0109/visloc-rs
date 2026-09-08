@@ -38,7 +38,7 @@ iterative solve would still have normal-equation conditioning; this does not
 claim to solve every conditioning or PCG convergence problem.
 
 The kernel currently lives behind `cfg(test)` in `landmark_qr.rs`; it has no
-production selector, solver connection or effect on existing BA. Five tests
+production selector or effect on existing BA. Five kernel tests
 pass: elimination/reconstruction, adjoint and back-substitution identities;
 projected cost versus an independent damped least-squares calculation; and
 linear retained storage plus invalid-input rejection. Clippy including tests
@@ -71,10 +71,26 @@ adapter rejects unprojectable rows rather than silently dropping them; this
 eligibility restriction must remain explicit during nonlinear integration.
 All six kernel/adapter tests and test-inclusive clippy pass.
 
-1. Connect the assembled multi-landmark action to the iterative solver.
+The adapter now connects to the existing test PCG recurrence with the unchanged
+128-iteration budget and relative/absolute tolerances of 1e-12. The rig fixture
+checks independently recomputed true residuals, agreement with the direct step,
+exact repeated results and failure with a zero iteration budget; no direct
+fallback is installed. This remains a test solver, not nonlinear integration.
+
+Its block-Jacobi preconditioner retains one inverse 6×6 block per variable pose
+(36P scalars). Construction accumulates pose diagonals and one landmark's
+pose/point cross blocks at a time, using the QR triangular factor for point
+elimination. Scratch is O(unique poses in the current track), with BTreeMap
+lookup overhead; no pose-pair enumeration or duplicate full normal system is
+needed. Unlike the QR operator action, this diagonal construction still uses
+normal-form subtraction and can suffer cancellation; nonfinite/non-SPD blocks
+reject. The fixture checks agreement with the existing Schur preconditioner.
+These are logical storage bounds, not measured native peak RSS.
+
+1. Promote the tested multi-landmark action/PCG connection out of test scope.
    Preserve total PCG budget and honest residual stopping; do not add another
    public policy before the bounded linear solve is validated.
-2. Add a bounded preconditioner and matched iterative/full-step tests. Audit
+2. Preserve the bounded preconditioner and matched iterative/full-step tests. Audit
    O(observations + poses + landmarks) retained storage and longest-track
    scratch; prohibit all-pose pair enumeration, global Q, and retaining a
    duplicate full normal system just to obtain a preconditioner.

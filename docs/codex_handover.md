@@ -7,7 +7,9 @@
 > [設計と次の実装手順](openloris_implicit_landmark_qr.md)。全Q/密なトラックJacobianは作らない。
 > rig線形化adapter/複数点operatorもtest-only接続済み。既存Jacobian/Huber重みを再利用し、
 > 固定pose/rotation/点、回転付きsensor、None/Huber6と減衰0.5/100で旧normal/direct stepと一致。
-> 次は反復solverと境界付き前処理へ接続。前処理のためにfull normal systemを二重保持しない。
+> test PCG接続・poseごと6×6前処理も実装。6関連テスト通過、真の残差/直接解/反復一致を確認。
+> 前処理はfull normal systemを二重保持しないが、normal-form減算の数値限界は残る。
+> 次はproduction solverへの接続とnonlinear/native統合。実データ品質・性能は未証明。
 > サブエージェントは使用しない。goal全体は未達。
 
 > Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。

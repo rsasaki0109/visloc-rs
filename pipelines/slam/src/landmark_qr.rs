@@ -4,6 +4,9 @@
 //! Inspired by nullspace elimination in Demmel et al., CVPR 2021; this is
 //! an independent compact-Householder implementation, not copied RootBA code.
 
+use nalgebra::{Matrix3, Matrix6, Matrix6x3};
+use std::collections::BTreeMap;
+
 #[derive(Debug)]
 struct LandmarkQr {
     reflectors: [Vec<f64>; 3],
@@ -119,6 +122,29 @@ impl ReducedLandmark {
         variable: bool,
         lambda: f64,
     ) -> Result<Self, &'static str> {
+        Self::build(rows, poses, variable, lambda, None)
+    }
+
+    pub(crate) fn new_accumulating_diagonal(
+        rows: Vec<WeightedRow>,
+        poses: usize,
+        variable: bool,
+        lambda: f64,
+        diagonal: &mut [Matrix6<f64>],
+    ) -> Result<Self, &'static str> {
+        if diagonal.len() != poses {
+            return Err("invalid preconditioner size");
+        }
+        Self::build(rows, poses, variable, lambda, Some(diagonal))
+    }
+
+    fn build(
+        rows: Vec<WeightedRow>,
+        poses: usize,
+        variable: bool,
+        lambda: f64,
+        diagonal: Option<&mut [Matrix6<f64>]>,
+    ) -> Result<Self, &'static str> {
         let pose_dimension = poses.checked_mul(6).ok_or("pose dimension overflow")?;
         if rows.is_empty() || !lambda.is_finite() || lambda <= 0.0 {
             return Err("positive damping and observation rows required");
@@ -146,6 +172,51 @@ impl ReducedLandmark {
         } else {
             None
         };
+        if let Some(diagonal) = diagonal {
+            // One landmark's repeated sensor rows are aggregated by pose.
+            // No pose-pair products or second full normal system are retained.
+            let mut cross: BTreeMap<usize, Matrix6x3<f64>> = BTreeMap::new();
+            for row in &rows {
+                let Some(p) = row.pose else {
+                    continue;
+                };
+                for r in 0..6 {
+                    for c in 0..6 {
+                        diagonal[p][(r, c)] += row.pose_jacobian[r] * row.pose_jacobian[c];
+                    }
+                }
+                if qr.is_some() {
+                    let block = cross.entry(p).or_insert_with(Matrix6x3::zeros);
+                    for r in 0..6 {
+                        for c in 0..3 {
+                            block[(r, c)] += row.pose_jacobian[r] * row.landmark_jacobian[c];
+                        }
+                    }
+                }
+            }
+            if let Some(qr) = &qr {
+                let mut r_inverse = Matrix3::<f64>::zeros();
+                for column in 0..3 {
+                    for r in (0..3).rev() {
+                        if qr.upper[r][r] == 0.0 {
+                            return Err("singular preconditioner factor");
+                        }
+                        let sum: f64 = ((r + 1)..3)
+                            .map(|c| qr.upper[r][c] * r_inverse[(c, column)])
+                            .sum();
+                        r_inverse[(r, column)] =
+                            ((if r == column { 1.0 } else { 0.0 }) - sum) / qr.upper[r][r];
+                    }
+                }
+                if !r_inverse.iter().all(|v| v.is_finite()) {
+                    return Err("nonfinite triangular inverse");
+                }
+                for (pose, cross) in cross {
+                    let reduced = cross * r_inverse;
+                    diagonal[pose] -= reduced * reduced.transpose();
+                }
+            }
+        }
         Ok(Self {
             rows: rows
                 .into_iter()
