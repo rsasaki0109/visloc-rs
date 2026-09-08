@@ -38,3 +38,20 @@ a perfect rejected-state cache could avoid in this replay, before cache costs.
 It is not enough evidence to add a large retained system. Main is running.
 Commands, timing and model hashes:
 `benchmarks/electro/m8-openloris-ba-retry-timing-v1.json`.
+
+Main completes with all six files byte-identical,164.03s wall and525280KiB
+peak RSS.1004 post-rejection assemblies cost12.0536s (7.35% of wall);1800
+other assemblies cost17.3784s. Rollback snapshot totals only0.5492s, so
+optimizing those copies alone has low potential. Rejected-state reuse could
+avoid at most the measured12.0536s of assembly before its own overhead.
+This is an opportunity bound, not an implemented or measured speedup.
+
+A bounded candidate may move the existing normal system between rejected
+iterations rather than clone it. Limit eligibility initially to Legacy's
+pose-diagonal sparse representation, preserving only the undamped6×6 blocks
+that `solve_step` consumes (O(variable poses), not a dense6P×6P copy).
+Landmark/cross blocks must remain single-owned. Reuse only after singular solve
+or exact rollback; discard after every accepted update. All other backends,
+scaled systems and dense/navigation paths remain unchanged. Require enabled
+and disabled per-iteration numerical traces and model hashes to match, plus
+reject→accept→reject invalidation tests, fixed-state tests and RSS measurements.
