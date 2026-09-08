@@ -1,5 +1,18 @@
 # Fixed boundary observations for native BA — implementation contract
 
+## 5k paired result
+
+Both candidate repeats produce identical models with all 5,000 images and
+2,500 frames in one final track-connected component. The same-binary control
+matches historical Legacy. RMSE/p95 improve from 0.477216/0.478983 m to
+0.164335/0.271032 m; raw mean reprojection improves 0.831377 to 0.819133 px.
+Support, positive depth and fixed sensor calibration pass independent audit.
+Mapper time increases from 53.399406 s to 83.156035/91.704508 s; peak RSS
+is 722704 versus 724532/724796 KiB. This is repeatable quality improvement
+on a derived 5k mapper-only slice, not a speedup or native E2E certificate.
+Independent tier nonregression and 10k remain to be checked.
+[Evidence](../benchmarks/electro/m8-openloris-5000-fixed-boundary-v1.json).
+
 Component anchoring improved 5k RMSE but worsened p95/reprojection. The
 remaining singleton 1616 explains only 2.134% of squared trajectory error;
 do not tune isolated-pose repairs or anchors against GT.
