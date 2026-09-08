@@ -9581,13 +9581,61 @@ mod tests {
             .map(|(track, point)| (track.position.unwrap() - point).norm())
             .sum::<f64>()
             / world_points.len() as f64;
-        let active_frames = HashSet::from([0, 1]);
         let config = RigSfmConfig {
             ba_anchor_disconnected_components: component_anchors,
             final_bundle_adjustment: false,
             structure_refinement_iterations: 0,
             ..RigSfmConfig::default()
         };
+        let selection_config = RigSfmConfig {
+            local_ba_covisibility: true,
+            ..config.clone()
+        };
+        let index = image_track_index(features.len(), &tracks);
+        let select = |order: &[usize],
+                      poses: &[Option<Pose>],
+                      tracks: &[WorkingTrack],
+                      cfg: &RigSfmConfig| {
+            select_local_ba_frames(
+                &rig,
+                &frames,
+                &features,
+                &image_assignment,
+                &index,
+                poses,
+                tracks,
+                order,
+                cfg,
+            )
+        };
+        let (active_frames, anchor) = select(&[0, 1], &image_poses, &tracks, &selection_config);
+        assert_eq!(active_frames, HashSet::from([0, 1]));
+        assert_eq!(anchor, 0);
+        assert_eq!(
+            select(&[1, 0], &image_poses, &tracks, &selection_config).1,
+            1
+        );
+        let mut unsupported = image_poses.clone();
+        unsupported[0] = None;
+        unsupported[1] = None;
+        assert!(select(&[1], &unsupported, &tracks, &selection_config)
+            .0
+            .is_empty());
+        let mut nonmetric = tracks.clone();
+        for track in &mut nonmetric {
+            track.metric_anchored = false;
+        }
+        let metric_config = RigSfmConfig {
+            ba_metric_tracks_only: true,
+            ..selection_config.clone()
+        };
+        assert!(select(&[0, 1], &image_poses, &nonmetric, &metric_config)
+            .0
+            .is_empty());
+        assert_eq!(
+            select(&[0, 1], &image_poses, &tracks, &config).0,
+            active_frames
+        );
         let ba_config = BaConfig {
             max_iterations: 40,
             linear_solver: LinearSolver::Sparse,
