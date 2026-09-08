@@ -1,0 +1,122 @@
+{
+  "schema": "visloc_m8_frozen_huber_ba_preflight_v1",
+  "status": "candidate_fixed_before_measurement",
+  "contract_commit": "9de6fe8",
+  "base_merge_commit": "e1695275c6a14e74f9776058a64c0a7d0ab56c2d",
+  "candidate": {
+    "kernel": "Huber",
+    "delta_px": 3,
+    "scale_basis": "existing IncrementalSfmConfig engineering default, not GT selected",
+    "matrix_free": true,
+    "column_scaling": true,
+    "adaptive_damping": true,
+    "iterations": 20,
+    "initial_lambda": 0.0001,
+    "pcg_max_iterations": 512,
+    "pcg_relative_tolerance": 1e-8,
+    "pcg_absolute_tolerance": 1e-12,
+    "pcg_max_restarts": 0,
+    "threads": 1,
+    "all_landmarks_variable": true,
+    "fixed_frame_id": 0
+  },
+  "gates": {
+    "ate_rmse_max_m": 0.026608055174816774,
+    "ate_p95_max_m": 0.04109998478546261,
+    "raw_mean_reprojection_max_px": 0.691588658326868,
+    "identity_and_order_exact": true,
+    "all_observations_positive_depth": true,
+    "one_supported_component": true,
+    "calibration_and_anchor_preserved": true,
+    "accepted_update_required": true,
+    "repeat_model_bytes_and_numerical_traces_exact": true
+  },
+  "initial": {
+    "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model",
+    "images": 1000,
+    "landmarks": 4716,
+    "observations": 130900,
+    "keypoints": 361170,
+    "raw_squared_cost": 126510.39875805238,
+    "huber_3px_cost": 125938.89325088603,
+    "raw_mean_px": 0.720678689714061,
+    "raw_rmse_px": 0.9830900239021312,
+    "raw_p95_px": 2.148156034094761,
+    "raw_max_px": 3.9995690559394936,
+    "downweighted_observations": 1984,
+    "weight_min": 0.7500808107175696,
+    "weight_sum": 130653.34773138781,
+    "all_positive_depth": true,
+    "min_depth_m": 0.00011093307669790553,
+    "max_depth_m": 5207.122999967967,
+    "nonprojectable_observations": 0,
+    "quantile_method": "numpy percentile linear, bounded O(130900) scalar audit buffer outside timed solve",
+    "input_sha256": {
+      "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images.txt": "90773af9546ea351f9610721eab2ccac7b6d55f9c0638fd7ce596942012610d6",
+      "points3D.txt": "8850f161ac44f76ef6d512f8c1739493970849a380f6a232c82e3006a33f346a"
+    }
+  },
+  "prior_controls": {
+    "legacy": {
+      "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-weak-angle-fixed-landmarks-v1/legacy/model",
+      "images": 1000,
+      "landmarks": 4716,
+      "observations": 130900,
+      "keypoints": 361170,
+      "raw_squared_cost": 118070.55436891594,
+      "huber_3px_cost": 117471.29096772365,
+      "raw_mean_px": 0.691588658326868,
+      "raw_rmse_px": 0.9497317958780395,
+      "raw_p95_px": 2.0550448938898276,
+      "raw_max_px": 4.84008923981911,
+      "downweighted_observations": 1700,
+      "weight_min": 0.6198232824550399,
+      "weight_sum": 130673.57532942058,
+      "all_positive_depth": true,
+      "min_depth_m": 0.00001364691730734724,
+      "max_depth_m": 5207.231377381257,
+      "nonprojectable_observations": 0,
+      "quantile_method": "numpy percentile linear, bounded O(130900) scalar audit buffer outside timed solve",
+      "input_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "dfc2dba4c21f4d5f31ffd8ac40f405c17476e4251ec630cd9806668e81252425",
+        "points3D.txt": "86242e11eb98dd920eda04af59f17c6fab4d79f257cbd7679421281e03a43e10"
+      }
+    },
+    "adaptive": {
+      "model": "/home/sasaki/datasets/openloris/corridor1-1-m8-weak-angle-fixed-landmarks-v1/adaptive/model",
+      "images": 1000,
+      "landmarks": 4716,
+      "observations": 130900,
+      "keypoints": 361170,
+      "raw_squared_cost": 113550.21933901115,
+      "huber_3px_cost": 112906.08606200629,
+      "raw_mean_px": 0.675153253020779,
+      "raw_rmse_px": 0.931374118687611,
+      "raw_p95_px": 2.0091280316378604,
+      "raw_max_px": 5.101115585248235,
+      "downweighted_observations": 1572,
+      "weight_min": 0.5881066503718542,
+      "weight_sum": 130679.82899874753,
+      "all_positive_depth": true,
+      "min_depth_m": 0.00006868780493446414,
+      "max_depth_m": 5212.560478444767,
+      "nonprojectable_observations": 0,
+      "quantile_method": "numpy percentile linear, bounded O(130900) scalar audit buffer outside timed solve",
+      "input_sha256": {
+        "cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images.txt": "5f06ca8c42e6aba0a557ad18dc73175467a6b535de04c6e156dfc55ad5af96c3",
+        "points3D.txt": "11d61d0e53e58c6eba2e3465e08ae0d5743ae5ded0cc63b3a4f37c4cffc75be0"
+      }
+    }
+  },
+  "independent_program": "import sys,json,math,hashlib,array\nfrom pathlib import Path\nimport numpy as np\nsys.path.insert(0,'scripts')\nfrom audit_colmap_pinhole_model import rotation\nroot=Path(sys.argv[1])\nnames=('cameras.txt','images.txt','points3D.txt')\nfor name in names:\n    path=root/name\n    assert path.is_file() and not path.is_symlink() and path.stat().st_size<=32*1024*1024\ndef hashes():\n    return {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}\nbefore=hashes()\ncameras={}\nfor line in (root/'cameras.txt').read_text().splitlines():\n    if line.strip() and not line.lstrip().startswith('#'):\n        row=line.split();assert row[1]=='PINHOLE' and len(row)==8\n        cameras[int(row[0])]=tuple(map(float,row[4:]))\nimages={};keypoints=0\nwith (root/'images.txt').open() as stream:\n    for line in stream:\n        if not line.strip() or line.lstrip().startswith('#'):continue\n        row=line.split();kp=next(stream).split();assert len(kp)%3==0\n        i=int(row[0]);assert i not in images\n        images[i]=(rotation(row[1:5]),tuple(map(float,row[5:8])),cameras[int(row[8])],kp)\n        keypoints+=len(kp)//3\n        assert len(images)<=1000 and keypoints<=361170\nresiduals=array.array('d');min_depth=math.inf;max_depth=0;points=0\nwith (root/'points3D.txt').open() as stream:\n    for line in stream:\n        if not line.strip() or line.lstrip().startswith('#'):continue\n        row=line.split();assert (len(row)-8)%2==0\n        point_id=int(row[0]);xyz=tuple(map(float,row[1:4]));points+=1\n        assert points<=4716 and all(map(math.isfinite,xyz))\n        for j in range(8,len(row),2):\n            i,k=map(int,row[j:j+2]);R,t,intr,kp=images[i]\n            assert int(kp[3*k+2])==point_id\n            q=[sum(v*x for v,x in zip(axis,xyz))+shift for axis,shift in zip(R,t)]\n            assert all(map(math.isfinite,q)) and q[2]>0\n            fx,fy,cx,cy=intr\n            dx=fx*q[0]/q[2]+cx-float(kp[3*k]);dy=fy*q[1]/q[2]+cy-float(kp[3*k+1])\n            s=dx*dx+dy*dy;assert math.isfinite(s)\n            residuals.append(math.sqrt(s));assert len(residuals)<=130900\n            min_depth=min(min_depth,q[2]);max_depth=max(max_depth,q[2])\nassert (len(images),points,len(residuals),keypoints)==(1000,4716,130900,361170)\nraw=math.fsum(r*r for r in residuals)\nrobust=math.fsum(r*r if r<=3 else 6*r-9 for r in residuals)\nweight_sum=math.fsum(1 if r<=3 else 3/r for r in residuals)\nresult=dict(model=str(root),images=len(images),landmarks=points,observations=len(residuals),keypoints=keypoints,\n    raw_squared_cost=raw,huber_3px_cost=robust,raw_mean_px=math.fsum(residuals)/len(residuals),\n    raw_rmse_px=math.sqrt(raw/len(residuals)),raw_p95_px=float(np.percentile(np.frombuffer(residuals,dtype=np.float64),95,method='linear')),\n    raw_max_px=max(residuals),downweighted_observations=sum(r>3 for r in residuals),\n    weight_min=min(1,3/max(residuals)),weight_sum=weight_sum,all_positive_depth=True,\n    min_depth_m=min_depth,max_depth_m=max_depth,nonprojectable_observations=0,\n    quantile_method='numpy percentile linear, bounded O(130900) scalar audit buffer outside timed solve',\n    input_sha256=before)\nassert hashes()==before\nprint(json.dumps(result,indent=2))\n",
+  "initial_command": "python3 -c 'import sys,json,math,hashlib,array\nfrom pathlib import Path\nimport numpy as np\nsys.path.insert(0,'\\''scripts'\\'')\nfrom audit_colmap_pinhole_model import rotation\nroot=Path(sys.argv[1])\nnames=('\\''cameras.txt'\\'','\\''images.txt'\\'','\\''points3D.txt'\\'')\nfor name in names:\n    path=root/name\n    assert path.is_file() and not path.is_symlink() and path.stat().st_size<=32*1024*1024\ndef hashes():\n    return {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}\nbefore=hashes()\ncameras={}\nfor line in (root/'\\''cameras.txt'\\'').read_text().splitlines():\n    if line.strip() and not line.lstrip().startswith('\\''#'\\''):\n        row=line.split();assert row[1]=='\\''PINHOLE'\\'' and len(row)==8\n        cameras[int(row[0])]=tuple(map(float,row[4:]))\nimages={};keypoints=0\nwith (root/'\\''images.txt'\\'').open() as stream:\n    for line in stream:\n        if not line.strip() or line.lstrip().startswith('\\''#'\\''):continue\n        row=line.split();kp=next(stream).split();assert len(kp)%3==0\n        i=int(row[0]);assert i not in images\n        images[i]=(rotation(row[1:5]),tuple(map(float,row[5:8])),cameras[int(row[8])],kp)\n        keypoints+=len(kp)//3\n        assert len(images)<=1000 and keypoints<=361170\nresiduals=array.array('\\''d'\\'');min_depth=math.inf;max_depth=0;points=0\nwith (root/'\\''points3D.txt'\\'').open() as stream:\n    for line in stream:\n        if not line.strip() or line.lstrip().startswith('\\''#'\\''):continue\n        row=line.split();assert (len(row)-8)%2==0\n        point_id=int(row[0]);xyz=tuple(map(float,row[1:4]));points+=1\n        assert points<=4716 and all(map(math.isfinite,xyz))\n        for j in range(8,len(row),2):\n            i,k=map(int,row[j:j+2]);R,t,intr,kp=images[i]\n            assert int(kp[3*k+2])==point_id\n            q=[sum(v*x for v,x in zip(axis,xyz))+shift for axis,shift in zip(R,t)]\n            assert all(map(math.isfinite,q)) and q[2]>0\n            fx,fy,cx,cy=intr\n            dx=fx*q[0]/q[2]+cx-float(kp[3*k]);dy=fy*q[1]/q[2]+cy-float(kp[3*k+1])\n            s=dx*dx+dy*dy;assert math.isfinite(s)\n            residuals.append(math.sqrt(s));assert len(residuals)<=130900\n            min_depth=min(min_depth,q[2]);max_depth=max(max_depth,q[2])\nassert (len(images),points,len(residuals),keypoints)==(1000,4716,130900,361170)\nraw=math.fsum(r*r for r in residuals)\nrobust=math.fsum(r*r if r<=3 else 6*r-9 for r in residuals)\nweight_sum=math.fsum(1 if r<=3 else 3/r for r in residuals)\nresult=dict(model=str(root),images=len(images),landmarks=points,observations=len(residuals),keypoints=keypoints,\n    raw_squared_cost=raw,huber_3px_cost=robust,raw_mean_px=math.fsum(residuals)/len(residuals),\n    raw_rmse_px=math.sqrt(raw/len(residuals)),raw_p95_px=float(np.percentile(np.frombuffer(residuals,dtype=np.float64),95,method='\\''linear'\\'')),\n    raw_max_px=max(residuals),downweighted_observations=sum(r>3 for r in residuals),\n    weight_min=min(1,3/max(residuals)),weight_sum=weight_sum,all_positive_depth=True,\n    min_depth_m=min_depth,max_depth_m=max_depth,nonprojectable_observations=0,\n    quantile_method='\\''numpy percentile linear, bounded O(130900) scalar audit buffer outside timed solve'\\'',\n    input_sha256=before)\nassert hashes()==before\nprint(json.dumps(result,indent=2))\n' '/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/rig-legacy-cap256/model'",
+  "limitations": [
+    "Read-only existing output audits are outside timed solve. No new candidate solve or GT scoring has run.",
+    "Initial model serialized-sensor projection differs at sub-micro cost level from BA body-pose recomposition; certify source hashes, use 1e-5 absolute external cost tolerance, and record actual differences.",
+    "Only 1.52% initial residuals exceed 3 px; no guarantee of causal leverage or accuracy improvement.",
+    "Exact raw p95 uses bounded O(130900) scalar buffer outside timed solve, not constant-memory streaming quantiles."
+  ]
+}

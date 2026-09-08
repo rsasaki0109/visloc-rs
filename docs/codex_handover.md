@@ -1,5 +1,25 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Frozen Huber BA完了（2026-09-08）: Luna Max `c026f40`をroot独立28テストと
+> clippy後にrelease認証。4本ともexit0、None対照はPR #91のモデル/trace一致、
+> Huber反復も3ファイル/85行一致。全identity/支持/校正/anchor/正深度を保持。
+> Huberは22.00/22.43 s、peak RSS85,156/85,108 KiB。GT308画像はRMSE/p95
+> **0.028822/0.044018 m**でlegacy基準を満たさず不採用（adaptive Noneよりは改善）。
+> 平均再投影0.673262 pxでも軌跡改善ゲートは閉じません。尺度sweep/atlas/既定化なし。
+> [結果](openloris_frozen_huber_ba.md)、
+> [全証跡](../benchmarks/electro/m8-openloris-frozen-huber-ba-v1.json)。次はこのPRのCI/merge。
+> Luna Maxは次のnative統合候補をread-only監査中。局所BAのパラメータ診断は繰り返さず、
+> native速度・メモリ改善へ進める具体的scopeを確認します。全体goalは未完了です。
+
+> 続行（2026-09-08）: PR #91はhead `b2a012f`のCI9項目
+> （run `34182134711`）通過後、`e169527`へsquash merge。旧branch整理済み。
+> 現在は `feat/m8-frozen-huber-ba`。次の[事前契約](openloris_frozen_huber_ba.md)を
+> `9de6fe8`で固定し、Luna Maxがdriver-only Huber-3 opt-inを実装中。
+> 同一130,900観測・全XYZ可変のrobust BAは、過去の観測集合を変える
+> robust triangulation/Huber-1実験とは区別します。尺度sweep・GT調整なし。
+> rootの初期モデル独立集計で3 px超は1,984観測（約1.52%）、最小重み0.750081。
+> 影響範囲は限定的で改善は未証明。実solveは未実施、全体goalは未完了です。
+
 > 固定39点A/B完了（2026-09-08）: `5a8f135`をroot独立24driverテスト＋既存rig固定点テスト後に
 > release build。legacy/adaptive対照は過去モデル・数値trace一致。fixed39反復も3ファイル/83行一致。
 > 全支持/identity/校正/anchor/正深度と固定39 XYZ bit一致を維持したが、post-only GT308画像は
