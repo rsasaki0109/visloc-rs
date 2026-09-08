@@ -1,0 +1,35 @@
+{
+  "schema": "m8-openloris-2500-sparse7n-connectivity-v1",
+  "audit_program": "import csv,json,collections\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n\")\nnames={int(r[\"image_index\"]):r[\"image_name\"] for r in csv.DictReader((root/\"images.tsv\").open(),delimiter=\"\\t\")}\nframe={i:int(n.rsplit(\"_\",1)[1].split(\".\")[0])//2 for i,n in names.items()}\nregistered=set()\nwith (root/\"legacy/model/images.txt\").open() as f:\n for line in f:\n  if not line.strip() or line.startswith(\"#\"):continue\n  fields=line.split(); next(f)\n  registered.add(int(fields[9].rsplit(\"_\",1)[1].split(\".\")[0])//2)\nparent=list(range(1250))\ndef find(x):\n while parent[x]!=x:parent[x]=parent[parent[x]];x=parent[x]\n return x\ncross=0;edges=0\nfor r in csv.DictReader((root/\"pairs.tsv\").open(),delimiter=\"\\t\"):\n if int(r[\"accepted_matches\"])==0:continue\n a,b=frame[int(r[\"image_i\"])],frame[int(r[\"image_j\"])]\n edges+=1\n if (a in registered)!=(b in registered):cross+=1\n a,b=find(a),find(b)\n if a!=b:parent[a]=b\ngroups=collections.defaultdict(list)\nfor f in range(1250):groups[find(f)].append(f)\nprint(json.dumps({\"registered_frames\":len(registered),\"registered_frame_min\":min(registered),\"registered_frame_max\":max(registered),\"accepted_pair_edges\":edges,\"registered_unregistered_crossing_pairs\":cross,\"frame_graph_component_sizes\":sorted(map(len,groups.values()),reverse=True),\"registered_by_250_frame_bin\":[sum(i in registered for i in range(s,s+250)) for s in range(0,1250,250)]}))\n",
+  "audit": {
+    "registered_frames": 612,
+    "registered_frame_min": 0,
+    "registered_frame_max": 611,
+    "accepted_pair_edges": 16321,
+    "registered_unregistered_crossing_pairs": 37,
+    "frame_graph_component_sizes": [
+      1250
+    ],
+    "registered_by_250_frame_bin": [
+      250,
+      250,
+      112,
+      0,
+      0
+    ]
+  },
+  "mapper_support": {
+    "unregistered_zero_support": 603,
+    "unregistered_below_pnp_support": 22,
+    "unregistered_eligible_pnp": 13,
+    "unregistered_below_sensors": 619,
+    "max_unregistered_support": 29
+  },
+  "limitations": [
+    "Connectivity is based on nonempty accepted pair edges projected to rig frames, not valid metric tracks or guaranteed PnP support.",
+    "Registered frame IDs come from model image names and cover exactly 0..611. A connected pair graph does not prove camera registrability.",
+    "37 crossing pairs exist; no new matches or observations were added. Candidate diagnosis is boundary track/3D support, not blanket graph-disconnection repair.",
+    "TSV export used existing inspect_verified_pair_snapshot binary; source/build provenance not independently certified for this diagnostic. Snapshot codec integrity was checked by exporter.",
+    "This does not close COLMAP quality, performance or native end-to-end gates."
+  ]
+}

@@ -25,6 +25,15 @@ tier gate, speedup, COLMAP comparison or large-QR quality test. Diagnose the
 input graph / unregistered coverage before claiming larger-tier progress.
 [Exact commands and audit](../benchmarks/electro/m8-openloris-bounded-native-2500-sparse7n-v1.json).
 
+Read-only coverage diagnosis: the 16,321 nonempty accepted image-pair edges
+project to one connected component containing all 1,250 rig frames. Registered
+frames are exactly 0–611, with 37 verified pairs crossing to the unregistered
+region. Mapper diagnostics report 603 zero-support, 22 below-PnP-support and
+13 eligible-but-unregistered frames (619 lack required sensor support, an
+overlapping classification). Pair connectivity is not metric-track or PnP
+support. Investigate boundary 3D/track support rather than assuming a disconnected
+input graph. [Audit and limitations](../benchmarks/electro/m8-openloris-2500-sparse7n-connectivity-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
