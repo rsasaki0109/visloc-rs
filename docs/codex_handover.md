@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 5k slice検証: 全5000画像登録、Legacy/policy2反復はモデルbytes一致。
+> 各420 BAは直接法、QR0。GT RMSE/p95 0.477216/0.478983 m、最大10.094671 m。
+> 幾何監査は支持点/正深度/固定rig正常だがtrack成分2495/2/2/1 frame。
+> 主成分外は791、1068/1071、1070/1072。次は軌跡外れ値との関連を診断。
+> 10k由来mapper-only入力で独立5k native E2Eではない。全goal未達。
+> 証跡 `m8-openloris-bounded-native-5000-slice-v1.json`。
+
 > Tier再検証: PR #100はCI9項目通過後 `d72bfdd` へmerge、旧branch整理済み。
 > 現branch `test/m8-rig-ann-tier-validation`。rig-aware dense ANN 2.5kでLegacy/policy2反復は過去モデルbytes一致。
 > 全2500画像/1250frame、独立GT RMSE/p95 0.133927/0.237364 m。各211 BAはすべて直接法、QR0。
