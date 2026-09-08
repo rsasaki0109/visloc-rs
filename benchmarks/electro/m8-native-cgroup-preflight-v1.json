@@ -1,0 +1,17 @@
+{
+  "schema": "m8-native-cgroup-preflight-v1",
+  "date": "2026-09-09",
+  "status": "configuration-and-child-inheritance-pass",
+  "launcher": ["systemd-run", "--user", "--scope", "--property=MemoryMax=2G", "--property=MemorySwapMax=0"],
+  "observed_cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/run-r85e19ce7df844b53b04fbcafafd33c95.scope",
+  "memory_max_bytes": 2147483648,
+  "memory_swap_max_bytes": 0,
+  "python_child_inherited_same_cgroup": true,
+  "probe_memory_peak_bytes": 11530240,
+  "limits": [
+    "Short Python parent/child configuration probe only; no SfM or memory-pressure/OOM test.",
+    "cgroup memory accounting includes charged file cache and kernel memory; memory.peak is not peak RSS.",
+    "The real runner must verify its own cgroup limits, capture memory.peak and memory.events before scope exit, and separately measure aggregate process-tree RSS.",
+    "Do not sum individual child high-water RSS values into a pipeline peak or silently retry uncapped after failure."
+  ]
+}
