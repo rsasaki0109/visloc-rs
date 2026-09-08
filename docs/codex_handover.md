@@ -8,7 +8,8 @@
 > 保存binary `corridor1-1-m8-compact-connectivity-v1/integrate-2c024cf` SHA256
 > `04314afeb4a280f411a5ad48e8a1f97ef8a8d0b2f17b68099278b0d68f720a16`。
 > tailはexit0、全6ファイル過去一致。連結性0.10246秒対前回0.31470秒、RSS77916KiB。
-> mainはsession80093実行中。完走確認後、candidate main-repeat→control-main-repeatを順番に測る。
+> mainもexit0・全6ファイル過去一致。連結性9.55577秒対27.32571秒、総151.46秒対164.04秒。
+> RSS524744KiB対525228KiB。候補main-repeatはsession2520実行中、次はcontrol-main-repeat。
 > 正確なコマンドを `m8-openloris-compact-connectivity-v1.json` のrepeat_commandsに凍結済み。
 > 同時build/測定禁止、既存出力上書き禁止。全goal未達。
 > 容量対応で再生成可能な`target/debug/incremental`約4.9GiBのみ

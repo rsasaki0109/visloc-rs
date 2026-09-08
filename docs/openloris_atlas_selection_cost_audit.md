@@ -130,5 +130,9 @@ is claimed yet: repeat both retained components and verify model bytes/RSS.
 Compact candidate tail: all six model files equal the historical output;
 connectivity0.10246s versus preceding control0.31470s, wall12.15s versus14.46s,
 RSS77916 versus77848KiB. These are single-run observations, not a certified
-overall speedup or memory reduction. Main and controlled repeats remain pending.
+overall speedup or memory reduction. Main also preserves all six model files:
+connectivity9.55577s versus27.32571s, wall151.46s versus164.04s,
+RSS524744 versus525228KiB. Candidate main repeat is running, followed by the
+retained control repeat. Do not infer improved trajectory: model bytes match
+the still-RMSE-failing atlas baseline exactly.
 Evidence: `benchmarks/electro/m8-openloris-compact-connectivity-v1.json`.
