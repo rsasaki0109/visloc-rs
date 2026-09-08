@@ -103,6 +103,13 @@ post-only quality gates. Luna Max hit its usage limit after producing the
 diagnostic implementation; further implementation requires its availability
 or an explicit user model choice. The full M8–M10 goal is unchanged.
 
+The user subsequently reported restored access, and Luna Max confirmed working
+tool access. The [next predeclared intervention](openloris_weak_angle_fixed_landmarks.md)
+tests adaptive LM with only the 39 initial weak-angle landmarks fixed, against
+the unchanged adaptive control and legacy quality thresholds. Membership is
+independently verified and source-hash-bound before implementation/measurement;
+all observations remain active. No intervention result or promotion is claimed.
+
 ## Current checkpoint (2026-09-07)
 
 The connected, observation-backed atlas now preserves 9,998 registered images,
