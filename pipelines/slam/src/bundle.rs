@@ -2251,7 +2251,7 @@ impl BundleAdjustment {
         Ok((result, runtime))
     }
 
-    fn validate_matrix_free_entry(
+    pub(crate) fn validate_matrix_free_entry(
         &self,
         config: &BaConfig,
         options: MatrixFreeBaOptions,

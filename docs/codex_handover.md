@@ -1,5 +1,11 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 次候補: `feat/m8-bounded-native-ba` に `bounded-direct64-qr` をdefault-off実装。
+> 解く前に64可変pose以下は従来直接法、65以上はQRを選択。失敗後fallbackなし。
+> 共通適用条件、境界/固定状態/rollbackテストとclippy通過。native実測はまだ。
+> [設計と検証契約](openloris_bounded_native_ba.md)。小窓合格だけで大規模QR品質を合格にしない。
+> 親PR #98はCI実行中。大規模品質・速度・省メモリの全goalは未達。
+
 > 同一状態診断: PR #97はCI9項目通過後 `ee3764e` へmerge、旧branch整理済み。
 > 現branch `diag/m8-qr-shared-state`。build `0cd9ec4` のLegacy shadowで全688状態を比較。
 > 出力はchampion bytes一致。QR成功571、失敗117（MaxIterations114/ResidualCheck3）。
