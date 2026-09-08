@@ -1,0 +1,20 @@
+{
+  "status": "complete-snapshot-byte-reproduction-pass",
+  "binary_sha256": "883a6ad7b21e34de9309cb71e35fe7750547df34d3ffe8c92b59921625247af5",
+  "command": "target/release/examples/admit_verified_bridge_snapshot --base-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-bridges-prefix-supplements.vps --augmented-snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-merged.vps --base-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --repair-registered-components /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-adaptive32-halo8-bridges-supp-pair-confidence-finalfix32-v1/model/retrieval-components.txt --output /home/sasaki/datasets/openloris/corridor1-1-m8-repair19-admission-replay-v1/output.vps",
+  "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-control-prefix-repair19.vps",
+  "output_and_reference_sha256": "ac93b28daf92b9bb4a621b9687087abbf906a1bc78cca0d8f4ea9688a1ba7a8d",
+  "exit_status": 0,
+  "wall_seconds": 2.95,
+  "peak_rss_kib": 680056,
+  "base_pairs": 59961,
+  "admitted_repair_pairs": 173,
+  "admitted_repair_matches": 11027,
+  "output_pairs": 60134,
+  "output_matches": 3348547,
+  "limitations": [
+    "New reproduction invocation; the historical invocation is not recovered.",
+    "Uses retained intermediate registered-component manifest, pre-repair snapshot and adaptive verified snapshot. Their producers must be included in E2E.",
+    "No repaired snapshot is an input, unlike the earlier order-only reproduction."
+  ]
+}
