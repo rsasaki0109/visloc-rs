@@ -1,5 +1,10 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> PR115は最終headc09875aのCI9成功確認後、bbaa344d7d94c099ae8bfcbebba6f2668761d93bへmerge済み。
+> 旧branch削除、test/m8-extraction-replay-preflightはmainへrebase済み。
+> 抽出session37896は継続中（直近50/1250）。saved binaryなのでgit更新は実行内容へ影響しない。
+> 同handleをpoll、観測timeoutで再実行しない。同時build/測定禁止。全goal未達。
+
 > 稼働中: extraction-shard0-replay-v1、exec session37896。1250画像/8threads/3600秒上限。
 > 出力 `/home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1`、extract.log/time。
 > 直近18/1250画像を出力、同handleをpollして継続確認。観測timeoutで再起動しない。
