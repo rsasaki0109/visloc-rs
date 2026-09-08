@@ -92,3 +92,18 @@ filter/retriangulation0.8739s, connectivity0.3147s. The nested outer phase is
 wall differs from the earlier10.78s trace; neither regression nor speedup is
 established without a controlled repeat. Evidence:
 `benchmarks/electro/m8-openloris-atlas-inner-timing-v1.json`.
+
+## Solver ownership check before further optimization
+
+Source inspection of `BundleAdjustment::optimize_weighted_backend` shows normal
+equations rebuilt at each LM iteration, including after an exactly rolled-back
+rejection. Reusing an unchanged linearization is a candidate for investigation,
+not a measured win. `solve_step` currently moves `system.h_pp` out with
+`mem::replace` for both pose-diagonal and dense branches. Retaining that consumed
+system without restoring the original Hessian is incorrect. Copying a dense
+Hessian to enable caching would reverse an existing memory optimization.
+Column equilibration also mutates the system and needs a separate contract.
+Any reuse experiment must first measure rejected-step assembly cost, preserve
+the LM iteration/acceptance trace exactly, limit additional state to an explicit
+bounded representation, and invalidate after accepted updates. Do not implement
+a blanket clone cache or alter damping to obtain more accepted steps.
