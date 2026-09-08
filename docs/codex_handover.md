@@ -2,8 +2,9 @@
 
 > 現branch `test/m8-strong-boundary-10k`。旧strong30/deferred8/direct2/s1/rot5条件をtimeログから復元。
 > manifest/snapshot/visloc pose-prior2ファイルSHA確認済み。契約 `m8-openloris-strong-boundary-contract-v1.json`。
-> 同binary `rig-7d99e07` の `strong-boundary-10k/control` をsession29185で実行中。
-> 起動時structure/deferred分割ログは過去ログの先頭行と完全一致、モデル一致は完走待ち。
+> 同binary `rig-7d99e07` の `strong-boundary-10k/control` はexit0、過去9998画像モデル全成分bytes一致。
+> structure/deferred分割ログも過去先頭行と一致。candidate-aはsession62512実行中。
+> 証跡 `m8-openloris-strong-boundary-result-v1.json` は対照のみ、候補品質未確認。
 > 360秒上限・単一thread、完走後旧モデルbytes確認→boundary flagのみ追加したcandidate-a/b。
 > 事前モデル生成コストは別途必要、native E2Eと混同しない。入力やthreshold変更なし。
 > 容量確保のため直前10k boundary-bモデルをbytes一致したboundary-aへhardlink化。
