@@ -13,6 +13,18 @@ from benchmark_electro import parse_gnu_time
 from replay_native_candidates import sha
 
 
+def output_disk_budget(sizes, allocation_unit):
+    """Round each reference file to destination blocks and retain 1 GiB slack."""
+    if allocation_unit <= 0:
+        raise ValueError('Allocation unit must be positive')
+    total = 0
+    for size in sizes:
+        if size < 0:
+            raise ValueError('File size must be nonnegative')
+        total += ((size + allocation_unit - 1) // allocation_unit) * allocation_unit
+    return total + 1024**3
+
+
 def partition_images(images, workers):
     if not 1 <= workers <= 6 or workers > len(images):
         raise ValueError('Require 1..6 workers and at least one image per worker')
@@ -59,9 +71,11 @@ def main():
     expected = {image.stem + suffix: sha(reference / (image.stem + suffix))
                 for image in selected for suffix in suffixes}
     output = args.output.resolve()
-    required = sum((reference / name).stat().st_size for name in expected) + 1024**3
+    allocation_unit = os.statvfs(output.parent).f_frsize
+    required = output_disk_budget(((reference / name).stat().st_size for name in expected),
+                                  allocation_unit)
     if shutil.disk_usage(output.parent).free < required:
-        raise RuntimeError('Insufficient disk for expected base bank plus 1 GiB reserve')
+        raise RuntimeError('Insufficient disk for rounded reference outputs plus 1 GiB reserve')
     output.mkdir()  # Never overwrite an existing probe.
     inputs = output / 'images'
     command[0] = str(binary)
@@ -85,6 +99,9 @@ def main():
         invocations.append(worker)
     threads = '8' if args.workers == 1 else '1'
     report = {'status': 'running', 'binary_sha256': binary_sha,
+              'preflight_required_free_bytes': required,
+              'destination_allocation_unit_bytes': allocation_unit,
+              'disk_budget_scope': 'Block-rounded reference files plus 1 GiB slack for sidecars, metadata and logs. Not a complete DAG lifetime budget.',
               'recipe_sha256': sha(recipe), 'reference_feature_sha256': expected,
               'image_sha256': {image.name: sha(image) for image in selected},
               'rayon_num_threads': int(threads), 'malloc_arena_max': '1',
