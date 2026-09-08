@@ -1,5 +1,17 @@
 # Bounded native BA policy — unmeasured candidate
 
+## First 1k measurement
+
+Release `b011cde` produced exact champion model bytes for the same-binary
+Legacy control and both policy repeats. Each policy run selected direct on
+all 86 calls and QR on zero calls. Mapper seconds: Legacy 4.417592, policy
+4.277948 / 4.513326. Process peak RSS KiB: 81,644 / 81,928 / 81,748.
+This shows small-window nonregression, not a speed or memory improvement.
+Champion quality metrics are inherited by byte identity, not newly scored.
+The >64 QR branch is entirely untested by these native runs; larger-tier
+quality, end-to-end and memory gates remain open.
+[Commands and exact-byte audit](../benchmarks/electro/m8-openloris-bounded-native-1k-v1.json).
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements

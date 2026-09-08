@@ -1,5 +1,10 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> bounded policy 1k: build `b011cde`、Legacyとpolicy2反復はchampion bytes一致。
+> policyは各86回すべて直接法、QR0回。mapper4.28/4.51 s対Legacy4.42 s、速度改善主張なし。
+> 証跡 `m8-openloris-bounded-native-1k-v1.json`。次tierでは選択経路のcoverageを必ず確認。
+> PR #98はCI9項目通過後 `66ec5c2` へmerge、旧branch整理済み。現在のpolicy branchは未PR。
+
 > 次候補: `feat/m8-bounded-native-ba` に `bounded-direct64-qr` をdefault-off実装。
 > 解く前に64可変pose以下は従来直接法、65以上はQRを選択。失敗後fallbackなし。
 > 共通適用条件、境界/固定状態/rollbackテストとclippy通過。native実測はまだ。
