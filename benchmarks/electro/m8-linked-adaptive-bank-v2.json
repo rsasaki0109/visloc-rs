@@ -1,0 +1,20 @@
+{
+  "schema": "m8-linked-adaptive-bank-v2",
+  "status": "pass",
+  "artifact_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-linked-adaptive-bank-v2",
+  "files": 10000,
+  "linked_files": 9308,
+  "selected_independent_files": 692,
+  "inventory_sha256": "c8d22b395f172b9326837ea220e916617e2929856ea45d2c7e44ec5bda43e6f1",
+  "selection_sha256": "fc0e26c55a75bab87ebf6b15187ea4666876e5de076c6961aa05ed8b4c018b57",
+  "all_reference_bytes_equal": true,
+  "base_bytes_unchanged": true,
+  "resume_reused": 10000,
+  "resume_written": 0,
+  "shared_logical_bytes": 1662345890,
+  "new_regular_file_allocated_bytes": 257925120,
+  "publication_wall_seconds": 4.826319043990225,
+  "allocation_excludes": "directory entries, metadata, logs and report",
+  "scope": "Retained-bank publication parity; not fresh extraction, E2E, peak-DAG disk, RSS, independent backup or speedup evidence.",
+  "failed_preflight": "v1 rejected the tier's source symlinks before publication. v2 uses their verified common real directory, with exact 10k membership and resolved path equality checked. No input bytes were modified."
+}

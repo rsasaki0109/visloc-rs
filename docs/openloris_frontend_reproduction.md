@@ -248,8 +248,14 @@ bank in place: this mode is not independent backup storage. Resume compares byte
 against current inputs, so an externally pinned base manifest must be validated
 to detect mutations that would affect both links. No input file is deleted.
 Unit tests cover copy/link inventory equality, selected-file independence, resume
-and cross-device failure; real10k linked-bank parity and peak-DAG disk accounting
-remain required before this is used in a measured continuous run.
+and cross-device failure. The real10k probe now passes: 9,308 shared files and
+692 independent selected files exactly match the retained adaptive bank; base
+bytes are unchanged and resume reuses all10k. Newly allocated regular file blocks
+total 257,925,120 bytes, excluding directories/metadata/logs. Evidence:
+`m8-linked-adaptive-bank-v2.json`. The initial v1 correctly rejected source
+symlinks; v2 checks the tier's exact membership and resolves every entry to the
+common real base directory before using it. Peak-DAG disk accounting remains
+required before a measured continuous run; this is not extraction or E2E proof.
 
 ### Snapshot storage audit
 
