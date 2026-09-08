@@ -11,6 +11,23 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-08)
 
+Equivalent-result atlas connectivity optimization is merged (PR111, final-head
+CI9 passed). Main connectivity time is27.33/31.70s for control versus9.56/10.47s
+for compact flags/streamed unions; every pre-BA/final model file matches in
+both components and repeats. Main wall improves in these runs, but tail wall
+varies; this is not uniform end-to-end superiority or an accuracy improvement.
+See [phase audit](openloris_atlas_selection_cost_audit.md).
+
+PR112 resolves all23 source-model components and corrects duplicated run costs:
+21 producing mapper executions total627.123191s historically. This is not
+native E2E; frontend, alignment and complete reproducible accounting remain.
+The [BA retry diagnostic](openloris_ba_retry_timing.md) now measures potential
+repeated assembly without adding a matrix cache. Tail output is byte-identical;
+its22 post-rejection assemblies cost0.14784s. Main measurement is running.
+Do not replace the unresolved quality work with cache tuning: the retained
+atlas still fails the frozen COLMAP RMSE gate, and no final-tier/restart/100k
+or README performance promotion follows from these phase optimizations.
+
 Bounded covisibility local-window selection is opt-in and fails the frozen1k
 quality gate: repeated RMSE0.025216m and reprojection0.703792px. All1000 images
 and500 rig frames are supported, with positive depths, valid fixed rig and one
