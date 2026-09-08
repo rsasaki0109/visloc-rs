@@ -26,6 +26,24 @@ def replace_path(command, flag, path):
     return result
 
 
+def bind_feature_input(command, manifest_path, override=None):
+    from benchmark_electro import validate_feature_manifest
+    if command.count('--features-dir') != 1:
+        raise ValueError('Missing or duplicate feature directory')
+    position = command.index('--features-dir') + 1
+    if position >= len(command):
+        raise ValueError('Missing feature directory value')
+    features = Path(override if override is not None else command[position]).resolve(strict=True)
+    validate_feature_manifest(manifest_path, features)
+    manifest = json.loads(manifest_path.read_text())
+    expected = {entry['feature'] for entry in manifest['images']}
+    actual = {path.name for path in features.iterdir()
+              if path.name.endswith(manifest['feature_suffix'])}
+    if actual != expected:
+        raise ValueError('Feature bank membership differs from frozen manifest')
+    return replace_path(command, '--features-dir', features), features
+
+
 def main():
     base = Path('/home/sasaki/datasets/openloris')
     parser = argparse.ArgumentParser(description=__doc__)
@@ -54,12 +72,8 @@ def main():
     recorded = shlex.split(first_line.split('Command being timed: ', 1)[1])[0]
     command = shlex.split(recorded)
     command[0] = str(binary)
-    if args.features_dir is not None:
-        command = replace_path(command, '--features-dir', args.features_dir.resolve(strict=True))
     # Validate either explicit or historical input before publishing any output.
-    from benchmark_electro import validate_feature_manifest
-    features = Path(command[command.index('--features-dir') + 1])
-    validate_feature_manifest(reference / 'features.json', features)
+    command, features = bind_feature_input(command, reference / 'features.json', args.features_dir)
     for flag, name in [('--export-candidate-manifest', 'candidates.txt'),
                        ('--out-colmap', 'unused-model-candidates')]:
         command = replace_path(command, flag, output / name)
