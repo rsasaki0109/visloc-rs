@@ -216,3 +216,12 @@ The remaining16 executions lack commands in the bounded location audited;
 do not infer their flags or claim all-source reproducibility. Next either
 recover an authoritative launch record or specify a new source pipeline
 explicitly and validate its full output independently of historical provenance.
+
+The bounded repository/scripts and `/tmp` M8-named script search did not
+recover an additional launch script. Instead, a new explicit source0
+specification uses the recorded650 policy with only frame start changed to0.
+This is not a recovered historical command. It completes in79.58s with
+340288KiB peak RSS and exactly reproduces all three retained source0 model
+files. Evidence: `m8-openloris-source-spec-0-v1.json`. Thus six source outputs
+are now reproducible under recorded new executions, only five of which start
+from recorded historical argv. No frontend or full-atlas quality gate closes.
