@@ -1,5 +1,19 @@
 # Implicit landmark QR — staged implementation
 
+## Shared-state diagnostic under development
+
+Branch `diag/m8-qr-shared-state` adds an opt-in
+`VISLOC_SFM_DEBUG_QR_SHARED_STATE=1` shadow solve on the Legacy path. At each
+eligible pre-step state it computes QR with the same observations, robust
+weights and lambda, reports pose/point delta differences and PCG status, then
+uses only the original Legacy delta. It does not change the acceptance policy.
+The comparison is restricted to pure rig/no-GNC states with at most 60 variable
+poses, 64 total poses, 1,024 total landmarks and 20,000 rig observations.
+Other states are not compared. Duplicate diagnostic storage is bounded by
+these caps; this mode must never be used for timing or RSS performance claims.
+Native model-byte parity and diagnostic coverage remain to be checked before
+interpreting its output. PR #97's separate validation-speedup CI is pending.
+
 ## Follow-up: bounded validation work
 
 On `perf/m8-qr-validation-scans`, full pose-vector finite checks are moved out

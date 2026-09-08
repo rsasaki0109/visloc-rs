@@ -3380,6 +3380,31 @@ impl BundleAdjustment {
             let solve_lambda = lambda;
             log_process_memory("ba-before-solve-step");
 
+            // Diagnostic only: compare the same pre-step state without
+            // changing the Legacy update. Strict caps bound duplicate storage.
+            let qr_shadow = if matches!(&backend, BaSolveBackend::Legacy)
+                && std::env::var("VISLOC_SFM_DEBUG_QR_SHARED_STATE").as_deref() == Ok("1")
+                && pose_index.len() <= 60
+                && self.poses.len() <= 64
+                && self.landmarks.len() <= 1024
+                && self.rig_observations.len() <= 20000
+                && !self.rig_observations.is_empty()
+                && self.observations.is_empty()
+                && self.stereo_observations.is_empty()
+                && self.general_stereo_observations.is_empty()
+                && gnc_weights.is_none()
+            {
+                Some(solve_rig_qr_step(
+                    self,
+                    config,
+                    lambda,
+                    MatrixFreeBaOptions::default(),
+                    &landmark_index,
+                ))
+            } else {
+                None
+            };
+
             let solve_result = match backend {
                 BaSolveBackend::Legacy => solve_step(
                     system.as_mut().expect("legacy normal system"),
@@ -3498,6 +3523,26 @@ impl BundleAdjustment {
                     }
                 }
             };
+            if let Some(shadow) = qr_shadow {
+                match (&solve_result, shadow) {
+                    (Ok((poses, points, _, _)), Ok(qr)) => {
+                        eprintln!(
+                            "sfm-debug-qr-shared-state: iteration={iteration} lambda={solve_lambda:.17e} poses={} landmarks={} pose_difference={:.17e} point_difference={:.17e} legacy_pose_norm={:.17e} legacy_point_norm={:.17e} pcg_iterations={:?} residual={:?} target={:?}",
+                            pose_index.len(), landmark_index.len(),
+                            (&qr.delta_poses - poses).norm(), (&qr.delta_landmarks - points).norm(),
+                            poses.norm(), points.norm(), qr.diagnostics.pcg_iterations,
+                            qr.diagnostics.pcg_residual_norm, qr.diagnostics.pcg_target,
+                        );
+                    }
+                    (_, Err(error)) => eprintln!(
+                        "sfm-debug-qr-shared-state: iteration={iteration} lambda={solve_lambda:.17e} qr_failure={}",
+                        error.diagnostic,
+                    ),
+                    (Err(error), Ok(_)) => eprintln!(
+                        "sfm-debug-qr-shared-state: iteration={iteration} lambda={solve_lambda:.17e} legacy_failure={error:?}",
+                    ),
+                }
+            }
             let (delta_poses, delta_landmarks, adaptive_prediction, quality) = match solve_result {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
