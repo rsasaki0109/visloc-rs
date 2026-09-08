@@ -240,3 +240,59 @@ not evidence of lower process RSS or improved native accuracy/speed.
 No three-run performance gate, cluster-size sweep or 10k promotion follows.
 Keep Legacy default and README performance claims unchanged.
 [Certificate, all commands and independent audits](../benchmarks/electro/m8-openloris-native-cluster8-v1.json).
+
+## Native window context and next bounded decision
+
+Scalar debug context at `db9b7f0` links each native BA call to its pose,
+landmark and observation counts, frame bounds and anchor. Both debug replays
+produce exactly the corresponding PR #94 model files; no performance or
+new GT measurement is claimed. Strict first fails at call 4 (40 poses,
+39 variable, 52 landmarks, 1209 observations); cluster8 first fails at
+call 3 (30 poses, 29 variable, 47 landmarks, 966 observations). The early
+frame bounds are 2..89: registration-order windows are not necessarily
+consecutive frames, so fixed slot clusters are only a temporal approximation.
+
+Failure classification exposes a distinction hidden by the aggregate counts:
+strict has 296 residual-check / 293 iteration-limit failures; cluster8 has
+530 residual-check / 57 iteration-limit failures. The native states differ,
+so these are not matched linear systems and do not prove a unique cause.
+[All 86 calls per arm and exact-output audit](../benchmarks/electro/m8-openloris-native-ba-context-v1.json).
+
+The next single predeclared arm is cluster8 plus **one existing true-residual
+restart**, within the same total 128 PCG iterations and unchanged relative /
+absolute 1e-12 criterion. This is not another cap/tolerance sweep: the new
+cluster-specific failure mix supplies the reason to test the combination.
+Retain exact operator/RHS, Huber6/native loss, scalar damping, observation
+selection and fixed-pose guards. Check the total iteration bound and
+restart=0 equivalence before a paired native replay. Compare against the
+same-binary cluster8 and Legacy controls, with the existing RMSE/p95/raw-mean
+gates, geometry/identity/repeat checks. No extra restart limit, cluster size
+or GT-driven tuning follows a failure.
+
+### Cluster8 + restart1 result — rejected
+
+Implementation `2cc2bd2` exposes `matrix-free-cluster8-restart1` without
+changing defaults. Eight cluster/restart tests, example tests and clippy
+including test code pass. Tests inject a recursive-residual gap, check one
+restart recovers it within the total budget, and reject when that budget is
+exhausted. Restart=0 reproduces the unchanged cluster8 API/operator results.
+
+Both same-binary native controls reproduce their previous model bytes.
+The candidate repeats exactly and preserves calibration, ordered keypoints,
+1000 supported images / 500 frames, one component and positive depth.
+It nevertheless fails all native quality gates: RMSE **0.1721147641 m**,
+p95 **0.3159879082 m**, raw mean **0.8126986930 px**. The trajectory is
+better than rejected cluster8 but worse than Legacy and strict; reprojection
+also worsens. It produces 2846 points / 28507 observations.
+
+Both runs record 507 restarts over 86 BA calls, with maximum total PCG
+iterations 128, 1195 true-residual rechecks and 1114 failed rechecks.
+Linear failures are 607/688 and accepted steps 53. Native trajectories differ,
+so this is not a same-linear-system causal comparison.
+
+Legacy / cluster8 / restart-a / restart-b mapper seconds are
+3.210290 / 5.305997 / 5.467070 / 6.382065; external peak RSS is
+82032 / 82536 / 82420 / 82356 KiB. These are correctness runs, not
+equivalent-quality performance evidence. No further restart, size or
+tolerance sweep, no 10k promotion, and no README claim follows.
+[Certificate, commands, full logs and independent audits](../benchmarks/electro/m8-openloris-native-cluster8-restart1-v1.json).

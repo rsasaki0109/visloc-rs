@@ -18,7 +18,9 @@ use visloc_vision::pnp::{
 };
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
-use crate::bundle::{BaConfig, BaRigObservation, BundleAdjustment, MatrixFreeBaOptions};
+use crate::bundle::{
+    BaConfig, BaRigObservation, BundleAdjustment, MatrixFreeBaOptions, MatrixFreeBaRestartOptions,
+};
 use crate::incremental_sfm::{
     build_tracks_confidence_ordered, build_tracks_confidence_ordered_with_trusted_prefix,
     build_tracks_detailed, build_tracks_incremental_correspondence,
@@ -97,6 +99,8 @@ pub enum RigBaBackend {
     MatrixFreeStrict,
     /// Experimental fixed-size (at most eight poses) Schur cluster preconditioner.
     MatrixFreeCluster8,
+    /// Cluster8 with one true-residual restart inside the same PCG budget.
+    MatrixFreeCluster8Restart1,
 }
 
 /// Conservative controls for generalized-rig incremental reconstruction.
@@ -4771,6 +4775,24 @@ fn run_rig_bundle_adjustment(
         }
     }
     let mut matrix_free_report = None;
+    // Scalar-only context for pairing native windows with existing LM debug
+    // records. No state copy, solve-policy change, or global pair graph.
+    if std::env::var_os("VISLOC_SFM_DEBUG_BA").is_some()
+        && std::env::var_os("VISLOC_SFM_DEBUG_BA_STEPS").is_some()
+    {
+        let variable_poses = problem
+            .poses
+            .keys()
+            .filter(|id| !problem.fixed_poses.contains(id))
+            .count();
+        eprintln!(
+            "rig-ba-context: backend={:?} poses={} variable_poses={} landmarks={} observations={} first_frame={:?} last_frame={:?} anchor={} fixed_rotations={}",
+            config.ba_backend, problem.poses.len(), variable_poses,
+            problem.landmarks.len(), visual_observations,
+            problem.poses.keys().min(), problem.poses.keys().max(),
+            anchor_frame_index, fix_active_rotations,
+        );
+    }
     let (initial_cost, final_cost, iterations, converged) = match config.ba_backend {
         RigBaBackend::Legacy => {
             // Keep the historical call and caller-provided BaConfig entirely
@@ -4785,7 +4807,9 @@ fn run_rig_bundle_adjustment(
                 result.converged,
             )
         }
-        RigBaBackend::MatrixFreeStrict | RigBaBackend::MatrixFreeCluster8 => {
+        RigBaBackend::MatrixFreeStrict
+        | RigBaBackend::MatrixFreeCluster8
+        | RigBaBackend::MatrixFreeCluster8Restart1 => {
             let has_variable_pose = problem
                 .poses
                 .keys()
@@ -4839,6 +4863,16 @@ fn run_rig_bundle_adjustment(
                 )
             } else if has_variable_pose {
                 let result = match config.ba_backend {
+                    RigBaBackend::MatrixFreeCluster8Restart1 => problem.optimize_matrix_free_cluster8_with_restart(
+                        ba_config, MatrixFreeBaOptions::default(), MatrixFreeBaRestartOptions { max_restarts_per_solve: 1 })
+                        .map(|result| {
+                            eprintln!("rig-ba-restart: limit=1 restarts={} max_pcg_iterations={} rechecks={} failed_rechecks={}",
+                                result.restart_iterations.iter().map(|s| s.restarts).sum::<usize>(),
+                                result.restart_iterations.iter().filter_map(|s| s.pcg_iterations).max().unwrap_or(0),
+                                result.restart_iterations.iter().map(|s| s.true_residual_rechecks).sum::<usize>(),
+                                result.restart_iterations.iter().map(|s| s.failed_true_residual_rechecks).sum::<usize>());
+                            result.ba
+                        }),
                     RigBaBackend::MatrixFreeCluster8 => problem.optimize_matrix_free_cluster8(
                         ba_config, MatrixFreeBaOptions::default()),
                     _ => problem.optimize_matrix_free(ba_config, MatrixFreeBaOptions::default()),
@@ -4850,7 +4884,9 @@ fn run_rig_bundle_adjustment(
                         RigSfmError::BundleAdjustment(error.to_string())
                     })?;
                 matrix_free_report = Some((
-                    if config.ba_backend == RigBaBackend::MatrixFreeCluster8 {
+                    if config.ba_backend == RigBaBackend::MatrixFreeCluster8Restart1 {
+                        "matrix-free-cluster8-restart1"
+                    } else if config.ba_backend == RigBaBackend::MatrixFreeCluster8 {
                         "matrix-free-cluster8"
                     } else {
                         "matrix-free"
@@ -8968,6 +9004,11 @@ mod tests {
     #[test]
     fn cluster8_native_preserves_fixed_rotations_observations_and_rollback() {
         check_fixed_rotation_backend(RigBaBackend::MatrixFreeCluster8);
+    }
+
+    #[test]
+    fn cluster8_restart_native_preserves_fixed_state_and_rollback() {
+        check_fixed_rotation_backend(RigBaBackend::MatrixFreeCluster8Restart1);
     }
 
     fn check_fixed_rotation_backend(backend: RigBaBackend) {

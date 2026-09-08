@@ -135,8 +135,9 @@ fn parse_ba_backend(value: &str) -> Result<RigBaBackend, String> {
         "legacy" => Ok(RigBaBackend::Legacy),
         "matrix-free" => Ok(RigBaBackend::MatrixFreeStrict),
         "matrix-free-cluster8" => Ok(RigBaBackend::MatrixFreeCluster8),
+        "matrix-free-cluster8-restart1" => Ok(RigBaBackend::MatrixFreeCluster8Restart1),
         other => Err(format!(
-            "--ba-backend must be legacy, matrix-free or matrix-free-cluster8, got {other}"
+            "--ba-backend must be legacy, matrix-free, matrix-free-cluster8 or matrix-free-cluster8-restart1, got {other}"
         )),
     }
 }
@@ -612,7 +613,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--max-track-frame-gap 0] ",
                     "[--local-ba-every 10] [--local-ba-window 40] ",
                     "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
-                    "[--ba-backend legacy|matrix-free|matrix-free-cluster8] ",
+                    "[--ba-backend legacy|matrix-free|matrix-free-cluster8|matrix-free-cluster8-restart1] ",
                     "[--structure-refinement-iterations 5] ",
                     "[--metric-anchored-cycle-tracks|--metric-temporal-cycle-tracks|",
                     "--metric-sparse-cycle-tracks|",
@@ -3714,6 +3715,10 @@ mod tests {
 
     #[test]
     fn parses_native_ba_backend_selector_strictly() {
+        assert_eq!(
+            parse_ba_backend("matrix-free-cluster8-restart1"),
+            Ok(RigBaBackend::MatrixFreeCluster8Restart1)
+        );
         assert_eq!(parse_ba_backend("legacy"), Ok(RigBaBackend::Legacy));
         assert_eq!(
             parse_ba_backend("matrix-free"),

@@ -1,5 +1,14 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。
+> `db9b7f0`のscalar contextで両debugモデルはPR94 bytes一致。strict初回失敗40pose、cluster8は30pose。
+> cluster8は残差チェック530/反復上限57（strict296/293）。単なる小窓→大窓のメモリ問題ではない。
+> 次は[事前契約](openloris_native_rig_matrix_free.md#native-window-context-and-next-bounded-decision)に沿い
+> cluster8+既存restart1を `2cc2bd2` で実装、総PCG128内・同じ残差基準で検証済み。
+> 2反復bytes一致、507restart/最大128反復。ただしRMSE/p95 0.172115/0.315988 m、raw mean0.812699 pxで失敗。
+> 残差・cluster-size・restartの追加sweepなし、既定化/10k展開なし。証跡保存後にPR/CI/mergeが必要。
+> 現branch `feat/m8-native-ba-context`。サブエージェントは使用しない。
+
 > 直接作業へ移行（2026-09-08）: ユーザー希望により以後サブエージェントへ依頼しない。
 > PR #93はCI9項目通過後 `3136b20` にmerge、旧branch整理済み。
 > 設定不変のdebug replayで589線形失敗を分類: ResidualCheckFailed296、MaxIterations293。

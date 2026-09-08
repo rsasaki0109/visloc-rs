@@ -2048,6 +2048,35 @@ impl BundleAdjustment {
         })
     }
 
+    /// Combine bounded cluster preconditioning with at most one existing
+    /// true-residual restart, sharing the original total PCG iteration budget.
+    pub(crate) fn optimize_matrix_free_cluster8_with_restart(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+        restart: MatrixFreeBaRestartOptions,
+    ) -> Result<MatrixFreeBaRestartResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options)?;
+        if restart.max_restarts_per_solve > 1 {
+            return Err(MatrixFreeBaError::InvalidConfiguration(
+                "max_restarts_per_solve must be 0 or 1",
+            ));
+        }
+        let mut runtime = MatrixFreeRuntime::with_restart(options, restart.max_restarts_per_solve);
+        runtime.cluster8 = true;
+        let (result, runtime) = self.run_matrix_free_backend(config, runtime)?;
+        Ok(MatrixFreeBaRestartResult {
+            ba: MatrixFreeBaResult {
+                initial_cost: result.initial_cost,
+                final_cost: result.final_cost,
+                iterations: result.iterations,
+                matrix_free_iterations: runtime.iterations,
+                converged: result.converged,
+            },
+            restart_iterations: runtime.restart_iterations.unwrap_or_default(),
+        })
+    }
+
     /// Run matrix-free BA with explicit column equilibration and scaled LM
     /// damping.  This is a separate opt-in policy: the legacy matrix-free
     /// entry point keeps scalar `lambda * I` damping and its exact arithmetic.
@@ -9692,6 +9721,45 @@ mod implicit_schur {
         }
 
         #[test]
+        fn cluster8_restart_shares_budget_and_checks_true_residual() {
+            let mut system = synthetic_system();
+            system.h_pp = CameraHessian::PoseDiagonal(vec![Matrix6::identity() * 100.0; 17]);
+            system.b_p = DVector::from_fn(102, |i, _| (i + 1) as f64);
+            let cross = system.landmarks[0].cross[0].1 * 0.1;
+            system.landmarks[0].cross = (0..17).map(|p| (p, cross)).collect();
+            let op = ImplicitSchurOperator::new(&system, 0.5)
+                .unwrap()
+                .with_cluster8()
+                .unwrap();
+            let options = PcgOptions {
+                max_iterations: 128,
+                relative_tolerance: 1e-12,
+                absolute_tolerance: 1e-12,
+            };
+            let plain = op.solve_pcg(op.rhs(), options).unwrap();
+            let zero = op.solve_pcg_with_restart(op.rhs(), options, 0).unwrap();
+            assert_eq!(plain, zero.result);
+            let run = op
+                .solve_pcg_with_injected_recursive_residual_for_test(op.rhs(), options, 1)
+                .unwrap();
+            assert_eq!(run.diagnostics.restarts, 1);
+            assert!(run.diagnostics.pcg_iterations.unwrap() <= 128);
+            assert!(run.result.residual_norm <= run.result.target);
+            let capped = op
+                .solve_pcg_with_injected_recursive_residual_for_test(
+                    op.rhs(),
+                    PcgOptions {
+                        max_iterations: 1,
+                        ..options
+                    },
+                    1,
+                )
+                .unwrap_err();
+            assert_eq!(capped.diagnostics.pcg_iterations, Some(1));
+            assert_eq!(capped.diagnostics.restarts, 0);
+        }
+
+        #[test]
         fn hand_check_fixture_matches_schur_and_full_normal_for_both_damping_values() {
             for lambda in [0.0, 0.5] {
                 let system = hand_check_system();
@@ -10360,6 +10428,38 @@ mod matrix_free_ba_api_tests {
         bad.refine_intrinsics = true;
         assert!(invalid
             .optimize_matrix_free_cluster8(&bad, options)
+            .is_err());
+        assert_eq!(invalid, original);
+    }
+
+    #[test]
+    fn cluster8_restart_api_zero_parity_and_invalid_limit_rollback() {
+        let original = make_problem();
+        let config = matrix_free_config();
+        let options = MatrixFreeBaOptions::default();
+        let mut a = original.clone();
+        let mut b = original.clone();
+        let plain = a.optimize_matrix_free_cluster8(&config, options).unwrap();
+        let zero = b
+            .optimize_matrix_free_cluster8_with_restart(
+                &config,
+                options,
+                MatrixFreeBaRestartOptions {
+                    max_restarts_per_solve: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(plain, zero.ba);
+        assert_eq!(a, b);
+        let mut invalid = original.clone();
+        assert!(invalid
+            .optimize_matrix_free_cluster8_with_restart(
+                &config,
+                options,
+                MatrixFreeBaRestartOptions {
+                    max_restarts_per_solve: 2
+                }
+            )
             .is_err());
         assert_eq!(invalid, original);
     }
