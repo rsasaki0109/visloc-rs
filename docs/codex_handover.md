@@ -1,5 +1,16 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新: `diag/m8-source-command-coverage`。PR114は最終head26f755aのCI9件成功後
+> `da96845c943f5889543b5ba8929079a0d2f2a982`へsquash merge済み。再利用は既定OFF。
+> 親branch整理済み、現branchはmainへrebase。サブエージェントは使わない。
+> source21実行のログSHAは全一致。兄弟time記録にコマンドがあるのは5件。
+> 証跡 `m8-openloris-source-command-coverage-v1.json`。他の場所の記録は未探索。
+> 記録済み650開始/500frame窓をrig-0466499で新規出力先へ再実行し、過去3モデルbytes一致。
+> wall36.60秒、RSS340100KiB。証跡 `m8-openloris-source-replay-650-v1.json`。
+> 残り20実行とfrontend/atlas alignment/integrationの一体的再現は未完。測定プロセスなし。
+> 次の再実行は保存コマンドのある1950/3200/250/4200窓から、毎回新しい出力先を使う。
+> 過去の不明flagsを推定した場合は過去再現と称さず、新規仕様として分ける。全goal未達。
+
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
 > BA再試行の単一所有normal system再利用を既定OFFで実装。CLIは
