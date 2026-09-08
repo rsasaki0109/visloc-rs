@@ -3334,8 +3334,18 @@ impl BundleAdjustment {
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let mut converged = false;
         let mut block_symbolic_cache = None;
+        let trace_phase_timing = std::env::var_os("VISLOC_BA_TRACE_PHASE_TIMING").is_some();
 
         for iteration in 0..config.max_iterations {
+            let after_rejection = iterations.last().is_some_and(|step| !step.step_accepted);
+            let emit_phase = |phase: &str, started: Option<std::time::Instant>| {
+                if let Some(started) = started {
+                    eprintln!("ba-phase-timing: iteration={} phase={} seconds={:.9} after_rejection={} variable_poses={} landmarks={}",
+                        iteration, phase, started.elapsed().as_secs_f64(), after_rejection,
+                        pose_index.len(), landmark_index.len());
+                }
+            };
+            let assembly_started = trace_phase_timing.then(std::time::Instant::now);
             let adaptive_damping = match &backend {
                 BaSolveBackend::MatrixFreeColumnScaled(runtime) => runtime.adaptive_damping,
                 _ => false,
@@ -3364,15 +3374,18 @@ impl BundleAdjustment {
                 constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, system);
             }
             log_process_memory("ba-after-normal-equations");
+            emit_phase("normal_equations", assembly_started);
 
             // Build the reduced (Schur-complement) camera system. λ is added
             // to both the pose and landmark diagonals before reduction so the
             // augmented system stays SPD when the un-damped one is rank-
             // deficient (as monocular BA generally is).
+            let snapshot_started = trace_phase_timing.then(std::time::Instant::now);
             let saved_poses = self.poses.clone();
             let saved_landmarks = self.landmarks.clone();
             let saved_velocities = self.velocities.clone();
             let saved_biases = self.biases.clone();
+            emit_phase("rollback_snapshot", snapshot_started);
             let cost_before = current_cost;
             // Keep the lambda actually supplied to this linear solve.  The
             // public BaIterationStats lambda intentionally retains its
@@ -3406,6 +3419,7 @@ impl BundleAdjustment {
                 None
             };
 
+            let solve_started = trace_phase_timing.then(std::time::Instant::now);
             let solve_result = match backend {
                 BaSolveBackend::Legacy => solve_step(
                     system.as_mut().expect("legacy normal system"),
@@ -3524,6 +3538,7 @@ impl BundleAdjustment {
                     }
                 }
             };
+            emit_phase("linear_solve", solve_started);
             if let Some(shadow) = qr_shadow {
                 match (&solve_result, shadow) {
                     (Ok((poses, points, _, _)), Ok(qr)) => {
@@ -3599,6 +3614,7 @@ impl BundleAdjustment {
                 Err(e) => return Err(e),
             };
             log_process_memory("ba-after-solve-step");
+            let update_started = trace_phase_timing.then(std::time::Instant::now);
 
             // Apply tentative update. `delta_poses` packs pose slots
             // first (`i * 6 .. i * 6 + 6`), then velocity slots
@@ -3661,6 +3677,7 @@ impl BundleAdjustment {
             let nonprojectable_before = current_nonprojectable;
             let cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
             let nonprojectable_after = self.nonprojectable_observation_count();
+            emit_phase("tentative_update_and_cost", update_started);
             let cost_accepted = match config.initial_lambda {
                 None => true, // Pure GN: accept unconditionally.
                 Some(_) => cost_after < cost_before,
