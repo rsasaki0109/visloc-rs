@@ -131,6 +131,9 @@ borrowed envelope実装はlib19/example64 tests、tests込みClippy、Python43 t
 readback session37522も完了。測定稼働なし。次はPR128最終CI/merge、現branchのPR、
 native runnerでの共有形式とrestart統合、全抽出E2E/COLMAP品質改善。全goal未達。
 
+更新: PR128はhead`7ee56a2`でCI9成功後`4b51e97a84f3c9d99e70086a8ba20ec9dfe8151c`へmerge、
+旧branchはremote/local整理済み。現branchはmainへrebase済み。Python43 testsも通過。
+
 ### 以前の状態（上記を優先）
 
 PR117は最終head68b1f72のCI9成功後a769432へmerge、branch整理済み。
