@@ -26,6 +26,21 @@ repeated assembly without adding a matrix cache. Tail output is byte-identical;
 its22 post-rejection assemblies cost0.14784s. Main also matches all model files;
 1004 post-rejection assemblies cost12.0536s of164.03s wall. Bounded single-owner
 reuse is a candidate, not an achieved speedup; no dense cache is justified.
+The default-off implementation now has repeated same-binary1k and independent
+2.5k mapper replay evidence: all model files match Legacy exactly.1k wall is
+3.73/3.94s off versus3.44/3.48s on;2.5k is38.50/37.69s versus35.63/36.16s.
+RSS does not show a reduction. These observed improvements are not10k or E2E
+proof. Synthetic parity now explicitly requires rejected→accepted→rejected
+transitions and full iteration/final-state equality. Next verify5k/10k parity/resources,
+then revisit unresolved accuracy and full-pipeline gates without promoting
+this experimental policy prematurely.
+Update: derived5k repeats match model bytes but wall ranges overlap. Full10k
+also matches all model bytes in four runs, but ON112.67/113.79s is slower than
+OFF102.32/99.99s. RSS is essentially unchanged (~1.22GiB). Keep reuse default
+off: this candidate does not meet the10k speed objective. Do not spend further
+unchanged tier replays on it; examine the overhead only with a bounded diagnosis,
+and retain unresolved quality/native-E2E work as the critical path. See
+`m8-openloris-10000-retry-reuse-v1.json` for the negative evidence.
 Do not replace the unresolved quality work with cache tuning: the retained
 atlas still fails the frozen COLMAP RMSE gate, and no final-tier/restart/100k
 or README performance promotion follows from these phase optimizations.

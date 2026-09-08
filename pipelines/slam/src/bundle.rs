@@ -3334,6 +3334,15 @@ impl BundleAdjustment {
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let mut converged = false;
         let mut block_symbolic_cache = None;
+        let mut rejected_system: Option<NormalEquationsBa> = None;
+        let allow_retry_reuse = config.reuse_rejected_pose_diagonal
+            && matches!(backend, BaSolveBackend::Legacy)
+            && config.linear_solver == LinearSolver::Sparse
+            && !pose_index.is_empty()
+            && velocity_index.is_empty()
+            && bias_index.is_empty()
+            && !config.refine_intrinsics
+            && !config.refine_distortion;
         let trace_phase_timing = std::env::var_os("VISLOC_BA_TRACE_PHASE_TIMING").is_some();
 
         for iteration in 0..config.max_iterations {
@@ -3356,22 +3365,27 @@ impl BundleAdjustment {
             ) || config.linear_solver == LinearSolver::Sparse;
             let use_landmark_qr =
                 matches!(&backend, BaSolveBackend::MatrixFree(runtime) if runtime.landmark_qr);
-            let mut system = (!use_landmark_qr).then(|| {
-                build_normal_equations(
-                    self,
-                    &intrinsics,
-                    &pose_index,
-                    &landmark_index,
-                    &velocity_index,
-                    &bias_index,
-                    &kernel,
-                    gnc_weights,
-                    config.parallel,
-                    prefer_pose_blocks,
-                )
+            let reused = rejected_system.is_some();
+            let mut system = rejected_system.take().or_else(|| {
+                (!use_landmark_qr).then(|| {
+                    build_normal_equations(
+                        self,
+                        &intrinsics,
+                        &pose_index,
+                        &landmark_index,
+                        &velocity_index,
+                        &bias_index,
+                        &kernel,
+                        gnc_weights,
+                        config.parallel,
+                        prefer_pose_blocks,
+                    )
+                })
             });
-            if let Some(system) = &mut system {
-                constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, system);
+            if !reused {
+                if let Some(system) = &mut system {
+                    constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, system);
+                }
             }
             log_process_memory("ba-after-normal-equations");
             emit_phase("normal_equations", assembly_started);
@@ -3420,6 +3434,17 @@ impl BundleAdjustment {
             };
 
             let solve_started = trace_phase_timing.then(std::time::Instant::now);
+            // The sparse solver consumes only these undamped pose blocks.
+            // Keep O(P) blocks, not a second normal system or dense Hessian.
+            let original_diagonal = if allow_retry_reuse {
+                system.as_ref().and_then(|system| match &system.h_pp {
+                    CameraHessian::PoseDiagonal(blocks) => Some(blocks.clone()),
+                    CameraHessian::Dense(_) => None,
+                })
+            } else {
+                None
+            };
+            let retry_eligible = original_diagonal.is_some();
             let solve_result = match backend {
                 BaSolveBackend::Legacy => solve_step(
                     system.as_mut().expect("legacy normal system"),
@@ -3539,6 +3564,10 @@ impl BundleAdjustment {
                 }
             };
             emit_phase("linear_solve", solve_started);
+            if let Some(diagonal) = original_diagonal {
+                system.as_mut().expect("eligible normal system").h_pp =
+                    CameraHessian::PoseDiagonal(diagonal);
+            }
             if let Some(shadow) = qr_shadow {
                 match (&solve_result, shadow) {
                     (Ok((poses, points, _, _)), Ok(qr)) => {
@@ -3562,6 +3591,9 @@ impl BundleAdjustment {
             let (delta_poses, delta_landmarks, adaptive_prediction, quality) = match solve_result {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
+                    if retry_eligible {
+                        rejected_system = system.take();
+                    }
                     // Treat singular system the same as a rejected LM step:
                     // bump λ and retry.
                     let next_lambda = if adaptive_damping {
@@ -3744,6 +3776,9 @@ impl BundleAdjustment {
             }
 
             if !step_accepted {
+                if retry_eligible {
+                    rejected_system = system.take();
+                }
                 self.poses = saved_poses;
                 self.landmarks = saved_landmarks;
                 self.velocities = saved_velocities;
@@ -3884,6 +3919,9 @@ fn clear_visual_and_structural_costs(ba: &mut BundleAdjustment) {
 /// Configuration for [`BundleAdjustment::optimize`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BaConfig {
+    /// Reuse a rolled-back Legacy sparse pose-diagonal linearization. Keeps
+    /// one normal system plus O(P) undamped pose blocks; excludes dense paths.
+    pub reuse_rejected_pose_diagonal: bool,
     pub max_iterations: usize,
     pub initial_lambda: Option<f64>,
     pub lambda_increase_factor: f64,
@@ -3947,6 +3985,7 @@ pub struct BaConfig {
 impl Default for BaConfig {
     fn default() -> Self {
         Self {
+            reuse_rejected_pose_diagonal: false,
             max_iterations: 20,
             initial_lambda: Some(1e-4),
             lambda_increase_factor: 10.0,
@@ -10854,6 +10893,62 @@ mod implicit_schur {
 mod matrix_free_ba_api_tests {
     use super::*;
     use nalgebra::{UnitQuaternion, Vector3};
+
+    #[test]
+    fn rejected_pose_diagonal_reuse_preserves_iteration_trace_and_state() {
+        let original = make_problem();
+        let config = BaConfig {
+            max_iterations: 80,
+            step_tolerance: 0.0,
+            cost_tolerance: 0.0,
+            linear_solver: LinearSolver::Sparse,
+            ..BaConfig::default()
+        };
+        let mut control = original.clone();
+        let mut candidate = original.clone();
+        let expected = control.optimize(&config).unwrap();
+        let actual = candidate
+            .optimize(&BaConfig {
+                reuse_rejected_pose_diagonal: true,
+                ..config
+            })
+            .unwrap();
+        assert!(expected.iterations.iter().any(|step| step.step_accepted));
+        assert!(
+            expected.iterations.windows(3).any(|steps| {
+                !steps[0].step_accepted && steps[1].step_accepted && !steps[2].step_accepted
+            }),
+            "fixture must exercise rejection, acceptance and renewed rejection: {:?}",
+            expected
+                .iterations
+                .iter()
+                .map(|s| s.step_accepted)
+                .collect::<Vec<_>>()
+        );
+        assert!(expected
+            .iterations
+            .windows(2)
+            .any(|steps| !steps[0].step_accepted && !steps[1].step_accepted));
+        assert_eq!(expected, actual);
+        assert_eq!(control, candidate);
+        // Dense dispatch remains outside the reuse policy.
+        let dense = BaConfig {
+            linear_solver: LinearSolver::Dense,
+            ..config
+        };
+        let mut control = original.clone();
+        let mut candidate = original;
+        assert_eq!(
+            control.optimize(&dense).unwrap(),
+            candidate
+                .optimize(&BaConfig {
+                    reuse_rejected_pose_diagonal: true,
+                    ..dense
+                })
+                .unwrap()
+        );
+        assert_eq!(control, candidate);
+    }
 
     fn make_problem() -> BundleAdjustment {
         let camera = Camera::pinhole(7, 640, 480, 420.0, 418.0, 320.0, 240.0);

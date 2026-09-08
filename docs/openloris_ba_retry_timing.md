@@ -55,3 +55,82 @@ or exact rollback; discard after every accepted update. All other backends,
 scaled systems and dense/navigation paths remain unchanged. Require enabled
 and disabled per-iteration numerical traces and model hashes to match, plus
 reject→accept→reject invalidation tests, fixed-state tests and RSS measurements.
+
+Initial implementation adds default-off `BaConfig::reuse_rejected_pose_diagonal`.
+It moves one normal system across rejections and restores only the consumed
+undamped pose-diagonal blocks. Dense systems, other backends, navigation slots
+and calibration refinement are excluded; accepted states discard the system.
+A synthetic test with accepted and consecutive rejected iterations matches
+the full public iteration result and final state exactly, and checks dense
+dispatch remains unchanged. Native CLI integration is available through
+`--ba-reuse-rejected-pose-diagonal` (default off). An explicitly enabled native
+fixture passes fixed-state checks with and without external boundary observations.
+Its matrix-free-only unsupported-calibration rollback assertion is not applied
+to Legacy, which supports that configuration. This is not evidence of cache-hit
+coverage or rejected-step rollback in that native fixture. The separate synthetic
+transition test is described below; larger-tier resource/parity gates remain pending. The existing39
+native tests passed before this additional enabled fixture.
+
+The first real-input1k replay uses one saved release binary at source0466499,
+with only the reuse flag changed. Control, candidate-a, candidate-b and
+control-repeat all match the retained Legacy cameras/images/points3D bytes.
+Wall times are3.73/3.94s off and3.44/3.48s on; peak RSS is81944/81968KiB off
+and82008/82200KiB on. The two candidate observations are faster but memory
+is not reduced. These are mapper replays with retained frontend inputs,
+not native E2E or a COLMAP comparison. The policy remains default off pending
+larger-tier parity/resource tests (transition coverage is recorded below).
+See `benchmarks/electro/m8-openloris-1000-retry-reuse-v1.json` for commands,
+binary hash, full logs, resource reports and output hashes.
+
+Independent2.5k verified-pair mapper replay also matches every retained Legacy
+model file in all four runs. Wall times are38.50/37.69s off and35.63/36.16s on;
+peak RSS is412748/413244KiB off and412980/413008KiB on. Candidate wall is lower
+in both observations; RSS overlaps. No memory reduction or COLMAP/native E2E
+claim follows. Commands and exact audit program are frozen in
+`benchmarks/electro/m8-openloris-2500-retry-reuse-v1.json`.
+
+Transition coverage is now explicit: the synthetic parity test requires a
+consecutive rejected→accepted→rejected triple, in addition to consecutive
+rejections, before asserting equality of every public iteration statistic and
+the complete final problem state. This passes with default sparse damping;
+no benchmark input or solver setting was tuned to manufacture the transition.
+This closes the previously pending transition fixture requirement, not the
+larger-tier, full-pipeline or memory-reduction gates.
+
+The first derived5k-prefix pair is byte-identical to the retained Legacy model
+for both policies:54.58s off versus53.07s on,722484 versus722808KiB peak RSS.
+The difference is small and repetitions remain pending; do not infer a robust
+speedup or memory reduction. This uses a prefix of the10k frontend, not an
+independent5k end-to-end run. Completed and pending commands are distinguished
+in `benchmarks/electro/m8-openloris-5000-retry-reuse-v1.json`.
+
+Both5k repeats have now completed with every model file exactly matching
+Legacy. Off wall is54.58/74.53s and on is53.07/64.05s; ranges overlap and
+substantial run variation precludes a stable general speedup claim. Peak RSS
+is722484/722936KiB off and722808/722860KiB on, with no reduction established.
+All four logs and resource reports are retained in the same evidence artifact.
+
+First full10k pair: all six model files match retained Legacy for both policies,
+but candidate wall112.67s is slower than control102.32s. Peak RSS is1274380KiB
+on versus1274584KiB off (both below2GiB, no meaningful reduction established).
+Do not extrapolate smaller-tier speed observations to10k. Repeats remain pending.
+Parity preserves the failing9936-image/4968-frame baseline, not COLMAP-quality
+success. Frontend is excluded. Full evidence and pending commands are in
+`benchmarks/electro/m8-openloris-10000-retry-reuse-v1.json`.
+
+Full10k repetitions complete: off102.32/99.99s versus on112.67/113.79s.
+Both candidate runs are slower than both controls, despite all six model files
+matching Legacy in every run. RSS off1274584/1274644KiB versus on1274380/1274444KiB
+does not establish meaningful memory reduction. Do not promote this policy as
+a10k speedup; keep default off. Smaller-tier observations do not override this
+negative result. The retained quality baseline still fails COLMAP gates.
+
+A bounded traced diagnostic pair confirms that reuse works:2722 post-rejection
+assembly events total4.4798s off versus0.00105s on, with matching phase counts
+and all six model hashes unchanged. Linear solve remains roughly31–32s total.
+Traced wall is101.10s off versus98.68s on, inconsistent with the earlier
+untraced slowdown. Do not pool the two instrumentation conditions or claim
+an allocator/cache cause: the earlier slowdown is not localized by this pair.
+The assembly opportunity is only about4.4% of this control wall. Keep default
+off; stable representative benefit and COLMAP-quality success are unproven.
+See `benchmarks/electro/m8-openloris-10000-retry-phase-v1.json`.
