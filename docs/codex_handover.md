@@ -1,5 +1,23 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+## 現在の状態（以下の過去ログより優先）
+
+- branch: `test/m8-extraction-replay-preflight`。サブエージェントは使わない。
+- 抽出session37896は終了コード0で完了。再poll・再起動不要。
+  1,250画像/2,500 feature+loci files/585,615,663 bytesが保存済み出力と完全一致。
+  51:00.39、peak283,612KiB。他CPU負荷を観測したため単独速度比較には使わない。
+- 追加画像選択は692画像の順序を含むJSON全項目が一致。
+  結合は元特徴のみを距離判定対象にして1px以内を除外し、追加特徴同士は除去しない。
+  全10,000 feature filesの生成hashが一致（変更692、元と同一9,308）。
+  base/adaptiveバンクにlociはない。新規バンク書き出し・restartは未実装/未検証。
+- 証跡: extraction-shard0-replay-v1、supplement-selection-replay-v1、
+  adaptive-bank-replay-audit-v1（`benchmarks/electro/m8-openloris-*.json`）。
+- 次: このbranchのPR/最終CI、追加特徴バンクの安全な書き出し、
+  ペア追加の入力・順序・モード再現、continuous native E2E。
+  10k atlas RMSEのCOLMAP基準未達は未解決。M8–M10全goalは未完了。
+
+## 過去の作業ログ（稼働状態は上記で上書き）
+
 > PR115は最終headc09875aのCI9成功確認後、bbaa344d7d94c099ae8bfcbebba6f2668761d93bへmerge済み。
 > 旧branch削除、test/m8-extraction-replay-preflightはmainへrebase済み。
 > 抽出session37896は継続中（直近50/1250）。saved binaryなのでgit更新は実行内容へ影響しない。
