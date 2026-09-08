@@ -96,3 +96,10 @@ the complete final problem state. This passes with default sparse damping;
 no benchmark input or solver setting was tuned to manufacture the transition.
 This closes the previously pending transition fixture requirement, not the
 larger-tier, full-pipeline or memory-reduction gates.
+
+The first derived5k-prefix pair is byte-identical to the retained Legacy model
+for both policies:54.58s off versus53.07s on,722484 versus722808KiB peak RSS.
+The difference is small and repetitions remain pending; do not infer a robust
+speedup or memory reduction. This uses a prefix of the10k frontend, not an
+independent5k end-to-end run. Completed and pending commands are distinguished
+in `benchmarks/electro/m8-openloris-5000-retry-reuse-v1.json`.
