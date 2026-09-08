@@ -9084,9 +9084,27 @@ mod tests {
             parallel: false,
             ..BaConfig::default()
         };
+        let direct_frame_poses_before = frame_poses.clone();
+        let direct_observations_before = tracks
+            .iter()
+            .map(|track| track.observations.clone())
+            .collect::<Vec<_>>();
+        let direct_track_positions_before = tracks
+            .iter()
+            .map(|track| track.position)
+            .collect::<Vec<_>>();
         let mut matrix_free_frame_poses = frame_poses.clone();
         let mut matrix_free_image_poses = image_poses.clone();
         let mut matrix_free_tracks = tracks.clone();
+        let matrix_free_image_poses_before = matrix_free_image_poses.clone();
+        let matrix_free_observations_before = matrix_free_tracks
+            .iter()
+            .map(|track| track.observations.clone())
+            .collect::<Vec<_>>();
+        let matrix_free_track_positions_before = matrix_free_tracks
+            .iter()
+            .map(|track| track.position)
+            .collect::<Vec<_>>();
         let matrix_free_stats = run_rig_bundle_adjustment(
             &rig,
             &features,
@@ -9108,6 +9126,49 @@ mod tests {
         .unwrap()
         .expect("matrix-free native rig fixture should have observations");
         assert!(matrix_free_stats.final_cost <= matrix_free_stats.initial_cost);
+        assert!(matrix_free_frame_poses
+            .iter()
+            .zip(&direct_frame_poses_before)
+            .any(|(after, before)| after != before));
+        assert!(matrix_free_tracks
+            .iter()
+            .map(|track| track.position)
+            .zip(&matrix_free_track_positions_before)
+            .any(|(after, before)| after != *before));
+        assert_eq!(
+            matrix_free_tracks
+                .iter()
+                .map(|track| track.observations.clone())
+                .collect::<Vec<_>>(),
+            matrix_free_observations_before
+        );
+        assert!(matrix_free_image_poses
+            .iter()
+            .zip(&matrix_free_image_poses_before)
+            .any(|(after, before)| after != before));
+        let matrix_free_after_tracks = public_tracks(&matrix_free_tracks);
+        let (matrix_free_after_sum, matrix_free_after_count) = reprojection_error(
+            &rig,
+            &image_assignment,
+            &matrix_free_image_poses,
+            &matrix_free_after_tracks,
+        );
+        let matrix_free_after_reprojection = matrix_free_after_sum / matrix_free_after_count as f64;
+        let matrix_free_after_center_error = (matrix_free_frame_poses[1]
+            .as_ref()
+            .unwrap()
+            .camera_center_world()
+            - truth[1].camera_center_world())
+        .norm();
+        let matrix_free_after_landmark_error = matrix_free_tracks
+            .iter()
+            .zip(&world_points)
+            .map(|(track, point)| (track.position.unwrap() - point).norm())
+            .sum::<f64>()
+            / world_points.len() as f64;
+        assert!(matrix_free_after_reprojection < before_reprojection);
+        assert!(matrix_free_after_center_error < before_center_error);
+        assert!(matrix_free_after_landmark_error < before_landmark_error);
         for (before, after) in rotations_before.iter().zip(&matrix_free_frame_poses) {
             assert!(before.angle_to(&after.as_ref().unwrap().world_to_camera.rotation) < 1.0e-10);
         }
@@ -9126,8 +9187,10 @@ mod tests {
             &mut image_poses,
             &mut tracks,
         )
-        .unwrap();
-        assert!(stats.is_some());
+        .unwrap()
+        .expect("direct native rig fixture should have observations");
+        assert_eq!(matrix_free_stats.observations, stats.observations);
+        assert_eq!(matrix_free_stats.initial_cost, stats.initial_cost);
         for (before, after) in rotations_before.iter().zip(&frame_poses) {
             assert!(before.angle_to(&after.as_ref().unwrap().world_to_camera.rotation) < 1.0e-10);
         }
@@ -9147,6 +9210,22 @@ mod tests {
         assert!(after_reprojection < before_reprojection);
         assert!(after_center_error < before_center_error);
         assert!(after_landmark_error < before_landmark_error);
+        assert!(frame_poses
+            .iter()
+            .zip(&direct_frame_poses_before)
+            .any(|(after, before)| after != before));
+        assert!(tracks
+            .iter()
+            .map(|track| track.position)
+            .zip(&direct_track_positions_before)
+            .any(|(after, before)| after != *before));
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.observations.clone())
+                .collect::<Vec<_>>(),
+            direct_observations_before
+        );
 
         let landmark_only_frame_poses = matrix_free_frame_poses.clone();
         let mut landmark_only_image_poses = matrix_free_image_poses.clone();
@@ -9177,6 +9256,8 @@ mod tests {
         let rejected_frame_poses = matrix_free_frame_poses.clone();
         let mut rejected_image_poses = landmark_only_image_poses.clone();
         let mut rejected_tracks = landmark_only_tracks.clone();
+        let rejected_image_poses_before = rejected_image_poses.clone();
+        let rejected_tracks_before = rejected_tracks.clone();
         let error = run_rig_bundle_adjustment(
             &rig,
             &features,
@@ -9203,6 +9284,8 @@ mod tests {
             matches!(error, RigSfmError::BundleAdjustment(message) if message.contains("matrix-free"))
         );
         assert_eq!(matrix_free_frame_poses, rejected_frame_poses);
+        assert_eq!(rejected_image_poses, rejected_image_poses_before);
+        assert_eq!(rejected_tracks, rejected_tracks_before);
     }
 
     #[test]
