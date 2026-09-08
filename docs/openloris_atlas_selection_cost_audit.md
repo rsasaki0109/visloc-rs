@@ -189,3 +189,12 @@ source replay must explicitly save argv, environment policy, immutable binary
 and input hashes, output hashes, exit status, wall and RSS for every unique
 execution, then include frontend and atlas alignment/integration phases.
 Do not silently guess historical flags to make a parity claim.
+
+First concrete source replay uses the recorded650-start/500-frame command,
+the saved0466499 binary and a new output directory. It completes in36.60s
+with340100KiB peak RSS, and all three output model files exactly match the
+historical source. This demonstrates one reproducible source output under the
+new recorded execution, not the historical binary/environment or full E2E.
+See `benchmarks/electro/m8-openloris-source-replay-650-v1.json` for argv,
+resource report, full log and old/new output hashes. The other20 executions
+and frontend/alignment/integration accounting remain outside this replay.
