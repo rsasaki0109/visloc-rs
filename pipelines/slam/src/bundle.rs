@@ -3384,11 +3384,12 @@ impl BundleAdjustment {
             // changing the Legacy update. Strict caps bound duplicate storage.
             let qr_shadow = if matches!(&backend, BaSolveBackend::Legacy)
                 && std::env::var("VISLOC_SFM_DEBUG_QR_SHARED_STATE").as_deref() == Ok("1")
-                && pose_index.len() <= 60
-                && self.poses.len() <= 64
-                && self.landmarks.len() <= 1024
-                && self.rig_observations.len() <= 20000
-                && !self.rig_observations.is_empty()
+                && qr_shadow_dimensions_allowed(
+                    pose_index.len(),
+                    self.poses.len(),
+                    self.landmarks.len(),
+                    self.rig_observations.len(),
+                )
                 && self.observations.is_empty()
                 && self.stereo_observations.is_empty()
                 && self.general_stereo_observations.is_empty()
@@ -8476,6 +8477,35 @@ fn general_stereo_residual_jacobians(
         .fixed_rows_mut::<2>(2)
         .copy_from(&j_right_landmark);
     Some((residual, j_pose, j_landmark))
+}
+
+fn qr_shadow_dimensions_allowed(
+    variable_poses: usize,
+    poses: usize,
+    landmarks: usize,
+    rows: usize,
+) -> bool {
+    variable_poses <= 60 && poses <= 64 && landmarks <= 1024 && (1..=20000).contains(&rows)
+}
+
+#[test]
+fn qr_shadow_caps_reject_oversized_diagnostics() {
+    assert!(qr_shadow_dimensions_allowed(60, 64, 1024, 20000));
+    for dimensions in [
+        (61, 64, 1024, 20000),
+        (60, 65, 1024, 20000),
+        (60, 64, 1025, 20000),
+        (60, 64, 1024, 20001),
+        (60, 64, 1024, 0),
+        (usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+    ] {
+        assert!(!qr_shadow_dimensions_allowed(
+            dimensions.0,
+            dimensions.1,
+            dimensions.2,
+            dimensions.3
+        ));
+    }
 }
 
 #[allow(clippy::result_large_err)] // Same diagnostic payload as the existing linear-step boundary.

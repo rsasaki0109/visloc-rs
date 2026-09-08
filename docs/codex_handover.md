@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 同一状態診断: PR #97はCI9項目通過後 `ee3764e` へmerge、旧branch整理済み。
+> 現branch `diag/m8-qr-shared-state`。build `0cd9ec4` のLegacy shadowで全688状態を比較。
+> 出力はchampion bytes一致。QR成功571、失敗117（MaxIterations114/ResidualCheck3）。
+> 成功時の正規化pose/point差は最大3.083e-6/3.537e-6。ただし同一LM採否は未証明。
+> 診断上限の境界テスト含むQR8テスト/clippy通過。PR/CI/mergeは未完了。
+> 別々の軌跡の棄却件数だけでは原因を決めない。実データ証跡 `m8-openloris-qr-shared-state-v1.json`。
+
 > QR follow-up: PR #96はCI9項目通過後 `bcbe2d5` へmerge、旧branch整理済み。
 > 現branch `perf/m8-qr-validation-scans`、重複全pose検査を除去 (`4072e05`, build `c7c3d8b`)。
 > Legacy/QRモデルは変更前bytes一致。QR12.59/13.12 s対旧QR対照19.35 s、Legacy4.60 s。
