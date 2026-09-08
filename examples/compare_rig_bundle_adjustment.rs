@@ -23,7 +23,7 @@ use visloc_rs::slam::{
 use visloc_rs::{Camera, CameraModel, Pose, SE3};
 
 const USAGE: &str = "usage: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
-    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--matrix-free-column-scaling] [--matrix-free-adaptive-damping] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
+    --solver direct|matrix-free --out-dir PATH [--fixed-frame-id U64] [--allow-unsupported-sensor-images] [--fixed-landmark-ids PATH] [--matrix-free-column-scaling] [--matrix-free-adaptive-damping] [--pcg-max-iterations N] [--pcg-relative-tolerance X] [--pcg-max-restarts 0|1]\n\
     or: compare_rig_bundle_adjustment --model PATH --rig-manifest PATH \\
     --export-oracle-fixture PATH";
 const CENTER_TOLERANCE_M: f64 = 1.0e-4;
@@ -46,6 +46,8 @@ const ORACLE_MAX_LANDMARKS: usize = 8_192;
 const ORACLE_MAX_OBSERVATIONS: usize = 262_144;
 const ORACLE_MAX_SCHUR_SCALARS: usize = 3_072;
 const ORACLE_MAX_CROSS_PAIR_WORK: usize = 64_000_000;
+const MAX_FIXED_LANDMARK_FILE_BYTES: usize = 64 * 1024;
+const MAX_FIXED_LANDMARK_IDS: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SolverArm {
@@ -87,6 +89,7 @@ struct Args {
     fixed_frame_explicit: bool,
     allow_unsupported_sensor_images: bool,
     allow_unsupported_sensor_images_explicit: bool,
+    fixed_landmark_ids: Option<PathBuf>,
     matrix_free_column_scaling: bool,
     matrix_free_adaptive_damping: bool,
     oracle_fixture_out: Option<PathBuf>,
@@ -218,6 +221,8 @@ where
     let mut fixed_frame_seen = false;
     let mut allow_unsupported_sensor_images = false;
     let mut allow_unsupported_seen = false;
+    let mut fixed_landmark_ids = None;
+    let mut fixed_landmark_ids_seen = false;
     let mut matrix_free_column_scaling = false;
     let mut matrix_free_column_scaling_seen = false;
     let mut matrix_free_adaptive_damping = false;
@@ -266,6 +271,20 @@ where
             }
             allow_unsupported_seen = true;
             allow_unsupported_sensor_images = true;
+            continue;
+        }
+        if flag == "--fixed-landmark-ids" {
+            if fixed_landmark_ids_seen {
+                return Err(format!("duplicate argument {flag}\n{USAGE}"));
+            }
+            fixed_landmark_ids_seen = true;
+            let value = values
+                .next()
+                .ok_or_else(|| format!("{flag} requires a path\n{USAGE}"))?;
+            if value.starts_with('-') {
+                return Err(format!("{flag} requires a path, got {value:?}\n{USAGE}"));
+            }
+            set_path(&mut fixed_landmark_ids, &flag, value)?;
             continue;
         }
         if flag == "--matrix-free-column-scaling" {
@@ -373,12 +392,13 @@ where
             || pcg_restarts_seen
             || fixed_frame_seen
             || allow_unsupported_seen
+            || fixed_landmark_ids_seen
             || matrix_free_column_scaling_seen
             || matrix_free_adaptive_damping_seen)
     {
         return Err(format!(
             "--export-oracle-fixture is a standalone operation; do not combine it with \
-             --solver, --out-dir, --fixed-frame-id, --allow-unsupported-sensor-images, \
+             --solver, --out-dir, --fixed-frame-id, --allow-unsupported-sensor-images, --fixed-landmark-ids, \
              --matrix-free-column-scaling, --matrix-free-adaptive-damping, --pcg-max-iterations, --pcg-relative-tolerance or \
              --pcg-max-restarts\n{USAGE}"
         ));
@@ -402,6 +422,7 @@ where
         fixed_frame_explicit: fixed_frame_seen,
         allow_unsupported_sensor_images,
         allow_unsupported_sensor_images_explicit: allow_unsupported_seen,
+        fixed_landmark_ids,
         matrix_free_column_scaling,
         matrix_free_adaptive_damping,
         oracle_fixture_out,
@@ -442,6 +463,13 @@ where
             "adaptive damping requires PCG max_iterations=512, relative_tolerance=1e-8, and max_restarts=0\n{USAGE}"
         ));
     }
+    if args.fixed_landmark_ids.is_some()
+        && !(args.solver == Some(SolverArm::MatrixFree) && matrix_free_adaptive_damping)
+    {
+        return Err(format!(
+            "--fixed-landmark-ids requires --solver matrix-free --matrix-free-column-scaling --matrix-free-adaptive-damping\n{USAGE}"
+        ));
+    }
     Ok(args)
 }
 
@@ -471,6 +499,16 @@ fn run(args: &Args) -> Result<(), String> {
         args.fixed_frame_id,
         args.allow_unsupported_sensor_images,
     )?;
+    let fixed_landmark_selection = if let Some(path) = &args.fixed_landmark_ids {
+        let source_hashes = hash_source_inputs(&args.model, &args.rig_manifest)?;
+        Some(parse_fixed_landmark_ids(
+            path,
+            &source_hashes.combined,
+            &source.point_indices,
+        )?)
+    } else {
+        None
+    };
     if args.oracle_fixture_out.is_none() {
         let out_dir = args
             .out_dir
@@ -480,6 +518,15 @@ fn run(args: &Args) -> Result<(), String> {
     }
 
     let mut prepared = build_problem_with_anchor(&source, &manifest, args.fixed_frame_id)?;
+    if let Some(selection) = &fixed_landmark_selection {
+        for &landmark_id in &selection.ids {
+            prepared.ba.fix_landmark(landmark_id);
+        }
+    }
+    let fixed_landmark_snapshot = fixed_landmark_selection
+        .as_ref()
+        .map(|selection| snapshot_fixed_landmarks(&source, &prepared.ba, &selection.ids))
+        .transpose()?;
     if let Some(fixture_path) = &args.oracle_fixture_out {
         let source_hashes = hash_source_inputs(&args.model, &args.rig_manifest)?;
         export_oracle_fixture(
@@ -524,8 +571,9 @@ fn run(args: &Args) -> Result<(), String> {
         ..BaConfig::default()
     };
     let solver_started = Instant::now();
-    let policy_explicit =
-        args.fixed_frame_explicit || args.allow_unsupported_sensor_images_explicit;
+    let policy_explicit = args.fixed_frame_explicit
+        || args.allow_unsupported_sensor_images_explicit
+        || fixed_landmark_selection.is_some();
     if policy_explicit {
         println!(
             "rig_driver_policy fixed_frame_id={} allow_unsupported_sensor_images={} source_supported_image_count={} source_image_count={}",
@@ -533,6 +581,19 @@ fn run(args: &Args) -> Result<(), String> {
             args.allow_unsupported_sensor_images,
             source_supported_image_count(&source),
             source.images.len(),
+        );
+    }
+    if let Some(selection) = &fixed_landmark_selection {
+        println!(
+            "fixed_landmark_policy enabled=true list={} list_sha256={} source_sha256={} declared_count={} actual_fixed_landmarks={}",
+            args.fixed_landmark_ids
+                .as_deref()
+                .expect("selection requires fixed-landmark path")
+                .display(),
+            selection.list_sha256,
+            selection.source_sha256,
+            selection.ids.len(),
+            prepared.ba.fixed_landmarks.len(),
         );
     }
     if args.matrix_free_column_scaling {
@@ -658,7 +719,17 @@ fn run(args: &Args) -> Result<(), String> {
     if !final_cost.is_finite() {
         return Err("final BA cost is non-finite".to_owned());
     }
-    publish_model_with_anchor(out_dir, &source, &manifest, &prepared, args.fixed_frame_id)?;
+    if let Some(snapshot) = &fixed_landmark_snapshot {
+        ensure_fixed_landmarks_unchanged(&prepared.ba, snapshot)?;
+    }
+    publish_model_with_anchor_and_fixed_landmarks(
+        out_dir,
+        &source,
+        &manifest,
+        &prepared,
+        args.fixed_frame_id,
+        fixed_landmark_selection.as_ref(),
+    )?;
     let total_seconds = total_started.elapsed().as_secs_f64();
     let summary = RunSummary {
         solver,
@@ -669,6 +740,7 @@ fn run(args: &Args) -> Result<(), String> {
         solver_seconds,
         total_seconds,
     };
+    let fixed_landmark_count = prepared.ba.fixed_landmarks.len();
     let solver_name = if args.matrix_free_adaptive_damping {
         "matrix-free-column-scaled-adaptive"
     } else if args.matrix_free_column_scaling {
@@ -682,7 +754,7 @@ fn run(args: &Args) -> Result<(), String> {
             _ => 0,
         };
         println!(
-            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 adaptive_damping=true adaptive_iterations={} prediction_coordinates=scaled prediction=undamped_squared_cost acceptance_rho=actual_same_observation_cost_decrease_over_prediction accepted_lambda_factor=max_1_3_1_minus_centered_rho_cubed solver_seconds={:.6} total_seconds={:.6} out={}",
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks={} allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 adaptive_damping=true adaptive_iterations={} prediction_coordinates=scaled prediction=undamped_squared_cost acceptance_rho=actual_same_observation_cost_decrease_over_prediction accepted_lambda_factor=max_1_3_1_minus_centered_rho_cubed solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
             summary.initial_cost,
             summary.final_cost,
@@ -702,6 +774,7 @@ fn run(args: &Args) -> Result<(), String> {
                 .map(|point| point.observations.len())
                 .sum::<usize>(),
             args.fixed_frame_id,
+            fixed_landmark_count,
             args.allow_unsupported_sensor_images,
             source_supported_image_count(&source),
             args.pcg_max_iterations,
@@ -714,7 +787,7 @@ fn run(args: &Args) -> Result<(), String> {
         );
     } else if args.matrix_free_column_scaling {
         println!(
-            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 residual_coordinates=scaled damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d column_scaling_diagonal=clamp_hjj[1e-6,1e32] solver_seconds={:.6} total_seconds={:.6} out={}",
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks={} allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts=0 residual_coordinates=scaled damping_coordinates=scaled damping_metric=identity physical_damping_metric=diag_d column_scaling_diagonal=clamp_hjj[1e-6,1e32] solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
             summary.initial_cost,
             summary.final_cost,
@@ -734,6 +807,7 @@ fn run(args: &Args) -> Result<(), String> {
                 .map(|point| point.observations.len())
                 .sum::<usize>(),
             args.fixed_frame_id,
+            fixed_landmark_count,
             args.allow_unsupported_sensor_images,
             source_supported_image_count(&source),
             args.pcg_max_iterations,
@@ -748,7 +822,7 @@ fn run(args: &Args) -> Result<(), String> {
         let total_failed_rechecks = result_restart_failed_rechecks(&optimization);
         let total_restarts = result_restart_count(&optimization);
         println!(
-            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts={} pcg_true_residual_rechecks={} pcg_failed_true_residual_rechecks={} pcg_restarts={} solver_seconds={:.6} total_seconds={:.6} out={}",
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks={} allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} pcg_max_restarts={} pcg_true_residual_rechecks={} pcg_failed_true_residual_rechecks={} pcg_restarts={} solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
             summary.initial_cost,
             summary.final_cost,
@@ -768,6 +842,7 @@ fn run(args: &Args) -> Result<(), String> {
                 .map(|point| point.observations.len())
                 .sum::<usize>(),
             args.fixed_frame_id,
+            fixed_landmark_count,
             args.allow_unsupported_sensor_images,
             source_supported_image_count(&source),
             args.pcg_max_iterations,
@@ -783,7 +858,7 @@ fn run(args: &Args) -> Result<(), String> {
         );
     } else if args.pcg_relative_tolerance_explicit && !policy_explicit {
         println!(
-            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
             summary.initial_cost,
             summary.final_cost,
@@ -793,6 +868,7 @@ fn run(args: &Args) -> Result<(), String> {
             manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
             source.points.len(),
             source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            fixed_landmark_count,
             args.pcg_max_iterations,
             args.pcg_relative_tolerance,
             PCG_TOLERANCE,
@@ -802,7 +878,7 @@ fn run(args: &Args) -> Result<(), String> {
         );
     } else if policy_explicit {
         println!(
-            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks=0 allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose={} fixed_landmarks={} allow_unsupported_sensor_images={} source_supported_image_count={} pcg_max_iterations={} pcg_relative_tolerance={:.17e} pcg_absolute_tolerance={:.17e} solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
             summary.initial_cost,
             summary.final_cost,
@@ -822,6 +898,7 @@ fn run(args: &Args) -> Result<(), String> {
                 .map(|point| point.observations.len())
                 .sum::<usize>(),
             args.fixed_frame_id,
+            fixed_landmark_count,
             args.allow_unsupported_sensor_images,
             source_supported_image_count(&source),
             args.pcg_max_iterations,
@@ -833,7 +910,7 @@ fn run(args: &Args) -> Result<(), String> {
         );
     } else {
         println!(
-            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks=0 pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
+            "solver={} initial_cost={:.15e} final_cost={:.15e} lm_iterations={} converged={} source_images={} source_frames={} source_landmarks={} source_observations={} fixed_pose=0 fixed_landmarks={} pcg_max_iterations={} pcg_tolerance={:.1e} solver_seconds={:.6} total_seconds={:.6} out={}",
             solver_name,
             summary.initial_cost,
             summary.final_cost,
@@ -843,6 +920,7 @@ fn run(args: &Args) -> Result<(), String> {
             manifest.assignments.values().map(|assignment| assignment.frame_id).collect::<BTreeSet<_>>().len(),
             source.points.len(),
             source.points.iter().map(|point| point.observations.len()).sum::<usize>(),
+            fixed_landmark_count,
             args.pcg_max_iterations,
             PCG_TOLERANCE,
             summary.solver_seconds,
@@ -871,11 +949,32 @@ fn validate_input_paths(args: &Args) -> Result<(), String> {
             return Err(format!("model is missing {file}: {}", args.model.display()));
         }
     }
+    if let Some(fixed_landmark_ids) = &args.fixed_landmark_ids {
+        let metadata = fs::symlink_metadata(fixed_landmark_ids).map_err(|error| {
+            format!(
+                "inspect fixed-landmark list {}: {error}",
+                fixed_landmark_ids.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "fixed-landmark list is not a regular file: {}",
+                fixed_landmark_ids.display()
+            ));
+        }
+    }
     if let Some(fixture) = &args.oracle_fixture_out {
         validate_fixture_output_path(fixture, &args.model, &args.rig_manifest)?;
     } else if let Some(out_dir) = &args.out_dir {
         if paths_overlap(out_dir, &args.model)? || paths_overlap(out_dir, &args.rig_manifest)? {
             return Err("--out-dir overlaps an input path; refusing to publish".to_owned());
+        }
+        if let Some(fixed_landmark_ids) = &args.fixed_landmark_ids {
+            if paths_overlap(out_dir, fixed_landmark_ids)? {
+                return Err(
+                    "--out-dir overlaps the fixed-landmark list; refusing to publish".to_owned(),
+                );
+            }
         }
     }
     Ok(())
@@ -935,6 +1034,13 @@ struct SourceHashes {
     combined: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FixedLandmarkSelection {
+    ids: BTreeSet<u64>,
+    list_sha256: String,
+    source_sha256: String,
+}
+
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -950,6 +1056,157 @@ fn hash_file(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn parse_fixed_landmark_ids(
+    path: &Path,
+    expected_source_sha256: &str,
+    known_landmarks: &BTreeMap<u64, usize>,
+) -> Result<FixedLandmarkSelection, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect fixed-landmark list {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "fixed-landmark list is not a regular file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_FIXED_LANDMARK_FILE_BYTES as u64 {
+        return Err(format!(
+            "fixed-landmark list exceeds {} bytes: {}",
+            MAX_FIXED_LANDMARK_FILE_BYTES,
+            metadata.len()
+        ));
+    }
+    let file = fs::File::open(path)
+        .map_err(|error| format!("read fixed-landmark list {}: {error}", path.display()))?;
+    let mut bytes =
+        Vec::with_capacity(MAX_FIXED_LANDMARK_FILE_BYTES.min(metadata.len() as usize) + 1);
+    file.take((MAX_FIXED_LANDMARK_FILE_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read fixed-landmark list {}: {error}", path.display()))?;
+    if bytes.len() > MAX_FIXED_LANDMARK_FILE_BYTES {
+        return Err(format!(
+            "fixed-landmark list exceeds {} bytes",
+            MAX_FIXED_LANDMARK_FILE_BYTES
+        ));
+    }
+    let contents = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("fixed-landmark list is not UTF-8: {error}"))?;
+    let data_lines = contents
+        .lines()
+        .enumerate()
+        .filter_map(|(line_index, raw)| {
+            let line = raw.trim();
+            (!line.is_empty() && !line.starts_with('#')).then_some((line_index + 1, line))
+        })
+        .collect::<Vec<_>>();
+    if data_lines.len() < 2 {
+        return Err("fixed-landmark list requires SOURCE_SHA256 and COUNT data lines".to_owned());
+    }
+    let source_fields = data_lines[0].1.split_whitespace().collect::<Vec<_>>();
+    if source_fields.len() != 2 || source_fields[0] != "SOURCE_SHA256" {
+        return Err(format!(
+            "fixed-landmark list line {} must be `SOURCE_SHA256 <sha256>`",
+            data_lines[0].0
+        ));
+    }
+    let source_sha256 = source_fields[1];
+    if !is_lower_sha256(source_sha256) {
+        return Err(format!(
+            "fixed-landmark list line {} has invalid lowercase SOURCE_SHA256",
+            data_lines[0].0
+        ));
+    }
+    if source_sha256 != expected_source_sha256 {
+        return Err(format!(
+            "fixed-landmark list SOURCE_SHA256 mismatch: expected {expected_source_sha256}, got {source_sha256}"
+        ));
+    }
+    let count_fields = data_lines[1].1.split_whitespace().collect::<Vec<_>>();
+    if count_fields.len() != 2 || count_fields[0] != "COUNT" {
+        return Err(format!(
+            "fixed-landmark list line {} must be `COUNT <N>`",
+            data_lines[1].0
+        ));
+    }
+    if count_fields[1].is_empty() || !count_fields[1].bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "fixed-landmark list line {} has malformed COUNT",
+            data_lines[1].0
+        ));
+    }
+    let count = count_fields[1].parse::<usize>().map_err(|error| {
+        format!(
+            "fixed-landmark list line {} has invalid COUNT: {error}",
+            data_lines[1].0
+        )
+    })?;
+    if count > MAX_FIXED_LANDMARK_IDS {
+        return Err(format!(
+            "fixed-landmark list COUNT exceeds {}: {}",
+            MAX_FIXED_LANDMARK_IDS, count
+        ));
+    }
+    if data_lines.len() != 2 + count {
+        return Err(format!(
+            "fixed-landmark list COUNT mismatch: declared {}, found {} LANDMARK rows",
+            count,
+            data_lines.len().saturating_sub(2)
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut previous = None;
+    for &(line_number, line) in data_lines.iter().skip(2) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 2 || fields[0] != "LANDMARK" {
+            return Err(format!(
+                "fixed-landmark list line {line_number} must be `LANDMARK <u64>`"
+            ));
+        }
+        if fields[1].is_empty() || !fields[1].bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!(
+                "fixed-landmark list line {line_number} has malformed landmark id"
+            ));
+        }
+        let id = fields[1].parse::<u64>().map_err(|error| {
+            format!("fixed-landmark list line {line_number} has invalid landmark id: {error}")
+        })?;
+        if previous.is_some_and(|previous| id <= previous) {
+            return Err(format!(
+                "fixed-landmark list IDs must be strictly ascending at line {line_number}"
+            ));
+        }
+        if !known_landmarks.contains_key(&id) {
+            return Err(format!(
+                "fixed-landmark list references unknown landmark {id}"
+            ));
+        }
+        if !ids.insert(id) {
+            return Err(format!(
+                "fixed-landmark list contains duplicate landmark {id}"
+            ));
+        }
+        previous = Some(id);
+    }
+    Ok(FixedLandmarkSelection {
+        ids,
+        list_sha256: hash_bytes(&bytes),
+        source_sha256: source_sha256.to_owned(),
+    })
 }
 
 fn hash_source_inputs(model_dir: &Path, rig_manifest: &Path) -> Result<SourceHashes, String> {
@@ -2153,6 +2410,53 @@ fn build_problem_with_anchor(
     Ok(PreparedProblem { ba })
 }
 
+type FixedLandmarkSnapshot = BTreeMap<u64, [u64; 3]>;
+
+fn point_bits(point: &Point3<f64>) -> [u64; 3] {
+    [point.x.to_bits(), point.y.to_bits(), point.z.to_bits()]
+}
+
+fn snapshot_fixed_landmarks(
+    source: &SourceModel,
+    ba: &BundleAdjustment,
+    ids: &BTreeSet<u64>,
+) -> Result<FixedLandmarkSnapshot, String> {
+    let mut snapshot = BTreeMap::new();
+    for &id in ids {
+        let source_point = source
+            .point_indices
+            .get(&id)
+            .and_then(|index| source.points.get(*index))
+            .ok_or_else(|| format!("fixed landmark {id} is absent from source"))?;
+        let ba_point = ba
+            .landmarks
+            .get(&id)
+            .ok_or_else(|| format!("fixed landmark {id} is absent from BA"))?;
+        let source_bits = point_bits(&source_point.position);
+        if point_bits(ba_point) != source_bits {
+            return Err(format!("fixed landmark {id} changed before optimization"));
+        }
+        snapshot.insert(id, source_bits);
+    }
+    Ok(snapshot)
+}
+
+fn ensure_fixed_landmarks_unchanged(
+    ba: &BundleAdjustment,
+    snapshot: &FixedLandmarkSnapshot,
+) -> Result<(), String> {
+    for (&id, expected_bits) in snapshot {
+        let point = ba
+            .landmarks
+            .get(&id)
+            .ok_or_else(|| format!("fixed landmark {id} was omitted by BA"))?;
+        if point_bits(point) != *expected_bits {
+            return Err(format!("fixed landmark {id} changed during optimization"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn publish_model(
     out_dir: &Path,
@@ -2163,12 +2467,31 @@ fn publish_model(
     publish_model_with_anchor(out_dir, source, manifest, prepared, 0)
 }
 
+#[cfg(test)]
 fn publish_model_with_anchor(
     out_dir: &Path,
     source: &SourceModel,
     manifest: &RigManifest,
     prepared: &PreparedProblem,
     fixed_frame_id: u64,
+) -> Result<(), String> {
+    publish_model_with_anchor_and_fixed_landmarks(
+        out_dir,
+        source,
+        manifest,
+        prepared,
+        fixed_frame_id,
+        None,
+    )
+}
+
+fn publish_model_with_anchor_and_fixed_landmarks(
+    out_dir: &Path,
+    source: &SourceModel,
+    manifest: &RigManifest,
+    prepared: &PreparedProblem,
+    fixed_frame_id: u64,
+    fixed_landmarks: Option<&FixedLandmarkSelection>,
 ) -> Result<(), String> {
     let source_frame_zero = source
         .sensor_zero_image_by_frame
@@ -2195,7 +2518,17 @@ fn publish_model_with_anchor(
         &optimized_frame_zero.world_to_camera,
         fixed_frame_id,
     )?;
-    atomic_write_model(out_dir, source, manifest, prepared)
+    if let Some(selection) = fixed_landmarks {
+        let snapshot = snapshot_fixed_landmarks(source, &prepared.ba, &selection.ids)?;
+        ensure_fixed_landmarks_unchanged(&prepared.ba, &snapshot)?;
+    }
+    atomic_write_model(
+        out_dir,
+        source,
+        manifest,
+        prepared,
+        fixed_landmarks.map(|selection| &selection.ids),
+    )
 }
 
 fn ensure_pose_unchanged(source: &SE3, candidate: &SE3, fixed_frame_id: u64) -> Result<(), String> {
@@ -2273,6 +2606,7 @@ fn atomic_write_model(
     source: &SourceModel,
     manifest: &RigManifest,
     prepared: &PreparedProblem,
+    fixed_landmarks: Option<&BTreeSet<u64>>,
 ) -> Result<(), String> {
     let parent = out_dir
         .parent()
@@ -2291,7 +2625,7 @@ fn atomic_write_model(
     }
     fs::create_dir(&staging).map_err(|error| format!("create staging model: {error}"))?;
     let result = (|| {
-        write_model_files(&staging, source, manifest, prepared)?;
+        write_model_files(&staging, source, manifest, prepared, fixed_landmarks)?;
         match fs::symlink_metadata(out_dir) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
@@ -2327,6 +2661,7 @@ fn write_model_files(
     source: &SourceModel,
     manifest: &RigManifest,
     prepared: &PreparedProblem,
+    fixed_landmarks: Option<&BTreeSet<u64>>,
 ) -> Result<(), String> {
     let mut cameras = BufWriter::new(
         fs::File::create(staging.join("cameras.txt"))
@@ -2422,13 +2757,40 @@ fn write_model_files(
             ));
         }
         let mean_error = point_mean_error(source, manifest, prepared, point, *position)?;
+        let fixed = fixed_landmarks.is_some_and(|ids| ids.contains(&point.point3d_id));
+        if fixed {
+            let source_position = source
+                .point_indices
+                .get(&point.point3d_id)
+                .and_then(|index| source.points.get(*index))
+                .ok_or_else(|| {
+                    format!(
+                        "fixed landmark {} is absent from source during publication",
+                        point.point3d_id
+                    )
+                })?
+                .position;
+            if point_bits(position) != point_bits(&source_position) {
+                return Err(format!(
+                    "fixed landmark {} changed before serialization",
+                    point.point3d_id
+                ));
+            }
+        }
+        let format_position = |value: f64| {
+            if fixed {
+                format_roundtrip_f64(value)
+            } else {
+                Ok(format_f64(value))
+            }
+        };
         writeln!(
             points,
             "{} {} {} {} {} {} {} {} {}",
             point.point3d_id,
-            format_f64(position.x),
-            format_f64(position.y),
-            format_f64(position.z),
+            format_position(position.x)?,
+            format_position(position.y)?,
+            format_position(position.z)?,
             point.color_tokens[0],
             point.color_tokens[1],
             point.color_tokens[2],
@@ -2678,6 +3040,20 @@ fn camera_matches_manifest(camera: &Camera, sensor: &SensorSpec) -> bool {
 fn format_f64(value: f64) -> String {
     let value = format!("{value:.15}");
     value.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+fn format_roundtrip_f64(value: f64) -> Result<String, String> {
+    if !value.is_finite() {
+        return Err("fixed landmark coordinate is non-finite".to_owned());
+    }
+    let formatted = value.to_string();
+    let parsed = formatted
+        .parse::<f64>()
+        .map_err(|error| format!("fixed landmark coordinate serialization failed: {error}"))?;
+    if parsed.to_bits() != value.to_bits() {
+        return Err("fixed landmark coordinate serialization changed bits".to_owned());
+    }
+    Ok(formatted)
 }
 
 fn parse_u64_token(value: &str, label: &str) -> Result<u64, String> {
@@ -3505,6 +3881,232 @@ mod tests {
     }
 
     #[test]
+    fn parses_fixed_landmark_ids_with_source_binding_and_comments() {
+        let root =
+            std::env::temp_dir().join(format!("visloc-fixed-landmark-list-{}", std::process::id()));
+        assert!(!root.exists());
+        fs::create_dir(&root).unwrap();
+        let source_sha256 = "a".repeat(64);
+        let contents = format!(
+            "# frozen membership\nSOURCE_SHA256 {source_sha256}\n\nCOUNT 2\nLANDMARK 3\n# keep comments between rows\nLANDMARK 7\n"
+        );
+        let path = root.join("fixed.txt");
+        fs::write(&path, &contents).unwrap();
+        let selection = parse_fixed_landmark_ids(
+            &path,
+            &source_sha256,
+            &BTreeMap::from([(3_u64, 0_usize), (7_u64, 1_usize)]),
+        )
+        .unwrap();
+        assert_eq!(selection.ids, BTreeSet::from([3_u64, 7_u64]));
+        assert_eq!(selection.source_sha256, source_sha256);
+        assert_eq!(selection.list_sha256, hash_bytes(contents.as_bytes()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_fixed_landmark_ids_before_any_solver_policy_is_selected() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc-fixed-landmark-list-invalid-{}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+        fs::create_dir(&root).unwrap();
+        let source_sha256 = "b".repeat(64);
+        let known = BTreeMap::from([(3_u64, 0_usize), (7_u64, 1_usize)]);
+        let cases = [
+            (
+                "wrong-hash",
+                format!("SOURCE_SHA256 {}\nCOUNT 1\nLANDMARK 3\n", "c".repeat(64)),
+                "SOURCE_SHA256 mismatch",
+            ),
+            (
+                "uppercase-hash",
+                format!("SOURCE_SHA256 {}\nCOUNT 1\nLANDMARK 3\n", "A".repeat(64)),
+                "lowercase",
+            ),
+            (
+                "count",
+                format!("SOURCE_SHA256 {source_sha256}\nCOUNT 2\nLANDMARK 3\n"),
+                "COUNT mismatch",
+            ),
+            (
+                "order",
+                format!("SOURCE_SHA256 {source_sha256}\nCOUNT 2\nLANDMARK 7\nLANDMARK 3\n"),
+                "strictly ascending",
+            ),
+            (
+                "unknown",
+                format!("SOURCE_SHA256 {source_sha256}\nCOUNT 1\nLANDMARK 9\n"),
+                "unknown landmark",
+            ),
+            (
+                "trailing",
+                format!("SOURCE_SHA256 {source_sha256}\nCOUNT 1\nLANDMARK 3\nLANDMARK 7\n"),
+                "COUNT mismatch",
+            ),
+        ];
+        for (name, contents, expected) in cases {
+            let path = root.join(name);
+            fs::write(&path, contents).unwrap();
+            let error = parse_fixed_landmark_ids(&path, &source_sha256, &known).unwrap_err();
+            assert!(error.contains(expected), "case={name} error={error}");
+        }
+        let oversized = root.join("oversized");
+        fs::write(&oversized, vec![b'#'; MAX_FIXED_LANDMARK_FILE_BYTES + 1]).unwrap();
+        let error = parse_fixed_landmark_ids(&oversized, &source_sha256, &known).unwrap_err();
+        assert!(error.contains("exceeds"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_fixed_landmark_ids_only_for_adaptive_matrix_free_and_rejects_export() {
+        let adaptive = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+                "--fixed-landmark-ids",
+                "fixed.txt",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(
+            adaptive.fixed_landmark_ids,
+            Some(PathBuf::from("fixed.txt"))
+        );
+
+        let direct = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "direct",
+                "--out-dir",
+                "out",
+                "--fixed-landmark-ids",
+                "fixed.txt",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(direct.contains("requires --solver matrix-free"));
+
+        let export = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--export-oracle-fixture",
+                "fixture.txt",
+                "--fixed-landmark-ids",
+                "fixed.txt",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(export.contains("standalone operation"));
+
+        let duplicate = parse_args(
+            [
+                "compare",
+                "--model",
+                "model",
+                "--rig-manifest",
+                "rig.txt",
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                "out",
+                "--fixed-landmark-ids",
+                "fixed.txt",
+                "--fixed-landmark-ids",
+                "fixed2.txt",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate argument"));
+    }
+
+    #[test]
+    fn invalid_fixed_landmark_list_is_rejected_before_output_creation() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc-fixed-landmark-run-reject-{}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+        fs::create_dir(&root).unwrap();
+        let (source, manifest) = publication_fixture();
+        let (model_dir, manifest_path) = write_publication_inputs(&root, &source, &manifest);
+        let source_hashes = hash_source_inputs(&model_dir, &manifest_path).unwrap();
+        let list_path = root.join("fixed.txt");
+        fs::write(
+            &list_path,
+            format!(
+                "SOURCE_SHA256 {}\nCOUNT 1\nLANDMARK 999\n",
+                source_hashes.combined
+            ),
+        )
+        .unwrap();
+        let out_dir = root.join("out");
+        let args = parse_args(
+            [
+                "compare",
+                "--model",
+                model_dir.to_str().unwrap(),
+                "--rig-manifest",
+                manifest_path.to_str().unwrap(),
+                "--solver",
+                "matrix-free",
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--matrix-free-column-scaling",
+                "--matrix-free-adaptive-damping",
+                "--pcg-max-iterations",
+                "512",
+                "--pcg-relative-tolerance",
+                "1e-8",
+                "--fixed-landmark-ids",
+                list_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let error = run(&args).unwrap_err();
+        assert!(error.contains("unknown landmark"), "error={error}");
+        assert!(!out_dir.exists());
+        assert!(fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains("staging")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_points2d_without_losing_order_or_ids() {
         let keypoints = parse_points2d("1.0 2.0 -1 3.0 4.0 17").unwrap();
         assert_eq!(keypoints.len(), 2);
@@ -3715,6 +4317,94 @@ mod tests {
         (source, manifest)
     }
 
+    fn write_publication_inputs(
+        root: &Path,
+        source: &SourceModel,
+        manifest: &RigManifest,
+    ) -> (PathBuf, PathBuf) {
+        use std::fmt::Write as _;
+
+        let model = root.join("model");
+        fs::create_dir_all(&model).unwrap();
+        fs::write(model.join("cameras.txt"), &source.cameras_text).unwrap();
+        let mut images = String::from("# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n");
+        for image in &source.images {
+            let q = image.pose.world_to_camera.rotation.quaternion();
+            let t = image.pose.world_to_camera.translation;
+            writeln!(
+                images,
+                "{} {} {} {} {} {} {} {} {} {}",
+                image.image_id,
+                format_f64(q.w),
+                format_f64(q.i),
+                format_f64(q.j),
+                format_f64(q.k),
+                format_f64(t.x),
+                format_f64(t.y),
+                format_f64(t.z),
+                image.camera_id,
+                image.name,
+            )
+            .unwrap();
+            writeln!(images, "{}", image.points2d_line).unwrap();
+        }
+        fs::write(model.join("images.txt"), images).unwrap();
+        let mut points = String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[]\n");
+        for point in &source.points {
+            writeln!(
+                points,
+                "{} {} {} {} {} {} {} 0 {}",
+                point.point3d_id,
+                format_f64(point.position.x),
+                format_f64(point.position.y),
+                format_f64(point.position.z),
+                point.color_tokens[0],
+                point.color_tokens[1],
+                point.color_tokens[2],
+                point.track_tokens,
+            )
+            .unwrap();
+        }
+        fs::write(model.join("points3D.txt"), points).unwrap();
+
+        let manifest_path = root.join("rig-manifest.txt");
+        let mut manifest_text = String::new();
+        for sensor in manifest.sensors.values() {
+            let q = sensor.sensor_from_rig.rotation.quaternion();
+            let t = sensor.sensor_from_rig.translation;
+            writeln!(
+                manifest_text,
+                "S {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                sensor.index,
+                sensor.camera_id,
+                sensor.width,
+                sensor.height,
+                format_f64(sensor.fx),
+                format_f64(sensor.fy),
+                format_f64(sensor.cx),
+                format_f64(sensor.cy),
+                format_f64(q.w),
+                format_f64(q.i),
+                format_f64(q.j),
+                format_f64(q.k),
+                format_f64(t.x),
+                format_f64(t.y),
+                format_f64(t.z),
+            )
+            .unwrap();
+        }
+        for (name, assignment) in &manifest.assignments {
+            writeln!(
+                manifest_text,
+                "F {} {} {}",
+                assignment.frame_id, name, assignment.sensor_index
+            )
+            .unwrap();
+        }
+        fs::write(&manifest_path, manifest_text).unwrap();
+        (model, manifest_path)
+    }
+
     fn unsupported_sensor_fixture() -> (SourceModel, RigManifest) {
         let (mut source, mut manifest) = publication_fixture();
         // Sensor 0 has no points in frame 0, while sensor 1 still supports
@@ -3839,6 +4529,59 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>();
         assert_eq!(output_point_row[7], "0");
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn fixed_landmark_residual_is_retained_and_xyz_serialization_is_bit_exact() {
+        let (mut source, manifest) = publication_fixture();
+        source.points[0].position = Point3::new(1.2345678901234567, -0.0, 2.0);
+        let mut prepared = build_problem(&source, &manifest).unwrap();
+        prepared.ba.landmarks.insert(7, source.points[0].position);
+        prepared.ba.fix_landmark(7);
+        let ids = BTreeSet::from([7_u64]);
+        let selection = FixedLandmarkSelection {
+            ids: ids.clone(),
+            list_sha256: "a".repeat(64),
+            source_sha256: "b".repeat(64),
+        };
+        let snapshot = snapshot_fixed_landmarks(&source, &prepared.ba, &ids).unwrap();
+        let initial_cost = prepared.ba.cost();
+        let observation_count = prepared.ba.rig_observations.len();
+        assert!(initial_cost.is_finite() && initial_cost > 0.0);
+        assert!(observation_count > 0);
+        assert_eq!(prepared.ba.cost().to_bits(), initial_cost.to_bits());
+        ensure_fixed_landmarks_unchanged(&prepared.ba, &snapshot).unwrap();
+
+        prepared.ba.landmarks.get_mut(&7).unwrap().x += 1.0;
+        assert!(ensure_fixed_landmarks_unchanged(&prepared.ba, &snapshot).is_err());
+        prepared.ba.landmarks.insert(7, source.points[0].position);
+        ensure_fixed_landmarks_unchanged(&prepared.ba, &snapshot).unwrap();
+        assert_eq!(prepared.ba.rig_observations.len(), observation_count);
+        assert_eq!(prepared.ba.cost().to_bits(), initial_cost.to_bits());
+
+        let output = std::env::temp_dir().join(format!(
+            "visloc-fixed-landmark-publication-{}",
+            std::process::id()
+        ));
+        assert!(!output.exists());
+        publish_model_with_anchor_and_fixed_landmarks(
+            &output,
+            &source,
+            &manifest,
+            &prepared,
+            0,
+            Some(&selection),
+        )
+        .unwrap();
+        let written =
+            parse_points(&fs::read_to_string(output.join("points3D.txt")).unwrap()).unwrap();
+        assert_eq!(
+            point_bits(&written[0].position),
+            point_bits(&source.points[0].position)
+        );
+        assert_eq!(written[0].position.y.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(written[0].observations, source.points[0].observations);
         fs::remove_dir_all(output).unwrap();
     }
 
