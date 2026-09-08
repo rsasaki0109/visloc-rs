@@ -162,6 +162,13 @@ complete mapper as though saved source windows were free.
 Follow-up resolves nodes27/28 through
 `/tmp/visloc-m8-seam650-nodes-20260907.tsv`. All23 retained source models now
 match their original three files exactly. Added mapper times22.431005s and
-27.669512s bring the historical mapper subtotal to678.765732s. This closes
+27.669512s bring the raw per-model sum to678.765732s. This closes
 source-model provenance, not native E2E accounting: alignment, frontend and
 other excluded costs still require a reproducible phase ledger and replay.
+
+Accounting correction: nodes12/13 share one `window-3000/mapper.log`, and
+nodes18/19 share `window-4250/mapper.log`. These are different output components
+of the same producing executions, not separate mapping runs. Deduplicating
+by producing log yields21 executions and627.123191s, not678.765732s.
+The evidence preserves the raw node sum and adds explicit execution groups so
+the double count is auditable. Neither subtotal is a native E2E measurement.
