@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full retained dense schedule through prepare/match/merge/completed resume."""
+"""Frozen native/dense schedule through prepare/match/merge/completed resume."""
 import argparse
 import json
 import os
@@ -14,6 +14,15 @@ from replay_native_candidates import sha, bind_feature_input
 from native_matching_recipe import flags_from_timing
 
 
+def bind_candidates(reference, override=None):
+    """Accept regenerated candidates only when their bytes match the frozen recipe."""
+    expected = sha(reference.resolve(strict=True))
+    selected = (override if override is not None else reference).resolve(strict=True)
+    if not selected.is_file() or sha(selected) != expected:
+        raise ValueError('Candidate manifest differs from frozen reference')
+    return selected, expected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -22,6 +31,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--variant', choices=['dense', 'native'], default='dense')
     parser.add_argument('--features-dir', type=Path)
+    parser.add_argument('--candidate-manifest', type=Path,
+                        help='Regenerated candidate file; must match frozen reference bytes')
     args = parser.parse_args()
     if not sys.platform.startswith('linux'):
         parser.error('Linux process-group timeout handling required')
@@ -56,6 +67,7 @@ def main():
                   str(base / 'corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt')]
     _, features = bind_feature_input(['sfm', '--features-dir', str(features)],
                                     recipe / 'features.json', args.features_dir)
+    candidates, candidate_hash = bind_candidates(candidates, args.candidate_manifest)
     runner = Path(__file__).resolve().with_name('benchmark_electro.py')
     runner_hash = sha(runner)
     common = [sys.executable, str(runner), '--features-dir', str(features),
@@ -69,8 +81,9 @@ def main():
              '--shared-snapshot-envelope', '--resume']
     report = {'status': 'running', 'variant': args.variant, 'features_resolved': str(features),
               'binaries': binaries, 'runner_sha256': runner_hash,
-              'candidate_sha256': sha(candidates), 'reference_merged_sha256': sha(reference_merged),
-              'phases': {}, 'scope': 'Manifest-validated10k features and retained candidates through Python matching+merge runner. No extraction, candidate generation, mapping, quality or native E2E timing claim.'}
+              'candidates_resolved': str(candidates),
+              'candidate_sha256': candidate_hash, 'reference_merged_sha256': sha(reference_merged),
+              'phases': {}, 'scope': 'Manifest-validated 10k features and frozen-byte-validated candidates through Python matching+merge runner. No extraction, candidate generation, mapping, quality or native E2E timing claim.'}
 
     def save():
         (root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -78,6 +91,8 @@ def main():
     def run(name, command):
         if sha(runner) != runner_hash:
             raise RuntimeError('Runner source changed during experiment')
+        if sha(candidates) != candidate_hash:
+            raise RuntimeError('Candidate manifest changed during experiment')
         print(f'Running {name}', flush=True)
         started = time.monotonic()
         with (root / f'{name}.log').open('w') as stream:

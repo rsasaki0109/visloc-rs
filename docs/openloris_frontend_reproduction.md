@@ -404,6 +404,12 @@ sidecars have no retained reference and are not covered by that comparison.
 
 ## Full native shared matching on regenerated base features
 
+`replay_full_shared_runner.py --candidate-manifest PATH` can consume a newly
+generated candidate file, but rejects bytes differing from the frozen variant
+reference. It records the resolved input and digest and rechecks the digest
+before every phase. This is a reproduction binding, not a way to evaluate a
+changed retrieval policy; candidate generation remains outside its timing.
+
 `m8-native-shared-full-v1.json` records a successful terminal detached service
 and measurement report. All 2,188 shards from 70,000 retained candidates match
 the legacy decoded records; merged bytes match, and completed resume leaves
