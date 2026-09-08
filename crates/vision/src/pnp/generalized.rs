@@ -494,6 +494,17 @@ impl GeneralizedPnPRansac {
                 world_to_camera: world_to_rig,
             };
             let score = score_pose(rig, &pose, correspondences, self.reprojection_threshold);
+            if std::env::var_os("VISLOC_SFM_DEBUG_PNP_HYPOTHESES").is_some() {
+                let own_sensor_inliers = score
+                    .inliers
+                    .iter()
+                    .filter(|&&i| correspondences[i].sensor_index == sensor_index)
+                    .count();
+                eprintln!(
+                    "generalized-pnp-central: sensor={sensor_index} correspondences={} central_inliers={} pooled_inliers={} own_sensor_inliers={own_sensor_inliers}",
+                    sensor_correspondences.len(), report.inliers.len(), score.inliers.len(),
+                );
+            }
             if score.is_better_than(&best_score) {
                 best_pose = Some(pose);
                 best_score = score;

@@ -1,5 +1,11 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 境界PnP: PR #99はCI9項目通過後 `28bf0e2` へmerge、旧branch整理済み。
+> 現branch `diag/m8-boundary-pnp`。build `015ab1b` の診断モデルはLegacy bytes一致。
+> frame612/613は25/29対応・2sensorで推定失敗。DLT候補26/11、central report各2は得られるが、
+> pooled inliersは両方5で必要6未満。閾値変更なし。各sensor内とrig全体のinlier比較ログを追加中。
+> 証跡 `m8-openloris-2500-pnp-hypotheses-v1.json`。次は追加ログのnative parity確認。
+
 > bounded policy 1k: build `b011cde`、Legacyとpolicy2反復はchampion bytes一致。
 > policyは各86回すべて直接法、QR0回。mapper4.28/4.51 s対Legacy4.42 s、速度改善主張なし。
 > 証跡 `m8-openloris-bounded-native-1k-v1.json`。次tierでは選択経路のcoverageを必ず確認。
