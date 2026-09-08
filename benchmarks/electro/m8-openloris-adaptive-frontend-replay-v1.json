@@ -1,0 +1,33 @@
+{
+  "status": "complete-adaptive-merged-snapshot-byte-reproduction-pass",
+  "source_commit": "a7ff5ff47b561556ba20a0afdb40417ec9413120",
+  "candidate_reference": "m8-openloris-native-candidates-legacy-replay-v1.json",
+  "candidate_schedule": "Same as native; only feature_manifest_sha256 differs in frozen worker plans.",
+  "candidate_shards_regenerated_and_hash_verified": 2188,
+  "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-bank-publication-v1/features",
+  "features_resolved": "/media/sasaki/aiueo1/visloc-replay-retired-20260909/corridor1-1-m8-adaptive-bank-publication-v1/features",
+  "feature_manifest_sha256": "406e2e82ea1faa57747465d2adfc95e645ad5e40cd1e301dbb4a70e285be9a0f",
+  "matching": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-matching-replay-v1/report.json",
+    "exit_status": 0,
+    "wall_seconds": 231.2854480210226,
+    "peak_rss_kib": 977952,
+    "rayon_num_threads": 4,
+    "snapshot_inventory_sha256": "0e994235445415195fe9325132ca93645abed79381b8f90fc87c1c0f42470e92",
+    "individual_reference_comparison": false
+  },
+  "merge": {
+    "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-merge-replay-v1/report.json",
+    "exit_status": 0,
+    "wall_seconds": 4.960614662966691,
+    "peak_rss_kib": 1870216,
+    "pairs": 61286,
+    "accepted_correspondences": 3434453,
+    "output_and_reference_sha256": "852c43c3df905ca150e44fbc65c35ed5a451507399019649b3900d06503ccf19"
+  },
+  "limitations": [
+    "Original adaptive individual snapshots are absent; exact comparison is at the complete merged-file boundary.",
+    "Freshly regenerated adaptive bank is on external ext4 storage following authorized cleanup; no unchanged-I/O speedup claim.",
+    "Separate candidate, matching and merge stage runs; no continuous native E2E, extraction or quality improvement claim."
+  ]
+}
