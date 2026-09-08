@@ -347,6 +347,20 @@ base SIFT recipe with the frozen image-capable extractor; all four feature files
 `m8-openloris-base-extraction-probe-v1.json`. This does not establish full10k
 extraction parity or E2E performance.
 
+The same script now accepts `--all-images --workers 6`: the full frozen 10k
+image set is split into disjoint balanced partitions, with one Rayon thread per
+worker. Each worker writes distinct feature filenames and its own log/timing;
+the harness compares the complete combined feature membership and hashes after
+all workers exit. Four-image/two-worker parity passed. Full10k six-worker replay
+is still awaiting terminal evidence in `corridor1-1-m8-full-base-extraction-v2`.
+The earlier single-worker v1 was deliberately interrupted, not completed or
+reused as a speed baseline. See `m8-full-base-extraction-transition-v1.json`.
+Use the dedicated 2 GiB scope wrapper for aggregate measurement/enforcement;
+the extraction script alone does not impose that limit. Worker RSS peaks are
+not summed. GNU timeout uses `--foreground` so workers remain in the command
+process group for wrapper timeout cleanup. This remains base extraction only,
+not dense extraction or continuous E2E.
+
 ## Empty vocabulary safety
 
 Streamed candidate export now rejects a missing/empty appearance vocabulary
