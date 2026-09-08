@@ -81,6 +81,20 @@ rig conversion. Investigate map correspondence consistency or independently
 triangulated stereo support; do not lower the six-inlier requirement.
 [Central/pooled evidence](../benchmarks/electro/m8-openloris-2500-central-pnp-v1.json).
 
+Input-policy correction: the sparse7n snapshot contains only three same-frame
+stereo edges overall and none at frames 608–613. Enabling the existing direct
+stereo bridge alone therefore lacks the local triangulation input it needs.
+Do not generalize that diagnostic input's failure to the established M8 graph.
+The earlier dense ANN 2.5k promotion evidence already includes 1,250 same-frame
+candidate pairs and full registration. Its retained snapshot at
+`/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-2500-ann-gap128-local32-8n-v1/mapping/verified-merged.vps`
+was rechecked: SHA256 `165bca7bd5c85b32a8138e421c0a32a74b1426c454f3c93d2926e3c39d583574`,
+matching `m8-openloris-dense256x2-2500-ann-gap128.json`. The envelope has 2,500
+images / 901,397 feature rows. Next use that retained, rig-aware graph for a
+paired current-binary Legacy/policy check before adding a recovery mechanism.
+This is a different input contract from sparse7n and requires separate evidence;
+historical full registration does not prove current policy success.
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
