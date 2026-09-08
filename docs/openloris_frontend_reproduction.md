@@ -404,6 +404,17 @@ sidecars have no retained reference and are not covered by that comparison.
 
 ## Full native shared matching on regenerated base features
 
+`replay_targeted_selection.py --stage prefix --snapshot NEW_PREFIX.vps
+--features-dir NEW_ADAPTIVE_BANK --output NEW_OUTPUT` now connects the prefix
+admission output to registration used by repair admission. It preserves the
+recorded mapper flags (no deferred-registration prefix flag), uses one Rayon
+thread as in the earlier successful replay, and requires exact full model and
+registration membership/hash parity with that replay. The default targeted
+stage retains its eight-thread recipe and registration/target-selection gate.
+Both stages hash-check their respective snapshot input and validate the adaptive
+feature manifest. The new prefix invocation is not yet executed; this adapter
+does not by itself assemble or measure the complete native DAG.
+
 `--variant targeted7` binds the retained 14,319 targeted candidate pairs to the
 adaptive bank and recorded min-matches 12 / ratio 0.8 settings. It requires all
 448 shared shards to match replayed legacy records, the frozen merged digest,
