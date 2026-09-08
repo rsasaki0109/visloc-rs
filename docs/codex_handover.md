@@ -1,5 +1,17 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> PR101は最終head `4ae1a8f` のCI9成功後、`a551e5a` にsquash merge・旧branch整理済み。
+> 現branch `diag/m8-ba-pose-motion`、build `49f3021`。既定OFFの
+> `VISLOC_SFM_TRACE_BA_POSE_MOTION` は各BAの固定anchor相対距離を前後で記録する。
+> 有効状態のbounded policy固定状態/rollbackテストとclippy通過、release57.19秒。
+> 5k `tier-5000-slice/ba-motion-debug` はexit0、Legacyモデルbytes一致。
+> 1070/1072はanchor1414との距離が同一BA内で約8.9m増加。固定pose距離変化0。
+> 次は登録順local BA窓内の観測連結性と固定anchorへの接続を診断する。
+> 証跡 `m8-openloris-5000-ba-motion-v1.json`。共通gauge移動だけでは説明できない。
+> binary SHA256 `296a740951a94b486daa4ca4c7a2eb9dfc4de0b6b780e0bfbd9dc6092ea88e6d`。
+> 前のsupport-debugはexit0・Legacy bytes一致。登録→最終の変位は共通gauge変化も含むので
+> BA原因の断定不可。証跡 `m8-openloris-5000-registration-diagnostic-v1.json`。
+
 > 5k外れ値診断: 孤立5frameは同一全体Sim(3)下で二乗誤差69.287%を占める。
 > 最大8画像は1068/1070/1071/1072、誤差8.21〜10.09 m。
 > 主成分内1416も5.577 mなので孤立解消だけで品質達成とは言えない。

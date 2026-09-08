@@ -1,0 +1,229 @@
+{
+  "schema": "m8-openloris-5000-ba-motion-v1",
+  "build_commit": "49f302178d9727a3840b463c9439c45c6da5261c",
+  "binary_sha256": "296a740951a94b486daa4ca4c7a2eb9dfc4de0b6b780e0bfbd9dc6092ea88e6d",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-motion-debug\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-motion-debug.time\nenv -u VISLOC_SFM_DEBUG -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_LM_QUALITY -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_PNP_HYPOTHESES VISLOC_SFM_TRACE_BA_POSE_MOTION=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-motion-debug.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-49f3021 --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/source-rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps --frame-range-start 0 --frame-range-count 2500 --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-motion-debug/model --max-matches-per-pair 256 --max-models 2 --min-model-frames 10 > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice/ba-motion-debug.log 2>&1",
+  "audit_program": "import json,re,hashlib\nfrom pathlib import Path\nb=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-5000-slice\")\nassert \"Exit status: 0\" in (b/\"ba-motion-debug.time\").read_text()\nfor name in (\"cameras.txt\",\"images.txt\",\"points3D.txt\"):\n assert (b/\"legacy/model/component-000\"/name).read_bytes()==(b/\"ba-motion-debug/model/component-000\"/name).read_bytes(),name\nrows=[]\nfor line in (b/\"ba-motion-debug.log\").read_text().splitlines():\n if not line.startswith(\"rig-ba-pose-motion:\"): continue\n v=dict(re.findall(r\"(\\w+)=([^ ]+)\",line))\n before=float(v[\"anchor_distance_before\"]);after=float(v[\"anchor_distance_after\"])\n rows.append(dict(frame=int(v[\"frame\"]),anchor=int(v[\"anchor\"]),fixed=v[\"fixed\"]==\"true\",before_m=before,after_m=after,delta_m=after-before))\nrows.sort(key=lambda r:abs(r[\"delta_m\"]),reverse=True)\nprint(json.dumps(dict(records=len(rows),top20=rows[:20],target_maxima={str(f):next((r for r in rows if r[\"frame\"]==f),None) for f in (791,1068,1070,1071,1072,1416)},fixed_max_delta=max((abs(r[\"delta_m\"]) for r in rows if r[\"fixed\"]),default=0)),indent=2))\n",
+  "model_exact_to_legacy": true,
+  "result": {
+    "records": 20000,
+    "top20": [
+      {
+        "frame": 1068,
+        "anchor": 1497,
+        "fixed": false,
+        "before_m": 20.402023070321057,
+        "after_m": 10.549949318254983,
+        "delta_m": -9.852073752066074
+      },
+      {
+        "frame": 1070,
+        "anchor": 1414,
+        "fixed": false,
+        "before_m": 9.257700743930144,
+        "after_m": 18.15578419594678,
+        "delta_m": 8.898083452016635
+      },
+      {
+        "frame": 1072,
+        "anchor": 1414,
+        "fixed": false,
+        "before_m": 9.215972386513604,
+        "after_m": 18.10864885976597,
+        "delta_m": 8.892676473252367
+      },
+      {
+        "frame": 1071,
+        "anchor": 1505,
+        "fixed": false,
+        "before_m": 11.695081012275438,
+        "after_m": 5.743255778398281,
+        "delta_m": -5.951825233877156
+      },
+      {
+        "frame": 1068,
+        "anchor": 1505,
+        "fixed": false,
+        "before_m": 10.771384486963232,
+        "after_m": 5.9014997955210085,
+        "delta_m": -4.869884691442223
+      },
+      {
+        "frame": 1416,
+        "anchor": 1469,
+        "fixed": false,
+        "before_m": 2.4492096812613418,
+        "after_m": 4.319578096286057,
+        "delta_m": 1.8703684150247155
+      },
+      {
+        "frame": 1416,
+        "anchor": 1497,
+        "fixed": false,
+        "before_m": 2.180118291423177,
+        "after_m": 3.94594443392009,
+        "delta_m": 1.765826142496913
+      },
+      {
+        "frame": 1416,
+        "anchor": 1439,
+        "fixed": false,
+        "before_m": 4.088346524875338,
+        "after_m": 5.561675286204834,
+        "delta_m": 1.4733287613294959
+      },
+      {
+        "frame": 1068,
+        "anchor": 1520,
+        "fixed": false,
+        "before_m": 6.308161198240103,
+        "after_m": 4.943785913419117,
+        "delta_m": -1.3643752848209854
+      },
+      {
+        "frame": 1071,
+        "anchor": 1520,
+        "fixed": false,
+        "before_m": 6.149557834858433,
+        "after_m": 4.891603606505427,
+        "delta_m": -1.2579542283530056
+      },
+      {
+        "frame": 1071,
+        "anchor": 1522,
+        "fixed": false,
+        "before_m": 4.944887628733865,
+        "after_m": 3.8387122428643523,
+        "delta_m": -1.1061753858695123
+      },
+      {
+        "frame": 1068,
+        "anchor": 1522,
+        "fixed": false,
+        "before_m": 4.996947314696256,
+        "after_m": 3.8967694818597844,
+        "delta_m": -1.1001778328364717
+      },
+      {
+        "frame": 1084,
+        "anchor": 1080,
+        "fixed": false,
+        "before_m": 1.0394444361403896,
+        "after_m": 0.07702862813785091,
+        "delta_m": -0.9624158080025387
+      },
+      {
+        "frame": 1416,
+        "anchor": 1410,
+        "fixed": false,
+        "before_m": 2.7221682770734708,
+        "after_m": 1.7797522616047743,
+        "delta_m": -0.9424160154686965
+      },
+      {
+        "frame": 774,
+        "anchor": 1382,
+        "fixed": false,
+        "before_m": 10.3395889769679,
+        "after_m": 11.264293160394455,
+        "delta_m": 0.9247041834265559
+      },
+      {
+        "frame": 774,
+        "anchor": 1392,
+        "fixed": false,
+        "before_m": 11.528690104246994,
+        "after_m": 12.41240466433836,
+        "delta_m": 0.8837145600913665
+      },
+      {
+        "frame": 1111,
+        "anchor": 1392,
+        "fixed": false,
+        "before_m": 6.568483184403725,
+        "after_m": 7.344328493937348,
+        "delta_m": 0.7758453095336231
+      },
+      {
+        "frame": 1072,
+        "anchor": 1392,
+        "fixed": false,
+        "before_m": 7.507979825797051,
+        "after_m": 8.27565827926188,
+        "delta_m": 0.7676784534648284
+      },
+      {
+        "frame": 1073,
+        "anchor": 1392,
+        "fixed": false,
+        "before_m": 7.520529751536383,
+        "after_m": 8.2598092822258,
+        "delta_m": 0.7392795306894175
+      },
+      {
+        "frame": 1075,
+        "anchor": 1392,
+        "fixed": false,
+        "before_m": 7.474621946239451,
+        "after_m": 8.213489678649797,
+        "delta_m": 0.7388677324103456
+      }
+    ],
+    "target_maxima": {
+      "791": {
+        "frame": 791,
+        "anchor": 900,
+        "fixed": false,
+        "before_m": 2.2034622059107645,
+        "after_m": 1.5635029955438602,
+        "delta_m": -0.6399592103669043
+      },
+      "1068": {
+        "frame": 1068,
+        "anchor": 1497,
+        "fixed": false,
+        "before_m": 20.402023070321057,
+        "after_m": 10.549949318254983,
+        "delta_m": -9.852073752066074
+      },
+      "1070": {
+        "frame": 1070,
+        "anchor": 1414,
+        "fixed": false,
+        "before_m": 9.257700743930144,
+        "after_m": 18.15578419594678,
+        "delta_m": 8.898083452016635
+      },
+      "1071": {
+        "frame": 1071,
+        "anchor": 1505,
+        "fixed": false,
+        "before_m": 11.695081012275438,
+        "after_m": 5.743255778398281,
+        "delta_m": -5.951825233877156
+      },
+      "1072": {
+        "frame": 1072,
+        "anchor": 1414,
+        "fixed": false,
+        "before_m": 9.215972386513604,
+        "after_m": 18.10864885976597,
+        "delta_m": 8.892676473252367
+      },
+      "1416": {
+        "frame": 1416,
+        "anchor": 1469,
+        "fixed": false,
+        "before_m": 2.4492096812613418,
+        "after_m": 4.319578096286057,
+        "delta_m": 1.8703684150247155
+      }
+    },
+    "fixed_max_delta": 0
+  },
+  "limitations": [
+    "Anchor-distance changes identify within-BA deformation, not its cause.",
+    "Local BA uses registration-order windows and only observations inside each window; connectivity to fixed anchors must be inspected before changing solver or thresholds.",
+    "Diagnostic timing is not a performance measurement."
+  ]
+}
