@@ -1,5 +1,14 @@
 {
-  "status": "running-unverified",
+  "status": "completed-model-and-registration-byte-parity",
+  "result": {
+    "exit_status": 0,
+    "wall_seconds": 169.82,
+    "peak_rss_kib": 974884,
+    "comparison": "Compare exact membership and SHA-256 of every component cameras.txt/images.txt/points3D.txt and root retrieval-components.txt against recorded-command model directory.",
+    "model_files": 6,
+    "retrieval_component_files": 1,
+    "missing": [], "extra": [], "hash_mismatches": []
+  },
   "session": 78386,
   "recorded_command_source": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-adaptive32-halo8-bridges-supp-pair-confidence-finalfix32-v1/mapper.time.txt",
   "binary": "/home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499",
