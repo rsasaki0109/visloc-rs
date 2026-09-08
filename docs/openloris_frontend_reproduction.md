@@ -295,6 +295,33 @@ A small 32 MiB allocation probe exited zero; a sleeping child hit its deadline
 and returned failure. These are launcher checks, not SfM resource evidence.
 The runner still needs the complete extraction-to-atlas DAG and restart protocol.
 
+For long work, use the detached service launcher instead of keeping the launch
+terminal alive:
+
+```sh
+python3 scripts/launch_native_measurement.py --unit visloc-UNIQUE-LOWERCASE-NAME \
+  --output NEW_MEASUREMENT_DIRECTORY --timeout 7200 -- COMMAND ARGUMENTS
+```
+
+Replace the example unit with an all-lowercase `visloc-` name. The launcher
+copies and hashes the monitor, configures the same memory limits, disables
+systemd argument environment expansion, persists stdout/stderr in `service.log`,
+and returns after service creation. It does not freeze the measured command's
+scripts/binaries/inputs; the executor must do that separately. `launch.json`
+with `launched-not-completed` is not a pass. Check `systemctl --user show UNIT`
+for `Result=success`, `ExecMainStatus=0`, and `SubState=exited`, plus a terminal
+passing `measurement.json`. The service has a runtime deadline and control-group
+cleanup; its retained service result is not a guarantee that cgroup counters
+remain available after exit. Persisted measurement data is still required.
+
+A short detached 32 MiB allocation probe saved its terminal ledger after the
+launch command returned. A 3,700-second low-load probe is in progress as
+`visloc-durable-long-probe-v1.service`, with artifacts under
+`/home/sasaki/datasets/openloris/m8-durable-long-probe-v1`. Long-duration success
+is not established until that service and its report are terminal. This addresses
+measurement durability, not extraction performance or the still-failing quality
+gate; the cause of the earlier missing final ledger remains unproven.
+
 The 2026-09-09 post-full-runner preflight found 8,914,128,896 bytes free on
 the dataset filesystem. Fresh base, dense (including loci) and adaptive banks
 alone require 8,332,098,526 logical bytes, leaving only 582,030,370 bytes before
