@@ -18,7 +18,7 @@ use visloc_vision::pnp::{
 };
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
-use crate::bundle::{BaConfig, BaRigObservation, BundleAdjustment};
+use crate::bundle::{BaConfig, BaRigObservation, BundleAdjustment, MatrixFreeBaOptions};
 use crate::incremental_sfm::{
     build_tracks_confidence_ordered, build_tracks_confidence_ordered_with_trusted_prefix,
     build_tracks_detailed, build_tracks_incremental_correspondence,
@@ -82,6 +82,19 @@ pub enum RigTrackBuilder {
     /// Metric-first sparse cycles, retaining only tracks that contain a
     /// calibrated multi-sensor observation at one synchronized frame.
     MetricAnchoredCycle,
+}
+
+/// Bundle-adjustment backend used by the native calibrated-rig mapper.
+///
+/// `Legacy` is deliberately the default so existing callers retain their
+/// configured [`BaConfig`] (including its linear-solver choice).  The
+/// matrix-free entry point is an explicit, strict opt-in and never falls back
+/// to the legacy solve when it rejects an input or fails numerically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RigBaBackend {
+    #[default]
+    Legacy,
+    MatrixFreeStrict,
 }
 
 /// Conservative controls for generalized-rig incremental reconstruction.
@@ -204,6 +217,7 @@ pub struct RigSfmConfig {
     /// from becoming numerically free after landmark/reprojection filtering.
     pub final_ba_min_pose_observations: usize,
     pub final_bundle_adjustment: bool,
+    pub ba_backend: RigBaBackend,
     pub ba_config: BaConfig,
     pub local_ba_every: usize,
     pub local_ba_window_size: usize,
@@ -277,6 +291,7 @@ impl Default for RigSfmConfig {
             ba_metric_tracks_only: false,
             final_ba_min_pose_observations: 0,
             final_bundle_adjustment: true,
+            ba_backend: RigBaBackend::Legacy,
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
                 robust_kernel: RobustKernel::Huber { delta: 6.0 },
@@ -4732,6 +4747,18 @@ fn run_rig_bundle_adjustment(
         }
     }
     if visual_observations == 0 {
+        if config.ba_backend == RigBaBackend::MatrixFreeStrict
+            && problem
+                .poses
+                .keys()
+                .any(|id| !problem.fixed_poses.contains(id))
+        {
+            let reason = "matrix-free backend has variable poses but no visual observations";
+            eprintln!(
+                "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+            );
+            return Err(RigSfmError::BundleAdjustment(reason.into()));
+        }
         return Ok(None);
     }
     if min_pose_observations > 0 {
@@ -4741,9 +4768,186 @@ fn run_rig_bundle_adjustment(
             }
         }
     }
-    let result = problem
-        .optimize(ba_config)
-        .map_err(|error| RigSfmError::BundleAdjustment(error.to_string()))?;
+    let mut matrix_free_report = None;
+    let (initial_cost, final_cost, iterations, converged) = match config.ba_backend {
+        RigBaBackend::Legacy => {
+            // Keep the historical call and caller-provided BaConfig entirely
+            // unchanged when the new selector is absent.
+            let result = problem
+                .optimize(ba_config)
+                .map_err(|error| RigSfmError::BundleAdjustment(error.to_string()))?;
+            (
+                result.initial_cost,
+                result.final_cost,
+                result.iterations.len(),
+                result.converged,
+            )
+        }
+        RigBaBackend::MatrixFreeStrict => {
+            let has_variable_pose = problem
+                .poses
+                .keys()
+                .any(|id| !problem.fixed_poses.contains(id));
+            let has_variable_landmark = problem
+                .landmarks
+                .keys()
+                .any(|id| !problem.fixed_landmarks.contains(id));
+
+            if !has_variable_pose && has_variable_landmark {
+                // The public matrix-free validator intentionally requires a
+                // variable pose.  A native window can nevertheless have all
+                // poses fixed while retaining variable landmarks.  This is a
+                // bounded landmark-only visual solve: its pose Schur dimension
+                // is exactly zero, so using the existing optimizer here does
+                // not create a hidden large legacy pose solve or change the
+                // observation/loss semantics.  Explicitly reject any
+                // calibration refinement rather than silently changing the
+                // requested problem.
+                if let Err(error) = problem
+                    .validate_matrix_free_landmark_only(ba_config, MatrixFreeBaOptions::default())
+                {
+                    eprintln!(
+                        "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={error}"
+                    );
+                    return Err(RigSfmError::BundleAdjustment(error.to_string()));
+                }
+                let result = problem
+                    .optimize(ba_config)
+                    .map_err(|error| {
+                        eprintln!(
+                            "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={error}"
+                        );
+                        RigSfmError::BundleAdjustment(error.to_string())
+                    })?;
+                matrix_free_report = Some((
+                    "landmark-only",
+                    result.iterations.len(),
+                    result
+                        .iterations
+                        .iter()
+                        .filter(|step| step.step_accepted)
+                        .count(),
+                    0usize,
+                ));
+                (
+                    result.initial_cost,
+                    result.final_cost,
+                    result.iterations.len(),
+                    result.converged,
+                )
+            } else if has_variable_pose {
+                let result = problem
+                    .optimize_matrix_free(ba_config, MatrixFreeBaOptions::default())
+                    .map_err(|error| {
+                        eprintln!(
+                            "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={error}"
+                        );
+                        RigSfmError::BundleAdjustment(error.to_string())
+                    })?;
+                matrix_free_report = Some((
+                    "matrix-free",
+                    result.iterations.len(),
+                    result
+                        .iterations
+                        .iter()
+                        .filter(|step| step.step_accepted)
+                        .count(),
+                    result
+                        .matrix_free_iterations
+                        .iter()
+                        .filter(|step| step.pcg_failure.is_some())
+                        .count(),
+                ));
+                (
+                    result.initial_cost,
+                    result.final_cost,
+                    result.iterations.len(),
+                    result.converged,
+                )
+            } else {
+                // This can only occur when the assembled problem has no
+                // variable state at all.  It is a genuine no-op, not a
+                // numerical failure, and has no mapper write-back to do.
+                if let Err(error) = problem
+                    .validate_matrix_free_landmark_only(ba_config, MatrixFreeBaOptions::default())
+                {
+                    eprintln!(
+                        "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={error}"
+                    );
+                    return Err(RigSfmError::BundleAdjustment(error.to_string()));
+                }
+                let cost = problem.robust_cost(&ba_config.robust_kernel);
+                if !cost.is_finite() {
+                    return Err(RigSfmError::BundleAdjustment(
+                        "matrix-free no-variable cost is non-finite".into(),
+                    ));
+                }
+                matrix_free_report = Some(("no-op", 0, 0, 0));
+                (cost, cost, 0, true)
+            }
+        }
+    };
+    if config.ba_backend == RigBaBackend::MatrixFreeStrict {
+        for &fixed_pose_id in &problem.fixed_poses {
+            let Some(original) = frame_poses
+                .get(fixed_pose_id as usize)
+                .and_then(Option::as_ref)
+            else {
+                let reason = format!("fixed pose {fixed_pose_id} disappeared during BA");
+                eprintln!(
+                    "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+                );
+                return Err(RigSfmError::BundleAdjustment(reason));
+            };
+            let Some(refined) = problem.poses.get(&fixed_pose_id) else {
+                let reason = format!("fixed pose {fixed_pose_id} disappeared from BA state");
+                eprintln!(
+                    "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+                );
+                return Err(RigSfmError::BundleAdjustment(reason));
+            };
+            if refined != original {
+                let reason = format!("fixed pose {fixed_pose_id} changed during matrix-free BA");
+                eprintln!(
+                    "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+                );
+                return Err(RigSfmError::BundleAdjustment(reason));
+            }
+        }
+        for &fixed_pose_id in &problem.fixed_pose_rotations {
+            let Some(original) = frame_poses
+                .get(fixed_pose_id as usize)
+                .and_then(Option::as_ref)
+            else {
+                let reason = format!("fixed-rotation pose {fixed_pose_id} disappeared during BA");
+                eprintln!(
+                    "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+                );
+                return Err(RigSfmError::BundleAdjustment(reason));
+            };
+            let Some(refined) = problem.poses.get(&fixed_pose_id) else {
+                let reason =
+                    format!("fixed-rotation pose {fixed_pose_id} disappeared from BA state");
+                eprintln!(
+                    "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+                );
+                return Err(RigSfmError::BundleAdjustment(reason));
+            };
+            if refined.world_to_camera.rotation != original.world_to_camera.rotation {
+                let reason =
+                    format!("fixed rotation pose {fixed_pose_id} changed during matrix-free BA");
+                eprintln!(
+                    "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={reason}"
+                );
+                return Err(RigSfmError::BundleAdjustment(reason));
+            }
+        }
+        if let Some((used, iterations, accepted, pcg_failures)) = matrix_free_report {
+            eprintln!(
+                "rig-ba-backend: requested=matrix-free used={used} eligibility=eligible iterations={iterations} accepted={accepted} pcg_failures={pcg_failures}"
+            );
+        }
+    }
     for (frame, pose) in frame_poses.iter_mut().enumerate() {
         let Some(reference_pose) = problem.poses.get(&(frame as u64)) else {
             continue;
@@ -4768,10 +4972,10 @@ fn run_rig_bundle_adjustment(
     }
     Ok(Some(RigBaStats {
         observations: visual_observations,
-        initial_cost: result.initial_cost,
-        final_cost: result.final_cost,
-        iterations: result.iterations.len(),
-        converged: result.converged,
+        initial_cost,
+        final_cost,
+        iterations,
+        converged,
     }))
 }
 
@@ -8880,6 +9084,33 @@ mod tests {
             parallel: false,
             ..BaConfig::default()
         };
+        let mut matrix_free_frame_poses = frame_poses.clone();
+        let mut matrix_free_image_poses = image_poses.clone();
+        let mut matrix_free_tracks = tracks.clone();
+        let matrix_free_stats = run_rig_bundle_adjustment(
+            &rig,
+            &features,
+            &image_assignment,
+            &RigSfmConfig {
+                ba_backend: RigBaBackend::MatrixFreeStrict,
+                ..config
+            },
+            &active_frames,
+            0,
+            &ba_config,
+            0,
+            &[],
+            true,
+            &mut matrix_free_frame_poses,
+            &mut matrix_free_image_poses,
+            &mut matrix_free_tracks,
+        )
+        .unwrap()
+        .expect("matrix-free native rig fixture should have observations");
+        assert!(matrix_free_stats.final_cost <= matrix_free_stats.initial_cost);
+        for (before, after) in rotations_before.iter().zip(&matrix_free_frame_poses) {
+            assert!(before.angle_to(&after.as_ref().unwrap().world_to_camera.rotation) < 1.0e-10);
+        }
         let stats = run_rig_bundle_adjustment(
             &rig,
             &features,
@@ -8916,6 +9147,62 @@ mod tests {
         assert!(after_reprojection < before_reprojection);
         assert!(after_center_error < before_center_error);
         assert!(after_landmark_error < before_landmark_error);
+
+        let landmark_only_frame_poses = matrix_free_frame_poses.clone();
+        let mut landmark_only_image_poses = matrix_free_image_poses.clone();
+        let mut landmark_only_tracks = matrix_free_tracks.clone();
+        let landmark_only_stats = run_rig_bundle_adjustment(
+            &rig,
+            &features,
+            &image_assignment,
+            &RigSfmConfig {
+                ba_backend: RigBaBackend::MatrixFreeStrict,
+                ..config
+            },
+            &active_frames,
+            0,
+            &ba_config,
+            0,
+            &[1],
+            false,
+            &mut matrix_free_frame_poses,
+            &mut landmark_only_image_poses,
+            &mut landmark_only_tracks,
+        )
+        .unwrap()
+        .expect("landmark-only native rig fixture should have observations");
+        assert!(landmark_only_stats.final_cost <= landmark_only_stats.initial_cost);
+        assert_eq!(matrix_free_frame_poses, landmark_only_frame_poses);
+
+        let rejected_frame_poses = matrix_free_frame_poses.clone();
+        let mut rejected_image_poses = landmark_only_image_poses.clone();
+        let mut rejected_tracks = landmark_only_tracks.clone();
+        let error = run_rig_bundle_adjustment(
+            &rig,
+            &features,
+            &image_assignment,
+            &RigSfmConfig {
+                ba_backend: RigBaBackend::MatrixFreeStrict,
+                ..config
+            },
+            &active_frames,
+            0,
+            &BaConfig {
+                refine_intrinsics: true,
+                ..ba_config
+            },
+            0,
+            &[1],
+            false,
+            &mut matrix_free_frame_poses,
+            &mut rejected_image_poses,
+            &mut rejected_tracks,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RigSfmError::BundleAdjustment(message) if message.contains("matrix-free"))
+        );
+        assert_eq!(matrix_free_frame_poses, rejected_frame_poses);
     }
 
     #[test]
@@ -9238,5 +9525,12 @@ mod tests {
                     if value == requested || (value.is_nan() && requested.is_nan())
             ));
         }
+    }
+
+    #[test]
+    fn native_ba_backend_defaults_to_legacy_and_is_explicit() {
+        let config = RigSfmConfig::default();
+        assert_eq!(config.ba_backend, RigBaBackend::Legacy);
+        assert_ne!(config.ba_backend, RigBaBackend::MatrixFreeStrict);
     }
 }
