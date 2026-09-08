@@ -1,5 +1,17 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 現branch `diag/m8-ba-anchor-connectivity`、親PR102はCI実行中。
+> build `4fbb952b600d36bc312c04f97c076f0a3ee1c7f8` に既定OFFの
+> `VISLOC_SFM_TRACE_BA_CONNECTIVITY` を追加。実際のBA採用観測のlandmark-starで
+> 固定poseへの到達性を判定。密なpose cliqueなし、O(観測+点+pose)診断状態。
+> 接続単体テストと有効状態の固定/rollbackテスト、clippy通過。release42.71秒。
+> 5k `tier-5000-slice/ba-connectivity-debug` はexit0、Legacyモデルbytes一致。
+> binary SHA256 `a2b1523fccf956ca912ba051043e186dc0f7a95e2ce70a041cfb2851079b2fb0`。
+> 全20000 pose/BA記録中306件が全固定poseから未接続。変位上位5件は全て未接続。
+> 1070/1072のanchor1414のBAも未接続。次は独立成分のgauge固定をdefault-off検証。
+> 1416は接続済みでも変位するため十分条件ではない。品質変更はまだない。
+> 証跡 `m8-openloris-5000-ba-connectivity-v1.json`。
+
 > PR101は最終head `4ae1a8f` のCI9成功後、`a551e5a` にsquash merge・旧branch整理済み。
 > 現branch `diag/m8-ba-pose-motion`、build `49f3021`。既定OFFの
 > `VISLOC_SFM_TRACE_BA_POSE_MOTION` は各BAの固定anchor相対距離を前後で記録する。
