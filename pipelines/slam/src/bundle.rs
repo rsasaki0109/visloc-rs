@@ -2028,6 +2028,26 @@ impl BundleAdjustment {
         self.validate_matrix_free_entry_with_pose_requirement(config, options, false)
     }
 
+    /// Experimental bounded eight-pose preconditioner for native rig BA.
+    /// The exact operator, stopping criterion and LM policy are unchanged.
+    pub(crate) fn optimize_matrix_free_cluster8(
+        &mut self,
+        config: &BaConfig,
+        options: MatrixFreeBaOptions,
+    ) -> Result<MatrixFreeBaResult, MatrixFreeBaError> {
+        self.validate_matrix_free_entry(config, options)?;
+        let mut runtime = MatrixFreeRuntime::new(options);
+        runtime.cluster8 = true;
+        let (result, runtime) = self.run_matrix_free_backend(config, runtime)?;
+        Ok(MatrixFreeBaResult {
+            initial_cost: result.initial_cost,
+            final_cost: result.final_cost,
+            iterations: result.iterations,
+            matrix_free_iterations: runtime.iterations,
+            converged: result.converged,
+        })
+    }
+
     /// Run matrix-free BA with explicit column equilibration and scaled LM
     /// damping.  This is a separate opt-in policy: the legacy matrix-free
     /// entry point keeps scalar `lambda * I` damping and its exact arithmetic.
@@ -3351,6 +3371,7 @@ impl BundleAdjustment {
                             scaling_state.as_ref(),
                             schur_debug_context,
                             adaptive_damping,
+                            runtime.cluster8,
                         ),
                     };
                     match solve_result {
@@ -4984,6 +5005,7 @@ mod column_scaling_tests {
             Some(&state),
             None,
             false,
+            false,
         ) {
             Ok(outcome) => outcome,
             Err(_) => panic!("scaled synthetic matrix-free solve should succeed"),
@@ -5599,6 +5621,7 @@ enum BaSolveBackend {
 }
 
 struct MatrixFreeRuntime {
+    cluster8: bool,
     options: MatrixFreeBaOptions,
     iterations: Vec<MatrixFreeBaIterationStats>,
     restart_limit: usize,
@@ -5612,6 +5635,7 @@ struct MatrixFreeRuntime {
 impl MatrixFreeRuntime {
     fn new(options: MatrixFreeBaOptions) -> Self {
         Self {
+            cluster8: false,
             options,
             iterations: Vec::new(),
             restart_limit: 0,
@@ -5625,6 +5649,7 @@ impl MatrixFreeRuntime {
 
     fn with_restart(options: MatrixFreeBaOptions, restart_limit: usize) -> Self {
         Self {
+            cluster8: false,
             options,
             iterations: Vec::new(),
             restart_limit,
@@ -5638,6 +5663,7 @@ impl MatrixFreeRuntime {
 
     fn with_column_scaling(options: MatrixFreeBaOptions) -> Self {
         Self {
+            cluster8: false,
             options,
             iterations: Vec::new(),
             restart_limit: 0,
@@ -5651,6 +5677,7 @@ impl MatrixFreeRuntime {
 
     fn with_column_scaling_adaptive(options: MatrixFreeBaOptions) -> Self {
         Self {
+            cluster8: false,
             options,
             iterations: Vec::new(),
             restart_limit: 0,
@@ -7285,6 +7312,7 @@ fn solve_matrix_free_step(
     scaling_state: Option<&ColumnEquilibrationState>,
     schur_debug_context: Option<SchurBlockDebugContext<'_>>,
     collect_adaptive_prediction: bool,
+    cluster8: bool,
 ) -> Result<MatrixFreeStepOutcome, MatrixFreeStepError> {
     let to_step_error = |error: implicit_schur::ImplicitSchurError| {
         let (pcg_iterations, pcg_residual_norm, pcg_target) = error.diagnostics();
@@ -7312,6 +7340,11 @@ fn solve_matrix_free_step(
         None => implicit_schur::ImplicitSchurOperator::new(system, lambda),
     }
     .map_err(to_step_error)?;
+    let operator = if cluster8 {
+        operator.with_cluster8().map_err(to_step_error)?
+    } else {
+        operator
+    };
     let pcg_options = implicit_schur::PcgOptions {
         max_iterations: options.max_pcg_iterations,
         relative_tolerance: options.pcg_relative_tolerance,
@@ -8696,6 +8729,7 @@ mod implicit_schur {
         landmarks: &'a [LandmarkBlock],
         h_ll_inverse: Vec<Option<Matrix3<f64>>>,
         preconditioner_inverse: Vec<Matrix6<f64>>,
+        cluster_inverse: Option<Vec<DMatrix<f64>>>,
         rhs: DVector<f64>,
     }
 
@@ -8868,8 +8902,87 @@ mod implicit_schur {
                 landmarks: &system.landmarks,
                 h_ll_inverse,
                 preconditioner_inverse,
+                cluster_inverse: None,
                 rhs,
             })
+        }
+
+        /// Principal Schur blocks on fixed groups of at most eight poses.
+        /// O(P*K) retained scalars and O(cross_rows*K) work, K=8. In particular,
+        /// never enumerate a landmark's global pose-pair clique.
+        pub(super) fn with_cluster8(mut self) -> Result<Self, ImplicitSchurError> {
+            const K: usize = 8;
+            let poses = self.diagonal.len();
+            let mut blocks: Vec<DMatrix<f64>> = self
+                .diagonal
+                .chunks(K)
+                .map(|chunk| {
+                    let mut block = DMatrix::zeros(chunk.len() * 6, chunk.len() * 6);
+                    for (slot, diagonal) in chunk.iter().enumerate() {
+                        block
+                            .view_mut((slot * 6, slot * 6), (6, 6))
+                            .copy_from(diagonal);
+                    }
+                    block
+                })
+                .collect();
+            // Scratch is allocated once, reset only for touched slots. Each
+            // cluster's list has at most K entries even for repeated sensors.
+            let mut cross_sum = vec![Matrix6x3::zeros(); poses];
+            let mut seen = vec![false; poses];
+            let mut members: Vec<Vec<usize>> = (0..blocks.len()).map(|_| Vec::new()).collect();
+            let mut touched = Vec::new();
+            for (landmark, inverse) in self.landmarks.iter().zip(&self.h_ll_inverse) {
+                let Some(inverse) = inverse else {
+                    continue;
+                };
+                for (pose, cross) in &landmark.cross {
+                    let cluster = *pose / K;
+                    if !seen[*pose] {
+                        if members[cluster].is_empty() {
+                            touched.push(cluster);
+                        }
+                        members[cluster].push(*pose);
+                        seen[*pose] = true;
+                    }
+                    cross_sum[*pose] += cross;
+                }
+                for &cluster in &touched {
+                    let block = &mut blocks[cluster];
+                    for &a in &members[cluster] {
+                        let left = cross_sum[a] * inverse;
+                        for &b in &members[cluster] {
+                            let update = left * cross_sum[b].transpose();
+                            for r in 0..6 {
+                                for c in 0..6 {
+                                    block[((a % K) * 6 + r, (b % K) * 6 + c)] -= update[(r, c)];
+                                }
+                            }
+                        }
+                    }
+                    for pose in members[cluster].drain(..) {
+                        seen[pose] = false;
+                        cross_sum[pose].fill(0.0);
+                    }
+                }
+                touched.clear();
+            }
+            for (cluster, block) in blocks.iter_mut().enumerate() {
+                if !block.iter().all(|v| v.is_finite()) {
+                    return Err(ImplicitSchurError::NonFinite("cluster preconditioner"));
+                }
+                let factor = block
+                    .clone()
+                    .cholesky()
+                    .ok_or(ImplicitSchurError::NonSpdPreconditioner(cluster * K))?;
+                *block = factor.inverse();
+                if !block.iter().all(|v| v.is_finite()) {
+                    return Err(ImplicitSchurError::NonFinite("cluster inverse"));
+                }
+            }
+            self.preconditioner_inverse.clear();
+            self.cluster_inverse = Some(blocks);
+            Ok(self)
         }
 
         pub(super) fn dimension(&self) -> usize {
@@ -8942,6 +9055,21 @@ mod implicit_schur {
                 return Err(ImplicitSchurError::NonFinite("preconditioner input"));
             }
             let mut out = DVector::zeros(self.dimension());
+            if let Some(clusters) = &self.cluster_inverse {
+                let mut offset = 0;
+                for inverse in clusters {
+                    let n = inverse.nrows();
+                    out.rows_mut(offset, n)
+                        .copy_from(&(inverse * residual.rows(offset, n)));
+                    offset += n;
+                }
+                if !out.iter().all(|v| v.is_finite()) {
+                    return Err(ImplicitSchurError::NonFinite(
+                        "cluster preconditioner output",
+                    ));
+                }
+                return Ok(out);
+            }
             for (pose, inverse) in self.preconditioner_inverse.iter().enumerate() {
                 let residual_pose: Vector6<f64> = residual.fixed_rows::<6>(pose * 6).into_owned();
                 let value = inverse * residual_pose;
@@ -9492,6 +9620,75 @@ mod implicit_schur {
             let expected_pose0 =
                 expected_inverse * Vector6::from_iterator((0..6).map(|i| (i + 1) as f64));
             assert!((applied.fixed_rows::<6>(0).into_owned() - expected_pose0).norm() < 1.0e-12);
+        }
+
+        #[test]
+        fn cluster8_matches_principal_schur_with_repeated_sensor_rows() {
+            for lambda in [0.0, 0.5] {
+                let system = synthetic_system();
+                let old = ImplicitSchurOperator::new(&system, lambda).unwrap();
+                let clustered = ImplicitSchurOperator::new(&system, lambda)
+                    .unwrap()
+                    .with_cluster8()
+                    .unwrap();
+                let schur = explicit_schur(&system, lambda);
+                let probe = DVector::from_fn(12, |i, _| (i + 1) as f64 / 13.0);
+                assert_eq!(old.rhs(), clustered.rhs());
+                assert_eq!(old.apply(&probe).unwrap(), clustered.apply(&probe).unwrap());
+                let applied = clustered.apply_preconditioner(&probe).unwrap();
+                assert!((&schur * &applied - &probe).norm() < 1e-11);
+                let result = clustered
+                    .solve_pcg(clustered.rhs(), PcgOptions::default())
+                    .unwrap();
+                assert!(result.residual_norm <= result.target);
+                assert!((&schur * result.solution - clustered.rhs()).norm() < 1e-10);
+            }
+        }
+
+        #[test]
+        fn cluster8_storage_is_bounded_for_a_long_track_and_partial_cluster() {
+            let poses = 17;
+            let mut system = synthetic_system();
+            system.h_pp = CameraHessian::PoseDiagonal(vec![Matrix6::identity() * 100.0; poses]);
+            system.b_p = DVector::from_element(poses * 6, 1.0);
+            let cross = system.landmarks[0].cross[0].1 * 0.01;
+            system.landmarks[0].cross = (0..poses).flat_map(|p| [(p, cross), (p, cross)]).collect();
+            let clustered = ImplicitSchurOperator::new(&system, 0.5)
+                .unwrap()
+                .with_cluster8()
+                .unwrap();
+            let blocks = clustered.cluster_inverse.as_ref().unwrap();
+            assert_eq!(
+                blocks.iter().map(|m| m.nrows()).collect::<Vec<_>>(),
+                vec![48, 48, 6]
+            );
+            assert!(blocks.iter().map(|m| m.len()).sum::<usize>() <= poses * 8 * 36);
+            let schur = explicit_schur(&system, 0.5);
+            let probe = DVector::from_element(poses * 6, 1.0);
+            let applied = clustered.apply_preconditioner(&probe).unwrap();
+            let mut offset = 0;
+            for inverse in blocks {
+                let n = inverse.nrows();
+                let principal = schur.view((offset, offset), (n, n));
+                assert!(
+                    (principal * applied.rows(offset, n) - probe.rows(offset, n)).norm() < 1e-10
+                );
+                offset += n;
+            }
+        }
+
+        #[test]
+        fn cluster8_rejects_an_indefinite_cluster_without_diagonal_fallback() {
+            let mut system = synthetic_system();
+            system.h_pp = CameraHessian::PoseDiagonal(vec![Matrix6::identity(); 2]);
+            system.landmarks[0].h_ll = Matrix3::identity();
+            let cross = Matrix6x3::from_fn(|r, c| if r == c { 0.8 } else { 0.0 });
+            system.landmarks[0].cross = vec![(0, cross), (1, cross)];
+            let diagonal = ImplicitSchurOperator::new(&system, 0.0).unwrap();
+            assert!(matches!(
+                diagonal.with_cluster8(),
+                Err(ImplicitSchurError::NonSpdPreconditioner(0))
+            ));
         }
 
         #[test]
@@ -10142,6 +10339,29 @@ mod matrix_free_ba_api_tests {
             .unwrap();
         assert_eq!(matrix_result, repeat_result);
         assert_eq!(matrix_free, repeat);
+    }
+
+    #[test]
+    fn cluster8_api_preserves_anchor_observations_and_repeatability() {
+        let original = make_problem();
+        let mut a = original.clone();
+        let mut b = original.clone();
+        let options = MatrixFreeBaOptions::default();
+        let config = matrix_free_config();
+        let result = a.optimize_matrix_free_cluster8(&config, options).unwrap();
+        let repeat = b.optimize_matrix_free_cluster8(&config, options).unwrap();
+        assert_eq!(result, repeat);
+        assert_eq!(a, b);
+        assert_eq!(a.poses[&0], original.poses[&0]);
+        assert_eq!(a.observations, original.observations);
+        assert!(result.final_cost < result.initial_cost);
+        let mut invalid = original.clone();
+        let mut bad = config.clone();
+        bad.refine_intrinsics = true;
+        assert!(invalid
+            .optimize_matrix_free_cluster8(&bad, options)
+            .is_err());
+        assert_eq!(invalid, original);
     }
 
     #[test]

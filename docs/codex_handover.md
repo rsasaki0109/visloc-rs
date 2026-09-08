@@ -6,8 +6,9 @@
 > debug出力モデルは通常MF出力と全bytes一致。残差比はvariant別fieldを区別して記録。
 > [診断とメモリ制約](openloris_native_rig_matrix_free.md#fixed-profile-linear-failure-classification)。
 > 全pose-pair graphを作るIC(0)案は最悪O(N²)のため採らない。
-> 次候補は固定上限8 poseのcluster Jacobi（未実装・未採用）、許容誤差/品質基準は維持。
-> 現branch `docs/m8-native-linear-failure-diagnosis` の証跡保存後、境界付き構築を実装・検証する。
+> 固定上限8 poseのcluster Jacobiをdefault-off実装、新規5テスト通過。未採用、許容誤差/品質基準は維持。
+> 現branch `docs/m8-native-linear-failure-diagnosis`。次はrelease認証、同一binary Legacy/strict対照一致、
+> cluster8 native 1kの品質・反復比較。実データ未実行、PR/CI/merge未完了。
 
 > Native rig matrix-free検証（2026-09-08）: Luna Max実装 `0298e0c`、
 > root独立rig29/API15テスト通過。同一binaryのLegacyは既存championと全モデルbytes一致。

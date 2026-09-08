@@ -95,6 +95,8 @@ pub enum RigBaBackend {
     #[default]
     Legacy,
     MatrixFreeStrict,
+    /// Experimental fixed-size (at most eight poses) Schur cluster preconditioner.
+    MatrixFreeCluster8,
 }
 
 /// Conservative controls for generalized-rig incremental reconstruction.
@@ -4747,7 +4749,7 @@ fn run_rig_bundle_adjustment(
         }
     }
     if visual_observations == 0 {
-        if config.ba_backend == RigBaBackend::MatrixFreeStrict
+        if config.ba_backend != RigBaBackend::Legacy
             && problem
                 .poses
                 .keys()
@@ -4783,7 +4785,7 @@ fn run_rig_bundle_adjustment(
                 result.converged,
             )
         }
-        RigBaBackend::MatrixFreeStrict => {
+        RigBaBackend::MatrixFreeStrict | RigBaBackend::MatrixFreeCluster8 => {
             let has_variable_pose = problem
                 .poses
                 .keys()
@@ -4836,8 +4838,11 @@ fn run_rig_bundle_adjustment(
                     result.converged,
                 )
             } else if has_variable_pose {
-                let result = problem
-                    .optimize_matrix_free(ba_config, MatrixFreeBaOptions::default())
+                let result = match config.ba_backend {
+                    RigBaBackend::MatrixFreeCluster8 => problem.optimize_matrix_free_cluster8(
+                        ba_config, MatrixFreeBaOptions::default()),
+                    _ => problem.optimize_matrix_free(ba_config, MatrixFreeBaOptions::default()),
+                }
                     .map_err(|error| {
                         eprintln!(
                             "rig-ba-backend: requested=matrix-free used=none eligibility=error reason={error}"
@@ -4845,7 +4850,11 @@ fn run_rig_bundle_adjustment(
                         RigSfmError::BundleAdjustment(error.to_string())
                     })?;
                 matrix_free_report = Some((
-                    "matrix-free",
+                    if config.ba_backend == RigBaBackend::MatrixFreeCluster8 {
+                        "matrix-free-cluster8"
+                    } else {
+                        "matrix-free"
+                    },
                     result.iterations.len(),
                     result
                         .iterations
@@ -4887,7 +4896,7 @@ fn run_rig_bundle_adjustment(
             }
         }
     };
-    if config.ba_backend == RigBaBackend::MatrixFreeStrict {
+    if config.ba_backend != RigBaBackend::Legacy {
         for &fixed_pose_id in &problem.fixed_poses {
             let Some(original) = frame_poses
                 .get(fixed_pose_id as usize)
@@ -8953,6 +8962,15 @@ mod tests {
 
     #[test]
     fn fixed_active_rotations_refine_rig_translation_and_landmarks() {
+        check_fixed_rotation_backend(RigBaBackend::MatrixFreeStrict);
+    }
+
+    #[test]
+    fn cluster8_native_preserves_fixed_rotations_observations_and_rollback() {
+        check_fixed_rotation_backend(RigBaBackend::MatrixFreeCluster8);
+    }
+
+    fn check_fixed_rotation_backend(backend: RigBaBackend) {
         let rig = GeneralizedCameraRig::new(vec![
             RigSensor {
                 camera: Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5),
@@ -9110,7 +9128,7 @@ mod tests {
             &features,
             &image_assignment,
             &RigSfmConfig {
-                ba_backend: RigBaBackend::MatrixFreeStrict,
+                ba_backend: backend,
                 ..config
             },
             &active_frames,
@@ -9235,7 +9253,7 @@ mod tests {
             &features,
             &image_assignment,
             &RigSfmConfig {
-                ba_backend: RigBaBackend::MatrixFreeStrict,
+                ba_backend: backend,
                 ..config
             },
             &active_frames,
@@ -9263,7 +9281,7 @@ mod tests {
             &features,
             &image_assignment,
             &RigSfmConfig {
-                ba_backend: RigBaBackend::MatrixFreeStrict,
+                ba_backend: backend,
                 ..config
             },
             &active_frames,

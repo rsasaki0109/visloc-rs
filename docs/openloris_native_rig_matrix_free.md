@@ -201,4 +201,18 @@ Before implementation, verify the construction's O(observations × K) bound,
 SPD handling and exact action/anchor tests. Keep PCG128, both tolerances
 1e-12, loss, damping and all native quality gates unchanged. A failed factor
 must fail explicitly, never fall back to a global direct solve. No improvement
-is claimed until the native 1k comparison passes; this arm is not implemented.
+is claimed until the native 1k comparison passes.
+
+The default-off `matrix-free-cluster8` native selector is now implemented.
+The operator action/RHS and scalar PCG/LM settings are unchanged. Construction
+uses per-pose scratch reset only for touched slots, aggregates repeated sensor
+rows, and loops over pairs only inside an at-most-eight-pose cluster. Local
+Cholesky inversion uses at most 48 × 48 workspace; no full-model clone or
+global pose-pair graph is added. Non-SPD clusters return a linear-step error.
+
+Five scoped tests pass: principal-Schur equivalence with repeated sensors,
+17-pose long-track/partial-cluster storage bounds, indefinite-cluster rejection,
+API anchor/observation/repeat checks, and native fixed-rotation/landmark-only/
+rollback behavior. Related rig/API/example tests and scoped clippy pass.
+Release certification and the same-input native 1k quality/repeat comparison
+are still pending. Do not promote this implementation based on synthetic tests.
