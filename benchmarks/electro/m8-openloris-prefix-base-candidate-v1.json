@@ -1,0 +1,18 @@
+{
+  "status": "ordered-edge-prefix-candidate-found",
+  "candidate": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-rig-runner-10k-v1/mapping/verified-merged.vps",
+  "candidate_pairs": 58530,
+  "candidate_accepted_correspondences": 3177460,
+  "candidate_pair_order_hash": "cfc2174c1ae0881f",
+  "reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-bridges-prefix-supplements.vps",
+  "reference_pairs": 59961,
+  "all_candidate_edge_keys_equal_reference_prefix": true,
+  "missing_candidate_edges": 0,
+  "rejected_alternatives_missing_edges": {
+    "component-ann-k128-match32-10k-v1": 50,
+    "native-rig-balanced-retrieval-match32-10k-v2": 1557,
+    "native-rig-long128-10k-v1": 581
+  },
+  "next_action": "Replay bridge admission with prefix supplements from native-rig-runner base and adaptive verified snapshot; compare complete output SHA-256.",
+  "limitations": ["Ordered image-index edge keys alone do not establish feature-envelope, correspondence or complete-file equality."]
+}
