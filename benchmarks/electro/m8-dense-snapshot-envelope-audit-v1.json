@@ -1,0 +1,16 @@
+{
+  "scope": "Structural envelope size audit only; pair payload/checksum not validated by this audit. Dense replay content was separately verified.",
+  "recipe": "python3 scripts/audit_snapshot_envelopes.py --snapshots /home/sasaki/datasets/openloris/corridor1-1-m8-dense-matching-replay-v1/matches",
+  "shards": 2500,
+  "images": 10000,
+  "pairs": 64862,
+  "file_bytes": 1294392088,
+  "shared_envelope_bytes_total": 777135000,
+  "unique_envelopes": {
+    "2c9273dbc3f298ed47319243b80560dc38d7f7a0325958984a31ba876f6c52b3": 310854
+  },
+  "duplicate_envelope_bytes": 776824146,
+  "image_dependent_bytes_total": 775000000,
+  "conclusion": "Fixed-size pair shards repeat the entire image envelope. With O(N) shards this metadata is O(N^2); streaming merge does not eliminate storage/I/O growth.",
+  "next": "Share the immutable envelope once, bind pair chunks to its content identity, and validate compatibility and restart before enabling compact output in the runner. Keep legacy v1 import support."
+}

@@ -226,7 +226,22 @@ remain open. Legacy v1 diagnostic shard reproduction is not proof of N²-free
 artifact growth: audit shared-envelope storage in the final runner before 100k
 claims.
 
-## Base extraction preflight
+## Extraction and storage preflights
+
+### Snapshot storage audit
+
+`scripts/audit_snapshot_envelopes.py` measured the 2,500 dense matching snapshots:
+1,294,392,088 total bytes, of which 777,135,000 are shared envelope bytes.
+All envelopes have the same SHA-256; 776,824,146 bytes are duplicate copies.
+The image-dependent portion alone is 775,000,000 bytes. Fixed-pair-count shards
+therefore retain quadratic image metadata when shard count grows with image
+count. Streaming merge bounds merge memory, not this storage/I/O cost.
+Evidence: `m8-dense-snapshot-envelope-audit-v1.json`. This structural audit does
+not validate pair payload checksums; full dense replay parity is separate.
+Next: shared immutable envelope plus identity-bound pair chunks, legacy v1 read
+compatibility, and restart/round-trip tests before runner adoption.
+
+### Raw image probe
 
 The base extraction preflight also passed on four raw images spread across both
 cameras and the sequence (`cam1_000000`, `cam1_006666`, `cam2_003333`,
