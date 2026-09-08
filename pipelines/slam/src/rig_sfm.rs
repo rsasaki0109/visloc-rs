@@ -4771,6 +4771,24 @@ fn run_rig_bundle_adjustment(
         }
     }
     let mut matrix_free_report = None;
+    // Scalar-only context for pairing native windows with existing LM debug
+    // records. No state copy, solve-policy change, or global pair graph.
+    if std::env::var_os("VISLOC_SFM_DEBUG_BA").is_some()
+        && std::env::var_os("VISLOC_SFM_DEBUG_BA_STEPS").is_some()
+    {
+        let variable_poses = problem
+            .poses
+            .keys()
+            .filter(|id| !problem.fixed_poses.contains(id))
+            .count();
+        eprintln!(
+            "rig-ba-context: backend={:?} poses={} variable_poses={} landmarks={} observations={} first_frame={:?} last_frame={:?} anchor={} fixed_rotations={}",
+            config.ba_backend, problem.poses.len(), variable_poses,
+            problem.landmarks.len(), visual_observations,
+            problem.poses.keys().min(), problem.poses.keys().max(),
+            anchor_frame_index, fix_active_rotations,
+        );
+    }
     let (initial_cost, final_cost, iterations, converged) = match config.ba_backend {
         RigBaBackend::Legacy => {
             // Keep the historical call and caller-provided BaConfig entirely
