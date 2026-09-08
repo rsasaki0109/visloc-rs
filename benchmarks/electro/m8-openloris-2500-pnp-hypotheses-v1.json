@@ -1,0 +1,26 @@
+{
+  "schema": "m8-openloris-2500-pnp-hypotheses-v1",
+  "commit": "015ab1bed6cb7e7e3d7a87dcac3e2f28c32ec871",
+  "binary_sha256": "78d7ebed13f1eb1471039612e8a46fd9765aae66537aecea90b6a9cb525b5aa9",
+  "command": "set -Ce\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-hypotheses\ntest ! -e /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-hypotheses.time\nenv -u VISLOC_SFM_DEBUG_QR_SHARED_STATE -u VISLOC_SFM_DEBUG_BA -u VISLOC_SFM_DEBUG_BA_STEPS -u VISLOC_SFM_DEBUG_BA_SCHUR_SLOT -u VISLOC_SFM_DEBUG_BA_LM_QUALITY VISLOC_SFM_DEBUG_PNP_HYPOTHESES=1 VISLOC_SFM_DEBUG=1 RAYON_NUM_THREADS=1 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-hypotheses.time timeout --signal=TERM --kill-after=10s 180s /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/rig-015ab1b --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-2500/pipeline-sparse7n/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-hypotheses/model > /home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n/pnp-hypotheses.log 2>&1",
+  "audit_program": "import json\nfrom pathlib import Path\nroot=Path(\"/home/sasaki/datasets/openloris/corridor1-1-m8-bounded-native-v1/tier-2500-sparse7n\")\nassert \"Exit status: 0\" in (root/\"pnp-hypotheses.time\").read_text()\nfor name in [\"cameras.txt\",\"images.txt\",\"points3D.txt\"]:\n assert (root/\"pnp-hypotheses/model\"/name).read_bytes()==(root/\"legacy/model\"/name).read_bytes()\nlines=(root/\"pnp-hypotheses.log\").read_text().splitlines()\nout=[]\nfor i,line in enumerate(lines):\n if \"frame=612 \" in line or \"frame=613 \" in line:\n  assert lines[i-1].startswith(\"generalized-pnp-hypotheses:\")\n  out.append({\"attempt\":line,\"hypotheses\":lines[i-1]})\nprint(json.dumps({\"model_bytes_exact\":True,\"boundary\":out}))\n",
+  "audit": {
+    "model_bytes_exact": true,
+    "boundary": [
+      {
+        "attempt": "rig-sfm-debug: frame=613 support=29 sensors=2 pnp=estimation-failed",
+        "hypotheses": "generalized-pnp-hypotheses: correspondences=29 dlt_hypotheses=11 central_reports=2 pooled_inliers=5 required=6 prior=false"
+      },
+      {
+        "attempt": "rig-sfm-debug: frame=612 support=25 sensors=2 pnp=estimation-failed",
+        "hypotheses": "generalized-pnp-hypotheses: correspondences=25 dlt_hypotheses=26 central_reports=2 pooled_inliers=5 required=6 prior=false"
+      }
+    ]
+  },
+  "interpretation": [
+    "Candidates exist for both boundary frames: DLT 26/11 and two central reports each, but pooled best support is five against six required.",
+    "Central report count is not the number of internal P3P hypotheses or roots.",
+    "No threshold change justified; investigate correspondence consistency or additional independently validated geometric support.",
+    "Debug model bytes equal paired Legacy. No performance or full-tier quality claim."
+  ]
+}

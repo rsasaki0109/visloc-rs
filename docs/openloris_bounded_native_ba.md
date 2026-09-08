@@ -44,6 +44,57 @@ camera alone explains this boundary. Inspect actual registration rejection
 at 612/613 before changing thresholds or enabling recovery.
 [Pair/3D association audit](../benchmarks/electro/m8-openloris-2500-boundary-support-v1.json).
 
+Actual registration debug (same certified binary, model-byte-exact) reports
+frame 612 with 25 correspondences / two sensors and frame 613 with 29 / two
+sensors; both return `pnp=estimation-failed`, not the mapper's sensor or inlier
+gate. The generalized estimator already includes per-sensor P3P hypotheses
+in addition to DLT. Next distinguish hypothesis failure from insufficient
+pooled inliers internally, without relaxing gates or adding duplicate P3P.
+[In-loop boundary evidence](../benchmarks/electro/m8-openloris-2500-boundary-pnp-v1.json).
+
+`VISLOC_SFM_DEBUG_PNP_HYPOTHESES` now enables one scalar summary per eligible
+generalized-PnP call: successful DLT hypothesis count, successful central
+sensor reports (not the internal number of P3P roots), best pooled inliers,
+minimum sample support and prior presence. It retains no correspondence or
+hypothesis history, does not change RNG draws/scoring/refinement, and requires
+native byte-parity verification before interpreting measured output. Six
+generalized-related tests pass. This is diagnostic instrumentation, not a fix.
+
+Measured `015ab1b` is model-byte-exact to Legacy. Frame 612 generates 26 DLT
+hypotheses and two central reports; frame 613 generates 11 and two. Both best
+pooled scores have only five inliers against six required. Candidate generation
+is not absent; investigate 2D/3D consistency or independently verified support
+without lowering the acceptance threshold. [Audit](../benchmarks/electro/m8-openloris-2500-pnp-hypotheses-v1.json).
+
+The opt-in diagnostic additionally reports each successful central sensor
+estimate's own inlier count and its pooled/own-sensor inlier counts after rig
+conversion. This separates weak per-camera fits from disagreement across
+sensors without changing sampling or choosing a different hypothesis.
+Native validation of these additional fields remains pending; the recorded
+`015ab1b` result above predates them.
+
+Native verification at `a70cc26` is Legacy-byte-exact. For both frames 612/613,
+each sensor's central report has five inliers; pooling retains the same five
+own-sensor inliers and gains zero from the other sensor. Central fits are
+already weak, rather than strong single-camera poses only disagreeing after
+rig conversion. Investigate map correspondence consistency or independently
+triangulated stereo support; do not lower the six-inlier requirement.
+[Central/pooled evidence](../benchmarks/electro/m8-openloris-2500-central-pnp-v1.json).
+
+Input-policy correction: the sparse7n snapshot contains only three same-frame
+stereo edges overall and none at frames 608–613. Enabling the existing direct
+stereo bridge alone therefore lacks the local triangulation input it needs.
+Do not generalize that diagnostic input's failure to the established M8 graph.
+The earlier dense ANN 2.5k promotion evidence already includes 1,250 same-frame
+candidate pairs and full registration. Its retained snapshot at
+`/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-2500-ann-gap128-local32-8n-v1/mapping/verified-merged.vps`
+was rechecked: SHA256 `165bca7bd5c85b32a8138e421c0a32a74b1426c454f3c93d2926e3c39d583574`,
+matching `m8-openloris-dense256x2-2500-ann-gap128.json`. The envelope has 2,500
+images / 901,397 feature rows. Next use that retained, rig-aware graph for a
+paired current-binary Legacy/policy check before adding a recovery mechanism.
+This is a different input contract from sparse7n and requires separate evidence;
+historical full registration does not prove current policy success.
+
 The objective remains native quality, speed and bounded 10k memory, not forcing
 every small BA window through an iterative solver. Same-state evidence shows
 117 unavailable QR steps on the Legacy path; paired small-window measurements
