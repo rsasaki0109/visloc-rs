@@ -153,3 +153,52 @@ linear-solve failures before proposing a bounded, separately predeclared
 policy; full native E2E and remaining M8–M10 gates stay open.
 
 [Candidate certificate, commands, logs and independent audits](../benchmarks/electro/m8-openloris-native-rig-matrix-free-v1.json).
+
+## Fixed-profile linear failure classification
+
+After PR #93 merged (`3136b20`), one replay of the same certified binary and
+inputs enabled existing BA/step/LM-quality debug output only. Solver settings
+and thread count stayed unchanged. All three model files exactly match the
+non-debug candidate; debug timing is not a performance measurement.
+
+All 589 reported failed linear steps classify as **296 ResidualCheckFailed**
+and **293 MaxIterations**. Residual-check failures used 46–128 iterations;
+their true residual / target ratios range from 1.003329 to 1130.530454.
+All iteration-limit failures used 128 iterations, with true residual / target
+from 1.262194 to 20,774,208,042.164658. The two variants name the true residual
+field differently (`true_norm` versus `residual_norm`); do not omit the latter
+when reporting all-failure ranges. There were no
+reported non-SPD, curvature, nonfinite or back-substitution failures.
+The aggregate field named `pcg_failures` can include other linear-step
+failures in general; this diagnostic establishes its actual contents here.
+
+This narrows the immediate issue to stopping-residual reliability and bounded
+convergence. It does not prove an incorrect operator or that raising iteration
+limits / relaxing tolerances would recover quality. Compare existing restart
+evidence before selecting one new native policy; no sweep or gate change.
+[Classification, every failure record and read-only audit](../benchmarks/electro/m8-openloris-native-linear-failure-diagnostic-v1.json).
+
+### Memory constraint on the next preconditioner
+
+Do not construct the entire pose-pair Schur sparsity graph for IC(0): one
+landmark visible in P poses can induce P(P-1)/2 blocks. Keeping only the
+lower triangle or calling the pattern sparse does not bound it below O(P²).
+The current implicit operator retains cross blocks, not an already-built
+pose-pair graph; constructing that graph would undo the central memory saving.
+
+[Ceres' preconditioner documentation](https://github.com/ceres-solver/ceres-solver/blob/master/docs/source/nnls_solving.rst)
+describes Schur block-Jacobi and visibility-cluster alternatives, including
+the cost of clustering. A possible next arm is **fixed-size cluster Jacobi**:
+at most eight consecutive variable-pose slots per cluster, no global
+visibility graph, cross-cluster Schur blocks omitted only from the
+preconditioner, exact implicit action/RHS retained. This is a bounded
+temporal approximation, not Ceres' visibility clustering implementation.
+For fixed cluster size K, factor storage is O(PK), with local matrices at
+most 6K × 6K. Group repeated rig-sensor cross blocks before forming local
+Schur blocks. Do not enumerate all pairs of a long track before filtering.
+
+Before implementation, verify the construction's O(observations × K) bound,
+SPD handling and exact action/anchor tests. Keep PCG128, both tolerances
+1e-12, loss, damping and all native quality gates unchanged. A failed factor
+must fail explicitly, never fall back to a global direct solve. No improvement
+is claimed until the native 1k comparison passes; this arm is not implemented.
