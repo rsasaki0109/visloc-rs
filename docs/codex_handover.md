@@ -1,5 +1,13 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 最新作業branch `test/m8-extraction-replay-preflight`（PR115の子）。PR115最終headc09875aは
+> CI8件成功、rust1件実行中のため未merge。親へ追加pushしてCIを再起動しない。
+> 容量対応: 再生成可能な`target/debug`約3.3GiBを
+> `/dev/shm/visloc-debug-cache.drbnfQ/debug`へ退避。移動完了、disk空き約3.9GiB。
+> 入力/証跡/release/保存binary変更なし。tmpfsは再起動で消えるためcache以外を置かない。
+> ローカルcargo/rustc稼働なしを確認して移動。以降debug buildは再生成が必要、CARGO_INCREMENTAL=0維持。
+> 全特徴4.5GiBの追加保存には依然不足。大規模抽出開始前に容量/出力方針を確定する。全goal未達。
+
 > 最新: `diag/m8-source-command-coverage`。PR114は最終head26f755aのCI9件成功後
 > `da96845c943f5889543b5ba8929079a0d2f2a982`へsquash merge済み。再利用は既定OFF。
 > 親branch整理済み、現branchはmainへrebase。サブエージェントは使わない。
