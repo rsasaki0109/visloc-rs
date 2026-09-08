@@ -404,6 +404,16 @@ sidecars have no retained reference and are not covered by that comparison.
 
 ## Full native shared matching on regenerated base features
 
+`run_native_admission.py --stage STAGE --bindings INPUTS.json --binary BINARY
+--output NEW_ROOT` executes one compiled admission recipe. The bindings JSON
+must contain exactly that stage's input placeholder names from
+`build_native_admission_recipe.py` (without braces). File inputs must match
+frozen reference hashes; feature banks must match their manifest and membership.
+The binary is hash-pinned, output must be new, and success requires the frozen
+output snapshot digest. Run through the detached measurement launcher for a
+resource cap. This executor is unit-tested but has not yet received a full
+real admission invocation; it does not assemble the complete native DAG.
+
 `replay_targeted_selection.py --stage prefix --snapshot NEW_PREFIX.vps
 --features-dir NEW_ADAPTIVE_BANK --output NEW_OUTPUT` now connects the prefix
 admission output to registration used by repair admission. It preserves the
