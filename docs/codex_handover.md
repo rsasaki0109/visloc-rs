@@ -1,5 +1,25 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 5k外れ値診断: 孤立5frameは同一全体Sim(3)下で二乗誤差69.287%を占める。
+> 最大8画像は1068/1070/1071/1072、誤差8.21〜10.09 m。
+> 主成分内1416も5.577 mなので孤立解消だけで品質達成とは言えない。
+> GTは診断のみ、モデル削除/再整列/閾値変更なし。既存repair経路の条件と
+> 登録時→最終trackの支持喪失を次に確認する。証跡 `m8-openloris-5000-slice-outliers-v1.json`。
+
+> 5k slice検証: 全5000画像登録、Legacy/policy2反復はモデルbytes一致。
+> 各420 BAは直接法、QR0。GT RMSE/p95 0.477216/0.478983 m、最大10.094671 m。
+> 幾何監査は支持点/正深度/固定rig正常だがtrack成分2495/2/2/1 frame。
+> 主成分外は791、1068/1071、1070/1072。次は軌跡外れ値との関連を診断。
+> 10k由来mapper-only入力で独立5k native E2Eではない。全goal未達。
+> 証跡 `m8-openloris-bounded-native-5000-slice-v1.json`。
+
+> Tier再検証: PR #100はCI9項目通過後 `d72bfdd` へmerge、旧branch整理済み。
+> 現branch `test/m8-rig-ann-tier-validation`。rig-aware dense ANN 2.5kでLegacy/policy2反復は過去モデルbytes一致。
+> 全2500画像/1250frame、独立GT RMSE/p95 0.133927/0.237364 m。各211 BAはすべて直接法、QR0。
+> mapper36.36/36.55 s対Legacy35.53 s、速度改善主張なし。証跡 `m8-openloris-bounded-native-2500-ann-v1.json`。
+> 次は5k入力契約の確認。独立したdense5kスナップショットはまだ見つからず、10kのsliceを使う場合は
+> mapper-only派生入力と明記し、5k native E2Eとは区別する。全goal未達。
+
 > 境界PnP: PR #99はCI9項目通過後 `28bf0e2` へmerge、旧branch整理済み。
 > 現branch `diag/m8-boundary-pnp`。build `015ab1b` の診断モデルはLegacy bytes一致。
 > frame612/613は25/29対応・2sensorで推定失敗。DLT候補26/11、central report各2は得られるが、
