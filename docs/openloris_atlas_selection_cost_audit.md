@@ -198,3 +198,11 @@ new recorded execution, not the historical binary/environment or full E2E.
 See `benchmarks/electro/m8-openloris-source-replay-650-v1.json` for argv,
 resource report, full log and old/new output hashes. The other20 executions
 and frontend/alignment/integration accounting remain outside this replay.
+
+Recorded1950-start and3200-start500-frame windows also replay exactly with
+the same saved binary: all three model files per source match historical
+output. Wall/RSS are30.25s/340220KiB and22.48s/340224KiB respectively.
+Evidence: `m8-openloris-source-replay-1950-v1.json` and
+`m8-openloris-source-replay-3200-v1.json`. This brings coverage to3 of21
+source executions, not full E2E. Historical elapsed times are not used as
+matched speed controls. No measured process remains running after these runs.
