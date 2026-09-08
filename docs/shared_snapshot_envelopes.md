@@ -29,8 +29,12 @@ the merged file against the frozen reference. Completed-resume must preserve
 shard hashes/mtimes and the worker log; merge may run again. Reports and phase
 logs remain in the fresh output directory, including failures. The harness is
 Linux-only and uses the local OpenLORIS fixture paths; it is not a portable demo.
-Its addition is not a passing result: inspect the terminal report before claiming
-validation. Extraction, candidate generation, mapping and E2E remain out of scope.
+The full run passed: all 2,500 shards match every reference record, the merged
+file matches SHA-256 `02cd6475…`, and completed-resume preserves all shard and
+worker-log hashes/mtimes. Matching+merge runner wall was 697.69 s; worker-only
+peak was 451,188 KiB (not aggregate process-tree RSS). Evidence:
+`m8-full-native-shared-runner-v1.json`. Extraction, candidate generation, mapping
+and E2E remain out of scope; this single replay is not a speedup claim.
 
 Each directory stores immutable `envelope-<sha256>.vpe` files and pair chunks.
 The envelope is the exact v1 payload prefix through verifier configuration;
