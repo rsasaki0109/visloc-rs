@@ -1,6 +1,38 @@
 # Implicit landmark QR — staged implementation
 
-Status: default-off native `--ba-backend matrix-free-qr` implemented. Kernel,
+## Native 1k result — rejected (2026-09-08)
+
+Release `f62f09b` completed in 56.62 s. Same-binary Legacy reproduces all three
+historical champion model files exactly. The two QR models are byte-identical;
+all 1,000 images / 500 rig frames are supported in one component, calibration
+and ordered input xy are preserved, and all 27,815 observations have positive
+depth (2,683 points). Independent geometry and GT scoring use repeat A.
+
+| Measure | Legacy / unchanged limit | QR A | QR B |
+| --- | ---: | ---: | ---: |
+| Mapper seconds | 4.064347 | 19.876707 | 18.796062 |
+| Process wall seconds | 4.61 | 20.38 | 19.26 |
+| Process peak RSS KiB | 82,060 | 81,620 | 81,836 |
+| GT RMSE m (308 scored images) | ≤0.022695321 | 0.044781448 | identical model |
+| GT p95 m | ≤0.037778776 | 0.064069244 | identical model |
+| Raw mean reprojection px | ≤0.671637382 | 0.660774274 | identical model |
+
+Both QR runs have 86 BA calls / 688 iterations, 166 accepted steps, 51 failed
+linear steps and 12 calls with no accepted step. This reduces observed linear
+failures relative to historical strict PCG (589), but does not establish the
+same-linear-system comparison: native trajectories and track memberships differ.
+Reprojection passes; trajectory and speed fail. Small-window RSS is not a 10k
+memory result, and saved-feature/snapshot replay is not native end-to-end.
+No default change, larger-tier promotion, tolerance or damping sweep follows.
+
+[Commands, hashes, logs and independent audits](../benchmarks/electro/m8-openloris-native-qr-v1.json)
+retain the rejected result. Next diagnosis must distinguish remaining numerical
+failures from nonlinear path differences and account for QR operator cost before
+another native candidate; reducing failure counts alone is not the objective.
+PR/CI/merge for this branch remains pending.
+
+Implementation-stage status (superseded by the measured result above):
+default-off native `--ba-backend matrix-free-qr` implemented. Kernel,
 shared LM and native fixed-state tests pass; real-data quality/performance
 is not yet measured. M8–M10 remains incomplete.
 

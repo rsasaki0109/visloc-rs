@@ -13,7 +13,10 @@
 > 3非線形反復のcost低下/反復一致/固定条件と、強制PCG失敗時の状態保持・lambda増加を検証。
 > production/native selector `--ba-backend matrix-free-qr` をdefault-off追加。
 > QR7テスト（native固定状態/rollback含む）通過。実データ品質・性能は未証明。
-> 次はrelease認証と1k同一binary Legacy対照・QR2反復、独立品質監査。合格まで大規模展開なし。
+> release `f62f09b`、同一binary Legacyはchampion bytes一致、QR2反復もbytes一致。
+> QRは再投影0.660774 pxで合格だがRMSE/p95 0.044781/0.064069 mで失敗。
+> mapper18.80/19.88 sはLegacy4.06 sより遅い。51/688線形失敗、accepted166。
+> evidence `m8-openloris-native-qr-v1.json`保存。大規模展開/既定化なし、PR/CI/merge未完了。
 > サブエージェントは使用しない。goal全体は未達。
 
 > Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。
