@@ -9463,6 +9463,26 @@ mod tests {
         component_anchors: bool,
         boundary_test: bool,
     ) {
+        check_fixed_rotation_backend_with_retry_reuse(
+            backend,
+            component_anchors,
+            boundary_test,
+            false,
+        );
+    }
+
+    #[test]
+    fn retry_reuse_native_preserves_fixed_state() {
+        check_fixed_rotation_backend_with_retry_reuse(RigBaBackend::Legacy, false, false, true);
+        check_fixed_rotation_backend_with_retry_reuse(RigBaBackend::Legacy, false, true, true);
+    }
+
+    fn check_fixed_rotation_backend_with_retry_reuse(
+        backend: RigBaBackend,
+        component_anchors: bool,
+        boundary_test: bool,
+        retry_reuse: bool,
+    ) {
         let rig = GeneralizedCameraRig::new(vec![
             RigSensor {
                 camera: Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5),
@@ -9638,6 +9658,7 @@ mod tests {
         );
         let ba_config = BaConfig {
             max_iterations: 40,
+            reuse_rejected_pose_diagonal: retry_reuse,
             linear_solver: LinearSolver::Sparse,
             robust_kernel: RobustKernel::None,
             parallel: false,
@@ -9878,6 +9899,12 @@ mod tests {
         .expect("landmark-only native rig fixture should have observations");
         assert!(landmark_only_stats.final_cost <= landmark_only_stats.initial_cost);
         assert_eq!(matrix_free_frame_poses, landmark_only_frame_poses);
+
+        // Calibration refinement is supported by Legacy; the unsupported-
+        // configuration rollback check below is specific to matrix-free.
+        if backend == RigBaBackend::Legacy {
+            return;
+        }
 
         let rejected_frame_poses = matrix_free_frame_poses.clone();
         let mut rejected_image_poses = landmark_only_image_poses.clone();

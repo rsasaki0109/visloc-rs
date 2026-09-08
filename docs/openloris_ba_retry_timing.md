@@ -62,5 +62,11 @@ undamped pose-diagonal blocks. Dense systems, other backends, navigation slots
 and calibration refinement are excluded; accepted states discard the system.
 A synthetic test with accepted and consecutive rejected iterations matches
 the full public iteration result and final state exactly, and checks dense
-dispatch remains unchanged. CLI integration, reject→accept→reject-specific
-coverage, full native tests and real-input resource/parity gates remain pending.
+dispatch remains unchanged. Native CLI integration is available through
+`--ba-reuse-rejected-pose-diagonal` (default off). An explicitly enabled native
+fixture passes fixed-state checks with and without external boundary observations.
+Its matrix-free-only unsupported-calibration rollback assertion is not applied
+to Legacy, which supports that configuration. This is not evidence of cache-hit
+coverage or rejected-step rollback in that fixture. Reject→accept→reject-specific
+coverage and real-input resource/parity gates remain pending. The existing39
+native tests passed before this additional enabled fixture.
