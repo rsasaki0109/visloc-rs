@@ -378,3 +378,26 @@ invalid completion sidecar and re-extracts, rather than reporting a resumed
 hit. Feature, loci and repaired sidecar SHA256 all match the untouched original
 pilot. See `m8-openloris-extraction-resume-corrupt-v1.json`. This tests one
 hash-mismatch recovery path, not crash interruption or the full restart gate.
+# Frontend recipe recovery: remaining dependency checks
+
+The retained `corridor1-1-m8-adaptive32-halo8-10k-v1/selection.json`
+records `min_sensor_rows_lt: 32`, `frame_halo: 8`, 221 base frames,
+346 selected frames and 692 image names. Its `merge.json` records
+`base_prefix_preserved: true` and `spatial_novelty_px_exclusive: 1.0`.
+These are recorded policies, not yet a reproduced selection/merge operation.
+A search of tracked Python, Rust and shell sources found neither the selection
+schema `visloc_adaptive_sift_selection_v1` nor `min_sensor_rows_lt`.
+
+The `admit_verified_bridge_snapshot` utility has distinct bridge, registered-frame
+repair, all-new-pair and frozen-track-extension modes. Its writer does not add
+these admission arguments to the snapshot configuration. Consequently, the
+retained snapshot alone does not recover the historical admission invocation;
+do not infer it from the `repair19-targeted7` filename. The generic disjoint-shard
+merge is not a substitute for this operation.
+
+Before a native E2E replay, recover or explicitly define and independently
+validate (1) selection from the base feature counts and rig frame order,
+(2) deterministic prefix-preserving spatial feature merge, and (3) the ordered
+base/repair/targeted admission inputs and modes. Include any intermediate
+registration used by repair selection in E2E time. Existing staged mapper
+reproduction and historical matching-worker timings do not close these steps.
