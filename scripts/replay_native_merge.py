@@ -17,6 +17,8 @@ def main():
     parser.add_argument('--variant', choices=['native', 'adaptive', 'targeted7', 'dense'], default='native')
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--binary-sha256', required=True)
+    parser.add_argument('--matching-root', type=Path)
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     base = Path('/home/sasaki/datasets/openloris')
     reference = (base / 'corridor1-1-m8-native-rig-runner-10k-v1' if args.variant == 'native'
@@ -25,7 +27,8 @@ def main():
         reference = base / 'corridor1-1-m8-targeted7-dense256-v1'
     elif args.variant == 'dense':
         reference = base / 'corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1'
-    matching = base / f'corridor1-1-m8-{args.variant}-matching-replay-v1'
+    matching = (args.matching_root.resolve(strict=True) if args.matching_root is not None else
+                base / f'corridor1-1-m8-{args.variant}-matching-replay-v1')
     report_path = matching / 'report.json'
     report = json.loads(report_path.read_text())
     accepted_status = 'complete-awaiting-merge-comparison' if args.variant == 'adaptive' else 'pass'
@@ -46,7 +49,8 @@ def main():
         if args.variant != 'adaptive' and sha(path) != sha(reference / 'matches' / name):
             raise RuntimeError(f'Snapshot changed: {name}')
         snapshots.append(path)
-    output = base / f'corridor1-1-m8-{args.variant}-merge-replay-v1'
+    output = (args.output.resolve() if args.output is not None else
+              base / f'corridor1-1-m8-{args.variant}-merge-replay-v1')
     output.mkdir()
     destination = output / 'verified-merged.vps'
     command = build_merge_command(args.binary.resolve(), destination, snapshots)
