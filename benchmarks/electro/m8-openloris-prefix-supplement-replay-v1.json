@@ -1,0 +1,18 @@
+{
+  "status": "rejected-reproduction-hypothesis",
+  "base": "/home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/pipeline-sparse7n/mapping/verified-merged.vps",
+  "augmented": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-merged.vps",
+  "operation": "admit_verified_bridge_snapshot --include-prefix-supplements; base-features-dir=m5/tiers/tier-10000/features256; rig-manifest=m8-visloc-rig/tier-10000-champion/rig-manifest.txt",
+  "output": "/home/sasaki/datasets/openloris/corridor1-1-m8-prefix-supplement-replay-v1/output.vps",
+  "recorded_command_and_time": "/home/sasaki/datasets/openloris/corridor1-1-m8-prefix-supplement-replay-v1/time.txt",
+  "exit_status": 0,
+  "wall_seconds": 2.99,
+  "peak_rss_kib": 690056,
+  "output_pairs": 60310,
+  "output_matches": 3601143,
+  "reference_pairs": 59961,
+  "reference_matches": 3337520,
+  "output_sha256": "734ca4ce6da282d85e1bab7100f5f0708f805bd783402965021f5b3db94f2dde",
+  "reference_sha256": "fbcd111cd193fd59a3311c99208de6fe30c2c334f0b088ba7798aeff69dffe6f",
+  "next_action": "Identify the actual pre-admission base selection; do not use raw sparse7n as an established producer or repeat this unchanged hypothesis."
+}
