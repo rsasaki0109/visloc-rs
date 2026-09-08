@@ -81,3 +81,10 @@ not native E2E or a COLMAP comparison. The policy remains default off pending
 larger-tier parity/resource tests and explicit invalidation transition coverage.
 See `benchmarks/electro/m8-openloris-1000-retry-reuse-v1.json` for commands,
 binary hash, full logs, resource reports and output hashes.
+
+Independent2.5k verified-pair mapper replay also matches every retained Legacy
+model file in all four runs. Wall times are38.50/37.69s off and35.63/36.16s on;
+peak RSS is412748/413244KiB off and412980/413008KiB on. Candidate wall is lower
+in both observations; RSS overlaps. No memory reduction or COLMAP/native E2E
+claim follows. Commands and exact audit program are frozen in
+`benchmarks/electro/m8-openloris-2500-retry-reuse-v1.json`.

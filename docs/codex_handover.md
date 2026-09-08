@@ -11,6 +11,11 @@
 > atlas CLIへの明示設定伝達は未完。実測はfrontend除外でE2Eではない。全goal未達。
 > 以下は過去の時点の記録。最新状態はgitと証跡を優先する。
 
+> 同じ保存binaryで独立2.5k control/candidate-a/b/control-repeatもexit0、
+> 全モデル3ファイルが過去Legacy対照と完全一致。wall OFF38.50/37.69秒、ON35.63/36.16秒。
+> RSS OFF412748/413244KiB、ON412980/413008KiB。省メモリ/10k/E2E優越は未証明。
+> 証跡 `m8-openloris-2500-retry-reuse-v1.json`。測定プロセスはすべて終了。
+
 > 最新: `perf/m8-stream-connectivity-unions`。PR108/109/110は最終headのCI9件成功後merge済み。
 > main最新merge `14d9b50661e2df6d8eb0c1743e815adfa6d62f9d`（PR110）。
 > atlas内訳計測で主成分164.04秒、solver87.06秒、連結性27.33秒、出力6ファイル過去一致。
