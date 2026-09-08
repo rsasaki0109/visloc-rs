@@ -41,3 +41,20 @@ connectivity validation just to improve a timing number.
 This work can reduce unchanged-objective overhead. It cannot itself fix the
 remaining trajectory error or establish native end-to-end parity. Those gates
 remain explicit in the M8–M10 plan.
+
+## Diagnostic implementation
+
+`VISLOC_ATLAS_TRACE_WINDOW_TIMING=1` enables stderr-only timers in the filtering
+runner for selection, counts, combined build/solve/validation, application,
+baseline connectivity and final validation. No timer is started when disabled.
+The combined phase deliberately does not claim solver-only timing. Trace I/O
+is outside reported phase intervals; their sum is not end-to-end wall time.
+Benchmark both actual components with identical inputs and compare model bytes
+before treating this instrumentation as behavior-preserving evidence.
+
+Build preflight found the filesystem full. Only regenerable workspace
+`target/debug/incremental` cache (about4.9GiB) was moved to
+`/dev/shm/visloc-atlas-build-cache.RcnQnI/incremental`; source and experiment
+artifacts are unchanged. This tmpfs backup is not durable across reboot and
+is not experiment evidence. Continue diagnostic builds with
+`CARGO_INCREMENTAL=0` to avoid immediately refilling the disk.

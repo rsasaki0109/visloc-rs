@@ -5765,8 +5765,17 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
     preserve_optimized_points: bool,
     pass: Option<usize>,
 ) -> Result<JointRigBaFilteringSummary, String> {
+    let trace_timing = std::env::var_os("VISLOC_ATLAS_TRACE_WINDOW_TIMING").is_some();
+    let baseline_started = trace_timing.then(std::time::Instant::now);
     let baseline_connectivity =
         support_connectivity_for_landmarks(landmarks, &BTreeMap::new(), &BTreeSet::new(), images)?;
+    if let Some(started) = baseline_started {
+        eprintln!(
+            "atlas-pass-timing: pass={} phase=baseline_connectivity seconds={:.9}",
+            pass.unwrap_or(0),
+            started.elapsed().as_secs_f64()
+        );
+    }
     let mut frame_ids = images
         .values()
         .map(|image| image.atlas.frame_id)
@@ -5781,7 +5790,13 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
             .copied()
             .collect::<BTreeSet<_>>();
         summary.windows_considered += 1;
+        let selection_started = trace_timing.then(std::time::Instant::now);
         let selected_result = selected_landmarks_for_frames(landmarks, &active_frames, images);
+        if let Some(started) = selection_started {
+            eprintln!("atlas-window-timing: pass={} start_frame={} phase=selection seconds={:.9} scanned_landmarks={}",
+                pass.unwrap_or(0), frame_ids[start], started.elapsed().as_secs_f64(), landmarks.len());
+        }
+        let counts_started = trace_timing.then(std::time::Instant::now);
         let window_counts = match selected_result.as_ref() {
             Ok(selected) => {
                 joint_ba_window_counts_with_selected(landmarks, images, &active_frames, selected)
@@ -5796,6 +5811,15 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
             summary.max_referenced_frames = summary.max_referenced_frames.max(*referenced_count);
             summary.max_free_frames = summary.max_free_frames.max(*free_count);
         }
+        if let Some(started) = counts_started {
+            eprintln!(
+                "atlas-window-timing: pass={} start_frame={} phase=counts seconds={:.9}",
+                pass.unwrap_or(0),
+                frame_ids[start],
+                started.elapsed().as_secs_f64()
+            );
+        }
+        let candidate_started = trace_timing.then(std::time::Instant::now);
         let candidate_result = match selected_result {
             Ok(selected) => build_joint_rig_ba_filter_candidate_with_selected(
                 manifest,
@@ -5810,10 +5834,23 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
             ),
             Err(reason) => Err(JointRigBaSkip::Invalid(reason)),
         };
+        if let Some(started) = candidate_started {
+            eprintln!("atlas-window-timing: pass={} start_frame={} phase=build_solve_validate seconds={:.9} accepted={}",
+                pass.unwrap_or(0), frame_ids[start], started.elapsed().as_secs_f64(), candidate_result.is_ok());
+        }
         match candidate_result {
             Ok(candidate) => {
                 let reason_counts = filter_reason_counts(&candidate.removed_observations);
+                let apply_started = trace_timing.then(std::time::Instant::now);
                 apply_joint_rig_ba_filter_candidate(&candidate, store, images, landmarks)?;
+                if let Some(started) = apply_started {
+                    eprintln!(
+                        "atlas-window-timing: pass={} start_frame={} phase=apply seconds={:.9}",
+                        pass.unwrap_or(0),
+                        frame_ids[start],
+                        started.elapsed().as_secs_f64()
+                    );
+                }
                 summary.windows_accepted += 1;
                 summary.max_iterations = summary.max_iterations.max(candidate.iterations);
                 if candidate.converged {
@@ -5914,7 +5951,15 @@ fn run_joint_rig_ba_filtering_with_policy_and_pass(
             }
         }
     }
+    let validation_started = trace_timing.then(std::time::Instant::now);
     validate_filtered_model(&baseline_connectivity, store, images, cameras, landmarks)?;
+    if let Some(started) = validation_started {
+        eprintln!(
+            "atlas-pass-timing: pass={} phase=final_validation seconds={:.9}",
+            pass.unwrap_or(0),
+            started.elapsed().as_secs_f64()
+        );
+    }
     Ok(summary)
 }
 
