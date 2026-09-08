@@ -362,3 +362,12 @@ All10000 image SHA256 values and sizes match (2999280260 bytes total), with
 no missing/extra names or content mismatches. See
 `m8-openloris-extraction-content-audit-v1.json`. This closes current input-image
 identity, not calibration interpretation, extraction output parity or E2E timing.
+
+A one-image extraction pilot (cam1_000000.png, chosen before execution)
+reproduces the retained dense feature and loci files exactly with377 keypoints.
+Enabling stream resume first creates validation sidecars; the next invocation
+reports a verified resumed hit and preserves both file hashes. See
+`m8-openloris-extraction-resume-pilot-v1.json`. This is not10k extraction parity,
+interruption/corruption recovery, or the pipeline restart gate. Full new dense
+output needs about4.5GiB versus less than1GiB available; no large extraction
+has been launched and existing evidence is retained.

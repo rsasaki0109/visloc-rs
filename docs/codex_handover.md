@@ -62,6 +62,9 @@
 > 内容hash/元binary/同時実行メモリは未証明。extract再実行なし。8wall単純合算/最大RSSでE2Eとしない。
 > extraction-content-audit-v1で10000画像/2999280260bytesを全SHA+size照合、欠落/余分/不一致0。
 > manifest SHAa3458a3a...はCOLMAP10k frozen契約と一致。入力画像同一性のみ確定、抽出出力/E2E未達。
+> extraction-resume-pilot-v1: cam1_000000の抽出feature/loci過去bytes一致（377kp）。resume初期化後hit確認。
+> 保存extract-3ae253a SHA8cfa9c53...、image-io build。1画像pilotのみ、10k/restart全体成功ではない。
+> full特徴4.5GiBに対し空き669MiB時点。全抽出未着手、既存証跡保持。測定稼働なし。
 
 > 最新: `perf/m8-bounded-retry-reuse`。PR111/112/113はCI確認後merge済み。
 > mainは `17277f9822a78e410bc2ae39de6915504fbccdf3`。サブエージェントは使用しない。
