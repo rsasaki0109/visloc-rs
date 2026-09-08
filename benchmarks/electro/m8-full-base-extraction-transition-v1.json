@@ -1,0 +1,14 @@
+{
+  "schema": "m8-full-base-extraction-transition-v1",
+  "sequential_run": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-base-extraction-v1",
+  "sequential_status": "deliberately-interrupted-not-parity-pass",
+  "reason": "Observed stream extraction using approximately one CPU core. Replaced the still-live serial run with disjoint image partitions to use available CPU under the same dedicated 2 GiB scope.",
+  "termination": "Revalidated owned timeout/extractor process group 3656296 and sent SIGTERM. Harness exited 1 and recorded extraction code 143; original outputs/logs retained.",
+  "parallel_preflight": "/home/sasaki/datasets/openloris/corridor1-1-m8-base-parallel-preflight-v1",
+  "parallel_preflight_result": "Four spread-out images, two workers, all feature bytes equal; scope wrapper exit zero.",
+  "full_parallel_run": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-base-extraction-v2",
+  "full_parallel_status_at_recording": "launched-awaiting-terminal-evidence",
+  "workers": 6,
+  "rayon_threads_per_worker": 1,
+  "limits": "No completed full10k parity, speedup, dense extraction or continuous E2E claim. Outer cgroup limits apply to the complete process tree; worker high-water values are not summed into aggregate RSS."
+}
