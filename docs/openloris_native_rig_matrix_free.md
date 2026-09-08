@@ -79,3 +79,30 @@ excludes feature extraction/matching and is not full native E2E.
 Failure stops promotion and larger performance claims. Passing only authorizes
 the next same-profile tier assessment. All final COLMAP/10k/native-E2E/restart/
 100k gates remain open, and README claims remain unchanged until verified.
+
+## Reproduced native main control
+
+Before implementation, root built the unmodified native code at main
+`ece2b71`, binary SHA
+`7a7446459817b492724f7b784894f826c1bbd1888637590a310d646a1ee39bcd`.
+The actual champion rig manifest, features256 directory and verified snapshot
+reproduce **all three historical model files byte-for-byte**. Independent
+audits confirm 1,000 supported images, 500 supported frames, 2,658 landmarks,
+27,716 observations, one component, fixed calibration and positive depth.
+Post-only RMSE/p95 also exactly reproduce 0.02269532080131782 /
+0.03777877644562742 m. Independent raw mean is 0.6716373819326764 px.
+
+The historical feature-tree hash did not specify its algorithm; it is not
+claimed equal to the new explicitly specified tree digest. Freeze the actual
+1,000 files / 302,873,132 bytes with `run_official_baselines.directory_identity`
+for candidate/control runs. Historical model and quality references stay
+unchanged. Their exact reproduction establishes the required mapper control,
+not historical equivalence of any ignored descriptor bytes.
+
+The first correctness run is 4.42 s process / 3.864511 s mapper, external
+peak RSS 81,916 KiB. This single run is not a speedup measurement. The writer's
+historical zero point-ERROR placeholders remain unchanged; independently
+recomputed residuals, not stored ERROR, define the quality gate.
+[Certificate, inputs, commands and audits](../benchmarks/electro/m8-openloris-native-rig-matrix-free-preflight-v1.json)
+are saved before candidate execution. Native matrix-free implementation and
+A/B remain incomplete.
