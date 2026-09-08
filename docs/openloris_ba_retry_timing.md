@@ -55,3 +55,12 @@ or exact rollback; discard after every accepted update. All other backends,
 scaled systems and dense/navigation paths remain unchanged. Require enabled
 and disabled per-iteration numerical traces and model hashes to match, plus
 reject→accept→reject invalidation tests, fixed-state tests and RSS measurements.
+
+Initial implementation adds default-off `BaConfig::reuse_rejected_pose_diagonal`.
+It moves one normal system across rejections and restores only the consumed
+undamped pose-diagonal blocks. Dense systems, other backends, navigation slots
+and calibration refinement are excluded; accepted states discard the system.
+A synthetic test with accepted and consecutive rejected iterations matches
+the full public iteration result and final state exactly, and checks dense
+dispatch remains unchanged. CLI integration, reject→accept→reject-specific
+coverage, full native tests and real-input resource/parity gates remain pending.
