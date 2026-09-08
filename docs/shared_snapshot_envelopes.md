@@ -51,6 +51,14 @@ The first eight-shard probe passed: IDs 0, 357, 714, 1071, 1428, 1785, 2142,
 membership and every decoded snapshot record match the retained legacy shards.
 Worker peak RSS was 451,184 KiB. Evidence: `m8-shared-worker-probe-v1.json`.
 
+The complete 2,500-shard/80,000-candidate worker replay also passed exact output
+membership and full decoded record equality. The plan itself matches the frozen
+reference byte-for-byte. Worker-only time was 594.68 s, peak 451,060 KiB.
+This single run does not show a matching speedup (the earlier legacy replay was
+557.35 s under a different run history). The demonstrated outcomes are parity
+and shared storage reduction, not E2E or COLMAP quality. Evidence:
+`m8-shared-worker-full-v1.json`.
+
 ## Remaining work
 
 The streaming merger now uses a one-entry envelope cache per pass. It validates
@@ -58,7 +66,13 @@ on first load, before eviction, and at pass completion; caches are not retained
 between passes. A change fails the merge before output publication. Standalone
 reads remain uncached. The cache assumes immutable inputs within each pass and
 uses the validated bytes consistently; it is not an instantaneous file watcher.
-Memory is bounded to one serialized envelope, not one per shard. Alternating
+The cache now retains a parsed immutable envelope, not just serialized bytes.
+An internal merge view shares that envelope by `Arc` and owns only shard-local
+pairs. The existing public owned `Snapshot` API remains unchanged. The pair
+decoder is shared with legacy and compact/capped reads, preserving validation.
+Repeated shards with the same cached envelope skip redundant envelope comparisons
+using pointer identity; a new envelope still receives full compatibility checks.
+Memory is bounded to a constant number of envelopes, not one per shard. Alternating
 different envelopes can still cause misses; normal same-bank shards share one.
 
 All 2,500 real dense shards merge to the exact retained legacy output SHA with
@@ -82,8 +96,11 @@ pairs copied from one seed payload. Output sizes are 20,012,094 / 200,292,475 /
 readback. The synthetic manifest/pair hashes do not represent real input banks.
 See `m8-shared-writer-scaling-v1.json` and `stress_shared_snapshot_writer`.
 
-This does not eliminate repeated envelope decoding/owned Snapshot construction.
-Add borrowed-envelope reading before claiming linear metadata CPU. Verify
+The shared-input merger now avoids repeated envelope decoding/owned Snapshot
+construction. Standalone owned reads and legacy v1 shards still pay their own
+envelope costs. This does not establish that the entire native pipeline is
+N²-free: candidate planning, restart orchestration, and other consumers need
+their own scaling evidence. Verify
 forced-interruption restart, real persistent-worker output parity,
 and 100k scaling before switching the native runner default. Full E2E, trajectory
 quality and whole-pipeline memory gates remain separate.

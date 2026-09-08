@@ -1,0 +1,15 @@
+{
+  "status": "full-merged-byte-parity-pass",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-borrowed-merge-v1/report.json",
+  "input": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-full-v1/matches",
+  "binary_sha256": "d85410b5b1a63eed6105450c44468aab5b772b74a62db7c63d30562a70e8d661",
+  "shards": 2500,
+  "output_sha256": "02cd6475098453cb6cf93761ff990ea31acba86217b715dfaf43660f3af0f05c",
+  "wall_seconds": 8.19,
+  "peak_rss_kib": 16256,
+  "rayon_num_threads": 1,
+  "malloc_arena_max": "1",
+  "exit_code": 0,
+  "time_report_sha256": "45c2e0ea8daea4b8919dfec8639e7c9b2227078b977f572e810a12bcfea15d5f",
+  "scope": "Single warm-cache merge of newly generated real worker shards. Full output SHA matches frozen reference. Not repeated speed evidence, full100k validation, restart, E2E, or COLMAP trajectory quality."
+}

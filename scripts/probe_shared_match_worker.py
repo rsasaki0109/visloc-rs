@@ -83,7 +83,9 @@ def main():
                   measurement=parse_gnu_time(output / 'time.txt'),
                   status='pass' if comparison and comparison.returncode == 0 else 'fail')
     report_path.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps(report, indent=2))
+    summary = {key: value for key, value in report.items() if key not in ('command', 'shard_ids')}
+    summary['shards'] = len(report['shard_ids'])
+    print(json.dumps(summary, indent=2))
     return 0 if report['status'] == 'pass' else 1
 
 
