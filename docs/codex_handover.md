@@ -1,5 +1,15 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 続行（2026-09-08）: PR #90はhead `b00d693` のCI9項目
+> （run `34179534033`）通過後、`1090b97`へmerge済み。旧branch整理済み。
+> ユーザーの復旧連絡後、Luna Maxのtoolアクセス復旧を確認しました。
+> 現在 `feat/m8-weak-angle-fixed-landmarks`。Luna Maxが比較driverに固定点リスト入力を実装中。
+> [事前契約](openloris_weak_angle_fixed_landmarks.md)はadaptive＋弱角39点XYZ固定の一候補。
+> rootの独立2計算法で39 IDs・949観測を照合し、入力hash付きリストを固定しました。
+> [選択証跡](../benchmarks/electro/m8-openloris-weak-angle-membership-v1.json)。
+> 全観測は残しますが、不確かなXYZ固定がposeを悪化させる可能性もあります。実solveは未実施。
+> 以下のLuna Max利用上限は当時の履歴です。全体goalは引き続き未完了です。
+
 > 観測幾何診断完了（2026-09-08）: Luna Maxの`5300634`をrootレビュー・31関連テスト後、
 > 初期/legacy/adaptive/Ceres/Ceres反復の5本で実行。19.53–21.29 s、peak RSS約216 MiB。
 > 全16群の点数/観測数を別計算法でも確認。Ceres反復はruntime以外一致、全入力hash不変。
