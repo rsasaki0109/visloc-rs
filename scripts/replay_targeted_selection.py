@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Replay the recovered repair-prefix mapper and derive unregistered targets."""
+import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import time
 
-from benchmark_electro import parse_gnu_time, validate_feature_manifest
-from replay_native_candidates import sha
+from benchmark_electro import parse_gnu_time
+from replay_native_candidates import sha, bind_feature_input
 from select_rig_sift_supplements import parse_frames
 
 
@@ -38,18 +39,27 @@ def unregistered_frames(frames, components):
 
 def main():
     base = Path('/home/sasaki/datasets/openloris')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--features-dir', type=Path,
+                        default=base / 'corridor1-1-m8-adaptive-bank-publication-v1/features')
+    parser.add_argument('--snapshot', type=Path,
+                        default=base / 'corridor1-1-m8-repair19-admission-replay-v1/output.vps')
+    parser.add_argument('--output', type=Path,
+                        default=base / 'corridor1-1-m8-targeted-selection-replay-v1')
+    args = parser.parse_args()
     rig = base / 'corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt'
-    features = base / 'corridor1-1-m8-adaptive-bank-publication-v1/features'
-    snapshot = base / 'corridor1-1-m8-repair19-admission-replay-v1/output.vps'
+    features = args.features_dir.resolve(strict=True)
+    snapshot = args.snapshot.resolve(strict=True)
     binary = base / 'corridor1-1-m8-retry-reuse-1k-v1/rig-0466499'
     if sha(binary) != '3d744ced8b2b09cbaba26bf963e9ac31c5293538b1a8bbbee62621ccfdd70c34':
         raise RuntimeError('Saved mapper binary changed')
     if sha(snapshot) != 'ac93b28daf92b9bb4a621b9687087abbf906a1bc78cca0d8f4ea9688a1ba7a8d':
         raise RuntimeError('Reproduced repair19 snapshot changed')
-    validate_feature_manifest(base / 'corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/features.json', features)
+    _, features = bind_feature_input(['mapper', '--features-dir', str(features)],
+        base / 'corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/features.json')
     frames = parse_frames(rig.read_bytes())
     reference = base / 'corridor1-1-m8-visloc-rig/tier-10000-deferred-repair19-pair-confidence-finalfix32-v1/model'
-    output = base / 'corridor1-1-m8-targeted-selection-replay-v1'
+    output = args.output.resolve()
     output.mkdir()
     command = [str(binary), '--manifest', str(rig), '--features-dir', str(features),
                '--snapshot', str(snapshot), '--out-colmap', str(output / 'model'),
