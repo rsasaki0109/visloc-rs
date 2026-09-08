@@ -256,3 +256,8 @@ in29.82s/340092KiB. Each duration belongs to one execution, not each component.
 Evidence: source-spec-3000/4250-v1 JSONs. Coverage is9 of21 executions and
 11 of23 retained model nodes;12 executions remain. No historical argv or
 full-pipeline success is inferred from these new-policy reproductions.
+
+Start750/count500 also reproduces all retained model files under the same
+new common policy:39.63s wall,340224KiB peak RSS. See
+`m8-openloris-source-spec-750-v1.json`. Coverage is10 of21 execution outputs
+(12 of23 retained nodes), leaving11 executions; frontend/E2E remains excluded.
