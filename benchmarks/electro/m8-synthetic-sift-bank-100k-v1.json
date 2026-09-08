@@ -1,0 +1,30 @@
+{
+  "scope": "synthetic-one-feature-per-image-no-supplements",
+  "command": "python3 scripts/stress_sift_bank_io.py --root /home/sasaki/datasets/openloris/synthetic-sift-bank-100k-v1 --count 100000",
+  "exit_status": 0,
+  "count": 100000,
+  "generation_seconds": 3.0619653369067237,
+  "publication_seconds": 42.565155563061126,
+  "resume_seconds": 6.430635778931901,
+  "linux_peak_rss_kib": 528516,
+  "written_first": 100000,
+  "reused_resume": 100000,
+  "written_resume": 0,
+  "inventory_sha256_both": "f7c4308b7152b14e6224734a8d879e734fa331d6da04b81f844280a12701f795",
+  "independent_all_rows_equal": true,
+  "isolated_completed_resume": {
+    "command": "/usr/bin/time -v python3 -c 'import sys; sys.path.insert(0,\"scripts\"); from pathlib import Path; from merge_sift_supplements import write_bank; import json; r=Path(\"/home/sasaki/datasets/openloris/synthetic-sift-bank-100k-v1\"); print(json.dumps(write_bank(r/\"base\",r/\"supplement\",{\"image_names\":[]},r/\"output\",True)))'",
+    "exit_status": 0,
+    "wall_seconds": 5.37,
+    "peak_rss_kib": 45388,
+    "reused": 100000,
+    "written": 0,
+    "inventory_sha256": "f7c4308b7152b14e6224734a8d879e734fa331d6da04b81f844280a12701f795",
+    "interpretation": "Isolated resume with retained inputs, not the full fixture-generation/publication/verification workload. The earlier 528516 KiB peak is retained; the cause of the difference is not established."
+  },
+  "limitations": [
+    "Single bank-publication phase, not candidate retrieval, matching, mapping or full SfM 100k stress.",
+    "One synthetic feature per file, no supplements; real descriptor density is not covered.",
+    "One scale does not establish linear memory growth; peak includes fixture generation and independent verification."
+  ]
+}

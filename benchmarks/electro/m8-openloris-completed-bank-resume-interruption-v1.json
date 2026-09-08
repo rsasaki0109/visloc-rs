@@ -1,0 +1,26 @@
+{
+  "status": "completed-bank-resume-after-kill-pass",
+  "implementation_commit": "e48978b",
+  "command_reference": "m8-openloris-adaptive-bank-publication-v1.json: command plus --resume",
+  "interruption": {
+    "wrapper": "timeout --signal=KILL 0.5s",
+    "shell_exit_status": 137,
+    "time_report_signal": 9,
+    "time_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-bank-publication-v1/interrupted-resume.time",
+    "verified_files_at_interruption": null
+  },
+  "subsequent_resume": {
+    "exit_status": 0,
+    "files": 10000,
+    "reused": 10000,
+    "written": 0,
+    "inventory_sha256": "c8d22b395f172b9326837ea220e916617e2929856ea45d2c7e44ec5bda43e6f1",
+    "time_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive-bank-publication-v1/after-interrupted-resume.time"
+  },
+  "limitations": [
+    "The starting bank was complete; this is not interrupted fresh10k publication.",
+    "The interruption point was time-based, not synchronized with a completed image or a partial write.",
+    "A small subprocess test separately synchronizes SIGKILL with a staged partial write.",
+    "Do not use GNU time's Exit status: 0 line for the killed wrapper as success; signal9 and shell137 establish interruption."
+  ]
+}
