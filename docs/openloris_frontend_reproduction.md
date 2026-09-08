@@ -315,10 +315,10 @@ cleanup; its retained service result is not a guarantee that cgroup counters
 remain available after exit. Persisted measurement data is still required.
 
 A short detached 32 MiB allocation probe saved its terminal ledger after the
-launch command returned. A 3,700-second low-load probe is in progress as
+launch command returned. A 3,700-second low-load probe completed successfully as
 `visloc-durable-long-probe-v1.service`, with artifacts under
-`/home/sasaki/datasets/openloris/m8-durable-long-probe-v1`. Long-duration success
-is not established until that service and its report are terminal. This addresses
+`/home/sasaki/datasets/openloris/m8-durable-long-probe-v1`. The service exited zero
+and the terminal measurement passed after 3700.04 seconds. This addresses
 measurement durability, not extraction performance or the still-failing quality
 gate; the cause of the earlier missing final ledger remains unproven.
 
@@ -398,7 +398,15 @@ dense extraction recipe, retaining its two orientations, RootSIFT and compatible
 detector/descriptor/orientation/output-order/grayscale flags. Its reference check
 includes both `_features.txt` and `_loci.txt`: four spread-out images/two workers
 match all eight files, and the detached measurement service exited successfully.
-See `m8-dense-parallel-preflight-v1.json`. Full10k dense execution is not yet done.
+See `m8-dense-parallel-preflight-v1.json`. Full10k dense extraction is now running
+with six workers under `visloc-full-dense-extraction-v1.service`, after the long
+durability probe passed and a fresh disk check. Output is at
+`/home/sasaki/datasets/openloris/corridor1-1-m8-full-dense-extraction-v1`;
+measurement is at
+`/home/sasaki/datasets/openloris/m8-full-dense-extraction-measurement-v1`.
+The service enforces 2 GiB memory / zero swap. Completion and full20k-file
+feature/loci parity remain pending. Do not launch other large-output stages
+against the narrow disk headroom during this run.
 The base parity result covers only its 10,000 feature files: new base loci
 sidecars have no retained reference and are not covered by that comparison.
 
@@ -481,7 +489,7 @@ aggregate peak RSS 276,100 KiB. Cgroup memory reached its 2 GiB cap with 1,462
 max events and no OOM events; this includes cache/kernel memory, not just RSS.
 This is neither an extraction/retrieval/mapping measurement nor proof of a
 speedup or improved trajectory quality. The long-duration durability probe is
-still a separate pending gate.
+now a separate passed lifecycle gate, not SfM performance evidence.
 
 ## Empty vocabulary safety
 
