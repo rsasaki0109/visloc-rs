@@ -1,5 +1,14 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> Native rig matrix-free検証（2026-09-08）: Luna Max実装 `0298e0c`、
+> root独立rig29/API15テスト通過。同一binaryのLegacyは既存championと全モデルbytes一致。
+> MFの2反復もbytes一致、1000画像/500frame支持・校正・正深度・xy順序は保持。
+> ただしRMSE/p95 **0.140219/0.234580 m**、raw mean **0.725011 px**で全品質基準失敗。
+> 688反復中589 PCG失敗、86呼び出し中52はaccepted stepなし。既定化・10k展開なし。
+> [結果と次の診断方針](openloris_native_rig_matrix_free.md)、
+> [証跡](../benchmarks/electro/m8-openloris-native-rig-matrix-free-v1.json)。
+> 現branch `feat/m8-native-rig-matrix-free` のPR/CI/mergeは未完了。READMEの性能主張は変更なし。
+
 > 続行（2026-09-08）: PR #92は最終head `8cda545`のCI9項目
 > （run `34184156416`）通過後、`ece2b71`へmerge。旧branch整理済み。
 > 現在 `feat/m8-native-rig-matrix-free`。次は[事前契約](openloris_native_rig_matrix_free.md)

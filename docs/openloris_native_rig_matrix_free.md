@@ -1,6 +1,6 @@
 # Native rig matrix-free integration
 
-Status: predeclared; implementation and native A/B not yet completed.
+Status: implemented default-off; native 1k A/B fails quality, not promoted.
 
 ## Outcome and actual target
 
@@ -109,5 +109,47 @@ peak RSS 81,916 KiB. This single run is not a speedup measurement. The writer's
 historical zero point-ERROR placeholders remain unchanged; independently
 recomputed residuals, not stored ERROR, define the quality gate.
 [Certificate, inputs, commands and audits](../benchmarks/electro/m8-openloris-native-rig-matrix-free-preflight-v1.json)
-are saved before candidate execution. Native matrix-free implementation and
-A/B remain incomplete.
+were saved before candidate execution.
+
+## Native candidate result — not promoted
+
+Implementation `0298e0c` adds the strict selector without changing Legacy
+defaults. Root independently passed 29 rig tests and 15 matrix-free API tests;
+the example's 15 tests, scoped clippy and formatting checks also pass.
+The release CLI rejects unknown and duplicate backend options.
+
+The same candidate binary's option-absent output reproduces the main and
+historical champion model bytes exactly. Both matrix-free runs also match
+each other exactly, but fail the predeclared native quality limits:
+
+| Metric | Legacy control | Matrix-free |
+| --- | ---: | ---: |
+| Supported images / rig frames | 1,000 / 500 | 1,000 / 500 |
+| Trajectory RMSE (m) | 0.0226953 | 0.1402194 |
+| Trajectory p95 (m) | 0.0377788 | 0.2345797 |
+| Independent raw mean (px) | 0.6716374 | 0.7250106 |
+| Landmarks / observations | 2,658 / 27,716 | 2,796 / 28,039 |
+| Mapper time (s) | 3.345699 | 5.001141 / 4.850592 |
+| Process time (s) | 3.81 | 5.45 / 5.28 |
+| External peak RSS (KiB) | 81,876 | 82,260 / 82,396 |
+
+Calibration, image identities, all 256,000 ordered keypoint coordinates,
+positive depths, bidirectional references and one-component support pass.
+Native track memberships can change; this is not frozen-observation BA.
+The feature-tree digest remains unchanged after the runs.
+
+Each candidate logs 86 backend calls, 688 iterations, 589 PCG failures,
+71 accepted steps and 52 calls with no accepted step. These diagnostics
+cover a different subset from the mapper's aggregate BA line. Failed PCG
+steps are rolled back; eligibility does not mean numerical convergence.
+This identifies a practical failure of the strict default policy, not proof
+of a unique underlying cause or permission to relax the quality gate.
+
+The correctness runs show no speed or memory improvement; the planned
+three-run performance gate is not entered after quality failure. No 10k
+promotion, tolerance sweep, hidden direct fallback or README performance
+claim follows. Keep Legacy default. The next work must diagnose native
+linear-solve failures before proposing a bounded, separately predeclared
+policy; full native E2E and remaining M8–M10 gates stay open.
+
+[Candidate certificate, commands, logs and independent audits](../benchmarks/electro/m8-openloris-native-rig-matrix-free-v1.json).
