@@ -88,6 +88,197 @@ impl LandmarkQr {
     }
 }
 
+#[derive(Clone, Debug)]
+struct WeightedRow {
+    pose: Option<usize>,
+    pose_jacobian: [f64; 6],
+    landmark_jacobian: [f64; 3],
+    residual: f64,
+}
+
+#[derive(Debug)]
+struct PoseRow {
+    pose: Option<usize>,
+    jacobian: [f64; 6],
+    residual: f64,
+}
+
+/// One landmark's reduced operator. Inputs are already robust-weighted;
+/// repeated sensors and fixed-pose rows remain distinct and in input order.
+#[derive(Debug)]
+struct ReducedLandmark {
+    rows: Vec<PoseRow>,
+    qr: Option<LandmarkQr>,
+    pose_dimension: usize,
+}
+
+impl ReducedLandmark {
+    fn new(
+        rows: Vec<WeightedRow>,
+        poses: usize,
+        variable: bool,
+        lambda: f64,
+    ) -> Result<Self, &'static str> {
+        let pose_dimension = poses.checked_mul(6).ok_or("pose dimension overflow")?;
+        if rows.is_empty() || !lambda.is_finite() || lambda <= 0.0 {
+            return Err("positive damping and observation rows required");
+        }
+        for row in &rows {
+            if row.pose.is_some_and(|p| p >= poses)
+                || !row
+                    .pose_jacobian
+                    .iter()
+                    .chain(&row.landmark_jacobian)
+                    .chain(std::iter::once(&row.residual))
+                    .all(|v| v.is_finite())
+            {
+                return Err("invalid weighted observation row");
+            }
+        }
+        let qr = if variable {
+            let mut jl: Vec<_> = rows.iter().map(|r| r.landmark_jacobian).collect();
+            for i in 0..3 {
+                let mut row = [0.0; 3];
+                row[i] = lambda.sqrt();
+                jl.push(row);
+            }
+            Some(LandmarkQr::factor(jl)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            rows: rows
+                .into_iter()
+                .map(|r| PoseRow {
+                    pose: r.pose,
+                    jacobian: r.pose_jacobian,
+                    residual: r.residual,
+                })
+                .collect(),
+            qr,
+            pose_dimension,
+        })
+    }
+
+    fn prepare(&self, scratch: &mut Vec<f64>) {
+        scratch.resize(self.rows.len() + if self.qr.is_some() { 3 } else { 0 }, 0.0);
+        scratch.fill(0.0);
+    }
+
+    fn pose_action(&self, x: &[f64], scratch: &mut Vec<f64>) -> Result<(), &'static str> {
+        if x.len() != self.pose_dimension || !x.iter().all(|v| v.is_finite()) {
+            return Err("invalid pose vector");
+        }
+        self.prepare(scratch);
+        for (value, row) in scratch.iter_mut().zip(&self.rows) {
+            if let Some(p) = row.pose {
+                *value = row
+                    .jacobian
+                    .iter()
+                    .zip(&x[p * 6..p * 6 + 6])
+                    .map(|(a, b)| a * b)
+                    .sum();
+            }
+        }
+        if !scratch.iter().all(|v| v.is_finite()) {
+            return Err("nonfinite pose action");
+        }
+        Ok(())
+    }
+
+    fn apply<'a>(&self, x: &[f64], scratch: &'a mut Vec<f64>) -> Result<&'a [f64], &'static str> {
+        self.pose_action(x, scratch)?;
+        if let Some(qr) = &self.qr {
+            qr.transform(scratch, true)?;
+            Ok(&scratch[3..])
+        } else {
+            Ok(scratch)
+        }
+    }
+
+    fn scatter(&self, values: &[f64], out: &mut [f64], sign: f64) -> Result<(), &'static str> {
+        if out.len() != self.pose_dimension || !out.iter().all(|v| v.is_finite()) {
+            return Err("invalid adjoint output");
+        }
+        for (value, row) in values.iter().zip(&self.rows) {
+            if let Some(p) = row.pose {
+                for (dst, j) in out[p * 6..p * 6 + 6].iter_mut().zip(row.jacobian) {
+                    *dst += sign * value * j;
+                }
+            }
+        }
+        if !out.iter().all(|v| v.is_finite()) {
+            return Err("nonfinite adjoint");
+        }
+        Ok(())
+    }
+
+    fn adjoint_add(
+        &self,
+        y: &[f64],
+        out: &mut [f64],
+        scratch: &mut Vec<f64>,
+    ) -> Result<(), &'static str> {
+        if y.len() != self.rows.len() || !y.iter().all(|v| v.is_finite()) {
+            return Err("invalid reduced vector");
+        }
+        self.prepare(scratch);
+        if let Some(qr) = &self.qr {
+            scratch[3..].copy_from_slice(y);
+            qr.transform(scratch, false)?;
+        } else {
+            scratch.copy_from_slice(y);
+        }
+        self.scatter(scratch, out, 1.0)
+    }
+
+    /// Add A^T A x using one reusable longest-track buffer. Global pose LM
+    /// damping is added once by the caller, not once per landmark.
+    fn normal_add(
+        &self,
+        x: &[f64],
+        out: &mut [f64],
+        scratch: &mut Vec<f64>,
+    ) -> Result<(), &'static str> {
+        self.pose_action(x, scratch)?;
+        if let Some(qr) = &self.qr {
+            qr.transform(scratch, true)?;
+            scratch[..3].fill(0.0);
+            qr.transform(scratch, false)?;
+        }
+        self.scatter(scratch, out, 1.0)
+    }
+
+    fn rhs_add(&self, out: &mut [f64], scratch: &mut Vec<f64>) -> Result<(), &'static str> {
+        self.prepare(scratch);
+        for (value, row) in scratch.iter_mut().zip(&self.rows) {
+            *value = row.residual;
+        }
+        if let Some(qr) = &self.qr {
+            qr.transform(scratch, true)?;
+            scratch[..3].fill(0.0);
+            qr.transform(scratch, false)?;
+        }
+        self.scatter(scratch, out, -1.0)
+    }
+
+    fn back_substitute(
+        &self,
+        x: &[f64],
+        scratch: &mut Vec<f64>,
+    ) -> Result<Option<[f64; 3]>, &'static str> {
+        self.pose_action(x, scratch)?;
+        let Some(qr) = &self.qr else {
+            return Ok(None);
+        };
+        for (value, row) in scratch.iter_mut().zip(&self.rows) {
+            *value = -(*value + row.residual);
+        }
+        qr.transform(scratch, true)?;
+        qr.solve_landmark(scratch).map(Some)
+    }
+}
+
 #[test]
 fn landmark_qr_eliminates_columns_and_preserves_adjoint() {
     let a = vec![
@@ -170,4 +361,130 @@ fn landmark_qr_long_track_storage_is_linear_and_invalid_inputs_fail() {
     assert!(LandmarkQr::factor(vec![[0.0; 3]; 4]).is_err());
     assert!(LandmarkQr::factor(vec![[f64::NAN; 3]; 4]).is_err());
     assert!(qr.transform(&mut [0.0; 2], true).is_err());
+}
+
+#[test]
+fn sparse_qr_action_rhs_and_full_step_match_damped_normal_system() {
+    use nalgebra::{DMatrix, DVector};
+    let rows: Vec<_> = (0..12)
+        .map(|i| {
+            let weight = if i % 3 == 0 { 0.3 } else { 1.0 };
+            WeightedRow {
+                pose: if i % 4 == 0 { None } else { Some(i % 2) },
+                pose_jacobian: std::array::from_fn(|j| weight * ((i * 7 + j * 3 + 1) as f64).sin()),
+                landmark_jacobian: std::array::from_fn(|j| weight * ((i * 3 + j + 2) as f64).cos()),
+                residual: weight * (i as f64 * 0.2 - 0.5),
+            }
+        })
+        .collect();
+    for variable in [false, true] {
+        for lambda in [1e-4_f64, 0.5, 100.0] {
+            let block = ReducedLandmark::new(rows.clone(), 2, variable, lambda).unwrap();
+            let jp = DMatrix::from_fn(12, 12, |i, j| {
+                if rows[i].pose == Some(j / 6) {
+                    rows[i].pose_jacobian[j % 6]
+                } else {
+                    0.0
+                }
+            });
+            let jl = DMatrix::from_fn(12, 3, |i, j| rows[i].landmark_jacobian[j]);
+            let r = DVector::from_iterator(12, rows.iter().map(|r| r.residual));
+            let hpp = jp.transpose() * &jp + DMatrix::identity(12, 12) * lambda;
+            let hll = jl.transpose() * &jl + DMatrix::identity(3, 3) * lambda;
+            let cross = jp.transpose() * &jl;
+            let inv = hll.clone().cholesky().unwrap().inverse();
+            let expected_s = if variable {
+                &hpp - &cross * &inv * cross.transpose()
+            } else {
+                hpp.clone()
+            };
+            let expected_b = if variable {
+                -jp.transpose() * &r + &cross * &inv * jl.transpose() * &r
+            } else {
+                -jp.transpose() * &r
+            };
+            let mut scratch = Vec::new();
+            let mut a = DMatrix::zeros(12, 12);
+            for col in 0..12 {
+                let mut x = vec![0.0; 12];
+                x[col] = 1.0;
+                a.column_mut(col).copy_from(&DVector::from_column_slice(
+                    block.apply(&x, &mut scratch).unwrap(),
+                ));
+            }
+            let actual_s = a.transpose() * &a + DMatrix::identity(12, 12) * lambda;
+            assert!((&actual_s - &expected_s).norm() < 1e-11);
+            let probe = DVector::from_fn(12, |i, _| (i as f64 * 0.3).sin());
+            let mut normal = vec![0.0; 12];
+            block
+                .normal_add(probe.as_slice(), &mut normal, &mut scratch)
+                .unwrap();
+            assert!(
+                (DVector::from_vec(normal) + &probe * lambda - &expected_s * probe).norm() < 1e-11
+            );
+            let y = DVector::from_fn(12, |i, _| i as f64 / 13.0);
+            let mut adjoint = vec![0.0; 12];
+            block
+                .adjoint_add(y.as_slice(), &mut adjoint, &mut scratch)
+                .unwrap();
+            assert!((DVector::from_vec(adjoint) - a.transpose() * y).norm() < 1e-12);
+            let mut rhs = vec![0.0; 12];
+            block.rhs_add(&mut rhs, &mut scratch).unwrap();
+            assert!((DVector::from_column_slice(&rhs) - &expected_b).norm() < 1e-12);
+            let dx = actual_s.cholesky().unwrap().solve(&DVector::from_vec(rhs));
+            let point = block.back_substitute(dx.as_slice(), &mut scratch).unwrap();
+            if variable {
+                let mut full = DMatrix::zeros(15, 15);
+                full.view_mut((0, 0), (12, 12)).copy_from(&hpp);
+                full.view_mut((0, 12), (12, 3)).copy_from(&cross);
+                full.view_mut((12, 0), (3, 12))
+                    .copy_from(&cross.transpose());
+                full.view_mut((12, 12), (3, 3)).copy_from(&hll);
+                let mut b = DVector::zeros(15);
+                b.rows_mut(0, 12).copy_from(&(-jp.transpose() * &r));
+                b.rows_mut(12, 3).copy_from(&(-jl.transpose() * &r));
+                let direct = full.cholesky().unwrap().solve(&b);
+                assert!((&dx - direct.rows(0, 12)).norm() < 1e-8);
+                assert!(
+                    (DVector::from_column_slice(&point.unwrap()) - direct.rows(12, 3)).norm()
+                        < 1e-8
+                );
+            } else {
+                assert!(point.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn sparse_qr_long_track_has_no_pose_pair_storage_and_validates_inputs() {
+    let row = WeightedRow {
+        pose: Some(0),
+        pose_jacobian: [0.2; 6],
+        landmark_jacobian: [0.3; 3],
+        residual: 0.1,
+    };
+    let n = 10003;
+    let block = ReducedLandmark::new(vec![row.clone(); n], 10000, true, 0.5).unwrap();
+    assert_eq!(block.rows.len(), n);
+    assert_eq!(
+        block
+            .qr
+            .as_ref()
+            .unwrap()
+            .reflectors
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>(),
+        3 * (n + 3) - 3
+    );
+    let mut scratch = Vec::new();
+    assert_eq!(
+        block.apply(&vec![0.0; 60000], &mut scratch).unwrap().len(),
+        n
+    );
+    assert_eq!(scratch.len(), n + 3);
+    assert!(block.apply(&[0.0; 6], &mut scratch).is_err());
+    assert!(ReducedLandmark::new(vec![row.clone()], 0, true, 0.5).is_err());
+    assert!(ReducedLandmark::new(vec![row], 1, true, 0.0).is_err());
 }

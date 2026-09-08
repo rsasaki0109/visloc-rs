@@ -1,6 +1,6 @@
 # Implicit landmark QR — staged implementation
 
-Status: compact elimination kernel tested; not a native BA backend or a
+Status: compact elimination and sparse pose-row kernels tested; not a native BA backend or a
 quality/performance improvement. M8–M10 remains incomplete.
 
 ## Reason and references
@@ -29,7 +29,7 @@ For m augmented rows, reflector storage is exactly 3m−3 scalar entries;
 factorization additionally owns a temporary 3m-scalar input. Work is O(m).
 The 20,003-row test checks logical storage counts, not process peak RSS.
 
-Next implement the reduced action as `A*x = tail(Q^T * (J_pose*x))`, and
+The reduced action is implemented as `A*x = tail(Q^T * (J_pose*x))`, and
 its adjoint as `A^T*y = J_pose^T * Q * [0; y]`. Keep original sparse per-row
 pose Jacobians (six columns per residual row) and reuse per-track vector
 scratch. This avoids materializing dense transformed camera blocks and the
@@ -38,21 +38,31 @@ iterative solve would still have normal-equation conditioning; this does not
 claim to solve every conditioning or PCG convergence problem.
 
 The kernel currently lives behind `cfg(test)` in `landmark_qr.rs`; it has no
-production selector, solver connection or effect on existing BA. Three tests
+production selector, solver connection or effect on existing BA. Five tests
 pass: elimination/reconstruction, adjoint and back-substitution identities;
 projected cost versus an independent damped least-squares calculation; and
 linear retained storage plus invalid-input rejection. Clippy including tests
-passes. Zero columns and nonfinite operations reject explicitly. This is not
+passes. The sparse-row tests additionally compare action, adjoint, reduced
+normal action/RHS and the recovered full pose/point step to a small damped
+normal system at three damping values. Repeated pose slots, fixed-pose rows,
+fixed-landmark bypass and preweighted rows are included. A 10,003-row track
+with 10,000 possible poses retains one sparse row per residual, three compact
+reflectors and one longest-track scratch buffer, not a pose-pair graph.
+The normal action reuses that buffer without copying a dense reduced block;
+global pose damping must be added once by its future caller.
+Zero columns and nonfinite operations reject explicitly. This is not
 a rank-revealing undamped pseudoinverse implementation.
 
 ## Required next steps before native comparison
 
-1. Add sparse pose-row reduced action/adjoint and RHS, preserving observation
-   order, repeated rig sensors, fixed poses/rotations and robust square-root
-   weights. Fixed landmarks bypass elimination; calibration stays fixed.
-2. Compare action, adjoint, RHS and recovered full step on small damped
-   problems. Audit O(observations + poses + landmarks) retained storage and
-   longest-track scratch; prohibit all-pose pair enumeration and global Q.
+1. Connect the tested sparse-row action/adjoint/RHS to the actual native rig
+   linearization. Verify observation order, repeated rig sensors, fixed
+   poses/rotations and robust square-root weights against existing assembly.
+   The synthetic preweighted-row test alone does not prove that adapter.
+2. Assemble the multi-landmark operator and shared pose damping, with a
+   bounded preconditioner and matched RHS/full-step tests. Audit
+   O(observations + poses + landmarks) retained storage and longest-track
+   scratch; prohibit all-pose pair enumeration and global Q.
 3. Integrate only after the linear kernel checks, keeping existing damping,
    loss and native acceptance gates. Define eligibility for positive damping
    and rank-deficient cases explicitly; no silent legacy fallback.

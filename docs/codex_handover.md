@@ -2,9 +2,10 @@
 
 > QR核の実装開始（2026-09-08）: PR #95はCI9項目通過後 `2f383f2` にmerge、旧branch整理済み。
 > 現branch `feat/m8-implicit-landmark-qr`。3本のHouseholderベクトルによる点消去核をtest-only実装。
-> 3テスト/clippy通過、native接続・実データ・性能改善は未検証。
+> 疎pose行の作用/随伴/右辺/normal action/点逆代入も追加、5テスト/clippy通過。
+> native接続・実データ・性能改善は未検証。
 > [設計と次の実装手順](openloris_implicit_landmark_qr.md)。全Q/密なトラックJacobianは作らない。
-> 次は疎なpose行の作用/随伴/RHSを接続し、固定pose・校正・loss/dampingと線形保持量を検証する。
+> 次は実際のrig線形化adapterと複数点operatorを接続し、固定pose・校正・loss/dampingと線形保持量を検証する。
 > サブエージェントは使用しない。goal全体は未達。
 
 > Native window診断（2026-09-08）: PR #94はCI9項目通過後 `539ae4f` にmerge、旧branch整理済み。
