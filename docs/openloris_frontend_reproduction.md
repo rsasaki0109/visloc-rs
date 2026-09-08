@@ -113,6 +113,16 @@ is unchanged. Binding a path is not proof that extraction ran: the enclosing
 executor must separately establish that provenance. This adapter does not yet
 connect extraction, all matching variants, admission and atlas execution.
 
+Matching replay accepts `--features-dir BANK --output NEW_MATCHING_DIRECTORY`
+alongside `--candidate-root`; merge replay accepts `--matching-root DIRECTORY
+--output NEW_MERGE_DIRECTORY`. Existing destinations remain rejected. Matching
+checks exact feature membership as well as manifest bytes, and merge retains
+its shard membership/content and final-byte checks. These options allow the
+diagnostic stages to exchange fresh outputs, but do not add extraction, an
+orchestrator, restart, or shared-envelope exports to the historical replay path.
+The final bounded-I/O runner must use the separately validated shared worker
+path, not promote legacy repeated-envelope artifacts as N²-free evidence.
+
 The external replay directories are
 `corridor1-1-m8-native-candidates-legacy-replay-v1` and
 `corridor1-1-m8-native-matching-replay-v1` under the OpenLORIS dataset root.

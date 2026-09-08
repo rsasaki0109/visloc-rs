@@ -17,7 +17,7 @@ from benchmark_electro import (
     write_candidate_manifest,
     write_candidate_shard_v2,
 )
-from replay_native_candidates import sha
+from replay_native_candidates import sha, bind_feature_input
 
 
 def snapshot_inventory(root, names):
@@ -40,6 +40,8 @@ def main():
     parser.add_argument('--variant', choices=['native', 'adaptive', 'targeted7', 'dense'], default='native')
     parser.add_argument('--candidate-root', type=Path,
                         default=base / 'corridor1-1-m8-native-candidates-replay-v1')
+    parser.add_argument('--features-dir', type=Path)
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--binary', type=Path,
                         default=base / 'corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a')
     parser.add_argument('--binary-sha256',
@@ -53,7 +55,8 @@ def main():
     elif args.variant == 'dense':
         reference = base / 'corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1'
     candidate_root = args.candidate_root.resolve(strict=True)
-    output = base / f'corridor1-1-m8-{args.variant}-matching-replay-v1'
+    output = (args.output.resolve() if args.output is not None else
+              base / f'corridor1-1-m8-{args.variant}-matching-replay-v1')
     binary = args.binary.resolve(strict=True)
     expected_binary = args.binary_sha256
     candidate_ok = (args.variant == 'targeted7' or
@@ -104,6 +107,8 @@ def main():
                 else base / 'corridor1-1-m8-adaptive-bank-publication-v1/features')
     if args.variant == 'dense':
         features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
+    if args.features_dir is not None:
+        features = args.features_dir.resolve(strict=True)
     validate_feature_manifest(reference / 'features.json', features)
     if f'feature_manifest_sha256 {sha(reference / "features.json")}' not in plan.splitlines():
         raise RuntimeError('Plan does not bind the validated feature manifest')
@@ -118,6 +123,7 @@ def main():
                        ('--features-dir', features),
                        ('--out-colmap', output / 'matches/unused-model-persistent')]:
         command[command.index(flag) + 1] = str(path)
+    command, features = bind_feature_input(command, reference / 'features.json', features)
     invocation = ['/usr/bin/time', '-v', '-o', str(output / 'time.txt'),
                   'timeout', '--signal=TERM', '--kill-after=10s', '1800s', *command]
     report = {'status': 'running', 'command': invocation, 'rayon_num_threads': 4,
