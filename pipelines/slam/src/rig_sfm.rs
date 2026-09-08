@@ -237,6 +237,9 @@ pub struct RigSfmConfig {
     pub final_ba_min_pose_observations: usize,
     pub final_bundle_adjustment: bool,
     pub ba_backend: RigBaBackend,
+    /// Fix the lowest frame ID in each BA observation component lacking a
+    /// fixed pose. Removes its rigid gauge, not every possible degeneracy.
+    pub ba_anchor_disconnected_components: bool,
     pub ba_config: BaConfig,
     pub local_ba_every: usize,
     pub local_ba_window_size: usize,
@@ -311,6 +314,7 @@ impl Default for RigSfmConfig {
             final_ba_min_pose_observations: 0,
             final_bundle_adjustment: true,
             ba_backend: RigBaBackend::Legacy,
+            ba_anchor_disconnected_components: false,
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
                 robust_kernel: RobustKernel::Huber { delta: 6.0 },
@@ -4681,10 +4685,9 @@ fn run_windowed_final_ba(
     Ok(aggregate)
 }
 
-fn rig_ba_anchor_reachable(
+fn rig_ba_pose_edges(
     observations: impl IntoIterator<Item = (u64, u64)>,
-    fixed: impl IntoIterator<Item = u64>,
-) -> BTreeSet<u64> {
+) -> BTreeMap<u64, Vec<u64>> {
     // A landmark star preserves connectivity without a pose-pair clique.
     // Storage is O(observations + landmarks + poses), never O(poses squared).
     let mut first = BTreeMap::new();
@@ -4696,6 +4699,14 @@ fn rig_ba_anchor_reachable(
             edges.entry(representative).or_default().push(pose);
         }
     }
+    edges
+}
+
+fn rig_ba_anchor_reachable(
+    observations: impl IntoIterator<Item = (u64, u64)>,
+    fixed: impl IntoIterator<Item = u64>,
+) -> BTreeSet<u64> {
+    let edges = rig_ba_pose_edges(observations);
     let mut reached: BTreeSet<_> = fixed.into_iter().collect();
     let mut pending: Vec<_> = reached.iter().copied().collect();
     while let Some(pose) = pending.pop() {
@@ -4708,6 +4719,38 @@ fn rig_ba_anchor_reachable(
         }
     }
     reached
+}
+
+fn rig_ba_component_anchors(
+    observations: impl IntoIterator<Item = (u64, u64)>,
+    poses: impl IntoIterator<Item = u64>,
+    fixed: &BTreeSet<u64>,
+) -> Vec<u64> {
+    let edges = rig_ba_pose_edges(observations);
+    let poses: BTreeSet<_> = poses.into_iter().collect();
+    let mut visited = BTreeSet::new();
+    let mut anchors = Vec::new();
+    for pose in poses {
+        if !visited.insert(pose) {
+            continue;
+        }
+        let mut has_fixed = false;
+        let mut pending = vec![pose];
+        while let Some(current) = pending.pop() {
+            has_fixed |= fixed.contains(&current);
+            if let Some(neighbors) = edges.get(&current) {
+                for &neighbor in neighbors {
+                    if visited.insert(neighbor) {
+                        pending.push(neighbor);
+                    }
+                }
+            }
+        }
+        if !has_fixed {
+            anchors.push(pose);
+        }
+    }
+    anchors
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4817,6 +4860,20 @@ fn run_rig_bundle_adjustment(
         }
     }
     let mut matrix_free_report = None;
+    if config.ba_anchor_disconnected_components {
+        let anchors = rig_ba_component_anchors(
+            problem
+                .rig_observations
+                .iter()
+                .map(|o| (o.keyframe_id, o.landmark_id)),
+            problem.poses.keys().copied(),
+            &problem.fixed_poses,
+        );
+        for id in anchors {
+            problem.fix_pose(id);
+            eprintln!("rig-ba-component-anchor: frame={id} original_anchor={anchor_frame_index}");
+        }
+    }
     if std::env::var_os("VISLOC_SFM_TRACE_BA_CONNECTIVITY").is_some() {
         let reached = rig_ba_anchor_reachable(
             problem
@@ -9147,6 +9204,23 @@ mod tests {
     }
 
     #[test]
+    fn component_anchors_preserve_fixed_components_and_are_order_independent() {
+        let observations = [(0, 10), (1, 10), (2, 11), (3, 11), (4, 12), (4, 12)];
+        let fixed = BTreeSet::from([1]);
+        assert_eq!(
+            rig_ba_component_anchors(observations, 0..6, &fixed),
+            vec![2, 4, 5]
+        );
+        assert_eq!(
+            rig_ba_component_anchors(observations.into_iter().rev(), (0..6).rev(), &fixed),
+            vec![2, 4, 5]
+        );
+        let all_fixed = BTreeSet::from([1, 3, 4, 5]);
+        assert!(rig_ba_component_anchors(observations, 0..6, &all_fixed).is_empty());
+        assert!(!RigSfmConfig::default().ba_anchor_disconnected_components);
+    }
+
+    #[test]
     fn bounded_policy_selects_before_solve_and_preserves_fixed_state() {
         for n in [0, 1, 63, 64] {
             assert_eq!(
@@ -9168,6 +9242,18 @@ mod tests {
     }
 
     fn check_fixed_rotation_backend(backend: RigBaBackend) {
+        check_fixed_rotation_backend_with_component_anchors(backend, false);
+    }
+
+    #[test]
+    fn component_anchoring_native_preserves_fixed_state_and_rollback() {
+        check_fixed_rotation_backend_with_component_anchors(RigBaBackend::BoundedDirect64Qr, true);
+    }
+
+    fn check_fixed_rotation_backend_with_component_anchors(
+        backend: RigBaBackend,
+        component_anchors: bool,
+    ) {
         let rig = GeneralizedCameraRig::new(vec![
             RigSensor {
                 camera: Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5),
@@ -9288,6 +9374,7 @@ mod tests {
             / world_points.len() as f64;
         let active_frames = HashSet::from([0, 1]);
         let config = RigSfmConfig {
+            ba_anchor_disconnected_components: component_anchors,
             final_bundle_adjustment: false,
             structure_refinement_iterations: 0,
             ..RigSfmConfig::default()
