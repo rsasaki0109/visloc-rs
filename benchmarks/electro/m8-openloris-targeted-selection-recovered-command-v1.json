@@ -1,0 +1,19 @@
+{
+  "status": "historical-command-recovered",
+  "replay_evidence": "m8-openloris-targeted-selection-replay-v1.json",
+  "source": "Same-thread retained completed CommandExecution event, 2026-09-02T23:34:18.633Z; only task-specific command and resource fields transcribed.",
+  "command": "target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/adaptive-features --snapshot /home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/mapping/verified-control-prefix-repair19.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-deferred-repair19-pair-confidence-finalfix32-v1/model --max-models 10 --pair-confidence-tracks --final-ba-min-pose-observations 32 --deferred-registration-pair-prefix 59961",
+  "environment": {"RAYON_NUM_THREADS": "8", "MALLOC_ARENA_MAX": "1"},
+  "exit_status": 0,
+  "wall_seconds": 175.70,
+  "peak_rss_kib": 838828,
+  "registered_frames": 4993,
+  "registered_images": 9986,
+  "models": 2,
+  "unregistered_frames_from_retained_component_manifest": [1999, 3264, 3266, 3267, 4493, 4494, 4495],
+  "limitations": [
+    "Original executable SHA was not recorded in this event.",
+    "This recovers the mapper invocation, not a new execution or continuous E2E result.",
+    "The deferred directory name does not imply a dense-overlay input; the recovered command instead sets the registration pair prefix."
+  ]
+}

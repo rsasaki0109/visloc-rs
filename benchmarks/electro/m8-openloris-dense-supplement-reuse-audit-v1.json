@@ -1,0 +1,21 @@
+{
+  "status": "dense-supplement-content-and-adaptive-bank-recipe-equivalence-pass",
+  "selected_images": 692,
+  "compared_supplement_feature_bytes": 231393842,
+  "different_supplement_feature_files": [],
+  "supplement_reference": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/supplement-features",
+  "equivalent_input": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features",
+  "verification": "Run merge_sift_supplements.py with the dense bank as --supplement and --resume against the complete published adaptive bank.",
+  "adaptive_files_verified": 10000,
+  "adaptive_files_reused": 10000,
+  "adaptive_files_written": 0,
+  "adaptive_inventory_sha256": "c8d22b395f172b9326837ea220e916617e2929856ea45d2c7e44ec5bda43e6f1",
+  "exit_status": 0,
+  "wall_seconds": 7.05,
+  "peak_rss_kib": 22976,
+  "implication": "A continuous recipe can compute the dense bank once and use its selected subset directly for adaptive-bank construction, without a separate 692-image extraction or copied supplement bank.",
+  "limitations": [
+    "Audits retained dense features and a completed adaptive output bank; not a new full extraction or full publication run.",
+    "This establishes input-content equivalence, not an observed E2E speedup or whole-pipeline memory reduction."
+  ]
+}

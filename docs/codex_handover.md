@@ -2,25 +2,35 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
-最新（2026-09-09）: PR118は`0b7f999`へmerge済み。PR119はhead
-`dd9c94c46723ef290fd524a0426cc27e919fef26`のCI9成功を確認し、
-`7568377c1aa46c208996b924f44c358cc7b65021`へsquash merge、旧branch整理済み。
-現作業branchは`diag/m8-adaptive-frontend-replay`。サブエージェントは使わない。
+最新（2026-09-09）: PR118/119に続きPR120（head`e136ae6`、CI9成功）は
+`09e79b8dae067521ee8b8be342c1373c68e090c8`へmerge、旧branch整理済み。
+整理記録のPR121（head`8b05461`、CI9成功）は
+`fdf94400e98f80b2cb81c45c86b0441a7977d6e9`へmerge、旧branch整理済み。
+現作業branchは`diag/m8-dense-frontend-replay`。サブエージェントは使わない。
 
 - native候補生成は現代版`3ae253a`だと3,761ペア差。旧版`a7ff5ff`再buildで
   70,000候補・2,188 matching shards・merged snapshotが全bytes一致。
   score順fillへの仕様変更を確認した。旧版への本番ロールバックではない。
 - adaptiveはnativeと同じ候補計画。再生成済みバンクからmatching/mergeを実行し、
   61,286ペアのmerged snapshotが全bytes一致。元の個別shardがないため比較は統合境界。
-- targeted7は指定7 frame/±256から14,319候補を生成し全bytes一致。
-  matching448 shard・265ペアの統合snapshotも一致。7 frame選定の前段mappingは未再現。
+- targeted7のmatching448 shard・統合snapshotは全bytes一致。
+  前段の記録コマンドを同thread実行ログから回収し、repair19 snapshot +
+  `--deferred-registration-pair-prefix 59961`で再実行。登録manifestと導出した7 frame、
+  そこからの14,319候補は全bytes一致。中間modelのmain images/pointsとcomponents.tsvは
+  異なるため、全model再現とはしない（後段は登録一覧のみ使用）。
+- denseも80,000候補・v2分割2,500・matching全shard・統合snapshotが全bytes一致。
+  現行streaming mergeはpeak18,188KiB（統合単体）。full extraction/E2Eではない。
+- 692画像の追加特徴はdenseバンクの同名特徴と全bytes一致。denseを直接supplement入力に
+  してadaptive10kバンク全hash一致を確認（resume検証、書込0）。連続実行では重複抽出を省ける。
+  base側はSIFT256/1 orientation/contrast0.02で別レシピ。base/D両方の全10k新規抽出は未完了。
 - 新規証跡と具体的コマンドは`docs/openloris_frontend_reproduction.md`。
   adaptive/targetedでは退避済みの再生成バンク（外部ext4）を使用。過去と同一I/Oではない。
-- 許可済み整理で空き約21 GiBを確保し、新規replay後は約18 GiB。
-  整理ログと検証付き重複削除scriptはlocal branch `chore/replay-storage-cleanup`
-  （`8b05461`、未PR）に保存。元データ・検証ログは保持。
-- 次: この変更のPR/CI/merge、target選定前段とdense overlayの再現、全10k抽出・
+- 許可済み整理で空き約21 GiBを確保し、新規replay後は約15 GiB。
+  整理ログと検証付き重複削除scriptはPR121経由でmainへ。元データ・検証ログは保持。
+- 次: この変更のPR/CI/merge、base抽出の小規模一致probeと全10k抽出・
   continuous E2E・未達のCOLMAP軌跡品質改善。phase時間の和をE2Eとしない。
+  100k前に共有metadataを含むartifact増加率を監査する。vocabなし時のstreamed候補生成には
+  現状all_pairs(N) fallbackがあり、N²メモリ危険分岐はまだ閉じていない。
   全goalは未達。READMEに未検証の高速化/品質改善を追加しない。
 
 ### 以前の状態（上記を優先）

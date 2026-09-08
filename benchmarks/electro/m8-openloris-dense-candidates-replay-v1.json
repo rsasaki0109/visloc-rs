@@ -1,0 +1,24 @@
+{
+  "status": "complete-dense-candidate-byte-reproduction-pass",
+  "source_commit": "3ae253a0af909042fe0cfbdb08e8d50733b79375",
+  "binary_sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34",
+  "recipe": "python3 scripts/replay_native_candidates.py --variant dense",
+  "external_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense-candidates-replay-v1/report.json",
+  "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features",
+  "images": 10000,
+  "candidate_pairs": 80000,
+  "local_descriptors": 3476573,
+  "vocabulary_samples": 40426,
+  "retrieval_topk": 128,
+  "retrieval_min_frame_gap": 128,
+  "lsh": {"tables": 8, "bits": 9, "bits_mode": "auto-v1", "probes": 6, "mean_pool": 1127.8, "max_pool": 1521, "exact_fallback_queries": 0},
+  "exit_status": 0,
+  "wall_seconds": 507.2357037279289,
+  "peak_rss_kib": 399312,
+  "rayon_num_threads": 8,
+  "output_and_reference_sha256": "7474f94769e0de284b641335132a45485bb0eaab1922b926304206dacfdec91c",
+  "limitations": [
+    "Candidate stage from retained dense features; full extraction and continuous E2E remain open.",
+    "No COLMAP speedup or quality improvement claim."
+  ]
+}

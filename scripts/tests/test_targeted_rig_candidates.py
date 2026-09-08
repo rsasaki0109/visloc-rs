@@ -21,6 +21,6 @@ class TargetedPairsTest(unittest.TestCase):
         self.assertEqual(pairs, [(1, 2)])
 
     def test_invalid_targets(self):
-        for targets, gap in [([], 1), ([0, 0], 1), ([2], 1), ([0], -1)]:
+        for targets, gap in [([], 1), ([0, 0], 1), ([2], 1), ([0], -1), ([True], 1), (['0'], 1)]:
             with self.assertRaises(ValueError):
                 targeted_pairs({0: ['a', 'b']}, targets, gap)

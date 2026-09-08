@@ -21,14 +21,18 @@ def sha(path):
 def main():
     base = Path('/home/sasaki/datasets/openloris')
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--variant', choices=['native', 'dense'], default='native')
     parser.add_argument('--binary', type=Path, default=base / 'corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a')
     parser.add_argument('--binary-sha256', default='8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34')
-    parser.add_argument('--output-name', default='corridor1-1-m8-native-candidates-replay-v1')
+    parser.add_argument('--output-name')
     parser.add_argument('--source-commit', default='3ae253a0af909042fe0cfbdb08e8d50733b79375')
     args = parser.parse_args()
-    if not args.output_name.startswith('corridor1-1-m8-native-candidates-') or Path(args.output_name).name != args.output_name:
-        parser.error('--output-name must be a simple native-candidate replay directory name')
-    reference = base / 'corridor1-1-m8-native-rig-runner-10k-v1'
+    if args.output_name is None:
+        args.output_name = f'corridor1-1-m8-{args.variant}-candidates-replay-v1'
+    if not args.output_name.startswith(f'corridor1-1-m8-{args.variant}-candidates-') or Path(args.output_name).name != args.output_name:
+        parser.error('--output-name must be a simple variant-specific candidate replay directory name')
+    reference = (base / 'corridor1-1-m8-native-rig-runner-10k-v1' if args.variant == 'native'
+                 else base / 'corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1')
     output = base / args.output_name
     binary = args.binary.resolve(strict=True)
     expected_binary = args.binary_sha256
@@ -47,11 +51,12 @@ def main():
     invocation = ['/usr/bin/time', '-v', '-o', str(output / 'time.txt'),
                   'timeout', '--signal=TERM', '--kill-after=10s', '1800s', *command]
     report = {'command': invocation, 'binary_sha256': expected_binary,
+              'variant': args.variant,
               'source_commit': args.source_commit,
               'reference_recipe_sha256': sha(timing),
               'reference_sha256': sha(reference / 'candidates.txt'),
               'rayon_num_threads': 8, 'status': 'running',
-              'scope': 'candidate generation only; retained base features'}
+              'scope': 'candidate generation only; retained feature bank'}
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     started = time.monotonic()
     with (output / 'run.log').open('w') as log:
