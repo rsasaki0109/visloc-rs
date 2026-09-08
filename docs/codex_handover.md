@@ -1,5 +1,12 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
+> 稼働中: extraction-shard0-replay-v1、exec session37896。1250画像/8threads/3600秒上限。
+> 出力 `/home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1`、extract.log/time。
+> 直近18/1250画像を出力、同handleをpollして継続確認。観測timeoutで再起動しない。
+> 期待出力585615663bytes、開始free4184961024bytes。抽出binaryは保存extract-3ae253a。
+> 完了後全feature/loci membership/hash比較して証跡JSON更新。1/8shardで全10k/E2E成功ではない。
+> 同時build/追加測定は行わない。PR115はheadc09875a CI8成功/rust稼働を最終確認。
+
 > 最新作業branch `test/m8-extraction-replay-preflight`（PR115の子）。PR115最終headc09875aは
 > CI8件成功、rust1件実行中のため未merge。親へ追加pushしてCIを再起動しない。
 > 容量対応: 再生成可能な`target/debug`約3.3GiBを

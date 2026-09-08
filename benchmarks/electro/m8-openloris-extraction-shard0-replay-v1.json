@@ -1,0 +1,13 @@
+{
+  "schema": "m8-openloris-extraction-shard0-replay-v1",
+  "status": "running-result-unverified",
+  "command": "set -Ce\nmkdir /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1\nenv RAYON_NUM_THREADS=8 /usr/bin/time -v -o /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/extract.time timeout --signal=TERM --kill-after=10s 3600s /home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/feature-extract/images/shard-0 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --sift-max-keypoints 256 --sift-max-orientations 2 --sift-l1-root --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order --sift-colmap-compatible-grayscale --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/unused-model >/home/sasaki/datasets/openloris/corridor1-1-m8-extraction-shard0-replay-v1/extract.log 2>&1",
+  "binary_sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34",
+  "threads": 8,
+  "expected_images": 1250,
+  "acceptance": "Exit zero; compare every feature/loci file and exact file membership to retained dense output; record wall/RSS without claiming whole-pipeline performance.",
+  "limitations": [
+    "One of eight shards, not full10k extraction or native E2E.",
+    "Saved new binary, recorded historical extractor flags, explicitly fixed thread count."
+  ]
+}
