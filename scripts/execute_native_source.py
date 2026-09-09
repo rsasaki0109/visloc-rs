@@ -86,7 +86,13 @@ def execute_source(stage, bindings, binary, run_root):
         actual = {p.relative_to(model).as_posix(): sha(p)
                   for p in model.rglob('*') if p.is_file()}
         report['model_hashes'] = actual
-        if result.returncode != 0 or actual != stage['expected_model_hashes']:
+        expected = stage['expected_model_hashes']
+        # Frozen source audits cover COLMAP files, not these mapper manifests.
+        # Record every hash, allow only the two known auxiliary outputs, and
+        # still reject missing/changed reference files or any unknown output.
+        auxiliary = {'components.tsv', 'retrieval-components.txt'}
+        if (result.returncode != 0 or any(actual.get(key) != value for key, value in expected.items())
+                or set(actual) - set(expected) - auxiliary):
             raise RuntimeError('Source failed or model hashes differ')
         report['status'] = 'pass'
     except BaseException as error:

@@ -43,19 +43,27 @@ class SourceExecutionTests(unittest.TestCase):
             self.assertEqual(len((Path(directory) / 'nodes.tsv').read_text().splitlines()), 24)
 
     def test_success_requires_exact_model_membership_and_contents(self):
-        for mismatch in (False, True):
-            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+        for case in ('exact', 'missing', 'changed', 'auxiliary', 'unknown'):
+            mismatch = case in ('missing', 'changed', 'unknown')
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 bindings = {value[1:-1]: root for value in INPUTS.values()}
                 code = ('import pathlib,sys; p=pathlib.Path(sys.argv[2]); '
                         'p.mkdir(); (p / "images.txt").write_text("model")')
+                if case == 'auxiliary':
+                    code += '; (p / "components.tsv").write_text("components"); (p / "retrieval-components.txt").write_text("retrieval")'
+                if case == 'unknown':
+                    code += '; (p / "unexpected.txt").write_text("unknown")'
+                if case == 'changed':
+                    code += '; (p / "images.txt").write_text("changed")'
                 stage = {'id': 'source', 'binary_sha256': sha(Path(sys.executable).resolve()),
                          'argv': ['{mapper_binary}', '-c', code, '--out-colmap',
                                   '{run_root}/sources/source/model'],
                          'expected_model_hashes': {'images.txt': hashlib.sha256(b'model').hexdigest()},
                          'environment': {}, 'unset_environment': [], 'timeout_seconds': 5}
-                if mismatch:
+                if case == 'missing':
                     stage['expected_model_hashes']['missing.txt'] = 'absent'
+                if mismatch:
                     with self.assertRaises(RuntimeError):
                         execute_source(stage, bindings, sys.executable, root)
                 else:
@@ -63,6 +71,9 @@ class SourceExecutionTests(unittest.TestCase):
                 report = json.loads((root / 'sources/source/report.json').read_text())
                 self.assertEqual(report['exit_code'], 0)
                 self.assertEqual(report['status'], 'fail' if mismatch else 'pass')
+                if case == 'auxiliary':
+                    self.assertEqual(set(report['model_hashes']),
+                                     {'images.txt', 'components.tsv', 'retrieval-components.txt'})
 
     def test_failed_process_is_recorded_and_cannot_be_reused(self):
         with tempfile.TemporaryDirectory() as directory:

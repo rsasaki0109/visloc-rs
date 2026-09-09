@@ -2,6 +2,13 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: 上記mapping v1はterminal FAILED（MainPID0 / Result exit-code）。再poll不要。
+最初のsource-replay-1950はmapper exit0、参照model hash全一致、31.800秒。
+失敗原因は参照audit対象外のcomponents.tsv/retrieval-components.txtを厳密dict比較で
+余分と判定したexecutorバグ。既知2補助ファイルだけ許可し全hash記録を保つ修正を実施。
+未知出力・参照欠落・hash不一致は引き続き拒否。85 tests PASS、追加回帰テストが次。
+v1出力・measurementは失敗証跡として保持。修正後は新v2パスで実行すること。
+
 最新追記: mapping suffixの実データ計測を開始。
 unit `visloc-native-mapping-bound-v1.service`、開始確認MainPID3927517。
 測定root `/home/sasaki/datasets/openloris/m8-native-mapping-bound-measurement-v1`、
