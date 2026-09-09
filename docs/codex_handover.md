@@ -2,6 +2,17 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新軽量作業: run_native_pipeline.pyに--resume（通常子exit>0の記録済み失敗限定）。
+native_pipeline_resume.pyでplan/pins/成功prefixの全artifact checkpointを検証後、
+失敗stageのoutput/log/payload/captureをfailed-attempts/<uuid>/へ退避し再実行。
+過去reportも退避、完了済みstageは再実行しない。flockで実行中executorとの競合拒否。
+関連14tests PASS：実child exit7→再開成功・完了inode保持・失敗成果物保持、
+plan差分/未観測失敗/負のsignal終了/実行中lockを拒否。
+SIGKILL/親強制終了/孤児child安全確認は未対応、全目標restart達成ではない。
+保守的16GiB guardはresume時も維持。各attempt wallをcold E2E時間と混同しない。
+base-v3はMainPID4045651で継続中、worker0=163/1667、OOM0、max5180。
+実行中base-v3 script/inputには変更なし。重い実験・buildを追加していない。
+
 最新軽量作業: native_pipeline_checkpoint.pyを追加、全体executorで成功stageの
 output/capture/payload/logの内容checkpointとcompleted=trueを保存するよう変更。
 ファイル・空directory・file symlink（target文字列+参照先hash）を記録。

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Extraction-through-atlas diagnostic executor; no restart or quality promotion.
+"""Extraction-through-atlas diagnostic executor with reported-failure resume.
 
 Run inside launch_native_measurement.py. All generated dependencies stay under
 one fresh root. Retained artifacts are comparison or calibration inputs only.
 The conservative 16 GiB free-space guard is not a measured lifetime bound.
+Resume requires a normal failed child exit and unchanged completed artifacts;
+unobserved interruption/SIGKILL recovery is not supported yet.
 """
 import argparse
+import fcntl
 import json
 from pathlib import Path
 import shutil
@@ -17,6 +20,7 @@ from replay_native_candidates import sha
 from measure_native_scope import validate_limits
 from benchmark_electro import atomic_json
 from native_pipeline_checkpoint import stage_checkpoint
+from native_pipeline_resume import validate_resume, quarantine_failed_stage
 
 
 def require_memory_scope(proc_cgroup=Path('/proc/self/cgroup'), cgroup_root=Path('/sys/fs/cgroup')):
@@ -167,22 +171,42 @@ def verify_pins(pins):
             raise RuntimeError('Pipeline dependency changed: ' + name)
 
 
-def execute(stages, root, pins=None):
+def execute(stages, root, pins=None, resume=False):
     pins = pins or {}
     verify_pins(pins)
     root = Path(root).resolve()
     if shutil.disk_usage(root.parent).free < 16 * 1024**3:
         raise RuntimeError('Require 16 GiB free for retained-stage diagnostic pipeline; no automatic cleanup')
-    root.mkdir()  # No implicit reuse of interrupted or completed outputs.
-    report = {'status': 'running', 'stages': [], 'plan': stages, 'dependency_sha256': pins,
+    if not resume:
+        root.mkdir()  # Reuse is only permitted through explicit validated resume.
+    elif not root.is_dir():
+        raise ValueError('Resume root missing')
+    with (root / 'pipeline.lock').open('a') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return execute_locked(stages, root, pins, resume)
+
+
+def execute_locked(stages, root, pins, resume):
+    start_index = 0
+    if resume:
+        report = json.loads((root / 'pipeline-report.json').read_text())
+        start_index = validate_resume(report, stages, pins)
+        archive = quarantine_failed_stage(root, stages[start_index], report)
+        report.setdefault('resumed_attempts', []).append(archive)
+        report['stages'] = report['stages'][:start_index]
+        report.update(status='running', active_stage=None)
+        report.pop('error', None)
+        report.pop('failure_kind', None)
+    else:
+        report = {'status': 'running', 'stages': [], 'plan': stages, 'dependency_sha256': pins,
               'artifact_lifetimes': artifact_lifetimes(stages),
-              'scope': 'Extraction-through-atlas diagnostic including reference validation; no restart or quality promotion.'}
+              'scope': 'Diagnostic pipeline; normal child-failure resume only, no SIGKILL recovery or quality promotion.'}
     def save():
         atomic_json(root / 'pipeline-report.json', report)
     save()
     started = time.monotonic()
     try:
-        for stage in stages:
+        for stage in stages[start_index:]:
             verify_pins(pins)
             report['active_stage'] = stage['id']
             save()
@@ -198,6 +222,8 @@ def execute(stages, root, pins=None):
             save()
             verify_pins(pins)
             if result.returncode:
+                if result.returncode > 0:
+                    report['failure_kind'] = 'child-exit'
                 raise RuntimeError('Pipeline stage failed: ' + stage['id'])
             if stage['capture']:
                 data = json.loads(log.read_text())
@@ -226,6 +252,8 @@ def main():
     parser.add_argument('--binaries', type=Path, required=True,
                         help='JSON name -> {path, sha256} for candidate_native/candidate_dense/sfm/merge/compare/admission/mapper/stitch/integration')
     parser.add_argument('--plan-only', action='store_true')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume a recorded normal child failure; unobserved or signal interruption is refused')
     args = parser.parse_args()
     spec = json.loads(args.binaries.read_text())
     required = {'candidate_native', 'candidate_dense', 'sfm', 'merge', 'compare', 'admission', 'mapper', 'stitch', 'integration'}
@@ -251,7 +279,7 @@ def main():
         # This verifies limits, not that an independent monitor is present.
         require_memory_scope()
         pins = pinned_files(Path(__file__).resolve().parents[1], spec)
-        print(json.dumps(execute(stages, args.output, pins), indent=2))
+        print(json.dumps(execute(stages, args.output, pins, resume=args.resume), indent=2))
 
 
 if __name__ == '__main__':
