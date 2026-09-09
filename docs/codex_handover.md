@@ -2,6 +2,14 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+base-v3は正常終了済み（MainPID0/Result success/SubState exited）。再起動不要。
+全6worker exit0。出力1万特徴と参照1万特徴を独立再SHA256照合し、集合・全hash一致。
+証跡: benchmarks/electro/m8-full-base-extraction-v3-audit.json。
+wall4673.225689s、sample aggregate peak RSS1474684KiB、OOM/oom_kill0。
+cgroup peak2147483648bytesで上限到達、max19818（圧迫なしとは言わない）。
+これはbase単体の新しい完走計測。v2の欠損ledgerや全cold E2E/品質gate達成とは別。
+次はこの証跡のレビューとPR反映、全cold用容量確保。以下のbase稼働中記録は過去状態。
+
 最新軽量作業: run_native_pipeline.pyに--resume（通常子exit>0の記録済み失敗限定）。
 native_pipeline_resume.pyでplan/pins/成功prefixの全artifact checkpointを検証後、
 失敗stageのoutput/log/payload/captureをfailed-attempts/<uuid>/へ退避し再実行。
