@@ -2,6 +2,13 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: 品質診断に戻りmapping-v2 main pre-ba/modelのpoint対応を監査。
+共通数値ID318222件中、同一観測集合7件、観測集合disjoint318215件。
+integrate_rig_atlas_landmarks.rsの出力は順序付け後index+1でIDを再採番する。
+従って数値point IDでBA前後をjoinした移動量・観測数変化の集計は無効として棄却。
+次はObservationKey（image identity, feature index）の対応で点集団を比較する。
+GT未使用、モデル変更なし。再投影低下だけで軌跡改善しない既存Ceres診断に沿う。
+
 最新: pipeline checkpointを既存atomic_jsonへ切替、child起動前にactive_stageを記録。
 atomic replace失敗時の旧JSON保持・起動前記録の試験を追加、93 tests PASS。
 file fsync+renameでありdirectory fsyncなし。電源断durability/full restartを主張しない。
