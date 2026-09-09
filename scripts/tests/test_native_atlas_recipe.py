@@ -25,4 +25,4 @@ class AtlasRecipeTests(unittest.TestCase):
             self.assertIn('{nodes_tsv}', stage['argv'])
         self.assertIn('{run_root}/atlas/component-001', stages[1]['argv'])
         self.assertIn('{run_root}/atlas/component-000', stages[2]['argv'])
-        self.assertEqual(sum(len(s.get('expected_files', {})) for s in stages), 12)
+        self.assertEqual(sum(len(s.get('expected_files', {})) for s in stages), 14)

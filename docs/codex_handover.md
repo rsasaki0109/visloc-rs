@@ -2,6 +2,22 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新追記: `run_native_mapping.py`でsource全21→nodes23→atlas結合/BAを接続。
+`--inputs`は5入力のpathとsha256（feature bankはmanifest/manifest_sha256）を要求。
+3 binaryは証跡hashを検証。`--validate-only`は出力を作らない。
+Python 84 tests成功。接続と失敗停止はmock検証で実データ実行は未確認。
+これは既存frontendからのmapping suffixであり、cold E2Eではない。
+入力hashは指定specへの一致で、spec自体の凍結参照との一致は呼出側の責務。
+資源制限は`launch_native_measurement.py`の外側wrapperを必ず使う。
+空き実測は内蔵3.0GiB/外部1.6GiB。全抽出DAGは容量/lifetime設計が必要。
+
+最新追記: `c718cf7`のCI run 34295216906はsuccess。
+`execute_native_atlas.py`にstitch→tail/main integrationの逐次実行を追加。
+binary/input hash記録、出力先拘束、timeout、参照14ファイルhash gateで失敗時停止。
+Python 81 tests成功（atlas実行はmock検証であり実SfM実行未確認）。
+まだsource phaseとの単一CLI接続、frontend全DAG、入力provenanceの全検証、
+restartと連続resource計測は未実装。cold E2E完了・品質改善とはしない。
+
 最新追記（2026-09-09）: dense全10k抽出サービス
 `visloc-full-dense-extraction-v1.service`は正常終了（MainPID 0 / exited / exit0）。
 再起動・待機pollは不要。20,000 feature/lociファイルを独立に再hashし参照全一致、

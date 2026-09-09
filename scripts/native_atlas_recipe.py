@@ -26,12 +26,17 @@ def build(evidence_root):
     root = Path(evidence_root)
     stitch = json.loads((root / 'm8-openloris-regenerated-atlas-v1.json').read_text())
     integration = json.loads((root / 'm8-openloris-regenerated-integration-v1.json').read_text())
+    audit = stitch['audit']
+    if (not audit['exact'] or audit['new_hashes'] != audit['old_hashes'] or
+            set(audit['new_hashes']) != {'component-000/images.txt', 'component-001/images.txt'}):
+        raise ValueError('Stitch lacks exact reference evidence')
     command = timed_argv(stitch['audit'], 180)
     command[0] = '{stitch_binary}'
     common = {'--rig-manifest': '{rig_manifest}', '--nodes-tsv': '{nodes_tsv}'}
     stages = [{'id': 'stitch', 'binary_sha256': stitch['binary_sha256'],
                'argv': bind(command, dict(common, **{'--out-dir': '{run_root}/atlas'})),
-               'environment': {'RAYON_NUM_THREADS': '1'}, 'timeout_seconds': 180}]
+               'environment': {'RAYON_NUM_THREADS': '1'}, 'timeout_seconds': 180,
+               'expected_files': audit['new_hashes']}]
     for name, component in [('tail', 'component-001'), ('main', 'component-000')]:
         audit = integration['audits'][name]
         required = {phase + '/' + filename for phase in ('model', 'pre-ba')
