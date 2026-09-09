@@ -1,0 +1,21 @@
+{
+  "status": "pass",
+  "service": "visloc-targeted-shared-bound-v1.service",
+  "terminal_state": "MainPID=0 SubState=exited Result=success ExecMainStatus=0",
+  "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-shared-bound-v1/report.json",
+  "report_sha256": "7a3d02a4dd619a1e300fbf07b8f5875353e7fa56c0e92c2364447870bb87b3c8",
+  "measurement": "/home/sasaki/datasets/openloris/m8-targeted-shared-bound-measurement-v1/measurement.json",
+  "measurement_sha256": "e515e1d0562da61949f964b6928cc8dc9ee986bd6b450553cc354203c965324d",
+  "candidate_input": "/media/sasaki/aiueo1/visloc-targeted-candidates-bound-v1/candidates.txt",
+  "shards_compared": 448,
+  "merged_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-shared-bound-v1/run/mapping/verified-merged.vps",
+  "merged_sha256": "5c21537b2d95b85e04739c97ccdf59b2d3837e435f688909114d8ac07e74eba1",
+  "prior_shards_unchanged": true,
+  "worker_log_unchanged": true,
+  "whole_command_wall_seconds": 119.10720104293432,
+  "sampled_aggregate_peak_rss_kib": 217760,
+  "rss_sampling_interval_seconds": 0.05,
+  "cgroup_memory_peak_bytes": 219144192,
+  "oom": 0,
+  "scope": "Newly generated selection-derived candidates through shared matching, merge, all-shard comparison and completed resume. Retained feature bank; not extraction-to-model native E2E or COLMAP quality/speedup. Sampled RSS includes monitor and can double-count shared pages or miss inter-sample peaks; cgroup peak includes cache/kernel charges."
+}
