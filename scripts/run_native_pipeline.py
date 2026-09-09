@@ -14,6 +14,19 @@ import sys
 import time
 
 from replay_native_candidates import sha
+from measure_native_scope import validate_limits
+
+
+def require_memory_scope(proc_cgroup=Path('/proc/self/cgroup'), cgroup_root=Path('/sys/fs/cgroup')):
+    entries = proc_cgroup.read_text().splitlines()
+    if len(entries) != 1 or not entries[0].startswith('0::/'):
+        raise ValueError('Require unified cgroup v2 measurement scope')
+    relative = Path(entries[0][4:])
+    if '..' in relative.parts or relative.is_absolute():
+        raise ValueError('Invalid cgroup path')
+    scope = cgroup_root / relative
+    validate_limits(scope)
+    return str(scope)
 
 
 def plan(root, binaries, dataset):
@@ -223,6 +236,9 @@ def main():
     if args.plan_only:
         print(json.dumps(stages, indent=2))
     else:
+        # Refuse a direct uncontained CLI run before hashing or extracting.
+        # This verifies limits, not that an independent monitor is present.
+        require_memory_scope()
         pins = pinned_files(Path(__file__).resolve().parents[1], spec)
         print(json.dumps(execute(stages, args.output, pins), indent=2))
 

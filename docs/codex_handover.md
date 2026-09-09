@@ -2,6 +2,11 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: 全体pipeline CLIはcgroup v2のmemory.max=2147483648/swap.max=0を必須化。
+通常シェルからの実CLIはexit1/期待診断/出力なしを確認。91 tests PASS。
+制限確認だけでは独立monitorの存在を証明しないためlaunch_native_measurement経由を維持。
+ライブラリexecuteの単体テストはCLIガード外。全体実データ実行は未開始。
+
 最新: pipeline reportに実行計画由来のartifact_lifetimesを追加（削除機能なし）。
 base/native match最終利用はprefix admission、adaptive matchはrepair admission、
 targeted matchはfinal admission。dense/adaptive特徴は最後のmappingまで必要。

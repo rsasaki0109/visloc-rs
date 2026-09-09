@@ -7,10 +7,31 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from run_native_pipeline import plan, execute, pinned_files, verify_pins, artifact_lifetimes
+from run_native_pipeline import plan, execute, pinned_files, verify_pins, artifact_lifetimes, require_memory_scope
 
 
 class PipelineTests(unittest.TestCase):
+    def test_pipeline_requires_exact_memory_and_swap_caps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc = root / 'proc-cgroup'
+            scope = root / 'cgroups/job'
+            scope.mkdir(parents=True)
+            proc.write_text('0::/job\n')
+            for memory, swap, valid in [('2147483648', '0', True), ('max', '0', False),
+                                        ('2147483648', 'max', False), ('4294967296', '0', False)]:
+                (scope / 'memory.max').write_text(memory)
+                (scope / 'memory.swap.max').write_text(swap)
+                if valid:
+                    self.assertEqual(require_memory_scope(proc, root / 'cgroups'), str(scope))
+                else:
+                    with self.assertRaises(ValueError):
+                        require_memory_scope(proc, root / 'cgroups')
+            for text in ('1:memory:/job\n', '0::/../job\n', '0::/job\n1:cpu:/job\n'):
+                proc.write_text(text)
+                with self.assertRaises(ValueError):
+                    require_memory_scope(proc, root / 'cgroups')
+
     def test_code_evidence_and_binary_pins_detect_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
