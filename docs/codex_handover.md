@@ -2,6 +2,22 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: Schur OFF v1はterminal success/MainPID0/exited、14参照ファイル独立hash全一致。
+wall176.969935s、sampled aggregate peak RSS560632KiB。再poll不要。
+ON unit visloc-schur-parity-on-v1.serviceを同binary/入力・--diagnosticで起動。
+出力dataset/corridor1-1-m8-schur-parity-on-v1、計測dataset/m8-schur-parity-on-measurement-v1。
+同ON unitを追跡し、完了後14file一致とSchurログのfirst-window制御を監査。
+ON未完了。空き起動前2.0GiB。実行スクリプト/binaryは変更しない。
+
+最新: integration build session76465はexit0完了（2m12s）。
+保存binary /home/sasaki/datasets/openloris/schur-probe-binaries.4WAfOy/integrate-dee3141
+SHA276c5d90452f938db49bf700591c87f98ceef9c4012e90af4bdb26676dd7782b。
+probe_atlas_schur_diagnostic.pyを追加（source/rig検証→stitch/integration参照比較）。
+OFF unit visloc-schur-parity-off-v1.serviceを起動、2GiB/Swap0/timeout1000。
+出力dataset/corridor1-1-m8-schur-parity-off-v1、計測dataset/m8-schur-parity-off-measurement-v1。
+同unitを追跡。OFF PASS後に新ON出力で診断比較、まだON未開始。
+Python既存93 tests PASS、新probeはpy_compile確認で実試験進行中。
+
 最新: session19766はexit0完了、release2m57s、Schur関連3 tests PASS。
 first-window claim（不適格非消費/並行一意）と非zero解不変性を確認。
 次はatlas integrationの実binaryをbuildし、同入力で診断OFF/ONのmodel bytesを比較。
