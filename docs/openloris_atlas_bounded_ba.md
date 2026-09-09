@@ -1974,3 +1974,11 @@ alpha schedule against GT. Preserve the experiment and logs for accounting.
 Before another mechanism, analyze the existing OFF/ON phase timings to check
 where time was actually spent; no further geometry replay is justified by this
 result alone. Free disk is now 386 MiB, requiring storage work before new runs.
+
+Post-run phase accounting (`m8-feasible-backtrack-phase-accounting-v1.json`):
+main normal-equation and linear-solve timer events both remain 2804. Linear
+solve time is 27.038570 s OFF versus 26.998891 s ON, whereas tentative update
+and cost time grows from 29.963184 s to 109.656562 s. Main emits 3430 scaled
+candidates with 291 accepted. Timer counts are not an independent count of
+numerical factorizations. The evidence does not support the intended reduction
+of repeated solves; do not pursue this arm by tuning the backtracking schedule.

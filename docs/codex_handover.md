@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: OFF/ON既存phaseログ集計完了、証跡m8-feasible-backtrack-phase-accounting-v1.json。
+main normal_equations/linear_solve event各2804で変化なし（factorization数そのものではない）。
+linear_solve27.038570→26.998891s、tentative_update_and_cost29.963184→109.656562s。
+ON main3430縮小候補/291受理。再solve削減仮説は今回成立せず、棄却を維持。
+容量整理: scripts/deduplicate_atlas_parity.pyで完了済みSchur診断3rootの14filesずつを
+canonical schur-feasibility-v2と全hash確認後hardlink化。42files、929980416bytes解放。
+raw/feature/log/measurement/ONモデルは変更なし。全path/bytes保持、inode metadataは共有。
+完了済みrootのモデルを絶対に上書きしないこと。必要なら独立コピーを作ってから利用。
+監査dataset/m8-schur-dedup-applied-v1.json（phase証跡内SHA）、planも保存。
+dedup helper2tests PASS、実全対象hash検証+終端unit確認+適用完了。空き約1.3GiB。
+全cold pipelineの容量には不足。新しい大型runを開始する根拠にはしない。
+
 最新確定: feasible-backtrack ON v1はterminal success/MainPID0/exited。
 再poll/再実行不要。実験は棄却。RMSE OFF0.3889930047→ON0.3891842840mで悪化。
 p95は0.6381734851→0.6380699612m、登録9998/GT採点9306。

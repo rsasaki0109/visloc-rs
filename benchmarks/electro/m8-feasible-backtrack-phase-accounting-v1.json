@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "status": "phase-accounting-completed",
+  "hashes": {
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/main/execution.log": "9985b7ac287eecc18c44dc33f0d2aab010e856b4fa32fffdd9febd475de6e9af",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/tail/execution.log": "07c0a3d5789cfd7f703eae4d53380dbfacf5be40d738482ba7a631109158e243",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/main/execution.log": "fbccca060c2684882120c483ee5a05044d78644657f130076b885c8a74e45ec4",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/tail/execution.log": "29395dc77c9396cf26881749c780551584440ced4fbedb980c74f08e343c4676",
+    "/home/sasaki/datasets/openloris/m8-schur-dedup-applied-v1.json": "3ee24af62c6f9d6ec9bf4e51af3fe0fe7252759ad62b7f6c65bc4a9cc1f37ed9"
+  },
+  "rows": [
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/tail/execution.log",
+      "phase": "normal_equations",
+      "count": 262,
+      "seconds": 1.39159216
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/main/execution.log",
+      "phase": "normal_equations",
+      "count": 2804,
+      "seconds": 25.069083679
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/main/execution.log",
+      "phase": "tentative_update_and_cost",
+      "count": 2608,
+      "seconds": 109.656561773
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/tail/execution.log",
+      "phase": "tentative_update_and_cost",
+      "count": 256,
+      "seconds": 2.22233386
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/main/execution.log",
+      "phase": "linear_solve",
+      "count": 2804,
+      "seconds": 26.998890867
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/tail/execution.log",
+      "phase": "rollback_snapshot",
+      "count": 263,
+      "seconds": 0.021599781
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/tail/execution.log",
+      "phase": "tentative_update_and_cost",
+      "count": 262,
+      "seconds": 1.450318547
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/tail/execution.log",
+      "phase": "normal_equations",
+      "count": 263,
+      "seconds": 1.444267652
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/main/execution.log",
+      "phase": "normal_equations",
+      "count": 2804,
+      "seconds": 25.114805383
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/main/execution.log",
+      "phase": "tentative_update_and_cost",
+      "count": 2771,
+      "seconds": 29.963183567
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/main/execution.log",
+      "phase": "linear_solve",
+      "count": 2804,
+      "seconds": 27.038570113
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/main/execution.log",
+      "phase": "rollback_snapshot",
+      "count": 2804,
+      "seconds": 0.419906896
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/tail/execution.log",
+      "phase": "rollback_snapshot",
+      "count": 262,
+      "seconds": 0.019465174
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/tail/execution.log",
+      "phase": "linear_solve",
+      "count": 262,
+      "seconds": 2.236622109
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1/integrated/main/execution.log",
+      "phase": "rollback_snapshot",
+      "count": 2804,
+      "seconds": 0.428857021
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/tail/execution.log",
+      "phase": "linear_solve",
+      "count": 263,
+      "seconds": 2.284138063
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/main/execution.log",
+      "phase": "backtrack",
+      "count": 3430,
+      "accepted": 291
+    },
+    {
+      "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-on-v1/integrated/tail/execution.log",
+      "phase": "backtrack",
+      "count": 52,
+      "accepted": 6
+    }
+  ],
+  "conclusion": "Main linear_solve and normal_equations event counts both stay at 2804; added tentative_update_and_cost time dominates observed slowdown. No repeat of this rejected arm.",
+  "limitations": [
+    "Phase timer event counts are not a proof of the number of numerical factorizations.",
+    "Single sequential measurements; not cold E2E or controlled hardware timing."
+  ],
+  "deduplication": {
+    "audit": "/home/sasaki/datasets/openloris/m8-schur-dedup-applied-v1.json",
+    "files": 42,
+    "freed_allocated_bytes": 929980416,
+    "preserves": "Paths, model bytes, logs and measurements; shares inode metadata. Do not overwrite frozen roots."
+  }
+}
