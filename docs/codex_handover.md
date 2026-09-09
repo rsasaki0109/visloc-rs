@@ -2,6 +2,33 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新確定: feasible-backtrack ON v1はterminal success/MainPID0/exited。
+再poll/再実行不要。実験は棄却。RMSE OFF0.3889930047→ON0.3891842840mで悪化。
+p95は0.6381734851→0.6380699612m、登録9998/GT採点9306。
+scorer/manifest/GT/transform/aliases/gapの同一性を確認。pre-ba+camera8hash独立一致。
+integration区間OFF153.3184523s→ON233.9327779s（単発比較、全wallは比較不可）。
+ON計測全wall237.1764653s/sample aggregate RSS560852KiB。
+証跡m8-feasible-backtrack-on-v1.json。既定OFFを維持し同設定再実験・GT閾値調整禁止。
+採点session19580はexit0終了。runner9c25b16、binary37298b3。
+空き386MiB。大型run/build不可。まず保存済みOFF/ON phase timingの内訳を集計し、
+無駄な再solve削減仮説を見直す。次の実験前に検証済み成果物の容量整理が必要。
+raw/feature/reference銀行は削除しない。全目標・COLMAP品質gateは依然未達。
+
+実行中: visloc-feasible-backtrack-on-v1.service（2GiB/Swap0/timeout1000）。
+runner9c25b16 scripts/run_atlas_backtrack_trial.py、同OFF binary37298b3。
+出力dataset/corridor1-1-m8-feasible-backtrack-on-v1、
+計測dataset/m8-feasible-backtrack-on-measurement-v1。同unit追跡、再起動禁止。
+mainでbacktrackログを確認。ON未完走、入力pins対象のscript/JSON/binaryは変更禁止。
+OFF stitchを再利用するため速度比較はintegration stage同士のみ（全wall比較禁止）。
+pre-ba全3filesとmodel/cameras完全一致を要求、post modelはhash記録し品質未評価扱い。
+runner出力validator2tests/既存exact executor3tests PASS。起動時空き683MiB。
+事後scorerはscripts/score_openloris_model.py（SHAc0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0）
+--manifest dataset/corridor1-1-m5/manifests/tier-10000.json
+--ground-truth dataset/official-groundtruth/calibration/corridor1-1/groundtruth.txt
+--transform-matrix dataset/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml
+--model-images newroot/integrated/main/model/images.txt とtailも指定、aliasesなし。
+従来scoreはdataset/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1/score.json。
+
 最新確定: feasible-backtrack OFF v1はterminal success/MainPID0/exited。
 再poll/再実行不要。14参照hashをsha256sum --checkで独立全一致。
 main/tail backtrackログ0。wall155.1414069s、sample aggregate RSS560748KiB。

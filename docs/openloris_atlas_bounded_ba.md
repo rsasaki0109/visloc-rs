@@ -1955,3 +1955,22 @@ are nonzero and match the reported step norms; rotation remains exactly fixed.
 Both point-only and joint exhaustion restore the entire problem exactly. CI now
 runs the flag-ON rig tests separately after the normal flag-OFF workspace tests.
 This extends synthetic coverage, not real-model parity or performance evidence.
+
+### Real bounded-backtracking arm: rejected
+
+`m8-feasible-backtrack-off-v1.json` proves real OFF parity for all 14 reference
+files. `m8-feasible-backtrack-on-v1.json` records the same binary's completed ON
+trial and eight independent pre-BA/fixed-camera hash matches. Scorer and scoring
+input hashes, aliases and interpolation gap match the historical control.
+RMSE worsens from 0.3889930047 m to 0.3891842840 m (COLMAP gate 0.3843065335 m).
+P95 changes from 0.6381734851 m to 0.6380699612 m; registered images remain 9998.
+Comparable integration-stage wall totals are OFF 153.3184523 s and ON
+233.9327779 s. This is a single sequential suffix comparison, not a cold E2E
+speed measurement. ON sampled aggregate RSS is 560852 KiB.
+
+Reject this fixed arm: it fails trajectory nonregression and gives no evidence
+of runtime benefit. Keep the flag OFF; do not repeat unchanged or tune the
+alpha schedule against GT. Preserve the experiment and logs for accounting.
+Before another mechanism, analyze the existing OFF/ON phase timings to check
+where time was actually spent; no further geometry replay is justified by this
+result alone. Free disk is now 386 MiB, requiring storage work before new runs.
