@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: session91383はexit0終了。release build 3m07s、追加した診断有無の解一致test PASS。
+続いてschur_block_debug_tests全2件PASS。build再poll不要。
+現一致fixtureはzero RHSなので非zero RHS・実model byte比較を追加する必要がある。
+first-window限定もまだ未実装。診断接続のみを完了とし品質改善を主張しない。
+
+最新: bundle.rsにlegacy sparse→既存Schur診断への接続を実装中（未commit）。
+solve_step_with_debug/solve_step_pose_blocks_with_debugは実inverse cache/reduced blockを使用。
+既存debug flags/slotのgateを維持。診断有無の解一致testを追加。
+`cargo test -p visloc-slam --lib debug_context_maps_variable_slot_after_fixed_pose_and_counts_rig_crosses --release -j 1`
+session91383がビルド稼働中。再起動せずpollすること。rustfmt実施/diff check PASS。
+最初の1window限定・実model bytes比較は未実装/未検証。空き約2.3GiB。
+
 最新: pose coupling実装箇所を確認。既存collect_schur_block_debug_countsは
 同poseのcross合算・solver inverse cache利用に対応するが、emitはmatrix-free側のみ。
 atlas実経路solve_step_pose_blocksのinverse cache構築後/factor前へ接続が必要。

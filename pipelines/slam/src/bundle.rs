@@ -588,6 +588,20 @@ mod schur_block_debug_tests {
         assert_eq!(counts.max_elimination_landmark, Some(0));
         assert!(counts.max_hll_inverse_residual.unwrap() < 1.0e-12);
         assert_eq!(context.landmark_index.get(&42), Some(&0));
+        let diagonal = vec![10.0 * Matrix6::identity(); 2];
+        let plain = solve_step_pose_blocks(&system, diagonal.clone(), 2, 1, 0.25, &mut None)
+            .expect("positive definite control");
+        let diagnosed = solve_step_pose_blocks_with_debug(
+            &system,
+            diagonal,
+            2,
+            1,
+            0.25,
+            &mut None,
+            Some(context),
+        )
+        .expect("positive definite diagnostic");
+        assert_eq!(plain, diagnosed, "diagnostics must not modify the solve");
     }
 }
 
@@ -3446,7 +3460,7 @@ impl BundleAdjustment {
             };
             let retry_eligible = original_diagonal.is_some();
             let solve_result = match backend {
-                BaSolveBackend::Legacy => solve_step(
+                BaSolveBackend::Legacy => solve_step_with_debug(
                     system.as_mut().expect("legacy normal system"),
                     pose_index.len(),
                     landmark_index.len(),
@@ -3456,6 +3470,7 @@ impl BundleAdjustment {
                     config.linear_solver,
                     config.parallel,
                     &mut block_symbolic_cache,
+                    matrix_free_schur_debug_context(&pose_index, &landmark_index, iteration, false),
                 )
                 .map(|(delta_poses, delta_landmarks)| (delta_poses, delta_landmarks, None, None)),
                 BaSolveBackend::MatrixFree(runtime)
@@ -7620,6 +7635,7 @@ fn solve_matrix_free_step(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn solve_step(
     system: &mut NormalEquationsBa,
     p_count: usize,
@@ -7630,6 +7646,32 @@ fn solve_step(
     linear_solver: LinearSolver,
     parallel: bool,
     block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    solve_step_with_debug(
+        system,
+        p_count,
+        l_count,
+        v_count,
+        b_count,
+        lambda,
+        linear_solver,
+        parallel,
+        block_symbolic_cache,
+        None,
+    )
+}
+
+fn solve_step_with_debug(
+    system: &mut NormalEquationsBa,
+    p_count: usize,
+    l_count: usize,
+    v_count: usize,
+    b_count: usize,
+    lambda: f64,
+    linear_solver: LinearSolver,
+    parallel: bool,
+    block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+    debug_context: Option<SchurBlockDebugContext<'_>>,
 ) -> Result<(DVector<f64>, DVector<f64>), BaError> {
     // Landmark-only BA: H_LL is block-diagonal so each landmark gets an
     // independent 3×3 solve. No Schur complement needed. Every landmark's
@@ -7687,13 +7729,14 @@ fn solve_step(
         else {
             unreachable!();
         };
-        return solve_step_pose_blocks(
+        return solve_step_pose_blocks_with_debug(
             system,
             diagonal,
             p_count,
             l_count,
             lambda,
             block_symbolic_cache,
+            debug_context,
         );
     }
 
@@ -7899,6 +7942,7 @@ fn solve_step(
 /// Hessian. Blocks are stored by block-column and row-sorted within each
 /// column, which makes the emitted scalar triplets match the legacy dense
 /// column-major scan exactly while visiting structural blocks only.
+#[cfg(test)]
 fn solve_step_pose_blocks(
     system: &NormalEquationsBa,
     diagonal: Vec<Matrix6<f64>>,
@@ -7907,6 +7951,35 @@ fn solve_step_pose_blocks(
     lambda: f64,
     block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
 ) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    solve_step_pose_blocks_with_debug(
+        system,
+        diagonal,
+        p_count,
+        l_count,
+        lambda,
+        block_symbolic_cache,
+        None,
+    )
+}
+
+fn solve_step_pose_blocks_with_debug(
+    system: &NormalEquationsBa,
+    diagonal: Vec<Matrix6<f64>>,
+    p_count: usize,
+    l_count: usize,
+    lambda: f64,
+    block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+    debug_context: Option<SchurBlockDebugContext<'_>>,
+) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    let debug_diagonal = debug_context.as_ref().and_then(|context| {
+        diagonal.get(context.pose_slot).map(|block| {
+            let mut damped = *block;
+            for k in 0..6 {
+                damped[(k, k)] += lambda.max(0.0);
+            }
+            damped
+        })
+    });
     let dim = p_count * 6;
     let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> =
         (0..p_count).map(|_| BTreeMap::new()).collect();
@@ -7962,6 +8035,20 @@ fn solve_step_pose_blocks(
     }
     log_process_memory("ba-after-schur-reduction");
 
+    if let (Some(context), Some(diagonal)) = (debug_context, debug_diagonal) {
+        if let Some(reduced) = columns
+            .get(context.pose_slot)
+            .and_then(|c| c.get(&context.pose_slot))
+        {
+            let counts = collect_schur_block_debug_counts(
+                system,
+                &h_ll_inv_cache,
+                lambda,
+                context.pose_slot,
+            );
+            emit_schur_block_debug(context, lambda, &diagonal, reduced, counts);
+        }
+    }
     log_process_memory("ba-sparse-before-factor");
     let rhs = DMatrix::from_column_slice(dim, 1, b_reduced.as_slice());
     let solution =
