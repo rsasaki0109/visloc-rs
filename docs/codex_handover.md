@@ -2,6 +2,22 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+実行中: visloc-full-base-extraction-v3.service、2GiB/Swap0/timeout22000。
+probe_openloris_base_extraction.py --all-images --workers6 --variant base。
+出力dataset/corridor1-1-m8-full-base-extraction-v3、
+計測dataset/m8-full-base-extraction-measurement-v3。同unitを追跡、再起動禁止。
+目的はv2で欠けた終端aggregate RSS/cgroup/OOM記録の取得。特徴一致だけで完了扱いしない。
+既存frozen extractor extract-3ae253aを使用、出力見積約1.8GiB/開始前空き5.7GiB。
+他の大型run/buildや入力bank変更を並行しない。完了後独立1万特徴hash監査と
+measurement terminalを照合。v2自体の不完全ledgerを後付けPASSに変更しない。
+起動head db9c76c。全cold E2Eではない、#138 base resource gap解消のための再計測。
+
+CI cd1c5fa/run34304912157はglobal_sfm disconnected fixtureでFAIL。
+ローカル別プロセス反復でも再現。fixture HashMap列挙が対応順を毎回変えていた。
+db9c76cでfixtureのみBTreeMap化（本番solver変更なし）、push済み。
+global_sfm19tests PASS（build79020 exit0/2m20s）、対象別process100回PASS、fmt PASS。
+入力順依存の本番一般性を解決したとは主張しない。新head CIは未確認。
+
 最新容量整理: 完了済みfull-dense-extraction-v1/featuresの2万filesを
 dense256x2-full10k-v2/featuresへ全hash確認後hardlink化。
 scripts/deduplicate_dense_extraction.py、plan session84735/apply43516ともexit0完了。
