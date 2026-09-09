@@ -3863,7 +3863,22 @@ impl BundleAdjustment {
             let feasibility_gate = nonprojectable_after <= current_nonprojectable;
             if sparse_debug_slot.is_some() && !feasibility_gate {
                 for (observation, frame, landmark, depth) in self.nonprojectable_rig_sample(16) {
-                    eprintln!("sfm-debug-ba-rig-infeasible: iteration={} observation={} frame_id={} track_id={} tentative_sensor_depth={:?} sample_limit=16", iteration, observation, frame, landmark, depth);
+                    let factor = &self.rig_observations[observation];
+                    let before = saved_poses.get(&frame).zip(saved_landmarks.get(&landmark));
+                    let before_depth = before.map(|(pose, point)| {
+                        factor
+                            .sensor_from_rig
+                            .transform_point(&pose.transform_world_point(point))
+                            .z
+                    });
+                    let before_projectable = before.is_some_and(|(pose, point)| {
+                        rig_residual_jacobians(factor, pose, point).is_some()
+                    });
+                    let point_step = saved_landmarks
+                        .get(&landmark)
+                        .zip(self.landmarks.get(&landmark))
+                        .map(|(old, new)| (new - old).norm());
+                    eprintln!("sfm-debug-ba-rig-infeasible: iteration={} observation={} frame_id={} track_id={} tentative_sensor_depth={:?} before_sensor_depth={:?} before_projectable={} point_step={:?} sample_limit=16", iteration, observation, frame, landmark, depth, before_depth, before_projectable, point_step);
                 }
             }
             let mut step_accepted = cost_accepted && feasibility_gate;

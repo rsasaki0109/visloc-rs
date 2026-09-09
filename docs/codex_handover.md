@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: session25100はexit0完了（release2m50s）、generalized_rig_factor_tests全2件PASS。
+before-depth診断ログの実データ検証は未実施。次にintegration binaryをbuildする。
+
+最新: feasibility sampleにbefore_sensor_depth/before_projectable/point_stepを追加中。
+saved_poses/saved_landmarks（既存rollback状態）を利用し追加全体コピーなし。
+受理gate/モデル更新は変更しない。未commit、実ログ未検証。
+cargo test -p visloc-slam --lib generalized_rig_factor_tests --release -j1
+session25100がビルド中。再起動せずpoll。rustfmt/diff check PASS、空き約1.4GiB。
+
 最新: feasibility v1はterminal success/MainPID0/exited、14参照hash独立全一致。
 wall158.972974s/sample aggregate RSS550652KiB。再poll不要。
 main115失敗観測行、内部trackは140/407/578/641/12192の5件、各反復最大12件。
