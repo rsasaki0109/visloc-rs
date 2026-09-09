@@ -98,12 +98,31 @@ def plan(root, binaries, dataset):
     return stages
 
 
-def execute(stages, root):
+def pinned_files(repository, binary_spec):
+    """Record code/evidence/binary identities; this is not filesystem isolation."""
+    repository = Path(repository)
+    paths = set((repository / 'scripts').glob('*.py'))
+    paths.update((repository / 'benchmarks/electro').glob('*.json'))
+    paths.update((repository / 'benchmarks/electro').glob('*.tsv'))
+    paths.update(Path(row['path']) for row in binary_spec.values())
+    return {str(path.resolve(strict=True)): sha(path) for path in sorted(paths)}
+
+
+def verify_pins(pins):
+    for name, expected in pins.items():
+        path = Path(name)
+        if not path.is_file() or sha(path) != expected:
+            raise RuntimeError('Pipeline dependency changed: ' + name)
+
+
+def execute(stages, root, pins=None):
+    pins = pins or {}
+    verify_pins(pins)
     root = Path(root).resolve()
     if shutil.disk_usage(root.parent).free < 16 * 1024**3:
         raise RuntimeError('Require 16 GiB free for retained-stage diagnostic pipeline; no automatic cleanup')
     root.mkdir()  # No implicit reuse of interrupted or completed outputs.
-    report = {'status': 'running', 'stages': [], 'plan': stages,
+    report = {'status': 'running', 'stages': [], 'plan': stages, 'dependency_sha256': pins,
               'scope': 'Extraction-through-atlas diagnostic including reference validation; no restart or quality promotion.'}
     def save():
         (root / 'pipeline-report.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -111,6 +130,7 @@ def execute(stages, root):
     started = time.monotonic()
     try:
         for stage in stages:
+            verify_pins(pins)
             if stage['payload']:
                 with Path(stage['payload']['path']).open('x') as stream:
                     json.dump(stage['payload']['data'], stream, indent=2)
@@ -121,6 +141,7 @@ def execute(stages, root):
             report['stages'].append({'id': stage['id'], 'exit_code': result.returncode,
                                      'wall_seconds': time.monotonic() - begin, 'log_sha256': sha(log)})
             save()
+            verify_pins(pins)
             if result.returncode:
                 raise RuntimeError('Pipeline stage failed: ' + stage['id'])
             if stage['capture']:
@@ -161,7 +182,11 @@ def main():
             raise ValueError('Candidate binary differs from reproduced recipe: ' + variant)
         binaries[key + '_sha256'] = expected
     stages = plan(args.output, binaries, Path('/home/sasaki/datasets/openloris'))
-    print(json.dumps(stages if args.plan_only else execute(stages, args.output), indent=2))
+    if args.plan_only:
+        print(json.dumps(stages, indent=2))
+    else:
+        pins = pinned_files(Path(__file__).resolve().parents[1], spec)
+        print(json.dumps(execute(stages, args.output, pins), indent=2))
 
 
 if __name__ == '__main__':

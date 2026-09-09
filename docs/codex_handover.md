@@ -2,6 +2,11 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: pipeline CLIは全scripts/*.py・electro JSON/TSV・9 binaryのhashを記録し、
+stage前後で再検証。変更されたらexit0のstageでも全体FAILで後段停止。
+実子プロセスの変更注入を含め90 tests PASS。これは境界検出で物理immutable化ではない。
+外部raw/calibration/reference全体の固定と、実行中変更→復元の検出はまだ保証しない。
+
 最新: 全体executorの候補生成binaryを実証跡と照合し分離。
 nativeはa7ff5ff/8eeee5c、denseは3ae253a/8cfa9c5。開始前に各hashを固定検証。
 9 binaryの実パス/hashを`benchmarks/electro/m8-native-pipeline-binaries-v1.json`に保存。

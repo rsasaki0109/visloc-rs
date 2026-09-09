@@ -7,10 +7,44 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from run_native_pipeline import plan, execute
+from run_native_pipeline import plan, execute, pinned_files, verify_pins
 
 
 class PipelineTests(unittest.TestCase):
+    def test_code_evidence_and_binary_pins_detect_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'scripts').mkdir()
+            (root / 'benchmarks/electro').mkdir(parents=True)
+            files = [root / 'scripts/imported.py', root / 'benchmarks/electro/input.json', root / 'binary']
+            for path in files:
+                path.write_text('original')
+            pins = pinned_files(root, {'tool': {'path': str(files[-1])}})
+            self.assertEqual(len(pins), 3)
+            verify_pins(pins)
+            for path in files:
+                path.write_text('changed')
+                with self.assertRaises(RuntimeError):
+                    verify_pins(pins)
+                path.write_text('original')
+
+    def test_changed_dependency_prevents_next_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dependency = root / 'dependency'
+            dependency.write_text('original')
+            from replay_native_candidates import sha
+            pins = {str(dependency): sha(dependency)}
+            code = 'from pathlib import Path; Path(' + repr(str(dependency)) + ').write_text("changed")'
+            stage = {'id': 'mutate', 'argv': [sys.executable, '-c', code], 'payload': None, 'capture': None}
+            with patch('run_native_pipeline.shutil.disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)):
+                with self.assertRaisesRegex(RuntimeError, 'dependency changed'):
+                    execute([stage, dict(stage, id='never')], root / 'run', pins)
+            report = json.loads((root / 'run/pipeline-report.json').read_text())
+            self.assertEqual(report['status'], 'fail')
+            self.assertEqual(len(report['stages']), 1)
+            self.assertEqual(report['stages'][0]['exit_code'], 0)
+
     def test_generated_dependencies_are_connected(self):
         binaries = {key: key for key in ('candidate_native', 'candidate_native_sha256',
                     'candidate_dense', 'candidate_dense_sha256', 'sfm', 'merge',
