@@ -2,6 +2,16 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: build39403はexit0完了（1m55s）。保存binary integrate-5def794（既存schur-probe-binaries.4WAfOy内）、
+SHA1539a5d848fcc30553471746781d007821da0bc7108373dbd1d92ba61a19a689。
+unit visloc-schur-feasibility-v2.serviceを2GiB/Swap0/timeout1000で起動。
+出力dataset/corridor1-1-m8-schur-feasibility-v2、計測dataset/m8-schur-feasibility-measurement-v2。
+同v2を追跡し14hash比較とbefore深度/投影可否/stepを監査。v1は終了済み。
+起動前空き1.4GiB、出力見積約310MB。追加大型runを並行起動しない。
+
+実行中: integration release build session39403（source5def794）。同sessionをpoll。
+完了後は新binary名で保存/hash確認し、新probe outputでbefore-depth診断を実行する。
+
 最新: session25100はexit0完了（release2m50s）、generalized_rig_factor_tests全2件PASS。
 before-depth診断ログの実データ検証は未実施。次にintegration binaryをbuildする。
 
