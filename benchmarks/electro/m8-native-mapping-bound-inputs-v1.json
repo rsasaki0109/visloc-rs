@@ -1,0 +1,24 @@
+{
+  "rig_manifest": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt",
+    "sha256": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943"
+  },
+  "adaptive_features": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-linked-adaptive-bank-v2/features",
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline/features.json",
+    "manifest_sha256": "406e2e82ea1faa57747465d2adfc95e645ad5e40cd1e301dbb4a70e285be9a0f"
+  },
+  "dense_features": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-dense-extraction-v1/features",
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/features.json",
+    "manifest_sha256": "9a58c1dd0699e72ed52149096cf17e85ee894ffaaf9d55772a1eb6b1c3d95ce2"
+  },
+  "targeted_admission": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-admission-bound-v1/admissions/targeted7-admission.vps",
+    "sha256": "c9b30f7f7c29257e79dda6fe9b479924917b1e875d351085768b19af1e476857"
+  },
+  "dense_snapshot": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1/mapping/verified-merged.vps",
+    "sha256": "02cd6475098453cb6cf93761ff990ea31acba86217b715dfaf43660f3af0f05c"
+  }
+}
