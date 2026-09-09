@@ -1947,3 +1947,11 @@ four trials and restores the complete problem. Tests assert fixed-pose equality
 and accepted landmark-step norm consistency. This is not yet joint-variable
 pose/point or fixed-rotation coverage, nor real-atlas OFF parity or an A/B result.
 Clippy for the release slam library passes. No default or quality claim changes.
+
+The production fixture now also runs with variable pose translation and variable
+landmark position while holding rotation fixed. ON/OFF processes both pass:
+joint alpha 0.25 is accepted after alpha 0.5 increases cost; both state increments
+are nonzero and match the reported step norms; rotation remains exactly fixed.
+Both point-only and joint exhaustion restore the entire problem exactly. CI now
+runs the flag-ON rig tests separately after the normal flag-OFF workspace tests.
+This extends synthetic coverage, not real-model parity or performance evidence.

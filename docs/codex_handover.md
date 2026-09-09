@@ -2,6 +2,14 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: joint variable pose+point（回転固定）もproduction fixtureへ追加。
+session48581はexit0（release2m51s）。OFF/ON各4 tests PASS。
+jointでalpha0.5拒否/0.25受理、両更新nonzero・step norm一致、回転exact不変。
+4候補尽きた場合のproblem全体exact rollbackも両modeでPASS。
+CIに実験flag ONの別プロセステストを追加。実atlas OFF一致とA/Bは次の未完作業。
+06a21fdまでpush済み、CI34303430195は直近確認時in_progress。
+全体CI成功・性能改善はまだ主張しない。
+
 最新作業: bundle.rsにVISLOC_SFM_BA_FEASIBLE_BACKTRACK=1限定の
 4候補joint pose/landmark step縮小を実装（既定OFF、実データ未適用）。
 pure rig/legacy sparse/LM/velocity+biasなしに限定。追加全体snapshotなし。

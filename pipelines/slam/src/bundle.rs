@@ -695,39 +695,60 @@ mod generalized_rig_factor_tests {
     fn feasible_backtrack_production_rescue_and_exhaustion() {
         let enabled = std::env::var("VISLOC_SFM_BA_FEASIBLE_BACKTRACK").as_deref() == Ok("1");
         for target_x in [30.0, 1000.0] {
-            let camera = Camera::pinhole(1, 848, 800, 1.0, 1.0, 0.0, 0.0);
-            let mut ba = BundleAdjustment::new(camera.clone());
-            ba.add_pose(0, Pose::identity());
-            ba.fix_pose(0);
-            ba.add_landmark(0, Point3::new(1.0, 0.0, 0.1));
-            ba.add_rig_observation(BaRigObservation {
-                keyframe_id: 0,
-                landmark_id: 0,
-                xy: Point2::new(target_x, 0.0),
-                camera,
-                sensor_from_rig: SE3::identity(),
-            });
-            let before = ba.clone();
-            let result = ba
-                .optimize(&BaConfig {
-                    max_iterations: 1,
-                    initial_lambda: Some(0.01),
-                    linear_solver: LinearSolver::Sparse,
-                    ..BaConfig::default()
-                })
-                .unwrap();
-            assert_eq!(result.iterations.len(), 1);
-            assert_eq!(ba.poses, before.poses, "fixed pose moved");
-            assert_eq!(ba.nonprojectable_observation_count(), 0);
-            if enabled && target_x == 30.0 {
-                assert!(result.iterations[0].step_accepted);
-                assert!(result.final_cost < result.initial_cost);
-                let actual_step = (ba.landmarks[&0] - before.landmarks[&0]).norm();
-                assert!((result.iterations[0].max_landmark_step - actual_step).abs() < 1e-12);
-            } else {
-                assert!(!result.iterations[0].step_accepted);
-                assert_eq!(ba, before, "rejection must restore the complete problem");
-                assert_eq!(result.final_cost, result.initial_cost);
+            for joint in [false, true] {
+                let camera = Camera::pinhole(1, 848, 800, 1.0, 1.0, 0.0, 0.0);
+                let mut ba = BundleAdjustment::new(camera.clone());
+                ba.add_pose(0, Pose::identity());
+                if joint {
+                    ba.fix_pose_rotation(0);
+                } else {
+                    ba.fix_pose(0);
+                }
+                ba.add_landmark(0, Point3::new(1.0, 0.0, 0.1));
+                ba.add_rig_observation(BaRigObservation {
+                    keyframe_id: 0,
+                    landmark_id: 0,
+                    xy: Point2::new(target_x, 0.0),
+                    camera,
+                    sensor_from_rig: SE3::identity(),
+                });
+                let before = ba.clone();
+                let result = ba
+                    .optimize(&BaConfig {
+                        max_iterations: 1,
+                        initial_lambda: Some(0.01),
+                        linear_solver: LinearSolver::Sparse,
+                        ..BaConfig::default()
+                    })
+                    .unwrap();
+                assert_eq!(result.iterations.len(), 1);
+                assert_eq!(
+                    ba.poses[&0].world_to_camera.rotation,
+                    before.poses[&0].world_to_camera.rotation,
+                    "fixed rotation moved"
+                );
+                if !joint {
+                    assert_eq!(ba.poses, before.poses, "fixed pose moved");
+                }
+                assert_eq!(ba.nonprojectable_observation_count(), 0);
+                if enabled && target_x == 30.0 {
+                    assert!(result.iterations[0].step_accepted);
+                    assert!(result.final_cost < result.initial_cost);
+                    let actual_step = (ba.landmarks[&0] - before.landmarks[&0]).norm();
+                    assert!(actual_step > 0.0);
+                    assert!((result.iterations[0].max_landmark_step - actual_step).abs() < 1e-12);
+                    if joint {
+                        let pose_step = (ba.poses[&0].world_to_camera.translation
+                            - before.poses[&0].world_to_camera.translation)
+                            .norm();
+                        assert!(pose_step > 0.0);
+                        assert!((result.iterations[0].max_pose_step - pose_step).abs() < 1e-12);
+                    }
+                } else {
+                    assert!(!result.iterations[0].step_accepted);
+                    assert_eq!(ba, before, "rejection must restore the complete problem");
+                    assert_eq!(result.final_cost, result.initial_cost);
+                }
             }
         }
     }
