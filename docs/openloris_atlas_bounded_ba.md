@@ -1847,3 +1847,41 @@ has a different point/observation set and is not this frozen objective control.
 No atlas/default/README promotion follows. The next step is a bounded,
 GT-free diagnosis of which input geometry and track populations carry cost
 reduction and state motion, with its metric and work cap fixed before use.
+
+### Pose-coupling diagnostic contract after connected mapping v2
+
+Observation-identity motion and top-motion geometry audits are recorded in
+`m8-atlas-observation-key-motion-v1.json` and
+`m8-atlas-top-motion-geometry-v1.json`. Numeric point IDs are not stable across
+publication. The five largest main-component motions are all two-observation
+tracks with pre-BA ray angles below 0.113 degrees. The largest landmark motion
+is 1004.613 m while its observing camera centres move at most 0.004214 m.
+This identifies weak range observability, not a demonstrated trajectory cause.
+
+The next diagnostic must use the actual `rig_residual_jacobians` in
+`pipelines/slam/src/bundle.rs`, not an independently chosen camera-pose
+parameterization. Its translation columns are the world-to-rig rotation;
+rotation columns include `-R * skew(point_world)`, followed by the sensor
+rotation and pinhole projection derivative. Preserve the actual fixed-pose
+set, sensor transforms and fixed calibration. The atlas builder uses plain
+squared residuals (`RobustKernel::None`) and sparse LM with initial lambda
+1e-4; do not silently introduce robust weights into the diagnostic.
+
+Implement an opt-in report at the first production window only, reusing its
+selected landmarks and existing normal-equation blocks. Keep all production
+window/landmark/observation caps, do not assemble a global dense pose matrix,
+and never change acceptance, damping or landmark selection. Record observation
+count, ray-angle range, residual squared cost and separate translation/rotation
+gradient statistics. For pose coupling, attribute each landmark's Schur
+contribution using the **same damped point block and fixed-pose handling as the
+solver**. Do not interpret a raw Jacobian norm as influence: units, gauge and
+point elimination matter. Near-singular/rejected blocks must be counted with
+the solver's existing policy, not inverted through a new fallback.
+
+Before applying this to real data, require synthetic fixed-boundary rig tests
+and equality of aggregated diagnostic contributions with the production
+system to a declared numerical tolerance. Require diagnostic-OFF model equality
+and diagnostic-ON unchanged model bytes. No threshold tuning or intervention
+is authorized by this diagnostic contract. In particular, the previously
+rejected weak-angle-freezing arm is not a new experiment. Camera rotation,
+coupling attribution and causality remain unmeasured at this checkpoint.
