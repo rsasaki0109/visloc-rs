@@ -2,6 +2,20 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+2026-09-09 最新確定: feasibility v2はterminal success、再実行不要。
+14参照hash一致、115診断行の全観測が更新前projectable。
+5内部trackの更新前sensor depthは0.000068〜0.038669m。
+証跡m8-schur-feasibility-v2.json。wall209.103801s/RSS550604KiB。
+品質改善ではない（RMSE 0.388993m > COLMAP 0.384307mのまま）。
+次の候補は点削除ではなく有限回のfeasibility-preserving step縮小。
+詳細・棄却条件はopenloris_atlas_bounded_ba.md末尾。未実装。
+空き1.1GiB、追加大型runを開始しない。既存データ削除なし。
+CI adb8fe6/run34302051261はClippy too_many_argumentsでFAIL。
+solve_stepから分離したsolve_step_with_debugの局所allow漏れを修正済み。
+cargo clippy -p visloc-slam --lib --release -j1 -- -D warnings PASS（19.55s）。
+cargo fmt --all -- --check / git diff --check PASS。新headの全体CIは未確認。
+以下のbuild/run稼働中という記録は過去ログ（現在完了済み）。
+
 最新: build39403はexit0完了（1m55s）。保存binary integrate-5def794（既存schur-probe-binaries.4WAfOy内）、
 SHA1539a5d848fcc30553471746781d007821da0bc7108373dbd1d92ba61a19a689。
 unit visloc-schur-feasibility-v2.serviceを2GiB/Swap0/timeout1000で起動。

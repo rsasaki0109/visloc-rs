@@ -7812,6 +7812,8 @@ fn solve_step(
     )
 }
 
+// Keep the solver dimensions and policy explicit, as in the test wrapper above.
+#[allow(clippy::too_many_arguments)]
 fn solve_step_with_debug(
     system: &mut NormalEquationsBa,
     p_count: usize,

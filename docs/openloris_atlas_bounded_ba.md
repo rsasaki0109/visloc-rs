@@ -1899,3 +1899,41 @@ that cache is constructed and before factorization, passing the cache rather
 than recomputing inverses. Stable frame/landmark IDs must be passed from the
 existing index maps; numeric exported point IDs cannot supply that mapping.
 This is the identified implementation boundary, not a completed diagnostic.
+
+### Feasibility v2 result and next experimental contract (2026-09-09)
+
+The sparse diagnostic connection and before-state probe have now completed.
+`m8-schur-feasibility-v2.json` records 14 unchanged reference hashes and 115
+sampled rejected observations, all projectable before the tentative update.
+Five internal tracks cross behind their sensors. Their sampled before-depth
+range is 0.000068–0.038669 m. These are not the far-range top-motion tracks;
+neither diagnosis proves a cause of trajectory error.
+
+Next candidate, not implemented or promoted: bounded joint-step backtracking
+on a feasibility-rejected legacy sparse rig LM update. The motivation is to
+avoid another factorization when a smaller already-computed step may work.
+[Ceres documents smaller-trust-region retries for invalid steps](https://ceres-solver.readthedocs.io/latest/nnls_solving.html#_CPPv4N5ceres6Solver7Options33max_num_consecutive_invalid_stepsE);
+[Ipopt documents backtracking and fraction-to-boundary machinery](https://coin-or.github.io/Ipopt/classIpopt_1_1BacktrackingLineSearch.html).
+These are methodological references, not evidence that either uses this exact
+rig-BA heuristic or that it will improve visloc quality.
+
+Fix the experimental policy before scoring: default OFF; legacy sparse rig LM
+only, no velocity/bias/adaptive-damping path; try alpha=1/2,1/4,1/8,1/16
+after a full-step feasibility rejection. Recompute every candidate from the
+existing rollback state using the production SE3 update convention, scaling
+pose and landmark increments together. Require finite strictly reduced cost,
+the existing feasibility gate, and no newly nonprojectable previously valid
+observation. Do not remove tracks, weaken depth checks, or select internal IDs.
+If no candidate passes, restore exactly and take the existing LM rejection
+path. Do not reuse full-step gain predictions or convergence-step norms for a
+scaled update. Reuse rollback buffers; no extra full-state snapshots or dense
+global matrices. Four evaluations are a work cap, not a tuned quality threshold.
+
+Before any real replay, test joint pose/point scaling, fixed-pose handling,
+nonfinite rejection, exact rollback, trial cap, cost-increasing feasible steps,
+and OFF-path equivalence. Then freeze one arm and run a same-input A/B with
+factorization/evaluation counts, wall time, peak RSS, registration/support,
+reprojection and post-only GT trajectory scoring. Reject if quality or measured
+runtime regresses; lower BA cost alone is not success. No threshold sweep using
+GT. Current disk free space is only 1.1 GiB: no new full pipeline or repeated
+atlas outputs until the storage budget is resolved without losing evidence.
