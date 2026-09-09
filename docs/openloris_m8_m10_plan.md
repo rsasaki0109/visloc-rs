@@ -28,6 +28,27 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
 
 ### Remaining execution order
 
+Checkpoint update: full dense extraction now passes all 20,000 feature/loci
+hashes with a terminal detached measurement (9,789.925 s, sampled aggregate
+peak RSS 1,776,952 KiB, no OOM; `m8-full-dense-extraction-v1.json`). Full base
+feature parity also passes, but its earlier aggregate resource ledger remains
+incomplete. Neither result establishes continuous E2E.
+
+The newly bound chain prefix registration → repair admission → target selection
+→ target candidates → shared matching/merge → final admission now reproduces
+the seven selected frames, 14,319 candidates, 448 matching shards and final
+snapshot digest. Evidence: `m8-repair-admission-bound-v1.json`,
+`m8-targeted-selection-bound-v1.json`, `m8-targeted-candidates-bound-v1.json`,
+`m8-targeted-shared-bound-v1.json`, `m8-targeted-admission-bound-v1.json`.
+Intermediate model files are not all identical; selection equality is the
+verified downstream contract. These were separately launched stages with
+retained upstream inputs, not one cold pipeline. Do not rerun unchanged source
+models merely to extend this chain. The next implementation must assemble the
+complete executor, including source mapping and atlas integration, with pinned
+inputs, explicit dependencies, restart validation and artifact lifetime budgets.
+The synthetic stress fixture is archived with verified contents; restore it
+before any readback rerun (see `replay_storage_cleanup.md`).
+
 1. Runner dependency binding and actual runner restart evidence are merged
    (PR130/131). Shared output remains opt-in.
 2. Full10k Python runner validation now passes: all 2,500 bound shards match
@@ -46,8 +67,9 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
    supplemental features; do not extract those 692 images twice. Preflight disk
    space and an aggregate process-tree memory cap before launching extraction.
    Measure a continuous cold run and a separately labelled resumed run, not a
-   sum of historical phase times. Four-image base and one dense extraction
-   shard parity are preflights, not full extraction completion.
+   sum of historical phase times. Full dense extraction is now verified as
+   described above; the base aggregate resource ledger still needs closure
+   through the continuous execution.
    Current building blocks: PR133's opt-in immutable adaptive bank sharing
    passed full10k parity/resume with 9,308 shared files and 692 independent files;
    PR134's compiler binds 21 source commands to 23 atlas nodes. Dedicated cgroup
