@@ -2,6 +2,13 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: main/tail各移動量上位5点の観測ray角とcamera range/translationを監査。
+main上位5は全2観測、pre角0.000252〜0.112018deg。
+最大1004.613m移動点はpre距離1043m、post38.4m、観測camera最大移動0.004214m。
+低視差と点の大移動は確認したがpose RMSEの原因・Jacobian影響は未証明。
+証跡`m8-atlas-top-motion-geometry-v1.json`。rangeは軸方向depthではない。
+次はposeへの残差/Jacobian寄与を診断。既存weak-angle freeze棄却armの単純再実行禁止。
+
 最新: ObservationKeyでpre-ba/modelを対応付けた診断完了。
 image ID/name一致、全final trackが一意の旧trackのsubset、新規/曖昧track0。
 削除957点・総14440観測で既存filter ledger一致。
