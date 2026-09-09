@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+実行中: visloc-feasible-backtrack-off-v1.service（2GiB/Swap0/timeout1000）。
+新binary source37298b3、build80812はexit0（1m52s）。
+保存schur-probe-binaries.4WAfOy/integrate-37298b3、
+SHA10b3698d14bbec10c61d35e4ddc25eae8e8d412fa1ffdd39cc46cb42ae20c05c。
+出力dataset/corridor1-1-m8-feasible-backtrack-off-v1、
+計測dataset/m8-feasible-backtrack-off-measurement-v1。
+probe_atlas_schur_diagnostic.py診断なしで実験OFFの14参照hashを検査中。
+同unitを追跡、完走後に独立hash監査。再起動しない。ONは未実行。
+起動直前空き983MiB、過去出力約310MBで今回1件のみ収容可と判断。
+これを全体cold pipeline/ON比較の容量許可と解釈しない。
+CI37298b3/run34303656924は直近rust実行中、他8jobs success。
+
 最新: joint variable pose+point（回転固定）もproduction fixtureへ追加。
 session48581はexit0（release2m51s）。OFF/ON各4 tests PASS。
 jointでalpha0.5拒否/0.25受理、両更新nonzero・step norm一致、回転exact不変。
