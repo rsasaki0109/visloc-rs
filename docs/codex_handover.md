@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新追記（2026-09-09）: dense全10k抽出サービス
+`visloc-full-dense-extraction-v1.service`は正常終了（MainPID 0 / exited / exit0）。
+再起動・待機pollは不要。20,000 feature/lociファイルを独立に再hashし参照全一致、
+6 worker全exit0、計測レポートPASS。抽出＋検証9,789.925秒、50msサンプリングの
+合計peak RSS 1,776,952 KiB、OOM 0。証跡`m8-full-dense-extraction-v1.json`。
+現branchは`feat/shared-matching-recipe`。空き約1GiBのため大容量stageは要容量確認。
+連続native DAG・COLMAP品質/速度比較は未達。base抽出の欠落resource ledgerも
+今回のdense測定では埋まらない。サブエージェントは使わない。
+
 最新（2026-09-09）: PR118/119に続きPR120（head`e136ae6`、CI9成功）は
 `09e79b8dae067521ee8b8be342c1373c68e090c8`へmerge、旧branch整理済み。
 整理記録のPR121（head`8b05461`、CI9成功）は

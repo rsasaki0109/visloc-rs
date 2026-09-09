@@ -398,15 +398,21 @@ dense extraction recipe, retaining its two orientations, RootSIFT and compatible
 detector/descriptor/orientation/output-order/grayscale flags. Its reference check
 includes both `_features.txt` and `_loci.txt`: four spread-out images/two workers
 match all eight files, and the detached measurement service exited successfully.
-See `m8-dense-parallel-preflight-v1.json`. Full10k dense extraction is now running
+See `m8-dense-parallel-preflight-v1.json`. Full10k dense extraction completed
 with six workers under `visloc-full-dense-extraction-v1.service`, after the long
 durability probe passed and a fresh disk check. Output is at
 `/home/sasaki/datasets/openloris/corridor1-1-m8-full-dense-extraction-v1`;
 measurement is at
 `/home/sasaki/datasets/openloris/m8-full-dense-extraction-measurement-v1`.
-The service enforces 2 GiB memory / zero swap. Completion and full20k-file
-feature/loci parity remain pending. Do not launch other large-output stages
-against the narrow disk headroom during this run.
+The service enforced 2 GiB memory / zero swap and exited successfully. All six
+workers exited zero; independently rehashing all 20,000 current feature/loci
+files matched both report dictionaries exactly. The measured extraction and
+validation command took 9,789.925 s with sampled aggregate peak RSS 1,776,952 KiB
+(50 ms sampling, monitor included), zero OOM events, and cgroup peak 2 GiB
+(including cache/kernel charges, not RSS). See
+[full dense evidence](../benchmarks/electro/m8-full-dense-extraction-v1.json).
+This is not continuous native E2E or COLMAP speedup/quality parity. Only about
+1 GiB free remained after completion; recheck capacity before another stage.
 The base parity result covers only its 10,000 feature files: new base loci
 sidecars have no retained reference and are not covered by that comparison.
 
