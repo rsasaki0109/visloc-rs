@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M8 model/match共有化完了: apply_m8_duplicate_inventory.py、session60517 exit0。
+固定一覧からsingle-link682filesのみ置換、19277934592bytes（17.95GiB）解放。
+全事前hash/inode/link照合と全事後hash/shared inode確認PASS。
+証跡benchmarks/electro/m8-model-match-dedup-applied-v1.json。全path/bytes保持。
+対象model/VPSは以後上書き禁止、fresh outputまたは独立コピーを使用。
+df空き45G（この操作で説明できる解放量は17.95GiBだけ）。16GiB容量guardは収容可能。
+次は全cold executorの現状レビュー・固定pins確認・測定開始条件確認。
+以下のinventory未適用という記録は過去状態。適用scriptの再実行不要。
+
 容量整理候補を保存: scripts/inventory_m8_duplicates.py（読み取り専用）。
 外部一覧m8-model-match-duplicate-inventory-v1.json、repo同名証跡にSHA固定。
 206groups/888unique inodes、解放候補19277934592bytes。まだ適用していない。
