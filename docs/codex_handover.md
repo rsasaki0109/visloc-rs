@@ -2,6 +2,16 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+連続native E2E診断v1を起動（source c80f45f）。
+unit visloc-native-e2e-v1.service、2GiB/Swap0/timeout43200、invocation5118aa2190cc4bc69110d602caa37e25。
+出力dataset/corridor1-1-m8-native-e2e-v1、計測dataset/m8-native-e2e-measurement-v1。
+同unit追跡・再起動禁止。全17stage、9binary hash確認、関連15tests PASS。
+初回の生成済み成果物なし連続診断であり、OS cache coldは保証していない。
+scripts/*.pyとbenchmarks/electro JSON/TSVとbinaryは実行中変更禁止（stage毎pins検証）。
+共有化済み既存model/VPSは上書き禁止。新runはfresh root。
+未完走・品質未達、SIGKILL resume未対応、反復性能比較でもない。
+完走時はpipeline/measurement終端・各stagecheckpoint・最終品質を検証する。
+
 M8 model/match共有化完了: apply_m8_duplicate_inventory.py、session60517 exit0。
 固定一覧からsingle-link682filesのみ置換、19277934592bytes（17.95GiB）解放。
 全事前hash/inode/link照合と全事後hash/shared inode確認PASS。
