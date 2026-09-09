@@ -28,6 +28,22 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
 
 ### Remaining execution order
 
+Capacity audit after connected mapping v2: root free space is about 2.4 GiB,
+external free space about 1.6 GiB. Independently counting allocated blocks of
+regular files (deduplicating inodes within each directory, excluding symlinks)
+gives 1,855,483,904 bytes for full-base-v2 and 4,770,639,872 bytes for
+full-dense-v1: **6,626,123,776 bytes before adaptive/matching/mapping outputs**.
+Thus the current all-banks-retained executor cannot start safely even if its
+conservative 16 GiB guard were reduced. Native shared output adds 485,498,880
+bytes, dense shared output 1,071,497,216 bytes and targeted shared output
+17,616,896 bytes in the observed runs; these are not a complete lifetime upper
+bound and do not include all adaptive/admission/model artifacts or slack.
+No data was removed for this audit. The approximately 30 GiB EuRoC frozen
+feature bank remains protected by the nonregression contract. Obtain additional
+storage or implement and verify artifact release/recomputation lifetimes before
+a cold launch; do not bypass the guard or substitute retained banks and call it
+cold E2E.
+
 Checkpoint update: full dense extraction now passes all 20,000 feature/loci
 hashes with a terminal detached measurement (9,789.925 s, sampled aggregate
 peak RSS 1,776,952 KiB, no OOM; `m8-full-dense-extraction-v1.json`). Full base
