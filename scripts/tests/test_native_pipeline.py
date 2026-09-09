@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from run_native_pipeline import plan, execute, pinned_files, verify_pins
+from run_native_pipeline import plan, execute, pinned_files, verify_pins, artifact_lifetimes
 
 
 class PipelineTests(unittest.TestCase):
@@ -70,6 +70,13 @@ class PipelineTests(unittest.TestCase):
         spec = stages[-1]['payload']['data']
         self.assertEqual(spec['dense_features']['path'], '/new-run/dense/features')
         self.assertEqual(spec['dense_snapshot']['path'], '/new-run/match-dense/run/mapping/verified-merged.vps')
+        lifetimes = artifact_lifetimes(stages)
+        self.assertEqual(lifetimes['/new-run/base']['last_consumer'], 'native-prefix-supplement')
+        self.assertEqual(lifetimes['/new-run/dense']['last_consumer'], 'mapping')
+        self.assertEqual(lifetimes['/new-run/adaptive']['last_consumer'], 'mapping')
+        self.assertEqual(lifetimes['/new-run/match-native']['last_consumer'], 'native-prefix-supplement')
+        self.assertEqual(lifetimes['/new-run/match-adaptive']['last_consumer'], 'repair19-admission')
+        self.assertEqual(lifetimes['/new-run/match-targeted7']['last_consumer'], 'targeted7-admission')
 
     def test_disk_guard_creates_nothing(self):
         with tempfile.TemporaryDirectory() as directory:

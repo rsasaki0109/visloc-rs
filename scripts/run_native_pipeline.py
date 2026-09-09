@@ -98,6 +98,43 @@ def plan(root, binaries, dataset):
     return stages
 
 
+def artifact_lifetimes(stages):
+    """Derive last path consumers for this serial plan; never delete artifacts.
+
+    This describes namespace lifetime, not physical allocation: adaptive files
+    can hardlink base inodes, so dropping base paths does not free shared bytes.
+    Checkpoint/restart retention can require keeping artifacts beyond this point.
+    """
+    produced = {}
+    for index, stage in enumerate(stages):
+        argv = stage['argv']
+        outputs = [argv[i + 1] for i, arg in enumerate(argv[:-1])
+                   if arg in ('--output', '--output-directory')]
+        if stage['capture']:
+            outputs.append(stage['capture'])
+        for value in outputs:
+            path = Path(value)
+            if path in produced:
+                raise ValueError('Repeated artifact producer: ' + value)
+            produced[path] = {'producer': stage['id'], 'produced_at': index,
+                              'last_consumer': stage['id'], 'last_use_at': index, 'consumers': []}
+    for index, stage in enumerate(stages):
+        reads = list(stage['argv'])
+        if stage['payload']:
+            def paths(value):
+                if isinstance(value, dict):
+                    return [p for item in value.values() for p in paths(item)]
+                return [value] if isinstance(value, str) else []
+            reads.extend(paths(stage['payload']['data']))
+        for output, row in produced.items():
+            if index <= row['produced_at']:
+                continue
+            if any(Path(value).is_relative_to(output) for value in reads if value.startswith('/')):
+                row['consumers'].append(stage['id'])
+                row.update(last_consumer=stage['id'], last_use_at=index)
+    return {str(path): row for path, row in produced.items()}
+
+
 def pinned_files(repository, binary_spec):
     """Record code/evidence/binary identities; this is not filesystem isolation."""
     repository = Path(repository)
@@ -123,6 +160,7 @@ def execute(stages, root, pins=None):
         raise RuntimeError('Require 16 GiB free for retained-stage diagnostic pipeline; no automatic cleanup')
     root.mkdir()  # No implicit reuse of interrupted or completed outputs.
     report = {'status': 'running', 'stages': [], 'plan': stages, 'dependency_sha256': pins,
+              'artifact_lifetimes': artifact_lifetimes(stages),
               'scope': 'Extraction-through-atlas diagnostic including reference validation; no restart or quality promotion.'}
     def save():
         (root / 'pipeline-report.json').write_text(json.dumps(report, indent=2) + '\n')

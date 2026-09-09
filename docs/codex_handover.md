@@ -2,6 +2,14 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: pipeline reportに実行計画由来のartifact_lifetimesを追加（削除機能なし）。
+base/native match最終利用はprefix admission、adaptive matchはrepair admission、
+targeted matchはfinal admission。dense/adaptive特徴は最後のmappingまで必要。
+実測dense特徴4,437,450,752 bytes、loci327,708,672 bytes。
+dense特徴だけで空き2.4GiBを超えるため、早期releaseだけでは現方式を実行できない。
+baseのhardlinkを消してもadaptiveが共有するinodeのbytesは解放されない。
+90 tests PASS。release設計はrestart保持契約と別途統合が必要。実データ削除なし。
+
 最新: pipeline CLIは全scripts/*.py・electro JSON/TSV・9 binaryのhashを記録し、
 stage前後で再検証。変更されたらexit0のstageでも全体FAILで後段停止。
 実子プロセスの変更注入を含め90 tests PASS。これは境界検出で物理immutable化ではない。
