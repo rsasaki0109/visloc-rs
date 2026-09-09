@@ -2,6 +2,16 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新軽量作業: native_pipeline_checkpoint.pyを追加、全体executorで成功stageの
+output/capture/payload/logの内容checkpointとcompleted=trueを保存するよう変更。
+ファイル・空directory・file symlink（target文字列+参照先hash）を記録。
+directory symlink/特殊fileは拒否。変更/追加/削除/参照先変更を検出。
+関連11tests PASS（実executor完了checkpointと事後log変更検出を含む）。
+これはresume前提の出力検証のみ。--resume/失敗stage退避/whole-pipeline再開は未実装。
+実行中base-v3のscript/inputは変更していない。新しいcheckpointは次の全体run向け。
+base-v3は継続中MainPID4045651、直近worker0=84/1667、memory.events oom/oom_kill0。
+memory.events max4767（圧迫あり）。終端RSS未確定、同unitを追跡し再起動しない。
+
 実行中: visloc-full-base-extraction-v3.service、2GiB/Swap0/timeout22000。
 probe_openloris_base_extraction.py --all-images --workers6 --variant base。
 出力dataset/corridor1-1-m8-full-base-extraction-v3、

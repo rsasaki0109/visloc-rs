@@ -16,6 +16,7 @@ import time
 from replay_native_candidates import sha
 from measure_native_scope import validate_limits
 from benchmark_electro import atomic_json
+from native_pipeline_checkpoint import stage_checkpoint
 
 
 def require_memory_scope(proc_cgroup=Path('/proc/self/cgroup'), cgroup_root=Path('/sys/fs/cgroup')):
@@ -202,6 +203,11 @@ def execute(stages, root, pins=None):
                 data = json.loads(log.read_text())
                 with Path(stage['capture']).open('x') as stream:
                     json.dump(data, stream, indent=2)
+            # Persist content identities only after successful execution and
+            # capture publication. This is prerequisite evidence for resume,
+            # not permission to reuse an interrupted output directory yet.
+            report['stages'][-1]['artifact_checkpoint'] = stage_checkpoint(stage, log)
+            report['stages'][-1]['completed'] = True
             report['active_stage'] = None
             save()
         report['status'] = 'pass'

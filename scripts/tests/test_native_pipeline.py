@@ -26,6 +26,13 @@ class PipelineTests(unittest.TestCase):
             report = json.loads((root / 'pipeline-report.json').read_text())
             self.assertIsNone(report['active_stage'])
             self.assertEqual(report['status'], 'pass')
+            from native_pipeline_checkpoint import verify_checkpoint
+            self.assertTrue(report['stages'][0]['completed'])
+            checkpoint = report['stages'][0]['artifact_checkpoint']
+            verify_checkpoint(checkpoint)
+            (root / 'child.log').write_text('modified after completion')
+            with self.assertRaises(ValueError):
+                verify_checkpoint(checkpoint)
 
     def test_failed_atomic_publish_preserves_prior_checkpoint(self):
         from benchmark_electro import atomic_json, ValidationError
