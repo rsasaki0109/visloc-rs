@@ -7,10 +7,43 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 
-from build_native_source_recipe import INPUTS
+from build_native_source_recipe import INPUTS, render_nodes_tsv
 from replay_native_candidates import sha
+
+
+def execute_sources(recipe, bindings, binary, run_root):
+    """Publish atlas inputs only after all frozen source stages pass.
+
+    This deliberately refuses existing source outputs; pipeline-level restart
+    must first validate dependencies rather than silently reusing directories.
+    """
+    root = Path(run_root).resolve()
+    nodes = root / 'nodes.tsv'
+    if nodes.exists() or (root / 'sources').exists():
+        raise FileExistsError('Source phase output already exists')
+    if len(recipe['executions']) != 21 or len(recipe['nodes']) != 23:
+        raise ValueError('Require all 21 source executions and 23 atlas nodes')
+    manifest = render_nodes_tsv(recipe, root)
+    reports = []
+    for stage in recipe['executions']:
+        reports.append(execute_source(stage, bindings, binary, root))
+    # Exclusive publication: an incomplete source phase never publishes nodes.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=root, prefix='.nodes-', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(manifest)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, nodes)  # Atomic publication, fails if destination exists.
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {'status': 'pass', 'sources': reports, 'nodes_tsv': str(nodes),
+            'nodes_sha256': sha(nodes), 'scope': 'Source phase only; not cold native E2E.'}
 
 
 def execute_source(stage, bindings, binary, run_root):

@@ -4,14 +4,44 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_native_source_recipe import INPUTS
-from execute_native_source import execute_source
+from build_native_source_recipe import INPUTS, build
+from execute_native_source import execute_source, execute_sources
 from replay_native_candidates import sha
 
 
 class SourceExecutionTests(unittest.TestCase):
+    def test_source_phase_publication_failure_leaves_no_partial_manifest(self):
+        recipe = build(Path(__file__).resolve().parents[2] / 'benchmarks/electro')
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('execute_native_source.execute_source', return_value={'status': 'pass'}), \
+                    patch('execute_native_source.os.link', side_effect=OSError('publication failed')):
+                with self.assertRaises(OSError):
+                    execute_sources(recipe, {}, sys.executable, directory)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_source_phase_does_not_publish_nodes_after_failure(self):
+        recipe = build(Path(__file__).resolve().parents[2] / 'benchmarks/electro')
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('execute_native_source.execute_source', side_effect=RuntimeError('failed')):
+                with self.assertRaises(RuntimeError):
+                    execute_sources(recipe, {}, sys.executable, directory)
+            self.assertFalse((Path(directory) / 'nodes.tsv').exists())
+
+    def test_source_phase_calls_every_stage_before_publication(self):
+        recipe = build(Path(__file__).resolve().parents[2] / 'benchmarks/electro')
+        with tempfile.TemporaryDirectory() as directory:
+            def stage_pass(*args):
+                self.assertFalse((Path(directory) / 'nodes.tsv').exists())
+                return {'status': 'pass'}
+            with patch('execute_native_source.execute_source', side_effect=stage_pass) as execute:
+                result = execute_sources(recipe, {}, sys.executable, directory)
+            self.assertEqual(execute.call_count, 21)
+            self.assertEqual(result['status'], 'pass')
+            self.assertEqual(len((Path(directory) / 'nodes.tsv').read_text().splitlines()), 24)
+
     def test_success_requires_exact_model_membership_and_contents(self):
         for mismatch in (False, True):
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
