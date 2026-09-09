@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: Schur ON v1はterminal success/MainPID0/exited。再poll不要。
+OFF/ON/凍結参照の14filesを独立hashし全一致。
+main診断20行(iter0..19/frame0)、tail14行(iter0..13/frame4495)、OFF0行。
+全行finite=true/singular_hll=0。初回適格BAのみの出力範囲を確認。
+ON wall152.620315s/RSS550680KiB、OFF176.969935s/RSS560632KiB。
+single sequential/cache条件が異なるため速度改善とはしない。
+証跡m8-schur-diagnostic-parity-v1.jsonに14hash/測定/診断各行の主要値。
+次は最大消去寄与trackと低視差大移動trackの対応を調べる。全pose/全window寄与は未測定。
+
 最新: Schur OFF v1はterminal success/MainPID0/exited、14参照ファイル独立hash全一致。
 wall176.969935s、sampled aggregate peak RSS560632KiB。再poll不要。
 ON unit visloc-schur-parity-on-v1.serviceを同binary/入力・--diagnosticで起動。
