@@ -1,0 +1,1007 @@
+{
+  "schema": "m8-schur-feasibility-v1",
+  "status": "reference-parity-and-bounded-diagnostic-pass",
+  "binary_sha256": "7194864f91b057878bfec1472f9ddd6ef41e677cf916195fa36219024984372a",
+  "reference_file_sha256": {
+    "atlas/component-000/images.txt": "a26a3a4444dd73be2e707d5c89c3ebce845fd92a34eb8c18a0d2e6833e489ed3",
+    "atlas/component-001/images.txt": "44005eeee990cb8b1fb10f9e253d64d789e9f66b0e99502dd4e530f579f77ca0",
+    "integrated/tail/model/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/tail/model/images.txt": "761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd",
+    "integrated/tail/model/points3D.txt": "931100c5151f008ced6cc2e7492658134931b805c4eab60fa3c6de87ec7d3d4f",
+    "integrated/tail/pre-ba/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/tail/pre-ba/images.txt": "96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff",
+    "integrated/tail/pre-ba/points3D.txt": "33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c",
+    "integrated/main/model/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/main/model/images.txt": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+    "integrated/main/model/points3D.txt": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14",
+    "integrated/main/pre-ba/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/main/pre-ba/images.txt": "046c7c6ed8c3ccc0a0c972b610bcf162df88347531bdae95aeb2d994f338d0c8",
+    "integrated/main/pre-ba/points3D.txt": "a9b4e5055da4604733a4734ba95a374531fc1190edf472477713c4b75293dfef"
+  },
+  "measurement_sha256": "79e00dde64d84162c08d0a33408f8e2f6eaf3f25189df1619e119a75de17852b",
+  "measurement": {
+    "status": "pass",
+    "command": [
+      "python3",
+      "scripts/probe_atlas_schur_diagnostic.py",
+      "--integration-binary",
+      "/home/sasaki/datasets/openloris/schur-probe-binaries.4WAfOy/integrate-5bb84bb",
+      "--binary-sha256",
+      "7194864f91b057878bfec1472f9ddd6ef41e677cf916195fa36219024984372a",
+      "--output",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-schur-feasibility-v1",
+      "--diagnostic"
+    ],
+    "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/visloc-schur-feasibility-v1.service",
+    "rss_sampling_interval_seconds": 0.05,
+    "scope": "Sampled aggregate RSS includes monitor; shared pages may be counted multiple times. cgroup peak includes charged cache/kernel memory and is not RSS.",
+    "exit_code": 0,
+    "wall_seconds": 158.97297366603743,
+    "sampled_aggregate_peak_rss_kib": 550652,
+    "cgroup_memory_peak_bytes": 821403648,
+    "memory_events_before": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+    "memory_events_after": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n"
+  },
+  "logs": {
+    "main": {
+      "log_sha256": "dd090f09fe5cc11e524e119c34504b57e7bf15b5cc9c5cc2c41c057f96e952c2",
+      "rows": [
+        {
+          "iteration": "0",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0006436652856421665)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008357537975946143)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0015616341385144825)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0017968590206464256)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.002114100631492122)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0019867545909382873)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005740358758813502)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005343800138847519)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.000239641645273967)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.000556669904712278)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019865453670308234)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "0",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.020028834146686388)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0006436650635690041)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008357540438965719)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0015617568089704402)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0017969506296873256)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0021141852853534004)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.001986843933976603)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005740302994157532)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005343742313885013)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00023961076239994086)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0005566416058674129)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019864743949338844)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "1",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.02002813093665821)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0006436659091136878)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008357596235772529)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0015617557362870003)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0017968801085085622)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0021140908865584732)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.001986755412553145)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005740177711461194)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005343619164230567)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00023930665919634722)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0005563614612210192)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.01985826507443711)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "2",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.020021709402691584)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.000643657645033453)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008357912851019102)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0015592367518711759)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0017942766521083062)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0021113742146606127)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0019839981092157023)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005740187720792103)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005343714885873048)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00023704654372210652)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0005542654140114008)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019820307895166454)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "3",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019983850816376526)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.000643516032394478)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008359176476094988)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0015497608668299154)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0017843889027511816)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0021005512861544755)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0019731111783785806)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005746802663800842)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.0053513866469346374)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.000231716173819541)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0005489805379489283)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019682743998539386)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "4",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019843846275497373)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0006475916729590833)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008422385009332813)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0015838129700538111)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0018166305302842675)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0021257358304134144)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0020013433273772)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005761700519559787)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005374381413410493)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00022901134629453652)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0005431105514572115)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.018976320059397176)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "5",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.019120196063191704)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0006468779000594845)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008511988694138817)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "44569",
+          "frame_id": "23",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0014855320094774183)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0016967467976791448)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0019793879519030954)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0018762095949463962)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005493066107395585)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.005138016307845773)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00022716708319362824)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0005309183853296138)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.01599104036688094)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "6",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.01606632101896484)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0005903270828950548)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0008330595588486394)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "44570",
+          "frame_id": "26",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-8.758354112315151e-5)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "44571",
+          "frame_id": "38",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.00032507860671847485)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "44572",
+          "frame_id": "53",
+          "track_id": "407",
+          "tentative_sensor_depth": "Some(-0.0002777727902121825)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.0040964269175476865)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.0038396485185010444)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00021032744665377878)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0004938027024939685)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "142218",
+          "frame_id": "39",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.003117991375350024)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "7",
+          "observation": "142219",
+          "frame_id": "71",
+          "track_id": "12192",
+          "tentative_sensor_depth": "Some(-0.0029628276735625394)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "8",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.00021608419456325837)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "8",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0005368071133190601)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "8",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-2.5754188140061077e-5)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "8",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00027965332243908524)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "10",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.00038082106309980613)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "10",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0006926366580782216)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "10",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.00011735961308849275)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "10",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-3.7334389315697415e-5)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "10",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00015506779155495648)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "10",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00041747298112103685)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "12",
+          "observation": "20073",
+          "frame_id": "42",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.00045985333990014934)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "12",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0007642219179922732)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "12",
+          "observation": "52699",
+          "frame_id": "26",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.0007409291228554846)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "12",
+          "observation": "52700",
+          "frame_id": "57",
+          "track_id": "578",
+          "tentative_sensor_depth": "Some(-0.0006451561405360812)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "12",
+          "observation": "54330",
+          "frame_id": "50",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.000207242061397713)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "12",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.0004740448238220508)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "13",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-0.0003197070412413435)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "13",
+          "observation": "54331",
+          "frame_id": "52",
+          "track_id": "641",
+          "tentative_sensor_depth": "Some(-0.00023206200894147682)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "16",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-1.436728033784012e-5)",
+          "sample_limit": "16"
+        },
+        {
+          "iteration": "18",
+          "observation": "20074",
+          "frame_id": "46",
+          "track_id": "140",
+          "tentative_sensor_depth": "Some(-2.060252451549418e-5)",
+          "sample_limit": "16"
+        }
+      ],
+      "count_by_iteration": {
+        "0": 12,
+        "1": 12,
+        "2": 12,
+        "3": 12,
+        "4": 12,
+        "5": 12,
+        "6": 12,
+        "7": 11,
+        "8": 4,
+        "10": 6,
+        "12": 6,
+        "13": 2,
+        "16": 1,
+        "18": 1
+      },
+      "track_ids": [
+        140,
+        407,
+        578,
+        641,
+        12192
+      ]
+    },
+    "tail": {
+      "log_sha256": "88740a890f4a3b91de0896376f867260ba4f819755accc86d1be15c1f605a61f",
+      "rows": [],
+      "count_by_iteration": {},
+      "track_ids": []
+    }
+  },
+  "limitations": [
+    "Internal track IDs are not serialized COLMAP point IDs.",
+    "Samples show tentative nonprojectable observations, not necessarily newly invalid observations.",
+    "At most 16 observations per rejected iteration; not global diagnosis.",
+    "No GT, model intervention, quality improvement or speedup claim."
+  ]
+}

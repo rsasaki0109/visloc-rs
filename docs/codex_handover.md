@@ -2,6 +2,21 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: feasibility v1はterminal success/MainPID0/exited、14参照hash独立全一致。
+wall158.972974s/sample aggregate RSS550652KiB。再poll不要。
+main115失敗観測行、内部trackは140/407/578/641/12192の5件、各反復最大12件。
+tail失敗行0。最大消去寄与4266とは異なる。証跡m8-schur-feasibility-v1.json。
+次はこの5trackの更新前後depth/geometryを取得し、受理gateを維持する改善仮説を検討。
+内部ID→COLMAP IDの直接joinは禁止。品質改善・因果はまだ未証明。
+
+最新: build99071はexit0完了、5bb84bbをpush済み。
+新保存binary schur-probe-binaries.4WAfOy/integrate-5bb84bb、
+SHA7194864f91b057878bfec1472f9ddd6ef41e677cf916195fa36219024984372a。
+unit visloc-schur-feasibility-v1.serviceを2GiB/Swap0/timeout1000で開始。
+出力dataset/corridor1-1-m8-schur-feasibility-v1、計測dataset/m8-schur-feasibility-measurement-v1。
+同unitを追跡し、完了後モデル14hashとsfm-debug-ba-rig-infeasibleを監査。
+既存OFF/ONは完了済みなので再poll不要。
+
 最新: session72367はexit0終了（release2m24s）、bounded sample test PASS。
 generalized_rig_factor_tests全2件もPASS。追加診断は実データではまだ未実行。
 空き1.7GiBなので新probeは一度に一件、保守的に出力約310MBとbinary容量を確認する。
