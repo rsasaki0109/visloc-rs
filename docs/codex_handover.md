@@ -2,6 +2,16 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新確定: feasible-backtrack OFF v1はterminal success/MainPID0/exited。
+再poll/再実行不要。14参照hashをsha256sum --checkで独立全一致。
+main/tail backtrackログ0。wall155.1414069s、sample aggregate RSS560748KiB。
+証跡m8-feasible-backtrack-off-v1.json。ON未実行、品質・高速化は未証明。
+CI37298b3/run34303656924はterminal success（ON synthetic test含む）。
+次は同binaryのONを評価。ただし既存probe/execute_atlasはpost model完全一致を
+要求するのでON品質比較にはそのまま使えない。厳密parity runnerのgateを緩めず、
+実験専用runnerでpre-ba一致・出力hash・事後品質採点を扱うこと。
+現在空き684MiB。新build不要、追加runは出力予算を再確認して一件のみ。
+
 実行中: visloc-feasible-backtrack-off-v1.service（2GiB/Swap0/timeout1000）。
 新binary source37298b3、build80812はexit0（1m52s）。
 保存schur-probe-binaries.4WAfOy/integrate-37298b3、
