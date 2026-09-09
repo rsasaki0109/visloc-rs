@@ -2,6 +2,14 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+base-v3の1万特徴を参照実体m5/feature-extract/featuresへhardlink化完了。
+scripts/deduplicate_base_v3.py、監査m8-base-v3-dedup-v1.json。
+全件事前hash/参照symlink実体確認、事後全hash+共有inode確認済み。
+1705103360bytes（約1.59GiB）解放、空き5.5GiB。全cold guard16GiBにはまだ不足。
+両bankは共有inodeなので上書き禁止。編集は独立コピー、新runは新root。
+sidecar/raw/log/計測証跡は変更なし。過去性能を共有化後の状態で再解釈しない。
+helper2tests PASS、apply session90133 exit0。395d537のCI34310596934は直近実行中。
+
 base-v3は正常終了済み（MainPID0/Result success/SubState exited）。再起動不要。
 全6worker exit0。出力1万特徴と参照1万特徴を独立再SHA256照合し、集合・全hash一致。
 証跡: benchmarks/electro/m8-full-base-extraction-v3-audit.json。

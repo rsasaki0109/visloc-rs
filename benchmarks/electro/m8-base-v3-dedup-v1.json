@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "audit": "/home/sasaki/datasets/openloris/m8-base-v3-dedup-applied-v1.json",
+  "audit_sha256": "2d53f8975b1c33c2e97f1e44d5896d12a6592373f4ffa64e40cbb6a88f27975a",
+  "files": 10000,
+  "freed_allocated_bytes": 1705103360,
+  "verification": "All input hashes checked before replacement; all output hashes and shared inodes checked afterwards. Two existing merge helper tests passed.",
+  "scope": "Only completed base-v3 *_features.txt output replaced by hardlinks to m5/feature-extract/features. Reference symlink backing paths verified. No sidecars, logs, raw images or measurement files removed.",
+  "caveat": "Both banks share inode metadata and must never be overwritten. Use independent copies for edits. Cache and sharing changes are not new performance evidence."
+}
