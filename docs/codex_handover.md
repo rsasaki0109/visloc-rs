@@ -2,6 +2,19 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: session19766はexit0完了、release2m57s、Schur関連3 tests PASS。
+first-window claim（不適格非消費/並行一意）と非zero解不変性を確認。
+次はatlas integrationの実binaryをbuildし、同入力で診断OFF/ONのmodel bytesを比較。
+基準binaryはdataset下の保存コピーを維持し上書きしない。
+
+最新: first-window制御をbundle.rsに実装中（未commit）。
+VISLOC_SFM_DEBUG_BA_SPARSE_FIRST_WINDOW + 既存VISLOC_SFM_DEBUG_BA/
+VISLOC_SFM_DEBUG_BA_STEPS/VISLOC_SFM_DEBUG_BA_SCHUR_SLOTで最初の適格rig sparse BAを選択。
+呼出内全反復で同slot使用。プロセス単位AtomicBoolで一度のみ、無効slot/非適格は消費しない。
+並行8呼出の一意claimテスト追加。cargo test --release schur_block_debug_tests
+session19766がビルド中。再起動せずpollする。rustfmt/diff check PASS。
+実model不変性・診断結果はまだ未検証。選択は単一thread atlas前提で再現性確認が必要。
+
 最新: Schur診断fixtureを非zero pose/landmark RHSへ強化。
 診断ON/OFFの解exact一致、両更新norm>0、同pose合算後の消去norm一致PASS。
 session53281はexit0終了、release2m24s、関連2 tests PASS。再poll不要。

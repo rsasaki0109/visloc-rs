@@ -151,6 +151,24 @@ fn ba_schur_debug_slot() -> Option<usize> {
         .ok()
 }
 
+fn claim_sparse_debug_window(
+    eligible: bool,
+    slot: Option<usize>,
+    pose_count: usize,
+    claimed: &std::sync::atomic::AtomicBool,
+) -> Option<usize> {
+    let slot = slot.filter(|slot| eligible && *slot < pose_count)?;
+    claimed
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .ok()?;
+    Some(slot)
+}
+
 fn matrix_free_schur_debug_context<'a>(
     pose_index: &'a BTreeMap<u64, usize>,
     landmark_index: &'a BTreeMap<u64, usize>,
@@ -514,6 +532,37 @@ fn emit_schur_block_debug(
 #[cfg(test)]
 mod schur_block_debug_tests {
     use super::*;
+
+    #[test]
+    fn sparse_debug_claim_is_once_and_ineligible_calls_do_not_consume_it() {
+        use std::sync::atomic::AtomicBool;
+        let claimed = AtomicBool::new(false);
+        assert_eq!(claim_sparse_debug_window(false, Some(0), 2, &claimed), None);
+        assert_eq!(claim_sparse_debug_window(true, None, 2, &claimed), None);
+        assert_eq!(claim_sparse_debug_window(true, Some(2), 2, &claimed), None);
+        assert_eq!(
+            claim_sparse_debug_window(true, Some(1), 2, &claimed),
+            Some(1)
+        );
+        assert_eq!(claim_sparse_debug_window(true, Some(0), 2, &claimed), None);
+        let concurrent = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        claim_sparse_debug_window(true, Some(0), 1, &concurrent).is_some() as usize
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .sum::<usize>(),
+                1
+            );
+        });
+    }
 
     #[test]
     fn local_block_metrics_distinguish_spd_non_spd_nonfinite_and_asymmetry() {
@@ -3363,6 +3412,21 @@ impl BundleAdjustment {
             && !config.refine_distortion;
         let trace_phase_timing = std::env::var_os("VISLOC_BA_TRACE_PHASE_TIMING").is_some();
 
+        static SPARSE_DEBUG_WINDOW_CLAIMED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let sparse_debug_slot = claim_sparse_debug_window(
+            std::env::var_os("VISLOC_SFM_DEBUG_BA_SPARSE_FIRST_WINDOW").is_some()
+                && matches!(backend, BaSolveBackend::Legacy)
+                && config.linear_solver == LinearSolver::Sparse
+                && velocity_index.is_empty()
+                && bias_index.is_empty()
+                && !self.rig_observations.is_empty()
+                && config.max_iterations > 0,
+            ba_schur_debug_slot(),
+            pose_index.len(),
+            &SPARSE_DEBUG_WINDOW_CLAIMED,
+        );
+
         for iteration in 0..config.max_iterations {
             let after_rejection = iterations.last().is_some_and(|step| !step.step_accepted);
             let emit_phase = |phase: &str, started: Option<std::time::Instant>| {
@@ -3474,7 +3538,15 @@ impl BundleAdjustment {
                     config.linear_solver,
                     config.parallel,
                     &mut block_symbolic_cache,
-                    matrix_free_schur_debug_context(&pose_index, &landmark_index, iteration, false),
+                    sparse_debug_slot.map(|slot| {
+                        schur_debug_context_for_slot_with_coordinates(
+                            &pose_index,
+                            &landmark_index,
+                            iteration,
+                            slot,
+                            false,
+                        )
+                    }),
                 )
                 .map(|(delta_poses, delta_landmarks)| (delta_poses, delta_landmarks, None, None)),
                 BaSolveBackend::MatrixFree(runtime)
