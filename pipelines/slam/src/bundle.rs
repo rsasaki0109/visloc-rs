@@ -658,11 +658,79 @@ mod schur_block_debug_tests {
     }
 }
 
+fn feasible_backtrack_accepts(
+    before_cost: f64,
+    trial_cost: f64,
+    before_nonprojectable: usize,
+    trial_nonprojectable: usize,
+    preserves_valid: bool,
+) -> bool {
+    before_cost.is_finite()
+        && trial_cost.is_finite()
+        && trial_cost < before_cost
+        && trial_nonprojectable <= before_nonprojectable
+        && preserves_valid
+}
+
 #[cfg(test)]
 mod generalized_rig_factor_tests {
     use nalgebra::{Point3, UnitQuaternion, Vector3};
 
     use super::*;
+
+    #[test]
+    fn feasible_backtrack_requires_finite_decrease_and_preserved_observations() {
+        assert!(feasible_backtrack_accepts(10.0, 9.0, 0, 0, true));
+        for cost in [10.0, 11.0, f64::NAN, f64::INFINITY] {
+            assert!(!feasible_backtrack_accepts(10.0, cost, 0, 0, true));
+        }
+        assert!(!feasible_backtrack_accepts(f64::INFINITY, 9.0, 0, 0, true));
+        assert!(!feasible_backtrack_accepts(10.0, 9.0, 0, 1, true));
+        assert!(!feasible_backtrack_accepts(10.0, 9.0, 1, 1, false));
+    }
+
+    // Run this fixture in separate test processes with the experimental env
+    // flag absent and set to 1; never mutate process environment in a test.
+    #[test]
+    fn feasible_backtrack_production_rescue_and_exhaustion() {
+        let enabled = std::env::var("VISLOC_SFM_BA_FEASIBLE_BACKTRACK").as_deref() == Ok("1");
+        for target_x in [30.0, 1000.0] {
+            let camera = Camera::pinhole(1, 848, 800, 1.0, 1.0, 0.0, 0.0);
+            let mut ba = BundleAdjustment::new(camera.clone());
+            ba.add_pose(0, Pose::identity());
+            ba.fix_pose(0);
+            ba.add_landmark(0, Point3::new(1.0, 0.0, 0.1));
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: 0,
+                landmark_id: 0,
+                xy: Point2::new(target_x, 0.0),
+                camera,
+                sensor_from_rig: SE3::identity(),
+            });
+            let before = ba.clone();
+            let result = ba
+                .optimize(&BaConfig {
+                    max_iterations: 1,
+                    initial_lambda: Some(0.01),
+                    linear_solver: LinearSolver::Sparse,
+                    ..BaConfig::default()
+                })
+                .unwrap();
+            assert_eq!(result.iterations.len(), 1);
+            assert_eq!(ba.poses, before.poses, "fixed pose moved");
+            assert_eq!(ba.nonprojectable_observation_count(), 0);
+            if enabled && target_x == 30.0 {
+                assert!(result.iterations[0].step_accepted);
+                assert!(result.final_cost < result.initial_cost);
+                let actual_step = (ba.landmarks[&0] - before.landmarks[&0]).norm();
+                assert!((result.iterations[0].max_landmark_step - actual_step).abs() < 1e-12);
+            } else {
+                assert!(!result.iterations[0].step_accepted);
+                assert_eq!(ba, before, "rejection must restore the complete problem");
+                assert_eq!(result.final_cost, result.initial_cost);
+            }
+        }
+    }
 
     #[test]
     fn infeasible_rig_sample_matches_predicate_and_is_bounded() {
@@ -3853,14 +3921,89 @@ impl BundleAdjustment {
             }
 
             let nonprojectable_before = current_nonprojectable;
-            let cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
-            let nonprojectable_after = self.nonprojectable_observation_count();
+            let mut cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
+            let mut nonprojectable_after = self.nonprojectable_observation_count();
+            let mut backtrack_exhausted = false;
+            // Experimental bounded rescue: keep the production full-step path
+            // unchanged unless explicitly enabled for pure rig sparse LM.
+            if nonprojectable_after > current_nonprojectable
+                && matches!(&backend, BaSolveBackend::Legacy)
+                && config.linear_solver == LinearSolver::Sparse
+                && config.initial_lambda.is_some()
+                && velocity_index.is_empty()
+                && bias_index.is_empty()
+                && !self.rig_observations.is_empty()
+                && self.observations.is_empty()
+                && self.stereo_observations.is_empty()
+                && self.general_stereo_observations.is_empty()
+                && std::env::var("VISLOC_SFM_BA_FEASIBLE_BACKTRACK").as_deref() == Ok("1")
+            {
+                backtrack_exhausted = true;
+                for alpha in [0.5, 0.25, 0.125, 0.0625] {
+                    // Always start from the rollback state, never accumulate
+                    // successive trial increments or copy an extra whole model.
+                    for (&id, &i) in &pose_index {
+                        let mut xi = delta_poses.fixed_rows::<6>(i * 6).into_owned() * alpha;
+                        if self.fixed_pose_rotations.contains(&id) {
+                            xi[3] = 0.0;
+                            xi[4] = 0.0;
+                            xi[5] = 0.0;
+                        }
+                        self.poses
+                            .get_mut(&id)
+                            .expect("pose exists")
+                            .world_to_camera =
+                            saved_poses[&id].world_to_camera.compose(&SE3::exp(&xi));
+                    }
+                    for (&id, &i) in &landmark_index {
+                        let dx = delta_landmarks.fixed_rows::<3>(i * 3).into_owned() * alpha;
+                        *self.landmarks.get_mut(&id).expect("landmark exists") =
+                            Point3::from(saved_landmarks[&id].coords + dx);
+                    }
+                    let trial_cost = self.robust_cost_weighted(&kernel, gnc_weights);
+                    let trial_nonprojectable = self.nonprojectable_observation_count();
+                    let preserves_valid = self.rig_observations.iter().all(|obs| {
+                        let old_valid = saved_poses
+                            .get(&obs.keyframe_id)
+                            .zip(saved_landmarks.get(&obs.landmark_id))
+                            .is_some_and(|(pose, point)| {
+                                rig_residual_jacobians(obs, pose, point).is_some()
+                            });
+                        !old_valid
+                            || self
+                                .poses
+                                .get(&obs.keyframe_id)
+                                .zip(self.landmarks.get(&obs.landmark_id))
+                                .is_some_and(|(pose, point)| {
+                                    rig_residual_jacobians(obs, pose, point).is_some()
+                                })
+                    });
+                    let accepted = feasible_backtrack_accepts(
+                        cost_before,
+                        trial_cost,
+                        current_nonprojectable,
+                        trial_nonprojectable,
+                        preserves_valid,
+                    );
+                    eprintln!("sfm-ba-feasible-backtrack: iteration={} alpha={} accepted={} cost={} nonprojectable={}", iteration, alpha, accepted, trial_cost, trial_nonprojectable);
+                    cost_after = trial_cost;
+                    nonprojectable_after = trial_nonprojectable;
+                    if accepted {
+                        backtrack_exhausted = false;
+                        max_pose_step *= alpha;
+                        max_landmark_step *= alpha;
+                        break;
+                    }
+                }
+                // On exhaustion force rejection and restore all saved states.
+            }
             emit_phase("tentative_update_and_cost", update_started);
             let cost_accepted = match config.initial_lambda {
                 None => true, // Pure GN: accept unconditionally.
                 Some(_) => cost_after < cost_before,
             };
-            let feasibility_gate = nonprojectable_after <= current_nonprojectable;
+            let feasibility_gate =
+                !backtrack_exhausted && nonprojectable_after <= current_nonprojectable;
             if sparse_debug_slot.is_some() && !feasibility_gate {
                 for (observation, frame, landmark, depth) in self.nonprojectable_rig_sample(16) {
                     let factor = &self.rig_observations[observation];
@@ -3932,7 +4075,7 @@ impl BundleAdjustment {
                     iteration,
                     step_accepted,
                     cost_accepted,
-                    nonprojectable_after <= nonprojectable_before,
+                    feasibility_gate,
                     nonprojectable_before,
                     nonprojectable_after,
                     cost_before,

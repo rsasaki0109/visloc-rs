@@ -2,6 +2,20 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新作業: bundle.rsにVISLOC_SFM_BA_FEASIBLE_BACKTRACK=1限定の
+4候補joint pose/landmark step縮小を実装（既定OFF、実データ未適用）。
+pure rig/legacy sparse/LM/velocity+biasなしに限定。追加全体snapshotなし。
+有限cost低下・既存非投影数gate・以前validな全rig観測のvalid維持を要求。
+失敗候補尽きたら強制拒否→既存rollback。受理時step normをalpha倍。
+session56698/23080はexit0完了、再poll不要。generalized_rig_factor_testsは
+OFF/ON別プロセス各4件PASS。production固定pose fixtureでalpha0.5のcost悪化拒否、
+alpha0.25受理、別fixtureの4候補尽きた完全rollback、固定pose不変、step norm一致。
+有限cost/既存valid観測維持predicateもPASS。joint variable pose+point、固定rotation、
+実atlas OFF byte parityは未検証。次はこの不足テストを補い一つの固定armを評価。
+session22417 Clippy --lib --release -D warnings PASS（8.29s）。
+診断step-detailのfeasibility表示もexhaustion込みgateへ修正済み。
+空き973MiB。実データrun禁止、まずテスト契約と容量予算を満たすこと。
+
 2026-09-09 最新確定: feasibility v2はterminal success、再実行不要。
 14参照hash一致、115診断行の全観測が更新前projectable。
 5内部trackの更新前sensor depthは0.000068〜0.038669m。

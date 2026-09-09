@@ -1937,3 +1937,13 @@ reprojection and post-only GT trajectory scoring. Reject if quality or measured
 runtime regresses; lower BA cost alone is not success. No threshold sweep using
 GT. Current disk free space is only 1.1 GiB: no new full pipeline or repeated
 atlas outputs until the storage budget is resolved without losing evidence.
+
+Implementation checkpoint: `VISLOC_SFM_BA_FEASIBLE_BACKTRACK=1` enables the
+experimental bounded policy; absent/other values retain the full-step path.
+Separate release test processes with the flag absent/present each pass all
+four generalized rig tests. The production point-only fixture rejects alpha
+0.5 on increased cost and accepts alpha 0.25; a second fixture exhausts exactly
+four trials and restores the complete problem. Tests assert fixed-pose equality
+and accepted landmark-step norm consistency. This is not yet joint-variable
+pose/point or fixed-rotation coverage, nor real-atlas OFF parity or an A/B result.
+Clippy for the release slam library passes. No default or quality claim changes.
