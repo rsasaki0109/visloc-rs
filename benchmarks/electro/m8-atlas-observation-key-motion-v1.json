@@ -1,0 +1,129 @@
+{
+  "schema": "m8-atlas-observation-key-motion-v1",
+  "status": "diagnostic-only",
+  "method": [
+    "Verify identical IMAGE_ID to image-name maps before comparing observation keys.",
+    "Map every pre-BA (IMAGE_ID, POINT2D_IDX) to one parent point; reject duplicate ownership.",
+    "For each final point require all observations map to one unique pre-BA parent and are its subset; reject reused parents.",
+    "Group survivors by pre-BA observation count: <=2, 3-4, 5-8, >=9. Compute Euclidean position change and serialized point mean-error sums.",
+    "Count deleted parent points and observations separately from removed observations on surviving tracks."
+  ],
+  "input_sha256": {
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/main/pre-ba/images.txt": "046c7c6ed8c3ccc0a0c972b610bcf162df88347531bdae95aeb2d994f338d0c8",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/main/pre-ba/points3D.txt": "a9b4e5055da4604733a4734ba95a374531fc1190edf472477713c4b75293dfef",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/main/model/images.txt": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/main/model/points3D.txt": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/tail/pre-ba/images.txt": "96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/tail/pre-ba/points3D.txt": "33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/tail/model/images.txt": "761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd",
+    "/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2/integrated/tail/model/points3D.txt": "931100c5151f008ced6cc2e7492658134931b805c4eab60fa3c6de87ec7d3d4f"
+  },
+  "results": {
+    "main": {
+      "groups_by_pre_ba_observation_count": {
+        "2": {
+          "count": 216828,
+          "sum_motion": 9522.814523483301,
+          "max_motion": 1004.6126867983585,
+          "sum_error_before": 84908.05388188065,
+          "sum_error_after": 83742.25815691771,
+          "removed_observations": 0,
+          "changed_tracks": 0,
+          "mean_motion": 0.043918749070614965
+        },
+        "9+": {
+          "count": 20971,
+          "sum_motion": 2404.2548863916895,
+          "max_motion": 24.95036655810147,
+          "sum_error_before": 17069.54989597898,
+          "sum_error_after": 15497.73667113353,
+          "removed_observations": 240,
+          "changed_tracks": 184,
+          "mean_motion": 0.11464664948699106
+        },
+        "5-8": {
+          "count": 26786,
+          "sum_motion": 3571.3447028586156,
+          "max_motion": 79.56081694023021,
+          "sum_error_before": 20367.950633261873,
+          "sum_error_after": 18075.28338653985,
+          "removed_observations": 19,
+          "changed_tracks": 19,
+          "mean_motion": 0.13332878006640095
+        },
+        "3-4": {
+          "count": 53637,
+          "sum_motion": 6984.111127030954,
+          "max_motion": 90.94686918630194,
+          "sum_error_before": 35668.66117577591,
+          "sum_error_after": 32802.94777407809,
+          "removed_observations": 1,
+          "changed_tracks": 1,
+          "mean_motion": 0.13021069647875447
+        }
+      },
+      "ambiguous_or_new_tracks": 0,
+      "deleted_points": 922,
+      "deleted_observations": 13528
+    },
+    "tail": {
+      "groups_by_pre_ba_observation_count": {
+        "2": {
+          "count": 26069,
+          "sum_motion": 343.2538813694895,
+          "max_motion": 21.197176988235103,
+          "sum_error_before": 8734.39759882133,
+          "sum_error_after": 8673.675050578557,
+          "removed_observations": 0,
+          "changed_tracks": 0,
+          "mean_motion": 0.013167128826172445
+        },
+        "9+": {
+          "count": 1494,
+          "sum_motion": 199.38075055706352,
+          "max_motion": 6.886714603424411,
+          "sum_error_before": 1134.692773673317,
+          "sum_error_after": 1035.837140930349,
+          "removed_observations": 25,
+          "changed_tracks": 23,
+          "mean_motion": 0.13345431764194346
+        },
+        "5-8": {
+          "count": 2181,
+          "sum_motion": 633.4426213573547,
+          "max_motion": 25.33317551771115,
+          "sum_error_before": 1481.7264286629254,
+          "sum_error_after": 1310.3584018333547,
+          "removed_observations": 0,
+          "changed_tracks": 0,
+          "mean_motion": 0.29043678191533917
+        },
+        "3-4": {
+          "count": 4871,
+          "sum_motion": 866.3778006770386,
+          "max_motion": 364.0737383773384,
+          "sum_error_before": 2628.066761503321,
+          "sum_error_after": 2448.687705854857,
+          "removed_observations": 0,
+          "changed_tracks": 0,
+          "mean_motion": 0.17786446328824443
+        }
+      },
+      "ambiguous_or_new_tracks": 0,
+      "deleted_points": 35,
+      "deleted_observations": 627
+    }
+  },
+  "checks": {
+    "ambiguous_or_new_tracks": 0,
+    "deleted_points": 957,
+    "total_removed_observations": 14440
+  },
+  "limitations": [
+    "No GT consumed, no reconstruction intervention or quality improvement.",
+    "Motion is in the model coordinate system; no per-point gauge correction applied.",
+    "Serialized mean errors are unweighted per-point aggregates, not the BA squared objective.",
+    "Large landmark displacement does not establish a causal contribution to trajectory error.",
+    "Next inspect parallax/depth and pose coupling before choosing a fixed GT-free intervention."
+  ]
+}

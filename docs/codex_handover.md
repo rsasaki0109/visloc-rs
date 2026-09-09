@@ -2,6 +2,14 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: ObservationKeyでpre-ba/modelを対応付けた診断完了。
+image ID/name一致、全final trackが一意の旧trackのsubset、新規/曖昧track0。
+削除957点・総14440観測で既存filter ledger一致。
+mainの旧2観測群216828点の平均移動0.043919m、最大1004.612687m。
+単純ID join結果とは異なる有効対応だが、軌跡誤差への因果は未証明。
+証跡`m8-atlas-observation-key-motion-v1.json`に8入力hash/集計手順/全群統計。
+次は大移動点の視差角・深度・pose couplingをGT-freeで調査。閾値変更はまだ行わない。
+
 最新: 品質診断に戻りmapping-v2 main pre-ba/modelのpoint対応を監査。
 共通数値ID318222件中、同一観測集合7件、観測集合disjoint318215件。
 integrate_rig_atlas_landmarks.rsの出力は順序付け後index+1でIDを再採番する。
