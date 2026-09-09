@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "service": "visloc-repair-admission-bound-v1.service",
+  "terminal_state": "MainPID=0 SubState=exited Result=success ExecMainStatus=0",
+  "bindings": "benchmarks/electro/m8-repair-admission-bound-inputs-v1.json",
+  "report": "/media/sasaki/aiueo1/visloc-repair-admission-bound-v1/report.json",
+  "report_sha256": "f99830250fcf7cf2fe79f86a9bd4b162af4e228a3a76ecd49fcf805f99de3ce8",
+  "measurement": "/home/sasaki/datasets/openloris/m8-repair-admission-bound-measurement-v1/measurement.json",
+  "measurement_sha256": "753d5db791eedfcac65b8d9cd4b6788a6a058952d594b51fa31a62604bd08a68",
+  "independently_rehashed_snapshot_sha256": "ac93b28daf92b9bb4a621b9687087abbf906a1bc78cca0d8f4ea9688a1ba7a8d",
+  "whole_command_wall_seconds": 9.476188782020472,
+  "sampled_aggregate_peak_rss_kib": 725992,
+  "rss_sampling_interval_seconds": 0.05,
+  "cgroup_memory_peak_bytes": 1320820736,
+  "oom": 0,
+  "oom_kill": 0,
+  "scope": "One bound repair admission using reproduced prefix registration and retained snapshots/features, with external-disk output. Exact frozen snapshot hash, not complete native E2E, quality improvement or comparable speedup. Sampled aggregate RSS includes monitor and may double-count shared pages or miss inter-sample peaks; cgroup peak includes cache/kernel memory."
+}

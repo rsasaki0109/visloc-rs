@@ -425,15 +425,19 @@ must contain exactly that stage's input placeholder names from
 frozen reference hashes; feature banks must match their manifest and membership.
 The binary is hash-pinned, output must be new, and success requires the frozen
 output snapshot digest. Run through the detached measurement launcher for a
-resource cap. This executor is unit-tested but has not yet received a full
-real admission invocation; it does not assemble the complete native DAG.
+resource cap. A full repair admission invocation now passes with the newly
+reproduced prefix registration manifest; it does not assemble the complete DAG.
 `--validate-only` checks the same inputs without creating output. This passed
 for repair using `benchmarks/electro/m8-repair-admission-bound-inputs-v1.json`,
 including the newly reproduced prefix registration manifest (SHA-256
 `365d8c3ca344a700d5d4666e19f00e251935e0e5b3ec143db6be49050be4aa83`).
 The snapshots in that binding remain retained replay outputs. Admission output
-generation is still untested through this executor; the preflight is not a
-continuous pipeline result.
+generation through this executor now matches the frozen snapshot SHA exactly.
+The externally stored output is `/media/sasaki/aiueo1/visloc-repair-admission-bound-v1`.
+The whole measured command took 9.476 s with sampled aggregate peak RSS
+725,992 KiB and zero OOM events. See
+[repair execution evidence](../benchmarks/electro/m8-repair-admission-bound-v1.json).
+This is not a continuous pipeline or speedup result.
 
 `replay_targeted_selection.py --stage prefix --snapshot NEW_PREFIX.vps
 --features-dir NEW_ADAPTIVE_BANK --output NEW_OUTPUT` now connects the prefix
