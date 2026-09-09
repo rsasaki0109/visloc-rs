@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新容量整理: 完了済みfull-dense-extraction-v1/featuresの2万filesを
+dense256x2-full10k-v2/featuresへ全hash確認後hardlink化。
+scripts/deduplicate_dense_extraction.py、plan session84735/apply43516ともexit0完了。
+4,765,159,424bytes（4.44GiB）解放、空き5.7GiB。
+全出力を事後再hashし共有inodeも全件確認。証跡m8-dense-dedup-v1.json、
+外部audit dataset/m8-dense-dedup-applied-v1.json。元reportSHA3fabb11f...不変。
+feature内容/path/manifest/抽出ログ/計測証跡は保持。inode/metadata共有なので
+両feature bankを絶対に上書きしない。編集が必要ならまず独立コピーを作る。
+新抽出は必ず新rootに実行。整理後のcache/共有状態で過去の性能比較を再解釈しない。
+generic merge helper2tests PASS、専用script py_compile+実全2万検証PASS。
+全cold開始guard16GiBには不足（残り約10.3GiB）。次は他の検証済み重複を調べる。
+
 最新: OFF/ON既存phaseログ集計完了、証跡m8-feasible-backtrack-phase-accounting-v1.json。
 main normal_equations/linear_solve event各2804で変化なし（factorization数そのものではない）。
 linear_solve27.038570→26.998891s、tentative_update_and_cost29.963184→109.656562s。
