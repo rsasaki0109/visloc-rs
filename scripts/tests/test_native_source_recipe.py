@@ -5,11 +5,29 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_native_source_recipe import build, compile_execution, INPUTS
+from build_native_source_recipe import build, compile_execution, INPUTS, render_nodes_tsv
 
 
 class SourceRecipeTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[2] / 'benchmarks/electro'
+
+    def test_atlas_nodes_use_new_run_source_outputs(self):
+        recipe = build(self.root)
+        with tempfile.TemporaryDirectory() as directory:
+            rows = render_nodes_tsv(recipe, directory).splitlines()[1:]
+            self.assertEqual(len(rows), 23)
+            for line, node in zip(rows, recipe['nodes']):
+                identity, offset, path = line.split('\t')
+                self.assertEqual(identity, str(node['node']))
+                self.assertEqual(offset, str(node['offset']))
+                self.assertEqual(Path(path), Path(directory).resolve() / 'sources' /
+                                 node['execution'] / 'model' / node['component'] / 'images.txt')
+
+    def test_atlas_nodes_reject_path_escape(self):
+        recipe = build(self.root)
+        recipe['nodes'][0]['component'] = '../retained'
+        with self.assertRaises(ValueError):
+            render_nodes_tsv(recipe, '/tmp/new-run')
 
     def test_all_sources_and_nodes_bind_without_retained_paths(self):
         recipe = build(self.root)
