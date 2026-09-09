@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: session72367はexit0終了（release2m24s）、bounded sample test PASS。
+generalized_rig_factor_tests全2件もPASS。追加診断は実データではまだ未実行。
+空き1.7GiBなので新probeは一度に一件、保守的に出力約310MBとbinary容量を確認する。
+
+最新: first-window step gateをsolver境界で集計（step-detailは拒否のみ出すので
+先頭N行をwindow扱いしない）。main20反復15拒否/feasibility14、tail14反復拒否0。
+証跡m8-schur-first-window-step-gates-v1.json、commit9c2dff5。
+bundle.rsに非投影rig観測の最大16件sampleを追加中。最初の診断windowかつ
+feasibility失敗時のみ、仮更新後のobservation index/frame/track/sensor depthを出力。
+本体rig_residual_jacobians判定を再利用。新規失敗だけではなく仮更新後失敗のsample。
+関連test build session72367稼働中。再起動せずpoll。未commit、実モデル未検証。
+
 最新: Schur ON v1はterminal success/MainPID0/exited。再poll不要。
 OFF/ON/凍結参照の14filesを独立hashし全一致。
 main診断20行(iter0..19/frame0)、tail14行(iter0..13/frame4495)、OFF0行。

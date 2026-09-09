@@ -665,6 +665,31 @@ mod generalized_rig_factor_tests {
     use super::*;
 
     #[test]
+    fn infeasible_rig_sample_matches_predicate_and_is_bounded() {
+        let camera = Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5);
+        let mut ba = BundleAdjustment::new(camera.clone());
+        ba.add_pose(0, Pose::identity());
+        for id in 0..20 {
+            ba.add_landmark(id, Point3::new(0.0, 0.0, if id == 0 { 3.0 } else { -1.0 }));
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: 0,
+                landmark_id: id,
+                xy: Point2::new(425.5, 398.5),
+                camera: camera.clone(),
+                sensor_from_rig: SE3::identity(),
+            });
+        }
+        assert_eq!(ba.nonprojectable_observation_count(), 19);
+        let sample = ba.nonprojectable_rig_sample(16);
+        assert_eq!(sample.len(), 16);
+        assert_eq!(sample[0], (1, 0, 1, Some(-1.0)));
+        assert_eq!(sample[15], (16, 0, 16, Some(-1.0)));
+        assert!(ba.nonprojectable_rig_sample(0).is_empty());
+        assert_eq!(ba.nonprojectable_rig_sample(100).len(), 19);
+        assert_eq!(ba.nonprojectable_observation_count(), 19);
+    }
+
+    #[test]
     fn arbitrary_sensor_factors_refine_one_shared_body_pose() {
         let camera_left = Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5);
         let camera_right = Camera::pinhole(2, 848, 800, 284.8, 286.1, 428.0, 397.5);
@@ -1541,6 +1566,36 @@ impl BundleAdjustment {
         });
 
         mono.count() + stereo.count() + general_stereo.count() + rig.count()
+    }
+
+    /// Bounded read-only sample using the exact rig feasibility predicate.
+    fn nonprojectable_rig_sample(&self, limit: usize) -> Vec<(usize, u64, u64, Option<f64>)> {
+        self.rig_observations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, observation)| {
+                let pose = self.poses.get(&observation.keyframe_id);
+                let point = self.landmarks.get(&observation.landmark_id);
+                if let (Some(pose), Some(point)) = (pose, point) {
+                    if rig_residual_jacobians(observation, pose, point).is_some() {
+                        return None;
+                    }
+                }
+                let depth = pose.zip(point).map(|(pose, point)| {
+                    observation
+                        .sensor_from_rig
+                        .transform_point(&pose.transform_world_point(point))
+                        .z
+                });
+                Some((
+                    index,
+                    observation.keyframe_id,
+                    observation.landmark_id,
+                    depth,
+                ))
+            })
+            .take(limit)
+            .collect()
     }
 
     /// Robust reprojection cost: `Σ ρ(||r||²)` where `ρ` is the supplied
@@ -3806,6 +3861,11 @@ impl BundleAdjustment {
                 Some(_) => cost_after < cost_before,
             };
             let feasibility_gate = nonprojectable_after <= current_nonprojectable;
+            if sparse_debug_slot.is_some() && !feasibility_gate {
+                for (observation, frame, landmark, depth) in self.nonprojectable_rig_sample(16) {
+                    eprintln!("sfm-debug-ba-rig-infeasible: iteration={} observation={} frame_id={} track_id={} tentative_sensor_depth={:?} sample_limit=16", iteration, observation, frame, landmark, depth);
+                }
+            }
             let mut step_accepted = cost_accepted && feasibility_gate;
             let adaptive_decision = if adaptive_damping {
                 let decision = adaptive_step_decision(
