@@ -2,6 +2,22 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: 全体executorの候補生成binaryを実証跡と照合し分離。
+nativeはa7ff5ff/8eeee5c、denseは3ae253a/8cfa9c5。開始前に各hashを固定検証。
+9 binaryの実パス/hashを`benchmarks/electro/m8-native-pipeline-binaries-v1.json`に保存。
+同specで`run_native_pipeline.py --plan-only`が17 stageを生成することを実確認。
+88 tests PASS。長時間の全体実行は開始していない。16GiB guardに対して空き2.4GiB。
+全binary/script/inputの凍結検証・容量lifetime・restartは依然残る。
+
+最新: `run_native_pipeline.py`に全抽出→候補→4系統shared matching→3 admission→
+prefix/target selection→source/atlasの接続実装を追加。88 Python tests PASS。
+実データで全体未実行、restartなし、全script/inputのimmutable provenance凍結も未完。
+16GiB freeを保守的な開始条件とする（実測lifetime上限ではない）。現在空き2.4GiB。
+自動削除なし。`--plan-only`と8 binaryのpath/sha256 JSONで計画を検査可能。
+次はbinary specを凍結し全コマンドと参照互換性をpreflight、容量確保/lifetime設計。
+特にnative/dense候補生成に同candidate binaryを使う接続は実データ未検証。
+品質gate未達とfull restart、連続cold測定の要求は変わらない。
+
 最新: mapping v2は正常終了（MainPID0 / exited / Result success）。再poll不要。
 21 source / 23 nodes / stitch / tail+main integrationが全PASS。
 参照86ファイルを独立再hashして全一致、nodes.tsvも新runへの23 bindingに一致。
