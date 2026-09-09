@@ -11,6 +11,33 @@ from run_native_pipeline import plan, execute, pinned_files, verify_pins, artifa
 
 
 class PipelineTests(unittest.TestCase):
+    def test_active_stage_checkpoint_precedes_child_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'run'
+            stage = {'id': 'child', 'argv': ['unused'], 'payload': None, 'capture': None}
+            def child(*args, **kwargs):
+                report = json.loads((root / 'pipeline-report.json').read_text())
+                self.assertEqual(report['active_stage'], 'child')
+                self.assertEqual(report['status'], 'running')
+                return SimpleNamespace(returncode=0)
+            with patch('run_native_pipeline.shutil.disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)), \
+                    patch('run_native_pipeline.subprocess.run', side_effect=child):
+                execute([stage], root)
+            report = json.loads((root / 'pipeline-report.json').read_text())
+            self.assertIsNone(report['active_stage'])
+            self.assertEqual(report['status'], 'pass')
+
+    def test_failed_atomic_publish_preserves_prior_checkpoint(self):
+        from benchmark_electro import atomic_json, ValidationError
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'report.json'
+            atomic_json(path, {'status': 'running'})
+            with patch('benchmark_electro.os.replace', side_effect=OSError('injected')):
+                with self.assertRaises(ValidationError):
+                    atomic_json(path, {'status': 'pass'})
+            self.assertEqual(json.loads(path.read_text()), {'status': 'running'})
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+
     def test_pipeline_requires_exact_memory_and_swap_caps(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

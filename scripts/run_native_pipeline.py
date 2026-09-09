@@ -15,6 +15,7 @@ import time
 
 from replay_native_candidates import sha
 from measure_native_scope import validate_limits
+from benchmark_electro import atomic_json
 
 
 def require_memory_scope(proc_cgroup=Path('/proc/self/cgroup'), cgroup_root=Path('/sys/fs/cgroup')):
@@ -176,12 +177,14 @@ def execute(stages, root, pins=None):
               'artifact_lifetimes': artifact_lifetimes(stages),
               'scope': 'Extraction-through-atlas diagnostic including reference validation; no restart or quality promotion.'}
     def save():
-        (root / 'pipeline-report.json').write_text(json.dumps(report, indent=2) + '\n')
+        atomic_json(root / 'pipeline-report.json', report)
     save()
     started = time.monotonic()
     try:
         for stage in stages:
             verify_pins(pins)
+            report['active_stage'] = stage['id']
+            save()
             if stage['payload']:
                 with Path(stage['payload']['path']).open('x') as stream:
                     json.dump(stage['payload']['data'], stream, indent=2)
@@ -199,6 +202,8 @@ def execute(stages, root, pins=None):
                 data = json.loads(log.read_text())
                 with Path(stage['capture']).open('x') as stream:
                     json.dump(data, stream, indent=2)
+            report['active_stage'] = None
+            save()
         report['status'] = 'pass'
     except BaseException as error:
         report.update(status='fail', error=str(error))
