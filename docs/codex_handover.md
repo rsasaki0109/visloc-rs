@@ -2,6 +2,17 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新追記: mapping suffixの実データ計測を開始。
+unit `visloc-native-mapping-bound-v1.service`、開始確認MainPID3927517。
+測定root `/home/sasaki/datasets/openloris/m8-native-mapping-bound-measurement-v1`、
+出力root `/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v1`。
+再起動せず同unitのterminal状態とreportを確認すること。MemoryMax2G/Swap0、timeout6000s。
+入力spec `benchmarks/electro/m8-native-mapping-bound-inputs-v1.json` は事前検証PASS。
+全dense新規抽出bankと新targeted admissionを使用、dense snapshot等はretained。
+従ってcold E2Eではない。保存出力からの容量見積はsource326MB+integration309MB。
+実行head `1153a0479c9e2a676b46f27a16e7589aa229b3b1`、CI34296178485は開始時in_progress。
+atlas実子プロセスexit0/7試験を追加しPython85 tests PASS。SfM実行結果とは区別。
+
 最新追記: `run_native_mapping.py`でsource全21→nodes23→atlas結合/BAを接続。
 `--inputs`は5入力のpathとsha256（feature bankはmanifest/manifest_sha256）を要求。
 3 binaryは証跡hashを検証。`--validate-only`は出力を作らない。

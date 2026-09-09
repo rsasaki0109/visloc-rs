@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -12,6 +13,38 @@ from replay_native_candidates import sha
 
 
 class AtlasExecutionTests(unittest.TestCase):
+    def test_real_child_failure_and_success(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture = root / 'input'
+                fixture.write_text('fixture')
+                binary = Path(sys.executable).resolve()
+                stages = build(Path(__file__).resolve().parents[2] / 'benchmarks/electro')
+                for stage in stages:
+                    stage['binary_sha256'] = sha(binary)
+                    stage['expected_files'] = {'result.txt': sha(fixture)}
+                    # Exercise timeout, environment, logging and reports with a
+                    # real child; this is deliberately not an SfM parity test.
+                    code = ('import pathlib,sys,os; '
+                            'assert os.environ["MALLOC_ARENA_MAX"] == "1"; '
+                            'p=pathlib.Path(sys.argv[sys.argv.index("--out-dir")+1]); '
+                            + ('p=p.parent; ' if stage['id'] != 'stitch' else '')
+                            + 'p.joinpath("result.txt").write_text("fixture"); '
+                            + f'sys.exit({exit_code})')
+                    stage['argv'][1:1] = ['-c', code]
+                args = (stages, dict(rig_manifest=fixture, nodes_tsv=fixture),
+                        dict(stitch_binary=binary, integration_binary=binary), root / 'run')
+                if exit_code:
+                    with self.assertRaises(RuntimeError):
+                        execute_atlas(*args)
+                    self.assertFalse((root / 'run/integrated').exists())
+                else:
+                    self.assertEqual(len(execute_atlas(*args)), 3)
+                report = json.loads((root / 'run/atlas/execution-report.json').read_text())
+                self.assertEqual(report['exit_code'], exit_code)
+                self.assertEqual(report['status'], 'fail' if exit_code else 'pass')
+
     def test_success_and_failed_stage_stop(self):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
