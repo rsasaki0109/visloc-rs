@@ -2,6 +2,12 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: pose coupling実装箇所を確認。既存collect_schur_block_debug_countsは
+同poseのcross合算・solver inverse cache利用に対応するが、emitはmatrix-free側のみ。
+atlas実経路solve_step_pose_blocksのinverse cache構築後/factor前へ接続が必要。
+index mapのframe/landmark IDを渡し、export point IDは使わない。
+診断機能の新規接続はまだ未実装。詳細はopenloris_atlas_bounded_ba.md末尾。
+
 最新: main/tail各移動量上位5点の観測ray角とcamera range/translationを監査。
 main上位5は全2観測、pre角0.000252〜0.112018deg。
 最大1004.613m移動点はpre距離1043m、post38.4m、観測camera最大移動0.004214m。

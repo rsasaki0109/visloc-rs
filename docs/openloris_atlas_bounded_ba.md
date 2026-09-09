@@ -1885,3 +1885,17 @@ and diagnostic-ON unchanged model bytes. No threshold tuning or intervention
 is authorized by this diagnostic contract. In particular, the previously
 rejected weak-angle-freezing arm is not a new experiment. Camera rotation,
 coupling attribution and causality remain unmeasured at this checkpoint.
+
+Implementation inspection: `collect_schur_block_debug_counts` already groups
+all cross entries for one variable pose before forming its diagonal landmark
+elimination block, and accepts the solver's inverse cache. Its existing rig
+test covers two cross entries on the same pose and fixed-pose slot mapping.
+Reuse that helper; summing separate observation elimination norms would miss
+cross terms. Its current emission is in the matrix-free preconditioner path,
+not the production atlas `solve_step_pose_blocks` path. The latter constructs
+the actual damped inverse cache, skips singular point inverses and accumulates
+lower-triangle pose blocks before factorization. Connect diagnostics after
+that cache is constructed and before factorization, passing the cache rather
+than recomputing inverses. Stable frame/landmark IDs must be passed from the
+existing index maps; numeric exported point IDs cannot supply that mapping.
+This is the identified implementation boundary, not a completed diagnostic.
