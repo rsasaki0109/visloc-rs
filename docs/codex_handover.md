@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: 補助ファイル許可/未知出力拒否/参照欠落/内容変更の実子プロセス回帰試験PASS、
+Python85 tests。修正head `b66d155`をpush済み。
+新unit `visloc-native-mapping-bound-v2.service`を起動（2GiB/Swap0/timeout6000s）。
+出力`/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2`、
+計測`/home/sasaki/datasets/openloris/m8-native-mapping-bound-measurement-v2`。
+このv2を同unitで追跡し、terminalを確認するまで再起動しない。
+v1の測定はfail/exit1、46.179秒、sampled aggregate peak RSS376044KiB、OOM0。
+最初のsourceはmodel一致だが全pipeline結果ではない。v1は保持。
+
 最新: 上記mapping v1はterminal FAILED（MainPID0 / Result exit-code）。再poll不要。
 最初のsource-replay-1950はmapper exit0、参照model hash全一致、31.800秒。
 失敗原因は参照audit対象外のcomponents.tsv/retrieval-components.txtを厳密dict比較で

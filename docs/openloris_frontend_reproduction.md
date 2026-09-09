@@ -76,6 +76,34 @@ Disk cleanup on 2026-09-09 restored about 21 GiB of root free space before the
 next replay. Do not silently move measured outputs to memory-backed storage or
 discard retained evidence to obtain a pass.
 
+### Connected mapping execution (not cold E2E)
+
+`scripts/run_native_mapping.py` now connects the 21 source executions, publishes
+the 23-node manifest only after their reference models pass, then runs stitch,
+tail integration and main integration. Inputs are explicitly bound by
+`benchmarks/electro/m8-native-mapping-bound-inputs-v1.json`: newly extracted dense
+features and regenerated targeted admission, with retained dense matching and
+an already assembled adaptive bank. This is **not** extraction-inclusive E2E.
+
+Use `--help` for required mapper/stitch/integration binaries and `--validate-only`
+to hash-check inputs without creating outputs. Run actual work through
+`scripts/launch_native_measurement.py` (2 GiB cgroup limit, swap disabled), not
+as an uncontained timing claim. Input-spec hashes establish consistency with
+the supplied spec; the caller must establish its provenance and keep all
+scripts, binaries and inputs immutable during execution. Existing output paths
+are rejected; full-pipeline restart is not implemented.
+
+The first measured run, `visloc-native-mapping-bound-v1.service`, stopped after
+its first source: exit 0 and all reference model hashes matched, but the adapter
+incorrectly rejected two auxiliary manifests. The fix permits only
+`components.tsv` and `retrieval-components.txt` beyond the reference file set,
+records their hashes, and still rejects unknown files, missing references and
+changed model contents. Regression tests cover all these cases. The v1 ledger
+is a failed run (46.179 s, sampled aggregate peak RSS 376,044 KiB), not a mapper
+performance result. Its outputs are retained. Run v2 uses fresh output and
+measurement directories; its completion and parity remain unproven until all
+source and atlas reports and the terminal measurement are audited.
+
 ## Native frontend replay commands
 
 The machine-local diagnostic recipes are:
