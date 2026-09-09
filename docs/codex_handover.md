@@ -2,6 +2,12 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: Schur診断fixtureを非zero pose/landmark RHSへ強化。
+診断ON/OFFの解exact一致、両更新norm>0、同pose合算後の消去norm一致PASS。
+session53281はexit0終了、release2m24s、関連2 tests PASS。再poll不要。
+公開済み03e0368のCI34298844551はsuccess（この新Rust変更のCIではない）。
+first-window制御と実model byte比較は引き続き次の作業。
+
 最新: session91383はexit0終了。release build 3m07s、追加した診断有無の解一致test PASS。
 続いてschur_block_debug_tests全2件PASS。build再poll不要。
 現一致fixtureはzero RHSなので非zero RHS・実model byte比較を追加する必要がある。

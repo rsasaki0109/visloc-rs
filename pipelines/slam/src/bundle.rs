@@ -568,10 +568,10 @@ mod schur_block_debug_tests {
         let cross = Matrix6x3::from_fn(|row, column| if row == column { 1.0 } else { 0.0 });
         let system = NormalEquationsBa {
             h_pp: CameraHessian::PoseDiagonal(vec![Matrix6::identity(); 2]),
-            b_p: DVector::zeros(12),
+            b_p: DVector::from_fn(12, |row, _| (row as f64 + 1.0) * 0.01),
             landmarks: vec![LandmarkBlock {
                 h_ll: Matrix3::identity(),
-                b_l: Vector3::zeros(),
+                b_l: Vector3::new(0.02, -0.03, 0.04),
                 cross: vec![(1, cross), (1, cross)],
             }],
         };
@@ -602,6 +602,10 @@ mod schur_block_debug_tests {
         )
         .expect("positive definite diagnostic");
         assert_eq!(plain, diagnosed, "diagnostics must not modify the solve");
+        assert!(plain.0.norm() > 0.0);
+        assert!(plain.1.norm() > 0.0);
+        let elimination = (2.0 * cross) * h_ll_inverse * (2.0 * cross).transpose();
+        assert!((counts.max_elimination_norm.unwrap() - elimination.norm()).abs() < 1.0e-12);
     }
 }
 
