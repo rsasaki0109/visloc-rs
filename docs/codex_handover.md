@@ -2,6 +2,14 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+容量整理候補を保存: scripts/inventory_m8_duplicates.py（読み取り専用）。
+外部一覧m8-model-match-duplicate-inventory-v1.json、repo同名証跡にSHA固定。
+206groups/888unique inodes、解放候補19277934592bytes。まだ適用していない。
+対象はM8配下1MiB以上のimages.txt/points3D.txt/*.vpsのみ、symlink除外。
+同一user FD監査で候補open0、ただし5process権限拒否あり（再確認sd-pam/sshd）。
+visloc user service稼働0。将来writer排除/完全quiescence証明ではない。
+次は固定一覧の対象レビューと適用前再照合、安全な共有化。inventory test1 PASS。
+
 base-v3の1万特徴を参照実体m5/feature-extract/featuresへhardlink化完了。
 scripts/deduplicate_base_v3.py、監査m8-base-v3-dedup-v1.json。
 全件事前hash/参照symlink実体確認、事後全hash+共有inode確認済み。
