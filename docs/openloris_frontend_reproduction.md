@@ -104,6 +104,15 @@ performance result. Its outputs are retained. Run v2 uses fresh output and
 measurement directories; its completion and parity remain unproven until all
 source and atlas reports and the terminal measurement are audited.
 
+Run v2 is now terminal PASS (service exited, MainPID 0). Independent hashing
+confirms all 86 reference files across 21 sources, stitch and both integrations;
+the 23-node manifest resolves to this run's source outputs. The measured
+input-validation-plus-mapping wall is **926.828 s**, with 50 ms sampled aggregate
+peak RSS **572,860 KiB**, cgroup peak 1,182,564,352 bytes and no OOM events.
+Cgroup peak includes cache/kernel memory and is not RSS. The single-run result
+does not close extraction-inclusive E2E, restart, repeats or the failing COLMAP
+trajectory gate. See [independent evidence](../benchmarks/electro/m8-native-mapping-bound-v2.json).
+
 ## Native frontend replay commands
 
 The machine-local diagnostic recipes are:

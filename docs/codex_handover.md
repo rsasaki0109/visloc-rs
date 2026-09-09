@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+最新: mapping v2は正常終了（MainPID0 / exited / Result success）。再poll不要。
+21 source / 23 nodes / stitch / tail+main integrationが全PASS。
+参照86ファイルを独立再hashして全一致、nodes.tsvも新runへの23 bindingに一致。
+入力検証込み連続wall926.828秒、sampled aggregate peak RSS572860KiB、
+cgroup peak1182564352 bytes（RSSではない）、OOM0。
+証跡`benchmarks/electro/m8-native-mapping-bound-v2.json`。
+既存frontendからのmapping suffix一回の結果でcold E2E・restart・品質改善ではない。
+次はfrontend全段接続と容量/lifetime設計、未達RMSE gateの品質改善。
+
 最新: 補助ファイル許可/未知出力拒否/参照欠落/内容変更の実子プロセス回帰試験PASS、
 Python85 tests。修正head `b66d155`をpush済み。
 新unit `visloc-native-mapping-bound-v2.service`を起動（2GiB/Swap0/timeout6000s）。
