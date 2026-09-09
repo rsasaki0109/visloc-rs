@@ -13,6 +13,32 @@ from native_pipeline_resume import validate_resume
 
 
 class ResumeTests(unittest.TestCase):
+    def test_changed_completed_output_refuses_resume_without_moving_failed_artifacts(self):
+        for mutation in ('modify', 'add', 'remove'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / 'run'
+                first = {'id': 'first', 'argv': [sys.executable, '-c',
+                         'import pathlib,sys; p=pathlib.Path(sys.argv[-1]); p.mkdir(); (p/"data").write_text("done")',
+                         '--output', str(root / 'first')], 'payload': None, 'capture': None}
+                second = {'id': 'second', 'argv': [sys.executable, '-c', 'raise SystemExit(7)'],
+                          'payload': None, 'capture': None}
+                with patch('run_native_pipeline.shutil.disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)):
+                    with self.assertRaises(RuntimeError):
+                        execute([first, second], root)
+                    report_before = (root / 'pipeline-report.json').read_bytes()
+                    failed_inode = (root / 'second.log').stat().st_ino
+                    if mutation == 'modify':
+                        (root / 'first/data').write_text('changed')
+                    elif mutation == 'add':
+                        (root / 'first/extra').touch()
+                    else:
+                        (root / 'first/data').unlink()
+                    with self.assertRaises(ValueError):
+                        execute([first, second], root, resume=True)
+                self.assertFalse((root / 'failed-attempts').exists())
+                self.assertEqual((root / 'pipeline-report.json').read_bytes(), report_before)
+                self.assertEqual((root / 'second.log').stat().st_ino, failed_inode)
+
     def test_live_executor_lock_prevents_resume_before_report_read(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
