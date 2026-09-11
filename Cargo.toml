@@ -47,7 +47,7 @@ categories = ["computer-vision", "science::robotics"]
 nalgebra = "0.33"
 rand = { version = "0.8", features = ["small_rng"] }
 rayon = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 
 [features]
