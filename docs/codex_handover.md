@@ -2,6 +2,19 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 strict-v2も1kで棄却。相互rank<2、両方向cosine-distance ratio<=0.8、
+順/逆3-frame path、frame当たり最大2辺をmapping前固定し、2783→15 rig pair→60
+image pairへ削減したが、凍結verifierは60/60受理。自動seedが26→313へ変わる交絡を
+発見したため、default-off `--seed-frame N`を追加。default pathとseed26 controlは
+凍結model 3 hashを完全再現。両arm seed26固定でも登録1000維持のみで、
+RMSE0.02270→0.10019m、p950.03778→0.16418m、reproj+7.39%、mapper+5.54%、
+RSS+0.68%のためFAIL。15 pairはframe307–315対372–379の一本の偽loop。
+証跡benchmarks/electro/m9-openloris-learned-retrieval-strict-1k-ab-v1.json。
+次はGT/再構成pose不使用のpost-verification rig rotation cycle gate。sensor相対回転を
+rig frameへ変換し、rig pair内multi-sensor dispersionと連続sequence間整合の両方を
+要求する。1kで空ならsafety passのみ（quality win扱い禁止）、2.5kはnon-empty有無を
+auditしてからmappingする。
+
 M9 learned retrievalの最初の全辺armは1k A/Bまで完了し、棄却。
 2783 rig pairを既存pair除外後10958 image pairへatomic materializeし、addition ledgerを
 保存。凍結ratio.8/cross-check/min12 verifierは343/343 shard完了、10919 pair受理。

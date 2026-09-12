@@ -1,0 +1,123 @@
+{
+  "schema": "visloc-m9-learned-retrieval-strict-ab-evidence-v1",
+  "recorded_at": "2026-09-13T06:45:00+09:00",
+  "status": "rank_margin_path_v2_rejected_at_tier_1000",
+  "ground_truth_used_during_mapping": false,
+  "admission_policy": {
+    "name": "rank-margin-path-v2",
+    "ann_top_k": 32,
+    "mutual_rank_exclusive_max": 2,
+    "cosine_distance_ratio_max": 0.8,
+    "competitor_sequence_exclusion_radius": 2,
+    "bidirectional_path_radius": 1,
+    "path_direction": "forward or reverse",
+    "per_frame_addition_budget": 2,
+    "selected_rig_pairs": 15,
+    "candidate_pair_cap": 500,
+    "retrieval_wall_seconds": 1.40,
+    "retrieval_peak_rss_kib": 5280,
+    "retrieval_sha256": "d85fe62b7883b20fe5c298b12e2abc77a755fc0efcd57f247c24fc677a02dc57",
+    "note": "The policy and thresholds were fixed before mapping and do not use local matches, reconstructed poses, or GT."
+  },
+  "materialization_and_matching": {
+    "new_image_pairs": 60,
+    "candidate_manifest_sha256": "3e5596ccf55144636a849d051a3f12bdf59f2dd0cece993f2232066dba6b0cc2",
+    "addition_ledger_sha256": "285bd6086178574796053901de3dd9a7116301276e7add1efeab8dff396eeabc",
+    "verified_pairs": 60,
+    "accepted_correspondences": 3578,
+    "matching_wall_seconds": 5.99,
+    "matching_peak_rss_kib": 26668,
+    "verified_additions_sha256": "83adcb427b64644bb47f15ea29bdaee817cc3ba735baecd5bd5a2ae3521cd436",
+    "merged_pairs": 6929,
+    "merged_snapshot_sha256": "4232d82904fed26595ed130e18be05b5d2dccad650452d2dad3f835f81745e68",
+    "verifier_config_hash": "a61bdaa684dbfad0"
+  },
+  "automatic_seed_ab": {
+    "control": {
+      "seed_frame": 26,
+      "registered_images": 1000,
+      "mean_reprojection_px": 0.671637382,
+      "mapper_seconds": 3.106559,
+      "wall_seconds": 3.5854134899564087,
+      "sampled_peak_rss_kib": 96284,
+      "ate_rmse_m": 0.02269532080131782,
+      "ate_p95_m": 0.03777877644562742,
+      "measurement_sha256": "a202991ed9e2f1c4261492217d56cd3f5dd126ddff8f3d5804f5aa792e3bca73",
+      "score_sha256": "7b7c7ce80140dfaa4abe4f5e8712f33768bfd1a209da5af15585a76505bc3796"
+    },
+    "candidate": {
+      "seed_frame": 313,
+      "registered_images": 1000,
+      "mean_reprojection_px": 0.696890383,
+      "mapper_seconds": 3.335682,
+      "wall_seconds": 3.7906567079480737,
+      "sampled_peak_rss_kib": 96180,
+      "ate_rmse_m": 0.06267376112097449,
+      "ate_p95_m": 0.09136805675380129,
+      "measurement_sha256": "40881fb8c68b21c3e44f57fdd6803fed388c56e3f1aa83c6efa18c13d42013fc",
+      "score_sha256": "0e6570776fcf94454edf01db762a94e5383bd165595bc79ac9bb9393ab21dc67"
+    },
+    "finding": "The additions changed automatic metric initialization, so a fixed-seed A/B was required to isolate graph effects."
+  },
+  "fixed_seed_ab": {
+    "seed_frame": 26,
+    "seed_source": "the control's automatic metric seed, selected before GT scoring",
+    "mapper_binary_sha256": "512abfe209f62c8a197d01fe1bf3eff18241933c796550ad585156b42f4cfee6",
+    "control": {
+      "registered_images": 1000,
+      "tracks": 2658,
+      "observations": 27716,
+      "mean_reprojection_px": 0.671637382,
+      "mapper_seconds": 3.196857,
+      "wall_seconds": 3.688581098103896,
+      "sampled_peak_rss_kib": 95580,
+      "ate_rmse_m": 0.02269532080131782,
+      "ate_p95_m": 0.03777877644562742,
+      "measurement_sha256": "861991aef575be661ab06b3ae477a01d199373987690afc532f395043e2f7d8a",
+      "score_sha256": "b7ee89c48b1714b19f094282da39a6a59d4a182c5de1606b57b39d985d46a03b"
+    },
+    "candidate": {
+      "registered_images": 1000,
+      "tracks": 2814,
+      "observations": 27372,
+      "mean_reprojection_px": 0.721238741,
+      "mapper_seconds": 3.374033,
+      "wall_seconds": 3.836959209991619,
+      "sampled_peak_rss_kib": 96228,
+      "ate_rmse_m": 0.10018898248058646,
+      "ate_p95_m": 0.16417647954228018,
+      "measurement_sha256": "27191d54897d4f34e66248232d2fed3192a6822e8466c64c53fd3133eed11536",
+      "score_sha256": "7ec56c8a7688dc16c16efe3f61ea5433a092f13915860e1129bcc9c52b12047a"
+    },
+    "candidate_vs_control_percent": {
+      "mean_reprojection": 7.385139709212907,
+      "mapper_seconds": 5.542193473151902,
+      "wall_seconds": 4.022633851374358,
+      "sampled_peak_rss": 0.6779661016949046,
+      "rmse": 341.45215376188435,
+      "p95": 334.5733107014964
+    }
+  },
+  "fixed_seed_feature": {
+    "cli": "generalized_rig_sfm --seed-frame N",
+    "default": null,
+    "default_path_model_hashes_match_frozen_control": true,
+    "fixed_control_model_hashes_match_frozen_control": true,
+    "invalid_index_is_rejected": true,
+    "purpose": "hold graph A/B initialization constant; it is not a quality optimization"
+  },
+  "decision": {
+    "promotion": "rejected",
+    "repeat_or_larger_tier": false,
+    "reason": "Even with only 60 new verified image pairs and the same seed, RMSE, p95, reprojection, mapper wall, and RSS all regress.",
+    "diagnosis": "All 15 rig pairs form one apparent sequence between frames 307-315 and 372-379. Frozen two-view verification accepts every expanded pair, but the added correspondence path is a false place identity and corrupts the trajectory.",
+    "next": "Do not tune descriptor thresholds against GT. Add a post-verification, pose-free rig/sequence rotation-cycle admission gate and require consistent multi-sensor relative rotations across a contiguous path before any edge reaches track construction."
+  },
+  "validation": {
+    "learned_retrieval_tests": 6,
+    "materializer_tests": 2,
+    "seed_frame_unit_test": true,
+    "target_clippy_deny_warnings": true,
+    "json_validated": true
+  }
+}

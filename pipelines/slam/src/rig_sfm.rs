@@ -130,6 +130,11 @@ pub struct RigSfmConfig {
     pub max_reprojection_error_px: f64,
     pub pnp_max_iterations: usize,
     pub ransac_seed: u64,
+    /// Restrict metric initialization to one caller-selected rig frame.
+    /// `None` preserves support-descending automatic selection. This is useful
+    /// for graph A/B tests where added edges must not silently change the
+    /// initialization frame.
+    pub seed_frame: Option<usize>,
     /// Minimum number of distinct rig sensors contributing 2D-3D
     /// correspondences to a frame registration. One is geometrically valid
     /// because the calibrated sensor-to-rig transform is fixed.
@@ -278,6 +283,7 @@ impl Default for RigSfmConfig {
             max_reprojection_error_px: 4.0,
             pnp_max_iterations: 512,
             ransac_seed: 7,
+            seed_frame: None,
             min_pnp_sensors: 2,
             direct_stereo_pnp_max_frame_gap: 0,
             direct_stereo_min_pnp_sensors: None,
@@ -466,6 +472,8 @@ pub enum RigSfmError {
     TooFewSensors,
     #[error("rig reconstruction contains no frames")]
     NoFrames,
+    #[error("requested metric seed frame {frame} is outside 0..{frame_count}")]
+    InvalidSeedFrame { frame: usize, frame_count: usize },
     #[error(
         "minimum PnP sensor count {requested} is outside the calibrated range 1..={sensor_count}"
     )]
@@ -924,7 +932,14 @@ pub fn incremental_rig_sfm(
         index.sort_unstable_by_key(|&(keypoint, _)| keypoint);
     }
     let metric_supports = metric_frame_supports(frames.len(), &tracks, &image_assignment);
-    let seed_candidates = metric_seed_candidates(&metric_supports);
+    let seed_candidates = if let Some(frame) = config.seed_frame {
+        (metric_supports[frame] > 0)
+            .then_some(frame)
+            .into_iter()
+            .collect()
+    } else {
+        metric_seed_candidates(&metric_supports)
+    };
     if std::env::var_os("VISLOC_SFM_DEBUG").is_some() {
         let metric_tracks = tracks.iter().filter(|track| track.metric_anchored).count();
         let max_frame_support = metric_supports.iter().copied().max().unwrap_or(0);
@@ -3003,7 +3018,10 @@ fn incremental_rig_sfm_dynamic(
         build_rig_track_output(features, pairwise, &image_assignment, &legacy_config).tracks;
     let legacy_seed_edges =
         dynamic_membership_seed_edges(&legacy_tracks, &csr, &image_assignment, frames.len());
-    let legacy_candidates = dynamic_seed_candidates(legacy_seed_edges, false);
+    let mut legacy_candidates = dynamic_seed_candidates(legacy_seed_edges, false);
+    if let Some(frame) = config.seed_frame {
+        legacy_candidates.retain(|candidate| candidate.frame == frame);
+    }
     let required_seed_landmarks = config.min_pnp_inliers.max(6);
     let mut seed_image_poses = vec![None; features.len()];
 
@@ -3033,7 +3051,11 @@ fn incremental_rig_sfm_dynamic(
         .then(|| {
             let direct_seed_edges =
                 dynamic_direct_seed_edges(&csr, &observations, &image_assignment, frames.len());
-            dynamic_seed_candidates(direct_seed_edges, true)
+            let mut candidates = dynamic_seed_candidates(direct_seed_edges, true);
+            if let Some(frame) = config.seed_frame {
+                candidates.retain(|candidate| candidate.frame == frame);
+            }
+            candidates
         });
     if let Some(fallback_candidates) = direct_candidates.as_ref() {
         candidate_evaluations += fallback_candidates.len();
@@ -5340,6 +5362,14 @@ fn validate_inputs(
     pairwise: &[PairwiseMatches],
     config: &RigSfmConfig,
 ) -> Result<(), RigSfmError> {
+    if let Some(frame) = config.seed_frame {
+        if frame >= frames.len() {
+            return Err(RigSfmError::InvalidSeedFrame {
+                frame,
+                frame_count: frames.len(),
+            });
+        }
+    }
     if !(1..=rig.sensors().len()).contains(&config.min_pnp_sensors) {
         return Err(RigSfmError::InvalidMinPnpSensors {
             requested: config.min_pnp_sensors,
@@ -10104,6 +10134,25 @@ mod tests {
             },
         ])
         .unwrap();
+
+        let error = validate_inputs(
+            &rig,
+            &[],
+            &[],
+            &[],
+            &RigSfmConfig {
+                seed_frame: Some(0),
+                ..RigSfmConfig::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RigSfmError::InvalidSeedFrame {
+                frame: 0,
+                frame_count: 0,
+            }
+        );
 
         for requested in [0, 3] {
             let error = validate_inputs(

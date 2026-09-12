@@ -103,6 +103,7 @@ struct Args {
     final_ba_fix_window_ends: bool,
     final_filter_refinement_passes: usize,
     ransac_seed: u64,
+    seed_frame: Option<usize>,
     track_builder: RigTrackBuilder,
     recover_metric_conflict_tracks: bool,
     conflict_recovery_max_hypotheses: usize,
@@ -226,6 +227,7 @@ fn parse_args() -> Result<Args, String> {
     let mut final_ba_fix_window_ends = defaults.final_ba_fix_window_ends;
     let mut final_filter_refinement_passes = defaults.final_filter_refinement_passes;
     let mut ransac_seed = defaults.ransac_seed;
+    let mut seed_frame = defaults.seed_frame;
     let mut track_builder = defaults.track_builder;
     let mut recover_metric_conflict_tracks = defaults.recover_metric_conflict_tracks;
     let mut conflict_recovery_max_hypotheses = defaults.conflict_recovery_max_hypotheses;
@@ -475,6 +477,9 @@ fn parse_args() -> Result<Args, String> {
             "--ransac-seed" => {
                 ransac_seed = value()?.parse().map_err(|error| format!("{error}"))?
             }
+            "--seed-frame" => {
+                seed_frame = Some(value()?.parse().map_err(|error| format!("{error}"))?)
+            }
             "--conflict-preserving-tracks" => track_builder = RigTrackBuilder::ConflictPreserving,
             "--stream-order-conflict-preserving-tracks" => {
                 track_builder = RigTrackBuilder::StreamOrderConflictPreserving
@@ -658,7 +663,7 @@ fn parse_args() -> Result<Args, String> {
                     "[--paired-pose-jump-max-closure-ratio 0.1] ",
                     "[--ba-metric-tracks-only|--ba-all-tracks] ",
                     "[--final-ba-min-pose-observations 0] ",
-                    "[--ransac-seed 7] [--final-ba|--no-final-ba] ",
+                    "[--ransac-seed 7] [--seed-frame N] [--final-ba|--no-final-ba] ",
                     "[--final-ba-passes 2] [--final-ba-window 60]",
                     " [--final-ba-fix-window-ends|--final-ba-single-anchor] ",
                     "[--final-filter-refinement-passes 0]"
@@ -818,6 +823,12 @@ fn parse_args() -> Result<Args, String> {
     if max_models == 0 {
         return Err("--max-models must be at least 1".into());
     }
+    if seed_frame.is_some() && max_models != 1 {
+        return Err("--seed-frame requires --max-models 1".into());
+    }
+    if seed_frame.is_some() && frame_range_start.is_some() {
+        return Err("--seed-frame cannot be combined with a frame range".into());
+    }
     if min_model_frames < 2 {
         return Err("--min-model-frames must be at least 2".into());
     }
@@ -901,6 +912,7 @@ fn parse_args() -> Result<Args, String> {
         final_ba_fix_window_ends,
         final_filter_refinement_passes,
         ransac_seed,
+        seed_frame,
         track_builder,
         recover_metric_conflict_tracks,
         conflict_recovery_max_hypotheses,
@@ -1684,6 +1696,7 @@ fn mapper_config(args: &Args) -> RigSfmConfig {
         final_ba_fix_window_ends: args.final_ba_fix_window_ends,
         final_filter_refinement_passes: args.final_filter_refinement_passes,
         ransac_seed: args.ransac_seed,
+        seed_frame: args.seed_frame,
         track_builder: args.track_builder,
         recover_metric_conflict_tracks: args.recover_metric_conflict_tracks,
         conflict_recovery_max_hypotheses: args.conflict_recovery_max_hypotheses,

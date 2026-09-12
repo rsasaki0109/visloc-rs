@@ -25,6 +25,13 @@ struct Args {
     probes: Option<usize>,
     min_frame_gap: usize,
     exact_audit_max_rows: usize,
+    admission_policy: AdmissionPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionPolicy {
+    ReciprocalSequenceV1,
+    RankMarginPathV2,
 }
 
 impl Default for Args {
@@ -38,6 +45,7 @@ impl Default for Args {
             probes: None,
             min_frame_gap: 64,
             exact_audit_max_rows: 1_000,
+            admission_policy: AdmissionPolicy::ReciprocalSequenceV1,
         }
     }
 }
@@ -60,11 +68,19 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--probes" => args.probes = Some(next()?.parse()?),
             "--min-frame-gap" => args.min_frame_gap = next()?.parse()?,
             "--exact-audit-max-rows" => args.exact_audit_max_rows = next()?.parse()?,
+            "--admission-policy" => {
+                args.admission_policy = match next()?.as_str() {
+                    "reciprocal-sequence-v1" => AdmissionPolicy::ReciprocalSequenceV1,
+                    "rank-margin-path-v2" => AdmissionPolicy::RankMarginPathV2,
+                    other => return Err(format!("unknown admission policy: {other}").into()),
+                }
+            }
             "-h" | "--help" => {
                 println!(
                     "learned_retrieval_candidates --descriptors globals.vprd --out pairs.tsv \
                      [--topk 32] [--tables 8] [--bits auto] [--probes auto] \
-                     [--min-frame-gap 64] [--exact-audit-max-rows 1000]"
+                     [--min-frame-gap 64] [--exact-audit-max-rows 1000] \
+                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2]"
                 );
                 std::process::exit(0);
             }
@@ -302,6 +318,62 @@ fn contains(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> 
     neighbors[query].iter().any(|row| row.0 == candidate)
 }
 
+const STRICT_ADMISSION_RANK: usize = 2;
+const STRICT_DISTANCE_RATIO: f32 = 0.8;
+const STRICT_SEQUENCE_RADIUS: usize = 1;
+const STRICT_COMPETITOR_EXCLUSION_RADIUS: usize = 2;
+
+fn rank(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> Option<usize> {
+    neighbors[query].iter().position(|row| row.0 == candidate)
+}
+
+fn cosine_distance(score: f32) -> f32 {
+    (1.0 - score).max(0.0)
+}
+
+fn distance_ratio(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> Option<f32> {
+    let chosen = neighbors[query].iter().find(|row| row.0 == candidate)?.1;
+    let competing = neighbors[query]
+        .iter()
+        .find(|row| row.0.abs_diff(candidate) > STRICT_COMPETITOR_EXCLUSION_RADIUS)?
+        .1;
+    Some(cosine_distance(chosen) / cosine_distance(competing).max(f32::EPSILON))
+}
+
+fn strict_edge(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> bool {
+    rank(neighbors, query, candidate).is_some_and(|value| value < STRICT_ADMISSION_RANK)
+        && rank(neighbors, candidate, query).is_some_and(|value| value < STRICT_ADMISSION_RANK)
+}
+
+fn strict_path_direction(
+    neighbors: &[Vec<(usize, f32)>],
+    query: usize,
+    candidate: usize,
+    direction: isize,
+) -> bool {
+    (-(STRICT_SEQUENCE_RADIUS as isize)..=STRICT_SEQUENCE_RADIUS as isize).all(|delta| {
+        let Some(path_query) = query.checked_add_signed(delta) else {
+            return false;
+        };
+        let Some(path_candidate) = candidate.checked_add_signed(direction * delta) else {
+            return false;
+        };
+        path_query < neighbors.len()
+            && path_candidate < neighbors.len()
+            && strict_edge(neighbors, path_query, path_candidate)
+    })
+}
+
+fn strict_selected(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> bool {
+    strict_edge(neighbors, query, candidate)
+        && distance_ratio(neighbors, query, candidate)
+            .is_some_and(|value| value <= STRICT_DISTANCE_RATIO)
+        && distance_ratio(neighbors, candidate, query)
+            .is_some_and(|value| value <= STRICT_DISTANCE_RATIO)
+        && (strict_path_direction(neighbors, query, candidate, 1)
+            || strict_path_direction(neighbors, query, candidate, -1))
+}
+
 fn sequence_support(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> usize {
     [-2_isize, -1, 1, 2]
         .into_iter()
@@ -422,10 +494,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     if pairs.len() > args.topk * descriptors.rows() {
         return Err("candidate count exceeded K*N invariant".into());
     }
-    let selected_count = pairs.values().filter(|row| selected(row)).count();
+    let selected_count = pairs
+        .iter()
+        .filter(|((query, candidate), row)| match args.admission_policy {
+            AdmissionPolicy::ReciprocalSequenceV1 => selected(row),
+            AdmissionPolicy::RankMarginPathV2 => {
+                strict_selected(&ann.neighbors, *query, *candidate)
+            }
+        })
+        .count();
     let binding = descriptors.store.binding();
     let mut output = format!(
-        "# visloc-learned-retrieval-v1\n# descriptor_sha256 {}\n# model_sha256 {}\n# manifest_sha256 {}\n# preprocessing_sha256 {}\n# rows {}\n# dimension {}\n# topk {}\n# tables {}\n# bits {}\n# probes {}\n# min_frame_gap {}\n# mean_pool {:.9}\n# max_pool {}\n# undersized_queries {}\n# candidate_pairs {}\n# selected_pairs {}\n",
+        "# visloc-learned-retrieval-{}\n# descriptor_sha256 {}\n# model_sha256 {}\n# manifest_sha256 {}\n# preprocessing_sha256 {}\n# rows {}\n# dimension {}\n# topk {}\n# tables {}\n# bits {}\n# probes {}\n# min_frame_gap {}\n# mean_pool {:.9}\n# max_pool {}\n# undersized_queries {}\n# candidate_pairs {}\n# selected_pairs {}\n",
+        match args.admission_policy {
+            AdmissionPolicy::ReciprocalSequenceV1 => "v1",
+            AdmissionPolicy::RankMarginPathV2 => "v2",
+        },
         hash_file(&args.descriptors)?,
         hex(&binding.model_sha256),
         hex(&binding.manifest_sha256),
@@ -451,13 +535,50 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         output.push_str("# exact_recall_at_k skipped\n");
     }
-    output.push_str("# pair query candidate cosine mutual sequence_support selected\n");
+    match args.admission_policy {
+        AdmissionPolicy::ReciprocalSequenceV1 => {
+            output.push_str("# admission_policy reciprocal-sequence-v1\n");
+            output.push_str("# pair query candidate cosine mutual sequence_support selected\n");
+        }
+        AdmissionPolicy::RankMarginPathV2 => {
+            output.push_str("# admission_policy rank-margin-path-v2\n");
+            output.push_str("# admission_rank 2\n# distance_ratio_max 0.8\n");
+            output.push_str("# competitor_exclusion_radius 2\n# sequence_path_radius 1\n");
+            output.push_str("# per_frame_addition_budget 2\n");
+            output.push_str(
+                "# pair query candidate cosine query_rank candidate_rank query_ratio candidate_ratio path selected\n",
+            );
+        }
+    }
     for ((query, candidate), row) in &pairs {
-        let selected_pair = selected(row);
-        output.push_str(&format!(
-            "pair {query} {candidate} {:.9} {} {} {}\n",
-            row.score, row.mutual, row.sequence_support, selected_pair
-        ));
+        match args.admission_policy {
+            AdmissionPolicy::ReciprocalSequenceV1 => {
+                let selected_pair = selected(row);
+                output.push_str(&format!(
+                    "pair {query} {candidate} {:.9} {} {} {}\n",
+                    row.score, row.mutual, row.sequence_support, selected_pair
+                ));
+            }
+            AdmissionPolicy::RankMarginPathV2 => {
+                let query_rank = rank(&ann.neighbors, *query, *candidate);
+                let candidate_rank = rank(&ann.neighbors, *candidate, *query);
+                let query_ratio = distance_ratio(&ann.neighbors, *query, *candidate);
+                let candidate_ratio = distance_ratio(&ann.neighbors, *candidate, *query);
+                let path = strict_path_direction(&ann.neighbors, *query, *candidate, 1)
+                    || strict_path_direction(&ann.neighbors, *query, *candidate, -1);
+                let selected_pair = strict_selected(&ann.neighbors, *query, *candidate);
+                output.push_str(&format!(
+                    "pair {query} {candidate} {:.9} {} {} {} {} {} {}\n",
+                    row.score,
+                    query_rank.map_or(-1, |value| value as isize),
+                    candidate_rank.map_or(-1, |value| value as isize),
+                    query_ratio.map_or(f32::INFINITY, |value| value),
+                    candidate_ratio.map_or(f32::INFINITY, |value| value),
+                    path,
+                    selected_pair
+                ));
+            }
+        }
     }
     write_atomic(&args.out, &output)?;
     println!(
@@ -516,5 +637,27 @@ mod tests {
             mutual: true,
             sequence_support: 2,
         }));
+    }
+
+    #[test]
+    fn strict_selection_requires_margin_and_bidirectional_three_point_path() {
+        let mut rows = vec![Vec::new(); 20];
+        for (query, candidate) in [(4, 14), (5, 15), (6, 16)] {
+            rows[query] = vec![(candidate, 0.99), (candidate + 1, 0.989), (0, 0.9)];
+            rows[candidate] = vec![(query, 0.99), (query + 1, 0.989), (19, 0.9)];
+        }
+        assert!(strict_selected(&rows, 5, 15));
+        rows[5][2].1 = 0.988;
+        assert!(!strict_selected(&rows, 5, 15));
+    }
+
+    #[test]
+    fn strict_path_accepts_reverse_traversal() {
+        let mut rows = vec![Vec::new(); 20];
+        for (query, candidate) in [(4, 16), (5, 15), (6, 14)] {
+            rows[query] = vec![(candidate, 0.99), (0, 0.9)];
+            rows[candidate] = vec![(query, 0.99), (19, 0.9)];
+        }
+        assert!(strict_path_direction(&rows, 5, 15, -1));
     }
 }

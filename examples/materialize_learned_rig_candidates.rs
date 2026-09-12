@@ -69,6 +69,22 @@ struct RetrievedPair {
 struct Retrieval {
     metadata: BTreeMap<String, String>,
     selected: Vec<RetrievedPair>,
+    policy: AdmissionPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionPolicy {
+    ReciprocalSequenceV1,
+    RankMarginPathV2,
+}
+
+impl AdmissionPolicy {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ReciprocalSequenceV1 => "reciprocal-sequence-v1",
+            Self::RankMarginPathV2 => "rank-margin-path-v2",
+        }
+    }
 }
 
 fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
@@ -76,12 +92,16 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         .map_err(|error| format!("read retrieval {}: {error}", path.display()))?;
     let mut metadata = BTreeMap::new();
     let mut selected = Vec::new();
-    let mut header = false;
+    let mut policy = None;
     for (zero_line, raw) in text.lines().enumerate() {
         let line_number = zero_line + 1;
         let line = raw.trim();
         if line == "# visloc-learned-retrieval-v1" {
-            header = true;
+            policy = Some(AdmissionPolicy::ReciprocalSequenceV1);
+            continue;
+        }
+        if line == "# visloc-learned-retrieval-v2" {
+            policy = Some(AdmissionPolicy::RankMarginPathV2);
             continue;
         }
         if let Some(comment) = line.strip_prefix("# ") {
@@ -99,7 +119,7 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
             continue;
         }
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() != 7 || fields[0] != "pair" {
+        if fields.len() < 4 || fields.first() != Some(&"pair") {
             return Err(format!("retrieval line {line_number} is malformed"));
         }
         let query: usize = fields[1]
@@ -111,21 +131,58 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         let score: f32 = fields[3]
             .parse()
             .map_err(|error| format!("retrieval line {line_number} score: {error}"))?;
-        let mutual: bool = fields[4]
-            .parse()
-            .map_err(|error| format!("retrieval line {line_number} mutual: {error}"))?;
-        let sequence_support: usize = fields[5]
-            .parse()
-            .map_err(|error| format!("retrieval line {line_number} support: {error}"))?;
-        let is_selected: bool = fields[6]
-            .parse()
-            .map_err(|error| format!("retrieval line {line_number} selected: {error}"))?;
         if query >= candidate || !score.is_finite() {
             return Err(format!(
                 "retrieval line {line_number} has invalid pair/score"
             ));
         }
-        let expected_selected = mutual && sequence_support >= 2;
+        let (sequence_support, is_selected, expected_selected) = match policy {
+            Some(AdmissionPolicy::ReciprocalSequenceV1) if fields.len() == 7 => {
+                let mutual: bool = fields[4]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} mutual: {error}"))?;
+                let support: usize = fields[5]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} support: {error}"))?;
+                let selected: bool = fields[6]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} selected: {error}"))?;
+                (support, selected, mutual && support >= 2)
+            }
+            Some(AdmissionPolicy::RankMarginPathV2) if fields.len() == 10 => {
+                let query_rank: isize = fields[4]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} query rank: {error}"))?;
+                let candidate_rank: isize = fields[5].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate rank: {error}")
+                })?;
+                let query_ratio: f32 = fields[6].parse().map_err(|error| {
+                    format!("retrieval line {line_number} query ratio: {error}")
+                })?;
+                let candidate_ratio: f32 = fields[7].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate ratio: {error}")
+                })?;
+                let path: bool = fields[8]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} path: {error}"))?;
+                let selected: bool = fields[9]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} selected: {error}"))?;
+                let expected = (0..2).contains(&query_rank)
+                    && (0..2).contains(&candidate_rank)
+                    && query_ratio.is_finite()
+                    && candidate_ratio.is_finite()
+                    && query_ratio <= 0.8
+                    && candidate_ratio <= 0.8
+                    && path;
+                (3, selected, expected)
+            }
+            _ => {
+                return Err(format!(
+                    "retrieval line {line_number} is malformed for its schema"
+                ))
+            }
+        };
         if is_selected != expected_selected {
             return Err(format!(
                 "retrieval line {line_number} selected flag violates reciprocal+sequence policy"
@@ -140,9 +197,7 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
             });
         }
     }
-    if !header {
-        return Err("retrieval header is missing".to_owned());
-    }
+    let policy = policy.ok_or_else(|| "retrieval header is missing".to_owned())?;
     let declared: usize = required(&metadata, "selected_pairs")?
         .parse()
         .map_err(|error| format!("selected_pairs: {error}"))?;
@@ -155,7 +210,42 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
     if required(&metadata, "topk")? != "32" {
         return Err("retrieval topk must be frozen at 32".to_owned());
     }
-    Ok(Retrieval { metadata, selected })
+    if policy == AdmissionPolicy::RankMarginPathV2 {
+        for key in [
+            "admission_rank",
+            "distance_ratio_max",
+            "competitor_exclusion_radius",
+            "sequence_path_radius",
+            "per_frame_addition_budget",
+        ] {
+            let expected = match key {
+                "admission_rank" | "competitor_exclusion_radius" | "per_frame_addition_budget" => {
+                    "2"
+                }
+                "distance_ratio_max" => "0.8",
+                "sequence_path_radius" => "1",
+                _ => unreachable!(),
+            };
+            if required(&metadata, key)? != expected {
+                return Err(format!(
+                    "retrieval metadata {key:?} is not frozen at {expected}"
+                ));
+            }
+        }
+        let mut degree = BTreeMap::<usize, usize>::new();
+        for row in &selected {
+            *degree.entry(row.query).or_default() += 1;
+            *degree.entry(row.candidate).or_default() += 1;
+        }
+        if degree.values().any(|value| *value > 2) {
+            return Err("strict retrieval exceeds the per-frame addition budget".to_owned());
+        }
+    }
+    Ok(Retrieval {
+        metadata,
+        selected,
+        policy,
+    })
 }
 
 fn required<'a>(metadata: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, String> {
@@ -377,7 +467,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     writeln!(
         candidates,
-        "metadata pair_source learned-rig-reciprocal-sequence-v1"
+        "metadata pair_source learned-rig-{}",
+        retrieval.policy.name()
     )?;
     writeln!(candidates, "metadata retrieval_sha256 {retrieval_sha256}")?;
     writeln!(candidates, "metadata rig_manifest_sha256 {rig_sha256}")?;
@@ -387,7 +478,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut ledger = format!(
-        "# visloc-learned-rig-additions-v1\n# retrieval_sha256 {retrieval_sha256}\n# base_snapshot_sha256 {snapshot_sha256}\n# rig_manifest_sha256 {rig_sha256}\n# rig_order_sha256 {rig_order_sha256}\n# selected_rig_pairs {}\n# existing_image_pairs {}\n# added_image_pairs {}\n# image_pair image_i image_j rig_query rig_candidate cosine sequence_support\n",
+        "# visloc-learned-rig-additions-v1\n# admission_policy {}\n# retrieval_sha256 {retrieval_sha256}\n# base_snapshot_sha256 {snapshot_sha256}\n# rig_manifest_sha256 {rig_sha256}\n# rig_order_sha256 {rig_order_sha256}\n# selected_rig_pairs {}\n# existing_image_pairs {}\n# added_image_pairs {}\n# image_pair image_i image_j rig_query rig_candidate cosine sequence_support\n",
+        retrieval.policy.name(),
         retrieval.selected.len(),
         existing.len(),
         additions.len()

@@ -11,6 +11,32 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+A second, predeclared ambiguity arm has also failed at 1k. It required mutual
+rank below two, bidirectional cosine-distance ratio at most 0.8 against the
+next unrelated sequence, a forward-or-reverse three-frame path, and at most
+two additions incident to any frame. This reduced 2,783 rig pairs to 15 and 60
+image pairs; all 60 still passed the frozen verifier. The additions changed the
+automatic metric seed from frame 26 to 313, so `--seed-frame` was added as a
+default-off A/B control. Its default path and fixed-frame control both reproduce
+the frozen model hashes exactly.
+
+With frame 26 fixed in both arms, the 60-pair candidate retained 1,000/1,000
+images but regressed RMSE from 0.02270 m to 0.10019 m, p95 from 0.03778 m to
+0.16418 m, reprojection by 7.39%, mapper time by 5.54%, and sampled RSS by
+0.68%. The 15 selected rig pairs are one apparent sequence between frames
+307–315 and 372–379; the result proves that descriptor sequence continuity plus
+independent two-view verification can still create a false place identity in a
+repetitive corridor. This arm is also stopped before repeat/larger tiers. See
+[m9-openloris-learned-retrieval-strict-1k-ab-v1.json](../benchmarks/electro/m9-openloris-learned-retrieval-strict-1k-ab-v1.json).
+
+The next gate moves after two-view verification without using GT or a
+reconstructed pose: convert each sensor-pair essential rotation to the common
+rig frame, require low multi-sensor rotation dispersion for each rig pair, and
+require those rig rotations to agree along a contiguous forward/reverse
+sequence path. Only cycle-consistent edges may enter track construction. If
+the 1k result is empty, record the gate as a safety pass but not a quality win;
+then audit whether a non-empty set appears at 2.5k before any mapping claim.
+
 The first learned long-range retrieval arm has now been matched, merged before
 track construction, mapped, scored, and **rejected at 1k**. The canonical
 materializer revalidated retrieval/snapshot/rig hashes, removed all 6,869
