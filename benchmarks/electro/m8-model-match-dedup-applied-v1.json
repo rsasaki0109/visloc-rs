@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "audit": "/home/sasaki/datasets/openloris/m8-model-match-dedup-applied-v1.json",
+  "audit_sha256": "0e2537e0b312f4ce9086571e8dc0b14c05c94186b6a7dfa4e8e71759dc107984",
+  "inventory_sha256": "fe8204077bc0a252229bbb47e2ae790be83b0e242ccac2b10d465d939be42dd0",
+  "replaced_single_link_files": 682,
+  "freed_allocated_bytes": 19277934592,
+  "validation": "Full preflight SHA256 and inode/link identity checks; per-replacement hash checks; every replaced path rehashed and shared inode checked after all replacements. Exit 0.",
+  "tests": "Two path-scope tests and two existing merge helper tests pass.",
+  "preservation": "All paths and bytes retained. No raw, feature, log or measurement removal. Participating models and VPS files must never be overwritten: they share inodes. Future runs require fresh roots or independent copies.",
+  "free_space_observation": "df reported 45G available afterwards, but only 19277934592 bytes are attributed to this operation; other filesystem changes are outside this audit.",
+  "performance_caveat": "Sharing and cache state changed. This operation is not performance evidence or a cold-run result."
+}

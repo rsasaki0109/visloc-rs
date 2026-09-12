@@ -1,0 +1,21 @@
+{
+  "status": "full-dense-extraction-parity-and-measurement-pass",
+  "service": "visloc-full-dense-extraction-v1.service",
+  "terminal_service_state": {"MainPID": 0, "SubState": "exited", "Result": "success", "ExecMainStatus": 0},
+  "report": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-dense-extraction-v1/report.json",
+  "report_sha256": "3fabb11f0df6cefd8ed73b12c16f7c206d29a5c399b7e4d3800aa936fb6a21b1",
+  "measurement": "/home/sasaki/datasets/openloris/m8-full-dense-extraction-measurement-v1/measurement.json",
+  "measurement_sha256": "9e566cafcd9531ad36887b4af2529cc92db512aff2c57fb5ac489a4cf400f564",
+  "images": 10000,
+  "verified_files": 20000,
+  "verification": "After terminal success, independently rehashed every current _features.txt and _loci.txt file. Exact dictionary equality with both output and reference hashes in the report; exactly 20000 files.",
+  "worker_exit_codes": [0, 0, 0, 0, 0, 0],
+  "wall_seconds": 9789.92505464796,
+  "sampled_aggregate_peak_rss_kib": 1776952,
+  "rss_sampling_interval_seconds": 0.05,
+  "cgroup_memory_peak_bytes": 2147483648,
+  "memory_events_max": 35185,
+  "oom": 0,
+  "oom_kill": 0,
+  "scope": "Full dense extraction and parity validation command only, six workers. Sampled RSS includes monitor and may double-count shared pages or miss inter-sample peaks. Cgroup peak includes cache/kernel memory, not RSS. Not continuous native E2E, COLMAP speedup, quality improvement, or closure of the earlier base-extraction resource ledger."
+}

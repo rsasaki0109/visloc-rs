@@ -9,7 +9,58 @@ time and peak RSS in both mapper-only and native end-to-end comparisons.
 This plan is outcome-gated. ANN retrieval, bridge discovery, track repair, and
 BA changes are possible means, not milestone success by themselves.
 
-## Latest checkpoint (2026-09-09)
+## Latest checkpoint (2026-09-12)
+
+The first continuous generated-artifact native run is complete. The detached
+service exited successfully without resume; all 17 stages completed with exit
+code zero, and an independent post-run traversal revalidated every recorded
+artifact checkpoint. Measured wall time was 17,006.10 s, sampled aggregate
+peak RSS was 1,806,376 KiB under a 2 GiB / swap-disabled cgroup, and no OOM was
+recorded. The cgroup reached its hard charged-memory limit 366,806 times, so
+the result passes the RSS/OOM gate but does not establish an absence of memory
+pressure.
+
+Against the frozen COLMAP control, the run's 816.39 s mapping stage is 20.41x
+faster than COLMAP's 16,663.88 s mapper. Its continuous 17,006.10 s wall is
+1.13x faster than COLMAP's 19,256.60 s measured phase sum, and sampled RSS is
+17.0% below COLMAP's process HWM. This is not yet a same-method cold benchmark:
+the native OS cache was uncontrolled, the COLMAP total is a phase sum rather
+than a continuous wall measurement, and neither side has the required three
+accepted repeats.
+
+The output exactly reproduces the connected filtered atlas: 9,998 images,
+4,999 supported rig frames, 0.581744 px mean reprojection, 0.388993 m RMSE,
+and 0.638173 m p95. Registration, reprojection, and p95 beat or match COLMAP;
+RMSE remains 1.22% above COLMAP's 0.384307 m target. Therefore the continuous
+execution and resource diagnostic passes, but M8 quality and M9/M10 acceptance
+remain open. Frozen hashes, stage times, comparison arithmetic, and caveats are
+in
+[m8-native-e2e-v1.json](../benchmarks/electro/m8-native-e2e-v1.json).
+
+The next quality arm must follow the accumulated negative evidence. Reprojection
+BA, adjacent descriptor/LK cycles, post-map track merge, sparse/global solve
+schedules, and feasibility backtracking are exhausted. One correspondence-
+ownership difference from COLMAP remains untested: its incremental Create
+claims one robust inlier set, then recursively partitions at least three
+remaining unowned observations into another 3-D point. The rejected visloc
+batched-Create arm claimed only its first inlier set.
+
+Implement exactly one default-off bounded recursive-Create arm: at most 32
+registered neighbours per CSR reference row, at most 128 deterministic
+ray-pair hypotheses per partition, and at most four mutually exclusive
+partitions. An observation may be published to only one track; positive depth,
+the existing angular/reprojection gates, deterministic ordering, and
+O(observations + CSR edges) persistent state are mandatory. Run the frozen
+1k control and candidate first, keep GT score-only after model publication, and
+stop before 2.5k on any registration, RMSE, p95, reprojection, mapper-wall, or
+RSS regression. If this arm fails, existing-correspondence ownership
+partitioning is exhausted; the next boundary must add an independently
+verified long-range identity signal rather than another pose-derived gate.
+Only a quality-passing arm proceeds to controlled cold-cache timing, three
+repeats, tier nonregression, full-process SIGKILL recovery, and final release
+closure.
+
+## Previous infrastructure checkpoint (2026-09-09)
 
 The shared-snapshot path now has complete dense worker parity on the retained
 10k feature bank: all 2,500 shards/80,000 candidates reproduce every legacy
@@ -28,6 +79,43 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
 
 ### Remaining execution order
 
+Capacity audit after connected mapping v2: root free space is about 2.4 GiB,
+external free space about 1.6 GiB. Independently counting allocated blocks of
+regular files (deduplicating inodes within each directory, excluding symlinks)
+gives 1,855,483,904 bytes for full-base-v2 and 4,770,639,872 bytes for
+full-dense-v1: **6,626,123,776 bytes before adaptive/matching/mapping outputs**.
+Thus the current all-banks-retained executor cannot start safely even if its
+conservative 16 GiB guard were reduced. Native shared output adds 485,498,880
+bytes, dense shared output 1,071,497,216 bytes and targeted shared output
+17,616,896 bytes in the observed runs; these are not a complete lifetime upper
+bound and do not include all adaptive/admission/model artifacts or slack.
+No data was removed for this audit. The approximately 30 GiB EuRoC frozen
+feature bank remains protected by the nonregression contract. Obtain additional
+storage or implement and verify artifact release/recomputation lifetimes before
+a cold launch; do not bypass the guard or substitute retained banks and call it
+cold E2E.
+
+Checkpoint update: full dense extraction now passes all 20,000 feature/loci
+hashes with a terminal detached measurement (9,789.925 s, sampled aggregate
+peak RSS 1,776,952 KiB, no OOM; `m8-full-dense-extraction-v1.json`). Full base
+feature parity also passes, but its earlier aggregate resource ledger remains
+incomplete. Neither result establishes continuous E2E.
+
+The newly bound chain prefix registration → repair admission → target selection
+→ target candidates → shared matching/merge → final admission now reproduces
+the seven selected frames, 14,319 candidates, 448 matching shards and final
+snapshot digest. Evidence: `m8-repair-admission-bound-v1.json`,
+`m8-targeted-selection-bound-v1.json`, `m8-targeted-candidates-bound-v1.json`,
+`m8-targeted-shared-bound-v1.json`, `m8-targeted-admission-bound-v1.json`.
+Intermediate model files are not all identical; selection equality is the
+verified downstream contract. These were separately launched stages with
+retained upstream inputs, not one cold pipeline. Do not rerun unchanged source
+models merely to extend this chain. The next implementation must assemble the
+complete executor, including source mapping and atlas integration, with pinned
+inputs, explicit dependencies, restart validation and artifact lifetime budgets.
+The synthetic stress fixture is archived with verified contents; restore it
+before any readback rerun (see `replay_storage_cleanup.md`).
+
 1. Runner dependency binding and actual runner restart evidence are merged
    (PR130/131). Shared output remains opt-in.
 2. Full10k Python runner validation now passes: all 2,500 bound shards match
@@ -35,14 +123,20 @@ pipeline restart. The retained atlas still misses the frozen COLMAP RMSE gate.
    the matching worker or change prior chunks. See
    `m8-full-native-shared-runner-v1.json` (PR132 merged). This is retained
    feature/candidate validation, not full pipeline extraction or restart.
+   Native matching also passes on the regenerated full10k base bank: all 2,188
+   shared shards match legacy records, merged bytes and completed resume pass,
+   and the detached service has a terminal resource report. See
+   `m8-native-shared-full-v1.json`. Retained candidates remain outside generation
+   timing; this does not close the continuous pipeline gate.
 3. Assemble one executable, version-pinned native DAG covering base and dense
    extraction, retrieval, adaptive selection, matching, repair/targeted
    selection, source mapping and atlas integration. The dense bank also supplies
    supplemental features; do not extract those 692 images twice. Preflight disk
    space and an aggregate process-tree memory cap before launching extraction.
    Measure a continuous cold run and a separately labelled resumed run, not a
-   sum of historical phase times. Four-image base and one dense extraction
-   shard parity are preflights, not full extraction completion.
+   sum of historical phase times. Full dense extraction is now verified as
+   described above; the base aggregate resource ledger still needs closure
+   through the continuous execution.
    Current building blocks: PR133's opt-in immutable adaptive bank sharing
    passed full10k parity/resume with 9,308 shared files and 692 independent files;
    PR134's compiler binds 21 source commands to 23 atlas nodes. Dedicated cgroup

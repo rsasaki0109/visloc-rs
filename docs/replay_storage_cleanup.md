@@ -1,5 +1,24 @@
 # Replay storage cleanup
 
+## Synthetic shared-writer archive, 2026-09-09
+
+Archived the completed synthetic writer/readback fixture
+`/home/sasaki/datasets/openloris/corridor1-1-m8-shared-writer-stress-v1` to
+`/home/sasaki/datasets/openloris/synthetic-stress-archive.ZTe3sv/shared-writer-stress-v1.tar.gz`
+(approximately 27 MiB). Archive SHA-256:
+`343f64faf884dace5d691a56fe91ed03cd8b3b25eee6ca4068a2f89b59a4a8a4`.
+GNU tar comparison exited zero, comparing archived contents and metadata with
+the original tree. An independent membership check found exactly 3,481 files,
+no duplicate archive file entries, and only regular-file/directory members.
+After these checks, removed only the expanded synthetic fixture directory.
+Its binaries, time logs and synthetic chunks are retained in the archive.
+No real image, feature bank or reconstruction was removed.
+
+To restore, verify the archive SHA, sufficient free space, and absence of the
+original directory, then extract with `tar -xzf ARCHIVE -C /home/sasaki/datasets/openloris`.
+The archive includes its top-level directory. This is storage recovery, not
+an SfM memory or speed improvement.
+
 User authorized external-disk relocation and disk cleanup. The destination is
 `/media/sasaki/aiueo1/visloc-replay-retired-20260909` (directory identifier).
 

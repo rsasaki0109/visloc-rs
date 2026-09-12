@@ -1,0 +1,205 @@
+{
+  "schema": "m8-atlas-top-motion-geometry-v1",
+  "status": "diagnostic-only",
+  "input_hash_reference": "m8-atlas-observation-key-motion-v1.json",
+  "selection": "Five largest Euclidean survivor landmark displacements per component, matched by unique observation ownership; no GT.",
+  "method": [
+    "Verify identical image ID/name mapping.",
+    "Compute world camera centers as -R^T t from normalized COLMAP wxyz quaternions.",
+    "For each selected point compute maximum angle between point-minus-camera-center rays over all observing camera pairs, and minimum/maximum Euclidean camera range.",
+    "Report maximum before/after center displacement of observing cameras; camera rotation and BA Jacobian influence are not measured."
+  ],
+  "results": {
+    "main": [
+      {
+        "old_point_id": 111501,
+        "new_point_id": 111119,
+        "motion_m": 1004.6126867983585,
+        "observations_before": 2,
+        "observations_after": 2,
+        "before": {
+          "max_ray_angle_deg": 0.006858501286769162,
+          "min_range_m": 1043.0288396752157,
+          "max_range_m": 1043.708846871922
+        },
+        "after": {
+          "max_ray_angle_deg": 0.18280415406665615,
+          "min_range_m": 38.41607020634002,
+          "max_range_m": 39.09677669700862
+        },
+        "max_observing_camera_translation_m": 0.004214080936591138
+      },
+      {
+        "old_point_id": 219354,
+        "new_point_id": 218673,
+        "motion_m": 478.1332949610963,
+        "observations_before": 2,
+        "observations_after": 2,
+        "before": {
+          "max_ray_angle_deg": 0.0037420524919213258,
+          "min_range_m": 887.4605865339802,
+          "max_range_m": 887.4876713611968
+        },
+        "after": {
+          "max_ray_angle_deg": 0.008112682356321647,
+          "min_range_m": 409.34242761085807,
+          "max_range_m": 409.36951242997407
+        },
+        "max_observing_camera_translation_m": 0.029984106254621796
+      },
+      {
+        "old_point_id": 209504,
+        "new_point_id": 208838,
+        "motion_m": 388.396916830319,
+        "observations_before": 2,
+        "observations_after": 2,
+        "before": {
+          "max_ray_angle_deg": 0.00025169965316901505,
+          "min_range_m": 14546.721957404143,
+          "max_range_m": 14546.725032784732
+        },
+        "after": {
+          "max_ray_angle_deg": 0.0002452129471010557,
+          "min_range_m": 14931.581363517853,
+          "max_range_m": 14931.584438898431
+        },
+        "max_observing_camera_translation_m": 0.027051884216879436
+      },
+      {
+        "old_point_id": 110885,
+        "new_point_id": 110506,
+        "motion_m": 182.22376188741512,
+        "observations_before": 2,
+        "observations_after": 2,
+        "before": {
+          "max_ray_angle_deg": 0.1120177573494632,
+          "min_range_m": 18.965273929571733,
+          "max_range_m": 18.994102857098614
+        },
+        "after": {
+          "max_ray_angle_deg": 0.010828972239017513,
+          "min_range_m": 201.1971254739077,
+          "max_range_m": 201.22768091451732
+        },
+        "max_observing_camera_translation_m": 0.010209449060207584
+      },
+      {
+        "old_point_id": 207174,
+        "new_point_id": 206513,
+        "motion_m": 110.8451248801057,
+        "observations_before": 2,
+        "observations_after": 2,
+        "before": {
+          "max_ray_angle_deg": 0.07892347472406887,
+          "min_range_m": 190.64653772256824,
+          "max_range_m": 191.95352065021567
+        },
+        "after": {
+          "max_ray_angle_deg": 0.19550818630748257,
+          "min_range_m": 79.81841685667591,
+          "max_range_m": 81.1072729313067
+        },
+        "max_observing_camera_translation_m": 0.027107557105941565
+      }
+    ],
+    "tail": [
+      {
+        "old_point_id": 5576,
+        "new_point_id": 5573,
+        "motion_m": 364.0737383773384,
+        "observations_before": 3,
+        "observations_after": 3,
+        "before": {
+          "max_ray_angle_deg": 0.002215087713026597,
+          "min_range_m": 396.69498754215635,
+          "max_range_m": 396.7222766166016
+        },
+        "after": {
+          "max_ray_angle_deg": 0.027554813935096848,
+          "min_range_m": 32.62563070105874,
+          "max_range_m": 32.65232318304226
+        },
+        "max_observing_camera_translation_m": 0.004895783910593252
+      },
+      {
+        "old_point_id": 11668,
+        "new_point_id": 11654,
+        "motion_m": 25.33317551771115,
+        "observations_before": 7,
+        "observations_after": 7,
+        "before": {
+          "max_ray_angle_deg": 0.27390649301533687,
+          "min_range_m": 50.508008024879985,
+          "max_range_m": 53.049317503370474
+        },
+        "after": {
+          "max_ray_angle_deg": 0.5887643034745863,
+          "min_range_m": 25.183106683450383,
+          "max_range_m": 27.70638064124375
+        },
+        "max_observing_camera_translation_m": 0.019808915851477153
+      },
+      {
+        "old_point_id": 5206,
+        "new_point_id": 5204,
+        "motion_m": 21.197176988235103,
+        "observations_before": 2,
+        "observations_after": 2,
+        "before": {
+          "max_ray_angle_deg": 0.06407771993315489,
+          "min_range_m": 16.147859477853476,
+          "max_range_m": 16.166792601408442
+        },
+        "after": {
+          "max_ray_angle_deg": 0.025657938168142613,
+          "min_range_m": 37.344483713967705,
+          "max_range_m": 37.36389142159904
+        },
+        "max_observing_camera_translation_m": 0.005958630980572225
+      },
+      {
+        "old_point_id": 2591,
+        "new_point_id": 2589,
+        "motion_m": 14.048289354828622,
+        "observations_before": 8,
+        "observations_after": 8,
+        "before": {
+          "max_ray_angle_deg": 0.4072848220301925,
+          "min_range_m": 46.286055048913106,
+          "max_range_m": 47.70328685829203
+        },
+        "after": {
+          "max_ray_angle_deg": 0.6057744100316105,
+          "min_range_m": 32.22453150566676,
+          "max_range_m": 33.656596196544896
+        },
+        "max_observing_camera_translation_m": 0.019360804193133255
+      },
+      {
+        "old_point_id": 9983,
+        "new_point_id": 9973,
+        "motion_m": 13.089000313155722,
+        "observations_before": 7,
+        "observations_after": 7,
+        "before": {
+          "max_ray_angle_deg": 0.48517091988806443,
+          "min_range_m": 39.578055544385634,
+          "max_range_m": 42.967727279687445
+        },
+        "after": {
+          "max_ray_angle_deg": 0.7414329281685591,
+          "min_range_m": 26.488473207218117,
+          "max_range_m": 29.862486936890484
+        },
+        "max_observing_camera_translation_m": 0.01656434382845843
+      }
+    ]
+  },
+  "limitations": [
+    "Ranges are Euclidean distances, not camera-axis depths.",
+    "Model coordinate units are reported as meters consistent with the rig model; no gauge correction is applied.",
+    "Low parallax and large landmark displacement do not demonstrate causation of trajectory RMSE.",
+    "Prior weak-angle freezing negative evidence must not be rerun unchanged.",
+    "Next diagnose pose-coupled residual/Jacobian contribution before proposing a new intervention."
+  ]
+}

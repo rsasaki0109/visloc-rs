@@ -1,6 +1,6 @@
 {
   "schema": "m8-durable-measurement-preflight-v1",
-  "status": "short-detached-probe-pass-long-probe-pending",
+  "status": "short-and-long-detached-probes-pass",
   "short_service": "visloc-measure-durable-probe-v1.service",
   "short_report": "/home/sasaki/datasets/openloris/m8-durable-measure-probe-v1.json",
   "short_service_result": "success",
@@ -10,6 +10,12 @@
   "short_cgroup_memory_peak_bytes": 45182976,
   "long_service": "visloc-durable-long-probe-v1.service",
   "long_artifact_root": "/home/sasaki/datasets/openloris/m8-durable-long-probe-v1",
-  "long_status_at_recording": "active/running; main PID 3712593 verified live",
-  "scope": "Launcher lifecycle only. Not long-duration completion, SfM RSS, continuous E2E or root-cause proof for the earlier missing scope ledger."
+  "long_status_at_recording": "exited; Result success; ExecMainStatus 0; measurement status pass",
+  "long_report_sha256": "2b0f6c0134224ef7c8c159735e02c50f7c1f6ae5f9351f3c10a4ac170abec618",
+  "long_wall_seconds": 3700.0400754720904,
+  "long_sampled_aggregate_peak_rss_kib": 25184,
+  "long_cgroup_memory_peak_bytes": 13529088,
+  "long_memory_max_events_delta": 0,
+  "long_oom_events_delta": 0,
+  "scope": "Launcher lifecycle including a completed 3700-second low-load sleep with terminal measurement. Not SfM RSS, continuous E2E or root-cause proof for the earlier missing scope ledger."
 }

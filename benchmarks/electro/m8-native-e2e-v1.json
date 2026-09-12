@@ -1,0 +1,115 @@
+{
+  "schema": "visloc_m8_native_e2e_evidence_v1",
+  "measured_at": "2026-09-09",
+  "audited_at": "2026-09-12",
+  "launch_repository_commit": "c80f45f2f9370961b083c0b8efa1ca4406e07d56",
+  "dataset": "OpenLORIS corridor1-1 tier-10000",
+  "status": "continuous-native-e2e-pass-quality-gate-fail",
+  "scope": "One uninterrupted 17-stage generated-artifact run under a 2 GiB cgroup. Diagnostic evidence; not a cold-cache or three-repeat acceptance result.",
+  "unit": {
+    "name": "visloc-native-e2e-v1.service",
+    "invocation_id": "5118aa2190cc4bc69110d602caa37e25",
+    "terminal": {
+      "MainPID": 0,
+      "SubState": "exited",
+      "Result": "success",
+      "ExecMainStatus": 0
+    },
+    "memory_max_bytes": 2147483648,
+    "memory_swap_max_bytes": 0,
+    "kill_mode": "control-group",
+    "runtime_max_seconds": 43230
+  },
+  "artifacts": {
+    "run_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-e2e-v1",
+    "measurement": "/home/sasaki/datasets/openloris/m8-native-e2e-measurement-v1/measurement.json",
+    "pipeline_report_sha256": "375ec7b08fb24549fcfacbe882b826b862890aeeb2f9dd9f788790a13c0739ad",
+    "measurement_sha256": "9f889eafa9b40dd7602d3767aefe970b33aec47284aa8eab3a68e443a6f6ce1c",
+    "score_sha256": "74e839b13cb4410bdbedbae4a0a8cdeefa6fb204d8e82064289ef743eaedc4be",
+    "monitor_sha256": "6ab8e65d971154b5ec2bb9829556e99ae78ce38dc3e52713e854be46e26a8200",
+    "binary_manifest_sha256": "58874eb0c393cd125b5356668820e830078ecec5dee77b451b6d2140213b42f3"
+  },
+  "pipeline": {
+    "status": "pass",
+    "uninterrupted": true,
+    "resumed": false,
+    "stage_count": 17,
+    "all_exit_zero": true,
+    "all_completed": true,
+    "independent_checkpoint_reverification": "all 17 stages pass",
+    "wall_seconds": 17005.152815646958,
+    "stages": [
+      ["extract-base", 4712.315808678046],
+      ["extract-dense", 8575.467412687023],
+      ["adaptive-selection", 6.5712402540957555],
+      ["adaptive-bank", 4.998876350000501],
+      ["candidates-native", 481.75466942403],
+      ["candidates-dense", 493.4640922070248],
+      ["match-native", 336.6987924539717],
+      ["match-adaptive", 364.3552380029578],
+      ["match-dense", 678.1113708689809],
+      ["native-prefix-supplement", 16.534276478923857],
+      ["prefix-registration", 151.5833389039617],
+      ["repair19-admission", 17.458752378006466],
+      ["target-selection", 151.91045313002542],
+      ["target-candidates", 0.18522356101311743],
+      ["match-targeted7", 125.87511692009866],
+      ["targeted7-admission", 13.318042288068682],
+      ["mapping", 816.3910946438555]
+    ]
+  },
+  "resources": {
+    "measured_wall_seconds": 17006.100370193948,
+    "sampled_aggregate_peak_rss_kib": 1806376,
+    "rss_sampling_interval_seconds": 0.05,
+    "cgroup_memory_peak_bytes": 2147483648,
+    "memory_events_max": 366806,
+    "oom": 0,
+    "oom_kill": 0,
+    "resource_gate_2_gib": "pass by sampled aggregate RSS; cgroup charged memory reached the hard limit"
+  },
+  "quality": {
+    "registered_images": 9998,
+    "supported_rig_frames": 4999,
+    "gt_scored_images": 9306,
+    "models": 2,
+    "ate_rmse_m": 0.3889930046821418,
+    "ate_p95_m": 0.6381734850813887,
+    "mean_reprojection_px_observation_weighted": 0.581743529675824,
+    "model_images_sha256": [
+      "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+      "761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd"
+    ],
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "ground_truth_used_only_for_post_mapping_score": true
+  },
+  "colmap_control": {
+    "evidence": "m8-openloris-colmap-10k-control.json",
+    "mapper_wall_seconds": 16663.880327857,
+    "measured_phase_total_wall_seconds": 19256.598764632003,
+    "pipeline_peak_process_hwm_kib": 2177632,
+    "registered_images": 9998,
+    "supported_rig_frames": 4999,
+    "ate_rmse_m": 0.3843065335437528,
+    "ate_p95_m": 0.6386693943260212,
+    "mean_reprojection_px_observation_weighted": 0.9030031518617252
+  },
+  "comparison": {
+    "mapper_speedup": 20.41163902593339,
+    "measured_phase_total_speedup": 1.132334770785102,
+    "sampled_rss_vs_colmap_process_hwm_ratio": 0.8295138939912713,
+    "registration_gate": "pass",
+    "p95_gate": "pass",
+    "reprojection_gate": "pass",
+    "rmse_gate": "fail: visloc is 1.2194617393501694 percent higher",
+    "performance_acceptance": "pending: one run, uncontrolled OS cache, and COLMAP total is a phase sum rather than one continuous wall measurement"
+  },
+  "limitations": [
+    "The run generated every pipeline artifact in one process tree, but OS cache state was not controlled.",
+    "The COLMAP total is a sum of measured phases; it is not a continuous cold-run wall clock.",
+    "Only one native E2E run exists; three-repeat nonregression is still pending.",
+    "Normal recorded child-exit resume is covered elsewhere; full parent SIGKILL recovery is not yet supported.",
+    "Cgroup charged memory repeatedly reached 2 GiB, so the run does not prove absence of memory pressure.",
+    "ATE RMSE remains above the frozen COLMAP target; no equivalent-quality 10k superiority claim is permitted."
+  ]
+}

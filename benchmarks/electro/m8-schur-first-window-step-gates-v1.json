@@ -1,0 +1,40 @@
+{
+  "schema": "m8-schur-first-window-step-gates-v1",
+  "status": "diagnostic-only",
+  "method": "Between first Schur row and following atlas-inner-timing phase=solver. step-detail emits only rejected steps for nonempty pose sets; counts may overlap.",
+  "results": {
+    "main": {
+      "log_sha256": "f9bd8ebfe714830aeb9e534c5f11128273c9c22258246f17340434762563ef91",
+      "rejection_rows": [
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=0 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.121230460e5 lambda=1.000e-4",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=1 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.121127275e5 lambda=1.000e-3",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=2 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.121061248e5 lambda=1.000e-2",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=3 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.120735628e5 lambda=1.000e-1",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=4 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.117712489e5 lambda=1.000e0",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=5 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.098499996e5 lambda=1.000e1",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=6 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->12 cost=1.154332571e5->1.074530901e5 lambda=1.000e2",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=7 accepted=false cost_gate=false feasibility_gate=false nonprojectable=0->11 cost=1.154332571e5->1.242197248e5 lambda=1.000e3",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=8 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->4 cost=1.154332571e5->1.143177237e5 lambda=1.000e4",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=10 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->6 cost=1.085030123e5->1.076019030e5 lambda=1.000e4",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=12 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->6 cost=1.084287410e5->1.075602683e5 lambda=1.000e4",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=13 accepted=false cost_gate=false feasibility_gate=false nonprojectable=0->2 cost=1.084287410e5->1.142384729e5 lambda=1.000e5",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=14 accepted=false cost_gate=false feasibility_gate=true nonprojectable=0->0 cost=1.084287410e5->1.101569615e5 lambda=1.000e6",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=16 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->1 cost=1.081448706e5->1.081197320e5 lambda=1.000e6",
+        "sfm-debug-ba-step-detail: poses=60 landmarks=9132 iteration=18 accepted=false cost_gate=true feasibility_gate=false nonprojectable=0->1 cost=1.081404547e5->1.081174125e5 lambda=1.000e6"
+      ],
+      "feasibility_rejections": 14,
+      "cost_rejections": 3
+    },
+    "tail": {
+      "log_sha256": "f55bc90fe2d1e20b1448b8c8c4e3f664520c59effadcf83114b4c7b0e49bb0e3",
+      "rejection_rows": [],
+      "feasibility_rejections": 0,
+      "cost_rejections": 0
+    }
+  },
+  "limitations": [
+    "Internal track IDs are not exported COLMAP point IDs.",
+    "No GT or model intervention; no causal trajectory claim.",
+    "Next identify observations failing projectability; do not relax the gate."
+  ]
+}

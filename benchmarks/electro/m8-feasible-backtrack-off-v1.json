@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "measurement_sha256": "ee31fe71ea6db9aba77253d8c459a047d4d69028129f6068e3ecf66550ea2a0d",
+  "status": "off-reference-parity-pass",
+  "source_commit": "37298b32696d3453cd14f9a55ef9efccb124b068",
+  "binary_sha256": "10b3698d14bbec10c61d35e4ddc25eae8e8d412fa1ffdd39cc46cb42ae20c05c",
+  "run_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1",
+  "unit": "visloc-feasible-backtrack-off-v1.service",
+  "terminal_state": {
+    "MainPID": 0,
+    "SubState": "exited",
+    "Result": "success"
+  },
+  "reference_file_sha256": {
+    "atlas/component-000/images.txt": "a26a3a4444dd73be2e707d5c89c3ebce845fd92a34eb8c18a0d2e6833e489ed3",
+    "atlas/component-001/images.txt": "44005eeee990cb8b1fb10f9e253d64d789e9f66b0e99502dd4e530f579f77ca0",
+    "integrated/tail/model/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/tail/model/images.txt": "761cb89f86be12d9ae774fa982fc1920fdabe6cda939d10c94861f62925b61bd",
+    "integrated/tail/model/points3D.txt": "931100c5151f008ced6cc2e7492658134931b805c4eab60fa3c6de87ec7d3d4f",
+    "integrated/tail/pre-ba/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/tail/pre-ba/images.txt": "96b395e295b6d8aed39613df4f00a30963fb24e6dfcb1ad7e38668ced0db72ff",
+    "integrated/tail/pre-ba/points3D.txt": "33ba8437c9040c827b20cc2be65f2ae13a3cd83d67a5385b3eba2cd87c69957c",
+    "integrated/main/model/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/main/model/images.txt": "6c3829f5e3f458c3581956eae6f872d0f8db770497df21cc6656996e8210c62b",
+    "integrated/main/model/points3D.txt": "9ab04b3969a80726223e6a9a99e2896b11bf2ca3b9b630d3f19e9217f6216d14",
+    "integrated/main/pre-ba/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+    "integrated/main/pre-ba/images.txt": "046c7c6ed8c3ccc0a0c972b610bcf162df88347531bdae95aeb2d994f338d0c8",
+    "integrated/main/pre-ba/points3D.txt": "a9b4e5055da4604733a4734ba95a374531fc1190edf472477713c4b75293dfef"
+  },
+  "independent_sha256sum_check": "14/14 OK",
+  "backtrack_log_rows": 0,
+  "measurement": {
+    "status": "pass",
+    "command": [
+      "python3",
+      "scripts/probe_atlas_schur_diagnostic.py",
+      "--integration-binary",
+      "/home/sasaki/datasets/openloris/schur-probe-binaries.4WAfOy/integrate-37298b3",
+      "--binary-sha256",
+      "10b3698d14bbec10c61d35e4ddc25eae8e8d412fa1ffdd39cc46cb42ae20c05c",
+      "--output",
+      "/home/sasaki/datasets/openloris/corridor1-1-m8-feasible-backtrack-off-v1"
+    ],
+    "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/visloc-feasible-backtrack-off-v1.service",
+    "rss_sampling_interval_seconds": 0.05,
+    "scope": "Sampled aggregate RSS includes monitor; shared pages may be counted multiple times. cgroup peak includes charged cache/kernel memory and is not RSS.",
+    "exit_code": 0,
+    "wall_seconds": 155.1414069009479,
+    "sampled_aggregate_peak_rss_kib": 560748,
+    "cgroup_memory_peak_bytes": 1082839040,
+    "memory_events_before": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+    "memory_events_after": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n"
+  },
+  "limitations": [
+    "OFF only; experimental ON not measured.",
+    "Atlas suffix with retained sources, not cold native E2E.",
+    "Single run; no speedup or quality-improvement claim."
+  ]
+}

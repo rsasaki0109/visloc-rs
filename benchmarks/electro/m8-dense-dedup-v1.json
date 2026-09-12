@@ -1,0 +1,15 @@
+{
+  "applied": true,
+  "caveat": "Paths and bytes preserved; shared inode/metadata, frozen banks must never be overwritten",
+  "estimated_freed_allocated_bytes": 4765159424,
+  "extraction_report": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-dense-extraction-v1/report.json",
+  "extraction_report_sha256": "3fabb11f0df6cefd8ed73b12c16f7c206d29a5c399b7e4d3800aa936fb6a21b1",
+  "files": 20000,
+  "freed_allocated_bytes": 4765159424,
+  "output": "/home/sasaki/datasets/openloris/corridor1-1-m8-full-dense-extraction-v1/features",
+  "processed_files": 20000,
+  "source": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features",
+  "status": "completed",
+  "validation": "All 20000 source and output digests checked against pinned extraction report before mutation; all output digests and shared inode identities rechecked after completion.",
+  "no_new_performance_claim": true
+}

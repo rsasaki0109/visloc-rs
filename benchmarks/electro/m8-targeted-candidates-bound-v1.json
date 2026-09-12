@@ -1,0 +1,10 @@
+{
+  "status": "pass",
+  "command": "python3 scripts/build_targeted_rig_candidates.py --rig-manifest /home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt --selection-json /media/sasaki/aiueo1/visloc-targeted-selection-bound-v1/selection.json --max-frame-gap 256 --output-directory /media/sasaki/aiueo1/visloc-targeted-candidates-bound-v1",
+  "selection_sha256": "5d493644271704dccae1ec190c0ec454c25823ddbd6f5fec3ce1f34ab6ad69d8",
+  "candidate_sha256": "14ac996b591a3d98c9be97d5c3c0aa47b04c93c48c551b2556353729c6895a4f",
+  "matches_frozen_candidate_sha256": true,
+  "images": 10000,
+  "pairs": 14319,
+  "scope": "Candidates generated from newly reproduced selection.json, not copied from retained candidates. No matching, resource measurement, continuous E2E or quality/speedup claim."
+}

@@ -151,6 +151,24 @@ fn ba_schur_debug_slot() -> Option<usize> {
         .ok()
 }
 
+fn claim_sparse_debug_window(
+    eligible: bool,
+    slot: Option<usize>,
+    pose_count: usize,
+    claimed: &std::sync::atomic::AtomicBool,
+) -> Option<usize> {
+    let slot = slot.filter(|slot| eligible && *slot < pose_count)?;
+    claimed
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .ok()?;
+    Some(slot)
+}
+
 fn matrix_free_schur_debug_context<'a>(
     pose_index: &'a BTreeMap<u64, usize>,
     landmark_index: &'a BTreeMap<u64, usize>,
@@ -516,6 +534,37 @@ mod schur_block_debug_tests {
     use super::*;
 
     #[test]
+    fn sparse_debug_claim_is_once_and_ineligible_calls_do_not_consume_it() {
+        use std::sync::atomic::AtomicBool;
+        let claimed = AtomicBool::new(false);
+        assert_eq!(claim_sparse_debug_window(false, Some(0), 2, &claimed), None);
+        assert_eq!(claim_sparse_debug_window(true, None, 2, &claimed), None);
+        assert_eq!(claim_sparse_debug_window(true, Some(2), 2, &claimed), None);
+        assert_eq!(
+            claim_sparse_debug_window(true, Some(1), 2, &claimed),
+            Some(1)
+        );
+        assert_eq!(claim_sparse_debug_window(true, Some(0), 2, &claimed), None);
+        let concurrent = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        claim_sparse_debug_window(true, Some(0), 1, &concurrent).is_some() as usize
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .sum::<usize>(),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn local_block_metrics_distinguish_spd_non_spd_nonfinite_and_asymmetry() {
         let spd = Matrix6::from_diagonal(&Vector6::from_element(2.0));
         let spd_metrics = inspect_schur_block(&spd);
@@ -568,10 +617,10 @@ mod schur_block_debug_tests {
         let cross = Matrix6x3::from_fn(|row, column| if row == column { 1.0 } else { 0.0 });
         let system = NormalEquationsBa {
             h_pp: CameraHessian::PoseDiagonal(vec![Matrix6::identity(); 2]),
-            b_p: DVector::zeros(12),
+            b_p: DVector::from_fn(12, |row, _| (row as f64 + 1.0) * 0.01),
             landmarks: vec![LandmarkBlock {
                 h_ll: Matrix3::identity(),
-                b_l: Vector3::zeros(),
+                b_l: Vector3::new(0.02, -0.03, 0.04),
                 cross: vec![(1, cross), (1, cross)],
             }],
         };
@@ -588,7 +637,39 @@ mod schur_block_debug_tests {
         assert_eq!(counts.max_elimination_landmark, Some(0));
         assert!(counts.max_hll_inverse_residual.unwrap() < 1.0e-12);
         assert_eq!(context.landmark_index.get(&42), Some(&0));
+        let diagonal = vec![10.0 * Matrix6::identity(); 2];
+        let plain = solve_step_pose_blocks(&system, diagonal.clone(), 2, 1, 0.25, &mut None)
+            .expect("positive definite control");
+        let diagnosed = solve_step_pose_blocks_with_debug(
+            &system,
+            diagonal,
+            2,
+            1,
+            0.25,
+            &mut None,
+            Some(context),
+        )
+        .expect("positive definite diagnostic");
+        assert_eq!(plain, diagnosed, "diagnostics must not modify the solve");
+        assert!(plain.0.norm() > 0.0);
+        assert!(plain.1.norm() > 0.0);
+        let elimination = (2.0 * cross) * h_ll_inverse * (2.0 * cross).transpose();
+        assert!((counts.max_elimination_norm.unwrap() - elimination.norm()).abs() < 1.0e-12);
     }
+}
+
+fn feasible_backtrack_accepts(
+    before_cost: f64,
+    trial_cost: f64,
+    before_nonprojectable: usize,
+    trial_nonprojectable: usize,
+    preserves_valid: bool,
+) -> bool {
+    before_cost.is_finite()
+        && trial_cost.is_finite()
+        && trial_cost < before_cost
+        && trial_nonprojectable <= before_nonprojectable
+        && preserves_valid
 }
 
 #[cfg(test)]
@@ -596,6 +677,106 @@ mod generalized_rig_factor_tests {
     use nalgebra::{Point3, UnitQuaternion, Vector3};
 
     use super::*;
+
+    #[test]
+    fn feasible_backtrack_requires_finite_decrease_and_preserved_observations() {
+        assert!(feasible_backtrack_accepts(10.0, 9.0, 0, 0, true));
+        for cost in [10.0, 11.0, f64::NAN, f64::INFINITY] {
+            assert!(!feasible_backtrack_accepts(10.0, cost, 0, 0, true));
+        }
+        assert!(!feasible_backtrack_accepts(f64::INFINITY, 9.0, 0, 0, true));
+        assert!(!feasible_backtrack_accepts(10.0, 9.0, 0, 1, true));
+        assert!(!feasible_backtrack_accepts(10.0, 9.0, 1, 1, false));
+    }
+
+    // Run this fixture in separate test processes with the experimental env
+    // flag absent and set to 1; never mutate process environment in a test.
+    #[test]
+    fn feasible_backtrack_production_rescue_and_exhaustion() {
+        let enabled = std::env::var("VISLOC_SFM_BA_FEASIBLE_BACKTRACK").as_deref() == Ok("1");
+        for target_x in [30.0, 1000.0] {
+            for joint in [false, true] {
+                let camera = Camera::pinhole(1, 848, 800, 1.0, 1.0, 0.0, 0.0);
+                let mut ba = BundleAdjustment::new(camera.clone());
+                ba.add_pose(0, Pose::identity());
+                if joint {
+                    ba.fix_pose_rotation(0);
+                } else {
+                    ba.fix_pose(0);
+                }
+                ba.add_landmark(0, Point3::new(1.0, 0.0, 0.1));
+                ba.add_rig_observation(BaRigObservation {
+                    keyframe_id: 0,
+                    landmark_id: 0,
+                    xy: Point2::new(target_x, 0.0),
+                    camera,
+                    sensor_from_rig: SE3::identity(),
+                });
+                let before = ba.clone();
+                let result = ba
+                    .optimize(&BaConfig {
+                        max_iterations: 1,
+                        initial_lambda: Some(0.01),
+                        linear_solver: LinearSolver::Sparse,
+                        ..BaConfig::default()
+                    })
+                    .unwrap();
+                assert_eq!(result.iterations.len(), 1);
+                assert_eq!(
+                    ba.poses[&0].world_to_camera.rotation,
+                    before.poses[&0].world_to_camera.rotation,
+                    "fixed rotation moved"
+                );
+                if !joint {
+                    assert_eq!(ba.poses, before.poses, "fixed pose moved");
+                }
+                assert_eq!(ba.nonprojectable_observation_count(), 0);
+                if enabled && target_x == 30.0 {
+                    assert!(result.iterations[0].step_accepted);
+                    assert!(result.final_cost < result.initial_cost);
+                    let actual_step = (ba.landmarks[&0] - before.landmarks[&0]).norm();
+                    assert!(actual_step > 0.0);
+                    assert!((result.iterations[0].max_landmark_step - actual_step).abs() < 1e-12);
+                    if joint {
+                        let pose_step = (ba.poses[&0].world_to_camera.translation
+                            - before.poses[&0].world_to_camera.translation)
+                            .norm();
+                        assert!(pose_step > 0.0);
+                        assert!((result.iterations[0].max_pose_step - pose_step).abs() < 1e-12);
+                    }
+                } else {
+                    assert!(!result.iterations[0].step_accepted);
+                    assert_eq!(ba, before, "rejection must restore the complete problem");
+                    assert_eq!(result.final_cost, result.initial_cost);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn infeasible_rig_sample_matches_predicate_and_is_bounded() {
+        let camera = Camera::pinhole(1, 848, 800, 285.0, 286.0, 425.5, 398.5);
+        let mut ba = BundleAdjustment::new(camera.clone());
+        ba.add_pose(0, Pose::identity());
+        for id in 0..20 {
+            ba.add_landmark(id, Point3::new(0.0, 0.0, if id == 0 { 3.0 } else { -1.0 }));
+            ba.add_rig_observation(BaRigObservation {
+                keyframe_id: 0,
+                landmark_id: id,
+                xy: Point2::new(425.5, 398.5),
+                camera: camera.clone(),
+                sensor_from_rig: SE3::identity(),
+            });
+        }
+        assert_eq!(ba.nonprojectable_observation_count(), 19);
+        let sample = ba.nonprojectable_rig_sample(16);
+        assert_eq!(sample.len(), 16);
+        assert_eq!(sample[0], (1, 0, 1, Some(-1.0)));
+        assert_eq!(sample[15], (16, 0, 16, Some(-1.0)));
+        assert!(ba.nonprojectable_rig_sample(0).is_empty());
+        assert_eq!(ba.nonprojectable_rig_sample(100).len(), 19);
+        assert_eq!(ba.nonprojectable_observation_count(), 19);
+    }
 
     #[test]
     fn arbitrary_sensor_factors_refine_one_shared_body_pose() {
@@ -1474,6 +1655,36 @@ impl BundleAdjustment {
         });
 
         mono.count() + stereo.count() + general_stereo.count() + rig.count()
+    }
+
+    /// Bounded read-only sample using the exact rig feasibility predicate.
+    fn nonprojectable_rig_sample(&self, limit: usize) -> Vec<(usize, u64, u64, Option<f64>)> {
+        self.rig_observations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, observation)| {
+                let pose = self.poses.get(&observation.keyframe_id);
+                let point = self.landmarks.get(&observation.landmark_id);
+                if let (Some(pose), Some(point)) = (pose, point) {
+                    if rig_residual_jacobians(observation, pose, point).is_some() {
+                        return None;
+                    }
+                }
+                let depth = pose.zip(point).map(|(pose, point)| {
+                    observation
+                        .sensor_from_rig
+                        .transform_point(&pose.transform_world_point(point))
+                        .z
+                });
+                Some((
+                    index,
+                    observation.keyframe_id,
+                    observation.landmark_id,
+                    depth,
+                ))
+            })
+            .take(limit)
+            .collect()
     }
 
     /// Robust reprojection cost: `Σ ρ(||r||²)` where `ρ` is the supplied
@@ -3345,6 +3556,21 @@ impl BundleAdjustment {
             && !config.refine_distortion;
         let trace_phase_timing = std::env::var_os("VISLOC_BA_TRACE_PHASE_TIMING").is_some();
 
+        static SPARSE_DEBUG_WINDOW_CLAIMED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let sparse_debug_slot = claim_sparse_debug_window(
+            std::env::var_os("VISLOC_SFM_DEBUG_BA_SPARSE_FIRST_WINDOW").is_some()
+                && matches!(backend, BaSolveBackend::Legacy)
+                && config.linear_solver == LinearSolver::Sparse
+                && velocity_index.is_empty()
+                && bias_index.is_empty()
+                && !self.rig_observations.is_empty()
+                && config.max_iterations > 0,
+            ba_schur_debug_slot(),
+            pose_index.len(),
+            &SPARSE_DEBUG_WINDOW_CLAIMED,
+        );
+
         for iteration in 0..config.max_iterations {
             let after_rejection = iterations.last().is_some_and(|step| !step.step_accepted);
             let emit_phase = |phase: &str, started: Option<std::time::Instant>| {
@@ -3446,7 +3672,7 @@ impl BundleAdjustment {
             };
             let retry_eligible = original_diagonal.is_some();
             let solve_result = match backend {
-                BaSolveBackend::Legacy => solve_step(
+                BaSolveBackend::Legacy => solve_step_with_debug(
                     system.as_mut().expect("legacy normal system"),
                     pose_index.len(),
                     landmark_index.len(),
@@ -3456,6 +3682,15 @@ impl BundleAdjustment {
                     config.linear_solver,
                     config.parallel,
                     &mut block_symbolic_cache,
+                    sparse_debug_slot.map(|slot| {
+                        schur_debug_context_for_slot_with_coordinates(
+                            &pose_index,
+                            &landmark_index,
+                            iteration,
+                            slot,
+                            false,
+                        )
+                    }),
                 )
                 .map(|(delta_poses, delta_landmarks)| (delta_poses, delta_landmarks, None, None)),
                 BaSolveBackend::MatrixFree(runtime)
@@ -3707,14 +3942,109 @@ impl BundleAdjustment {
             }
 
             let nonprojectable_before = current_nonprojectable;
-            let cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
-            let nonprojectable_after = self.nonprojectable_observation_count();
+            let mut cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
+            let mut nonprojectable_after = self.nonprojectable_observation_count();
+            let mut backtrack_exhausted = false;
+            // Experimental bounded rescue: keep the production full-step path
+            // unchanged unless explicitly enabled for pure rig sparse LM.
+            if nonprojectable_after > current_nonprojectable
+                && matches!(&backend, BaSolveBackend::Legacy)
+                && config.linear_solver == LinearSolver::Sparse
+                && config.initial_lambda.is_some()
+                && velocity_index.is_empty()
+                && bias_index.is_empty()
+                && !self.rig_observations.is_empty()
+                && self.observations.is_empty()
+                && self.stereo_observations.is_empty()
+                && self.general_stereo_observations.is_empty()
+                && std::env::var("VISLOC_SFM_BA_FEASIBLE_BACKTRACK").as_deref() == Ok("1")
+            {
+                backtrack_exhausted = true;
+                for alpha in [0.5, 0.25, 0.125, 0.0625] {
+                    // Always start from the rollback state, never accumulate
+                    // successive trial increments or copy an extra whole model.
+                    for (&id, &i) in &pose_index {
+                        let mut xi = delta_poses.fixed_rows::<6>(i * 6).into_owned() * alpha;
+                        if self.fixed_pose_rotations.contains(&id) {
+                            xi[3] = 0.0;
+                            xi[4] = 0.0;
+                            xi[5] = 0.0;
+                        }
+                        self.poses
+                            .get_mut(&id)
+                            .expect("pose exists")
+                            .world_to_camera =
+                            saved_poses[&id].world_to_camera.compose(&SE3::exp(&xi));
+                    }
+                    for (&id, &i) in &landmark_index {
+                        let dx = delta_landmarks.fixed_rows::<3>(i * 3).into_owned() * alpha;
+                        *self.landmarks.get_mut(&id).expect("landmark exists") =
+                            Point3::from(saved_landmarks[&id].coords + dx);
+                    }
+                    let trial_cost = self.robust_cost_weighted(&kernel, gnc_weights);
+                    let trial_nonprojectable = self.nonprojectable_observation_count();
+                    let preserves_valid = self.rig_observations.iter().all(|obs| {
+                        let old_valid = saved_poses
+                            .get(&obs.keyframe_id)
+                            .zip(saved_landmarks.get(&obs.landmark_id))
+                            .is_some_and(|(pose, point)| {
+                                rig_residual_jacobians(obs, pose, point).is_some()
+                            });
+                        !old_valid
+                            || self
+                                .poses
+                                .get(&obs.keyframe_id)
+                                .zip(self.landmarks.get(&obs.landmark_id))
+                                .is_some_and(|(pose, point)| {
+                                    rig_residual_jacobians(obs, pose, point).is_some()
+                                })
+                    });
+                    let accepted = feasible_backtrack_accepts(
+                        cost_before,
+                        trial_cost,
+                        current_nonprojectable,
+                        trial_nonprojectable,
+                        preserves_valid,
+                    );
+                    eprintln!("sfm-ba-feasible-backtrack: iteration={} alpha={} accepted={} cost={} nonprojectable={}", iteration, alpha, accepted, trial_cost, trial_nonprojectable);
+                    cost_after = trial_cost;
+                    nonprojectable_after = trial_nonprojectable;
+                    if accepted {
+                        backtrack_exhausted = false;
+                        max_pose_step *= alpha;
+                        max_landmark_step *= alpha;
+                        break;
+                    }
+                }
+                // On exhaustion force rejection and restore all saved states.
+            }
             emit_phase("tentative_update_and_cost", update_started);
             let cost_accepted = match config.initial_lambda {
                 None => true, // Pure GN: accept unconditionally.
                 Some(_) => cost_after < cost_before,
             };
-            let feasibility_gate = nonprojectable_after <= current_nonprojectable;
+            let feasibility_gate =
+                !backtrack_exhausted && nonprojectable_after <= current_nonprojectable;
+            if sparse_debug_slot.is_some() && !feasibility_gate {
+                for (observation, frame, landmark, depth) in self.nonprojectable_rig_sample(16) {
+                    let factor = &self.rig_observations[observation];
+                    let before = saved_poses.get(&frame).zip(saved_landmarks.get(&landmark));
+                    let before_depth = before.map(|(pose, point)| {
+                        factor
+                            .sensor_from_rig
+                            .transform_point(&pose.transform_world_point(point))
+                            .z
+                    });
+                    let before_projectable = before.is_some_and(|(pose, point)| {
+                        rig_residual_jacobians(factor, pose, point).is_some()
+                    });
+                    let point_step = saved_landmarks
+                        .get(&landmark)
+                        .zip(self.landmarks.get(&landmark))
+                        .map(|(old, new)| (new - old).norm());
+                    eprintln!("sfm-debug-ba-rig-infeasible: iteration={} observation={} frame_id={} track_id={} tentative_sensor_depth={:?} before_sensor_depth={:?} before_projectable={} point_step={:?} sample_limit=16", iteration, observation, frame, landmark, depth, before_depth, before_projectable, point_step);
+                }
+            }
             let mut step_accepted = cost_accepted && feasibility_gate;
             let adaptive_decision = if adaptive_damping {
                 let decision = adaptive_step_decision(
@@ -3766,7 +4096,7 @@ impl BundleAdjustment {
                     iteration,
                     step_accepted,
                     cost_accepted,
-                    nonprojectable_after <= nonprojectable_before,
+                    feasibility_gate,
                     nonprojectable_before,
                     nonprojectable_after,
                     cost_before,
@@ -7620,6 +7950,7 @@ fn solve_matrix_free_step(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn solve_step(
     system: &mut NormalEquationsBa,
     p_count: usize,
@@ -7630,6 +7961,34 @@ fn solve_step(
     linear_solver: LinearSolver,
     parallel: bool,
     block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    solve_step_with_debug(
+        system,
+        p_count,
+        l_count,
+        v_count,
+        b_count,
+        lambda,
+        linear_solver,
+        parallel,
+        block_symbolic_cache,
+        None,
+    )
+}
+
+// Keep the solver dimensions and policy explicit, as in the test wrapper above.
+#[allow(clippy::too_many_arguments)]
+fn solve_step_with_debug(
+    system: &mut NormalEquationsBa,
+    p_count: usize,
+    l_count: usize,
+    v_count: usize,
+    b_count: usize,
+    lambda: f64,
+    linear_solver: LinearSolver,
+    parallel: bool,
+    block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+    debug_context: Option<SchurBlockDebugContext<'_>>,
 ) -> Result<(DVector<f64>, DVector<f64>), BaError> {
     // Landmark-only BA: H_LL is block-diagonal so each landmark gets an
     // independent 3×3 solve. No Schur complement needed. Every landmark's
@@ -7687,13 +8046,14 @@ fn solve_step(
         else {
             unreachable!();
         };
-        return solve_step_pose_blocks(
+        return solve_step_pose_blocks_with_debug(
             system,
             diagonal,
             p_count,
             l_count,
             lambda,
             block_symbolic_cache,
+            debug_context,
         );
     }
 
@@ -7899,6 +8259,7 @@ fn solve_step(
 /// Hessian. Blocks are stored by block-column and row-sorted within each
 /// column, which makes the emitted scalar triplets match the legacy dense
 /// column-major scan exactly while visiting structural blocks only.
+#[cfg(test)]
 fn solve_step_pose_blocks(
     system: &NormalEquationsBa,
     diagonal: Vec<Matrix6<f64>>,
@@ -7907,6 +8268,35 @@ fn solve_step_pose_blocks(
     lambda: f64,
     block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
 ) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    solve_step_pose_blocks_with_debug(
+        system,
+        diagonal,
+        p_count,
+        l_count,
+        lambda,
+        block_symbolic_cache,
+        None,
+    )
+}
+
+fn solve_step_pose_blocks_with_debug(
+    system: &NormalEquationsBa,
+    diagonal: Vec<Matrix6<f64>>,
+    p_count: usize,
+    l_count: usize,
+    lambda: f64,
+    block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+    debug_context: Option<SchurBlockDebugContext<'_>>,
+) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    let debug_diagonal = debug_context.as_ref().and_then(|context| {
+        diagonal.get(context.pose_slot).map(|block| {
+            let mut damped = *block;
+            for k in 0..6 {
+                damped[(k, k)] += lambda.max(0.0);
+            }
+            damped
+        })
+    });
     let dim = p_count * 6;
     let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> =
         (0..p_count).map(|_| BTreeMap::new()).collect();
@@ -7962,6 +8352,20 @@ fn solve_step_pose_blocks(
     }
     log_process_memory("ba-after-schur-reduction");
 
+    if let (Some(context), Some(diagonal)) = (debug_context, debug_diagonal) {
+        if let Some(reduced) = columns
+            .get(context.pose_slot)
+            .and_then(|c| c.get(&context.pose_slot))
+        {
+            let counts = collect_schur_block_debug_counts(
+                system,
+                &h_ll_inv_cache,
+                lambda,
+                context.pose_slot,
+            );
+            emit_schur_block_debug(context, lambda, &diagonal, reduced, counts);
+        }
+    }
     log_process_memory("ba-sparse-before-factor");
     let rhs = DMatrix::from_column_slice(dim, 1, b_reduced.as_slice());
     let solution =

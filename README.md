@@ -40,14 +40,28 @@ p95 target, but **RMSE parity is still open**.
 | ATE p95 ↓ | 0.6387 m | **0.6382 m** | Met |
 | Observation-weighted mean reprojection ↓ | 0.9030 px | **0.5817 px** | Met |
 
+The first continuous, generated-artifact native diagnostic also completed all
+17 stages inside a 2 GiB cgroup:
+
+| OpenLORIS 10k diagnostic | Frozen COLMAP control | visloc-rs | Outcome |
+| --- | ---: | ---: | ---: |
+| Mapper wall ↓ | 4:37:44 | **13:36** | **20.41× faster** |
+| Measured generated phases ↓ | 5:20:57 | **4:43:26** | **1.13× faster** |
+| Peak process / sampled RSS ↓ | 2.08 GiB | **1.72 GiB** | **17.0% lower** |
+| OOM kills | 0 | 0 | parity |
+
 Both models contain connected 4,494-frame and 505-frame components. Lower
 reprojection error is not proof of better trajectory accuracy. ATE uses one
 Sim(3) alignment per component; RMSE and p95 are computed from the pooled
 GT-scored image errors, not averages of component scores. This is a
 repeated development-sequence evaluation, not held-out validation, and no
-10k speed win at equivalent quality is claimed. See the
+10k speed win at equivalent quality is claimed. The visloc timing is one
+uninterrupted run, but OS cache state was uncontrolled; the COLMAP total is a
+sum of measured phases rather than one continuous cold wall clock. Repeated
+cold-cache acceptance therefore remains open. See the
 [frozen COLMAP control](benchmarks/electro/m8-openloris-colmap-10k-control.json)
-and [experimental refinement evidence](benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
+and [native E2E evidence](benchmarks/electro/m8-native-e2e-v1.json), plus the
+[experimental refinement evidence](benchmarks/electro/m8-openloris-atlas-connected-filtered-ba-v1.json).
 
 ## 10,008-image real-world SfM scale validation
 

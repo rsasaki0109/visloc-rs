@@ -1,0 +1,38 @@
+{
+  "candidate_native": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-native-frontend-binaries-v1/candidates-a7ff5ff",
+    "sha256": "8eeee5c2f8b39de6575c2308e89cba11b96d38d66d1ae3d51ab6ce0d61d43e79"
+  },
+  "candidate_dense": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-extract-resume-pilot-v1/extract-3ae253a",
+    "sha256": "8cfa9c53fcaea5d6305dbdd3018b8381ae214806751e6ee3dc85bb8692a8da34"
+  },
+  "sfm": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-probe-v1/sfm-b02f85e",
+    "sha256": "b02f85ecce56074e000d77a6bbd63242b3d0f568294f9c22fcc9a2dc4ca01c50"
+  },
+  "merge": {
+    "path": "/home/sasaki/workspace/visloc-rs/target/release/examples/merge_verified_pair_snapshots",
+    "sha256": "d85410b5b1a63eed6105450c44468aab5b772b74a62db7c63d30562a70e8d661"
+  },
+  "compare": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-shared-worker-probe-v1/compare-1180dc1",
+    "sha256": "1180dc17ec811c5a5ceb1a90ae893a4c668354e8e95b2eefcd6508b610af55d9"
+  },
+  "admission": {
+    "path": "/home/sasaki/workspace/visloc-rs/target/release/examples/admit_verified_bridge_snapshot",
+    "sha256": "883a6ad7b21e34de9309cb71e35fe7750547df34d3ffe8c92b59921625247af5"
+  },
+  "mapper": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-retry-reuse-1k-v1/rig-0466499",
+    "sha256": "3d744ced8b2b09cbaba26bf963e9ac31c5293538b1a8bbbee62621ccfdd70c34"
+  },
+  "stitch": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-regenerated-atlas-v1/stitch-cfe11c6",
+    "sha256": "6354f5da56efa1444701e8cf9e5a3ed0aa5dc3b7974d056e5a5b85a143bac564"
+  },
+  "integration": {
+    "path": "/home/sasaki/datasets/openloris/corridor1-1-m8-ba-retry-timing-v1/integrate-b23a6a4",
+    "sha256": "c013184d39d70947f52b6b17ef79c290fe50899b4277a682a477ca063098c172"
+  }
+}

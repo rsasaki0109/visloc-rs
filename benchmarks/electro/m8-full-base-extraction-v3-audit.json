@@ -1,0 +1,28 @@
+{
+  "status": "pass",
+  "scope": "Single full 10k base extraction; not cold whole-pipeline E2E, quality parity, or repeated performance evidence. Does not repair the historical v2 measurement ledger.",
+  "unit": "visloc-full-base-extraction-v3.service",
+  "terminal": {"MainPID": 0, "SubState": "exited", "Result": "success"},
+  "dataset_root": "/home/sasaki/datasets/openloris",
+  "report": "corridor1-1-m8-full-base-extraction-v3/report.json",
+  "report_sha256": "a56c54eeab2fcef6bd2a3552fef850ddb97f23171a61ba1fae4d4d4515d48a47",
+  "measurement": "m8-full-base-extraction-measurement-v3/measurement.json",
+  "measurement_sha256": "bc0b129914cc22bdcd26658655f7278e167ab3e9c8695f9ce436cf091d16d032",
+  "independent_audit": {
+    "feature_count": 10000,
+    "exact_output_and_reference_membership": true,
+    "output_and_reference_files_rehashed": 20000,
+    "all_sha256_equal_report": true,
+    "reference": "corridor1-1-m5/tiers/tier-10000/features256",
+    "loci_sidecar_reference_parity": "not evaluated"
+  },
+  "worker_exit_codes": [0, 0, 0, 0, 0, 0],
+  "wall_seconds": 4673.225689293933,
+  "sampled_aggregate_peak_rss_kib": 1474684,
+  "rss_sampling_interval_seconds": 0.05,
+  "cgroup_memory_peak_bytes": 2147483648,
+  "memory_events_max": 19818,
+  "oom": 0,
+  "oom_kill": 0,
+  "resource_caveat": "Sampled aggregate RSS includes monitor and may double-count shared pages. Cgroup peak includes cache/kernel memory and reached the 2 GiB limit; no claim of absence of memory pressure."
+}

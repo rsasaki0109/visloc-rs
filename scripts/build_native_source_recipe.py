@@ -15,6 +15,26 @@ INPUTS = {
 }
 
 
+def render_nodes_tsv(recipe, run_root):
+    """Bind atlas nodes to this run's source outputs, never retained models."""
+    root = Path(run_root).resolve()
+    executions = {row['id'] for row in recipe['executions']}
+    lines = ['# node_id\twindow_start\timages_txt']
+    seen = set()
+    for row in recipe['nodes']:
+        if row['node'] in seen or row['execution'] not in executions:
+            raise ValueError('Duplicate node or unknown source execution')
+        seen.add(row['node'])
+        for value in (row['execution'], row['component']):
+            if not value or Path(value).name != value or value in ('.', '..'):
+                raise ValueError('Invalid source path component')
+        path = root / 'sources' / row['execution'] / 'model' / row['component'] / 'images.txt'
+        if any(char in str(path) for char in '\t\r\n'):
+            raise ValueError('Path cannot be represented in TSV')
+        lines.append(f"{row['node']}\t{row['offset']}\t{path}")
+    return '\n'.join(lines) + '\n'
+
+
 def compile_execution(path):
     raw = path.read_bytes()
     evidence = json.loads(raw)

@@ -4939,7 +4939,10 @@ mod tests {
             gt_poses.push(Pose::from_world_to_camera(q_w2c, t_w2c));
         }
         let mut features = Vec::new();
-        let mut visible: Vec<std::collections::HashMap<usize, usize>> = Vec::new();
+        // Keep the rendered correspondence order deterministic. Randomized
+        // HashMap iteration changes the samples seen by the two-view solver
+        // between test processes, even though the scene itself is fixed.
+        let mut visible: Vec<std::collections::BTreeMap<usize, usize>> = Vec::new();
         for pose in &gt_poses {
             let (kps, descs): (Vec<_>, Vec<_>) = points
                 .iter()

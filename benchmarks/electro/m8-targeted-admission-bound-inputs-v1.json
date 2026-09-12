@@ -1,0 +1,6 @@
+{
+  "repair_snapshot": "/media/sasaki/aiueo1/visloc-repair-admission-bound-v1/admissions/repair19-admission.vps",
+  "targeted_snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-targeted-shared-bound-v1/run/mapping/verified-merged.vps",
+  "adaptive_features": "/home/sasaki/datasets/openloris/corridor1-1-m8-linked-adaptive-bank-v2/features",
+  "rig_manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt"
+}

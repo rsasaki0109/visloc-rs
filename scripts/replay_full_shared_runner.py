@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full retained dense schedule through prepare/match/merge/completed resume."""
+"""Frozen frontend matching schedules through shared output and completed resume."""
 import argparse
 import json
 import os
@@ -10,7 +10,18 @@ import subprocess
 import sys
 import time
 
-from replay_native_candidates import sha
+from replay_native_candidates import sha, bind_feature_input
+from native_matching_recipe import flags_from_timing
+from replay_native_matching import same_candidate_schedule
+
+
+def bind_candidates(reference, override=None):
+    """Accept regenerated candidates only when their bytes match the frozen recipe."""
+    expected = sha(reference.resolve(strict=True))
+    selected = (override if override is not None else reference).resolve(strict=True)
+    if not selected.is_file() or sha(selected) != expected:
+        raise ValueError('Candidate manifest differs from frozen reference')
+    return selected, expected
 
 
 def main():
@@ -19,6 +30,10 @@ def main():
     parser.add_argument('--merge-binary', type=Path, required=True)
     parser.add_argument('--compare-binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--variant', choices=['dense', 'native', 'adaptive', 'targeted7'], default='dense')
+    parser.add_argument('--features-dir', type=Path)
+    parser.add_argument('--candidate-manifest', type=Path,
+                        help='Regenerated candidate file; must match frozen reference bytes')
     args = parser.parse_args()
     if not sys.platform.startswith('linux'):
         parser.error('Linux process-group timeout handling required')
@@ -38,20 +53,56 @@ def main():
     candidates = base / 'corridor1-1-m8-dense-candidates-replay-v1/candidates.txt'
     reference = base / 'corridor1-1-m8-dense-matching-replay-v1/matches'
     reference_merged = base / 'corridor1-1-m8-dense-merge-replay-v1/verified-merged.vps'
+    recipe = base / 'corridor1-1-m8-dense256x2-10k-ann-gap128-local32-8n-v1'
+    features = base / 'corridor1-1-m8-dense256x2-full10k-v2/features'
+    shard_count = 2500
+    policy = ['--retrieval-topk', '128', '--retrieval-min-frame-gap', '128', '--candidate-budget', '80000']
+    if args.variant in ('native', 'adaptive'):
+        candidates = base / 'corridor1-1-m8-native-candidates-legacy-replay-v1/candidates.txt'
+        reference = base / 'corridor1-1-m8-native-matching-replay-v1/matches'
+        reference_merged = base / 'corridor1-1-m8-native-merge-replay-v1/verified-merged.vps'
+        recipe = base / 'corridor1-1-m8-native-rig-runner-10k-v1'
+        features = base / 'corridor1-1-m5/tiers/tier-10000/features256'
+        shard_count = 2188
+        policy = ['--retrieval-topk', '32', '--candidate-budget', '70000', '--rig-frame-manifest',
+                  str(base / 'corridor1-1-m8-visloc-rig/tier-10000-champion/rig-manifest.txt')]
+        if args.variant == 'adaptive':
+            reference = base / 'corridor1-1-m8-adaptive-matching-replay-v1/matches'
+            reference_merged = base / 'corridor1-1-m8-adaptive-merge-replay-v1/verified-merged.vps'
+            recipe = base / 'corridor1-1-m8-adaptive32-halo8-10k-v1/pipeline'
+            features = base / 'corridor1-1-m8-linked-adaptive-bank-v2/features'
+            native_recipe = base / 'corridor1-1-m8-native-rig-runner-10k-v1'
+            if not same_candidate_schedule((native_recipe / 'match-worker.plan').read_text(),
+                                           (recipe / 'match-worker.plan').read_text()):
+                raise RuntimeError('Adaptive schedule differs from native candidates')
+    if args.variant == 'targeted7':
+        recipe = base / 'corridor1-1-m8-targeted7-dense256-v1'
+        candidates = recipe / 'candidates.txt'
+        reference = base / 'corridor1-1-m8-targeted7-matching-replay-v1/matches'
+        reference_merged = base / 'corridor1-1-m8-targeted7-merge-replay-v1/verified-merged.vps'
+        features = base / 'corridor1-1-m8-linked-adaptive-bank-v2/features'
+        shard_count = 448
+        # Candidates are supplied explicitly; these flags do not regenerate them.
+        policy = ['--candidate-budget', '14319']
+    _, features = bind_feature_input(['sfm', '--features-dir', str(features)],
+                                    recipe / 'features.json', args.features_dir)
+    candidates, candidate_hash = bind_candidates(candidates, args.candidate_manifest)
     runner = Path(__file__).resolve().with_name('benchmark_electro.py')
     runner_hash = sha(runner)
-    common = [sys.executable, str(runner), '--features-dir', str(base / 'corridor1-1-m8-dense256x2-full10k-v2/features'),
+    common = [sys.executable, str(runner), '--features-dir', str(features),
               '--calibration-dir', str(base / 'corridor1-1-m5/tiers/tier-10000/calibration'),
               '--artifact-root', str(root / 'run'), '--candidate-manifest', str(candidates),
               '--binary', binaries['sfm']['path'], '--merge-binary', binaries['merge']['path'],
               '--pairs-per-shard', '32', '--pair-source', 'temporal-pyramid',
-              '--temporal-pyramid-max-offset', '32', '--retrieval-topk', '128',
-              '--retrieval-min-frame-gap', '128', '--candidate-budget', '80000']
+              '--temporal-pyramid-max-offset', '32', *policy,
+              *flags_from_timing(recipe / 'timing/persistent-match.time.txt')]
     match = [*common, '--match', '--persistent-matcher', '--stream-match-features',
              '--shared-snapshot-envelope', '--resume']
-    report = {'status': 'running', 'binaries': binaries, 'runner_sha256': runner_hash,
-              'candidate_sha256': sha(candidates), 'reference_merged_sha256': sha(reference_merged),
-              'phases': {}, 'scope': 'Retained10k features/candidates through Python matching+merge runner. No extraction, candidate generation, mapping, quality or native E2E claim.'}
+    report = {'status': 'running', 'variant': args.variant, 'features_resolved': str(features),
+              'binaries': binaries, 'runner_sha256': runner_hash,
+              'candidates_resolved': str(candidates),
+              'candidate_sha256': candidate_hash, 'reference_merged_sha256': sha(reference_merged),
+              'phases': {}, 'scope': 'Manifest-validated 10k features and frozen-byte-validated candidates through Python matching+merge runner. No extraction, candidate generation, mapping, quality or native E2E timing claim.'}
 
     def save():
         (root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -59,6 +110,8 @@ def main():
     def run(name, command):
         if sha(runner) != runner_hash:
             raise RuntimeError('Runner source changed during experiment')
+        if sha(candidates) != candidate_hash:
+            raise RuntimeError('Candidate manifest changed during experiment')
         print(f'Running {name}', flush=True)
         started = time.monotonic()
         with (root / f'{name}.log').open('w') as stream:
@@ -81,7 +134,7 @@ def main():
         run('match', match)
         outputs = root / 'run/matches'
         index = json.loads((outputs / 'index.json').read_text())
-        if len(index['shards']) != 2500 or any(entry['status'] != 'complete' or not entry.get('snapshot_envelope') for entry in index['shards']):
+        if len(index['shards']) != shard_count or any(entry['status'] != 'complete' or not entry.get('snapshot_envelope') for entry in index['shards']):
             raise RuntimeError('Incomplete or unbound match index')
         expected = {path.name for path in reference.glob('*.vps')}
         paths = sorted(outputs.glob('*.vps'))

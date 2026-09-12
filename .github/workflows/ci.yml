@@ -68,6 +68,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      - name: Experimental feasible BA backtracking
+        env:
+          VISLOC_SFM_BA_FEASIBLE_BACKTRACK: '1'
+        run: cargo test -p visloc-slam --lib generalized_rig_factor_tests -- --nocapture
+
       - name: API stability allowlist
         run: cargo test --test api_stability -- --nocapture
 

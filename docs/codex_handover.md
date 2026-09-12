@@ -2,6 +2,436 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+連続native E2E診断v1（source c80f45f）はterminal success。
+unit visloc-native-e2e-v1.service、MainPID0/SubState exited/Result success/exit0、
+invocation5118aa2190cc4bc69110d602caa37e25。再実行・再poll不要。
+全17stageが初回連続実行でexit0/completed。終了後に全stage artifact checkpointを
+独立再検証して17/17 PASS。pipeline wall17005.153s、計測wall17006.100s。
+sample aggregate peak RSS1806376KiB（1.72GiB）、cgroup peak2GiB、Swap0、
+memory.events max366806、OOM/oom_kill0。メモリ圧迫なしとは主張しない。
+最終scoreは9998画像/4999frame、RMSE0.388993m、p950.638173m。
+COLMAP比でmapper20.41倍、phase合計比1.13倍、sampled RSS17.0%低いが、
+RMSEはCOLMAP0.384307mより1.22%悪く品質gate未達。
+またOS cache未制御、COLMAP側は連続wallでなくphase和、単発runのため、
+同条件cold E2E性能acceptance・3反復・全SIGKILL restartは未達。
+証跡benchmarks/electro/m8-native-e2e-v1.json。pipeline report SHA375ec7b...、
+measurement SHA9f889ea...、score SHA74e839b...。
+次はCOLMAP IncrementalTriangulator::Createとの差として残るbounded recursive
+partitionを固定armで実装する。既存batched Createは最初のinlier集合だけを所有したが、
+COLMAPは未所有残差が3観測以上なら別trackを再帰生成する。上限はCSR rowあたり
+32近傍/128 ray-pair仮説/4排他的partition、GTはpublication後だけ。まず1kで
+登録/RMSE/p95/再投影/time/RSSの一つでも悪化したら上位tierへ進めない。
+通過後にcold条件統一、3反復、tier非回帰へ進む。
+共有化済み既存model/VPSは上書き禁止。新runはfresh root。
+
+M8 model/match共有化完了: apply_m8_duplicate_inventory.py、session60517 exit0。
+固定一覧からsingle-link682filesのみ置換、19277934592bytes（17.95GiB）解放。
+全事前hash/inode/link照合と全事後hash/shared inode確認PASS。
+証跡benchmarks/electro/m8-model-match-dedup-applied-v1.json。全path/bytes保持。
+対象model/VPSは以後上書き禁止、fresh outputまたは独立コピーを使用。
+df空き45G（この操作で説明できる解放量は17.95GiBだけ）。16GiB容量guardは収容可能。
+次は全cold executorの現状レビュー・固定pins確認・測定開始条件確認。
+以下のinventory未適用という記録は過去状態。適用scriptの再実行不要。
+
+容量整理候補を保存: scripts/inventory_m8_duplicates.py（読み取り専用）。
+外部一覧m8-model-match-duplicate-inventory-v1.json、repo同名証跡にSHA固定。
+206groups/888unique inodes、解放候補19277934592bytes。まだ適用していない。
+対象はM8配下1MiB以上のimages.txt/points3D.txt/*.vpsのみ、symlink除外。
+同一user FD監査で候補open0、ただし5process権限拒否あり（再確認sd-pam/sshd）。
+visloc user service稼働0。将来writer排除/完全quiescence証明ではない。
+次は固定一覧の対象レビューと適用前再照合、安全な共有化。inventory test1 PASS。
+
+base-v3の1万特徴を参照実体m5/feature-extract/featuresへhardlink化完了。
+scripts/deduplicate_base_v3.py、監査m8-base-v3-dedup-v1.json。
+全件事前hash/参照symlink実体確認、事後全hash+共有inode確認済み。
+1705103360bytes（約1.59GiB）解放、空き5.5GiB。全cold guard16GiBにはまだ不足。
+両bankは共有inodeなので上書き禁止。編集は独立コピー、新runは新root。
+sidecar/raw/log/計測証跡は変更なし。過去性能を共有化後の状態で再解釈しない。
+helper2tests PASS、apply session90133 exit0。395d537のCI34310596934は直近実行中。
+
+base-v3は正常終了済み（MainPID0/Result success/SubState exited）。再起動不要。
+全6worker exit0。出力1万特徴と参照1万特徴を独立再SHA256照合し、集合・全hash一致。
+証跡: benchmarks/electro/m8-full-base-extraction-v3-audit.json。
+wall4673.225689s、sample aggregate peak RSS1474684KiB、OOM/oom_kill0。
+cgroup peak2147483648bytesで上限到達、max19818（圧迫なしとは言わない）。
+これはbase単体の新しい完走計測。v2の欠損ledgerや全cold E2E/品質gate達成とは別。
+次はこの証跡のレビューとPR反映、全cold用容量確保。以下のbase稼働中記録は過去状態。
+
+最新軽量作業: run_native_pipeline.pyに--resume（通常子exit>0の記録済み失敗限定）。
+native_pipeline_resume.pyでplan/pins/成功prefixの全artifact checkpointを検証後、
+失敗stageのoutput/log/payload/captureをfailed-attempts/<uuid>/へ退避し再実行。
+過去reportも退避、完了済みstageは再実行しない。flockで実行中executorとの競合拒否。
+関連14tests PASS：実child exit7→再開成功・完了inode保持・失敗成果物保持、
+plan差分/未観測失敗/負のsignal終了/実行中lockを拒否。
+SIGKILL/親強制終了/孤児child安全確認は未対応、全目標restart達成ではない。
+保守的16GiB guardはresume時も維持。各attempt wallをcold E2E時間と混同しない。
+base-v3はMainPID4045651で継続中、worker0=163/1667、OOM0、max5180。
+実行中base-v3 script/inputには変更なし。重い実験・buildを追加していない。
+
+最新軽量作業: native_pipeline_checkpoint.pyを追加、全体executorで成功stageの
+output/capture/payload/logの内容checkpointとcompleted=trueを保存するよう変更。
+ファイル・空directory・file symlink（target文字列+参照先hash）を記録。
+directory symlink/特殊fileは拒否。変更/追加/削除/参照先変更を検出。
+関連11tests PASS（実executor完了checkpointと事後log変更検出を含む）。
+これはresume前提の出力検証のみ。--resume/失敗stage退避/whole-pipeline再開は未実装。
+実行中base-v3のscript/inputは変更していない。新しいcheckpointは次の全体run向け。
+base-v3は継続中MainPID4045651、直近worker0=84/1667、memory.events oom/oom_kill0。
+memory.events max4767（圧迫あり）。終端RSS未確定、同unitを追跡し再起動しない。
+
+実行中: visloc-full-base-extraction-v3.service、2GiB/Swap0/timeout22000。
+probe_openloris_base_extraction.py --all-images --workers6 --variant base。
+出力dataset/corridor1-1-m8-full-base-extraction-v3、
+計測dataset/m8-full-base-extraction-measurement-v3。同unitを追跡、再起動禁止。
+目的はv2で欠けた終端aggregate RSS/cgroup/OOM記録の取得。特徴一致だけで完了扱いしない。
+既存frozen extractor extract-3ae253aを使用、出力見積約1.8GiB/開始前空き5.7GiB。
+他の大型run/buildや入力bank変更を並行しない。完了後独立1万特徴hash監査と
+measurement terminalを照合。v2自体の不完全ledgerを後付けPASSに変更しない。
+起動head db9c76c。全cold E2Eではない、#138 base resource gap解消のための再計測。
+
+CI cd1c5fa/run34304912157はglobal_sfm disconnected fixtureでFAIL。
+ローカル別プロセス反復でも再現。fixture HashMap列挙が対応順を毎回変えていた。
+db9c76cでfixtureのみBTreeMap化（本番solver変更なし）、push済み。
+global_sfm19tests PASS（build79020 exit0/2m20s）、対象別process100回PASS、fmt PASS。
+入力順依存の本番一般性を解決したとは主張しない。新head CIは未確認。
+
+最新容量整理: 完了済みfull-dense-extraction-v1/featuresの2万filesを
+dense256x2-full10k-v2/featuresへ全hash確認後hardlink化。
+scripts/deduplicate_dense_extraction.py、plan session84735/apply43516ともexit0完了。
+4,765,159,424bytes（4.44GiB）解放、空き5.7GiB。
+全出力を事後再hashし共有inodeも全件確認。証跡m8-dense-dedup-v1.json、
+外部audit dataset/m8-dense-dedup-applied-v1.json。元reportSHA3fabb11f...不変。
+feature内容/path/manifest/抽出ログ/計測証跡は保持。inode/metadata共有なので
+両feature bankを絶対に上書きしない。編集が必要ならまず独立コピーを作る。
+新抽出は必ず新rootに実行。整理後のcache/共有状態で過去の性能比較を再解釈しない。
+generic merge helper2tests PASS、専用script py_compile+実全2万検証PASS。
+全cold開始guard16GiBには不足（残り約10.3GiB）。次は他の検証済み重複を調べる。
+
+最新: OFF/ON既存phaseログ集計完了、証跡m8-feasible-backtrack-phase-accounting-v1.json。
+main normal_equations/linear_solve event各2804で変化なし（factorization数そのものではない）。
+linear_solve27.038570→26.998891s、tentative_update_and_cost29.963184→109.656562s。
+ON main3430縮小候補/291受理。再solve削減仮説は今回成立せず、棄却を維持。
+容量整理: scripts/deduplicate_atlas_parity.pyで完了済みSchur診断3rootの14filesずつを
+canonical schur-feasibility-v2と全hash確認後hardlink化。42files、929980416bytes解放。
+raw/feature/log/measurement/ONモデルは変更なし。全path/bytes保持、inode metadataは共有。
+完了済みrootのモデルを絶対に上書きしないこと。必要なら独立コピーを作ってから利用。
+監査dataset/m8-schur-dedup-applied-v1.json（phase証跡内SHA）、planも保存。
+dedup helper2tests PASS、実全対象hash検証+終端unit確認+適用完了。空き約1.3GiB。
+全cold pipelineの容量には不足。新しい大型runを開始する根拠にはしない。
+
+最新確定: feasible-backtrack ON v1はterminal success/MainPID0/exited。
+再poll/再実行不要。実験は棄却。RMSE OFF0.3889930047→ON0.3891842840mで悪化。
+p95は0.6381734851→0.6380699612m、登録9998/GT採点9306。
+scorer/manifest/GT/transform/aliases/gapの同一性を確認。pre-ba+camera8hash独立一致。
+integration区間OFF153.3184523s→ON233.9327779s（単発比較、全wallは比較不可）。
+ON計測全wall237.1764653s/sample aggregate RSS560852KiB。
+証跡m8-feasible-backtrack-on-v1.json。既定OFFを維持し同設定再実験・GT閾値調整禁止。
+採点session19580はexit0終了。runner9c25b16、binary37298b3。
+空き386MiB。大型run/build不可。まず保存済みOFF/ON phase timingの内訳を集計し、
+無駄な再solve削減仮説を見直す。次の実験前に検証済み成果物の容量整理が必要。
+raw/feature/reference銀行は削除しない。全目標・COLMAP品質gateは依然未達。
+
+実行中: visloc-feasible-backtrack-on-v1.service（2GiB/Swap0/timeout1000）。
+runner9c25b16 scripts/run_atlas_backtrack_trial.py、同OFF binary37298b3。
+出力dataset/corridor1-1-m8-feasible-backtrack-on-v1、
+計測dataset/m8-feasible-backtrack-on-measurement-v1。同unit追跡、再起動禁止。
+mainでbacktrackログを確認。ON未完走、入力pins対象のscript/JSON/binaryは変更禁止。
+OFF stitchを再利用するため速度比較はintegration stage同士のみ（全wall比較禁止）。
+pre-ba全3filesとmodel/cameras完全一致を要求、post modelはhash記録し品質未評価扱い。
+runner出力validator2tests/既存exact executor3tests PASS。起動時空き683MiB。
+事後scorerはscripts/score_openloris_model.py（SHAc0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0）
+--manifest dataset/corridor1-1-m5/manifests/tier-10000.json
+--ground-truth dataset/official-groundtruth/calibration/corridor1-1/groundtruth.txt
+--transform-matrix dataset/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml
+--model-images newroot/integrated/main/model/images.txt とtailも指定、aliasesなし。
+従来scoreはdataset/corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1/score.json。
+
+最新確定: feasible-backtrack OFF v1はterminal success/MainPID0/exited。
+再poll/再実行不要。14参照hashをsha256sum --checkで独立全一致。
+main/tail backtrackログ0。wall155.1414069s、sample aggregate RSS560748KiB。
+証跡m8-feasible-backtrack-off-v1.json。ON未実行、品質・高速化は未証明。
+CI37298b3/run34303656924はterminal success（ON synthetic test含む）。
+次は同binaryのONを評価。ただし既存probe/execute_atlasはpost model完全一致を
+要求するのでON品質比較にはそのまま使えない。厳密parity runnerのgateを緩めず、
+実験専用runnerでpre-ba一致・出力hash・事後品質採点を扱うこと。
+現在空き684MiB。新build不要、追加runは出力予算を再確認して一件のみ。
+
+実行中: visloc-feasible-backtrack-off-v1.service（2GiB/Swap0/timeout1000）。
+新binary source37298b3、build80812はexit0（1m52s）。
+保存schur-probe-binaries.4WAfOy/integrate-37298b3、
+SHA10b3698d14bbec10c61d35e4ddc25eae8e8d412fa1ffdd39cc46cb42ae20c05c。
+出力dataset/corridor1-1-m8-feasible-backtrack-off-v1、
+計測dataset/m8-feasible-backtrack-off-measurement-v1。
+probe_atlas_schur_diagnostic.py診断なしで実験OFFの14参照hashを検査中。
+同unitを追跡、完走後に独立hash監査。再起動しない。ONは未実行。
+起動直前空き983MiB、過去出力約310MBで今回1件のみ収容可と判断。
+これを全体cold pipeline/ON比較の容量許可と解釈しない。
+CI37298b3/run34303656924は直近rust実行中、他8jobs success。
+
+最新: joint variable pose+point（回転固定）もproduction fixtureへ追加。
+session48581はexit0（release2m51s）。OFF/ON各4 tests PASS。
+jointでalpha0.5拒否/0.25受理、両更新nonzero・step norm一致、回転exact不変。
+4候補尽きた場合のproblem全体exact rollbackも両modeでPASS。
+CIに実験flag ONの別プロセステストを追加。実atlas OFF一致とA/Bは次の未完作業。
+06a21fdまでpush済み、CI34303430195は直近確認時in_progress。
+全体CI成功・性能改善はまだ主張しない。
+
+最新作業: bundle.rsにVISLOC_SFM_BA_FEASIBLE_BACKTRACK=1限定の
+4候補joint pose/landmark step縮小を実装（既定OFF、実データ未適用）。
+pure rig/legacy sparse/LM/velocity+biasなしに限定。追加全体snapshotなし。
+有限cost低下・既存非投影数gate・以前validな全rig観測のvalid維持を要求。
+失敗候補尽きたら強制拒否→既存rollback。受理時step normをalpha倍。
+session56698/23080はexit0完了、再poll不要。generalized_rig_factor_testsは
+OFF/ON別プロセス各4件PASS。production固定pose fixtureでalpha0.5のcost悪化拒否、
+alpha0.25受理、別fixtureの4候補尽きた完全rollback、固定pose不変、step norm一致。
+有限cost/既存valid観測維持predicateもPASS。joint variable pose+point、固定rotation、
+実atlas OFF byte parityは未検証。次はこの不足テストを補い一つの固定armを評価。
+session22417 Clippy --lib --release -D warnings PASS（8.29s）。
+診断step-detailのfeasibility表示もexhaustion込みgateへ修正済み。
+空き973MiB。実データrun禁止、まずテスト契約と容量予算を満たすこと。
+
+2026-09-09 最新確定: feasibility v2はterminal success、再実行不要。
+14参照hash一致、115診断行の全観測が更新前projectable。
+5内部trackの更新前sensor depthは0.000068〜0.038669m。
+証跡m8-schur-feasibility-v2.json。wall209.103801s/RSS550604KiB。
+品質改善ではない（RMSE 0.388993m > COLMAP 0.384307mのまま）。
+次の候補は点削除ではなく有限回のfeasibility-preserving step縮小。
+詳細・棄却条件はopenloris_atlas_bounded_ba.md末尾。未実装。
+空き1.1GiB、追加大型runを開始しない。既存データ削除なし。
+CI adb8fe6/run34302051261はClippy too_many_argumentsでFAIL。
+solve_stepから分離したsolve_step_with_debugの局所allow漏れを修正済み。
+cargo clippy -p visloc-slam --lib --release -j1 -- -D warnings PASS（19.55s）。
+cargo fmt --all -- --check / git diff --check PASS。新headの全体CIは未確認。
+以下のbuild/run稼働中という記録は過去ログ（現在完了済み）。
+
+最新: build39403はexit0完了（1m55s）。保存binary integrate-5def794（既存schur-probe-binaries.4WAfOy内）、
+SHA1539a5d848fcc30553471746781d007821da0bc7108373dbd1d92ba61a19a689。
+unit visloc-schur-feasibility-v2.serviceを2GiB/Swap0/timeout1000で起動。
+出力dataset/corridor1-1-m8-schur-feasibility-v2、計測dataset/m8-schur-feasibility-measurement-v2。
+同v2を追跡し14hash比較とbefore深度/投影可否/stepを監査。v1は終了済み。
+起動前空き1.4GiB、出力見積約310MB。追加大型runを並行起動しない。
+
+実行中: integration release build session39403（source5def794）。同sessionをpoll。
+完了後は新binary名で保存/hash確認し、新probe outputでbefore-depth診断を実行する。
+
+最新: session25100はexit0完了（release2m50s）、generalized_rig_factor_tests全2件PASS。
+before-depth診断ログの実データ検証は未実施。次にintegration binaryをbuildする。
+
+最新: feasibility sampleにbefore_sensor_depth/before_projectable/point_stepを追加中。
+saved_poses/saved_landmarks（既存rollback状態）を利用し追加全体コピーなし。
+受理gate/モデル更新は変更しない。未commit、実ログ未検証。
+cargo test -p visloc-slam --lib generalized_rig_factor_tests --release -j1
+session25100がビルド中。再起動せずpoll。rustfmt/diff check PASS、空き約1.4GiB。
+
+最新: feasibility v1はterminal success/MainPID0/exited、14参照hash独立全一致。
+wall158.972974s/sample aggregate RSS550652KiB。再poll不要。
+main115失敗観測行、内部trackは140/407/578/641/12192の5件、各反復最大12件。
+tail失敗行0。最大消去寄与4266とは異なる。証跡m8-schur-feasibility-v1.json。
+次はこの5trackの更新前後depth/geometryを取得し、受理gateを維持する改善仮説を検討。
+内部ID→COLMAP IDの直接joinは禁止。品質改善・因果はまだ未証明。
+
+最新: build99071はexit0完了、5bb84bbをpush済み。
+新保存binary schur-probe-binaries.4WAfOy/integrate-5bb84bb、
+SHA7194864f91b057878bfec1472f9ddd6ef41e677cf916195fa36219024984372a。
+unit visloc-schur-feasibility-v1.serviceを2GiB/Swap0/timeout1000で開始。
+出力dataset/corridor1-1-m8-schur-feasibility-v1、計測dataset/m8-schur-feasibility-measurement-v1。
+同unitを追跡し、完了後モデル14hashとsfm-debug-ba-rig-infeasibleを監査。
+既存OFF/ONは完了済みなので再poll不要。
+
+最新: session72367はexit0終了（release2m24s）、bounded sample test PASS。
+generalized_rig_factor_tests全2件もPASS。追加診断は実データではまだ未実行。
+空き1.7GiBなので新probeは一度に一件、保守的に出力約310MBとbinary容量を確認する。
+
+最新: first-window step gateをsolver境界で集計（step-detailは拒否のみ出すので
+先頭N行をwindow扱いしない）。main20反復15拒否/feasibility14、tail14反復拒否0。
+証跡m8-schur-first-window-step-gates-v1.json、commit9c2dff5。
+bundle.rsに非投影rig観測の最大16件sampleを追加中。最初の診断windowかつ
+feasibility失敗時のみ、仮更新後のobservation index/frame/track/sensor depthを出力。
+本体rig_residual_jacobians判定を再利用。新規失敗だけではなく仮更新後失敗のsample。
+関連test build session72367稼働中。再起動せずpoll。未commit、実モデル未検証。
+
+最新: Schur ON v1はterminal success/MainPID0/exited。再poll不要。
+OFF/ON/凍結参照の14filesを独立hashし全一致。
+main診断20行(iter0..19/frame0)、tail14行(iter0..13/frame4495)、OFF0行。
+全行finite=true/singular_hll=0。初回適格BAのみの出力範囲を確認。
+ON wall152.620315s/RSS550680KiB、OFF176.969935s/RSS560632KiB。
+single sequential/cache条件が異なるため速度改善とはしない。
+証跡m8-schur-diagnostic-parity-v1.jsonに14hash/測定/診断各行の主要値。
+次は最大消去寄与trackと低視差大移動trackの対応を調べる。全pose/全window寄与は未測定。
+
+最新: Schur OFF v1はterminal success/MainPID0/exited、14参照ファイル独立hash全一致。
+wall176.969935s、sampled aggregate peak RSS560632KiB。再poll不要。
+ON unit visloc-schur-parity-on-v1.serviceを同binary/入力・--diagnosticで起動。
+出力dataset/corridor1-1-m8-schur-parity-on-v1、計測dataset/m8-schur-parity-on-measurement-v1。
+同ON unitを追跡し、完了後14file一致とSchurログのfirst-window制御を監査。
+ON未完了。空き起動前2.0GiB。実行スクリプト/binaryは変更しない。
+
+最新: integration build session76465はexit0完了（2m12s）。
+保存binary /home/sasaki/datasets/openloris/schur-probe-binaries.4WAfOy/integrate-dee3141
+SHA276c5d90452f938db49bf700591c87f98ceef9c4012e90af4bdb26676dd7782b。
+probe_atlas_schur_diagnostic.pyを追加（source/rig検証→stitch/integration参照比較）。
+OFF unit visloc-schur-parity-off-v1.serviceを起動、2GiB/Swap0/timeout1000。
+出力dataset/corridor1-1-m8-schur-parity-off-v1、計測dataset/m8-schur-parity-off-measurement-v1。
+同unitを追跡。OFF PASS後に新ON出力で診断比較、まだON未開始。
+Python既存93 tests PASS、新probeはpy_compile確認で実試験進行中。
+
+最新: session19766はexit0完了、release2m57s、Schur関連3 tests PASS。
+first-window claim（不適格非消費/並行一意）と非zero解不変性を確認。
+次はatlas integrationの実binaryをbuildし、同入力で診断OFF/ONのmodel bytesを比較。
+基準binaryはdataset下の保存コピーを維持し上書きしない。
+
+最新: first-window制御をbundle.rsに実装中（未commit）。
+VISLOC_SFM_DEBUG_BA_SPARSE_FIRST_WINDOW + 既存VISLOC_SFM_DEBUG_BA/
+VISLOC_SFM_DEBUG_BA_STEPS/VISLOC_SFM_DEBUG_BA_SCHUR_SLOTで最初の適格rig sparse BAを選択。
+呼出内全反復で同slot使用。プロセス単位AtomicBoolで一度のみ、無効slot/非適格は消費しない。
+並行8呼出の一意claimテスト追加。cargo test --release schur_block_debug_tests
+session19766がビルド中。再起動せずpollする。rustfmt/diff check PASS。
+実model不変性・診断結果はまだ未検証。選択は単一thread atlas前提で再現性確認が必要。
+
+最新: Schur診断fixtureを非zero pose/landmark RHSへ強化。
+診断ON/OFFの解exact一致、両更新norm>0、同pose合算後の消去norm一致PASS。
+session53281はexit0終了、release2m24s、関連2 tests PASS。再poll不要。
+公開済み03e0368のCI34298844551はsuccess（この新Rust変更のCIではない）。
+first-window制御と実model byte比較は引き続き次の作業。
+
+最新: session91383はexit0終了。release build 3m07s、追加した診断有無の解一致test PASS。
+続いてschur_block_debug_tests全2件PASS。build再poll不要。
+現一致fixtureはzero RHSなので非zero RHS・実model byte比較を追加する必要がある。
+first-window限定もまだ未実装。診断接続のみを完了とし品質改善を主張しない。
+
+最新: bundle.rsにlegacy sparse→既存Schur診断への接続を実装中（未commit）。
+solve_step_with_debug/solve_step_pose_blocks_with_debugは実inverse cache/reduced blockを使用。
+既存debug flags/slotのgateを維持。診断有無の解一致testを追加。
+`cargo test -p visloc-slam --lib debug_context_maps_variable_slot_after_fixed_pose_and_counts_rig_crosses --release -j 1`
+session91383がビルド稼働中。再起動せずpollすること。rustfmt実施/diff check PASS。
+最初の1window限定・実model bytes比較は未実装/未検証。空き約2.3GiB。
+
+最新: pose coupling実装箇所を確認。既存collect_schur_block_debug_countsは
+同poseのcross合算・solver inverse cache利用に対応するが、emitはmatrix-free側のみ。
+atlas実経路solve_step_pose_blocksのinverse cache構築後/factor前へ接続が必要。
+index mapのframe/landmark IDを渡し、export point IDは使わない。
+診断機能の新規接続はまだ未実装。詳細はopenloris_atlas_bounded_ba.md末尾。
+
+最新: main/tail各移動量上位5点の観測ray角とcamera range/translationを監査。
+main上位5は全2観測、pre角0.000252〜0.112018deg。
+最大1004.613m移動点はpre距離1043m、post38.4m、観測camera最大移動0.004214m。
+低視差と点の大移動は確認したがpose RMSEの原因・Jacobian影響は未証明。
+証跡`m8-atlas-top-motion-geometry-v1.json`。rangeは軸方向depthではない。
+次はposeへの残差/Jacobian寄与を診断。既存weak-angle freeze棄却armの単純再実行禁止。
+
+最新: ObservationKeyでpre-ba/modelを対応付けた診断完了。
+image ID/name一致、全final trackが一意の旧trackのsubset、新規/曖昧track0。
+削除957点・総14440観測で既存filter ledger一致。
+mainの旧2観測群216828点の平均移動0.043919m、最大1004.612687m。
+単純ID join結果とは異なる有効対応だが、軌跡誤差への因果は未証明。
+証跡`m8-atlas-observation-key-motion-v1.json`に8入力hash/集計手順/全群統計。
+次は大移動点の視差角・深度・pose couplingをGT-freeで調査。閾値変更はまだ行わない。
+
+最新: 品質診断に戻りmapping-v2 main pre-ba/modelのpoint対応を監査。
+共通数値ID318222件中、同一観測集合7件、観測集合disjoint318215件。
+integrate_rig_atlas_landmarks.rsの出力は順序付け後index+1でIDを再採番する。
+従って数値point IDでBA前後をjoinした移動量・観測数変化の集計は無効として棄却。
+次はObservationKey（image identity, feature index）の対応で点集団を比較する。
+GT未使用、モデル変更なし。再投影低下だけで軌跡改善しない既存Ceres診断に沿う。
+
+最新: pipeline checkpointを既存atomic_jsonへ切替、child起動前にactive_stageを記録。
+atomic replace失敗時の旧JSON保持・起動前記録の試験を追加、93 tests PASS。
+file fsync+renameでありdirectory fsyncなし。電源断durability/full restartを主張しない。
+
+最新: 全体pipeline CLIはcgroup v2のmemory.max=2147483648/swap.max=0を必須化。
+通常シェルからの実CLIはexit1/期待診断/出力なしを確認。91 tests PASS。
+制限確認だけでは独立monitorの存在を証明しないためlaunch_native_measurement経由を維持。
+ライブラリexecuteの単体テストはCLIガード外。全体実データ実行は未開始。
+
+最新: pipeline reportに実行計画由来のartifact_lifetimesを追加（削除機能なし）。
+base/native match最終利用はprefix admission、adaptive matchはrepair admission、
+targeted matchはfinal admission。dense/adaptive特徴は最後のmappingまで必要。
+実測dense特徴4,437,450,752 bytes、loci327,708,672 bytes。
+dense特徴だけで空き2.4GiBを超えるため、早期releaseだけでは現方式を実行できない。
+baseのhardlinkを消してもadaptiveが共有するinodeのbytesは解放されない。
+90 tests PASS。release設計はrestart保持契約と別途統合が必要。実データ削除なし。
+
+最新: pipeline CLIは全scripts/*.py・electro JSON/TSV・9 binaryのhashを記録し、
+stage前後で再検証。変更されたらexit0のstageでも全体FAILで後段停止。
+実子プロセスの変更注入を含め90 tests PASS。これは境界検出で物理immutable化ではない。
+外部raw/calibration/reference全体の固定と、実行中変更→復元の検出はまだ保証しない。
+
+最新: 全体executorの候補生成binaryを実証跡と照合し分離。
+nativeはa7ff5ff/8eeee5c、denseは3ae253a/8cfa9c5。開始前に各hashを固定検証。
+9 binaryの実パス/hashを`benchmarks/electro/m8-native-pipeline-binaries-v1.json`に保存。
+同specで`run_native_pipeline.py --plan-only`が17 stageを生成することを実確認。
+88 tests PASS。長時間の全体実行は開始していない。16GiB guardに対して空き2.4GiB。
+全binary/script/inputの凍結検証・容量lifetime・restartは依然残る。
+
+最新: `run_native_pipeline.py`に全抽出→候補→4系統shared matching→3 admission→
+prefix/target selection→source/atlasの接続実装を追加。88 Python tests PASS。
+実データで全体未実行、restartなし、全script/inputのimmutable provenance凍結も未完。
+16GiB freeを保守的な開始条件とする（実測lifetime上限ではない）。現在空き2.4GiB。
+自動削除なし。`--plan-only`と8 binaryのpath/sha256 JSONで計画を検査可能。
+次はbinary specを凍結し全コマンドと参照互換性をpreflight、容量確保/lifetime設計。
+特にnative/dense候補生成に同candidate binaryを使う接続は実データ未検証。
+品質gate未達とfull restart、連続cold測定の要求は変わらない。
+
+最新: mapping v2は正常終了（MainPID0 / exited / Result success）。再poll不要。
+21 source / 23 nodes / stitch / tail+main integrationが全PASS。
+参照86ファイルを独立再hashして全一致、nodes.tsvも新runへの23 bindingに一致。
+入力検証込み連続wall926.828秒、sampled aggregate peak RSS572860KiB、
+cgroup peak1182564352 bytes（RSSではない）、OOM0。
+証跡`benchmarks/electro/m8-native-mapping-bound-v2.json`。
+既存frontendからのmapping suffix一回の結果でcold E2E・restart・品質改善ではない。
+次はfrontend全段接続と容量/lifetime設計、未達RMSE gateの品質改善。
+
+最新: 補助ファイル許可/未知出力拒否/参照欠落/内容変更の実子プロセス回帰試験PASS、
+Python85 tests。修正head `b66d155`をpush済み。
+新unit `visloc-native-mapping-bound-v2.service`を起動（2GiB/Swap0/timeout6000s）。
+出力`/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v2`、
+計測`/home/sasaki/datasets/openloris/m8-native-mapping-bound-measurement-v2`。
+このv2を同unitで追跡し、terminalを確認するまで再起動しない。
+v1の測定はfail/exit1、46.179秒、sampled aggregate peak RSS376044KiB、OOM0。
+最初のsourceはmodel一致だが全pipeline結果ではない。v1は保持。
+
+最新: 上記mapping v1はterminal FAILED（MainPID0 / Result exit-code）。再poll不要。
+最初のsource-replay-1950はmapper exit0、参照model hash全一致、31.800秒。
+失敗原因は参照audit対象外のcomponents.tsv/retrieval-components.txtを厳密dict比較で
+余分と判定したexecutorバグ。既知2補助ファイルだけ許可し全hash記録を保つ修正を実施。
+未知出力・参照欠落・hash不一致は引き続き拒否。85 tests PASS、追加回帰テストが次。
+v1出力・measurementは失敗証跡として保持。修正後は新v2パスで実行すること。
+
+最新追記: mapping suffixの実データ計測を開始。
+unit `visloc-native-mapping-bound-v1.service`、開始確認MainPID3927517。
+測定root `/home/sasaki/datasets/openloris/m8-native-mapping-bound-measurement-v1`、
+出力root `/home/sasaki/datasets/openloris/corridor1-1-m8-native-mapping-bound-v1`。
+再起動せず同unitのterminal状態とreportを確認すること。MemoryMax2G/Swap0、timeout6000s。
+入力spec `benchmarks/electro/m8-native-mapping-bound-inputs-v1.json` は事前検証PASS。
+全dense新規抽出bankと新targeted admissionを使用、dense snapshot等はretained。
+従ってcold E2Eではない。保存出力からの容量見積はsource326MB+integration309MB。
+実行head `1153a0479c9e2a676b46f27a16e7589aa229b3b1`、CI34296178485は開始時in_progress。
+atlas実子プロセスexit0/7試験を追加しPython85 tests PASS。SfM実行結果とは区別。
+
+最新追記: `run_native_mapping.py`でsource全21→nodes23→atlas結合/BAを接続。
+`--inputs`は5入力のpathとsha256（feature bankはmanifest/manifest_sha256）を要求。
+3 binaryは証跡hashを検証。`--validate-only`は出力を作らない。
+Python 84 tests成功。接続と失敗停止はmock検証で実データ実行は未確認。
+これは既存frontendからのmapping suffixであり、cold E2Eではない。
+入力hashは指定specへの一致で、spec自体の凍結参照との一致は呼出側の責務。
+資源制限は`launch_native_measurement.py`の外側wrapperを必ず使う。
+空き実測は内蔵3.0GiB/外部1.6GiB。全抽出DAGは容量/lifetime設計が必要。
+
+最新追記: `c718cf7`のCI run 34295216906はsuccess。
+`execute_native_atlas.py`にstitch→tail/main integrationの逐次実行を追加。
+binary/input hash記録、出力先拘束、timeout、参照14ファイルhash gateで失敗時停止。
+Python 81 tests成功（atlas実行はmock検証であり実SfM実行未確認）。
+まだsource phaseとの単一CLI接続、frontend全DAG、入力provenanceの全検証、
+restartと連続resource計測は未実装。cold E2E完了・品質改善とはしない。
+
+最新追記（2026-09-09）: dense全10k抽出サービス
+`visloc-full-dense-extraction-v1.service`は正常終了（MainPID 0 / exited / exit0）。
+再起動・待機pollは不要。20,000 feature/lociファイルを独立に再hashし参照全一致、
+6 worker全exit0、計測レポートPASS。抽出＋検証9,789.925秒、50msサンプリングの
+合計peak RSS 1,776,952 KiB、OOM 0。証跡`m8-full-dense-extraction-v1.json`。
+現branchは`feat/shared-matching-recipe`。空き約1GiBのため大容量stageは要容量確認。
+連続native DAG・COLMAP品質/速度比較は未達。base抽出の欠落resource ledgerも
+今回のdense測定では埋まらない。サブエージェントは使わない。
+
 最新（2026-09-09）: PR118/119に続きPR120（head`e136ae6`、CI9成功）は
 `09e79b8dae067521ee8b8be342c1373c68e090c8`へmerge、旧branch整理済み。
 整理記録のPR121（head`8b05461`、CI9成功）は

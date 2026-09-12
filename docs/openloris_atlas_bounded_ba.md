@@ -1847,3 +1847,138 @@ has a different point/observation set and is not this frozen objective control.
 No atlas/default/README promotion follows. The next step is a bounded,
 GT-free diagnosis of which input geometry and track populations carry cost
 reduction and state motion, with its metric and work cap fixed before use.
+
+### Pose-coupling diagnostic contract after connected mapping v2
+
+Observation-identity motion and top-motion geometry audits are recorded in
+`m8-atlas-observation-key-motion-v1.json` and
+`m8-atlas-top-motion-geometry-v1.json`. Numeric point IDs are not stable across
+publication. The five largest main-component motions are all two-observation
+tracks with pre-BA ray angles below 0.113 degrees. The largest landmark motion
+is 1004.613 m while its observing camera centres move at most 0.004214 m.
+This identifies weak range observability, not a demonstrated trajectory cause.
+
+The next diagnostic must use the actual `rig_residual_jacobians` in
+`pipelines/slam/src/bundle.rs`, not an independently chosen camera-pose
+parameterization. Its translation columns are the world-to-rig rotation;
+rotation columns include `-R * skew(point_world)`, followed by the sensor
+rotation and pinhole projection derivative. Preserve the actual fixed-pose
+set, sensor transforms and fixed calibration. The atlas builder uses plain
+squared residuals (`RobustKernel::None`) and sparse LM with initial lambda
+1e-4; do not silently introduce robust weights into the diagnostic.
+
+Implement an opt-in report at the first production window only, reusing its
+selected landmarks and existing normal-equation blocks. Keep all production
+window/landmark/observation caps, do not assemble a global dense pose matrix,
+and never change acceptance, damping or landmark selection. Record observation
+count, ray-angle range, residual squared cost and separate translation/rotation
+gradient statistics. For pose coupling, attribute each landmark's Schur
+contribution using the **same damped point block and fixed-pose handling as the
+solver**. Do not interpret a raw Jacobian norm as influence: units, gauge and
+point elimination matter. Near-singular/rejected blocks must be counted with
+the solver's existing policy, not inverted through a new fallback.
+
+Before applying this to real data, require synthetic fixed-boundary rig tests
+and equality of aggregated diagnostic contributions with the production
+system to a declared numerical tolerance. Require diagnostic-OFF model equality
+and diagnostic-ON unchanged model bytes. No threshold tuning or intervention
+is authorized by this diagnostic contract. In particular, the previously
+rejected weak-angle-freezing arm is not a new experiment. Camera rotation,
+coupling attribution and causality remain unmeasured at this checkpoint.
+
+Implementation inspection: `collect_schur_block_debug_counts` already groups
+all cross entries for one variable pose before forming its diagonal landmark
+elimination block, and accepts the solver's inverse cache. Its existing rig
+test covers two cross entries on the same pose and fixed-pose slot mapping.
+Reuse that helper; summing separate observation elimination norms would miss
+cross terms. Its current emission is in the matrix-free preconditioner path,
+not the production atlas `solve_step_pose_blocks` path. The latter constructs
+the actual damped inverse cache, skips singular point inverses and accumulates
+lower-triangle pose blocks before factorization. Connect diagnostics after
+that cache is constructed and before factorization, passing the cache rather
+than recomputing inverses. Stable frame/landmark IDs must be passed from the
+existing index maps; numeric exported point IDs cannot supply that mapping.
+This is the identified implementation boundary, not a completed diagnostic.
+
+### Feasibility v2 result and next experimental contract (2026-09-09)
+
+The sparse diagnostic connection and before-state probe have now completed.
+`m8-schur-feasibility-v2.json` records 14 unchanged reference hashes and 115
+sampled rejected observations, all projectable before the tentative update.
+Five internal tracks cross behind their sensors. Their sampled before-depth
+range is 0.000068–0.038669 m. These are not the far-range top-motion tracks;
+neither diagnosis proves a cause of trajectory error.
+
+Next candidate, not implemented or promoted: bounded joint-step backtracking
+on a feasibility-rejected legacy sparse rig LM update. The motivation is to
+avoid another factorization when a smaller already-computed step may work.
+[Ceres documents smaller-trust-region retries for invalid steps](https://ceres-solver.readthedocs.io/latest/nnls_solving.html#_CPPv4N5ceres6Solver7Options33max_num_consecutive_invalid_stepsE);
+[Ipopt documents backtracking and fraction-to-boundary machinery](https://coin-or.github.io/Ipopt/classIpopt_1_1BacktrackingLineSearch.html).
+These are methodological references, not evidence that either uses this exact
+rig-BA heuristic or that it will improve visloc quality.
+
+Fix the experimental policy before scoring: default OFF; legacy sparse rig LM
+only, no velocity/bias/adaptive-damping path; try alpha=1/2,1/4,1/8,1/16
+after a full-step feasibility rejection. Recompute every candidate from the
+existing rollback state using the production SE3 update convention, scaling
+pose and landmark increments together. Require finite strictly reduced cost,
+the existing feasibility gate, and no newly nonprojectable previously valid
+observation. Do not remove tracks, weaken depth checks, or select internal IDs.
+If no candidate passes, restore exactly and take the existing LM rejection
+path. Do not reuse full-step gain predictions or convergence-step norms for a
+scaled update. Reuse rollback buffers; no extra full-state snapshots or dense
+global matrices. Four evaluations are a work cap, not a tuned quality threshold.
+
+Before any real replay, test joint pose/point scaling, fixed-pose handling,
+nonfinite rejection, exact rollback, trial cap, cost-increasing feasible steps,
+and OFF-path equivalence. Then freeze one arm and run a same-input A/B with
+factorization/evaluation counts, wall time, peak RSS, registration/support,
+reprojection and post-only GT trajectory scoring. Reject if quality or measured
+runtime regresses; lower BA cost alone is not success. No threshold sweep using
+GT. Current disk free space is only 1.1 GiB: no new full pipeline or repeated
+atlas outputs until the storage budget is resolved without losing evidence.
+
+Implementation checkpoint: `VISLOC_SFM_BA_FEASIBLE_BACKTRACK=1` enables the
+experimental bounded policy; absent/other values retain the full-step path.
+Separate release test processes with the flag absent/present each pass all
+four generalized rig tests. The production point-only fixture rejects alpha
+0.5 on increased cost and accepts alpha 0.25; a second fixture exhausts exactly
+four trials and restores the complete problem. Tests assert fixed-pose equality
+and accepted landmark-step norm consistency. This is not yet joint-variable
+pose/point or fixed-rotation coverage, nor real-atlas OFF parity or an A/B result.
+Clippy for the release slam library passes. No default or quality claim changes.
+
+The production fixture now also runs with variable pose translation and variable
+landmark position while holding rotation fixed. ON/OFF processes both pass:
+joint alpha 0.25 is accepted after alpha 0.5 increases cost; both state increments
+are nonzero and match the reported step norms; rotation remains exactly fixed.
+Both point-only and joint exhaustion restore the entire problem exactly. CI now
+runs the flag-ON rig tests separately after the normal flag-OFF workspace tests.
+This extends synthetic coverage, not real-model parity or performance evidence.
+
+### Real bounded-backtracking arm: rejected
+
+`m8-feasible-backtrack-off-v1.json` proves real OFF parity for all 14 reference
+files. `m8-feasible-backtrack-on-v1.json` records the same binary's completed ON
+trial and eight independent pre-BA/fixed-camera hash matches. Scorer and scoring
+input hashes, aliases and interpolation gap match the historical control.
+RMSE worsens from 0.3889930047 m to 0.3891842840 m (COLMAP gate 0.3843065335 m).
+P95 changes from 0.6381734851 m to 0.6380699612 m; registered images remain 9998.
+Comparable integration-stage wall totals are OFF 153.3184523 s and ON
+233.9327779 s. This is a single sequential suffix comparison, not a cold E2E
+speed measurement. ON sampled aggregate RSS is 560852 KiB.
+
+Reject this fixed arm: it fails trajectory nonregression and gives no evidence
+of runtime benefit. Keep the flag OFF; do not repeat unchanged or tune the
+alpha schedule against GT. Preserve the experiment and logs for accounting.
+Before another mechanism, analyze the existing OFF/ON phase timings to check
+where time was actually spent; no further geometry replay is justified by this
+result alone. Free disk is now 386 MiB, requiring storage work before new runs.
+
+Post-run phase accounting (`m8-feasible-backtrack-phase-accounting-v1.json`):
+main normal-equation and linear-solve timer events both remain 2804. Linear
+solve time is 27.038570 s OFF versus 26.998891 s ON, whereas tentative update
+and cost time grows from 29.963184 s to 109.656562 s. Main emits 3430 scaled
+candidates with 291 accepted. Timer counts are not an independent count of
+numerical factorizations. The evidence does not support the intended reduction
+of repeated solves; do not pursue this arm by tuning the backtracking schedule.

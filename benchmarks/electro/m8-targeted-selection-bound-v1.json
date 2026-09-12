@@ -1,0 +1,20 @@
+{
+  "status": "selection-reproduction-pass",
+  "service": "visloc-targeted-selection-bound-v1.service",
+  "terminal_state": "MainPID=0 SubState=exited Result=success ExecMainStatus=0",
+  "report": "/media/sasaki/aiueo1/visloc-targeted-selection-bound-v1/report.json",
+  "report_sha256": "8e8218060523c1fb604adc8a148f65aa034a2b78978628e597fad06116882aa6",
+  "measurement": "/home/sasaki/datasets/openloris/m8-targeted-selection-bound-measurement-v1/measurement.json",
+  "measurement_sha256": "3e0d86e40e45f4a5b563235f5f16efb2dc9f6147de59b00c1762662791b59461",
+  "input_snapshot": "/media/sasaki/aiueo1/visloc-repair-admission-bound-v1/admissions/repair19-admission.vps",
+  "target_frames": [1999, 3264, 3266, 3267, 4493, 4494, 4495],
+  "target_frames_match": true,
+  "all_model_files_identical": false,
+  "different_model_files": ["component-000/images.txt", "component-000/points3D.txt", "components.tsv"],
+  "whole_command_wall_seconds": 170.34961499203928,
+  "sampled_aggregate_peak_rss_kib": 1025468,
+  "rss_sampling_interval_seconds": 0.05,
+  "cgroup_memory_peak_bytes": 1028640768,
+  "oom": 0,
+  "scope": "Connects newly generated repair admission to intermediate registration and reproduces the seven selection frames. Not full model equality, complete native E2E, quality improvement, or speedup. Historical recovered_command_event_utc refers to the recipe, not this run. Sampled RSS includes monitor and can double-count shared pages or miss inter-sample peaks; cgroup peak includes cache/kernel charges."
+}

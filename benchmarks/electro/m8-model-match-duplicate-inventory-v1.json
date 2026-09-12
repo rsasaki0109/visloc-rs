@@ -1,0 +1,16 @@
+{
+  "status": "inventory-only",
+  "inventory": "/home/sasaki/datasets/openloris/m8-model-match-duplicate-inventory-v1.json",
+  "inventory_sha256": "fe8204077bc0a252229bbb47e2ae790be83b0e242ccac2b10d465d939be42dd0",
+  "groups": 206,
+  "unique_candidate_inodes": 888,
+  "potential_freed_bytes": 19277934592,
+  "scope": "OpenLORIS corridor1-1-m8-* regular files >=1 MiB named images.txt or points3D.txt or ending .vps; symlinks excluded. Existing shared inodes counted once. No replacements performed.",
+  "checks": {
+    "inventory_test": "pass",
+    "observed_running_visloc_user_services": 0,
+    "observed_same_user_open_candidate_fds": 0,
+    "fd_scan_permission_denied_processes": 5
+  },
+  "limitations": "FD scan is point-in-time, not full process exclusion; some same-user process FD directories were inaccessible. Follow-up identified sd-pam and sshd processes. Requires target review, revalidation and quiescence checks before any application."
+}
