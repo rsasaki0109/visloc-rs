@@ -1,0 +1,113 @@
+{
+  "schema": "visloc-m9-bounded-aliked-lightglue-development-evidence-v1",
+  "recorded_at": "2026-09-13T12:00:00+09:00",
+  "status": "geometry_gate_pass_mapper_neutral_runtime_not_promoted",
+  "claim_scope": "development_oracle_only_not_holdout_or_end_to_end_performance",
+  "inputs": {
+    "tier_images": 2500,
+    "rig_frames": 1250,
+    "selected_rig_pairs": 26,
+    "candidate_image_pairs": 104,
+    "incident_images": 68,
+    "candidate_manifest_sha256": "ac2e0f9a04b52837a60aadea6205b1f6f14ea54857262c32c7244c229d3c5d8b",
+    "ground_truth_used_for_retrieval_matching_or_admission": false,
+    "development_set_disclosure": "The v3 shortlist was designed after a post-hoc 2.5k GT opportunity audit; these results cannot be a holdout claim."
+  },
+  "guided_sift_control": {
+    "policy": "COLMAP-compatible append-only guided rematching under each initially verified model",
+    "verified_pairs_before_after": [96, 96],
+    "accepted_correspondences_before_after": [5261, 6865],
+    "wall_seconds_before_after": [12.55, 13.47],
+    "peak_rss_kib_before_after": [47208, 46568],
+    "control_snapshot_sha256": "da960486e83bd52db77978278d6074be67d2971a196445310f2bd304d90ca4de",
+    "guided_snapshot_sha256": "766f8a1c389c0226f6466b543fff54602ac15c02cd8c5b6249c281068b32c82c",
+    "cycle_admitted_rig_pairs": 0,
+    "cycle_admission_ledger_sha256": "32da5b3130b9e68508c44e70120750f9f7918abfbd29a4c11dc861cde6995f30",
+    "decision": "rejected; more SIFT correspondences did not repair the multi-sensor rotation evidence"
+  },
+  "learned_local_oracle": {
+    "frontend": "official ALIKED n16, max 1024 keypoints, plus official LightGlue ALIKED weights",
+    "lightglue_git_commit": "eb42fee2d71449efb0aa5c10549752b5d75384d8",
+    "lightglue_license": "Apache-2.0",
+    "aliked_embedded_source_license": "BSD-3-Clause",
+    "model_sha256": {
+      "aliked-n16.pth": "5be8704840ed662d9d8c561bf7279c222092674e7eb05fd0feab94899e9d82f2",
+      "aliked_lightglue_v0-1_arxiv.pth": "d975e965b105311a6143194852297dff4f02aea5cc2e10cecfed966ca0e22503"
+    },
+    "source_urls": {
+      "paper": "https://arxiv.org/abs/2306.13643",
+      "lightglue": "https://github.com/cvg/LightGlue",
+      "aliked_wrapper_license": "https://github.com/cvg/LightGlue/blob/main/lightglue/aliked.py"
+    },
+    "raw_matches": 62150,
+    "features_aggregate_sha256": "a6e4fee387f62abf4a3ed20c17d9c381d72c95a070df83d968183444487a8b6a",
+    "matches_import_sha256": "4634a420b22265b6d95190c84c4e78cc5b70b4891e22bd0b8e403270084eaa3b",
+    "repeat_byte_identical": true,
+    "run_1": {
+      "extraction_seconds": 140.690962853143,
+      "matching_seconds": 35.664093367988244,
+      "wall_seconds": 180.48,
+      "peak_rss_kib": 2198172
+    },
+    "run_2": {
+      "extraction_seconds": 140.46986685297452,
+      "matching_seconds": 46.2329464009963,
+      "wall_seconds": 190.86,
+      "peak_rss_kib": 2170224,
+      "malloc_arena_max": 1
+    },
+    "runtime_gate": "failed; the Python/PyTorch oracle exceeds the 2 GiB target and is not a deployable runtime"
+  },
+  "rust_verification_and_cycle_gate": {
+    "loaded_keypoints_including_inert_nonincident_rows": 70607,
+    "verified_pairs": 104,
+    "accepted_correspondences": 61949,
+    "classifications": {
+      "calibrated": 25,
+      "uncalibrated": 8,
+      "planar": 71
+    },
+    "verification_wall_seconds": 2.23,
+    "verification_peak_rss_kib": 55532,
+    "verified_snapshot_sha256": "8c0bbcf099752fa0918f4ab5b640e66cea9d0ebf1755e990c84a6e0ddb734472",
+    "admitted_rig_pairs": 1,
+    "admitted_image_pairs": 2,
+    "admitted_pair": [939, 1003],
+    "rotation_dispersion_deg": 0.21380557113334506,
+    "sift_rotation_dispersion_deg_for_same_pair": 26.047471941308796,
+    "admission_ledger_sha256": "51a1c1db924090bb4453fe027687d953af1943ab5510fb53691da404a235a09e",
+    "admitted_snapshot_sha256": "fc18155bc88e87c0ad655a13fd00fc961dc23bbe75545d487837e4cac64a652a"
+  },
+  "mapper_ab": {
+    "configuration": "generalized rig, pair-confidence tracks, 96 matches per pair, identical deterministic CPU1 settings",
+    "control": {
+      "pairs": 16321,
+      "registered_frames": 1250,
+      "registered_images": 2500,
+      "mean_reprojection_px": 0.859957574,
+      "mapper_seconds": 59.744611,
+      "wall_seconds": 60.73,
+      "peak_rss_kib": 211756
+    },
+    "candidate": {
+      "pairs": 16323,
+      "admitted_matches_after_cap": 192,
+      "registered_frames": 1250,
+      "registered_images": 2500,
+      "mean_reprojection_px": 0.859957574,
+      "mapper_seconds": 61.481905,
+      "wall_seconds": 62.51,
+      "peak_rss_kib": 231844
+    },
+    "camera_pose_header_sha256_both_arms": "fa68f450f384ac62c9d3c0969563f3548e34830e3dc3608e4b82a7f752022bbe",
+    "points3d_sha256_both_arms": "bdd8374c61b8c04b0420a0dc97644d934d9dc531b696306c68a8eed21493ece4",
+    "finding": "The admitted bridge is geometrically safe, but the 2.5k control already registers every frame and the recovered poses/points are unchanged."
+  },
+  "decision": {
+    "guided_sift": "reject",
+    "python_runtime": "reject for production speed and memory",
+    "learned_local_geometry": "retain as a bounded oracle",
+    "mapping_quality_promotion": "not yet; mapper result is neutral on a development tier",
+    "next": "Freeze v3 plus the unchanged 3-degree cycle gate, evaluate an unobserved 5k interval, and only then design an ONNX/streamed local frontend if a real registration or trajectory win appears."
+  }
+}

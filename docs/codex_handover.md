@@ -2,6 +2,22 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 bounded learned-local development oracleで、固定rotation-cycle gateを初めて通過。
+既存SIFTへのCOLMAP-compatible guided matchingは5261→6865 correspondenceへ増えたが
+cycle admission 0で棄却。公式ALIKED n16（1024点）+ LightGlue-ALIKEDを、v3の
+68 incident image/104 pairだけに適用した。2反復でfeature aggregate SHA
+`a6e4fee3...`、matches SHA `4634a420...`が完全一致。Rust full verifierは104/104 pair、
+61949 correspondenceを受理し、rig pair 939↔1003の2 image pairが固定3度gateを通過。
+同pairのsensor rotation dispersionはSIFT 26.05度→learned 0.214度で、local matcher
+bottleneck解消のproof。ただし2.5k generalized mapper controlは既に1250/1250 frame、
+candidateも同じで、pose header/points3D SHA、reprojection 0.859958pxが同一。wall
+60.73→62.51s、RSS211756→231844KiB。さらにPython oracle自体はpeak RSS
+2.07–2.10GiBで2GiB gateを超える。従ってruntime/quality performanceは未promote、
+2.5kはdevelopment setのまま。証跡
+benchmarks/electro/m9-openloris-bounded-aliked-lightglue-2500-dev-v1.json。
+次はv3 shortlistと3度gateを凍結したまま、未観測5k intervalでregistration/trajectory
+winの有無を先に確認。winが出た場合のみALIKED/LightGlueのONNX streaming化へ進む。
+
 M9 geometry-first v3 development armもmapping前に停止。post-hoc GT機会監査では
 scorable 1kに0.5m以内のcomplete 3-frame revisitは0、2.5kにはforward5453/
 reverse5409。GTはretrieval/match/admissionへ未使用だが、2.5kはdevelopment set扱いで

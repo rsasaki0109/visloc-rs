@@ -5,7 +5,8 @@ import shlex
 
 def runner_match_flags(command):
     options = {}
-    boolean = {'--stream-match-features', '--shared-snapshot-envelope'}
+    boolean = {'--stream-match-features', '--shared-snapshot-envelope',
+               '--guided-matching', '--colmap-guided-matching'}
     paths = {'--features-dir', '--input-colmap-calibration',
              '--persistent-match-worker-plan', '--out-colmap'}
     fixed = {'--feature-extractor': 'files', '--verification-mode': 'full',
@@ -32,7 +33,11 @@ def runner_match_flags(command):
     ratio = float(options['--match-ratio'])
     if int(options['--min-matches']) <= 0 or not math.isfinite(ratio) or not 0 < ratio < 1:
         raise ValueError('Invalid matching thresholds')
-    return [item for flag in forwarded for item in (flag, options[flag])]
+    flags = [item for flag in forwarded for item in (flag, options[flag])]
+    for flag in ('--guided-matching', '--colmap-guided-matching'):
+        if options.get(flag):
+            flags.append(flag)
+    return flags
 
 
 def flags_from_timing(path):

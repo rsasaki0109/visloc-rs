@@ -11,6 +11,24 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+A bounded learned-local oracle has now passed the unchanged rotation-cycle gate
+for the first time. COLMAP-compatible guided rematching increased the existing
+SIFT arm from 5,261 to 6,865 correspondences but still admitted no rig pair.
+Official ALIKED n16 plus LightGlue-ALIKED, restricted to the same 68 incident
+images and 104 pairs, produced byte-identical feature and match hashes in two
+runs. The Rust full verifier retained all 104 pairs and 61,949 correspondences;
+the fixed 3-degree gate admitted rig pair 939–1003 with 0.214-degree sensor
+rotation dispersion, versus 26.05 degrees from SIFT.
+
+This is a geometry proof, not a performance promotion. The 2.5k generalized
+mapper control already registers all 1,250 frames; the two admitted image pairs
+leave camera poses, points, and 0.859958 px reprojection unchanged while adding
+1.78 s and about 20 MiB. The isolated PyTorch oracle also peaks at 2.07–2.10
+GiB, above the runtime target. Freeze v3 and the cycle gate and move to an
+unobserved 5k interval before investing in an ONNX/streamed deployment path.
+See
+[m9-openloris-bounded-aliked-lightglue-2500-dev-v1.json](../benchmarks/electro/m9-openloris-bounded-aliked-lightglue-2500-dev-v1.json).
+
 The geometry-first v3 development arm is also stopped before mapping. A
 post-hoc GT opportunity audit—never consumed by retrieval, matching, or
 admission—showed no complete 0.5 m three-frame revisit in the scorable 1k

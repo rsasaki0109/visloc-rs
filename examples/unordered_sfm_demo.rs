@@ -6628,9 +6628,7 @@ fn validate_persistent_match_worker_args(args: &Args) -> Result<(), String> {
             "--persistent-match-worker-plan cannot be combined with feature export or alternate incremental modes".into(),
         );
     }
-    if args.guided_matching
-        || args.colmap_guided_matching
-        || args.multiple_models
+    if args.multiple_models
         || args.min_e_f_inlier_ratio.is_some()
         || args.calibrated_prefer_essential
         || args.refine_uncalibrated_f_to_essential
@@ -6649,7 +6647,7 @@ fn validate_persistent_match_worker_args(args: &Args) -> Result<(), String> {
         || args.essential_edge_weight_boost != 1.0
     {
         return Err(
-            "--persistent-match-worker-plan currently supports only the frozen simple NN/full verifier settings".into(),
+            "--persistent-match-worker-plan currently supports only the frozen NN/full verifier settings (optionally with guided matching)".into(),
         );
     }
     if args.sift_append_descriptor_magnification.is_some()
@@ -21943,11 +21941,26 @@ mod append_only_matcher_tests {
         assert!(streamed.stream_match_features);
         assert!(parse_args_from(minimal_args(&["--stream-match-features"])).is_err());
 
+        let guided = parse_args_from(vec![
+            "--input-colmap-calibration".to_owned(),
+            "/tmp/calibration".to_owned(),
+            "--verification-mode".to_owned(),
+            "full".to_owned(),
+            "--persistent-match-worker-plan".to_owned(),
+            "/tmp/match-worker.plan".to_owned(),
+            "--guided-matching".to_owned(),
+            "--colmap-guided-matching".to_owned(),
+            "--out-colmap".to_owned(),
+            "/tmp/persistent-model".to_owned(),
+        ])
+        .unwrap();
+        assert!(guided.guided_matching);
+        assert!(guided.colmap_guided_matching);
+
         for extra in [
             vec!["--mapper", "global"],
             vec!["--matcher", "lightglue"],
             vec!["--verification-mode", "legacy"],
-            vec!["--guided-matching"],
             vec!["--candidate-manifest", "/tmp/candidate.txt"],
             vec!["--import-verified-pairs-snapshot", "/tmp/pairs.vps"],
             vec!["--canonical-feature-order"],
