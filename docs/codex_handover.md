@@ -2,6 +2,19 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 fixed learned armの2.5k safety/scaling audit完了、5k前で停止。
+EigenPlaces streamingは1250 rig row/2500画像を313.43s、sample RSS146648KiB、
+OOM0で生成、artifact SHA4142ccf...。固定K32/t12/b9/p9/gap64 ANNは4.06s、
+RSS9868KiB、33062 candidates<=40000、selected15。ただしmean pool861.86は
+全rowの約69%で、10k計算量のsubquadratic性は未証明。15 pairは1kと完全に同じ
+frame307–315対372–379の偽loopで、追加750 row由来は0。60 image pairを凍結matchし
+60/60、3578 correspondence受理後、固定rotation-cycle gateは0/15。empty overlayは
+2.5k base16321 pairとSHA734eb36d...でbyte-identicalのためmappingは重複実行せず。
+これはsafety passでquality winではない。証跡
+benchmarks/electro/m9-openloris-learned-retrieval-2500-safety-v1.json。
+現policyを5k/10kへ進めない。次はquery poolを狭め、1kでnon-empty cycle-consistent
+additionを出せるretrieval設計をmapping/GT前に固定して再開する。
+
 M9 post-verification rig rotation-cycle gateの1k安全性監査はPASS。ただしquality win
 ではない。凍結thresholdはsensor-pair rotation 2本以上、rig frame内dispersion<=3度、
 順/逆3-frame path（radius1）の代表rotation差<=3度。strict-v2の15 rig pair中、単体

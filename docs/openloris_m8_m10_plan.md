@@ -11,6 +11,26 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+The fixed learned-retrieval arm has now completed its 2.5k safety/scaling
+audit and is stopped before 5k. Streaming EigenPlaces extraction produced
+1,250 rig rows in 313.43 s at 146,648 KiB sampled RSS. Fixed K32/t12/b9/p9
+ANN emitted 33,062 candidates under the 40,000 cap in 4.06 s / 9,868 KiB,
+but its mean exact-rerank pool was 861.86 rows, about 69% of the database.
+Thus output memory remains bounded while the current bucket geometry does not
+establish acceptable 10k compute scaling.
+
+More importantly, the only 15 selected rig pairs were exactly the already
+known frame 307–315 versus 372–379 false sequence; the additional 750 rig rows
+contributed no selected pair. Frozen matching again accepted all 60 expanded
+image pairs (3,578 correspondences), and the fixed rotation-cycle gate admitted
+zero. Merging that empty result reproduced the 16,321-pair 2.5k base snapshot
+byte-for-byte, so mapping would be a duplicate control run and was correctly
+skipped. This is a safety pass, not a quality win. Do not run the unchanged arm
+at 5k/10k; the next retrieval design must reduce the query pool and produce a
+non-empty cycle-consistent set at 1k before promotion. Full hashes and resource
+records are in
+[m9-openloris-learned-retrieval-2500-safety-v1.json](../benchmarks/electro/m9-openloris-learned-retrieval-2500-safety-v1.json).
+
 The post-verification rig-rotation cycle gate now passes its 1k safety test.
 Its thresholds were fixed before the audit: at least two sensor-pair essential
 rotations per rig pair, at most 3 degrees of common-rig-frame dispersion, and

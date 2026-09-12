@@ -1,0 +1,89 @@
+{
+  "schema": "visloc-m9-learned-retrieval-2500-safety-evidence-v1",
+  "recorded_at": "2026-09-13T06:52:23+09:00",
+  "status": "safety_pass_zero_admissions_scaling_warning_not_quality_win",
+  "ground_truth_used": false,
+  "descriptor_generation": {
+    "rig_rows": 1250,
+    "images": 2500,
+    "dimension": 512,
+    "wall_seconds": 313.4313708629925,
+    "sampled_aggregate_peak_rss_kib": 146648,
+    "cgroup_memory_peak_bytes": 603176960,
+    "oom_kill": 0,
+    "artifact_bytes": 2570160,
+    "artifact_sha256": "4142ccf95401c9e2c14e4aa4ceb20cec21d9f3a3b2700e332475c6521ed9a834",
+    "measurement_sha256": "680ed7d6f93c2cae380f63bd1319548c070c8c540811fa779284780668734127"
+  },
+  "ann": {
+    "top_k": 32,
+    "tables": 12,
+    "bits": 9,
+    "probes": 9,
+    "minimum_frame_gap": 64,
+    "exact_recall_audit": "skipped_above_1000_rows",
+    "mean_pool": 861.8576,
+    "maximum_pool": 1116,
+    "undersized_queries": 0,
+    "candidate_pairs": 33062,
+    "candidate_cap": 40000,
+    "selected_pairs": 15,
+    "selected_cap": 1250,
+    "wall_seconds": 4.06,
+    "peak_rss_kib": 9868,
+    "artifact_bytes": 1920340,
+    "artifact_sha256": "c6474177cf598b081a9a7347ef57054d86eea0edea894fff97768473fe1c41ee",
+    "finding": "All 15 selected pairs are the same frame 307-315 versus 372-379 false-loop sequence seen at 1k; no selected pair comes from the added 750 rig rows."
+  },
+  "scaling_from_500_to_1250_rig_rows": {
+    "row_factor": 2.5,
+    "mean_pool_factor": 2.474753345201861,
+    "mean_pool_fraction_at_500": 0.69652,
+    "mean_pool_fraction_at_1250": 0.68948608,
+    "ann_wall_factor": 2.9,
+    "ann_rss_factor": 1.868939393939394,
+    "candidate_pair_factor": 2.501853953840333,
+    "warning": "The bounded output passes 32N, but exact reranking still visits about 69% of all rows per query. This LSH configuration does not establish subquadratic 10k compute scaling."
+  },
+  "materialization_and_matching": {
+    "base_snapshot_pairs": 16321,
+    "base_snapshot_sha256": "734eb36d8c7ef1749b88cc6885bebee4e5c8a5ee2e053e5a314ab87d8c2f2dbc",
+    "new_image_pairs": 60,
+    "candidate_manifest_sha256": "2949183763c521f8bcadf5928740448326a23d5405b54cc71fadcf88b000e5a2",
+    "addition_ledger_sha256": "95ee4c1ea8c28cca3cb30bf5da8629bd3460a0dd87726372c9b213220f5ed246",
+    "verified_pairs": 60,
+    "accepted_correspondences": 3578,
+    "matching_wall_seconds": 12.214047841029242,
+    "matching_peak_rss_kib": 47428,
+    "verified_additions_sha256": "718bc7c57103ed21cdb9978e3af45a0b8079bd37a41fa6ad3d48259767b17801",
+    "summary_sha256": "21f3fc23f7f59f59c6c204555b6b279e76b88d2e6658bdee8993419e9deb4d54",
+    "persistent_worker_shards": 2,
+    "streamed_features": true,
+    "shared_snapshot_envelope": true
+  },
+  "rotation_cycle_admission": {
+    "minimum_sensor_pair_rotations": 2,
+    "maximum_within_rig_pair_dispersion_degrees": 3.0,
+    "path_radius": 1,
+    "maximum_path_rotation_difference_degrees": 3.0,
+    "rig_pairs_audited": 15,
+    "rig_pairs_passing_complete_path": 0,
+    "admitted_rig_pairs": 0,
+    "admitted_image_pairs": 0,
+    "peak_rss_kib": 3796,
+    "admitted_snapshot_sha256": "aab2b9fed8b924e89b6e696ecb2d5a6e54f88bbd3f02aa9d90342fa339475f03",
+    "admission_ledger_sha256": "b5af9696f9313d853e843f18a918af483a5664a0a22ac65e5b9eb3a5bbd5a2fb"
+  },
+  "overlay_check": {
+    "base_plus_admitted_sha256": "734eb36d8c7ef1749b88cc6885bebee4e5c8a5ee2e053e5a314ab87d8c2f2dbc",
+    "byte_identical_to_base": true,
+    "mapping_run_required": false
+  },
+  "decision": {
+    "quality_claim": false,
+    "promotion_to_mapping": false,
+    "promotion_to_5k_with_current_policy": false,
+    "reason": "The gate safely removes the only selected sequence, leaving a byte-identical mapping input, while the new 2.5k interval supplies no usable learned edge.",
+    "next": "Do not spend 5k/10k descriptor and matching time on this unchanged policy. Replace the broad fixed-bit LSH and false-loop-only admission arm with a predeclared retrieval design that has a tighter query pool and can yield non-empty cycle-consistent additions, then restart at 1k."
+  }
+}
