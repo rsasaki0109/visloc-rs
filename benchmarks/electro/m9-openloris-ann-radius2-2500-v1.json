@@ -1,0 +1,86 @@
+{
+  "schema": "visloc-m9-ann-radius2-evidence-v1",
+  "recorded_at": "2026-09-13T07:04:08+09:00",
+  "status": "ann_infrastructure_speed_and_memory_pass_not_mapping_quality",
+  "ground_truth_used": false,
+  "implementation": {
+    "cli": "learned_retrieval_candidates --probe-radius 1|2",
+    "default_probe_radius": 1,
+    "default_output_byte_identical": true,
+    "default_strict_1k_sha256": "d85fe62b7883b20fe5c298b12e2abc77a755fc0efcd57f247c24fc677a02dc57",
+    "radius_two_masks": "exact bucket plus all one-bit and two-bit masks over the configured low-margin projection bits",
+    "full_probe_order_storage_elided": true,
+    "output_state_bound": "candidate pairs remain at most K*N; no N*N score or state allocation"
+  },
+  "selection_protocol": {
+    "source": "1k exact cosine audit only",
+    "minimum_exact_recall_at_32": 0.94,
+    "require_strict_selected_pair_parity": true,
+    "chosen": {
+      "top_k": 32,
+      "tables": 12,
+      "bits": 14,
+      "one_bit_probes": 14,
+      "probe_radius": 2,
+      "minimum_frame_gap": 64
+    },
+    "mapping_or_trajectory_score_used_for_tuning": false
+  },
+  "tier_1000_exact_audit": {
+    "control_recall_at_32": 0.982125,
+    "candidate_recall_at_32": 0.9470625,
+    "recall_change_percentage_points": -3.50625,
+    "control_mean_pool": 348.26,
+    "candidate_mean_pool": 308.92,
+    "control_selected_pairs": 15,
+    "candidate_selected_pairs": 15,
+    "selected_pair_set_equal": true,
+    "candidate_sha256": "6df043ea5f7c331c2f34e899d619e77a6926a9a2849864ef69ece07997b83aaf",
+    "candidate_repeat_byte_identical": true
+  },
+  "tier_2500_three_repeat_ab": {
+    "control": {
+      "wall_seconds": [4.44, 4.48, 4.51],
+      "median_wall_seconds": 4.48,
+      "peak_rss_kib": [10064, 10000, 10048],
+      "median_peak_rss_kib": 10048,
+      "mean_pool": 861.8576,
+      "maximum_pool": 1116,
+      "candidate_pairs": 33062,
+      "selected_pairs": 15,
+      "sha256": "c6474177cf598b081a9a7347ef57054d86eea0edea894fff97768473fe1c41ee"
+    },
+    "candidate": {
+      "wall_seconds": [2.96, 2.98, 3.0],
+      "median_wall_seconds": 2.98,
+      "peak_rss_kib": [9972, 10036, 9972],
+      "median_peak_rss_kib": 9972,
+      "mean_pool": 637.0096,
+      "maximum_pool": 959,
+      "candidate_pairs": 33071,
+      "selected_pairs": 15,
+      "sha256": "f274040095191dee87bb515205c515be3262bbcbbf24e4434237554cc4e3945b",
+      "all_repeats_byte_identical": true
+    },
+    "candidate_vs_control_percent": {
+      "median_wall": -33.48214285714286,
+      "median_peak_rss": -0.7563694267515908,
+      "mean_pool": -26.08876454764686
+    },
+    "speedup": 1.5033557046979866,
+    "strict_selected_pair_set_equal": true
+  },
+  "decision": {
+    "ann_backend_promotion": "pass",
+    "learned_edge_or_mapping_promotion": "not_claimed",
+    "reason": "Radius-two probing trades 3.51 percentage points of raw top-32 recall for identical strict selected edges, 1.50x median ANN speed, a 26.1% smaller rerank pool, and slightly lower measured RSS at 2.5k.",
+    "next": "Use this bounded ANN configuration only as infrastructure. The false-loop-only learned admission policy remains stopped; quality work must introduce independent evidence that yields non-empty cycle-consistent edges before another mapper A/B."
+  },
+  "validation": {
+    "release_tests": 7,
+    "target_clippy_deny_warnings": true,
+    "default_artifact_parity": true,
+    "candidate_repeat_artifact_parity": true,
+    "json_validated": true
+  }
+}

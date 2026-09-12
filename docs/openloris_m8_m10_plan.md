@@ -11,6 +11,18 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+ANN multi-probe infrastructure now has a retained speed/memory improvement.
+Default radius one remains byte-identical. A 1k exact-only sweep selected
+12 tables, 14 bits, all 14 one-bit probes, and Hamming radius two at a declared
+recall@32 floor of 0.94; it achieves 0.94706 and preserves the exact same 15
+strict selected pairs. On 2.5k, three interleaved repeats reduce median ANN
+wall from 4.48 to 2.98 s (1.50x), median RSS from 10,048 to 9,972 KiB, and mean
+exact-rerank pool from 861.86 to 637.01 rows. All control and candidate
+artifacts are byte-identical within their arms. This promotes ANN
+infrastructure only: the 15 selected edges remain the rejected false loop, so
+there is no mapping-quality claim. See
+[m9-openloris-ann-radius2-2500-v1.json](../benchmarks/electro/m9-openloris-ann-radius2-2500-v1.json).
+
 The fixed learned-retrieval arm has now completed its 2.5k safety/scaling
 audit and is stopped before 5k. Streaming EigenPlaces extraction produced
 1,250 rig rows in 313.43 s at 146,648 KiB sampled RSS. Fixed K32/t12/b9/p9

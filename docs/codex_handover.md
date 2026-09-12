@@ -2,6 +2,15 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 ANN radius-2 multi-probeはinfrastructureとしてPASS。default radius1 artifactは
+SHA d85fe62b...でbyte-identical。1k exact-only sweepでrecall@32 floor0.94を満たす
+t12/b14/p14/radius2を固定し、recall0.9470625、strict selected15 pairは完全同一。
+2.5k control/candidate各3反復でmedian wall 4.48→2.98s（1.50x）、median RSS
+10048→9972KiB、mean rerank pool861.86→637.01（-26.1%）。arm内artifactは全repeat
+byte-identical。証跡benchmarks/electro/m9-openloris-ann-radius2-2500-v1.json。
+ただし15 pairは既知の偽loopのままなのでmapping品質claimではない。ANN基盤だけ保持し、
+learned admission policyは停止を維持。次はnon-empty cycle-consistent edgeを生む独立証拠。
+
 M9 fixed learned armの2.5k safety/scaling audit完了、5k前で停止。
 EigenPlaces streamingは1250 rig row/2500画像を313.43s、sample RSS146648KiB、
 OOM0で生成、artifact SHA4142ccf...。固定K32/t12/b9/p9/gap64 ANNは4.06s、

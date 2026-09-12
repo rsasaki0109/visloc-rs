@@ -26,6 +26,7 @@ struct Args {
     min_frame_gap: usize,
     exact_audit_max_rows: usize,
     admission_policy: AdmissionPolicy,
+    probe_radius: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +47,7 @@ impl Default for Args {
             min_frame_gap: 64,
             exact_audit_max_rows: 1_000,
             admission_policy: AdmissionPolicy::ReciprocalSequenceV1,
+            probe_radius: 1,
         }
     }
 }
@@ -75,12 +77,14 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                     other => return Err(format!("unknown admission policy: {other}").into()),
                 }
             }
+            "--probe-radius" => args.probe_radius = next()?.parse()?,
             "-h" | "--help" => {
                 println!(
                     "learned_retrieval_candidates --descriptors globals.vprd --out pairs.tsv \
                      [--topk 32] [--tables 8] [--bits auto] [--probes auto] \
                      [--min-frame-gap 64] [--exact-audit-max-rows 1000] \
-                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2]"
+                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2] \
+                     [--probe-radius 1|2]"
                 );
                 std::process::exit(0);
             }
@@ -92,6 +96,9 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     }
     if args.topk == 0 || args.tables == 0 || args.bits == Some(0) {
         return Err("topk, tables, and an explicit bit count must be positive".into());
+    }
+    if !(1..=2).contains(&args.probe_radius) {
+        return Err("--probe-radius must be 1 or 2".into());
     }
     Ok(args)
 }
@@ -223,24 +230,56 @@ struct AnnResult {
     undersized_queries: usize,
 }
 
-fn ann_neighbors(
-    descriptors: &MappedDescriptors,
+#[derive(Clone, Copy)]
+struct AnnConfig {
     topk: usize,
     tables: usize,
     bits: usize,
     probes: usize,
     min_gap: usize,
-) -> AnnResult {
+    probe_radius: usize,
+}
+
+fn visit_probe_masks(ordered: &[u8], radius: usize, mut visit: impl FnMut(u64)) {
+    for bit in ordered {
+        visit(1_u64 << bit);
+    }
+    if radius == 2 {
+        for left in 0..ordered.len() {
+            for right in left + 1..ordered.len() {
+                visit((1_u64 << ordered[left]) | (1_u64 << ordered[right]));
+            }
+        }
+    }
+}
+
+fn ann_neighbors(descriptors: &MappedDescriptors, config: &AnnConfig) -> AnnResult {
+    let AnnConfig {
+        topk,
+        tables,
+        bits,
+        probes,
+        min_gap,
+        probe_radius,
+    } = *config;
     let rows = descriptors.rows();
     let mut signatures = vec![0_u64; tables * rows];
-    let mut orders = vec![0_u8; tables * rows * bits];
+    let store_orders = probes < bits;
+    let mut orders = if store_orders {
+        vec![0_u8; tables * rows * probes]
+    } else {
+        Vec::new()
+    };
+    let all_bits = (0..bits as u8).collect::<Vec<_>>();
     let mut buckets = vec![BTreeMap::<u64, Vec<usize>>::new(); tables];
     for table in 0..tables {
         for row in 0..rows {
             let (code, order) = signature(descriptors, row, table, bits);
             signatures[table * rows + row] = code;
-            let start = (table * rows + row) * bits;
-            orders[start..start + bits].copy_from_slice(&order);
+            if store_orders {
+                let start = (table * rows + row) * probes;
+                orders[start..start + probes].copy_from_slice(&order[..probes]);
+            }
             buckets[table].entry(code).or_default().push(row);
         }
     }
@@ -256,12 +295,17 @@ fn ann_neighbors(
             if let Some(bucket) = buckets[table].get(&code) {
                 pool.extend(bucket.iter().copied());
             }
-            let order_start = (table * rows + query) * bits;
-            for bit in &orders[order_start..order_start + probes] {
-                if let Some(bucket) = buckets[table].get(&(code ^ (1_u64 << bit))) {
+            let ordered = if store_orders {
+                let start = (table * rows + query) * probes;
+                &orders[start..start + probes]
+            } else {
+                &all_bits
+            };
+            visit_probe_masks(ordered, probe_radius, |mask| {
+                if let Some(bucket) = buckets[table].get(&(code ^ mask)) {
                     pool.extend(bucket.iter().copied());
                 }
-            }
+            });
         }
         pool.remove(&query);
         pool.retain(|candidate| query.abs_diff(*candidate) >= min_gap);
@@ -482,11 +526,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let ann = ann_neighbors(
         &descriptors,
-        args.topk,
-        args.tables,
-        bits,
-        probes,
-        args.min_frame_gap,
+        &AnnConfig {
+            topk: args.topk,
+            tables: args.tables,
+            bits,
+            probes,
+            min_gap: args.min_frame_gap,
+            probe_radius: args.probe_radius,
+        },
     );
     let exact = (descriptors.rows() <= args.exact_audit_max_rows)
         .then(|| exact_recall(&descriptors, &ann.neighbors, args.topk, args.min_frame_gap));
@@ -535,6 +582,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         output.push_str("# exact_recall_at_k skipped\n");
     }
+    if args.probe_radius != 1 {
+        output.push_str(&format!("# probe_radius {}\n", args.probe_radius));
+    }
     match args.admission_policy {
         AdmissionPolicy::ReciprocalSequenceV1 => {
             output.push_str("# admission_policy reciprocal-sequence-v1\n");
@@ -582,8 +632,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     write_atomic(&args.out, &output)?;
     println!(
-        "ANN rows={} dim={} tables={} bits={} probes={} topk={} pool_mean={:.1} pool_max={} candidates={} selected={} exact_recall={} -> {}",
-        descriptors.rows(), descriptors.dimension(), args.tables, bits, probes, args.topk,
+        "ANN rows={} dim={} tables={} bits={} probes={} radius={} topk={} pool_mean={:.1} pool_max={} candidates={} selected={} exact_recall={} -> {}",
+        descriptors.rows(), descriptors.dimension(), args.tables, bits, probes,
+        args.probe_radius, args.topk,
         ann.mean_pool, ann.max_pool, pairs.len(), selected_count,
         exact.map(|row| format!("{:.6}", row.0)).unwrap_or_else(|| "skipped".to_owned()),
         args.out.display()
@@ -618,6 +669,13 @@ mod tests {
         assert_eq!(automatic_bits(500), 5);
         assert_eq!(automatic_bits(5_000), 9);
         assert_eq!(automatic_bits(50_000), 12);
+    }
+
+    #[test]
+    fn radius_two_visits_unique_one_and_two_bit_masks() {
+        let mut masks = Vec::new();
+        visit_probe_masks(&[2, 0, 1], 2, |mask| masks.push(mask));
+        assert_eq!(masks, vec![4, 1, 2, 5, 6, 3]);
     }
 
     #[test]
