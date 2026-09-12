@@ -2,7 +2,20 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
-M9 learned retrievalのmodel/export/store/ANN feasibilityは1kで完了。
+M9 learned retrievalの最初の全辺armは1k A/Bまで完了し、棄却。
+2783 rig pairを既存pair除外後10958 image pairへatomic materializeし、addition ledgerを
+保存。凍結ratio.8/cross-check/min12 verifierは343/343 shard完了、10919 pair受理。
+base6869 pairと設定hash一致・重複なしでtrack build前mergeし17788 pair。
+default mapperは1000→998登録、RMSE0.02270→0.11772m、p950.03778→0.17203m、
+reproj0.67164→0.74489px、RSS96048→151452KiBでFAIL。pair-confidenceを両armへ
+同条件適用しても登録だけ1000へ戻り、RMSE+33.6%、p95+1.16%、reproj+13.7%、
+mapper wall+55.9%、RSS+72.1%でFAIL。GTはmodel公開後のみ。repeat/2.5k以上は未実施。
+証跡benchmarks/electro/m9-openloris-learned-retrieval-1k-ab-v1.json。
+次はGTで調整せず、descriptor-only rank margin + 双方向連続sequence path + 小さい固定
+per-frame budgetを事前固定し、1k survival curve後に同じfail-fast A/B。現候補集合は再利用・
+大tier昇格しない。
+
+M9 learned retrievalのmodel/export/store/ANN feasibility自体は1kで完了。
 公式MIT EigenPlaces ResNet18/512重みSHA b47ea1ef...、opset17 ONNX
 SHA ab42f8f...（45,754,260bytes）、Rust ORT1.23.2 SHA718c3fb...を外部固定。
 Torch/ORT最大差2.01e-7、dynamic 3解像度PASS。VLVPRD01はmodel/rig順/
@@ -13,9 +26,7 @@ SHA5b7de21f...。mmap LSH K32/tables12/bits9/probes9/gap64は1.33s、RSS5180KiB�
 exact recall@32=0.982125、13215 candidates<=16000、reciprocal AND隣接query
 2件以上のsequence supportで2783選択。repeat byte-identical SHA270ae4a...。
 証跡benchmarks/electro/m9-openloris-learned-retrieval-1k-v1.json。
-まだmatching/mapper A/Bは未実施で性能達成ではない。次は既存structure pair除外、
-選択rig pair→同期image pair化、凍結local matcher/verifierで追加分だけmatch、
-track build前mergeとaddition ledger、その後1k control/candidate/repeat全品質非回帰。
+このinfrastructure passは維持するが、上記mapping A/B失敗により性能達成ではない。
 branch feat/m9-learned-retrieval。外部model/artifactはrepoへcommitしない。
 
 連続native E2E診断v1（source c80f45f）はterminal success。

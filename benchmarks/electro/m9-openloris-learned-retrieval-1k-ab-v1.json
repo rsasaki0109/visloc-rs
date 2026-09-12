@@ -1,0 +1,131 @@
+{
+  "schema": "visloc-m9-learned-retrieval-ab-evidence-v1",
+  "recorded_at": "2026-09-13T06:22:00+09:00",
+  "status": "rejected_at_tier_1000",
+  "scope": "OpenLORIS corridor1-1 tier-1000, frozen local features/verifier/mapper",
+  "ground_truth_used_during_mapping": false,
+  "retrieval": {
+    "descriptor": "EigenPlaces ResNet18/512, 500 rig-frame rows",
+    "descriptor_sha256": "5b7de21f584470068e66863545cc8122b2fe820a0dcd90b7a18331437204ea12",
+    "policy": "K=32 reciprocal retrieval AND descriptor-only sequence_support>=2, minimum frame gap 64",
+    "retrieval_ledger_sha256": "270ae4a42573019c6c46cb59e6fee9792fff794157c9fe43e943f0ec70fa0ac2",
+    "selected_rig_pairs": 2783,
+    "base_image_pairs": 6869,
+    "new_image_pairs": 10958,
+    "candidate_manifest_sha256": "250a64798277c27a9fe94c6ffe7a4e36d68c429b8e6636da25bccf36299cc1a3",
+    "addition_ledger_sha256": "cc5d7f6539fc2aafcd6c89a952c27c5e03b19ad5ece0e065d07454716a5a65f1",
+    "binding": "canonical rig order and frozen snapshot image names are revalidated; existing pairs and duplicate ownership are rejected before atomic publication"
+  },
+  "matching": {
+    "binary_sha256": "b02f85ecce56074e000d77a6bbd63242b3d0f568294f9c22fcc9a2dc4ca01c50",
+    "recipe": "ratio=0.8, cross-check, full verifier, min_matches=12, persistent streamed features, shared snapshot envelope, 32 pairs/shard, RAYON_NUM_THREADS=4",
+    "candidate_pairs": 10958,
+    "shards_completed": 343,
+    "shards_total": 343,
+    "verified_addition_pairs": 10919,
+    "accepted_correspondences": 715179,
+    "wall_seconds": 50.37,
+    "peak_rss_kib": 58840,
+    "verified_additions_sha256": "89c7ee39ef4b656373d1b72595716887019a023810a35deb368bfb644403c88c",
+    "verifier_config_hash": "a61bdaa684dbfad0",
+    "discarded_probe": "A first isolated run accidentally used the runner default min_matches=30. It was retained externally as diagnostic evidence but was not merged or used for the A/B."
+  },
+  "pre_track_merge": {
+    "base_snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "base_pairs": 6869,
+    "merged_pairs": 17788,
+    "accepted_correspondences": 1376607,
+    "merged_snapshot_sha256": "b86181e8e1670183dc470b191fefd8df7a721ca8920bc5a6c54d651d7a489103",
+    "verifier_config_hash": "a61bdaa684dbfad0",
+    "disjoint_pair_and_image_order_validation": true
+  },
+  "measurement_contract": {
+    "mapper_binary_sha256": "3d744ced8b2b09cbaba26bf963e9ac31c5293538b1a8bbbee62621ccfdd70c34",
+    "environment": "RAYON_NUM_THREADS=1; debug and phase-timing variables unset",
+    "memory": "one dedicated cgroup v2 scope per arm, MemoryMax=2G, MemorySwapMax=0, 50 ms aggregate-RSS sampling",
+    "timeout_seconds": 300,
+    "model_publication_precedes_gt_scoring": true,
+    "promotion_gate": "candidate must be no worse in registration, RMSE, p95, mean reprojection, mapper wall, and sampled peak RSS"
+  },
+  "default_track_builder_ab": {
+    "control": {
+      "registered_images": 1000,
+      "tracks": 2658,
+      "observations": 27716,
+      "mean_reprojection_px": 0.671637382,
+      "mapper_seconds": 3.165356,
+      "wall_seconds": 3.635428100824356,
+      "sampled_peak_rss_kib": 96048,
+      "ate_rmse_m": 0.02269532080131782,
+      "ate_p95_m": 0.03777877644562742,
+      "ate_max_m": 0.061655609452973735,
+      "measurement_sha256": "b16e9d9e74844e7d7db557f75a2ba4caa0ac7178f1dd89886f1d1cf866e8b43c",
+      "score_sha256": "d8e97d9e1e1860d6cd753778824b2e4568936742081026d1fc4a10d6fee8af6a"
+    },
+    "candidate": {
+      "registered_images": 998,
+      "tracks": 2179,
+      "observations": 17929,
+      "mean_reprojection_px": 0.744894857,
+      "mapper_seconds": 2.729737,
+      "wall_seconds": 3.381963151972741,
+      "sampled_peak_rss_kib": 151452,
+      "ate_rmse_m": 0.1177247056305619,
+      "ate_p95_m": 0.1720283931642129,
+      "ate_max_m": 0.2679267224441888,
+      "measurement_sha256": "b9990db075e4ba15f356fb88d3eaf2d82d3f897d91bb2584046481f254166192",
+      "score_sha256": "818c47b5a984dbb6517a2d8487fe977874761af8087b95b1af0b2ba16b5d4e94"
+    },
+    "failure": "registration, RMSE, p95, reprojection, and RSS regress; no repeat or larger tier is allowed"
+  },
+  "pair_confidence_diagnostic": {
+    "description": "The existing production pair-confidence track builder was applied identically to control and candidate to test whether conflict ordering alone could contain the added edges.",
+    "control": {
+      "registered_images": 1000,
+      "tracks": 4826,
+      "observations": 113524,
+      "mean_reprojection_px": 0.87822423,
+      "mapper_seconds": 14.783843,
+      "wall_seconds": 15.25920098577626,
+      "sampled_peak_rss_kib": 141828,
+      "ate_rmse_m": 0.0240703722856282,
+      "ate_p95_m": 0.048099542747875854,
+      "measurement_sha256": "cca591a44cb36922f6917a708510eeef7825f0187e5ab0e6e59ba82c7e20edf5",
+      "score_sha256": "7c40f4fb800084328bf12e164d6a333f7edbbf1505740ee58d8af11da82a2e1f"
+    },
+    "candidate": {
+      "registered_images": 1000,
+      "tracks": 4349,
+      "observations": 121329,
+      "mean_reprojection_px": 0.998793995,
+      "mapper_seconds": 23.052027,
+      "wall_seconds": 23.737060508923605,
+      "sampled_peak_rss_kib": 244036,
+      "ate_rmse_m": 0.032148337307899996,
+      "ate_p95_m": 0.0486576079758764,
+      "measurement_sha256": "8801a84b8ae05c232344f1e0d3c6881e6d93530ee778d19c864f3a053c23bbe2",
+      "score_sha256": "0fc07aa6a589d1b476bc8b2dd015f37a669a50890749060ae8a2306353898e5b"
+    },
+    "candidate_vs_control_percent": {
+      "rmse": 33.559784312496646,
+      "p95": 1.1602297987025834,
+      "mean_reprojection": 13.728813312290411,
+      "mapper_wall": 55.927163187541964,
+      "sampled_peak_rss": 72.06475449135571
+    },
+    "failure": "registration recovers, but every remaining quality/resource gate regresses"
+  },
+  "decision": {
+    "promote_to_tier_2500": false,
+    "repeat_required_after_failure": false,
+    "accepted_claim": "restart-safe learned descriptor storage and bounded ANN infrastructure remain valid",
+    "rejected_claim": "this K=32 all-edge learned-retrieval candidate improves SfM quality or end-to-end performance",
+    "cause": "The corridor descriptors form a broad high-similarity pool and 10919 of 10958 additions pass the permissive frozen two-view verifier. Hard insertion before track construction over-connects repetitive correspondences; confidence ordering does not recover trajectory quality or resource parity.",
+    "next_hypothesis": "Before any new mapping run, add a bounded descriptor-only ambiguity gate (rank margin plus bidirectional sequence path, with a fixed per-frame addition budget) and audit its 1k survival curve. Keep the matcher/verifier frozen and rerun the same fail-fast 1k A/B only for a materially smaller predeclared candidate set."
+  },
+  "tests": {
+    "materializer_unit_tests_passed": 2,
+    "materializer_clippy_deny_warnings": true,
+    "json_validated": true
+  }
+}

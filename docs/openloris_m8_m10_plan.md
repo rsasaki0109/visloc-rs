@@ -11,6 +11,36 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+The first learned long-range retrieval arm has now been matched, merged before
+track construction, mapped, scored, and **rejected at 1k**. The canonical
+materializer revalidated retrieval/snapshot/rig hashes, removed all 6,869
+existing image pairs, expanded 2,783 selected rig pairs into 10,958 unique new
+image pairs, and preserved an attribution ledger. Frozen ratio-0.8,
+cross-checked, `min_matches=12` verification accepted 10,919 additions in 343
+restartable shards. Their verifier configuration hash matches the base, and a
+disjoint merge produced 17,788 total verified pairs before track construction.
+
+The default mapper then regressed from 1,000/1,000 to 998/1,000 images, RMSE
+from 0.02270 m to 0.11772 m, p95 from 0.03778 m to 0.17203 m, reprojection from
+0.67164 px to 0.74489 px, and sampled RSS from 96,048 to 151,452 KiB. The
+existing pair-confidence track builder restored full registration, but still
+regressed RMSE by 33.6%, p95 by 1.16%, reprojection by 13.7%, mapper wall by
+55.9%, and RSS by 72.1%. No OOM occurred and GT was used only after model
+publication. Per the fail-fast contract, no repeat or 2.5k/5k/10k promotion is
+allowed for this candidate set. Full hashes and both A/Bs are frozen in
+[m9-openloris-learned-retrieval-1k-ab-v1.json](../benchmarks/electro/m9-openloris-learned-retrieval-1k-ab-v1.json).
+
+The failure is informative: 10,919/10,958 additions surviving the frozen
+two-view verifier is not selective enough for this repetitive corridor, and
+hard pre-track insertion over-connects the correspondence graph. The next arm
+must be declared before mapping and remain descriptor-only at selection time:
+require an explicit nearest-neighbour rank margin, a bidirectional contiguous
+sequence path (not merely two neighbouring votes), and a much smaller fixed
+per-frame addition budget. Audit its 1k survival curve first; keep local
+matching and geometry frozen; run the same fail-fast 1k A/B only if the set is
+materially smaller. The current all-edge arm is not to be tuned on GT or run at
+larger tiers.
+
 The learned-retrieval feasibility gate now passes on the frozen 1k tier. The
 first arm is the official MIT-licensed EigenPlaces ResNet18/512 checkpoint,
 exported as one 45,754,260-byte opset-17 ONNX file. Strict weight loading,
@@ -35,9 +65,9 @@ under the 16,000=`32N` cap, and selected 2,783 only when retrieval was reciproca
 An independent repeat was byte-identical. Full model/runtime/source hashes,
 commands, resource records, negative ABI finding, and limitations are frozen in
 [m9-openloris-learned-retrieval-1k-v1.json](../benchmarks/electro/m9-openloris-learned-retrieval-1k-v1.json).
-This closes descriptor/ANN infrastructure only: no new pair has been matched,
-no mapper quality has been scored, and broad corridor LSH pools still require a
-large-tier growth gate.
+This closes descriptor/ANN infrastructure only. The subsequent all-edge 1k arm
+described above failed mapping quality and resource gates; broad corridor LSH
+pools still require a large-tier growth gate for any future, stricter arm.
 
 The first continuous generated-artifact native run is complete. The detached
 service exited successfully without resume; all 17 stages completed with exit
@@ -95,18 +125,19 @@ VLAD ranking and must not use reconstructed poses or GT for selection:
    recall@32 `0.982125`, emits no more than 32N candidates, and records pool,
    wall, RSS and hashes without N x N score/state allocation. Its broad pool
    remains a scaling gate at larger tiers.
-3. Emit only previously absent long-range candidates. Require reciprocal
+3. **Rejected as initially specified:** emitting all previously absent pairs
+   with reciprocal
    descriptor support plus descriptor-only sequence consistency: at least two
    adjacent query rig frames must retrieve a consistent remote rig-frame
    neighbourhood. This gate may use manifest order but not poses, local-match
    counts, verifier inliers, reconstructed components, or GT.
-4. Match only those bounded additions with the frozen local features and the
+4. **Completed for the rejected arm:** match only those bounded additions with the frozen local features and the
    unchanged geometric verifier. Merge accepted edges into the structure input
    before track construction, rather than appending them after the structure
    prefix as in the rejected ANN80k diagnostic. Preserve a separate addition
    ledger so every changed track and registration can be attributed to a new
    verified edge.
-5. Run control/candidate/repeat on frozen 1k under 2 GiB first. Require equal or
+5. **Failed before repeat:** run control/candidate/repeat on frozen 1k under 2 GiB first. Require equal or
    better registration, RMSE, p95, reprojection, mapper wall, and sampled RSS;
    model publication precedes GT scoring. Stop and revert on any regression.
    Only a complete pass proceeds to 2.5k, 5k, 10k, cold-cache three-repeat

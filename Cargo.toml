@@ -156,6 +156,10 @@ name = "learned_retrieval_candidates"
 path = "examples/learned_retrieval_candidates.rs"
 
 [[example]]
+name = "materialize_learned_rig_candidates"
+path = "examples/materialize_learned_rig_candidates.rs"
+
+[[example]]
 name = "euroc_dpvo_vo_demo"
 path = "examples/euroc_dpvo_vo_demo.rs"
 required-features = ["image-io", "onnx-inference"]
