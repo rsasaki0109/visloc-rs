@@ -160,6 +160,10 @@ name = "materialize_learned_rig_candidates"
 path = "examples/materialize_learned_rig_candidates.rs"
 
 [[example]]
+name = "admit_learned_rig_rotation_cycles"
+path = "examples/admit_learned_rig_rotation_cycles.rs"
+
+[[example]]
 name = "euroc_dpvo_vo_demo"
 path = "examples/euroc_dpvo_vo_demo.rs"
 required-features = ["image-io", "onnx-inference"]

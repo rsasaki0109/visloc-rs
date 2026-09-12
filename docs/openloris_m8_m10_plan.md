@@ -11,6 +11,19 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+The post-verification rig-rotation cycle gate now passes its 1k safety test.
+Its thresholds were fixed before the audit: at least two sensor-pair essential
+rotations per rig pair, at most 3 degrees of common-rig-frame dispersion, and
+a complete forward or reverse three-frame path whose representative rotations
+also agree within 3 degrees. Four of the 15 strict retrieval pairs passed the
+individual dispersion test, but none formed a complete qualifying path, so no
+image pair was admitted. Merging the empty admission snapshot left the frozen
+base byte-identical; rerunning the mapper would add no evidence. This is a
+**safety pass, not a quality win**. The same fixed policy now proceeds to a
+2.5k non-empty/scaling audit, and mapping is allowed only if at least one edge
+survives. See
+[m9-openloris-rotation-cycle-1k-v1.json](../benchmarks/electro/m9-openloris-rotation-cycle-1k-v1.json).
+
 A second, predeclared ambiguity arm has also failed at 1k. It required mutual
 rank below two, bidirectional cosine-distance ratio at most 0.8 against the
 next unrelated sequence, a forward-or-reverse three-frame path, and at most

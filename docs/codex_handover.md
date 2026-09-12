@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 post-verification rig rotation-cycle gateの1k安全性監査はPASS。ただしquality win
+ではない。凍結thresholdはsensor-pair rotation 2本以上、rig frame内dispersion<=3度、
+順/逆3-frame path（radius1）の代表rotation差<=3度。strict-v2の15 rig pair中、単体
+dispersionを通るのは4 pairだがcomplete pathは0、admitted image pairも0。empty VPSを
+baseへmergeした出力SHAはbaseと同一4964cbbe...のためmapper再実行は不要。
+証跡benchmarks/electro/m9-openloris-rotation-cycle-1k-v1.json。utilityは
+examples/admit_learned_rig_rotation_cycles.rs、3 tests/clippy PASS。次は同じ固定policyの
+2.5k non-empty/scaling audit。descriptor 1250 rig rows生成はdetached unit
+visloc-m9-vpr-2500-v1.serviceで進行中。再起動せずterminal measurementを確認し、
+strict-v2 ANN→追加pair materialize→凍結match→cycle gateの順。cycle admissionが空なら
+safety auditで停止、non-emptyの場合だけ凍結recipeのcontrol seedを確定してmapping A/B。
+
 M9 strict-v2も1kで棄却。相互rank<2、両方向cosine-distance ratio<=0.8、
 順/逆3-frame path、frame当たり最大2辺をmapping前固定し、2783→15 rig pair→60
 image pairへ削減したが、凍結verifierは60/60受理。自動seedが26→313へ変わる交絡を

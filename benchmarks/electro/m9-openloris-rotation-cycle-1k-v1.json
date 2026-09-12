@@ -1,0 +1,59 @@
+{
+  "schema": "visloc-m9-learned-rig-rotation-cycle-evidence-v1",
+  "recorded_at": "2026-09-13T06:43:45+09:00",
+  "status": "safety_pass_zero_admissions_not_quality_win",
+  "ground_truth_used_for_admission": false,
+  "reconstructed_pose_used_for_admission": false,
+  "input": {
+    "policy": "rank-margin-path-v2",
+    "selected_rig_pairs": 15,
+    "verified_image_pairs": 60,
+    "addition_ledger_sha256": "285bd6086178574796053901de3dd9a7116301276e7add1efeab8dff396eeabc",
+    "verified_additions_sha256": "83adcb427b64644bb47f15ea29bdaee817cc3ba735baecd5bd5a2ae3521cd436"
+  },
+  "admission_policy": {
+    "name": "rig-rotation-cycle-v1",
+    "minimum_sensor_pair_rotations": 2,
+    "maximum_within_rig_pair_dispersion_degrees": 3.0,
+    "path_radius": 1,
+    "maximum_path_rotation_difference_degrees": 3.0,
+    "path_direction": "forward or reverse",
+    "relative_rotation_source": "frozen two-view essential geometry",
+    "common_frame": "camera-pair rotations converted to the rig frame using the frozen rig calibration",
+    "note": "The policy and thresholds were fixed before this audit and use neither reconstructed poses nor GT. A qualifying rig pair must also belong to a complete contiguous three-frame path."
+  },
+  "result": {
+    "rig_pairs_audited": 15,
+    "rig_pairs_passing_within_pair_dispersion_only": 4,
+    "rig_pairs_passing_complete_path": 0,
+    "admitted_rig_pairs": 0,
+    "admitted_image_pairs": 0,
+    "minimum_observed_dispersion_degrees": 0.6495862433746548,
+    "maximum_observed_dispersion_degrees": 20.90915534607631,
+    "wall_seconds": 0.0,
+    "sampled_peak_rss_kib": 3676,
+    "admitted_snapshot_sha256": "5a7937029f5ed69cf48203c2301151919006d40e06687ead3d449d992c0caead",
+    "admission_ledger_sha256": "b5af9696f9313d853e843f18a918af483a5664a0a22ac65e5b9eb3a5bbd5a2fb"
+  },
+  "overlay_check": {
+    "base_snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "base_plus_admitted_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "byte_identical": true,
+    "mapping_run_required": false,
+    "reason": "The empty admitted snapshot leaves the frozen mapping input byte-identical, so another mapper run cannot add evidence."
+  },
+  "decision": {
+    "promotion": "safety_gate_retained_for_nonempty_audit",
+    "quality_claim": false,
+    "finding": "The gate rejects the known frame 307-315 versus 372-379 false place sequence that survived descriptor and independent two-view checks.",
+    "next": "Run the already-fixed descriptor, ANN, matching, and rotation-cycle policy at 2.5k. Map only if a non-empty admitted set remains; otherwise record another safety audit without claiming a quality gain."
+  },
+  "validation": {
+    "unit_tests": 3,
+    "target_clippy_deny_warnings": true,
+    "input_pair_set_revalidated": true,
+    "rotation_matrices_revalidated": true,
+    "atomic_output": true,
+    "json_validated": true
+  }
+}
