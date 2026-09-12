@@ -9,7 +9,46 @@ time and peak RSS in both mapper-only and native end-to-end comparisons.
 This plan is outcome-gated. ANN retrieval, bridge discovery, track repair, and
 BA changes are possible means, not milestone success by themselves.
 
-## Latest checkpoint (2026-09-09)
+## Latest checkpoint (2026-09-12)
+
+The first continuous generated-artifact native run is complete. The detached
+service exited successfully without resume; all 17 stages completed with exit
+code zero, and an independent post-run traversal revalidated every recorded
+artifact checkpoint. Measured wall time was 17,006.10 s, sampled aggregate
+peak RSS was 1,806,376 KiB under a 2 GiB / swap-disabled cgroup, and no OOM was
+recorded. The cgroup reached its hard charged-memory limit 366,806 times, so
+the result passes the RSS/OOM gate but does not establish an absence of memory
+pressure.
+
+Against the frozen COLMAP control, the run's 816.39 s mapping stage is 20.41x
+faster than COLMAP's 16,663.88 s mapper. Its continuous 17,006.10 s wall is
+1.13x faster than COLMAP's 19,256.60 s measured phase sum, and sampled RSS is
+17.0% below COLMAP's process HWM. This is not yet a same-method cold benchmark:
+the native OS cache was uncontrolled, the COLMAP total is a phase sum rather
+than a continuous wall measurement, and neither side has the required three
+accepted repeats.
+
+The output exactly reproduces the connected filtered atlas: 9,998 images,
+4,999 supported rig frames, 0.581744 px mean reprojection, 0.388993 m RMSE,
+and 0.638173 m p95. Registration, reprojection, and p95 beat or match COLMAP;
+RMSE remains 1.22% above COLMAP's 0.384307 m target. Therefore the continuous
+execution and resource diagnostic passes, but M8 quality and M9/M10 acceptance
+remain open. Frozen hashes, stage times, comparison arithmetic, and caveats are
+in
+[m8-native-e2e-v1.json](../benchmarks/electro/m8-native-e2e-v1.json).
+
+The next quality arm must follow the accumulated negative evidence. Reprojection
+BA, adjacent descriptor/LK cycles, post-map track merge, sparse/global solve
+schedules, and feasibility backtracking are exhausted. The remaining bounded
+boundary is mutually-exclusive pre-ownership hypothesis selection using an
+independent long-range identity signal. Declare its fixed geometric and
+resource gates at 1k, keep GT score-only after publication, and stop before
+2.5k on any registration, RMSE, p95, reprojection, or runtime regression.
+Only a quality-passing arm proceeds to controlled cold-cache timing, three
+repeats, tier nonregression, full-process SIGKILL recovery, and final release
+closure.
+
+## Previous infrastructure checkpoint (2026-09-09)
 
 The shared-snapshot path now has complete dense worker parity on the retained
 10k feature bank: all 2,500 shards/80,000 candidates reproduce every legacy

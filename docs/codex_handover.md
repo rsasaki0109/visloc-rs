@@ -2,15 +2,23 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
-連続native E2E診断v1を起動（source c80f45f）。
-unit visloc-native-e2e-v1.service、2GiB/Swap0/timeout43200、invocation5118aa2190cc4bc69110d602caa37e25。
-出力dataset/corridor1-1-m8-native-e2e-v1、計測dataset/m8-native-e2e-measurement-v1。
-同unit追跡・再起動禁止。全17stage、9binary hash確認、関連15tests PASS。
-初回の生成済み成果物なし連続診断であり、OS cache coldは保証していない。
-scripts/*.pyとbenchmarks/electro JSON/TSVとbinaryは実行中変更禁止（stage毎pins検証）。
+連続native E2E診断v1（source c80f45f）はterminal success。
+unit visloc-native-e2e-v1.service、MainPID0/SubState exited/Result success/exit0、
+invocation5118aa2190cc4bc69110d602caa37e25。再実行・再poll不要。
+全17stageが初回連続実行でexit0/completed。終了後に全stage artifact checkpointを
+独立再検証して17/17 PASS。pipeline wall17005.153s、計測wall17006.100s。
+sample aggregate peak RSS1806376KiB（1.72GiB）、cgroup peak2GiB、Swap0、
+memory.events max366806、OOM/oom_kill0。メモリ圧迫なしとは主張しない。
+最終scoreは9998画像/4999frame、RMSE0.388993m、p950.638173m。
+COLMAP比でmapper20.41倍、phase合計比1.13倍、sampled RSS17.0%低いが、
+RMSEはCOLMAP0.384307mより1.22%悪く品質gate未達。
+またOS cache未制御、COLMAP側は連続wallでなくphase和、単発runのため、
+同条件cold E2E性能acceptance・3反復・全SIGKILL restartは未達。
+証跡benchmarks/electro/m8-native-e2e-v1.json。pipeline report SHA375ec7b...、
+measurement SHA9f889ea...、score SHA74e839b...。
+次は同じGTでの閾値調整ではなく、segment別誤差の原因を観測・幾何から診断して
+固定した品質改善armを作る。その後cold条件統一、3反復、tier非回帰へ進む。
 共有化済み既存model/VPSは上書き禁止。新runはfresh root。
-未完走・品質未達、SIGKILL resume未対応、反復性能比較でもない。
-完走時はpipeline/measurement終端・各stagecheckpoint・最終品質を検証する。
 
 M8 model/match共有化完了: apply_m8_duplicate_inventory.py、session60517 exit0。
 固定一覧からsingle-link682filesのみ置換、19277934592bytes（17.95GiB）解放。
