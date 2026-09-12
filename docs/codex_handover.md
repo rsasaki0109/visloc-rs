@@ -16,12 +16,27 @@ RMSEはCOLMAP0.384307mより1.22%悪く品質gate未達。
 同条件cold E2E性能acceptance・3反復・全SIGKILL restartは未達。
 証跡benchmarks/electro/m8-native-e2e-v1.json。pipeline report SHA375ec7b...、
 measurement SHA9f889ea...、score SHA74e839b...。
-次はCOLMAP IncrementalTriangulator::Createとの差として残るbounded recursive
-partitionを固定armで実装する。既存batched Createは最初のinlier集合だけを所有したが、
-COLMAPは未所有残差が3観測以上なら別trackを再帰生成する。上限はCSR rowあたり
-32近傍/128 ray-pair仮説/4排他的partition、GTはpublication後だけ。まず1kで
-登録/RMSE/p95/再投影/time/RSSの一つでも悪化したら上位tierへ進めない。
-通過後にcold条件統一、3反復、tier非回帰へ進む。
+bounded recursive Createは1kで実装・測定後に棄却し、source/CLI変更をrevert済み。
+同一binaryのdefault-OFF controlは旧model 3 filesとSHA完全一致、1000/1000登録。
+candidateも1000/1000だが、RMSE0.0290996→0.0295248m（+1.46%）、
+p950.0436789→0.0444145m（+1.68%）、再投影0.743284→0.757226px（+1.88%）で
+全品質指標が悪化。2.5kへ進めない。candidateは6774 partition/25057観測を公開、
+OOM0。単発mapper/RSS低下はcache非統制かつ品質FAILのため性能主張にしない。
+証跡benchmarks/electro/m8-openloris-dynamic-recursive-create-ab.json、外部raw root
+dataset/corridor1-1-m8-recursive-create-1k-v1。既存correspondence graphのbounded
+ownership変更はこれで打ち切る。
+
+次は独立したlearned long-range identityの固定arm。既存
+GlobalDescriptorOnnxExtractorを再利用するが、EigenPlaces/CosPlace ONNXはrepoに
+存在しない。暗黙download禁止。まずmodel license/SHA/preprocess/output次元をpinし、
+1画像ずつresumable/atomicにglobal descriptorを書き出す。rig-frame単位の
+deterministic mmap ANN（K=32、candidate<=32N、N x N state禁止）をexact cosine 1kで
+recall検証。既存pairを除外し、reciprocal retrieval + 隣接2 query frameの
+descriptor-only sequence consistencyだけでlong-range候補を作る。pose/GT/local
+match数/inlier数を選択へ使わない。凍結local feature/verifierで追加pairだけmatchし、
+既存ANN80kのようなdeferred appendではなくtrack build前のstructure inputへ追加、
+変更ledgerを保存。1k control/candidate/repeatで登録/RMSE/p95/再投影/mapper/RSSの
+全非回帰を要求し、一つでも悪化ならrevert。詳細はdocs/openloris_m8_m10_plan.md冒頭。
 共有化済み既存model/VPSは上書き禁止。新runはfresh root。
 
 M8 model/match共有化完了: apply_m8_duplicate_inventory.py、session60517 exit0。

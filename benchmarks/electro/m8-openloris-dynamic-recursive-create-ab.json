@@ -1,0 +1,116 @@
+{
+  "schema": "visloc_m8_openloris_dynamic_recursive_create_ab_v1",
+  "date": "2026-09-13",
+  "dataset": "OpenLORIS corridor1-1, frozen calibrated-rig 1k",
+  "ground_truth_used_during_mapping": false,
+  "source_experiment": {
+    "base_commit": "dfaa2b1",
+    "state": "uncommitted source/CLI experiment, subsequently reverted",
+    "binary_sha256": "e8d2cb8e8ce042d80e0dda2fb1f82fec638292eb9f92387547615380832a38b5",
+    "source_diff_sha256": "2f7dd6f18cfe3e9737c34200a813e208342cbb650558c9ea2fffdaa930c73d8e",
+    "default_path_changed": false,
+    "tests": "8 release dynamic-tracking tests passed; release example check and clippy -D warnings passed"
+  },
+  "method": {
+    "description": "bounded COLMAP-style recursive Create over the unowned residual of one registered CSR neighbourhood",
+    "isolation": "continuation and bootstrap remained unchanged; only free/free creation changed behind an opt-in flag",
+    "limits": {
+      "max_registered_neighbors_per_row": 32,
+      "max_deterministic_ray_pair_hypotheses_per_partition": 128,
+      "max_mutually_exclusive_partitions_per_row": 4,
+      "minimum_distinct_images_per_partition": 3,
+      "persistent_state": "O(observations + CSR edges); bounded per-row scratch; no region, track-pair, or image-pair matrix"
+    },
+    "ownership": "score all bounded hypotheses before mutation; one lowest-error observation per image; recheck empty owners; publish one observation to one track only; retry only the residual",
+    "ground_truth_role": "post-mapping score only"
+  },
+  "inputs": {
+    "images": 1000,
+    "verified_pairs": 6935,
+    "matches": 1605174,
+    "keypoints": 361170,
+    "manifest": "/home/sasaki/datasets/openloris/corridor1-1-m8-visloc-rig/tier-1000/rig-manifest.txt",
+    "features": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-full10k-v2/features-1k",
+    "snapshot": "/home/sasaki/datasets/openloris/corridor1-1-m8-dense256x2-1k-control-v1/mapping/verified-merged.vps",
+    "run_root": "/home/sasaki/datasets/openloris/corridor1-1-m8-recursive-create-1k-v1"
+  },
+  "measurement_contract": {
+    "order": [
+      "control",
+      "candidate"
+    ],
+    "binary": "same immutable copied binary for both arms",
+    "environment": "RAYON_NUM_THREADS=1; debug and phase timing variables unset",
+    "scope": "dedicated cgroup v2 scope per arm, MemoryMax=2G, MemorySwapMax=0, 50 ms aggregate-RSS sampling",
+    "timeout_seconds": 300,
+    "timing_caveat": "one control-then-candidate run with uncontrolled OS cache; timing and charged cgroup peak are diagnostic, not a promoted speed or memory claim"
+  },
+  "control": {
+    "flag": "--dynamic-correspondence-tracking",
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "models": 1,
+    "tracks": 8441,
+    "observations": 271594,
+    "mean_reprojection_error_px": 0.743283945,
+    "ate_rmse_m": 0.029099635763349854,
+    "ate_p95_m": 0.043678871077456695,
+    "ate_max_m": 0.0852041159532134,
+    "mapper_seconds": 54.079464,
+    "measurement_wall_seconds": 56.15267684380524,
+    "sampled_aggregate_peak_rss_kib": 186612,
+    "cgroup_memory_peak_bytes": 768000000,
+    "oom_events": 0,
+    "legacy_control_bytes_match": true,
+    "measurement_sha256": "01945f280550677aa07e46d7570b6a6b2c0bab7d64434b06c606976702628a24",
+    "score_sha256": "bbfa670439541b22edea180986e5d483432fa4f40453c539da896511d473733b",
+    "mapper_log_sha256": "03cf3233b0fe21469acb50ba8aea98302e9c96ae4afa00b7d56ae66d5a3a8e9d",
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "af37165e09603859c19b84ea7babe6d2c5b785036260957b1ac7dcf5da19a6c5",
+      "points3D_txt": "ca7d7793d45ef16513e88698ab1c667ebbb6563abc75a6468ac8edbbc62a6aa8"
+    }
+  },
+  "candidate": {
+    "flag": "--dynamic-recursive-create (also enables dynamic correspondence tracking)",
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "models": 1,
+    "tracks": 6864,
+    "observations": 257336,
+    "mean_reprojection_error_px": 0.757225578,
+    "ate_rmse_m": 0.02952476946818406,
+    "ate_p95_m": 0.044414509825986534,
+    "ate_max_m": 0.0857578032767588,
+    "mapper_seconds": 43.015757,
+    "measurement_wall_seconds": 44.414621100062504,
+    "sampled_aggregate_peak_rss_kib": 178676,
+    "cgroup_memory_peak_bytes": 175046656,
+    "oom_events": 0,
+    "counters": {
+      "attempted_rows": 142880,
+      "ray_pair_hypotheses": 20780,
+      "published_partitions": 6774,
+      "claimed_observations": 25057
+    },
+    "measurement_sha256": "8f571c675a0c27d99b15fe608d477958dafd52b82a34df76d9fd8c23241eeb9e",
+    "score_sha256": "2fa5ee3076bf8c0f6722589fb189754c65b08dba75c58d20385deaf41fdea4c9",
+    "mapper_log_sha256": "54a6f41525ff33e7b3c7198a03aafc53701382cc07590a774d523335c43b2675",
+    "model_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "d1cc786afc62e2b2623fa8af23fdc46b32415415d1c47b635ffaedc7c5d4d62f",
+      "points3D_txt": "3631cb8df6846ff697253911af5ca38f00abf93dc6cec29be2ae25a17569711a"
+    }
+  },
+  "candidate_vs_control": {
+    "registration_delta_images": 0,
+    "ate_rmse_delta_percent": 1.460958852858396,
+    "ate_p95_delta_percent": 1.684198172670981,
+    "mean_reprojection_error_delta_percent": 1.8756806323860564,
+    "mapper_seconds_delta_percent": -20.458240858304364,
+    "sampled_aggregate_peak_rss_delta_percent": -4.252673997384948
+  },
+  "decision": "rejected_at_1k_and_not_promoted",
+  "conclusion": "Registration was retained, but RMSE, p95, and mean reprojection error all regressed. Recursive residual partitioning therefore does not repair the quality loss from changing existing-correspondence ownership.",
+  "next_action": "Treat bounded existing-correspondence ownership partitioning as exhausted. Any next quality arm must add independently retrieved long-range identity evidence, keep GT post-score-only, and start again at the frozen 1k gate."
+}

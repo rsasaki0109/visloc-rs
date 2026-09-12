@@ -9,7 +9,7 @@ time and peak RSS in both mapper-only and native end-to-end comparisons.
 This plan is outcome-gated. ANN retrieval, bridge discovery, track repair, and
 BA changes are possible means, not milestone success by themselves.
 
-## Latest checkpoint (2026-09-12)
+## Latest checkpoint (2026-09-13)
 
 The first continuous generated-artifact native run is complete. The detached
 service exited successfully without resume; all 17 stages completed with exit
@@ -37,28 +37,59 @@ remain open. Frozen hashes, stage times, comparison arithmetic, and caveats are
 in
 [m8-native-e2e-v1.json](../benchmarks/electro/m8-native-e2e-v1.json).
 
-The next quality arm must follow the accumulated negative evidence. Reprojection
-BA, adjacent descriptor/LK cycles, post-map track merge, sparse/global solve
-schedules, and feasibility backtracking are exhausted. One correspondence-
-ownership difference from COLMAP remains untested: its incremental Create
-claims one robust inlier set, then recursively partitions at least three
-remaining unowned observations into another 3-D point. The rejected visloc
-batched-Create arm claimed only its first inlier set.
+The final bounded correspondence-ownership difference from COLMAP has now been
+tested and rejected. The default-off recursive-Create prototype scored at most
+32 registered neighbours and 128 deterministic ray-pair hypotheses per
+partition, published at most four mutually exclusive residual partitions, and
+never assigned one observation to multiple tracks. Its release tests and
+clippy passed, and its default-OFF 1k control reproduced all three previous
+model hashes exactly.
 
-Implement exactly one default-off bounded recursive-Create arm: at most 32
-registered neighbours per CSR reference row, at most 128 deterministic
-ray-pair hypotheses per partition, and at most four mutually exclusive
-partitions. An observation may be published to only one track; positive depth,
-the existing angular/reprojection gates, deterministic ordering, and
-O(observations + CSR edges) persistent state are mandatory. Run the frozen
-1k control and candidate first, keep GT score-only after model publication, and
-stop before 2.5k on any registration, RMSE, p95, reprojection, mapper-wall, or
-RSS regression. If this arm fails, existing-correspondence ownership
-partitioning is exhausted; the next boundary must add an independently
-verified long-range identity signal rather than another pose-derived gate.
-Only a quality-passing arm proceeds to controlled cold-cache timing, three
-repeats, tier nonregression, full-process SIGKILL recovery, and final release
-closure.
+The 1k candidate retained 1,000/1,000 images and published 6,774 partitions /
+25,057 observations, but RMSE regressed from 0.0290996 to 0.0295248 m (+1.46%),
+p95 from 0.0436789 to 0.0444145 m (+1.68%), and mean reprojection from 0.743284
+to 0.757226 px (+1.88%). It was stopped before 2.5k and its source changes were
+reverted. The apparent single-run wall/RSS reductions are not promoted because
+the quality gate failed and the control-then-candidate cache state was not
+controlled. Commands, counters, hashes, cgroup records, and scores are frozen
+in
+[m8-openloris-dynamic-recursive-create-ab.json](../benchmarks/electro/m8-openloris-dynamic-recursive-create-ab.json).
+
+This exhausts bounded ownership changes over the existing correspondence graph.
+The next quality boundary is one isolated **learned long-range retrieval arm**;
+it must add identity evidence that is independent of the current local-feature
+VLAD ranking and must not use reconstructed poses or GT for selection:
+
+1. Pin one learned global-descriptor ONNX model, license, SHA-256, input
+   preprocessing, output dimension, image manifest, and ordering. Reuse the
+   existing `GlobalDescriptorOnnxExtractor`; first add a resumable writer that
+   reads one image at a time and atomically publishes a manifest-bound descriptor
+   artifact. Images and inference tensors must not accumulate in memory.
+2. Add a deterministic mmap/stream reader and bounded ANN query path over rig
+   frames, not separate synchronized sensor images. Compare ANN top-K against
+   exact cosine top-K on 1k before mapping. Cap retrieval at K=32 and emitted
+   candidates at 32N; record index bytes, resident rows, query pool sizes, recall,
+   wall, RSS, and artifact hashes. No N x N score/state allocation is allowed.
+3. Emit only previously absent long-range candidates. Require reciprocal
+   descriptor support plus descriptor-only sequence consistency: at least two
+   adjacent query rig frames must retrieve a consistent remote rig-frame
+   neighbourhood. This gate may use manifest order but not poses, local-match
+   counts, verifier inliers, reconstructed components, or GT.
+4. Match only those bounded additions with the frozen local features and the
+   unchanged geometric verifier. Merge accepted edges into the structure input
+   before track construction, rather than appending them after the structure
+   prefix as in the rejected ANN80k diagnostic. Preserve a separate addition
+   ledger so every changed track and registration can be attributed to a new
+   verified edge.
+5. Run control/candidate/repeat on frozen 1k under 2 GiB first. Require equal or
+   better registration, RMSE, p95, reprojection, mapper wall, and sampled RSS;
+   model publication precedes GT scoring. Stop and revert on any regression.
+   Only a complete pass proceeds to 2.5k, 5k, 10k, cold-cache three-repeat
+   timing, full-process restart, and 100k I/O closure.
+
+The learned model is not currently present in the repository, so model
+acquisition/export and license/hash pinning are an explicit feasibility gate,
+not something the implementation may silently download during a benchmark.
 
 ## Previous infrastructure checkpoint (2026-09-09)
 
