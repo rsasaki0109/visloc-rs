@@ -2,6 +2,18 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 geometry-first v3 development armもmapping前に停止。post-hoc GT機会監査では
+scorable 1kに0.5m以内のcomplete 3-frame revisitは0、2.5kにはforward5453/
+reverse5409。GTはretrieval/match/admissionへ未使用だが、2.5kはdevelopment set扱いで
+性能claim不可。公開済みtop32 ANNは0.5m opportunityを持つframeの98.9%をcoverする一方、
+v2 ratio gateはdescriptor pathもあるproximity pair 5件を全落ちさせていた。
+v3はratioをdiagnostic-onlyにし、mutual rank<2/path/degree<=2の26 rig pairを固定。
+104 image pair中96 pair/5261 correspondenceを凍結verifierが受理したが、cycle gateは
+0件。937–940対1001–1004付近はsensor rotation dispersion17–28度で、現SIFT/two-view
+geometryが品質bottleneck。3度gateは緩和せずmapping未実行。証跡
+benchmarks/electro/m9-openloris-rank-path-cycle-2500-dev-v1.json。
+次はbounded shortlistのlocal matcher/two-view evidenceを置換し、同じcycle gateを通す。
+
 M9 ANN radius-2 multi-probeはinfrastructureとしてPASS。default radius1 artifactは
 SHA d85fe62b...でbyte-identical。1k exact-only sweepでrecall@32 floor0.94を満たす
 t12/b14/p14/radius2を固定し、recall0.9470625、strict selected15 pairは完全同一。

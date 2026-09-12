@@ -178,14 +178,29 @@ fn parse_rig(path: &Path, image_names: &[String]) -> Result<RigBinding, String> 
 type ImagePair = (usize, usize);
 type RigPair = (usize, usize);
 
+fn validate_snapshot_subset(
+    snapshot_keys: &BTreeSet<ImagePair>,
+    owners: &BTreeMap<ImagePair, RigPair>,
+) -> Result<(), String> {
+    let ledger_keys = owners.keys().copied().collect::<BTreeSet<_>>();
+    if !snapshot_keys.is_subset(&ledger_keys) {
+        return Err(
+            "addition snapshot contains image pairs absent from the attribution ledger".into(),
+        );
+    }
+    Ok(())
+}
+
 fn parse_ledger(path: &Path) -> Result<BTreeMap<ImagePair, RigPair>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("read addition ledger {}: {error}", path.display()))?;
-    if !text
-        .lines()
-        .any(|line| line == "# admission_policy rank-margin-path-v2")
-    {
-        return Err("addition ledger is not bound to rank-margin-path-v2".into());
+    if !text.lines().any(|line| {
+        matches!(
+            line,
+            "# admission_policy rank-margin-path-v2" | "# admission_policy rank-path-cycle-v3"
+        )
+    }) {
+        return Err("addition ledger is not bound to a cycle-gated retrieval policy".into());
     }
     let mut owners = BTreeMap::new();
     for (zero_line, line) in text.lines().enumerate() {
@@ -345,9 +360,7 @@ fn admit(
             Ok((left.min(right), left.max(right)))
         })
         .collect::<Result<BTreeSet<_>, String>>()?;
-    if snapshot_keys != owners.keys().copied().collect() {
-        return Err("addition snapshot image pairs differ from the attribution ledger".into());
-    }
+    validate_snapshot_subset(&snapshot_keys, owners)?;
     let mut grouped = BTreeMap::<RigPair, Vec<(ImagePair, UnitQuaternion<f64>)>>::new();
     for pair in &snapshot.pairs {
         let key = (pair.image_i as usize, pair.image_j as usize);
@@ -512,5 +525,12 @@ mod tests {
             ((6, 14), evidence(3.0)),
         ]);
         assert!(path_consistent(&rows, (5, 15), -1));
+    }
+
+    #[test]
+    fn verified_snapshot_may_be_a_ledger_subset_but_not_add_unknown_pairs() {
+        let owners = BTreeMap::from([((1, 2), (3, 4)), ((5, 6), (7, 8))]);
+        assert!(validate_snapshot_subset(&BTreeSet::from([(1, 2)]), &owners).is_ok());
+        assert!(validate_snapshot_subset(&BTreeSet::from([(1, 3)]), &owners).is_err());
     }
 }

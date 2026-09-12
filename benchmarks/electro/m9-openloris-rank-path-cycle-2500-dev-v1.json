@@ -1,0 +1,88 @@
+{
+  "schema": "visloc-m9-rank-path-cycle-development-evidence-v1",
+  "recorded_at": "2026-09-13T07:14:23+09:00",
+  "status": "development_arm_rejected_before_mapping",
+  "claim_scope": "diagnosis_only_not_holdout_quality",
+  "ground_truth_use": {
+    "used_for_candidate_generation": false,
+    "used_for_matching_or_cycle_admission": false,
+    "used_post_hoc_to_audit_revisit_opportunity_and_explain_v2_failure": true,
+    "consequence": "The 2.5k tier is now a development set and cannot support a promoted performance claim for v3.",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "transform_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69"
+  },
+  "revisit_opportunity_audit": {
+    "definition": "camera-1 GT centres, frame gap at least 64, complete three-frame forward or reverse path, interpolation gap at most 0.1 seconds",
+    "tier_1000": {
+      "rig_frames": 500,
+      "gt_interpolated_frames": 154,
+      "paths_within_0_5_m_forward": 0,
+      "paths_within_0_5_m_reverse": 0,
+      "manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa"
+    },
+    "tier_2500": {
+      "rig_frames": 1250,
+      "gt_interpolated_frames": 904,
+      "paths_within_0_5_m_forward": 5453,
+      "paths_within_0_5_m_reverse": 5409,
+      "manifest_sha256": "b05a280dd4cc1279bda064b6f52f9207e67e0ebcfb892e516ebe4aa8e98eddf1"
+    },
+    "finding": "A non-empty learned-loop requirement is not meaningful at 1k under the tight 0.5 m opportunity definition; 2.5k is the first tier with scorable opportunities."
+  },
+  "published_ann_post_hoc_audit": {
+    "gt_proximity_pairs_within_0_5_m_gap64": 5628,
+    "gt_frames_with_such_a_pair": 176,
+    "ann_candidate_true_proximity_pairs": 3345,
+    "ann_candidate_true_proximity_pair_recall": 0.5943496801705757,
+    "ann_gt_frame_coverage": 0.9886363636363636,
+    "three_frame_path_flag_true_proximity_pairs": 5,
+    "v2_selected_true_proximity_pairs": 0,
+    "finding": "Top-32 retrieval covers nearly every GT-opportunity frame, but the v2 descriptor ratio rejects all five path-supported proximity pairs while retaining the known false sequence."
+  },
+  "v3_development_policy": {
+    "name": "rank-path-cycle-v3",
+    "ann": "K32/t12/b14/p14/Hamming-radius2/gap64",
+    "pre_match": "mutual rank below two, complete forward or reverse three-frame path, degree at most two; descriptor distance ratio is diagnostic only",
+    "mandatory_post_match": "rig-rotation-cycle-v1",
+    "selected_rig_pairs": 26,
+    "retrieval_wall_seconds": 3.81,
+    "retrieval_peak_rss_kib": 9976,
+    "retrieval_sha256": "414a3f4f2defcc742ef90969be39e467d12ca98daa813a21f9724df36e485ddf"
+  },
+  "materialization_and_matching": {
+    "image_pair_candidates": 104,
+    "candidate_manifest_sha256": "ac2e0f9a04b52837a60aadea6205b1f6f14ea54857262c32c7244c229d3c5d8b",
+    "addition_ledger_sha256": "c308a1fea710169379b1bf82d972e6bb0fb22cde009e2e44e36110ae7d6a852d",
+    "verified_pairs": 96,
+    "accepted_correspondences": 5261,
+    "matching_wall_seconds": 15.20405086898245,
+    "matching_peak_rss_kib": 47404,
+    "verified_snapshot_sha256": "da960486e83bd52db77978278d6074be67d2971a196445310f2bd304d90ca4de",
+    "summary_sha256": "414f522467b5fa3e725d37adc51e30ed4d046169b2a7a591e203f9e69dd5183e"
+  },
+  "rotation_cycle": {
+    "rig_pairs_audited": 26,
+    "rig_pairs_passing_within_pair_dispersion_only": 5,
+    "rig_pairs_passing_complete_path": 0,
+    "admitted_rig_pairs": 0,
+    "admitted_image_pairs": 0,
+    "admitted_snapshot_sha256": "aab2b9fed8b924e89b6e696ecb2d5a6e54f88bbd3f02aa9d90342fa339475f03",
+    "admission_ledger_sha256": "2e8846ec574c7037deaa53fe1d79c91e75f5dbf789ffc8a5cbc75b180f1d45b2",
+    "diagnosis": "The 937-940 versus 1001-1004 path near GT proximity opportunities has 17-28 degree within-pair sensor rotation dispersion. Frozen SIFT matching and essential geometry do not provide consistent multi-sensor rotations for these additions."
+  },
+  "decision": {
+    "mapping_run": false,
+    "promotion": "rejected",
+    "threshold_relaxation": false,
+    "reason": "The mandatory pose-free geometry gate admits nothing. Relaxing its 3 degree threshold would also admit isolated evidence from the known false loop and would be GT-driven tuning.",
+    "next": "Keep the ANN speedup. Replace the local matcher/two-view evidence for the bounded shortlist, then require the same frozen rotation-cycle gate before mapping on an unobserved holdout interval."
+  },
+  "validation": {
+    "learned_retrieval_tests": 7,
+    "materializer_tests": 2,
+    "rotation_cycle_tests": 4,
+    "target_clippy_deny_warnings": true,
+    "verified_snapshot_subset_of_ledger": true,
+    "json_validated": true
+  }
+}

@@ -76,6 +76,7 @@ struct Retrieval {
 enum AdmissionPolicy {
     ReciprocalSequenceV1,
     RankMarginPathV2,
+    RankPathCycleV3,
 }
 
 impl AdmissionPolicy {
@@ -83,6 +84,7 @@ impl AdmissionPolicy {
         match self {
             Self::ReciprocalSequenceV1 => "reciprocal-sequence-v1",
             Self::RankMarginPathV2 => "rank-margin-path-v2",
+            Self::RankPathCycleV3 => "rank-path-cycle-v3",
         }
     }
 }
@@ -102,6 +104,10 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         }
         if line == "# visloc-learned-retrieval-v2" {
             policy = Some(AdmissionPolicy::RankMarginPathV2);
+            continue;
+        }
+        if line == "# visloc-learned-retrieval-v3" {
+            policy = Some(AdmissionPolicy::RankPathCycleV3);
             continue;
         }
         if let Some(comment) = line.strip_prefix("# ") {
@@ -177,6 +183,29 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
                     && path;
                 (3, selected, expected)
             }
+            Some(AdmissionPolicy::RankPathCycleV3) if fields.len() == 10 => {
+                let query_rank: isize = fields[4]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} query rank: {error}"))?;
+                let candidate_rank: isize = fields[5].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate rank: {error}")
+                })?;
+                let _: f32 = fields[6].parse().map_err(|error| {
+                    format!("retrieval line {line_number} query ratio diagnostic: {error}")
+                })?;
+                let _: f32 = fields[7].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate ratio diagnostic: {error}")
+                })?;
+                let path: bool = fields[8]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} path: {error}"))?;
+                let selected: bool = fields[9]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} selected: {error}"))?;
+                let expected =
+                    (0..2).contains(&query_rank) && (0..2).contains(&candidate_rank) && path;
+                (3, selected, expected)
+            }
             _ => {
                 return Err(format!(
                     "retrieval line {line_number} is malformed for its schema"
@@ -185,7 +214,7 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         };
         if is_selected != expected_selected {
             return Err(format!(
-                "retrieval line {line_number} selected flag violates reciprocal+sequence policy"
+                "retrieval line {line_number} selected flag violates its declared admission policy"
             ));
         }
         if is_selected {
@@ -210,14 +239,20 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
     if required(&metadata, "topk")? != "32" {
         return Err("retrieval topk must be frozen at 32".to_owned());
     }
-    if policy == AdmissionPolicy::RankMarginPathV2 {
-        for key in [
+    if matches!(
+        policy,
+        AdmissionPolicy::RankMarginPathV2 | AdmissionPolicy::RankPathCycleV3
+    ) {
+        let mut keys = vec![
             "admission_rank",
-            "distance_ratio_max",
             "competitor_exclusion_radius",
             "sequence_path_radius",
             "per_frame_addition_budget",
-        ] {
+        ];
+        if policy == AdmissionPolicy::RankMarginPathV2 {
+            keys.push("distance_ratio_max");
+        }
+        for key in keys {
             let expected = match key {
                 "admission_rank" | "competitor_exclusion_radius" | "per_frame_addition_budget" => {
                     "2"
@@ -231,6 +266,12 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
                     "retrieval metadata {key:?} is not frozen at {expected}"
                 ));
             }
+        }
+        if policy == AdmissionPolicy::RankPathCycleV3
+            && (required(&metadata, "post_verification_gate")? != "rig-rotation-cycle-v1"
+                || required(&metadata, "distance_ratio_diagnostic_only")? != "true")
+        {
+            return Err("v3 retrieval is not bound to its frozen post-verification gate".into());
         }
         let mut degree = BTreeMap::<usize, usize>::new();
         for row in &selected {

@@ -11,6 +11,25 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+The geometry-first v3 development arm is also stopped before mapping. A
+post-hoc GT opportunity audit—never consumed by retrieval, matching, or
+admission—showed no complete 0.5 m three-frame revisit in the scorable 1k
+interval, but thousands at 2.5k. Therefore 1k cannot require a non-empty loop,
+and 2.5k is now explicitly a development set rather than holdout evidence.
+Published top-32 ANN candidates already cover 98.9% of 2.5k frames having a
+0.5 m long-range proximity opportunity. The v2 distance-ratio gate discarded
+all five proximity pairs that also had a descriptor three-frame path.
+
+V3 consequently tested a bounded 26-rig-pair rank/path shortlist with the
+distance ratio diagnostic-only, while keeping the frozen matcher and mandatory
+rotation-cycle gate. Materialization produced 104 image pairs; the verifier
+retained 96 with 5,261 correspondences. The cycle gate still admitted zero.
+The proximity path around frames 937–940 versus 1001–1004 has 17–28 degree
+multi-sensor rotation dispersion, so frozen SIFT/two-view geometry—not ANN
+coverage—is now the quality bottleneck. The 3 degree gate is not relaxed and
+no mapping was run. See
+[m9-openloris-rank-path-cycle-2500-dev-v1.json](../benchmarks/electro/m9-openloris-rank-path-cycle-2500-dev-v1.json).
+
 ANN multi-probe infrastructure now has a retained speed/memory improvement.
 Default radius one remains byte-identical. A 1k exact-only sweep selected
 12 tables, 14 bits, all 14 one-bit probes, and Hamming radius two at a declared

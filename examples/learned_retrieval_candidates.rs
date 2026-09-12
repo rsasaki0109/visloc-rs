@@ -33,6 +33,7 @@ struct Args {
 enum AdmissionPolicy {
     ReciprocalSequenceV1,
     RankMarginPathV2,
+    RankPathCycleV3,
 }
 
 impl Default for Args {
@@ -74,6 +75,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                 args.admission_policy = match next()?.as_str() {
                     "reciprocal-sequence-v1" => AdmissionPolicy::ReciprocalSequenceV1,
                     "rank-margin-path-v2" => AdmissionPolicy::RankMarginPathV2,
+                    "rank-path-cycle-v3" => AdmissionPolicy::RankPathCycleV3,
                     other => return Err(format!("unknown admission policy: {other}").into()),
                 }
             }
@@ -83,7 +85,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                     "learned_retrieval_candidates --descriptors globals.vprd --out pairs.tsv \
                      [--topk 32] [--tables 8] [--bits auto] [--probes auto] \
                      [--min-frame-gap 64] [--exact-audit-max-rows 1000] \
-                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2] \
+                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2|rank-path-cycle-v3] \
                      [--probe-radius 1|2]"
                 );
                 std::process::exit(0);
@@ -418,6 +420,12 @@ fn strict_selected(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usi
             || strict_path_direction(neighbors, query, candidate, -1))
 }
 
+fn rank_path_selected(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> bool {
+    strict_edge(neighbors, query, candidate)
+        && (strict_path_direction(neighbors, query, candidate, 1)
+            || strict_path_direction(neighbors, query, candidate, -1))
+}
+
 fn sequence_support(neighbors: &[Vec<(usize, f32)>], query: usize, candidate: usize) -> usize {
     [-2_isize, -1, 1, 2]
         .into_iter()
@@ -548,6 +556,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             AdmissionPolicy::RankMarginPathV2 => {
                 strict_selected(&ann.neighbors, *query, *candidate)
             }
+            AdmissionPolicy::RankPathCycleV3 => {
+                rank_path_selected(&ann.neighbors, *query, *candidate)
+            }
         })
         .count();
     let binding = descriptors.store.binding();
@@ -556,6 +567,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         match args.admission_policy {
             AdmissionPolicy::ReciprocalSequenceV1 => "v1",
             AdmissionPolicy::RankMarginPathV2 => "v2",
+            AdmissionPolicy::RankPathCycleV3 => "v3",
         },
         hash_file(&args.descriptors)?,
         hex(&binding.model_sha256),
@@ -599,6 +611,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "# pair query candidate cosine query_rank candidate_rank query_ratio candidate_ratio path selected\n",
             );
         }
+        AdmissionPolicy::RankPathCycleV3 => {
+            output.push_str("# admission_policy rank-path-cycle-v3\n");
+            output.push_str("# admission_rank 2\n# sequence_path_radius 1\n");
+            output.push_str("# per_frame_addition_budget 2\n");
+            output.push_str("# post_verification_gate rig-rotation-cycle-v1\n");
+            output.push_str("# distance_ratio_diagnostic_only true\n");
+            output.push_str("# competitor_exclusion_radius 2\n");
+            output.push_str(
+                "# pair query candidate cosine query_rank candidate_rank query_ratio candidate_ratio path selected\n",
+            );
+        }
     }
     for ((query, candidate), row) in &pairs {
         match args.admission_policy {
@@ -609,14 +632,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     row.score, row.mutual, row.sequence_support, selected_pair
                 ));
             }
-            AdmissionPolicy::RankMarginPathV2 => {
+            AdmissionPolicy::RankMarginPathV2 | AdmissionPolicy::RankPathCycleV3 => {
                 let query_rank = rank(&ann.neighbors, *query, *candidate);
                 let candidate_rank = rank(&ann.neighbors, *candidate, *query);
                 let query_ratio = distance_ratio(&ann.neighbors, *query, *candidate);
                 let candidate_ratio = distance_ratio(&ann.neighbors, *candidate, *query);
                 let path = strict_path_direction(&ann.neighbors, *query, *candidate, 1)
                     || strict_path_direction(&ann.neighbors, *query, *candidate, -1);
-                let selected_pair = strict_selected(&ann.neighbors, *query, *candidate);
+                let selected_pair = match args.admission_policy {
+                    AdmissionPolicy::RankMarginPathV2 => {
+                        strict_selected(&ann.neighbors, *query, *candidate)
+                    }
+                    AdmissionPolicy::RankPathCycleV3 => {
+                        rank_path_selected(&ann.neighbors, *query, *candidate)
+                    }
+                    AdmissionPolicy::ReciprocalSequenceV1 => unreachable!(),
+                };
                 output.push_str(&format!(
                     "pair {query} {candidate} {:.9} {} {} {} {} {} {}\n",
                     row.score,
