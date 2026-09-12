@@ -1,0 +1,143 @@
+{
+  "schema": "visloc-m9-bounded-aliked-lightglue-holdout-evidence-v1",
+  "recorded_at": "2026-09-13T17:30:00+09:00",
+  "status": "holdout_geometry_safe_mapper_neutral_runtime_not_promoted",
+  "claim_scope": "first_frozen_5000_image_holdout_evaluation; no quality, speed, or memory promotion",
+  "protocol": {
+    "dataset": "OpenLORIS corridor1-1",
+    "tier_images": 5000,
+    "rig_frames": 2500,
+    "retrieval_policy": "frozen v3 mutual-rank/path/degree shortlist",
+    "cycle_gate": "frozen 3 degree multi-sensor rotation and radius-1 path gate",
+    "ground_truth_used_for_retrieval_matching_admission_or_mapping": false,
+    "ground_truth_first_read": "after both mapper arms completed"
+  },
+  "global_retrieval": {
+    "descriptor": "EigenPlaces ResNet18, 512 dimensions, 640x480 CPU streaming",
+    "descriptor_rows": 2500,
+    "descriptor_images": 5000,
+    "descriptor_wall_seconds": 676.433223,
+    "descriptor_sampled_peak_rss_kib": 155772,
+    "descriptor_cgroup_peak_bytes": 896532480,
+    "descriptor_oom_kills": 0,
+    "descriptor_sha256": "2e1cf7bbc6beeaf5e50b737df876d0a94a2c0de78d11b146d2e60dabd9a87c2e",
+    "ann_configuration": "K32, tables12, bits14, probes14, radius2, min frame gap64",
+    "ann_candidates": 66179,
+    "ann_mean_rerank_pool": 1246.2992,
+    "ann_max_rerank_pool": 1951,
+    "ann_selected_rig_pairs": 61,
+    "ann_selected_rig_pairs_touching_new_rows": 36,
+    "ann_wall_seconds": 12.53,
+    "ann_peak_rss_kib": 17636,
+    "ann_output_sha256": "e713bb9c39e1fd2f5de22a000b37bb81882ccf171a761dbcd09cf067051bb3d7",
+    "scaling_finding": "the exact rerank pool is still about half of the database, so the frozen ANN is not promoted as a 10k compute solution"
+  },
+  "bounded_candidates": {
+    "selected_rig_pairs": 61,
+    "candidate_image_pairs_after_existing_pair_exclusion": 244,
+    "incident_images": 160,
+    "candidate_manifest_sha256": "55bb6db46f3651f8fb1254d424d8dbb6bce55b92698506547e12052cf7e91927",
+    "addition_ledger_sha256": "80117780c2cccdabebdb73dcc3544f82474c06b4ba0eeb95f293459d6fb52203"
+  },
+  "sift_control": {
+    "verified_pairs": 195,
+    "accepted_correspondences": 7250,
+    "worker_wall_seconds": 44.45347069413401,
+    "wrapper_wall_seconds": 47.83,
+    "peak_rss_kib": 73616,
+    "streamed_descriptor_peak_rows": 29411,
+    "streamed_descriptor_peak_images": 160,
+    "verified_snapshot_sha256": "9e533f9f78aed741ea889be95335420c8da52c159c887d4002e2728d4ac4a9bb",
+    "cycle_admitted_rig_pairs": 0,
+    "cycle_admission_ledger_sha256": "d26aa9e6ef6d3988babcb4d0abc56cdd19c56f1f707597b0313c02c3276905f8",
+    "decision": "rejected; the frozen SIFT frontend again produced no cycle-consistent bridge"
+  },
+  "learned_local_oracle": {
+    "frontend": "official ALIKED n16, max 1024 keypoints, plus official LightGlue ALIKED weights",
+    "lightglue_git_commit": "eb42fee2d71449efb0aa5c10549752b5d75384d8",
+    "model_sha256": {
+      "aliked-n16.pth": "5be8704840ed662d9d8c561bf7279c222092674e7eb05fd0feab94899e9d82f2",
+      "aliked_lightglue_v0-1_arxiv.pth": "d975e965b105311a6143194852297dff4f02aea5cc2e10cecfed966ca0e22503"
+    },
+    "source_urls": {
+      "paper": "https://arxiv.org/abs/2306.13643",
+      "lightglue": "https://github.com/cvg/LightGlue",
+      "aliked_wrapper_license": "https://github.com/cvg/LightGlue/blob/main/lightglue/aliked.py"
+    },
+    "incident_images": 160,
+    "candidate_pairs": 244,
+    "raw_matches": 80398,
+    "features_aggregate_sha256": "c5ae843c8362f678bd3e62ddd27e0dc80beab497b73a6c851706ed7073dda426",
+    "matches_import_sha256": "42abcdaada9e25f8f856bdb2b6bf77161543156e431c00e48d63590be733f83c",
+    "extraction_seconds": 318.98306694300845,
+    "matching_seconds": 56.40450852108188,
+    "wall_seconds": 380.49,
+    "peak_rss_kib": 2296036,
+    "runtime_gate": "failed; this isolated Python/PyTorch oracle exceeds the 2 GiB target"
+  },
+  "rust_verification_and_cycle_gate": {
+    "loaded_keypoints_including_inert_nonincident_rows": 113155,
+    "verified_pairs": 244,
+    "accepted_correspondences": 79683,
+    "classifications": {
+      "calibrated": 131,
+      "uncalibrated": 25,
+      "planar": 88
+    },
+    "verification_wall_seconds": 3.55,
+    "verification_peak_rss_kib": 87104,
+    "verified_snapshot_sha256": "9610495de5b10d08e3a73a3d6ec2ca4425060f9aab71b8ccea39e2e5fd3b8295",
+    "admitted_rig_pairs": 1,
+    "admitted_image_pairs": 2,
+    "admitted_pair": [939, 1003],
+    "rotation_dispersion_deg": 0.21380557113334506,
+    "admitted_pairs_touching_new_2500_to_4999_image_interval": 0,
+    "admission_ledger_sha256": "a927f6a0d45767b86ff2ea348905060f9b687b7a6c443ec55d77001dc98da96f",
+    "admitted_snapshot_sha256": "e47062557ee818848d19bf933fa45ca3ca8848193c7f807570618efaa8ed2e59"
+  },
+  "mapper_ab": {
+    "configuration": "generalized rig, pair-confidence tracks, 96 matches per pair, identical deterministic CPU1 settings",
+    "control": {
+      "pairs": 31521,
+      "registered_frames": 1933,
+      "registered_images": 3866,
+      "tracks": 21964,
+      "observations": 279550,
+      "mean_reprojection_px": 0.883264094,
+      "mapper_seconds": 84.083410,
+      "wall_seconds": 85.50,
+      "peak_rss_kib": 359884
+    },
+    "candidate": {
+      "pairs": 31523,
+      "admitted_matches_after_cap": 192,
+      "registered_frames": 1933,
+      "registered_images": 3866,
+      "tracks": 21964,
+      "observations": 279550,
+      "mean_reprojection_px": 0.883264094,
+      "mapper_seconds": 84.636955,
+      "wall_seconds": 86.26,
+      "peak_rss_kib": 389952
+    },
+    "camera_pose_header_sha256_both_arms": "04c83e65426175254df8c7c0b658068ba2e8a1ca828a02336a832205e6e7e499",
+    "points3d_sha256_both_arms": "0423b56fe71d19f03b3e7f310c654076fe84f71750cba7a4e3da2cb5c47f0690",
+    "finding": "the only admitted pair is the same development-interval pair and leaves all recovered poses, points, registration, and reprojection metrics unchanged"
+  },
+  "post_mapping_score": {
+    "scored_images": 3174,
+    "sim3_rmse_m_both_arms": 2.021066004828052,
+    "sim3_median_m_both_arms": 1.8309484207087348,
+    "sim3_p95_m_both_arms": 3.6837696984997996,
+    "sim3_max_m_both_arms": 4.689296290426828,
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "ground_truth_used_only_for_post_mapping_score": true
+  },
+  "decision": {
+    "frozen_v3_retrieval": "reject for quality promotion and stop before 10k",
+    "python_runtime": "reject for production speed and memory",
+    "learned_local_geometry": "retain only as a bounded diagnostic oracle",
+    "readme_promotion": "no; no end-to-end quality, speed, or memory win over the control",
+    "next": "Use reconstruction-graph component/frontier state without GT to propose cross-component bridge runs, keep bounded learned-local verification and the unchanged cycle gate, and require a new-interval admission before another mapper A/B."
+  }
+}

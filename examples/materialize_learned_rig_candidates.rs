@@ -77,6 +77,7 @@ enum AdmissionPolicy {
     ReciprocalSequenceV1,
     RankMarginPathV2,
     RankPathCycleV3,
+    ComponentBridgeV4,
 }
 
 impl AdmissionPolicy {
@@ -85,6 +86,7 @@ impl AdmissionPolicy {
             Self::ReciprocalSequenceV1 => "reciprocal-sequence-v1",
             Self::RankMarginPathV2 => "rank-margin-path-v2",
             Self::RankPathCycleV3 => "rank-path-cycle-v3",
+            Self::ComponentBridgeV4 => "component-bridge-v4",
         }
     }
 }
@@ -108,6 +110,10 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         }
         if line == "# visloc-learned-retrieval-v3" {
             policy = Some(AdmissionPolicy::RankPathCycleV3);
+            continue;
+        }
+        if line == "# visloc-learned-retrieval-v4" {
+            policy = Some(AdmissionPolicy::ComponentBridgeV4);
             continue;
         }
         if let Some(comment) = line.strip_prefix("# ") {
@@ -206,6 +212,29 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
                     (0..2).contains(&query_rank) && (0..2).contains(&candidate_rank) && path;
                 (3, selected, expected)
             }
+            Some(AdmissionPolicy::ComponentBridgeV4) if fields.len() == 10 => {
+                let query_rank: isize = fields[4]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} query rank: {error}"))?;
+                let candidate_rank: isize = fields[5].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate rank: {error}")
+                })?;
+                let _: f32 = fields[6].parse().map_err(|error| {
+                    format!("retrieval line {line_number} query ratio diagnostic: {error}")
+                })?;
+                let _: f32 = fields[7].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate ratio diagnostic: {error}")
+                })?;
+                let path: bool = fields[8]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} path: {error}"))?;
+                let selected: bool = fields[9]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} selected: {error}"))?;
+                let expected =
+                    (0..8).contains(&query_rank) && (0..8).contains(&candidate_rank) && path;
+                (3, selected, expected)
+            }
             _ => {
                 return Err(format!(
                     "retrieval line {line_number} is malformed for its schema"
@@ -280,6 +309,41 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         }
         if degree.values().any(|value| *value > 2) {
             return Err("strict retrieval exceeds the per-frame addition budget".to_owned());
+        }
+    }
+    if policy == AdmissionPolicy::ComponentBridgeV4 {
+        for (key, expected) in [
+            ("admission_rank", "8"),
+            ("sequence_path_radius", "1"),
+            ("per_frame_addition_budget", "2"),
+            ("post_verification_gate", "rig-rotation-cycle-v1"),
+            ("cross_component_ann_only", "true"),
+            ("requires_unregistered_endpoint", "true"),
+        ] {
+            if required(&metadata, key)? != expected {
+                return Err(format!(
+                    "retrieval metadata {key:?} is not frozen at {expected}"
+                ));
+            }
+        }
+        for key in [
+            "rig_manifest_sha256",
+            "retrieval_component_manifest_sha256",
+            "registered_rows",
+            "unregistered_rows",
+            "registered_components",
+            "inferred_unregistered_runs",
+            "component_rank_path_survival",
+        ] {
+            let _ = required(&metadata, key)?;
+        }
+        let mut degree = BTreeMap::<usize, usize>::new();
+        for row in &selected {
+            *degree.entry(row.query).or_default() += 1;
+            *degree.entry(row.candidate).or_default() += 1;
+        }
+        if degree.values().any(|value| *value > 2) {
+            return Err("component retrieval exceeds the per-frame addition budget".to_owned());
         }
     }
     Ok(Retrieval {
@@ -583,6 +647,29 @@ mod tests {
         )
         .unwrap();
         assert!(parse_retrieval(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parser_accepts_a_bounded_component_bridge_policy() {
+        let path =
+            std::env::temp_dir().join(format!("visloc-component-retrieval-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "# visloc-learned-retrieval-v4\n\
+             # topk 32\n# selected_pairs 1\n# admission_rank 8\n\
+             # sequence_path_radius 1\n# per_frame_addition_budget 2\n\
+             # post_verification_gate rig-rotation-cycle-v1\n\
+             # cross_component_ann_only true\n# requires_unregistered_endpoint true\n\
+             # rig_manifest_sha256 rig\n# retrieval_component_manifest_sha256 components\n\
+             # registered_rows 3\n# unregistered_rows 3\n# registered_components 1\n\
+             # inferred_unregistered_runs 1\n# component_rank_path_survival 2:0,8:1\n\
+             pair 1 4 0.9 0 1 1.0 1.0 true true\n",
+        )
+        .unwrap();
+        let retrieval = parse_retrieval(&path).unwrap();
+        assert_eq!(retrieval.policy, AdmissionPolicy::ComponentBridgeV4);
+        assert_eq!(retrieval.selected.len(), 1);
         std::fs::remove_file(path).unwrap();
     }
 }

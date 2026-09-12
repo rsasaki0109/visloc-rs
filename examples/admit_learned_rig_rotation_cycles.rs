@@ -197,7 +197,9 @@ fn parse_ledger(path: &Path) -> Result<BTreeMap<ImagePair, RigPair>, String> {
     if !text.lines().any(|line| {
         matches!(
             line,
-            "# admission_policy rank-margin-path-v2" | "# admission_policy rank-path-cycle-v3"
+            "# admission_policy rank-margin-path-v2"
+                | "# admission_policy rank-path-cycle-v3"
+                | "# admission_policy component-bridge-v4"
         )
     }) {
         return Err("addition ledger is not bound to a cycle-gated retrieval policy".into());
@@ -532,5 +534,26 @@ mod tests {
         let owners = BTreeMap::from([((1, 2), (3, 4)), ((5, 6), (7, 8))]);
         assert!(validate_snapshot_subset(&BTreeSet::from([(1, 2)]), &owners).is_ok());
         assert!(validate_snapshot_subset(&BTreeSet::from([(1, 3)]), &owners).is_err());
+    }
+
+    #[test]
+    fn component_bridge_ledger_is_cycle_gate_compatible() {
+        let path = std::env::temp_dir().join(format!(
+            "visloc-component-cycle-ledger-{}",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "# visloc-learned-rig-additions-v1\n\
+             # admission_policy component-bridge-v4\n\
+             # image_pair image_i image_j rig_query rig_candidate cosine sequence_support\n\
+             image_pair 1 2 3 4 0.9 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_ledger(&path).unwrap(),
+            BTreeMap::from([((1, 2), (3, 4))])
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

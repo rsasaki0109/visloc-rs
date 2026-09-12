@@ -2,6 +2,37 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 component-aware v4は計算量を改善したがretrieval品質で棄却。凍結baseを
+multi-model replayすると主componentは1933/2500 frame、残る567 frameには5378
+verified pairがあるがmulti-sensor metric seedを作れない。登録component 1つと連続
+unregistered run 2つをGTなしでlabel化し、ANN exact rerank前にsame-componentを除外。
+mean poolは1246.30→315.97（-74.6%）、3.06s/RSS18968KiB。rank8の37 survivorを
+degree<=2で20 rig pair/80 image pair/50 incident imageへ固定。SIFTはverified 0。
+ALIKED+LightGlueは47/80、1714 correspondenceだが、各rig pairで2 sensor rotationが
+揃わず固定cycle gate 0、mappingは未実行。post-hoc GT診断では20/20 scorableだが
+最短12.07m、5m以内0で、EigenPlaces単画像の廊下perceptual aliasが原因。5kはv4以降
+development扱い。証跡benchmarks/electro/m9-openloris-component-bridge-5000-dev-v1.json。
+次はcomponent filterを保持し、GT非依存の広いmulti-scale sequence score（短い3-frame
+だけでなく数十frame span）でaliasを落とす。5kで凍結後、新10k intervalでcycle
+admissionが出るまでmappingしない。Python oracleは依然2GiB超なので本番昇格禁止。
+
+M9の凍結v3を未観測5k tierで評価し、quality/runtime昇格を棄却した。EigenPlaces
+2500 rig row生成は676.43s、sample RSS155772KiB、OOM0。radius2 ANNは12.53s、
+RSS17636KiB、66179 candidates→61 rig pairだが、mean rerank pool1246.30は全rowの
+約50%で10k計算量も未合格。既存pair除外後244 image pair/160 incident image。
+streaming SIFTは195 pair/7250 correspondenceを受理したがcycle admission 0。
+ALIKED+LightGlue oracleは244/244、79683 correspondenceを受理したものの、固定3度
+gateを通ったのは2.5k開発時と同じ939↔1003の2 image pairだけで、新5k区間由来は0。
+Python oracleは380.49s/RSS2296036KiBでruntime gate失敗。非空なので同一設定mapper
+A/Bを実施したが、両armとも1933/2500 frame、3866/5000 image、reprojection
+0.883264px、pose header/points3D SHAが完全一致。post-map GTも3174 image、Sim(3)
+RMSE2.02107m/p953.68377mで同一。候補は+0.76s、RSS+30068KiB。従ってv3を10kへ
+進めず、READMEにもpromoteしない。証跡
+benchmarks/electro/m9-openloris-bounded-aliked-lightglue-5000-holdout-v1.json。
+次はGTを使わずbase reconstruction graphのcomponent/frontierをquery集合にし、
+cross-component runだけをbounded learned-local→同じcycle gateへ渡すv4を作る。
+新5k区間のadmissionが0ならmappingせず棄却し、非空時だけA/Bする。
+
 M9 bounded learned-local development oracleで、固定rotation-cycle gateを初めて通過。
 既存SIFTへのCOLMAP-compatible guided matchingは5261→6865 correspondenceへ増えたが
 cycle admission 0で棄却。公式ALIKED n16（1024点）+ LightGlue-ALIKEDを、v3の

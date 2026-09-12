@@ -1,0 +1,109 @@
+{
+  "schema": "visloc-m9-component-bridge-development-evidence-v1",
+  "recorded_at": "2026-09-13T19:00:00+09:00",
+  "status": "compute_reduced_retrieval_quality_rejected",
+  "claim_scope": "5000-image development diagnosis after the frozen v3 holdout was scored; no holdout or performance claim",
+  "inputs": {
+    "dataset": "OpenLORIS corridor1-1",
+    "images": 5000,
+    "rig_frames": 2500,
+    "base_verified_pairs": 31521,
+    "ground_truth_used_for_component_generation_retrieval_matching_or_admission": false
+  },
+  "component_frontier": {
+    "source": "generalized-rig mapper registration state from the frozen base snapshot",
+    "registered_frames": 1933,
+    "unregistered_frames": 567,
+    "remaining_verified_pairs": 5378,
+    "remaining_model_stop_reason": "no frame has enough multi-sensor tracks for metric initialization",
+    "registered_components": 1,
+    "inferred_contiguous_unregistered_runs": 2,
+    "retrieval_component_manifest_sha256": "37925ba00f72de0bc34bb34d2b597d2c48c6852cdb5cc5b61994e3ab2ef8bef2"
+  },
+  "component_aware_ann": {
+    "descriptor": "the frozen EigenPlaces ResNet18 512-dimensional store",
+    "configuration": "K32, tables12, bits14, probes14, radius2, min frame gap64",
+    "same_component_candidates_removed_before_exact_rerank": true,
+    "requires_unregistered_endpoint": true,
+    "requires_same-run_three-frame_path": true,
+    "admission_rank": 8,
+    "per_frame_degree_budget": 2,
+    "mean_rerank_pool_before_after_component_filter": [1246.2992, 315.9704],
+    "max_rerank_pool": 1719,
+    "candidate_pairs": 77143,
+    "rank_path_survival": {
+      "rank_2": 0,
+      "rank_4": 2,
+      "rank_8": 37,
+      "rank_16": 335,
+      "rank_32": 1578
+    },
+    "selected_rig_pairs_after_degree_budget": 20,
+    "candidate_image_pairs": 80,
+    "incident_images": 50,
+    "wall_seconds": 3.06,
+    "peak_rss_kib": 18968,
+    "retrieval_sha256": "b1c7aab127bbb65fc535efa2db90078bb89f7c3c692e76452d4da5eca6b84df1",
+    "candidate_manifest_sha256": "353502098d09b35eaf996b9b2477be41555a6e4244e720f673e7feb7a80573d4"
+  },
+  "sift_control": {
+    "verified_pairs": 0,
+    "accepted_correspondences": 0,
+    "worker_wall_seconds": 43.6879845650401,
+    "peak_rss_kib": 73636,
+    "cycle_admitted_rig_pairs": 0,
+    "decision": "rejected before mapping"
+  },
+  "bounded_learned_local": {
+    "frontend": "official ALIKED n16 plus official LightGlue ALIKED weights, max 1024 keypoints",
+    "incident_images": 50,
+    "candidate_pairs": 80,
+    "raw_matches": 3343,
+    "extraction_seconds": 101.27726503182203,
+    "matching_seconds": 25.116830796934664,
+    "wall_seconds": 131.50,
+    "peak_rss_kib": 2197856,
+    "features_aggregate_sha256": "4b0c4cefae49be6259daf93db0b0e61650b13984f8cbfeaaeab44c62973e49d3",
+    "matches_import_sha256": "57e3ce45a5696144209ee6d5939833086d900abed79b0859c442b9717fa22c09",
+    "verified_pairs": 47,
+    "accepted_correspondences": 1714,
+    "classifications": {
+      "calibrated": 11,
+      "uncalibrated": 36,
+      "degenerate": 28
+    },
+    "verified_snapshot_sha256": "63d1edc4333fa15e38d34e2ecd65979bc72946d29c5a014c82a13edf6b2315eb",
+    "cycle_admitted_rig_pairs": 0,
+    "cycle_admission_ledger_sha256": "bf1a2c82c3787ab8867be443d50a67fab09a42c0210cbf0e83d6a7c1e65b8471",
+    "mapping_performed": false
+  },
+  "posthoc_ground_truth_diagnosis": {
+    "performed_after_retrieval_matching_and_admission": true,
+    "scorable_selected_rig_pairs": 20,
+    "within_0_5_m": 0,
+    "within_1_m": 0,
+    "within_2_m": 0,
+    "within_5_m": 0,
+    "minimum_distance_m": 12.07425,
+    "dominant_false_sequence_distance_m": "12.07 to 12.27",
+    "outlier_false_sequence_distance_m": "33.67 to 33.71",
+    "finding": "the component filter reduced compute, but every selected sequence was a perceptual alias rather than a physical revisit"
+  },
+  "implementation": {
+    "default_behavior_changed": false,
+    "new_policy": "component-bridge-v4",
+    "tests": {
+      "learned_retrieval_candidates": 9,
+      "materialize_learned_rig_candidates": 3,
+      "admit_learned_rig_rotation_cycles": 5
+    },
+    "v3_default_path_parity_sha256": "e713bb9c39e1fd2f5de22a000b37bb81882ccf171a761dbcd09cf067051bb3d7"
+  },
+  "decision": {
+    "component_filter": "retain as a compute and candidate-volume reduction",
+    "eigenplaces_single_frame_ranking": "reject as the sole bridge retrieval signal on this corridor",
+    "python_learned_local_runtime": "still rejected for production memory and speed",
+    "mapper_ab": "not run because the frozen cycle gate admitted no pair",
+    "next": "Add a GT-free, wider multi-scale sequence score before local matching; freeze it on this now-development tier and require a cycle-consistent bridge on a fresh 10k interval before promotion."
+  }
+}

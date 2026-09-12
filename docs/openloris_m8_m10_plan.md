@@ -11,6 +11,54 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+Component-aware v4 reduced retrieval work but failed its quality gate. A
+GT-free multi-model replay of the frozen base registered 1,933/2,500 frames;
+the remaining 567 frames still had 5,378 verified pairs but could not form a
+multi-sensor metric seed. Treating the registered model and two contiguous
+unregistered runs as components, and removing same-component candidates
+before exact reranking, cut the mean ANN pool from 1,246.30 to 315.97
+(-74.6%). Rank-8 sequence survival plus a degree-two budget yielded only 20
+rig pairs, 80 image pairs, and 50 incident images.
+
+That compute reduction did not recover a bridge. SIFT verified no pair;
+bounded ALIKED plus LightGlue verified 47/80 pairs and 1,714 correspondences,
+but no rig pair supplied two consistent sensor rotations, so the unchanged
+cycle gate admitted zero and mapping was correctly skipped. A post-hoc GT
+diagnosis, performed only after admission, showed all 20 candidates were
+false perceptual aliases: the nearest was 12.07 m away and none was within
+5 m. The component filter is retained, but EigenPlaces single-frame ranking
+is rejected as the sole signal. The next development arm adds a wider,
+GT-free multi-scale sequence score before local matching; it must be frozen
+on 5k and then produce a cycle-consistent bridge on a fresh 10k interval.
+See
+[m9-openloris-component-bridge-5000-dev-v1.json](../benchmarks/electro/m9-openloris-component-bridge-5000-dev-v1.json).
+
+The frozen v3 policy has now completed its first unobserved 5k evaluation and
+is rejected for quality/runtime promotion. Streaming EigenPlaces extraction
+completed 2,500 rig rows in 676.43 s without an OOM; radius-two ANN took
+12.53 s / 17,636 KiB and selected 61 rig pairs. Its mean exact-rerank pool was
+still 1,246.30 rows, roughly half the database, so it also fails the intended
+10k compute-scaling gate. Existing-pair exclusion left 244 image pairs over
+only 160 incident images.
+
+The bounded SIFT control retained 195 pairs and 7,250 correspondences but
+admitted no rotation-consistent cycle. ALIKED plus LightGlue retained all 244
+pairs and 79,683 correspondences, yet the unchanged 3-degree gate admitted
+only the same 939--1003 pair already found in the 2.5k development interval;
+no admitted pair touches the new interval. The Python oracle took 380.49 s and
+peaked at 2,296,036 KiB, so it remains diagnostic-only.
+
+Because the overlay was non-empty, a frozen generalized-rig mapper A/B was
+still completed before opening GT. Both arms registered exactly 1,933/2,500
+frames, produced identical pose-header and point-cloud hashes, and scored the
+same 2.02107 m Sim(3) RMSE / 3.68377 m p95 over 3,174 GT-scored images. The
+candidate instead added 0.76 s wall time and 30,068 KiB peak RSS. Do not carry
+v3 or the Python runtime to 10k and do not promote this result to the README.
+The next arm must use GT-free reconstruction-component/frontier state to form
+bounded cross-component bridge runs, retain the same learned-local verifier
+and cycle gate, and require a new-interval admission before mapping. See
+[m9-openloris-bounded-aliked-lightglue-5000-holdout-v1.json](../benchmarks/electro/m9-openloris-bounded-aliked-lightglue-5000-holdout-v1.json).
+
 A bounded learned-local oracle has now passed the unchanged rotation-cycle gate
 for the first time. COLMAP-compatible guided rematching increased the existing
 SIFT arm from 5,261 to 6,865 correspondences but still admitted no rig pair.
