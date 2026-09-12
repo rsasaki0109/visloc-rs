@@ -126,7 +126,10 @@ impl GlobalDescriptorOnnxExtractor {
 
         let session = ort::session::Session::builder()
             .map_err(GlobalDescriptorOnnxError::from_ort)?
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            // `Level3` maps to the newer ORT_ENABLE_LAYOUT enum value and is
+            // rejected by ONNX Runtime 1.22. `All` is the portable historical
+            // ORT_ENABLE_ALL value while retaining the full optimization set.
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
             .map_err(GlobalDescriptorOnnxError::from_ort)?
             .with_execution_providers(providers)
             .map_err(GlobalDescriptorOnnxError::from_ort)?

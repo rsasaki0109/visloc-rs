@@ -56,6 +56,7 @@ pub use visloc_core::types::{
     QueryImage, VisualMap, VisualMapValidationIssue, VisualMapValidationReport,
 };
 
+pub mod global_descriptor_store;
 /// Lossless verified-pair snapshot codec shared by the SfM diagnostics.
 ///
 /// This lives in the library rather than directly under `examples/` so Cargo

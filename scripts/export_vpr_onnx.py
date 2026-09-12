@@ -67,7 +67,7 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
-# --- aggregation layers, reproduced verbatim from the upstream layers.py -----
+# --- aggregation layers, matching the upstream model -------------------------
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6):
         super().__init__()
@@ -76,7 +76,11 @@ class GeM(nn.Module):
 
     def forward(self, x):
         x = x.clamp(min=self.eps).pow(self.p)
-        x = F.avg_pool2d(x, (x.size(-2), x.size(-1)))
+        # Global adaptive pooling is numerically equivalent to an average pool
+        # whose kernel spans H x W, while exporting to ONNX GlobalAveragePool.
+        # The latter supports the dynamic spatial axes promised by this file's
+        # input contract; a runtime-computed avg_pool2d kernel does not.
+        x = F.adaptive_avg_pool2d(x, (1, 1))
         return x.pow(1.0 / self.p)
 
 

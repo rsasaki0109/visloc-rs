@@ -2,6 +2,22 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+M9 learned retrievalのmodel/export/store/ANN feasibilityは1kで完了。
+公式MIT EigenPlaces ResNet18/512重みSHA b47ea1ef...、opset17 ONNX
+SHA ab42f8f...（45,754,260bytes）、Rust ORT1.23.2 SHA718c3fb...を外部固定。
+Torch/ORT最大差2.01e-7、dynamic 3解像度PASS。VLVPRD01はmodel/rig順/
+preprocess hashをheader bindingし、各行checksum、partial checkpoint、atomic rename。
+8-row SIGTERM相当timeout後row2からresumeしfreshとSHA一致。1k画像=500 rig rowの
+640x480 CPU生成133.13s、peak RSS146940KiB、artifact1,028,160bytes、
+SHA5b7de21f...。mmap LSH K32/tables12/bits9/probes9/gap64は1.33s、RSS5180KiB、
+exact recall@32=0.982125、13215 candidates<=16000、reciprocal AND隣接query
+2件以上のsequence supportで2783選択。repeat byte-identical SHA270ae4a...。
+証跡benchmarks/electro/m9-openloris-learned-retrieval-1k-v1.json。
+まだmatching/mapper A/Bは未実施で性能達成ではない。次は既存structure pair除外、
+選択rig pair→同期image pair化、凍結local matcher/verifierで追加分だけmatch、
+track build前mergeとaddition ledger、その後1k control/candidate/repeat全品質非回帰。
+branch feat/m9-learned-retrieval。外部model/artifactはrepoへcommitしない。
+
 連続native E2E診断v1（source c80f45f）はterminal success。
 unit visloc-native-e2e-v1.service、MainPID0/SubState exited/Result success/exit0、
 invocation5118aa2190cc4bc69110d602caa37e25。再実行・再poll不要。

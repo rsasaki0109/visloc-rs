@@ -11,6 +11,34 @@ BA changes are possible means, not milestone success by themselves.
 
 ## Latest checkpoint (2026-09-13)
 
+The learned-retrieval feasibility gate now passes on the frozen 1k tier. The
+first arm is the official MIT-licensed EigenPlaces ResNet18/512 checkpoint,
+exported as one 45,754,260-byte opset-17 ONNX file. Strict weight loading,
+Torch/ORT parity (maximum absolute difference `2.01e-7`), dynamic spatial
+inputs, model/license hashes, and the exact grayscale/resize/rig aggregation
+protocol are pinned. The model remains external and benchmark execution never
+downloads it.
+
+The new `VLVPRD01` store processes one sensor image at a time, averages the two
+synchronized descriptors into one L2-normalized rig-frame row, checkpoints a
+checksummed `.partial` file, and atomically renames only a complete artifact.
+A forced timeout after two of eight rows resumed at row two and produced the
+same SHA-256 as a fresh run. The complete 500-rig-frame / 1,000-image artifact
+took 133.13 s on CPU at 640x480, used 146,940 KiB peak RSS, and occupies
+1,028,160 bytes.
+
+The deterministic mmap LSH audit (K=32, 12 tables, 9 bits, all nine one-bit
+probes, minimum gap 64) achieved exact recall@32 `0.982125` without an N x N
+score/state allocation. It took 1.33 s / 5,180 KiB, emitted 13,215 unique pairs
+under the 16,000=`32N` cap, and selected 2,783 only when retrieval was reciprocal
+**and** at least two adjacent query frames supported the same remote sequence.
+An independent repeat was byte-identical. Full model/runtime/source hashes,
+commands, resource records, negative ABI finding, and limitations are frozen in
+[m9-openloris-learned-retrieval-1k-v1.json](../benchmarks/electro/m9-openloris-learned-retrieval-1k-v1.json).
+This closes descriptor/ANN infrastructure only: no new pair has been matched,
+no mapper quality has been scored, and broad corridor LSH pools still require a
+large-tier growth gate.
+
 The first continuous generated-artifact native run is complete. The detached
 service exited successfully without resume; all 17 stages completed with exit
 code zero, and an independent post-run traversal revalidated every recorded
@@ -60,16 +88,13 @@ The next quality boundary is one isolated **learned long-range retrieval arm**;
 it must add identity evidence that is independent of the current local-feature
 VLAD ranking and must not use reconstructed poses or GT for selection:
 
-1. Pin one learned global-descriptor ONNX model, license, SHA-256, input
-   preprocessing, output dimension, image manifest, and ordering. Reuse the
-   existing `GlobalDescriptorOnnxExtractor`; first add a resumable writer that
-   reads one image at a time and atomically publishes a manifest-bound descriptor
-   artifact. Images and inference tensors must not accumulate in memory.
-2. Add a deterministic mmap/stream reader and bounded ANN query path over rig
-   frames, not separate synchronized sensor images. Compare ANN top-K against
-   exact cosine top-K on 1k before mapping. Cap retrieval at K=32 and emitted
-   candidates at 32N; record index bytes, resident rows, query pool sizes, recall,
-   wall, RSS, and artifact hashes. No N x N score/state allocation is allowed.
+1. **Complete:** EigenPlaces ResNet18/512 model/license/SHA/preprocessing/output
+   dimension and manifest ordering are pinned; the resumable one-image-at-a-time
+   atomic writer passes real-data restart equality.
+2. **Complete at 1k:** deterministic mmap ANN operates on rig frames, has
+   recall@32 `0.982125`, emits no more than 32N candidates, and records pool,
+   wall, RSS and hashes without N x N score/state allocation. Its broad pool
+   remains a scaling gate at larger tiers.
 3. Emit only previously absent long-range candidates. Require reciprocal
    descriptor support plus descriptor-only sequence consistency: at least two
    adjacent query rig frames must retrieve a consistent remote rig-frame
