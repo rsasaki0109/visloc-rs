@@ -39,11 +39,23 @@ in
 
 The next quality arm must follow the accumulated negative evidence. Reprojection
 BA, adjacent descriptor/LK cycles, post-map track merge, sparse/global solve
-schedules, and feasibility backtracking are exhausted. The remaining bounded
-boundary is mutually-exclusive pre-ownership hypothesis selection using an
-independent long-range identity signal. Declare its fixed geometric and
-resource gates at 1k, keep GT score-only after publication, and stop before
-2.5k on any registration, RMSE, p95, reprojection, or runtime regression.
+schedules, and feasibility backtracking are exhausted. One correspondence-
+ownership difference from COLMAP remains untested: its incremental Create
+claims one robust inlier set, then recursively partitions at least three
+remaining unowned observations into another 3-D point. The rejected visloc
+batched-Create arm claimed only its first inlier set.
+
+Implement exactly one default-off bounded recursive-Create arm: at most 32
+registered neighbours per CSR reference row, at most 128 deterministic
+ray-pair hypotheses per partition, and at most four mutually exclusive
+partitions. An observation may be published to only one track; positive depth,
+the existing angular/reprojection gates, deterministic ordering, and
+O(observations + CSR edges) persistent state are mandatory. Run the frozen
+1k control and candidate first, keep GT score-only after model publication, and
+stop before 2.5k on any registration, RMSE, p95, reprojection, mapper-wall, or
+RSS regression. If this arm fails, existing-correspondence ownership
+partitioning is exhausted; the next boundary must add an independently
+verified long-range identity signal rather than another pose-derived gate.
 Only a quality-passing arm proceeds to controlled cold-cache timing, three
 repeats, tier nonregression, full-process SIGKILL recovery, and final release
 closure.

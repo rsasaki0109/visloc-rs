@@ -16,8 +16,12 @@ RMSEはCOLMAP0.384307mより1.22%悪く品質gate未達。
 同条件cold E2E性能acceptance・3反復・全SIGKILL restartは未達。
 証跡benchmarks/electro/m8-native-e2e-v1.json。pipeline report SHA375ec7b...、
 measurement SHA9f889ea...、score SHA74e839b...。
-次は同じGTでの閾値調整ではなく、segment別誤差の原因を観測・幾何から診断して
-固定した品質改善armを作る。その後cold条件統一、3反復、tier非回帰へ進む。
+次はCOLMAP IncrementalTriangulator::Createとの差として残るbounded recursive
+partitionを固定armで実装する。既存batched Createは最初のinlier集合だけを所有したが、
+COLMAPは未所有残差が3観測以上なら別trackを再帰生成する。上限はCSR rowあたり
+32近傍/128 ray-pair仮説/4排他的partition、GTはpublication後だけ。まず1kで
+登録/RMSE/p95/再投影/time/RSSの一つでも悪化したら上位tierへ進めない。
+通過後にcold条件統一、3反復、tier非回帰へ進む。
 共有化済み既存model/VPSは上書き禁止。新runはfresh root。
 
 M8 model/match共有化完了: apply_m8_duplicate_inventory.py、session60517 exit0。
