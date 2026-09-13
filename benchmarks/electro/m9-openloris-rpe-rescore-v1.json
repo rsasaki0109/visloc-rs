@@ -1,0 +1,322 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-14",
+  "status": "rpe_metric_preregistered_rescored_existing_models_no_remapping",
+  "metric_preregistration": {
+    "scorer": "scripts/score_openloris_rpe.py",
+    "reuses": "scripts/score_openloris_model.py GT interpolation, camera-centre convention and per-component Sim(3) (unchanged)",
+    "pose_set": "camera-1 images only, one pose per rig frame",
+    "windows_seconds": [
+      1,
+      10
+    ],
+    "pairing": "for each GT-interpolable camera-1 image i, the image j closest to t_i+window (tolerance recorded per window); counted once per i",
+    "evaluable": "i and j registered in the same component",
+    "error": "|| s R (c_j - c_i)_est - (c_j - c_i)_gt || with that component's Sim(3)",
+    "coverage": "evaluable_pairs / reference_pairs; fragmentation lowers coverage instead of improving error",
+    "rotation_rpe": "omitted: existing scorer exposes camera centres only",
+    "decided_before_results": true
+  },
+  "tests": "scripts/tests/test_score_openloris_rpe.py (perfect model, two-component split, uniform scale drift with analytic value): 4 PASS",
+  "sanity": "per-component registered/gt_scored/sim3_scale/ATE recomputed through the shared helpers match every recorded score.json",
+  "results": {
+    "corridor1-1 tier-10000 (development)": [
+      {
+        "model": "c11-10k-A",
+        "registered_images": 3866,
+        "components": 1,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "32d27cf53f13399b8e8a9936d26cc9748a49699e081be273dcf787568ae7f7c8",
+        "rpe_1s": {
+          "reference_pairs": 4625,
+          "evaluable_pairs": 1557,
+          "coverage": 0.33664864864864863,
+          "rmse_m": 0.9430495647487578,
+          "median_m": 0.5942706260111417,
+          "p95_m": 2.1633490039870225
+        },
+        "rpe_10s": {
+          "reference_pairs": 4368,
+          "evaluable_pairs": 1287,
+          "coverage": 0.29464285714285715,
+          "rmse_m": 6.235796196046152,
+          "median_m": 4.042575119369824,
+          "p95_m": 13.496909311117964
+        }
+      },
+      {
+        "model": "c11-10k-B6",
+        "registered_images": 9626,
+        "components": 4,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "3b9ec4bb31d0c6c94908f74555699c0e1e41316e821a1ddb8e5e7c29ea00958f",
+        "rpe_1s": {
+          "reference_pairs": 4625,
+          "evaluable_pairs": 4346,
+          "coverage": 0.9396756756756757,
+          "rmse_m": 0.5744695555594507,
+          "median_m": 0.08384892292460315,
+          "p95_m": 1.491393492478862
+        },
+        "rpe_10s": {
+          "reference_pairs": 4368,
+          "evaluable_pairs": 3281,
+          "coverage": 0.7511446886446886,
+          "rmse_m": 3.9229968872524816,
+          "median_m": 0.6939269868010959,
+          "p95_m": 7.013215188260978
+        }
+      },
+      {
+        "model": "c11-10k-Cprime",
+        "registered_images": 9632,
+        "components": 4,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "0dbe97c5783378de24b897ebe922f858c326ef48ec158de265032fe5436f4a67",
+        "rpe_1s": {
+          "reference_pairs": 4625,
+          "evaluable_pairs": 4349,
+          "coverage": 0.9403243243243243,
+          "rmse_m": 0.11193763919252145,
+          "median_m": 0.04730897932862684,
+          "p95_m": 0.16721448652529355
+        },
+        "rpe_10s": {
+          "reference_pairs": 4368,
+          "evaluable_pairs": 3284,
+          "coverage": 0.7518315018315018,
+          "rmse_m": 0.373857894672182,
+          "median_m": 0.21992219241926741,
+          "p95_m": 0.7662751961197118
+        }
+      },
+      {
+        "model": "c11-10k-D",
+        "registered_images": 9652,
+        "components": 3,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "11d4f8b199ef4f178acde050a08e4d30673012e00adf2c76ef0b4639565d1c7b",
+        "rpe_1s": {
+          "reference_pairs": 4625,
+          "evaluable_pairs": 4364,
+          "coverage": 0.9435675675675675,
+          "rmse_m": 0.41194208570872975,
+          "median_m": 0.056063714608497524,
+          "p95_m": 0.3408785489739913
+        },
+        "rpe_10s": {
+          "reference_pairs": 4368,
+          "evaluable_pairs": 3561,
+          "coverage": 0.8152472527472527,
+          "rmse_m": 1.2608183424157478,
+          "median_m": 0.2651649381949866,
+          "p95_m": 3.4991564394464985
+        }
+      },
+      {
+        "model": "c11-10k-COLMAP",
+        "registered_images": 9998,
+        "components": 2,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "544d6ff50b5eb75be0a71e97b74ca9b9f7db0070ce2a6a8f3ec708db9ec4e8e9",
+        "rpe_1s": {
+          "reference_pairs": 4625,
+          "evaluable_pairs": 4594,
+          "coverage": 0.9932972972972973,
+          "rmse_m": 0.05265469391893296,
+          "median_m": 0.035965064859907594,
+          "p95_m": 0.09937390191124948
+        },
+        "rpe_10s": {
+          "reference_pairs": 4368,
+          "evaluable_pairs": 4067,
+          "coverage": 0.9310897435897436,
+          "rmse_m": 0.30470123205482996,
+          "median_m": 0.2907733402915191,
+          "p95_m": 0.461505314998589
+        }
+      },
+      {
+        "model": "c11-10k-native-e2e",
+        "registered_images": 9998,
+        "components": 2,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "886850ec2166c813800cd2b671b2467b44ad89a5bae2dcc2a01436b80900bac7",
+        "rpe_1s": {
+          "reference_pairs": 4625,
+          "evaluable_pairs": 4594,
+          "coverage": 0.9932972972972973,
+          "rmse_m": 0.13820776924203831,
+          "median_m": 0.05078345347158915,
+          "p95_m": 0.24544705524930205
+        },
+        "rpe_10s": {
+          "reference_pairs": 4368,
+          "evaluable_pairs": 4067,
+          "coverage": 0.9310897435897436,
+          "rmse_m": 0.4281214149018926,
+          "median_m": 0.3597786839043796,
+          "p95_m": 0.7046223503506601
+        }
+      }
+    ],
+    "corridor1-1 tier-5000 (development)": [
+      {
+        "model": "c11-5k-D",
+        "registered_images": 4950,
+        "components": 2,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "1ca97eb1e23bd52ef1951f684efde130727fd257b0c7c69cccf3a8400bd9f459",
+        "rpe_1s": {
+          "reference_pairs": 2125,
+          "evaluable_pairs": 2069,
+          "coverage": 0.9736470588235294,
+          "rmse_m": 0.1155858915555138,
+          "median_m": 0.05197192916436867,
+          "p95_m": 0.2048525353526184
+        },
+        "rpe_10s": {
+          "reference_pairs": 1869,
+          "evaluable_pairs": 1544,
+          "coverage": 0.8261102193686464,
+          "rmse_m": 0.4260709721293985,
+          "median_m": 0.3125402544912201,
+          "p95_m": 0.7720291354220743
+        }
+      },
+      {
+        "model": "c11-5k-gap46",
+        "registered_images": 4968,
+        "components": 3,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "74306a381d5fe39fe42a9869865a9f99e1588ad7e828aee5f942e141faeef90d",
+        "rpe_1s": {
+          "reference_pairs": 2125,
+          "evaluable_pairs": 2057,
+          "coverage": 0.968,
+          "rmse_m": 1.565512570529043,
+          "median_m": 0.2930976109888988,
+          "p95_m": 0.735517641455506
+        },
+        "rpe_10s": {
+          "reference_pairs": 1869,
+          "evaluable_pairs": 1523,
+          "coverage": 0.8148742643124666,
+          "rmse_m": 3.525079233125941,
+          "median_m": 1.4931373817398026,
+          "p95_m": 6.372575200493869
+        }
+      }
+    ],
+    "corridor1-5 tier-8762 (holdout, already used once)": [
+      {
+        "model": "c15-A",
+        "registered_images": 8454,
+        "components": 5,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "02cb0cb0227f793f66ce676962f28709017ef379307fe89a66fed47801906be8",
+        "rpe_1s": {
+          "reference_pairs": 4344,
+          "evaluable_pairs": 4062,
+          "coverage": 0.9350828729281768,
+          "rmse_m": 0.2850322252082917,
+          "median_m": 0.09773127184297345,
+          "p95_m": 0.4761511699856158
+        },
+        "rpe_10s": {
+          "reference_pairs": 4090,
+          "evaluable_pairs": 2794,
+          "coverage": 0.6831295843520783,
+          "rmse_m": 1.0481381962723324,
+          "median_m": 0.8934346046529248,
+          "p95_m": 1.7570877172883668
+        }
+      },
+      {
+        "model": "c15-B6",
+        "registered_images": 8474,
+        "components": 5,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "c2be76e928d7456de140f38883f1cad09d2bdb361f15a40cb9716ca972aff6a0",
+        "rpe_1s": {
+          "reference_pairs": 4344,
+          "evaluable_pairs": 4076,
+          "coverage": 0.9383057090239411,
+          "rmse_m": 0.28211291527566895,
+          "median_m": 0.09836104736472617,
+          "p95_m": 0.48474357140714536
+        },
+        "rpe_10s": {
+          "reference_pairs": 4090,
+          "evaluable_pairs": 2804,
+          "coverage": 0.6855745721271393,
+          "rmse_m": 1.0385201479120099,
+          "median_m": 0.900823624070948,
+          "p95_m": 1.764570541047572
+        }
+      },
+      {
+        "model": "c15-Cprime",
+        "registered_images": 8482,
+        "components": 5,
+        "scorer_sha256": {
+          "score_openloris_model.py": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+          "score_openloris_rpe.py": "0177112e1255122cd6eea4845a80028fee82d0f4f131f962dfc88cd3897fe878"
+        },
+        "output_sha256": "3c7f7c3f30437084861094dd49b310ea302dcecf05ec9fa81de23e4466153872",
+        "rpe_1s": {
+          "reference_pairs": 4344,
+          "evaluable_pairs": 4080,
+          "coverage": 0.9392265193370166,
+          "rmse_m": 0.2939450002182985,
+          "median_m": 0.09017394432441778,
+          "p95_m": 0.618334194944445
+        },
+        "rpe_10s": {
+          "reference_pairs": 4090,
+          "evaluable_pairs": 2808,
+          "coverage": 0.6865525672371638,
+          "rmse_m": 1.103542892042927,
+          "median_m": 1.0578238505331554,
+          "p95_m": 1.7343068418588024
+        }
+      }
+    ]
+  },
+  "lead_analysis": [
+    "Under the fragmentation-neutral RPE the 10k ranking is COLMAP (10s RMSE 0.305 m, coverage 0.931) < C' (0.374 m, 0.752) < native E2E (0.428 m, 0.931) < D (1.261 m, 0.815) < B6 (3.923 m) < A (6.236 m). C' remains better than D, so the C' decision stands, but C' covers 18 points less of the 10 s pairs than COLMAP and has larger 10 s error: no COLMAP parity claim.",
+    "D's 1 s RMSE (0.412 m) exceeds its 1 s p95 (0.341 m): errors are dominated by a small number of gross outlier pairs (rank-0 component 1 s RMSE 0.449 m vs p95 0.249 m; the 814-image component with Sim(3) scale 0.649 has 1 s p95 2.12 m). The D base graph fixes metric scale but the mapper still produces local pose jumps/drift; that is the next GT-free diagnosis target.",
+    "5k D beats the 5k gap46 configuration on both windows (10 s RMSE 0.426 vs 3.525 m at similar coverage 0.826 vs 0.815).",
+    "corridor1-5: C' is not better than A/B6 on RPE either (10 s RMSE 1.104 vs 1.039 m), consistent with the failed holdout gates."
+  ]
+}

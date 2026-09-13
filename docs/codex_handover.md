@@ -2,6 +2,20 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-14 分割に依存しないRPE指標を事前登録し既存modelを再採点
+
+`scripts/score_openloris_rpe.py`（既存scorerのGT補間・Sim(3)を再利用、cam1のみ、
+窓1s/10s、同一component内pairのみ評価、coverage=評価可能pair/参照pair）。test 4件PASS、
+既存score.jsonとのATE sanity全一致。mappingは再実行していない。
+
+10k（RPE-10s RMSE / coverage）: COLMAP 0.305m/0.931、C′ 0.374m/0.752、native E2E
+0.428m/0.931、D 1.261m/0.815、B6 3.923m/0.751、A 6.236m/0.295。C′>DはRPEでも維持、
+ただしCOLMAPよりerror大・coverage約18pt低くparity主張なし。Dは1s RMSE 0.412m >
+p95 0.341mで少数の大外れpairが支配（scale 0.649の814 image component等）→次は
+Dのlocal pose jump/driftをGT非依存で診断。5kはD 0.426m/0.826がgap46 3.525m/0.815を
+上回る。corridor1-5ではC′ 1.104mがA 1.048m/B6 1.039mより悪く、holdout FAILと整合。
+証跡`benchmarks/electro/m9-openloris-rpe-rescore-v1.json`。
+
 ### 2026-09-14 arm D: `--rig-frame-manifest`でbaseのstereo欠落を修正（10k精度gateはFAIL）
 
 原因: corridor1-1 baseの`benchmark_electro.py --run --pair-source temporal-pyramid
