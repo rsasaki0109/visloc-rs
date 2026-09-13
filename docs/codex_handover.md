@@ -2,6 +2,24 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-14 arm D2/D3（Dの交絡2件を検証）: 両方gate FAIL、C′維持
+
+lead review交絡: (1) Dは同一budgetでstereo約4600 pairが長offset pairを押し出した
+（verified same-sensor gap33-95: 旧base 3120→D 901、cross gap5-95: 1569→167）、
+(2) DはC′の`--direct-stereo-pnp-*` flagなしでmapping。事前登録gate vs C′:
+R1 frame>=4768、R2 RPE-10s RMSE<=0.411m かつ coverage>=0.752、R3 100 frame以上の
+component scale∈[0.9,1.1]、R4 <2GiB。
+- D2（D snapshot + C′ mapper flag）: 4843 frame、RPE-10s 1.265m/0.821、frame 4589-4999
+  componentのscale 0.652 → R2/R3 FAIL。flag交絡は棄却。
+- D3（budget 75000で再base + C′ mapper）: 4854 frame、s33-95は1541まで回復、RPE-10s
+  0.943m/0.827、同componentのscale 0.627 → R2/R3 FAIL。押し出しは一部要因のみ。
+frame 4589-4999はD系で常にscale約0.63-0.65、C′では同じ407-409 frameが0.993。
+D系はそこにbase ratio0.8由来の同一frame stereo約384 pair、C′はstride-8をratio0.95→
+幾何reverifyしたものだけ。次はarmではなく、GT非依存のmodel間Sim(3)とpair差分で
+この区間を診断する。corridor1-1 10kでのarm反復は過学習リスクが増えており、採用変更は
+未使用holdout（corridor1-2）が必須。root: `$R/openloris-tier10000-rigframe-
+{directstereo,budget75k}-v1`。証跡`benchmarks/electro/m9-openloris-rigframe-d2-d3-10000-v1.json`。
+
 ### 2026-09-14 分割に依存しないRPE指標を事前登録し既存modelを再採点
 
 `scripts/score_openloris_rpe.py`（既存scorerのGT補間・Sim(3)を再利用、cam1のみ、

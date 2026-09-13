@@ -1,0 +1,218 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-14",
+  "status": "d2_d3_rejected_c_prime_remains_10k_dev_configuration",
+  "background": "Arm D (base with --rig-frame-manifest, budget 70000, base-only mapper flags) failed 10k gates vs C'. Lead review found two confounds: (1) the same candidate budget let ~4600 new same-frame stereo pairs displace long-offset pairs (verified same-sensor gap 33-95: old base 3120 -> D 901; cross-sensor gap 5-95: 1569 -> 167); (2) D was mapped without C''s --direct-stereo-pnp-max-frame-gap 8 --direct-stereo-min-pnp-sensors 1.",
+  "pre_registration": {
+    "D2": "arm D snapshot mapped with exactly the C' mapper command",
+    "D3": "arm D base command with --candidate-budget 75000 (70000 + 5000 same-frame stereo slots), mapped with the C' mapper command",
+    "gates_vs_c_prime": {
+      "R1": "registered frames >= 4768",
+      "R2": "RPE-10s RMSE <= 0.411 m and coverage >= 0.752 (C' 0.374 m / 0.752)",
+      "R3": "components with >= 100 frames have sim3_scale in [0.9, 1.1]",
+      "R4": "all stages < 2 GiB"
+    },
+    "decided_before_results": true
+  },
+  "pair_class_table_verified": {
+    "columns": [
+      "s1",
+      "s2-4",
+      "s5-16",
+      "s17-32",
+      "s33-95",
+      "s>95",
+      "x0",
+      "x1",
+      "x2-4",
+      "x5-16",
+      "x17-32",
+      "x33-95",
+      "x>95",
+      "total"
+    ],
+    "old_base": [
+      9541,
+      19192,
+      18373,
+      6071,
+      3120,
+      37,
+      111,
+      223,
+      635,
+      1150,
+      148,
+      271,
+      7,
+      58879
+    ],
+    "D": [
+      9541,
+      19290,
+      17769,
+      5315,
+      901,
+      0,
+      4686,
+      168,
+      393,
+      164,
+      3,
+      0,
+      0,
+      58230
+    ],
+    "D3": [
+      9541,
+      19884,
+      19051,
+      5994,
+      1541,
+      0,
+      4686,
+      507,
+      1118,
+      629,
+      9,
+      1,
+      0,
+      62961
+    ]
+  },
+  "arms": {
+    "D2_directstereo_mapper": {
+      "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-directstereo-v1",
+      "score_sha256": "0de538709451e8132bc9c377eba3a0bb90419ddfd198c7c4750af650548c8ccd",
+      "rpe_sha256": "625b817073d17196d9ddbf5ded686879255136eef83073b24620da058ef08508",
+      "models": 3,
+      "registered_images": 9686,
+      "gt_scored_images": 8994,
+      "ate": {
+        "rmse_m": 0.8944005473622926,
+        "p95_m": 2.031433530211442,
+        "median_m": 0.1968390678069047
+      },
+      "components": [
+        {
+          "registered": 6396,
+          "rmse_m": 1.094689799471821,
+          "p95_m": 2.246728301648651,
+          "sim3_scale": 0.9866387344969791,
+          "images_txt_sha256": "09c313486d315713944badb64da2a131442ce64c88bbf8e24b7ade9faa4b2836"
+        },
+        {
+          "registered": 2472,
+          "rmse_m": 0.14274643274898252,
+          "p95_m": 0.18323548091924644,
+          "sim3_scale": 0.965077756330369,
+          "images_txt_sha256": "37838c2274590f7a2a32a20a53cd7825298539dab1c7bca525d8774e3bd25488"
+        },
+        {
+          "registered": 818,
+          "rmse_m": 0.6146503198406649,
+          "p95_m": 1.1122049741341455,
+          "sim3_scale": 0.6515114368884675,
+          "images_txt_sha256": "8b2f44940a5609dbf54dcb784c3d0fc8310674ef60067186382b0dcbe8118c2f"
+        }
+      ],
+      "rpe": {
+        "1s": {
+          "coverage": 0.9483243243243243,
+          "rmse_m": 0.4234045060997068,
+          "p95_m": 0.34321065096114745,
+          "median_m": 0.05414813742433239,
+          "evaluable_pairs": 4386,
+          "reference_pairs": 4625
+        },
+        "10s": {
+          "coverage": 0.8211996336996337,
+          "rmse_m": 1.2644617169549515,
+          "p95_m": 3.493630619082978,
+          "median_m": 0.27295010290479904,
+          "evaluable_pairs": 3587,
+          "reference_pairs": 4368
+        }
+      }
+    },
+    "D3_budget75k": {
+      "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-budget75k-v1",
+      "score_sha256": "4cb6076bba261261b4e6732c7747e4efeae4a91a8af3ac014592ccad7a307ccb",
+      "rpe_sha256": "15eec3f4c42b3a6629167911cec0749bef669a90107e59d8d0f135be059c7f46",
+      "models": 3,
+      "registered_images": 9708,
+      "gt_scored_images": 9016,
+      "ate": {
+        "rmse_m": 0.8358607970440527,
+        "p95_m": 1.5103489918277813,
+        "median_m": 0.5422141681110328
+      },
+      "components": [
+        {
+          "registered": 6418,
+          "rmse_m": 0.9564568805417878,
+          "p95_m": 1.5279637760368716,
+          "sim3_scale": 0.9226297852005964,
+          "images_txt_sha256": "757cf64688316b1f67a254f0347d526b159c0e1e9484dcef03910e6fc8512c63"
+        },
+        {
+          "registered": 2472,
+          "rmse_m": 0.37632463338272,
+          "p95_m": 0.32555847053601106,
+          "sim3_scale": 0.9585526059151654,
+          "images_txt_sha256": "e72390793a4429533985fc23ba794f34dbadc0cc6996534674da32cb8b5a9bb4"
+        },
+        {
+          "registered": 818,
+          "rmse_m": 0.9322149021672727,
+          "p95_m": 1.4231046042235016,
+          "sim3_scale": 0.6273899413214765,
+          "images_txt_sha256": "825d04a41905fdca3d99f736513d2d4527bc62f8a8b9973de3cb4b44a81d8352"
+        }
+      ],
+      "rpe": {
+        "1s": {
+          "coverage": 0.9528648648648649,
+          "rmse_m": 0.3983842509826435,
+          "p95_m": 0.3648315916125306,
+          "median_m": 0.0657958514129931,
+          "evaluable_pairs": 4407,
+          "reference_pairs": 4625
+        },
+        "10s": {
+          "coverage": 0.8264652014652014,
+          "rmse_m": 0.9428995373369294,
+          "p95_m": 2.043569757693745,
+          "median_m": 0.4608554230804399,
+          "evaluable_pairs": 3610,
+          "reference_pairs": 4368
+        }
+      }
+    }
+  },
+  "wall_rss": {
+    "D2_mapper": "3:40.35 / 773804 KiB",
+    "D3_base": "58:27.24 / 1194536 KiB (candidate generation 3062.99 s)",
+    "D3_mapper": "3:17.05 / 827524 KiB"
+  },
+  "gates": {
+    "D2": {
+      "R1": "PASS 4843",
+      "R2": "FAIL RPE-10s 1.2645 m (coverage 0.8212)",
+      "R3": "FAIL component-002 409 frames scale 0.6515",
+      "R4": "PASS"
+    },
+    "D3": {
+      "R1": "PASS 4854",
+      "R2": "FAIL RPE-10s 0.9429 m (coverage 0.8265)",
+      "R3": "FAIL component-002 409 frames scale 0.6274",
+      "R4": "PASS"
+    }
+  },
+  "lead_analysis": [
+    "Mapper flag confound rejected: direct-stereo flags do not fix the frames 4589-4999 component (scale 0.649 -> 0.652).",
+    "Budget displacement is only partly responsible: restoring budget raises long-offset same-sensor pairs to 1541 (old base 3120) and improves RPE-10s 1.26 -> 0.94 m, still 2.5x C'.",
+    "The frames 4589-4999 component keeps scale ~0.63-0.65 in D, D2 and D3 while C' reconstructs the same 407-409 frames at scale 0.993. D-family snapshots contain ~384 same-frame stereo pairs there from base ratio-0.8 matching; C' has only stride-8 stereo pairs matched at ratio 0.95 and geometrically reverified. A GT-free model-to-model Sim(3) between those components plus a pair-level diff is the next diagnostic, not another arm.",
+    "Several dev arms have now been run on corridor1-1 10k; further tuning there increases overfitting risk. Any adopted change still needs an untouched holdout (corridor1-2)."
+  ]
+}
