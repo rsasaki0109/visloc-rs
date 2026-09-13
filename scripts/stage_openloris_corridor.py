@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ from pathlib import Path
 
 
 SOURCE_COMMIT = "cbc03108723d08322b23d0338680bffa9404cce9"
+DEFAULT_SCENE = "corridor1-1"
 ARCHIVE_URL = (
     "https://huggingface.co/datasets/shixuesong/openloris-scene/resolve/"
     f"{SOURCE_COMMIT}/package/corridor1-1.7z"
@@ -37,6 +39,9 @@ TERMS_URL = (
 )
 ARCHIVE_BYTES = 13_853_763_765
 ARCHIVE_SHA256 = "c7ff1a472ca54da82198521eda8c18f2065691075a05e706880f7fb58fda8415"
+ARCHIVE_SHA256_SOURCE = (
+    "Hugging Face LFS oid at source_commit; Range extraction does not rehash the complete remote archive"
+)
 TIER_COUNTS = (1000, 2500, 5000, 10000)
 
 # OpenLORIS corridor1-1 sensors.yaml.  The official serialization orders the
@@ -100,8 +105,53 @@ def write_atomic(path: Path, payload: bytes) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--timestamps", type=int, default=5000)
+    parser.add_argument(
+        "--scene",
+        default=DEFAULT_SCENE,
+        help="top-level directory name inside the 7z archive, and the manifest 'scene' field",
+    )
+    parser.add_argument("--source-commit", default=SOURCE_COMMIT)
+    parser.add_argument(
+        "--timestamps",
+        type=int,
+        default=5000,
+        help="max frames per camera to select (default keeps corridor1-1 behavior: 5000)",
+    )
     parser.add_argument("--archive-url", default=ARCHIVE_URL)
+    parser.add_argument(
+        "--archive-bytes",
+        type=int,
+        default=ARCHIVE_BYTES,
+        help="byte size recorded in source-audit.json for provenance (defaults to the corridor1-1 whole-archive size)",
+    )
+    parser.add_argument(
+        "--archive-sha256",
+        default=ARCHIVE_SHA256,
+        help="sha256 recorded in source-audit.json for provenance (defaults to the corridor1-1 whole-archive digest)",
+    )
+    parser.add_argument(
+        "--archive-sha256-source",
+        default=ARCHIVE_SHA256_SOURCE,
+        help="free-text provenance note for --archive-sha256",
+    )
+    parser.add_argument(
+        "--member-offset",
+        type=int,
+        default=None,
+        help="byte offset of an embedded 7z member within --archive-url (e.g. a .7z packed inside a .tar); "
+        "requires --member-size. When unset, --archive-url is read as a standalone 7z archive (corridor1-1 default).",
+    )
+    parser.add_argument(
+        "--member-size",
+        type=int,
+        default=None,
+        help="byte length of the embedded 7z member; requires --member-offset",
+    )
+    parser.add_argument(
+        "--tier-counts",
+        default=",".join(str(count) for count in TIER_COUNTS),
+        help="comma-separated prefix tier sizes to materialize (default matches corridor1-1: 1000,2500,5000,10000)",
+    )
     parser.add_argument("--list-only", action="store_true")
     parser.add_argument("--keep-raw", action="store_true")
     parser.add_argument(
@@ -116,16 +166,100 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="target-count fallback batching; 0 streams each solid folder exactly once",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if (args.member_offset is None) != (args.member_size is None):
+        parser.error("--member-offset and --member-size must be given together")
+    try:
+        args.tier_counts = tuple(sorted({int(item) for item in args.tier_counts.split(",") if item}))
+    except ValueError as exc:
+        parser.error(f"invalid --tier-counts: {exc}")
+    return args
 
 
-def official_members(url: str, block_bytes: int):
+class TarMemberView(io.IOBase):
+    """Present a byte range of an already-opened remote file as its own file.
+
+    Some OpenLORIS releases pack several ``.7z`` archives as members of one
+    ``.tar`` (e.g. ``corridor1-2_5-package.tar``). Rather than downloading the
+    tar, wrap the underlying fsspec file object so every read/seek is
+    translated into the ``[offset, offset + size)`` byte window of the outer
+    file. py7zr requires an ``io.IOBase`` instance; libarchive-c only needs
+    read/seek/tell. Either way this view is a drop-in stand-in for a
+    standalone remote 7z file.
+    """
+
+    def __init__(self, inner, offset: int, size: int) -> None:
+        super().__init__()
+        self._inner = inner
+        self._offset = offset
+        self._size = size
+        self._pos = 0
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            new_pos = offset
+        elif whence == 1:
+            new_pos = self._pos + offset
+        elif whence == 2:
+            new_pos = self._size + offset
+        else:
+            raise ValueError(f"unsupported whence: {whence}")
+        if new_pos < 0:
+            raise ValueError(f"negative seek position: {new_pos}")
+        self._pos = new_pos
+        return self._pos
+
+    def tell(self) -> int:
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = self._size - self._pos
+        size = max(0, min(size, self._size - self._pos))
+        if size == 0:
+            return b""
+        self._inner.seek(self._offset + self._pos)
+        data = self._inner.read(size)
+        self._pos += len(data)
+        return data
+
+    def readinto(self, buffer) -> int:
+        data = self.read(len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def open_remote_member(url: str, block_bytes: int, member_offset: int | None, member_size: int | None):
+    """Open ``url`` and, if a member range is given, view only that byte range."""
+
     import fsspec
+
+    remote = fsspec.open(url, "rb", block_size=block_bytes, cache_type="readahead").open()
+    if member_offset is None:
+        return remote, remote
+    return remote, TarMemberView(remote, member_offset, member_size)
+
+
+def official_members(
+    url: str,
+    block_bytes: int,
+    member_offset: int | None = None,
+    member_size: int | None = None,
+):
     import py7zr
 
     patch_py7zr_backpressure()
-    remote = fsspec.open(url, "rb", block_size=block_bytes, cache_type="readahead").open()
-    archive = py7zr.SevenZipFile(remote, "r")
+    remote, view = open_remote_member(url, block_bytes, member_offset, member_size)
+    archive = py7zr.SevenZipFile(view, "r")
     return remote, archive, archive.getnames()
 
 
@@ -231,14 +365,20 @@ def trim_allocator() -> None:
 
 
 def extract_target_batches(
-    url: str, raw_root: Path, targets: list[str], block_bytes: int, batch_size: int
+    url: str,
+    raw_root: Path,
+    targets: list[str],
+    block_bytes: int,
+    batch_size: int,
+    member_offset: int | None = None,
+    member_size: int | None = None,
 ) -> None:
     """Bound py7zr state by closing the remote archive after each target batch."""
 
     total_batches = (len(targets) + batch_size - 1) // batch_size
     for batch_index, start in enumerate(range(0, len(targets), batch_size), 1):
         batch = targets[start : start + batch_size]
-        remote, archive, _ = official_members(url, block_bytes)
+        remote, archive, _ = official_members(url, block_bytes, member_offset, member_size)
         try:
             archive.extract(
                 path=raw_root,
@@ -326,10 +466,12 @@ def validate_complete_raw(raw_root: Path, targets: list[str]) -> None:
         )
 
 
-def selected_members(names: list[str], timestamps: int) -> tuple[list[tuple[int, str, str]], list[str]]:
+def selected_members(
+    names: list[str], timestamps: int, scene: str = DEFAULT_SCENE
+) -> tuple[list[tuple[int, str, str]], list[str]]:
     by_camera = {}
     for camera, config in CAMERAS.items():
-        prefix = f"corridor1-1/{config['directory']}/"
+        prefix = f"{scene}/{config['directory']}/"
         members = sorted(
             name for name in names if name.startswith(prefix) and name.endswith(".png")
         )
@@ -339,11 +481,11 @@ def selected_members(names: list[str], timestamps: int) -> tuple[list[tuple[int,
         raise ValueError(f"--timestamps must be within 1..{available}, got {timestamps}")
     selected = []
     targets = [
-        "corridor1-1/sensors.yaml",
-        "corridor1-1/trans_matrix.yaml",
-        "corridor1-1/groundtruth.txt",
-        "corridor1-1/fisheye1.txt",
-        "corridor1-1/fisheye2.txt",
+        f"{scene}/sensors.yaml",
+        f"{scene}/trans_matrix.yaml",
+        f"{scene}/groundtruth.txt",
+        f"{scene}/fisheye1.txt",
+        f"{scene}/fisheye2.txt",
     ]
     for camera in sorted(by_camera):
         for member in by_camera[camera][:timestamps]:
@@ -354,7 +496,7 @@ def selected_members(names: list[str], timestamps: int) -> tuple[list[tuple[int,
 
 
 def undistort(
-    raw_root: Path, output: Path, selected: list[tuple[int, str, str]]
+    raw_root: Path, output: Path, selected: list[tuple[int, str, str]], scene: str = DEFAULT_SCENE
 ) -> tuple[dict[int, tuple[float, ...]], list[dict]]:
     import cv2
     import numpy as np
@@ -365,7 +507,7 @@ def undistort(
     new_intrinsics = {}
     maps = {}
     config_hashes = {}
-    sensors_path = raw_root / "corridor1-1" / "sensors.yaml"
+    sensors_path = raw_root / scene / "sensors.yaml"
     storage = cv2.FileStorage(str(sensors_path), cv2.FILE_STORAGE_READ)
     if not storage.isOpened():
         raise ValueError(f"cannot read official OpenLORIS calibration: {sensors_path}")
@@ -508,12 +650,15 @@ def write_calibration(root: Path, intrinsics: dict[int, tuple[float, ...]], reco
 
 
 def write_tier_views(
-    root: Path, intrinsics: dict[int, tuple[float, ...]], records: list[dict]
+    root: Path,
+    intrinsics: dict[int, tuple[float, ...]],
+    records: list[dict],
+    tier_counts: tuple[int, ...] = TIER_COUNTS,
 ) -> dict[str, dict[str, str | int]]:
     """Create deterministic prefix views without duplicating staged images."""
 
     tiers = {}
-    for count in TIER_COUNTS:
+    for count in tier_counts:
         if count > len(records):
             continue
         tier_root = root / "tiers" / f"tier-{count}"
@@ -544,12 +689,19 @@ def main() -> int:
     if args.http_block_mib <= 0 or args.extract_batch_size < 0:
         print("--http-block-mib must be positive and --extract-batch-size non-negative", file=sys.stderr)
         return 2
+    terms_url = (
+        "https://huggingface.co/datasets/shixuesong/openloris-scene/raw/"
+        f"{args.source_commit}/README.md"
+    )
     try:
         remote, archive, names = official_members(
-            args.archive_url, args.http_block_mib * 1024 * 1024
+            args.archive_url,
+            args.http_block_mib * 1024 * 1024,
+            args.member_offset,
+            args.member_size,
         )
         try:
-            selected, targets = selected_members(names, args.timestamps)
+            selected, targets = selected_members(names, args.timestamps, args.scene)
             if args.list_only:
                 print(json.dumps({"archive_members": len(names), "selected_images": len(selected), "first": selected[0][2], "last": selected[-1][2]}, indent=2))
                 return 0
@@ -569,36 +721,36 @@ def main() -> int:
                 targets,
                 args.http_block_mib * 1024 * 1024,
                 args.extract_batch_size,
+                args.member_offset,
+                args.member_size,
             )
             extraction_backend = "py7zr target batches"
         else:
-            import fsspec
-
-            remote = fsspec.open(
+            remote, view = open_remote_member(
                 args.archive_url,
-                "rb",
-                block_size=args.http_block_mib * 1024 * 1024,
-                cache_type="readahead",
-            ).open()
+                args.http_block_mib * 1024 * 1024,
+                args.member_offset,
+                args.member_size,
+            )
             try:
-                extract_targets_libarchive(remote, raw_root, targets)
+                extract_targets_libarchive(view, raw_root, targets)
             finally:
                 remote.close()
             extraction_backend = "libarchive streaming"
 
-        intrinsics, records = undistort(raw_root, args.output_dir / "images", selected)
+        intrinsics, records = undistort(raw_root, args.output_dir / "images", selected, args.scene)
         write_calibration(args.output_dir, intrinsics, records)
-        tier_views = write_tier_views(args.output_dir, intrinsics, records)
-        with urllib.request.urlopen(TERMS_URL, timeout=30) as response:
+        tier_views = write_tier_views(args.output_dir, intrinsics, records, args.tier_counts)
+        with urllib.request.urlopen(terms_url, timeout=30) as response:
             terms = response.read()
         write_atomic(args.output_dir / "source-terms.md", terms)
         manifests = {}
-        for count in TIER_COUNTS:
+        for count in args.tier_counts:
             if count > len(records):
                 continue
             payload = {
                 "schema": "visloc_openloris_corridor_manifest_v1",
-                "scene": "corridor1-1",
+                "scene": args.scene,
                 "images": records[:count],
             }
             encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
@@ -607,14 +759,14 @@ def main() -> int:
             manifests[str(count)] = {"path": str(path), "sha256": sha256_bytes(encoded)}
         audit = {
             "schema": "visloc_openloris_corridor_source_audit_v1",
-            "scene": "corridor1-1",
+            "scene": args.scene,
             "connected_rig": True,
             "archive_url": args.archive_url,
-            "archive_bytes": ARCHIVE_BYTES,
-            "archive_sha256": ARCHIVE_SHA256,
-            "archive_sha256_source": "Hugging Face LFS oid at source_commit; Range extraction does not rehash the complete remote archive",
-            "source_commit": SOURCE_COMMIT,
-            "terms_url": TERMS_URL,
+            "archive_bytes": args.archive_bytes,
+            "archive_sha256": args.archive_sha256,
+            "archive_sha256_source": args.archive_sha256_source,
+            "source_commit": args.source_commit,
+            "terms_url": terms_url,
             "terms_sha256": sha256_bytes(terms),
             "license": "CC BY-ND 4.0",
             "redistribution_of_staged_derivatives": False,
@@ -632,6 +784,9 @@ def main() -> int:
             "tier_manifests": manifests,
             "tier_views": tier_views,
         }
+        if args.member_offset is not None:
+            audit["archive_member_offset"] = args.member_offset
+            audit["archive_member_size"] = args.member_size
         write_atomic(
             args.output_dir / "source-audit.json",
             (json.dumps(audit, sort_keys=True, indent=2) + "\n").encode(),
