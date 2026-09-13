@@ -200,6 +200,7 @@ fn parse_ledger(path: &Path) -> Result<BTreeMap<ImagePair, RigPair>, String> {
             "# admission_policy rank-margin-path-v2"
                 | "# admission_policy rank-path-cycle-v3"
                 | "# admission_policy component-bridge-v4"
+                | "# admission_policy multi-scale-component-bridge-v5"
         )
     }) {
         return Err("addition ledger is not bound to a cycle-gated retrieval policy".into());

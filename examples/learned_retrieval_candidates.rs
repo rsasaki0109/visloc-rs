@@ -37,6 +37,7 @@ enum AdmissionPolicy {
     RankMarginPathV2,
     RankPathCycleV3,
     ComponentBridgeV4,
+    MultiScaleComponentBridgeV5,
 }
 
 impl Default for Args {
@@ -82,6 +83,9 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                     "rank-margin-path-v2" => AdmissionPolicy::RankMarginPathV2,
                     "rank-path-cycle-v3" => AdmissionPolicy::RankPathCycleV3,
                     "component-bridge-v4" => AdmissionPolicy::ComponentBridgeV4,
+                    "multi-scale-component-bridge-v5" => {
+                        AdmissionPolicy::MultiScaleComponentBridgeV5
+                    }
                     other => return Err(format!("unknown admission policy: {other}").into()),
                 }
             }
@@ -95,7 +99,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                     "learned_retrieval_candidates --descriptors globals.vprd --out pairs.tsv \
                      [--topk 32] [--tables 8] [--bits auto] [--probes auto] \
                      [--min-frame-gap 64] [--exact-audit-max-rows 1000] \
-                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2|rank-path-cycle-v3|component-bridge-v4] \
+                     [--admission-policy reciprocal-sequence-v1|rank-margin-path-v2|rank-path-cycle-v3|component-bridge-v4|multi-scale-component-bridge-v5] \
                      [--probe-radius 1|2] [--rig-manifest rig.txt \
                      --retrieval-component-manifest retrieval-components.txt]"
                 );
@@ -115,15 +119,18 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     }
     let has_component_inputs =
         args.rig_manifest.is_some() || args.retrieval_component_manifest.is_some();
-    if args.admission_policy == AdmissionPolicy::ComponentBridgeV4 {
+    if matches!(
+        args.admission_policy,
+        AdmissionPolicy::ComponentBridgeV4 | AdmissionPolicy::MultiScaleComponentBridgeV5
+    ) {
         if args.rig_manifest.is_none() || args.retrieval_component_manifest.is_none() {
             return Err(
-                "component-bridge-v4 requires --rig-manifest and --retrieval-component-manifest"
+                "component bridge policies require --rig-manifest and --retrieval-component-manifest"
                     .into(),
             );
         }
     } else if has_component_inputs {
-        return Err("component manifests are only valid with component-bridge-v4".into());
+        return Err("component manifests are only valid with component bridge policies".into());
     }
     Ok(args)
 }
@@ -394,6 +401,37 @@ struct AnnConfig {
     probes: usize,
     min_gap: usize,
     probe_radius: usize,
+    sequence_rerank: bool,
+}
+
+const SEQUENCE_PRE_RERANK_MULTIPLIER: usize = 4;
+const MULTI_SCALE_SEQUENCE_OFFSETS: [isize; 7] = [-32, -16, -8, 0, 8, 16, 32];
+
+fn multi_scale_sequence_score(
+    descriptors: &MappedDescriptors,
+    labels: &[u64],
+    query: usize,
+    candidate: usize,
+) -> Option<f32> {
+    [1_isize, -1]
+        .into_iter()
+        .filter_map(|direction| {
+            let mut sum = 0.0_f32;
+            for offset in MULTI_SCALE_SEQUENCE_OFFSETS {
+                let query_row = query.checked_add_signed(offset)?;
+                let candidate_row = candidate.checked_add_signed(direction * offset)?;
+                if query_row >= labels.len()
+                    || candidate_row >= labels.len()
+                    || labels[query_row] != labels[query]
+                    || labels[candidate_row] != labels[candidate]
+                {
+                    return None;
+                }
+                sum += descriptors.dot(query_row, candidate_row);
+            }
+            Some(sum / MULTI_SCALE_SEQUENCE_OFFSETS.len() as f32)
+        })
+        .max_by(f32::total_cmp)
 }
 
 fn visit_probe_masks(ordered: &[u8], radius: usize, mut visit: impl FnMut(u64)) {
@@ -421,6 +459,7 @@ fn ann_neighbors(
         probes,
         min_gap,
         probe_radius,
+        sequence_rerank,
     } = *config;
     let rows = descriptors.rows();
     let mut signatures = vec![0_u64; tables * rows];
@@ -474,16 +513,33 @@ fn ann_neighbors(
         }
         pool_sum += pool.len();
         max_pool = max_pool.max(pool.len());
-        if pool.len() < topk {
-            undersized_queries += 1;
-        }
-        let mut best = Vec::with_capacity(topk);
+        let preliminary_k = if sequence_rerank {
+            topk.saturating_mul(SEQUENCE_PRE_RERANK_MULTIPLIER)
+        } else {
+            topk
+        };
+        let mut best = Vec::with_capacity(preliminary_k);
         for candidate in pool {
             insert_topk(
                 &mut best,
                 (candidate, descriptors.dot(query, candidate)),
-                topk,
+                preliminary_k,
             );
+        }
+        if sequence_rerank {
+            let labels = component_labels.expect("sequence reranking requires component labels");
+            let mut reranked = Vec::with_capacity(topk);
+            for (candidate, _) in best {
+                if let Some(score) =
+                    multi_scale_sequence_score(descriptors, labels, query, candidate)
+                {
+                    insert_topk(&mut reranked, (candidate, score), topk);
+                }
+            }
+            best = reranked;
+        }
+        if best.len() < topk {
+            undersized_queries += 1;
         }
         neighbors[query] = best;
     }
@@ -798,18 +854,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             probes,
             min_gap: args.min_frame_gap,
             probe_radius: args.probe_radius,
+            sequence_rerank: args.admission_policy == AdmissionPolicy::MultiScaleComponentBridgeV5,
         },
         component_rows.as_ref().map(|rows| rows.labels.as_slice()),
     );
-    let exact = (descriptors.rows() <= args.exact_audit_max_rows).then(|| {
-        exact_recall(
-            &descriptors,
-            &ann.neighbors,
-            args.topk,
-            args.min_frame_gap,
-            component_rows.as_ref().map(|rows| rows.labels.as_slice()),
-        )
-    });
+    let exact = (descriptors.rows() <= args.exact_audit_max_rows
+        && args.admission_policy != AdmissionPolicy::MultiScaleComponentBridgeV5)
+        .then(|| {
+            exact_recall(
+                &descriptors,
+                &ann.neighbors,
+                args.topk,
+                args.min_frame_gap,
+                component_rows.as_ref().map(|rows| rows.labels.as_slice()),
+            )
+        });
     let pairs = candidate_pairs(&ann.neighbors);
     if pairs.len() > args.topk * descriptors.rows() {
         return Err("candidate count exceeded K*N invariant".into());
@@ -831,6 +890,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .expect("v4 selected pairs")
                 .contains(&(*query, *candidate)),
+            AdmissionPolicy::MultiScaleComponentBridgeV5 => component_selected
+                .as_ref()
+                .expect("v5 selected pairs")
+                .contains(&(*query, *candidate)),
         })
         .count();
     let binding = descriptors.store.binding();
@@ -841,6 +904,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             AdmissionPolicy::RankMarginPathV2 => "v2",
             AdmissionPolicy::RankPathCycleV3 => "v3",
             AdmissionPolicy::ComponentBridgeV4 => "v4",
+            AdmissionPolicy::MultiScaleComponentBridgeV5 => "v5",
         },
         hash_file(&args.descriptors)?,
         hex(&binding.model_sha256),
@@ -905,6 +969,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>()
             .join(",");
         output.push_str(&format!("# component_rank_path_survival {survival}\n"));
+        if args.admission_policy == AdmissionPolicy::MultiScaleComponentBridgeV5 {
+            output.push_str(
+                "# sequence_offsets -32,-16,-8,0,8,16,32\n# sequence_direction forward-or-reverse\n# sequence_pre_rerank_k 128\n",
+            );
+        }
     }
     match args.admission_policy {
         AdmissionPolicy::ReciprocalSequenceV1 => {
@@ -943,6 +1012,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "# pair query candidate cosine query_rank candidate_rank query_ratio candidate_ratio path selected\n",
             );
         }
+        AdmissionPolicy::MultiScaleComponentBridgeV5 => {
+            output.push_str("# admission_policy multi-scale-component-bridge-v5\n");
+            output.push_str(&format!(
+                "# admission_rank {COMPONENT_ADMISSION_RANK}\n# sequence_path_radius 1\n"
+            ));
+            output.push_str("# per_frame_addition_budget 2\n");
+            output.push_str("# post_verification_gate rig-rotation-cycle-v1\n");
+            output.push_str("# requires_unregistered_endpoint true\n");
+            output.push_str(
+                "# pair query candidate cosine query_rank candidate_rank query_ratio candidate_ratio path selected\n",
+            );
+        }
     }
     for ((query, candidate), row) in &pairs {
         match args.admission_policy {
@@ -955,12 +1036,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             AdmissionPolicy::RankMarginPathV2
             | AdmissionPolicy::RankPathCycleV3
-            | AdmissionPolicy::ComponentBridgeV4 => {
+            | AdmissionPolicy::ComponentBridgeV4
+            | AdmissionPolicy::MultiScaleComponentBridgeV5 => {
                 let query_rank = rank(&ann.neighbors, *query, *candidate);
                 let candidate_rank = rank(&ann.neighbors, *candidate, *query);
                 let query_ratio = distance_ratio(&ann.neighbors, *query, *candidate);
                 let candidate_ratio = distance_ratio(&ann.neighbors, *candidate, *query);
-                let path = if args.admission_policy == AdmissionPolicy::ComponentBridgeV4 {
+                let path = if matches!(
+                    args.admission_policy,
+                    AdmissionPolicy::ComponentBridgeV4
+                        | AdmissionPolicy::MultiScaleComponentBridgeV5
+                ) {
                     component_selected
                         .as_ref()
                         .expect("v4 selected pairs")
@@ -979,6 +1065,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     AdmissionPolicy::ComponentBridgeV4 => component_selected
                         .as_ref()
                         .expect("v4 selected pairs")
+                        .contains(&(*query, *candidate)),
+                    AdmissionPolicy::MultiScaleComponentBridgeV5 => component_selected
+                        .as_ref()
+                        .expect("v5 selected pairs")
                         .contains(&(*query, *candidate)),
                     AdmissionPolicy::ReciprocalSequenceV1 => unreachable!(),
                 };

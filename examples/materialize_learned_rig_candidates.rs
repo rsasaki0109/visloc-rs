@@ -78,6 +78,7 @@ enum AdmissionPolicy {
     RankMarginPathV2,
     RankPathCycleV3,
     ComponentBridgeV4,
+    MultiScaleComponentBridgeV5,
 }
 
 impl AdmissionPolicy {
@@ -87,6 +88,7 @@ impl AdmissionPolicy {
             Self::RankMarginPathV2 => "rank-margin-path-v2",
             Self::RankPathCycleV3 => "rank-path-cycle-v3",
             Self::ComponentBridgeV4 => "component-bridge-v4",
+            Self::MultiScaleComponentBridgeV5 => "multi-scale-component-bridge-v5",
         }
     }
 }
@@ -114,6 +116,10 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
         }
         if line == "# visloc-learned-retrieval-v4" {
             policy = Some(AdmissionPolicy::ComponentBridgeV4);
+            continue;
+        }
+        if line == "# visloc-learned-retrieval-v5" {
+            policy = Some(AdmissionPolicy::MultiScaleComponentBridgeV5);
             continue;
         }
         if let Some(comment) = line.strip_prefix("# ") {
@@ -235,6 +241,29 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
                     (0..8).contains(&query_rank) && (0..8).contains(&candidate_rank) && path;
                 (3, selected, expected)
             }
+            Some(AdmissionPolicy::MultiScaleComponentBridgeV5) if fields.len() == 10 => {
+                let query_rank: isize = fields[4]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} query rank: {error}"))?;
+                let candidate_rank: isize = fields[5].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate rank: {error}")
+                })?;
+                let _: f32 = fields[6].parse().map_err(|error| {
+                    format!("retrieval line {line_number} query ratio diagnostic: {error}")
+                })?;
+                let _: f32 = fields[7].parse().map_err(|error| {
+                    format!("retrieval line {line_number} candidate ratio diagnostic: {error}")
+                })?;
+                let path: bool = fields[8]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} path: {error}"))?;
+                let selected: bool = fields[9]
+                    .parse()
+                    .map_err(|error| format!("retrieval line {line_number} selected: {error}"))?;
+                let expected =
+                    (0..8).contains(&query_rank) && (0..8).contains(&candidate_rank) && path;
+                (3, selected, expected)
+            }
             _ => {
                 return Err(format!(
                     "retrieval line {line_number} is malformed for its schema"
@@ -311,7 +340,10 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
             return Err("strict retrieval exceeds the per-frame addition budget".to_owned());
         }
     }
-    if policy == AdmissionPolicy::ComponentBridgeV4 {
+    if matches!(
+        policy,
+        AdmissionPolicy::ComponentBridgeV4 | AdmissionPolicy::MultiScaleComponentBridgeV5
+    ) {
         for (key, expected) in [
             ("admission_rank", "8"),
             ("sequence_path_radius", "1"),
@@ -336,6 +368,19 @@ fn parse_retrieval(path: &Path) -> Result<Retrieval, String> {
             "component_rank_path_survival",
         ] {
             let _ = required(&metadata, key)?;
+        }
+        if policy == AdmissionPolicy::MultiScaleComponentBridgeV5 {
+            for (key, expected) in [
+                ("sequence_offsets", "-32,-16,-8,0,8,16,32"),
+                ("sequence_direction", "forward-or-reverse"),
+                ("sequence_pre_rerank_k", "128"),
+            ] {
+                if required(&metadata, key)? != expected {
+                    return Err(format!(
+                        "retrieval metadata {key:?} is not frozen at {expected}"
+                    ));
+                }
+            }
         }
         let mut degree = BTreeMap::<usize, usize>::new();
         for row in &selected {
