@@ -2,6 +2,66 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-14 区切りまとめ（次の担当者はまずここを読む）
+
+branch `feat/m9-learned-retrieval`、HEADはこの節を含むcommit（直前`e75aad4`）、push済み、
+worktree clean。実行中のjob/unitなし。M9 sessionのcommitは`7ebc0ff..`以降。
+
+**採用中の10k development設定（C′）**
+1. base: `benchmark_electro.py --run`（tier-10000 pipeline-sparse7n既存snapshot、58879 pair）
+2. `generalized_rig_sfm` base-only（component-frontier flag）→ 未登録runとrank0登録runそれぞれに
+   run start/8 frameごと/run endの同一frame stereo候補（`build_targeted_rig_candidates.py
+   --max-frame-gap 0`）
+3. SIFT ratio0.95 match → `export_verified_matches_import.py` → 凍結ratio0.8 reverify →
+   既存graphにあるpairを除外 → base先頭でmerge
+4. `generalized_rig_sfm`をcomponent-frontier flag + `--direct-stereo-pnp-max-frame-gap 8
+   --direct-stereo-min-pnp-sensors 1`、`--rank0-pair-prefix`なしでmapping
+結果: 4816/5000 frame、4 component、ATE 0.236m、RPE-10s 0.374m（coverage 0.752）、
+repeat byte一致。証跡`m9-openloris-sparse-stereo-10000-v1.json`。
+
+**現時点の比較（corridor1-1 10k、RPE-10s RMSE / coverage、`score_openloris_rpe.py`）**
+COLMAP 0.305m/0.931、C′ 0.374m/0.752、native E2E 0.428m/0.931、D3 0.943m/0.827。
+COLMAP parityは未達。READMEは未更新（更新しないこと）。
+
+**確定した事実**
+- corridor1-1 baseに同一frame cam1↔cam2 pairがほぼないのは、`--rig-frame-manifest`なしの
+  temporal-pyramidがfile名末尾数字で同期判定しcam1偶数/cam2奇数が一致しないため
+  （`unordered_sfm_demo.rs` rig_camera_timestamp）。`--rig-frame-manifest`で解消し、
+  現在は無指定時に警告を出す。
+- per-component Sim(3) ATEは分割が多いほど有利。比較は必ずRPEとcoverageを併記する。
+- `--rank0-pair-prefix`はrank0をbyte不変に保つ道具として保持（採用設定では不使用）。
+
+**棄却・未達**
+- corridor1-5 holdout（未使用sequence）でC′はgate P2/P3 FAIL。corridor1-5はbase時点で
+  scale崩壊がなく、C′はcorridor1-1固有の欠陥への対処にとどまる。一般化claimなし。
+  corridor1-5はholdoutとして使用済み。
+- arm D/D2/D3（rig-frame-manifest base系）は10k gate FAIL。frame 4589-4999の約409 frame
+  componentがD系で常にscale約0.63-0.65（C′では同frameが0.993）。
+- global descriptor retrieval（v1-v5）は5kで棄却済み。
+
+**未解決課題（優先順）**
+1. frame 4589-4999のscale崩れ。GT非依存にDとC′の該当componentのmodel間Sim(3)と
+   stereo pair差分を比較し、低特徴区間の密stereo pairの誤対応を疑う。新armはその後。
+2. COLMAPとのcoverage差（約18pt）と10s RPE差。component数4→2の統合。
+3. 5kの未登録16 frame（特徴点不足、1920-1979付近）。
+4. 採用変更は未使用holdout corridor1-2（3479 frame/camera、`corridor1-2_5-package.tar`内、
+   calibration一致確認済み）で事前登録gateを通してから。corridor1-1 10kでのarm反復は
+   過学習リスクが高い。
+
+**新規tool**: `scripts/export_verified_matches_import.py`、`scripts/score_openloris_rpe.py`、
+`stage_openloris_corridor.py`の他sequence対応（tar内7z range読み）、
+`build_openloris_rig_manifest.py --timestamp-tolerance-seconds`。
+
+**主要root**（`$R=/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1`）:
+`$R/openloris-tier10000-all-stereo8-v1{,-repeat}`（C′）、`$R/openloris-tier10000-rigframe-*`
+（D系）、`/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1`（holdout）。
+全て上書き・削除禁止、新実験はfresh root。GTはmapping後のscorerのみ。
+
+**証跡一覧**（`benchmarks/electro/`）: `m9-openloris-sparse-stereo-rank0-prefix-5000-v1`、
+`m9-openloris-sparse-stereo-gap46-5000-v1`、`m9-openloris-sparse-stereo-10000-v1`、
+`m9-openloris-corridor1-5-holdout-v1`、`m9-openloris-rig-frame-manifest-base-v1`、
+`m9-openloris-rpe-rescore-v1`、`m9-openloris-rigframe-d2-d3-10000-v1`（各`.json`）。
+
 ### 2026-09-14 arm D2/D3（Dの交絡2件を検証）: 両方gate FAIL、C′維持
 
 lead review交絡: (1) Dは同一budgetでstereo約4600 pairが長offset pairを押し出した
