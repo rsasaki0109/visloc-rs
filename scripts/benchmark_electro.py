@@ -2319,6 +2319,15 @@ def main(argv: list[str] | None = None) -> int:
             args.rig_frame_manifest = args.rig_frame_manifest.expanduser().resolve()
             if not args.rig_frame_manifest.is_file():
                 raise ValidationError(f"rig frame manifest is missing: {args.rig_frame_manifest}")
+        elif args.pair_source == "temporal-pyramid" and mode in {"prepare", "run"}:
+            # Without a manifest, cross-camera edges require identical numeric
+            # filename suffixes; rigs named cam1_000000/cam2_000001 get none, and
+            # --rig-local-grouping does not change that for temporal-pyramid.
+            print(
+                "warning: --pair-source temporal-pyramid without --rig-frame-manifest groups "
+                "cross-camera frames by identical filename timestamps only",
+                file=sys.stderr,
+            )
         if args.retrieval_component_manifest is not None:
             if args.pair_source != "temporal-pyramid":
                 raise ValidationError(
