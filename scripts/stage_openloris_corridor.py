@@ -653,10 +653,12 @@ def write_tier_views(
     root: Path,
     intrinsics: dict[int, tuple[float, ...]],
     records: list[dict],
-    tier_counts: tuple[int, ...] = TIER_COUNTS,
+    tier_counts: tuple[int, ...] | None = None,
 ) -> dict[str, dict[str, str | int]]:
     """Create deterministic prefix views without duplicating staged images."""
 
+    if tier_counts is None:
+        tier_counts = TIER_COUNTS
     tiers = {}
     for count in tier_counts:
         if count > len(records):
