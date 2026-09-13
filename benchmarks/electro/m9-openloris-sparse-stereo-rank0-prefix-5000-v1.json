@@ -1,0 +1,399 @@
+{
+  "schema": "visloc_m9_sparse_stereo_rank0_prefix_5000_v1",
+  "recorded_at": "2026-09-13T19:30:00+09:00",
+  "status": "rank0_pair_prefix_deterministic_and_rank0_sha_invariant_registration_diagnostic",
+  "claim_scope": "5000-image (2500-frame) OpenLORIS corridor1-1 tier, GT-free candidate generation/matching/admission; ground truth used only for the post-map score in stage f",
+  "background": "The frozen 5k base reconstruction (31521 verified SIFT pairs) leaves 567 unregistered frames (frame 1931, and 1934..2499 contiguous) because base pair coverage supplies no synchronized cross-sensor stereo edge into that tail (pair-graph audit: only 1 same-frame cross-sensor pair / 77 correspondences in all 31521 base pairs; 0 inside the tail's own 5376 pairs). This experiment adds a small GT-free stride-8 synchronized-stereo probe across that tail, re-verifies it under the frozen ratio-0.8 policy, merges it after the base prefix, and maps with a new --rank0-pair-prefix guard so the added edges cannot perturb the already-registered rank-0 component.",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "tier": "tier-5000",
+    "images": 5000,
+    "rig_frames": 2500,
+    "rig_manifest": "openloris-tier5000-rig-manifest-v1.txt",
+    "rig_manifest_sha256": "bffe3e7524cd27e0a60c146d793d81112392787daecb003834444dd35de09437",
+    "rig_manifest_bytes": 123302,
+    "base_verified_pairs": 31521,
+    "base_accepted_correspondences": 2106827,
+    "base_snapshot_path": "corridor1-1-m5/tiers/tier-5000/pipeline-sparse7n/mapping/verified-merged.vps",
+    "base_snapshot_bytes": 147304288,
+    "base_snapshot_sha256": "fa6b0ab44d06128cbd705876339887ec2a247fc8786b182517f7042cc211c912",
+    "base_registered_frames": 1933,
+    "base_unregistered_frames": 567,
+    "base_unregistered_frame_set": "frame 1931 (1 frame) plus contiguous 1934..2499 (566 frames)",
+    "ground_truth_used_for_candidate_generation_matching_or_admission": false
+  },
+  "stage_a_candidate_generation": {
+    "tool": "scripts/build_targeted_rig_candidates.py",
+    "tool_sha256": "ebe834cf47adc4288f72c08cf19675ce59c484f5d7a221e201c0418417669b98",
+    "pair_source": "targeted-dense-window-v1",
+    "max_frame_gap": 0,
+    "target_frame_rule": "frame 1931, then stride-8 lattice 1934,1942,...,2494 (71 values), then explicit endpoint 2499",
+    "target_frame_count": 73,
+    "target_frames_equal_stride8_subsample_of_base_unregistered_frames": true,
+    "pairs_generated": 73,
+    "pair_rule": "one synchronized cam1<->cam2 pair per target frame (max_frame_gap=0), no cross-frame or cross-target pairs",
+    "candidates_path": "openloris-tier5000-sparse-stereo8-v1-source/candidates.txt",
+    "candidates_bytes": 135494,
+    "candidates_sha256": "e51d66e8d815b217934c63445446e5236b82fe179ac63f110e5edef18f6f2a2e",
+    "reproduction": {
+      "performed": true,
+      "method": "re-ran scripts/build_targeted_rig_candidates.py against the same rig manifest and the target_frames/max_frame_gap embedded in candidates.txt's own metadata lines",
+      "result_sha256": "e51d66e8d815b217934c63445446e5236b82fe179ac63f110e5edef18f6f2a2e",
+      "byte_identical": true
+    },
+    "original_invocation_logged": false,
+    "gap": "no shell history or wrapper log records the literal historical command; byte-identical independent reproduction plus the candidate_source_sha256 recorded in the downstream match-worker.plan are the evidence trail instead"
+  },
+  "stage_b_sift_ratio95_match": {
+    "binary": "target/release/examples/unordered_sfm_demo",
+    "wrapper": "scripts/benchmark_electro.py --match --persistent-matcher --stream-match-features --shared-snapshot-envelope (wrapper flag spelling inferred from argparse; underlying binary settings below are read directly from the logged effective-config)",
+    "match_ratio": 0.95,
+    "matcher": "nn (SIFT NN + Lowe ratio)",
+    "min_matches": 12,
+    "min_pnp_inliers": 12,
+    "verification_mode": "full",
+    "features_dir": "corridor1-1-m5/tiers/tier-5000/features256",
+    "candidate_pairs": 73,
+    "shards": 3,
+    "shard_pair_counts": [
+      32,
+      32,
+      9
+    ],
+    "shard_accepted_pairs": [
+      28,
+      32,
+      9
+    ],
+    "shard_accepted_correspondences": [
+      1450,
+      2057,
+      1111
+    ],
+    "accepted_pairs": 69,
+    "accepted_correspondences": 4618,
+    "matching_elapsed_sum_s": 0.430232704,
+    "worker_wall_s": 43.800904903095216,
+    "peak_rss_kib": 73580,
+    "match_worker_plan_sha256": "3fc19377ade68a9812d4cc936dea0fffe32c82bf67b62186c325b08cdc4dc9c5",
+    "match_worker_plan_bytes": 134700,
+    "summary_json_sha256": "3ffd050c3d2e3e64ddcb3eed9df3dd9464fa6f05445bb40979d4accd97e2d695",
+    "summary_json_bytes": 129912,
+    "merged_snapshot_path": "openloris-tier5000-sparse-stereo8-sift-ratio95-v1/mapping/verified-merged.vps",
+    "merged_snapshot_bytes": 482912,
+    "merged_snapshot_sha256": "396b5d8343f6c98c137a6ef356e7a4f1e5260323e569525fecaf8c2d6454ce31",
+    "ground_truth_used_for_selection_or_mapping": false,
+    "original_invocation_logged": false,
+    "gap": "no wrapper log records sys.argv for the top-level benchmark_electro.py call; the Rust binary's own effective-config Args dump pins every setting that matters"
+  },
+  "stage_c_frozen_ratio08_reverify": {
+    "binary": "target/release/examples/unordered_sfm_demo",
+    "command": "target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir corridor1-1-m5/tiers/tier-5000/features256 --feature-suffix _features.txt --image-suffix .png --input-colmap-calibration corridor1-1-m5/tiers/tier-5000/calibration --verification-mode full --matcher nn --min-matches 12 --match-ratio 0.8 --candidate-manifest openloris-tier5000-sparse-stereo8-v1-source/candidates.txt --import-matches-file openloris-tier5000-sparse-stereo8-sift-reverify-v1/matches-import.txt --export-verified-pairs-snapshot openloris-tier5000-sparse-stereo8-sift-reverify-v1/verified.vps --export-verified-pairs-only --out-colmap openloris-tier5000-sparse-stereo8-sift-reverify-v1/unused-model",
+    "command_source": "verified verbatim from verify.time.txt (Command being timed)",
+    "match_ratio": 0.8,
+    "candidate_pairs": 73,
+    "accepted_pairs": 69,
+    "accepted_correspondences": 4567,
+    "colmap_style_classification": {
+      "calibrated": 17,
+      "uncalibrated": 3,
+      "planar": 49,
+      "panoramic": 0,
+      "planar_or_panoramic": 0,
+      "watermark": 0,
+      "degenerate": 0,
+      "multiple": 0
+    },
+    "user_s": 15.56,
+    "system_s": 1.05,
+    "wall_s": 16.04,
+    "peak_rss_kib": 530000,
+    "verified_snapshot_path": "openloris-tier5000-sparse-stereo8-sift-reverify-v1/verified.vps",
+    "verified_snapshot_bytes": 474288,
+    "verified_snapshot_sha256": "1afa70f11d2fb1ea451eef5b3b90cb8f02fb0b0a17adccbd3d61e1b0ea4c5eb7",
+    "pairs_tsv_sha256": "295b03bf3998a09e41c220446bd33368d67f008e6990f221239850b9007e0332",
+    "images_tsv_sha256": "3a2c92104be6a97bd323032b57748598892fbda35c0b1740caa0c67c768d4d6a",
+    "matches_import_sha256": "c695f7ad244ecb7b3b7eca60566bd279055abff48f5ab1eadf2a2c9327cd639b",
+    "verify_log_sha256": "27455e95d5a8070f47453f62ce41b31700f865a18f901af00728dfaaa85a6d88",
+    "original_invocation_logged": true
+  },
+  "stage_d_merge": {
+    "tool": "target/release/examples/merge_verified_pair_snapshots",
+    "order_contract": "base snapshot first (31521-pair prefix, unmodified byte order), addition snapshot second (69-pair suffix) -- verified by reproduction below",
+    "inputs": [
+      {
+        "role": "base",
+        "path": "corridor1-1-m5/tiers/tier-5000/pipeline-sparse7n/mapping/verified-merged.vps",
+        "pairs": 31521,
+        "bytes": 147304288,
+        "sha256": "fa6b0ab44d06128cbd705876339887ec2a247fc8786b182517f7042cc211c912"
+      },
+      {
+        "role": "addition",
+        "path": "openloris-tier5000-sparse-stereo8-sift-reverify-v1/verified.vps",
+        "pairs": 69,
+        "bytes": 474288,
+        "sha256": "1afa70f11d2fb1ea451eef5b3b90cb8f02fb0b0a17adccbd3d61e1b0ea4c5eb7"
+      }
+    ],
+    "output_path": "openloris-tier5000-sparse-stereo8-sift-reverify-v1/base-plus-stereo.vps",
+    "output_pairs": 31590,
+    "output_bytes": 147622640,
+    "output_sha256": "e6941f3245eae863ce33168d364125e8765bfe66e3d3a45179f7d37898569e3f",
+    "reproduction": {
+      "performed": true,
+      "command": "target/release/examples/merge_verified_pair_snapshots --output OUT.vps --snapshot <base> --snapshot <addition>",
+      "result_sha256": "e6941f3245eae863ce33168d364125e8765bfe66e3d3a45179f7d37898569e3f",
+      "byte_identical": true
+    },
+    "original_invocation_logged": false,
+    "gap": "no wrapper log records the literal historical merge command; the byte-identical reproduction above stands in as proof of tool identity and order"
+  },
+  "stage_e_mapper": {
+    "binary": "target/release/examples/generalized_rig_sfm",
+    "new_flag": "--rank0-pair-prefix COUNT (default-off, uncommitted; requires --max-models >= 2; gives rank 0 only the first COUNT verified pairs of the snapshot, defers the rest to later ranks)",
+    "command": "timeout --signal=TERM --kill-after=10s 300s target/release/examples/generalized_rig_sfm --manifest openloris-tier5000-rig-manifest-v1.txt --features-dir corridor1-1-m5/tiers/tier-5000/features256 --snapshot openloris-tier5000-sparse-stereo8-sift-reverify-v1/base-plus-stereo.vps --out-colmap openloris-tier5000-rank0-frozen-sparse-stereo8-v1/model --max-models 16 --min-model-frames 10 --rank0-pair-prefix 31521 --min-pnp-inliers 8 --min-pnp-sensors 2 --direct-stereo-pnp-max-frame-gap 8 --direct-stereo-min-pnp-sensors 1 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+    "command_source": "verified verbatim from time.txt (Command being timed); handover-doc snippet has a path typo dropping the tiers/ segment in --features-dir, corrected here",
+    "rank0": {
+      "pair_prefix": 31521,
+      "registered_frames": 1933,
+      "registered_images": 3866,
+      "tracks": 21708,
+      "observations": 275789,
+      "mean_reprojection_px": 0.928522158
+    },
+    "rank1": {
+      "pairs": 5447,
+      "registered_frames": 521,
+      "registered_images": 1042,
+      "tracks": 4926,
+      "observations": 64300,
+      "mean_reprojection_px": 0.813195297
+    },
+    "total": {
+      "models": 2,
+      "registered_frames": "2454/2500",
+      "registered_images": "4908/5000",
+      "tracks": 26634,
+      "observations": 340089,
+      "mean_reprojection_px": 0.906717521,
+      "mapper_seconds": 148.975689,
+      "peak_rss_kib": 476612
+    },
+    "wall_clock_time_txt": {
+      "user_s": 149.48,
+      "system_s": 0.57,
+      "wall_s": 150.32,
+      "max_rss_kib": 476612,
+      "exit_status": 0
+    },
+    "rank0_sha_invariance": {
+      "compared_against": "openloris-tier5000-component-frontier-v1/model/component-000 (base-only reconstruction)",
+      "cameras_txt_sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt_sha256": "a01924f24582d330412f7210cfe34941f60255da2d743582b7741c05252ea105",
+      "points3d_txt_sha256": "27aeffd0a7c8f91bc9e0771bc1728875e5a40f24c89439083135c6e12afca0b1",
+      "byte_identical": true
+    },
+    "rank1_component_001_sha256": {
+      "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "images_txt": "4fd03b5e50900f57a2e03ef0fdcb288ca2b9a11a733844f864066ae3b2af22c6",
+      "points3d_txt": "e80f348cd9fce462788ef5a35399b54e22813b7b726ec4303b97e5cc9cd801e6"
+    },
+    "run_log_sha256": "875353e1ba79148d33d4a43d246769c8b965598f4f3685cad30e87a39bca94da",
+    "time_txt_sha256": "958dcefefd8cd234a3f4ff6419df2caca69ac9779f5fc0d2ec5718cf05647ff6",
+    "original_invocation_logged": true,
+    "repeat": {
+      "status": "verified: repeat mapper run confirms rank0-pair-prefix determinism",
+      "output_root": "openloris-tier5000-rank0-frozen-sparse-stereo8-v1-repeat",
+      "command_identical_to_first_run": true,
+      "rank0": {
+        "registered_frames": 1933,
+        "registered_images": 3866,
+        "tracks": 21708,
+        "observations": 275789,
+        "mean_reprojection_px": 0.928522158
+      },
+      "rank1": {
+        "registered_frames": 521,
+        "registered_images": 1042,
+        "tracks": 4926,
+        "observations": 64300,
+        "mean_reprojection_px": 0.813195297,
+        "unregistered_below_sensors": 46
+      },
+      "total": {
+        "models": 2,
+        "registered_frames": "2454/2500",
+        "registered_images": "4908/5000",
+        "tracks": 26634,
+        "observations": 340089,
+        "mean_reprojection_px": 0.906717521,
+        "mapper_seconds": 140.986997,
+        "peak_rss_kib": 476956
+      },
+      "wall_clock_time_txt": {
+        "user_s": 141.03,
+        "system_s": 0.54,
+        "wall_s": 141.93,
+        "max_rss_kib": 476956,
+        "exit_status": 0
+      },
+      "vs_first_run": {
+        "metrics_identical": true,
+        "mapper_seconds_differs": true,
+        "mapper_seconds_first_run": 148.975689,
+        "mapper_seconds_repeat": 140.986997,
+        "peak_rss_kib_first_run": 476612,
+        "peak_rss_kib_repeat": 476956,
+        "interpretation": "run-to-run wall-clock/allocator noise only, not a determinism break"
+      },
+      "model_file_sha256": {
+        "component-000/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "component-000/images.txt": "a01924f24582d330412f7210cfe34941f60255da2d743582b7741c05252ea105",
+        "component-000/points3D.txt": "27aeffd0a7c8f91bc9e0771bc1728875e5a40f24c89439083135c6e12afca0b1",
+        "component-001/cameras.txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "component-001/images.txt": "4fd03b5e50900f57a2e03ef0fdcb288ca2b9a11a733844f864066ae3b2af22c6",
+        "component-001/points3D.txt": "e80f348cd9fce462788ef5a35399b54e22813b7b726ec4303b97e5cc9cd801e6",
+        "components.tsv": "b10e3d0fcf5eea9e1494138f1c704347536203c955b5f76f71222ead85ef6714",
+        "retrieval-components.txt": "0883015012878d8442396de968f7c33f1ed1c4ea4a34ce1e346d323e344a5b87"
+      },
+      "model_file_sha256_matches_first_run": {
+        "component-000/cameras.txt": true,
+        "component-000/images.txt": true,
+        "component-000/points3D.txt": true,
+        "component-001/cameras.txt": true,
+        "component-001/images.txt": true,
+        "component-001/points3D.txt": true,
+        "components.tsv": true,
+        "retrieval-components.txt": true
+      },
+      "all_8_model_files_byte_identical_to_first_run": true,
+      "per_component_registered_frames_images_tracks_observations_reprojection_identical_to_first_run": true,
+      "run_log_sha256": "0148c41ea4ccf3beabe01908c8e287f025670b5262929094bd28cd16f443cb5d",
+      "run_log_bytes": 4507,
+      "time_txt_sha256": "bb47de9cb079680a767469dba5c6806cb3c5826e68aecfe5acc510b4d6ab2da7",
+      "time_txt_bytes": 1835,
+      "note": "strongest available confirmation that --rank0-pair-prefix is deterministic given fixed inputs: all 8 model files (component-000 and component-001 cameras/images/points3D.txt, components.tsv, retrieval-components.txt) are byte-identical (sha256 match) between the first run and this repeat; only mapper_seconds and peak RSS differ, consistent with ordinary run-to-run timing/allocator noise."
+    }
+  },
+  "stage_f_post_map_score": {
+    "scorer": "scripts/score_openloris_model.py",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "scorer_sha256_matches_repo_copy": true,
+    "invocation": "python3 scripts/score_openloris_model.py --model-images .../model/component-000/images.txt --model-images .../model/component-001/images.txt --manifest corridor1-1-m5/manifests/tier-5000.json --ground-truth official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix official-groundtruth/calibration/corridor1-1/trans_matrix.yaml --output-json .../score.json",
+    "invocation_logged": false,
+    "invocation_gap": "the literal historical invocation was not found recorded verbatim anywhere on disk (no score.log/wrapper script); however the inferred invocation below was independently re-executed in this session and reproduces score.json byte-for-byte",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "components": [
+      {
+        "rank": 0,
+        "registered": 3866,
+        "gt_scored": 3174,
+        "rmse_m": 3.3246993680217845,
+        "p95_m": 6.858238407548922,
+        "median_m": 1.6231660824083973,
+        "max_m": 15.752378891253278,
+        "sim3_scale": 0.38109273583353215
+      },
+      {
+        "rank": 1,
+        "registered": 1042,
+        "gt_scored": 1042,
+        "rmse_m": 0.17009968259197233,
+        "p95_m": 0.29030992166938446,
+        "median_m": 0.130587218545208,
+        "max_m": 0.38677919303195535,
+        "sim3_scale": 0.9169116259001565
+      }
+    ],
+    "aggregate": {
+      "gt_scored_images": 4216,
+      "component_weighted_rmse_m": 2.8859716682609267,
+      "component_weighted_p95_m": 6.311102329853266,
+      "component_weighted_median_m": 0.8627096349842039,
+      "component_weighted_max_m": 15.752378891253278
+    },
+    "score_json_sha256": "ec62abcb794d6bb4de8fadfe17c0af239b31f6fd11d70c665d6622bb4abb8919",
+    "score_json_bytes": 11933,
+    "comparison_warning": "do not directly compare against the earlier recorded rank-0 RMSE 2.02107m without matching scorer/aggregation conditions (per handover doc); rank-0 invariance is established by model SHA identity, not by score comparison",
+    "reproduction": {
+      "performed": true,
+      "rerun_output_path_scratch": "score-rerun.json",
+      "rerun_command": "python3 scripts/score_openloris_model.py --model-images .../model/component-000/images.txt --model-images .../model/component-001/images.txt --manifest corridor1-1-m5/manifests/tier-5000.json --ground-truth official-groundtruth/calibration/corridor1-1/groundtruth.txt --transform-matrix official-groundtruth/calibration/corridor1-1/trans_matrix.yaml --output-json .../score.json",
+      "rerun_result_sha256": "ec62abcb794d6bb4de8fadfe17c0af239b31f6fd11d70c665d6622bb4abb8919",
+      "byte_identical_to_recorded_score_json": true,
+      "note": "the exact same invocation, re-executed against the original run's frozen model/images.txt files, produces a score.json byte-identical (sha256 match) to the artifact recorded on disk -- this closes the stage_f invocation gap with proof rather than inference alone; only the literal historical command line itself remains unlogged."
+    },
+    "repeat_model_score": {
+      "performed": true,
+      "output_path_scratch": "score-repeat.json",
+      "result_sha256": "76342329dac88cd34042c7e202f6aa877ce04d201e00b5ce9f4dfd7fa51449af",
+      "sha256_differs_from_original_reason": "images_txt path field points at the -repeat model directory; every non-path-valued field (all rmse/p95/median/max/sim3_scale/segment metrics, gt_scored_images, aggregate stats) is identical to the original run's score.json",
+      "numerically_identical_to_original_excluding_path_fields": true
+    }
+  },
+  "auxiliary_replays": {
+    "tail_only_replay": {
+      "purpose": "single-model mapper replay windowed to only the 1934..2499 unregistered tail, using base-plus-stereo.vps as input, to check whether the tail is metrically self-sufficient without rank0",
+      "output_root": "openloris-tier5000-sparse-stereo8-sift-direct8-tail-map-v1",
+      "command_flags_vs_stage_e": "same mapper binary/base snapshot; uses --frame-range-start 1934 --frame-range-count 566 instead of --max-models/--rank0-pair-prefix",
+      "registered_frames": "519/566",
+      "registered_images": "1038/1132",
+      "tracks": 5045,
+      "observations": 67787,
+      "mean_reprojection_px": 0.82521482,
+      "mapper_seconds": 21.919924,
+      "peak_rss_kib": 99732,
+      "run_log_sha256": "5a9f6da56fbde6cec6543a4e1c6f4154fc282b0dd0a1fda9cce276ba03a83024",
+      "time_txt_sha256": "e3408df257087627a0f39c6aebe238ffef5ecc971f2cd76b4d90d5a0b54ed36f"
+    },
+    "rejected_naive_multimodel_replay": {
+      "purpose": "same multi-model mapper command as stage e but WITHOUT --rank0-pair-prefix, to show why the prefix guard is needed",
+      "output_root": "openloris-tier5000-sparse-stereo8-multimodel-v1",
+      "rank0_registered_frames": 1937,
+      "rank0_registered_images": 3874,
+      "rank0_tracks": 21722,
+      "rank0_observations": 275817,
+      "rank0_mean_reprojection_px": 0.927666029,
+      "rank1_registered_frames": 521,
+      "rank1_registered_images": 1042,
+      "total_registered_frames": "2458/2500",
+      "total_registered_images": "4916/5000",
+      "total_tracks": 26646,
+      "total_observations": 339769,
+      "mapper_seconds": 101.982555,
+      "peak_rss_kib": 477348,
+      "score_rank0_rmse_m": 3.402205417582653,
+      "score_rank0_p95_m": 7.066239446421591,
+      "score_aggregate_rmse_m": 2.954156975953751,
+      "score_aggregate_p95_m": 6.528133571294581,
+      "score_gt_scored_images": 4224,
+      "rejection_reason": "registers more frames (2458 vs 2454) but distorts the primary/rank-0 component (1937 vs 1933 frames, RMSE 3.4022m vs 3.3247m) because unguarded extra edges perturb already-good component-internal tracks; --rank0-pair-prefix avoids this",
+      "run_log_sha256": "4b691e6f82b67f77f56c563da084c66773ce11b70d81c80d8510618b5b495659",
+      "time_txt_sha256": "17c6cfe70f48baa3b9c055ec285b52ee195f4af6e09f9128f925c5352e98dd8c",
+      "score_json_sha256": "ce09c2571c46602b78c9d3aa8357cf7f5dc3078955c11d81c37d51d804caa04a"
+    }
+  },
+  "implementation": {
+    "default_behavior_changed": false,
+    "new_cli_flag": "--rank0-pair-prefix (examples/generalized_rig_sfm.rs, uncommitted at time of this report)",
+    "targeted_unit_test": "rank0_pair_prefix_defers_only_the_suffix_to_remaining_models",
+    "targeted_test_and_clippy_status_at_time_of_prior_session": "reported PASS in docs/codex_handover.md; not re-run in this read-only report task"
+  },
+  "gaps": [
+    "stage_a: literal historical build_targeted_rig_candidates.py invocation not logged in shell history or any wrapper log; closed by an independent byte-identical reproduction of candidates.txt (this is a registration diagnostic reproducibility claim, not a claim that the exact original command line was recovered)",
+    "stage_b: literal top-level benchmark_electro.py wrapper command not logged verbatim; closed via the underlying binary's own effective-config Args dump, which pins every setting that matters (ratio, min_matches, min_pnp_inliers, persistent-matcher/stream/shared-envelope booleans) even though the wrapper's exact flag spelling is inferred from argparse",
+    "stage_d: literal historical merge_verified_pair_snapshots invocation not logged verbatim; closed by an independent byte-identical reproduction of base-plus-stereo.vps",
+    "stage_f: literal historical score_openloris_model.py invocation not logged verbatim; the inferred invocation (from argparse signature and score.json's own recorded input paths) was independently re-executed in this session and reproduces score.json byte-for-byte (sha256 match), and reproduces numerically identical results (excluding path fields) against the repeat model -- so the scorer result is now confirmed reproducible, not merely inferred, though the exact historical command text itself remains unrecovered",
+    "shell history (~/.bash_history, 2000 lines; ~/.zsh_history absent) contains no trace of any command from this pipeline -- true for all stages, not fixable from this machine",
+    "handover doc's mapper command snippet had a path typo (dropped the tiers/ segment in --features-dir); corrected in this file's stage_e.command and in docs/codex_handover.md",
+    "remaining: this experiment is a registration diagnostic with post-hoc GT scoring, not a COLMAP-parity or performance benchmark, and 5k is a development tier, not a held-out claim; the 46 frames still unregistered under rank 1 (unregistered_below_sensors=46, confirmed identically in both the first run and the repeat) have not yet been diagnosed or addressed"
+  ],
+  "decision": {
+    "rank0_prefix_guard": "adopted as the mapper policy for admitting GT-free stereo bridges without perturbing the frozen primary component",
+    "summary": "--rank0-pair-prefix is deterministic (repeat mapper run byte-identical across all 8 model files) and rank-0 is byte-invariant to the added stereo edges (component-000 cameras/images/points3D.txt sha256 match the base-only reconstruction exactly). This is a registration diagnostic with post-hoc GT scoring, not a COLMAP-parity or performance claim, and the 5000-image tier is development scale, not a held-out result. Global-descriptor retrieval v5 is rejected at 5k (per prior sessions' safety-audit findings; not revisited in this report).",
+    "not_claimed": "COLMAP parity, wall-clock/performance superiority, or held-out generalization beyond the 5k development tier",
+    "next": "diagnose the remaining 46 unregistered frames (rank1's unregistered_below_sensors=46, identical in both the original and repeat mapper runs) under the existing gates: rank0 SHA non-regression, rank1 RMSE/p95 non-regression, bounded pairs/RSS, and no GT tuning (ground truth stays post-hoc-scoring-only, never used to select candidates, matches, or admission thresholds)"
+  }
+}

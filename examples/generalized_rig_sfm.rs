@@ -50,6 +50,7 @@ struct Args {
     out_colmap: PathBuf,
     max_models: usize,
     min_model_frames: usize,
+    rank0_pair_prefix: Option<usize>,
     frame_range_start: Option<usize>,
     frame_range_count: Option<usize>,
     min_pnp_inliers: usize,
@@ -163,6 +164,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out_colmap = None;
     let mut max_models = 1usize;
     let mut min_model_frames = 10usize;
+    let mut rank0_pair_prefix = None;
     let mut frame_range_start = None;
     let mut frame_range_count = None;
     let mut min_pnp_inliers = 8usize;
@@ -295,6 +297,9 @@ fn parse_args() -> Result<Args, String> {
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
             "--min-model-frames" => {
                 min_model_frames = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--rank0-pair-prefix" => {
+                rank0_pair_prefix = Some(value()?.parse().map_err(|error| format!("{error}"))?)
             }
             "--frame-range-start" => {
                 frame_range_start = Some(value()?.parse().map_err(|error| format!("{error}"))?)
@@ -588,6 +593,7 @@ fn parse_args() -> Result<Args, String> {
                     "--deferred-overlay-max-matches-per-pair COUNT] ",
                     "--snapshot FILE [--out-colmap DIR] [--feature-suffix _features.txt] ",
                     "[--max-models 1] [--min-model-frames 10] ",
+                    "[--rank0-pair-prefix COUNT] ",
                     "[--frame-range-start N --frame-range-count N] ",
                     "[--min-pnp-inliers 8] [--min-pnp-sensors 2] ",
                     "[--direct-stereo-pnp-max-frame-gap 0] ",
@@ -826,6 +832,9 @@ fn parse_args() -> Result<Args, String> {
     if seed_frame.is_some() && max_models != 1 {
         return Err("--seed-frame requires --max-models 1".into());
     }
+    if rank0_pair_prefix.is_some() && max_models < 2 {
+        return Err("--rank0-pair-prefix requires --max-models at least 2".into());
+    }
     if seed_frame.is_some() && frame_range_start.is_some() {
         return Err("--seed-frame cannot be combined with a frame range".into());
     }
@@ -859,6 +868,7 @@ fn parse_args() -> Result<Args, String> {
         out_colmap: out_colmap.ok_or("--out-colmap is required")?,
         max_models,
         min_model_frames,
+        rank0_pair_prefix,
         frame_range_start,
         frame_range_count,
         min_pnp_inliers,
@@ -1895,6 +1905,24 @@ fn export_rig_model(
     Ok((export.landmark_count, export.observation_count))
 }
 
+fn model_rank_pair_prefix(
+    pair_count: usize,
+    rank: usize,
+    rank0_pair_prefix: Option<usize>,
+) -> Result<usize, String> {
+    let prefix = if rank == 0 {
+        rank0_pair_prefix.unwrap_or(pair_count)
+    } else {
+        pair_count
+    };
+    if prefix > pair_count {
+        return Err(format!(
+            "--rank0-pair-prefix {prefix} exceeds {pair_count} verified pairs"
+        ));
+    }
+    Ok(prefix)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn map_remaining_models(
     args: &Args,
@@ -1918,11 +1946,12 @@ fn map_remaining_models(
     let mut retrieval_components = String::from("# retrieval-component-manifest-v1\n");
     let mut emitted_models = 0usize;
     for rank in 0..args.max_models {
+        let pair_prefix = model_rank_pair_prefix(pairs.len(), rank, args.rank0_pair_prefix)?;
         let input = remaining_model_input(
             frames,
             features,
-            pairs,
-            snapshot_pairs,
+            &pairs[..pair_prefix],
+            &snapshot_pairs[..pair_prefix],
             &remaining_frames,
             args.deferred_registration_pair_prefix,
             args.deferred_retriangulation_pair_prefix,
@@ -1933,6 +1962,13 @@ fn map_remaining_models(
         let supplied_frames = input.frames.len();
         let supplied_images = input.features.len();
         let verified_pairs = input.pairs.len();
+        if rank == 0 && pair_prefix != pairs.len() {
+            eprintln!(
+                "rig-component pair stream: rank=0 prefix={pair_prefix} total_pairs={} deferred_to_remaining={}",
+                pairs.len(),
+                pairs.len() - pair_prefix,
+            );
+        }
         let mut config = mapper_config(args);
         if args.deferred_registration_pair_prefix.is_some() {
             config.deferred_registration_pair_prefix = Some(input.base_pair_count);
@@ -4426,6 +4462,18 @@ mod tests {
         assert_eq!(input.snapshot_pairs[0].image_j, 1);
         assert_eq!(input.base_pair_count, 1);
         assert_eq!(input.registration_pair_count, 2);
+    }
+
+    #[test]
+    fn rank0_pair_prefix_defers_only_the_suffix_to_remaining_models() {
+        assert_eq!(model_rank_pair_prefix(12, 0, None).unwrap(), 12);
+        assert_eq!(model_rank_pair_prefix(12, 0, Some(9)).unwrap(), 9);
+        assert_eq!(model_rank_pair_prefix(12, 1, Some(9)).unwrap(), 12);
+        assert_eq!(model_rank_pair_prefix(12, 7, Some(9)).unwrap(), 12);
+        assert_eq!(
+            model_rank_pair_prefix(12, 0, Some(13)).unwrap_err(),
+            "--rank0-pair-prefix 13 exceeds 12 verified pairs"
+        );
     }
 
     #[test]

@@ -1,6 +1,151 @@
-# visloc-rs COLMAP parity — Codex 引き継ぎ資料
+# visloc-rs COLMAP parity — Codex → Claude 引き継ぎ資料
 
 ## 現在の状態（以下の過去ログより優先）
+
+### 2026-09-13 Claude向け最新チェックポイント
+
+作業branchは`feat/m9-learned-retrieval`。Codex引き継ぎ時点のHEADは`c3012b8`
+（`feat: bound retrieval to reconstruction components`）で、当時未commitだった下記4ファイルは
+Claudeが次の手順4でcommit/push済み。
+
+- `examples/generalized_rig_sfm.rs`: 新しいdefault-off CLI
+  `--rank0-pair-prefix COUNT`。rank 0だけverified pair streamのprefixを使い、rank 1以降は
+  全pairを使う。`--max-models >= 2`必須。追加unit testとrelease clippyはPASS。
+- `examples/learned_retrieval_candidates.rs`
+- `examples/materialize_learned_rig_candidates.rs`
+- `examples/admit_learned_rig_rotation_cycles.rs`
+
+追試（他agentによる独立再現）で以下を確認済み。詳細は
+`benchmarks/electro/m9-openloris-sparse-stereo-rank0-prefix-5000-v1.json`。
+- repeat決定論性: PASS。fresh `-repeat` rootで同一commandを再実行し、
+  component-000/component-001の`cameras.txt`/`images.txt`/`points3D.txt`、
+  `components.tsv`、`retrieval-components.txt`の計8 fileが全てSHA-256完全一致。
+  registered frame/image/track/observation/reprojectionもcomponent単位で完全一致。
+  差分は`mapper_seconds`（148.976s→140.987s）と`peak RSS`（476612→476956KiB）のみで、
+  誤差範囲内。
+- scorer再実行: `scripts/score_openloris_model.py`を推定invocationで再実行し、
+  元runの`score.json`とSHA-256完全一致（byte-identical）。repeat modelへも同invocationを
+  実行し、path欄以外の数値（RMSE/p95/median/max/sim3_scale/aggregate）は全て一致。
+- candidate生成器: `scripts/build_targeted_rig_candidates.py`を同じrig manifestと
+  exact flag（`--target-frames ... --max-frame-gap 0`）で再実行し、`candidates.txt`と
+  byte-identical。
+- merge: `merge_verified_pair_snapshots`をbase→additionの順で再実行し、
+  `base-plus-stereo.vps`とbyte-identical。
+
+後ろ3ファイルはcomponent-aware multi-scale sequence rerank v5の未commit実験。v5はANN
+18.08s、RSS18532KiB、30 rig pairまで絞ったが、post-hoc GTでは30/30が誤対応、5m以内0、
+最短7.199mだった。5kの登録済み対未登録GT機会自体もgap>=64で0.5m/1m以内0、2m以内
+577 pair（該当未登録frame 75）、5m以内14137 pair（同191）で、最短約1.724mは主に
+gap64の順方向継続でありrevisitではない。従って**5kでglobal descriptor retrievalを
+続けない、10kへ上げない、READMEへpromoteしない**。v5 artifactは次にある。
+
+```text
+/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/
+  openloris-tier5000-multiscale-component-bridge-v5.tsv
+```
+
+5k base componentの未登録範囲はframe 1931（1 frame）と1934..2499（566 frame）。
+tail 1934..2499だけを凍結base snapshotでreplayすると、5376 pair、267764 match、
+163295 keypoint、confidence track 14032、retained observation 137118だが、
+`metric_anchored_tracks=0`、`metric_seed_candidates=0`、`max_frame_support=0`で
+`NoMetricSeed`。pair graph監査ではbase全31521 pair/2106827 accepted correspondence中、
+同一frame cross-sensor pairはわずか1 pair/77 correspondence、tail内は5376 pair/
+274264 correspondenceだがstereo pair 0。1934境界も5 pair/82 correspondenceが全て
+same-sensorだった。つまり不足bridgeの正体はloop edgeではなく、tailへmetric baselineを
+供給する同期stereo edgeだった。診断ログは`/tmp/visloc-m9-seed-diag.wKJ2EL`と
+`/tmp/visloc-m9-pair-audit.5P9td0`（一時領域なので存在は保証しない）。
+
+そこでGT/poseを選択に使わず、frame 1931と1934..2499へstride 8で同期sensor pairを
+73本だけ置いた。既存SIFT descriptorをratio 0.95でmatchすると69/73 pair、4618
+correspondence、matcher実時間0.4302s、worker wall43.8009s、peak RSS73580KiB。
+受理match listを凍結ratio 0.8 verifierへ再投入し、69 pair/4567 correspondenceを固定した。
+ALIKED+LightGlue 10-pair proofは10/10、1798 correspondenceだったが、base SIFTと異なる
+keypoint空間のためtemporal trackへ接続せず1 frameしか登録できない。今回はdescriptor
+bankを追加せずSIFT sparse stereoを採用した。重要artifactは削除・上書きしないこと。
+
+```text
+/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/
+  openloris-tier5000-sparse-stereo8-v1-source/candidates.txt
+  openloris-tier5000-sparse-stereo8-sift-ratio95-v1/
+  openloris-tier5000-sparse-stereo8-sift-reverify-v1/verified.vps
+  openloris-tier5000-sparse-stereo8-sift-reverify-v1/base-plus-stereo.vps
+  openloris-tier5000-rank0-frozen-sparse-stereo8-v1/
+```
+
+tail-only replayは519/566 frame、1038 image、5045 track、67787 observation、reprojection
+0.825215px、mapper21.92s、peak RSS99732KiB。全5kで追加edgeをrank 0にも見せる素朴な
+multi-model replayは2458/2500 frameまで伸びたが、主componentを1937 frameへ変形し
+post-hoc品質を悪化させたため棄却。これを避けるため上記`--rank0-pair-prefix 31521`を実装し、
+凍結base 31521 pairはrank 0だけ、追加69 pairはrank 1以降だけへ渡した最終診断が成功した。
+
+```text
+output root:
+/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/
+  openloris-tier5000-rank0-frozen-sparse-stereo8-v1/
+
+rank 0: 1933/2500 frame, 3866 image, 21708 track, 275789 observation,
+        reprojection 0.928522px
+rank 1:  521 frame, 1042 image, 4926 track, 64300 observation,
+        reprojection 0.813195px
+total: 2454/2500 frame, 4908/5000 image, mapper 148.976s,
+       peak RSS 476612KiB
+```
+
+rank 0の`cameras.txt`、`images.txt`、`points3D.txt`は旧
+`openloris-tier5000-component-frontier-v1/model/component-000`とSHA-256完全一致
+（順に`65e29cd8...`、`a01924f...`、`27aeffd0...`）。したがって追加edgeが主componentを
+変えていないことはbyte-levelで確認済み。post-mapでのみGTを使ったper-component Sim(3)
+scoreはrank 0が3174画像、RMSE 3.32470m、p95 6.85824m、rank 1が1042画像、
+RMSE 0.170100m、p95 0.290310m。集約は4216画像、RMSE 2.88597m、p95 6.31110m。
+scoreは上記output rootの`score.json`、scorer SHAは`c0196be5...`。過去記録のrank 0
+RMSE2.02107mとはscorer/集約条件を揃えず直接比較しないこと。rank 0の不変性はmodel SHAを
+正とする。
+
+最終診断のmapper command（release binary）は次。snapshotの先頭31521 pairが凍結base、
+suffix 69 pairがsparse stereoであるという順序が契約なので、merge順を変えない。
+
+```bash
+target/release/examples/generalized_rig_sfm \
+  --manifest /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rig-manifest-v1.txt \
+  --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-5000/features256 \
+  --snapshot /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-sparse-stereo8-sift-reverify-v1/base-plus-stereo.vps \
+  --out-colmap /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rank0-frozen-sparse-stereo8-v1-repeat/model \
+  --max-models 16 --min-model-frames 10 --rank0-pair-prefix 31521 \
+  --min-pnp-inliers 8 --min-pnp-sensors 2 \
+  --direct-stereo-pnp-max-frame-gap 8 --direct-stereo-min-pnp-sensors 1 \
+  --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 \
+  --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 \
+  --structure-refinement-iterations 5 --pair-confidence-tracks \
+  --complete-tracks-after-registration --track-completion-max-passes 2 \
+  --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2
+```
+
+Claudeの次の作業順は以下。
+
+1. [done] `git diff`を読み、4ファイルの未commit差分を保持する。新CLIのtargeted testとclippyは
+   `cargo test --release --example generalized_rig_sfm rank0_pair_prefix_defers_only_the_suffix_to_remaining_models`
+   と`cargo clippy --release --example generalized_rig_sfm -- -D warnings`で両方PASS確認済み。
+2. [done] 上記commandをfresh `-repeat` rootで1回再実行し、component-000だけでなく
+   component-001も含む8 fileすべてがSHA-256完全一致することを確認した（上記「追試」段落参照）。
+   既存rootへは上書きしていない。
+3. [done] stride-8 candidate生成規則、ratio0.95 match、凍結ratio0.8 reverify、merge順、mapper、
+   post-map scoreを`benchmarks/electro/m9-openloris-sparse-stereo-rank0-prefix-5000-v1.json`
+   へ1本で固定した。candidate生成器・merge tool・scorerはいずれも独立再現でbyte-identical
+   （scorerのみ数値一致、path欄以外）を確認済み。残るgapは「文字通りの過去commandがログに
+   残っていない」点のみ（再現自体は成功しているため実害なし）。
+4. [done] `--rank0-pair-prefix`、関連test、benchmark evidence JSON、この引き継ぎを1 commit、
+   v5 retrieval差分（multi-scale-component-bridge-v5、負の診断として保持）を別commitに分けて
+   push。4 exampleのrelease clippy -D warnings/test、fmt checkはPASS。
+5. 5kで未回収の46 frameを、global retrievalではなくstereo anchorの終端/strideまたは
+   component replay条件で診断する。ただしrank 0 SHA非回帰、rank 1 RMSE/p95非回帰、
+   bounded pair/RSSをgateにする。閾値をGTで調整しない。
+6. その後にのみ未観測10kへ進める。README/COLMAP比較は10kで同条件の登録率・精度・
+   wall/RSSを測って昇格判定後に更新する。ユーザー指示によりREADMEへメモリbefore/after表は
+   書かない。現在READMEは変更していない。
+
+外部model/artifact、既存共有hardlink、既存run rootは削除・上書き禁止。新しい実験はfresh
+rootを使う。GTは候補生成、match、admission、anchor選択に入れず、model公開後のscoreだけに
+隔離する。
 
 M9 component-aware v4は計算量を改善したがretrieval品質で棄却。凍結baseを
 multi-model replayすると主componentは1933/2500 frame、残る567 frameには5378
