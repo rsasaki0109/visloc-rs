@@ -43,7 +43,13 @@ def finite_vector(value: object, length: int, label: str) -> list[float]:
     return result
 
 
-def build(tier_path: Path, rig_path: Path, width: int, height: int) -> str:
+def build(
+    tier_path: Path,
+    rig_path: Path,
+    width: int,
+    height: int,
+    timestamp_tolerance_seconds: float = 0.001,
+) -> str:
     tier = load_json(tier_path)
     if not isinstance(tier, dict) or tier.get("schema") != "visloc_openloris_corridor_manifest_v1":
         raise ManifestError("unsupported OpenLORIS tier manifest schema")
@@ -118,11 +124,15 @@ def build(tier_path: Path, rig_path: Path, width: int, height: int) -> str:
             raise ManifestError(f"image {name!r} uses unknown camera {camera_number}")
         parsed_rows.append({"name": name, "camera": camera_number, "timestamp": timestamp})
     try:
-        canonical_timestamps, repaired_pairs = canonicalize_rig_timestamps(parsed_rows)
+        canonical_timestamps, repaired_pairs = canonicalize_rig_timestamps(
+            parsed_rows, tolerance_seconds=timestamp_tolerance_seconds
+        )
     except RigFrameGroupingError as exc:
         raise ManifestError(str(exc)) from exc
 
-    output.append(f"# timestamp_tolerance_seconds 0.001 repaired_pairs {repaired_pairs}")
+    output.append(
+        f"# timestamp_tolerance_seconds {timestamp_tolerance_seconds:g} repaired_pairs {repaired_pairs}"
+    )
     output.append("# F frame_id image_name sensor_index")
     timestamp_ids: dict[str, int] = {}
     frame_sensors: dict[int, set[int]] = {}
@@ -156,11 +166,23 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--width", type=int, default=848)
     parser.add_argument("--height", type=int, default=800)
+    parser.add_argument(
+        "--timestamp-tolerance-seconds",
+        type=float,
+        default=0.001,
+        help="max skew for repairing a split cam1/cam2 exposure pair",
+    )
     args = parser.parse_args()
     if args.width <= 0 or args.height <= 0:
         parser.error("--width and --height must be positive")
     try:
-        payload = build(args.tier_manifest, args.rig_config, args.width, args.height)
+        payload = build(
+            args.tier_manifest,
+            args.rig_config,
+            args.width,
+            args.height,
+            args.timestamp_tolerance_seconds,
+        )
         write_atomic(args.output, payload)
     except ManifestError as exc:
         parser.error(str(exc))
