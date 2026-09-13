@@ -2,6 +2,35 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-14 arm D: `--rig-frame-manifest`でbaseのstereo欠落を修正（10k精度gateはFAIL）
+
+原因: corridor1-1 baseの`benchmark_electro.py --run --pair-source temporal-pyramid
+--rig-local-grouping`は同一frame cross-sensor候補をほぼ生成しない。manifestなしでは
+`examples/unordered_sfm_demo.rs`の`rig_camera_timestamp`がfile名末尾数字でgroup化し、
+cam1(偶数)/cam2(奇数)が一致しない。さらに`build_candidate_command`は
+`--rig-local-grouping`をvlad-unionでしか渡さず黙って捨てる。cross-sensorはVLAD top-32
+頼みで、自己相似の多いcorridor1-1では押し出される（同一frame cross候補/verified:
+5k 1/1、10k 111/111、corridor1-5 780/767）。候補になれば92-100%受理されるので
+verifierは原因ではない。
+
+arm D（事前登録）: 同一base recipeに`--rig-frame-manifest <tier rig manifest>`を追加し、
+component-frontier flagでbase-only mapping。同一frame cross verifiedは5k 2408、
+10k 4686へ回復、rank0 Sim(3) scaleは5k 0.381→1.026、10k 0.045→0.987。
+5kは2475/2500 frame、aggregate RMSE 0.269m/p95 0.508m（stereo probe段なし）。
+10kは4826/5000 frame、3 component、aggregate RMSE 0.888m/p95 2.020m。
+gate vs C′: Q1 PASS（4826>=4768）、Q2 FAIL、Q3 FAIL（814 image componentのscale
+0.649）、Q4 PASS（最大約1.20GiB）。10k dev設定はC′のまま。
+
+注意（claimではない）: per-component Sim(3) aggregateは分割が多いほど有利。Dのrank0は
+6370 imageの1本で区間RMSEが0.16→2.22mへ増えるdriftを含み、C′は同じ軌跡を短い
+componentへ分けて個別alignしている（COLMAP 10kは2 component）。以後の比較の前に
+分割数に依存しない指標（固定窓の相対pose誤差等）を結果を見る前に事前登録すること。
+`--rig-local-grouping`がtemporal-pyramidで黙って無視される点も修正対象。
+
+root: `/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/
+openloris-tier{5000,10000}-rigframe-base-v1/`。証跡:
+`benchmarks/electro/m9-openloris-rig-frame-manifest-base-v1.json`。
+
 ### 2026-09-13 corridor1-5 holdout: 事前登録gate 2/4 FAIL（C'はdev-set結果のまま）
 
 corridor1-1 10k arm C'（rank0自身にstereo8 bridge、`--rank0-pair-prefix`なし）の

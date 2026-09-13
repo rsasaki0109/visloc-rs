@@ -1,0 +1,647 @@
+{
+  "schema": "visloc_m9_openloris_rig_frame_manifest_base_v1",
+  "recorded_at": "2026-09-13T18:40:00+09:00",
+  "status": "rig_frame_manifest_fix_confirmed_10k_accuracy_gates_failed",
+  "claim_scope": "OpenLORIS corridor1-1, 5000-image (2500-frame) and 10000-image (5000-frame) tiers, GT-free candidate generation/matching/mapping; ground truth used only for the post-map score in stage A4. This step reruns the old corridor1-1 base recipe (benchmark_electro.py --run --pair-source temporal-pyramid --rig-local-grouping) with --rig-frame-manifest added (arm D), a base-only rerun with no stereo8 bridge stage, to isolate the effect of the manifest flag alone from the diagnosed same-frame cross-sensor pairing failure. No GT-free stride-8 bridge is applied in this step -- the frontier this experiment characterizes is the base-only generalized_rig_sfm component frontier, exactly as in prior *-component-frontier-v1 steps.",
+  "diagnosis": {
+    "claim": "the old corridor1-1 base recipe (benchmark_electro.py --run --pair-source temporal-pyramid --rig-local-grouping, no --rig-frame-manifest) generated almost no same-frame cross-sensor candidates, for two independently confirmed reasons",
+    "reason_a": "without --rig-frame-manifest, examples/unordered_sfm_demo.rs's rig_camera_timestamp (unordered_sfm_demo.rs:3257-3277) derives its grouping 'timestamp' directly from the trailing numeric suffix of the filename (e.g. cam1_000000.png -> timestamp 0, cam2_000001.png -> timestamp 1). Because this repo's cam1/cam2 filenames use disjoint even/odd numeric suffixes for the same physical instant, rig_local_pairs (used only when rig_local_grouping is actually active) never sees a matching (camera, timestamp) pair across sensors -- cam1 and cam2 frames from the same instant never collide.",
+    "reason_a_verified_by": "read examples/unordered_sfm_demo.rs:3257-3277 (rig_camera_timestamp) and the surrounding rig_local_pairs doc comment directly; not re-run",
+    "reason_b": "scripts/benchmark_electro.py's build_candidate_command only appends --rig-local-grouping to the launched command when pair_source == 'vlad-union' (benchmark_electro.py:1037-1038: 'if pair_source == \"vlad-union\" and rig_local_grouping: command.append(\"--rig-local-grouping\")'). For pair_source == 'temporal-pyramid' the flag is silently dropped even when the CLI wrapper was invoked with --rig-local-grouping.",
+    "reason_b_verified_by": "read scripts/benchmark_electro.py:964-1038 directly (build_candidate_command); confirmed empirically in this same experiment's own artifacts below (reason_b_reproduced_in_this_run)",
+    "reason_b_reproduced_in_this_run": {
+      "claim": "even in this experiment's own run_d0.sh (which passes --rig-local-grouping on the CLI), the resulting candidate-generation.log effective-config shows rig_local_grouping: false for both tiers -- the flag drop is confirmed live, not just by reading source",
+      "tier5000_effective_config_excerpt": "pair_source: TemporalPyramid, local_stem_window: None, rig_local_grouping: false, rig_frame_manifest: Some(\"/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rig-manifest-v1.txt\")",
+      "tier10000_effective_config_excerpt": "pair_source: TemporalPyramid, local_stem_window: None, rig_local_grouping: false, rig_frame_manifest: Some(\"/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rig-manifest-v1.txt\")",
+      "source": "pipeline-sparse7n/candidate-generation.log in both openloris-tier{5000,10000}-rigframe-base-v1 artifact roots",
+      "implication": "this run's near-complete recovery of same-frame cross-sensor candidates (see results_per_tier below) is attributable entirely to --rig-frame-manifest; --rig-local-grouping contributed nothing in this run because it was silently dropped, exactly as reason_b predicts"
+    },
+    "verified_pair_pass_rate": "when same-frame cross-sensor pairs are proposed as candidates, they verify (pass geometric verification) at 92-100% in every tier examined",
+    "old_counts_reported_previously_not_rederived_here": {
+      "note": "these figures describe the OLD recipe (no --rig-frame-manifest) and are carried forward from prior analysis of that recipe's artifacts, which are not part of this step's artifact roots; not recomputed here",
+      "same_frame_cross_sensor_candidates_over_verified": {
+        "5000": "1/1",
+        "10000": "111/111",
+        "corridor1-5": "780/767"
+      },
+      "far_same_sensor_gt32_candidates": {
+        "5000": 2513,
+        "10000": 3157,
+        "corridor1-5": 30
+      }
+    }
+  },
+  "arm_d_preregistration": {
+    "arm": "D",
+    "recipe": "identical base recipe to the old corridor1-1 recipe (scripts/benchmark_electro.py --run --pair-source temporal-pyramid --rig-local-grouping) plus --rig-frame-manifest <tier rig manifest>; base-only generalized_rig_sfm component frontier (target/release/examples/generalized_rig_sfm) with the same component-frontier flags used in every prior *-component-frontier-v1 step; no stereo8 bridge stage",
+    "control": "arm C' (m9-openloris-sparse-stereo-10000-v1.json's followup) at the 10000-image tier: 4816 frames, RMSE 0.236057, p95 0.459024",
+    "gates_10k_vs_c_prime": {
+      "Q1_frames": {
+        "threshold": ">= 4768",
+        "rationale": "C' frames (4816) minus slack"
+      },
+      "Q2_accuracy": {
+        "threshold": "RMSE <= 0.259663 and p95 <= 0.504926",
+        "rationale": "C' RMSE/p95 plus slack"
+      },
+      "Q3_component_scale": {
+        "threshold": "every component with >= 100 registered frames has sim3_scale in [0.9, 1.1]"
+      },
+      "Q4_memory": {
+        "threshold": "< 2 GiB peak RSS across all sub-phases"
+      }
+    }
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "ground_truth_used_for_candidate_generation_matching_or_admission": false,
+    "tiers": {
+      "tier-5000": {
+        "images": 5000,
+        "rig_frames": 2500
+      },
+      "tier-10000": {
+        "images": 10000,
+        "rig_frames": 5000
+      }
+    }
+  },
+  "artifact_roots": {
+    "tier5000": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rigframe-base-v1",
+    "tier10000": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-base-v1",
+    "shared_rig_manifests_reused_byte_identical_from_prior_steps": {
+      "tier5000_manifest": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rig-manifest-v1.txt",
+      "tier5000_manifest_sha256": "bffe3e7524cd27e0a60c146d793d81112392787daecb003834444dd35de09437",
+      "tier5000_manifest_sha256_matches_m9_sparse_stereo_10000_v1_json": true,
+      "tier10000_manifest": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rig-manifest-v1.txt",
+      "tier10000_manifest_sha256": "c631e5ef1c729f889fc3fa4d4e1601f2876b691b09d45171d9f077fd6fcb8943",
+      "tier10000_manifest_sha256_matches_m9_sparse_stereo_10000_v1_json": true
+    }
+  },
+  "stage_d0_base_pipeline": {
+    "tool": "scripts/benchmark_electro.py --run",
+    "command_source": "verified verbatim from d0.time.txt (Command being timed), with 'set -x' echoing the run_d0.sh invocation",
+    "tier5000": {
+      "run_script": "run_d0.sh",
+      "command": "python3 scripts/benchmark_electro.py --run --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-5000/features256 --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-5000/images --calibration-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-5000/calibration --artifact-root /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rigframe-base-v1/pipeline-sparse7n --pair-source temporal-pyramid --rig-local-grouping --rig-frame-manifest /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rig-manifest-v1.txt --retrieval-topk 32 --temporal-pyramid-max-offset 32 --candidate-budget 35000 --pairs-per-shard 32 --persistent-matcher --min-matches 12 --match-ratio 0.8 --min-pnp-inliers 8 --max-mapper-matches-per-pair 96 --snapshot-keypoints-only --periodic-ba-min-registered-images 5001 --seed-trials 16 --ba-linear-solver sparse --ba-max-iterations 8 --post-refinement-registration --global-ba-max-refinements 0",
+      "pid": 41696,
+      "wall_clock_time_txt": {
+        "user_s": 1571.05,
+        "system_s": 40.72,
+        "percent_cpu": "120%",
+        "wall_clock": "22:21.22",
+        "wall_s": 1341.22,
+        "max_rss_kib": 690832,
+        "major_page_faults": 0,
+        "minor_page_faults": 2732450,
+        "exit_status": 0
+      },
+      "phase_ledger_sub_phases_from_summary_json": {
+        "candidate_generation": {
+          "elapsed_s": 991.989329662174,
+          "user_s": 988.71,
+          "system_s": 2.35,
+          "peak_rss_kib": 690832,
+          "exit_status": 0
+        },
+        "candidate_sharding": {
+          "elapsed_s": 1.10056971013546
+        },
+        "feature_manifest_validation": {
+          "elapsed_s": 10.669760335003957
+        },
+        "persistent_worker_matching": {
+          "elapsed_s": 226.31731351697817,
+          "shards": 1094,
+          "shard_elapsed_sum_s": 167.701534419,
+          "user_s": 465.72,
+          "system_s": 33.26,
+          "peak_rss_kib": 527652,
+          "exit_status": 0
+        },
+        "merge": {
+          "elapsed_s": 4.814874134026468,
+          "user_s": 4.39,
+          "system_s": 0.41,
+          "peak_rss_kib": 12164,
+          "exit_status": 0
+        },
+        "mapping": {
+          "elapsed_s": 100.76241227192804,
+          "user_s": 98.04,
+          "system_s": 2.69,
+          "peak_rss_kib": 299392,
+          "exit_status": 0
+        }
+      },
+      "candidate_pairs": 35000,
+      "candidate_index_sha256": "f828e9010cb6c7e04bb5553a33919fd178c8d8d1ca168c046590f5d0e0cb0359",
+      "candidates_txt": {
+        "bytes": 641081,
+        "sha256": "4601cdf9ba21325d816163afdfcfe4fa3bb88bb43d3009e401f41b08d7e1aac4"
+      },
+      "features_sha256": "5cf7886b10aa5ec81f11fb258cdd4937d3397d0b81b2288bb2484b4700ce2580",
+      "features_total_rows": 865988,
+      "merged_snapshot_verified_merged_vps": {
+        "path": "pipeline-sparse7n/mapping/verified-merged.vps",
+        "bytes": 135470232,
+        "sha256": "6c45b03b47d1512e08dbd150cae87d698f1e2c3dc8ba60240d299bf8dcc33d20",
+        "verified_pairs": 31293,
+        "accepted_correspondences": 1925074,
+        "verified_by": "mapping.log 'import verified-pair snapshot: 31293 pairs, 1925074 accepted correspondences' and 'verified 31293 / 31293 pairs, 1925074 inlier correspondences'"
+      },
+      "summary_json_sha256": "7cff435f976703fda8c194c390684f6ad474b340274683ebf6c36e8946e4f35c",
+      "audit_tsvs": {
+        "verified_images_tsv": {
+          "bytes": 123232,
+          "sha256": "3a2c92104be6a97bd323032b57748598892fbda35c0b1740caa0c67c768d4d6a",
+          "rows": 5000
+        },
+        "verified_pairs_tsv": {
+          "bytes": 788098,
+          "sha256": "6d3a5568535850767692a2909ef63c29d3ed79255eff862c3bb4cc508165527c",
+          "rows": 31293
+        }
+      }
+    },
+    "tier10000": {
+      "run_script": "run_d0.sh",
+      "command": "python3 scripts/benchmark_electro.py --run --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/features256 --images-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/images --calibration-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/calibration --artifact-root /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-base-v1/pipeline-sparse7n --pair-source temporal-pyramid --rig-local-grouping --rig-frame-manifest /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rig-manifest-v1.txt --retrieval-topk 32 --temporal-pyramid-max-offset 32 --candidate-budget 70000 --pairs-per-shard 32 --persistent-matcher --min-matches 12 --match-ratio 0.8 --min-pnp-inliers 8 --max-mapper-matches-per-pair 96 --snapshot-keypoints-only --periodic-ba-min-registered-images 10001 --seed-trials 16 --ba-linear-solver sparse --ba-max-iterations 8 --post-refinement-registration --global-ba-max-refinements 0",
+      "pid": 57078,
+      "wall_clock_time_txt": {
+        "user_s": 4950.62,
+        "system_s": 57.44,
+        "percent_cpu": "109%",
+        "wall_clock": "1:16:04",
+        "wall_s": 4564.0,
+        "max_rss_kib": 1194868,
+        "major_page_faults": 1,
+        "minor_page_faults": 4091831,
+        "exit_status": 0
+      },
+      "phase_ledger_sub_phases_from_summary_json": {
+        "candidate_generation": {
+          "elapsed_s": 3918.3884854789358,
+          "user_s": 3910.47,
+          "system_s": 4.15,
+          "peak_rss_kib": 1194868,
+          "exit_status": 0
+        },
+        "candidate_sharding": {
+          "elapsed_s": 3.150855327025056
+        },
+        "feature_manifest_validation": {
+          "elapsed_s": 17.569429500959814
+        },
+        "persistent_worker_matching": {
+          "elapsed_s": 450.6587167249527,
+          "shards": 2188,
+          "shard_elapsed_sum_s": 320.102102814,
+          "user_s": 856.08,
+          "system_s": 44.82,
+          "peak_rss_kib": 870100,
+          "exit_status": 0
+        },
+        "merge": {
+          "elapsed_s": 10.790841712150723,
+          "user_s": 9.9,
+          "system_s": 0.87,
+          "peak_rss_kib": 17796,
+          "exit_status": 0
+        },
+        "mapping": {
+          "elapsed_s": 152.1974771260284,
+          "user_s": 147.73,
+          "system_s": 4.13,
+          "peak_rss_kib": 487004,
+          "exit_status": 0
+        }
+      },
+      "candidate_pairs": 70000,
+      "candidate_index_sha256": "0077dfe022d317e1afd2076d453efad82af1502be324c1ca4a28b8f40b6538c2",
+      "candidates_txt": {
+        "bytes": 1297818,
+        "sha256": "22ea70f40c3b8ce2da018e910f3480df311aec95c4b608deb164ba947cb0046c"
+      },
+      "features_sha256": "2d5d87c93c9131f8e1c625691c53156c230117c1d130d5babefc86e05bee241d",
+      "features_total_rows": 1427634,
+      "merged_snapshot_verified_merged_vps": {
+        "path": "pipeline-sparse7n/mapping/verified-merged.vps",
+        "bytes": 223287280,
+        "sha256": "b5e26dc1db2925824c36e3a5476dfa94c499660c497de85f765e26193c7c3530",
+        "verified_pairs": 58230,
+        "accepted_correspondences": 3136334,
+        "verified_by": "mapping.log 'import verified-pair snapshot: 58230 pairs, 3136334 accepted correspondences' and 'verified 58230 / 58230 pairs, 3136334 inlier correspondences'"
+      },
+      "summary_json_sha256": "1f5c9984a18e4ce5e2cf9fae2403a5eb70a3d1c62fd36e9ed21fa47c8c873170",
+      "audit_tsvs": {
+        "verified_images_tsv": {
+          "bytes": 245082,
+          "sha256": "f538b076b141b3626fde2983cd4feea35b9b7c327e197d6fdaae080ca4b20a90",
+          "rows": 10000
+        },
+        "verified_pairs_tsv": {
+          "bytes": 1473834,
+          "sha256": "ee27871e956f856d5379070ab2ccf6448eb9adb209d0ee64f5149049213c3615",
+          "rows": 58230
+        }
+      }
+    },
+    "old_10k_base_pipeline_comparison": {
+      "source": "benchmarks/electro/m9-openloris-sparse-stereo-10000-v1.json stage_a1_base_snapshot (old recipe, no --rig-frame-manifest, --pair-source temporal-pyramid --rig-local-grouping)",
+      "old": {
+        "user_s": 4260.82,
+        "system_s": 102.15,
+        "wall_clock": "1:03:45",
+        "max_rss_kib": 1869412,
+        "exit_status": 0
+      },
+      "new_arm_d": {
+        "user_s": 4950.62,
+        "system_s": 57.44,
+        "wall_clock": "1:16:04",
+        "max_rss_kib": 1194868,
+        "exit_status": 0
+      },
+      "delta": "new arm D is ~19% slower wall-clock (76:04 vs 63:45) but uses ~36% less peak RSS (1,194,868 vs 1,869,412 KiB); no old-vs-new comparison is available for the 5000-image tier because no equivalent full base-pipeline benchmark of the OLD recipe at that tier exists in this repo's benchmarks/electro/ history"
+    }
+  },
+  "stage_d2_base_only_component_frontier": {
+    "tool": "target/release/examples/generalized_rig_sfm",
+    "command_source": "verified verbatim from d2.time.txt (Command being timed)",
+    "flags_shared": "--max-models 16 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+    "tier5000": {
+      "run_script": "run_d2.sh",
+      "command": "timeout --signal=TERM --kill-after=10s 600s target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rig-manifest-v1.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-5000/features256 --snapshot /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rigframe-base-v1/pipeline-sparse7n/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rigframe-base-v1/component-frontier-v1/model --max-models 16 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+      "pid": 55110,
+      "timeout_signal_s": 600,
+      "stdout_summary": "rig-multimodel result: models=2 registered_frames=2475/2500 registered_images=4950/5000 tracks=22216 observations=346185 mean_reprojection_px=0.899157372 mapper_seconds=188.581160 VmHWM_KiB=459168",
+      "wall_clock_time_txt": {
+        "user_s": 189.06,
+        "system_s": 0.55,
+        "percent_cpu": "99%",
+        "wall_clock": "3:09.71",
+        "wall_s": 189.71,
+        "max_rss_kib": 459168,
+        "minor_page_faults": 139712,
+        "exit_status": 0
+      },
+      "components": [
+        {
+          "rank": 0,
+          "supplied_frames": 2500,
+          "supplied_images": 5000,
+          "verified_pairs": 31293,
+          "registered_frames": 1955,
+          "registered_images": 3910,
+          "tracks": 17904,
+          "observations": 275806,
+          "mean_reprojection_px": 0.920708853,
+          "seed_global_frame": 506,
+          "unregistered_below_sensors": 535
+        },
+        {
+          "rank": 1,
+          "supplied_frames": 545,
+          "supplied_images": 1090,
+          "verified_pairs": 5880,
+          "registered_frames": 520,
+          "registered_images": 1040,
+          "tracks": 4312,
+          "observations": 70379,
+          "mean_reprojection_px": 0.814699965,
+          "seed_global_frame": 2455,
+          "unregistered_below_sensors": 25
+        }
+      ],
+      "rank2_stop": "rig-component-stop: rank=2 supplied_frames=25 verified_pairs=13 reason=no frame has enough multi-sensor tracks for metric initialization",
+      "components_tsv": {
+        "bytes": 1304,
+        "sha256": "522cb7d093d55b4434163e0404ba862b85519b0568cac96cc4fa2921fd3985f1"
+      },
+      "score_json": {
+        "bytes": 12017,
+        "sha256": "c4f9b3bfc20ce9a24265ead1b0e8f1aaef4cfda2ca5ad63fe9e0de36e88a34ca"
+      }
+    },
+    "tier10000": {
+      "run_script": "run_d2.sh",
+      "command": "timeout --signal=TERM --kill-after=10s 3600s target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rig-manifest-v1.txt --features-dir /home/sasaki/datasets/openloris/corridor1-1-m5/tiers/tier-10000/features256 --snapshot /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-base-v1/pipeline-sparse7n/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-base-v1/component-frontier-v1/model --max-models 16 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+      "pid": 100966,
+      "timeout_signal_s": 3600,
+      "stdout_summary": "rig-multimodel result: models=3 registered_frames=4826/5000 registered_images=9652/10000 tracks=37841 observations=541466 mean_reprojection_px=0.899661517 mapper_seconds=204.224020 VmHWM_KiB=773880",
+      "wall_clock_time_txt": {
+        "user_s": 205.2,
+        "system_s": 0.82,
+        "percent_cpu": "99%",
+        "wall_clock": "3:26.04",
+        "wall_s": 206.04,
+        "max_rss_kib": 773880,
+        "major_page_faults": 1,
+        "minor_page_faults": 236283,
+        "exit_status": 0
+      },
+      "components": [
+        {
+          "rank": 0,
+          "supplied_frames": 5000,
+          "supplied_images": 10000,
+          "verified_pairs": 58230,
+          "registered_frames": 3185,
+          "registered_images": 6370,
+          "tracks": 26552,
+          "observations": 422533,
+          "mean_reprojection_px": 0.888540409,
+          "seed_global_frame": 2597,
+          "unregistered_below_sensors": 1815
+        },
+        {
+          "rank": 1,
+          "supplied_frames": 1815,
+          "supplied_images": 3630,
+          "verified_pairs": 16568,
+          "registered_frames": 1234,
+          "registered_images": 2468,
+          "tracks": 9156,
+          "observations": 91229,
+          "mean_reprojection_px": 0.965884248,
+          "seed_global_frame": 4404,
+          "unregistered_below_sensors": 580
+        },
+        {
+          "rank": 2,
+          "supplied_frames": 581,
+          "supplied_images": 1162,
+          "verified_pairs": 4564,
+          "registered_frames": 407,
+          "registered_images": 814,
+          "tracks": 2133,
+          "observations": 27704,
+          "mean_reprojection_px": 0.851206483,
+          "seed_global_frame": 4874,
+          "unregistered_below_sensors": 174
+        }
+      ],
+      "rank3_stop": "rig-component-stop: rank=4 supplied_frames=173 verified_pairs=45 reason=no frame has enough multi-sensor tracks for metric initialization",
+      "components_tsv": {
+        "bytes": 1443,
+        "sha256": "f7d0b6b18bba7f7961b44c427b2a10fb42308dd87c59369f9a3a290654db7c0e"
+      },
+      "score_json": {
+        "bytes": 15834,
+        "sha256": "9e8d35a0f46f3005adb5a4352a3f0250509a2ea63331de7546b9f60d726624a5"
+      }
+    }
+  },
+  "pids_txt": {
+    "tier5000": {
+      "bytes": 18,
+      "sha256": "5d308c148da3643787106a818eafd72f0831ac2b50f1fb3ea34bd18f882927b5",
+      "content": "d0 41696\nd2 55110"
+    },
+    "tier10000": {
+      "bytes": 19,
+      "sha256": "80256c4aa387e70d096c30026420b6445e785019fc62afd57de718c92081c067",
+      "content": "d0 57078\nd2 100966"
+    }
+  },
+  "candidate_verified_class_table": {
+    "method": "each candidate/verified pair classified via the tier's rig manifest F rows (frame_id, image_name, camera_index): same_frame_cross_sensor (same frame_id, different camera), same_sensor (same camera_index, any frame gap), cross_frame_cross_sensor (different frame_id and different camera). far_same_sensor_gt32 is the same_sensor subset with |frame_gap| > 32 (temporal_pyramid_max_offset). Computed directly from pipeline-sparse7n/candidates.txt (candidate pairs) and verified-pairs.tsv/verified-images.tsv (verified pairs) joined against the rig manifest F rows -- no GT read.",
+    "tier5000": {
+      "candidates_total": 35000,
+      "candidates_same_frame_cross_sensor": 2500,
+      "candidates_same_sensor": 32333,
+      "candidates_cross_frame_cross_sensor": 167,
+      "candidates_far_same_sensor_gt32": 455,
+      "candidates_max_same_sensor_gap": 79,
+      "verified_total": 31293,
+      "verified_same_frame_cross_sensor": 2408,
+      "verified_same_sensor": 28796,
+      "verified_cross_frame_cross_sensor": 89,
+      "verified_far_same_sensor_gt32": 455,
+      "same_frame_cross_sensor_pass_rate": "2408/2500 = 96.3%"
+    },
+    "tier10000": {
+      "candidates_total": 70000,
+      "candidates_same_frame_cross_sensor": 5000,
+      "candidates_same_sensor": 64086,
+      "candidates_cross_frame_cross_sensor": 914,
+      "candidates_far_same_sensor_gt32": 901,
+      "candidates_max_same_sensor_gap": 95,
+      "verified_total": 58230,
+      "verified_same_frame_cross_sensor": 4686,
+      "verified_same_sensor": 52816,
+      "verified_cross_frame_cross_sensor": 728,
+      "verified_far_same_sensor_gt32": 901,
+      "same_frame_cross_sensor_pass_rate": "4686/5000 = 93.7%"
+    },
+    "note_on_far_same_sensor_delta_vs_old": "the old recipe's far-same-sensor(>32) candidate counts (5k 2513, 10k 3157, reported separately, not re-derived here) are far larger than this arm D run's (5k 455, 10k 901); --rig-frame-manifest changes how temporal-pyramid computes frame-space offsets, which affects same-sensor pairing density as well as cross-sensor pairing -- not investigated further in this step"
+  },
+  "stage_a4_post_map_score": {
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "tier5000": {
+      "score_json_bytes": 12017,
+      "score_json_sha256": "c4f9b3bfc20ce9a24265ead1b0e8f1aaef4cfda2ca5ad63fe9e0de36e88a34ca",
+      "manifest_sha256": "ac9762deb0b3f0aed591d320e0441e8e739089105ac9e898ef9aca431bde875f",
+      "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+      "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+      "models": 2,
+      "registered_images": 4950,
+      "gt_scored_images": 4258,
+      "components": [
+        {
+          "rank": 0,
+          "model_dir": "component-000",
+          "registered": 3910,
+          "gt_scored": 3218,
+          "rmse_m": 0.3063275335390221,
+          "p95_m": 0.5131357006949092,
+          "median_m": 0.2564725227211948,
+          "max_m": 0.5588251333633473,
+          "sim3_scale": 1.0263578170466972,
+          "reference_extent_m": 31.07656836518414,
+          "trajectory_segment_rmse_m": [
+            0.5078,
+            0.178,
+            0.1768,
+            0.2086,
+            0.2622,
+            0.3609,
+            0.341,
+            0.3604,
+            0.2669,
+            0.2404
+          ]
+        },
+        {
+          "rank": 1,
+          "model_dir": "component-001",
+          "registered": 1040,
+          "gt_scored": 1040,
+          "rmse_m": 0.0707629,
+          "p95_m": 0.1078,
+          "median_m": 0.0637,
+          "max_m": 0.1536,
+          "sim3_scale": 0.9455,
+          "reference_extent_m": 11.3782,
+          "trajectory_segment_rmse_m": [
+            0.0427,
+            0.0688,
+            0.087,
+            0.0584,
+            0.0952,
+            0.0707,
+            0.0627,
+            0.0461,
+            0.0378,
+            0.1053
+          ]
+        }
+      ],
+      "aggregate": {
+        "component_weighted_rmse_m": 0.26859386853883627,
+        "component_weighted_p95_m": 0.5084210392472024,
+        "component_weighted_median_m": 0.21932287155686933,
+        "component_weighted_max_m": 0.5588251333633473,
+        "gt_scored_images": 4258
+      }
+    },
+    "tier10000": {
+      "score_json_bytes": 15834,
+      "score_json_sha256": "9e8d35a0f46f3005adb5a4352a3f0250509a2ea63331de7546b9f60d726624a5",
+      "manifest_sha256": "a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c",
+      "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+      "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+      "models": 3,
+      "registered_images": 9652,
+      "gt_scored_images": 8960,
+      "components": [
+        {
+          "rank": 0,
+          "model_dir": "component-000",
+          "registered": 6370,
+          "gt_scored": 5678,
+          "rmse_m": 1.0876,
+          "p95_m": 2.242,
+          "median_m": 0.4108,
+          "max_m": 2.967,
+          "sim3_scale": 0.9865,
+          "reference_extent_m": 58.9119,
+          "trajectory_segment_rmse_m": [
+            0.28,
+            0.16,
+            0.19,
+            0.18,
+            0.2,
+            0.63,
+            1.07,
+            1.55,
+            1.65,
+            2.22
+          ],
+          "note": "per-segment RMSE rises monotonically along the last 5 of 10 trajectory segments -- see lead_analysis confound_fragmentation_neutral_metric_needed"
+        },
+        {
+          "rank": 1,
+          "model_dir": "component-001",
+          "registered": 2468,
+          "gt_scored": 2468,
+          "rmse_m": 0.1281,
+          "p95_m": 0.1828,
+          "median_m": 0.1005,
+          "max_m": 1.6505,
+          "sim3_scale": 0.9655,
+          "reference_extent_m": 36.6132
+        },
+        {
+          "rank": 2,
+          "model_dir": "component-002",
+          "registered": 814,
+          "gt_scored": 814,
+          "rmse_m": 0.6132,
+          "p95_m": 1.1065,
+          "median_m": 0.503,
+          "max_m": 1.2453,
+          "sim3_scale": 0.6495,
+          "reference_extent_m": 11.4034
+        }
+      ],
+      "aggregate": {
+        "component_weighted_rmse_m": 0.887861436019643,
+        "component_weighted_p95_m": 2.0203673265969138,
+        "component_weighted_median_m": 0.1952545633259161,
+        "component_weighted_max_m": 2.967007981526165,
+        "gt_scored_images": 8960
+      }
+    }
+  },
+  "gates_10k_vs_c_prime": {
+    "control_c_prime": {
+      "frames": 4816,
+      "rmse_m": 0.236057,
+      "p95_m": 0.459024
+    },
+    "Q1_frames": {
+      "threshold": ">= 4768",
+      "observed": 4826,
+      "result": "PASS"
+    },
+    "Q2_accuracy": {
+      "threshold": "RMSE <= 0.259663 and p95 <= 0.504926",
+      "observed_rmse_m": 0.887861436019643,
+      "observed_p95_m": 2.0203673265969138,
+      "result": "FAIL"
+    },
+    "Q3_component_scale": {
+      "threshold": "every component with >= 100 registered frames has sim3_scale in [0.9, 1.1]",
+      "components_checked": [
+        {
+          "rank": 0,
+          "registered_frames": 3185,
+          "sim3_scale": 0.9865,
+          "in_band": true
+        },
+        {
+          "rank": 1,
+          "registered_frames": 1234,
+          "sim3_scale": 0.9655,
+          "in_band": true
+        },
+        {
+          "rank": 2,
+          "registered_frames": 407,
+          "sim3_scale": 0.6495,
+          "in_band": false
+        }
+      ],
+      "result": "FAIL",
+      "failing_component": "rank 2, sim3_scale 0.6495"
+    },
+    "Q4_memory": {
+      "threshold": "< 2 GiB (2097152 KiB) peak RSS across all sub-phases",
+      "observed_max_rss_kib": 1194868,
+      "observed_max_rss_source": "stage_d0 candidate_generation phase (largest of all d0/d2 sub-phase peak_rss_kib values)",
+      "result": "PASS"
+    },
+    "overall": "2/4 PASS (Q1, Q4); 2/4 FAIL (Q2, Q3) -- arm D does not meet the pre-registered 10k accuracy gates versus C', so C' remains the 10k development configuration"
+  },
+  "lead_analysis": [
+    "1. The diagnosis is confirmed: adding --rig-frame-manifest alone restores same-frame cross-sensor candidates from near-zero (old: 1/1 at 5k, 111/111 at 10k) to essentially complete (new: 2500/2408 verified at 5k, 5000/4686 verified at 10k) and fixes rank-0 Sim(3) scale (5k 0.381 -> 1.0264 rank0 / new 2-component split; 10k 0.045 -> 0.9865 rank0), with no stride-8 probe stage of any kind.",
+    "2. At 5k, base-only arm D reaches 2475/2500 frames (4950/5000 images) with aggregate RMSE 0.2686 m -- close to the previous best 5k configuration (gap46: 2484 frames) but without that configuration's degenerate rank-0 RMSE of 3.32 m.",
+    "3. At 10k, arm D fails the pre-registered accuracy gates versus C' (Q2 RMSE 0.8879 m and p95 2.0204 m both far exceed the C'-derived thresholds; Q3 fails because component rank 2's sim3_scale 0.6495 is well outside [0.9, 1.1]), so C' remains the 10k development-tier configuration -- arm D is not adopted at 10k.",
+    "4. Confound, not a claim: the per-component Sim(3) aggregate rewards fragmentation. Arm D's rank-0 component spans 6370 images (3185 frames) with drift growing along the trajectory (segment RMSE 0.16 -> 2.22 m over the last 5 of 10 segments), whereas C' splits the same trajectory into more, shorter, independently-aligned components. COLMAP's own 10k reconstruction likewise splits into only 2 components. A fragmentation-neutral metric (e.g. fixed-window relative pose error, not per-component Sim(3)) should be pre-registered before further D-vs-C' comparisons are drawn.",
+    "5. The benchmark_electro.py silent drop of --rig-local-grouping for pair_source=temporal-pyramid (build_candidate_command, benchmark_electro.py:1037-1038) is a footgun: this experiment's own run_d0.sh passed --rig-local-grouping and it was silently ignored for both tiers (confirmed live in candidate-generation.log's effective-config, rig_local_grouping: false). The flag should either be forwarded for temporal-pyramid too, or the CLI should reject/warn when --rig-local-grouping is combined with --pair-source temporal-pyramid so future runs do not silently rely on a no-op flag."
+  ],
+  "audit_files": {
+    "tier5000": {
+      "pipeline_sparse7n_dir": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rigframe-base-v1/pipeline-sparse7n",
+      "component_frontier_dir": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier5000-rigframe-base-v1/component-frontier-v1"
+    },
+    "tier10000": {
+      "pipeline_sparse7n_dir": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-base-v1/pipeline-sparse7n",
+      "component_frontier_dir": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-rigframe-base-v1/component-frontier-v1"
+    }
+  }
+}
