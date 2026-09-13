@@ -2,6 +2,61 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-13 corridor1-5 holdout: 事前登録gate 2/4 FAIL（C'はdev-set結果のまま）
+
+corridor1-1 10k arm C'（rank0自身にstereo8 bridge、`--rank0-pair-prefix`なし）の
+仮説はB6のGT由来post-hoc観察から着想したためcorridor1-1はdev setとみなし、
+未使用sequence corridor1-5（HF `shixuesong/openloris-scene` commit
+`cbc03108...`、`corridor1-2_5-package.tar`内`corridor1-5.7z`をoffset/sizeで
+Range抽出、4381 frame/camera=8762 image、他corridor1-*中最大の未使用sequence）で
+同一手法・同一gate定義のholdoutを実施（`scripts/stage_openloris_corridor.py`
+commit 5f0508e）。calibration gate（trans_matrix.yaml sha256・cameras.txt
+sha256がcorridor1-1と完全一致、fisheye intrinsicsも一致）はPASS。
+
+逸脱1件（commit afd7c91, mapping前に決定・GT不使用で検証済み）: rig manifestの
+timestamp tolerance を0.001→0.002に拡張。理由はcam2_007012/cam1_007013間の
+露光ずれ1.03msがdefault 1ms閾値を僅かに超えるため（frame_id 3506として統合）。
+inertness: corridor1-1では0.002はheaderのみ変化・default出力とbyte一致、
+corridor1-5では0.002/0.005/0.01でF行が完全一致。
+
+Pipeline: candidate budget 61334（7n）、`--periodic-ba-min-registered-images 8763`
+（N+1）でcorridor1-1 10kと同一。A2（base-only frontier）: 4227/4381 frame
+（96.5%）登録、rank0 sim3_scale**0.896**（corridor1-1の0.045ほど劣化していない）。
+B（unregistered tail向けstride-8、28 target→13件受理、`--rank0-pair-prefix`固定）:
+4237/4381、aggregate RMSE 0.6235m/p95 1.1846m。C'（rank0自身のrun start/every-8/
+run-end targetで200 target→ratio0.95で200件受理→base graphに既存の60 pairを
+GT不使用dedupで除外→140 pair merge、`--rank0-pair-prefix`なし）: 4241/4381、
+aggregate RMSE **0.6368m**（B6比+2.1%、悪化）/p95 **1.0642m**（B6比-10.2%、改善）。
+
+事前登録gate結果: **P1 PASS**（4241>=4237かつ>=3943）、**P2 FAIL**（rmse
+0.6368>=0.6235、p95 1.0642<1.1846だが両方改善が条件のため不合格）、**P3 FAIL**
+（component-001 sim3_scale 0.8713が[0.9,1.1]外——ただしA2の時点で既に0.8751と
+band外であり、C'のstereo8 bridgeが触れていないrank1の pre-existing な問題。
+component-000は0.8959→0.9221とband内に改善）、**P4 PASS**（全stage中の最大RSSは
+pipeline-sparse7n candidate-generation stageの1,223,600 KiB）。
+
+結論: holdout gateが不合格のため、corridor1-5に対する汎化・性能claimは行わない。
+C'はcorridor1-1のdevelopment-set結果のまま。corridor1-1でC'が解消した障害
+（base graphにcross-sensor edgeがほぼ無くrank0 scaleが0.045まで劣化）はcorridor1-5
+には存在しない——base-only A2の時点で既に4227/4381 frame・rank0 scale 0.896と
+健全で、rank0-stereo8候補200件中60件は既にbase graphに存在していた
+（corridor1-1 10kでは244件中13件のみ）。C'の効果はmixed:
+rank0 p95 1.376→1.099m・scale 0.896→0.922と改善する一方、rank0 RMSEは
+0.751→0.782mと悪化。次のstep: なぜcorridor1-1のbase graphにはrank0近傍の
+same-frame cross-sensor pairがほとんど無く、corridor1-5には既にあるのか
+（candidate生成のtemporal-pyramid/rig-local-grouping挙動差）をGT不使用で調査。
+corridor1-5でのCOLMAP controlは未実施、READMEへの昇格は行わない。
+
+Artifact: `benchmarks/electro/m9-openloris-corridor1-5-holdout-v1.json`
+（status: `holdout_gates_failed_no_performance_claim`）。根拠は
+`/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1`
+（source-audit.json, calibration-source/, manifests/tier-8762.json,
+feature-extract/timing, official-groundtruth/manifest.json）と同ディレクトリの
+`m9/`配下（pipeline-sparse7n, rig-manifest-v1.txt, component-frontier-v1,
+sparse-stereo8-\*, rank0-frozen-sparse-stereo8-v1, rank0-stereo8-\*,
+all-stereo8-v1）の run.log/time.txt/score.json/sha256sum から直接読み取り、
+groundtruth.txt自体は未読。
+
 ### 2026-09-13 10k Phase A/B/C' 追記（rank0 scale drift解消、C'をdev pipelineに採用）
 
 10k tier（tier-10000, 5000 frame/10000 image）で3 phase実施。Phase A（base-only

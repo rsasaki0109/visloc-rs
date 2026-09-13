@@ -1,0 +1,1613 @@
+{
+  "schema": "visloc_m9_openloris_corridor1_5_holdout_v1",
+  "recorded_at": "2026-09-13T19:10:00+09:00",
+  "status": "holdout_gates_failed_no_performance_claim",
+  "claim_scope": "Pre-registered, GT-free holdout replication of the corridor1-1 10k arm C' method (m9-openloris-sparse-stereo-10000-v1.json's adopted 10k pipeline: A2 base-only frontier -> B rank0-prefix stereo8 bridge over the unregistered tail -> C' stereo8 bridge admitted onto rank 0's own frames, mapped without --rank0-pair-prefix) on an untouched OpenLORIS sequence (corridor1-5) not used to form the arm-C' hypothesis. Candidate generation, matching, and admission are GT-free throughout; ground truth is used only for the post-mapping scores. The pre-registered holdout gates (P1-P4) are evaluated against control B6, per the protocol registered before any mapping was run on this sequence.",
+  "background": "m9-openloris-sparse-stereo-10000-v1.json found that on corridor1-1's 10k tier, B6's rank-0 component had a badly degenerate Sim(3) scale (0.045) caused by the base snapshot having almost no cross-sensor (stereo) edges, and that admitting the stride-8 stereo8 bridge directly onto rank 0's own frames (arm C', no --rank0-pair-prefix) corrected this to near-metric scale (0.989) and cut aggregate RMSE 14.4x. Because that hypothesis was formed by inspecting a GT-derived Sim(3) scale on corridor1-1, corridor1-1 is a development set with respect to it (caveat (a) of that file). This step re-runs the identical pre-registered method on corridor1-5 -- an OpenLORIS sequence never used in forming or tuning the arm-C' hypothesis -- as the pre-registered holdout check.",
+  "holdout_selection": {
+    "rationale": "corridor1-5 was chosen as the holdout sequence because (1) it is an untouched OpenLORIS session with respect to the arm-C' hypothesis -- no prior m8/m9 step staged, mapped, or inspected corridor1-5 -- and (2) among the corridor1-* sequences not yet used for m9 development, it is the largest available (4381 frames/camera, 8762 images), giving the most statistical power to the holdout gates.",
+    "source": {
+      "dataset": "OpenLORIS-Scene, Hugging Face shixuesong/openloris-scene",
+      "source_commit": "cbc03108723d08322b23d0338680bffa9404cce9",
+      "archive_url": "https://huggingface.co/datasets/shixuesong/openloris-scene/resolve/cbc03108723d08322b23d0338680bffa9404cce9/package/corridor1-2_5-package.tar",
+      "tar_member": "corridor1-5.7z",
+      "archive_member_offset": 12802381312,
+      "archive_member_size": 6892693271,
+      "archive_sha256_in_source_audit_json": null,
+      "archive_sha256_source_note": "source-audit.json (the canonical staged-tier artifact) records archive_sha256=null with archive_sha256_source='not computed: corridor1-5.7z is an embedded tar member extracted via HTTP Range reads; only its byte length was verified from tar headers, matching the tar member's own recorded size'",
+      "license": "CC BY-ND 4.0",
+      "selected_frames_per_camera": 4381,
+      "selected_images": 8762,
+      "sampling": "first frames per camera, globally timestamp-sorted, both T265 fisheyes"
+    },
+    "unverifiable_note": "logs/stage.log shows archive_bytes=13853763765 and archive_sha256=c7ff1a47... from the first staging invocation: these are the corridor1-1 whole-archive defaults (corridor1-1.7z), which leaked because --archive-bytes/--archive-sha256 were not passed; the staging worker then corrected source-audit.json to the corridor1-5.7z member size 6892693271 with archive_sha256=null (member never hashed as a whole; only tar-header size verified). Image content provenance is unaffected: members were read from the stated tar offset/size."
+  },
+  "staging": {
+    "tool": "scripts/stage_openloris_corridor.py",
+    "commit": "5f0508e (bench: stage OpenLORIS sequences packed inside tar archives)",
+    "command_source": "verified verbatim from logs/timing/stage.time.txt (Command being timed)",
+    "command": "python scripts/stage_openloris_corridor.py --output-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1 --scene corridor1-5 --archive-url https://huggingface.co/datasets/shixuesong/openloris-scene/resolve/cbc03108723d08322b23d0338680bffa9404cce9/package/corridor1-2_5-package.tar --member-offset 12802381312 --member-size 6892693271 --timestamps 4381 --tier-counts 8762 --http-block-mib 16",
+    "extraction_backend": "libarchive streaming",
+    "targets_extracted": 8767,
+    "staged_images_selected": 8762,
+    "tier_manifest": {
+      "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/manifests/tier-8762.json",
+      "sha256": "27017fa2a200b228ca8bd91e1dcbd8b4060c9bd5444b53925014512c61bd3726"
+    },
+    "official_groundtruth_manifest": {
+      "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/official-groundtruth/manifest.json",
+      "note": "groundtruth.txt content intentionally not read/printed during staging (and not read during this benchmarking step per task constraints)",
+      "files": {
+        "fisheye1.txt": {
+          "bytes": 214669,
+          "sha256": "ff3d92372a9b23c40d133ab62d4063ad3ca9ee231cdc6e23e534e7e2ead4a5df"
+        },
+        "fisheye2.txt": {
+          "bytes": 214669,
+          "sha256": "34eea9ce67c8b0bdb6048a03c0eb68317141d287546095b10fb13ea558c8b0a5"
+        },
+        "groundtruth.txt": {
+          "bytes": 947431,
+          "sha256": "22070c5d9545a0a35bd0d2b34b14b83866e35ec16fa2472a67720e5b93690e27"
+        }
+      }
+    },
+    "wall_clock_time_txt": {
+      "user_s": 1193.66,
+      "system_s": 59.28,
+      "wall_clock": "28:11.65",
+      "max_rss_kib": 191684,
+      "exit_status": 0
+    }
+  },
+  "calibration_gate": {
+    "description": "pre-registered gate: corridor1-5's exported/official calibration must match corridor1-1's byte-for-byte (cameras.txt, trans_matrix.yaml) or be identical in substance (fisheye intrinsics inside sensors.yaml), since the mapping pipeline and rig manifest builder assume a shared rig geometry across corridor1-* sessions",
+    "cameras_txt": {
+      "corridor1_5_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/calibration/cameras.txt",
+      "corridor1_1_path": "/home/sasaki/datasets/openloris/corridor1-1-m5/calibration/cameras.txt",
+      "sha256": "a377b0a5e2d2fddb8e93566c20ded20fea40a1f1c630f5c33ea2b04eb4f13ea4",
+      "byte_identical": true
+    },
+    "trans_matrix_yaml": {
+      "corridor1_5_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/calibration-source/corridor1-5/trans_matrix.yaml",
+      "corridor1_1_path": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/trans_matrix.yaml",
+      "sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+      "byte_identical": true
+    },
+    "sensors_yaml_fisheye_intrinsics": {
+      "corridor1_5_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/calibration-source/corridor1-5/sensors.yaml",
+      "corridor1_1_path": "/home/sasaki/datasets/openloris/official-groundtruth/calibration/corridor1-1/sensors.yaml",
+      "whole_file_sha256_matches": false,
+      "whole_file_diff_note": "diff -u shows exactly 4 differing lines, all inside the d400_accelerometer/d400_gyroscope IMU noise_variances/bias_variances blocks (corridor1-5 has measured values, corridor1-1's copy has zeros); every camera/intrinsics/distortion block (t265_fisheye1_optical_frame, t265_fisheye2_optical_frame, d400_color_optical_frame, d400_depth_optical_frame) is untouched by the diff",
+      "fisheye_intrinsics_identical": true
+    },
+    "gate_result": "PASS (all three checks confirm shared rig geometry with corridor1-1)"
+  },
+  "feature_extraction": {
+    "tool": "target/release/examples/unordered_sfm_demo --feature-extractor sift --sift-stream-export",
+    "command_source": "verified verbatim from feature-extract/timing/shard-0.time.txt (Command being timed); identical flags across all 8 shards, --images-dir/--out-colmap vary by shard",
+    "command_shard0": "target/release/examples/unordered_sfm_demo --feature-extractor sift --images-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/feature-extract/images/shard-0 --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/calibration --sift-max-keypoints 256 --sift-max-orientations 1 --sift-contrast-threshold 0.02 --sift-stream-export --export-features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/feature-extract/features --export-features-only --out-colmap /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/feature-extract/unused-model-0",
+    "shards": 8,
+    "total_images": 8762,
+    "total_keypoints": 1451127,
+    "per_shard": [
+      {
+        "shard": 0,
+        "images": 1096,
+        "keypoints": 181276,
+        "user_s": 3413.45,
+        "system_s": 207.58,
+        "wall_clock": "1:16:20",
+        "max_rss_kib": 271664
+      },
+      {
+        "shard": 1,
+        "images": 1096,
+        "keypoints": 181690,
+        "user_s": 3422.34,
+        "system_s": 207.12,
+        "wall_clock": "1:16:39",
+        "max_rss_kib": 271484
+      },
+      {
+        "shard": 2,
+        "images": 1095,
+        "keypoints": 181492,
+        "user_s": 3403.05,
+        "system_s": 206.85,
+        "wall_clock": "1:16:58",
+        "max_rss_kib": 272260
+      },
+      {
+        "shard": 3,
+        "images": 1095,
+        "keypoints": 181481,
+        "user_s": 3409.16,
+        "system_s": 206.97,
+        "wall_clock": "1:16:18",
+        "max_rss_kib": 271616
+      },
+      {
+        "shard": 4,
+        "images": 1095,
+        "keypoints": 181555,
+        "user_s": 3387.56,
+        "system_s": 205.34,
+        "wall_clock": "1:17:17",
+        "max_rss_kib": 271512
+      },
+      {
+        "shard": 5,
+        "images": 1095,
+        "keypoints": 181280,
+        "user_s": 3419.43,
+        "system_s": 207.16,
+        "wall_clock": "1:16:53",
+        "max_rss_kib": 272276
+      },
+      {
+        "shard": 6,
+        "images": 1095,
+        "keypoints": 181001,
+        "user_s": 3409.66,
+        "system_s": 207.93,
+        "wall_clock": "1:16:39",
+        "max_rss_kib": 271648
+      },
+      {
+        "shard": 7,
+        "images": 1095,
+        "keypoints": 181352,
+        "user_s": 3400.42,
+        "system_s": 216.4,
+        "wall_clock": "1:16:51",
+        "max_rss_kib": 271496
+      }
+    ],
+    "aggregate_wall_clock_note": "8 shards ran as independent processes; longest wall clock 1:17:17 (shard 4); sum of per-shard user_s = 27265.07s",
+    "peak_rss_kib_max_across_shards": 272276
+  },
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-5",
+    "tier": "tier-8762",
+    "images": 8762,
+    "rig_frames": 4381,
+    "ground_truth_used_for_candidate_generation_matching_or_admission": false
+  },
+  "pre_registered_protocol": {
+    "pregistered_before_running": true,
+    "description": "Pipeline identical to corridor1-1's 10k arm-C' run (m9-openloris-sparse-stereo-10000-v1.json), with only dataset paths and tier-size-derived flags changed for corridor1-5's 8762-image (4381-frame/camera) tier: candidate budget 61334 (= 8762 x 7, '7n'), --periodic-ba-min-registered-images 8763 (= N+1, N=8762 images).",
+    "stage_flow": "A2 (base-only component frontier) -> B (rank0-prefix stride-8 stereo bridge on A2's unregistered tail) -> C' (stride-8 stereo bridge admitted onto A2 rank-0's own frames, deduped against pairs already in the graph, mapped with no rank0 prefix)",
+    "candidate_budget": 61334,
+    "candidate_budget_formula": "7 x 8762 images ('7n')",
+    "periodic_ba_min_registered_images": 8763,
+    "periodic_ba_min_registered_images_formula": "8762 images + 1 (N+1)",
+    "gates": [
+      {
+        "id": "P1",
+        "description": "C' registered_frames does not regress vs control B6, and clears an absolute floor",
+        "threshold": ">= B6's registered_frames (4237) AND >= 3943"
+      },
+      {
+        "id": "P2",
+        "description": "both aggregate accuracy metrics improve vs control B6",
+        "threshold": "C' component_weighted_rmse_m < B6's (0.6234934533417992) AND C' component_weighted_p95_m < B6's (1.1845623943814065)"
+      },
+      {
+        "id": "P3",
+        "description": "every C' component with >=100 registered frames has a near-metric Sim(3) scale",
+        "threshold": "sim3_scale in [0.9, 1.1] for every component with registered >= 100"
+      },
+      {
+        "id": "P4",
+        "description": "peak RSS (VmHWM) stays within a 2 GiB budget at every stage",
+        "threshold": "<= 2097152 KiB (2 GiB) per stage"
+      }
+    ]
+  },
+  "deviation_rig_timestamp_tolerance": {
+    "commit": "afd7c91de40796d9be205db12f4b32e01da252bb (feat: expose rig timestamp repair tolerance)",
+    "commit_message": "Add --timestamp-tolerance-seconds (default 0.001, unchanged) to build_openloris_rig_manifest.py. The corridor1-5 holdout contains one split cam1/cam2 exposure pair 1.03 ms apart, just over the 1 ms default.\n\nVerified GT-free before any mapping: default output is byte-identical to the corridor1-1 5k/10k manifests; at 0.002 only the header changes there (repaired_pairs stays 1); on corridor1-5 the frame rows are identical for 0.002, 0.005 and 0.01, so the holdout result is insensitive to the choice.",
+    "reason": "corridor1-5's rig manifest has one split cam1/cam2 exposure pair (cam2_007012.png / cam1_007013.png, joined as frame_id 3506 in the emitted manifest) whose timestamps are 1.03 ms apart -- just over the 1 ms default --timestamp-tolerance-seconds, which would otherwise fail rig-frame grouping for that pair.",
+    "tolerance_used_seconds": 0.002,
+    "rig_manifest_header_line": "# timestamp_tolerance_seconds 0.002 repaired_pairs 1",
+    "rig_manifest_evidence": {
+      "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rig-manifest-v1.txt",
+      "sha256": "050140b54ac6bdd99835910dad0371e904d6afafec526181eed942cd2cd94898",
+      "f_row_count": 8762,
+      "repaired_pair_frame_id": 3506,
+      "repaired_pair_images": [
+        "cam2_007012.png (sensor 1)",
+        "cam1_007013.png (sensor 0)"
+      ],
+      "verified_by": "grep '007012\\|007013' across rig-manifest-v1.txt and pipeline artifacts: frame_id 3506 maps to exactly this cam1/cam2 pair"
+    },
+    "inertness_evidence": "Per the afd7c91 commit message (verified GT-free before any mapping was run): (1) on corridor1-1, the default (0.001) rig manifest output is byte-identical to the frozen 5k/10k manifests used in prior m9 steps, and raising the tolerance to 0.002 changes only the header line (repaired_pairs stays 1) -- no F row changes; (2) on corridor1-5 itself, the F rows are identical across 0.002, 0.005, and 0.01, so the holdout mapping result is insensitive to the exact tolerance chosen within that range.",
+    "decided_before_any_mapping": true
+  },
+  "stage_a1_base_snapshot": {
+    "tool": "scripts/benchmark_electro.py --run",
+    "artifact_root": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/pipeline-sparse7n",
+    "command_source": "verified verbatim from m9/stage0-command.txt",
+    "command": "python3 scripts/benchmark_electro.py --run --features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/features256 --images-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/images --calibration-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/calibration --artifact-root /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/pipeline-sparse7n --pair-source temporal-pyramid --rig-local-grouping --retrieval-topk 32 --temporal-pyramid-max-offset 32 --candidate-budget 61334 --pairs-per-shard 32 --persistent-matcher --min-matches 12 --match-ratio 0.8 --min-pnp-inliers 8 --max-mapper-matches-per-pair 96 --snapshot-keypoints-only --periodic-ba-min-registered-images 8763 --seed-trials 16 --ba-linear-solver sparse --ba-max-iterations 8 --post-refinement-registration --global-ba-max-refinements 0",
+    "sub_phases": {
+      "candidate_generation": {
+        "command_source": "verified verbatim from pipeline-sparse7n/timing/candidate-generation.time.txt",
+        "candidate_pairs": 61334,
+        "user_s": 2324.35,
+        "system_s": 2.37,
+        "wall_clock": "38:46.86",
+        "peak_rss_kib": 1223600,
+        "exit_status": 0,
+        "candidates_txt_sha256": "e1b564544ab801fbac37bc3dff145597e1510243c0a61a6ae7d8f6c473ffa087",
+        "candidates_txt_bytes": 1140537
+      },
+      "persistent_match": {
+        "command_source": "verified verbatim from pipeline-sparse7n/timing/persistent-match.time.txt",
+        "match_ratio": 0.8,
+        "min_matches": 12,
+        "user_s": 653.06,
+        "system_s": 89.13,
+        "wall_clock": "4:29.13",
+        "peak_rss_kib": 939080,
+        "exit_status": 0
+      },
+      "mapping": {
+        "command_source": "verified verbatim from pipeline-sparse7n/timing/mapping.time.txt",
+        "note": "this is benchmark_electro.py's own generic incremental-mapper sanity check (272/8762 images registered, from mapping.log), not the rig-aware frontier used downstream; it is not used further",
+        "user_s": 92.22,
+        "system_s": 3.11,
+        "wall_clock": "1:33.92",
+        "peak_rss_kib": 558136,
+        "exit_status": 0
+      }
+    },
+    "output_snapshot": {
+      "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/pipeline-sparse7n/mapping/verified-merged.vps",
+      "bytes": 209532822,
+      "sha256": "262a8dda2b5676d724ac6150ab36d8cf8397ac7ab6d0d3becab3b26234ae7ea5",
+      "verified_pairs": 52961,
+      "accepted_correspondences": 2951978
+    },
+    "features": {
+      "image_count": 8762,
+      "total_rows_keypoints": 1451127,
+      "sha256": "0a696ef5904cdea5143dc4b972656d22f6d245fc7829839cc815417a8d0031b0"
+    },
+    "peak_rss_kib_max_of_sub_phases": 1223600
+  },
+  "stage_a2_base_only_component_frontier": {
+    "output_root": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/component-frontier-v1",
+    "binary": "target/release/examples/generalized_rig_sfm",
+    "command_source": "verified verbatim from component-frontier-v1/command.txt",
+    "command": "timeout --signal=TERM --kill-after=10s 3600s target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rig-manifest-v1.txt --features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/pipeline-sparse7n/mapping/verified-merged.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/component-frontier-v1/model --max-models 16 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+    "components": [
+      {
+        "rank": 0,
+        "supplied_frames": 4381,
+        "pairs": 52961,
+        "registered_frames": 1592,
+        "registered_images": 3184,
+        "tracks": 13656,
+        "observations": 176625,
+        "mean_reprojection_px": 1.010673114,
+        "seed_global_frame": 2805,
+        "unregistered_below_sensors": 2774
+      },
+      {
+        "rank": 1,
+        "supplied_frames": 2789,
+        "pairs": 31656,
+        "registered_frames": 777,
+        "registered_images": 1554,
+        "tracks": 6536,
+        "observations": 90813,
+        "mean_reprojection_px": 0.916436091,
+        "seed_global_frame": 348,
+        "unregistered_below_sensors": 2008
+      },
+      {
+        "rank": 2,
+        "supplied_frames": 2012,
+        "pairs": 21588,
+        "registered_frames": 228,
+        "registered_images": 456,
+        "tracks": 2298,
+        "observations": 46054,
+        "mean_reprojection_px": 0.671238663,
+        "seed_global_frame": 4319,
+        "unregistered_below_sensors": 1781
+      },
+      {
+        "rank": 3,
+        "supplied_frames": 1784,
+        "pairs": 18236,
+        "registered_frames": 1115,
+        "registered_images": 2230,
+        "tracks": 13605,
+        "observations": 128699,
+        "mean_reprojection_px": 0.994887129,
+        "seed_global_frame": 3742,
+        "unregistered_below_sensors": 664
+      },
+      {
+        "rank": 4,
+        "supplied_frames": 669,
+        "pairs": 5523,
+        "registered_frames": 515,
+        "registered_images": 1030,
+        "tracks": 3441,
+        "observations": 36272,
+        "mean_reprojection_px": 1.005918435,
+        "seed_global_frame": 1309,
+        "unregistered_below_sensors": 154
+      }
+    ],
+    "rank5_stop": {
+      "reason": "rig-component-stop: rank=5 supplied_frames=154 verified_pairs=53 reason=metric seed frame 142 triangulated fewer than 8 landmarks"
+    },
+    "total": {
+      "models": 5,
+      "registered_frames": "4227/4381",
+      "registered_images": "8454/8762",
+      "tracks": 39536,
+      "observations": 478463,
+      "mean_reprojection_px": 0.955508215,
+      "mapper_seconds": 161.729577,
+      "peak_rss_kib": 762536
+    },
+    "wall_clock_time_txt": {
+      "user_s": 162.31,
+      "system_s": 0.65,
+      "wall_clock": "2:42.97",
+      "max_rss_kib": 762536,
+      "exit_status": 0
+    },
+    "run_log_sha256": "6fff6163de099cae7598a5e592f5b6745b33e4884afae70d699e9dbb4bec307b",
+    "time_txt_sha256": "92e378f13d8b1c43af5bd46c72a9b4ad0d670917a5f9885bf45906045c61623e",
+    "still_unregistered": {
+      "count": 154,
+      "run_count": 8,
+      "runs": [
+        [
+          532,
+          536
+        ],
+        [
+          539,
+          539
+        ],
+        [
+          541,
+          541
+        ],
+        [
+          544,
+          544
+        ],
+        [
+          785,
+          845
+        ],
+        [
+          1361,
+          1431
+        ],
+        [
+          3024,
+          3028
+        ],
+        [
+          4144,
+          4152
+        ]
+      ],
+      "derivation": "mapped every registered image name in all 5 components' images.txt back to a frame id via rig-manifest-v1.txt's F rows, unioned, and took the complement in [0,4380]"
+    }
+  },
+  "stage_a3_post_map_score": {
+    "scorer": "scripts/score_openloris_model.py",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "manifest_sha256": "27017fa2a200b228ca8bd91e1dcbd8b4060c9bd5444b53925014512c61bd3726",
+    "ground_truth_sha256": "22070c5d9545a0a35bd0d2b34b14b83866e35ec16fa2472a67720e5b93690e27",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+    "components": [
+      {
+        "rank": 0,
+        "registered": 3184,
+        "gt_scored": 3184,
+        "rmse_m": 0.7511905442437915,
+        "p95_m": 1.3757093632446031,
+        "median_m": 0.5441529715972748,
+        "max_m": 2.103882291075459,
+        "sim3_scale": 0.8958756856155219,
+        "reference_extent_m": 38.73087146447053
+      },
+      {
+        "rank": 1,
+        "registered": 1554,
+        "gt_scored": 1554,
+        "rmse_m": 0.4768510894944786,
+        "p95_m": 0.8502178373302203,
+        "median_m": 0.3965741164065214,
+        "max_m": 0.88779295556784,
+        "sim3_scale": 0.8750503731101259,
+        "reference_extent_m": 22.856739754782986
+      },
+      {
+        "rank": 2,
+        "registered": 456,
+        "gt_scored": 456,
+        "rmse_m": 0.042290362382574706,
+        "p95_m": 0.08694099177695201,
+        "median_m": 0.033009414136167425,
+        "max_m": 0.1547383618908466,
+        "sim3_scale": 1.035860593659596,
+        "reference_extent_m": 1.3306130204771203
+      },
+      {
+        "rank": 3,
+        "registered": 2230,
+        "gt_scored": 2220,
+        "rmse_m": 0.7220554108499989,
+        "p95_m": 1.1127202170015502,
+        "median_m": 0.6726833024672247,
+        "max_m": 1.5874848684759786,
+        "sim3_scale": 1.0043397151789202,
+        "reference_extent_m": 33.53366664411146
+      },
+      {
+        "rank": 4,
+        "registered": 1030,
+        "gt_scored": 1030,
+        "rmse_m": 0.1523624339675914,
+        "p95_m": 0.2577316746710387,
+        "median_m": 0.06939340569047897,
+        "max_m": 1.025416944619173,
+        "sim3_scale": 0.9481461693047066,
+        "reference_extent_m": 13.365850659901296
+      }
+    ],
+    "aggregate": {
+      "models": 5,
+      "registered_images": 8454,
+      "gt_scored_images": 8444,
+      "component_weighted_rmse_m": 0.6281909817188575,
+      "component_weighted_p95_m": 1.181497128055097,
+      "component_weighted_median_m": 0.46260245415865725,
+      "component_weighted_max_m": 2.103882291075459
+    },
+    "score_json_bytes": 23476,
+    "score_json_sha256": "f7f9b0559824fbdfbf066678500a37690de8a467e735cd7b71d6697a3c9e1055"
+  },
+  "stage_b1_target_derivation": {
+    "pregistered_before_running": true,
+    "unregistered_frame_set_u": {
+      "definition": "frames not registered by A2's rank 0 across any of A2's 5 components (i.e. A2's still_unregistered set)",
+      "count": 154,
+      "contiguous_runs": [
+        [
+          532,
+          536
+        ],
+        [
+          539,
+          539
+        ],
+        [
+          541,
+          541
+        ],
+        [
+          544,
+          544
+        ],
+        [
+          785,
+          845
+        ],
+        [
+          1361,
+          1431
+        ],
+        [
+          3024,
+          3028
+        ],
+        [
+          4144,
+          4152
+        ]
+      ]
+    },
+    "target_rule": "for each maximal contiguous run in U, take the run's start frame, then every 8th frame after it, then the run's own end frame (added explicitly if not already hit by the stride)",
+    "target_frame_count": 28,
+    "target_frames": "532,536,539,541,544,785,793,801,809,817,825,833,841,845,1361,1369,1377,1385,1393,1401,1409,1417,1425,1431,3024,3028,4144,4152 (verbatim from sparse-stereo8-v1-source/candidates.txt's own embedded metadata target_frames line)",
+    "b1_unregistered_runs_txt_line_count": 8
+  },
+  "stage_b2_candidate_generation": {
+    "tool": "scripts/build_targeted_rig_candidates.py",
+    "pair_source": "targeted-dense-window-v1",
+    "max_frame_gap": 0,
+    "target_frame_count": 28,
+    "pairs_generated": 28,
+    "pair_rule": "one synchronized cam1<->cam2 pair per target frame (max_frame_gap=0)",
+    "candidates_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-v1-source/candidates.txt",
+    "candidates_bytes": 236140,
+    "candidates_sha256": "cc65e394ec38db20a744041b6c6679ebe89065f89fa3afcb336bb2d479e9270b",
+    "not_separately_timed": true,
+    "ground_truth_used": false
+  },
+  "stage_b3_sift_ratio95_match": {
+    "binary": "target/release/examples/unordered_sfm_demo",
+    "wrapper": "scripts/benchmark_electro.py --match --persistent-matcher --stream-match-features --shared-snapshot-envelope",
+    "command_source": "verified verbatim from m9/b3-command.txt",
+    "command": "python3 scripts/benchmark_electro.py --match --features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/features256 --images-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/images --calibration-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/calibration --artifact-root /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-ratio95-v1 --candidate-manifest /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-v1-source/candidates.txt --persistent-matcher --stream-match-features --shared-snapshot-envelope --min-matches 12 --match-ratio 0.95",
+    "match_ratio": 0.95,
+    "matcher": "nn (SIFT NN + Lowe ratio)",
+    "min_matches": 12,
+    "candidate_pairs": 28,
+    "user_s": 85.79,
+    "system_s": 3.25,
+    "wall_clock": "1:28.98",
+    "peak_rss_kib": 176412,
+    "exit_status": 0,
+    "merged_snapshot_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-ratio95-v1/mapping/verified-merged.vps",
+    "merged_snapshot_bytes": 292270,
+    "merged_snapshot_sha256": "25e22e331996257a5eb8d551cf1714da21d7e9e581d22af187390302e3390cf7",
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "stage_b4_frozen_ratio08_reverify": {
+    "binary": "target/release/examples/unordered_sfm_demo",
+    "command_source": "verified verbatim from m9/b4-command.txt",
+    "command": "target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/features256 --feature-suffix _features.txt --image-suffix .png --input-colmap-calibration /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/calibration --verification-mode full --matcher nn --min-matches 12 --match-ratio 0.8 --candidate-manifest /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-v1-source/candidates.txt --import-matches-file /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/matches-import.txt --export-verified-pairs-snapshot /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/verified.vps --export-verified-pairs-only --out-colmap /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/unused-model",
+    "match_ratio": 0.8,
+    "candidate_pairs": 28,
+    "accepted_pairs": 13,
+    "accepted_correspondences": 240,
+    "matches_import_txt_bytes": 141668,
+    "matches_import_txt_sha256": "1392629857322e4e5a786553e8450e971d95b031a26dd1d3594c8ac065158432",
+    "verified_snapshot_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/verified.vps",
+    "verified_snapshot_bytes": 292142,
+    "verified_snapshot_sha256": "3db287d82fdf9d5df64503ee85111d0a7b0046fe482c4a97d11062ca914cc0b8",
+    "user_s": 36.64,
+    "system_s": 1.81,
+    "wall_clock": "0:38.37",
+    "peak_rss_kib": 939332,
+    "exit_status": 0
+  },
+  "stage_b5_merge": {
+    "tool": "target/release/examples/merge_verified_pair_snapshots",
+    "order_contract": "base snapshot first (52961-pair prefix, unmodified byte order), stereo8 addition second (13-pair suffix)",
+    "inputs": [
+      {
+        "role": "base",
+        "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/pipeline-sparse7n/mapping/verified-merged.vps",
+        "pairs": 52961,
+        "sha256": "262a8dda2b5676d724ac6150ab36d8cf8397ac7ab6d0d3becab3b26234ae7ea5"
+      },
+      {
+        "role": "addition",
+        "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/verified.vps",
+        "pairs": 13,
+        "sha256": "3db287d82fdf9d5df64503ee85111d0a7b0046fe482c4a97d11062ca914cc0b8"
+      }
+    ],
+    "output_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/base-plus-stereo8.vps",
+    "output_pairs": 52974,
+    "output_bytes": 209552406,
+    "output_sha256": "c7eb7469f641cba09c636c237b6ea3926e3572e2cb8e72293ac0c052b602a276",
+    "user_s": 2.51,
+    "system_s": 0.47,
+    "wall_clock": "0:02.98",
+    "peak_rss_kib": 305152,
+    "exit_status": 0
+  },
+  "stage_b6_mapper": {
+    "binary": "target/release/examples/generalized_rig_sfm",
+    "command_source": "verified verbatim from rank0-frozen-sparse-stereo8-v1/command.txt",
+    "command": "timeout --signal=TERM --kill-after=10s 3600s target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rig-manifest-v1.txt --features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/base-plus-stereo8.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-frozen-sparse-stereo8-v1/model --max-models 16 --min-model-frames 10 --rank0-pair-prefix 52961 --min-pnp-inliers 8 --min-pnp-sensors 2 --direct-stereo-pnp-max-frame-gap 8 --direct-stereo-min-pnp-sensors 1 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+    "components": [
+      {
+        "rank": 0,
+        "supplied_frames": 4381,
+        "pairs": 52961,
+        "registered_frames": 1592,
+        "registered_images": 3184,
+        "tracks": 13656,
+        "observations": 176625,
+        "mean_reprojection_px": 1.010673114,
+        "cameras_txt_sha256_matches_a2": true,
+        "images_txt_sha256_matches_a2": true,
+        "points3d_txt_sha256_matches_a2": true
+      },
+      {
+        "rank": 1,
+        "supplied_frames": 2789,
+        "pairs": 31669,
+        "registered_frames": 784,
+        "registered_images": 1568,
+        "tracks": 6469,
+        "observations": 89317,
+        "mean_reprojection_px": 0.896851514,
+        "unregistered_below_sensors": 2001
+      },
+      {
+        "rank": 2,
+        "supplied_frames": 2005,
+        "pairs": 21586,
+        "registered_frames": 228,
+        "registered_images": 456,
+        "tracks": 2310,
+        "observations": 47036,
+        "mean_reprojection_px": 0.68399095,
+        "unregistered_below_sensors": 1774
+      },
+      {
+        "rank": 3,
+        "supplied_frames": 1777,
+        "pairs": 18234,
+        "registered_frames": 1115,
+        "registered_images": 2230,
+        "tracks": 13601,
+        "observations": 128665,
+        "mean_reprojection_px": 1.000622532,
+        "unregistered_below_sensors": 657
+      },
+      {
+        "rank": 4,
+        "supplied_frames": 662,
+        "pairs": 5521,
+        "registered_frames": 518,
+        "registered_images": 1036,
+        "tracks": 3448,
+        "observations": 38242,
+        "mean_reprojection_px": 1.032251381,
+        "unregistered_below_sensors": 143
+      }
+    ],
+    "rank7_stop": {
+      "reason": "rig-component-stop: rank=7 supplied_frames=142 verified_pairs=41 reason=metric seed frame 132 triangulated fewer than 8 landmarks"
+    },
+    "total": {
+      "models": 5,
+      "registered_frames": "4237/4381",
+      "registered_images": "8474/8762",
+      "tracks": 39484,
+      "observations": 479885,
+      "mean_reprojection_px": 0.956493491,
+      "mapper_seconds": 172.088015,
+      "peak_rss_kib": 762436
+    },
+    "wall_clock_time_txt": {
+      "user_s": 172.78,
+      "system_s": 0.62,
+      "wall_clock": "2:53.42",
+      "max_rss_kib": 762436,
+      "exit_status": 0
+    },
+    "run_log_sha256": "603db782c3258dce6fb9fb46fa743462e785a5cc32c41e96dcc7e1afc7555423",
+    "time_txt_sha256": "7db1e95a68f0d02096cdc1be4c682b5df41b14229b5afc9ba3eb763f6176f547",
+    "still_unregistered": {
+      "count": 144,
+      "run_count": 8,
+      "runs": [
+        [
+          534,
+          536
+        ],
+        [
+          539,
+          539
+        ],
+        [
+          786,
+          788
+        ],
+        [
+          790,
+          791
+        ],
+        [
+          793,
+          842
+        ],
+        [
+          1361,
+          1431
+        ],
+        [
+          3024,
+          3028
+        ],
+        [
+          4144,
+          4152
+        ]
+      ],
+      "derivation": "same method as A2: mapped every registered image name in all 5 components' images.txt back to a frame id via rig-manifest-v1.txt's F rows, unioned, complement in [0,4380]"
+    },
+    "component000_byte_identical_to_a2": {
+      "images_txt_sha256": "f9cd921e7b1eb4e2c57a0485d346ea125d58aa52d5b605b3ebedd3820e525aec",
+      "points3d_txt_sha256": "b24dbeadd866b2acc08089e156b52caf117ff711de2050d2b4b4a8d3f52685eb",
+      "cameras_txt_sha256": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+      "note": "confirms the frozen 52961-pair rank0 prefix left component-000 completely untouched by the 13-pair stereo8 addition"
+    }
+  },
+  "stage_b6_post_map_score": {
+    "scorer": "scripts/score_openloris_model.py",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+    "ground_truth_used_only_for_post_mapping_score": true,
+    "score_convention": "per-component Sim(3), image-weighted aggregate",
+    "manifest_sha256": "27017fa2a200b228ca8bd91e1dcbd8b4060c9bd5444b53925014512c61bd3726",
+    "ground_truth_sha256": "22070c5d9545a0a35bd0d2b34b14b83866e35ec16fa2472a67720e5b93690e27",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+    "components": [
+      {
+        "rank": 0,
+        "registered": 3184,
+        "gt_scored": 3184,
+        "rmse_m": 0.7511905442437915,
+        "p95_m": 1.3757093632446031,
+        "sim3_scale": 0.8958756856155219,
+        "reference_extent_m": 38.73087146447053,
+        "comparability_note": "same rank-0 model as A2/A3; unchanged by the stereo8 addition (byte-identical model files)"
+      },
+      {
+        "rank": 1,
+        "registered": 1568,
+        "gt_scored": 1568,
+        "rmse_m": 0.45496301050302795,
+        "p95_m": 0.8242143633291239,
+        "sim3_scale": 0.8712521172280204,
+        "reference_extent_m": 23.055769927700354
+      },
+      {
+        "rank": 2,
+        "registered": 456,
+        "gt_scored": 456,
+        "rmse_m": 0.04229067210163377,
+        "p95_m": 0.07967999838001287,
+        "sim3_scale": 1.0359691706843304,
+        "reference_extent_m": 1.3306130204771203
+      },
+      {
+        "rank": 3,
+        "registered": 2230,
+        "gt_scored": 2220,
+        "rmse_m": 0.7178952375449897,
+        "p95_m": 1.1276454069122974,
+        "sim3_scale": 1.0052898360670977,
+        "reference_extent_m": 33.53366664411146
+      },
+      {
+        "rank": 4,
+        "registered": 1036,
+        "gt_scored": 1036,
+        "rmse_m": 0.15262214430186383,
+        "p95_m": 0.2506879886861688,
+        "sim3_scale": 0.9457467974169707,
+        "reference_extent_m": 13.417901871789143
+      }
+    ],
+    "aggregate": {
+      "models": 5,
+      "registered_images": 8474,
+      "gt_scored_images": 8464,
+      "component_weighted_rmse_m": 0.6234934533417992,
+      "component_weighted_p95_m": 1.1845623943814065,
+      "component_weighted_median_m": 0.4599892719128229,
+      "component_weighted_max_m": 2.103882291075459
+    },
+    "score_json_bytes": 23538,
+    "score_json_sha256": "e76b9c0fea759c4d0f7e9bc801311eec6c130a8c35bf7b319be19df35be509b9"
+  },
+  "arm_c_prime": {
+    "arm_name": "arm C' (\"rank0 stereo\"): stride-8 synchronized-stereo GT-free bridge admitted onto rank 0's OWN registered frames, mapped WITHOUT --rank0-pair-prefix",
+    "control": "this file's stage_b6_mapper / stage_b6_post_map_score (control B6)",
+    "rationale": "Replicates corridor1-1's pre-registered arm C' exactly: targets are derived from A2's own component-000 (rank 0) registered frame set, a stride-8 stereo bridge is generated/matched/verified over those targets, deduplicated against pairs already present in B5's merged graph, and merged after B5's base-plus-stereo8.vps; the mapper is then run with no --rank0-pair-prefix so every rank -- including rank 0 -- sees the added stereo8 edges.",
+    "stage_c1_target_derivation": {
+      "pregistered_before_running": true,
+      "targets_source": "A2's own component-000 (rank 0) registered frame set (component000-registered-frames.txt, 1592 frames)",
+      "registered_set_shape": "a single contiguous run [1432, 3023] (1592 frames) -- corridor1-5's A2 rank 0 has no internal hole, unlike corridor1-1's 10k A2 rank 0",
+      "rule": "for each maximal contiguous run of registered frames in A2's component-000, take the run's start frame, then every 8th frame after it, then the run's own end frame (added explicitly if not already hit by the stride)",
+      "target_frame_count": 200,
+      "target_frames_first_3": [
+        1432,
+        1440,
+        1448
+      ],
+      "target_frames_last_3": [
+        3008,
+        3016,
+        3023
+      ],
+      "target_frame_count_check": "independently recomputed: floor((3023-1432)/8)+1 = 199 strided targets + 1 explicit run-end = 200, matching c1-targets.txt's line count and rank0-stereo8-v1-source/candidates.txt's embedded metadata target_frames line exactly"
+    },
+    "gates": [
+      {
+        "id": "P1",
+        "description": "C' registered_frames does not regress vs control B6, and clears an absolute floor",
+        "threshold": ">= 4237 (B6) AND >= 3943"
+      },
+      {
+        "id": "P2",
+        "description": "both aggregate accuracy metrics improve vs control B6",
+        "threshold": "rmse < 0.6234934533417992 m AND p95 < 1.1845623943814065 m"
+      },
+      {
+        "id": "P3",
+        "description": "every C' component with >=100 registered frames has sim3_scale in [0.9, 1.1]",
+        "threshold": "[0.9, 1.1] for components with registered >= 100"
+      },
+      {
+        "id": "P4",
+        "description": "peak RSS (VmHWM) stays within a 2 GiB budget at every stage",
+        "threshold": "<= 2097152 KiB per stage"
+      }
+    ],
+    "stage_c2_sift_ratio95_match": {
+      "tool": "scripts/build_targeted_rig_candidates.py (candidate generation) + scripts/benchmark_electro.py --match (matching)",
+      "pair_source": "targeted-dense-window-v1",
+      "max_frame_gap": 0,
+      "candidates_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-stereo8-v1-source/candidates.txt",
+      "candidates_bytes": 239609,
+      "candidates_sha256": "9706377ec2c85b9234b2eb5700c41c8039a9c5999ad28f9560c8bbf32c7bd3de",
+      "candidate_pairs": 200,
+      "match_ratio": 0.95,
+      "matcher": "nn (SIFT NN + Lowe ratio)",
+      "min_matches": 12,
+      "shards": 7,
+      "user_s": 88.33,
+      "system_s": 3.62,
+      "wall_clock": "1:30.00",
+      "peak_rss_kib": 176428,
+      "exit_status": 0,
+      "merged_snapshot_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-stereo8-sift-ratio95-v1/mapping/verified-merged.vps",
+      "merged_snapshot_bytes": 1447046,
+      "merged_snapshot_sha256": "de096fb5e5981b54e15251f7bd016b69d762b88fed33be98c1c5b88a095f101c",
+      "accepted_pairs": 200,
+      "ground_truth_used_for_selection_or_mapping": false
+    },
+    "stage_c3_dedup_and_reverify": {
+      "binary": "target/release/examples/unordered_sfm_demo",
+      "match_ratio": 0.8,
+      "candidate_manifest": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-stereo8-v1-source/candidates.txt",
+      "pre_dedup": {
+        "description": "matches-import-pre-dedup.txt reconstructed from stage-c2's ratio-0.95 merged snapshot, reverified under the frozen ratio-0.8 policy BEFORE dedup against B5's base-plus-stereo8.vps",
+        "matches_import_pre_dedup_txt_bytes": 258447,
+        "matches_import_pre_dedup_txt_sha256": "611c108b9d3ab36c39ade80b6efd449fdaae17debcf637542168f0f8497b0c74",
+        "candidate_pairs": 200,
+        "accepted_pairs": 200,
+        "accepted_correspondences": 16813,
+        "verified_pre_dedup_vps_bytes": 1423702,
+        "verified_pre_dedup_vps_sha256": "dbf197eba1eb13a96b63a28277f7896ffae84211405911e3effa30f817acf585",
+        "verify_pre_dedup_time_txt": {
+          "user_s": 38.58,
+          "system_s": 1.74,
+          "wall_clock": "0:38.41",
+          "peak_rss_kib": 941012,
+          "exit_status": 0
+        }
+      },
+      "dedup_rule_applied": {
+        "description": "a deterministic, GT-free rule (same as corridor1-1's arm C'): drop any stage-c3 candidate pair already present (as an unordered image-index pair) in B5's 52974-pair base-plus-stereo8.vps before merging",
+        "pairs_dropped": 60,
+        "dropped_pairs_frame_ids": [
+          1440,
+          1464,
+          1528,
+          1632,
+          1720,
+          1808,
+          1848,
+          1856,
+          1864,
+          1872,
+          1888,
+          1904,
+          1912,
+          1928,
+          1944,
+          1960,
+          1976,
+          2032,
+          2056,
+          2128,
+          2160,
+          2304,
+          2312,
+          2360,
+          2384,
+          2392,
+          2400,
+          2416,
+          2440,
+          2456,
+          2472,
+          2480,
+          2488,
+          2496,
+          2504,
+          2512,
+          2520,
+          2640,
+          2656,
+          2672,
+          2680,
+          2696,
+          2712,
+          2720,
+          2728,
+          2744,
+          2752,
+          2768,
+          2784,
+          2792,
+          2808,
+          2816,
+          2848,
+          2856,
+          2888,
+          2936,
+          2944,
+          2976,
+          2984,
+          3008
+        ]
+      },
+      "post_dedup": {
+        "description": "matches-import.txt with the 60 overlapping pairs removed, reverified under the same frozen ratio-0.8 policy",
+        "matches_import_txt_bytes": 220574,
+        "matches_import_txt_sha256": "319e9fb440489700487c4953d41d20b8a4caa5d910447bd9329e6a5b2a405996",
+        "candidate_pairs": 200,
+        "accepted_pairs": 140,
+        "accepted_correspondences": 11401,
+        "verified_vps_bytes": 1053390,
+        "verified_vps_sha256": "0e2bf696f5410ab0c365c0034f2ca8bb2baf07e0430205a3aea16ac4f1bb6164",
+        "verify_time_txt": {
+          "user_s": 38.28,
+          "system_s": 1.78,
+          "wall_clock": "0:38.77",
+          "peak_rss_kib": 940564,
+          "exit_status": 0
+        }
+      },
+      "targets_accepted_dedup_summary": "200 targets -> 200 accepted at ratio 0.95 -> 60 already in graph (dropped) -> 140 merged"
+    },
+    "stage_c4_merge": {
+      "tool": "target/release/examples/merge_verified_pair_snapshots",
+      "order_contract": "B5's base-plus-stereo8.vps first (52974-pair prefix), post-dedup rank0-stereo8 addition second (140-pair suffix)",
+      "inputs": [
+        {
+          "role": "base",
+          "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/sparse-stereo8-sift-reverify-v1/base-plus-stereo8.vps",
+          "pairs": 52974,
+          "sha256": "c7eb7469f641cba09c636c237b6ea3926e3572e2cb8e72293ac0c052b602a276"
+        },
+        {
+          "role": "addition",
+          "path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-stereo8-sift-reverify-v1/verified.vps (post-dedup)",
+          "pairs": 140,
+          "sha256": "0e2bf696f5410ab0c365c0034f2ca8bb2baf07e0430205a3aea16ac4f1bb6164"
+        }
+      ],
+      "output_path": "/home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-stereo8-sift-reverify-v1/base-plus-stereo8-plus-rank0stereo8.vps",
+      "output_pairs": 53114,
+      "output_bytes": 210333238,
+      "output_sha256": "505c93327879f21776046d30be37b8b29eb02561305dfbe97c1dffc8a0773fd7",
+      "user_s": 2.25,
+      "system_s": 0.36,
+      "wall_clock": "0:02.61",
+      "peak_rss_kib": 305252,
+      "exit_status": 0
+    },
+    "stage_c5_mapper": {
+      "binary": "target/release/examples/generalized_rig_sfm",
+      "command_source": "verified verbatim from all-stereo8-v1/command.txt",
+      "command": "timeout --signal=TERM --kill-after=10s 3600s target/release/examples/generalized_rig_sfm --manifest /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rig-manifest-v1.txt --features-dir /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/tiers/tier-8762/features256 --snapshot /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/rank0-stereo8-sift-reverify-v1/base-plus-stereo8-plus-rank0stereo8.vps --out-colmap /home/sasaki/datasets/openloris/corridor1-5-m9-holdout-v1/m9/all-stereo8-v1/model --max-models 16 --min-model-frames 10 --min-pnp-inliers 8 --min-pnp-sensors 2 --direct-stereo-pnp-max-frame-gap 8 --direct-stereo-min-pnp-sensors 1 --max-matches-per-pair 96 --max-reprojection-error-px 4 --pnp-max-iterations 512 --local-ba-every 10 --local-ba-window 40 --local-ba-iterations 8 --structure-refinement-iterations 5 --pair-confidence-tracks --complete-tracks-after-registration --track-completion-max-passes 2 --track-completion-max-reprojection-error-px 1 --final-filter-refinement-passes 2",
+      "key_difference_from_b6": "NO --rank0-pair-prefix flag -- every rank's PnP/BA sees all 53114 pairs, including the new rank0-stereo8 edges inside rank 0's own frame range",
+      "components": [
+        {
+          "rank": 0,
+          "supplied_frames": 4381,
+          "pairs": 53114,
+          "registered_frames": 1596,
+          "registered_images": 3192,
+          "tracks": 13865,
+          "observations": 184796,
+          "mean_reprojection_px": 1.012371626,
+          "seed_global_frame": 2805
+        },
+        {
+          "rank": 1,
+          "supplied_frames": 2785,
+          "pairs": 31652,
+          "registered_frames": 784,
+          "registered_images": 1568,
+          "tracks": 6469,
+          "observations": 89317,
+          "mean_reprojection_px": 0.896851514,
+          "seed_global_frame": 348,
+          "unregistered_below_sensors": 1997
+        },
+        {
+          "rank": 2,
+          "supplied_frames": 2001,
+          "pairs": 21569,
+          "registered_frames": 228,
+          "registered_images": 456,
+          "tracks": 2309,
+          "observations": 46904,
+          "mean_reprojection_px": 0.681807904,
+          "seed_global_frame": 4319,
+          "unregistered_below_sensors": 1770
+        },
+        {
+          "rank": 3,
+          "supplied_frames": 1773,
+          "pairs": 18217,
+          "registered_frames": 1115,
+          "registered_images": 2230,
+          "tracks": 13596,
+          "observations": 128338,
+          "mean_reprojection_px": 1.000145459,
+          "seed_global_frame": 3742,
+          "unregistered_below_sensors": 656
+        },
+        {
+          "rank": 4,
+          "supplied_frames": 658,
+          "pairs": 5504,
+          "registered_frames": 518,
+          "registered_images": 1036,
+          "tracks": 3448,
+          "observations": 38242,
+          "mean_reprojection_px": 1.032251381,
+          "seed_global_frame": 1309,
+          "unregistered_below_sensors": 139
+        }
+      ],
+      "rank6_stop": {
+        "reason": "rig-component-stop: rank=6 supplied_frames=139 verified_pairs=30 reason=metric seed frame 129 triangulated fewer than 8 landmarks"
+      },
+      "total": {
+        "models": 5,
+        "registered_frames": "4241/4381",
+        "registered_images": "8482/8762",
+        "tracks": 39687,
+        "observations": 487597,
+        "mean_reprojection_px": 0.957753753,
+        "mapper_seconds": 171.976754,
+        "peak_rss_kib": 764172
+      },
+      "wall_clock_time_txt": {
+        "user_s": 172.57,
+        "system_s": 0.55,
+        "wall_clock": "2:53.15",
+        "max_rss_kib": 764172,
+        "exit_status": 0
+      },
+      "still_unregistered": {
+        "count": 140,
+        "run_count": 8,
+        "runs": [
+          [
+            534,
+            536
+          ],
+          [
+            539,
+            539
+          ],
+          [
+            786,
+            788
+          ],
+          [
+            790,
+            791
+          ],
+          [
+            793,
+            842
+          ],
+          [
+            1361,
+            1430
+          ],
+          [
+            3027,
+            3028
+          ],
+          [
+            4144,
+            4152
+          ]
+        ],
+        "derivation": "same method as A2/B6: mapped every registered image name in all 5 components' images.txt back to a frame id via rig-manifest-v1.txt's F rows, unioned, complement in [0,4380]; 4 fewer unregistered frames than B6 (140 vs 144)"
+      },
+      "run_log_sha256": "c97d02e0ba5a84cbcd3a8b0520c6560034288f398b87e1a1183d88db8097cdd1",
+      "time_txt_sha256": "ec7014e7349723a4fa9bc193e58ae33aaa57f5d680ecf2b6f5cd7f6123230382",
+      "model_file_sha256": {
+        "component-000/images.txt": "fccd1ee31b5b6780a9fdc796263166959f70a0de9be615046f8157edc1fe2661",
+        "component-000/points3D.txt": "e140677888f24527ee32200a3c9d895c5e0bbba39d534ccf519d57898286d1de",
+        "component-001/images.txt": "091e4fac393b6d08c5411d8941c30474e234050885cef545bab1f93144b5f2e3",
+        "component-001/points3D.txt": "a6877823b2803d539b426883c4131e48a2ac5766d6b663b19013de1c01eed3b6",
+        "component-002/images.txt": "09f9bd0cd06adbe80f05409888cb73189e85b77993f619cde2c4d5b19651689b",
+        "component-002/points3D.txt": "98458c49833b524731445b1280ed68e8476b0742aa555f61b257ed1e3a8fd540",
+        "component-003/images.txt": "05a478ad047e0b78a5be19df73e3e02c4e1e20cc73b6e8b3fb1a5413056af1e5",
+        "component-003/points3D.txt": "d199af33e84b796679d358d1312ac74204bb56fcc50ac23eb6921924fdc37f8b",
+        "component-004/images.txt": "c7dec5192d18137cc21c7c009b741a5648d83b1793180d74f05ef531b45c3ee8",
+        "component-004/points3D.txt": "2a740e2e84c74ce1113970d848f8783c82deddd3b21464ed8d4046806993646b",
+        "components.tsv": "783d1d1a8093232e276fd74c46d8a65f39dfed6175ea83f7f5325020f99cceec"
+      }
+    },
+    "stage_c6_post_map_score": {
+      "scorer": "scripts/score_openloris_model.py",
+      "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0",
+      "ground_truth_used_only_for_post_mapping_score": true,
+      "score_convention": "per-component Sim(3), image-weighted aggregate",
+      "manifest_sha256": "27017fa2a200b228ca8bd91e1dcbd8b4060c9bd5444b53925014512c61bd3726",
+      "ground_truth_sha256": "22070c5d9545a0a35bd0d2b34b14b83866e35ec16fa2472a67720e5b93690e27",
+      "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+      "components": [
+        {
+          "rank": 0,
+          "registered": 3192,
+          "gt_scored": 3192,
+          "rmse_m": 0.7814617759409137,
+          "p95_m": 1.0985071037189786,
+          "median_m": 0.7691090779231446,
+          "max_m": 1.5881353660236266,
+          "sim3_scale": 0.9221384796093484,
+          "reference_extent_m": 38.83559382620665,
+          "comparability_note": "same rank-0 frame set as A2/B6's rank 0 plus 4 additionally registered frames (1596 vs 1592/1592), NOT byte-identical to B6's rank 0 -- the rank0-stereo8 edges (visible here because no --rank0-pair-prefix was used) move rank 0's own fitted Sim(3) scale from 0.8958756856155219 (A2/B6) to 0.9221384796093484 (C')"
+        },
+        {
+          "rank": 1,
+          "registered": 1568,
+          "gt_scored": 1568,
+          "rmse_m": 0.45496301050302795,
+          "p95_m": 0.8242143633291239,
+          "sim3_scale": 0.8712521172280204,
+          "reference_extent_m": 23.055769927700354,
+          "comparability_note": "identical to B6's rank 1 (not touched by this arm's rank0-targeted stereo bridge)"
+        },
+        {
+          "rank": 2,
+          "registered": 456,
+          "gt_scored": 456,
+          "rmse_m": 0.04226019599711299,
+          "p95_m": 0.0810614707432442,
+          "sim3_scale": 1.0375849005186917,
+          "reference_extent_m": 1.3306130204771203
+        },
+        {
+          "rank": 3,
+          "registered": 2230,
+          "gt_scored": 2220,
+          "rmse_m": 0.7154358725040353,
+          "p95_m": 1.1198544413730487,
+          "sim3_scale": 1.0051640181951043,
+          "reference_extent_m": 33.53366664411146
+        },
+        {
+          "rank": 4,
+          "registered": 1036,
+          "gt_scored": 1036,
+          "rmse_m": 0.15262214430186383,
+          "p95_m": 0.2506879886861688,
+          "sim3_scale": 0.9457467974169707,
+          "reference_extent_m": 13.417901871789143
+        }
+      ],
+      "aggregate": {
+        "models": 5,
+        "registered_images": 8482,
+        "gt_scored_images": 8472,
+        "component_weighted_rmse_m": 0.6367624133319092,
+        "component_weighted_p95_m": 1.0641870737390404,
+        "component_weighted_median_m": 0.6361197822385256,
+        "component_weighted_max_m": 1.8324055985037253
+      },
+      "score_json_bytes": 23464,
+      "score_json_sha256": "082595767a2b00b5c2e61e1912eee7e20bdeeaab08028dee5f1d31c8d19b3c67"
+    },
+    "comparison_vs_b6": {
+      "aggregate": {
+        "registered_frames": {
+          "b6": "4237/4381",
+          "c_prime": "4241/4381",
+          "delta": 4
+        },
+        "registered_images": {
+          "b6": 8474,
+          "c_prime": 8482,
+          "delta": 8
+        },
+        "gt_scored_images": {
+          "b6": 8464,
+          "c_prime": 8472,
+          "delta": 8
+        },
+        "component_weighted_rmse_m": {
+          "b6": 0.6234934533417992,
+          "c_prime": 0.6367624133319092,
+          "change_pct": 2.128,
+          "direction": "regression (worse)"
+        },
+        "component_weighted_p95_m": {
+          "b6": 1.1845623943814065,
+          "c_prime": 1.0641870737390404,
+          "change_pct": -10.16,
+          "direction": "improvement (better)"
+        },
+        "peak_rss_kib_mapper_stage": {
+          "b6": 762436,
+          "c_prime": 764172,
+          "delta_pct": 0.228
+        }
+      },
+      "rank0_component": {
+        "sim3_scale": {
+          "a2_b6": 0.8958756856155219,
+          "c_prime": 0.9221384796093484
+        },
+        "rmse_m": {
+          "a2_b6": 0.7511905442437915,
+          "c_prime": 0.7814617759409137
+        },
+        "p95_m": {
+          "a2_b6": 1.3757093632446031,
+          "c_prime": 1.0985071037189786
+        },
+        "registered_frames": {
+          "a2_b6": 1592,
+          "c_prime": 1596
+        },
+        "note": "unlike corridor1-1's 10k arm C', which fixed a severely degenerate rank-0 scale (0.045 -> 0.989), corridor1-5's A2/B6 rank 0 already had a moderately reasonable scale (0.896) before C' ran. Admitting the rank0-stereo8 edges nudges the scale further toward metric (0.896 -> 0.922) and cuts p95 (1.376 -> 1.099 m), but RMSE regresses slightly (0.751 -> 0.782 m), unlike corridor1-1 where every rank-0 metric improved."
+      }
+    }
+  },
+  "results_summary": {
+    "models_and_registration": {
+      "A2": {
+        "models": 5,
+        "registered_frames": "4227/4381",
+        "registered_images": "8454/8762",
+        "gt_scored_images": 8444
+      },
+      "B6": {
+        "models": 5,
+        "registered_frames": "4237/4381",
+        "registered_images": "8474/8762",
+        "gt_scored_images": 8464
+      },
+      "C_prime": {
+        "models": 5,
+        "registered_frames": "4241/4381",
+        "registered_images": "8482/8762",
+        "gt_scored_images": 8472
+      }
+    },
+    "aggregate_accuracy_m": {
+      "A2": {
+        "rmse": 0.6281909817188575,
+        "p95": 1.181497128055097,
+        "median": 0.46260245415865725
+      },
+      "B6": {
+        "rmse": 0.6234934533417992,
+        "p95": 1.1845623943814065,
+        "median": 0.4599892719128229
+      },
+      "C_prime": {
+        "rmse": 0.6367624133319092,
+        "p95": 1.0641870737390404,
+        "median": 0.6361197822385256
+      }
+    },
+    "rank0_component_m_and_scale": {
+      "A2_and_B6_rank0": {
+        "registered": 3184,
+        "rmse": 0.7511905442437915,
+        "p95": 1.3757093632446031,
+        "sim3_scale": 0.8958756856155219,
+        "note": "byte-identical model between A2 and B6 (frozen rank0 prefix)"
+      },
+      "C_prime_rank0": {
+        "registered": 3192,
+        "rmse": 0.7814617759409137,
+        "p95": 1.0985071037189786,
+        "sim3_scale": 0.9221384796093484
+      }
+    },
+    "per_rank_supplied_pairs_registered": {
+      "A2": [
+        {
+          "rank": 0,
+          "supplied_frames": 4381,
+          "pairs": 52961,
+          "registered_frames": 1592
+        },
+        {
+          "rank": 1,
+          "supplied_frames": 2789,
+          "pairs": 31656,
+          "registered_frames": 777
+        },
+        {
+          "rank": 2,
+          "supplied_frames": 2012,
+          "pairs": 21588,
+          "registered_frames": 228
+        },
+        {
+          "rank": 3,
+          "supplied_frames": 1784,
+          "pairs": 18236,
+          "registered_frames": 1115
+        },
+        {
+          "rank": 4,
+          "supplied_frames": 669,
+          "pairs": 5523,
+          "registered_frames": 515
+        }
+      ],
+      "B6": [
+        {
+          "rank": 0,
+          "supplied_frames": 4381,
+          "pairs": 52961,
+          "registered_frames": 1592
+        },
+        {
+          "rank": 1,
+          "supplied_frames": 2789,
+          "pairs": 31669,
+          "registered_frames": 784
+        },
+        {
+          "rank": 2,
+          "supplied_frames": 2005,
+          "pairs": 21586,
+          "registered_frames": 228
+        },
+        {
+          "rank": 3,
+          "supplied_frames": 1777,
+          "pairs": 18234,
+          "registered_frames": 1115
+        },
+        {
+          "rank": 4,
+          "supplied_frames": 662,
+          "pairs": 5521,
+          "registered_frames": 518
+        }
+      ],
+      "C_prime": [
+        {
+          "rank": 0,
+          "supplied_frames": 4381,
+          "pairs": 53114,
+          "registered_frames": 1596
+        },
+        {
+          "rank": 1,
+          "supplied_frames": 2785,
+          "pairs": 31652,
+          "registered_frames": 784
+        },
+        {
+          "rank": 2,
+          "supplied_frames": 2001,
+          "pairs": 21569,
+          "registered_frames": 228
+        },
+        {
+          "rank": 3,
+          "supplied_frames": 1773,
+          "pairs": 18217,
+          "registered_frames": 1115
+        },
+        {
+          "rank": 4,
+          "supplied_frames": 658,
+          "pairs": 5504,
+          "registered_frames": 518
+        }
+      ]
+    },
+    "wall_rss_per_stage": {
+      "pipeline_sparse7n_candidate_generation": {
+        "wall_clock": "38:46.86",
+        "peak_rss_kib": 1223600
+      },
+      "pipeline_sparse7n_persistent_match": {
+        "wall_clock": "4:29.13",
+        "peak_rss_kib": 939080
+      },
+      "pipeline_sparse7n_mapping_sanity_check": {
+        "wall_clock": "1:33.92",
+        "peak_rss_kib": 558136
+      },
+      "A2_mapper": {
+        "wall_clock": "2:42.97",
+        "peak_rss_kib": 762536
+      },
+      "B3_match_ratio95": {
+        "wall_clock": "1:28.98",
+        "peak_rss_kib": 176412
+      },
+      "B4_reverify_ratio08": {
+        "wall_clock": "0:38.37",
+        "peak_rss_kib": 939332
+      },
+      "B5_merge": {
+        "wall_clock": "0:02.98",
+        "peak_rss_kib": 305152
+      },
+      "B6_mapper": {
+        "wall_clock": "2:53.42",
+        "peak_rss_kib": 762436
+      },
+      "C2_match_ratio95": {
+        "wall_clock": "1:30.00",
+        "peak_rss_kib": 176428
+      },
+      "C3_pre_dedup_reverify": {
+        "wall_clock": "0:38.41",
+        "peak_rss_kib": 941012
+      },
+      "C3_post_dedup_reverify": {
+        "wall_clock": "0:38.77",
+        "peak_rss_kib": 940564
+      },
+      "C4_merge": {
+        "wall_clock": "0:02.61",
+        "peak_rss_kib": 305252
+      },
+      "C5_mapper": {
+        "wall_clock": "2:53.15",
+        "peak_rss_kib": 764172
+      },
+      "feature_extraction_max_shard": {
+        "wall_clock": "1:17:17",
+        "peak_rss_kib": 272276
+      },
+      "staging": {
+        "wall_clock": "28:11.65",
+        "peak_rss_kib": 191684
+      },
+      "max_across_all_stages_kib": 1223600
+    },
+    "target_accepted_dedup_counts": {
+      "B": {
+        "targets": 28,
+        "accepted_at_ratio08": 13
+      },
+      "C": {
+        "targets": 200,
+        "accepted_at_ratio095": 200,
+        "already_in_graph_dropped": 60,
+        "merged_after_dedup": 140
+      }
+    },
+    "still_unregistered_runs": {
+      "A2": {
+        "count": 154,
+        "run_count": 8
+      },
+      "B6": {
+        "count": 144,
+        "run_count": 8
+      },
+      "C_prime": {
+        "count": 140,
+        "run_count": 8
+      }
+    }
+  },
+  "gates": [
+    {
+      "id": "P1",
+      "description": "C' registered_frames does not regress vs control B6, and clears an absolute floor",
+      "threshold": ">= 4237 (B6) AND >= 3943",
+      "actual": "4241/4381",
+      "checks": {
+        "vs_b6_4237": true,
+        "vs_floor_3943": true
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "P2",
+      "description": "both aggregate accuracy metrics improve vs control B6",
+      "threshold": "rmse < 0.6234934533417992 m AND p95 < 1.1845623943814065 m",
+      "actual": {
+        "rmse_m": 0.6367624133319092,
+        "p95_m": 1.0641870737390404
+      },
+      "checks": {
+        "rmse_improves": false,
+        "rmse_detail": "0.6367624133319092 >= 0.6234934533417992 (B6) -- regression",
+        "p95_improves": true,
+        "p95_detail": "1.0641870737390404 < 1.1845623943814065 (B6) -- improvement"
+      },
+      "status": "FAIL"
+    },
+    {
+      "id": "P3",
+      "description": "every C' component with >=100 registered frames has sim3_scale in [0.9, 1.1]",
+      "threshold": "[0.9, 1.1] for registered >= 100",
+      "per_component": [
+        {
+          "rank": 0,
+          "registered": 3192,
+          "sim3_scale": 0.9221384796093484,
+          "in_band": true
+        },
+        {
+          "rank": 1,
+          "registered": 1568,
+          "sim3_scale": 0.8712521172280204,
+          "in_band": false
+        },
+        {
+          "rank": 2,
+          "registered": 456,
+          "sim3_scale": 1.0375849005186917,
+          "in_band": true
+        },
+        {
+          "rank": 3,
+          "registered": 2230,
+          "sim3_scale": 1.0051640181951043,
+          "in_band": true
+        },
+        {
+          "rank": 4,
+          "registered": 1036,
+          "sim3_scale": 0.9457467974169707,
+          "in_band": true
+        }
+      ],
+      "failing_component": {
+        "rank": 1,
+        "sim3_scale": 0.8712521172280204,
+        "note": "component-001's scale is unchanged by arm C' (rank 1 is not touched by the rank0-targeted stereo bridge) and was ALREADY outside [0.9, 1.1] in A2 (0.8750503731101259) and in B6 (0.8712521172280204); component-000/rank 0 was also outside the band in A2/B6 (0.8958756856155219) before C' moved it in-band (0.9221384796093484). Unlike corridor1-1, where arm C' brought a severely degenerate rank-0 scale from 0.045 to 0.989 with all other ranks already near-metric, corridor1-5 has a second component (rank 1) whose scale is outside the band independent of the stereo8 method and untouched by it."
+      },
+      "status": "FAIL"
+    },
+    {
+      "id": "P4",
+      "description": "peak RSS (VmHWM) stays within a 2 GiB (2097152 KiB) budget at every stage",
+      "threshold": "<= 2097152 KiB per stage",
+      "actual_max_kib": 1223600,
+      "actual_max_stage": "pipeline-sparse7n candidate-generation (A1)",
+      "status": "PASS"
+    }
+  ],
+  "analysis": {
+    "1_no_generalization_claim": "The holdout gates fail (P2 and P3 FAIL), so this step makes no generalization or performance claim for arm C' beyond corridor1-1. Arm C' remains, as recorded in m9-openloris-sparse-stereo-10000-v1.json, a corridor1-1 development result: adopted as the current 10k development pipeline there, but not shown here to transfer cleanly to a second, untouched sequence.",
+    "2_corridor1_1_failure_mode_absent_here": "The specific failure mode arm C' was designed to fix on corridor1-1 -- a base graph (A2's rank 0) with almost no cross-sensor edges, producing a severely degenerate Sim(3) scale (0.045) -- does not occur on corridor1-5. corridor1-5's base-only A2 already registers 4227/4381 frames (96.5%) with a moderately reasonable rank-0 scale of 0.8958756856155219 (~0.896), far from corridor1-1's 0.045. Corroborating this, 60 of the 200 rank-0-targeted stereo8 candidates in arm C' were already present as verified edges in the base graph before this arm ran (corridor1-1's 10k arm C' found only 13 of 244 already present) -- i.e. corridor1-5's base pair graph already carries substantially more cross-sensor structure around rank 0's frames than corridor1-1's did.",
+    "3_mixed_effect_on_holdout": "Arm C's effect on corridor1-5 is mixed rather than uniformly positive. Rank 0's own metrics: p95 improves (1.3757093632446031 -> 1.0985071037189786 m) and sim3_scale moves toward metric (0.8958756856155219 -> 0.9221384796093484), consistent with corridor1-1's direction of effect -- but rank 0's RMSE regresses (0.7511905442437915 -> 0.7814617759409137 m), opposite to corridor1-1 where every rank-0 metric improved together. At the aggregate level, RMSE regresses +2.128% vs control B6 (0.6234934533417992 -> 0.6367624133319092 m) while p95 improves -10.16% (1.1845623943814065 -> 1.0641870737390404 m). Because P2 requires BOTH metrics to improve, the gate fails on the RMSE leg alone.",
+    "4_next_steps": "Open follow-on question (GT-free, to be investigated without touching groundtruth.txt): why does corridor1-1's base graph lack same-frame cross-sensor pairs around its rank-0 frontier while corridor1-5's base graph already has them, given both runs use identical temporal-pyramid/rig-local-grouping candidate generation flags (--pair-source temporal-pyramid --rig-local-grouping --retrieval-topk 32 --temporal-pyramid-max-offset 32) and the same 7n candidate budget scaling. No COLMAP control was run on corridor1-5 in this step, and no README/registry promotion is made -- this file records a pre-registered holdout check, not a benchmark result."
+  },
+  "decision": {
+    "outcome": "2 of 4 pre-registered holdout gates PASS (P1, P4); 2 FAIL (P2, P3)",
+    "summary": "Running the corridor1-1-derived arm C' method unmodified on the untouched corridor1-5 sequence registers 4241/4381 frames (vs B6's 4237/4381, P1 PASS) with all stages staying well under the 2 GiB RSS budget (max 1,223,600 KiB, P4 PASS). However, the aggregate accuracy gate fails: RMSE regresses 2.1% vs control B6 even though p95 improves 10.2% (P2 FAIL, since both legs are required). The per-component scale gate also fails: component-001's Sim(3) scale (0.8712521172280204) sits outside [0.9, 1.1], but this is a pre-existing property of the base graph (already 0.8750503731101259 in A2, untouched by arm C's rank0-targeted bridge) rather than something arm C' introduced or could fix (P3 FAIL). Root-cause analysis shows the corridor1-1 failure mode arm C' was built to correct (a near-edgeless, severely scale-degenerate rank-0 base graph) is largely absent in corridor1-5 -- its A2 rank 0 already registers 96.5% of frames with a scale of 0.896, and 60 of 200 candidate rank0-stereo8 pairs were already present in the base graph.",
+    "not_claimed": "COLMAP parity, wall-clock/performance superiority, or that arm C' generalizes as a corridor-agnostic accuracy improvement. This holdout run establishes that arm C' does NOT clear its own pre-registered accuracy and per-component-scale gates on a second sequence, so m9-openloris-sparse-stereo-10000-v1.json's corridor1-1 result should continue to be read as a development-set finding, not a validated general method."
+  },
+  "caveats": {
+    "a": "P2 fails on the RMSE leg by a small margin (2.1% regression) while p95 improves substantially (10.2%); a practitioner weighting p95 (tail behavior) more heavily than mean RMSE might read this arm more favorably, but the pre-registered gate as written requires both metrics to improve, and this step reports the gate result as pre-registered rather than re-litigating the threshold post hoc.",
+    "b": "P3's failing component (component-001, rank 1) was never touched by arm C's stereo8 bridge (which targets only rank 0's own frames) and was already outside the [0.9, 1.1] band in A2 before any stereo8 bridging ran on corridor1-5 at all. This means P3's failure reflects a pre-existing property of corridor1-5's rank-1 component's base graph, not a regression introduced by this step's method -- but the gate, as pre-registered, does not distinguish pre-existing from introduced scale problems, so it is reported as FAIL per its literal text.",
+    "c": "No COLMAP control was run on corridor1-5 in this step (context_not_gated numbers from other benchmark files, such as the corridor1-1 COLMAP 10k control, are not directly comparable to corridor1-5 and are omitted here rather than juxtaposed misleadingly).",
+    "d": "This file's own archive_sha256 provenance has an internal discrepancy between the final source-audit.json (archive_sha256=null, documented as not computed) and an in-flight copy embedded in logs/stage.log (a populated archive_sha256 for the full tar). See holdout_selection.unverifiable_note above; this was not independently reconciled."
+  }
+}
