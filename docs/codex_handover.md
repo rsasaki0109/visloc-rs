@@ -2,6 +2,77 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-13 10k Phase A/B/C' 追記（rank0 scale drift解消、C'をdev pipelineに採用）
+
+10k tier（tier-10000, 5000 frame/10000 image）で3 phase実施。Phase A（base-only
+frontier, `openloris-tier10000-component-frontier-v1`）: rank0のみ1933/5000 frame
+登録、rank1は"no frame has enough multi-sensor tracks"で即stop。Phase B（B6,
+frozen `--rank0-pair-prefix 58879`＋unregistered tail向けstride-8 stereoブリッジ）:
+4813/5000 frame、4 component、aggregate RMSE 3.400433m/p95 8.328011mとGate
+G1-G5全PASSだが、lead reviewでrank0自身のfitted Sim(3) scaleが0.045（5kの同種rank0-prefix
+armは0.381）まで劣化していると判明。rank1-3（stereo8で新規登録）はscale
+0.968-0.991とほぼmetricなので、aggregate誤差はrank0の（stereo8手法とは無関係な）
+pre-existingなscale driftが支配的と結論。
+
+Phase C'（本追記の主題、事前登録・control=B6）: 同じGT不使用stride-8 stereo
+bridgeをrank0自身の登録済みframe range（A2 component-000のrun start/every-8/
+run-end rule→245 target）にも適用し、`--rank0-pair-prefix`を外して（全rankが
+全pairを見る）mapping。結果: 4816/5000 frame（B6比+3）、aggregate RMSE
+**0.236057m**/p95 **0.459024m**（B6比14.4x/18.1x改善）、そしてrank0自身のsim3_scaleが
+**0.045→0.989**まで回復——lead reviewの仮説（driftはrank0のcross-sensor edge欠如が
+原因でstereo8手法自体の問題ではない）を裏付けた。事前登録gate H1（frame数
+>=4813）H2（rmse/p95双方<B6）H3（追加pair<=245 target）H4（全stage<2GiB）は
+全PASS。Dedup逸脱1件: rank0-stereo8候補245件中244件受理→base-plus-stereo8.vps
+(59242 pair)へmerge試行時に13 pairがoverlap（merge tool側でreject、frame
+392..496、seed_global_frame=488近傍）→matches-import.txtから13 pair除去し
+231/245で再verify・再merge（計59473 pair）。この13 pairはGT不使用で「C4
+pre-dedup pairsとB5 base-plus-stereo8.vpsの交差」として独立に再計算し、
+dropped setとbyte-level一致を確認済み（再現性あり、今後は候補生成時に組み込む
+予定のルールとして記録）。
+
+決定論性repeat: mapperをfresh rootへ`--out-colmap`のみ変えて再実行し、
+model/配下14 file（4 component×{cameras,images,points3D}.txt + components.tsv +
+retrieval-components.txt）全SHA-256完全一致、score.jsonも path文字列以外の数値
+（rmse/p95/median/max/per-segment等）完全一致（差はmapper_seconds/VmHWMの誤差
+範囲のみ）。
+
+Caveat: (a) C'の仮説自体はB6のGT由来post-hoc Sim3 scale観察から着想した
+（candidate/match/admissionはGT不使用のまま）ため、10kは本仮説に関しては
+development setであり、精度主張には未touchのholdoutでの再現が必要。(b)
+aggregateは4 component独立Sim(3)・8940 gt_scored/9632 registeredで、COLMAP
+10k control（2 model・9306 gt_scored/9998 registered、`benchmarks/electro/
+m8-openloris-colmap-10k-control.json` ate_rmse 0.384307m）と同一scorer規約だが
+条件は非同一——COLMAP勝ち主張はしない。(c) 184 frame未登録（C6由来のrun
+list）、componentは4個のままでCOLMAPの2個より多い（未着手のfollow-on）。
+
+Artifact roots（`$R=/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1`）:
+`openloris-tier10000-component-frontier-v1`（Phase A）、
+`openloris-tier10000-sparse-stereo8-v1-source` / `-sift-ratio95-v1` /
+`-sift-reverify-v1`（Phase B候補/match/reverify）、
+`openloris-tier10000-rank0-frozen-sparse-stereo8-v1`（B6 mapper）、
+`openloris-tier10000-rank0-stereo8-v1-source` / `-sift-ratio95-v1` /
+`-sift-reverify-v1`（Phase C'候補/match/dedup+reverify、pre-dedup系ファイル含む）、
+`openloris-tier10000-all-stereo8-v1`（C' mapper、非公式に"C6"と呼称）、
+`openloris-tier10000-all-stereo8-v1-repeat`（決定論性repeat）。Evidence:
+`benchmarks/electro/m9-openloris-sparse-stereo-10000-v1.json`
+（`followup_arm_c_prime`セクションに全stage command/count/RSS/SHA-256、
+`caveats`に(a)(b)(c)を記載）。
+
+Next steps: (i) 精度主張の前に未touch holdoutでの検証が必須。
+`/home/sasaki/datasets/openloris`直下はcorridor1-1系（-m5/-m6/-m7/-m8*/-m9*、
+全て同一corridor1-1シーケンスのtier/pipeline派生）と`official-groundtruth`の
+みで、ローカルに画像/featureがあるOpenLORISシーケンスはcorridor1-1のみ
+（source-audit.jsonによれば元archiveから"first 5000 frame/camera"のみ選択
+extraction済みで、フルシーケンスはより長い可能性あり）。
+`official-groundtruth/groundtruth.zip`のper-sequenceにはcafe1-1/1-2、
+corridor1-2/1-3/1-4/1-5、home1-1..5、market1-1..3、office1-1..7のGTのみ
+キャッシュ済み（画像は未取得）——holdoutにはcorridor1-1の未使用frame範囲の追加
+extractionか、他シーケンスの画像/feature取得（HF `shixuesong/openloris-scene`
+より）のいずれかが必要（ls確認のみ、未取得）。(ii) 5kでも同じrank0 stereo
+（rank0自身のframeへのstride-8 bridge、no prefix）を適用しconsistency
+check。(iii) 残184 frame未登録とcomponent 4→2への統合。(iv) README更新は
+未実施（今回はしない）。
+
 ### 2026-09-13 gap46診断（未回収46 frame中30回収）追記
 
 前段（下記チェックポイント）の未回収46 frame（rank1のunregistered set：frame 1931∪
