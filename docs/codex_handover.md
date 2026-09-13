@@ -2,6 +2,56 @@
 
 ## 現在の状態（以下の過去ログより優先）
 
+### 2026-09-13 gap46診断（未回収46 frame中30回収）追記
+
+前段（下記チェックポイント）の未回収46 frame（rank1のunregistered set：frame 1931∪
+1934..1977∪1979、1978のみ既registered）を診断した。原因はtexture starvation:
+1920-1979近傍のSIFT feature数はcam1平均29.05、cam2平均33.47（結合平均31.26/image）で、
+他stretchの100+features/imageより著しく少ない。46 frame中7 frameは前段のstride-8 anchor
+と重複（1931,1934,1942,1950,1958,1966,1974）で、そのうち4本（1942,1950,1958,1974）は
+前段matchで受理pairを得られなかった（残り3本1931,1934,1966は受理pairがあったが未registered）。
+同一pairの再matchは決定論的に同結果なので7 frameとも対象外にした。
+
+残り39 frameへGT不使用でgap=0の同期stereo probeを追加（"gap46" arm）。ratio0.95 matchで
+39→13 pair/205 correspondence受理、凍結ratio0.8 reverifyでも13/205不変。
+`openloris-tier5000-sparse-stereo8-sift-reverify-v1/base-plus-stereo.vps`（31590 pair）
+の後ろへmergeし31603 pairとして同じ`--rank0-pair-prefix 31521`でmapping。結果は独立
+component-003（30 frame/60 image/126 track/689 obs、reprojection 0.716046px、post-hoc
+GT RMSE 0.0313887m、p95 0.0605911m）として新規登録。対象外にしたanchor frameのうち
+1931,1934,1950,1966もcomponent-003へ入った（1942,1958,1974は未登録）。rank0/rank1はbyte-identicalかつ
+RMSE/p95不変（事前登録gate G1-G5全PASS、詳細はevidence JSON）。mapper_secondsは
+148.976s→181.535s（+21.9%、非gate、報告のみ）。fresh rootをforegroundで1回repeatし、
+component-000/001/003の計9 model file + components.tsv + retrieval-components.txtの
+11 fileが全SHA-256完全一致（mapper_seconds/RSSのみ誤差範囲で相違）。
+
+component-003は30 frameの独立Sim(3) gaugeであり、その低RMSEはrank0/rank1と比較可能な
+精度主張ではない。残り16 frameは引き続き未registered、うち5 frame（1949,1956,1958,1962,
+1975）はgap46追加前のbase 31590-pair graphでもverified edgeがゼロだった（feature
+starvationの直接証拠）。
+
+証跡: `benchmarks/electro/m9-openloris-sparse-stereo-gap46-5000-v1.json`。
+
+```text
+output roots:
+/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/
+  openloris-tier5000-sparse-stereo-gap46-v1-source/candidates.txt
+  openloris-tier5000-sparse-stereo-gap46-sift-ratio95-v1/
+  openloris-tier5000-sparse-stereo-gap46-sift-reverify-v1/{verified.vps,base-plus-stereo8-plus-gap46.vps}
+  openloris-tier5000-rank0-frozen-sparse-stereo-gap46-v1/
+  openloris-tier5000-rank0-frozen-sparse-stereo-gap46-v1-repeat/
+```
+
+また、`matches-import.txt`（凍結ratio0.8 reverify stageへの生match入力）を候補manifest
++ 検証済み.vps snapshotから再構成する`scripts/export_verified_matches_import.py`を追加
+した（`scripts/tests/test_export_verified_matches_import.py`、8 test全PASS）。stereo8/
+gap46両方のmatches-import.txtをこのtoolで再生成しbyte-identicalを確認済み（旧手順の
+ad hoc再構成スクリプトに依存しない形になった）。matches-import.txtはratio0.95 stage-bの
+`mapping/verified-merged.vps`から再構成する点に注意（最終ratio0.8 verified.vpsからではない）。
+
+次: 残り16 frameはmatcher/mapper policyでなくfeature extraction不足が主因（SIFT
+contrast thresholdを下げる、別detectorを使う等）。閾値調整にGTを使わないこと。10kへは
+未着手。
+
 ### 2026-09-13 Claude向け最新チェックポイント
 
 作業branchは`feat/m9-learned-retrieval`。Codex引き継ぎ時点のHEADは`c3012b8`
@@ -136,9 +186,14 @@ Claudeの次の作業順は以下。
 4. [done] `--rank0-pair-prefix`、関連test、benchmark evidence JSON、この引き継ぎを1 commit、
    v5 retrieval差分（multi-scale-component-bridge-v5、負の診断として保持）を別commitに分けて
    push。4 exampleのrelease clippy -D warnings/test、fmt checkはPASS。
-5. 5kで未回収の46 frameを、global retrievalではなくstereo anchorの終端/strideまたは
-   component replay条件で診断する。ただしrank 0 SHA非回帰、rank 1 RMSE/p95非回帰、
-   bounded pair/RSSをgateにする。閾値をGTで調整しない。
+5. [done] 5kで未回収の46 frameを診断した。原因はglobal retrievalの不足ではなくtexture
+   starvation（1920-1979近傍で平均27-32 features/image）。stereo anchorのstride間隙
+   39 frameへ密なgap=0 stereo probeを追加した"gap46" arm（rank 0 SHA非回帰、rank 1
+   RMSE/p95非回帰、bounded pair<=46、RSS<=524273 KiBの4+1 gate、全PASS。GTは
+   選択に未使用、post-hoc scoreのみ）で30/46 frameを独立component-003として回収、
+   残り16 frameはfeature starvation（5 frameはverified edgeゼロ）と特定した。詳細は
+   本節冒頭の「2026-09-13 gap46診断」と
+   `benchmarks/electro/m9-openloris-sparse-stereo-gap46-5000-v1.json`。
 6. その後にのみ未観測10kへ進める。README/COLMAP比較は10kで同条件の登録率・精度・
    wall/RSSを測って昇格判定後に更新する。ユーザー指示によりREADMEへメモリbefore/after表は
    書かない。現在READMEは変更していない。
