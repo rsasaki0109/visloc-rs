@@ -155,7 +155,10 @@ fn spread_triple(correspondences: &[Correspondence2D3D]) -> Option<(usize, usize
 
 /// Solve Grunert's P3P for the camera-frame depths and return the candidate
 /// poses (world→camera) recovered by absolute orientation. Up to four.
-fn solve_grunert(points: &[Point3<f64>; 3], rays: &[Vector3<f64>; 3]) -> Option<Vec<Pose>> {
+pub(crate) fn solve_grunert(
+    points: &[Point3<f64>; 3],
+    rays: &[Vector3<f64>; 3],
+) -> Option<Vec<Pose>> {
     let p1 = points[0].coords;
     let p2 = points[1].coords;
     let p3 = points[2].coords;

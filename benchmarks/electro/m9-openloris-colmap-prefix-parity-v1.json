@@ -1,0 +1,198 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-14",
+  "status": "parity_tiers_built_scale_collapse_onset_between_2500_and_5000_images",
+  "milestone": "C0b of docs/colmap_rig_mapper_port_plan.md",
+  "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-prefix-parity-v1",
+  "method": {
+    "prefix_databases": "copies of corridor1-1-m8-colmap/tier-10000-rig-v3/database.db (sha256 e2456f4f..., unchanged) with WAL checkpointed into the copy and every row referencing images outside the tier-N prefix removed (keypoints, descriptors, frame_data, frames, matches, two_view_geometries, pose_priors); integrity checks passed",
+    "prefix_db_counts": {
+      "2500": {
+        "images": 2500,
+        "frames": 1250,
+        "two_view_geometries": 25000,
+        "verified_inliers": 4931095,
+        "exported_pairs": 24965
+      },
+      "5000": {
+        "images": 5000,
+        "frames": 2500,
+        "two_view_geometries": 40000,
+        "verified_inliers": 6413088,
+        "exported_pairs": 39906
+      }
+    },
+    "colmap": "colmap mapper with the 10k control options (multiple_models 1, max_num_models 50, min_model_size 10, num_threads 8, abs_pose_min_num_inliers 8, no intrinsic refinement, ba_refine_sensor_from_rig 0, random_seed 0), docker colmap/colmap@sha256:b809882...",
+    "visloc": "generalized_rig_sfm with C' flags on the exported COLMAP graph (export_colmap_verified_for_visloc.py + import_colmap_verified_snapshot)",
+    "wall_rss": {
+      "2500": {
+        "colmap": "1:34:57 / 739016 KiB",
+        "visloc": "3:05.43 / 568624 KiB"
+      },
+      "5000": {
+        "colmap": "2:10:54 / 1317116 KiB",
+        "visloc": "2:51.48 / 907388 KiB"
+      }
+    }
+  },
+  "tiers": {
+    "2500": {
+      "colmap": {
+        "models": 1,
+        "registered_images": 2500,
+        "gt_scored_images": 1808,
+        "ate_rmse_m": 0.07183921961099571,
+        "ate_p95_m": 0.14773839578562403,
+        "sim3_scale": [
+          1.026344318016754
+        ],
+        "segment_rmse_m": [
+          0.03967772865388769,
+          0.13649517216613954,
+          0.07410232040329483,
+          0.12223893648101522,
+          0.053537397965540336,
+          0.036180357235210375,
+          0.026608725290312343,
+          0.023474287269155205,
+          0.03778191197467484,
+          0.06502783993764218
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.05606234325424061,
+            "evaluable_pairs": 875
+          },
+          "10s": {
+            "coverage": 1.0,
+            "rmse_m": 0.08899437803613922,
+            "evaluable_pairs": 618
+          }
+        },
+        "score_sha256": "4d26afc5926815a709c7c305d4ec0ef39f2db69ab8f33d384083592c1da6f002",
+        "rpe_sha256": "66b8e03035301946f2f420a5291417f03cefb75e44f8d82f76ecefb86bee7644"
+      },
+      "visloc": {
+        "models": 1,
+        "registered_images": 2500,
+        "gt_scored_images": 1808,
+        "ate_rmse_m": 0.3205114927202506,
+        "ate_p95_m": 0.516656502006384,
+        "sim3_scale": [
+          1.007143140187454
+        ],
+        "segment_rmse_m": [
+          0.3074772613703775,
+          0.3463622026458305,
+          0.283155561981458,
+          0.3786370662555494,
+          0.47021741317044924,
+          0.32316660417659954,
+          0.19548931995344382,
+          0.1548096660321529,
+          0.24505013628769837,
+          0.3771577959140598
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.1406276508444811,
+            "evaluable_pairs": 875
+          },
+          "10s": {
+            "coverage": 1.0,
+            "rmse_m": 0.5745186197020152,
+            "evaluable_pairs": 618
+          }
+        },
+        "score_sha256": "527a3fd78b6fa526d0041324f49574c2fde4f1aa50c261da8ab181ebf3ea46a4",
+        "rpe_sha256": "1fabef718a3b6af945b267e45dd51978c6192d0590627fb508100b1e5e023d44"
+      }
+    },
+    "5000": {
+      "colmap": {
+        "models": 1,
+        "registered_images": 5000,
+        "gt_scored_images": 4308,
+        "ate_rmse_m": 0.12268531994957262,
+        "ate_p95_m": 0.2360154639213036,
+        "sim3_scale": [
+          1.0676117399443572
+        ],
+        "segment_rmse_m": [
+          0.2369049583060672,
+          0.10400701402826873,
+          0.07163924031882092,
+          0.12778018113462505,
+          0.14822740216174565,
+          0.09912414127272301,
+          0.0691733857917349,
+          0.08309506334205558,
+          0.09594114496747778,
+          0.09659555604297487
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.04348019503632137,
+            "evaluable_pairs": 2125
+          },
+          "10s": {
+            "coverage": 1.0,
+            "rmse_m": 0.14738851185398658,
+            "evaluable_pairs": 1869
+          }
+        },
+        "score_sha256": "7e4892fa4ed3718b2ae341db52a2ec03882493c1401dd3670dc18551b35df119",
+        "rpe_sha256": "cf1b708c4029f87059333d637c02cc2a69c7e5aa150d27715c0ff81065426c54"
+      },
+      "visloc": {
+        "models": 1,
+        "registered_images": 5000,
+        "gt_scored_images": 4308,
+        "ate_rmse_m": 4.094883698005167,
+        "ate_p95_m": 7.045586417482004,
+        "sim3_scale": [
+          0.07898715599964358
+        ],
+        "segment_rmse_m": [
+          6.13330901369566,
+          4.159368650057401,
+          1.8738383143520552,
+          1.6882163764616556,
+          5.445310238821888,
+          5.541225521664559,
+          3.429190323643804,
+          3.8992312853082334,
+          1.547009883743208,
+          4.081066105220693
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.7503367307506944,
+            "evaluable_pairs": 2125
+          },
+          "10s": {
+            "coverage": 1.0,
+            "rmse_m": 4.868349179155537,
+            "evaluable_pairs": 1869
+          }
+        },
+        "score_sha256": "a35a297ad56e234eefceaafc68855b981cd35e6a6c0c5d463213bd7382f68026",
+        "rpe_sha256": "ea8ba03fad2e15b38a51d1db08bf08d474acfbbde2d31eac250d01070d81c3ff"
+      }
+    }
+  },
+  "reference_other_tiers": {
+    "1000": "m9-openloris-colmap-graph-isolation-1000-v1: visloc ATE 0.0271 m scale 1.125 vs COLMAP 0.0280 m scale 1.136",
+    "10000": "m9-openloris-colmap-graph-isolation-10000-v1: visloc scale 0.136 ATE 11.88 m vs COLMAP 1.106 / 0.384 m"
+  },
+  "lead_analysis": [
+    "Both mappers register every image in one component at 2.5k and 5k, so graph structure and coverage are not confounds.",
+    "2.5k: visloc keeps metric scale (1.007 vs COLMAP 1.026) but is uniformly less accurate (ATE 0.321 vs 0.072 m, RPE-10s 0.575 vs 0.089 m): a consistency gap already exists before any collapse.",
+    "5k: visloc collapses in scale (0.079 vs COLMAP 1.068), with ATE 4.09 m and RPE-10s 4.87 m, the same failure as 10k. The onset lies between 1250 and 2500 rig frames.",
+    "These prefix tiers are the parity targets for the faithful mapper port: 2.5k first (ATE 0.072 m, RPE-10s 0.089 m), then 5k (ATE 0.123 m, scale 1.068)."
+  ]
+}

@@ -1,0 +1,716 @@
+{
+  "global_ba_events": {
+    "colmap_count": 67,
+    "colmap_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      11,
+      13,
+      15,
+      17,
+      19,
+      22,
+      25,
+      28,
+      31,
+      35,
+      39,
+      43,
+      47,
+      52,
+      58,
+      64,
+      71,
+      79,
+      88,
+      98,
+      109,
+      121,
+      134,
+      148,
+      163,
+      180,
+      199,
+      220,
+      243,
+      268,
+      295,
+      325,
+      358,
+      395,
+      435,
+      456,
+      468,
+      479,
+      491,
+      508,
+      530,
+      561,
+      580,
+      602,
+      615,
+      633,
+      660,
+      706,
+      764,
+      807,
+      851,
+      897,
+      987,
+      1086,
+      1152,
+      1201,
+      1248,
+      1248
+    ],
+    "ported_count": 68,
+    "ported_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      11,
+      13,
+      15,
+      17,
+      19,
+      22,
+      25,
+      28,
+      31,
+      35,
+      39,
+      44,
+      49,
+      55,
+      61,
+      68,
+      75,
+      83,
+      92,
+      102,
+      113,
+      125,
+      138,
+      152,
+      168,
+      186,
+      205,
+      226,
+      249,
+      275,
+      303,
+      334,
+      358,
+      395,
+      435,
+      447,
+      456,
+      468,
+      480,
+      492,
+      509,
+      531,
+      560,
+      579,
+      601,
+      615,
+      633,
+      661,
+      707,
+      768,
+      810,
+      849,
+      894,
+      984,
+      1083,
+      1151,
+      1200,
+      1248,
+      1248
+    ]
+  },
+  "initial_pair": {
+    "colmap_attempts": [
+      {
+        "colmap_name": "rig/camera1/1560000039.580336.png",
+        "flat_name": "cam1_002164.png",
+        "frame": 1082,
+        "image_id": 1083,
+        "sensor": "cam1"
+      },
+      {
+        "colmap_name": "rig/camera1/1560000038.523667.png",
+        "flat_name": "cam1_002100.png",
+        "frame": 1050,
+        "image_id": 1052,
+        "sensor": "cam1"
+      },
+      {
+        "colmap_name": "rig/camera1/1560000025.800295.png",
+        "flat_name": "cam1_001336.png",
+        "frame": 668,
+        "image_id": 668,
+        "sensor": "cam1"
+      },
+      {
+        "colmap_name": "rig/camera1/1560000026.333608.png",
+        "flat_name": "cam1_001368.png",
+        "frame": 684,
+        "image_id": 686,
+        "sensor": "cam1"
+      },
+      {
+        "colmap_name": "rig/camera2/1560000018.390219.png",
+        "flat_name": "cam2_000893.png",
+        "frame": 446,
+        "image_id": 5446,
+        "sensor": "cam2"
+      },
+      {
+        "colmap_name": "rig/camera2/1560000018.923581.png",
+        "flat_name": "cam2_000925.png",
+        "frame": 462,
+        "image_id": 5463,
+        "sensor": "cam2"
+      }
+    ],
+    "colmap_successful": [
+      {
+        "colmap_name": "rig/camera2/1560000018.390219.png",
+        "flat_name": "cam2_000893.png",
+        "frame": 446,
+        "image_id": 5446,
+        "sensor": "cam2"
+      },
+      {
+        "colmap_name": "rig/camera2/1560000018.923581.png",
+        "flat_name": "cam2_000925.png",
+        "frame": 462,
+        "image_id": 5463,
+        "sensor": "cam2"
+      }
+    ],
+    "colmap_successful_frames": [
+      446,
+      462
+    ],
+    "frames_match": false,
+    "ported_frames": [
+      388,
+      420
+    ],
+    "ported_image_ids": [
+      776,
+      840
+    ]
+  },
+  "inputs": {
+    "colmap_images": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-prefix-parity-v1/tier-2500/colmap/models-text/0/images.txt",
+    "colmap_log": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-prefix-parity-v1/tier-2500/colmap/logs/mapper.log",
+    "image_aliases": "/home/sasaki/datasets/openloris/corridor1-1-m8-colmap/tier-10000-rig-v3/image_aliases.tsv",
+    "ported_images": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-gp3p-colmap-repeat/model/model/0/images.txt",
+    "ported_log": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-gp3p-colmap-repeat/stderr.log",
+    "rig_manifest": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier2500-rig-manifest-v1.txt"
+  },
+  "pose_difference": {
+    "center_error_m": {
+      "max": 0.09250020779994361,
+      "mean": 0.03233074051841588,
+      "median": 0.022699408982931758,
+      "p95": 0.07725735986667644
+    },
+    "error_by_colmap_rank_bucket": [
+      {
+        "images": 100,
+        "max_m": 0.017762423899484552,
+        "mean_m": 0.016122924228025498,
+        "p95_m": 0.017464905447527476,
+        "rank_start": 0
+      },
+      {
+        "images": 100,
+        "max_m": 0.019535382257650103,
+        "mean_m": 0.018169419883019254,
+        "p95_m": 0.019295452739940416,
+        "rank_start": 100
+      },
+      {
+        "images": 100,
+        "max_m": 0.02142776231312686,
+        "mean_m": 0.02020459899197714,
+        "p95_m": 0.021296638401935734,
+        "rank_start": 200
+      },
+      {
+        "images": 100,
+        "max_m": 0.02348109001501574,
+        "mean_m": 0.021832556064358327,
+        "p95_m": 0.02317792861247052,
+        "rank_start": 300
+      },
+      {
+        "images": 100,
+        "max_m": 0.02342091768568719,
+        "mean_m": 0.020309132316741575,
+        "p95_m": 0.023223536218427064,
+        "rank_start": 400
+      },
+      {
+        "images": 100,
+        "max_m": 0.032529986746961455,
+        "mean_m": 0.028863095188143992,
+        "p95_m": 0.030974842154805754,
+        "rank_start": 500
+      },
+      {
+        "images": 100,
+        "max_m": 0.07887267206350489,
+        "mean_m": 0.046536364889630366,
+        "p95_m": 0.07748543729264752,
+        "rank_start": 600
+      },
+      {
+        "images": 100,
+        "max_m": 0.08366025773456062,
+        "mean_m": 0.07428667051951286,
+        "p95_m": 0.08032397220753551,
+        "rank_start": 700
+      },
+      {
+        "images": 100,
+        "max_m": 0.07151907659434592,
+        "mean_m": 0.039834170621004195,
+        "p95_m": 0.05914160891519962,
+        "rank_start": 800
+      },
+      {
+        "images": 100,
+        "max_m": 0.020423134176955928,
+        "mean_m": 0.018808404725488784,
+        "p95_m": 0.01962504938974524,
+        "rank_start": 900
+      },
+      {
+        "images": 100,
+        "max_m": 0.024046189330878334,
+        "mean_m": 0.017810403964551556,
+        "p95_m": 0.022694120431516175,
+        "rank_start": 1000
+      },
+      {
+        "images": 100,
+        "max_m": 0.06874680809437547,
+        "mean_m": 0.04434846684704873,
+        "p95_m": 0.06521466866693706,
+        "rank_start": 1100
+      },
+      {
+        "images": 50,
+        "max_m": 0.09250020779994361,
+        "mean_m": 0.0804365790247251,
+        "p95_m": 0.09129824638361983,
+        "rank_start": 1200
+      }
+    ],
+    "matched_images": 2500,
+    "sim3_scale_ported_to_colmap": 1.0143439116817763,
+    "worst_frames": [
+      {
+        "colmap_rank": 1248,
+        "error_m": 0.09250020779994361,
+        "frame": 1249
+      },
+      {
+        "colmap_rank": 1249,
+        "error_m": 0.09162483113622606,
+        "frame": 1248
+      },
+      {
+        "colmap_rank": 1247,
+        "error_m": 0.09146757840339712,
+        "frame": 1247
+      },
+      {
+        "colmap_rank": 1246,
+        "error_m": 0.09109128502611426,
+        "frame": 1245
+      },
+      {
+        "colmap_rank": 1243,
+        "error_m": 0.09039335368292421,
+        "frame": 1243
+      },
+      {
+        "colmap_rank": 1245,
+        "error_m": 0.08982644701906414,
+        "frame": 1246
+      },
+      {
+        "colmap_rank": 1237,
+        "error_m": 0.08871990018182872,
+        "frame": 1239
+      },
+      {
+        "colmap_rank": 1244,
+        "error_m": 0.0884299165303029,
+        "frame": 1244
+      },
+      {
+        "colmap_rank": 1235,
+        "error_m": 0.08780569586919809,
+        "frame": 1235
+      },
+      {
+        "colmap_rank": 1240,
+        "error_m": 0.08712606023797946,
+        "frame": 1241
+      },
+      {
+        "colmap_rank": 1241,
+        "error_m": 0.08694183665913421,
+        "frame": 1240
+      },
+      {
+        "colmap_rank": 1221,
+        "error_m": 0.08629456976494776,
+        "frame": 1221
+      },
+      {
+        "colmap_rank": 1227,
+        "error_m": 0.08599316710849247,
+        "frame": 1227
+      },
+      {
+        "colmap_rank": 1233,
+        "error_m": 0.08571496831036997,
+        "frame": 1234
+      },
+      {
+        "colmap_rank": 1234,
+        "error_m": 0.08513148483683611,
+        "frame": 1233
+      },
+      {
+        "colmap_rank": 1242,
+        "error_m": 0.0849387156357142,
+        "frame": 1242
+      },
+      {
+        "colmap_rank": 1238,
+        "error_m": 0.08443402714104475,
+        "frame": 1238
+      },
+      {
+        "colmap_rank": 1236,
+        "error_m": 0.08423540026077408,
+        "frame": 1237
+      },
+      {
+        "colmap_rank": 1228,
+        "error_m": 0.08389020722011745,
+        "frame": 1228
+      },
+      {
+        "colmap_rank": 757,
+        "error_m": 0.08366025773456062,
+        "frame": 759
+      }
+    ]
+  },
+  "rank_displacement": {
+    "frames": [
+      {
+        "colmap_rank": 1,
+        "frame": 462,
+        "ported_rank": 462
+      },
+      {
+        "colmap_rank": 0,
+        "frame": 446,
+        "ported_rank": 445
+      },
+      {
+        "colmap_rank": 2,
+        "frame": 438,
+        "ported_rank": 438
+      },
+      {
+        "colmap_rank": 3,
+        "frame": 437,
+        "ported_rank": 437
+      },
+      {
+        "colmap_rank": 4,
+        "frame": 436,
+        "ported_rank": 436
+      },
+      {
+        "colmap_rank": 9,
+        "frame": 440,
+        "ported_rank": 440
+      },
+      {
+        "colmap_rank": 5,
+        "frame": 435,
+        "ported_rank": 435
+      },
+      {
+        "colmap_rank": 11,
+        "frame": 441,
+        "ported_rank": 441
+      },
+      {
+        "colmap_rank": 12,
+        "frame": 442,
+        "ported_rank": 442
+      },
+      {
+        "colmap_rank": 13,
+        "frame": 443,
+        "ported_rank": 443
+      },
+      {
+        "colmap_rank": 10,
+        "frame": 439,
+        "ported_rank": 439
+      },
+      {
+        "colmap_rank": 15,
+        "frame": 444,
+        "ported_rank": 444
+      },
+      {
+        "colmap_rank": 6,
+        "frame": 433,
+        "ported_rank": 433
+      },
+      {
+        "colmap_rank": 7,
+        "frame": 434,
+        "ported_rank": 434
+      },
+      {
+        "colmap_rank": 8,
+        "frame": 432,
+        "ported_rank": 341
+      },
+      {
+        "colmap_rank": 14,
+        "frame": 431,
+        "ported_rank": 340
+      },
+      {
+        "colmap_rank": 16,
+        "frame": 430,
+        "ported_rank": 339
+      },
+      {
+        "colmap_rank": 17,
+        "frame": 429,
+        "ported_rank": 338
+      },
+      {
+        "colmap_rank": 19,
+        "frame": 428,
+        "ported_rank": 337
+      },
+      {
+        "colmap_rank": 253,
+        "frame": 445,
+        "ported_rank": 446
+      }
+    ],
+    "max_abs": 461
+  },
+  "registration_order": {
+    "full": {
+      "colmap_at_divergence": 446,
+      "colmap_count": 1250,
+      "colmap_unique": 1250,
+      "equal_positions": 477,
+      "first_divergence_index": 0,
+      "lcs_length": 885,
+      "lcs_ratio": 0.708,
+      "longest_identical_runs": [
+        {
+          "length": 98,
+          "start": 545
+        },
+        {
+          "length": 30,
+          "start": 1199
+        },
+        {
+          "length": 24,
+          "start": 463
+        },
+        {
+          "length": 19,
+          "start": 645
+        },
+        {
+          "length": 19,
+          "start": 720
+        },
+        {
+          "length": 18,
+          "start": 666
+        },
+        {
+          "length": 17,
+          "start": 1155
+        },
+        {
+          "length": 16,
+          "start": 896
+        },
+        {
+          "length": 15,
+          "start": 501
+        },
+        {
+          "length": 14,
+          "start": 1028
+        },
+        {
+          "length": 12,
+          "start": 1174
+        },
+        {
+          "length": 10,
+          "start": 1013
+        },
+        {
+          "length": 10,
+          "start": 1086
+        },
+        {
+          "length": 9,
+          "start": 520
+        },
+        {
+          "length": 9,
+          "start": 1131
+        },
+        {
+          "length": 8,
+          "start": 491
+        },
+        {
+          "length": 8,
+          "start": 1099
+        },
+        {
+          "length": 8,
+          "start": 1242
+        }
+      ],
+      "ported_at_divergence": 388,
+      "ported_count": 1250,
+      "ported_unique": 1250,
+      "registered_set_equal": true
+    },
+    "post_init": {
+      "colmap_at_divergence": 438,
+      "colmap_count": 1248,
+      "colmap_unique": 1248,
+      "equal_positions": 477,
+      "first_divergence_index": 0,
+      "lcs_length": 885,
+      "lcs_ratio": 0.7091346153846154,
+      "longest_identical_runs": [
+        {
+          "length": 98,
+          "start": 543
+        },
+        {
+          "length": 30,
+          "start": 1197
+        },
+        {
+          "length": 24,
+          "start": 461
+        },
+        {
+          "length": 19,
+          "start": 643
+        },
+        {
+          "length": 19,
+          "start": 718
+        },
+        {
+          "length": 18,
+          "start": 664
+        },
+        {
+          "length": 17,
+          "start": 1153
+        },
+        {
+          "length": 16,
+          "start": 894
+        },
+        {
+          "length": 15,
+          "start": 499
+        },
+        {
+          "length": 14,
+          "start": 1026
+        },
+        {
+          "length": 12,
+          "start": 1172
+        },
+        {
+          "length": 10,
+          "start": 1011
+        },
+        {
+          "length": 10,
+          "start": 1084
+        },
+        {
+          "length": 9,
+          "start": 518
+        },
+        {
+          "length": 9,
+          "start": 1129
+        },
+        {
+          "length": 8,
+          "start": 489
+        },
+        {
+          "length": 8,
+          "start": 1097
+        },
+        {
+          "length": 8,
+          "start": 1240
+        }
+      ],
+      "ported_at_divergence": 421,
+      "ported_count": 1248,
+      "ported_unique": 1248,
+      "registered_set_equal": false
+    }
+  },
+  "schema": "visloc_colmap_mapper_registration_diag_v1"
+}

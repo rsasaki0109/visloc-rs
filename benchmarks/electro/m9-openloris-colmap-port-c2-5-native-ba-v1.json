@@ -1,0 +1,134 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-15",
+  "status": "c2_5_native_ba_2500_ate_and_scale_pass_rpe10s_fail",
+  "milestone": "C2.5 of docs/colmap_rig_mapper_port_plan.md (commit 3740942, runs from the pre-shard-balancing snapshot)",
+  "tiers": {
+    "1000": {
+      "native": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-1000-fastba",
+        "models": 1,
+        "registered_images": 1000,
+        "ate_rmse_m": 0.03326445494348154,
+        "ate_p95_m": 0.04941685236812878,
+        "sim3_scale": [
+          1.151958093939506
+        ],
+        "segment_rmse_m": [
+          0.0366178683940679,
+          0.03670301542907214,
+          0.01789292979947529,
+          0.019061357123510425,
+          0.04219949468550555,
+          0.042435206725662096,
+          0.026510304845862302,
+          0.016365833671273505,
+          0.040745011027935873,
+          0.037881949567043535
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.04248272953902602
+          },
+          "10s": {
+            "coverage": null,
+            "rmse_m": null
+          }
+        },
+        "score_sha256": "3524ec754b793809681e1df76692b211f104eae56805e99408c4c81c6d60f5d5",
+        "images_txt_sha256": "46bce3e394e21a3a13c97bc8af227eb78d8182445a04a73d14d6aa254729b40f"
+      },
+      "wall": "13:06.69",
+      "peak_rss_kib": 1149236,
+      "legacy_ba": {
+        "ate_rmse_m": 0.0359,
+        "sim3_scale": 1.1353,
+        "wall": "1:40:37"
+      },
+      "colmap": {
+        "ate_rmse_m": 0.028,
+        "sim3_scale": 1.1364,
+        "rpe_1s_rmse_m": 0.0352
+      }
+    },
+    "2500": {
+      "native": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-fastba",
+        "models": 1,
+        "registered_images": 2500,
+        "ate_rmse_m": 0.10518086671676113,
+        "ate_p95_m": 0.18787098010268524,
+        "sim3_scale": [
+          1.0761911052715332
+        ],
+        "segment_rmse_m": [
+          0.09349532756830148,
+          0.14963794258264237,
+          0.11269435371862341,
+          0.1758811642268236,
+          0.08304738796047809,
+          0.060559634215839715,
+          0.04230394333295916,
+          0.03704670288664293,
+          0.055218266686968054,
+          0.13880346838767482
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.05852605305803891
+          },
+          "10s": {
+            "coverage": 1.0,
+            "rmse_m": 0.15929095535501778
+          }
+        },
+        "score_sha256": "4b0849010f26e2bccbb6f977aa1123adfa7f4e11920319b1772a10d201f9b6c4",
+        "images_txt_sha256": "b15dea08c3b889504eb9b5d2215d435462b6dec8888ec9aebb6b933938a51660"
+      },
+      "wall": "48:58.54",
+      "peak_rss_kib": 1884836,
+      "points": 21492,
+      "legacy_ba": {
+        "ate_rmse_m": 0.3442,
+        "sim3_scale": 1.2194,
+        "rpe_10s_rmse_m": 0.5685,
+        "wall": "6:40:19"
+      },
+      "colmap": {
+        "ate_rmse_m": 0.0718,
+        "ate_p95_m": 0.1477,
+        "sim3_scale": 1.0263,
+        "rpe_1s_rmse_m": 0.0561,
+        "rpe_10s_rmse_m": 0.089,
+        "segment_rmse_m": [
+          0.04,
+          0.136,
+          0.074,
+          0.122,
+          0.054,
+          0.036,
+          0.027,
+          0.023,
+          0.038,
+          0.065
+        ],
+        "wall": "1:34:57"
+      }
+    }
+  },
+  "acceptance_2500": {
+    "registered>=2475": "PASS 2500",
+    "one_component": "PASS",
+    "scale_within_10pct_of_1.026": "PASS 1.076 (+4.9%)",
+    "ate<=0.1077": "PASS 0.1052",
+    "rpe10s<=0.1335": "FAIL 0.1593"
+  },
+  "lead_analysis": [
+    "Replacing only the optimizer takes 2.5k from ATE 0.344 m / scale 1.219 to 0.105 m / 1.076 (COLMAP 0.072 / 1.026), confirming that the legacy BA's convergence was the main cause of the visloc scale/shape error on this rig.",
+    "Termination is faithful: with the control's Ceres options (function_tolerance 0, gradient_tolerance 1e-4 absolute) Ceres also runs global BA to the 50-iteration cap on these gradients; cost converges by ~10 iterations.",
+    "Remaining gap (ATE 1.46x, RPE-10s 1.8x): documented deviations still in the loop — local-BA point policy (COLMAP pulls in observations from images outside the window as fixed-pose residuals and refines those points; the port keeps them constant), 6-point DLT instead of GP3P for generalized registration, no structure-less registration fallback.",
+    "Next: exact ParameterizePoints/AddPointToProblem semantics, then C3 GP3P; and a 5k run with the native BA to check the scale collapse that the legacy mapper showed between 2.5k and 5k."
+  ]
+}

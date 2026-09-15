@@ -1,0 +1,62 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-15",
+  "status": "5k_native_ba_no_scale_collapse_gap_2x",
+  "milestone": "C2.5 binary (native BA, pre-GP3P snapshot) on the 5k COLMAP prefix graph",
+  "run": {
+    "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-5000-fastba",
+    "binary_sha256": "67e8f601afbff425d05513889a4b04fc0c010c0aef3efab0b8f4921a67719cf2",
+    "models": 1,
+    "registered_images": 5000,
+    "gt_scored_images": 4308,
+    "ate_rmse_m": 0.2725369473538573,
+    "ate_p95_m": 0.5953836839367633,
+    "sim3_scale": 1.172600571545972,
+    "segment_rmse_m": [
+      0.5586486007816377,
+      0.18001828291552843,
+      0.15185455639698978,
+      0.2523657070270777,
+      0.350901588011221,
+      0.292588473802218,
+      0.10837948109897694,
+      0.14179737689955518,
+      0.138470446357722,
+      0.22603067616156616
+    ],
+    "rpe": {
+      "1s": {
+        "coverage": 1.0,
+        "rmse_m": 0.06356800906365859
+      },
+      "10s": {
+        "coverage": 1.0,
+        "rmse_m": 0.2840159385094162
+      }
+    },
+    "wall": "1:49:37",
+    "peak_rss_kib": 2966388,
+    "score_sha256": "e47687d8494970552b468cfd3eebb54be2b8fc2683588905b8facc2aa8fb6631",
+    "images_txt_sha256": "a18d41ffa007edc061ad30a58812e0b34de3f278ed9cd22f3dfe41e9fe60ac11",
+    "note": "ran concurrently with other mapper runs; wall not clean"
+  },
+  "colmap_5000": {
+    "ate_rmse_m": 0.1227,
+    "ate_p95_m": 0.236,
+    "sim3_scale": 1.0676,
+    "rpe_1s_rmse_m": 0.0435,
+    "rpe_10s_rmse_m": 0.1474,
+    "wall": "2:10:54",
+    "peak_rss_kib": 1317116
+  },
+  "legacy_generalized_rig_sfm_5000": {
+    "ate_rmse_m": 4.0949,
+    "sim3_scale": 0.079,
+    "rpe_10s_rmse_m": 4.8683
+  },
+  "lead_analysis": [
+    "The scale collapse the legacy mapper showed between 2.5k and 5k (Sim(3) 0.079) does not occur with the COLMAP-loop port and native BA: one model, 5000/5000 images, scale 1.173 (COLMAP 1.068).",
+    "Accuracy gap 2.2x ATE / 1.9x RPE-10s with the pre-GP3P binary; the C2.6 binary (GP3P + COLMAP point policy) reduced the 2.5k gap from 1.46x to 1.22x and is being run at 5k and 10k next.",
+    "Wall 1:49 vs COLMAP 2:11 (both single-process on this laptop; not a controlled timing)."
+  ]
+}

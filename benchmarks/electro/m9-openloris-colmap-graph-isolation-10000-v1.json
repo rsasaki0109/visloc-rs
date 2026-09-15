@@ -1,0 +1,179 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-14",
+  "status": "mapper_major_gap_isolated",
+  "question": "Is the corridor1-1 10k gap to COLMAP caused by the frontend (verified graph) or by the visloc mapper?",
+  "pre_registration": {
+    "input": "frozen COLMAP 10k control database (sha256 e2456f4fad1796ddb4fd79afcab8ebbc921ebd08fa5d9ddee0438271b3deece5): all 69621 verified pairs, 9352301 inlier correspondences and COLMAP keypoints, transferred without re-verification via scripts/export_colmap_verified_for_visloc.py + examples/import_colmap_verified_snapshot",
+    "mapper": "generalized_rig_sfm with exactly the C' flags (component-frontier flags + --direct-stereo-pnp-max-frame-gap 8 --direct-stereo-min-pnp-sensors 1, --max-matches-per-pair 96, no --rank0-pair-prefix)",
+    "rules": {
+      "FRONTEND-DOMINANT": "registered images >= 9900 and components <= 2 and RPE-10s RMSE <= 0.366 m and coverage >= 0.90",
+      "MAPPER-MAJOR": "RPE-10s RMSE >= 0.374 m or components >= 4 or RPE-10s coverage < 0.80",
+      "MIXED": "otherwise"
+    },
+    "decided_before_results": true
+  },
+  "results": {
+    "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier10000-colmap-graph-visloc-mapper-v1",
+    "mapper_ranks": [
+      {
+        "rank": 0,
+        "supplied_frames": 5000,
+        "verified_pairs": 69621,
+        "registered_frames": 4493,
+        "registered_images": 8986
+      },
+      {
+        "rank": 1,
+        "supplied_frames": 507,
+        "verified_pairs": 5858,
+        "registered_frames": 0,
+        "stop": "no frame has enough multi-sensor tracks for metric initialization"
+      }
+    ],
+    "tracks": 129599,
+    "observations": 1069842,
+    "mean_reprojection_px": 0.876,
+    "wall_s": 318.5,
+    "peak_rss_kib": 1576136,
+    "ate": {
+      "models": 1,
+      "registered_images": 8986,
+      "gt_scored_images": 8294,
+      "rmse_m": 11.881768022917356,
+      "p95_m": 20.61635297585016,
+      "components": [
+        {
+          "registered": 8986,
+          "rmse_m": 11.881768022917356,
+          "p95_m": 20.61635297585016,
+          "sim3_scale": 0.13556230039064668,
+          "segment_rmse_m": [
+            2.0449406152298457,
+            3.7336970315931617,
+            8.5751432441187,
+            14.785286728438004,
+            18.955165903060163,
+            11.796874048646542,
+            4.070587055045707,
+            6.603549876318492,
+            15.86464272553368,
+            17.06676631989154
+          ]
+        }
+      ]
+    },
+    "rpe": {
+      "1s": {
+        "coverage": 0.8901621621621622,
+        "rmse_m": 1.110815579698449,
+        "median_m": 0.7001080271330492,
+        "p95_m": 2.2986810741473023,
+        "evaluable_pairs": 4117,
+        "reference_pairs": 4625
+      },
+      "10s": {
+        "coverage": 0.8807234432234432,
+        "rmse_m": 8.22652780193118,
+        "median_m": 6.647287789962879,
+        "p95_m": 18.488857788520914,
+        "evaluable_pairs": 3847,
+        "reference_pairs": 4368
+      }
+    },
+    "sha256": {
+      "score.json": "60581e6045cbf7a3aedb4ebe19ea94e741c8ce12bb895eec285ca22a6e217138",
+      "rpe.json": "b425235a775132d802132d1e00f1f506b1039e98ca4b0b41f006a4b5db6f0510",
+      "colmap-verified.vps": "0bf6e55988045d1d231aaf8698c07f46ec65844bf002a6c3e69a4846d74a8cfd",
+      "candidate_comparison.json": "152bda2e0ac1ba7ab68ebbff545466b5dd2b95118c1fa479bcf2638c0c944e01"
+    }
+  },
+  "references": {
+    "colmap_control": {
+      "components": [
+        4494,
+        505
+      ],
+      "rpe_10s_rmse_m": 0.3047,
+      "rpe_10s_coverage": 0.93109
+    },
+    "c_prime": {
+      "components": 4,
+      "rpe_10s_rmse_m": 0.374,
+      "rpe_10s_coverage": 0.752
+    }
+  },
+  "verdict": "MAPPER-MAJOR (RPE-10s RMSE 8.227 m >= 0.374 m)",
+  "candidate_verification_comparison": {
+    "candidate_sets_equal": true,
+    "colmap_candidates": 70000,
+    "visloc_candidates": 70000,
+    "candidates_colmap_only": 0,
+    "candidates_visloc_only": 0,
+    "candidates_common": 70000,
+    "colmap_verified_total": 69621,
+    "visloc_verified_total": 58879,
+    "on_common_candidates": {
+      "both_verified": 58879,
+      "colmap_only_verified": 10742,
+      "visloc_only_verified": 0,
+      "neither_verified": 379
+    },
+    "by_class": {
+      "same-sensor gap=2-4": {
+        "both": 19192,
+        "colmap_only": 1152,
+        "visloc_only": 0,
+        "neither": 4
+      },
+      "same-sensor gap=5-16": {
+        "both": 18373,
+        "colmap_only": 3642,
+        "visloc_only": 0,
+        "neither": 97
+      },
+      "same-sensor gap=1": {
+        "both": 9541,
+        "colmap_only": 456,
+        "visloc_only": 0,
+        "neither": 1
+      },
+      "same-sensor gap=17-32": {
+        "both": 6071,
+        "colmap_only": 5492,
+        "visloc_only": 0,
+        "neither": 277
+      },
+      "cross-sensor gap>0": {
+        "both": 2434,
+        "colmap_only": 0,
+        "visloc_only": 0,
+        "neither": 0
+      },
+      "same-sensor gap=33-95": {
+        "both": 3120,
+        "colmap_only": 0,
+        "visloc_only": 0,
+        "neither": 0
+      },
+      "cross-sensor gap=0": {
+        "both": 111,
+        "colmap_only": 0,
+        "visloc_only": 0,
+        "neither": 0
+      },
+      "same-sensor gap=>95": {
+        "both": 37,
+        "colmap_only": 0,
+        "visloc_only": 0,
+        "neither": 0
+      }
+    }
+  },
+  "lead_analysis": [
+    "Given COLMAP's exact verified graph, the visloc mapper reproduces COLMAP's component structure almost exactly (rank 0 4493 frames vs COLMAP 4494; the remaining ~505-frame island fails metric initialization) but the model collapses in scale (Sim(3) scale 0.136, ATE 11.88 m, RPE-10s 8.23 m vs COLMAP 0.305 m). The dominant gap is therefore the mapper, not pair coverage.",
+    "COLMAP's graph has only 111 same-frame cross-sensor pairs, yet COLMAP stays metric: its rig-aware BA ties both cameras to one rig pose so cross-camera tracks at different frames carry the calibrated baseline. The visloc rig mapper evidently does not extract scale from that structure and needs dense same-frame stereo edges (compare C' and arm D).",
+    "Frontend is a secondary gap: the candidate sets are identical (70000 pairs), visloc verifies a strict subset (58879 of COLMAP's 69621); all 10742 missing pairs are short/medium same-sensor gaps (1-32).",
+    "Next: faithful port of COLMAP's rig-aware incremental mapper and bundle-adjustment schedule, validated on COLMAP's database as input before any speed/memory deviation."
+  ]
+}

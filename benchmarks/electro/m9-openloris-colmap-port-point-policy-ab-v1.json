@@ -1,0 +1,159 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-15",
+  "status": "point_policy_ab_matrix_colmap_pullin_not_best_at_5k_determinism_confirmed",
+  "binaries": {
+    "c2_6": "1395781d06d850e17239a2e91716970c2b2d3c66d14b73502b6086453b5bff1a",
+    "c2_6_with_switches": "c51da6f4cb2be57c55f932166a57b1d8f62cf9737420f627ef0ab2856a8f0274",
+    "pre_c2_6": "67e8f601afbff425d05513889a4b04fc0c010c0aef3efab0b8f4921a67719cf2"
+  },
+  "runs": {
+    "2500": {
+      "pre_c2_6_native_ba_dlt_oldpolicy": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-fastba",
+        "registered_images": 2500,
+        "models": 1,
+        "ate_rmse_m": 0.10518086671676113,
+        "sim3_scale": 1.0761911052715332,
+        "rpe_1s_rmse_m": 0.05852605305803891,
+        "rpe_10s_rmse_m": 0.15929095535501778,
+        "images_txt_sha256": "b15dea08c3b889504eb9b5d2215d435462b6dec8888ec9aebb6b933938a51660",
+        "wall": "mm:ss or m:ss): 48:58.54"
+      },
+      "c2_6_gp3p_colmap": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-v2",
+        "registered_images": 2500,
+        "models": 1,
+        "ate_rmse_m": 0.08739385798808699,
+        "sim3_scale": 1.0434111081188566,
+        "rpe_1s_rmse_m": 0.05735307777954902,
+        "rpe_10s_rmse_m": 0.1257533864119336,
+        "images_txt_sha256": "e8b1ac374ab58bd884f06d720cf0b39e56eabc5dfc3c5962caca10243da94de9",
+        "wall": "mm:ss or m:ss): 47:30.67"
+      },
+      "c2_6_gp3p_colmap_repeat": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-gp3p-colmap-repeat",
+        "registered_images": 2500,
+        "models": 1,
+        "ate_rmse_m": 0.08739385798808699,
+        "sim3_scale": 1.0434111081188566,
+        "rpe_1s_rmse_m": 0.05735307777954902,
+        "rpe_10s_rmse_m": 0.1257533864119336,
+        "images_txt_sha256": "e8b1ac374ab58bd884f06d720cf0b39e56eabc5dfc3c5962caca10243da94de9",
+        "wall": "mm:ss or m:ss): 1:05:53"
+      },
+      "c2_6_gp3p_window": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-gp3p-window",
+        "registered_images": 2500,
+        "models": 1,
+        "ate_rmse_m": 1.173525217848196,
+        "sim3_scale": 1.883218066372403,
+        "rpe_1s_rmse_m": 0.31882432082980644,
+        "rpe_10s_rmse_m": 1.9344082221054788,
+        "images_txt_sha256": "3e35a0f33b70d408de5e2acdf569486ce2b6fa2e07d34e9fbbb5e8cedcd54920",
+        "wall": "mm:ss or m:ss): 1:21:21"
+      },
+      "c2_6_dlt_window": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-dlt-window",
+        "registered_images": 2500,
+        "models": 1,
+        "ate_rmse_m": 0.19777507868241498,
+        "sim3_scale": 1.1466260342594448,
+        "rpe_1s_rmse_m": 0.07646477595251398,
+        "rpe_10s_rmse_m": 0.32762462249658464,
+        "images_txt_sha256": "89b7156c9b3e2ea6b7858ab358eedc1334a112059eb9d82ec05a1111df3028d6",
+        "wall": "mm:ss or m:ss): 1:18:35"
+      }
+    },
+    "5000": {
+      "pre_c2_6_native_ba_dlt_oldpolicy": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-5000-fastba",
+        "registered_images": 5000,
+        "models": 1,
+        "ate_rmse_m": 0.2725369473538573,
+        "sim3_scale": 1.172600571545972,
+        "rpe_1s_rmse_m": 0.06356800906365859,
+        "rpe_10s_rmse_m": 0.2840159385094162,
+        "images_txt_sha256": "a18d41ffa007edc061ad30a58812e0b34de3f278ed9cd22f3dfe41e9fe60ac11",
+        "wall": "mm:ss or m:ss): 1:49:37"
+      },
+      "c2_6_gp3p_colmap": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-5000-v2",
+        "registered_images": 5000,
+        "models": 1,
+        "ate_rmse_m": 0.4358619718336859,
+        "sim3_scale": 1.1530539219645124,
+        "rpe_1s_rmse_m": 0.06911220144928489,
+        "rpe_10s_rmse_m": 0.4506593908215996,
+        "images_txt_sha256": "29ea5bb50fc4874415c4557f47df3ee9cdec07d3d8d9b6c9e51435ee838b07f7",
+        "wall": "mm:ss or m:ss): 2:02:24"
+      },
+      "c2_6_dlt_colmap": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-5000-v2-dlt",
+        "registered_images": 5000,
+        "models": 1,
+        "ate_rmse_m": 0.6991239933482936,
+        "sim3_scale": 1.240741616316877,
+        "rpe_1s_rmse_m": 0.10029687685724659,
+        "rpe_10s_rmse_m": 0.717332044234833,
+        "images_txt_sha256": "e24f4886eef4e234be455f7a54b7c6047fc2817c640c07d2484772d69f9fdbf8",
+        "wall": "mm:ss or m:ss): 1:31:34"
+      },
+      "c2_6_gp3p_window": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-5000-gp3p-window",
+        "registered_images": 5000,
+        "models": 1,
+        "ate_rmse_m": 2.3874056613955106,
+        "sim3_scale": 3.713111680647591,
+        "rpe_1s_rmse_m": 0.4972448342233468,
+        "rpe_10s_rmse_m": 2.883180957413968,
+        "images_txt_sha256": "5ecd0b3c9f2939fc30a28a0049b791b5a49b14b2c839482a1f6d1a462aa47707",
+        "wall": "mm:ss or m:ss): 2:47:44"
+      }
+    },
+    "10000": {
+      "c2_6_gp3p_colmap": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-10000-v2",
+        "registered_images": 10000,
+        "models": 1,
+        "ate_rmse_m": 3.2735801299322893,
+        "sim3_scale": 1.5839089699573334,
+        "rpe_1s_rmse_m": 0.21293810194055202,
+        "rpe_10s_rmse_m": 1.7721148578634272,
+        "images_txt_sha256": "64f1258703d396a07d20f299389f55316a9f6828420e702b0e3dbc937ec18c35",
+        "wall": "mm:ss or m:ss): 4:26:40"
+      }
+    }
+  },
+  "colmap": {
+    "2500": {
+      "ate_rmse_m": 0.0718,
+      "sim3_scale": 1.0263,
+      "rpe_10s_rmse_m": 0.089
+    },
+    "5000": {
+      "ate_rmse_m": 0.1227,
+      "sim3_scale": 1.0676,
+      "rpe_10s_rmse_m": 0.1474
+    },
+    "10000": {
+      "ate_rmse_m": 0.3843,
+      "sim3_scale": [
+        1.106,
+        1.142
+      ],
+      "rpe_10s_rmse_m": 0.3047,
+      "components": [
+        4494,
+        505
+      ]
+    }
+  },
+  "lead_analysis": [
+    "Determinism: the GP3P+Colmap repeat reproduces images.txt byte-for-byte and the full registration sequence; differences between arms are code, not noise.",
+    "The faithful pull-in policy (Colmap) is best at 2.5k with GP3P (0.087 m) but worst at 5k (GP3P 0.436 m, DLT 0.699 m) versus the pre-C2.6 rule (variable points optimized on in-window observations only, no pull-in): 0.273 m at 5k.",
+    "WindowOnly is a third, stricter rule (variable set ignored unless the track is fully inside) and performs badly (2.5k 1.17 m); it is not the pre-C2.6 behaviour.",
+    "10k with GP3P+Colmap registers all 10000 images in one model (COLMAP: 4494+505 frames in two) but with ATE 3.27 m / scale 1.58: bridging the split that COLMAP keeps separate and the pull-in policy both need investigation.",
+    "Next: restore the pre-C2.6 rule as an explicit policy, run GP3P with it at 2.5k/5k/10k, and investigate why the faithful pull-in degrades with scale (stale outside poses on revisits is the working hypothesis)."
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-15",
+  "status": "c2_acceptance_pass_at_2500_with_gp3p_and_colmap_point_policy",
+  "milestone": "C2.6 (commit 285dd15): GP3P generalized registration + COLMAP local-BA point parameterization, on top of C2.5 native BA",
+  "run": {
+    "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-v2",
+    "binary_sha256": "1395781d06d850e17239a2e91716970c2b2d3c66d14b73502b6086453b5bff1a",
+    "models": 1,
+    "registered_images": 2500,
+    "gt_scored_images": 1808,
+    "points": 23169,
+    "ate_rmse_m": 0.08739385798808699,
+    "ate_p95_m": 0.1505918848640985,
+    "sim3_scale": 1.0434111081188566,
+    "segment_rmse_m": [
+      0.07564659332763936,
+      0.1233579808084272,
+      0.09674532965867055,
+      0.13741468334750756,
+      0.1022484686943758,
+      0.052269702414637464,
+      0.03481043666891553,
+      0.031045966105082732,
+      0.04185632990088317,
+      0.10100703335112558
+    ],
+    "rpe": {
+      "1s": {
+        "coverage": 1.0,
+        "rmse_m": 0.05735307777954902
+      },
+      "10s": {
+        "coverage": 1.0,
+        "rmse_m": 0.1257533864119336
+      }
+    },
+    "wall": "47:30.67",
+    "peak_rss_kib": 2311036,
+    "score_sha256": "a6cb9b479f9cdf6c3f0ac83f0c5a2da55d5f8387cce5a80356ea015de6388d67",
+    "images_txt_sha256": "e8b1ac374ab58bd884f06d720cf0b39e56eabc5dfc3c5962caca10243da94de9",
+    "note": "ran concurrently with the 5k run, wall time not clean"
+  },
+  "colmap_2500": {
+    "ate_rmse_m": 0.0718,
+    "ate_p95_m": 0.1477,
+    "sim3_scale": 1.0263,
+    "rpe_1s_rmse_m": 0.0561,
+    "rpe_10s_rmse_m": 0.089,
+    "points": 22801,
+    "wall": "1:34:57"
+  },
+  "history_2500": {
+    "legacy_generalized_rig_sfm": {
+      "ate_rmse_m": 0.3205,
+      "rpe_10s_rmse_m": 0.5745
+    },
+    "c2_legacy_ba": {
+      "ate_rmse_m": 0.3442,
+      "scale": 1.2194,
+      "rpe_10s_rmse_m": 0.5685
+    },
+    "c2_5_native_ba": {
+      "ate_rmse_m": 0.1052,
+      "scale": 1.0762,
+      "rpe_10s_rmse_m": 0.1593
+    },
+    "c2_6": {
+      "ate_rmse_m": 0.08739385798808699,
+      "scale": 1.0434111081188566,
+      "rpe_10s_rmse_m": 0.1257533864119336
+    }
+  },
+  "acceptance_2500": {
+    "registered>=2475": "PASS 2500",
+    "one_component": "PASS",
+    "scale_within_10pct_of_1.026": "PASS 1.043 (+1.7%)",
+    "ate<=1.5x0.0718=0.1077": "PASS 0.0874 (1.22x)",
+    "rpe10s<=1.5x0.089=0.1335": "PASS 0.1258 (1.41x)"
+  },
+  "lead_analysis": [
+    "GP3P plus the exact local-BA point policy brings 2.5k to ATE 0.087 m / scale 1.043 / RPE-10s 0.126 m against COLMAP 0.072 / 1.026 / 0.089: every C2 sub-gate passes; the remaining gap is 1.2-1.4x.",
+    "Remaining documented deviations: no structure-less registration fallback, per-camera RANSAC error threshold approximated in pixel space, no UniqueInlierSupportMeasurer dedup, root finding by eigenvalues instead of Sturm sequences. Numerical differences between bundle.rs-style LM and Ceres remain a possible residual.",
+    "Next: 5k (running) and 10k on the COLMAP graphs with this binary; parity gates for C3 per the plan (components within 1% of COLMAP's 4494/505, ATE <= 1.2x); then the held-out corridor1-2 run before any speed claims."
+  ]
+}

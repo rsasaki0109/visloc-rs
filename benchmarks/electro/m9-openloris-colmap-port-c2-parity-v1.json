@@ -1,0 +1,143 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-15",
+  "status": "c2_faithful_loop_1k_pass_2500_fail_with_legacy_ba",
+  "milestone": "C2 of docs/colmap_rig_mapper_port_plan.md (commit 053f6e4)",
+  "method": "examples/colmap_incremental_mapper (COLMAP 64805cb incremental loop port) on the COLMAP control graphs; BA via bundle.rs legacy backend with relative cost tolerance 1e-6; generalized registration via 6-point DLT RANSAC (GP3P pending, C3)",
+  "tiers": {
+    "1000": {
+      "c2": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-1000",
+        "models": 1,
+        "registered_images": 1000,
+        "gt_scored_images": 308,
+        "ate_rmse_m": 0.035860292407088,
+        "ate_p95_m": 0.05379848920540565,
+        "sim3_scale": [
+          1.1353208240510837
+        ],
+        "segment_rmse_m": [
+          0.039546035685971336,
+          0.039758668139076664,
+          0.01953033611762759,
+          0.02085567603157719,
+          0.04641215935258457,
+          0.04617394113109449,
+          0.027636549787568247,
+          0.016952064466310316,
+          0.04228513285925198,
+          0.04153508826756295
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.045646452993826865,
+            "evaluable_pairs": 125
+          },
+          "10s": {
+            "coverage": null,
+            "rmse_m": null,
+            "evaluable_pairs": 0
+          }
+        },
+        "score_sha256": "5b7b478291dfcbdaf50a2bd0021cbcc765e9d6da142729ece7aa12f636131fe9",
+        "rpe_sha256": "2ab960f491563600c842c7d048373f0a275ec5e550e28c68a1105f5813cc329e",
+        "images_txt_sha256": "eff09e89896d5bcac913c87d2e92acf5818d5a7646c4aa799746fb6126e161a8"
+      },
+      "c2_wall": "1:40:37",
+      "c2_peak_rss_kib": 393492,
+      "c2_points": 5289,
+      "colmap": {
+        "ate_rmse_m": 0.028,
+        "ate_p95_m": 0.0423,
+        "sim3_scale": 1.1364,
+        "rpe_1s_rmse_m": 0.0352,
+        "points": 5505
+      }
+    },
+    "2500": {
+      "c2": {
+        "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500",
+        "models": 1,
+        "registered_images": 2500,
+        "gt_scored_images": 1808,
+        "ate_rmse_m": 0.3442267953849852,
+        "ate_p95_m": 0.6891996008324917,
+        "sim3_scale": [
+          1.2194048897540888
+        ],
+        "segment_rmse_m": [
+          0.38513056028439674,
+          0.276424401924556,
+          0.24669373986488016,
+          0.32764923984631134,
+          0.31020975302466497,
+          0.2951194913841311,
+          0.22854952215009997,
+          0.19761021240998475,
+          0.2116557851978084,
+          0.6885064676769329
+        ],
+        "rpe": {
+          "1s": {
+            "coverage": 1.0,
+            "rmse_m": 0.1084818885416948,
+            "evaluable_pairs": 875
+          },
+          "10s": {
+            "coverage": 1.0,
+            "rmse_m": 0.5684740025542807,
+            "evaluable_pairs": 618
+          }
+        },
+        "score_sha256": "ead770aca52b4763b7689c6e71fb67921fb0fc14e7428b3923d7bf7f47f6bc6c",
+        "rpe_sha256": "4a4972425e56f4e1b53601d70739fc2232c67eaa91da9a84bdd5b9268b71c4dd",
+        "images_txt_sha256": "21a9b2976f19f6027c15d7a0a13b1493f3675e1af476f9b64a638303668e4c24"
+      },
+      "c2_wall": "6:40:19",
+      "c2_peak_rss_kib": 1448332,
+      "c2_points": 22930,
+      "c2_observations": 592653,
+      "colmap": {
+        "ate_rmse_m": 0.0718,
+        "ate_p95_m": 0.1477,
+        "sim3_scale": 1.0263,
+        "rpe_1s_rmse_m": 0.0561,
+        "rpe_10s_rmse_m": 0.089,
+        "points": 22801,
+        "observations": 612341,
+        "segment_rmse_m": [
+          0.04,
+          0.136,
+          0.074,
+          0.122,
+          0.054,
+          0.036,
+          0.027,
+          0.023,
+          0.038,
+          0.065
+        ]
+      },
+      "legacy_generalized_rig_sfm": {
+        "ate_rmse_m": 0.3205,
+        "rpe_10s_rmse_m": 0.5745,
+        "sim3_scale": 1.0071
+      }
+    }
+  },
+  "acceptance_2500": {
+    "registered>=2475": "PASS 2500",
+    "one_component": "PASS",
+    "scale_within_10pct_of_1.026": "FAIL 1.219",
+    "ate<=1.5x0.0718": "FAIL 0.344",
+    "rpe10s<=1.5x0.089": "FAIL 0.569"
+  },
+  "lead_analysis": [
+    "Graph statistics match COLMAP at 2.5k (22930 vs 22801 points, 593k vs 612k observations, all 2500 images in one model), so the loop, triangulation and filtering reproduce COLMAP's structure.",
+    "Trajectory accuracy does not: ATE 0.344 m vs 0.072 m, Sim(3) scale 1.219 vs 1.026, with error spread uniformly over all ten segments (0.20-0.39 m) rather than growing, i.e. a global metric/shape error, nearly identical to the legacy generalized_rig_sfm result (0.32 m) on the same graph.",
+    "The remaining common factor is the optimizer: the T265 baseline (~6 cm) makes metric scale a weakly observable direction; Ceres in COLMAP iterates until the gradient max-norm is below 1e-4, whereas the legacy bundle.rs LM stops on relative cost change 1e-6 (or the iteration cap) and never fully resolves that direction. Second candidate: the 6-point DLT generalized PnP versus GP3P.",
+    "Next: rerun 2.5k with the native BA (C2.5, Ceres-style LM with gradient tolerance) before touching anything else; if scale converges to ~1.03 the optimizer explanation holds, otherwise proceed to C3 (GP3P) and a per-frame pose diff against COLMAP's registration log.",
+    "Wall time 6:40 at 2.5k is dominated by the legacy BA (28 min per global refinement); C2.5 replaces it."
+  ]
+}

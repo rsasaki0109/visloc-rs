@@ -22,6 +22,7 @@ use rand::SeedableRng;
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::Camera;
 
+use crate::pnp::gp3p::gp3p_solve;
 use crate::pnp::{Correspondence2D3D, GaussNewtonPoseRefiner, P3PGrunert};
 use crate::ransac::{PnPRansac, RobustPoseEstimator};
 
@@ -273,12 +274,44 @@ impl GeneralizedDltPoseEstimator {
 }
 
 /// Shared-rig nonlinear pose refiner.
+///
+/// Port of COLMAP's post-RANSAC generalized-pose refinement,
+/// `RefineGeneralizedAbsolutePose` (`estimators/generalized_pose.cc:280-431`),
+/// as called from `RegisterNextGeneralFrame`
+/// (`sfm/incremental_mapper.cc:601-641`) — the routine this crate's
+/// `GeneralizedPnPRansac` uses this refiner for. That routine hardcodes a
+/// Cauchy loss unconditionally (`generalized_pose.cc:298-299`:
+/// `std::make_unique<ceres::CauchyLoss>(options.loss_function_scale)` — there
+/// is no `Trivial`/`SoftL1` option at this call site to mirror, unlike
+/// `colmap_incremental::bundle_adjustment::LossFunction`'s BA path), so
+/// `loss_scale` here is *always* applied as a Cauchy loss, not a switchable
+/// enum. `AbsolutePoseRefinementOptions::loss_function_scale`'s default is
+/// `1.0` (`estimators/pose.h:73`), reproduced by
+/// [`GeneralizedGaussNewtonPoseRefiner::default`].
+///
+/// This refiner computes its Jacobian by finite differences on the *raw*
+/// (loss-free) stacked residual vector (unchanged from before this port), so
+/// the robust-loss correction is applied as a distinct step afterward,
+/// per-observation (one `[x,y]` sub-block per correspondence, matching
+/// Ceres' per-residual-block granularity exactly): see
+/// [`apply_robust_loss`], a block-local port of `ceres::internal::Corrector`
+/// (`internal/ceres/corrector.cc`) — the same algorithm as
+/// `colmap_incremental::rig_ba_solver::Corrector` (that module's doc has the
+/// full citation), reimplemented here directly on `DVector`/`DMatrix`
+/// row-slices rather than shared across crates, since this refiner's problem
+/// (stacked finite-difference Jacobian, not a per-observation analytic
+/// Jacobian folded into a Schur-complement system) has a different enough
+/// shape that sharing the fixed-size `SMatrix`-based type from
+/// `rig_ba_solver.rs` would need its own adapter either way.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeneralizedGaussNewtonPoseRefiner {
     pub iterations: usize,
     pub damping: f64,
     pub finite_difference_epsilon: f64,
     pub minimum_error_reduction: f64,
+    /// Cauchy loss scale `a` (`AbsolutePoseRefinementOptions::loss_function_scale`,
+    /// `estimators/pose.h:73`, default `1.0`).
+    pub loss_scale: f64,
 }
 
 impl Default for GeneralizedGaussNewtonPoseRefiner {
@@ -288,6 +321,7 @@ impl Default for GeneralizedGaussNewtonPoseRefiner {
             damping: 1.0e-6,
             finite_difference_epsilon: 1.0e-6,
             minimum_error_reduction: 1.0e-10,
+            loss_scale: 1.0,
         }
     }
 }
@@ -305,14 +339,16 @@ impl GeneralizedGaussNewtonPoseRefiner {
             || self.damping < 0.0
             || !self.finite_difference_epsilon.is_finite()
             || self.finite_difference_epsilon <= 0.0
+            || !self.loss_scale.is_finite()
+            || self.loss_scale <= 0.0
         {
             return None;
         }
         let mut pose = initial_pose.clone();
-        let mut best_error = mean_squared_error(rig, &pose, correspondences)?;
+        let mut best_cost = robust_cost(rig, &pose, correspondences, self.loss_scale)?;
         for _ in 0..self.iterations {
-            let residual = residuals(rig, &pose, correspondences)?;
-            let mut jacobian = DMatrix::<f64>::zeros(residual.len(), 6);
+            let raw_residual = residuals(rig, &pose, correspondences)?;
+            let mut jacobian = DMatrix::<f64>::zeros(raw_residual.len(), 6);
             for parameter in 0..6 {
                 let mut delta = DVector::<f64>::zeros(6);
                 delta[parameter] = self.finite_difference_epsilon;
@@ -320,9 +356,14 @@ impl GeneralizedGaussNewtonPoseRefiner {
                 let perturbed = residuals(rig, &perturbed_pose, correspondences)?;
                 jacobian.set_column(
                     parameter,
-                    &((perturbed - &residual) / self.finite_difference_epsilon),
+                    &((perturbed - &raw_residual) / self.finite_difference_epsilon),
                 );
             }
+            // Robust-loss correction, per observation block — mutates both
+            // in place (Jacobian first, from the still-raw residual, then
+            // the residual itself; see `apply_robust_loss`'s doc).
+            let mut residual = raw_residual;
+            apply_robust_loss(self.loss_scale, &mut residual, &mut jacobian);
             let transpose = jacobian.transpose();
             let mut hessian = &transpose * &jacobian;
             for diagonal in 0..6 {
@@ -334,16 +375,103 @@ impl GeneralizedGaussNewtonPoseRefiner {
                 break;
             }
             let candidate = perturb_pose(&pose, &step);
-            let Some(candidate_error) = mean_squared_error(rig, &candidate, correspondences) else {
+            let Some(candidate_cost) =
+                robust_cost(rig, &candidate, correspondences, self.loss_scale)
+            else {
                 break;
             };
-            if candidate_error + self.minimum_error_reduction >= best_error {
+            if candidate_cost + self.minimum_error_reduction >= best_cost {
                 break;
             }
             pose = candidate;
-            best_error = candidate_error;
+            best_cost = candidate_cost;
         }
         Some(pose)
+    }
+}
+
+/// `rho(s), rho'(s), rho''(s)` for `ceres::CauchyLoss` — port of
+/// `CauchyLoss::Evaluate` (`internal/ceres/loss_function.cc:77-84`),
+/// `b=a²,c=1/b` from `include/ceres/loss_function.h:207-217`. Identical
+/// formula to `colmap_incremental::rig_ba_solver::evaluate_loss`'s
+/// `LossFunction::Cauchy` arm; duplicated here (rather than shared) since
+/// this crate (`visloc-vision`) does not depend on `visloc-slam`.
+#[inline]
+fn cauchy_loss(scale: f64, s: f64) -> [f64; 3] {
+    let b = scale * scale;
+    let c = 1.0 / b;
+    let sum = 1.0 + s * c;
+    let inv = 1.0 / sum;
+    let rho0 = b * sum.ln();
+    let rho1 = inv.max(f64::MIN_POSITIVE);
+    let rho2 = -c * (inv * inv);
+    [rho0, rho1, rho2]
+}
+
+/// `Σ rho(s_i)` over every observation's own squared residual norm
+/// `s_i = r_i.x² + r_i.y²` — the robustified analog of `mean_squared_error`,
+/// matching Ceres' `cost = Σ 0.5·rho(s_i)` convention up to the constant
+/// `0.5`/`N` factors (irrelevant here: only used to compare a candidate
+/// step's cost against the current best, `residual_block.cc:161-168`).
+fn robust_cost(
+    rig: &GeneralizedCameraRig,
+    pose: &Pose,
+    correspondences: &[GeneralizedCorrespondence2D3D],
+    loss_scale: f64,
+) -> Option<f64> {
+    let r = residuals(rig, pose, correspondences)?;
+    let num_obs = r.len() / 2;
+    let mut cost = 0.0;
+    for i in 0..num_obs {
+        let s = r[2 * i] * r[2 * i] + r[2 * i + 1] * r[2 * i + 1];
+        cost += cauchy_loss(loss_scale, s)[0];
+    }
+    Some(cost)
+}
+
+/// Block-local port of `ceres::internal::Corrector`
+/// (`internal/ceres/corrector.cc:41-155`; see
+/// `colmap_incremental::rig_ba_solver::Corrector`'s doc for the full
+/// algorithm citation and the exact call-order/cost-convention rationale
+/// this mirrors, `residual_block.cc:161-197`) applied independently to each
+/// `[x,y]` observation sub-block of `residual`/`jacobian` (rows `2i,2i+1`) —
+/// i.e. at the same per-residual-block granularity Ceres itself uses,
+/// despite `jacobian` being one finite-difference-assembled `2N×6` matrix
+/// here rather than N separate analytic `2×6` blocks. Mutates both in place;
+/// `jacobian`'s correction uses the *pre-correction* residual values (must
+/// run first, matching Ceres), so `residual` is corrected last.
+fn apply_robust_loss(loss_scale: f64, residual: &mut DVector<f64>, jacobian: &mut DMatrix<f64>) {
+    let num_obs = residual.len() / 2;
+    let ncols = jacobian.ncols();
+    for i in 0..num_obs {
+        let r0 = residual[2 * i];
+        let r1 = residual[2 * i + 1];
+        let s = r0 * r0 + r1 * r1;
+        let rho = cauchy_loss(loss_scale, s);
+        let sqrt_rho1 = rho[1].max(0.0).sqrt();
+        let (residual_scaling, alpha_sq_norm) = if s == 0.0 || rho[2] <= 0.0 {
+            (sqrt_rho1, 0.0)
+        } else {
+            let d = 1.0 + 2.0 * s * rho[2] / rho[1];
+            let alpha = 1.0 - d.sqrt();
+            (sqrt_rho1 / (1.0 - alpha), alpha / s)
+        };
+        if alpha_sq_norm == 0.0 {
+            for c in 0..ncols {
+                jacobian[(2 * i, c)] *= sqrt_rho1;
+                jacobian[(2 * i + 1, c)] *= sqrt_rho1;
+            }
+        } else {
+            for c in 0..ncols {
+                let j0 = jacobian[(2 * i, c)];
+                let j1 = jacobian[(2 * i + 1, c)];
+                let r_transpose_j = r0 * j0 + r1 * j1;
+                jacobian[(2 * i, c)] = sqrt_rho1 * (j0 - alpha_sq_norm * r0 * r_transpose_j);
+                jacobian[(2 * i + 1, c)] = sqrt_rho1 * (j1 - alpha_sq_norm * r1 * r_transpose_j);
+            }
+        }
+        residual[2 * i] *= residual_scaling;
+        residual[2 * i + 1] *= residual_scaling;
     }
 }
 
@@ -359,9 +487,27 @@ pub struct GeneralizedRansacReport {
     pub refinement_applied: bool,
 }
 
+/// Which minimal solver [`GeneralizedPnPRansac`] uses to generate pose
+/// hypotheses from a minimal sample. Port of the C3 task's "keep the
+/// existing 6-point DLT path selectable (option) for A/B" instruction:
+/// [`MinimalSolver::Gp3p`] (the default, matching COLMAP's
+/// `EstimateGeneralizedAbsolutePose` -> `GP3PEstimator`,
+/// `estimators/generalized_pose.cc:131-190`, `RANSAC<GP3PEstimator,...>`
+/// sampling exactly 3 correspondences per trial) is the faithful C3 port;
+/// [`MinimalSolver::Dlt6pt`] keeps this port's pre-C3 6-point linear DLT
+/// path (see `generalized.rs`'s module doc and
+/// [`GeneralizedDltPoseEstimator`]) available for A/B parity checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MinimalSolver {
+    #[default]
+    Gp3p,
+    Dlt6pt,
+}
+
 /// Deterministic pixel-space RANSAC for one generalized rig frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeneralizedPnPRansac {
+    pub minimal_solver: MinimalSolver,
     pub pose_estimator: GeneralizedDltPoseEstimator,
     pub pose_refiner: Option<GeneralizedGaussNewtonPoseRefiner>,
     pub iterations: usize,
@@ -373,6 +519,7 @@ pub struct GeneralizedPnPRansac {
 impl Default for GeneralizedPnPRansac {
     fn default() -> Self {
         Self {
+            minimal_solver: MinimalSolver::default(),
             pose_estimator: GeneralizedDltPoseEstimator::default(),
             pose_refiner: Some(GeneralizedGaussNewtonPoseRefiner::default()),
             iterations: 256,
@@ -381,6 +528,31 @@ impl Default for GeneralizedPnPRansac {
             seed: 7,
         }
     }
+}
+
+/// Generates GP3P's up-to-8 candidate `world -> rig` poses from a minimal
+/// 3-correspondence sample, drawn from possibly different sensors of the
+/// rig (`rig.ray_rig` handles the per-sensor bearing/origin transform into
+/// the shared rig frame, same helper [`GeneralizedDltPoseEstimator`] uses).
+fn gp3p_hypotheses(
+    rig: &GeneralizedCameraRig,
+    correspondences: &[GeneralizedCorrespondence2D3D],
+    sample_idx: [usize; 3],
+    seed: u64,
+) -> Vec<Pose> {
+    let mut origins = [Point3::origin(); 3];
+    let mut bearings = [Vector3::zeros(); 3];
+    let mut points = [Point3::origin(); 3];
+    for (k, &idx) in sample_idx.iter().enumerate() {
+        let correspondence = &correspondences[idx];
+        let Some((origin, bearing)) = rig.ray_rig(correspondence) else {
+            return Vec::new();
+        };
+        origins[k] = origin;
+        bearings[k] = bearing;
+        points[k] = correspondence.point3d;
+    }
+    gp3p_solve(&origins, &bearings, &points, seed)
 }
 
 impl GeneralizedPnPRansac {
@@ -398,7 +570,10 @@ impl GeneralizedPnPRansac {
         correspondences: &[GeneralizedCorrespondence2D3D],
         pose_prior: Option<&Pose>,
     ) -> Option<GeneralizedRansacReport> {
-        let sample_size = GeneralizedDltPoseEstimator::MINIMUM_CORRESPONDENCES;
+        let sample_size = match self.minimal_solver {
+            MinimalSolver::Gp3p => 3,
+            MinimalSolver::Dlt6pt => GeneralizedDltPoseEstimator::MINIMUM_CORRESPONDENCES,
+        };
         if correspondences.len() < sample_size
             || self.iterations == 0
             || !self.reprojection_threshold.is_finite()
@@ -418,30 +593,56 @@ impl GeneralizedPnPRansac {
         let mut central_hypotheses = 0usize;
         for iteration in 0..self.iterations {
             indices.shuffle(&mut rng);
-            let sample = indices
-                .iter()
-                .take(sample_size)
-                .map(|index| correspondences[*index].clone())
-                .collect::<Vec<_>>();
-            let Some(pose) = self.pose_estimator.estimate_pose(rig, &sample) else {
-                continue;
+            let hypotheses: Vec<Pose> = match self.minimal_solver {
+                MinimalSolver::Dlt6pt => {
+                    let sample = indices
+                        .iter()
+                        .take(sample_size)
+                        .map(|index| correspondences[*index].clone())
+                        .collect::<Vec<_>>();
+                    self.pose_estimator
+                        .estimate_pose(rig, &sample)
+                        .into_iter()
+                        .collect()
+                }
+                MinimalSolver::Gp3p => {
+                    // A per-trial seed derived from the RANSAC seed and
+                    // trial index — deterministic for a fixed `self.seed`
+                    // (task requirement), distinct per trial so different
+                    // trials don't repeat GP3P's own internal auxiliary
+                    // randomness (see `gp3p.rs`'s module doc).
+                    let trial_seed = self
+                        .seed
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add(iteration as u64);
+                    gp3p_hypotheses(
+                        rig,
+                        correspondences,
+                        [indices[0], indices[1], indices[2]],
+                        trial_seed,
+                    )
+                }
             };
-            dlt_hypotheses += 1;
-            let score = score_pose(rig, &pose, correspondences, self.reprojection_threshold);
-            if score.is_better_than(&best_score) {
-                best_pose = Some(pose);
-                best_score = score;
-                if let Some(confidence) = self.confidence {
-                    let inlier_ratio =
-                        best_score.inliers.len() as f64 / correspondences.len() as f64;
-                    if inlier_ratio >= 1.0 {
-                        required_iterations = iteration + 1;
-                    } else if inlier_ratio > 0.0 && confidence > 0.0 && confidence < 1.0 {
-                        let denominator = (1.0 - inlier_ratio.powi(sample_size as i32)).ln();
-                        if denominator < -1.0e-12 {
-                            required_iterations = required_iterations
-                                .min(((1.0 - confidence).ln() / denominator).ceil().max(1.0)
-                                    as usize);
+            if !hypotheses.is_empty() {
+                dlt_hypotheses += 1;
+            }
+            for pose in &hypotheses {
+                let score = score_pose(rig, pose, correspondences, self.reprojection_threshold);
+                if score.is_better_than(&best_score) {
+                    best_pose = Some(pose.clone());
+                    best_score = score;
+                    if let Some(confidence) = self.confidence {
+                        let inlier_ratio =
+                            best_score.inliers.len() as f64 / correspondences.len() as f64;
+                        if inlier_ratio >= 1.0 {
+                            required_iterations = iteration + 1;
+                        } else if inlier_ratio > 0.0 && confidence > 0.0 && confidence < 1.0 {
+                            let denominator = (1.0 - inlier_ratio.powi(sample_size as i32)).ln();
+                            if denominator < -1.0e-12 {
+                                required_iterations = required_iterations
+                                    .min(((1.0 - confidence).ln() / denominator).ceil().max(1.0)
+                                        as usize);
+                            }
                         }
                     }
                 }
@@ -457,7 +658,15 @@ impl GeneralizedPnPRansac {
         // transform them to the rig frame, then score them against *all*
         // sensors. Sensor choice affects hypothesis generation only; the
         // accepted body pose and nonlinear refinement remain fully pooled.
-        for sensor_index in 0..rig.sensors().len() {
+        // Only applies to the [`MinimalSolver::Dlt6pt`] A/B path — GP3P is
+        // already an exact minimal solver and COLMAP's own
+        // `EstimateGeneralizedAbsolutePose` has no analogous per-sensor
+        // bootstrap step.
+        for sensor_index in 0..(if self.minimal_solver == MinimalSolver::Dlt6pt {
+            rig.sensors().len()
+        } else {
+            0
+        }) {
             let sensor_correspondences = correspondences
                 .iter()
                 .filter(|correspondence| correspondence.sensor_index == sensor_index)
@@ -525,13 +734,25 @@ impl GeneralizedPnPRansac {
             .iter()
             .map(|index| correspondences[*index].clone())
             .collect::<Vec<_>>();
-        let refit_pose = self
-            .pose_estimator
-            .estimate_pose(rig, &inliers)
-            .filter(|pose| {
-                let score = score_pose(rig, pose, correspondences, self.reprojection_threshold);
-                !best_score.is_better_than(&score)
-            });
+        // COLMAP's `EstimateGeneralizedAbsolutePose` (plain `RANSAC`, no
+        // local-optimization refit step) returns the best minimal-sample
+        // model directly into `RefineGeneralizedAbsolutePose` — so the
+        // intermediate linear-DLT refit below is specific to this port's
+        // A/B [`MinimalSolver::Dlt6pt`] path, where it compensates for the
+        // 6-point DLT's higher noise sensitivity; it is skipped for
+        // [`MinimalSolver::Gp3p`] to match COLMAP's flow exactly (the
+        // Gauss-Newton `pose_refiner` step below still runs either way,
+        // matching `RefineGeneralizedAbsolutePose`).
+        let refit_pose = if self.minimal_solver == MinimalSolver::Dlt6pt {
+            self.pose_estimator
+                .estimate_pose(rig, &inliers)
+                .filter(|pose| {
+                    let score = score_pose(rig, pose, correspondences, self.reprojection_threshold);
+                    !best_score.is_better_than(&score)
+                })
+        } else {
+            None
+        };
         let mut pose = refit_pose.or(best_pose)?;
         let refit_score = score_pose(rig, &pose, correspondences, self.reprojection_threshold);
         let mut refinement_applied = false;
@@ -627,6 +848,12 @@ fn score_pose(
     }
 }
 
+/// Trivial-loss mean squared reprojection error — only used by
+/// `tests::nonlinear_refinement_reduces_joint_sensor_error` to report a
+/// loss-independent before/after error metric; [`GeneralizedGaussNewtonPoseRefiner::refine_pose`]
+/// itself now uses [`robust_cost`] (Cauchy-weighted) since it always applies
+/// a robust loss, see that struct's doc.
+#[cfg(test)]
 fn mean_squared_error(
     rig: &GeneralizedCameraRig,
     pose: &Pose,
@@ -782,6 +1009,97 @@ mod tests {
             "translation error {translation_error}"
         );
         assert!(report.mean_reprojection_error < 1.0e-5);
+    }
+
+    /// C3 task item: "RANSAC recovers it with 30% outliers" for the GP3P
+    /// minimal solver path specifically (not relying on
+    /// [`GeneralizedPnPRansac::default`] happening to already be
+    /// [`MinimalSolver::Gp3p`], in case that default ever changes).
+    #[test]
+    fn gp3p_ransac_recovers_pose_with_thirty_percent_outliers() {
+        let rig = test_rig();
+        let truth = truth_pose();
+        let mut correspondences = synthetic_correspondences(&rig, &truth);
+        // 24 correspondences total (see `synthetic_correspondences`); flip
+        // 7 (~29%) into gross pixel outliers.
+        for index in [0usize, 3, 7, 10, 14, 18, 22] {
+            correspondences[index].point2d.x += 120.0 + index as f64;
+            correspondences[index].point2d.y -= 75.0;
+        }
+        let report = GeneralizedPnPRansac {
+            minimal_solver: MinimalSolver::Gp3p,
+            iterations: 1024,
+            reprojection_threshold: 1.0,
+            ..GeneralizedPnPRansac::default()
+        }
+        .estimate(&rig, &correspondences)
+        .unwrap();
+        let (rotation_error, translation_error) = pose_errors(&report.pose, &truth);
+        assert_eq!(report.inliers.len(), correspondences.len() - 7);
+        assert!(rotation_error < 1.0e-6, "rotation error {rotation_error}");
+        assert!(
+            translation_error < 1.0e-6,
+            "translation error {translation_error}"
+        );
+    }
+
+    /// C3 task item: determinism with a fixed seed, at the RANSAC level
+    /// (covers both GP3P's own internal auxiliary-randomness seeding, per
+    /// `gp3p.rs`'s module doc, and the RANSAC sample-shuffling `SmallRng`).
+    #[test]
+    fn gp3p_ransac_is_deterministic_for_a_fixed_seed() {
+        let rig = test_rig();
+        let truth = truth_pose();
+        let mut correspondences = synthetic_correspondences(&rig, &truth);
+        for index in [1usize, 6, 11, 16, 21] {
+            correspondences[index].point2d.x += 90.0 + index as f64;
+            correspondences[index].point2d.y -= 55.0;
+        }
+        let config = GeneralizedPnPRansac {
+            minimal_solver: MinimalSolver::Gp3p,
+            iterations: 512,
+            reprojection_threshold: 1.0,
+            seed: 4242,
+            ..GeneralizedPnPRansac::default()
+        };
+        let a = config.estimate(&rig, &correspondences).unwrap();
+        let b = config.estimate(&rig, &correspondences).unwrap();
+        assert_eq!(a.inliers, b.inliers);
+        assert_eq!(
+            a.pose.world_to_camera.rotation,
+            b.pose.world_to_camera.rotation
+        );
+        assert_eq!(
+            a.pose.world_to_camera.translation,
+            b.pose.world_to_camera.translation
+        );
+    }
+
+    /// A/B: the pre-C3 6-point DLT path stays selectable and functional.
+    #[test]
+    fn dlt6pt_minimal_solver_still_selectable_and_recovers_pose() {
+        let rig = test_rig();
+        let truth = truth_pose();
+        let mut correspondences = synthetic_correspondences(&rig, &truth);
+        for index in [1usize, 6, 11, 16, 21] {
+            correspondences[index].point2d.x += 90.0 + index as f64;
+            correspondences[index].point2d.y -= 55.0;
+        }
+        let report = GeneralizedPnPRansac {
+            minimal_solver: MinimalSolver::Dlt6pt,
+            iterations: 512,
+            reprojection_threshold: 1.0,
+            ..GeneralizedPnPRansac::default()
+        }
+        .estimate(&rig, &correspondences)
+        .unwrap();
+        let (rotation_error, translation_error) = pose_errors(&report.pose, &truth);
+        assert_eq!(report.inliers.len(), 19);
+        assert!(rotation_error < 1.0e-6, "rotation error {rotation_error}");
+        assert!(
+            translation_error < 1.0e-6,
+            "translation error {translation_error}"
+        );
     }
 
     #[test]

@@ -1,0 +1,82 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-14",
+  "status": "c0_baseline_1k_no_gap",
+  "milestone": "C0 of docs/colmap_rig_mapper_port_plan.md",
+  "method": "same as m9-openloris-colmap-graph-isolation-10000-v1 on the COLMAP 1k control (corridor1-1-m8-colmap/tier-1000-rig-v3): COLMAP verified graph and keypoints exported without re-verification, generalized_rig_sfm with C' flags",
+  "colmap_1k_control": {
+    "models": 1,
+    "registered_images": 1000,
+    "gt_scored_images": 308,
+    "ate_rmse_m": 0.027968541677842282,
+    "ate_p95_m": 0.042266006958647205,
+    "sim3_scale": 1.1363795944240869,
+    "reference_extent_m": 1.97,
+    "score": "corridor1-1-m8-colmap/tier-1000-rig-v3/openloris-gt-score.json"
+  },
+  "visloc_on_colmap_1k_graph": {
+    "visloc_cprime_flags": {
+      "models": 1,
+      "registered_images": 1000,
+      "gt_scored_images": 308,
+      "ate_rmse_m": 0.027130387529525388,
+      "ate_p95_m": 0.04136742731870032,
+      "sim3_scale": [
+        1.1250489207981034
+      ],
+      "rpe": {
+        "1.0": {
+          "reference_pairs": 125,
+          "coverage": 1.0,
+          "rmse_m": 0.03522779067188707
+        },
+        "10.0": {
+          "reference_pairs": 0,
+          "coverage": null,
+          "rmse_m": null
+        }
+      },
+      "score_sha256": "e3d853f938e5e65570e161dfd32c821ee974626d19c74ffd1d92565e950d3a5c",
+      "images_txt_sha256": "62b819136c0af9b27cea1fe0ed78ad1c6cd08c629c3d96645375d649030ffdf0",
+      "registered_frames": "500/500",
+      "tracks": 11173,
+      "observations": 161240,
+      "mean_reprojection_px": 0.659674864,
+      "wall": "0:44.22",
+      "peak_rss_kib": 187512
+    },
+    "diagnostic_min_pnp_sensors_1": {
+      "models": 1,
+      "registered_images": 1000,
+      "gt_scored_images": 308,
+      "ate_rmse_m": 0.027130387529525388,
+      "ate_p95_m": 0.04136742731870032,
+      "sim3_scale": [
+        1.1250489207981034
+      ],
+      "rpe": {
+        "1.0": {
+          "reference_pairs": 125,
+          "coverage": 1.0,
+          "rmse_m": 0.03522779067188707
+        },
+        "10.0": {
+          "reference_pairs": 0,
+          "coverage": null,
+          "rmse_m": null
+        }
+      },
+      "score_sha256": "9b7915744be990df70acb0c640a0fbb3e5c3a72787acd0520b7c89df2c7d19aa",
+      "images_txt_sha256": "62b819136c0af9b27cea1fe0ed78ad1c6cd08c629c3d96645375d649030ffdf0",
+      "note": "model images.txt identical to the C' flags arm",
+      "wall": "0:45.35",
+      "peak_rss_kib": 187380
+    }
+  },
+  "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/openloris-tier1000-colmap-graph-visloc-mapper-v1",
+  "lead_analysis": [
+    "At 1k the visloc rig mapper on COLMAP's graph matches COLMAP: 1000/1000 images, one component, ATE 0.0271 m vs 0.0280 m, Sim(3) scale 1.125 vs 1.136.",
+    "--min-pnp-sensors 1 changes nothing at 1k (identical model), so the two-sensor registration gate is not active on this tier.",
+    "The 1k tier cannot discriminate the 10k scale collapse: GT covers only 308 images over a 1.97 m extent and no 10 s RPE pairs exist. Parity work needs intermediate tiers (2.5k/5k) where the collapse appears."
+  ]
+}

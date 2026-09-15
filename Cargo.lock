@@ -942,6 +942,7 @@ dependencies = [
  "rayon",
  "thiserror",
  "visloc-core",
+ "visloc-io",
  "visloc-localization",
  "visloc-mapping",
  "visloc-tracking",

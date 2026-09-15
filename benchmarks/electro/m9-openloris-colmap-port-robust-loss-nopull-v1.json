@@ -1,0 +1,62 @@
+{
+  "schema": "visloc_benchmark_evidence_v1",
+  "recorded_at": "2026-09-15",
+  "status": "robust_loss_and_nopull_arms_recorded_no_improvement",
+  "runs": {
+    "2500_gp3p_colmap_robust_loss_7d61d27": {
+      "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-robust",
+      "binary_sha256": "9ce2579c3b57cfcf20416a6f64313fde8111aa3750258e81fd369ee1f430247f",
+      "registered_images": 2500,
+      "models": 1,
+      "ate_rmse_m": 0.15417398176217678,
+      "ate_p95_m": 0.25164397702073477,
+      "sim3_scale": 1.0825395896631802,
+      "rpe_1s_rmse_m": 0.07148787239369464,
+      "rpe_10s_rmse_m": 0.24956259780417756,
+      "images_txt_sha256": "53c1b9da26c44769190525da4731562ee2a740ffe68eb802b752c84691abfb32",
+      "wall": "mm:ss or m:ss): 1:01:11"
+    },
+    "2500_gp3p_nopull_trivial_8bb90c4": {
+      "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-2500-gp3p-nopull",
+      "binary_sha256": "79529eb64d9c2019c792832c91097cedda6339ab5a061ff7f20978477d7f13b2",
+      "registered_images": 2500,
+      "models": 1,
+      "ate_rmse_m": 0.16156808569679013,
+      "ate_p95_m": 0.262023778601372,
+      "sim3_scale": 1.120592545032698,
+      "rpe_1s_rmse_m": 0.06731565208394087,
+      "rpe_10s_rmse_m": 0.2614975451479041,
+      "images_txt_sha256": "ca23abc27ab9ec58a8fe0a0daeb822535593869e6210753fe94b8bc5ba0c9209",
+      "wall": "mm:ss or m:ss): 51:27.39"
+    },
+    "5000_gp3p_nopull_trivial_8bb90c4": {
+      "root": "/home/sasaki/datasets/openloris/m9-learned-retrieval-models-v1/colmap-port-c2-v1/tier-5000-gp3p-nopull",
+      "binary_sha256": "79529eb64d9c2019c792832c91097cedda6339ab5a061ff7f20978477d7f13b2",
+      "registered_images": 5000,
+      "models": 1,
+      "ate_rmse_m": 0.4396767321141603,
+      "ate_p95_m": 0.9519836468432458,
+      "sim3_scale": 1.2724026744333838,
+      "rpe_1s_rmse_m": 0.0778731102540434,
+      "rpe_10s_rmse_m": 0.44569835446833034,
+      "images_txt_sha256": "9ac7d77f732d49e82121b99b8a256e9d5c077bcfdb1176d66c25184a9d4064ed",
+      "wall": "mm:ss or m:ss): 2:50:49"
+    }
+  },
+  "reference": {
+    "2500": {
+      "colmap_ate": 0.0718,
+      "colmap_rpe10s": 0.089,
+      "best_port": "gp3p+colmap trivial (285dd15): ATE 0.0874, RPE-10s 0.1258"
+    },
+    "5000": {
+      "colmap_ate": 0.1227,
+      "colmap_rpe10s": 0.1474,
+      "best_port": "pre-C2.6 native BA + DLT (3740942 snapshot): ATE 0.2725, RPE-10s 0.284"
+    }
+  },
+  "lead_analysis": [
+    "Ceres-faithful robust losses (SoftL1 first local refinement, Cauchy pose refinement) made 2.5k worse (0.154 vs 0.087 m) despite being the documented COLMAP behaviour; the nopull policy did not help at 5k (0.440 m).",
+    "Across all arms the port's results vary 2-5x under small, individually faithful changes while COLMAP is stable; this points to a remaining structural divergence (registration order / next-image selection, filtering cadence, or BA convergence) rather than to any single policy. Per-frame comparison against COLMAP's registration log and trajectory is the next diagnostic, not more A/B arms."
+  ]
+}

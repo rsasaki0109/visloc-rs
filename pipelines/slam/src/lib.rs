@@ -12,6 +12,11 @@
 //! from 2D reprojection residuals.
 
 pub mod bundle;
+// Milestone C1 (docs/colmap_rig_mapper_port_plan.md): a faithful, from-source
+// port of COLMAP's rig-aware incremental-mapper data model (Rig/Frame/
+// DatabaseCache/Reconstruction), kept separate from `rig_sfm` — see the
+// module doc for why.
+pub mod colmap_incremental;
 // Experimental, explicitly selected square-root landmark elimination.
 mod landmark_qr;
 mod process_memory;

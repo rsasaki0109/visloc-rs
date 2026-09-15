@@ -9840,7 +9840,13 @@ where
     unreachable!("the max-iteration branch returns above");
 }
 
-fn rig_residual_jacobians(
+/// `pub(crate)` (rather than private) solely so
+/// `colmap_incremental::rig_ba_solver`'s test suite can cross-check its own
+/// (independently, allocation-free re-derived) residual/Jacobian formula
+/// against this already-exercised implementation on random inputs. The
+/// native solver's hot path does **not** call this (it stays link-independent
+/// of `bundle.rs`, per its module doc); only its `#[cfg(test)]` module does.
+pub(crate) fn rig_residual_jacobians(
     observation: &BaRigObservation,
     pose: &Pose,
     point_world: &Point3<f64>,
