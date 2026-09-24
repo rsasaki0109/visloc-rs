@@ -726,6 +726,8 @@ impl Trainer {
         let dev = st.renderer.ctx.device.clone();
         let queue = st.renderer.ctx.queue.clone();
         let n = st.renderer.num_gaussians();
+        // Population cap: past it only pruning (and opacity resets) run.
+        let grow = grow && n < d.max_gaussians;
         let params = st.renderer.param_buffers();
         let src = [
             params.transforms.clone(),

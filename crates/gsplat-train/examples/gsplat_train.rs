@@ -35,6 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--steps" => cfg.steps = next()?.parse()?,
             "--eval-every" => eval_every = next()?.parse()?,
             "--no-densify" => cfg.densify = None,
+            "--max-gaussians" => {
+                let cap = next()?.parse()?;
+                if let Some(d) = cfg.densify.as_mut() {
+                    d.max_gaussians = cap;
+                }
+            }
             "--init-ply" => init_ply = Some(PathBuf::from(next()?)),
             "--export-steps" => {
                 export_steps = next()?
