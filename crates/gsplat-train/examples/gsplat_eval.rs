@@ -23,6 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data: Option<PathBuf> = None;
     let mut eval_every = 8usize;
     let mut save_dir: Option<PathBuf> = None;
+    let mut sh_degree: Option<u32> = None;
+    let mut sh_rest_coef_major = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--ply" => ply = args.next().map(PathBuf::from),
@@ -34,13 +36,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("--eval-every needs a number")?
             }
             "--save-dir" => save_dir = args.next().map(PathBuf::from),
+            // Diagnostics: evaluate SH only up to this degree.
+            "--sh-degree" => sh_degree = args.next().and_then(|v| v.parse().ok()),
+            // Diagnostics: read f_rest as coefficient-major ([k][ch]) instead
+            // of the Inria channel-major ([ch][k]) layout.
+            "--sh-rest-coef-major" => sh_rest_coef_major = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
     let ply = ply.ok_or("--ply <path> is required")?;
     let data = data.ok_or("--data <colmap root> is required")?;
 
-    let scene = load_ply(&ply)?;
+    let mut scene = load_ply(&ply)?;
+    if sh_rest_coef_major {
+        for g in scene.gaussians.iter_mut() {
+            let rest = g.sh_rest.len() / 3;
+            let orig = g.sh_rest.clone();
+            for ch in 0..3 {
+                for k in 0..rest {
+                    g.sh_rest[ch * rest + k] = orig[k * 3 + ch];
+                }
+            }
+        }
+    }
     let dataset = load_colmap_dataset(&data, Some(eval_every))?;
     println!(
         "{} gaussians (sh degree {}), {} eval / {} train views",
@@ -65,7 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some((_, _, r)) => r.ctx,
                 None => GpuContext::new()?,
             };
-            renderer = Some((w, h, Renderer::new(ctx, &scene, w, h)?));
+            let mut r = Renderer::new(ctx, &scene, w, h)?;
+            r.set_active_sh_degree(sh_degree);
+            renderer = Some((w, h, r));
         }
         let (_, _, r) = renderer.as_mut().expect("renderer set above");
         let image = r.render(&view.camera, bg);
