@@ -29,14 +29,14 @@ pub const SH_BASIS_COEFFS: [f32; 15] = [
     1.092_548_5, // 2, -1
     0.315_391_6, // 2, 0
     1.092_548_5, // 2, 1
-    1.092_548_5, // 2, 2
-    0.373_176_2, // 3, -3
-    2.890_611_3, // 3, -2
-    1.843_772,   // 3, -1
-    0.590_043_6, // 3, 0
-    1.843_772,   // 3, 1
-    2.890_611_3, // 3, 2
-    0.373_176_2, // 3, 3
+    0.546_274_2, // 2, 2
+    0.590_043_6, // 3, -3
+    2.890_611_4, // 3, -2
+    0.457_045_8, // 3, -1
+    0.373_176_3, // 3, 0
+    0.457_045_8, // 3, 1
+    1.445_305_7, // 3, 2
+    0.590_043_6, // 3, 3
 ];
 
 /// Evaluate the real SH basis up to `degree` (0..=3) for unit direction `dir`.
@@ -144,6 +144,38 @@ mod tests {
         assert!(b[1].abs() < 1e-6);
         assert!((b[2] - SH_BASIS_COEFFS[1]).abs() < 1e-6);
         assert!(b[3].abs() < 1e-6);
+    }
+
+    #[test]
+    fn basis_is_orthonormal_on_the_sphere() {
+        // Real SH with the Inria / brush normalisation are orthonormal:
+        // (4 pi) * mean over a uniform sphere sampling of b_i b_j = delta_ij.
+        // Catches wrong per-band constants (they once were swapped).
+        let n = 40_000;
+        let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+        let mut gram = [[0.0f64; 16]; 16];
+        for i in 0..n {
+            let z = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
+            let r = (1.0 - z * z).sqrt();
+            let phi = golden * i as f32;
+            let b = eval_sh_basis(3, Vector3::new(r * phi.cos(), r * phi.sin(), z));
+            for a in 0..16 {
+                for c in 0..16 {
+                    gram[a][c] += (b[a] * b[c]) as f64;
+                }
+            }
+        }
+        let scale = 4.0 * std::f64::consts::PI / n as f64;
+        for (a, row) in gram.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                let want = if a == c { 1.0 } else { 0.0 };
+                assert!(
+                    (v * scale - want).abs() < 2e-3,
+                    "<b{a}, b{c}> = {}",
+                    v * scale
+                );
+            }
+        }
     }
 
     #[test]

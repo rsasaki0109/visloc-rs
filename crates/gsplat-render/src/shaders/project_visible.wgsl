@@ -37,10 +37,13 @@ fn sh_color(sh_base: u32, rest_pc: u32, act: u32, d: vec3<f32>) -> vec3<f32> {
     let c0 = 0.4886025;
     let c3 = 1.0925485;
     let c5 = 0.3153916;
-    let c8 = 0.3731762;
-    let c9 = 2.8906113;
-    let c10 = 1.843772;
-    let c11 = 0.5900436;
+    // Inria / brush real-SH normalisation (utils/sh_utils.py C2, C3).
+    let c8 = 0.5900436;
+    let c9 = 2.8906114;
+    let c10 = 0.4570458;
+    let c11 = 0.3731763;
+    let c2b = 0.5462742;
+    let c14 = 1.4453057;
     let b1 = -c0 * y;
     let b2 = c0 * z;
     let b3 = -c0 * x;
@@ -48,13 +51,13 @@ fn sh_color(sh_base: u32, rest_pc: u32, act: u32, d: vec3<f32>) -> vec3<f32> {
     let b5 = -c3 * y * z;
     let b6 = c5 * (2.0 * zz - xx - yy);
     let b7 = -c3 * x * z;
-    let b8 = c3 * (xx - yy);
+    let b8 = c2b * (xx - yy);
     let b9 = -c8 * y * (3.0 * xx - yy);
     let b10 = c9 * x * y * z;
     let b11 = -c10 * y * (4.0 * zz - xx - yy);
     let b12 = c11 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
     let b13 = -c10 * x * (4.0 * zz - xx - yy);
-    let b14 = c9 * z * (xx - yy);
+    let b14 = c14 * z * (xx - yy);
     let b15 = -c8 * x * (xx - 3.0 * yy);
     var out: vec3<f32>;
     for (var ch = 0u; ch < 3u; ch = ch + 1u) {

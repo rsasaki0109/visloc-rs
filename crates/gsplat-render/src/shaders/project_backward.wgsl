@@ -236,10 +236,13 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
     let c0 = 0.4886025;
     let c3 = 1.0925485;
     let c5 = 0.3153916;
-    let c8 = 0.3731762;
-    let c9 = 2.8906113;
-    let c10 = 1.843772;
-    let c11 = 0.5900436;
+    // Inria / brush real-SH normalisation (utils/sh_utils.py C2, C3).
+    let c8 = 0.5900436;
+    let c9 = 2.8906114;
+    let c10 = 0.4570458;
+    let c11 = 0.3731763;
+    let c2b = 0.5462742;
+    let c14 = 1.4453057;
     // Basis values b1..b15 (b0 = C0 is the DC term).
     let b1 = -c0 * y;
     let b2 = c0 * z;
@@ -248,13 +251,13 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
     let b5 = -c3 * y * z;
     let b6 = c5 * (2.0 * zz - xx - yy);
     let b7 = -c3 * x * z;
-    let b8 = c3 * (xx - yy);
+    let b8 = c2b * (xx - yy);
     let b9 = -c8 * y * (3.0 * xx - yy);
     let b10 = c9 * x * y * z;
     let b11 = -c10 * y * (4.0 * zz - xx - yy);
     let b12 = c11 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
     let b13 = -c10 * x * (4.0 * zz - xx - yy);
-    let b14 = c9 * z * (xx - yy);
+    let b14 = c14 * z * (xx - yy);
     let b15 = -c8 * x * (xx - 3.0 * yy);
     var gdir = vec3<f32>(0.0, 0.0, 0.0);
     for (var ch = 0u; ch < 3u; ch = ch + 1u) {
@@ -319,14 +322,14 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
             + vec3<f32>(0.0, -c3 * z, -c3 * y) * r5
             + vec3<f32>(-2.0 * c5 * x, -2.0 * c5 * y, 4.0 * c5 * z) * r6
             + vec3<f32>(-c3 * z, 0.0, -c3 * x) * r7
-            + vec3<f32>(2.0 * c3 * x, -2.0 * c3 * y, 0.0) * r8;
+            + vec3<f32>(2.0 * c2b * x, -2.0 * c2b * y, 0.0) * r8;
         dd = dd
             + vec3<f32>(-6.0 * c8 * x * y, -c8 * (3.0 * xx - 3.0 * yy), 0.0) * r9
             + vec3<f32>(c9 * y * z, c9 * x * z, c9 * x * y) * r10
             + vec3<f32>(2.0 * c10 * x * y, -c10 * (4.0 * zz - xx - 3.0 * yy), -8.0 * c10 * y * z) * r11
             + vec3<f32>(-6.0 * c11 * x * z, -6.0 * c11 * y * z, c11 * (6.0 * zz - 3.0 * xx - 3.0 * yy)) * r12
             + vec3<f32>(-c10 * (4.0 * zz - 3.0 * xx - yy), 2.0 * c10 * x * y, -8.0 * c10 * x * z) * r13
-            + vec3<f32>(2.0 * c9 * x * z, -2.0 * c9 * y * z, c9 * (xx - yy)) * r14
+            + vec3<f32>(2.0 * c14 * x * z, -2.0 * c14 * y * z, c14 * (xx - yy)) * r14
             + vec3<f32>(-c8 * (3.0 * xx - 3.0 * yy), 6.0 * c8 * x * y, 0.0) * r15;
         gdir = gdir + gc * dd;
     }

@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut save_dir: Option<PathBuf> = None;
     let mut sh_degree: Option<u32> = None;
     let mut sh_rest_coef_major = false;
+    let mut renders_dir: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--ply" => ply = args.next().map(PathBuf::from),
@@ -41,11 +42,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Diagnostics: read f_rest as coefficient-major ([k][ch]) instead
             // of the Inria channel-major ([ch][k]) layout.
             "--sh-rest-coef-major" => sh_rest_coef_major = true,
+            // Score another renderer's saved eval images (<stem>.png) with
+            // the same metrics and split instead of rendering a PLY here.
+            "--renders-dir" => renders_dir = args.next().map(PathBuf::from),
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
-    let ply = ply.ok_or("--ply <path> is required")?;
     let data = data.ok_or("--data <colmap root> is required")?;
+    if let Some(dir) = renders_dir {
+        let dataset = load_colmap_dataset(&data, Some(eval_every))?;
+        let (mut sum, mut ssim_sum) = (0.0f64, 0.0f64);
+        for view in &dataset.eval {
+            let stem = std::path::Path::new(&view.name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| view.name.clone());
+            let img = image::open(dir.join(format!("{stem}.png")))?.to_rgb8();
+            let (w, h) = img.dimensions();
+            let rgb: Vec<[f32; 3]> = img
+                .pixels()
+                .map(|p| {
+                    [
+                        p[0] as f32 / 255.0,
+                        p[1] as f32 / 255.0,
+                        p[2] as f32 / 255.0,
+                    ]
+                })
+                .collect();
+            let gt = load_view_rgb(view)?;
+            let score = psnr(&rgb, &gt);
+            let s = ssim(&rgb, &gt, w as usize, h as usize);
+            sum += score;
+            ssim_sum += s;
+            println!("{:<24} psnr {score:6.2}  ssim {s:.4}", view.name);
+        }
+        let n = dataset.eval.len().max(1) as f64;
+        println!(
+            "mean psnr {:.3}  ssim {:.4} over {} views",
+            sum / n,
+            ssim_sum / n,
+            dataset.eval.len()
+        );
+        return Ok(());
+    }
+    let ply = ply.ok_or("--ply <path> is required")?;
 
     let mut scene = load_ply(&ply)?;
     if sh_rest_coef_major {
