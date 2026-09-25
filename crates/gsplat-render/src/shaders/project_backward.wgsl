@@ -95,7 +95,7 @@ fn project_backward(
 fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
     // Evaluated rest coefficients per channel (progressive SH degree).
     let act = (u.sh_active_degree + 1u) * (u.sh_active_degree + 1u) - 1u;
-    let sg = compact * 9u;
+    let sg = compact * 10u;
     let g_u = screen_grads[sg + 0u];
     let g_v = screen_grads[sg + 1u];
     let g_ca = screen_grads[sg + 2u];

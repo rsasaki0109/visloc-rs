@@ -10,6 +10,10 @@
 //       their moments, new rows start at zero; split children get a mean
 //       sampled from the parent (hashed normals) and scales / 1.6. An opacity
 //       reset clamps every opacity logit and zeroes that group's moments.
+//   Action 4 (brush refine): the parent is replaced by itself shifted by -o
+//       and a new copy shifted by +o, o = R (N(0, 0.5) * s); both get scales /
+//       sqrt(2) and opacity 1 - sqrt(1 - a). Row 0 keeps the parent's
+//       moments, row 1 starts at zero.
 
 struct ScatterUniforms {
     n: u32,
@@ -85,6 +89,45 @@ fn densify_scatter(
     let out0 = cum[i] - count;
     let st = su.stride;
     let src = i * st;
+
+    if (su.kind == 0u && action == 4u) {
+        let q = vec4<f32>(src_p[src + 3u], src_p[src + 4u], src_p[src + 5u], src_p[src + 6u]);
+        let s = exp(vec3<f32>(src_p[src + 7u], src_p[src + 8u], src_p[src + 9u]));
+        let mean = vec3<f32>(src_p[src], src_p[src + 1u], src_p[src + 2u]);
+        let key = (su.seed ^ (i * 6u)) * 3u;
+        let o = quat_rotate(q, vec3<f32>(normal(key), normal(key + 1u), normal(key + 2u)) * 0.5 * s);
+        let shrink = log(sqrt(2.0));
+        for (var c = 0u; c < 2u; c = c + 1u) {
+            let m = select(mean - o, mean + o, c == 1u);
+            let d = (out0 + c) * st;
+            dst_p[d + 0u] = m.x;
+            dst_p[d + 1u] = m.y;
+            dst_p[d + 2u] = m.z;
+            for (var k = 3u; k < 7u; k = k + 1u) {
+                dst_p[d + k] = src_p[src + k];
+            }
+            for (var k = 7u; k < 10u; k = k + 1u) {
+                dst_p[d + k] = src_p[src + k] - shrink;
+            }
+            for (var k = 0u; k < 10u; k = k + 1u) {
+                dst_m1[d + k] = select(src_m1[src + k], 0.0, c == 1u);
+                dst_m2[d + k] = select(src_m2[src + k], 0.0, c == 1u);
+            }
+        }
+        return;
+    }
+    if (su.kind == 1u && action == 4u) {
+        let a = 1.0 / (1.0 + exp(-src_p[src]));
+        let na = clamp(1.0 - sqrt(max(1.0 - a, 0.0)), 1e-7, 1.0 - 1e-7);
+        let logit = log(na / (1.0 - na));
+        for (var c = 0u; c < 2u; c = c + 1u) {
+            let d = out0 + c;
+            dst_p[d] = logit;
+            dst_m1[d] = select(src_m1[src], 0.0, c == 1u);
+            dst_m2[d] = select(src_m2[src], 0.0, c == 1u);
+        }
+        return;
+    }
 
     if (su.kind == 0u && action == 3u) {
         // Split: two children N(mean, R diag(s)^2 R^T), scales / 1.6.

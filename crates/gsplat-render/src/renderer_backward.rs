@@ -19,7 +19,9 @@ use crate::shaders;
 
 /// Floats per screen-space gradient record: du, dv, dA, dB, dC, dopacity,
 /// dr, dg, db (conic `[A, B, C]` as in `projected_splats`).
-pub const SCREEN_GRAD_FLOATS: usize = 9;
+/// du, dv, dA, dB, dC, dopacity, dr, dg, db and the brush/AbsGS refine
+/// weight (sum over pixels of |dL/du| W + |dL/dv| H).
+pub const SCREEN_GRAD_FLOATS: usize = 10;
 
 /// Parameter gradients of one backward pass, in the forward input layouts
 /// (see [`crate::packing::PackedScene`]), for every gaussian in scene order.

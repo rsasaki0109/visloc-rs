@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut eval_every = 1000usize;
     let mut export_steps: Vec<usize> = Vec::new();
     let mut init_ply: Option<PathBuf> = None;
+    let mut brush_strategy = false;
+    let mut max_gaussians: Option<usize> = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -36,12 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--eval-every" => eval_every = next()?.parse()?,
             "--no-densify" => cfg.densify = None,
             "--sh-interval" => cfg.sh_degree_interval = next()?.parse()?,
-            "--max-gaussians" => {
-                let cap = next()?.parse()?;
-                if let Some(d) = cfg.densify.as_mut() {
-                    d.max_gaussians = cap;
-                }
-            }
+            "--max-gaussians" => max_gaussians = Some(next()?.parse()?),
+            // brush 0.3's refine strategy, mean noise and learning rates.
+            "--strategy" => match next()?.as_str() {
+                "brush" => brush_strategy = true,
+                "inria" => brush_strategy = false,
+                other => return Err(format!("unknown strategy {other}").into()),
+            },
             "--init-ply" => init_ply = Some(PathBuf::from(next()?)),
             "--export-steps" => {
                 export_steps = next()?
@@ -53,6 +56,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let data = data.ok_or("--data <colmap root> is required")?;
+    if brush_strategy {
+        let keep_densify_off = cfg.densify.is_none();
+        cfg = TrainConfig {
+            steps: cfg.steps,
+            seed: cfg.seed,
+            ssim_weight: cfg.ssim_weight,
+            sh_degree_interval: cfg.sh_degree_interval,
+            background: cfg.background,
+            ..TrainConfig::brush_preset()
+        };
+        if keep_densify_off {
+            // --no-densify: no refine either (fixed population).
+            cfg.brush_refine = None;
+        }
+    }
+    if let Some(cap) = max_gaussians {
+        if let Some(d) = cfg.densify.as_mut() {
+            d.max_gaussians = cap;
+        }
+        if let Some(b) = cfg.brush_refine.as_mut() {
+            b.max_gaussians = cap;
+        }
+    }
 
     let dataset = load_colmap_dataset(&data, Some(8))?;
     let model = [data.join("sparse").join("0"), data.join("sparse")]
