@@ -12636,6 +12636,8 @@ fn verify_pairs(
     });
 
     let verify_started = std::time::Instant::now();
+    #[allow(unused_mut)] // only written with `--features gpu`
+    let mut gpu_match_seconds = 0.0f64;
     #[cfg(feature = "onnx-inference")]
     let sequential = matches!(matcher, PairMatcher::LightGlue { .. });
     #[cfg(not(feature = "onnx-inference"))]
@@ -13207,7 +13209,9 @@ fn verify_pairs(
                 let (ctx, gm) = GPU_NN.get().expect("gpu bank implies GPU_NN");
                 let mut out = Vec::with_capacity(candidates.len());
                 for chunk in candidates.chunks(2048) {
+                    let match_started = std::time::Instant::now();
                     let dms = gm.match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check);
+                    gpu_match_seconds += match_started.elapsed().as_secs_f64();
                     out.par_extend(
                         chunk
                             .par_iter()
@@ -13221,9 +13225,10 @@ fn verify_pairs(
         }
     };
     eprintln!(
-        "verify-pairs: {} candidates in {:.2}s",
+        "verify-pairs: {} candidates in {:.2}s (gpu match {:.2}s)",
         candidates.len(),
-        verify_started.elapsed().as_secs_f64()
+        verify_started.elapsed().as_secs_f64(),
+        gpu_match_seconds
     );
 
     let mut stats = VerificationStats::default();

@@ -141,10 +141,23 @@ mod tests {
             .map(|_| unit((0..128).map(|_| rnd()).collect()))
             .collect();
 
-        let bank = FeatureBank::upload(&ctx, &[&a, &b, &c]).unwrap();
+        // Edge cases: a single descriptor and an empty image.
+        let d: Vec<Vec<f32>> = vec![a[7].clone()];
+        let empty: Vec<Vec<f32>> = Vec::new();
+
+        let bank = FeatureBank::upload(&ctx, &[&a, &b, &c, &d, &empty]).unwrap();
         let matcher = GpuMatcher::new(&ctx);
-        let pairs = [(0usize, 1usize), (1, 0), (0, 2), (2, 1)];
-        let sets = [&a, &b, &c];
+        let pairs = [
+            (0usize, 1usize),
+            (1, 0),
+            (0, 2),
+            (2, 1),
+            (0, 3),
+            (3, 0),
+            (4, 0),
+            (0, 4),
+        ];
+        let sets = [&a, &b, &c, &d, &empty];
         for cross in [false, true] {
             for ratio in [None, Some(0.8)] {
                 let gpu = matcher.match_pairs(&ctx, &bank, &pairs, ratio, cross);
