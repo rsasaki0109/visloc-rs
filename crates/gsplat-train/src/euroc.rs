@@ -57,6 +57,8 @@ pub struct EurocSfmConfig {
     pub gpu_ba: bool,
     /// Override the SfM's LM iteration budget per bundle adjustment.
     pub ba_max_iterations: Option<usize>,
+    /// Relative cost tolerance that ends local BA windows early.
+    pub local_ba_relative_tolerance: Option<f64>,
     /// Keyframe gate: a frame joins the SfM only once the accumulated median
     /// feature motion since the last kept frame reaches this many pixels.
     /// Near-static frames (e.g. before take-off) have no parallax and were
@@ -82,6 +84,7 @@ impl Default for EurocSfmConfig {
             gpu_sift: false,
             gpu_ba: false,
             ba_max_iterations: None,
+            local_ba_relative_tolerance: None,
             min_keyframe_motion_px: 2.0,
         }
     }
@@ -456,6 +459,7 @@ pub fn build_euroc_dataset(
     if let Some(it) = cfg.ba_max_iterations {
         sfm_cfg.ba_config.max_iterations = it;
     }
+    sfm_cfg.local_ba_relative_cost_tolerance = cfg.local_ba_relative_tolerance;
     let result = incremental_sfm(&camera, &features, &pairwise, &sfm_cfg)
         .map_err(|e| EurocError::Sfm(e.to_string()))?;
     let registered = result.poses.iter().filter(|p| p.is_some()).count();

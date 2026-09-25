@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             "--window" => sfm.window = next()?.parse()?,
             "--ba-iterations" => sfm.ba_max_iterations = Some(next()?.parse()?),
+            "--local-ba-rel-tol" => sfm.local_ba_relative_tolerance = Some(next()?.parse()?),
             "--min-motion-px" => sfm.min_keyframe_motion_px = next()?.parse()?,
             "--skips" => {
                 sfm.skip_offsets = next()?

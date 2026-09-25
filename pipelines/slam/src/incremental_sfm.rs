@@ -636,6 +636,11 @@ pub struct IncrementalSfmConfig {
     /// images (besides the newly registered one) the per-registration local BA
     /// optimises. Only used when `colmap_style_mapper` is set.
     pub local_ba_num_images: usize,
+    /// Stop a local BA once an accepted LM step lowers the cost by less than
+    /// this fraction (COLMAP's function tolerance). `None` keeps the shared
+    /// `ba_config` tolerances, under which local windows almost always run
+    /// the full iteration budget.
+    pub local_ba_relative_cost_tolerance: Option<f64>,
     /// COLMAP `Mapper.ba_global_images_ratio`: trigger a global refinement once
     /// the registered-image count has grown by this factor since the last one.
     /// Only used when `colmap_style_mapper` is set.
@@ -1016,6 +1021,7 @@ impl Default for IncrementalSfmConfig {
             colmap_style_mapper: false,
             final_iterative_global_refinement: false,
             local_ba_num_images: 8,
+            local_ba_relative_cost_tolerance: None,
             global_ba_images_ratio: 1.1,
             global_ba_max_refinements: 5,
             global_ba_change_rate: 0.0005,
@@ -12122,6 +12128,8 @@ fn bundle_adjust_local(
     track_point: &mut [Option<Point3<f64>>],
     variable: &HashSet<usize>,
 ) -> Result<(), BaError> {
+    let timing = std::env::var_os("VISLOC_SFM_LOCAL_BA_TIMING").is_some();
+    let build_started = std::time::Instant::now();
     let mut ba = BundleAdjustment::new(camera.clone());
 
     // Landmarks touching ≥1 variable image, and the images that participate.
@@ -12198,15 +12206,29 @@ fn bundle_adjust_local(
             eprintln!("sfm-ba-dump: failed: {error}");
         }
     }
-    match crate::ba_accel::ba_accelerator()
-        .and_then(|a| a.optimize(&mut ba, &config.ba_config, crate::ba_accel::BaScope::Local))
+    let build_seconds = build_started.elapsed().as_secs_f64();
+    let optimize_started = std::time::Instant::now();
+    let local_config = BaConfig {
+        relative_cost_tolerance: config
+            .local_ba_relative_cost_tolerance
+            .or(config.ba_config.relative_cost_tolerance),
+        ..config.ba_config
+    };
+    let iterations = match crate::ba_accel::ba_accelerator()
+        .and_then(|a| a.optimize(&mut ba, &local_config, crate::ba_accel::BaScope::Local))
     {
-        Some(result) => {
-            result?;
-        }
-        None => {
-            ba.optimize(&config.ba_config)?;
-        }
+        Some(result) => result?.iterations.len(),
+        None => ba.optimize(&local_config)?.iterations.len(),
+    };
+    if timing {
+        eprintln!(
+            "sfm-local-ba: build={build_seconds:.4}s optimize={:.4}s iterations={iterations} poses={} variable={} landmarks={} observations={}",
+            optimize_started.elapsed().as_secs_f64(),
+            ba.poses.len(),
+            variable.len(),
+            ba.landmarks.len(),
+            ba.observations.len()
+        );
     }
 
     for &image in &used {
