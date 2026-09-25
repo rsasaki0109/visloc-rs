@@ -34,8 +34,11 @@ pub struct ProjectUniforms {
     pub num_visible: u32,
     /// Number of `(tile, compact)` intersections this frame.
     pub num_intersections: u32,
+    /// SH degree actually evaluated (<= `sh_degree`, which sets the buffer
+    /// stride); trainers raise it progressively. Higher bands read as 0.
+    pub sh_active_degree: u32,
     /// Padding to keep the struct 16-byte aligned for storage/uniform use.
-    pub _pad: [u32; 2],
+    pub _pad: [u32; 3],
 }
 
 /// The uniform block consumed by the `rasterize` kernel.
@@ -105,7 +108,8 @@ impl ProjectUniforms {
             total_splats,
             num_visible: 0,
             num_intersections: 0,
-            _pad: [0; 2],
+            sh_active_degree: sh_degree,
+            _pad: [0; 3],
         }
     }
 

@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--steps" => cfg.steps = next()?.parse()?,
             "--eval-every" => eval_every = next()?.parse()?,
             "--no-densify" => cfg.densify = None,
+            "--sh-interval" => cfg.sh_degree_interval = next()?.parse()?,
             "--max-gaussians" => {
                 let cap = next()?.parse()?;
                 if let Some(d) = cfg.densify.as_mut() {

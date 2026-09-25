@@ -26,7 +26,8 @@ fn sh_rest_coef(sh_base: u32, rest_pc: u32, ch: u32, k: u32) -> f32 {
 
 // View-dependent colour (raw, + 0.5) up to degree 3; same basis as
 // `eval_sh_basis`.
-fn sh_color(sh_base: u32, rest_pc: u32, d: vec3<f32>) -> vec3<f32> {
+fn sh_color(sh_base: u32, rest_pc: u32, act: u32, d: vec3<f32>) -> vec3<f32> {
+    // rest_pc: stored rest coefficients per channel (stride); act: evaluated.
     let x = d.x;
     let y = d.y;
     let z = d.z;
@@ -58,19 +59,19 @@ fn sh_color(sh_base: u32, rest_pc: u32, d: vec3<f32>) -> vec3<f32> {
     var out: vec3<f32>;
     for (var ch = 0u; ch < 3u; ch = ch + 1u) {
         var acc = 0.2820948 * sh_in[sh_base + ch];
-        if (rest_pc >= 3u) {
+        if (act >= 3u) {
             acc = acc + b1 * sh_rest_coef(sh_base, rest_pc, ch, 0u)
                 + b2 * sh_rest_coef(sh_base, rest_pc, ch, 1u)
                 + b3 * sh_rest_coef(sh_base, rest_pc, ch, 2u);
         }
-        if (rest_pc >= 8u) {
+        if (act >= 8u) {
             acc = acc + b4 * sh_rest_coef(sh_base, rest_pc, ch, 3u)
                 + b5 * sh_rest_coef(sh_base, rest_pc, ch, 4u)
                 + b6 * sh_rest_coef(sh_base, rest_pc, ch, 5u)
                 + b7 * sh_rest_coef(sh_base, rest_pc, ch, 6u)
                 + b8 * sh_rest_coef(sh_base, rest_pc, ch, 7u);
         }
-        if (rest_pc >= 15u) {
+        if (act >= 15u) {
             acc = acc + b9 * sh_rest_coef(sh_base, rest_pc, ch, 8u)
                 + b10 * sh_rest_coef(sh_base, rest_pc, ch, 9u)
                 + b11 * sh_rest_coef(sh_base, rest_pc, ch, 10u)
@@ -117,7 +118,8 @@ fn project_visible(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let sh_base = gid * 3u * cpc2;
     // Written out term by term: copying the coefficients into a
     // runtime-indexed local array made the compiler spill it.
-    let color = sh_color(sh_base, cpc2 - 1u, dir);
+    let act = (u.sh_active_degree + 1u) * (u.sh_active_degree + 1u) - 1u;
+    let color = sh_color(sh_base, cpc2 - 1u, act, dir);
 
     let out = compact * PROJECTED_STRIDE;
     projected_splats[out + 0u] = select(0.0, p.proj_u, p.ok);

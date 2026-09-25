@@ -25,6 +25,11 @@ struct ProjectUniforms {
     total_splats: u32,
     num_visible: u32,
     num_intersections: u32,
+    // SH degree evaluated (<= sh_degree, the buffer stride).
+    sh_active_degree: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 };
 
 struct RasterUniforms {

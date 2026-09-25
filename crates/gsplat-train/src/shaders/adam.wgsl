@@ -23,7 +23,9 @@ struct AdamUniforms {
 
 @group(0) @binding(0) var<uniform> au: AdamUniforms;
 @group(0) @binding(1) var<storage, read_write> params: array<f32>;
-@group(0) @binding(2) var<storage, read> grads: array<f32>;
+// Read and zeroed: the renderer skips its own gradient clear
+// (`Renderer::set_grads_zeroed_by_caller`).
+@group(0) @binding(2) var<storage, read_write> grads: array<f32>;
 @group(0) @binding(3) var<storage, read_write> m1: array<f32>;
 @group(0) @binding(4) var<storage, read_write> m2: array<f32>;
 
@@ -44,6 +46,7 @@ fn adam(
         lr = au.lr_b;
     }
     let g = grads[i];
+    grads[i] = 0.0;
     let m = au.beta1 * m1[i] + (1.0 - au.beta1) * g;
     let v = au.beta2 * m2[i] + (1.0 - au.beta2) * g * g;
     m1[i] = m;

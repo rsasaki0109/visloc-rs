@@ -45,8 +45,8 @@ var<workgroup> row_gid: array<u32, 64>;
 
 // SH rest coefficient k (0-based, after DC) of channel ch of this thread's
 // staged row, or 0 past the scene's degree.
-fn sh_rest(row: u32, rest_pc: u32, ch: u32, k: u32) -> f32 {
-    if (k >= rest_pc) {
+fn sh_rest(row: u32, rest_pc: u32, act: u32, ch: u32, k: u32) -> f32 {
+    if (k >= act) {
         return 0.0;
     }
     return sh_rows[row + 3u + ch * rest_pc + k];
@@ -93,6 +93,8 @@ fn project_backward(
 }
 
 fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
+    // Evaluated rest coefficients per channel (progressive SH degree).
+    let act = (u.sh_active_degree + 1u) * (u.sh_active_degree + 1u) - 1u;
     let sg = compact * 9u;
     let g_u = screen_grads[sg + 0u];
     let g_v = screen_grads[sg + 1u];
@@ -256,21 +258,21 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
     let b15 = -c8 * x * (xx - 3.0 * yy);
     var gdir = vec3<f32>(0.0, 0.0, 0.0);
     for (var ch = 0u; ch < 3u; ch = ch + 1u) {
-        let r1 = sh_rest(row, rest_pc, ch, 0u);
-        let r2 = sh_rest(row, rest_pc, ch, 1u);
-        let r3 = sh_rest(row, rest_pc, ch, 2u);
-        let r4 = sh_rest(row, rest_pc, ch, 3u);
-        let r5 = sh_rest(row, rest_pc, ch, 4u);
-        let r6 = sh_rest(row, rest_pc, ch, 5u);
-        let r7 = sh_rest(row, rest_pc, ch, 6u);
-        let r8 = sh_rest(row, rest_pc, ch, 7u);
-        let r9 = sh_rest(row, rest_pc, ch, 8u);
-        let r10 = sh_rest(row, rest_pc, ch, 9u);
-        let r11 = sh_rest(row, rest_pc, ch, 10u);
-        let r12 = sh_rest(row, rest_pc, ch, 11u);
-        let r13 = sh_rest(row, rest_pc, ch, 12u);
-        let r14 = sh_rest(row, rest_pc, ch, 13u);
-        let r15 = sh_rest(row, rest_pc, ch, 14u);
+        let r1 = sh_rest(row, rest_pc, act, ch, 0u);
+        let r2 = sh_rest(row, rest_pc, act, ch, 1u);
+        let r3 = sh_rest(row, rest_pc, act, ch, 2u);
+        let r4 = sh_rest(row, rest_pc, act, ch, 3u);
+        let r5 = sh_rest(row, rest_pc, act, ch, 4u);
+        let r6 = sh_rest(row, rest_pc, act, ch, 5u);
+        let r7 = sh_rest(row, rest_pc, act, ch, 6u);
+        let r8 = sh_rest(row, rest_pc, act, ch, 7u);
+        let r9 = sh_rest(row, rest_pc, act, ch, 8u);
+        let r10 = sh_rest(row, rest_pc, act, ch, 9u);
+        let r11 = sh_rest(row, rest_pc, act, ch, 10u);
+        let r12 = sh_rest(row, rest_pc, act, ch, 11u);
+        let r13 = sh_rest(row, rest_pc, act, ch, 12u);
+        let r14 = sh_rest(row, rest_pc, act, ch, 13u);
+        let r15 = sh_rest(row, rest_pc, act, ch, 14u);
         let raw = 0.2820948 * sh_rows[row + ch]
             + b1 * r1 + b2 * r2 + b3 * r3 + b4 * r4 + b5 * r5 + b6 * r6 + b7 * r7 + b8 * r8
             + b9 * r9 + b10 * r10 + b11 * r11 + b12 * r12 + b13 * r13 + b14 * r14 + b15 * r15
@@ -283,19 +285,19 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
         // with their gradient (stored back to grad_sh by the workgroup).
         sh_rows[row + ch] = gc * 0.2820948;
         let rb = row + 3u + ch * rest_pc;
-        if (rest_pc >= 3u) {
+        if (act >= 3u) {
             sh_rows[rb + 0u] = gc * b1;
             sh_rows[rb + 1u] = gc * b2;
             sh_rows[rb + 2u] = gc * b3;
         }
-        if (rest_pc >= 8u) {
+        if (act >= 8u) {
             sh_rows[rb + 3u] = gc * b4;
             sh_rows[rb + 4u] = gc * b5;
             sh_rows[rb + 5u] = gc * b6;
             sh_rows[rb + 6u] = gc * b7;
             sh_rows[rb + 7u] = gc * b8;
         }
-        if (rest_pc >= 15u) {
+        if (act >= 15u) {
             sh_rows[rb + 8u] = gc * b9;
             sh_rows[rb + 9u] = gc * b10;
             sh_rows[rb + 10u] = gc * b11;
@@ -303,6 +305,11 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
             sh_rows[rb + 12u] = gc * b13;
             sh_rows[rb + 13u] = gc * b14;
             sh_rows[rb + 14u] = gc * b15;
+        }
+        // Bands past the active degree get zero gradient (their staged
+        // coefficients would otherwise be written back as gradients).
+        for (var k = act; k < rest_pc; k = k + 1u) {
+            sh_rows[rb + k] = 0.0;
         }
         // d(colour)/d(dir) = sum_k coef_k * d(b_k)/d(dir).
         var dd = vec3<f32>(0.0, -c0, 0.0) * r1

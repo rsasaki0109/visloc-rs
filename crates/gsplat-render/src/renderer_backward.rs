@@ -170,9 +170,11 @@ impl Renderer {
             label: Some("backward"),
         });
         // Gaussians not visible this frame keep zero parameter gradients.
-        encoder.clear_buffer(&st.grad_transforms, 0, None);
-        encoder.clear_buffer(&st.grad_opacity, 0, None);
-        encoder.clear_buffer(&st.grad_sh, 0, None);
+        if !self.grads_zeroed_by_caller {
+            encoder.clear_buffer(&st.grad_transforms, 0, None);
+            encoder.clear_buffer(&st.grad_opacity, 0, None);
+            encoder.clear_buffer(&st.grad_sh, 0, None);
+        }
         if frame.nv > 0 {
             // rasterize_backward accumulates into these with atomics.
             encoder.clear_buffer(

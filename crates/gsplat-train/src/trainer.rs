@@ -33,6 +33,10 @@ pub struct TrainConfig {
     pub ssim_weight: f32,
     /// `None` keeps the initial gaussians fixed in number.
     pub densify: Option<DensifyConfig>,
+    /// Raise the evaluated SH degree by one every this many steps (Inria /
+    /// brush schedule; early steps skip the higher bands). 0 evaluates the
+    /// scene's full degree from the start.
+    pub sh_degree_interval: usize,
 }
 
 impl Default for TrainConfig {
@@ -50,6 +54,7 @@ impl Default for TrainConfig {
             seed: 42,
             ssim_weight: 0.2,
             densify: Some(DensifyConfig::default()),
+            sh_degree_interval: 1000,
         }
     }
 }
@@ -447,6 +452,8 @@ impl Trainer {
         let n = renderer.num_gaussians() as u32;
         let cpc2 = (self.sh_degree + 1) * (self.sh_degree + 1);
         renderer.set_skip_readback(true);
+        // Adam zeroes each gradient after reading it.
+        renderer.set_grads_zeroed_by_caller(true);
         let dev = renderer.ctx.device.clone();
 
         let out_img = renderer.output_buffer().clone();
@@ -601,6 +608,9 @@ impl Trainer {
             dev.poll(wgpu::PollType::wait_indefinitely()).ok();
             p.start();
         }
+        let active_sh = (self.cfg.sh_degree_interval > 0)
+            .then(|| (self.step / self.cfg.sh_degree_interval) as u32);
+        st.renderer.set_active_sh_degree(active_sh);
         let _ = st.renderer.render(&view, bg);
         if let Some(p) = self.profile.as_mut() {
             p.mark(&dev, "forward");
