@@ -1978,6 +1978,11 @@ struct Args {
     /// Not bit-identical to the CPU extractor (>= 98% identical keypoints,
     /// descriptor dot > 0.999 in its parity test); needs `--features gpu`.
     gpu_sift: bool,
+    /// `--gpu-ba`: run the mapper's global bundle adjustments on the wgpu
+    /// LM solver (`visloc-ba-gpu`); local BA stays on the CPU. Same final
+    /// cost as the dense solver up to f32 linearisation, not bit-identical;
+    /// needs `--features gpu`.
+    gpu_ba: bool,
     /// `Files` (default): read precomputed `X Y SCORE D…` feature files from
     /// `features_dir`. `Sift`: run the pure-Rust SIFT frontend in-process on
     /// every image in `images_dir` (requires `--images-dir`; ignores
@@ -4831,6 +4836,7 @@ where
     let mut rescue_cross_check = false;
     let mut gpu_match = false;
     let mut gpu_sift = false;
+    let mut gpu_ba = false;
     let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
     let mut diagnose_pairs_csv: Option<PathBuf> = None;
     let mut diagnose_pair_stems: Vec<String> = Vec::new();
@@ -5573,6 +5579,12 @@ where
                     return Err("--gpu-sift needs a build with --features gpu".into());
                 }
                 gpu_sift = true
+            }
+            "--gpu-ba" => {
+                if !cfg!(feature = "gpu") {
+                    return Err("--gpu-ba needs a build with --features gpu".into());
+                }
+                gpu_ba = true
             }
             "--diagnose-pair" => {
                 let raw = a.remove(i + 1);
@@ -6370,6 +6382,7 @@ where
     let parsed = Args {
         gpu_match,
         gpu_sift,
+        gpu_ba,
         feature_extractor,
         features_dir: features_dir.unwrap_or_default(),
         hybrid_filter_priors,
@@ -16450,6 +16463,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.gpu_sift {
         let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
         let _ = GPU_SIFT.set(std::sync::Mutex::new(visloc_sift_gpu::SiftGpu::new(ctx)));
+    }
+    #[cfg(feature = "gpu")]
+    if args.gpu_ba {
+        let ctx = visloc_ba_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        visloc_rs::slam::set_ba_accelerator(Box::new(visloc_ba_gpu::GpuBundleAdjuster::new(ctx)));
     }
     if args.feature_extractor == FeatureExtractorKind::Files
         && args.features_dir.as_os_str().is_empty()
