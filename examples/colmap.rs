@@ -19,9 +19,14 @@
 //!
 //! Supported subcommands and their commonly used flags:
 //! - `feature_extractor`: `--database_path`, `--image_path`,
-//!   `--SiftExtraction.max_features`
-//! - `exhaustive_matcher`: `--database_path`
-//! - `mapper`: `--database_path`, `--output_path`, `--Mapper.min_num_matches`
+//!   `--SiftExtraction.max_features`, `--SiftExtraction.use_gpu`
+//! - `exhaustive_matcher`: `--database_path`, `--SiftMatching.use_gpu`
+//! - `mapper`: `--database_path`, `--output_path`, `--Mapper.min_num_matches`,
+//!   `--Mapper.ba_use_gpu`
+//!
+//! The `use_gpu` flags need a build with `--features gpu` (wgpu SIFT, batched
+//! GPU matching, GPU global bundle adjustment); pair verification always
+//! runs in parallel.
 //! - `model_converter`: `--input_path`, `--output_path`, `--output_type TXT`
 //!
 //! Unknown flags are ignored with a warning (so typical scripts keep going).
@@ -29,7 +34,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // Everything is reached through the `visloc_rs` facade (`src/lib.rs`).
+use rayon::prelude::*;
 use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig};
+use visloc_rs::vision::matching::DescriptorMatch;
 use visloc_rs::vision::two_view::{
     ConfigurationType, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
 };
@@ -81,6 +88,16 @@ impl Args {
 
     fn get_or(&self, key: &str, default: &str) -> String {
         self.get(key).unwrap_or(default).to_string()
+    }
+
+    /// COLMAP-style boolean flag (`1` / `true`); errors when a GPU flag is
+    /// set on a build without the `gpu` feature.
+    fn use_gpu(&self, key: &str) -> Result<bool, String> {
+        let on = matches!(self.get(key), Some("1") | Some("true") | Some("True"));
+        if on && !cfg!(feature = "gpu") {
+            return Err(format!("--{key} needs a build with --features gpu"));
+        }
+        Ok(on)
     }
 }
 
@@ -150,14 +167,20 @@ fn cmd_feature_extractor(args: &Args) -> Result<(), String> {
         .get_or("SiftExtraction.max_features", "4096")
         .parse()
         .map_err(|e| format!("{e}"))?;
+    let gpu = args.use_gpu("SiftExtraction.use_gpu")?;
     warn_unknown_flags(
         args,
-        &["database_path", "image_path", "SiftExtraction.max_features"],
+        &[
+            "database_path",
+            "image_path",
+            "SiftExtraction.max_features",
+            "SiftExtraction.use_gpu",
+        ],
     );
 
     #[cfg(not(feature = "image-io"))]
     {
-        let _ = (db, image_dir, max_keypoints);
+        let _ = (db, image_dir, max_keypoints, gpu);
         Err("feature_extractor requires building with --features image-io".to_string())
     }
     #[cfg(feature = "image-io")]
@@ -170,6 +193,15 @@ fn cmd_feature_extractor(args: &Args) -> Result<(), String> {
             max_keypoints,
             ..SiftConfig::default()
         };
+        #[cfg(feature = "gpu")]
+        let mut sift_gpu = if gpu {
+            let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+            Some(visloc_sift_gpu::SiftGpu::new(ctx))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "gpu"))]
+        let _ = gpu;
         for image in &images {
             let name = image.file_name().unwrap().to_string_lossy().to_string();
             let stem = Path::new(&name).file_stem().unwrap().to_string_lossy();
@@ -185,8 +217,17 @@ fn cmd_feature_extractor(args: &Args) -> Result<(), String> {
             let pixels: Vec<f32> = gray.as_raw().iter().map(|&b| b as f32).collect();
             let gray = GrayImage::new(w as usize, h as usize, &pixels)
                 .map_err(|e| format!("gray {image:?}: {e}"))?;
-            let (keypoints, descriptors) =
-                extract_sift(&gray, &config).map_err(|e| format!("sift {image:?}: {e}"))?;
+            #[cfg(feature = "gpu")]
+            let extracted = match sift_gpu.as_mut() {
+                Some(g) => g
+                    .extract(&gray, &config)
+                    .map_err(|e| format!("gpu sift {image:?}: {e}")),
+                None => extract_sift(&gray, &config).map_err(|e| format!("sift {image:?}: {e}")),
+            };
+            #[cfg(not(feature = "gpu"))]
+            let extracted =
+                extract_sift(&gray, &config).map_err(|e| format!("sift {image:?}: {e}"));
+            let (keypoints, descriptors) = extracted?;
             let kp: Vec<(f64, f64)> = keypoints.iter().map(|k| (k.x, k.y)).collect();
             write_feature_file(&out_path, &kp, &descriptors)?;
             println!("extracted {name}: {} keypoints", keypoints.len());
@@ -225,8 +266,16 @@ fn load_stored_features(db: &Path) -> Result<(Vec<FeatureSet>, Vec<String>), Str
                 tokens[0].parse().map_err(|e| format!("{e}"))?,
                 tokens[1].parse().map_err(|e| format!("{e}"))?,
             ));
+            // `write_feature_file` stores `x y scale` then the descriptor, so
+            // a 128-D SIFT row is its last 128 tokens (the old fixed offset
+            // of 6 silently dropped three descriptor values).
+            let start = if tokens.len() >= 3 + 128 {
+                tokens.len() - 128
+            } else {
+                3
+            };
             descriptors.push(
-                tokens[6..]
+                tokens[start..]
                     .iter()
                     .map(|t| t.parse::<f32>().map_err(|e| format!("{e}")))
                     .collect::<Result<Vec<f32>, _>>()?,
@@ -241,14 +290,18 @@ fn load_stored_features(db: &Path) -> Result<(Vec<FeatureSet>, Vec<String>), Str
     Ok((features, names))
 }
 
+fn cpu_matches(fi: &FeatureSet, fj: &FeatureSet) -> Vec<DescriptorMatch> {
+    let matcher = BruteForceMatcher { ratio: Some(0.8) };
+    CrossCheckMatcher::new(matcher).match_descriptors(&fi.descriptors, &fj.descriptors)
+}
+
 fn verify_pair(
     camera: &Camera,
     fi: &FeatureSet,
     fj: &FeatureSet,
+    dm: &[DescriptorMatch],
     min_matches: usize,
 ) -> Option<Vec<(usize, usize)>> {
-    let matcher = BruteForceMatcher { ratio: Some(0.8) };
-    let dm = CrossCheckMatcher::new(matcher).match_descriptors(&fi.descriptors, &fj.descriptors);
     if dm.len() < min_matches {
         return None;
     }
@@ -278,32 +331,65 @@ fn verify_pair(
 
 fn cmd_exhaustive_matcher(args: &Args) -> Result<(), String> {
     let db = PathBuf::from(args.get_or("database_path", "database.db"));
-    warn_unknown_flags(args, &["database_path"]);
+    let gpu = args.use_gpu("SiftMatching.use_gpu")?;
+    warn_unknown_flags(args, &["database_path", "SiftMatching.use_gpu"]);
+    #[cfg(not(feature = "gpu"))]
+    let _ = gpu;
     let (features, names) = load_stored_features(&db)?;
     let (w, h) = (1600u32, 1066u32);
     let fx = 0.55 * w as f64;
     let camera = Camera::pinhole(1, w, h, fx, fx, w as f64 / 2.0, h as f64 / 2.0);
 
+    let all: Vec<(usize, usize)> = (0..names.len())
+        .flat_map(|i| ((i + 1)..names.len()).map(move |j| (i, j)))
+        .collect();
+    let total = all.len();
+    #[cfg(feature = "gpu")]
+    let gpu_bank = if gpu {
+        let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
+        let bank = visloc_sift_gpu::FeatureBank::upload(&ctx, &sets)
+            .map_err(|e| format!("gpu feature bank: {e}"))?;
+        let matcher = visloc_sift_gpu::GpuMatcher::new(&ctx);
+        Some((ctx, bank, matcher))
+    } else {
+        None
+    };
+    // Chunked so the raw matches of an exhaustive run never all sit in
+    // memory at once: match a chunk (one batched GPU pass, or per pair on
+    // the CPU), then verify it in parallel (seeded RANSAC: deterministic).
     let mut pairs: Vec<PairwiseMatches> = Vec::new();
-    let total = names.len() * (names.len() - 1) / 2;
     let mut done = 0usize;
-    for i in 0..names.len() {
-        for j in (i + 1)..names.len() {
-            done += 1;
-            if let Some(matches) = verify_pair(&camera, &features[i], &features[j], 20) {
-                pairs.push(PairwiseMatches {
-                    image_i: i,
-                    image_j: j,
-                    matches,
-                    two_view_config: None,
-                    essential_matches: None,
-                    essential_matrix: None,
-                });
-            }
-            if done % 100 == 0 {
-                println!("matched {done}/{total}");
-            }
-        }
+    for chunk in all.chunks(2048) {
+        #[cfg(feature = "gpu")]
+        let chunk_matches: Option<Vec<Vec<DescriptorMatch>>> = gpu_bank
+            .as_ref()
+            .map(|(ctx, bank, m)| m.match_pairs(ctx, bank, chunk, Some(0.8), true));
+        #[cfg(not(feature = "gpu"))]
+        let chunk_matches: Option<Vec<Vec<DescriptorMatch>>> = None;
+        let verified: Vec<PairwiseMatches> = chunk
+            .par_iter()
+            .enumerate()
+            .filter_map(|(c, &(i, j))| {
+                let dm = match &chunk_matches {
+                    Some(all) => std::borrow::Cow::Borrowed(&all[c]),
+                    None => std::borrow::Cow::Owned(cpu_matches(&features[i], &features[j])),
+                };
+                verify_pair(&camera, &features[i], &features[j], &dm, 20).map(|matches| {
+                    PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                        two_view_config: None,
+                        essential_matches: None,
+                        essential_matrix: None,
+                    }
+                })
+            })
+            .collect();
+        pairs.extend(verified);
+        done += chunk.len();
+        println!("matched {done}/{total}");
     }
     let dir = data_dir(&db);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
@@ -340,10 +426,24 @@ fn cmd_mapper(args: &Args) -> Result<(), String> {
         .get_or("Mapper.min_num_matches", "20")
         .parse()
         .map_err(|e| format!("{e}"))?;
+    let ba_gpu = args.use_gpu("Mapper.ba_use_gpu")?;
     warn_unknown_flags(
         args,
-        &["database_path", "output_path", "Mapper.min_num_matches"],
+        &[
+            "database_path",
+            "output_path",
+            "Mapper.min_num_matches",
+            "Mapper.ba_use_gpu",
+        ],
     );
+    #[cfg(feature = "gpu")]
+    if ba_gpu {
+        // Global bundle adjustments of the incremental mapper on the GPU.
+        let ctx = visloc_ba_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        visloc_rs::slam::set_ba_accelerator(Box::new(visloc_ba_gpu::GpuBundleAdjuster::new(ctx)));
+    }
+    #[cfg(not(feature = "gpu"))]
+    let _ = ba_gpu;
     let (features, names) = load_stored_features(&db)?;
     let matches_path = data_dir(&db).join("matches.txt");
     if !matches_path.exists() {
