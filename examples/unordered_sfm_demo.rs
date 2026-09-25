@@ -1969,6 +1969,10 @@ impl std::str::FromStr for UnionTraversalOrder {
 
 #[derive(Debug)]
 struct Args {
+    /// `--gpu-match`: batched GPU descriptor matching (wgpu) for the plain
+    /// `nn` matcher in pair verification. Same decisions as the CPU
+    /// matcher up to f32 summation order; needs `--features gpu`.
+    gpu_match: bool,
     /// `Files` (default): read precomputed `X Y SCORE D…` feature files from
     /// `features_dir`. `Sift`: run the pure-Rust SIFT frontend in-process on
     /// every image in `images_dir` (requires `--images-dir`; ignores
@@ -4820,6 +4824,7 @@ where
     let mut rescue_min_matches = 15usize;
     let mut rescue_max_candidates = 200usize;
     let mut rescue_cross_check = false;
+    let mut gpu_match = false;
     let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
     let mut diagnose_pairs_csv: Option<PathBuf> = None;
     let mut diagnose_pair_stems: Vec<String> = Vec::new();
@@ -5551,6 +5556,12 @@ where
                 rescue_max_candidates = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--rescue-cross-check" => rescue_cross_check = true,
+            "--gpu-match" => {
+                if !cfg!(feature = "gpu") {
+                    return Err("--gpu-match needs a build with --features gpu".into());
+                }
+                gpu_match = true
+            }
             "--diagnose-pair" => {
                 let raw = a.remove(i + 1);
                 let (lhs, rhs) = raw
@@ -6345,6 +6356,7 @@ where
     )?;
 
     let parsed = Args {
+        gpu_match,
         feature_extractor,
         features_dir: features_dir.unwrap_or_default(),
         hybrid_filter_priors,
@@ -11543,6 +11555,26 @@ impl PairMatcher {
 /// Run the legacy NN+ratio matcher on descriptor slices, preserving the
 /// exact cross-check and tie-breaking behavior used when append-only mode is
 /// disabled.
+/// GPU matcher shared by every [`verify_pairs`] call (`--gpu-match`).
+#[cfg(feature = "gpu")]
+static GPU_NN: std::sync::OnceLock<(visloc_sift_gpu::GpuContext, visloc_sift_gpu::GpuMatcher)> =
+    std::sync::OnceLock::new();
+
+/// Batched GPU equivalent of [`nn_matches`] over `pairs`, when `--gpu-match`
+/// is on and the descriptors fit the GPU bank. `None` = use the CPU path.
+#[cfg(feature = "gpu")]
+fn gpu_nn_bank(features: &[FeatureSet]) -> Option<visloc_sift_gpu::FeatureBank> {
+    let (ctx, _) = GPU_NN.get()?;
+    let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
+    match visloc_sift_gpu::FeatureBank::upload(ctx, &sets) {
+        Ok(bank) => Some(bank),
+        Err(e) => {
+            eprintln!("gpu-match: falling back to the CPU matcher ({e})");
+            None
+        }
+    }
+}
+
 fn nn_matches(
     ratio: f32,
     cross_check: bool,
@@ -12603,6 +12635,7 @@ fn verify_pairs(
         }
     });
 
+    let verify_started = std::time::Instant::now();
     #[cfg(feature = "onnx-inference")]
     let sequential = matches!(matcher, PairMatcher::LightGlue { .. });
     #[cfg(not(feature = "onnx-inference"))]
@@ -12624,7 +12657,7 @@ fn verify_pairs(
     let dump_essential_quality =
         std::env::var_os("VISLOC_SFM_DEBUG_DUMP_ESSENTIAL_QUALITY").is_some();
     let dump_f2e_diagnostics = std::env::var_os("VISLOC_SFM_DEBUG_DUMP_F2E_DIAGNOSTICS").is_some();
-    let verify_one = |&(i, j): &(usize, usize)| {
+    let verify_one = |&(i, j): &(usize, usize), precomputed: Option<Vec<DescriptorMatch>>| {
         let dm: Vec<DescriptorMatch> = if let Some(imp) = imported_matches {
             let key = (i.min(j), i.max(j));
             let Some(raw) = imp.get(&key) else {
@@ -12664,6 +12697,8 @@ fn verify_pairs(
             } else {
                 matcher.match_pair(match_ratio, cross_check, i, j, &features[i], &features[j])
             }
+        } else if let Some(dm) = precomputed {
+            dm
         } else {
             matcher.match_pair(match_ratio, cross_check, i, j, &features[i], &features[j])
         };
@@ -13151,12 +13186,45 @@ fn verify_pairs(
                 if k % 25 == 0 || k + 1 == total {
                     eprintln!("lightglue verify: {} / {} pairs", k + 1, total);
                 }
-                verify_one(pair)
+                verify_one(pair, None)
             })
             .collect()
     } else {
-        candidates.par_iter().map(verify_one).collect()
+        // `--gpu-match`: one batched GPU pass per chunk of plain-NN pairs
+        // (imported/supplement matches keep their own source), then the
+        // usual parallel verification.
+        #[cfg(feature = "gpu")]
+        let gpu = (matches!(matcher, PairMatcher::Nn)
+            && imported_matches.is_none()
+            && imported_matches_supplement.is_none())
+        .then(|| gpu_nn_bank(features))
+        .flatten();
+        #[cfg(not(feature = "gpu"))]
+        let gpu: Option<()> = None;
+        match gpu {
+            #[cfg(feature = "gpu")]
+            Some(bank) => {
+                let (ctx, gm) = GPU_NN.get().expect("gpu bank implies GPU_NN");
+                let mut out = Vec::with_capacity(candidates.len());
+                for chunk in candidates.chunks(2048) {
+                    let dms = gm.match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check);
+                    out.par_extend(
+                        chunk
+                            .par_iter()
+                            .zip(dms.into_par_iter())
+                            .map(|(pair, dm)| verify_one(pair, Some(dm))),
+                    );
+                }
+                out
+            }
+            _ => candidates.par_iter().map(|p| verify_one(p, None)).collect(),
+        }
     };
+    eprintln!(
+        "verify-pairs: {} candidates in {:.2}s",
+        candidates.len(),
+        verify_started.elapsed().as_secs_f64()
+    );
 
     let mut stats = VerificationStats::default();
     let mut pairwise = Vec::with_capacity(results.len());
@@ -16303,6 +16371,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+    #[cfg(feature = "gpu")]
+    if args.gpu_match {
+        let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        let matcher = visloc_sift_gpu::GpuMatcher::new(&ctx);
+        let _ = GPU_NN.set((ctx, matcher));
+    }
     if args.feature_extractor == FeatureExtractorKind::Files
         && args.features_dir.as_os_str().is_empty()
     {
