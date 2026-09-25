@@ -218,8 +218,7 @@ impl GpuMatcher {
                 } else {
                     (bank.counts[i], 0)
                 };
-                if end > start && (rows + r > MAX_BATCH_ROWS || parts + pt > MAX_BATCH_PARTIALS)
-                {
+                if end > start && (rows + r > MAX_BATCH_ROWS || parts + pt > MAX_BATCH_PARTIALS) {
                     break;
                 }
                 rows += r;

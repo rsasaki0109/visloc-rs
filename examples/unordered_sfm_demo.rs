@@ -1973,6 +1973,11 @@ struct Args {
     /// `nn` matcher in pair verification. Same decisions as the CPU
     /// matcher up to f32 summation order; needs `--features gpu`.
     gpu_match: bool,
+    /// `--gpu-sift`: run the wgpu SIFT extractor for configurations it
+    /// supports (DoG, no affine/DSP/VLFeat modes); others stay on the CPU.
+    /// Not bit-identical to the CPU extractor (>= 98% identical keypoints,
+    /// descriptor dot > 0.999 in its parity test); needs `--features gpu`.
+    gpu_sift: bool,
     /// `Files` (default): read precomputed `X Y SCORE D…` feature files from
     /// `features_dir`. `Sift`: run the pure-Rust SIFT frontend in-process on
     /// every image in `images_dir` (requires `--images-dir`; ignores
@@ -4825,6 +4830,7 @@ where
     let mut rescue_max_candidates = 200usize;
     let mut rescue_cross_check = false;
     let mut gpu_match = false;
+    let mut gpu_sift = false;
     let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
     let mut diagnose_pairs_csv: Option<PathBuf> = None;
     let mut diagnose_pair_stems: Vec<String> = Vec::new();
@@ -5561,6 +5567,12 @@ where
                     return Err("--gpu-match needs a build with --features gpu".into());
                 }
                 gpu_match = true
+            }
+            "--gpu-sift" => {
+                if !cfg!(feature = "gpu") {
+                    return Err("--gpu-sift needs a build with --features gpu".into());
+                }
+                gpu_sift = true
             }
             "--diagnose-pair" => {
                 let raw = a.remove(i + 1);
@@ -6357,6 +6369,7 @@ where
 
     let parsed = Args {
         gpu_match,
+        gpu_sift,
         feature_extractor,
         features_dir: features_dir.unwrap_or_default(),
         hybrid_filter_priors,
@@ -6933,8 +6946,7 @@ fn extract_sift_for_image(
     Box<dyn std::error::Error>,
 > {
     use visloc_rs::vision::features::sift::{
-        describe_sift_keypoints, extract_sift, GrayImage, SiftConfig, SiftDetector,
-        SiftNormalization,
+        describe_sift_keypoints, GrayImage, SiftConfig, SiftDetector, SiftNormalization,
     };
     let detector_grayscale = if colmap_compatible_grayscale || split_colmap_detector_grayscale {
         visloc_io::images::read_common_image_colmap_grayscale(path)?
@@ -7005,7 +7017,7 @@ fn extract_sift_for_image(
     let (mut keypoints, mut descriptors) = if split_colmap_detector_grayscale {
         extract_sift_with_split_grayscale(&image, &descriptor_image, &primary_config)?
     } else {
-        extract_sift(&image, &primary_config)?
+        extract_sift_maybe_gpu(&image, &primary_config)?
     };
     let primary_keypoint_count = keypoints.len();
     if extra_keypoints > 0 {
@@ -7013,7 +7025,8 @@ fn extract_sift_for_image(
             max_keypoints.saturating_add(extra_keypoints.saturating_mul(2).max(extra_keypoints));
         let dense_threshold =
             effective_extra_contrast_threshold(extra_contrast_threshold, contrast_threshold);
-        let (dense_kp, dense_desc) = extract_sift(&image, &make_cfg(dense_cap, dense_threshold))?;
+        let (dense_kp, dense_desc) =
+            extract_sift_maybe_gpu(&image, &make_cfg(dense_cap, dense_threshold))?;
         append_spatially_novel_keypoints(
             &mut keypoints,
             &mut descriptors,
@@ -11559,6 +11572,40 @@ impl PairMatcher {
 #[cfg(feature = "gpu")]
 static GPU_NN: std::sync::OnceLock<(visloc_sift_gpu::GpuContext, visloc_sift_gpu::GpuMatcher)> =
     std::sync::OnceLock::new();
+
+/// GPU SIFT extractor shared by every image (`--gpu-sift`); images still
+/// decode in parallel, extraction serialises on the one device.
+#[cfg(feature = "gpu")]
+static GPU_SIFT: std::sync::OnceLock<std::sync::Mutex<visloc_sift_gpu::SiftGpu>> =
+    std::sync::OnceLock::new();
+
+/// `extract_sift`, on the GPU when `--gpu-sift` is on and supports `config`.
+#[cfg(feature = "image-io")]
+fn extract_sift_maybe_gpu(
+    image: &visloc_rs::vision::features::sift::GrayImage<'_>,
+    config: &visloc_rs::vision::features::sift::SiftConfig,
+) -> Result<
+    (
+        Vec<visloc_rs::vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    #[cfg(feature = "gpu")]
+    if let Some(gpu) = GPU_SIFT.get() {
+        if visloc_sift_gpu::SiftGpu::supports(config) {
+            let mut gpu = gpu.lock().map_err(|_| "gpu sift mutex poisoned")?;
+            return Ok(gpu.extract(image, config)?);
+        }
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!("gpu-sift: configuration unsupported on the GPU; using the CPU extractor")
+        });
+    }
+    Ok(visloc_rs::vision::features::sift::extract_sift(
+        image, config,
+    )?)
+}
 
 /// Batched GPU equivalent of [`nn_matches`] over `pairs`, when `--gpu-match`
 /// is on and the descriptors fit the GPU bank. `None` = use the CPU path.
@@ -16398,6 +16445,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
         let matcher = visloc_sift_gpu::GpuMatcher::new(&ctx);
         let _ = GPU_NN.set((ctx, matcher));
+    }
+    #[cfg(feature = "gpu")]
+    if args.gpu_sift {
+        let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        let _ = GPU_SIFT.set(std::sync::Mutex::new(visloc_sift_gpu::SiftGpu::new(ctx)));
     }
     if args.feature_extractor == FeatureExtractorKind::Files
         && args.features_dir.as_os_str().is_empty()
