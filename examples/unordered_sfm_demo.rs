@@ -13207,17 +13207,34 @@ fn verify_pairs(
             #[cfg(feature = "gpu")]
             Some(bank) => {
                 let (ctx, gm) = GPU_NN.get().expect("gpu bank implies GPU_NN");
-                let mut out = Vec::with_capacity(candidates.len());
-                for chunk in candidates.chunks(2048) {
-                    let match_started = std::time::Instant::now();
-                    let dms = gm.match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check);
-                    gpu_match_seconds += match_started.elapsed().as_secs_f64();
-                    out.par_extend(
+                let verify_chunk =
+                    |chunk: &[(usize, usize)], dms: Vec<Vec<DescriptorMatch>>| -> Vec<_> {
                         chunk
                             .par_iter()
                             .zip(dms.into_par_iter())
-                            .map(|(pair, dm)| verify_one(pair, Some(dm))),
+                            .map(|(pair, dm)| verify_one(pair, Some(dm)))
+                            .collect()
+                    };
+                // Software pipeline: the GPU matches chunk k while the CPU
+                // verifies chunk k - 1.
+                let mut out = Vec::with_capacity(candidates.len());
+                let mut pending: Option<(&[(usize, usize)], Vec<Vec<DescriptorMatch>>)> = None;
+                for chunk in candidates.chunks(512) {
+                    let ((dms, seconds), verified) = rayon::join(
+                        || {
+                            let started = std::time::Instant::now();
+                            let dms =
+                                gm.match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check);
+                            (dms, started.elapsed().as_secs_f64())
+                        },
+                        || pending.take().map(|(c, d)| verify_chunk(c, d)),
                     );
+                    gpu_match_seconds += seconds;
+                    out.extend(verified.into_iter().flatten());
+                    pending = Some((chunk, dms));
+                }
+                if let Some((c, d)) = pending {
+                    out.extend(verify_chunk(c, d));
                 }
                 out
             }
