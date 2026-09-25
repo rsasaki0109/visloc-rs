@@ -16453,6 +16453,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+    // Parsing rejects the GPU flags on builds without the `gpu` feature.
+    #[cfg(not(feature = "gpu"))]
+    let _ = (args.gpu_match, args.gpu_sift, args.gpu_ba);
     #[cfg(feature = "gpu")]
     if args.gpu_match {
         let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
