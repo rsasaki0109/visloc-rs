@@ -43,6 +43,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--window" => sfm.window = next()?.parse()?,
             "--ba-iterations" => sfm.ba_max_iterations = Some(next()?.parse()?),
             "--local-ba-rel-tol" => sfm.local_ba_relative_tolerance = Some(next()?.parse()?),
+            "--sfm-opt" => sfm.sfm_overrides.push(next()?),
+            "--keep-planar" => sfm.keep_planar = true,
+            "--no-panoramic" => sfm.keep_planar_no_panoramic = true,
+            "--sift-l1-root" => sfm.sift_l1_root = true,
+            "--sift-opt" => sfm.sift_overrides.push(next()?),
+            "--import-features" => sfm.import_features = Some(PathBuf::from(next()?)),
+            "--mapper" => match next()?.as_str() {
+                "colmap-port" => sfm.colmap_port_mapper = true,
+                "incremental" => sfm.colmap_port_mapper = false,
+                other => return Err(format!("--mapper {other}: colmap-port|incremental").into()),
+            },
+            "--init-poses" => sfm.init_poses = Some(PathBuf::from(next()?)),
+            "--import-colmap" => sfm.import_colmap = Some(PathBuf::from(next()?)),
+            "--verify-min-inliers" => sfm.verify_min_inliers = Some(next()?.parse()?),
             "--min-motion-px" => sfm.min_keyframe_motion_px = next()?.parse()?,
             "--skips" => {
                 sfm.skip_offsets = next()?

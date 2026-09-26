@@ -493,6 +493,10 @@ pub struct IncrementalSfmConfig {
     /// A pair must contribute at least this many verified matches to be a
     /// candidate seed pair. (Track building still uses *all* pairs.)
     pub min_seed_matches: usize,
+    /// COLMAP `Mapper.init_min_tri_angle`: a seed pair is accepted only when
+    /// the median triangulation angle of its well-triangulated inliers is at
+    /// least this many degrees. `None` (default) keeps the count-only gate.
+    pub seed_min_median_tri_angle_deg: Option<f64>,
     /// How many candidate seeds to grow before committing. The highest-match
     /// pair is not always a good seed: on repetitive structure (a building with
     /// near-identical façades) the most-overlapping pair can be an isolated local
@@ -992,6 +996,7 @@ impl Default for IncrementalSfmConfig {
     fn default() -> Self {
         Self {
             min_seed_matches: 30,
+            seed_min_median_tri_angle_deg: None,
             seed_trials: 12,
             seed_attempts: 0,
             seed_pair: None,
@@ -4523,11 +4528,38 @@ fn place_seed_pair(
     ));
     // Count inlier correspondences that triangulate to well-conditioned points.
     let mut well_triangulated = 0usize;
+    let centres = [
+        poses[pair.image_i]
+            .as_ref()
+            .map(|p| p.camera_to_world().translation),
+        poses[pair.image_j]
+            .as_ref()
+            .map(|p| p.camera_to_world().translation),
+    ];
+    let mut angles: Vec<f64> = Vec::new();
     for &inl in &relative.inliers {
         let (px_i, px_j) = corr_kp[inl];
         let obs = [(pair.image_i, px_i), (pair.image_j, px_j)];
-        if triangulate_track(camera, poses, &obs, config).is_some() {
+        if let Some(x) = triangulate_track(camera, poses, &obs, config) {
             well_triangulated += 1;
+            if let [Some(ci), Some(cj)] = centres {
+                angles.push((x.coords - ci).angle(&(x.coords - cj)).to_degrees());
+            }
+        }
+    }
+    if let Some(min_angle) = config.seed_min_median_tri_angle_deg {
+        angles.sort_by(f64::total_cmp);
+        let median = angles.get(angles.len() / 2).copied().unwrap_or(0.0);
+        if std::env::var_os("VISLOC_SFM_SEED_DEBUG").is_some() {
+            eprintln!(
+                "sfm-seed-debug: pair=({},{}) median_tri_angle={median:.2} min={min_angle}",
+                pair.image_i, pair.image_j
+            );
+        }
+        if median < min_angle {
+            poses[pair.image_i] = None;
+            poses[pair.image_j] = None;
+            return false;
         }
     }
     if std::env::var_os("VISLOC_SFM_SEED_DEBUG").is_some() {
