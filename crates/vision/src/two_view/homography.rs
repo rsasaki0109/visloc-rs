@@ -83,7 +83,9 @@ pub fn estimate_homography_dlt(correspondences: &[TwoViewCorrespondence]) -> Opt
         a[(2 * i + 1, 8)] = -yp;
     }
 
-    let ata = a.transpose() * a;
+    // Same A^T A product; the 9x9 SVD runs on a fixed-size matrix (same
+    // algorithm and operation order as the former DMatrix path, no heap).
+    let ata = nalgebra::SMatrix::<f64, 9, 9>::from_iterator((a.transpose() * a).iter().copied());
     let svd = ata.svd(true, true);
     let v_t = svd.v_t?;
     let h = v_t.row(v_t.nrows() - 1);
