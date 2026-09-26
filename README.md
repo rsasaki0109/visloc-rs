@@ -81,7 +81,7 @@ camera-centre RMSE, and beats official COLMAP on the 38-image courtyard control
 ### GPU SfM vs COLMAP (CUDA) on EuRoC
 
 Same 200 undistorted frames per sequence, same fixed intrinsics, same
-GTX 1660 Ti, run back to back. visloc-rs uses GPU SIFT, batched GPU
+GPU, run back to back. visloc-rs uses GPU SIFT, batched GPU
 matching and the COLMAP incremental-mapper port. COLMAP 4.1 uses GPU
 extraction, GPU sequential matching and its default mapper. ATE is the
 Sim(3) camera-centre RMSE against ground truth.
