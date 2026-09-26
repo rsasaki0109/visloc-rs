@@ -285,22 +285,10 @@ impl EssentialMatrixEstimator for FivePointEssentialMatrixEstimator {
         // triangulates in front of both cameras. The over-determined path
         // (used for the inlier refit) returns every root.
         if correspondences.len() == self.min_correspondences {
-            let mut out: Vec<Matrix3<f64>> = Vec::new();
-            for essential in models {
-                let inliers: Vec<usize> = (0..correspondences.len()).collect();
-                if recover_relative_pose_with_options(
-                    &essential,
-                    correspondences,
-                    camera,
-                    &inliers,
-                    &CheiralityOptions::default(),
-                )
-                .is_some_and(|recovery| recovery.best_score as usize == correspondences.len())
-                {
-                    out.push(essential);
-                }
-            }
-            out
+            models
+                .into_iter()
+                .filter(|essential| all_in_front_for_some_pose(essential, correspondences, camera))
+                .collect()
         } else {
             models
         }
@@ -424,7 +412,6 @@ where
                 .iter()
                 .map(|&i| correspondences[i])
                 .collect();
-
             for candidate in self.estimator.estimate_all(&sample, camera) {
                 let Some(inliers) = score_inliers_if_competitive(
                     &candidate,
@@ -815,6 +802,92 @@ pub fn recover_relative_pose_with_options(
     })
 }
 
+/// Linear two-view triangulation of one normalized correspondence; `Some`
+/// only when the point lies in front of both cameras. Fixed-size 4x4 SVD
+/// (the same algorithm and operation order as the former `DMatrix` path).
+#[inline]
+fn triangulate_in_front(
+    p_prev: &Matrix3x4<f64>,
+    p_curr: &Matrix3x4<f64>,
+    rotation: &Matrix3<f64>,
+    translation: &Vector3<f64>,
+    prev: Point2<f64>,
+    curr: Point2<f64>,
+) -> Option<Vector3<f64>> {
+    let mut a = nalgebra::Matrix4::<f64>::zeros();
+    for column in 0..4 {
+        a[(0, column)] = prev.x * p_prev[(2, column)] - p_prev[(0, column)];
+        a[(1, column)] = prev.y * p_prev[(2, column)] - p_prev[(1, column)];
+        a[(2, column)] = curr.x * p_curr[(2, column)] - p_curr[(0, column)];
+        a[(3, column)] = curr.y * p_curr[(2, column)] - p_curr[(1, column)];
+    }
+    let svd = a.svd(true, true);
+    let v_t = svd.v_t?;
+    let solution = v_t.row(3);
+    let w = solution[3];
+    if w.abs() < 1e-12 {
+        return None;
+    }
+    let world = Vector3::new(solution[0] / w, solution[1] / w, solution[2] / w);
+    let camera_curr = rotation * world + translation;
+    if world.z <= 0.0 || camera_curr.z <= 0.0 {
+        return None;
+    }
+    Some(world)
+}
+
+/// Whether some decomposition of `essential` puts *every* correspondence in
+/// front of both cameras — exactly `recover_relative_pose_with_options(..,
+/// all indices, CheiralityOptions::default())` returning `best_score ==
+/// len` (the default options have no angle, ambiguity or depth-fraction
+/// gate), but stopping each candidate at its first failing point.
+fn all_in_front_for_some_pose(
+    essential: &Matrix3<f64>,
+    correspondences: &[TwoViewCorrespondence],
+    camera: &Camera,
+) -> bool {
+    if correspondences.is_empty() {
+        return false;
+    }
+    let svd = essential.svd(true, true);
+    let (Some(u), Some(v_t)) = (svd.u, svd.v_t) else {
+        return false;
+    };
+    let w = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    let mut r1 = u * w * v_t;
+    let mut r2 = u * w.transpose() * v_t;
+    if r1.determinant() < 0.0 {
+        r1 = -r1;
+    }
+    if r2.determinant() < 0.0 {
+        r2 = -r2;
+    }
+    let t_unit = u.column(2).into_owned();
+    let points: Option<Vec<(Point2<f64>, Point2<f64>)>> = correspondences
+        .iter()
+        .map(|c| {
+            Some((
+                camera.normalize_pixel(&c.previous_xy)?,
+                camera.normalize_pixel(&c.current_xy)?,
+            ))
+        })
+        .collect();
+    let Some(points) = points else {
+        return false;
+    };
+    let p_prev = Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    [(r1, t_unit), (r1, -t_unit), (r2, t_unit), (r2, -t_unit)]
+        .iter()
+        .any(|(rotation, translation)| {
+            let mut p_curr = Matrix3x4::zeros();
+            p_curr.fixed_view_mut::<3, 3>(0, 0).copy_from(rotation);
+            p_curr.fixed_view_mut::<3, 1>(0, 3).copy_from(translation);
+            points.iter().all(|&(prev, curr)| {
+                triangulate_in_front(&p_prev, &p_curr, rotation, translation, prev, curr).is_some()
+            })
+        })
+}
+
 fn cheirality_score(
     rotation: &Matrix3<f64>,
     translation: &Vector3<f64>,
@@ -841,27 +914,10 @@ fn cheirality_score(
             continue;
         };
 
-        let mut a = DMatrix::<f64>::zeros(4, 4);
-        for column in 0..4 {
-            a[(0, column)] = prev.x * p_prev[(2, column)] - p_prev[(0, column)];
-            a[(1, column)] = prev.y * p_prev[(2, column)] - p_prev[(1, column)];
-            a[(2, column)] = curr.x * p_curr[(2, column)] - p_curr[(0, column)];
-            a[(3, column)] = curr.y * p_curr[(2, column)] - p_curr[(1, column)];
-        }
-        let svd = a.svd(true, true);
-        let Some(v_t) = svd.v_t else {
+        let Some(world) = triangulate_in_front(&p_prev, &p_curr, rotation, translation, prev, curr)
+        else {
             continue;
         };
-        let solution = v_t.row(v_t.nrows() - 1);
-        let w = solution[3];
-        if w.abs() < 1e-12 {
-            continue;
-        }
-        let world = Vector3::new(solution[0] / w, solution[1] / w, solution[2] / w);
-        let camera_curr = rotation * world + translation;
-        if world.z <= 0.0 || camera_curr.z <= 0.0 {
-            continue;
-        }
         if min_tri_angle_rad > 0.0 {
             let ray1 = world;
             let ray2 = world - cam2_centre;
