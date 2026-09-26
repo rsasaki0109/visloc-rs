@@ -6,11 +6,13 @@
 //!     --euroc E:/datasets/euroc_mav/all11/V1_01_easy --work out_dir \
 //!     [--stride 4] [--max-frames 200] [--steps 7000] [--export-steps 7000] [--gpu-sift] [--gpu-ba]
 //!     [--keypoints 8000] [--window 10] [--skips 15,20,30,45,60,90,120]
-//!     [--ba-iterations 20] [--min-motion-px 2]
+//!     [--ba-iterations 20] [--min-motion-px 2] [--render-dir <dir>]
 //! ```
 //!
 //! `--euroc` is the directory containing `mav0/`. Undistorted frames go to
-//! `<work>/images`, the splat to `<work>/scene.ply`.
+//! `<work>/images`, the splat to `<work>/scene.ply`. `--render-dir` also
+//! renders every registered camera after training (`render_<frame>.png`, in
+//! frame order: a flythrough along the recovered path).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -29,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut work = PathBuf::from("gsplat_euroc");
     let mut sfm = EurocSfmConfig::default();
     let mut cfg = TrainConfig::default();
+    let mut render_dir: Option<PathBuf> = None;
     let mut export_steps: Vec<usize> = Vec::new();
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
@@ -68,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<Result<_, _>>()?
             }
             "--steps" => cfg.steps = next()?.parse()?,
+            "--render-dir" => render_dir = Some(PathBuf::from(next()?)),
             "--export-steps" => {
                 export_steps = next()?
                     .split(',')
@@ -144,5 +148,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     save_ply(&trainer.scene(), &ply)?;
     println!("wrote {}", ply.display());
+    if let Some(dir) = render_dir {
+        // Every registered view, in frame order: a flythrough along the
+        // recovered camera path (render_<frame>.png next to the input frame).
+        std::fs::create_dir_all(&dir)?;
+        let mut views: Vec<_> = dataset.train.iter().chain(&dataset.eval).collect();
+        views.sort_by(|a, b| a.name.cmp(&b.name));
+        for v in &views {
+            let img = trainer.render(&v.camera);
+            let (w, h) = (v.camera.camera.width, v.camera.camera.height);
+            let bytes: Vec<u8> = img
+                .rgb
+                .iter()
+                .flat_map(|p| p.iter().map(|c| (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8))
+                .collect();
+            let out = dir.join(format!("render_{}", v.name));
+            image::save_buffer(&out, &bytes, w, h, image::ColorType::Rgb8)?;
+        }
+        println!("rendered {} views to {}", views.len(), dir.display());
+    }
     Ok(())
 }
