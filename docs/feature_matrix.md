@@ -12,6 +12,7 @@ dependency surface that matches their deployment.
 | `onnx-inference` | Tier 2 opt-in | `VISLOC_CHECK_ONNX=1 sh scripts/check_feature_matrix.sh` on a current stable Rust | Not part of the Rust 1.83 MSRV guarantee | Pulls ONNX Runtime through `ort`; model files and hashes must be recorded in benchmark manifests. |
 | `onnx-cuda` | Tier 2 hardware-gated | `VISLOC_CHECK_ONNX_CUDA=1 sh scripts/check_feature_matrix.sh` on CUDA-capable hosts | Not part of the Rust 1.83 MSRV guarantee | Requires CUDA/cuDNN-compatible ONNX Runtime setup and remains outside the default CI gate. |
 | `gpu-matcher` | Tier 2 hardware-gated | No CI gate; built and exercised locally on CUDA-capable hosts | Rust 1.83 | Adds `GpuDescriptorMatcher`, an exact nearest-neighbour matcher backed by a runtime-loaded CUDA top-2 kernel (`scripts/build_descriptor_gemm_kernels.ps1`). A missing kernel library falls back to the CPU matcher, so the feature is safe to enable without a GPU. |
+| `gpu` | Tier 2 hardware-gated | No CI gate; built and exercised locally on a wgpu-capable GPU (DX12/Vulkan/Metal) | Not part of the Rust 1.83 MSRV guarantee (wgpu needs Rust 1.85+) | Enables the wgpu SIFT extractor, batched GPU matcher and GPU bundle adjustment (`visloc-sift-gpu`, `visloc-ba-gpu`) behind opt-in flags in the SfM examples (`colmap`, `unordered_sfm_demo`); the CPU paths are unchanged when the flags are off. |
 
 `basalt-timing-breakdown` and `basalt-lm-workspace-reuse` are internal, narrowly-scoped
 opt-in switches on `visloc-basalt` (a timing/instrumentation sidecar and a capacity-only
