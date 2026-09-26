@@ -356,6 +356,18 @@ impl BundleAdjustmentOptions {
     }
 }
 
+fn visloc_slam_bundle_observation(
+    keyframe_id: u64,
+    landmark_id: u64,
+    xy: nalgebra::Point2<f64>,
+) -> crate::BaObservation {
+    crate::BaObservation {
+        keyframe_id,
+        landmark_id,
+        xy,
+    }
+}
+
 fn sensor_from_rig_for_image(recon: &Reconstruction, image_id: ImageT) -> SE3 {
     let image = recon.image(image_id);
     let frame = recon.frame(image.frame_id);
@@ -694,31 +706,81 @@ pub fn solve(
     let n_obs = ba.rig_observations.len();
     let n_lm = ba.landmarks.len();
     let n_fixed_lm = ba.fixed_landmarks.len();
-    let solved = match options.backend {
-        BaBackend::Legacy => {
-            // `Legacy` (`bundle::BundleAdjustment::optimize`) predates
-            // `LossFunction` and does not implement Ceres' `Corrector`
-            // (`super::rig_ba_solver`'s port) — it always solves the
-            // trivial-loss problem regardless of `options.loss_function`.
-            // Not wired up: `Legacy` is a regression/parity escape hatch,
-            // never this port's default backend (`BaBackend::default() ==
-            // Native`), and every test/call site that needs robust loss
-            // uses `Native`.
-            if options.loss_function != LossFunction::Trivial {
-                eprintln!(
-                    "BA_SOLVE WARNING backend=Legacy loss_function={:?} is ignored \
-                     (Legacy is trivial-loss only); use backend=Native for robust loss",
-                    options.loss_function
-                );
-            }
-            ba.optimize(&ba_config)
+    // Optional accelerator (e.g. GPU LM) for trivial-loss (global) problems
+    // of a single camera: identity sensor-from-rig observations are ordinary
+    // monocular observations. Anything else stays on the native solver.
+    //
+    // Opt-in (VISLOC_PORT_GPU_BA=1): on 200-frame EuRoC it saved little
+    // (per-call setup dominates) and, without the native relative-gradient
+    // stop, hurt accuracy (MH_05 2.58 -> 3.06 cm; V1_01 collapsed at a
+    // 4-iteration cap), so the native solver stays the default.
+    let accelerated = (options.loss_function == LossFunction::Trivial
+        && std::env::var_os("VISLOC_PORT_GPU_BA").is_some())
+    .then(crate::ba_accel::ba_accelerator)
+    .flatten()
+    .and_then(|accel| {
+        let monocular = ba.rig_observations.iter().all(|o| {
+            o.camera == ba.camera
+                && o.sensor_from_rig.translation.norm() == 0.0
+                && o.sensor_from_rig.rotation.angle() == 0.0
+        });
+        if !monocular {
+            return None;
         }
-        BaBackend::Native => super::rig_ba_solver::optimize_with_tolerance(
-            &mut ba,
-            options.max_num_iterations,
-            options.loss_function,
-            options.gradient_tolerance_rel,
-        ),
+        let rig = std::mem::take(&mut ba.rig_observations);
+        ba.observations = rig
+            .iter()
+            .map(|o| visloc_slam_bundle_observation(o.keyframe_id, o.landmark_id, o.xy))
+            .collect();
+        // The native solver stops on Ceres' relative gradient tolerance
+        // after ~1-3 iterations; the accelerator has no such criterion,
+        // so cap it (VISLOC_PORT_GPU_BA_ITERS, default 2).
+        let iters = std::env::var("VISLOC_PORT_GPU_BA_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2usize);
+        let gpu_config = BaConfig {
+            max_iterations: iters.min(options.max_num_iterations),
+            relative_cost_tolerance: Some(1.0e-6),
+            ..BaConfig::default()
+        };
+        let result = accel.optimize(&mut ba, &gpu_config, crate::ba_accel::BaScope::Global);
+        if result.is_none() {
+            // Declined: restore the rig form for the native solver.
+            ba.observations.clear();
+            ba.rig_observations = rig;
+        }
+        result
+    });
+    let solved = if let Some(result) = accelerated {
+        result
+    } else {
+        match options.backend {
+            BaBackend::Legacy => {
+                // `Legacy` (`bundle::BundleAdjustment::optimize`) predates
+                // `LossFunction` and does not implement Ceres' `Corrector`
+                // (`super::rig_ba_solver`'s port) — it always solves the
+                // trivial-loss problem regardless of `options.loss_function`.
+                // Not wired up: `Legacy` is a regression/parity escape hatch,
+                // never this port's default backend (`BaBackend::default() ==
+                // Native`), and every test/call site that needs robust loss
+                // uses `Native`.
+                if options.loss_function != LossFunction::Trivial {
+                    eprintln!(
+                        "BA_SOLVE WARNING backend=Legacy loss_function={:?} is ignored \
+                     (Legacy is trivial-loss only); use backend=Native for robust loss",
+                        options.loss_function
+                    );
+                }
+                ba.optimize(&ba_config)
+            }
+            BaBackend::Native => super::rig_ba_solver::optimize_with_tolerance(
+                &mut ba,
+                options.max_num_iterations,
+                options.loss_function,
+                options.gradient_tolerance_rel,
+            ),
+        }
     };
     let Ok(result) = solved else {
         return false;
