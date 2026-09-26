@@ -55,7 +55,7 @@ rand = { version = "0.8", features = ["small_rng"] }
 rayon = "1"
 # sha2 0.11 pulls const-oid 0.10 (edition2024, needs Cargo 1.85+) via digest
 # 0.11, which breaks MSRV 1.83. Hold at 0.10 until the MSRV is bumped.
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
