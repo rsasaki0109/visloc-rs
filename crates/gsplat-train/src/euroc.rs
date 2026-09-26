@@ -20,7 +20,7 @@ use visloc_core::types::Camera;
 use visloc_gsplat_core::colmap_scene::camera_view_from;
 use visloc_gsplat_core::gaussian::Scene;
 use visloc_io::euroc::read_euroc_dataset_dir;
-use visloc_slam::{incremental_sfm, IncrementalSfmConfig, PairwiseMatches};
+use visloc_slam::{IncrementalSfmConfig, PairwiseMatches};
 use visloc_vision::distortion::RadialTangential;
 use visloc_vision::features::sift::{extract_sift, GrayImage, SiftConfig};
 use visloc_vision::features::FeatureSet;
@@ -57,6 +57,43 @@ pub struct EurocSfmConfig {
     pub gpu_ba: bool,
     /// Override the SfM's LM iteration budget per bundle adjustment.
     pub ba_max_iterations: Option<usize>,
+    /// Relative cost tolerance that ends local BA windows early.
+    pub local_ba_relative_tolerance: Option<f64>,
+    /// `key=value` overrides of the incremental mapper configuration (see
+    /// [`apply_sfm_override`]), applied last.
+    pub sfm_overrides: Vec<String>,
+    /// Keep planar / panoramic / multi-model verified pairs too (COLMAP's
+    /// `UseInlierMatchesCheck`), not only calibrated/uncalibrated ones.
+    pub keep_planar: bool,
+    /// With `keep_planar`: keep planar / multi-model pairs but still drop
+    /// pure-rotation (panoramic) ones, which carry no baseline.
+    pub keep_planar_no_panoramic: bool,
+    /// Keep gate-dropped (near-static) frames in the reconstruction too,
+    /// linked only to kept frames within `window` (no skip pairs, no
+    /// static-static pairs), so the mapper registers them by PnP.
+    pub register_gated: bool,
+    /// Merge disconnected COLMAP-port models by a similarity estimated from
+    /// cross-model matches, then re-triangulate + bundle-adjust the union.
+    pub merge_models: bool,
+    /// Inlier floor for a verified pair; `None` = `min_matches`.
+    pub verify_min_inliers: Option<usize>,
+    /// Diagnostic: replace the SIFT features and verified pairs with an
+    /// export of a COLMAP database (`export_colmap_db.py`), so the mapper
+    /// can be compared on identical correspondences.
+    pub import_colmap: Option<PathBuf>,
+    /// Diagnostic: seed the mapper with fixed initial poses from a text file
+    /// of `frame qw qx qy qz tx ty tz` (world-to-camera, COLMAP convention).
+    pub init_poses: Option<PathBuf>,
+    /// Run the faithful COLMAP incremental-mapper port
+    /// (`visloc_slam::colmap_incremental`) instead of `incremental_sfm`.
+    pub colmap_port_mapper: bool,
+    /// RootSIFT (L1-root) descriptor normalisation, COLMAP's default.
+    pub sift_l1_root: bool,
+    /// `key=value` overrides of the SIFT configuration (see `apply_sift_override`).
+    pub sift_overrides: Vec<String>,
+    /// Diagnostic: replace the extracted keypoints/descriptors with
+    /// `export_colmap_features.py` output (matching and verification stay ours).
+    pub import_features: Option<PathBuf>,
     /// Keyframe gate: a frame joins the SfM only once the accumulated median
     /// feature motion since the last kept frame reaches this many pixels.
     /// Near-static frames (e.g. before take-off) have no parallax and were
@@ -82,6 +119,19 @@ impl Default for EurocSfmConfig {
             gpu_sift: false,
             gpu_ba: false,
             ba_max_iterations: None,
+            local_ba_relative_tolerance: None,
+            sfm_overrides: Vec::new(),
+            keep_planar: false,
+            keep_planar_no_panoramic: false,
+            register_gated: false,
+            merge_models: false,
+            verify_min_inliers: None,
+            import_colmap: None,
+            init_poses: None,
+            colmap_port_mapper: false,
+            sift_l1_root: false,
+            sift_overrides: Vec::new(),
+            import_features: None,
             min_keyframe_motion_px: 2.0,
         }
     }
@@ -158,6 +208,506 @@ pub fn sim3_ate_rmse(est: &[Vector3<f64>], gt: &[Vector3<f64>]) -> Option<f64> {
     Some((sq / n as f64).sqrt())
 }
 
+/// Poses, tracks and mean reprojection error read back from the port.
+type PortModel = (
+    Vec<Option<visloc_core::geometry::Pose>>,
+    Vec<visloc_slam::SfmTrack>,
+    f64,
+);
+/// A chunk of candidate pairs and their raw matches, awaiting verification.
+type MatchedChunk<'a> = (&'a [(usize, usize)], Vec<Vec<DescriptorMatch>>);
+/// Features and verified pairs imported from a COLMAP database export.
+type ImportedMatches = (Vec<FeatureSet>, Vec<PairwiseMatches>);
+
+/// The parts of an SfM result the dataset builder consumes.
+struct SfmOutcome {
+    poses: Vec<Option<visloc_core::geometry::Pose>>,
+    tracks: Vec<visloc_slam::SfmTrack>,
+    mean_reprojection_px: f64,
+    refined_camera: Option<Camera>,
+}
+
+/// Run the COLMAP incremental-mapper port on our features/verified pairs:
+/// write its inputs (single-sensor rig manifest, keypoints, VISLOC-COLMAP-1
+/// pairs) under `out_dir/port`, run `colmap_incremental::pipeline::run`,
+/// and read the largest model back as poses + tracks.
+fn run_colmap_port(
+    out_dir: &Path,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    log: &mut dyn FnMut(&str),
+) -> Result<Vec<PortModel>, EurocError> {
+    use std::io::Write;
+    use visloc_slam::colmap_incremental::{pipeline, DatabaseCache, PipelineOptions};
+    let err = |e: String| EurocError::Sfm(format!("colmap-port: {e}"));
+    let dir = out_dir.join("port");
+    let feat_dir = dir.join("features");
+    std::fs::create_dir_all(&feat_dir).map_err(|e| err(e.to_string()))?;
+    let [fx, fy, cx, cy] = [
+        camera.params[0],
+        camera.params[1],
+        camera.params[2],
+        camera.params[3],
+    ];
+    let name = |i: usize| format!("frame_{i:05}.png");
+    // Only images that take part in a verified pair (the port's
+    // correspondence graph has no node for an isolated image); names keep
+    // the original frame index, the export order is the port's image id.
+    let mut used = vec![false; features.len()];
+    for p in pairwise {
+        used[p.image_i] = true;
+        used[p.image_j] = true;
+    }
+    let order: Vec<usize> = (0..features.len()).filter(|&i| used[i]).collect();
+    let mut slot = vec![usize::MAX; features.len()];
+    for (k, &i) in order.iter().enumerate() {
+        slot[i] = k;
+    }
+    let mut manifest = format!(
+        "# generalized-rig-manifest-v1\nS 0 1 {width} {height} {fx} {fy} {cx} {cy} 1 0 0 0 0 0 0\n"
+    );
+    for &i in &order {
+        manifest.push_str(&format!("F {i} {} 0\n", name(i)));
+        let text: String = features[i]
+            .keypoints
+            .iter()
+            .map(|k| format!("{} {}\n", k.x, k.y))
+            .collect();
+        std::fs::write(feat_dir.join(format!("frame_{i:05}_features.txt")), text)
+            .map_err(|e| err(e.to_string()))?;
+    }
+    std::fs::write(dir.join("manifest.txt"), manifest).map_err(|e| err(e.to_string()))?;
+    let mut bin: Vec<u8> = b"VISLOC-COLMAP-1\0".to_vec();
+    bin.extend((order.len() as u64).to_le_bytes());
+    for &i in &order {
+        let f = &features[i];
+        let n = name(i);
+        bin.extend((n.len() as u64).to_le_bytes());
+        bin.extend(n.as_bytes());
+        bin.extend((f.keypoints.len() as u64).to_le_bytes());
+    }
+    bin.extend((pairwise.len() as u64).to_le_bytes());
+    for p in pairwise {
+        bin.extend((slot[p.image_i] as u64).to_le_bytes());
+        bin.extend((slot[p.image_j] as u64).to_le_bytes());
+        bin.extend((p.matches.len() as u64).to_le_bytes());
+        for &(a, b) in &p.matches {
+            bin.extend((a as u32).to_le_bytes());
+            bin.extend((b as u32).to_le_bytes());
+        }
+    }
+    std::fs::File::create(dir.join("pairs.bin"))
+        .and_then(|mut f| f.write_all(&bin))
+        .map_err(|e| err(e.to_string()))?;
+
+    let db = DatabaseCache::from_generalized_rig_export(
+        &dir.join("manifest.txt"),
+        &feat_dir,
+        &dir.join("pairs.bin"),
+    )
+    .map_err(|e| err(e.to_string()))?;
+    let mut options = PipelineOptions::default();
+    // The port's default (8) is a rig-benchmark control override; use
+    // COLMAP's own `Mapper.abs_pose_min_num_inliers` for single cameras.
+    options.mapper.abs_pose_min_num_inliers = 30;
+    let run = pipeline::run(&options, &db);
+    let _ = std::fs::write(dir.join("mapper.log"), run.log.join("\n"));
+    let mut order: Vec<usize> = (0..run.models.len()).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(run.models[k].reconstruction.num_reg_images()));
+    if order.is_empty() {
+        return Err(err("no model reconstructed".into()));
+    }
+    log(&format!(
+        "colmap-port: {} model(s), sizes {:?}",
+        run.models.len(),
+        order
+            .iter()
+            .map(|&k| run.models[k].reconstruction.num_reg_images())
+            .collect::<Vec<_>>()
+    ));
+    let mut models = Vec::with_capacity(order.len());
+    for (rank, &k) in order.iter().enumerate() {
+        let model_dir = dir.join(format!("model{rank}"));
+        run.models[k]
+            .reconstruction
+            .export_colmap_text(&model_dir)
+            .map_err(|e| err(e.to_string()))?;
+        models.push(read_port_model(&model_dir, features).map_err(err)?);
+    }
+    Ok(models)
+}
+
+/// Read a COLMAP text model written by the port back as poses + tracks.
+fn read_port_model(model_dir: &Path, features: &[FeatureSet]) -> Result<PortModel, String> {
+    let images_txt =
+        std::fs::read_to_string(model_dir.join("images.txt")).map_err(|e| e.to_string())?;
+    let mut poses = vec![None; features.len()];
+    let mut frame_of_image: std::collections::HashMap<u64, usize> = Default::default();
+    let mut lines = images_txt.lines().filter(|l| !l.starts_with('#'));
+    while let Some(header) = lines.next() {
+        let _points = lines.next();
+        let t: Vec<&str> = header.split_whitespace().collect();
+        if t.len() < 10 {
+            continue;
+        }
+        let v: Vec<f64> = t[1..8].iter().filter_map(|x| x.parse().ok()).collect();
+        let (Ok(image_id), Some(frame)) = (
+            t[0].parse::<u64>(),
+            t[9].strip_prefix("frame_")
+                .and_then(|s| s.split('.').next())
+                .and_then(|s| s.parse::<usize>().ok()),
+        ) else {
+            continue;
+        };
+        if v.len() != 7 || frame >= poses.len() {
+            continue;
+        }
+        let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+            v[0], v[1], v[2], v[3],
+        ));
+        poses[frame] = Some(visloc_core::geometry::Pose::from_world_to_camera(
+            q,
+            Vector3::new(v[4], v[5], v[6]),
+        ));
+        frame_of_image.insert(image_id, frame);
+    }
+    let points_txt =
+        std::fs::read_to_string(model_dir.join("points3D.txt")).map_err(|e| e.to_string())?;
+    let mut tracks = Vec::new();
+    let (mut err_sum, mut err_n) = (0.0, 0usize);
+    for line in points_txt.lines().filter(|l| !l.starts_with('#')) {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.len() < 8 {
+            continue;
+        }
+        let xyz: Vec<f64> = t[1..4].iter().filter_map(|x| x.parse().ok()).collect();
+        if xyz.len() != 3 {
+            continue;
+        }
+        if let Ok(e) = t[7].parse::<f64>() {
+            err_sum += e;
+            err_n += 1;
+        }
+        let observations = t[8..]
+            .chunks_exact(2)
+            .filter_map(|c| {
+                let frame = *frame_of_image.get(&c[0].parse::<u64>().ok()?)?;
+                let kp: usize = c[1].parse().ok()?;
+                Some((frame, kp, *features[frame].keypoints.get(kp)?))
+            })
+            .collect();
+        tracks.push(visloc_slam::SfmTrack {
+            position: nalgebra::Point3::new(xyz[0], xyz[1], xyz[2]),
+            observations,
+        });
+    }
+    Ok((poses, tracks, err_sum / err_n.max(1) as f64))
+}
+
+/// Least-squares similarity `dst ~ s R src + t` (Umeyama).
+fn umeyama(
+    src: &[nalgebra::Point3<f64>],
+    dst: &[nalgebra::Point3<f64>],
+) -> Option<(f64, nalgebra::Rotation3<f64>, Vector3<f64>)> {
+    let n = src.len() as f64;
+    if src.len() < 3 {
+        return None;
+    }
+    let ms = src.iter().fold(Vector3::zeros(), |a, p| a + p.coords) / n;
+    let md = dst.iter().fold(Vector3::zeros(), |a, p| a + p.coords) / n;
+    let mut cov = nalgebra::Matrix3::zeros();
+    let mut var = 0.0;
+    for (a, b) in src.iter().zip(dst) {
+        let da = a.coords - ms;
+        cov += (b.coords - md) * da.transpose();
+        var += da.norm_squared();
+    }
+    cov /= n;
+    var /= n;
+    if var <= 0.0 {
+        return None;
+    }
+    let svd = cov.svd(true, true);
+    let (u, vt) = (svd.u?, svd.v_t?);
+    let mut d = nalgebra::Matrix3::identity();
+    if (u * vt).determinant() < 0.0 {
+        d[(2, 2)] = -1.0;
+    }
+    let r = u * d * vt;
+    let scale = (svd.singular_values.component_mul(&d.diagonal())).sum() / var;
+    let t = md - scale * r * ms;
+    Some((scale, nalgebra::Rotation3::from_matrix_unchecked(r), t))
+}
+
+/// Merge disconnected port models into the largest one: 3D-3D
+/// correspondences come from verified matches whose two keypoints are each
+/// observed by a point of the two models; a RANSAC similarity (Umeyama on
+/// minimal samples, refit on inliers) maps the smaller model's poses into
+/// the reference frame. Returns merged initial poses (`None` = unregistered).
+fn merge_port_models(
+    models: &[PortModel],
+    pairwise: &[PairwiseMatches],
+    log: &mut dyn FnMut(&str),
+) -> Vec<Option<visloc_core::geometry::Pose>> {
+    use std::collections::HashMap;
+    let mut merged = models[0].0.clone();
+    // (frame, keypoint) -> point position, in the merged frame so far.
+    let point_map = |m: &PortModel| -> HashMap<(usize, usize), nalgebra::Point3<f64>> {
+        let mut map = HashMap::new();
+        for t in &m.1 {
+            for &(f, k, _) in &t.observations {
+                map.insert((f, k), t.position);
+            }
+        }
+        map
+    };
+    let mut reference = point_map(&models[0]);
+    let extent = {
+        let pts: Vec<_> = reference.values().collect();
+        let c = pts.iter().fold(Vector3::zeros(), |a, p| a + p.coords) / pts.len().max(1) as f64;
+        let mut d: Vec<f64> = pts.iter().map(|p| (p.coords - c).norm()).collect();
+        d.sort_by(f64::total_cmp);
+        d.get(d.len() / 2).copied().unwrap_or(1.0)
+    };
+    let tau = 0.05 * extent;
+    for (k, model) in models.iter().enumerate().skip(1) {
+        let other = point_map(model);
+        let mut src = Vec::new();
+        let mut dst = Vec::new();
+        for p in pairwise {
+            for &(a, b) in &p.matches {
+                for ((fa, ka), (fb, kb)) in [
+                    ((p.image_i, a), (p.image_j, b)),
+                    ((p.image_j, b), (p.image_i, a)),
+                ] {
+                    if let (Some(x_ref), Some(x_other)) =
+                        (reference.get(&(fa, ka)), other.get(&(fb, kb)))
+                    {
+                        if merged[fb].is_none() {
+                            src.push(*x_other);
+                            dst.push(*x_ref);
+                        }
+                    }
+                }
+            }
+        }
+        if src.len() < 30 {
+            log(&format!(
+                "merge: model {k} has {} links, skipped",
+                src.len()
+            ));
+            continue;
+        }
+        // RANSAC over minimal 3-point similarity samples (deterministic LCG).
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        let count = |s: f64, r: &nalgebra::Rotation3<f64>, t: &Vector3<f64>| -> Vec<usize> {
+            (0..src.len())
+                .filter(|&i| ((s * (r * src[i].coords) + t) - dst[i].coords).norm() < tau)
+                .collect()
+        };
+        let mut best: Vec<usize> = Vec::new();
+        for _ in 0..2000 {
+            let idx = [next() % src.len(), next() % src.len(), next() % src.len()];
+            let (a, b): (Vec<_>, Vec<_>) = idx.iter().map(|&i| (src[i], dst[i])).unzip();
+            if let Some((s, r, t)) = umeyama(&a, &b) {
+                let inl = count(s, &r, &t);
+                if inl.len() > best.len() {
+                    best = inl;
+                }
+            }
+        }
+        let ratio = best.len() as f64 / src.len() as f64;
+        if best.len() < 30 || ratio < 0.3 {
+            log(&format!(
+                "merge: model {k} rejected ({} / {} inliers)",
+                best.len(),
+                src.len()
+            ));
+            continue;
+        }
+        let (a, b): (Vec<_>, Vec<_>) = best.iter().map(|&i| (src[i], dst[i])).unzip();
+        let Some((s, r, t)) = umeyama(&a, &b) else {
+            continue;
+        };
+        // x_ref = s R x_other + t; camera: x_cam' = s x_cam.
+        let mut added = 0;
+        for (f, pose) in model.0.iter().enumerate() {
+            let (Some(pose), None) = (pose, &merged[f]) else {
+                continue;
+            };
+            let w2c = &pose.world_to_camera;
+            let rb = w2c.rotation.to_rotation_matrix();
+            let new_r = rb * r.inverse();
+            let new_t = s * w2c.translation - new_r * t;
+            merged[f] = Some(visloc_core::geometry::Pose::from_world_to_camera(
+                nalgebra::UnitQuaternion::from_rotation_matrix(&new_r),
+                new_t,
+            ));
+            added += 1;
+        }
+        for tr in &model.1 {
+            for &(f, kp, _) in &tr.observations {
+                reference
+                    .entry((f, kp))
+                    .or_insert_with(|| nalgebra::Point3::from(s * (r * tr.position.coords) + t));
+            }
+        }
+        log(&format!(
+            "merge: model {k} joined ({} / {} inliers, scale {s:.3}, +{added} frames)",
+            best.len(),
+            src.len()
+        ));
+    }
+    merged
+}
+
+/// Load `export_colmap_db.py` output: per-frame keypoints (no descriptors)
+/// and verified inlier matches.
+fn import_colmap_export(dir: &Path, n: usize) -> Result<ImportedMatches, EurocError> {
+    let bad = |what: String| EurocError::Sfm(format!("import-colmap: {what}"));
+    let mut features = Vec::with_capacity(n);
+    for i in 0..n {
+        let path = dir.join("keypoints").join(format!("frame_{i:05}.txt"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let keypoints: Vec<Point2<f64>> = text
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split_whitespace().map(|v| v.parse::<f64>());
+                Some(Point2::new(it.next()?.ok()?, it.next()?.ok()?))
+            })
+            .collect();
+        let descriptors = vec![Vec::new(); keypoints.len()];
+        features.push(FeatureSet {
+            keypoints,
+            descriptors,
+        });
+    }
+    let text = std::fs::read_to_string(dir.join("pairs.txt")).map_err(|e| bad(e.to_string()))?;
+    let mut pairwise = Vec::new();
+    for line in text.lines() {
+        let v: Vec<usize> = line
+            .split_whitespace()
+            .map(|t| t.parse::<usize>())
+            .collect::<Result<_, _>>()
+            .map_err(|e| bad(e.to_string()))?;
+        if v.len() < 2 || v[0] >= n || v[1] >= n {
+            continue;
+        }
+        let matches: Vec<(usize, usize)> = v[2..].chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        pairwise.push(PairwiseMatches {
+            image_i: v[0],
+            image_j: v[1],
+            matches,
+            two_view_config: None,
+            essential_matches: None,
+            essential_matrix: None,
+        });
+    }
+    Ok((features, pairwise))
+}
+
+#[cfg(feature = "gpu")]
+macro_rules! visloc_sift_gpu_or_unit {
+    () => {
+        visloc_sift_gpu::SiftGpu
+    };
+}
+#[cfg(not(feature = "gpu"))]
+macro_rules! visloc_sift_gpu_or_unit {
+    () => {
+        ()
+    };
+}
+
+/// Apply one `key=value` override to the SIFT configuration.
+pub fn apply_sift_override(cfg: &mut SiftConfig, kv: &str) -> Result<(), String> {
+    let (key, value) = kv
+        .split_once('=')
+        .ok_or_else(|| format!("--sift-opt {kv}: expected key=value"))?;
+    let num = || {
+        value
+            .parse::<f64>()
+            .map_err(|e| format!("--sift-opt {key}: {e}"))
+    };
+    let flag = || matches!(value, "1" | "true");
+    match key {
+        "descriptor_magnification" => cfg.descriptor_magnification = num()?,
+        "max_orientations" => cfg.max_orientations = num()? as usize,
+        "prefer_larger_scale" => cfg.prefer_larger_scale = flag(),
+        "full_pyramid" => cfg.full_pyramid = flag(),
+        "contrast_threshold" => cfg.contrast_threshold = num()?,
+        "edge_threshold" => cfg.edge_threshold = num()?,
+        "octaves" => cfg.octaves = num()? as usize,
+        "sigma_base" => cfg.sigma_base = num()?,
+        _ => return Err(format!("--sift-opt: unknown key {key}")),
+    }
+    Ok(())
+}
+
+/// Apply one `key=value` override to the incremental mapper configuration.
+pub fn apply_sfm_override(cfg: &mut IncrementalSfmConfig, kv: &str) -> Result<(), String> {
+    let (key, value) = kv
+        .split_once('=')
+        .ok_or_else(|| format!("--sfm-opt {kv}: expected key=value"))?;
+    let flag = || -> Result<bool, String> {
+        match value {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => Err(format!("--sfm-opt {key}: expected a bool, got {value}")),
+        }
+    };
+    let num = || -> Result<f64, String> {
+        value
+            .parse::<f64>()
+            .map_err(|e| format!("--sfm-opt {key}: {e}"))
+    };
+    match key {
+        "retriangulate" => cfg.retriangulate = flag()?,
+        "incremental_correspondence_triangulation" => {
+            cfg.incremental_correspondence_triangulation = flag()?
+        }
+        "colmap_style_mapper" => cfg.colmap_style_mapper = flag()?,
+        "final_iterative_global_refinement" => cfg.final_iterative_global_refinement = flag()?,
+        "ba_every" => cfg.ba_every = num()? as usize,
+        "seed_min_median_tri_angle_deg" => cfg.seed_min_median_tri_angle_deg = Some(num()?),
+        "min_seed_matches" => cfg.min_seed_matches = num()? as usize,
+        "seed_trials" => cfg.seed_trials = num()? as usize,
+        "post_refinement_registration" => cfg.post_refinement_registration = flag()?,
+        "filter_images" => cfg.filter_images = flag()?,
+        "final_global_ba" => cfg.final_global_ba = flag()?,
+        "pnp_max_iterations" => cfg.pnp_max_iterations = num()? as usize,
+        "min_pnp_inliers" => cfg.min_pnp_inliers = num()? as usize,
+        "max_registration_trials" => cfg.max_registration_trials = num()? as usize,
+        "local_ba_num_images" => cfg.local_ba_num_images = num()? as usize,
+        "global_ba_images_ratio" => cfg.global_ba_images_ratio = num()?,
+        "global_ba_max_refinements" => cfg.global_ba_max_refinements = num()? as usize,
+        "max_reprojection_error_px" => cfg.max_reprojection_error_px = num()?,
+        "min_triangulation_angle_deg" => cfg.min_triangulation_angle_deg = num()?,
+        "huber_delta" => {
+            cfg.ba_config.robust_kernel = visloc_slam::RobustKernel::Huber { delta: num()? }
+        }
+        "next_image_policy" => {
+            cfg.next_image_policy = match value {
+                "auto" => visloc_slam::NextImagePolicy::Auto,
+                "visibility" => visloc_slam::NextImagePolicy::VisibilityPyramid,
+                "count" => visloc_slam::NextImagePolicy::CorrespondenceCount,
+                _ => return Err(format!("--sfm-opt next_image_policy: {value}")),
+            }
+        }
+        _ => return Err(format!("--sfm-opt: unknown key {key}")),
+    }
+    Ok(())
+}
+
 /// Bilinear undistortion of a grey image to a pinhole camera with the same
 /// intrinsics: for each output pixel, distort its normalised coordinate and
 /// sample the source. Pixels that map outside the source are 0.
@@ -204,6 +754,8 @@ fn verify_pair(
     fj: &FeatureSet,
     dm: &[DescriptorMatch],
     min_matches: usize,
+    keep_planar: bool,
+    no_panoramic: bool,
 ) -> Option<Vec<(usize, usize)>> {
     if dm.len() < min_matches {
         return None;
@@ -219,7 +771,12 @@ fn verify_pair(
     let keep = matches!(
         report.config,
         ConfigurationType::Calibrated | ConfigurationType::Uncalibrated
-    );
+    ) || (keep_planar
+        && match report.config {
+            ConfigurationType::Planar | ConfigurationType::Multiple => true,
+            ConfigurationType::Panoramic | ConfigurationType::PlanarOrPanoramic => !no_panoramic,
+            _ => false,
+        });
     if !keep || report.inliers.len() < min_matches {
         return None;
     }
@@ -270,10 +827,18 @@ pub fn build_euroc_dataset(
     ));
 
     // Undistort, save, extract SIFT.
-    let sift_cfg = SiftConfig {
+    let mut sift_cfg = SiftConfig {
         max_keypoints: cfg.sift_max_keypoints,
+        normalization: if cfg.sift_l1_root {
+            visloc_vision::features::sift::SiftNormalization::L1Root
+        } else {
+            visloc_vision::features::sift::SiftNormalization::L2
+        },
         ..SiftConfig::default()
     };
+    for o in &cfg.sift_overrides {
+        apply_sift_override(&mut sift_cfg, o).map_err(EurocError::Sift)?;
+    }
     #[cfg(feature = "gpu")]
     let mut gpu_sift = if cfg.gpu_sift {
         let ctx = visloc_sift_gpu::GpuContext::new()
@@ -295,32 +860,42 @@ pub fn build_euroc_dataset(
         // Process-wide: the first registration wins.
         visloc_slam::set_ba_accelerator(Box::new(visloc_ba_gpu::GpuBundleAdjuster::new(ctx)));
     }
-    let mut grays: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
-    let mut names: Vec<String> = Vec::with_capacity(frames.len());
-    let mut features: Vec<FeatureSet> = Vec::with_capacity(frames.len());
-    for (i, f) in frames.iter().enumerate() {
-        let path = seq.cam0_image_dir.join(&f.filename);
-        let img = image::open(&path)
-            .map_err(|source| EurocError::Image {
-                path: path.clone(),
-                source,
-            })?
-            .to_luma8();
-        let und = undistort_gray(img.as_raw(), width, height, k, &dist);
-        let name = format!("frame_{i:05}.png");
-        let out = images_dir.join(&name);
-        let rgb: Vec<u8> = und.iter().flat_map(|&g| [g, g, g]).collect();
-        image::save_buffer(&out, &rgb, width, height, image::ColorType::Rgb8).map_err(
-            |source| EurocError::Image {
-                path: out.clone(),
-                source,
-            },
-        )?;
+    // Decode + undistort + write the training PNG in parallel; SIFT then
+    // runs on the GPU one frame at a time (one device), or in parallel on
+    // the CPU.
+    let grays: Vec<Vec<u8>> = frames
+        .par_iter()
+        .enumerate()
+        .map(|(i, f)| -> Result<Vec<u8>, EurocError> {
+            let path = seq.cam0_image_dir.join(&f.filename);
+            let img = image::open(&path)
+                .map_err(|source| EurocError::Image {
+                    path: path.clone(),
+                    source,
+                })?
+                .to_luma8();
+            let und = undistort_gray(img.as_raw(), width, height, k, &dist);
+            let out = images_dir.join(format!("frame_{i:05}.png"));
+            let rgb: Vec<u8> = und.iter().flat_map(|&g| [g, g, g]).collect();
+            image::save_buffer(&out, &rgb, width, height, image::ColorType::Rgb8).map_err(
+                |source| EurocError::Image {
+                    path: out.clone(),
+                    source,
+                },
+            )?;
+            Ok(und)
+        })
+        .collect::<Result<_, _>>()?;
+    let names: Vec<String> = (0..frames.len())
+        .map(|i| format!("frame_{i:05}.png"))
+        .collect();
+    let extract_one = |und: &[u8], gpu: Option<&mut visloc_sift_gpu_or_unit!()>| {
+        let _ = &gpu;
         let pixels: Vec<f32> = und.iter().map(|&b| b as f32).collect();
         let gray = GrayImage::new(width as usize, height as usize, &pixels)
             .map_err(|e| EurocError::Sift(format!("{e}")))?;
         #[cfg(feature = "gpu")]
-        let extracted = match gpu_sift.as_mut() {
+        let extracted = match gpu {
             Some(g) => g
                 .extract(&gray, &sift_cfg)
                 .map_err(|e| EurocError::Sift(format!("{e}"))),
@@ -330,12 +905,43 @@ pub fn build_euroc_dataset(
         let extracted =
             extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")));
         let (kps, desc) = extracted?;
-        features.push(FeatureSet {
+        Ok::<_, EurocError>(FeatureSet {
             keypoints: kps.iter().map(|k| Point2::new(k.x, k.y)).collect(),
             descriptors: desc,
-        });
-        grays.push(und);
-        names.push(name);
+        })
+    };
+    #[cfg(feature = "gpu")]
+    let mut features: Vec<FeatureSet> = match gpu_sift.as_mut() {
+        Some(g) => grays
+            .iter()
+            .map(|und| extract_one(und, Some(&mut *g)))
+            .collect::<Result<_, _>>()?,
+        None => grays
+            .par_iter()
+            .map(|und| extract_one(und, None))
+            .collect::<Result<_, _>>()?,
+    };
+    #[cfg(not(feature = "gpu"))]
+    let mut features: Vec<FeatureSet> = grays
+        .par_iter()
+        .map(|und| extract_one(und, None))
+        .collect::<Result<_, _>>()?;
+    if let Some(dir) = &cfg.import_features {
+        for (i, f) in features.iter_mut().enumerate() {
+            let path = dir.join(format!("frame_{i:05}.bin"));
+            let bytes =
+                std::fs::read(&path).map_err(|e| EurocError::Sfm(format!("{path:?}: {e}")))?;
+            let n = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            let f32_at =
+                |k: usize| f32::from_le_bytes(bytes[4 + 4 * k..8 + 4 * k].try_into().unwrap());
+            f.keypoints = (0..n)
+                .map(|j| Point2::new(f32_at(2 * j) as f64, f32_at(2 * j + 1) as f64))
+                .collect();
+            f.descriptors = (0..n)
+                .map(|j| (0..128).map(|c| f32_at(2 * n + 128 * j + c)).collect())
+                .collect();
+        }
+        log("import-features: replaced keypoints/descriptors");
     }
     log(&format!(
         "sift: mean {} keypoints",
@@ -354,38 +960,32 @@ pub fn build_euroc_dataset(
             }
         }
     }
-    // Cross-checked ratio matches for every candidate pair: one batched GPU
-    // pass over a device-resident descriptor bank, or per pair on the CPU.
+    // Cross-checked ratio matches: one batched GPU pass over a
+    // device-resident descriptor bank, or per pair on the CPU.
     #[cfg(feature = "gpu")]
-    let all_matches: Option<Vec<Vec<DescriptorMatch>>> = gpu_sift.as_ref().map(|g| {
+    let gpu_match = gpu_sift.as_ref().and_then(|g| {
         let ctx = g.context();
         let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
-        let bank = visloc_sift_gpu::FeatureBank::upload(ctx, &sets);
-        match bank {
-            Ok(bank) => visloc_sift_gpu::GpuMatcher::new(ctx).match_pairs(
-                ctx,
-                &bank,
-                &candidates,
-                Some(0.8),
-                true,
-            ),
-            Err(_) => candidates
-                .iter()
-                .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
-                .collect(),
-        }
+        visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
+            .ok()
+            .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
     });
-    #[cfg(not(feature = "gpu"))]
-    let all_matches: Option<Vec<Vec<DescriptorMatch>>> = None;
-    log(&format!("matched {} candidate pairs", candidates.len()));
+    let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, bank, m)) = &gpu_match {
+            return m.match_pairs(ctx, bank, pairs, Some(0.8), true);
+        }
+        pairs
+            .par_iter()
+            .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
+            .collect()
+    };
 
     // Keyframe gate from the consecutive-pair matches: median pixel motion
     // of the cross-checked matches, accumulated since the last kept frame.
-    let consecutive_motion = |c: usize, i: usize, j: usize| -> Option<f64> {
-        let dm = match &all_matches {
-            Some(all) => std::borrow::Cow::Borrowed(&all[c]),
-            None => std::borrow::Cow::Owned(cpu_matches(&features[i], &features[j])),
-        };
+    let consecutive: Vec<(usize, usize)> = (1..n).map(|j| (j - 1, j)).collect();
+    let consecutive_matches = match_pairs(&consecutive);
+    let consecutive_motion = |dm: &[DescriptorMatch], i: usize, j: usize| -> Option<f64> {
         if dm.len() < cfg.min_matches {
             return None; // weak overlap: treat as motion
         }
@@ -399,13 +999,10 @@ pub fn build_euroc_dataset(
         Some(d[d.len() / 2])
     };
     let mut keep = vec![true; n];
-    if cfg.min_keyframe_motion_px > 0.0 {
+    if cfg.min_keyframe_motion_px > 0.0 && cfg.window >= 1 {
         let mut accumulated = 0.0;
-        for (c, &(i, j)) in candidates.iter().enumerate() {
-            if j != i + 1 {
-                continue;
-            }
-            match consecutive_motion(c, i, j) {
+        for (&(i, j), dm) in consecutive.iter().zip(&consecutive_matches) {
+            match consecutive_motion(dm, i, j) {
                 Some(px) => accumulated += px,
                 None => accumulated = f64::INFINITY,
             }
@@ -423,29 +1020,91 @@ pub fn build_euroc_dataset(
             cfg.min_keyframe_motion_px
         ));
     }
-    // Geometric verification is independent per pair (seeded RANSAC), so it
-    // runs in parallel; results keep the candidate order.
-    let pairwise: Vec<PairwiseMatches> = candidates
-        .par_iter()
-        .enumerate()
-        .filter(|(_, &(i, j))| keep[i] && keep[j])
-        .filter_map(|(c, &(i, j))| {
-            let dm = match &all_matches {
-                Some(all) => std::borrow::Cow::Borrowed(&all[c]),
-                None => std::borrow::Cow::Owned(cpu_matches(&features[i], &features[j])),
-            };
-            verify_pair(&camera, &features[i], &features[j], &dm, cfg.min_matches).map(|matches| {
-                PairwiseMatches {
+
+    // Match and verify only the pairs between kept frames, as a two-stage
+    // software pipeline: the GPU matches chunk k while the CPU verifies
+    // chunk k-1 (seeded RANSAC, so the output is order-deterministic).
+    let mut kept: Vec<(usize, usize)> = candidates
+        .iter()
+        .copied()
+        .filter(|&(i, j)| {
+            (keep[i] && keep[j])
+                || (cfg.register_gated && keep[i] != keep[j] && j - i <= cfg.window)
+        })
+        .collect();
+    if cfg.register_gated {
+        // A long static stretch can leave a dropped frame with no kept frame
+        // inside the window: always link it to the nearest kept frame on
+        // each side (it sees nearly the same view).
+        let mut have: std::collections::HashSet<(usize, usize)> = kept.iter().copied().collect();
+        for g in (0..n).filter(|&g| !keep[g]) {
+            let before = (0..g).rev().find(|&k| keep[k]);
+            let after = ((g + 1)..n).find(|&k| keep[k]);
+            for k in [before, after].into_iter().flatten() {
+                let pair = (g.min(k), g.max(k));
+                if have.insert(pair) {
+                    kept.push(pair);
+                }
+            }
+        }
+    }
+    let verify_chunk = |chunk: &[(usize, usize)], dms: Vec<Vec<DescriptorMatch>>| {
+        chunk
+            .par_iter()
+            .zip(dms.into_par_iter())
+            .filter_map(|(&(i, j), dm)| {
+                verify_pair(
+                    &camera,
+                    &features[i],
+                    &features[j],
+                    &dm,
+                    cfg.verify_min_inliers.unwrap_or(cfg.min_matches),
+                    cfg.keep_planar,
+                    cfg.keep_planar_no_panoramic,
+                )
+                .map(|matches| PairwiseMatches {
                     image_i: i,
                     image_j: j,
                     matches,
                     two_view_config: None,
                     essential_matches: None,
                     essential_matrix: None,
-                }
+                })
             })
-        })
-        .collect();
+            .collect::<Vec<_>>()
+    };
+    let mut pairwise: Vec<PairwiseMatches> = Vec::new();
+    let mut pending: Option<MatchedChunk> = None;
+    let (mut match_s, mut verify_s) = (0.0f64, 0.0f64);
+    for chunk in kept.chunks(512) {
+        let ((dms, ms), (verified, vs)) = rayon::join(
+            || {
+                let t = std::time::Instant::now();
+                (match_pairs(chunk), t.elapsed().as_secs_f64())
+            },
+            || {
+                let t = std::time::Instant::now();
+                (
+                    pending.take().map(|(c, d)| verify_chunk(c, d)),
+                    t.elapsed().as_secs_f64(),
+                )
+            },
+        );
+        match_s += ms;
+        verify_s += vs;
+        pairwise.extend(verified.into_iter().flatten());
+        pending = Some((chunk, dms));
+    }
+    if let Some((c, d)) = pending {
+        let t = std::time::Instant::now();
+        pairwise.extend(verify_chunk(c, d));
+        verify_s += t.elapsed().as_secs_f64();
+    }
+    log(&format!(
+        "matched {} of {} candidate pairs (gpu/cpu match {match_s:.1}s, verify {verify_s:.1}s)",
+        kept.len(),
+        candidates.len()
+    ));
     log(&format!("{} verified pairs", pairwise.len()));
 
     let mut sfm_cfg = IncrementalSfmConfig {
@@ -456,9 +1115,120 @@ pub fn build_euroc_dataset(
     if let Some(it) = cfg.ba_max_iterations {
         sfm_cfg.ba_config.max_iterations = it;
     }
-    let result = incremental_sfm(&camera, &features, &pairwise, &sfm_cfg)
+    sfm_cfg.local_ba_relative_cost_tolerance = cfg.local_ba_relative_tolerance;
+    for o in &cfg.sfm_overrides {
+        apply_sfm_override(&mut sfm_cfg, o).map_err(EurocError::Sfm)?;
+    }
+    let (features, pairwise) = match &cfg.import_colmap {
+        Some(dir) => {
+            let imported = import_colmap_export(dir, features.len())?;
+            log(&format!(
+                "import-colmap: {} verified pairs from {}",
+                imported.1.len(),
+                dir.display()
+            ));
+            imported
+        }
+        None => (features, pairwise),
+    };
+    let init_poses: Option<Vec<Option<visloc_core::geometry::Pose>>> = match &cfg.init_poses {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| EurocError::Sfm(format!("init-poses: {e}")))?;
+            let mut poses = vec![None; features.len()];
+            for line in text.lines() {
+                let v: Vec<f64> = line
+                    .split_whitespace()
+                    .filter_map(|t| t.parse().ok())
+                    .collect();
+                if v.len() == 8 && (v[0] as usize) < poses.len() {
+                    let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+                        v[1], v[2], v[3], v[4],
+                    ));
+                    poses[v[0] as usize] = Some(visloc_core::geometry::Pose::from_world_to_camera(
+                        q,
+                        Vector3::new(v[5], v[6], v[7]),
+                    ));
+                }
+            }
+            log(&format!(
+                "init-poses: {} poses from {}",
+                poses.iter().filter(|p| p.is_some()).count(),
+                path.display()
+            ));
+            Some(poses)
+        }
+        None => None,
+    };
+    let result = if cfg.colmap_port_mapper {
+        let models = run_colmap_port(out_dir, &camera, width, height, &features, &pairwise, log)?;
+        if cfg.merge_models && models.len() > 1 {
+            let merged = merge_port_models(&models, &pairwise, log);
+            let joined = merged.iter().filter(|p| p.is_some()).count();
+            if joined > models[0].0.iter().filter(|p| p.is_some()).count() {
+                // Re-triangulate and bundle-adjust the union (poses start
+                // fixed, then all become BA variables).
+                let r = visloc_slam::incremental_sfm_with_initial_poses(
+                    &camera,
+                    &features,
+                    &pairwise,
+                    &sfm_cfg,
+                    Some(&merged),
+                )
+                .map_err(|e| EurocError::Sfm(e.to_string()))?;
+                SfmOutcome {
+                    poses: r.poses,
+                    tracks: r.tracks,
+                    mean_reprojection_px: r.mean_reprojection_px,
+                    refined_camera: r.refined_camera,
+                }
+            } else {
+                let (poses, tracks, mean_reprojection_px) = models.into_iter().next().unwrap();
+                SfmOutcome {
+                    poses,
+                    tracks,
+                    mean_reprojection_px,
+                    refined_camera: None,
+                }
+            }
+        } else {
+            let (poses, tracks, mean_reprojection_px) = models.into_iter().next().unwrap();
+            SfmOutcome {
+                poses,
+                tracks,
+                mean_reprojection_px,
+                refined_camera: None,
+            }
+        }
+    } else {
+        let r = visloc_slam::incremental_sfm_with_initial_poses(
+            &camera,
+            &features,
+            &pairwise,
+            &sfm_cfg,
+            init_poses.as_deref(),
+        )
         .map_err(|e| EurocError::Sfm(e.to_string()))?;
+        SfmOutcome {
+            poses: r.poses,
+            tracks: r.tracks,
+            mean_reprojection_px: r.mean_reprojection_px,
+            refined_camera: r.refined_camera,
+        }
+    };
     let registered = result.poses.iter().filter(|p| p.is_some()).count();
+    if std::env::var_os("VISLOC_EUROC_DUMP_TRACKS").is_some() {
+        // Diagnostic: one line per track, its observing image indices.
+        let text: String = result
+            .tracks
+            .iter()
+            .map(|t| {
+                let ids: Vec<String> = t.observations.iter().map(|o| o.0.to_string()).collect();
+                ids.join(" ") + "\n"
+            })
+            .collect();
+        let _ = std::fs::write(out_dir.join("tracks.txt"), text);
+    }
     // ATE against ground truth: nearest GT sample within 10 ms of each
     // registered frame, cam0 centre = p_WB + R_WB t_BS.
     let ate_rmse_m = {
@@ -467,6 +1237,7 @@ pub fn build_euroc_dataset(
         let gt = &seq.ground_truth;
         let mut est_c = Vec::new();
         let mut gt_c = Vec::new();
+        let mut frame_ids = Vec::new();
         for (i, pose) in result.poses.iter().enumerate() {
             let Some(pose) = pose else { continue };
             let ts = frames[i].timestamp_nanoseconds;
@@ -479,22 +1250,15 @@ pub fn build_euroc_dataset(
             if let Some(s) = near.filter(|s| (s.timestamp_nanoseconds - ts).abs() <= 10_000_000) {
                 est_c.push(pose.camera_to_world().translation);
                 gt_c.push(s.position_world + s.orientation_world * t_bs);
+                frame_ids.push(i);
             }
         }
         // Associated centres for offline inspection / other aligners.
-        let csv: String = std::iter::once(
-            "frame,est_x,est_y,est_z,gt_x,gt_y,gt_z
-"
-            .to_string(),
-        )
-        .chain(est_c.iter().zip(&gt_c).enumerate().map(|(i, (e, g))| {
-            format!(
-                "{i},{},{},{},{},{},{}
-",
-                e.x, e.y, e.z, g.x, g.y, g.z
-            )
-        }))
-        .collect();
+        let csv: String = std::iter::once("frame,est_x,est_y,est_z,gt_x,gt_y,gt_z\n".to_string())
+            .chain(est_c.iter().zip(&gt_c).zip(&frame_ids).map(|((e, g), &i)| {
+                format!("{i},{},{},{},{},{},{}\n", e.x, e.y, e.z, g.x, g.y, g.z)
+            }))
+            .collect();
         let _ = std::fs::write(out_dir.join("trajectory_vs_gt.csv"), csv);
         sim3_ate_rmse(&est_c, &gt_c)
     };

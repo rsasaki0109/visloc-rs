@@ -82,10 +82,20 @@ struct Top2 {
 
 pub struct GpuMatcher {
     pipeline: wgpu::ComputePipeline,
+    reduce: wgpu::ComputePipeline,
 }
 
 /// Rows of output per dispatch batch (16 B each).
 const MAX_BATCH_ROWS: usize = 1 << 20;
+/// Reverse partial records per dispatch batch (16 B each, 64 MiB).
+const MAX_BATCH_PARTIALS: usize = 1 << 22;
+const NONE: u32 = u32::MAX;
+
+/// Forward (and, with cross-check, reverse) top-2 of one pair.
+struct PairTops {
+    forward: Vec<Top2>,
+    reverse: Vec<Top2>,
+}
 
 impl GpuMatcher {
     pub fn new(ctx: &GpuContext) -> Self {
@@ -95,23 +105,28 @@ impl GpuMatcher {
                 label: Some("match"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("shaders/match.wgsl").into()),
             });
-        let pipeline = ctx
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("top2"),
-                layout: None,
-                module: &module,
-                entry_point: Some("top2"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        Self { pipeline }
+        let make = |entry: &str| {
+            ctx.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+        };
+        Self {
+            pipeline: make("top2"),
+            reduce: make("rev_reduce"),
+        }
     }
 
     /// Match image `i` (query) against image `j` (train) for every `(i, j)`
     /// in `pairs`; same result as `BruteForceMatcher { ratio }` and, with
     /// `cross_check`, `CrossCheckMatcher::new(BruteForceMatcher { ratio })`
-    /// (up to f32 summation order in the dot products).
+    /// (up to f32 summation order in the dot products). The cross-check's
+    /// reverse direction reuses the forward dot products.
     pub fn match_pairs(
         &self,
         ctx: &GpuContext,
@@ -120,21 +135,16 @@ impl GpuMatcher {
         ratio: Option<f32>,
         cross_check: bool,
     ) -> Vec<Vec<DescriptorMatch>> {
-        // Directed entries: forward (i -> j), then reverse (j -> i).
-        let mut directed: Vec<(usize, usize)> = pairs.to_vec();
-        if cross_check {
-            directed.extend(pairs.iter().map(|&(i, j)| (j, i)));
-        }
-        let tops = self.top2(ctx, bank, &directed);
-        let np = pairs.len();
-        (0..np)
-            .map(|p| {
-                let (i, j) = pairs[p];
-                let forward = self.finish(bank, i, j, &tops[p], ratio);
+        let tops = self.top2(ctx, bank, pairs, cross_check);
+        pairs
+            .iter()
+            .zip(&tops)
+            .map(|(&(i, j), t)| {
+                let forward = self.finish(bank, i, j, &t.forward, ratio);
                 if !cross_check || forward.is_empty() {
                     return forward;
                 }
-                let reverse = self.finish(bank, j, i, &tops[np + p], ratio);
+                let reverse = self.finish(bank, j, i, &t.reverse, ratio);
                 let mut back = vec![usize::MAX; bank.counts[j]];
                 for m in &reverse {
                     back[m.query_index] = m.train_index;
@@ -181,27 +191,41 @@ impl GpuMatcher {
         out
     }
 
-    /// Per directed entry, the top-2 of every query row.
+    /// Per pair, the top-2 of every query row, plus (with `reverse`) the
+    /// top-2 of every train row against the query image, from the same
+    /// dot products.
     fn top2(
         &self,
         ctx: &GpuContext,
         bank: &FeatureBank,
-        directed: &[(usize, usize)],
-    ) -> Vec<Vec<Top2>> {
-        let mut result: Vec<Vec<Top2>> = Vec::with_capacity(directed.len());
+        pairs: &[(usize, usize)],
+        reverse: bool,
+    ) -> Vec<PairTops> {
+        let mut result: Vec<PairTops> = Vec::with_capacity(pairs.len());
         let mut start = 0;
-        while start < directed.len() {
-            // Batch so the output stays bounded and entries fit one dispatch.
+        while start < pairs.len() {
+            // Batch so the outputs stay bounded and entries fit one dispatch.
             let mut end = start;
             let mut rows = 0usize;
-            while end < directed.len()
-                && end - start < 65535
-                && (rows == 0 || rows + bank.counts[directed[end].0] <= MAX_BATCH_ROWS)
-            {
-                rows += bank.counts[directed[end].0];
+            let mut parts = 0usize;
+            while end < pairs.len() && end - start < 65535 {
+                let (i, j) = pairs[end];
+                let (r, pt) = if reverse {
+                    (
+                        bank.counts[i] + bank.counts[j],
+                        bank.counts[i].div_ceil(128) * bank.counts[j],
+                    )
+                } else {
+                    (bank.counts[i], 0)
+                };
+                if end > start && (rows + r > MAX_BATCH_ROWS || parts + pt > MAX_BATCH_PARTIALS) {
+                    break;
+                }
+                rows += r;
+                parts += pt;
                 end += 1;
             }
-            result.extend(self.top2_batch(ctx, bank, &directed[start..end], rows));
+            result.extend(self.top2_batch(ctx, bank, &pairs[start..end], reverse, rows, parts));
             start = end;
         }
         result
@@ -211,72 +235,88 @@ impl GpuMatcher {
         &self,
         ctx: &GpuContext,
         bank: &FeatureBank,
-        directed: &[(usize, usize)],
+        pairs: &[(usize, usize)],
+        reverse: bool,
         rows: usize,
-    ) -> Vec<Vec<Top2>> {
+        parts: usize,
+    ) -> Vec<PairTops> {
         let dev = &ctx.device;
         let queue = &ctx.queue;
-        let mut words: Vec<u32> = Vec::with_capacity(directed.len() * 8);
-        let mut out_offs = Vec::with_capacity(directed.len());
+        let mut words: Vec<u32> = Vec::with_capacity(pairs.len() * 8);
+        let mut offs = Vec::with_capacity(pairs.len());
         let mut out_off = 0usize;
+        let mut part_off = 0usize;
         let mut max_q = 0usize;
-        for &(qi, ti) in directed {
-            let nq = bank.counts[qi];
+        let mut max_t = 0usize;
+        for &(qi, ti) in pairs {
+            let (nq, nt) = (bank.counts[qi], bank.counts[ti]);
+            let rev_out = out_off + nq;
             words.extend_from_slice(&[
                 bank.offsets[qi] as u32,
                 nq as u32,
                 bank.offsets[ti] as u32,
-                bank.counts[ti] as u32,
+                nt as u32,
                 out_off as u32,
-                0,
-                0,
+                part_off as u32,
+                if reverse { rev_out as u32 } else { NONE },
                 0,
             ]);
-            out_offs.push(out_off);
+            offs.push((out_off, rev_out));
             out_off += nq;
+            if reverse {
+                out_off += nt;
+                part_off += nq.div_ceil(128) * nt;
+            }
             max_q = max_q.max(nq);
+            max_t = max_t.max(nt);
         }
         if rows == 0 {
-            return directed.iter().map(|_| Vec::new()).collect();
+            return pairs
+                .iter()
+                .map(|_| PairTops {
+                    forward: Vec::new(),
+                    reverse: Vec::new(),
+                })
+                .collect();
         }
         let use_ = wgpu::BufferUsages::empty();
         let entries = storage(dev, "match-entries", (words.len() * 4) as u64, use_);
         queue.write_buffer(&entries, 0, bytemuck::cast_slice(&words));
         let out = storage(dev, "match-out", (rows * 16) as u64, use_);
+        let rev_part = storage(dev, "match-rev-part", (parts * 16) as u64, use_);
         let params = dev.create_buffer(&wgpu::BufferDescriptor {
             label: Some("match-params"),
             size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let pw: [u32; 4] = [(bank.dim / 4) as u32, directed.len() as u32, 0, 0];
+        let pw: [u32; 4] = [(bank.dim / 4) as u32, pairs.len() as u32, 0, 0];
         queue.write_buffer(&params, 0, bytemuck::cast_slice(&pw));
-        let bg = dev.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("match"),
-            layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: bank.desc.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: bank.norms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: entries.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: out.as_entire_binding(),
-                },
+        let bind = |pipeline: &wgpu::ComputePipeline, bindings: &[(u32, &wgpu::Buffer)]| {
+            let entries: Vec<wgpu::BindGroupEntry> = bindings
+                .iter()
+                .map(|&(binding, buffer)| wgpu::BindGroupEntry {
+                    binding,
+                    resource: buffer.as_entire_binding(),
+                })
+                .collect();
+            dev.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("match"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            })
+        };
+        let bg = bind(
+            &self.pipeline,
+            &[
+                (0, &params),
+                (1, &bank.desc),
+                (2, &bank.norms),
+                (3, &entries),
+                (4, &out),
+                (5, &rev_part),
             ],
-        });
+        );
         let mut encoder = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("match"),
         });
@@ -287,24 +327,42 @@ impl GpuMatcher {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(max_q.div_ceil(64) as u32, directed.len() as u32, 1);
+            pass.dispatch_workgroups(max_q.div_ceil(128) as u32, pairs.len() as u32, 1);
+        }
+        if reverse {
+            let bg = bind(&self.reduce, &[(3, &entries), (4, &out), (5, &rev_part)]);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("match-rev-reduce"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.reduce);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(max_t.div_ceil(64) as u32, pairs.len() as u32, 1);
         }
         queue.submit(Some(encoder.finish()));
         let raw: Vec<u32> = bytemuck::cast_slice(&read_bytes(dev, queue, &out, rows * 16)).to_vec();
-        directed
+        let read = |off: usize, n: usize| -> Vec<Top2> {
+            (0..n)
+                .map(|r| {
+                    let w = &raw[(off + r) * 4..(off + r) * 4 + 4];
+                    Top2 {
+                        best: w[0],
+                        s1: f32::from_bits(w[1]),
+                        s2: f32::from_bits(w[2]),
+                    }
+                })
+                .collect()
+        };
+        pairs
             .iter()
-            .zip(&out_offs)
-            .map(|(&(qi, _), &off)| {
-                (0..bank.counts[qi])
-                    .map(|r| {
-                        let w = &raw[(off + r) * 4..(off + r) * 4 + 4];
-                        Top2 {
-                            best: w[0],
-                            s1: f32::from_bits(w[1]),
-                            s2: f32::from_bits(w[2]),
-                        }
-                    })
-                    .collect()
+            .zip(&offs)
+            .map(|(&(qi, ti), &(fwd, rev))| PairTops {
+                forward: read(fwd, bank.counts[qi]),
+                reverse: if reverse {
+                    read(rev, bank.counts[ti])
+                } else {
+                    Vec::new()
+                },
             })
             .collect()
     }

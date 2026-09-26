@@ -80,6 +80,21 @@ fn main() {
         t_up,
         gpu.iter().map(Vec::len).sum::<usize>() / pairs.len().max(1)
     );
+    // FNV-1a over every match (indices + distance bits): a kernel change
+    // that keeps the per-element summation order must keep this digest.
+    let mut digest = 0xcbf29ce484222325u64;
+    for m in gpu.iter().flatten() {
+        for v in [
+            m.query_index as u64,
+            m.train_index as u64,
+            u64::from(m.distance.to_bits()),
+        ] {
+            for b in v.to_le_bytes() {
+                digest = (digest ^ u64::from(b)).wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    println!("gpu match digest {digest:016x}");
 
     let m = CrossCheckMatcher::new(BruteForceMatcher { ratio: Some(0.8) });
     let n = cpu_pairs.min(pairs.len());

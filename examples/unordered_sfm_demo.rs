@@ -1969,6 +1969,20 @@ impl std::str::FromStr for UnionTraversalOrder {
 
 #[derive(Debug)]
 struct Args {
+    /// `--gpu-match`: batched GPU descriptor matching (wgpu) for the plain
+    /// `nn` matcher in pair verification. Same decisions as the CPU
+    /// matcher up to f32 summation order; needs `--features gpu`.
+    gpu_match: bool,
+    /// `--gpu-sift`: run the wgpu SIFT extractor for configurations it
+    /// supports (DoG, no affine/DSP/VLFeat modes); others stay on the CPU.
+    /// Not bit-identical to the CPU extractor (>= 98% identical keypoints,
+    /// descriptor dot > 0.999 in its parity test); needs `--features gpu`.
+    gpu_sift: bool,
+    /// `--gpu-ba`: run the mapper's global bundle adjustments on the wgpu
+    /// LM solver (`visloc-ba-gpu`); local BA stays on the CPU. Same final
+    /// cost as the dense solver up to f32 linearisation, not bit-identical;
+    /// needs `--features gpu`.
+    gpu_ba: bool,
     /// `Files` (default): read precomputed `X Y SCORE D…` feature files from
     /// `features_dir`. `Sift`: run the pure-Rust SIFT frontend in-process on
     /// every image in `images_dir` (requires `--images-dir`; ignores
@@ -4820,6 +4834,9 @@ where
     let mut rescue_min_matches = 15usize;
     let mut rescue_max_candidates = 200usize;
     let mut rescue_cross_check = false;
+    let mut gpu_match = false;
+    let mut gpu_sift = false;
+    let mut gpu_ba = false;
     let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
     let mut diagnose_pairs_csv: Option<PathBuf> = None;
     let mut diagnose_pair_stems: Vec<String> = Vec::new();
@@ -5551,6 +5568,24 @@ where
                 rescue_max_candidates = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--rescue-cross-check" => rescue_cross_check = true,
+            "--gpu-match" => {
+                if !cfg!(feature = "gpu") {
+                    return Err("--gpu-match needs a build with --features gpu".into());
+                }
+                gpu_match = true
+            }
+            "--gpu-sift" => {
+                if !cfg!(feature = "gpu") {
+                    return Err("--gpu-sift needs a build with --features gpu".into());
+                }
+                gpu_sift = true
+            }
+            "--gpu-ba" => {
+                if !cfg!(feature = "gpu") {
+                    return Err("--gpu-ba needs a build with --features gpu".into());
+                }
+                gpu_ba = true
+            }
             "--diagnose-pair" => {
                 let raw = a.remove(i + 1);
                 let (lhs, rhs) = raw
@@ -6345,6 +6380,9 @@ where
     )?;
 
     let parsed = Args {
+        gpu_match,
+        gpu_sift,
+        gpu_ba,
         feature_extractor,
         features_dir: features_dir.unwrap_or_default(),
         hybrid_filter_priors,
@@ -6921,8 +6959,7 @@ fn extract_sift_for_image(
     Box<dyn std::error::Error>,
 > {
     use visloc_rs::vision::features::sift::{
-        describe_sift_keypoints, extract_sift, GrayImage, SiftConfig, SiftDetector,
-        SiftNormalization,
+        describe_sift_keypoints, GrayImage, SiftConfig, SiftDetector, SiftNormalization,
     };
     let detector_grayscale = if colmap_compatible_grayscale || split_colmap_detector_grayscale {
         visloc_io::images::read_common_image_colmap_grayscale(path)?
@@ -6993,7 +7030,7 @@ fn extract_sift_for_image(
     let (mut keypoints, mut descriptors) = if split_colmap_detector_grayscale {
         extract_sift_with_split_grayscale(&image, &descriptor_image, &primary_config)?
     } else {
-        extract_sift(&image, &primary_config)?
+        extract_sift_maybe_gpu(&image, &primary_config)?
     };
     let primary_keypoint_count = keypoints.len();
     if extra_keypoints > 0 {
@@ -7001,7 +7038,8 @@ fn extract_sift_for_image(
             max_keypoints.saturating_add(extra_keypoints.saturating_mul(2).max(extra_keypoints));
         let dense_threshold =
             effective_extra_contrast_threshold(extra_contrast_threshold, contrast_threshold);
-        let (dense_kp, dense_desc) = extract_sift(&image, &make_cfg(dense_cap, dense_threshold))?;
+        let (dense_kp, dense_desc) =
+            extract_sift_maybe_gpu(&image, &make_cfg(dense_cap, dense_threshold))?;
         append_spatially_novel_keypoints(
             &mut keypoints,
             &mut descriptors,
@@ -11543,6 +11581,60 @@ impl PairMatcher {
 /// Run the legacy NN+ratio matcher on descriptor slices, preserving the
 /// exact cross-check and tie-breaking behavior used when append-only mode is
 /// disabled.
+/// GPU matcher shared by every [`verify_pairs`] call (`--gpu-match`).
+#[cfg(feature = "gpu")]
+static GPU_NN: std::sync::OnceLock<(visloc_sift_gpu::GpuContext, visloc_sift_gpu::GpuMatcher)> =
+    std::sync::OnceLock::new();
+
+/// GPU SIFT extractor shared by every image (`--gpu-sift`); images still
+/// decode in parallel, extraction serialises on the one device.
+#[cfg(feature = "gpu")]
+static GPU_SIFT: std::sync::OnceLock<std::sync::Mutex<visloc_sift_gpu::SiftGpu>> =
+    std::sync::OnceLock::new();
+
+/// `extract_sift`, on the GPU when `--gpu-sift` is on and supports `config`.
+#[cfg(feature = "image-io")]
+fn extract_sift_maybe_gpu(
+    image: &visloc_rs::vision::features::sift::GrayImage<'_>,
+    config: &visloc_rs::vision::features::sift::SiftConfig,
+) -> Result<
+    (
+        Vec<visloc_rs::vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    #[cfg(feature = "gpu")]
+    if let Some(gpu) = GPU_SIFT.get() {
+        if visloc_sift_gpu::SiftGpu::supports(config) {
+            let mut gpu = gpu.lock().map_err(|_| "gpu sift mutex poisoned")?;
+            return Ok(gpu.extract(image, config)?);
+        }
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!("gpu-sift: configuration unsupported on the GPU; using the CPU extractor")
+        });
+    }
+    Ok(visloc_rs::vision::features::sift::extract_sift(
+        image, config,
+    )?)
+}
+
+/// Batched GPU equivalent of [`nn_matches`] over `pairs`, when `--gpu-match`
+/// is on and the descriptors fit the GPU bank. `None` = use the CPU path.
+#[cfg(feature = "gpu")]
+fn gpu_nn_bank(features: &[FeatureSet]) -> Option<visloc_sift_gpu::FeatureBank> {
+    let (ctx, _) = GPU_NN.get()?;
+    let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
+    match visloc_sift_gpu::FeatureBank::upload(ctx, &sets) {
+        Ok(bank) => Some(bank),
+        Err(e) => {
+            eprintln!("gpu-match: falling back to the CPU matcher ({e})");
+            None
+        }
+    }
+}
+
 fn nn_matches(
     ratio: f32,
     cross_check: bool,
@@ -12603,6 +12695,9 @@ fn verify_pairs(
         }
     });
 
+    let verify_started = std::time::Instant::now();
+    #[allow(unused_mut)] // only written with `--features gpu`
+    let mut gpu_match_seconds = 0.0f64;
     #[cfg(feature = "onnx-inference")]
     let sequential = matches!(matcher, PairMatcher::LightGlue { .. });
     #[cfg(not(feature = "onnx-inference"))]
@@ -12624,7 +12719,7 @@ fn verify_pairs(
     let dump_essential_quality =
         std::env::var_os("VISLOC_SFM_DEBUG_DUMP_ESSENTIAL_QUALITY").is_some();
     let dump_f2e_diagnostics = std::env::var_os("VISLOC_SFM_DEBUG_DUMP_F2E_DIAGNOSTICS").is_some();
-    let verify_one = |&(i, j): &(usize, usize)| {
+    let verify_one = |&(i, j): &(usize, usize), precomputed: Option<Vec<DescriptorMatch>>| {
         let dm: Vec<DescriptorMatch> = if let Some(imp) = imported_matches {
             let key = (i.min(j), i.max(j));
             let Some(raw) = imp.get(&key) else {
@@ -12664,6 +12759,8 @@ fn verify_pairs(
             } else {
                 matcher.match_pair(match_ratio, cross_check, i, j, &features[i], &features[j])
             }
+        } else if let Some(dm) = precomputed {
+            dm
         } else {
             matcher.match_pair(match_ratio, cross_check, i, j, &features[i], &features[j])
         };
@@ -13151,12 +13248,65 @@ fn verify_pairs(
                 if k % 25 == 0 || k + 1 == total {
                     eprintln!("lightglue verify: {} / {} pairs", k + 1, total);
                 }
-                verify_one(pair)
+                verify_one(pair, None)
             })
             .collect()
     } else {
-        candidates.par_iter().map(verify_one).collect()
+        // `--gpu-match`: one batched GPU pass per chunk of plain-NN pairs
+        // (imported/supplement matches keep their own source), then the
+        // usual parallel verification.
+        #[cfg(feature = "gpu")]
+        let gpu = (matches!(matcher, PairMatcher::Nn)
+            && imported_matches.is_none()
+            && imported_matches_supplement.is_none())
+        .then(|| gpu_nn_bank(features))
+        .flatten();
+        #[cfg(not(feature = "gpu"))]
+        let gpu: Option<()> = None;
+        match gpu {
+            #[cfg(feature = "gpu")]
+            Some(bank) => {
+                let (ctx, gm) = GPU_NN.get().expect("gpu bank implies GPU_NN");
+                let verify_chunk =
+                    |chunk: &[(usize, usize)], dms: Vec<Vec<DescriptorMatch>>| -> Vec<_> {
+                        chunk
+                            .par_iter()
+                            .zip(dms.into_par_iter())
+                            .map(|(pair, dm)| verify_one(pair, Some(dm)))
+                            .collect()
+                    };
+                // Software pipeline: the GPU matches chunk k while the CPU
+                // verifies chunk k - 1.
+                let mut out = Vec::with_capacity(candidates.len());
+                let mut pending: Option<(&[(usize, usize)], Vec<Vec<DescriptorMatch>>)> = None;
+                for chunk in candidates.chunks(512) {
+                    let ((dms, seconds), verified) = rayon::join(
+                        || {
+                            let started = std::time::Instant::now();
+                            let dms =
+                                gm.match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check);
+                            (dms, started.elapsed().as_secs_f64())
+                        },
+                        || pending.take().map(|(c, d)| verify_chunk(c, d)),
+                    );
+                    gpu_match_seconds += seconds;
+                    out.extend(verified.into_iter().flatten());
+                    pending = Some((chunk, dms));
+                }
+                if let Some((c, d)) = pending {
+                    out.extend(verify_chunk(c, d));
+                }
+                out
+            }
+            _ => candidates.par_iter().map(|p| verify_one(p, None)).collect(),
+        }
     };
+    eprintln!(
+        "verify-pairs: {} candidates in {:.2}s (gpu match {:.2}s)",
+        candidates.len(),
+        verify_started.elapsed().as_secs_f64(),
+        gpu_match_seconds
+    );
 
     let mut stats = VerificationStats::default();
     let mut pairwise = Vec::with_capacity(results.len());
@@ -16303,6 +16453,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+    // Parsing rejects the GPU flags on builds without the `gpu` feature.
+    #[cfg(not(feature = "gpu"))]
+    let _ = (args.gpu_match, args.gpu_sift, args.gpu_ba);
+    #[cfg(feature = "gpu")]
+    if args.gpu_match {
+        let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        let matcher = visloc_sift_gpu::GpuMatcher::new(&ctx);
+        let _ = GPU_NN.set((ctx, matcher));
+    }
+    #[cfg(feature = "gpu")]
+    if args.gpu_sift {
+        let ctx = visloc_sift_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        let _ = GPU_SIFT.set(std::sync::Mutex::new(visloc_sift_gpu::SiftGpu::new(ctx)));
+    }
+    #[cfg(feature = "gpu")]
+    if args.gpu_ba {
+        let ctx = visloc_ba_gpu::GpuContext::new().map_err(|e| format!("gpu: {e}"))?;
+        visloc_rs::slam::set_ba_accelerator(Box::new(visloc_ba_gpu::GpuBundleAdjuster::new(ctx)));
+    }
     if args.feature_extractor == FeatureExtractorKind::Files
         && args.features_dir.as_os_str().is_empty()
     {

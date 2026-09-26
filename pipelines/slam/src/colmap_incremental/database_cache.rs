@@ -475,10 +475,10 @@ fn parse_rig_manifest(path: &Path) -> Result<ParsedRigManifest, DatabaseCacheErr
             None => {}
         }
     }
-    if sensors.len() < 2 || frame_rows.is_empty() {
+    if sensors.is_empty() || frame_rows.is_empty() {
         return Err(DatabaseCacheError::Parse {
             path: path.display().to_string(),
-            message: "manifest requires at least two sensors and one frame row".into(),
+            message: "manifest requires at least one sensor and one frame row".into(),
         });
     }
     Ok(ParsedRigManifest {

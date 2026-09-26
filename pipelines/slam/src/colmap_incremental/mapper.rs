@@ -326,16 +326,34 @@ impl IncrementalMapper {
                 graph,
                 &self.num_registrations,
             );
-            for image_id2 in image_ids2 {
-                let key = (image_id1.min(image_id2), image_id1.max(image_id2));
-                if !self.init_image_pairs.insert(key) {
-                    continue;
-                }
-                let estimate = mapper_impl::estimate_initial_two_view_geometry(
-                    &gate, recon, graph, image_id1, image_id2,
-                );
-                if let Some(cam2_from_cam1) = estimate {
-                    return Some((image_id1, image_id2, cam2_from_cam1));
+            // Same visiting order and `init_image_pairs` bookkeeping as the
+            // sequential loop, but the (pure, seeded) two-view estimates of
+            // the next few untried pairs are evaluated in parallel; the first
+            // success in order wins, so the chosen pair is unchanged.
+            let untried: Vec<ImageT> = image_ids2
+                .into_iter()
+                .filter(|&image_id2| {
+                    !self
+                        .init_image_pairs
+                        .contains(&(image_id1.min(image_id2), image_id1.max(image_id2)))
+                })
+                .collect();
+            for chunk in untried.chunks(32) {
+                use rayon::prelude::*;
+                let estimates: Vec<Option<SE3>> = chunk
+                    .par_iter()
+                    .map(|&image_id2| {
+                        mapper_impl::estimate_initial_two_view_geometry(
+                            &gate, recon, graph, image_id1, image_id2,
+                        )
+                    })
+                    .collect();
+                for (&image_id2, estimate) in chunk.iter().zip(estimates) {
+                    self.init_image_pairs
+                        .insert((image_id1.min(image_id2), image_id1.max(image_id2)));
+                    if let Some(cam2_from_cam1) = estimate {
+                        return Some((image_id1, image_id2, cam2_from_cam1));
+                    }
                 }
             }
         }
