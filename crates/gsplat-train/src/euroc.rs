@@ -1224,8 +1224,7 @@ pub fn build_euroc_dataset(
             .iter()
             .map(|t| {
                 let ids: Vec<String> = t.observations.iter().map(|o| o.0.to_string()).collect();
-                ids.join(" ")
-                    + "\n"
+                ids.join(" ") + "\n"
             })
             .collect();
         let _ = std::fs::write(out_dir.join("tracks.txt"), text);
@@ -1255,17 +1254,11 @@ pub fn build_euroc_dataset(
             }
         }
         // Associated centres for offline inspection / other aligners.
-        let csv: String = std::iter::once(
-            "frame,est_x,est_y,est_z,gt_x,gt_y,gt_z\n"
-            .to_string(),
-        )
-        .chain(est_c.iter().zip(&gt_c).zip(&frame_ids).map(|((e, g), &i)| {
-            format!(
-                "{i},{},{},{},{},{},{}\n",
-                e.x, e.y, e.z, g.x, g.y, g.z
-            )
-        }))
-        .collect();
+        let csv: String = std::iter::once("frame,est_x,est_y,est_z,gt_x,gt_y,gt_z\n".to_string())
+            .chain(est_c.iter().zip(&gt_c).zip(&frame_ids).map(|((e, g), &i)| {
+                format!("{i},{},{},{},{},{},{}\n", e.x, e.y, e.z, g.x, g.y, g.z)
+            }))
+            .collect();
         let _ = std::fs::write(out_dir.join("trajectory_vs_gt.csv"), csv);
         sim3_ate_rmse(&est_c, &gt_c)
     };
