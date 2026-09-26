@@ -314,13 +314,7 @@ fn run_colmap_port(
     // COLMAP's own `Mapper.abs_pose_min_num_inliers` for single cameras.
     options.mapper.abs_pose_min_num_inliers = 30;
     let run = pipeline::run(&options, &db);
-    let _ = std::fs::write(
-        dir.join("mapper.log"),
-        run.log.join(
-            "
-",
-        ),
-    );
+    let _ = std::fs::write(dir.join("mapper.log"), run.log.join("\n"));
     let mut order: Vec<usize> = (0..run.models.len()).collect();
     order.sort_by_key(|&k| std::cmp::Reverse(run.models[k].reconstruction.num_reg_images()));
     if order.is_empty() {
@@ -1231,8 +1225,7 @@ pub fn build_euroc_dataset(
             .map(|t| {
                 let ids: Vec<String> = t.observations.iter().map(|o| o.0.to_string()).collect();
                 ids.join(" ")
-                    + "
-"
+                    + "\n"
             })
             .collect();
         let _ = std::fs::write(out_dir.join("tracks.txt"), text);
@@ -1263,14 +1256,12 @@ pub fn build_euroc_dataset(
         }
         // Associated centres for offline inspection / other aligners.
         let csv: String = std::iter::once(
-            "frame,est_x,est_y,est_z,gt_x,gt_y,gt_z
-"
+            "frame,est_x,est_y,est_z,gt_x,gt_y,gt_z\n"
             .to_string(),
         )
         .chain(est_c.iter().zip(&gt_c).zip(&frame_ids).map(|((e, g), &i)| {
             format!(
-                "{i},{},{},{},{},{},{}
-",
+                "{i},{},{},{},{},{},{}\n",
                 e.x, e.y, e.z, g.x, g.y, g.z
             )
         }))
