@@ -46,6 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--sfm-opt" => sfm.sfm_overrides.push(next()?),
             "--keep-planar" => sfm.keep_planar = true,
             "--no-panoramic" => sfm.keep_planar_no_panoramic = true,
+            "--register-gated" => sfm.register_gated = true,
+            "--merge-models" => sfm.merge_models = true,
             "--sift-l1-root" => sfm.sift_l1_root = true,
             "--sift-opt" => sfm.sift_overrides.push(next()?),
             "--import-features" => sfm.import_features = Some(PathBuf::from(next()?)),

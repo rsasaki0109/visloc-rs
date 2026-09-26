@@ -68,6 +68,13 @@ pub struct EurocSfmConfig {
     /// With `keep_planar`: keep planar / multi-model pairs but still drop
     /// pure-rotation (panoramic) ones, which carry no baseline.
     pub keep_planar_no_panoramic: bool,
+    /// Keep gate-dropped (near-static) frames in the reconstruction too,
+    /// linked only to kept frames within `window` (no skip pairs, no
+    /// static-static pairs), so the mapper registers them by PnP.
+    pub register_gated: bool,
+    /// Merge disconnected COLMAP-port models by a similarity estimated from
+    /// cross-model matches, then re-triangulate + bundle-adjust the union.
+    pub merge_models: bool,
     /// Inlier floor for a verified pair; `None` = `min_matches`.
     pub verify_min_inliers: Option<usize>,
     /// Diagnostic: replace the SIFT features and verified pairs with an
@@ -116,6 +123,8 @@ impl Default for EurocSfmConfig {
             sfm_overrides: Vec::new(),
             keep_planar: false,
             keep_planar_no_panoramic: false,
+            register_gated: false,
+            merge_models: false,
             verify_min_inliers: None,
             import_colmap: None,
             init_poses: None,
@@ -230,7 +239,7 @@ fn run_colmap_port(
     features: &[FeatureSet],
     pairwise: &[PairwiseMatches],
     log: &mut dyn FnMut(&str),
-) -> Result<PortModel, EurocError> {
+) -> Result<Vec<PortModel>, EurocError> {
     use std::io::Write;
     use visloc_slam::colmap_incremental::{pipeline, DatabaseCache, PipelineOptions};
     let err = |e: String| EurocError::Sfm(format!("colmap-port: {e}"));
@@ -312,24 +321,35 @@ fn run_colmap_port(
 ",
         ),
     );
-    let best = run
-        .models
-        .iter()
-        .max_by_key(|m| m.reconstruction.num_reg_images())
-        .ok_or_else(|| err("no model reconstructed".into()))?;
+    let mut order: Vec<usize> = (0..run.models.len()).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(run.models[k].reconstruction.num_reg_images()));
+    if order.is_empty() {
+        return Err(err("no model reconstructed".into()));
+    }
     log(&format!(
-        "colmap-port: {} model(s), largest {} registered",
+        "colmap-port: {} model(s), sizes {:?}",
         run.models.len(),
-        best.reconstruction.num_reg_images()
+        order
+            .iter()
+            .map(|&k| run.models[k].reconstruction.num_reg_images())
+            .collect::<Vec<_>>()
     ));
-    let model_dir = dir.join("model");
-    best.reconstruction
-        .export_colmap_text(&model_dir)
-        .map_err(|e| err(e.to_string()))?;
+    let mut models = Vec::with_capacity(order.len());
+    for (rank, &k) in order.iter().enumerate() {
+        let model_dir = dir.join(format!("model{rank}"));
+        run.models[k]
+            .reconstruction
+            .export_colmap_text(&model_dir)
+            .map_err(|e| err(e.to_string()))?;
+        models.push(read_port_model(&model_dir, features).map_err(err)?);
+    }
+    Ok(models)
+}
 
-    // Read the text model back: images -> poses, points -> tracks.
+/// Read a COLMAP text model written by the port back as poses + tracks.
+fn read_port_model(model_dir: &Path, features: &[FeatureSet]) -> Result<PortModel, String> {
     let images_txt =
-        std::fs::read_to_string(model_dir.join("images.txt")).map_err(|e| err(e.to_string()))?;
+        std::fs::read_to_string(model_dir.join("images.txt")).map_err(|e| e.to_string())?;
     let mut poses = vec![None; features.len()];
     let mut frame_of_image: std::collections::HashMap<u64, usize> = Default::default();
     let mut lines = images_txt.lines().filter(|l| !l.starts_with('#'));
@@ -361,7 +381,7 @@ fn run_colmap_port(
         frame_of_image.insert(image_id, frame);
     }
     let points_txt =
-        std::fs::read_to_string(model_dir.join("points3D.txt")).map_err(|e| err(e.to_string()))?;
+        std::fs::read_to_string(model_dir.join("points3D.txt")).map_err(|e| e.to_string())?;
     let mut tracks = Vec::new();
     let (mut err_sum, mut err_n) = (0.0, 0usize);
     for line in points_txt.lines().filter(|l| !l.starts_with('#')) {
@@ -391,6 +411,169 @@ fn run_colmap_port(
         });
     }
     Ok((poses, tracks, err_sum / err_n.max(1) as f64))
+}
+
+/// Least-squares similarity `dst ~ s R src + t` (Umeyama).
+fn umeyama(
+    src: &[nalgebra::Point3<f64>],
+    dst: &[nalgebra::Point3<f64>],
+) -> Option<(f64, nalgebra::Rotation3<f64>, Vector3<f64>)> {
+    let n = src.len() as f64;
+    if src.len() < 3 {
+        return None;
+    }
+    let ms = src.iter().fold(Vector3::zeros(), |a, p| a + p.coords) / n;
+    let md = dst.iter().fold(Vector3::zeros(), |a, p| a + p.coords) / n;
+    let mut cov = nalgebra::Matrix3::zeros();
+    let mut var = 0.0;
+    for (a, b) in src.iter().zip(dst) {
+        let da = a.coords - ms;
+        cov += (b.coords - md) * da.transpose();
+        var += da.norm_squared();
+    }
+    cov /= n;
+    var /= n;
+    if var <= 0.0 {
+        return None;
+    }
+    let svd = cov.svd(true, true);
+    let (u, vt) = (svd.u?, svd.v_t?);
+    let mut d = nalgebra::Matrix3::identity();
+    if (u * vt).determinant() < 0.0 {
+        d[(2, 2)] = -1.0;
+    }
+    let r = u * d * vt;
+    let scale = (svd.singular_values.component_mul(&d.diagonal())).sum() / var;
+    let t = md - scale * r * ms;
+    Some((scale, nalgebra::Rotation3::from_matrix_unchecked(r), t))
+}
+
+/// Merge disconnected port models into the largest one: 3D-3D
+/// correspondences come from verified matches whose two keypoints are each
+/// observed by a point of the two models; a RANSAC similarity (Umeyama on
+/// minimal samples, refit on inliers) maps the smaller model's poses into
+/// the reference frame. Returns merged initial poses (`None` = unregistered).
+fn merge_port_models(
+    models: &[PortModel],
+    pairwise: &[PairwiseMatches],
+    log: &mut dyn FnMut(&str),
+) -> Vec<Option<visloc_core::geometry::Pose>> {
+    use std::collections::HashMap;
+    let mut merged = models[0].0.clone();
+    // (frame, keypoint) -> point position, in the merged frame so far.
+    let point_map = |m: &PortModel| -> HashMap<(usize, usize), nalgebra::Point3<f64>> {
+        let mut map = HashMap::new();
+        for t in &m.1 {
+            for &(f, k, _) in &t.observations {
+                map.insert((f, k), t.position);
+            }
+        }
+        map
+    };
+    let mut reference = point_map(&models[0]);
+    let extent = {
+        let pts: Vec<_> = reference.values().collect();
+        let c = pts.iter().fold(Vector3::zeros(), |a, p| a + p.coords) / pts.len().max(1) as f64;
+        let mut d: Vec<f64> = pts.iter().map(|p| (p.coords - c).norm()).collect();
+        d.sort_by(f64::total_cmp);
+        d.get(d.len() / 2).copied().unwrap_or(1.0)
+    };
+    let tau = 0.05 * extent;
+    for (k, model) in models.iter().enumerate().skip(1) {
+        let other = point_map(model);
+        let mut src = Vec::new();
+        let mut dst = Vec::new();
+        for p in pairwise {
+            for &(a, b) in &p.matches {
+                for ((fa, ka), (fb, kb)) in [
+                    ((p.image_i, a), (p.image_j, b)),
+                    ((p.image_j, b), (p.image_i, a)),
+                ] {
+                    if let (Some(x_ref), Some(x_other)) =
+                        (reference.get(&(fa, ka)), other.get(&(fb, kb)))
+                    {
+                        if merged[fb].is_none() {
+                            src.push(*x_other);
+                            dst.push(*x_ref);
+                        }
+                    }
+                }
+            }
+        }
+        if src.len() < 30 {
+            log(&format!(
+                "merge: model {k} has {} links, skipped",
+                src.len()
+            ));
+            continue;
+        }
+        // RANSAC over minimal 3-point similarity samples (deterministic LCG).
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        let count = |s: f64, r: &nalgebra::Rotation3<f64>, t: &Vector3<f64>| -> Vec<usize> {
+            (0..src.len())
+                .filter(|&i| ((s * (r * src[i].coords) + t) - dst[i].coords).norm() < tau)
+                .collect()
+        };
+        let mut best: Vec<usize> = Vec::new();
+        for _ in 0..2000 {
+            let idx = [next() % src.len(), next() % src.len(), next() % src.len()];
+            let (a, b): (Vec<_>, Vec<_>) = idx.iter().map(|&i| (src[i], dst[i])).unzip();
+            if let Some((s, r, t)) = umeyama(&a, &b) {
+                let inl = count(s, &r, &t);
+                if inl.len() > best.len() {
+                    best = inl;
+                }
+            }
+        }
+        let ratio = best.len() as f64 / src.len() as f64;
+        if best.len() < 30 || ratio < 0.3 {
+            log(&format!(
+                "merge: model {k} rejected ({} / {} inliers)",
+                best.len(),
+                src.len()
+            ));
+            continue;
+        }
+        let (a, b): (Vec<_>, Vec<_>) = best.iter().map(|&i| (src[i], dst[i])).unzip();
+        let Some((s, r, t)) = umeyama(&a, &b) else {
+            continue;
+        };
+        // x_ref = s R x_other + t; camera: x_cam' = s x_cam.
+        let mut added = 0;
+        for (f, pose) in model.0.iter().enumerate() {
+            let (Some(pose), None) = (pose, &merged[f]) else {
+                continue;
+            };
+            let w2c = &pose.world_to_camera;
+            let rb = w2c.rotation.to_rotation_matrix();
+            let new_r = rb * r.inverse();
+            let new_t = s * w2c.translation - new_r * t;
+            merged[f] = Some(visloc_core::geometry::Pose::from_world_to_camera(
+                nalgebra::UnitQuaternion::from_rotation_matrix(&new_r),
+                new_t,
+            ));
+            added += 1;
+        }
+        for tr in &model.1 {
+            for &(f, kp, _) in &tr.observations {
+                reference
+                    .entry((f, kp))
+                    .or_insert_with(|| nalgebra::Point3::from(s * (r * tr.position.coords) + t));
+            }
+        }
+        log(&format!(
+            "merge: model {k} joined ({} / {} inliers, scale {s:.3}, +{added} frames)",
+            best.len(),
+            src.len()
+        ));
+    }
+    merged
 }
 
 /// Load `export_colmap_db.py` output: per-frame keypoints (no descriptors)
@@ -847,11 +1030,30 @@ pub fn build_euroc_dataset(
     // Match and verify only the pairs between kept frames, as a two-stage
     // software pipeline: the GPU matches chunk k while the CPU verifies
     // chunk k-1 (seeded RANSAC, so the output is order-deterministic).
-    let kept: Vec<(usize, usize)> = candidates
+    let mut kept: Vec<(usize, usize)> = candidates
         .iter()
         .copied()
-        .filter(|&(i, j)| keep[i] && keep[j])
+        .filter(|&(i, j)| {
+            (keep[i] && keep[j])
+                || (cfg.register_gated && keep[i] != keep[j] && j - i <= cfg.window)
+        })
         .collect();
+    if cfg.register_gated {
+        // A long static stretch can leave a dropped frame with no kept frame
+        // inside the window: always link it to the nearest kept frame on
+        // each side (it sees nearly the same view).
+        let mut have: std::collections::HashSet<(usize, usize)> = kept.iter().copied().collect();
+        for g in (0..n).filter(|&g| !keep[g]) {
+            let before = (0..g).rev().find(|&k| keep[k]);
+            let after = ((g + 1)..n).find(|&k| keep[k]);
+            for k in [before, after].into_iter().flatten() {
+                let pair = (g.min(k), g.max(k));
+                if have.insert(pair) {
+                    kept.push(pair);
+                }
+            }
+        }
+    }
     let verify_chunk = |chunk: &[(usize, usize)], dms: Vec<Vec<DescriptorMatch>>| {
         chunk
             .par_iter()
@@ -965,13 +1167,44 @@ pub fn build_euroc_dataset(
         None => None,
     };
     let result = if cfg.colmap_port_mapper {
-        let (poses, tracks, mean_reprojection_px) =
-            run_colmap_port(out_dir, &camera, width, height, &features, &pairwise, log)?;
-        SfmOutcome {
-            poses,
-            tracks,
-            mean_reprojection_px,
-            refined_camera: None,
+        let models = run_colmap_port(out_dir, &camera, width, height, &features, &pairwise, log)?;
+        if cfg.merge_models && models.len() > 1 {
+            let merged = merge_port_models(&models, &pairwise, log);
+            let joined = merged.iter().filter(|p| p.is_some()).count();
+            if joined > models[0].0.iter().filter(|p| p.is_some()).count() {
+                // Re-triangulate and bundle-adjust the union (poses start
+                // fixed, then all become BA variables).
+                let r = visloc_slam::incremental_sfm_with_initial_poses(
+                    &camera,
+                    &features,
+                    &pairwise,
+                    &sfm_cfg,
+                    Some(&merged),
+                )
+                .map_err(|e| EurocError::Sfm(e.to_string()))?;
+                SfmOutcome {
+                    poses: r.poses,
+                    tracks: r.tracks,
+                    mean_reprojection_px: r.mean_reprojection_px,
+                    refined_camera: r.refined_camera,
+                }
+            } else {
+                let (poses, tracks, mean_reprojection_px) = models.into_iter().next().unwrap();
+                SfmOutcome {
+                    poses,
+                    tracks,
+                    mean_reprojection_px,
+                    refined_camera: None,
+                }
+            }
+        } else {
+            let (poses, tracks, mean_reprojection_px) = models.into_iter().next().unwrap();
+            SfmOutcome {
+                poses,
+                tracks,
+                mean_reprojection_px,
+                refined_camera: None,
+            }
         }
     } else {
         let r = visloc_slam::incremental_sfm_with_initial_poses(
