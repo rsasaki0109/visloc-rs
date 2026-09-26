@@ -78,6 +78,35 @@ camera-centre RMSE, and beats official COLMAP on the 38-image courtyard control
 
 <p align="center"><sub>Same-input CPU8 Electro 1,200: visloc-rs <b>3.46× faster</b> and <b>25.2% lower</b> camera-centre RMSE than COLMAP. Unordered SfM, sequential SfM vs COLMAP, and EuRoC reconstruction evidence are in the <a href="docs/unordered_sfm_benchmark.md">SfM benchmark docs</a>.</sub></p>
 
+### GPU SfM vs COLMAP (CUDA) on EuRoC
+
+Same 200 undistorted frames per sequence, same fixed intrinsics, same
+GTX 1660 Ti, run back to back. visloc-rs uses GPU SIFT, batched GPU
+matching and the COLMAP incremental-mapper port. COLMAP 4.1 uses GPU
+extraction, GPU sequential matching and its default mapper. ATE is the
+Sim(3) camera-centre RMSE against ground truth.
+
+| Sequence | Time (visloc-rs / COLMAP) | ATE (visloc-rs / COLMAP) | Registered (visloc-rs / COLMAP) |
+| --- | ---: | ---: | ---: |
+| MH_01_easy | **131 s** / 634 s | 0.35 / 0.35 cm | 182 / **200** |
+| MH_03_medium | **175 s** / 340 s | **1.32** / 2.61 cm | 166 / **200** |
+| MH_05_difficult | **132 s** / 764 s | **2.58** / 193.66 cm | 194 / **200** |
+| V1_01_easy | **157 s** / 219 s | **2.40** / 2.75 cm | 199 / **200** |
+| V1_02_medium | **81 s** / 101 s | **1.76** / 1.83 cm | 198 / **200** |
+| V2_01_easy | **117 s** / 172 s | 3.30 / **1.00** cm | 199 / **200** |
+| V1_03_difficult | **68 s** / 93 s | 2.17 / **1.98** cm | 67 / **80** |
+| V2_03_difficult | 64 s / **60 s** | 3.37 / **2.85** cm | 118 / **180** |
+
+visloc-rs is faster on 7 of 8 sequences (1.2–5.8×). It is more accurate
+on 4 and equal on MH_01. COLMAP is more accurate on V2_01, V1_03 and V2_03,
+and it registers more frames, most visibly on the blurred V1_03 and V2_03.
+
+COLMAP's results vary between runs: an earlier run gave V2_01 34.9 cm, and
+MH_05 failed in both runs. visloc-rs is deterministic.
+
+Configuration, caveats and the ablation that got here:
+[EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
+
 ### Run the SfM demo
 
 Reconstruct an unordered photo set in one command — SIFT features estimated
