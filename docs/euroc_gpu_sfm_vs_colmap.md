@@ -48,19 +48,18 @@ sequences, and accuracy is scored against the Vicon/Leica ground truth.
 
 | Sequence | visloc-rs time | COLMAP time | visloc-rs reg. | COLMAP reg. | visloc-rs ATE | COLMAP ATE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| MH_01_easy | **131 s** | 634 s | 182 | **200** | **0.35 cm** | **0.35 cm** |
-| MH_03_medium | **175 s** | 340 s | 166 | **200** | **1.32 cm** | 2.61 cm |
-| MH_05_difficult | **132 s** | 764 s | 194 | **200** | **2.58 cm** | 193.66 cm |
-| V1_01_easy | **157 s** | 219 s | 199 | **200** | **2.40 cm** | 2.75 cm |
-| V1_02_medium | **81 s** | 101 s | 198 | **200** | **1.76 cm** | 1.83 cm |
-| V2_01_easy | **117 s** | 172 s | 199 | **200** | 3.30 cm | **1.00 cm** |
-| V1_03_difficult | **68 s** | 93 s | 67 | **80** | 2.17 cm | **1.98 cm** |
-| V2_03_difficult | 64 s | **60 s** | 118 | **180** | 3.37 cm | **2.85 cm** |
+| MH_01_easy | **96 s** | 634 s | 182 | **200** | **0.35 cm** | **0.35 cm** |
+| MH_03_medium | **113 s** | 340 s | 166 | **200** | **1.32 cm** | 2.61 cm |
+| MH_05_difficult | **102 s** | 764 s | 194 | **200** | **2.58 cm** | 193.66 cm |
+| V1_01_easy | **104 s** | 219 s | 199 | **200** | **2.40 cm** | 2.75 cm |
+| V1_02_medium | **55 s** | 101 s | 198 | **200** | **1.76 cm** | 1.83 cm |
+| V2_01_easy | **81 s** | 172 s | 199 | **200** | 3.30 cm | **1.00 cm** |
+| V1_03_difficult | **45 s** | 93 s | 67 | **80** | 2.17 cm | **1.98 cm** |
+| V2_03_difficult | **42 s** | 60 s | 118 | **180** | 3.37 cm | **2.85 cm** |
 
 **Summary:**
 
-- **Speed:** visloc-rs is faster on 7 of 8 sequences, 1.2–5.8× (V2_03 is
-  about even).
+- **Speed:** visloc-rs is faster on all 8 sequences, 1.4–7.5×.
 - **Accuracy:** visloc-rs is more accurate on 4 of 8 (MH_03, MH_05, V1_01,
   V1_02) and equal on MH_01. COLMAP is more accurate on V2_01, V1_03 and
   V2_03.
@@ -83,6 +82,12 @@ sequences, and accuracy is scored against the Vicon/Leica ground truth.
   - The remaining gap is SIFT quality on blurred frames.
 - **The visloc-rs time includes writing the undistorted PNGs** that COLMAP
   then reads.
+- **The visloc-rs times come from a rerun.** They were re-measured the same
+  day, on the same machine, after the two-view RANSAC speed-ups (commits
+  2e0b525 and 79acc65). Those commits leave every verification decision,
+  registration and ATE unchanged; before them the times were 131 / 175 /
+  132 / 157 / 81 / 117 / 68 / 64 s. The COLMAP numbers come from the
+  back-to-back run.
 
 ## What moved the numbers
 

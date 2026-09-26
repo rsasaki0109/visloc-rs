@@ -88,16 +88,16 @@ Sim(3) camera-centre RMSE against ground truth.
 
 | Sequence | Time (visloc-rs / COLMAP) | ATE (visloc-rs / COLMAP) | Registered (visloc-rs / COLMAP) |
 | --- | ---: | ---: | ---: |
-| MH_01_easy | **131 s** / 634 s | 0.35 / 0.35 cm | 182 / **200** |
-| MH_03_medium | **175 s** / 340 s | **1.32** / 2.61 cm | 166 / **200** |
-| MH_05_difficult | **132 s** / 764 s | **2.58** / 193.66 cm | 194 / **200** |
-| V1_01_easy | **157 s** / 219 s | **2.40** / 2.75 cm | 199 / **200** |
-| V1_02_medium | **81 s** / 101 s | **1.76** / 1.83 cm | 198 / **200** |
-| V2_01_easy | **117 s** / 172 s | 3.30 / **1.00** cm | 199 / **200** |
-| V1_03_difficult | **68 s** / 93 s | 2.17 / **1.98** cm | 67 / **80** |
-| V2_03_difficult | 64 s / **60 s** | 3.37 / **2.85** cm | 118 / **180** |
+| MH_01_easy | **96 s** / 634 s | 0.35 / 0.35 cm | 182 / **200** |
+| MH_03_medium | **113 s** / 340 s | **1.32** / 2.61 cm | 166 / **200** |
+| MH_05_difficult | **102 s** / 764 s | **2.58** / 193.66 cm | 194 / **200** |
+| V1_01_easy | **104 s** / 219 s | **2.40** / 2.75 cm | 199 / **200** |
+| V1_02_medium | **55 s** / 101 s | **1.76** / 1.83 cm | 198 / **200** |
+| V2_01_easy | **81 s** / 172 s | 3.30 / **1.00** cm | 199 / **200** |
+| V1_03_difficult | **45 s** / 93 s | 2.17 / **1.98** cm | 67 / **80** |
+| V2_03_difficult | **42 s** / 60 s | 3.37 / **2.85** cm | 118 / **180** |
 
-visloc-rs is faster on 7 of 8 sequences (1.2–5.8×). It is more accurate
+visloc-rs is faster on all 8 sequences (1.4–7.5×). It is more accurate
 on 4 and equal on MH_01. COLMAP is more accurate on V2_01, V1_03 and V2_03,
 and it registers more frames, most visibly on the blurred V1_03 and V2_03.
 
