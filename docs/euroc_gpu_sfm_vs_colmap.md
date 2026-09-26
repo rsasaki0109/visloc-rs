@@ -67,6 +67,30 @@ sequences, and accuracy is scored against the Vicon/Leica ground truth.
   small on the easy/medium sequences (182–199 vs 200) and large on
   V1_03/V2_03.
 
+## MH_05 animation
+
+![EuRoC MH_05: COLMAP vs visloc-rs trajectories, then the 3DGS flythrough](assets/euroc_mh05_vs_colmap.gif)
+
+**Trajectories:** the COLMAP and visloc-rs trajectories are Sim(3)-aligned
+to ground truth, top-down. The data comes from the COLMAP run of the table
+above and the `gsplat_euroc` run below.
+
+**Flythrough:**
+
+- **Pipeline:** the same `gsplat_euroc` configuration trains a 3DGS scene
+  for 7000 steps (215 s) and renders every registered camera with
+  `--render-dir`.
+  - Eval: PSNR 24.1, SSIM 0.876 on 25 held-out views.
+- **Frames shown:** the animation starts at 15% of the sequence. The first
+  frames are near-static close-ups during take-off, seen from few
+  viewpoints, and render poorly.
+- **Rebuild:**
+
+  ```text
+  gsplat_euroc --euroc <MH_05> --work <run> --stride 4 --max-frames 200 --steps 7000     <configuration above> --render-dir <run>/renders
+  python scripts/make_euroc_vs_colmap_gif.py --euroc-root <EuRoC> --bench-out <out>     --run <run> --out docs/assets/euroc_mh05_vs_colmap.gif --colmap-time 764 --ours-time 102
+  ```
+
 ## Caveats
 
 - **COLMAP varies between runs; visloc-rs does not.**

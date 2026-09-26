@@ -104,6 +104,11 @@ and it registers more frames, most visibly on the blurred V1_03 and V2_03.
 COLMAP's results vary between runs: an earlier run gave V2_01 34.9 cm, and
 MH_05 failed in both runs. visloc-rs is deterministic.
 
+<p align="center">
+  <img src="docs/assets/euroc_mh05_vs_colmap.gif" alt="EuRoC MH_05: COLMAP 4.1 GPU trajectory breaks (ATE 193.7 cm, 764 s) while visloc-rs stays on ground truth (2.58 cm, 102 s), then a 3D Gaussian Splatting flythrough trained from the visloc-rs poses" width="800">
+</p>
+<p align="center"><sub>EuRoC MH_05, same 200 frames, same GPU. COLMAP breaks (ATE 193.7 cm, 764 s), visloc-rs stays at <b>2.58 cm</b> in <b>102 s</b>. The visloc-rs poses then train a 3D Gaussian Splatting scene: raw frames to splat in pure Rust + wgpu, no COLMAP. <a href="scripts/make_euroc_vs_colmap_gif.py">Script</a>.</sub></p>
+
 Configuration, caveats and the ablation that got here:
 [EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
 
