@@ -493,6 +493,11 @@ pub struct Renderer {
     max_isects_limit: usize,
     /// Skip the output-image readback (for GPU-only timing / viewer use).
     skip_readback: bool,
+    /// Evaluated SH degree override (see `set_active_sh_degree`).
+    active_sh_degree: Option<u32>,
+    /// The caller zeroes the parameter gradients after consuming them (e.g.
+    /// a fused optimizer step), so `backward` need not clear them.
+    pub(crate) grads_zeroed_by_caller: bool,
     /// Counts of the last rendered frame (what the backward pass differentiates).
     last_frame: FrameCounts,
     /// Backward-pass pipelines and buffers, built on first use.
@@ -771,6 +776,8 @@ impl Renderer {
             counts_sorted,
             max_isects_limit,
             skip_readback: false,
+            active_sh_degree: None,
+            grads_zeroed_by_caller: false,
             last_frame: FrameCounts::default(),
             backward: None,
         })
@@ -819,6 +826,21 @@ impl Renderer {
     ///
     /// A native viewer presents the output buffer directly, so this is the
     /// per-frame cost that matters; use it to measure the true GPU frame time.
+    /// Promise that the parameter gradient buffers are zero at the start of
+    /// every backward pass (the caller clears them after reading, as the
+    /// trainer's Adam step does), which saves a full clear per step.
+    pub fn set_grads_zeroed_by_caller(&mut self, zeroed: bool) {
+        self.grads_zeroed_by_caller = zeroed;
+    }
+
+    /// Evaluate spherical harmonics only up to `degree` (clamped to the
+    /// scene's degree); higher bands contribute nothing and get zero
+    /// gradients. `None` evaluates the full degree. Trainers use this for
+    /// the usual one-band-per-1000-steps schedule.
+    pub fn set_active_sh_degree(&mut self, degree: Option<u32>) {
+        self.active_sh_degree = degree;
+    }
+
     pub fn set_skip_readback(&mut self, skip: bool) {
         self.skip_readback = skip;
     }
@@ -844,7 +866,10 @@ impl Renderer {
             "view height matches renderer"
         );
         let mut prof = StageTimer::from_env();
-        let u = ProjectUniforms::from_view(view, self.sh_degree, self.num_gaussians() as u32);
+        let mut u = ProjectUniforms::from_view(view, self.sh_degree, self.num_gaussians() as u32);
+        u.sh_active_degree = self
+            .active_sh_degree
+            .map_or(self.sh_degree, |d| d.min(self.sh_degree));
         let num_tiles = u.num_tiles();
         let raster_u = RasterUniforms::new(&u, bg);
         let n = self.num_gaussians() as u32;

@@ -449,6 +449,13 @@ mod gpu_tests {
 
     /// GPU parameter gradients (full backward) against the f64 CPU reference.
     fn check_param_grads(scene: &Scene, w: u32, h: u32) {
+        check_param_grads_active(scene, w, h, None);
+    }
+
+    /// With `active = Some(a)` the GPU evaluates SH only up to degree `a`:
+    /// compare against the CPU oracle on the scene with the higher bands
+    /// zeroed, whose gradients for those bands must come back as 0.
+    fn check_param_grads_active(scene: &Scene, w: u32, h: u32, active: Option<u32>) {
         let Some(ctx) = try_context() else {
             eprintln!("skipping param-grad check: no GPU adapter");
             return;
@@ -481,9 +488,33 @@ mod gpu_tests {
             })
             .collect();
         let d64: Vec<[f64; 3]> = d_image.iter().map(|p| p.map(|x| x as f64)).collect();
-        let cpu =
-            visloc_gsplat_core::backward::render_backward(scene, &view, bg.map(|x| x as f64), &d64);
+        let rest_full = visloc_gsplat_core::gaussian::sh_rest_coeffs_per_channel(scene.sh_degree);
+        let act = active.map_or(rest_full, |a| {
+            visloc_gsplat_core::gaussian::sh_rest_coeffs_per_channel(a.min(scene.sh_degree))
+        });
+        let mut reference = scene.clone();
+        for g in reference.gaussians.iter_mut() {
+            for ch in 0..3 {
+                for k in act..rest_full {
+                    g.sh_rest[ch * rest_full + k] = 0.0;
+                }
+            }
+        }
+        let mut cpu = visloc_gsplat_core::backward::render_backward(
+            &reference,
+            &view,
+            bg.map(|x| x as f64),
+            &d64,
+        );
+        for g in cpu.sh_rest.iter_mut() {
+            for ch in 0..3 {
+                for k in act..rest_full {
+                    g[ch * rest_full + k] = 0.0;
+                }
+            }
+        }
         let mut renderer = Renderer::new(ctx, scene, w, h).expect("renderer");
+        renderer.set_active_sh_degree(active);
         let _ = renderer.render(&view, bg);
         let gpu = renderer.backward(&d_image).expect("backward");
 
@@ -561,6 +592,13 @@ mod gpu_tests {
     fn gpu_param_grads_match_cpu_many_tiles() {
         let scene = random_scene(64, 11, 3);
         check_param_grads(&scene, 96, 80);
+    }
+
+    #[test]
+    fn gpu_param_grads_respect_active_sh_degree() {
+        let scene = random_scene(24, 5, 3);
+        check_param_grads_active(&scene, 64, 48, Some(1));
+        check_param_grads_active(&scene, 64, 48, Some(0));
     }
 
     #[test]

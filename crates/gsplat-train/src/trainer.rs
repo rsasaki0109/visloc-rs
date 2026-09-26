@@ -12,7 +12,7 @@ use visloc_gsplat_core::gaussian::{Gaussian, Scene};
 use visloc_gsplat_render::{GpuContext, GpuError, GpuScene, PackedScene, PrefixScanner, Renderer};
 
 use crate::dataset::{load_view_rgb, Dataset, DatasetError, View};
-use crate::densify::{DensifyConfig, DensifyReport, Group, Population};
+use crate::densify::{BrushRefineConfig, DensifyConfig, DensifyReport, Group, Population};
 use crate::loss::{SsimBinds, SsimKernels};
 
 /// Training hyper-parameters.
@@ -33,6 +33,17 @@ pub struct TrainConfig {
     pub ssim_weight: f32,
     /// `None` keeps the initial gaussians fixed in number.
     pub densify: Option<DensifyConfig>,
+    /// brush's refine strategy instead of the Inria rule (`densify` is then
+    /// ignored); see [`BrushRefineConfig`]. In this mode `lr_mean` scales
+    /// with the splats' bound size (brush) rather than the camera extent.
+    pub brush_refine: Option<BrushRefineConfig>,
+    /// Exponential decay target of the scale learning rate (`None` keeps
+    /// `lr_scale` constant, the Inria schedule).
+    pub lr_scale_final: Option<f32>,
+    /// Raise the evaluated SH degree by one every this many steps (Inria /
+    /// brush schedule; early steps skip the higher bands). 0 evaluates the
+    /// scene's full degree from the start.
+    pub sh_degree_interval: usize,
 }
 
 impl Default for TrainConfig {
@@ -50,6 +61,30 @@ impl Default for TrainConfig {
             seed: 42,
             ssim_weight: 0.2,
             densify: Some(DensifyConfig::default()),
+            sh_degree_interval: 1000,
+            brush_refine: None,
+            lr_scale_final: None,
+        }
+    }
+}
+
+impl TrainConfig {
+    /// brush 0.3's defaults: its refine strategy, mean noise and learning
+    /// rates (mean 2e-5 -> 1e-6 times the bound size, scale 1e-2 -> 6e-3,
+    /// opacity 1e-2, SH DC 2e-3 with the rest / 20).
+    pub fn brush_preset() -> Self {
+        Self {
+            lr_mean: 2e-5,
+            lr_mean_final: 1e-6,
+            lr_quat: 1e-3,
+            lr_scale: 1e-2,
+            lr_scale_final: Some(6e-3),
+            lr_opacity: 1e-2,
+            lr_sh_dc: 2e-3,
+            lr_sh_rest: 2e-3 / 20.0,
+            densify: None,
+            brush_refine: Some(BrushRefineConfig::default()),
+            ..Self::default()
         }
     }
 }
@@ -101,7 +136,17 @@ struct StatsUniforms {
     num_visible: u32,
     half_w: f32,
     half_h: f32,
-    pad0: u32,
+    /// 0 Inria (sum of NDC xy grad norms), 1 brush (max refine weight).
+    mode: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct NoiseUniforms {
+    n: u32,
+    seed: u32,
+    scale: f32,
+    max_noise: f32,
 }
 
 /// Everything sized by the gaussian count; rebuilt after densification.
@@ -113,6 +158,7 @@ struct SceneState {
     grad_accum: wgpu::Buffer,
     grad_count: wgpu::Buffer,
     stats_bind: wgpu::BindGroup,
+    noise_bind: wgpu::BindGroup,
 }
 
 /// The trainer. Owns the renderer (and so the scene on the GPU).
@@ -123,6 +169,11 @@ pub struct Trainer {
     width: u32,
     height: u32,
     extent: f32,
+    /// brush's bound size: the median axis length of the central 75% box of
+    /// the splat centres (updated at every brush refine).
+    bound_size: f32,
+    noise_pipeline: wgpu::ComputePipeline,
+    noise_uniforms: wgpu::Buffer,
     sh_degree: u32,
     /// Ground truth of the current view (the host keeps every view packed
     /// as RGBA8 and uploads one per step: ~3 MB instead of ~300 MB resident).
@@ -388,6 +439,19 @@ impl Trainer {
             "densify_stats",
         );
         let stats_uniforms = uniform(&dev, "stats_uniforms", 16);
+        let noise_pipeline = pipeline(
+            &dev,
+            "mean_noise",
+            include_str!("shaders/mean_noise.wgsl"),
+            "mean_noise",
+        );
+        let noise_uniforms = uniform(&dev, "noise_uniforms", 16);
+        let init_means: Vec<[f32; 3]> = init
+            .gaussians
+            .iter()
+            .map(|g| [g.mean.x, g.mean.y, g.mean.z])
+            .collect();
+        let bound_size = central_bound_size(&init_means, 0.75).unwrap_or(extent);
         let classify_pipeline = pipeline(
             &dev,
             "densify_classify",
@@ -407,6 +471,9 @@ impl Trainer {
             width,
             height,
             extent,
+            bound_size,
+            noise_pipeline,
+            noise_uniforms,
             sh_degree: init.sh_degree,
             gt,
             gt_host,
@@ -447,6 +514,8 @@ impl Trainer {
         let n = renderer.num_gaussians() as u32;
         let cpc2 = (self.sh_degree + 1) * (self.sh_degree + 1);
         renderer.set_skip_readback(true);
+        // Adam zeroes each gradient after reading it.
+        renderer.set_grads_zeroed_by_caller(true);
         let dev = renderer.ctx.device.clone();
 
         let out_img = renderer.output_buffer().clone();
@@ -525,6 +594,12 @@ impl Trainer {
             "stats",
             &[&self.stats_uniforms, gfc, screen, &grad_accum, &grad_count],
         );
+        let noise_bind = bind(
+            &dev,
+            &self.noise_pipeline,
+            "mean_noise",
+            &[&self.noise_uniforms, &pt, &po],
+        );
         self.state = Some(SceneState {
             renderer,
             loss_bind,
@@ -533,6 +608,7 @@ impl Trainer {
             grad_accum,
             grad_count,
             stats_bind,
+            noise_bind,
         });
         Ok(())
     }
@@ -587,11 +663,15 @@ impl Trainer {
         let vi = self.next_view();
         let view = self.views[vi].camera;
         let bg = self.cfg.background;
-        let densifying = self
-            .cfg
-            .densify
-            .as_ref()
-            .is_some_and(|d| self.step < d.stop);
+        let brush = self.cfg.brush_refine.is_some();
+        // brush gathers refine statistics for the whole run (pruning never
+        // stops); the Inria rule only until densification stops.
+        let densifying = brush
+            || self
+                .cfg
+                .densify
+                .as_ref()
+                .is_some_and(|d| self.step < d.stop);
         let npix = self.width * self.height;
         let (half_w, half_h) = (self.width as f32 * 0.5, self.height as f32 * 0.5);
 
@@ -601,6 +681,9 @@ impl Trainer {
             dev.poll(wgpu::PollType::wait_indefinitely()).ok();
             p.start();
         }
+        let active_sh = (self.cfg.sh_degree_interval > 0)
+            .then(|| (self.step / self.cfg.sh_degree_interval) as u32);
+        st.renderer.set_active_sh_degree(active_sh);
         let _ = st.renderer.render(&view, bg);
         if let Some(p) = self.profile.as_mut() {
             p.mark(&dev, "forward");
@@ -640,9 +723,13 @@ impl Trainer {
         let frac = (self.step as f32 / self.cfg.steps.max(1) as f32).min(1.0);
         let lr_mean = (self.cfg.lr_mean.ln() * (1.0 - frac) + self.cfg.lr_mean_final.ln() * frac)
             .exp()
-            * self.extent;
+            * if brush { self.bound_size } else { self.extent };
+        let lr_scale = match self.cfg.lr_scale_final {
+            Some(end) => (self.cfg.lr_scale.ln() * (1.0 - frac) + end.ln() * frac).exp(),
+            None => self.cfg.lr_scale,
+        };
         let lrs = [
-            (lr_mean, self.cfg.lr_quat, self.cfg.lr_scale),
+            (lr_mean, self.cfg.lr_quat, lr_scale),
             (
                 self.cfg.lr_opacity,
                 self.cfg.lr_opacity,
@@ -661,7 +748,7 @@ impl Trainer {
                     num_visible: nv,
                     half_w,
                     half_h,
-                    pad0: 0,
+                    mode: brush as u32,
                 };
                 queue.write_buffer(&self.stats_uniforms, 0, bytemuck::bytes_of(&su));
                 pass.set_pipeline(&self.stats_pipeline);
@@ -689,6 +776,21 @@ impl Trainer {
                 let (x, y) = groups_2d(g.n);
                 pass.dispatch_workgroups(x, y, 1);
             }
+            if let Some(b) = self.cfg.brush_refine.as_ref() {
+                // Mean noise on nearly transparent gaussians, after the step.
+                let n = st.renderer.num_gaussians() as u32;
+                let nu = NoiseUniforms {
+                    n,
+                    seed: (self.cfg.seed as u32) ^ (self.step as u32).wrapping_mul(0x85EB_CA6B),
+                    scale: lr_mean * b.mean_noise_weight,
+                    max_noise: 0.25 * self.bound_size,
+                };
+                queue.write_buffer(&self.noise_uniforms, 0, bytemuck::bytes_of(&nu));
+                pass.set_pipeline(&self.noise_pipeline);
+                pass.set_bind_group(0, &st.noise_bind, &[]);
+                let (x, y) = groups_2d(n);
+                pass.dispatch_workgroups(x, y, 1);
+            }
         }
         queue.submit(Some(enc.finish()));
         if let Some(p) = self.profile.as_mut() {
@@ -696,7 +798,15 @@ impl Trainer {
         }
         self.step += 1;
 
-        if let Some(d) = self.cfg.densify.clone() {
+        if let Some(b) = self.cfg.brush_refine.clone() {
+            if self.step % b.refine_every.max(1) == 0 {
+                self.brush_refine_now(&b)?;
+                let dev = self.st().renderer.ctx.device.clone();
+                if let Some(p) = self.profile.as_mut() {
+                    p.mark(&dev, "densify");
+                }
+            }
+        } else if let Some(d) = self.cfg.densify.clone() {
             let s = self.step;
             let at_densify = s >= d.start && s <= d.stop && s % d.interval == 0;
             let at_reset = s < d.stop && s % d.opacity_reset_interval == 0;
@@ -726,6 +836,8 @@ impl Trainer {
         let dev = st.renderer.ctx.device.clone();
         let queue = st.renderer.ctx.queue.clone();
         let n = st.renderer.num_gaussians();
+        // Population cap: past it only pruning (and opacity resets) run.
+        let grow = grow && n < d.max_gaussians;
         let params = st.renderer.param_buffers();
         let src = [
             params.transforms.clone(),
@@ -736,7 +848,6 @@ impl Trainer {
         // 1. Classify.
         let actions = storage(&dev, "densify_actions", n as u64 * 4);
         let counts = storage(&dev, "densify_counts", n as u64 * 4);
-        let cum = storage(&dev, "densify_cum", n as u64 * 4);
         let tallies = storage(&dev, "densify_tallies", 12);
         let cu = uniform(&dev, "densify_classify_u", 32);
         let words: [u32; 8] = [
@@ -775,17 +886,12 @@ impl Trainer {
         }
         queue.submit(Some(enc.finish()));
 
-        // 2. Prefix sum of the row counts -> output offsets and the new count.
-        if self.scanner.as_ref().is_none_or(|(_, cap)| *cap < n) {
-            self.scanner = Some((PrefixScanner::new(&dev, n.max(1)), n));
-        }
-        let (scanner, _) = self.scanner.as_ref().expect("scanner");
-        scanner.scan(&dev, &queue, &counts, &cum, n);
-        let n_after = if n > 0 {
-            read_u32_at(&dev, &queue, &cum, n - 1) as usize
-        } else {
-            0
-        };
+        let n_after = self.apply_actions(n, &actions, &counts, reset)?;
+        let st = self.state.as_ref().expect("trainer state");
+        let (dev, queue) = (
+            st.renderer.ctx.device.clone(),
+            st.renderer.ctx.queue.clone(),
+        );
         let t: Vec<u32> = read_f32(&dev, &queue, &tallies, 3)
             .iter()
             .map(|x| x.to_bits())
@@ -800,6 +906,165 @@ impl Trainer {
             });
         }
 
+        if self.profile.is_some() && self.step % 1000 == 0 {
+            eprintln!(
+                "[densify] {n} -> {n_after} on device in {:.0} ms",
+                t0.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        Ok(())
+    }
+
+    /// brush's refine step (see [`BrushRefineConfig`]): decide on the host
+    /// which gaussians to prune and which to split (weighted sampling, as
+    /// brush does), then apply the actions on the device.
+    fn brush_refine_now(&mut self, b: &BrushRefineConfig) -> Result<(), TrainError> {
+        let st = self.state.as_ref().expect("trainer state");
+        let dev = st.renderer.ctx.device.clone();
+        let queue = st.renderer.ctx.queue.clone();
+        let n = st.renderer.num_gaussians();
+        if n == 0 {
+            return Ok(());
+        }
+        let params = st.renderer.param_buffers();
+        let transforms = read_f32(&dev, &queue, params.transforms, n * 10);
+        let opacity_logit = read_f32(&dev, &queue, params.opacity, n);
+        let weight_max = read_f32(&dev, &queue, &st.grad_accum, n);
+        let seen = read_f32(&dev, &queue, &st.grad_count, n);
+
+        // Bounds of the current splat centres (brush: central 75% box).
+        let means: Vec<[f32; 3]> = transforms
+            .chunks_exact(10)
+            .map(|t| [t[0], t[1], t[2]])
+            .collect();
+        let (center, size) = central_bounds(&means, 0.75).unwrap_or(([0.0; 3], self.bound_size));
+        let sigmoid = |x: f32| 1.0 / (1.0 + (-x).exp());
+        let opacity: Vec<f32> = opacity_logit.iter().map(|&x| sigmoid(x)).collect();
+        let pruned: Vec<bool> = (0..n)
+            .map(|i| {
+                let t = &transforms[i * 10..i * 10 + 10];
+                opacity[i] < b.min_opacity
+                    || t[7..10].iter().any(|&ls| ls < -15.0)
+                    || (0..3).any(|k| (t[k] - center[k]).abs() > size * 10.0)
+            })
+            .collect();
+        let pruned_count = pruned.iter().filter(|p| **p).count();
+
+        // Replacements for the pruned, sampled by opacity; then growth from
+        // the gaussians above the refine threshold, sampled by their weight.
+        let mut add = vec![false; n];
+        let rng = &mut self.rng;
+        let mut sample = |weights: &[f32], count: usize, add: &mut Vec<bool>| {
+            let mut cdf = Vec::with_capacity(weights.len());
+            let mut acc = 0.0f64;
+            for &w in weights {
+                acc += w.max(0.0) as f64;
+                cdf.push(acc);
+            }
+            if acc <= 0.0 {
+                return;
+            }
+            for _ in 0..count {
+                *rng ^= *rng << 13;
+                *rng ^= *rng >> 7;
+                *rng ^= *rng << 17;
+                let u = (*rng >> 11) as f64 / (1u64 << 53) as f64 * acc;
+                let j = cdf.partition_point(|&c| c <= u).min(weights.len() - 1);
+                add[j] = true;
+            }
+        };
+        if pruned_count > 0 {
+            let w: Vec<f32> = (0..n)
+                .map(|i| if pruned[i] { 0.0 } else { opacity[i] })
+                .collect();
+            sample(&w, pruned_count, &mut add);
+        }
+        let mut grown = 0;
+        if self.step < b.growth_stop {
+            let above: Vec<bool> = (0..n)
+                .map(|i| !pruned[i] && weight_max[i] / seen[i].max(1.0) > b.growth_grad_threshold)
+                .collect();
+            let threshold_count = above.iter().filter(|a| **a).count();
+            let grow = ((threshold_count as f32 * b.growth_select_fraction).round() as usize)
+                .saturating_sub(pruned_count);
+            let current = n - pruned_count + add.iter().filter(|a| **a).count();
+            let grow = grow.min(b.max_gaussians.saturating_sub(current));
+            if grow > 0 {
+                let w: Vec<f32> = (0..n)
+                    .map(|i| if above[i] { weight_max[i] } else { 0.0 })
+                    .collect();
+                let before = add.iter().filter(|a| **a).count();
+                sample(&w, grow, &mut add);
+                grown = add.iter().filter(|a| **a).count() - before;
+            }
+        }
+        let actions_host: Vec<u32> = (0..n)
+            .map(|i| {
+                if pruned[i] {
+                    0
+                } else if add[i] {
+                    4
+                } else {
+                    1
+                }
+            })
+            .collect();
+        let counts_host: Vec<u32> = actions_host
+            .iter()
+            .map(|&a| match a {
+                0 => 0,
+                4 => 2,
+                _ => 1,
+            })
+            .collect();
+        let actions = storage(&dev, "refine_actions", n as u64 * 4);
+        let counts = storage(&dev, "refine_counts", n as u64 * 4);
+        queue.write_buffer(&actions, 0, bytemuck::cast_slice(&actions_host));
+        queue.write_buffer(&counts, 0, bytemuck::cast_slice(&counts_host));
+        let n_after = self.apply_actions(n, &actions, &counts, false)?;
+        self.bound_size = size;
+        self.last_densify = Some(DensifyReport {
+            cloned: grown,
+            split: actions_host.iter().filter(|a| **a == 4).count() - grown,
+            pruned: pruned_count,
+            before: n,
+            after: n_after,
+        });
+        Ok(())
+    }
+
+    /// Apply per-gaussian actions (0 prune, 1 keep, 2 clone, 3 Inria split,
+    /// 4 brush split) with their output row counts: prefix-sum the counts,
+    /// scatter parameters and Adam moments into new buffers, and rebuild the
+    /// renderer around them. Returns the new gaussian count.
+    fn apply_actions(
+        &mut self,
+        n: usize,
+        actions: &wgpu::Buffer,
+        counts: &wgpu::Buffer,
+        reset: bool,
+    ) -> Result<usize, TrainError> {
+        let st = self.state.as_ref().expect("trainer state");
+        let dev = st.renderer.ctx.device.clone();
+        let queue = st.renderer.ctx.queue.clone();
+        let params = st.renderer.param_buffers();
+        let src = [
+            params.transforms.clone(),
+            params.opacity.clone(),
+            params.sh.clone(),
+        ];
+        let cum = storage(&dev, "densify_cum", n as u64 * 4);
+        // 2. Prefix sum of the row counts -> output offsets and the new count.
+        if self.scanner.as_ref().is_none_or(|(_, cap)| *cap < n) {
+            self.scanner = Some((PrefixScanner::new(&dev, n.max(1)), n));
+        }
+        let (scanner, _) = self.scanner.as_ref().expect("scanner");
+        scanner.scan(&dev, &queue, counts, &cum, n);
+        let n_after = if n > 0 {
+            read_u32_at(&dev, &queue, &cum, n - 1) as usize
+        } else {
+            0
+        };
         // 3. Scatter every group into new buffers.
         let st = self.state.as_ref().expect("trainer state");
         let cpc2 = (self.sh_degree + 1) * (self.sh_degree + 1);
@@ -832,7 +1097,7 @@ impl Trainer {
                 &self.scatter_pipeline,
                 "densify_scatter",
                 &[
-                    &su, &actions, &cum, &src[kind], &g.m1, &g.m2, &dp, &dm1, &dm2,
+                    &su, actions, &cum, &src[kind], &g.m1, &g.m2, &dp, &dm1, &dm2,
                 ],
             );
             {
@@ -862,13 +1127,7 @@ impl Trainer {
         let scene = GpuScene::from_buffers(pt, po, ps, n_after, self.sh_degree);
         let renderer = Renderer::from_gpu_scene(ctx, scene, self.width, self.height)?;
         self.build_state(renderer, Some([(mt1, mt2), (mo1, mo2), (ms1, ms2)]))?;
-        if self.profile.is_some() && self.step % 1000 == 0 {
-            eprintln!(
-                "[densify] {n} -> {n_after} on device in {:.0} ms",
-                t0.elapsed().as_secs_f64() * 1e3
-            );
-        }
-        Ok(())
+        Ok(n_after)
     }
 
     /// Mean L1 loss over the steps since the last call (reads the device).
@@ -941,4 +1200,35 @@ impl Trainer {
             self.sh_degree,
         )
     }
+}
+
+/// brush's bounds: the per-axis central `percentile` box of `points`;
+/// returns (centre, median axis length).
+fn central_bounds(points: &[[f32; 3]], percentile: f32) -> Option<([f32; 3], f32)> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut center = [0.0f32; 3];
+    let mut sizes = [0.0f32; 3];
+    for k in 0..3 {
+        let mut v: Vec<f32> = points
+            .iter()
+            .map(|p| p[k])
+            .filter(|x| x.is_finite())
+            .collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_by(|a, b| a.total_cmp(b));
+        let lo = ((1.0 - percentile) / 2.0 * v.len() as f32) as usize;
+        let hi = (((1.0 + percentile) / 2.0 * v.len() as f32) as usize).min(v.len() - 1);
+        center[k] = 0.5 * (v[lo] + v[hi]);
+        sizes[k] = v[hi] - v[lo];
+    }
+    sizes.sort_by(|a, b| a.total_cmp(b));
+    Some((center, sizes[1].max(1e-6)))
+}
+
+fn central_bound_size(points: &[[f32; 3]], percentile: f32) -> Option<f32> {
+    central_bounds(points, percentile).map(|(_, s)| s)
 }

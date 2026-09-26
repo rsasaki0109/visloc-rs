@@ -19,7 +19,9 @@ use crate::shaders;
 
 /// Floats per screen-space gradient record: du, dv, dA, dB, dC, dopacity,
 /// dr, dg, db (conic `[A, B, C]` as in `projected_splats`).
-pub const SCREEN_GRAD_FLOATS: usize = 9;
+/// du, dv, dA, dB, dC, dopacity, dr, dg, db and the brush/AbsGS refine
+/// weight (sum over pixels of |dL/du| W + |dL/dv| H).
+pub const SCREEN_GRAD_FLOATS: usize = 10;
 
 /// Parameter gradients of one backward pass, in the forward input layouts
 /// (see [`crate::packing::PackedScene`]), for every gaussian in scene order.
@@ -170,9 +172,11 @@ impl Renderer {
             label: Some("backward"),
         });
         // Gaussians not visible this frame keep zero parameter gradients.
-        encoder.clear_buffer(&st.grad_transforms, 0, None);
-        encoder.clear_buffer(&st.grad_opacity, 0, None);
-        encoder.clear_buffer(&st.grad_sh, 0, None);
+        if !self.grads_zeroed_by_caller {
+            encoder.clear_buffer(&st.grad_transforms, 0, None);
+            encoder.clear_buffer(&st.grad_opacity, 0, None);
+            encoder.clear_buffer(&st.grad_sh, 0, None);
+        }
         if frame.nv > 0 {
             // rasterize_backward accumulates into these with atomics.
             encoder.clear_buffer(

@@ -418,11 +418,35 @@ differentiating against). Structure:
   | gerrard-hall | ours | 30k | 19.579 | 0.7046 | 0.64M | 2344 s |
   | gerrard-hall | ours (main @ PR #206) | 30k | **19.766** | **0.7053** | 0.64M | **1356 s** |
 
-  With the tile sort running in place over 4 per-intersection buffers and
-  project_backward staging SH rows through shared memory (both in PR #206),
-  **all three success bars are met**: quality beats brush (+0.61 / +0.74 dB)
-  and training is 20% / 37% faster than brush on the same GPU (which was
-  thermal-throttling at ~86 C during these runs).
+  **Correction (2026-09-25): the brush scores above are wrong** and so is
+  the "beats brush" reading of this table. brush's PLYs were scored by
+  rendering them with our renderer, whose degree-2/3 SH constants were
+  swapped (fixed in the SH-normalisation commit); that mis-coloured every
+  view-dependent term of *other* trainers' PLYs (our own training was
+  self-consistent) and made brush look 1-6 dB worse. The speed numbers are
+  unaffected.
+- **Fair benchmark (2026-09-25)**, after that fix: our renderer now renders
+  brush's PLY to within 0.02 dB of brush's own eval images (Mip-NeRF 360
+  bonsai: 33.018 vs 33.004 via `gsplat_eval --renders-dir`). Same split
+  (every 8th image by name), black background, 30k steps, GTX 1660 Ti
+  (thermal-throttling); Mip-NeRF 360 at `images_4` for both trainers
+  (brush `--max-resolution 1600`, i.e. no downscale), our population
+  capped at 2.5M. brush times are from its first runs (a duplicate run
+  landed within 6%).
+
+  | scene | ours PSNR / SSIM | brush PSNR / SSIM | ours time | brush time |
+  | --- | --- | --- | --- | --- |
+  | Mip-NeRF 360 bonsai | 32.43 / 0.955 | **33.02 / 0.960** | 1583 s | **1333 s** |
+  | Mip-NeRF 360 room | 32.12 / 0.942 | **32.95 / 0.951** | 1747 s | **1184 s** |
+  | Mip-NeRF 360 garden | 27.20 / 0.855 | **27.62 / 0.868** | 3401 s | **3134 s** |
+  | south-building | 22.44 / 0.804 | **22.69 / 0.805** | **2205 s** | 2379 s |
+  | gerrard-hall | 19.93 / 0.713 | **19.98 / 0.719** | **1444 s** | 2147 s |
+
+  brush has the better quality on all five scenes (by 0.05-0.83 dB; within
+  the 0.5 dB bar on three). We are faster on the two COLMAP sample scenes
+  and slower on Mip-NeRF 360, so the trainer goal is **not** met yet: the
+  open work is quality on the indoor 360 scenes and speed at 2.5M
+  gaussians / 1297x840.
 - **M3**: `gsplat_euroc` example (feature `euroc`): raw EuRoC -> undistort
   -> SIFT -> verified temporal matches -> visloc-rs incremental SfM ->
   trainer, no COLMAP or Python. With `--gpu-sift --gpu-ba` (crates

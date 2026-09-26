@@ -16,7 +16,7 @@
 // total is then added to the gaussian's record in screen_grads with one
 // global CAS float add per component (no per-intersection storage).
 //
-// Record layout (9 floats, per compact id): du, dv, dA, dB, dC, dopacity,
+// Record layout (10 floats, per compact id): du, dv, dA, dB, dC, dopacity,
 // dr, dg, db.
 
 @group(0) @binding(0) var<uniform> u: RasterUniforms;
@@ -32,7 +32,9 @@
 const TILE_W: u32 = 16u;
 const TILE_H: u32 = 16u;
 const BB: u32 = 128u;
-const NG: u32 = 9u;
+// du dv dA dB dC dopacity dr dg db, and the refine weight (brush / AbsGS:
+// sum over pixels of |dL/du| W + |dL/dv| H).
+const NG: u32 = 10u;
 
 var<workgroup> bsplat: array<f32, BB * 9u>;
 var<workgroup> bcompact: array<u32, BB>;
@@ -139,6 +141,7 @@ fn rasterize_backward(
             var g_c = 0.0;
             var g_o = 0.0;
             var g_col = vec3<f32>(0.0, 0.0, 0.0);
+            var g_r = 0.0;
             var hit = false;
             if (in_image && j < last) {
                 let opac = bsplat[s * 9u + 5u];
@@ -172,6 +175,7 @@ fn rasterize_backward(
                             g_b = d_sigma * dx * dy;
                             g_c = d_sigma * 0.5 * dy * dy;
                             g_o = d_alpha * e;
+                            g_r = abs(g_u) * f32(u.img_w) + abs(g_v) * f32(u.img_h);
                         }
                     }
                 }
@@ -184,6 +188,7 @@ fn rasterize_backward(
                 let t_abc = subgroupAdd(vec3<f32>(g_a, g_b, g_c));
                 let t_o = subgroupAdd(g_o);
                 let t_col = subgroupAdd(g_col);
+                let t_r = subgroupAdd(g_r);
                 if (lane == 0u) {
                     let base = s * NG;
                     gacc_add(base + 0u, t_uv.x);
@@ -195,6 +200,7 @@ fn rasterize_backward(
                     gacc_add(base + 6u, t_col.x);
                     gacc_add(base + 7u, t_col.y);
                     gacc_add(base + 8u, t_col.z);
+                    gacc_add(base + 9u, t_r);
                 }
             }
         }

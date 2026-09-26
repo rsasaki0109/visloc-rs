@@ -288,3 +288,38 @@ mod tests {
         assert!(p.opacity.m1.iter().all(|&x| x == 0.0));
     }
 }
+
+/// brush's refine strategy (brush 0.3 `refine_if_needed`), an alternative to
+/// the Inria clone / split / prune rule above. Every `refine_every` steps:
+/// prune gaussians with opacity < `min_opacity`, a log-scale below -15 or a
+/// centre more than 10 bound sizes away; replace them by splitting as many
+/// gaussians sampled by opacity; and, until `growth_stop`, split a further
+/// `growth_select_fraction` of those whose max refine weight (divided by
+/// their visible count) exceeds `growth_grad_threshold`, sampled by that
+/// weight. A split replaces the parent by two copies offset by
+/// +-R (N(0, 0.5) * s), with scales / sqrt 2 and opacity 1 - sqrt(1 - a).
+/// Nearly transparent gaussians also get mean noise every step.
+#[derive(Debug, Clone)]
+pub struct BrushRefineConfig {
+    pub refine_every: usize,
+    pub growth_grad_threshold: f32,
+    pub growth_select_fraction: f32,
+    pub growth_stop: usize,
+    pub min_opacity: f32,
+    pub max_gaussians: usize,
+    pub mean_noise_weight: f32,
+}
+
+impl Default for BrushRefineConfig {
+    fn default() -> Self {
+        Self {
+            refine_every: 200,
+            growth_grad_threshold: 4e-5,
+            growth_select_fraction: 0.1,
+            growth_stop: 15_000,
+            min_opacity: 2.0 / 255.0,
+            max_gaussians: 10_000_000,
+            mean_noise_weight: 40.0,
+        }
+    }
+}

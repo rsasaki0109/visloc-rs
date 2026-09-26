@@ -26,7 +26,8 @@ fn sh_rest_coef(sh_base: u32, rest_pc: u32, ch: u32, k: u32) -> f32 {
 
 // View-dependent colour (raw, + 0.5) up to degree 3; same basis as
 // `eval_sh_basis`.
-fn sh_color(sh_base: u32, rest_pc: u32, d: vec3<f32>) -> vec3<f32> {
+fn sh_color(sh_base: u32, rest_pc: u32, act: u32, d: vec3<f32>) -> vec3<f32> {
+    // rest_pc: stored rest coefficients per channel (stride); act: evaluated.
     let x = d.x;
     let y = d.y;
     let z = d.z;
@@ -36,10 +37,13 @@ fn sh_color(sh_base: u32, rest_pc: u32, d: vec3<f32>) -> vec3<f32> {
     let c0 = 0.4886025;
     let c3 = 1.0925485;
     let c5 = 0.3153916;
-    let c8 = 0.3731762;
-    let c9 = 2.8906113;
-    let c10 = 1.843772;
-    let c11 = 0.5900436;
+    // Inria / brush real-SH normalisation (utils/sh_utils.py C2, C3).
+    let c8 = 0.5900436;
+    let c9 = 2.8906114;
+    let c10 = 0.4570458;
+    let c11 = 0.3731763;
+    let c2b = 0.5462742;
+    let c14 = 1.4453057;
     let b1 = -c0 * y;
     let b2 = c0 * z;
     let b3 = -c0 * x;
@@ -47,30 +51,30 @@ fn sh_color(sh_base: u32, rest_pc: u32, d: vec3<f32>) -> vec3<f32> {
     let b5 = -c3 * y * z;
     let b6 = c5 * (2.0 * zz - xx - yy);
     let b7 = -c3 * x * z;
-    let b8 = c3 * (xx - yy);
+    let b8 = c2b * (xx - yy);
     let b9 = -c8 * y * (3.0 * xx - yy);
     let b10 = c9 * x * y * z;
     let b11 = -c10 * y * (4.0 * zz - xx - yy);
     let b12 = c11 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
     let b13 = -c10 * x * (4.0 * zz - xx - yy);
-    let b14 = c9 * z * (xx - yy);
+    let b14 = c14 * z * (xx - yy);
     let b15 = -c8 * x * (xx - 3.0 * yy);
     var out: vec3<f32>;
     for (var ch = 0u; ch < 3u; ch = ch + 1u) {
         var acc = 0.2820948 * sh_in[sh_base + ch];
-        if (rest_pc >= 3u) {
+        if (act >= 3u) {
             acc = acc + b1 * sh_rest_coef(sh_base, rest_pc, ch, 0u)
                 + b2 * sh_rest_coef(sh_base, rest_pc, ch, 1u)
                 + b3 * sh_rest_coef(sh_base, rest_pc, ch, 2u);
         }
-        if (rest_pc >= 8u) {
+        if (act >= 8u) {
             acc = acc + b4 * sh_rest_coef(sh_base, rest_pc, ch, 3u)
                 + b5 * sh_rest_coef(sh_base, rest_pc, ch, 4u)
                 + b6 * sh_rest_coef(sh_base, rest_pc, ch, 5u)
                 + b7 * sh_rest_coef(sh_base, rest_pc, ch, 6u)
                 + b8 * sh_rest_coef(sh_base, rest_pc, ch, 7u);
         }
-        if (rest_pc >= 15u) {
+        if (act >= 15u) {
             acc = acc + b9 * sh_rest_coef(sh_base, rest_pc, ch, 8u)
                 + b10 * sh_rest_coef(sh_base, rest_pc, ch, 9u)
                 + b11 * sh_rest_coef(sh_base, rest_pc, ch, 10u)
@@ -117,7 +121,8 @@ fn project_visible(@builtin(global_invocation_id) gid3: vec3<u32>) {
     let sh_base = gid * 3u * cpc2;
     // Written out term by term: copying the coefficients into a
     // runtime-indexed local array made the compiler spill it.
-    let color = sh_color(sh_base, cpc2 - 1u, dir);
+    let act = (u.sh_active_degree + 1u) * (u.sh_active_degree + 1u) - 1u;
+    let color = sh_color(sh_base, cpc2 - 1u, act, dir);
 
     let out = compact * PROJECTED_STRIDE;
     projected_splats[out + 0u] = select(0.0, p.proj_u, p.ok);

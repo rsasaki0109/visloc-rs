@@ -25,6 +25,11 @@ struct ProjectUniforms {
     total_splats: u32,
     num_visible: u32,
     num_intersections: u32,
+    // SH degree evaluated (<= sh_degree, the buffer stride).
+    sh_active_degree: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 };
 
 struct RasterUniforms {
@@ -98,8 +103,8 @@ fn eval_sh_basis(d: vec3<f32>) -> array<f32, 16> {
     let z = d.z;
     let c = array<f32, 15>(
         0.4886025, 0.4886025, 0.4886025,
-        1.0925485, 1.0925485, 0.3153916, 1.0925485, 1.0925485,
-        0.3731762, 2.8906113, 1.843772, 0.5900436, 1.843772, 2.8906113, 0.3731762,
+        1.0925485, 1.0925485, 0.3153916, 1.0925485, 0.5462742,
+        0.5900436, 2.8906114, 0.4570458, 0.3731763, 0.4570458, 1.4453057, 0.5900436,
     );
     var b: array<f32, 16>;
     b[0] = 0.2820948;
