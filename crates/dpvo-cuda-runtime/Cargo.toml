@@ -12,5 +12,5 @@ repository.workspace = true
 
 [dependencies]
 # libloading 0.9 requires Rust 1.88; hold at 0.8 for MSRV 1.83.
-libloading = "0.8"
+libloading = "0.9"
 ndarray = "0.17"
