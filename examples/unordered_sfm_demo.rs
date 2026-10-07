@@ -2219,6 +2219,8 @@ struct Args {
     component_model_max_count: usize,
     refine_intrinsics: bool,
     refine_distortion: bool,
+    /// `--shared-focal`: constrain the refined focal to `fx == fy`.
+    shared_focal: bool,
     colmap_style: bool,
     /// Plain-growth final pass: iterative global BA + filter + re-triangulate
     /// (COLMAP final polish without colmap-style per-registration local BA).
@@ -4737,6 +4739,7 @@ where
     let mut candidate_budget: Option<usize> = None;
     let mut refine_intrinsics = false;
     let mut refine_distortion = false;
+    let mut shared_focal = false;
     let mut colmap_style = false;
     let mut final_iterative_global_refinement = false;
     let mut global_ba_max_refinements: Option<usize> = None;
@@ -5230,6 +5233,7 @@ where
             }
             "--refine-intrinsics" => refine_intrinsics = true,
             "--refine-distortion" => refine_distortion = true,
+            "--shared-focal" => shared_focal = true,
             "--colmap-style" => colmap_style = true,
             "--final-iterative-refinement" => final_iterative_global_refinement = true,
             "--global-ba-max-refinements" => {
@@ -5929,6 +5933,9 @@ where
                 .into(),
         );
     }
+    if shared_focal && !(refine_intrinsics || refine_distortion) {
+        return Err("--shared-focal requires --refine-intrinsics or --refine-distortion".into());
+    }
     if input_colmap_calibration.is_some() && (refine_intrinsics || refine_distortion) {
         return Err(
             "--input-colmap-calibration currently keeps per-image PINHOLE intrinsics fixed; remove --refine-intrinsics/--refine-distortion"
@@ -6432,6 +6439,7 @@ where
         component_model_max_count,
         refine_intrinsics,
         refine_distortion,
+        shared_focal,
         colmap_style,
         final_iterative_global_refinement,
         global_ba_max_refinements,
@@ -6810,6 +6818,7 @@ fn validate_persistent_match_worker_args(args: &Args) -> Result<(), String> {
         || !args.final_ba
         || args.refine_intrinsics
         || args.refine_distortion
+        || args.shared_focal
         || args.final_iterative_global_refinement
         || args.global_ba_max_refinements.is_some()
         || args.post_refinement_registration
@@ -17737,6 +17746,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(default_ba_config.linear_solver),
             matrix_free_ba: args.matrix_free_ba,
             refine_distortion: args.refine_distortion,
+            shared_focal: args.shared_focal,
             ..default_ba_config
         },
         periodic_ba_min_registered_images: args.periodic_ba_min_registered_images,
@@ -21276,6 +21286,7 @@ mod diagnose_cli_tests {
         // too so an omitted flag cannot silently select a newer path.
         assert!(!first.refine_intrinsics);
         assert!(!first.refine_distortion);
+        assert!(!first.shared_focal);
         assert!(!first.colmap_style);
         assert!(!first.final_iterative_global_refinement);
         assert_eq!(first.global_ba_max_refinements, None);

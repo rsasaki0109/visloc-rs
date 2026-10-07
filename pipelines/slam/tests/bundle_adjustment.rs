@@ -186,6 +186,122 @@ fn refine_intrinsics_recovers_perturbed_focal_length() {
 }
 
 #[test]
+fn shared_focal_keeps_fx_equal_to_fy_while_recovering_focal_and_distortion() {
+    // Same setup as the perturbed-focal test, but with distortion in the data
+    // and an anisotropic wrong start (fx 520 / fy 515). With `shared_focal` the
+    // solve starts from their mean and must keep fx == fy *exactly* at every
+    // accepted step while still recovering the true focal and (k1, k2).
+    let (true_k1, true_k2) = (-0.05, 0.01);
+    let mut ba = truth_bundle_distorted(true_k1, true_k2);
+    ba.camera = Camera::pinhole(1, 640, 480, 520.0, 515.0, 326.0, 233.0);
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    for (id, _) in world_grid() {
+        ba.fix_landmark(id);
+    }
+
+    let cost_before = ba.cost();
+    let config = BaConfig {
+        refine_intrinsics: true,
+        refine_distortion: true,
+        shared_focal: true,
+        ..BaConfig::default()
+    };
+    ba.optimize(&config)
+        .expect("BA with shared-focal refinement");
+
+    let (fx, fy, cx, cy) = ba.camera.intrinsics().unwrap();
+    assert_eq!(fx, fy, "shared focal must keep fx == fy bit-exactly");
+    assert!(
+        (fx - 500.0).abs() < 0.5,
+        "focal not recovered: f={fx} (truth 500)"
+    );
+    assert!(
+        (cx - 320.0).abs() < 0.5 && (cy - 240.0).abs() < 0.5,
+        "principal point not recovered: cx={cx}, cy={cy}"
+    );
+    let (k1, k2) = ba.camera.radial_distortion().unwrap();
+    assert!(
+        (k1 - true_k1).abs() < 5.0e-3 && (k2 - true_k2).abs() < 5.0e-3,
+        "distortion not recovered: k1={k1}, k2={k2}"
+    );
+    assert!(
+        ba.cost() < 0.1 && ba.cost() < cost_before,
+        "cost {} (was {cost_before})",
+        ba.cost()
+    );
+}
+
+#[test]
+fn shared_focal_fits_the_best_single_focal_to_anisotropic_data() {
+    // Data rendered with fx = 510, fy = 490 cannot be fit exactly by one focal:
+    // the constrained solve must still keep fx == fy, land between the two, and
+    // leave a non-zero residual, while the unconstrained solve fits both.
+    let truth = Camera::pinhole(1, 640, 480, 510.0, 490.0, 320.0, 240.0);
+    let build = || {
+        let mut ba = BundleAdjustment::new(truth.clone());
+        let poses = [
+            (10u64, pose_at(Vector3::new(0.0, 0.0, 0.0))),
+            (20u64, pose_at(Vector3::new(0.5, 0.0, 0.0))),
+            (30u64, pose_at(Vector3::new(1.0, 0.0, 0.0))),
+        ];
+        for (id, pose) in &poses {
+            ba.add_pose(*id, pose.clone());
+        }
+        for (id, point) in world_grid() {
+            ba.add_landmark(id, point);
+        }
+        for (kf_id, pose) in &poses {
+            for (lm_id, point) in world_grid() {
+                let uv = truth.project(&pose.transform_world_point(&point)).unwrap();
+                ba.add_observation(BaObservation {
+                    keyframe_id: *kf_id,
+                    landmark_id: lm_id,
+                    xy: uv,
+                });
+            }
+        }
+        ba.camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        ba.fix_pose(10);
+        ba.fix_pose(20);
+        for (id, _) in world_grid() {
+            ba.fix_landmark(id);
+        }
+        ba
+    };
+    let mut shared = build();
+    shared
+        .optimize(&BaConfig {
+            refine_intrinsics: true,
+            shared_focal: true,
+            ..BaConfig::default()
+        })
+        .unwrap();
+    let (fx, fy, _, _) = shared.camera.intrinsics().unwrap();
+    assert_eq!(fx, fy);
+    assert!(
+        fx > 490.0 && fx < 510.0,
+        "shared focal {fx} should lie between 490 and 510"
+    );
+    assert!(
+        shared.cost() > 1.0e-3,
+        "one focal cannot explain anisotropic data"
+    );
+
+    let mut free = build();
+    free.optimize(&BaConfig {
+        refine_intrinsics: true,
+        ..BaConfig::default()
+    })
+    .unwrap();
+    let (fx, fy, _, _) = free.camera.intrinsics().unwrap();
+    assert!(
+        (fx - 510.0).abs() < 0.5 && (fy - 490.0).abs() < 0.5,
+        "free fx={fx}, fy={fy}"
+    );
+}
+
+#[test]
 fn refine_intrinsics_is_noop_when_disabled() {
     // With the flag off, optimize() must leave the (wrong) intrinsics untouched —
     // the default path is unchanged.
