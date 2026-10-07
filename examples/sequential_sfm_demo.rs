@@ -283,6 +283,8 @@ struct Args {
     colmap_style: bool,
     min_tri_angle: f64,
     refine_intrinsics: bool,
+    /// `--shared-focal`: constrain the refined focal to `fx == fy`.
+    shared_focal: bool,
     next_image_policy: NextImagePolicy,
     post_refinement_registration: bool,
     structureless_registration: bool,
@@ -341,6 +343,7 @@ fn parse_args_from(mut a: Vec<String>) -> Result<Args, String> {
     let mut colmap_style = false;
     let mut min_tri_angle = 2.0f64;
     let mut refine_intrinsics = false;
+    let mut shared_focal = false;
     // Keep the library/API default at CorrespondenceCount while making the
     // sequential demo's no-flag workflow use the robust Auto policy. The
     // historical count and visibility strategies remain explicit flags.
@@ -429,6 +432,7 @@ fn parse_args_from(mut a: Vec<String>) -> Result<Args, String> {
                 min_tri_angle = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--refine-intrinsics" => refine_intrinsics = true,
+            "--shared-focal" => shared_focal = true,
             "--next-image-policy" => {
                 next_image_policy = match a.remove(i + 1).as_str() {
                     "auto" => NextImagePolicy::Auto,
@@ -591,6 +595,7 @@ fn parse_args_from(mut a: Vec<String>) -> Result<Args, String> {
         colmap_style,
         min_tri_angle,
         refine_intrinsics,
+        shared_focal,
         next_image_policy,
         post_refinement_registration,
         structureless_registration,
@@ -2056,6 +2061,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // BA this binary runs — periodic, final, and (via `hierarchical_config.local_submap.sfm
     // = config.clone()` below) each hierarchical local submap's — reads `config.ba_config`.
     config.ba_config.parallel = args.parallel_ba;
+    if args.shared_focal && !args.refine_intrinsics {
+        return Err("--shared-focal requires --refine-intrinsics".into());
+    }
+    config.ba_config.shared_focal = args.shared_focal;
     if args.hierarchical {
         if args.refine_intrinsics {
             return Err(
