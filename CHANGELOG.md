@@ -20,6 +20,15 @@ All notable changes to `visloc-rs` will be documented here.
   radial-only. Such cameras now use the full Brown-Conrady model (shared with
   `FULL_OPENCV`, k3..k6 = 0); results with `p1 = p2 = 0` are bit-identical to
   before. New `Camera::tangential_distortion`.
+- **Pose/structure BA ignored self-calibrated radial distortion.** With
+  `refine_intrinsics = false` (e.g. the SfM polish / warm-start passes after
+  `--refine-distortion`), `optimize_weighted` built its residuals and
+  Jacobians with an undistorted pinhole while the cost it accepts steps
+  against used the distorted `Camera::project`, so LM optimised a different
+  model than it measured and could stall. The monocular residual and Jacobian
+  (serial, parallel, and dense-QR assembly, plus the GNC residual vector) now
+  apply `1 + k1·r² + k2·r⁴` with an analytic Jacobian; distortion-free cameras
+  keep the historical closed form bit-for-bit.
 
 ### Added
 

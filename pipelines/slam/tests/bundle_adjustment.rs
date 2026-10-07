@@ -394,6 +394,69 @@ fn bundle_optimize_pulls_drifted_pose_back_to_truth() {
     );
 }
 
+/// Exact bundle rendered through `camera` (including its lens), with KF30 and one
+/// landmark drifted, so a pose/structure-only BA (no intrinsics refinement)
+/// has to move both through the camera's own projection.
+fn drifted_bundle_through(camera: Camera) -> BundleAdjustment {
+    let mut ba = BundleAdjustment::new(camera.clone());
+    let truth_poses = [
+        (10u64, pose_at(Vector3::new(0.0, 0.0, 0.0))),
+        (20u64, pose_at(Vector3::new(0.5, 0.0, 0.0))),
+        (30u64, pose_at(Vector3::new(1.0, 0.0, 0.0))),
+    ];
+    for (id, pose) in &truth_poses {
+        ba.add_pose(*id, pose.clone());
+    }
+    for (id, point) in world_grid() {
+        ba.add_landmark(id, point);
+    }
+    for (kf_id, pose) in &truth_poses {
+        for (lm_id, point) in world_grid() {
+            let uv = camera
+                .project(&pose.transform_world_point(&point))
+                .expect("point in front of camera");
+            ba.add_observation(BaObservation {
+                keyframe_id: *kf_id,
+                landmark_id: lm_id,
+                xy: uv,
+            });
+        }
+    }
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    ba.add_pose(30, pose_at(Vector3::new(1.05, 0.02, 0.03)));
+    ba.add_landmark(5, Point3::new(0.03, -0.02, 6.1));
+    ba
+}
+
+fn assert_distorted_bundle_converges(camera: Camera) {
+    let mut ba = drifted_bundle_through(camera);
+    let result = ba
+        .optimize(&BaConfig::default())
+        .expect("pose/structure BA with a distorted camera");
+    assert!(
+        result.final_cost < 1.0e-10,
+        "residual must vanish when the BA uses the camera's lens model: {} (was {})",
+        result.final_cost,
+        result.initial_cost
+    );
+    let recovered = ba.poses[&30].camera_center_world();
+    assert!(
+        (recovered - Point3::new(1.0, 0.0, 0.0)).norm() < 1.0e-5,
+        "recovered KF30 center {recovered:?}"
+    );
+}
+
+#[test]
+fn pose_structure_ba_uses_radial_distortion_in_residual_and_jacobian() {
+    // Before the fix, the plain BA built its step from an undistorted pinhole
+    // while the cost evaluated the distorted camera, so strong radial
+    // distortion stalled LM far from the truth.
+    assert_distorted_bundle_converges(Camera::pinhole_radial(
+        1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.15, 0.05,
+    ));
+}
+
 #[test]
 fn bundle_optimize_recovers_drifted_landmark_from_two_views() {
     let mut ba = truth_bundle();

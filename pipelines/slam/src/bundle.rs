@@ -2084,6 +2084,7 @@ impl BundleAdjustment {
             out.resize(n, f64::NAN);
             return out;
         };
+        let mono_projection = MonoProjection::for_camera(&self.camera);
         for obs in &self.observations {
             let s = (|| {
                 let pose = self.poses.get(&obs.keyframe_id)?;
@@ -2092,7 +2093,11 @@ impl BundleAdjustment {
                 if xc.z <= 0.0 {
                     return None;
                 }
-                let predicted = project_pinhole(&intrinsics, &xc)?;
+                let predicted = if mono_projection == MonoProjection::Pinhole {
+                    project_pinhole(&intrinsics, &xc)?
+                } else {
+                    self.camera.project(&xc)?
+                };
                 let r = predicted - obs.xy;
                 Some(r.x * r.x + r.y * r.y)
             })();
@@ -6764,18 +6769,9 @@ fn compute_mono_contribution(
     if xc.z <= 0.0 {
         return None;
     }
-    let predicted = project_pinhole(intrinsics, &xc)?;
+    let projection = MonoProjection::for_camera(&ba.camera);
+    let (predicted, j_pi) = mono_project_with_jacobian(projection, intrinsics, &xc)?;
     let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
-
-    let (fx, fy, _, _) = *intrinsics;
-    let z_inv = 1.0 / xc.z;
-    let mut j_pi = Matrix2x3::<f64>::zeros();
-    j_pi[(0, 0)] = fx * z_inv;
-    j_pi[(0, 1)] = 0.0;
-    j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
-    j_pi[(1, 0)] = 0.0;
-    j_pi[(1, 1)] = fy * z_inv;
-    j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
 
     let xw_skew = skew(&point.coords);
     let mut dx_dxi = nalgebra::Matrix3x6::<f64>::zeros();
@@ -6968,6 +6964,7 @@ fn build_normal_equations(
             &mut landmarks,
         );
     } else {
+        let projection = MonoProjection::for_camera(&ba.camera);
         for (obs_idx, obs) in ba.observations.iter().enumerate() {
             let pose = &ba.poses[&obs.keyframe_id];
             let point = &ba.landmarks[&obs.landmark_id];
@@ -6980,24 +6977,14 @@ fn build_normal_equations(
             if xc.z <= 0.0 {
                 continue;
             }
-            // Predicted pixel - measured pixel.
-            let predicted = match project_pinhole(intrinsics, &xc) {
-                Some(p) => p,
-                None => continue,
+            // Predicted pixel - measured pixel, and the projection Jacobian
+            // J_π (2×3) at X_c (pinhole: (1/Z)[[fx, 0, -fx X/Z], [0, fy, -fy Y/Z]];
+            // distortion-aware otherwise, see `MonoProjection`).
+            let Some((predicted, j_pi)) = mono_project_with_jacobian(projection, intrinsics, &xc)
+            else {
+                continue;
             };
             let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
-
-            // Projection Jacobian J_π (2×3) at X_c = (X, Y, Z):
-            //   J_π = (1/Z) [[fx, 0, -fx X/Z], [0, fy, -fy Y/Z]]
-            let (fx, fy, _, _) = *intrinsics;
-            let z_inv = 1.0 / xc.z;
-            let mut j_pi = Matrix2x3::<f64>::zeros();
-            j_pi[(0, 0)] = fx * z_inv;
-            j_pi[(0, 1)] = 0.0;
-            j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
-            j_pi[(1, 0)] = 0.0;
-            j_pi[(1, 1)] = fy * z_inv;
-            j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
 
             // Right perturbation pose Jacobian:
             //   ∂X_c / ∂[ρ; ω] = [R, -R · [X_w]_×]   (3×6)
@@ -8167,6 +8154,7 @@ pub fn build_sqrt_factor_rows(
     let stereo_offset = ba.observations.len();
     let general_offset = ba.observations.len() + ba.stereo_observations.len();
 
+    let mono_projection = MonoProjection::for_camera(&ba.camera);
     for (obs_idx, obs) in ba.observations.iter().enumerate() {
         let Some(pose) = ba.poses.get(&obs.keyframe_id) else {
             continue;
@@ -8183,17 +8171,11 @@ pub fn build_sqrt_factor_rows(
         if xc.z <= 0.0 {
             continue;
         }
-        let Some(predicted) = project_pinhole(intrinsics, &xc) else {
+        let Some((predicted, j_pi)) = mono_project_with_jacobian(mono_projection, intrinsics, &xc)
+        else {
             continue;
         };
         let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
-        let (fx, fy, _, _) = *intrinsics;
-        let z_inv = 1.0 / xc.z;
-        let mut j_pi = Matrix2x3::<f64>::zeros();
-        j_pi[(0, 0)] = fx * z_inv;
-        j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
-        j_pi[(1, 1)] = fy * z_inv;
-        j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
         let xw_skew = skew(&point.coords);
         let mut dx_dxi = nalgebra::Matrix3x6::<f64>::zeros();
         dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
@@ -9044,6 +9026,89 @@ fn schur_reduce_parallel(
     }
 
     (h_ll_inv_cache, b_l_cache)
+}
+
+/// How a monocular observation is projected by the pose/structure BA
+/// (`optimize_weighted` and the solvers it dispatches to).
+///
+/// The residual and its Jacobian must use the same camera model as the cost
+/// (`robust_cost_weighted`, which calls the distortion-aware
+/// [`Camera::project`]); otherwise LM steps are computed for a pinhole that the
+/// accept/reject test does not evaluate. The BA accepts only `Pinhole` /
+/// `SimplePinhole` cameras (see `intrinsics`), whose only lens terms are the
+/// optional radial `[k1, k2]` tail written by distortion self-calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MonoProjection {
+    /// Distortion-free pinhole: the historical closed form, bit-identical.
+    Pinhole,
+    /// Radial `1 + k1·r² + k2·r⁴` with an analytic Jacobian.
+    Radial { k1: f64, k2: f64 },
+}
+
+impl MonoProjection {
+    fn for_camera(camera: &Camera) -> Self {
+        match camera
+            .radial_distortion()
+            .filter(|&(k1, k2)| k1 != 0.0 || k2 != 0.0)
+        {
+            None => Self::Pinhole,
+            Some((k1, k2)) => Self::Radial { k1, k2 },
+        }
+    }
+}
+
+/// Predicted pixel of a camera-frame point and the 2×3 Jacobian of that
+/// prediction w.r.t. the point, for the lens model selected by `projection`
+/// (the radial branch reproduces [`Camera::project`] exactly).
+fn mono_project_with_jacobian(
+    projection: MonoProjection,
+    intrinsics: &(f64, f64, f64, f64),
+    xc: &Point3<f64>,
+) -> Option<(Point2<f64>, Matrix2x3<f64>)> {
+    if xc.z <= 0.0 {
+        return None;
+    }
+    let (fx, fy, cx, cy) = *intrinsics;
+    match projection {
+        MonoProjection::Pinhole => {
+            let predicted = project_pinhole(intrinsics, xc)?;
+            let z_inv = 1.0 / xc.z;
+            let mut j_pi = Matrix2x3::<f64>::zeros();
+            j_pi[(0, 0)] = fx * z_inv;
+            j_pi[(0, 1)] = 0.0;
+            j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
+            j_pi[(1, 0)] = 0.0;
+            j_pi[(1, 1)] = fy * z_inv;
+            j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
+            Some((predicted, j_pi))
+        }
+        MonoProjection::Radial { k1, k2 } => {
+            // Same arithmetic as `Camera::project`'s radial branch, so the
+            // residual equals the one the cost evaluates.
+            let x = xc.x / xc.z;
+            let y = xc.y / xc.z;
+            let r2 = x * x + y * y;
+            let d = 1.0 + k1 * r2 + k2 * r2 * r2;
+            let predicted = Point2::new(fx * (x * d) + cx, fy * (y * d) + cy);
+            // J = diag(fx, fy) · D · ∂(x, y)/∂X_c with
+            // D = [[d + 2x²g, 2xyg], [2xyg, d + 2y²g]], g = k1 + 2·k2·r²
+            // (the formula of the joint intrinsics solve).
+            let g = k1 + 2.0 * k2 * r2;
+            let d11 = d + 2.0 * x * x * g;
+            let d12 = 2.0 * x * y * g;
+            let d22 = d + 2.0 * y * y * g;
+            let z_inv = 1.0 / xc.z;
+            let mut j_pi = Matrix2x3::<f64>::zeros();
+            j_pi[(0, 0)] = fx * d11 * z_inv;
+            j_pi[(0, 1)] = fx * d12 * z_inv;
+            j_pi[(0, 2)] = -fx * (d11 * x + d12 * y) * z_inv;
+            j_pi[(1, 0)] = fy * d12 * z_inv;
+            j_pi[(1, 1)] = fy * d22 * z_inv;
+            j_pi[(1, 2)] = -fy * (d12 * x + d22 * y) * z_inv;
+            (predicted.coords.iter().all(|v| v.is_finite()) && j_pi.iter().all(|v| v.is_finite()))
+                .then_some((predicted, j_pi))
+        }
+    }
 }
 
 fn project_pinhole(intrinsics: &(f64, f64, f64, f64), xc: &Point3<f64>) -> Option<Point2<f64>> {
