@@ -541,3 +541,23 @@ fn assert_invalid_binary<T>(
         other => panic!("expected InvalidBinary, got {other:?}"),
     }
 }
+
+#[test]
+fn imported_opencv_camera_applies_tangential_distortion() {
+    // A real COLMAP OPENCV camera with non-zero p1/p2 used to be projected with
+    // k1/k2 only. Reference pixel from OpenCV 4.10 `cv2.projectPoints`.
+    let cameras = parse_cameras_txt(
+        "1 OPENCV 1920 1080 1353.09 1338.03 962.7 539.93 0.0346 -0.0235 0.0012 -0.0008\n",
+    )
+    .unwrap();
+    let pixel = cameras[0].project(&Point3::new(0.5, -0.3, 1.0)).unwrap();
+    assert!(
+        (pixel.x - 1643.9695843529998).abs() < 1e-8 && (pixel.y - 136.0453501334).abs() < 1e-8,
+        "got {pixel:?}"
+    );
+    let ray = cameras[0].normalize_pixel(&pixel).unwrap();
+    assert!(
+        (ray.x - 0.5).abs() < 1e-9 && (ray.y + 0.3).abs() < 1e-9,
+        "got {ray:?}"
+    );
+}

@@ -13242,7 +13242,8 @@ fn ba_point_projection_jacobian(
     }
     let has_distortion = camera
         .radial_distortion()
-        .is_some_and(|(k1, k2)| k1 != 0.0 || k2 != 0.0);
+        .is_some_and(|(k1, k2)| k1 != 0.0 || k2 != 0.0)
+        || camera.tangential_distortion().is_some();
     if !has_distortion {
         let z_inv = 1.0 / point_camera.z;
         let mut jacobian = Matrix2x3::<f64>::zeros();

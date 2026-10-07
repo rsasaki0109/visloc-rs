@@ -4,6 +4,15 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **OPENCV tangential distortion.** `Camera::project` / `normalize_pixel` /
+  `unit_ray_from_pixel` ignored `p1, p2` of an `OpenCv` camera, so a COLMAP
+  `OPENCV` model with non-zero tangential terms was silently treated as
+  radial-only. Such cameras now use the full Brown-Conrady model (shared with
+  `FULL_OPENCV`, k3..k6 = 0); results with `p1 = p2 = 0` are bit-identical to
+  before. New `Camera::tangential_distortion`.
+
 ## 0.2.0 - 2026-09-15
 
 ### Highlights

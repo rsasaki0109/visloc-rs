@@ -827,6 +827,12 @@ fn initial_poses_from_colmap_images_txt_with_expected_cameras(
     let camera_text = std::fs::read_to_string(&camera_path).map_err(|error| {
         format!("--initial-poses requires readable sibling cameras.txt at {camera_path:?}: {error}")
     })?;
+    if camera.tangential_distortion().is_some() {
+        return Err(
+            "--initial-poses COLMAP PINHOLE validation does not support nonzero input distortion"
+                .into(),
+        );
+    }
     if let Some((k1, k2)) = camera.radial_distortion() {
         if k1.abs() > 1.0e-12 || k2.abs() > 1.0e-12 {
             return Err(
