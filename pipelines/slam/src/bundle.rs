@@ -2836,6 +2836,11 @@ impl BundleAdjustment {
         }
         let k_dim = if refine_dist { 6 } else { 4 };
         let cam_dim = k_off + k_dim;
+        if config.shared_focal {
+            let f = 0.5 * (self.camera.params[0] + self.camera.params[1]);
+            self.camera.params[0] = f;
+            self.camera.params[1] = f;
+        }
 
         let initial_cost = self.robust_cost_weighted(&kernel, None);
         let mut iterations: Vec<BaIterationStats> = Vec::with_capacity(config.max_iterations);
@@ -2895,7 +2900,33 @@ impl BundleAdjustment {
                 }
             }
 
-            let delta_cam = match solve_normal_equations(&s, &b_reduced) {
+            let solved = if config.shared_focal {
+                // Reduce with T: full -> shared, fy (index k_off + 1) folded into
+                // fx (k_off): S' = T^T S T, b' = T^T b, delta = T delta'.
+                let fy = k_off + 1;
+                let map = |i: usize| {
+                    if i < fy {
+                        i
+                    } else if i == fy {
+                        k_off
+                    } else {
+                        i - 1
+                    }
+                };
+                let mut s_red = DMatrix::<f64>::zeros(cam_dim - 1, cam_dim - 1);
+                let mut b_red = DVector::<f64>::zeros(cam_dim - 1);
+                for i in 0..cam_dim {
+                    b_red[map(i)] += b_reduced[i];
+                    for j in 0..cam_dim {
+                        s_red[(map(i), map(j))] += s[(i, j)];
+                    }
+                }
+                solve_normal_equations(&s_red, &b_red)
+                    .map(|d| DVector::<f64>::from_fn(cam_dim, |i, _| d[map(i)]))
+            } else {
+                solve_normal_equations(&s, &b_reduced)
+            };
+            let delta_cam = match solved {
                 Ok(d) => d,
                 Err(_) => {
                     lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
@@ -4347,6 +4378,16 @@ pub struct BaConfig {
     /// are appended to `Camera::params` as `[fx, fy, cx, cy, k1, k2]`. **`false`
     /// by default.**
     pub refine_distortion: bool,
+    /// Constrain the refined focal length to `fx == fy` (one shared focal, as
+    /// COLMAP's `SIMPLE_*` / `RADIAL` models and every square-pixel sensor do).
+    /// Without it `fx` and `fy` move independently, which lets weakly
+    /// observable motion (e.g. near-pure forward translation) trade a spurious
+    /// aspect ratio against structure. The constraint is applied to the reduced
+    /// camera system (`fx`/`fy` rows and columns summed, the shared update
+    /// written to both), so the Jacobian builder is unchanged. Requires
+    /// `refine_intrinsics`; a camera whose `fx != fy` starts from their mean.
+    /// **`false` by default** (the joint solve is then bit-identical to before).
+    pub shared_focal: bool,
     /// Run the per-observation assembly, per-landmark Schur reduction, and
     /// back-substitution loops of [`BundleAdjustment::optimize_weighted`]'s
     /// Levenberg-Marquardt iteration on the `rayon` pool (see the module's
@@ -4392,6 +4433,7 @@ impl Default for BaConfig {
             robust_kernel: RobustKernel::None,
             refine_intrinsics: false,
             refine_distortion: false,
+            shared_focal: false,
             parallel: false,
             matrix_free_ba: false,
         }
