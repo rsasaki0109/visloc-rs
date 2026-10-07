@@ -9122,6 +9122,7 @@ pub(crate) fn audit_visual_jacobian_case(
         || camera
             .radial_distortion()
             .is_some_and(|(k1, k2)| k1 != 0.0 || k2 != 0.0)
+        || camera.tangential_distortion().is_some()
     {
         return None;
     }

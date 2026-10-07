@@ -14,6 +14,12 @@ All notable changes to `visloc-rs` will be documented here.
   exports it as `OPENCV` with `p1 = p2 = 0` (the identical projection), and
   fallible writers reject any camera whose parameter count does not match its
   COLMAP model. New public helper `visloc_io::colmap::colmap_camera_record`.
+- **OPENCV tangential distortion.** `Camera::project` / `normalize_pixel` /
+  `unit_ray_from_pixel` ignored `p1, p2` of an `OpenCv` camera, so a COLMAP
+  `OPENCV` model with non-zero tangential terms was silently treated as
+  radial-only. Such cameras now use the full Brown-Conrady model (shared with
+  `FULL_OPENCV`, k3..k6 = 0); results with `p1 = p2 = 0` are bit-identical to
+  before. New `Camera::tangential_distortion`.
 
 ### Added
 

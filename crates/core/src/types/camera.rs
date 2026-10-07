@@ -179,7 +179,8 @@ impl Camera {
     /// Radial-distortion coefficients `(k1, k2)` carried alongside the
     /// pinhole intrinsics, if any. A plain 4-parameter pinhole returns `None`
     /// (distortion-free); `Pinhole` / `OpenCv` read the optional trailing
-    /// `[k1, k2]`, while COLMAP `SimpleRadial` / `Radial` read their native
+    /// `[k1, k2]` (an `OpenCv` camera's `(p1, p2)` are reported separately by
+    /// [`Self::tangential_distortion`]), while COLMAP `SimpleRadial` / `Radial` read their native
     /// `[f, cx, cy, k1(, k2)]` layout. The fisheye and Double Sphere models
     /// carry their own distortion and return `None` here.
     pub fn radial_distortion(&self) -> Option<(f64, f64)> {
@@ -195,6 +196,21 @@ impl Camera {
                 .map(|&k1| (k1, self.params.get(4).copied().unwrap_or(0.0))),
             _ => None,
         }
+    }
+
+    /// Tangential-distortion coefficients `(p1, p2)` of a COLMAP `OPENCV`
+    /// camera (`[fx, fy, cx, cy, k1, k2, p1, p2]`), or `None` when the model is
+    /// not `OpenCv`, the slots are absent, or both are zero. When present,
+    /// [`Self::project`] and [`Self::normalize_pixel`] apply the full
+    /// Brown-Conrady model (radial + tangential); without them the radial-only
+    /// path is used, unchanged.
+    pub fn tangential_distortion(&self) -> Option<(f64, f64)> {
+        if self.model != CameraModel::OpenCv {
+            return None;
+        }
+        let p1 = self.params.get(6).copied().unwrap_or(0.0);
+        let p2 = self.params.get(7).copied().unwrap_or(0.0);
+        (p1 != 0.0 || p2 != 0.0).then_some((p1, p2))
     }
 
     pub fn intrinsics(&self) -> Option<(f64, f64, f64, f64)> {
@@ -247,7 +263,9 @@ impl Camera {
             }
             return Some(Point2::new(ray.x / ray.z, ray.y / ray.z));
         }
-        if self.model == CameraModel::FullOpenCv {
+        // `OPENCV` is `FULL_OPENCV` with k3..k6 = 0, so a camera with non-zero
+        // (p1, p2) shares its iterative undistortion.
+        if self.model == CameraModel::FullOpenCv || self.tangential_distortion().is_some() {
             let (fx, fy, cx, cy) = self.intrinsics()?;
             let xd = (point.x - cx) / fx;
             let yd = (point.y - cy) / fy;
@@ -306,6 +324,17 @@ impl Camera {
                 project_fov(fx, fy, cx, cy, omega, point_camera)
             }
             CameraModel::FullOpenCv => {
+                let [fx, fy, cx, cy] = params4(&self.params)?;
+                project_full_opencv(
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    full_opencv_coeffs(&self.params),
+                    point_camera,
+                )
+            }
+            CameraModel::OpenCv if self.tangential_distortion().is_some() => {
                 let [fx, fy, cx, cy] = params4(&self.params)?;
                 project_full_opencv(
                     fx,
@@ -810,5 +839,60 @@ mod tests {
             assert!(model.is_fisheye());
         }
         assert_eq!(CameraModel::DoubleSphere.colmap_name(), None);
+    }
+
+    fn opencv(p1: f64, p2: f64) -> Camera {
+        Camera {
+            id: 0,
+            model: CameraModel::OpenCv,
+            width: 1920,
+            height: 1080,
+            params: vec![1353.09, 1338.03, 962.7, 539.93, 0.0346, -0.0235, p1, p2],
+        }
+    }
+
+    #[test]
+    fn opencv_tangential_matches_cv2_project_points() {
+        // Reference values from OpenCV 4.10 `cv2.projectPoints` with
+        // K = [[1353.09, 0, 962.7], [0, 1338.03, 539.93]] and
+        // dist = [k1, k2, p1, p2] = [0.0346, -0.0235, 0.0012, -0.0008].
+        let camera = opencv(0.0012, -0.0008);
+        assert_eq!(camera.tangential_distortion(), Some((0.0012, -0.0008)));
+        for (point, (u, v)) in [
+            (
+                Point3::new(0.5, -0.3, 1.0),
+                (1643.9695843529998, 136.0453501334),
+            ),
+            (
+                Point3::new(-0.7, 0.4, 1.2),
+                (162.9927043515022, 992.2680873586517),
+            ),
+            (
+                Point3::new(0.6, 0.35, 0.9),
+                (1875.0649158305705, 1067.547689735487),
+            ),
+        ] {
+            let pixel = camera.project(&point).unwrap();
+            assert!(
+                (pixel.x - u).abs() < 1e-8 && (pixel.y - v).abs() < 1e-8,
+                "{point:?}: got {pixel:?}, cv2 ({u}, {v})"
+            );
+            round_trip(&camera, point);
+        }
+    }
+
+    #[test]
+    fn opencv_without_tangential_keeps_the_radial_only_path_bit_exact() {
+        // p1 = p2 = 0 must not change results for existing OPENCV / radial users.
+        let opencv = opencv(0.0, 0.0);
+        let radial = Camera::pinhole_radial(
+            0, 1920, 1080, 1353.09, 1338.03, 962.7, 539.93, 0.0346, -0.0235,
+        );
+        assert_eq!(opencv.tangential_distortion(), None);
+        for point in [Point3::new(0.5, -0.3, 1.0), Point3::new(-0.7, 0.4, 1.2)] {
+            let a = opencv.project(&point).unwrap();
+            assert_eq!(a, radial.project(&point).unwrap());
+            assert_eq!(opencv.normalize_pixel(&a), radial.normalize_pixel(&a));
+        }
     }
 }
