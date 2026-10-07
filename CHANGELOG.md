@@ -4,6 +4,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **Pose/structure BA ignored self-calibrated radial distortion.** With
+  `refine_intrinsics = false` (e.g. the SfM polish / warm-start passes after
+  `--refine-distortion`), `optimize_weighted` built its residuals and
+  Jacobians with an undistorted pinhole while the cost it accepts steps
+  against used the distorted `Camera::project`, so LM optimised a different
+  model than it measured and could stall. The monocular residual and Jacobian
+  (serial, parallel, and dense-QR assembly, plus the GNC residual vector) now
+  apply `1 + k1·r² + k2·r⁴` with an analytic Jacobian; distortion-free cameras
+  keep the historical closed form bit-for-bit.
+
 ## 0.2.0 - 2026-09-15
 
 ### Highlights
