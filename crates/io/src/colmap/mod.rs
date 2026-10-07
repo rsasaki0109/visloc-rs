@@ -197,6 +197,9 @@ pub fn read_colmap_binary_model(path: impl AsRef<Path>) -> Result<VisualMap, Col
 
 pub fn write_colmap_text_model(map: &VisualMap, path: impl AsRef<Path>) -> Result<(), ColmapError> {
     let path = path.as_ref();
+    for camera in map.cameras.values() {
+        validated_colmap_camera_record(camera)?;
+    }
     fs::create_dir_all(path)?;
     fs::write(path.join("cameras.txt"), format_cameras_txt(map))?;
     fs::write(path.join("images.txt"), format_images_txt(map))?;
@@ -210,9 +213,10 @@ pub fn write_colmap_text_model(map: &VisualMap, path: impl AsRef<Path>) -> Resul
 /// The writer materialises `cameras.txt`, `images.txt`, and `points3D.txt`
 /// under `out_dir` from a stereo VO output:
 ///
-/// - `camera`: shared pinhole intrinsics (the model is replicated as a single
-///   COLMAP camera id; `camera.params` must already match the COLMAP layout
-///   for `camera.model`)
+/// - `camera`: shared intrinsics (replicated as a single COLMAP camera id).
+///   Trailing radial `[k1, k2]` on a `Pinhole` is exported as `OPENCV`
+///   (see [`colmap_camera_record`]); any other params must already match the
+///   COLMAP layout for `camera.model`, otherwise the export is rejected
 /// - `poses`: per-frame `world_to_camera` SE3 (one COLMAP image entry each)
 /// - `left_features`: left keypoints per frame; only the keypoints that
 ///   participate in a stereo feature are written to the per-image 2D point
@@ -251,24 +255,14 @@ where
     // Reject CameraModel::Unknown(name) that the binary counterpart would
     // also reject, so a caller driving both writers off the same input
     // either gets both files or the same structured error from each.
-    colmap_id_from_camera_model(&camera.model)?;
+    let (colmap_model, colmap_params) = validated_colmap_camera_record(camera)?;
 
     let out_dir = out_dir.as_ref();
     fs::create_dir_all(out_dir)?;
 
     // cameras.txt — one shared camera.
     let mut cameras_text = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
-    cameras_text.push_str(&format!(
-        "{} {} {} {}",
-        camera.id,
-        camera_model_to_colmap_name(&camera.model),
-        camera.width,
-        camera.height,
-    ));
-    for param in &camera.params {
-        cameras_text.push_str(&format!(" {}", format_f64(*param)));
-    }
-    cameras_text.push('\n');
+    cameras_text.push_str(&format_camera_line(camera, &colmap_model, &colmap_params));
     fs::write(out_dir.join("cameras.txt"), cameras_text)?;
 
     // Aggregate world-frame landmarks (deduplication is intentionally skipped
@@ -393,7 +387,8 @@ where
     fs::create_dir_all(out_dir)?;
 
     // cameras.bin — single shared camera (matches the text writer).
-    let model_id = colmap_id_from_camera_model(&camera.model)?;
+    let (colmap_model, colmap_params) = validated_colmap_camera_record(camera)?;
+    let model_id = colmap_id_from_camera_model(&colmap_model)?;
     let camera_id_u32 = u32::try_from(camera.id).map_err(|_| {
         ColmapError::InvalidExportInput(format!(
             "camera id {} does not fit in u32 (COLMAP binary cameras use u32 ids)",
@@ -406,7 +401,7 @@ where
     cameras_bytes.extend_from_slice(&model_id.to_le_bytes());
     cameras_bytes.extend_from_slice(&(camera.width as u64).to_le_bytes());
     cameras_bytes.extend_from_slice(&(camera.height as u64).to_le_bytes());
-    for param in &camera.params {
+    for param in &colmap_params {
         cameras_bytes.extend_from_slice(&param.to_le_bytes());
     }
     fs::write(out_dir.join("cameras.bin"), cameras_bytes)?;
@@ -540,24 +535,14 @@ where
             left_features.len(),
         )));
     }
-    colmap_id_from_camera_model(&camera.model)?;
+    let (colmap_model, colmap_params) = validated_colmap_camera_record(camera)?;
 
     let out_dir = out_dir.as_ref();
     fs::create_dir_all(out_dir)?;
 
     // cameras.txt — one shared camera.
     let mut cameras_text = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
-    cameras_text.push_str(&format!(
-        "{} {} {} {}",
-        camera.id,
-        camera_model_to_colmap_name(&camera.model),
-        camera.width,
-        camera.height,
-    ));
-    for param in &camera.params {
-        cameras_text.push_str(&format!(" {}", format_f64(*param)));
-    }
-    cameras_text.push('\n');
+    cameras_text.push_str(&format_camera_line(camera, &colmap_model, &colmap_params));
     fs::write(out_dir.join("cameras.txt"), cameras_text)?;
 
     // For each frame, map left-keypoint index -> assigned POINT3D_ID so the
@@ -665,7 +650,7 @@ where
     }
     let mut unique_cameras = BTreeMap::<u64, Camera>::new();
     for camera in cameras {
-        colmap_id_from_camera_model(&camera.model)?;
+        validated_colmap_camera_record(camera)?;
         if camera.width == 0 || camera.height == 0 || camera.params.iter().any(|p| !p.is_finite()) {
             return Err(ColmapError::InvalidExportInput(format!(
                 "camera {} has invalid dimensions or non-finite parameters",
@@ -687,17 +672,8 @@ where
 
     let mut cameras_text = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
     for camera in unique_cameras.values() {
-        cameras_text.push_str(&format!(
-            "{} {} {} {}",
-            camera.id,
-            camera_model_to_colmap_name(&camera.model),
-            camera.width,
-            camera.height,
-        ));
-        for param in &camera.params {
-            cameras_text.push_str(&format!(" {}", format_f64(*param)));
-        }
-        cameras_text.push('\n');
+        let (model, params) = colmap_camera_record(camera);
+        cameras_text.push_str(&format_camera_line(camera, &model, &params));
     }
     fs::write(out_dir.join("cameras.txt"), cameras_text)?;
 
@@ -793,17 +769,8 @@ pub fn format_cameras_txt(map: &VisualMap) -> String {
     let mut cameras = map.cameras.values().collect::<Vec<_>>();
     cameras.sort_by_key(|camera| camera.id);
     for camera in cameras {
-        output.push_str(&format!(
-            "{} {} {} {}",
-            camera.id,
-            camera_model_to_colmap_name(&camera.model),
-            camera.width,
-            camera.height
-        ));
-        for param in &camera.params {
-            output.push_str(&format!(" {}", format_f64(*param)));
-        }
-        output.push('\n');
+        let (model, params) = colmap_camera_record(camera);
+        output.push_str(&format_camera_line(camera, &model, &params));
     }
     output
 }
@@ -1132,6 +1099,88 @@ pub fn parse_points3d_bin(contents: &[u8]) -> Result<Vec<Landmark>, ColmapError>
 
     reader.finish()?;
     Ok(landmarks)
+}
+
+/// Number of `PARAMS[]` the COLMAP camera model carries in `cameras.txt` /
+/// `cameras.bin`, or `None` for models COLMAP does not define.
+fn colmap_param_count(model: &CameraModel) -> Option<usize> {
+    Some(match model {
+        CameraModel::SimplePinhole => 3,
+        CameraModel::Pinhole => 4,
+        CameraModel::SimpleRadial => 4,
+        CameraModel::Radial => 5,
+        CameraModel::OpenCv => 8,
+        CameraModel::OpenCvFisheye => 8,
+        CameraModel::FullOpenCv => 12,
+        CameraModel::Fov => 5,
+        CameraModel::SimpleRadialFisheye => 4,
+        CameraModel::RadialFisheye => 5,
+        CameraModel::DoubleSphere | CameraModel::Unknown(_) => return None,
+    })
+}
+
+/// Map a camera onto the `(model, params)` record COLMAP expects.
+///
+/// visloc keeps self-calibrated radial distortion as two trailing `[k1, k2]`
+/// slots on a `Pinhole` (see [`Camera::pinhole_radial`]) or a 6-parameter
+/// `OpenCv`. COLMAP's `PINHOLE` has exactly four parameters and `OPENCV`
+/// exactly eight, so writing those params verbatim produces a model file
+/// that COLMAP rejects (or whose distortion other readers silently drop).
+/// Such cameras are exported as `OPENCV` with `p1 = p2 = 0`, which is the
+/// identical projection; an all-zero distortion tail on a `Pinhole`
+/// collapses back to plain `PINHOLE`. Every other camera is returned as is.
+pub fn colmap_camera_record(camera: &Camera) -> (CameraModel, Vec<f64>) {
+    let params = &camera.params;
+    match camera.model {
+        CameraModel::Pinhole if params.len() > 4 && params[4..].iter().all(|&k| k == 0.0) => {
+            (CameraModel::Pinhole, params[..4].to_vec())
+        }
+        CameraModel::Pinhole | CameraModel::OpenCv if params.len() > 4 && params.len() < 8 => {
+            let mut opencv = params.clone();
+            opencv.resize(8, 0.0);
+            (CameraModel::OpenCv, opencv)
+        }
+        _ => (camera.model.clone(), params.clone()),
+    }
+}
+
+/// [`colmap_camera_record`] plus the checks every fallible writer needs: the
+/// model must exist in COLMAP and carry exactly COLMAP's parameter count.
+fn validated_colmap_camera_record(camera: &Camera) -> Result<(CameraModel, Vec<f64>), ColmapError> {
+    let (model, params) = colmap_camera_record(camera);
+    colmap_id_from_camera_model(&model)?;
+    let expected = colmap_param_count(&model).ok_or_else(|| {
+        ColmapError::InvalidExportInput(format!(
+            "camera {} model {} is not a COLMAP camera model",
+            camera.id,
+            camera_model_to_colmap_name(&model)
+        ))
+    })?;
+    if params.len() != expected {
+        return Err(ColmapError::InvalidExportInput(format!(
+            "camera {} model {} needs {expected} params for COLMAP, got {}",
+            camera.id,
+            camera_model_to_colmap_name(&model),
+            params.len()
+        )));
+    }
+    Ok((model, params))
+}
+
+/// One `cameras.txt` line (with trailing newline).
+fn format_camera_line(camera: &Camera, model: &CameraModel, params: &[f64]) -> String {
+    let mut line = format!(
+        "{} {} {} {}",
+        camera.id,
+        camera_model_to_colmap_name(model),
+        camera.width,
+        camera.height,
+    );
+    for param in params {
+        line.push_str(&format!(" {}", format_f64(*param)));
+    }
+    line.push('\n');
+    line
 }
 
 fn camera_model_to_colmap_name(model: &CameraModel) -> &str {
