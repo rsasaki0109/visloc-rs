@@ -26,7 +26,7 @@ A photo collection hands you `N` images and nothing else. The pipeline has to:
 
 The core is ~600 lines of pure Rust orchestrating the parts visloc-rs already
 had (two-view geometry, PnP RANSAC, VLAD retrieval, Schur-complement BA); the
-[`unordered_sfm_demo`](../examples/unordered_sfm_demo.rs) example wires VLAD
+[`unordered_sfm_demo`](../examples/unordered_sfm_demo/main.rs) example wires VLAD
 retrieval + verification on top of file-backed deep features and exports a
 COLMAP model.
 
