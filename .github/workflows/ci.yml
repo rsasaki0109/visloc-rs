@@ -230,7 +230,7 @@ jobs:
         uses: taiki-e/install-action@cargo-deny
 
       - name: Dependency policy (cargo-deny)
-        run: cargo deny --manifest-path Cargo.toml check --config "$GITHUB_WORKSPACE/deny.toml"
+        run: cargo deny --manifest-path Cargo.toml --config "$GITHUB_WORKSPACE/deny.toml" check
 
   feature-matrix:
     runs-on: ${{ matrix.os }}
