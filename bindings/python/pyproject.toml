@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "visloc"
+description = "Python bindings for visloc-rs: cameras, SE(3) poses, COLMAP IO, map-based localization, and trajectory evaluation."
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/rsasaki0109/visloc-rs"
+
+[tool.maturin]
+python-source = "python"
+module-name = "visloc._visloc"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

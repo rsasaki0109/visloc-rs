@@ -34,6 +34,10 @@ members = [
     "pipelines/fusion",
     "pipelines/basalt",
 ]
+# The pyo3/maturin Python bindings are a standalone workspace with their own
+# Cargo.lock (see bindings/python/Cargo.toml): an extension-module cdylib must
+# not join `cargo test --workspace` linking or the MSRV/deny/package gates.
+exclude = ["bindings/python"]
 resolver = "2"
 
 # Build-level speed lever for the real-time VI-SLAM push: fat LTO,
