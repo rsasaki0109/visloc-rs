@@ -25,6 +25,7 @@ named inline; nothing is tuned against ground truth unless stated.
   |---|---:|---:|---:|---:|---:|
   | Aria's own SLAM (proprietary, non-causal) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 |
   | microSLAM (mono) | 64.5 | 74.5 | 82.3 | 78.3 | 85.6 |
+  | GroundedSI / RoboCap (bino+IMU; avg 62.3 — per their arXiv 2610.07217 report, unverified) | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 |
   | **Ours (training, R_11_5cp VIO+mapper)** | **57.66** | — | — | — | — |
   | Best academic (OpenVINS+Maplab) | 27.7 | 23.4 | 12.8 | 19.8 | 13.9 |
   | OKVIS2 | 20.0 | 11.6 | 2.6 | 14.5 | 4.7 |
@@ -115,13 +116,28 @@ before/after on training sequences.
    (`BASALT_INIT_GRAVITY_WINDOW_MS`, branch `exp/lamaria-moving-start-init`)
    changed seq_1_19 SE3 ATE only 19.304 → 19.244 m, and loosening
    `vio_init_pose_weight` 1e8 → 1e2 did nothing.
-4. **Online focal-length estimation.** Aria's focal length changes ~0.11 %
+4. **Use both cameras of the divergent Aria rig.** Status: **implemented,
+   awaiting LaMAria measurement** ([`lamaria_multicam.md`](lamaria_multicam.md)).
+   The port is cam0-centric: it detects only in cam0, seeds the cam0→cam1
+   stereo KLT at the same pixel (hundreds of pixels off on Aria's 75°-rotated
+   pair, so stereo mostly fails), hosts every landmark in cam0 and counts only
+   cam0 tracks for keyframes — effectively mono-inertial on cam0. Opt-in keys
+   now add a `REPROJ_FIX_DEPTH` stereo seed from the extrinsics, cam1 FAST
+   replenishment, cam1-hosted landmarks and all-camera keyframe connectivity
+   (`configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json`).
+   On a synthetic Aria-geometry rig it keeps vision in the window while cam0
+   faces a blank wall, where the cam0-only config falls back to dead
+   reckoning. RoboCap (GroundedSI) attributes its LaMAria lead to this kind of
+   per-camera mono-inertial plus overlap-stereo fusion. Measure: big window
+   vs big window + multicam on R_11_5cp and sequence_1_19 (commands in the
+   linked doc); watch runtime, since cam1 roughly doubles the tracked points.
+5. **Online focal-length estimation.** Aria's focal length changes ~0.11 %
    over a session; the current calibration is fixed per sequence. An online
    focal estimate removes a systematic scale/drift source.
-5. **Low-light and moving-platform robustness.** Distinct failure modes
+6. **Low-light and moving-platform robustness.** Distinct failure modes
    (feature starvation; tram/motion dynamics). Likely needs frontend-level
    work rather than mapper tuning.
-6. **Runtime headroom.** 22 h of test data at ≥1× RT is required. VIO is
+7. **Runtime headroom.** 22 h of test data at ≥1× RT is required. VIO is
    already ~1.1× (near-uncontended); the mapper (lever 1) is the open item.
 
 ## 5. Test-set operational pipeline
@@ -152,6 +168,8 @@ before/after on training sequences.
 ## See also
 
 - [`lamaria_stage0.md`](lamaria_stage0.md) — method, results, mapper fixes.
+- [`lamaria_multicam.md`](lamaria_multicam.md) — multi-camera VIO for the
+  divergent Aria rig (lever 4).
 - [`vi_slam_benchmarks.md`](vi_slam_benchmarks.md) — EuRoC VI-SLAM results.
 - [`vi_slam_global_consistency_plan.md`](vi_slam_global_consistency_plan.md) —
   global-consistency evidence and staged plan.
