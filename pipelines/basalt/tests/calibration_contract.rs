@@ -74,3 +74,24 @@ fn interval_overflow_is_reported() {
         Err(TimeIntervalError::TimestampOverflow)
     ));
 }
+
+#[test]
+fn retain_cameras_produces_cam0_only_monocular_rig() {
+    let stereo = BasaltCalibration::from_path(fixture_path()).unwrap();
+    let mono = stereo.retain_cameras(1).unwrap();
+
+    assert_eq!(mono.cameras.len(), 1);
+    assert_eq!(mono.t_imu_cam.len(), 1);
+    assert_eq!(mono.resolutions, [(752, 480)]);
+    assert_eq!(mono.cameras[0], stereo.cameras[0]);
+    assert_eq!(mono.t_imu_cam[0], stereo.t_imu_cam[0]);
+    assert!(mono.camera(1).is_none());
+    // IMU and clock contracts are untouched.
+    assert_eq!(mono.accel_noise_std, stereo.accel_noise_std);
+    assert_eq!(mono.gyro_bias_std, stereo.gyro_bias_std);
+    assert_eq!(mono.cam_time_offset_ns, stereo.cam_time_offset_ns);
+    // Retaining every camera is the identity.
+    assert_eq!(stereo.retain_cameras(2).unwrap(), stereo);
+    assert!(stereo.retain_cameras(0).is_err());
+    assert!(stereo.retain_cameras(3).is_err());
+}

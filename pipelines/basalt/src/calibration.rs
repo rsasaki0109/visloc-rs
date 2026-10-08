@@ -75,6 +75,29 @@ impl BasaltCalibration {
         self.camera_to_imu(camera_id).map(SE3::inverse)
     }
 
+    /// Returns a copy that keeps only the first `count` cameras (intrinsics,
+    /// extrinsics and resolutions together); IMU and mocap fields are
+    /// unchanged.
+    ///
+    /// `retain_cameras(1)` turns a stereo calibration into the
+    /// monocular-inertial (cam0 + IMU) rig used by the opt-in `--mono`
+    /// replay.  `count` must be in `1..=self.cameras.len()`.
+    pub fn retain_cameras(&self, count: usize) -> Result<Self, CalibrationError> {
+        if count == 0 || count > self.cameras.len() {
+            return Err(CalibrationError::Invalid {
+                reason: format!(
+                    "cannot retain {count} of {} calibrated cameras",
+                    self.cameras.len()
+                ),
+            });
+        }
+        let mut retained = self.clone();
+        retained.t_imu_cam.truncate(count);
+        retained.cameras.truncate(count);
+        retained.resolutions.truncate(count);
+        Ok(retained)
+    }
+
     /// Converts a camera timestamp interval into the corrected IMU clock.
     ///
     /// Basalt's `cam_time_offset_ns` convention is additive:
