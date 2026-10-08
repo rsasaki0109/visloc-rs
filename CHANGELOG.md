@@ -32,6 +32,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Python bindings (`bindings/python`, package `visloc`).** pyo3/maturin
+  extension with NumPy interop: `Camera` (COLMAP models + Double Sphere),
+  `Pose`/`SE3`, COLMAP text/binary `Reconstruction` read/write, `localize` and
+  `estimate_pose_pnp_ransac`, and `evaluate_ate` / `evaluate_rpe` /
+  `umeyama_alignment`. Ships `.pyi` stubs and pytest tests; built and tested
+  by a new `python-bindings` CI job. The crate is excluded from the root
+  workspace (own `Cargo.lock`), so pyo3/numpy do not enter the Rust gates.
+- **`visloc_io::colmap::write_colmap_binary_model`** for a `VisualMap`.
 - **`BaConfig::shared_focal` / `--shared-focal`** (unordered and sequential
   SfM demos): constrain intrinsics self-calibration to `fx == fy`. Previously
   `fx` and `fy` were always refined independently, so weakly observable
