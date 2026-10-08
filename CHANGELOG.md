@@ -23,6 +23,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **ROS 2 nodes (`ros2/visloc-ros2`)** over pure-Rust DDS (`ros2-client` /
+  RustDDS; no ROS install needed to build). `visloc_vio_node` runs the Basalt
+  stereo-inertial VIO on two `sensor_msgs/Image` topics plus
+  `sensor_msgs/Imu` and publishes `nav_msgs/Odometry`,
+  `geometry_msgs/PoseStamped`, `nav_msgs/Path` and `/tf` (VIO only; the
+  online mapper is not attached). `visloc_localize_node` localizes
+  `sensor_msgs/Image` frames against a COLMAP map plus landmark descriptors
+  and publishes `PoseWithCovarianceStamped`, an inlier count and
+  diagnostics. The crate is excluded from the root workspace, has its own
+  lockfile and a dedicated CI job, and is tested end to end over RTPS
+  (RustDDS to RustDDS), not yet against a ROS 2 install.
 - **`Camera::project_with_point_jacobian`** (visloc-core): the pixel from
   `Camera::project` plus its analytic 2×3 Jacobian with respect to the
   camera-frame point, for every lens model.

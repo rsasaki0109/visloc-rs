@@ -48,6 +48,7 @@ commands to reproduce it.
 - [Photos to splat and mesh](#photos-to-splat-and-mesh-3d-gaussian-splatting)
 - [Visual-inertial SLAM](#visual-inertial-slam-basalt-rust-port)
 - [Localize against a map](#localize-against-a-map)
+- [Use from ROS 2](#use-from-ros-2)
 - [More results](#more-results) — KITTI, TUM RGB-D, sequential SfM
 - [Documentation](#documentation)
 
@@ -402,6 +403,27 @@ cargo run --release --features image-io --example deep_localization_demo -- \
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the
 [archived README details](docs/readme_details.md#demos).
+
+## Use from ROS 2
+
+[`ros2/visloc-ros2`](ros2/visloc-ros2/README.md) has two ROS 2 nodes built on
+the pure-Rust `ros2-client` (RustDDS), so building them needs no ROS install:
+
+- `visloc_vio_node` runs the Basalt stereo-inertial VIO on two
+  `sensor_msgs/Image` topics plus `sensor_msgs/Imu`, and publishes
+  `nav_msgs/Odometry`, `geometry_msgs/PoseStamped`, `nav_msgs/Path` and `/tf`.
+- `visloc_localize_node` localizes `sensor_msgs/Image` frames against a COLMAP
+  map and publishes `PoseWithCovarianceStamped`, an inlier count and
+  diagnostics.
+
+```bash
+cd ros2/visloc-ros2 && cargo build --release
+./target/release/visloc_vio_node --calibration <basalt_calib.json> --config <basalt_config.json> \
+  --remap left/image_raw=/cam0/image_raw --remap right/image_raw=/cam1/image_raw --remap imu=/imu0
+```
+
+The nodes are tested over DDS (RustDDS to RustDDS) but not yet against a ROS 2
+install; see the crate README for topics, parameters, QoS notes and limits.
 
 ## More results
 
