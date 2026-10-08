@@ -12,6 +12,12 @@
 //!   --config configs/basalt/euroc_config.json \
 //!   --out-dir target/basalt_mh01_smoke --max-frames 80
 //! ```
+//!
+//! `--mono` replays the same recording as monocular-inertial VIO (cam0 +
+//! IMU): `mav0/cam1` is not read and the (stereo) calibration is reduced to
+//! camera 0, so every landmark is seeded by temporal triangulation and metric
+//! scale comes from the IMU. It is opt-in and experimental; see
+//! `docs/mono_inertial_vio.md`. Without it the stereo replay is unchanged.
 
 use std::{
     env, fs,
@@ -44,6 +50,7 @@ struct Args {
     pipeline_capacity: usize,
     decode_threads: usize,
     threads: Option<usize>,
+    mono: bool,
 }
 
 const NATIVE_COMPANION_BINDING_SCHEMA: &str = "basalt.rust.native_companion_binding.v1";
@@ -60,6 +67,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     if args.no_marg_data && args.native_companion_binding.is_some() {
         return Err("--native-companion-binding requires MargData output".into());
+    }
+    if args.mono && args.native_companion_binding.is_some() {
+        return Err(
+            "--native-companion-binding binds stereo native captures; not valid with --mono".into(),
+        );
     }
     // Sizes the process-wide rayon pool used by data-parallel stages (e.g.
     // the frontend's per-track temporal KLT). Left unset, rayon lazily sizes
@@ -106,15 +118,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut timing = TimingBreakdown::from_env();
-    let dataset = if timing.enabled() {
-        EurocSensorDataset::open_with_timing(
+    let dataset = match (args.mono, timing.enabled()) {
+        (false, true) => EurocSensorDataset::open_with_timing(
             &args.euroc_dir,
             &args.calibration,
             &args.config,
             &mut timing,
-        )?
-    } else {
-        EurocSensorDataset::open(&args.euroc_dir, &args.calibration, &args.config)?
+        )?,
+        (false, false) => {
+            EurocSensorDataset::open(&args.euroc_dir, &args.calibration, &args.config)?
+        }
+        (true, true) => EurocSensorDataset::open_monocular_with_timing(
+            &args.euroc_dir,
+            &args.calibration,
+            &args.config,
+            &mut timing,
+        )?,
+        (true, false) => {
+            EurocSensorDataset::open_monocular(&args.euroc_dir, &args.calibration, &args.config)?
+        }
     };
     let mut adapter =
         BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
@@ -298,7 +320,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map_or_else(|| "disabled".to_owned(), |path| path.display().to_string());
 
-    let summary = format!(
+    let mut summary = format!(
         "sensor_only=true\nframes_requested={}\nframes_processed={}\ncam0_manifest_frames={}\ncam1_manifest_timestamps={}\nimu_samples_loaded={}\nimu_samples_delivered={}\nobservations_emitted={}\ntrajectory_tum={}\ntrajectory_csv={}\ntrace_jsonl={}\nmarg_data_dir={}\n",
         args.max_frames
             .map_or_else(|| "all".to_owned(), |value| value.to_string()),
@@ -313,6 +335,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         trace_summary,
         marg_summary,
     );
+    // Only the opt-in monocular replay adds a line, so the stereo summary
+    // stays byte-identical for existing tooling.
+    if dataset.is_monocular() {
+        summary.push_str("camera_mode=mono_inertial\n");
+    }
 
     timing.measure(TimingBucket::DemoTrajectoryOutput, || {
         fs::write(&trajectory_tum, tum)?;
@@ -774,6 +801,7 @@ impl Args {
         let mut pipeline_capacity = 4usize;
         let mut decode_threads = 3usize;
         let mut threads = None;
+        let mut mono = false;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let option = argument.to_string_lossy();
@@ -810,6 +838,7 @@ impl Args {
                     native_companion_binding = Some(next_path(&mut arguments, &option)?);
                 }
                 "--pipeline" => pipeline = true,
+                "--mono" => mono = true,
                 "--pipeline-capacity" => {
                     let value = arguments
                         .next()
@@ -867,11 +896,12 @@ impl Args {
             pipeline_capacity,
             decode_threads,
             threads,
+            mono,
         })
     }
 
     fn usage() -> String {
-        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N]".into()
+        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono]".into()
     }
 }
 
@@ -1023,6 +1053,22 @@ mod tests {
         assert!(usage.contains("--pipeline-capacity"));
         assert!(usage.contains("--decode-threads"));
         assert!(usage.contains("--threads"));
+    }
+
+    #[test]
+    fn mono_flag_defaults_off_and_is_parsed() {
+        let args = parse(&["--euroc-dir", "dataset", "--calibration", "calib.json"]);
+        assert!(!args.mono);
+
+        let args = parse(&[
+            "--euroc-dir",
+            "dataset",
+            "--calibration",
+            "calib.json",
+            "--mono",
+        ]);
+        assert!(args.mono);
+        assert!(Args::usage().contains("--mono"));
     }
 
     #[test]
