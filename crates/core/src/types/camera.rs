@@ -1,4 +1,4 @@
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Matrix2x3, Point2, Point3, Vector3};
 
 pub type CameraId = u64;
 
@@ -365,6 +365,77 @@ impl Camera {
         }
     }
 
+    /// [`Self::project`] together with its analytic 2×3 Jacobian with respect to
+    /// the camera-frame point.
+    ///
+    /// The returned pixel is exactly [`Self::project`]'s (it is computed by that
+    /// function), so a least-squares residual built from it matches a cost that
+    /// calls `project`. The Jacobian is the derivative of that same lens model for
+    /// every supported family: pinhole with radial `1 + k1 r² + k2 r⁴`
+    /// (`Pinhole`, `SimplePinhole`, `SimpleRadial`, `Radial`, `OpenCv`), the full
+    /// Brown-Conrady rational model with tangential `(p1, p2)` (`OpenCv` with
+    /// non-zero tangential terms, `FullOpenCv`), the Kannala-Brandt equidistant
+    /// fisheye (`OpenCvFisheye`, `SimpleRadialFisheye`, `RadialFisheye`), the FOV
+    /// model and Double Sphere. Returns `None` wherever `project` does, for an
+    /// `Unknown` model, or when the Jacobian is not finite.
+    pub fn project_with_point_jacobian(
+        &self,
+        point_camera: &Point3<f64>,
+    ) -> Option<(Point2<f64>, Matrix2x3<f64>)> {
+        let pixel = self.project(point_camera)?;
+        let (fx, fy, _, _) = self.intrinsics()?;
+        let jacobian = match self.model {
+            CameraModel::DoubleSphere => {
+                let [_, _, _, _, xi, alpha] = params6(&self.params)?;
+                double_sphere_point_jacobian(fx, fy, xi, alpha, point_camera)?
+            }
+            CameraModel::OpenCvFisheye
+            | CameraModel::SimpleRadialFisheye
+            | CameraModel::RadialFisheye => {
+                equidistant_point_jacobian(fx, fy, self.equidistant_coeffs(), point_camera)?
+            }
+            CameraModel::Fov => {
+                let omega = *self.params.get(4)?;
+                fov_point_jacobian(fx, fy, omega, point_camera)?
+            }
+            CameraModel::FullOpenCv => {
+                full_opencv_point_jacobian(fx, fy, full_opencv_coeffs(&self.params), point_camera)?
+            }
+            CameraModel::OpenCv if self.tangential_distortion().is_some() => {
+                full_opencv_point_jacobian(fx, fy, full_opencv_coeffs(&self.params), point_camera)?
+            }
+            CameraModel::Unknown(_) => return None,
+            _ => {
+                let (k1, k2) = self
+                    .radial_distortion()
+                    .filter(|&(k1, k2)| k1 != 0.0 || k2 != 0.0)
+                    .unwrap_or((0.0, 0.0));
+                // Brown-Conrady with only the radial `1 + k1 r² + k2 r⁴` terms.
+                full_opencv_point_jacobian(
+                    fx,
+                    fy,
+                    [k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    point_camera,
+                )?
+            }
+        };
+        jacobian
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some((pixel, jacobian))
+    }
+
+    /// Kannala-Brandt `[k1, k2, k3, k4]` of the equidistant fisheye models
+    /// (missing slots and the coefficients a reduced model lacks are zero).
+    fn equidistant_coeffs(&self) -> [f64; 4] {
+        let at = |index: usize| self.params.get(index).copied().unwrap_or(0.0);
+        match self.model {
+            CameraModel::SimpleRadialFisheye => [at(3), 0.0, 0.0, 0.0],
+            CameraModel::RadialFisheye => [at(3), at(4), 0.0, 0.0],
+            _ => [at(4), at(5), at(6), at(7)],
+        }
+    }
+
     /// Back-project a pixel to a unit camera-frame ray.  Unlike
     /// [`Self::normalize_pixel`] this is defined for the full field of view,
     /// including rays at or behind the image plane, so it is the robust entry
@@ -670,6 +741,176 @@ fn project_full_opencv(
     finite_point(Point2::new(fx * xd + cx, fy * yd + cy))
 }
 
+/// `∂(x, y)/∂P = (1/Z)·[[1, 0, -x], [0, 1, -y]]` chained after a 2×2 lens
+/// Jacobian `[[a, b], [c, d]]` on normalized coordinates and scaled by the focal
+/// lengths: the pixel Jacobian of `(fx·u(x, y) + cx, fy·v(x, y) + cy)`.
+fn chain_normalized_jacobian(
+    fx: f64,
+    fy: f64,
+    lens: [[f64; 2]; 2],
+    x: f64,
+    y: f64,
+    z: f64,
+) -> Matrix2x3<f64> {
+    let z_inv = 1.0 / z;
+    let [[a, b], [c, d]] = lens;
+    Matrix2x3::new(
+        fx * a * z_inv,
+        fx * b * z_inv,
+        -fx * (a * x + b * y) * z_inv,
+        fy * c * z_inv,
+        fy * d * z_inv,
+        -fy * (c * x + d * y) * z_inv,
+    )
+}
+
+/// Point Jacobian of [`project_full_opencv`] (radial rational `num/den` plus
+/// tangential `(p1, p2)`).
+fn full_opencv_point_jacobian(
+    fx: f64,
+    fy: f64,
+    k: [f64; 8],
+    point: &Point3<f64>,
+) -> Option<Matrix2x3<f64>> {
+    if point.z <= 0.0 {
+        return None;
+    }
+    let x = point.x / point.z;
+    let y = point.y / point.z;
+    let r2 = x * x + y * y;
+    let r4 = r2 * r2;
+    let numerator = 1.0 + k[0] * r2 + k[1] * r4 + k[4] * r4 * r2;
+    let denominator = 1.0 + k[5] * r2 + k[6] * r4 + k[7] * r4 * r2;
+    if denominator.abs() <= EPS {
+        return None;
+    }
+    let radial = numerator / denominator;
+    let d_numerator = k[0] + 2.0 * k[1] * r2 + 3.0 * k[4] * r4;
+    let d_denominator = k[5] + 2.0 * k[6] * r2 + 3.0 * k[7] * r4;
+    // d(radial)/d(r²)
+    let g = (d_numerator * denominator - numerator * d_denominator) / (denominator * denominator);
+    let (p1, p2) = (k[2], k[3]);
+    let cross = 2.0 * x * y * g + 2.0 * p1 * x + 2.0 * p2 * y;
+    let lens = [
+        [
+            radial + 2.0 * x * x * g + 2.0 * p1 * y + 6.0 * p2 * x,
+            cross,
+        ],
+        [
+            cross,
+            radial + 2.0 * y * y * g + 6.0 * p1 * y + 2.0 * p2 * x,
+        ],
+    ];
+    Some(chain_normalized_jacobian(fx, fy, lens, x, y, point.z))
+}
+
+/// Point Jacobian of [`project_equidistant`].
+fn equidistant_point_jacobian(
+    fx: f64,
+    fy: f64,
+    k: [f64; 4],
+    point: &Point3<f64>,
+) -> Option<Matrix2x3<f64>> {
+    let (x, y, z) = (point.x, point.y, point.z);
+    let r2 = x * x + y * y;
+    let r = r2.sqrt();
+    if r <= EPS {
+        // On the optical axis `theta_d / r -> 1 / z` (theta ≈ r / z), so the
+        // map is locally the pinhole one.
+        if z <= 0.0 {
+            return None;
+        }
+        return Some(Matrix2x3::new(fx / z, 0.0, 0.0, 0.0, fy / z, 0.0));
+    }
+    let rho2 = r2 + z * z;
+    let theta = r.atan2(z);
+    let t2 = theta * theta;
+    let theta_d = theta * equidistant_poly(theta, k);
+    // d(theta_d)/d(theta) = 1 + 3 k1 θ² + 5 k2 θ⁴ + 7 k3 θ⁶ + 9 k4 θ⁸.
+    let d_theta_d =
+        1.0 + t2 * (3.0 * k[0] + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * 9.0 * k[3])));
+    let scale = theta_d / r;
+    // scale = theta_d(theta(X, Y, Z)) / r(X, Y):
+    //   ∂scale/∂X = X/r² · (θd'·Z/ρ² − scale), likewise for Y, and
+    //   ∂scale/∂Z = −θd'/ρ².
+    let lateral = (d_theta_d * z / rho2 - scale) / r2;
+    let ds_dx = x * lateral;
+    let ds_dy = y * lateral;
+    let ds_dz = -d_theta_d / rho2;
+    Some(Matrix2x3::new(
+        fx * (scale + x * ds_dx),
+        fx * x * ds_dy,
+        fx * x * ds_dz,
+        fy * y * ds_dx,
+        fy * (scale + y * ds_dy),
+        fy * y * ds_dz,
+    ))
+}
+
+/// Point Jacobian of [`project_fov`].
+fn fov_point_jacobian(fx: f64, fy: f64, omega: f64, point: &Point3<f64>) -> Option<Matrix2x3<f64>> {
+    if omega.abs() <= EPS || point.z <= EPS {
+        return None;
+    }
+    let xn = point.x / point.z;
+    let yn = point.y / point.z;
+    let r = (xn * xn + yn * yn).sqrt();
+    let two_tan = 2.0 * (omega / 2.0).tan();
+    let lens = if r <= EPS {
+        // Limit of atan(2 r tan(ω/2)) / (ω r) at r -> 0.
+        let s = two_tan / omega;
+        [[s, 0.0], [0.0, s]]
+    } else {
+        let scale = (r * two_tan).atan() / (omega * r);
+        // d(scale)/dr / r = (A'(r)/ω − scale) / r², A = atan(2 r tan(ω/2)).
+        let d_atan = two_tan / (1.0 + r * r * two_tan * two_tan);
+        let h = (d_atan / omega - scale) / (r * r);
+        [
+            [scale + xn * xn * h, xn * yn * h],
+            [xn * yn * h, scale + yn * yn * h],
+        ]
+    };
+    Some(chain_normalized_jacobian(fx, fy, lens, xn, yn, point.z))
+}
+
+/// Point Jacobian of [`project_double_sphere`].
+fn double_sphere_point_jacobian(
+    fx: f64,
+    fy: f64,
+    xi: f64,
+    alpha: f64,
+    point: &Point3<f64>,
+) -> Option<Matrix2x3<f64>> {
+    let p = point.coords;
+    let d1 = p.norm();
+    if d1 <= EPS {
+        return None;
+    }
+    let zeta = xi * d1 + p.z;
+    let d2 = (p.x * p.x + p.y * p.y + zeta * zeta).sqrt();
+    let denominator = alpha * d2 + (1.0 - alpha) * zeta;
+    if !denominator.is_finite() || denominator <= EPS || d2 <= EPS {
+        return None;
+    }
+    // ∂ζ/∂P = ξ·P/d1 + e_z, ∂d2/∂P = (X e_x + Y e_y + ζ ∂ζ/∂P)/d2,
+    // ∂den/∂P = α ∂d2/∂P + (1 − α) ∂ζ/∂P.
+    let d_zeta = xi * p / d1 + Vector3::z();
+    let d_d2 = (Vector3::new(p.x, p.y, 0.0) + zeta * d_zeta) / d2;
+    let d_den = alpha * d_d2 + (1.0 - alpha) * d_zeta;
+    let inv = 1.0 / denominator;
+    let u = p.x * inv;
+    let v = p.y * inv;
+    // ∂(X/den)/∂P = e_x/den − (X/den²)·∂den/∂P.
+    Some(Matrix2x3::new(
+        fx * (inv - u * inv * d_den.x),
+        -fx * u * inv * d_den.y,
+        -fx * u * inv * d_den.z,
+        -fy * v * inv * d_den.x,
+        fy * (inv - v * inv * d_den.y),
+        -fy * v * inv * d_den.z,
+    ))
+}
+
 fn normalize_full_opencv(xd: f64, yd: f64, k: [f64; 8]) -> Point2<f64> {
     let (mut x, mut y) = (xd, yd);
     for _ in 0..30 {
@@ -894,5 +1135,121 @@ mod tests {
             assert_eq!(a, radial.project(&point).unwrap());
             assert_eq!(opencv.normalize_pixel(&a), radial.normalize_pixel(&a));
         }
+    }
+
+    /// Every lens family the shared front-end supports, with distortion strong
+    /// enough that a pinhole Jacobian would be visibly wrong.
+    fn jacobian_test_cameras() -> Vec<Camera> {
+        let with = |model: CameraModel, params: Vec<f64>| Camera {
+            id: 1,
+            model,
+            width: 1280,
+            height: 960,
+            params,
+        };
+        vec![
+            Camera::pinhole(1, 1280, 960, 600.0, 590.0, 640.0, 480.0),
+            Camera::pinhole_radial(1, 1280, 960, 600.0, 590.0, 640.0, 480.0, -0.15, 0.05),
+            with(CameraModel::SimplePinhole, vec![600.0, 640.0, 480.0]),
+            with(CameraModel::SimpleRadial, vec![600.0, 640.0, 480.0, -0.12]),
+            with(CameraModel::Radial, vec![600.0, 640.0, 480.0, -0.12, 0.03]),
+            with(
+                CameraModel::OpenCv,
+                vec![600.0, 590.0, 640.0, 480.0, -0.15, 0.05, 0.0, 0.0],
+            ),
+            with(
+                CameraModel::OpenCv,
+                vec![600.0, 590.0, 640.0, 480.0, -0.15, 0.05, 0.004, -0.003],
+            ),
+            with(
+                CameraModel::FullOpenCv,
+                vec![
+                    600.0, 590.0, 640.0, 480.0, -0.15, 0.05, 0.004, -0.003, 0.01, 0.02, -0.01,
+                    0.005,
+                ],
+            ),
+            Camera::opencv_fisheye(
+                1,
+                1280,
+                960,
+                400.0,
+                405.0,
+                640.0,
+                480.0,
+                [0.05, -0.02, 0.01, -0.003],
+            ),
+            with(
+                CameraModel::SimpleRadialFisheye,
+                vec![400.0, 640.0, 480.0, 0.04],
+            ),
+            with(
+                CameraModel::RadialFisheye,
+                vec![400.0, 640.0, 480.0, 0.04, -0.01],
+            ),
+            with(CameraModel::Fov, vec![500.0, 495.0, 640.0, 480.0, 0.9]),
+            Camera::double_sphere(1, 1280, 960, 350.0, 352.0, 640.0, 480.0, -0.2, 0.6),
+        ]
+    }
+
+    #[test]
+    fn project_with_point_jacobian_matches_central_differences_for_every_lens() {
+        let points = [
+            Point3::new(0.3, -0.2, 2.0),
+            Point3::new(-0.9, 0.6, 1.5),
+            Point3::new(0.05, 0.02, 3.0),
+            Point3::new(1.2, 0.9, 1.1),
+            Point3::new(0.0, 0.0, 2.5),
+        ];
+        for camera in jacobian_test_cameras() {
+            for point in points {
+                let (pixel, jacobian) = camera
+                    .project_with_point_jacobian(&point)
+                    .unwrap_or_else(|| panic!("{:?} at {point:?}", camera.model));
+                assert_eq!(
+                    Some(pixel),
+                    camera.project(&point),
+                    "pixel must be project()'s"
+                );
+                let h = 1.0e-6;
+                for axis in 0..3 {
+                    let mut plus = point;
+                    let mut minus = point;
+                    plus[axis] += h;
+                    minus[axis] -= h;
+                    let numeric = (camera.project(&plus).unwrap()
+                        - camera.project(&minus).unwrap())
+                        / (2.0 * h);
+                    for row in 0..2 {
+                        let analytic = jacobian[(row, axis)];
+                        let tolerance = 1.0e-5 * (1.0 + analytic.abs());
+                        assert!(
+                            (analytic - numeric[row]).abs() < tolerance,
+                            "{:?} {:?} at {point:?}: d{row}/d{axis} analytic {analytic} vs numeric {}",
+                            camera.model,
+                            camera.params,
+                            numeric[row]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn project_with_point_jacobian_rejects_unprojectable_points_and_unknown_models() {
+        let pinhole = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        assert!(pinhole
+            .project_with_point_jacobian(&Point3::new(0.1, 0.1, -1.0))
+            .is_none());
+        let unknown = Camera {
+            id: 1,
+            model: CameraModel::Unknown("THIN_PRISM_FISHEYE".into()),
+            width: 640,
+            height: 480,
+            params: vec![500.0, 500.0, 320.0, 240.0],
+        };
+        assert!(unknown
+            .project_with_point_jacobian(&Point3::new(0.1, 0.1, 1.0))
+            .is_none());
     }
 }
