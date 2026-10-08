@@ -2058,11 +2058,38 @@ impl BundleAdjustment {
         total
     }
 
+    /// `(fx, fy, cx, cy)` of the BA camera, or `None` when its model has no
+    /// projection the BA can linearise (an `Unknown` COLMAP model).
+    ///
+    /// Monocular residuals use the camera's full lens model through
+    /// [`MonoProjection`] (radial, tangential, rational, equidistant fisheye,
+    /// FOV and Double Sphere all carry analytic Jacobians), so every model with
+    /// a [`Camera::project`] is admitted. The rectified / general stereo terms
+    /// only implement the pinhole; [`Self::check_stereo_camera_model`] keeps
+    /// them restricted to `Pinhole` / `SimplePinhole` cameras.
     fn intrinsics(&self) -> Option<(f64, f64, f64, f64)> {
         match self.camera.model {
-            CameraModel::Pinhole | CameraModel::SimplePinhole => self.camera.intrinsics(),
-            _ => None,
+            CameraModel::Unknown(_) => None,
+            _ => self.camera.intrinsics(),
         }
+    }
+
+    /// Rectified and general stereo residuals project through the plain
+    /// pinhole, so they are only admitted with the two camera models the BA has
+    /// always paired them with (`Pinhole` / `SimplePinhole`); any other lens
+    /// would be silently linearised as a pinhole.
+    fn check_stereo_camera_model(&self) -> Result<(), BaError> {
+        let has_stereo =
+            !self.stereo_observations.is_empty() || !self.general_stereo_observations.is_empty();
+        if has_stereo
+            && !matches!(
+                self.camera.model,
+                CameraModel::Pinhole | CameraModel::SimplePinhole
+            )
+        {
+            return Err(BaError::UnsupportedCameraModel);
+        }
+        Ok(())
     }
 
     /// Per-observation squared reprojection residual `s = 窶睦窶鳴ｲ` (pixelﾂｲ),
@@ -2157,11 +2184,17 @@ impl BundleAdjustment {
             return self.optimize_weighted(config, None);
         }
         // Joint pose + structure + intrinsics refinement (the COLMAP self-
-        // calibration formulation). Falls back to the pose/structure-only solve
-        // for non-pinhole cameras, which carry no refinable 4-parameter intrinsics.
-        if self.camera.model != CameraModel::Pinhole || self.camera.intrinsics().is_none() {
+        // calibration formulation) for the `[fx, fy, cx, cy(, k1, k2(, p1, p2))]`
+        // layout of `Pinhole` / `OpenCv`. Other models fall back to the
+        // pose/structure-only solve (which still uses their full lens model).
+        if !matches!(
+            self.camera.model,
+            CameraModel::Pinhole | CameraModel::OpenCv
+        ) || self.camera.intrinsics().is_none()
+        {
             return self.optimize_weighted(config, None);
         }
+        self.check_stereo_camera_model()?;
         self.optimize_joint_intrinsics(config)
     }
 
@@ -2831,7 +2864,10 @@ impl BundleAdjustment {
         // its baseline term does not carry a distortion model). The two coefficients
         // get appended to the camera block, so `k_dim` is 6 instead of 4.
         let refine_dist = config.refine_distortion
-            && self.camera.model == CameraModel::Pinhole
+            && matches!(
+                self.camera.model,
+                CameraModel::Pinhole | CameraModel::OpenCv
+            )
             && self.stereo_observations.is_empty();
         if refine_dist {
             // Ensure the camera carries the two distortion slots (start at 0).
@@ -2839,7 +2875,24 @@ impl BundleAdjustment {
                 self.camera.params.push(0.0);
             }
         }
-        let k_dim = if refine_dist { 6 } else { 4 };
+        // Opt-in tangential (p1, p2): the camera becomes an `OpenCv`
+        // `[fx, fy, cx, cy, k1, k2, p1, p2]` (the only layout that carries them;
+        // with p1 = p2 = 0 it projects exactly like the radial pinhole) and the
+        // camera block grows to 8.
+        let refine_tangential = refine_dist && config.refine_tangential_distortion;
+        if refine_tangential {
+            self.camera.model = CameraModel::OpenCv;
+            while self.camera.params.len() < 8 {
+                self.camera.params.push(0.0);
+            }
+        }
+        let k_dim = if refine_tangential {
+            8
+        } else if refine_dist {
+            6
+        } else {
+            4
+        };
         let cam_dim = k_off + k_dim;
         if config.shared_focal {
             let f = 0.5 * (self.camera.params[0] + self.camera.params[1]);
@@ -2858,12 +2911,20 @@ impl BundleAdjustment {
             // Current distortion (reflects the running k1, k2 estimate) drives the
             // distortion-aware projection / Jacobians inside the build.
             let dist = self.camera.radial_distortion();
+            // Tangential terms take the full Brown-Conrady branch whenever they
+            // are being refined or the camera already carries non-zero (p1, p2).
+            let tangential = if refine_tangential {
+                Some(self.camera.tangential_distortion().unwrap_or((0.0, 0.0)))
+            } else {
+                self.camera.tangential_distortion()
+            };
             let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
                 &pose_index,
                 &landmark_index,
                 &kernel,
                 k_dim,
                 dist,
+                tangential,
             );
             debug_assert_eq!(cam_dim_n, cam_dim);
 
@@ -3074,6 +3135,7 @@ impl BundleAdjustment {
         kernel: &RobustKernel,
         k_dim: usize,
         dist: Option<(f64, f64)>,
+        tangential: Option<(f64, f64)>,
     ) -> (usize, DMatrix<f64>, DVector<f64>, Vec<JointLandmarkBlock>) {
         let intrinsics = self.intrinsics().expect("pinhole checked by caller");
         let (fx, fy, cx, cy) = intrinsics;
@@ -3158,6 +3220,44 @@ impl BundleAdjustment {
                 j_k[(1, 4)] = fy * y * r2;
                 j_k[(1, 5)] = fy * y * r2 * r2;
             }
+            // Tangential `(p1, p2)` (an `OpenCv` camera that carries them, or is
+            // refining them): the radial-only terms above are replaced by the
+            // full Brown-Conrady model. The residual is `Camera::project`'s and
+            // the point Jacobian its analytic derivative; the camera columns
+            // extend to `[.., k1, k2, p1, p2]` when `k_dim` is 8.
+            let (residual, j_pose, j_lm, j_k) = match tangential {
+                None => (residual, j_pose, j_lm, j_k),
+                Some((p1, p2)) => {
+                    let Some((predicted, j_pi)) = self.camera.project_with_point_jacobian(&xc)
+                    else {
+                        continue;
+                    };
+                    let residual = predicted - obs.xy;
+                    let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
+                    let j_lm: Matrix2x3<f64> = j_pi * r_mat;
+                    let xy2 = 2.0 * x * y;
+                    let xd = x * d + p1 * xy2 + p2 * (r2 + 2.0 * x * x);
+                    let yd = y * d + p1 * (r2 + 2.0 * y * y) + p2 * xy2;
+                    let mut j_k = DMatrix::<f64>::zeros(2, k_dim);
+                    j_k[(0, 0)] = xd;
+                    j_k[(0, 2)] = 1.0;
+                    j_k[(1, 1)] = yd;
+                    j_k[(1, 3)] = 1.0;
+                    if k_dim >= 6 {
+                        j_k[(0, 4)] = fx * x * r2;
+                        j_k[(0, 5)] = fx * x * r2 * r2;
+                        j_k[(1, 4)] = fy * y * r2;
+                        j_k[(1, 5)] = fy * y * r2 * r2;
+                    }
+                    if k_dim == 8 {
+                        j_k[(0, 6)] = fx * xy2;
+                        j_k[(0, 7)] = fx * (r2 + 2.0 * x * x);
+                        j_k[(1, 6)] = fy * (r2 + 2.0 * y * y);
+                        j_k[(1, 7)] = fy * xy2;
+                    }
+                    (residual, j_pose, j_lm, j_k)
+                }
+            };
 
             let s = residual.x * residual.x + residual.y * residual.y;
             let w = kernel.weight(s);
@@ -3471,6 +3571,7 @@ impl BundleAdjustment {
         mut backend: &mut BaSolveBackend,
     ) -> Result<BaResult, BaError> {
         let intrinsics = self.intrinsics().ok_or(BaError::UnsupportedCameraModel)?;
+        self.check_stereo_camera_model()?;
         if self.poses.is_empty() {
             return Err(BaError::NoPoses);
         }
@@ -4371,9 +4472,11 @@ pub struct BaConfig {
     /// forces a residual onto the poses, and the joint solve lets the camera absorb
     /// it. (The coupled, landmark-eliminated gradient is what makes this work; an
     /// alternating refinement against converged structure cannot move a wrong focal,
-    /// because the structure-fixed gradient is ~0.) Only the 4-parameter
-    /// [`CameraModel::Pinhole`] is refined; any other model falls back to the
-    /// pose/structure-only solve. **`false` by default** (the public
+    /// because the structure-fixed gradient is ~0.) Only [`CameraModel::Pinhole`]
+    /// and [`CameraModel::OpenCv`] (whose lens terms are held fixed unless
+    /// [`Self::refine_distortion`] is set) are refined; any other model falls
+    /// back to the pose/structure-only solve, which still uses its full lens
+    /// model. **`false` by default** (the public
     /// [`BundleAdjustment::optimize`] is then bit-identical to before).
     pub refine_intrinsics: bool,
     /// Additionally self-calibrate the two radial-distortion coefficients
@@ -4382,7 +4485,21 @@ pub struct BaConfig {
     /// reconstruction (rectified stereo is already undistorted). The coefficients
     /// are appended to `Camera::params` as `[fx, fy, cx, cy, k1, k2]`. **`false`
     /// by default.**
+    ///
+    /// An [`CameraModel::OpenCv`] camera (`[fx, fy, cx, cy, k1, k2, p1, p2]`) is
+    /// refined in the same layout: its `(k1, k2)` are refined and its tangential
+    /// `(p1, p2)` stay fixed unless [`Self::refine_tangential_distortion`] is set.
     pub refine_distortion: bool,
+    /// Additionally self-calibrate the tangential coefficients `(p1, p2)` (the
+    /// camera block grows from 6 to 8). Requires `refine_intrinsics` and
+    /// `refine_distortion`, and is ignored without them. A `Pinhole` camera is
+    /// promoted to [`CameraModel::OpenCv`] `[fx, fy, cx, cy, k1, k2, p1, p2]`
+    /// (starting from `p1 = p2 = 0`, which projects exactly like the radial
+    /// pinhole), since that is the layout that carries tangential terms.
+    /// Decentering is weakly observable and trades against the principal point
+    /// on small or forward-moving scenes, so it is opt-in. **`false` by
+    /// default** (the joint solve is then bit-identical to before).
+    pub refine_tangential_distortion: bool,
     /// Constrain the refined focal length to `fx == fy` (one shared focal, as
     /// COLMAP's `SIMPLE_*` / `RADIAL` models and every square-pixel sensor do).
     /// Without it `fx` and `fy` move independently, which lets weakly
@@ -4438,6 +4555,7 @@ impl Default for BaConfig {
             robust_kernel: RobustKernel::None,
             refine_intrinsics: false,
             refine_distortion: false,
+            refine_tangential_distortion: false,
             shared_focal: false,
             parallel: false,
             matrix_free_ba: false,
@@ -9033,20 +9151,30 @@ fn schur_reduce_parallel(
 ///
 /// The residual and its Jacobian must use the same camera model as the cost
 /// (`robust_cost_weighted`, which calls the distortion-aware
-/// [`Camera::project`]); otherwise LM steps are computed for a pinhole that the
-/// accept/reject test does not evaluate. The BA accepts only `Pinhole` /
-/// `SimplePinhole` cameras (see `intrinsics`), whose only lens terms are the
-/// optional radial `[k1, k2]` tail written by distortion self-calibration.
+/// [`Camera::project`]); otherwise LM steps are computed for a lens that the
+/// accept/reject test does not evaluate. Pinhole-family cameras whose only lens
+/// terms are radial `[k1, k2]` (`Pinhole`, `SimplePinhole`, `SimpleRadial`,
+/// `Radial`, and `OpenCv` without tangential terms) keep the two historical
+/// closed forms bit-for-bit; every other model the BA admits (see
+/// `BundleAdjustment::intrinsics`) goes through the camera's own analytic
+/// Jacobian, [`Camera::project_with_point_jacobian`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum MonoProjection {
+enum MonoProjection<'a> {
     /// Distortion-free pinhole: the historical closed form, bit-identical.
     Pinhole,
     /// Radial `1 + k1·r² + k2·r⁴` with an analytic Jacobian.
     Radial { k1: f64, k2: f64 },
+    /// Any other lens (tangential Brown-Conrady, rational, equidistant
+    /// fisheye, FOV, Double Sphere): the residual is [`Camera::project`]
+    /// itself and the Jacobian its analytic derivative.
+    Lens(&'a Camera),
 }
 
-impl MonoProjection {
-    fn for_camera(camera: &Camera) -> Self {
+impl<'a> MonoProjection<'a> {
+    fn for_camera(camera: &'a Camera) -> Self {
+        if !is_radial_pinhole_family(camera) {
+            return Self::Lens(camera);
+        }
         match camera
             .radial_distortion()
             .filter(|&(k1, k2)| k1 != 0.0 || k2 != 0.0)
@@ -9057,11 +9185,27 @@ impl MonoProjection {
     }
 }
 
+/// Whether `camera` is a pinhole-family model whose [`Camera::project`] is the
+/// plain pinhole optionally followed by radial `1 + k1·r² + k2·r⁴` (so
+/// `project_pinhole` / [`MonoProjection::Radial`] reproduce it exactly, and the
+/// rectified / general stereo terms, which use the plain pinhole, stay
+/// meaningful).
+fn is_radial_pinhole_family(camera: &Camera) -> bool {
+    match camera.model {
+        CameraModel::Pinhole
+        | CameraModel::SimplePinhole
+        | CameraModel::SimpleRadial
+        | CameraModel::Radial => true,
+        CameraModel::OpenCv => camera.tangential_distortion().is_none(),
+        _ => false,
+    }
+}
+
 /// Predicted pixel of a camera-frame point and the 2×3 Jacobian of that
 /// prediction w.r.t. the point, for the lens model selected by `projection`
-/// (the radial branch reproduces [`Camera::project`] exactly).
+/// (every branch reproduces [`Camera::project`] exactly).
 fn mono_project_with_jacobian(
-    projection: MonoProjection,
+    projection: MonoProjection<'_>,
     intrinsics: &(f64, f64, f64, f64),
     xc: &Point3<f64>,
 ) -> Option<(Point2<f64>, Matrix2x3<f64>)> {
@@ -9107,6 +9251,207 @@ fn mono_project_with_jacobian(
             j_pi[(1, 2)] = -fy * (d12 * x + d22 * y) * z_inv;
             (predicted.coords.iter().all(|v| v.is_finite()) && j_pi.iter().all(|v| v.is_finite()))
                 .then_some((predicted, j_pi))
+        }
+        MonoProjection::Lens(camera) => camera.project_with_point_jacobian(xc),
+    }
+}
+
+#[cfg(test)]
+mod mono_projection_tests {
+    use super::*;
+
+    fn camera(model: CameraModel, params: Vec<f64>) -> Camera {
+        Camera {
+            id: 1,
+            model,
+            width: 640,
+            height: 480,
+            params,
+        }
+    }
+
+    fn sample_points() -> Vec<Point3<f64>> {
+        let mut points = Vec::new();
+        for i in 0..7 {
+            for j in 0..5 {
+                let z = 1.5 + 0.37 * f64::from(i + j);
+                points.push(Point3::new(
+                    -1.3 + 0.41 * f64::from(i),
+                    -0.9 + 0.43 * f64::from(j),
+                    z,
+                ));
+            }
+        }
+        points
+    }
+
+    /// The pre-lens-model closed forms, copied verbatim, so any change to the
+    /// distortion-free / radial-only arithmetic is caught bit-for-bit.
+    fn historical_pinhole(
+        (fx, fy, cx, cy): (f64, f64, f64, f64),
+        xc: &Point3<f64>,
+    ) -> (Point2<f64>, Matrix2x3<f64>) {
+        let predicted = Point2::new(fx * xc.x / xc.z + cx, fy * xc.y / xc.z + cy);
+        let z_inv = 1.0 / xc.z;
+        let mut j_pi = Matrix2x3::<f64>::zeros();
+        j_pi[(0, 0)] = fx * z_inv;
+        j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
+        j_pi[(1, 1)] = fy * z_inv;
+        j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
+        (predicted, j_pi)
+    }
+
+    fn historical_radial(
+        (fx, fy, cx, cy): (f64, f64, f64, f64),
+        (k1, k2): (f64, f64),
+        xc: &Point3<f64>,
+    ) -> (Point2<f64>, Matrix2x3<f64>) {
+        let x = xc.x / xc.z;
+        let y = xc.y / xc.z;
+        let r2 = x * x + y * y;
+        let d = 1.0 + k1 * r2 + k2 * r2 * r2;
+        let predicted = Point2::new(fx * (x * d) + cx, fy * (y * d) + cy);
+        let g = k1 + 2.0 * k2 * r2;
+        let d11 = d + 2.0 * x * x * g;
+        let d12 = 2.0 * x * y * g;
+        let d22 = d + 2.0 * y * y * g;
+        let z_inv = 1.0 / xc.z;
+        let j_pi = Matrix2x3::new(
+            fx * d11 * z_inv,
+            fx * d12 * z_inv,
+            -fx * (d11 * x + d12 * y) * z_inv,
+            fy * d12 * z_inv,
+            fy * d22 * z_inv,
+            -fy * (d12 * x + d22 * y) * z_inv,
+        );
+        (predicted, j_pi)
+    }
+
+    fn bits(value: &(Point2<f64>, Matrix2x3<f64>)) -> Vec<u64> {
+        value
+            .0
+            .coords
+            .iter()
+            .chain(value.1.iter())
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    #[test]
+    fn distortion_free_and_radial_cameras_keep_the_historical_closed_forms_bit_for_bit() {
+        let intrinsics = (512.5, 498.25, 321.0, 239.5);
+        let (fx, fy, cx, cy) = intrinsics;
+        let pinholes = [
+            Camera::pinhole(1, 640, 480, fx, fy, cx, cy),
+            Camera::pinhole_radial(1, 640, 480, fx, fy, cx, cy, 0.0, 0.0),
+            camera(
+                CameraModel::OpenCv,
+                vec![fx, fy, cx, cy, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ];
+        let radials = [
+            Camera::pinhole_radial(1, 640, 480, fx, fy, cx, cy, -0.17, 0.06),
+            camera(
+                CameraModel::OpenCv,
+                vec![fx, fy, cx, cy, -0.17, 0.06, 0.0, 0.0],
+            ),
+        ];
+        for xc in sample_points() {
+            let expected = bits(&historical_pinhole(intrinsics, &xc));
+            for camera in &pinholes {
+                let projection = MonoProjection::for_camera(camera);
+                assert_eq!(projection, MonoProjection::Pinhole, "{camera:?}");
+                let got = mono_project_with_jacobian(projection, &intrinsics, &xc).unwrap();
+                assert_eq!(bits(&got), expected, "{camera:?} at {xc:?}");
+            }
+            let expected = bits(&historical_radial(intrinsics, (-0.17, 0.06), &xc));
+            for camera in &radials {
+                let projection = MonoProjection::for_camera(camera);
+                assert_eq!(
+                    projection,
+                    MonoProjection::Radial {
+                        k1: -0.17,
+                        k2: 0.06
+                    }
+                );
+                let got = mono_project_with_jacobian(projection, &intrinsics, &xc).unwrap();
+                assert_eq!(bits(&got), expected, "{camera:?} at {xc:?}");
+                // The cost evaluates `Camera::project`: identical bits.
+                assert_eq!(got.0, camera.project(&xc).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn every_other_lens_uses_project_and_its_analytic_jacobian() {
+        let lenses = [
+            camera(
+                CameraModel::OpenCv,
+                vec![500.0, 500.0, 320.0, 240.0, -0.15, 0.05, 0.004, -0.003],
+            ),
+            camera(
+                CameraModel::FullOpenCv,
+                vec![
+                    500.0, 500.0, 320.0, 240.0, -0.15, 0.05, 0.004, -0.003, 0.01, 0.02, -0.01,
+                    0.005,
+                ],
+            ),
+            Camera::opencv_fisheye(
+                1,
+                640,
+                480,
+                300.0,
+                300.0,
+                320.0,
+                240.0,
+                [0.05, -0.02, 0.0, 0.0],
+            ),
+            camera(
+                CameraModel::SimpleRadialFisheye,
+                vec![300.0, 320.0, 240.0, 0.04],
+            ),
+            camera(
+                CameraModel::RadialFisheye,
+                vec![300.0, 320.0, 240.0, 0.04, -0.01],
+            ),
+            camera(CameraModel::Fov, vec![400.0, 400.0, 320.0, 240.0, 0.9]),
+            Camera::double_sphere(1, 640, 480, 250.0, 250.0, 320.0, 240.0, -0.2, 0.6),
+        ];
+        for camera in &lenses {
+            let projection = MonoProjection::for_camera(camera);
+            assert_eq!(projection, MonoProjection::Lens(camera));
+            let intrinsics = camera.intrinsics().unwrap();
+            for xc in sample_points() {
+                let (predicted, j_pi) =
+                    mono_project_with_jacobian(projection, &intrinsics, &xc).unwrap();
+                assert_eq!(predicted, camera.project(&xc).unwrap());
+                let h = 1.0e-6;
+                for axis in 0..3 {
+                    let mut plus = xc;
+                    let mut minus = xc;
+                    plus[axis] += h;
+                    minus[axis] -= h;
+                    let numeric = (camera.project(&plus).unwrap()
+                        - camera.project(&minus).unwrap())
+                        / (2.0 * h);
+                    for row in 0..2 {
+                        let analytic = j_pi[(row, axis)];
+                        assert!(
+                            (analytic - numeric[row]).abs() < 1.0e-5 * (1.0 + analytic.abs()),
+                            "{:?} at {xc:?}: d{row}/d{axis} {analytic} vs {}",
+                            camera.model,
+                            numeric[row]
+                        );
+                    }
+                }
+            }
+            // Behind the camera the BA skips the observation, like the cost.
+            assert!(mono_project_with_jacobian(
+                projection,
+                &intrinsics,
+                &Point3::new(0.1, 0.1, -1.0)
+            )
+            .is_none());
         }
     }
 }
