@@ -21,6 +21,16 @@ Per-sequence calibration/config variants for the Project Aria LaMAria benchmark
 - `euroc_config_big_window.json`: **the larger sliding window found to matter
   at km scale** — `vio_max_states = 10`, `vio_max_kfs = 30`, everything else
   unchanged.
+- `euroc_config_big_window_multicam.json`: the big window plus the opt-in
+  multi-camera keys for Aria's divergent camera pair (cameras ~75° apart):
+  `optical_flow_matching_guess_type = "REPROJ_FIX_DEPTH"` with
+  `optical_flow_matching_default_depth = 2.0` (stereo seed from the
+  extrinsics instead of the same pixel), `optical_flow_detect_all_cameras`
+  (FAST replenishment in cam1 too), `vio_landmarks_all_cameras` (cam1-hosted
+  landmarks) and `vio_kf_connectivity_all_cameras`. **Not yet measured on
+  LaMAria**; see [`docs/lamaria_multicam.md`](../../../docs/lamaria_multicam.md)
+  for the diagnosis, synthetic results and the A/B commands. The detection
+  grid is unchanged (50 px; 15×11 cells on 758×572).
 
 ## Why the big window
 
