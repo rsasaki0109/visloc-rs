@@ -4,6 +4,35 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **Bundle adjustment uses the camera's full lens model.** Pose/structure BA
+  (serial, parallel, dense-QR assembly and the GNC residual vector) now
+  linearises the same lens that `Camera::project` measures, with analytic
+  Jacobians for OPENCV (k1, k2, p1, p2), FULL_OPENCV, OPENCV_FISHEYE,
+  SIMPLE_RADIAL_FISHEYE, RADIAL_FISHEYE, FOV and Double Sphere. These cameras
+  were previously rejected with `UnsupportedCameraModel`; SIMPLE_RADIAL and
+  RADIAL are now accepted too. Pipelines that used to skip BA silently on
+  such a camera (they swallow the error) now run it. Unknown models stay
+  rejected, and stereo observations with any camera other than PINHOLE /
+  SIMPLE_PINHOLE now return `UnsupportedCameraModel` instead of being
+  modelled as a pinhole. Distortion-free and radial-only cameras are
+  bit-for-bit unchanged (pinned by tests). Not yet covered: rig observations
+  still project with a pinhole, and the matrix-free / GPU backends still
+  decline distorted cameras and fall back to the regular solver.
+
+### Added
+
+- **`Camera::project_with_point_jacobian`** (visloc-core): the pixel from
+  `Camera::project` plus its analytic 2×3 Jacobian with respect to the
+  camera-frame point, for every lens model.
+- **`BaConfig::refine_tangential_distortion` / `--refine-tangential-distortion`**
+  (unordered SfM demo): opt-in self-calibration of p1/p2 on top of
+  `refine_distortion`. A PINHOLE camera is promoted to OPENCV
+  `[fx, fy, cx, cy, k1, k2, p1, p2]` starting from p1 = p2 = 0.
+  `refine_intrinsics` now also refines OPENCV cameras (their lens terms stay
+  fixed unless `refine_distortion` is set). Default off.
+
 ## 0.2.1 - 2026-10-08
 
 Patch release: camera-distortion correctness fixes. Each fix below corrected
