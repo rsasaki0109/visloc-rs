@@ -516,7 +516,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     RejectReason::ExistingStereoForward(..) => &mut existing_stereo_forward,
                     RejectReason::ExistingStereoBackward(..) => &mut existing_stereo_backward,
                     RejectReason::ExistingStereoFbSquared => &mut existing_stereo_fb_squared,
-                    RejectReason::FastNoCandidate => &mut fast_no_candidate,
+                    RejectReason::FastNoCandidate | RejectReason::Cam1FastNoCandidate => {
+                        &mut fast_no_candidate
+                    }
                     // The opt-in reprojection seed rejects a keypoint before
                     // the forward search; count it with the forward failures
                     // so the CSV layout stays unchanged.

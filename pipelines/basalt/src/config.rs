@@ -75,6 +75,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     // `docs/lamaria_multicam.md`.
     "config.optical_flow_matching_guess_type",
     "config.optical_flow_matching_default_depth",
+    "config.optical_flow_detect_all_cameras",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -187,6 +188,7 @@ impl BasaltConfig {
     ///   `"REPROJ_AVG_DEPTH"` is not implemented and is rejected.
     /// * `config.optical_flow_matching_default_depth`: metres along the cam0
     ///   ray for `REPROJ_FIX_DEPTH` (default 2.0, upstream's default).
+    /// * `config.optical_flow_detect_all_cameras`: also replenish cam1.
     pub fn multi_camera_flow_options(&self) -> Result<MultiCameraFlowOptions, ConfigError> {
         let guess_key = "config.optical_flow_matching_guess_type";
         let depth_key = "config.optical_flow_matching_default_depth";
@@ -215,7 +217,10 @@ impl BasaltConfig {
         } else {
             StereoMatchingGuess::SamePixel
         };
-        Ok(MultiCameraFlowOptions { stereo_guess })
+        Ok(MultiCameraFlowOptions {
+            stereo_guess,
+            detect_all_cameras: self.optional_bool("config.optical_flow_detect_all_cameras")?,
+        })
     }
     pub fn compat_profile(&self) -> Result<CompatProfile, ConfigError> {
         Ok(CompatProfile {

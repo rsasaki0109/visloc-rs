@@ -89,6 +89,11 @@ pub enum StereoMatchingGuess {
 pub struct MultiCameraFlowOptions {
     /// Initial cam1 position of the new-keypoint stereo KLT.
     pub stereo_guess: StereoMatchingGuess,
+    /// Also run grid FAST replenishment in cam1, with its own occupancy grid
+    /// (which counts cam1 points that came from stereo matches and earlier
+    /// cam1 detections).  cam1-born tracks get fresh track ids, have no cam0
+    /// observation, and are then tracked temporally in cam1.
+    pub detect_all_cameras: bool,
 }
 
 impl MultiCameraFlowOptions {
@@ -137,6 +142,10 @@ pub enum TrackStage {
     StereoBackwardSe2Ic,
     StereoFbSquared,
     DsBearingEssentialResidual,
+    /// Opt-in ([`MultiCameraFlowOptions::detect_all_cameras`]): grid FAST
+    /// replenishment in cam1 after the essential filter.  Absent from the
+    /// default trace.
+    Cam1GridFastReplenish,
     Emit,
 }
 
@@ -170,6 +179,8 @@ pub enum RejectReason {
     /// Opt-in reprojection seed ([`StereoMatchingGuess::ReprojectFixedDepth`])
     /// did not land inside cam1, so no stereo search was started.
     StereoSeedOutOfView,
+    /// Opt-in cam1 replenishment found no new corner in any free cell.
+    Cam1FastNoCandidate,
 }
 
 /// Per-frame and cumulative reject counters.
@@ -437,6 +448,12 @@ impl DirectKltStream {
             TrackStage::DsBearingEssentialResidual,
             TrackStage::Emit,
         ];
+        let mut stage_trace = stage_trace;
+        if self.multi_camera.detect_all_cameras && current.cam1.is_some() {
+            // Opt-in only: the default trace above is left untouched.
+            let emit = stage_trace.len() - 1;
+            stage_trace.insert(emit, TrackStage::Cam1GridFastReplenish);
+        }
 
         let old_tracks = std::mem::take(&mut self.tracks);
         let mut current_tracks = BTreeMap::new();
@@ -661,6 +678,43 @@ impl DirectKltStream {
             }
         }
         timing.finish(TimingBucket::FrontendEssentialFilter, essential_started);
+
+        // Opt-in independent cam1 replenishment.  Runs after the essential
+        // filter so the cam1 occupancy grid counts exactly the cam1 points
+        // that survive this frame: temporally tracked ones, stereo matches of
+        // new cam0 keypoints, and earlier cam1-born tracks.
+        if self.multi_camera.detect_all_cameras {
+            if let (Some(current_cam1), Some(_camera1)) =
+                (&current.cam1, self.calibration.camera(1))
+            {
+                let cam1_started = timing.start();
+                let existing_cam1: Vec<_> = current_tracks
+                    .values()
+                    .filter_map(|track| track.cam1.map(|cam1| *cam1.translation()))
+                    .collect();
+                let new_cam1 = self.detector.detect(
+                    current_cam1.level(0).expect("level zero exists"),
+                    &existing_cam1,
+                );
+                if new_cam1.is_empty() {
+                    counters.record(RejectReason::Cam1FastNoCandidate);
+                }
+                for position in new_cam1 {
+                    let track_id = self.next_track_id;
+                    self.next_track_id += 1;
+                    current_tracks.insert(
+                        track_id,
+                        ActiveTrack {
+                            cam0: None,
+                            cam1: Some(AffineCompact2f::new(Matrix2::identity(), position)),
+                            created_frame_id: frame.frame_id,
+                        },
+                    );
+                    created_track_ids.push(track_id);
+                }
+                timing.finish(TimingBucket::FrontendFastReplenish, cam1_started);
+            }
+        }
 
         let output_started = timing.start();
         let mut observations = Vec::new();
@@ -1316,6 +1370,172 @@ mod tests {
         assert!((warp.determinant() - 1.0).abs() > 0.05, "{warp:?}");
     }
 
+    /// Piecewise-constant 5 px random tiles, so FAST finds tile corners and
+    /// KLT patches have gradients.  `seed` selects the texture.
+    fn tile_image(width: usize, height: usize, seed: u64, dx: usize) -> crate::RawU16Image {
+        crate::RawU16Image::from_fn(width, height, |x, y| {
+            let tx = ((x + dx) / 5) as u64;
+            let ty = (y / 5) as u64;
+            let mut h = seed
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(tx.wrapping_mul(0xbf58_476d_1ce4_e5b9))
+                .wrapping_add(ty.wrapping_mul(0x94d0_49bb_1331_11eb));
+            h ^= h >> 31;
+            h = h.wrapping_mul(0xd6e8_feb8_6659_fd93);
+            h ^= h >> 29;
+            (((h >> 56) as u16).clamp(20, 235)) << 8
+        })
+        .unwrap()
+    }
+
+    /// cam1 shows the cam0 texture on its left half (stereo matches succeed
+    /// at the same pixel there) and an unrelated texture on its right half.
+    fn half_shared_cam1(width: usize, height: usize, dx: usize) -> crate::RawU16Image {
+        let shared = tile_image(width, height, 7, dx);
+        let other = tile_image(width, height, 99, dx);
+        crate::RawU16Image::from_fn(width, height, |x, y| {
+            if x < width / 2 {
+                shared.pixels()[y * width + x]
+            } else {
+                other.pixels()[y * width + x]
+            }
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn cam1_replenishment_fills_only_cells_free_of_stereo_matches() {
+        let (width, height) = (240_usize, 160_usize);
+        let camera = DoubleSphereCamera::new(
+            120.0,
+            120.0,
+            120.0,
+            80.0,
+            0.0,
+            0.0,
+            width as u32,
+            height as u32,
+        )
+        .unwrap();
+        let mut calibration = synthetic_calibration(camera);
+        calibration.resolutions = vec![(width as u32, height as u32); 2];
+        calibration.t_imu_cam[1].translation.x = 0.1;
+        let config = DirectKltConfig {
+            pyramid_levels: 2,
+            fast: GridFastConfig {
+                cell_size: 40,
+                edge_threshold: 8,
+                ..GridFastConfig::default()
+            },
+            ..DirectKltConfig::default()
+        };
+        let frame = |id: u64, dx: usize| {
+            StereoFrame::new(
+                id,
+                1_000 + id as i64,
+                tile_image(width, height, 7, dx),
+                Some(half_shared_cam1(width, height, dx)),
+            )
+        };
+        let cell_of = |p: Point2<f64>| ((p.x as usize) / 40, (p.y as usize) / 40);
+
+        // Default: every cam1 observation is a stereo match of a cam0 track.
+        let mut pinned = DirectKltStream::new(calibration.clone(), config).unwrap();
+        let pinned_out = pinned.process_frame(frame(0, 0)).unwrap();
+        let pinned_cam0: std::collections::BTreeSet<_> = pinned_out
+            .observations
+            .iter()
+            .filter(|o| o.camera_id == 0)
+            .map(|o| o.track_id)
+            .collect();
+        assert!(pinned_out
+            .observations
+            .iter()
+            .all(|o| o.camera_id == 0 || pinned_cam0.contains(&o.track_id)));
+        assert!(!pinned_out
+            .stage_trace
+            .contains(&TrackStage::Cam1GridFastReplenish));
+
+        let mut stream = DirectKltStream::new(calibration, config)
+            .unwrap()
+            .with_multi_camera_options(MultiCameraFlowOptions {
+                detect_all_cameras: true,
+                ..MultiCameraFlowOptions::default()
+            })
+            .unwrap();
+        let out = stream.process_frame(frame(0, 0)).unwrap();
+        // The cam0 stage is unchanged by the option.
+        let cam0: Vec<_> = out
+            .observations
+            .iter()
+            .filter(|o| o.camera_id == 0)
+            .map(|o| (o.track_id, o.pixel))
+            .collect();
+        let pinned_cam0_obs: Vec<_> = pinned_out
+            .observations
+            .iter()
+            .filter(|o| o.camera_id == 0)
+            .map(|o| (o.track_id, o.pixel))
+            .collect();
+        assert_eq!(cam0, pinned_cam0_obs);
+        let cam0_ids: std::collections::BTreeSet<_> = cam0.iter().map(|(id, _)| *id).collect();
+        let stereo_cells: std::collections::BTreeSet<_> = out
+            .observations
+            .iter()
+            .filter(|o| o.camera_id == 1 && cam0_ids.contains(&o.track_id))
+            .map(|o| cell_of(o.pixel))
+            .collect();
+        let cam1_born: Vec<_> = out
+            .observations
+            .iter()
+            .filter(|o| o.camera_id == 1 && !cam0_ids.contains(&o.track_id))
+            .collect();
+        assert!(
+            !stereo_cells.is_empty(),
+            "no stereo match on the shared half"
+        );
+        assert!(!cam1_born.is_empty(), "no cam1-born track");
+        let mut born_cells = std::collections::BTreeSet::new();
+        for observation in &cam1_born {
+            let cell = cell_of(observation.pixel);
+            assert!(
+                !stereo_cells.contains(&cell),
+                "cam1 detection {cell:?} landed in a cell a stereo match occupies"
+            );
+            assert!(born_cells.insert(cell), "two cam1 detections in {cell:?}");
+            // Fresh ids, allocated after every cam0-born id of this frame.
+            assert!(observation.track_id > *cam0_ids.iter().max().unwrap());
+            assert!(out.created_track_ids.contains(&observation.track_id));
+        }
+        // Every cell of the unshared right half is covered by cam1.
+        assert!(born_cells.iter().any(|(cx, _)| *cx >= 3));
+        assert!(out.stage_trace.contains(&TrackStage::Cam1GridFastReplenish));
+
+        // Next frame (1 px shift): cam1-born tracks continue temporally in
+        // cam1 under their ids, and no new detection lands on them.
+        let next = stream.process_frame(frame(1, 1)).unwrap();
+        let retained = cam1_born
+            .iter()
+            .filter(|born| {
+                next.observations
+                    .iter()
+                    .any(|o| o.camera_id == 1 && o.track_id == born.track_id)
+            })
+            .count();
+        // Points whose patch straddles the texture seam at x = 120 (fixed in
+        // image space while the content shifts) may legitimately fail.
+        assert!(
+            retained * 2 >= cam1_born.len(),
+            "only {retained}/{} cam1-born tracks survived one frame",
+            cam1_born.len()
+        );
+        assert!(next
+            .observations
+            .iter()
+            .filter(|o| cam1_born.iter().any(|born| born.track_id == o.track_id))
+            .all(|o| o.camera_id == 1));
+    }
+
     #[test]
     fn multi_camera_options_validate_the_default_depth() {
         let camera = DoubleSphereCamera::new(40.0, 40.0, 48.0, 48.0, 0.0, 0.5, 96, 96).unwrap();
@@ -1328,6 +1548,7 @@ mod tests {
                 .clone()
                 .with_multi_camera_options(MultiCameraFlowOptions {
                     stereo_guess: StereoMatchingGuess::ReprojectFixedDepth { depth_m },
+                    detect_all_cameras: false,
                 })
                 .is_err());
         }
