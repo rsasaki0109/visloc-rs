@@ -81,6 +81,10 @@ pub struct EstimatorConfig {
     /// from that track's retained multi-frame history.  `false` keeps the
     /// pinned cam0-hosted landmark creation.
     pub landmarks_all_cameras: bool,
+    /// Opt-in (not upstream; `config.vio_kf_connectivity_all_cameras`).  The
+    /// keyframe connectivity ratio counts distinct tracks observed by any
+    /// camera instead of camera-0 tracks only.
+    pub kf_connectivity_all_cameras: bool,
 }
 
 impl Default for EstimatorConfig {
@@ -96,6 +100,7 @@ impl Default for EstimatorConfig {
             initial_accel_bias_weight: 1.0e1,
             initial_gyro_bias_weight: 1.0e2,
             landmarks_all_cameras: false,
+            kf_connectivity_all_cameras: false,
         }
     }
 }
@@ -2869,10 +2874,15 @@ impl BasaltVioEstimator {
         plan
     }
 
+    /// Upstream's keyframe connectivity: camera-0 tracks with a landmark
+    /// versus camera-0 tracks without one.  With the opt-in
+    /// `kf_connectivity_all_cameras`, distinct tracks observed by any camera
+    /// are counted instead (a stereo track counts once).
     fn cam0_connectivity(&self, observations: &[TrackObservation]) -> (usize, usize) {
+        let all_cameras = self.config.kf_connectivity_all_cameras;
         let mut track_ids = observations
             .iter()
-            .filter(|observation| observation.camera_id == 0)
+            .filter(|observation| all_cameras || observation.camera_id == 0)
             .map(|observation| observation.track_id)
             .collect::<Vec<_>>();
         track_ids.sort_unstable();
@@ -5844,6 +5854,48 @@ mod tests {
                 assert!(!rows.is_empty());
                 assert!(rows.iter().all(|observation| observation.camera_id == 1));
             }
+        }
+    }
+
+    #[test]
+    fn keyframe_connectivity_counts_all_cameras_only_when_enabled() {
+        let (camera, extrinsics) = divergent_rig();
+        let observation = |track_id: u64, camera_id: u16| TrackObservation {
+            track_id,
+            frame_id: 3,
+            timestamp_ns: 30,
+            camera_id,
+            pixel: Point2::new(300.0, 200.0),
+        };
+        // Track 1: stereo (both cameras), landmark.  Track 2: cam0 only.
+        // Track 3: cam1 only, landmark.  Track 4: cam1 only, no landmark.
+        let observations = [
+            observation(1, 0),
+            observation(1, 1),
+            observation(2, 0),
+            observation(3, 1),
+            observation(4, 1),
+        ];
+        for (all_cameras, expected) in [(false, (1, 1)), (true, (2, 2))] {
+            let config = EstimatorConfig {
+                kf_connectivity_all_cameras: all_cameras,
+                ..EstimatorConfig::default()
+            };
+            let mut estimator = BasaltVioEstimator::new(camera, config)
+                .with_camera_rig(vec![camera, camera], extrinsics.clone())
+                .unwrap();
+            for (track_id, host) in [(1_u64, 0_u16), (3, 1)] {
+                estimator.landmarks.insert(
+                    track_id,
+                    InverseDistanceLandmark {
+                        anchor_pose: 2,
+                        anchor_camera_id: host,
+                        direction: StereographicDirection::from_bearing(Vector3::z()).unwrap(),
+                        inverse_distance: 0.5,
+                    },
+                );
+            }
+            assert_eq!(estimator.cam0_connectivity(&observations), expected);
         }
     }
 
