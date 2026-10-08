@@ -34,6 +34,7 @@ members = [
     "pipelines/fusion",
     "pipelines/basalt",
 ]
+exclude = ["ros2/visloc-ros2"]
 resolver = "2"
 
 # Build-level speed lever for the real-time VI-SLAM push: fat LTO,
