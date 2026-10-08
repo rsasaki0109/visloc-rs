@@ -355,8 +355,8 @@ pub mod prelude {
         read_kitti_calibration_txt, read_kitti_pinhole_camera, CalibrationError, KittiProjection,
     };
     pub use crate::io::colmap::{
-        read_colmap_binary_model, read_colmap_text_model, write_colmap_text_model, ColmapError,
-        ColmapMapProviderError,
+        read_colmap_binary_model, read_colmap_text_model, write_colmap_binary_model,
+        write_colmap_text_model, ColmapError, ColmapMapProviderError,
     };
     pub use crate::io::descriptors::{read_landmark_descriptors_txt, DescriptorStoreError};
     #[cfg(feature = "image-io")]

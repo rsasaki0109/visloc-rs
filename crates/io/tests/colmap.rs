@@ -10,8 +10,8 @@ use visloc_core::types::{
 use visloc_io::colmap::{
     format_cameras_txt, format_images_txt, format_points3d_txt, parse_cameras_bin,
     parse_cameras_txt, parse_images_bin, parse_images_txt, parse_points3d_bin, parse_points3d_txt,
-    read_colmap_binary_model, read_colmap_text_model, write_colmap_text_model, ColmapError,
-    ColmapMapProvider, ColmapMapProviderError,
+    read_colmap_binary_model, read_colmap_text_model, write_colmap_binary_model,
+    write_colmap_text_model, ColmapError, ColmapMapProvider, ColmapMapProviderError,
 };
 use visloc_localization::{DescriptorProvider, MapProvider};
 
@@ -325,6 +325,58 @@ fn writes_and_reads_colmap_text_model_round_trip() {
         1001
     );
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn writes_and_reads_colmap_binary_model_round_trip() {
+    let text_dir = binary_fixture_dir().join("text");
+    let binary_dir = binary_fixture_dir().join("binary");
+    let map = writable_map();
+
+    write_colmap_text_model(&map, &text_dir).unwrap();
+    write_colmap_binary_model(&map, &binary_dir).unwrap();
+    let from_text = read_colmap_text_model(&text_dir).unwrap();
+    let from_binary = read_colmap_binary_model(&binary_dir).unwrap();
+
+    assert!(from_binary.validate().is_valid());
+    // The binary writer mirrors the text writer record-for-record.
+    assert_eq!(from_binary, from_text);
+    assert_eq!(from_binary.cameras, map.cameras);
+    assert_eq!(
+        from_binary.keyframes.get(&10).unwrap().observations[1].landmark_id,
+        1001
+    );
+    for (id, landmark) in &map.landmarks {
+        assert_eq!(from_binary.landmarks[id].position, landmark.position);
+    }
+    // points3D.bin carries the same TRACK[] as points3D.txt.
+    let points = fs::read(binary_dir.join("points3D.bin")).unwrap();
+    let track_entries = map
+        .landmarks
+        .values()
+        .map(|landmark| landmark.observations.len())
+        .sum::<usize>();
+    assert_eq!(
+        points.len(),
+        8 + map.landmarks.len() * 51 + track_entries * 8
+    );
+    fs::remove_dir_all(text_dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn binary_writer_rejects_ids_beyond_colmap_u32_range() {
+    let dir = binary_fixture_dir();
+    let mut map = writable_map();
+    let mut camera = map.cameras.remove(&2).unwrap();
+    camera.id = u64::from(u32::MAX) + 1;
+    map.cameras.insert(camera.id, camera);
+
+    let error = write_colmap_binary_model(&map, &dir).unwrap_err();
+    assert!(
+        matches!(error, ColmapError::InvalidExportInput(_)),
+        "{error}"
+    );
+    assert!(!dir.exists());
 }
 
 fn camera_bin() -> Vec<u8> {
