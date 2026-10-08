@@ -23,6 +23,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Monocular-inertial VIO on the Basalt port (experimental).**
+  `basalt_euroc_vio_demo --mono` replays cam0 + IMU with the stereo
+  calibration reduced to camera 0. The estimator needed no change: it already
+  triangulates new keyframe landmarks across frames, initialises from IMU
+  gravity alignment, and its KLT frontend treats cam1 as optional; the gap was
+  the EuRoC reader and rig construction. New `EurocSensorDataset::open_monocular`,
+  `BasaltCalibration::retain_cameras` and
+  `visloc_basalt::vio_estimator_from_calibration`. The stereo-inertial path is
+  unchanged. Synthetic tests (including rendered images through the real KLT
+  frontend) recover metric scale within 0.3% at 5–9 mm RMS; EuRoC is still to
+  be measured, and position drifts with IMU bias while the platform is static
+  before the first motion. See `docs/mono_inertial_vio.md`.
 - **Python bindings (`bindings/python`, package `visloc`).** pyo3/maturin
   extension with NumPy interop: `Camera` (COLMAP models + Double Sphere),
   `Pose`/`SE3`, COLMAP text/binary `Reconstruction` read/write, `localize` and
