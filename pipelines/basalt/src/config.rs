@@ -66,6 +66,10 @@ const KEYS: &[&str] = &[
 const OPTIONAL_KEYS: &[&str] = &[
     "config.vio_urgent_kf_keypoints_thresh",
     "config.vio_urgent_min_frames_after_kf",
+    // Raw-gyro rotation seed for temporal cam0 KLT (default false).  It was
+    // already read by `adapter::direct_klt_config`, but only programmatic
+    // callers could set it because this list rejected it in a JSON file.
+    "config.optical_flow_imu_seed_rotation",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -160,6 +164,14 @@ impl BasaltConfig {
             initial_accel_bias_weight: self.value("config.vio_init_ba_weight")?,
             initial_gyro_bias_weight: self.value("config.vio_init_bg_weight")?,
         })
+    }
+    /// An optional boolean key; absent means `false`.
+    pub fn optional_bool(&self, key: &str) -> Result<bool, ConfigError> {
+        if self.values.contains_key(key) {
+            self.value(key)
+        } else {
+            Ok(false)
+        }
     }
     pub fn compat_profile(&self) -> Result<CompatProfile, ConfigError> {
         Ok(CompatProfile {
