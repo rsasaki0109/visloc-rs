@@ -13,29 +13,29 @@ DPVO CUDA) stay as they are; nothing here depends on them.
 
 | Item | Status | Gate |
 | --- | --- | --- |
-| 0.2.1 patch release (distortion fixes) | Version bumped, CHANGELOG cut | Tag after main CI is green |
-| crates.io readiness | All 16 crates package; root package trimmed from ~83 MB to 0.87 MiB compressed with an `include` allowlist | `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` passes; then `cargo publish --workspace` (needs a crates.io token) |
-| BA distortion models | Pose/structure BA handles radial k1, k2 only. Extend to OPENCV p1/p2 and OPENCV_FISHEYE so BA optimizes the same model `Camera::project` measures | Finite-difference Jacobian tests and a synthetic BA round-trip per model; distortion-free and radial-only outputs stay bit-identical |
+| 0.2.1 patch release (distortion fixes) | Done: version bumped, CHANGELOG cut | Tag `v0.2.1` after main CI is green |
+| crates.io readiness | Done: all 16 crates package and verify-build from their packaged sources; root package trimmed from ~83 MB to 0.87 MiB compressed with an `include` allowlist | `cargo publish --workspace` (needs a crates.io token) |
+| BA distortion models | Done: pose/structure BA linearises every lens model (OPENCV, FULL_OPENCV, the fisheye models, FOV, Double Sphere); opt-in p1/p2 self-calibration. Open: rig observations still project with a pinhole; matrix-free / GPU backends fall back for distorted cameras | Follow-up: lens model in rig BA |
 
 ## Track 2: Sensor coverage (the empty cells in the README sensor table)
 
 | Item | Status | Gate |
 | --- | --- | --- |
-| Monocular + IMU VIO on the Basalt port | Not started on the Basalt path | Synthetic mono-inertial test tracks with metric scale; stereo path bit-identical; then an EuRoC measurement (needs dataset access) |
-| GNSS fusion | Example-level prior only | Joint optimization of VO constraints and GNSS position factors with online ENU alignment, lever arm and outlier gating; synthetic ATE well below VO-only ATE |
+| Monocular + IMU VIO on the Basalt port | Done (experimental): `basalt_euroc_vio_demo --mono`; synthetic scale error < 0.3%, 5–9 mm RMS; stereo path unchanged ([notes](mono_inertial_vio.md)) | EuRoC ATE (needs dataset access); static-start drift; mono in the online mapper |
+| GNSS fusion | Done (synthetic): joint VO + GNSS pose graph with estimated alignment, lever arm, GNC outlier rejection, dropout bridging; ATE 5.25 m → 0.90 m ([notes](gnss_fusion.md)) | Real-data run (e.g. KITTI raw OXTS); geodetic-to-ENU conversion; IMU in the graph |
 
 ## Track 3: Usability
 
 | Item | Status | Gate |
 | --- | --- | --- |
-| Python bindings (pyo3 + maturin) | Not started | Camera, Pose, COLMAP I/O, ATE evaluation from Python, with pytest coverage and a CI job |
-| ROS 2 node | Not started | Needs a ROS 2 toolchain to build and test. Design first, then implement where it can be verified |
+| Python bindings (pyo3 + maturin) | Done: `bindings/python` (Camera, Pose, COLMAP I/O, PnP localization, ATE/RPE), 42 pytest tests, CI job | Publish wheels to PyPI |
+| ROS 2 nodes | Done: `ros2/visloc-ros2` VIO and localization nodes over pure-Rust DDS, tested end to end over RTPS, CI job | Test against a real ROS 2 install (Fast DDS / Cyclone); attach the online mapper to the VIO node |
 
 ## Track 4: Maintainability
 
 | Item | Status | Gate |
 | --- | --- | --- |
-| Planning docs | `PLAN.md` (233 KB) and the itemized 0.2.0 CHANGELOG (~4,800 lines) moved to [`archive/`](archive/); short handoff and changelog in their place | Docs link check passes |
+| Planning docs | Done: `PLAN.md` (233 KB) and the itemized 0.2.0 CHANGELOG (~4,800 lines) moved to [`archive/`](archive/); short handoff and changelog in their place | — |
 | Split very large source files | `examples/unordered_sfm_demo.rs` (22.5k lines), `pipelines/basalt/src/vio/aom.rs` (21.5k), `pipelines/slam/src/incremental_sfm.rs` (18.5k), `pipelines/slam/src/bundle.rs` (17k) | Pure moves into submodules; no behavior change; full test suite and parity/hash tests unchanged |
 
 ## Needs real data (not runnable from a dataset-less environment)
@@ -46,7 +46,8 @@ These stay open, but each needs EuRoC / OpenLORIS access to measure:
   inner iterations are about 80% of VIO wall time; any speed-up must be
   checked against the VIO trajectory hash.
 - **OpenLORIS 10k rig SfM RMSE parity.** 0.3890 m vs COLMAP's 0.3843 m.
-- **Mono-inertial VIO ATE on EuRoC** once Track 2 lands.
+- **Mono-inertial VIO ATE on EuRoC** (the code is in; only the measurement is missing).
+- **GNSS fusion on real data** (for example KITTI raw OXTS as the GNSS source).
 
 ## Guardrails (unchanged)
 
