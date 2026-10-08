@@ -207,6 +207,128 @@ pub fn write_colmap_text_model(map: &VisualMap, path: impl AsRef<Path>) -> Resul
     Ok(())
 }
 
+/// Binary counterpart of [`write_colmap_text_model`]: saves a `VisualMap` as
+/// COLMAP `cameras.bin`, `images.bin`, and `points3D.bin` under `path`.
+///
+/// The records mirror the text writer exactly — cameras go through
+/// [`colmap_camera_record`], images are named `image_<id>.jpg` and list every
+/// keypoint with its observed `POINT3D_ID` (or `-1`), and each point's
+/// `TRACK[]` comes from `Landmark::observations` sorted by
+/// `(frame_id, keypoint_index)` with white RGB and zero error. Ids that do not
+/// fit COLMAP's 32-bit camera/image id or track fields are rejected with
+/// [`ColmapError::InvalidExportInput`] before any file is written.
+pub fn write_colmap_binary_model(
+    map: &VisualMap,
+    path: impl AsRef<Path>,
+) -> Result<(), ColmapError> {
+    let path = path.as_ref();
+    let cameras_bytes = format_cameras_bin(map)?;
+    let images_bytes = format_images_bin(map)?;
+    let points_bytes = format_points3d_bin(map)?;
+    fs::create_dir_all(path)?;
+    fs::write(path.join("cameras.bin"), cameras_bytes)?;
+    fs::write(path.join("images.bin"), images_bytes)?;
+    fs::write(path.join("points3D.bin"), points_bytes)?;
+    Ok(())
+}
+
+fn u32_id(value: u64, what: &str) -> Result<u32, ColmapError> {
+    u32::try_from(value).map_err(|_| {
+        ColmapError::InvalidExportInput(format!(
+            "{what} {value} does not fit in u32 (COLMAP binary models use 32-bit ids)"
+        ))
+    })
+}
+
+fn format_cameras_bin(map: &VisualMap) -> Result<Vec<u8>, ColmapError> {
+    let mut cameras = map.cameras.values().collect::<Vec<_>>();
+    cameras.sort_by_key(|camera| camera.id);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(cameras.len() as u64).to_le_bytes());
+    for camera in cameras {
+        let (model, params) = validated_colmap_camera_record(camera)?;
+        let model_id = colmap_id_from_camera_model(&model)?;
+        bytes.extend_from_slice(&u32_id(camera.id, "camera id")?.to_le_bytes());
+        bytes.extend_from_slice(&model_id.to_le_bytes());
+        bytes.extend_from_slice(&u64::from(camera.width).to_le_bytes());
+        bytes.extend_from_slice(&u64::from(camera.height).to_le_bytes());
+        for param in params {
+            bytes.extend_from_slice(&param.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn format_images_bin(map: &VisualMap) -> Result<Vec<u8>, ColmapError> {
+    let mut keyframes = map.keyframes.values().collect::<Vec<_>>();
+    keyframes.sort_by_key(|keyframe| keyframe.frame.id);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(keyframes.len() as u64).to_le_bytes());
+    for keyframe in keyframes {
+        let frame = &keyframe.frame;
+        bytes.extend_from_slice(&u32_id(frame.id, "image id")?.to_le_bytes());
+        let pose = frame.pose.clone().unwrap_or_default();
+        let q = pose.world_to_camera.rotation.quaternion();
+        let t = pose.world_to_camera.translation;
+        for value in [q.w, q.i, q.j, q.k, t.x, t.y, t.z] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&u32_id(frame.camera_id, "camera id")?.to_le_bytes());
+        bytes.extend_from_slice(format!("image_{}.jpg", frame.id).as_bytes());
+        bytes.push(0);
+
+        let mut landmark_by_keypoint = BTreeMap::new();
+        for observation in &keyframe.observations {
+            landmark_by_keypoint
+                .entry(observation.keypoint_index)
+                .or_insert(observation.landmark_id);
+        }
+        bytes.extend_from_slice(&(frame.keypoints.len() as u64).to_le_bytes());
+        for (keypoint_index, xy) in frame.keypoints.iter().enumerate() {
+            bytes.extend_from_slice(&xy.x.to_le_bytes());
+            bytes.extend_from_slice(&xy.y.to_le_bytes());
+            let point3d_id = match landmark_by_keypoint.get(&keypoint_index) {
+                Some(&landmark_id) => i64::try_from(landmark_id).map_err(|_| {
+                    ColmapError::InvalidExportInput(format!(
+                        "landmark id {landmark_id} does not fit in COLMAP's signed POINT3D_ID"
+                    ))
+                })?,
+                None => -1,
+            };
+            bytes.extend_from_slice(&point3d_id.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn format_points3d_bin(map: &VisualMap) -> Result<Vec<u8>, ColmapError> {
+    let mut landmarks = map.landmarks.values().collect::<Vec<_>>();
+    landmarks.sort_by_key(|landmark| landmark.id);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(landmarks.len() as u64).to_le_bytes());
+    for landmark in landmarks {
+        bytes.extend_from_slice(&landmark.id.to_le_bytes());
+        for value in [
+            landmark.position.x,
+            landmark.position.y,
+            landmark.position.z,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[255u8, 255u8, 255u8]);
+        bytes.extend_from_slice(&0.0f64.to_le_bytes());
+        let mut observations = landmark.observations.iter().collect::<Vec<_>>();
+        observations.sort_by_key(|observation| (observation.frame_id, observation.keypoint_index));
+        bytes.extend_from_slice(&(observations.len() as u64).to_le_bytes());
+        for observation in observations {
+            bytes.extend_from_slice(&u32_id(observation.frame_id, "track image id")?.to_le_bytes());
+            let keypoint_index = u32_id(observation.keypoint_index as u64, "track POINT2D_IDX")?;
+            bytes.extend_from_slice(&keypoint_index.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
 /// Write a COLMAP text model suitable for bootstrapping a 3D Gaussian
 /// Splatting (3DGS) / NeRF training pipeline.
 ///

@@ -44,7 +44,11 @@ members = [
     "pipelines/fusion",
     "pipelines/basalt",
 ]
-exclude = ["ros2/visloc-ros2"]
+# Standalone crates with their own Cargo.lock: the pyo3/maturin Python
+# bindings (an extension-module cdylib must not join `cargo test --workspace`
+# linking or the MSRV/deny/package gates) and the ROS 2 nodes (their DDS
+# dependency tree stays out of the root lockfile).
+exclude = ["bindings/python", "ros2/visloc-ros2"]
 resolver = "2"
 
 # Build-level speed lever for the real-time VI-SLAM push: fat LTO,

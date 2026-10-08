@@ -95,7 +95,13 @@ This is intended for sparse map reuse after local/online updates. The writer emi
 - generated image names use `image_<FRAME_ID>.jpg`
 - missing keypoint observations are written with `POINT3D_ID = -1`
 
-The writer does not write feature descriptors. For binary COLMAP output, use the 3DGS exporter below.
+The writer does not write feature descriptors.
+
+`visloc_io::colmap::write_colmap_binary_model` writes the same records as
+`cameras.bin`, `images.bin`, and `points3D.bin` (same camera-model mapping,
+generated image names, `-1` placeholders, and white/zero-error points). Camera
+and image ids, and track entries, must fit COLMAP's 32-bit fields; otherwise the
+writer returns `ColmapError::InvalidExportInput` before writing any file.
 
 ## 3DGS / NeRF Bootstrap Export
 

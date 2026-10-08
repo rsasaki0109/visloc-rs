@@ -23,6 +23,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Python bindings (`bindings/python`, package `visloc`).** pyo3/maturin
+  extension with NumPy interop: `Camera` (COLMAP models + Double Sphere),
+  `Pose`/`SE3`, COLMAP text/binary `Reconstruction` read/write, `localize` and
+  `estimate_pose_pnp_ransac`, and `evaluate_ate` / `evaluate_rpe` /
+  `umeyama_alignment`. Ships `.pyi` stubs and pytest tests; built and tested
+  by a new `python-bindings` CI job. The crate is excluded from the root
+  workspace (own `Cargo.lock`), so pyo3/numpy do not enter the Rust gates.
+- **`visloc_io::colmap::write_colmap_binary_model`** for a `VisualMap`.
 - **ROS 2 nodes (`ros2/visloc-ros2`)** over pure-Rust DDS (`ros2-client` /
   RustDDS; no ROS install needed to build). `visloc_vio_node` runs the Basalt
   stereo-inertial VIO on two `sensor_msgs/Image` topics plus
