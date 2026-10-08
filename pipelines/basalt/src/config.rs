@@ -76,6 +76,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "config.optical_flow_matching_guess_type",
     "config.optical_flow_matching_default_depth",
     "config.optical_flow_detect_all_cameras",
+    "config.vio_landmarks_all_cameras",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -169,6 +170,7 @@ impl BasaltConfig {
             initial_pose_weight: self.value("config.vio_init_pose_weight")?,
             initial_accel_bias_weight: self.value("config.vio_init_ba_weight")?,
             initial_gyro_bias_weight: self.value("config.vio_init_bg_weight")?,
+            landmarks_all_cameras: self.optional_bool("config.vio_landmarks_all_cameras")?,
         })
     }
     /// An optional boolean key; absent means `false`.

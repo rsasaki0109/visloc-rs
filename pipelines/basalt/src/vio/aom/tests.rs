@@ -7244,6 +7244,170 @@ fn anchored_stereographic_factor_matches_upstream_finite_difference_contract() {
     }
 }
 
+/// A landmark hosted in cam1 of a divergent rig (cam1 = cam0 rotated 75
+/// degrees about x, 0.138 m baseline, as Project Aria's SLAM pair), observed
+/// by cam1 and by cam0 at another pose.  The analytic host/target pose and
+/// landmark Jacobians must match central differences for every
+/// host/target camera combination the multi-camera VIO can produce.
+#[test]
+fn cam1_hosted_factor_matches_finite_difference_on_divergent_rig() {
+    let camera = DoubleSphereCamera::new(241.6, 241.6, 379.0, 286.0, 0.0, 0.0, 758, 572).unwrap();
+    let extrinsics = [
+        SE3::identity(),
+        SE3::new(
+            UnitQuaternion::from_scaled_axis(Vector3::new(75_f64.to_radians(), 0.0, 0.0)),
+            Vector3::new(0.004, -0.109, -0.085),
+        ),
+    ];
+    let anchor_pose = SE3::new(
+        UnitQuaternion::from_scaled_axis(Vector3::new(0.05, -0.03, 0.2)),
+        Vector3::new(0.4, -0.2, 0.1),
+    );
+    let target_pose = SE3::new(
+        UnitQuaternion::from_scaled_axis(Vector3::new(-0.02, 0.06, 0.25)),
+        Vector3::new(0.65, -0.1, 0.18),
+    );
+    // In the band both cameras share: cam1 sees it low in its image.
+    let point_host = Vector3::new(0.1, 1.5, 2.0);
+    let landmark = InverseDistanceLandmark {
+        anchor_pose: 3,
+        anchor_camera_id: 1,
+        direction: StereographicDirection::from_bearing(point_host.normalize()).unwrap(),
+        inverse_distance: 1.0 / point_host.norm(),
+    };
+    let config = FactorConfig {
+        observation_stddev: 1.0,
+        huber_delta: 0.0,
+        outlier_threshold: f64::INFINITY,
+    };
+    let point_world = anchor_pose
+        .compose(&extrinsics[1])
+        .transform_point(&Point3::from(point_host));
+    for target_camera in [1_usize, 0] {
+        let truth = camera
+            .project(
+                &target_pose
+                    .compose(&extrinsics[target_camera])
+                    .inverse()
+                    .transform_point(&point_world),
+            )
+            .unwrap();
+        assert!(camera.contains_pixel(&truth), "target cam{target_camera}");
+        let factor = |anchor: &SE3, target: &SE3, landmark: &InverseDistanceLandmark, pixel| {
+            anchored_visual_reprojection_factor(
+                &camera,
+                anchor,
+                &extrinsics[1],
+                target,
+                &extrinsics[target_camera],
+                landmark,
+                pixel,
+                false,
+                config,
+            )
+            .unwrap()
+        };
+        // The exact projection gives a zero residual: the host extrinsic is
+        // T_imu_cam1, not cam0's.
+        assert!(
+            factor(&anchor_pose, &target_pose, &landmark, truth)
+                .residual
+                .norm()
+                < 1e-8
+        );
+        let observation = truth + Vector2::new(1.5, -0.8);
+        let linearized = factor(&anchor_pose, &target_pose, &landmark, observation);
+        let epsilon = 1e-7;
+        for column in 0..6 {
+            let numerical = (factor(
+                &basalt_pose_increment(&anchor_pose, column, epsilon),
+                &target_pose,
+                &landmark,
+                observation,
+            )
+            .residual
+                - factor(
+                    &basalt_pose_increment(&anchor_pose, column, -epsilon),
+                    &target_pose,
+                    &landmark,
+                    observation,
+                )
+                .residual)
+                / (2.0 * epsilon);
+            assert!(
+                (numerical - linearized.anchor_pose_jacobian.column(column)).norm() < 2e-5,
+                "cam{target_camera} anchor column {column}: {numerical:?} vs {:?}",
+                linearized.anchor_pose_jacobian.column(column)
+            );
+            let numerical = (factor(
+                &anchor_pose,
+                &basalt_pose_increment(&target_pose, column, epsilon),
+                &landmark,
+                observation,
+            )
+            .residual
+                - factor(
+                    &anchor_pose,
+                    &basalt_pose_increment(&target_pose, column, -epsilon),
+                    &landmark,
+                    observation,
+                )
+                .residual)
+                / (2.0 * epsilon);
+            assert!(
+                (numerical - linearized.target_pose_jacobian.column(column)).norm() < 2e-5,
+                "cam{target_camera} target column {column}: {numerical:?} vs {:?}",
+                linearized.target_pose_jacobian.column(column)
+            );
+        }
+        for column in 0..3 {
+            let mut plus = landmark;
+            let mut minus = landmark;
+            if column < 2 {
+                plus.direction.xy[column] += epsilon;
+                minus.direction.xy[column] -= epsilon;
+            } else {
+                plus.inverse_distance += epsilon;
+                minus.inverse_distance -= epsilon;
+            }
+            let numerical = (factor(&anchor_pose, &target_pose, &plus, observation).residual
+                - factor(&anchor_pose, &target_pose, &minus, observation).residual)
+                / (2.0 * epsilon);
+            assert!(
+                (numerical - linearized.landmark_jacobian.column(column)).norm() < 2e-5,
+                "cam{target_camera} landmark column {column}: {numerical:?} vs {:?}",
+                linearized.landmark_jacobian.column(column)
+            );
+        }
+        // The f32 production factor agrees with the f64 reference.
+        let f32_factor = anchored_visual_reprojection_factor_f32(
+            &camera,
+            &anchor_pose,
+            &extrinsics[1],
+            &target_pose,
+            &extrinsics[target_camera],
+            &landmark,
+            observation,
+            false,
+            config,
+        )
+        .unwrap();
+        assert!((f32_factor.residual - linearized.residual).norm() < 1e-2);
+        assert!(
+            (f32_factor.anchor_pose_jacobian - linearized.anchor_pose_jacobian).norm()
+                < 1e-3 * linearized.anchor_pose_jacobian.norm()
+        );
+        assert!(
+            (f32_factor.target_pose_jacobian - linearized.target_pose_jacobian).norm()
+                < 1e-3 * linearized.target_pose_jacobian.norm()
+        );
+        assert!(
+            (f32_factor.landmark_jacobian - linearized.landmark_jacobian).norm()
+                < 1e-3 * linearized.landmark_jacobian.norm()
+        );
+    }
+}
+
 #[test]
 fn huber_and_outlier_gates_are_explicit_and_deterministic() {
     let cam = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 0.7, 640, 480).unwrap();

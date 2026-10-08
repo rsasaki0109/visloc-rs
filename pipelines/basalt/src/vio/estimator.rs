@@ -74,6 +74,13 @@ pub struct EstimatorConfig {
     pub initial_pose_weight: f64,
     pub initial_accel_bias_weight: f64,
     pub initial_gyro_bias_weight: f64,
+    /// Opt-in (not upstream; `config.vio_landmarks_all_cameras`).  When a
+    /// keyframe is taken, an unconnected track observed in the current frame
+    /// by a camera other than cam0 -- and not by cam0 -- also becomes a
+    /// landmark candidate, hosted in the lowest such camera and triangulated
+    /// from that track's retained multi-frame history.  `false` keeps the
+    /// pinned cam0-hosted landmark creation.
+    pub landmarks_all_cameras: bool,
 }
 
 impl Default for EstimatorConfig {
@@ -88,6 +95,7 @@ impl Default for EstimatorConfig {
             initial_pose_weight: 1.0e8,
             initial_accel_bias_weight: 1.0e1,
             initial_gyro_bias_weight: 1.0e2,
+            landmarks_all_cameras: false,
         }
     }
 }
@@ -668,6 +676,24 @@ impl BasaltVioEstimator {
 
     pub fn active_pose_count(&self) -> usize {
         self.window_poses.len()
+    }
+
+    /// Diagnostic: number of landmarks in the database that are not removed,
+    /// indexed by host camera (`result[c]` counts landmarks hosted in camera
+    /// `c`).  Read-only; it does not touch solver state.
+    pub fn landmark_count_by_host_camera(&self) -> Vec<usize> {
+        let mut counts = vec![0; self.t_imu_cam.len().max(1)];
+        for record in self.landmarks.landmarks.values() {
+            if record.status == LandmarkStatus::Removed {
+                continue;
+            }
+            let camera = record.landmark.anchor_camera_id as usize;
+            if camera >= counts.len() {
+                counts.resize(camera + 1, 0);
+            }
+            counts[camera] += 1;
+        }
+        counts
     }
 
     pub(crate) const fn no_output_mode_active(&self) -> bool {
@@ -1573,6 +1599,30 @@ impl BasaltVioEstimator {
                 unconnected_cam0.insert(observation.track_id);
             }
         }
+        // Opt-in (`landmarks_all_cameras`): unconnected tracks that cam0 does
+        // not see in this frame, keyed by the lowest other camera that does.
+        // They are tried after every cam0 candidate, in track-id order, so
+        // the pinned cam0 candidate order is untouched.  Empty by default.
+        let mut unconnected_other_host = BTreeMap::<TrackId, u16>::new();
+        if self.config.landmarks_all_cameras {
+            let seen_by_cam0 = current
+                .iter()
+                .filter(|(observation, _, _)| observation.camera_id == 0)
+                .map(|(observation, _, _)| observation.track_id)
+                .collect::<BTreeSet<_>>();
+            for (observation, _bearing, _history_entry) in &current {
+                if observation.camera_id == 0
+                    || seen_by_cam0.contains(&observation.track_id)
+                    || landmark_exists(&self.landmarks, observation.track_id)
+                {
+                    continue;
+                }
+                unconnected_other_host
+                    .entry(observation.track_id)
+                    .and_modify(|host| *host = (*host).min(observation.camera_id))
+                    .or_insert(observation.camera_id);
+            }
+        }
 
         let mut prepared_landmarks = Vec::<PreparedLandmarkInsertion>::new();
         let triangulation_trace_path = diagnostic_env_snapshot().triangulation_trace.clone();
@@ -1589,9 +1639,40 @@ impl BasaltVioEstimator {
                     (observation.track_id, (history.raw_bearing, history.clone()))
                 })
                 .collect::<BTreeMap<_, _>>();
+            // Opt-in host observations in cameras other than cam0, keyed by
+            // (track, camera).  Empty unless `landmarks_all_cameras` found a
+            // candidate above.
+            let current_other_host = current
+                .iter()
+                .filter(|(observation, _, _)| {
+                    unconnected_other_host.get(&observation.track_id)
+                        == Some(&observation.camera_id)
+                })
+                .map(|(observation, _bearing, history)| {
+                    (
+                        (observation.track_id, observation.camera_id),
+                        (history.raw_bearing, history.clone()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let candidate_hosts = unconnected_cam0
+                .iter()
+                .map(|track_id| (*track_id, 0_u16))
+                .chain(
+                    unconnected_other_host
+                        .iter()
+                        .map(|(&track, &host)| (track, host)),
+                )
+                .collect::<Vec<_>>();
 
-            for track_id in unconnected_cam0.iter() {
-                let Some((target_bearing, target_history)) = current_cam0.get(&track_id) else {
+            for (track_id, host_camera_id) in &candidate_hosts {
+                let host_camera_id = *host_camera_id;
+                let target = if host_camera_id == 0 {
+                    current_cam0.get(track_id)
+                } else {
+                    current_other_host.get(&(*track_id, host_camera_id))
+                };
+                let Some((target_bearing, target_history)) = target else {
                     continue;
                 };
 
@@ -1699,7 +1780,9 @@ impl BasaltVioEstimator {
                             candidate.imu_pose.rotation.j as f32,
                             candidate.imu_pose.rotation.k as f32,
                         ));
-                        let Some(target_extrinsic) = self.camera_to_imu(0) else {
+                        // The host camera is cam0 unless the opt-in
+                        // `landmarks_all_cameras` selected another camera.
+                        let Some(target_extrinsic) = self.camera_to_imu(host_camera_id) else {
                             continue;
                         };
                         let Some(candidate_extrinsic) = self.camera_to_imu(candidate.camera_id)
@@ -1915,7 +1998,7 @@ impl BasaltVioEstimator {
                     point_world,
                     landmark: InverseDistanceLandmark {
                         anchor_pose: frame_id,
-                        anchor_camera_id: 0,
+                        anchor_camera_id: host_camera_id,
                         direction: stereographic_direction,
                         inverse_distance,
                     },
@@ -2483,6 +2566,16 @@ impl BasaltVioEstimator {
             .map(|pose| pose.frame_id)
             .chain(self.window_states.iter().map(|state| state.frame_id))
             .collect::<std::collections::BTreeSet<_>>();
+        // Opt-in (`landmarks_all_cameras`): a landmark keeps its host camera
+        // when it is re-hosted, because a cam1-only point may lie behind
+        // cam0.  The default keeps the pinned camera-0 re-host above.
+        let host_camera_poses = if self.config.landmarks_all_cameras {
+            (0..self.t_imu_cam.len())
+                .map(|camera_id| self.camera_pose(&anchor_imu_pose, camera_id as u16))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         for (track_id, record) in &mut self.landmarks.landmarks {
             if active_ids.contains(&record.landmark.anchor_pose) {
                 continue;
@@ -2490,6 +2583,16 @@ impl BasaltVioEstimator {
             let Some(point_world) = self.landmark_world.get(track_id).copied() else {
                 continue;
             };
+            if self.config.landmarks_all_cameras {
+                let host_camera_id = record.landmark.anchor_camera_id;
+                let Some(Some(host_pose)) = host_camera_poses.get(host_camera_id as usize) else {
+                    continue;
+                };
+                record
+                    .landmark
+                    .reanchor(anchor_id, host_camera_id, host_pose, point_world);
+                continue;
+            }
             record
                 .landmark
                 .reanchor(anchor_id, anchor_camera_id, &anchor_pose, point_world);
@@ -5628,6 +5731,172 @@ mod tests {
         let rb = (point - b.translation).normalize();
         let (q, _) = triangulate_two_rays(&a, ra, &b, rb).unwrap();
         assert!((q - point).norm() / point.norm() < 0.01);
+    }
+
+    /// Pinhole camera plus a divergent two-camera rig shaped like Project
+    /// Aria's SLAM pair: cam1 is cam0 rotated 75 degrees about cam0's x axis
+    /// with a 0.138 m baseline.
+    fn divergent_rig() -> (DoubleSphereCamera, Vec<SE3>) {
+        let camera =
+            DoubleSphereCamera::new(241.6, 241.6, 379.0, 286.0, 0.0, 0.0, 758, 572).unwrap();
+        let cam1 = SE3::new(
+            UnitQuaternion::from_scaled_axis(Vector3::new(75_f64.to_radians(), 0.0, 0.0)),
+            Vector3::new(0.004, -0.109, -0.085),
+        );
+        (camera, vec![SE3::identity(), cam1])
+    }
+
+    fn rig_estimator(landmarks_all_cameras: bool, scalar_mode: ScalarMode) -> BasaltVioEstimator {
+        let (camera, extrinsics) = divergent_rig();
+        let config = EstimatorConfig {
+            scalar_mode,
+            landmarks_all_cameras,
+            ..EstimatorConfig::default()
+        };
+        BasaltVioEstimator::new(camera, config)
+            .with_camera_rig(vec![camera, camera], extrinsics)
+            .unwrap()
+    }
+
+    #[test]
+    fn cam1_only_track_is_hosted_in_cam1_only_when_enabled() {
+        let (camera, extrinsics) = divergent_rig();
+        // In front of cam1 and outside cam0's image.
+        let point_world = extrinsics[1].transform_point(&Point3::new(0.3, -0.2, 3.0));
+        assert!(camera
+            .project(&extrinsics[0].inverse().transform_point(&point_world))
+            .is_none_or(|pixel| !camera.contains_pixel(&pixel)));
+        // A stereo-visible point (seen by both cameras) for the cam0 path.
+        let stereo_world = extrinsics[1].transform_point(&Point3::new(0.1, 1.5, 2.0));
+        let nav_at = |x: f64| BasaltNavState {
+            imu_to_world: SE3::new(UnitQuaternion::identity(), Vector3::new(x, 0.02, 0.0)),
+            ..BasaltNavState::default()
+        };
+        let project = |nav: &BasaltNavState, camera_id: usize, point: &Point3<f64>| {
+            let camera_pose = nav.imu_to_world.compose(&extrinsics[camera_id]);
+            camera
+                .project(&camera_pose.inverse().transform_point(point))
+                .filter(|pixel| camera.contains_pixel(pixel))
+        };
+        let frame = |frame_id: u64, nav: &BasaltNavState| {
+            let mut observations = vec![TrackObservation {
+                track_id: 5,
+                frame_id,
+                timestamp_ns: frame_id as i64 * 10,
+                camera_id: 1,
+                pixel: project(nav, 1, &point_world).expect("cam1 sees the point"),
+            }];
+            for camera_id in [0_u16, 1] {
+                observations.push(TrackObservation {
+                    track_id: 9,
+                    frame_id,
+                    timestamp_ns: frame_id as i64 * 10,
+                    camera_id,
+                    pixel: project(nav, camera_id as usize, &stereo_world)
+                        .expect("both cameras see the stereo point"),
+                });
+            }
+            observations
+        };
+
+        for scalar_mode in [ScalarMode::ExtendedF64, ScalarMode::UpstreamF32] {
+            for enabled in [false, true] {
+                let mut estimator = rig_estimator(enabled, scalar_mode);
+                let (nav1, nav2) = (nav_at(0.0), nav_at(0.3));
+                estimator
+                    .collect_observations(1, 10, &nav1, &frame(1, &nav1), false)
+                    .unwrap();
+                estimator
+                    .collect_observations(2, 20, &nav2, &frame(2, &nav2), true)
+                    .unwrap();
+                // The stereo track is cam0-hosted either way.
+                let stereo = &estimator.landmarks.landmarks[&9].landmark;
+                assert_eq!(stereo.anchor_camera_id, 0);
+                if !enabled {
+                    assert!(!estimator.landmarks.landmarks.contains_key(&5));
+                    assert_eq!(estimator.num_points_kf.get(&2), Some(&1));
+                    continue;
+                }
+                let landmark = &estimator.landmarks.landmarks[&5].landmark;
+                assert_eq!(landmark.anchor_pose, 2);
+                assert_eq!(landmark.anchor_camera_id, 1);
+                assert_eq!(estimator.num_points_kf.get(&2), Some(&2));
+                // Host identity (timestamp, camera 1) joins the native
+                // unordered host map next to the cam0 host of this keyframe.
+                let mut hosts = estimator.native_host_order.keys().collect::<Vec<_>>();
+                hosts.sort_unstable();
+                assert_eq!(hosts, vec![(20, 0), (20, 1)]);
+                assert_eq!(estimator.native_host_keys.get(&(2, 1)), Some(&20));
+                let host_pose = nav2.imu_to_world.compose(&extrinsics[1]);
+                let reconstructed = host_pose
+                    .transform_point(&Point3::from(landmark.position_in_anchor().unwrap()));
+                let tolerance = if scalar_mode == ScalarMode::ExtendedF64 {
+                    1e-6
+                } else {
+                    2e-3
+                };
+                assert!(
+                    (reconstructed - point_world).norm() < tolerance,
+                    "{scalar_mode:?}: {reconstructed:?} vs {point_world:?}"
+                );
+                // Factor-visible observations are the track's cam1 rows.
+                let rows = &estimator.window_observations[&5];
+                assert!(!rows.is_empty());
+                assert!(rows.iter().all(|observation| observation.camera_id == 1));
+            }
+        }
+    }
+
+    #[test]
+    fn reanchoring_keeps_the_host_camera_only_when_enabled() {
+        let (_camera, extrinsics) = divergent_rig();
+        for enabled in [false, true] {
+            let mut estimator = rig_estimator(enabled, ScalarMode::ExtendedF64);
+            let nav = BasaltNavState {
+                imu_to_world: SE3::new(
+                    UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.0, 0.3)),
+                    Vector3::new(1.0, 2.0, 0.5),
+                ),
+                ..BasaltNavState::default()
+            };
+            estimator.window_states.push(WindowState {
+                frame_id: 8,
+                timestamp_ns: 80,
+                nav: nav.clone(),
+                stored_current_nav: nav.clone(),
+                linearized_nav: nav.clone(),
+                linearized_delta: DVector::zeros(NAV_STATE_DOF),
+                is_keyframe: true,
+                is_latest: true,
+                linearized: true,
+            });
+            // Host frame 3 has left the window; the point lies in front of
+            // cam1 of the new anchor frame.
+            let point_world = nav
+                .imu_to_world
+                .compose(&extrinsics[1])
+                .transform_point(&Point3::new(0.1, 0.2, 2.0));
+            estimator.landmarks.insert(
+                44,
+                InverseDistanceLandmark {
+                    anchor_pose: 3,
+                    anchor_camera_id: 1,
+                    direction: StereographicDirection::from_bearing(Vector3::z()).unwrap(),
+                    inverse_distance: 0.5,
+                },
+            );
+            estimator.landmark_world.insert(44, point_world);
+            estimator.reanchor_landmarks();
+            let landmark = estimator.landmarks.landmarks[&44].landmark;
+            assert_eq!(landmark.anchor_pose, 8);
+            assert_eq!(landmark.anchor_camera_id, u16::from(enabled));
+            let host = nav
+                .imu_to_world
+                .compose(&extrinsics[landmark.anchor_camera_id as usize]);
+            let reconstructed =
+                host.transform_point(&Point3::from(landmark.position_in_anchor().unwrap()));
+            assert!((reconstructed - point_world).norm() < 1e-9);
+        }
     }
 
     #[test]
