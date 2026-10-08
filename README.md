@@ -48,7 +48,7 @@ commands to reproduce it.
 - [Photos to splat and mesh](#photos-to-splat-and-mesh-3d-gaussian-splatting)
 - [Visual-inertial SLAM](#visual-inertial-slam-basalt-rust-port)
 - [Localize against a map](#localize-against-a-map)
-- [Use from ROS 2](#use-from-ros-2)
+- [Use from Python and ROS 2](#use-from-python-and-ros-2)
 - [More results](#more-results) — KITTI, TUM RGB-D, sequential SfM
 - [Documentation](#documentation)
 
@@ -404,7 +404,21 @@ More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the
 [archived README details](docs/readme_details.md#demos).
 
-## Use from ROS 2
+## Use from Python and ROS 2
+
+### Python
+
+[`bindings/python`](bindings/python/README.md) builds a `visloc` Python package
+with pyo3 + maturin: cameras (COLMAP models), SE(3) poses, COLMAP text/binary
+read/write as NumPy arrays, PnP + RANSAC localization, and ATE / RPE
+trajectory evaluation.
+
+```bash
+cd bindings/python && pip install maturin numpy && maturin develop --release
+python -c "import visloc; print(visloc.Camera('PINHOLE', 640, 480, [500, 500, 320, 240]))"
+```
+
+### ROS 2
 
 [`ros2/visloc-ros2`](ros2/visloc-ros2/README.md) has two ROS 2 nodes built on
 the pure-Rust `ros2-client` (RustDDS), so building them needs no ROS install:
