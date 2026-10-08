@@ -303,6 +303,69 @@ pub(crate) fn solve_spd_blocks6_cached(
     Ok(out)
 }
 
+/// Generic-block-size counterpart of [`solve_spd_blocks6_cached`]: solve an
+/// SPD system supplied directly as lower-triangular `B×B` block columns
+/// (`columns[j]` maps block row `i ≥ j` to `A_ij`; entries with `i < j` are
+/// ignored) for a single right-hand side. The symbolic factorization is cached
+/// and refreshed whenever the block pattern changes.
+pub(crate) fn solve_spd_blocks_cached<const B: usize>(
+    cache: &mut Option<BlockSymbolic>,
+    columns: Vec<BTreeMap<usize, SMatrix<f64, B, B>>>,
+    rhs: &DVector<f64>,
+) -> Result<DVector<f64>, ()> {
+    let n = columns.len();
+    let mut block_lower = vec![Vec::new(); n];
+    let mut a_pattern = Vec::with_capacity(n);
+    for (column, rows) in columns.iter().enumerate() {
+        let pattern: Vec<usize> = rows.keys().copied().filter(|&row| row >= column).collect();
+        if pattern.binary_search(&column).is_err() {
+            return Err(());
+        }
+        for &row in pattern.iter().filter(|&&row| row > column) {
+            block_lower[row].push(column);
+        }
+        a_pattern.push(pattern);
+    }
+    let pattern_matches = cache
+        .as_ref()
+        .is_some_and(|sym| sym.block_size == B && sym.n == n && sym.a_pattern == a_pattern);
+    if !pattern_matches {
+        let (col_rows, contributors, parent) = symbolic(&block_lower, n);
+        let (levels, col_level) = build_levels(&contributors, n);
+        *cache = Some(BlockSymbolic {
+            block_size: B,
+            n,
+            col_rows,
+            contributors,
+            levels,
+            a_pattern,
+            parent,
+            col_level,
+        });
+    }
+    let sym = cache.as_ref().expect("block symbolic cache initialized");
+    let a_lower: Vec<Vec<(usize, SMatrix<f64, B, B>)>> = columns
+        .into_iter()
+        .enumerate()
+        .map(|(column, rows)| rows.into_iter().filter(|(row, _)| *row >= column).collect())
+        .collect();
+    let (col_vals, diag_inv) = factor_from_lower::<B>(
+        sym,
+        &a_lower,
+        default_thread_count(),
+        PARALLEL_MIN_LEVEL_WORK,
+        INTRA_MIN_CONTRIB,
+        INTRA_MIN_WORK,
+    )?;
+    Ok(solve_block_system::<B>(
+        &sym.col_rows,
+        &col_vals,
+        &diag_inv,
+        n,
+        rhs,
+    ))
+}
+
 /// Like [`solve_spd_block`], but reuse a previously computed [`BlockSymbolic`]
 /// (analyzing and storing it on the first call). For a system whose sparsity is
 /// fixed across solves — the Levenberg–Marquardt normal equations, re-solved with

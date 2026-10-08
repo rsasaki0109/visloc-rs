@@ -1,10 +1,23 @@
 #![forbid(unsafe_code)]
 //! Loose-coupling sensor-fusion foundations.
 //!
-//! This crate does not implement a full GNSS/INS/VIO optimizer. It provides
-//! timestamped measurement types and conversions into localization priors so
-//! visual localization, tracking, and SLAM pipelines can use external sensors
-//! without depending on a specific robotics stack.
+//! This crate provides timestamped measurement types and conversions into
+//! localization priors so visual localization, tracking, and SLAM pipelines
+//! can use external sensors without depending on a specific robotics stack.
+//!
+//! [`gnss_interpolation`] resamples GNSS fixes at camera frame times (with
+//! per-fix covariance, conservative blending, and dropout detection). The
+//! joint GNSS + visual-odometry estimator built on it lives in
+//! `visloc_slam::gnss_fusion` (also reachable as `visloc_rs::slam::gnss_fusion`):
+//! it is loosely coupled in the GNSS domain (receiver position solutions, not
+//! raw pseudoranges) and has no IMU/INS integration.
+
+pub mod gnss_interpolation;
+
+pub use gnss_interpolation::{
+    gnss_fix_covariance, interpolate_gnss_fix, GnssFixSource, GnssInterpolationConfig,
+    InterpolatedGnssFix,
+};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -432,6 +445,11 @@ where
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.measurements.iter()
+    }
+
+    /// The measurements, sorted by timestamp (stable for equal timestamps).
+    pub fn as_slice(&self) -> &[T] {
+        &self.measurements
     }
 
     pub fn latest_before_or_at(&self, timestamp: Timestamp) -> Option<&T> {

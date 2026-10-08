@@ -1,13 +1,17 @@
+use std::collections::BTreeMap;
+
 use nalgebra::{Point3, UnitQuaternion, Vector3, Vector6};
 use visloc_core::geometry::{Pose, SE3};
-use visloc_core::types::{Camera, Frame, Keyframe, Landmark, Observation, VisualMap};
+use visloc_core::types::{Camera, CameraModel, Frame, Keyframe, Landmark, Observation, VisualMap};
 use visloc_mapping::{LocalMapWindow, LocalRefinementReason, LocalRefiner, StagedMapUpdate};
+use visloc_slam::gnc::GncConfig;
 use visloc_slam::{
-    pairwise_pose_factors_from_loop_closures, BaConfig, BaError, BaGeneralStereoObservation,
-    BaObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
-    BundleAdjustmentRefiner, GravityPrior, ImuPreintegrationFactor, ImuPreintegrator, LinearSolver,
-    LoopClosureConstraint, PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior,
-    PositionPrior, PositionPriorObservation, RobustKernel,
+    build_sqrt_factor_rows, pairwise_pose_factors_from_loop_closures, BaConfig, BaError,
+    BaGeneralStereoObservation, BaObservation, BaStereoObservation, BiasRandomWalkFactor,
+    BundleAdjustment, BundleAdjustmentRefiner, GravityPrior, ImuPreintegrationFactor,
+    ImuPreintegrator, LinearSolver, LoopClosureConstraint, PairwisePoseFactor,
+    PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
+    RobustKernel,
 };
 
 fn pinhole() -> Camera {
@@ -455,6 +459,521 @@ fn pose_structure_ba_uses_radial_distortion_in_residual_and_jacobian() {
     assert_distorted_bundle_converges(Camera::pinhole_radial(
         1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.15, 0.05,
     ));
+}
+
+fn camera_with(model: CameraModel, params: Vec<f64>) -> Camera {
+    Camera {
+        id: 1,
+        model,
+        width: 640,
+        height: 480,
+        params,
+    }
+}
+
+/// One camera per lens family the pose/structure BA linearises beyond the
+/// historical radial pinhole, each with distortion strong enough that a
+/// pinhole (or radial-only) Jacobian would be visibly wrong.
+fn lens_cameras() -> Vec<(&'static str, Camera)> {
+    vec![
+        (
+            "opencv_tangential",
+            camera_with(
+                CameraModel::OpenCv,
+                vec![500.0, 500.0, 320.0, 240.0, -0.15, 0.05, 0.004, -0.003],
+            ),
+        ),
+        (
+            "full_opencv",
+            camera_with(
+                CameraModel::FullOpenCv,
+                vec![
+                    500.0, 500.0, 320.0, 240.0, -0.15, 0.05, 0.004, -0.003, 0.01, 0.02, -0.01,
+                    0.005,
+                ],
+            ),
+        ),
+        (
+            "opencv_fisheye",
+            Camera::opencv_fisheye(
+                1,
+                640,
+                480,
+                300.0,
+                302.0,
+                320.0,
+                240.0,
+                [0.05, -0.02, 0.01, -0.003],
+            ),
+        ),
+        (
+            "simple_radial_fisheye",
+            camera_with(
+                CameraModel::SimpleRadialFisheye,
+                vec![300.0, 320.0, 240.0, 0.04],
+            ),
+        ),
+        (
+            "radial_fisheye",
+            camera_with(
+                CameraModel::RadialFisheye,
+                vec![300.0, 320.0, 240.0, 0.04, -0.01],
+            ),
+        ),
+        (
+            "fov",
+            camera_with(CameraModel::Fov, vec![400.0, 400.0, 320.0, 240.0, 0.9]),
+        ),
+        (
+            "double_sphere",
+            Camera::double_sphere(1, 640, 480, 250.0, 251.0, 320.0, 240.0, -0.2, 0.6),
+        ),
+        (
+            "simple_radial",
+            camera_with(CameraModel::SimpleRadial, vec![500.0, 320.0, 240.0, -0.12]),
+        ),
+        (
+            "radial",
+            camera_with(CameraModel::Radial, vec![500.0, 320.0, 240.0, -0.12, 0.03]),
+        ),
+    ]
+}
+
+/// Wide-angle scene (rays up to ~55° off-axis, where fisheye lenses differ most
+/// from a pinhole) rendered exactly through `camera`, with the third pose and
+/// two landmarks drifted.
+fn wide_drifted_bundle_through(camera: &Camera, grid: usize) -> BundleAdjustment {
+    let mut ba = BundleAdjustment::new(camera.clone());
+    let truth_poses = [
+        (10u64, pose_at(Vector3::new(0.0, 0.0, 0.0))),
+        (20u64, pose_with_yaw(Vector3::new(0.6, 0.1, 0.0), 0.08)),
+        (30u64, pose_with_yaw(Vector3::new(1.2, -0.1, 0.2), -0.1)),
+    ];
+    for (id, pose) in &truth_poses {
+        ba.add_pose(*id, pose.clone());
+    }
+    let points = wide_points(grid);
+    for (id, point) in &points {
+        ba.add_landmark(*id, *point);
+    }
+    for (kf_id, pose) in &truth_poses {
+        for (lm_id, point) in &points {
+            let uv = camera
+                .project(&pose.transform_world_point(point))
+                .expect("point projects");
+            ba.add_observation(BaObservation {
+                keyframe_id: *kf_id,
+                landmark_id: *lm_id,
+                xy: uv,
+            });
+        }
+    }
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    ba.add_pose(30, pose_with_yaw(Vector3::new(1.26, -0.07, 0.24), -0.085));
+    for id in WIDE_DRIFTED_LANDMARKS {
+        let truth = points[(id - 1) as usize].1;
+        ba.add_landmark(id, truth + Vector3::new(0.04, -0.03, 0.05));
+    }
+    ba
+}
+
+const WIDE_DRIFTED_LANDMARKS: [u64; 2] = [1, 7];
+
+/// `grid × grid` landmarks spread 8 m × 5 m at 3–5 m depth.
+fn wide_points(grid: usize) -> Vec<(u64, Point3<f64>)> {
+    let mut points = Vec::new();
+    for i in 0..grid {
+        for j in 0..grid {
+            let u = i as f64 / (grid - 1) as f64;
+            let v = j as f64 / (grid - 1) as f64;
+            let id = (i * grid + j + 1) as u64;
+            points.push((
+                id,
+                Point3::new(
+                    -3.5 + 8.0 * u,
+                    -2.5 + 5.0 * v,
+                    3.0 + ((i + 2 * j) % 3) as f64,
+                ),
+            ));
+        }
+    }
+    points
+}
+
+fn assert_wide_bundle_recovered(name: &str, ba: &BundleAdjustment, final_cost: f64, grid: usize) {
+    assert!(
+        final_cost < 1.0e-10,
+        "{name}: residual must vanish when BA linearises the camera's own lens: {final_cost}"
+    );
+    let center = ba.poses[&30].camera_center_world();
+    assert!(
+        (center - Point3::new(1.2, -0.1, 0.2)).norm() < 1.0e-6,
+        "{name}: recovered KF30 center {center:?}"
+    );
+    let truth = wide_points(grid);
+    for id in WIDE_DRIFTED_LANDMARKS {
+        let recovered = ba.landmarks[&id];
+        let expected = truth[(id - 1) as usize].1;
+        assert!(
+            (recovered - expected).norm() < 1.0e-6,
+            "{name}: landmark {id} at {recovered:?}, truth {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn pose_structure_ba_recovers_drift_through_every_lens_model() {
+    for (name, camera) in lens_cameras() {
+        let mut ba = wide_drifted_bundle_through(&camera, 5);
+        let initial = ba.cost();
+        assert!(initial > 1.0, "{name}: drift must be visible ({initial})");
+        let result = ba
+            .optimize(&BaConfig::default())
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_wide_bundle_recovered(name, &ba, result.final_cost, 5);
+        assert!(
+            result.iterations.len() <= 10,
+            "{name}: a correct analytic Jacobian converges quadratically, took {}",
+            result.iterations.len()
+        );
+        // The narrow-angle bundle of the radial regression test as well.
+        assert_distorted_bundle_converges(camera);
+    }
+}
+
+#[test]
+fn pose_structure_ba_jacobian_matches_finite_differences_for_every_lens_model() {
+    // `build_sqrt_factor_rows` is the dense-QR assembly of the same monocular
+    // residual/Jacobian the LM solvers use; check every column against central
+    // differences of its residual, for a perturbed (non-zero residual) state.
+    let mut cameras = lens_cameras();
+    cameras.push(("pinhole", pinhole()));
+    cameras.push((
+        "pinhole_radial",
+        Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.15, 0.05),
+    ));
+    for (name, camera) in cameras {
+        let ba = wide_drifted_bundle_through(&camera, 3);
+        let intrinsics = camera.intrinsics().unwrap();
+        let pose_index: BTreeMap<u64, usize> = [(30u64, 0usize)].into_iter().collect();
+        let landmark_index: BTreeMap<u64, usize> = ba
+            .landmarks
+            .keys()
+            .enumerate()
+            .map(|(index, &id)| (id, index))
+            .collect();
+        let empty = BTreeMap::new();
+        let rows = |problem: &BundleAdjustment| {
+            build_sqrt_factor_rows(
+                problem,
+                &intrinsics,
+                &pose_index,
+                &landmark_index,
+                &empty,
+                &empty,
+                &RobustKernel::None,
+                None,
+            )
+            .expect("rows")
+        };
+        let stack = rows(&ba);
+        assert!(stack.resid.norm() > 1.0, "{name}: perturbed state");
+        let h = 1.0e-6;
+        // (Jacobian column, landmark id or `None` for the KF30 pose, axis).
+        let mut columns: Vec<(usize, Option<u64>, usize)> = (0..6).map(|a| (a, None, a)).collect();
+        for (&id, &slot) in &landmark_index {
+            for axis in 0..3 {
+                columns.push((stack.landmark_offset + 3 * slot + axis, Some(id), axis));
+            }
+        }
+        let perturb = |problem: &mut BundleAdjustment, landmark: Option<u64>, axis: usize, step| {
+            if let Some(id) = landmark {
+                problem.landmarks.get_mut(&id).unwrap()[axis] += step;
+            } else {
+                // Right perturbation, as the LM update applies it.
+                let mut xi = Vector6::zeros();
+                xi[axis] = step;
+                let pose = problem.poses.get_mut(&30).unwrap();
+                pose.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&xi));
+            }
+        };
+        for &(column, landmark, axis) in &columns {
+            let mut plus = ba.clone();
+            perturb(&mut plus, landmark, axis, h);
+            let mut minus = ba.clone();
+            perturb(&mut minus, landmark, axis, -h);
+            let numeric = (rows(&plus).resid - rows(&minus).resid) / (2.0 * h);
+            for row in 0..stack.resid.len() {
+                let analytic = stack.jac[(row, column)];
+                assert!(
+                    (analytic - numeric[row]).abs() < 1.0e-4 * (1.0 + analytic.abs()),
+                    "{name}: row {row} column {column}: analytic {analytic} vs numeric {}",
+                    numeric[row]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn parallel_assembly_and_gnc_use_the_lens_model() {
+    // 3 views x 1600 landmarks = 4800 observations: above the parallel
+    // assembly threshold, so the rayon path is exercised and must agree with
+    // the serial one bit-for-bit for a non-pinhole lens too.
+    let camera = lens_cameras()
+        .into_iter()
+        .find(|(name, _)| *name == "opencv_fisheye")
+        .unwrap()
+        .1;
+    let config = BaConfig {
+        max_iterations: 6,
+        ..BaConfig::default()
+    };
+    let mut serial = wide_drifted_bundle_through(&camera, 40);
+    let serial_result = serial.optimize(&config).unwrap();
+    let mut parallel = wide_drifted_bundle_through(&camera, 40);
+    let parallel_result = parallel
+        .optimize(&BaConfig {
+            parallel: true,
+            ..config
+        })
+        .unwrap();
+    assert_eq!(
+        serial_result.final_cost.to_bits(),
+        parallel_result.final_cost.to_bits()
+    );
+    assert_eq!(serial.poses, parallel.poses);
+    assert_eq!(serial.landmarks, parallel.landmarks);
+    assert_wide_bundle_recovered("parallel", &parallel, parallel_result.final_cost, 40);
+
+    // GNC (its residual vector goes through the lens too) rejects a gross
+    // outlier and still recovers the drifted pose. The outlier is a vertical
+    // shift on KF30's view of landmark 13 (observations are KF-major, 25 per
+    // view), across the horizontal baseline's epipolar lines so depth cannot
+    // absorb it.
+    let mut gnc = wide_drifted_bundle_through(&camera, 5);
+    let outlier = 2 * 25 + 12;
+    assert_eq!(
+        (
+            gnc.observations[outlier].keyframe_id,
+            gnc.observations[outlier].landmark_id
+        ),
+        (30, 13)
+    );
+    gnc.observations[outlier].xy.y += 40.0;
+    let result = gnc
+        .optimize_gnc(&BaConfig::default(), &GncConfig::default())
+        .unwrap();
+    assert!(
+        result.observation_weights[outlier] < 0.1,
+        "outlier weight {}",
+        result.observation_weights[outlier]
+    );
+    assert!(
+        (gnc.poses[&30].camera_center_world() - Point3::new(1.2, -0.1, 0.2)).norm() < 1.0e-4,
+        "GNC recovered KF30 center {:?}",
+        gnc.poses[&30].camera_center_world()
+    );
+}
+
+fn assert_bundles_bit_identical(a: &Camera, b: &Camera) {
+    let mut first = drifted_bundle_through(a.clone());
+    let mut second = drifted_bundle_through(b.clone());
+    for config in [
+        BaConfig::default(),
+        BaConfig {
+            linear_solver: LinearSolver::Sparse,
+            ..BaConfig::default()
+        },
+    ] {
+        let r1 = first.optimize(&config).unwrap();
+        let r2 = second.optimize(&config).unwrap();
+        assert_eq!(r1.final_cost.to_bits(), r2.final_cost.to_bits());
+        assert_eq!(r1.iterations, r2.iterations);
+        assert_eq!(first.poses, second.poses);
+        assert_eq!(first.landmarks, second.landmarks);
+    }
+}
+
+#[test]
+fn radial_only_models_keep_the_historical_radial_pinhole_path_bit_for_bit() {
+    // An OPENCV camera without tangential terms and the COLMAP radial models
+    // must run exactly the pre-existing radial-pinhole residual/Jacobian (the
+    // one a `Pinhole` camera with a `[k1, k2]` tail uses), not the generic lens
+    // path: same bits, same iterations.
+    let radial = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.15, 0.05);
+    let opencv = camera_with(
+        CameraModel::OpenCv,
+        vec![500.0, 500.0, 320.0, 240.0, -0.15, 0.05, 0.0, 0.0],
+    );
+    assert_bundles_bit_identical(&radial, &opencv);
+    let radial_k1 = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.12, 0.0);
+    let simple_radial = camera_with(CameraModel::SimpleRadial, vec![500.0, 320.0, 240.0, -0.12]);
+    assert_bundles_bit_identical(&radial_k1, &simple_radial);
+    let radial_model = camera_with(CameraModel::Radial, vec![500.0, 320.0, 240.0, -0.15, 0.05]);
+    assert_bundles_bit_identical(&radial, &radial_model);
+    // ... and a distortion-free OPENCV camera runs the plain pinhole path.
+    let opencv_zero = camera_with(
+        CameraModel::OpenCv,
+        vec![500.0, 500.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0],
+    );
+    assert_bundles_bit_identical(&pinhole(), &opencv_zero);
+}
+
+#[test]
+fn non_pinhole_lens_with_stereo_or_unknown_model_is_rejected() {
+    // Rectified stereo residuals only implement the pinhole: pairing them with
+    // another lens must fail loudly instead of linearising the wrong model.
+    let (_, fisheye) = lens_cameras().into_iter().nth(2).unwrap();
+    let mut stereo = truth_stereo_bundle(0.12);
+    stereo.camera = fisheye;
+    stereo.fix_pose(10);
+    assert!(matches!(
+        stereo.optimize(&BaConfig::default()),
+        Err(BaError::UnsupportedCameraModel)
+    ));
+    let mut stereo_opencv = truth_stereo_bundle(0.12);
+    stereo_opencv.camera = camera_with(
+        CameraModel::OpenCv,
+        vec![500.0, 500.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0],
+    );
+    stereo_opencv.fix_pose(10);
+    assert!(matches!(
+        stereo_opencv.optimize(&BaConfig {
+            refine_intrinsics: true,
+            ..BaConfig::default()
+        }),
+        Err(BaError::UnsupportedCameraModel)
+    ));
+
+    let mut unknown = truth_bundle();
+    unknown.camera = camera_with(
+        CameraModel::Unknown("THIN_PRISM_FISHEYE".into()),
+        vec![500.0, 500.0, 320.0, 240.0],
+    );
+    unknown.fix_pose(10);
+    assert!(matches!(
+        unknown.optimize(&BaConfig::default()),
+        Err(BaError::UnsupportedCameraModel)
+    ));
+}
+
+/// Exact 3-view bundle rendered through `truth` with structure and two poses
+/// fixed, so the joint intrinsics solve only has KF30 and the camera to fit.
+fn fixed_structure_bundle_through(truth: &Camera) -> BundleAdjustment {
+    let mut ba = drifted_bundle_through(truth.clone());
+    ba.add_pose(30, pose_at(Vector3::new(1.0, 0.0, 0.0)));
+    ba.add_landmark(5, Point3::new(0.0, 0.0, 6.0));
+    for (id, _) in world_grid() {
+        ba.fix_landmark(id);
+    }
+    ba
+}
+
+#[test]
+fn joint_intrinsics_keeps_fixed_tangential_terms_of_an_opencv_camera() {
+    // An OPENCV camera with non-zero (p1, p2) is now refined jointly (before,
+    // the BA rejected the model): the focal/principal point are recovered and
+    // the lens terms are held exactly where they were.
+    let truth = camera_with(
+        CameraModel::OpenCv,
+        vec![500.0, 500.0, 320.0, 240.0, -0.15, 0.05, 0.004, -0.003],
+    );
+    let mut ba = fixed_structure_bundle_through(&truth);
+    ba.camera.params[..4].copy_from_slice(&[520.0, 515.0, 326.0, 233.0]);
+    let result = ba
+        .optimize(&BaConfig {
+            refine_intrinsics: true,
+            ..BaConfig::default()
+        })
+        .unwrap();
+    assert!(result.final_cost < 1.0e-8, "cost {}", result.final_cost);
+    for (got, want) in ba.camera.params[..4].iter().zip(&truth.params[..4]) {
+        assert!((got - want).abs() < 1.0e-3, "{:?}", ba.camera.params);
+    }
+    assert_eq!(ba.camera.params[4..], truth.params[4..]);
+    assert_eq!(ba.camera.model, CameraModel::OpenCv);
+}
+
+#[test]
+fn joint_intrinsics_self_calibrates_tangential_distortion_when_asked() {
+    let truth = camera_with(
+        CameraModel::OpenCv,
+        vec![500.0, 500.0, 320.0, 240.0, -0.05, 0.01, 0.003, -0.002],
+    );
+    let config = BaConfig {
+        refine_intrinsics: true,
+        refine_distortion: true,
+        refine_tangential_distortion: true,
+        ..BaConfig::default()
+    };
+
+    // From a distortion-free pinhole start the camera is promoted to OPENCV and
+    // all eight parameters are recovered.
+    let mut ba = fixed_structure_bundle_through(&truth);
+    ba.camera = Camera::pinhole(1, 640, 480, 510.0, 505.0, 323.0, 236.0);
+    let result = ba.optimize(&config).unwrap();
+    assert_eq!(ba.camera.model, CameraModel::OpenCv);
+    assert_eq!(ba.camera.params.len(), 8);
+    assert!(result.final_cost < 1.0e-8, "cost {}", result.final_cost);
+    let (p1, p2) = ba.camera.tangential_distortion().expect("p1/p2 refined");
+    assert!(
+        (p1 - 0.003).abs() < 1.0e-5 && (p2 + 0.002).abs() < 1.0e-5,
+        "tangential not recovered: p1={p1}, p2={p2}"
+    );
+    let (k1, k2) = ba.camera.radial_distortion().unwrap();
+    assert!(
+        (k1 + 0.05).abs() < 1.0e-4 && (k2 - 0.01).abs() < 1.0e-4,
+        "radial not recovered: k1={k1}, k2={k2}"
+    );
+    for (got, want) in ba.camera.params[..4].iter().zip(&truth.params[..4]) {
+        assert!((got - want).abs() < 1.0e-3, "{:?}", ba.camera.params);
+    }
+
+    // Radial-only self-calibration cannot explain the decentering: it stalls
+    // with a residual the tangential solve removes.
+    let mut radial_only = fixed_structure_bundle_through(&truth);
+    radial_only.camera = Camera::pinhole(1, 640, 480, 510.0, 505.0, 323.0, 236.0);
+    let radial_result = radial_only
+        .optimize(&BaConfig {
+            refine_tangential_distortion: false,
+            ..config
+        })
+        .unwrap();
+    assert_eq!(radial_only.camera.model, CameraModel::Pinhole);
+    assert!(
+        radial_result.final_cost > 1.0e3 * result.final_cost.max(1.0e-12),
+        "radial-only {} vs tangential {}",
+        radial_result.final_cost,
+        result.final_cost
+    );
+}
+
+#[test]
+fn tangential_refinement_flag_is_inert_without_distortion_refinement() {
+    // `refine_tangential_distortion` needs `refine_distortion`: alone it must
+    // neither promote the camera nor change a single bit of the solve.
+    let truth = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.05, 0.01);
+    let run = |tangential: bool| {
+        let mut ba = fixed_structure_bundle_through(&truth);
+        ba.camera = Camera::pinhole(1, 640, 480, 510.0, 505.0, 323.0, 236.0);
+        let result = ba
+            .optimize(&BaConfig {
+                refine_intrinsics: true,
+                refine_tangential_distortion: tangential,
+                ..BaConfig::default()
+            })
+            .unwrap();
+        (ba, result)
+    };
+    let (with_flag, with_result) = run(true);
+    let (without_flag, without_result) = run(false);
+    assert_eq!(with_flag.camera, without_flag.camera);
+    assert_eq!(with_flag.camera.model, CameraModel::Pinhole);
+    assert_eq!(with_flag.camera.params.len(), 4);
+    assert_eq!(with_result.iterations, without_result.iterations);
+    assert_eq!(with_flag.poses, without_flag.poses);
 }
 
 #[test]

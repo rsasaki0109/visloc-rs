@@ -1,0 +1,33 @@
+[package]
+name = "visloc-py"
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Python bindings (pyo3) for visloc-rs: cameras, poses, COLMAP IO, localization, and trajectory evaluation."
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/rsasaki0109/visloc-rs"
+readme = "README.md"
+publish = false
+
+# Standalone workspace: this crate is deliberately excluded from the root
+# workspace (see `exclude` in the root Cargo.toml). A pyo3 extension-module
+# cdylib leaves libpython symbols unresolved at link time and pulls pyo3/numpy
+# into the dependency graph, which would break `cargo test --workspace` and
+# widen the root MSRV, cargo-deny, and packaging checks. It keeps its own
+# Cargo.lock and depends on the workspace crates by path.
+[workspace]
+
+[lib]
+name = "_visloc"
+crate-type = ["cdylib"]
+
+[dependencies]
+nalgebra = "0.33"
+numpy = "0.29"
+pyo3 = { version = "0.29", features = ["extension-module"] }
+visloc-core = { path = "../../crates/core" }
+visloc-io = { path = "../../crates/io" }
+visloc-localization = { path = "../../pipelines/localization" }
+visloc-tracking = { path = "../../pipelines/tracking" }
+visloc-vision = { path = "../../crates/vision" }

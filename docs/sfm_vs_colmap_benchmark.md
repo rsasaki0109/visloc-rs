@@ -187,7 +187,7 @@ gap to 595 / 600 while keeping the ATE within ~1.06× of COLMAP at ~3.4× lower
 wall time.
 
 The same matrix-free opt-in is exposed to the online SLAM local-BA stages:
-[`BaConfig::matrix_free_ba`](../pipelines/slam/src/bundle.rs) is honoured by
+[`BaConfig::matrix_free_ba`](../pipelines/slam/src/bundle/mod.rs) is honoured by
 `BundleAdjustment::optimize_honoring_matrix_free`, which the covisibility local
 BA now calls, so `--covisibility-local-ba --matrix-free-ba` on
 `euroc_online_slam_vi_demo` routes the pure-visual local window through the

@@ -1,6 +1,6 @@
 [package]
 name = "visloc-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -9,7 +9,17 @@ readme = "README.md"
 documentation = "https://docs.rs/visloc-rs"
 homepage = "https://github.com/rsasaki0109/visloc-rs"
 repository = "https://github.com/rsasaki0109/visloc-rs"
-exclude = ["docs/assets/*.gif"]
+# Allowlist the published package: the repository also carries ~80 MB of
+# benchmark evidence, docs media, and work logs that would push the crate
+# far past crates.io's size limit and are useless to a dependent build.
+include = [
+    "/src/**",
+    "/examples/**",
+    "/configs/**",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
 keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
 categories = ["computer-vision", "science::robotics"]
 
@@ -34,6 +44,11 @@ members = [
     "pipelines/fusion",
     "pipelines/basalt",
 ]
+# Standalone crates with their own Cargo.lock: the pyo3/maturin Python
+# bindings (an extension-module cdylib must not join `cargo test --workspace`
+# linking or the MSRV/deny/package gates) and the ROS 2 nodes (their DDS
+# dependency tree stays out of the root lockfile).
+exclude = ["bindings/python", "ros2/visloc-ros2"]
 resolver = "2"
 
 # Build-level speed lever for the real-time VI-SLAM push: fat LTO,
@@ -52,7 +67,7 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -122,18 +137,18 @@ nalgebra = { workspace = true }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = { workspace = true }
 memmap2 = "0.9"
-visloc-core = { path = "crates/core", version = "0.2.0" }
-visloc-vision = { path = "crates/vision", version = "0.2.0" }
-visloc-io = { path = "crates/io", version = "0.2.0" }
-visloc-localization = { path = "pipelines/localization", version = "0.2.0" }
-visloc-tracking = { path = "pipelines/tracking", version = "0.2.0" }
-visloc-mapping = { path = "pipelines/mapping", version = "0.2.0" }
-visloc-slam = { path = "pipelines/slam", version = "0.2.0" }
-visloc-fusion = { path = "pipelines/fusion", version = "0.2.0" }
-visloc-basalt = { path = "pipelines/basalt", version = "0.2.0" }
+visloc-core = { path = "crates/core", version = "0.2.1" }
+visloc-vision = { path = "crates/vision", version = "0.2.1" }
+visloc-io = { path = "crates/io", version = "0.2.1" }
+visloc-localization = { path = "pipelines/localization", version = "0.2.1" }
+visloc-tracking = { path = "pipelines/tracking", version = "0.2.1" }
+visloc-mapping = { path = "pipelines/mapping", version = "0.2.1" }
+visloc-slam = { path = "pipelines/slam", version = "0.2.1" }
+visloc-fusion = { path = "pipelines/fusion", version = "0.2.1" }
+visloc-basalt = { path = "pipelines/basalt", version = "0.2.1" }
 ndarray = { version = "0.17", optional = true }
-visloc-sift-gpu = { path = "crates/sift-gpu", version = "0.2.0", optional = true }
-visloc-ba-gpu = { path = "crates/ba-gpu", version = "0.2.0", optional = true }
+visloc-sift-gpu = { path = "crates/sift-gpu", version = "0.2.1", optional = true }
+visloc-ba-gpu = { path = "crates/ba-gpu", version = "0.2.1", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
 [[example]]

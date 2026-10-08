@@ -206,6 +206,15 @@ pub use dpvo_scale_coupling::{
 pub mod dpvo_vo;
 mod finite_difference;
 pub mod gnc;
+pub mod gnss_fusion;
+pub mod gnss_pose_graph;
+pub mod gnss_synthetic;
+pub use gnss_pose_graph::{
+    bootstrap_gnss_alignment, fit_gnss_alignment, AlignmentBootstrap, AlignmentBootstrapConfig,
+    AlignmentCorrespondence, AlignmentRotationDof, GnssAlignment, GnssAlignmentPrior,
+    GnssGraphNode, GnssPoseGraph, GnssPoseGraphConfig, GnssPoseGraphError, GnssPoseGraphResult,
+    GnssPositionFactor, GnssRobustMode, GnssScaleMode, VoRelativeFactor, GNSS_CHI2_3DOF_999,
+};
 pub mod incremental_pose_graph;
 pub mod map_atlas;
 pub mod marginalization;

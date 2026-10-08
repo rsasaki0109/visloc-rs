@@ -12,6 +12,9 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 # This crate intentionally retains a large set of upstream-parity reference
 # implementations (the `upstream_f32_*`/`eigen_*`/`sophus_*`/`lm_token_*`
 # families, and similar oracle/diagnostic helpers) that are not called from
@@ -88,4 +91,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 thread-priority = { version = "3.1.1", optional = true }
-visloc-core = { path = "../../crates/core", version = "0.2.0" }
+visloc-core = { path = "../../crates/core", version = "0.2.1" }

@@ -21,7 +21,7 @@ limitations, and runnable tests rather than by a completion percentage.
 
 Completed pieces:
 
-- **Phase 3 (next_development_plan.md) — single-binary deep-SLAM wall-clock
+- **Phase 3 (`docs/archive/next_development_plan_2026-07.md`) — single-binary deep-SLAM wall-clock
   is now registry-backed.** The existing end-to-end wall-clock result
   documented in `docs/inprocess_slam_benchmark.md` (EuRoC MH_03_medium,
   2700-frame, in-process ONNX SuperPoint+LightGlue vs file-based pre-export)
@@ -41,7 +41,7 @@ Completed pieces:
   is bit-identical to the Python reference given the same features), and both
   land within ~2.4x of ORB-SLAM3 on this flight. README's single-binary deep
   stereo pipeline row now links to the generated doc.
-- **Phase 2 (next_development_plan.md) — SfM-vs-COLMAP head-to-head is now
+- **Phase 2 (`docs/archive/next_development_plan_2026-07.md`) — SfM-vs-COLMAP head-to-head is now
   registry-backed.** The existing EuRoC MH_03_medium (2700-frame) head-to-head
   documented in `docs/sfm_vs_colmap_benchmark.md` is formalized as two run
   manifests under `benchmarks/registry/runs/euroc/` (`sfm-vs-colmap-visloc-...`,

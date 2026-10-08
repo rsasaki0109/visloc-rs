@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Loose-coupling sensor-prior types for GNSS, pose, and IMU inputs in visloc-rs."
+description = "Loose-coupling sensor-prior types and GNSS time synchronization for GNSS, pose, and IMU inputs in visloc-rs."
 readme.workspace = true
 documentation = "https://docs.rs/visloc-fusion"
 homepage.workspace = true
@@ -17,5 +17,5 @@ all-features = true
 
 [dependencies]
 nalgebra = { workspace = true }
-visloc-core = { path = "../../crates/core", version = "0.2.0" }
-visloc-localization = { path = "../localization", version = "0.2.0" }
+visloc-core = { path = "../../crates/core", version = "0.2.1" }
+visloc-localization = { path = "../localization", version = "0.2.1" }

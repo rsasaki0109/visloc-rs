@@ -26,8 +26,8 @@ bytemuck = { workspace = true, optional = true }
 nalgebra = { workspace = true }
 pollster = { workspace = true, optional = true }
 thiserror = { workspace = true }
-visloc-gsplat-render = { path = "../gsplat-render", version = "0.2.0" }
-visloc-vision = { path = "../vision", version = "0.2.0" }
+visloc-gsplat-render = { path = "../gsplat-render", version = "0.2.1" }
+visloc-vision = { path = "../vision", version = "0.2.1" }
 wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]

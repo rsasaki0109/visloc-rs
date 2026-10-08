@@ -58,6 +58,41 @@ jobs:
       - name: Check advisories, licenses, bans, sources
         run: cargo deny --all-features check
 
+  # ROS 2 nodes (pure-Rust DDS via ros2-client; no ROS install needed).
+  # The crate is excluded from the root workspace and has its own lockfile,
+  # so it is checked here rather than by the workspace jobs. Its tests spawn
+  # the node binaries and talk RTPS over loopback multicast.
+  ros2-nodes:
+    name: ROS 2 nodes (visloc-ros2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ros2/visloc-ros2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ros2-nodes
+          workspaces: ros2/visloc-ros2 -> target
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -150,6 +185,52 @@ jobs:
 
       - name: Package
         run: scripts/package_check.sh
+
+  python-bindings:
+    name: Python bindings (maturin + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bindings/python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python -> target
+          key: python-bindings
+
+      - name: Format and clippy
+        run: |
+          cargo fmt -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build and install wheel
+        run: |
+          python -m pip install --quiet --disable-pip-version-check "maturin>=1.7,<2" pytest numpy
+          maturin build --release --locked --out dist
+          python -m pip install --quiet --disable-pip-version-check dist/*.whl
+
+      - name: Pytest
+        run: python -m pytest -q
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Dependency policy (cargo-deny)
+        run: cargo deny --manifest-path Cargo.toml --config "$GITHUB_WORKSPACE/deny.toml" check
 
   feature-matrix:
     runs-on: ${{ matrix.os }}

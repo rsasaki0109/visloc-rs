@@ -50,7 +50,8 @@ pub mod update;
 pub mod vio;
 
 pub use adapter::{
-    direct_klt_config, BasaltAdapterError, BasaltAdapterOutput, BasaltVioEstimatorAdapter,
+    direct_klt_config, vio_estimator_from_calibration, BasaltAdapterError, BasaltAdapterOutput,
+    BasaltVioEstimatorAdapter,
 };
 pub use calibration::{BasaltCalibration, CalibrationError};
 pub use camera::{CameraModelError, DoubleSphereCamera};

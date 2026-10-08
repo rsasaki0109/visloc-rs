@@ -2,7 +2,7 @@
 
 Status: DESIGN DRAFT, 2026-07-09. Not yet implemented. Produced as the "A" arm of
 the SOTA push (the "B" arm is the SP-ONNX live-frontend A/B). Supersedes nothing;
-companion strategy context in `PLAN.md` §"Strategy 2026-06-12 — Visual-Inertial
+companion strategy context in `docs/archive/plan_history_2026-05_to_09.md` §"Strategy 2026-06-12 — Visual-Inertial
 SLAM" (Phase 2 there is this document).
 
 ## 0. Scope-clarifying finding — read this before doing anything else

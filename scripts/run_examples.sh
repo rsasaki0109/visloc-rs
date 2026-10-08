@@ -5,6 +5,7 @@ examples="
 evaluate_trajectory_dummy
 evaluate_trajectory_from_kitti_files
 evaluate_trajectory_from_tum_files
+gnss_vo_fusion_demo
 localize_dummy
 localize_colmap_text
 localize_colmap_provider

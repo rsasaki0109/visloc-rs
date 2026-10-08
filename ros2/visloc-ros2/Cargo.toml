@@ -1,0 +1,55 @@
+# ROS 2 nodes for visloc-rs, built on the pure-Rust `ros2-client` (RustDDS)
+# stack, so no ROS 2 installation or `colcon` build is required.
+#
+# This crate is deliberately OUTSIDE the root workspace (listed in the root
+# `[workspace] exclude`, and it declares its own empty `[workspace]` below so
+# it stays standalone even if that exclude entry is lost in a merge). It has
+# its own `Cargo.lock`; the root `cargo metadata`, `cargo deny`, MSRV and
+# packaging checks never see its dependency tree. Build it with
+# `cargo build --manifest-path ros2/visloc-ros2/Cargo.toml`.
+[package]
+name = "visloc-ros2"
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "ROS 2 nodes (stereo-inertial VIO and map-based localization) for visloc-rs over pure-Rust DDS."
+repository = "https://github.com/rsasaki0109/visloc-rs"
+publish = false
+
+[workspace]
+
+[lib]
+name = "visloc_ros2"
+path = "src/lib.rs"
+
+[[bin]]
+name = "visloc_vio_node"
+path = "src/bin/visloc_vio_node.rs"
+
+[[bin]]
+name = "visloc_localize_node"
+path = "src/bin/visloc_localize_node.rs"
+
+[dependencies]
+futures = "0.3"
+nalgebra = "0.33"
+ros2-client = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+visloc-basalt = { path = "../../pipelines/basalt" }
+visloc-core = { path = "../../crates/core" }
+visloc-io = { path = "../../crates/io" }
+visloc-localization = { path = "../../pipelines/localization" }
+visloc-vision = { path = "../../crates/vision" }
+
+
+# The Basalt estimator and SIFT are far too slow unoptimized for the
+# end-to-end tests, and full debuginfo for this dependency tree is large.
+# Optimize dependencies (including the path-dependent visloc crates, which
+# are not members of this workspace) and keep this crate fast to rebuild.
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2

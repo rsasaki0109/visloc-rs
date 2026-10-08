@@ -23,7 +23,7 @@ image-io = ["dep:image"]
 image = { version = "=0.25.5", default-features = false, features = ["jpeg", "png"], optional = true }
 nalgebra = { workspace = true }
 thiserror = { workspace = true }
-visloc-core = { path = "../core", version = "0.2.0" }
-visloc-vision = { path = "../vision", version = "0.2.0" }
-visloc-localization = { path = "../../pipelines/localization", version = "0.2.0" }
-visloc-fusion = { path = "../../pipelines/fusion", version = "0.2.0" }
+visloc-core = { path = "../core", version = "0.2.1" }
+visloc-vision = { path = "../vision", version = "0.2.1" }
+visloc-localization = { path = "../../pipelines/localization", version = "0.2.1" }
+visloc-fusion = { path = "../../pipelines/fusion", version = "0.2.1" }
