@@ -63,8 +63,9 @@ pub use patch::{
 pub use pattern::Pattern51;
 pub use pyramid::{ImageError, RawU16Image, RawU16Pyramid};
 pub use stream::{
-    DirectKltConfig, DirectKltStream, KltFailure, RejectReason, RejectReasonCounters, StereoFrame,
-    StreamError, TrackFrameOutput, TrackStage,
+    DirectKltConfig, DirectKltStream, KltFailure, MultiCameraFlowOptions, RejectReason,
+    RejectReasonCounters, StereoFrame, StereoMatchingGuess, StreamError, TrackFrameOutput,
+    TrackStage,
 };
 pub use time::{select_imu_interval, ImuInterval, TimeInterval, TimeIntervalError};
 pub use timing::{TimingBreakdown, TimingBucket, TimingStat};

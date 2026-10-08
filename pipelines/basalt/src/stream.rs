@@ -61,6 +61,43 @@ impl Default for DirectKltConfig {
     }
 }
 
+/// How the cam1 search for a newly detected cam0 keypoint is initialized.
+///
+/// Mirrors newer upstream Basalt's `optical_flow_matching_guess_type`.  The
+/// pinned commit only has [`Self::SamePixel`], which is adequate for a
+/// fronto-parallel stereo pair (EuRoC) but places the seed hundreds of pixels
+/// away from the true match on a divergent rig such as Project Aria's two
+/// SLAM cameras (~75 degrees apart).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum StereoMatchingGuess {
+    /// Seed the cam1 search at the cam0 pixel coordinates (pinned upstream).
+    #[default]
+    SamePixel,
+    /// Upstream `REPROJ_FIX_DEPTH`: unproject the cam0 keypoint to a unit
+    /// bearing, place the point at `depth_m` metres along that ray, move it
+    /// into cam1 with the calibrated `T_cam1_cam0`, and project it.  A
+    /// keypoint whose seed does not project into cam1 is not stereo-tracked.
+    ReprojectFixedDepth { depth_m: f64 },
+}
+
+/// Opt-in multi-camera frontend extensions (not in the pinned upstream).
+///
+/// The default value reproduces the pinned cam0-centric frontend bit for
+/// bit: new keypoints are detected in cam0 only and stereo-tracked into cam1
+/// from the same pixel coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MultiCameraFlowOptions {
+    /// Initial cam1 position of the new-keypoint stereo KLT.
+    pub stereo_guess: StereoMatchingGuess,
+}
+
+impl MultiCameraFlowOptions {
+    /// True when every option has its pinned-upstream value.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A stereo frame supplied directly to the Basalt KLT stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StereoFrame {
@@ -130,6 +167,9 @@ pub enum RejectReason {
     StereoFbSquared,
     StereoBearingInvalid,
     StereoEssentialResidual,
+    /// Opt-in reprojection seed ([`StereoMatchingGuess::ReprojectFixedDepth`])
+    /// did not land inside cam1, so no stereo search was started.
+    StereoSeedOutOfView,
 }
 
 /// Per-frame and cumulative reject counters.
@@ -210,6 +250,8 @@ struct FramePyramids {
 pub struct DirectKltStream {
     calibration: BasaltCalibration,
     config: DirectKltConfig,
+    /// Opt-in multi-camera extensions; the default is the pinned frontend.
+    multi_camera: MultiCameraFlowOptions,
     detector: GridFastDetector,
     previous: Option<FramePyramids>,
     previous_frame: Option<BasaltFrame>,
@@ -252,6 +294,7 @@ impl DirectKltStream {
             detector: GridFastDetector::new(config.fast),
             calibration,
             config,
+            multi_camera: MultiCameraFlowOptions::default(),
             previous: None,
             previous_frame: None,
             tracks: BTreeMap::new(),
@@ -260,6 +303,28 @@ impl DirectKltStream {
             pyramid_scratch_cam0: Vec::new(),
             pyramid_scratch_cam1: Vec::new(),
         })
+    }
+
+    /// Enables the opt-in multi-camera frontend extensions.  Passing
+    /// [`MultiCameraFlowOptions::default()`] leaves the stream unchanged.
+    pub fn with_multi_camera_options(
+        mut self,
+        options: MultiCameraFlowOptions,
+    ) -> Result<Self, StreamError> {
+        if let StereoMatchingGuess::ReprojectFixedDepth { depth_m } = options.stereo_guess {
+            if !depth_m.is_finite() || depth_m <= 0.0 {
+                return Err(StreamError::InvalidConfig(
+                    "stereo matching default depth must be finite and positive",
+                ));
+            }
+        }
+        self.multi_camera = options;
+        Ok(self)
+    }
+
+    /// The multi-camera options this stream runs with.
+    pub const fn multi_camera_options(&self) -> &MultiCameraFlowOptions {
+        &self.multi_camera
     }
 
     pub fn active_track_ids(&self) -> Vec<TrackId> {
@@ -487,24 +552,70 @@ impl DirectKltStream {
                 let Some(cam0_transform) = track.cam0 else {
                     continue;
                 };
-                let stereo_transform = match track_direction(
-                    &current.cam0,
-                    current_cam1,
-                    cam0_transform,
-                    &self.config,
-                ) {
+                // Opt-in reprojection seed.  With the pinned `SamePixel`
+                // guess `seed` is `None` and both searches below are the
+                // unchanged `track_direction` calls.
+                let seed = match self.multi_camera.stereo_guess {
+                    StereoMatchingGuess::SamePixel => None,
+                    StereoMatchingGuess::ReprojectFixedDepth { depth_m } => {
+                        match reprojected_stereo_seed_with_warp(
+                            &self.calibration,
+                            *cam0_transform.translation(),
+                            depth_m,
+                        ) {
+                            Some(seed) => Some(seed),
+                            None => {
+                                counters.record(RejectReason::StereoSeedOutOfView);
+                                continue;
+                            }
+                        }
+                    }
+                };
+                let forward = match seed {
+                    None => {
+                        track_direction(&current.cam0, current_cam1, cam0_transform, &self.config)
+                    }
+                    // The cam1 patch is sampled through the predicted local
+                    // cam0->cam1 warp, so the SE(2) search only has to absorb
+                    // the residual rotation and translation.
+                    Some((seed, warp)) => track_direction_from_warped_seed(
+                        &current.cam0,
+                        current_cam1,
+                        *cam0_transform.translation(),
+                        AffineCompact2f::new(warp, seed),
+                        &self.config,
+                    ),
+                };
+                let stereo_transform = match forward {
                     Ok(transform) => transform,
                     Err(failure) => {
                         counters.record(RejectReason::StereoForward(failure));
                         continue;
                     }
                 };
-                let recovered = match track_direction(
-                    current_cam1,
-                    &current.cam0,
-                    stereo_transform,
-                    &self.config,
-                ) {
+                // The backward search of a reprojection-seeded match starts
+                // from the cam0 keypoint itself (the inverse guess); the
+                // same-pixel path keeps upstream's seed at the cam1 match.
+                let backward = match seed {
+                    None => {
+                        track_direction(current_cam1, &current.cam0, stereo_transform, &self.config)
+                    }
+                    Some((_, warp)) => track_direction_from_warped_seed(
+                        current_cam1,
+                        &current.cam0,
+                        *stereo_transform.translation(),
+                        AffineCompact2f::new(
+                            stereo_transform
+                                .linear()
+                                .try_inverse()
+                                .or_else(|| warp.try_inverse())
+                                .unwrap_or_else(Matrix2::identity),
+                            *cam0_transform.translation(),
+                        ),
+                        &self.config,
+                    ),
+                };
+                let recovered = match backward {
                     Ok(transform) => transform,
                     Err(failure) => {
                         counters.record(RejectReason::StereoBackward(failure));
@@ -814,6 +925,30 @@ fn track_direction_from_seed(
         current_pyramid,
         source_position,
         initial_transform,
+        false,
+        config,
+        #[cfg(test)]
+        None,
+    )
+}
+
+/// Like [`track_direction_from_seed`], but the IC search starts from
+/// `initial_transform`'s linear part (a predicted patch warp) instead of the
+/// identity, and the found transform is returned without composing a base.
+/// Used only by the opt-in reprojection stereo seed.
+fn track_direction_from_warped_seed(
+    old_pyramid: &RawU16Pyramid,
+    current_pyramid: &RawU16Pyramid,
+    source_position: Vector2<f32>,
+    initial_transform: AffineCompact2f,
+    config: &DirectKltConfig,
+) -> Result<AffineCompact2f, KltFailure> {
+    track_direction_from_seed_impl(
+        old_pyramid,
+        current_pyramid,
+        source_position,
+        initial_transform,
+        true,
         config,
         #[cfg(test)]
         None,
@@ -849,6 +984,7 @@ fn track_direction_from_seed_with_observer(
         current_pyramid,
         source_position,
         initial_transform,
+        false,
         config,
         Some(observer),
     )
@@ -859,14 +995,23 @@ fn track_direction_from_seed_impl(
     current_pyramid: &RawU16Pyramid,
     source_position: Vector2<f32>,
     initial_transform: AffineCompact2f,
+    search_from_initial_linear: bool,
     config: &DirectKltConfig,
     #[cfg(test)] mut observer: Option<&mut dyn KltIterationObserver>,
 ) -> Result<AffineCompact2f, KltFailure> {
     // Basalt resets the linear part for the current IC search. The previous
     // affine linear part is composed back onto the result after all levels;
     // the old point centre seeds the translation search.
-    let base_linear = *initial_transform.linear();
-    let mut transform = AffineCompact2f::new(Matrix2::identity(), *initial_transform.translation());
+    //
+    // Opt-in (`search_from_initial_linear`, used only by the reprojection
+    // stereo seed): the search instead starts from the initial linear part,
+    // a predicted cam0->cam1 patch warp, and the result is returned as found.
+    let (base_linear, search_linear) = if search_from_initial_linear {
+        (Matrix2::identity(), *initial_transform.linear())
+    } else {
+        (*initial_transform.linear(), Matrix2::identity())
+    };
+    let mut transform = AffineCompact2f::new(search_linear, *initial_transform.translation());
     for level in (0..=config.pyramid_levels).rev() {
         let scale = (1_u32 << level) as f32;
         let old_position = source_position / scale;
@@ -937,6 +1082,61 @@ const fn map_update_error(error: Se2UpdateError) -> KltFailure {
         Se2UpdateError::NonFiniteIncrement => KltFailure::IncrementNonFinite,
         Se2UpdateError::IncrementTooLarge { .. } => KltFailure::IncrementTooLarge,
     }
+}
+
+/// Upstream `REPROJ_FIX_DEPTH` seed: the cam1 pixel of the point `depth_m`
+/// metres along the (unit) cam0 bearing of `cam0_pixel`.  Returns `None` when
+/// the bearing or projection is invalid or the projection lies outside cam1.
+pub(crate) fn reprojected_stereo_seed(
+    calibration: &BasaltCalibration,
+    cam0_pixel: Vector2<f32>,
+    depth_m: f64,
+) -> Option<Vector2<f32>> {
+    let camera0 = calibration.camera(0)?;
+    let camera1 = calibration.camera(1)?;
+    let bearing0 = camera0.unproject(&Point2::new(cam0_pixel.x as f64, cam0_pixel.y as f64))?;
+    let norm = bearing0.norm();
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return None;
+    }
+    let point_cam0 = Point3::from(bearing0 / norm * depth_m);
+    // T_cam1_cam0 = T_imu_cam1^-1 * T_imu_cam0.
+    let t_cam1_cam0 = calibration
+        .imu_to_camera(1)?
+        .compose(calibration.camera_to_imu(0)?);
+    let point_cam1 = t_cam1_cam0.transform_point(&point_cam0);
+    let pixel = camera1.project(&point_cam1)?;
+    if !pixel.x.is_finite() || !pixel.y.is_finite() || !camera1.contains_pixel(&pixel) {
+        return None;
+    }
+    Some(Vector2::new(pixel.x as f32, pixel.y as f32))
+}
+
+/// [`reprojected_stereo_seed`] plus the local linear warp of the cam0 ->
+/// cam1 reprojection at that depth (central differences over +-1 px).  The
+/// warp is the identity when a neighbouring sample does not reproject into
+/// cam1 or the differences are not invertible.
+pub(crate) fn reprojected_stereo_seed_with_warp(
+    calibration: &BasaltCalibration,
+    cam0_pixel: Vector2<f32>,
+    depth_m: f64,
+) -> Option<(Vector2<f32>, Matrix2<f32>)> {
+    let seed = reprojected_stereo_seed(calibration, cam0_pixel, depth_m)?;
+    let step = 1.0_f32;
+    let column = |offset: Vector2<f32>| {
+        let plus = reprojected_stereo_seed(calibration, cam0_pixel + offset, depth_m)?;
+        let minus = reprojected_stereo_seed(calibration, cam0_pixel - offset, depth_m)?;
+        Some((plus - minus) / (2.0 * step))
+    };
+    let warp = column(Vector2::new(step, 0.0))
+        .zip(column(Vector2::new(0.0, step)))
+        .map(|(dx, dy)| Matrix2::from_columns(&[dx, dy]))
+        .filter(|warp| {
+            let determinant = warp.determinant();
+            determinant.is_finite() && determinant.abs() > 1e-3
+        })
+        .unwrap_or_else(Matrix2::identity);
+    Some((seed, warp))
 }
 
 fn essential_residual(
@@ -1033,6 +1233,104 @@ mod tests {
         )
         .unwrap();
         assert!(residual < 1e-12);
+    }
+
+    /// Independent pinhole reference for the `REPROJ_FIX_DEPTH` seed: a
+    /// divergent rig whose cam1 is rotated 75 degrees about the cam0 x axis
+    /// and offset by a 0.138 m baseline (Project Aria geometry).
+    #[test]
+    fn reprojected_stereo_seed_matches_independent_pinhole_projection() {
+        let (f, cx, cy) = (241.6, 382.4, 286.5);
+        let camera = DoubleSphereCamera::new(f, f, cx, cy, 0.0, 0.0, 758, 572).unwrap();
+        let mut calibration = synthetic_calibration(camera);
+        calibration.resolutions = vec![(758, 572); 2];
+        let r_imu_cam0 = UnitQuaternion::from_scaled_axis(Vector3::new(0.1, -0.2, 0.05));
+        let t_imu_cam0 = Vector3::new(0.02, -0.1, 0.07);
+        // cam1 = cam0 rotated +75 degrees about its own x axis.
+        let r_cam0_cam1 =
+            UnitQuaternion::from_scaled_axis(Vector3::new(75_f64.to_radians(), 0.0, 0.0));
+        let t_cam0_cam1 = Vector3::new(0.004, -0.109, -0.085);
+        calibration.t_imu_cam = vec![
+            visloc_core::geometry::SE3::new(r_imu_cam0, t_imu_cam0),
+            visloc_core::geometry::SE3::new(
+                r_imu_cam0 * r_cam0_cam1,
+                t_imu_cam0 + r_imu_cam0 * t_cam0_cam1,
+            ),
+        ];
+
+        // A pixel in the top band of cam0, which this rig shares with cam1.
+        let pixel0 = Vector2::new(600.0_f32, 120.0_f32);
+        for depth in [2.0, 5.0, 20.0] {
+            let ray = Vector3::new((pixel0.x as f64 - cx) / f, (pixel0.y as f64 - cy) / f, 1.0);
+            let point_cam0 = ray.normalize() * depth;
+            let point_cam1 = r_cam0_cam1.inverse() * (point_cam0 - t_cam0_cam1);
+            assert!(point_cam1.z > 0.0);
+            let expected = Vector2::new(
+                f * point_cam1.x / point_cam1.z + cx,
+                f * point_cam1.y / point_cam1.z + cy,
+            );
+            let seed =
+                reprojected_stereo_seed(&calibration, pixel0, depth).expect("point is inside cam1");
+            assert!(
+                (seed.cast::<f64>() - expected).norm() < 1e-3,
+                "depth {depth}: seed {seed:?} expected {expected:?}"
+            );
+            // The same-pixel guess is hundreds of pixels off on this rig.
+            assert!((seed - pixel0).norm() > 200.0, "seed {seed:?}");
+        }
+        // At 1 m the baseline pushes the same ray below cam1's last row.
+        assert_eq!(reprojected_stereo_seed(&calibration, pixel0, 1.0), None);
+        // A pixel at the bottom of cam0 looks away from cam1: no seed.
+        assert_eq!(
+            reprojected_stereo_seed(&calibration, Vector2::new(382.0, 560.0), 2.0),
+            None
+        );
+
+        // Degenerate rig (identical cameras, no baseline): the seed is the
+        // same pixel at every depth.
+        let identity = synthetic_calibration(camera);
+        let seed = reprojected_stereo_seed(&identity, pixel0, 3.0).unwrap();
+        assert!((seed - pixel0).norm() < 1e-3);
+        let (_, warp) = reprojected_stereo_seed_with_warp(&identity, pixel0, 3.0).unwrap();
+        assert!((warp - Matrix2::identity()).norm() < 1e-3);
+
+        // The patch warp is the local derivative of the reprojection: map a
+        // small cam0 offset and compare with the independent projection.
+        let (seed, warp) = reprojected_stereo_seed_with_warp(&calibration, pixel0, 5.0).unwrap();
+        let project_at = |pixel: Vector2<f32>| {
+            let ray = Vector3::new((pixel.x as f64 - cx) / f, (pixel.y as f64 - cy) / f, 1.0);
+            let point_cam1 = r_cam0_cam1.inverse() * (ray.normalize() * 5.0 - t_cam0_cam1);
+            Vector2::new(
+                f * point_cam1.x / point_cam1.z + cx,
+                f * point_cam1.y / point_cam1.z + cy,
+            )
+        };
+        let offset = Vector2::new(3.0_f32, -2.0_f32);
+        let predicted = (seed + warp * offset).cast::<f64>();
+        let actual = project_at(pixel0 + offset);
+        assert!(
+            (predicted - actual).norm() < 0.05,
+            "{predicted:?} vs {actual:?}"
+        );
+        // On this rig the warp is far from a pure rotation (scale/shear).
+        assert!((warp.determinant() - 1.0).abs() > 0.05, "{warp:?}");
+    }
+
+    #[test]
+    fn multi_camera_options_validate_the_default_depth() {
+        let camera = DoubleSphereCamera::new(40.0, 40.0, 48.0, 48.0, 0.0, 0.5, 96, 96).unwrap();
+        let stream =
+            DirectKltStream::new(synthetic_calibration(camera), DirectKltConfig::default())
+                .unwrap();
+        assert!(stream.multi_camera_options().is_default());
+        for depth_m in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(stream
+                .clone()
+                .with_multi_camera_options(MultiCameraFlowOptions {
+                    stereo_guess: StereoMatchingGuess::ReprojectFixedDepth { depth_m },
+                })
+                .is_err());
+        }
     }
 
     fn synthetic_calibration(camera: DoubleSphereCamera) -> BasaltCalibration {

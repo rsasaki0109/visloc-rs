@@ -55,7 +55,8 @@ impl BasaltVioEstimatorAdapter {
     ) -> Result<Self, BasaltAdapterError> {
         let direct_config = direct_klt_config(config)?;
         let estimator_config = config.estimator_config()?;
-        let frontend = DirectKltStream::new(calibration.clone(), direct_config)?;
+        let frontend = DirectKltStream::new(calibration.clone(), direct_config)?
+            .with_multi_camera_options(config.multi_camera_flow_options()?)?;
         let estimator = vio_estimator_from_parts(calibration, estimator_config)?;
         Ok(Self {
             frontend,

@@ -1,4 +1,5 @@
 use crate::mapper::{GlobalBaConfig, MapperConfig, OfflineMapperConfig};
+use crate::stream::{MultiCameraFlowOptions, StereoMatchingGuess};
 use crate::vio::aom::LmConfig;
 use crate::vio::estimator::{EstimatorConfig, UrgentKeyframePolicy};
 use crate::vio::margdata::WindowPolicy;
@@ -70,6 +71,10 @@ const OPTIONAL_KEYS: &[&str] = &[
     // already read by `adapter::direct_klt_config`, but only programmatic
     // callers could set it because this list rejected it in a JSON file.
     "config.optical_flow_imu_seed_rotation",
+    // Multi-camera extensions for divergent rigs (all default off); see
+    // `docs/lamaria_multicam.md`.
+    "config.optical_flow_matching_guess_type",
+    "config.optical_flow_matching_default_depth",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -172,6 +177,45 @@ impl BasaltConfig {
         } else {
             Ok(false)
         }
+    }
+    /// The opt-in multi-camera optical-flow options.  With none of the keys
+    /// present this is [`MultiCameraFlowOptions::default`], the pinned
+    /// cam0-centric frontend.
+    ///
+    /// * `config.optical_flow_matching_guess_type`: `"SAME_PIXEL"` (default)
+    ///   or `"REPROJ_FIX_DEPTH"`, as in newer upstream Basalt.
+    ///   `"REPROJ_AVG_DEPTH"` is not implemented and is rejected.
+    /// * `config.optical_flow_matching_default_depth`: metres along the cam0
+    ///   ray for `REPROJ_FIX_DEPTH` (default 2.0, upstream's default).
+    pub fn multi_camera_flow_options(&self) -> Result<MultiCameraFlowOptions, ConfigError> {
+        let guess_key = "config.optical_flow_matching_guess_type";
+        let depth_key = "config.optical_flow_matching_default_depth";
+        let depth_m = if self.values.contains_key(depth_key) {
+            let depth: f64 = self.value(depth_key)?;
+            if !depth.is_finite() || depth <= 0.0 {
+                return Err(ConfigError::Value(format!(
+                    "{depth_key} must be finite and positive"
+                )));
+            }
+            depth
+        } else {
+            2.0
+        };
+        let stereo_guess = if self.values.contains_key(guess_key) {
+            let guess: String = self.value(guess_key)?;
+            match guess.as_str() {
+                "SAME_PIXEL" => StereoMatchingGuess::SamePixel,
+                "REPROJ_FIX_DEPTH" => StereoMatchingGuess::ReprojectFixedDepth { depth_m },
+                other => {
+                    return Err(ConfigError::Value(format!(
+                        "{guess_key}: unsupported value {other:?} (expected \"SAME_PIXEL\" or \"REPROJ_FIX_DEPTH\")"
+                    )))
+                }
+            }
+        } else {
+            StereoMatchingGuess::SamePixel
+        };
+        Ok(MultiCameraFlowOptions { stereo_guess })
     }
     pub fn compat_profile(&self) -> Result<CompatProfile, ConfigError> {
         Ok(CompatProfile {
