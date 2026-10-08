@@ -26,9 +26,9 @@ nalgebra = { workspace = true }
 pollster = { workspace = true, optional = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
-visloc-core = { path = "../core", version = "0.2.0" }
-visloc-gsplat-render = { path = "../gsplat-render", version = "0.2.0" }
-visloc-slam = { path = "../../pipelines/slam", version = "0.2.0" }
+visloc-core = { path = "../core", version = "0.2.1" }
+visloc-gsplat-render = { path = "../gsplat-render", version = "0.2.1" }
+visloc-slam = { path = "../../pipelines/slam", version = "0.2.1" }
 wgpu = { workspace = true, optional = true }
 
 [[example]]

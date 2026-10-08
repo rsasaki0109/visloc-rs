@@ -44,7 +44,7 @@ nalgebra = { workspace = true }
 rand = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-visloc-core = { path = "../core", version = "0.2.0" }
+visloc-core = { path = "../core", version = "0.2.1" }
 ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "api-22", "ndarray", "std", "tls-rustls"] }
 ndarray = { version = "0.17", optional = true }
 # M4-perf (`docs/dpvo_droid_port_plan.md`): edge-level parallelism for
@@ -55,4 +55,4 @@ ndarray = { version = "0.17", optional = true }
 # gated the same way `ort`/`ndarray` are (only pulled in under
 # `onnx-inference`, since that is the only feature that compiles `dpvo/`).
 rayon = { workspace = true, optional = true }
-visloc-dpvo-cuda-runtime = { path = "../dpvo-cuda-runtime", version = "0.2.0", optional = true }
+visloc-dpvo-cuda-runtime = { path = "../dpvo-cuda-runtime", version = "0.2.1", optional = true }

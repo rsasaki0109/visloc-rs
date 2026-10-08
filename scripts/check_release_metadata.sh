@@ -32,7 +32,7 @@ pipelines/fusion/Cargo.toml
 "
 
 echo "Checking workspace release metadata"
-grep_normalized '^version = "0.2.0"$' Cargo.toml
+grep_normalized '^version = "0.2.1"$' Cargo.toml
 grep_normalized '^rust-version = "1.88"$' Cargo.toml
 grep_normalized '^license = "MIT OR Apache-2.0"$' Cargo.toml
 grep_normalized '^repository = "https://github.com/rsasaki0109/visloc-rs"$' Cargo.toml

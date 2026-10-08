@@ -29,7 +29,7 @@ bytemuck = { workspace = true, optional = true }
 nalgebra = { workspace = true }
 pollster = { workspace = true, optional = true }
 thiserror = { workspace = true }
-visloc-gsplat-core = { path = "../gsplat-core", version = "0.2.0" }
+visloc-gsplat-core = { path = "../gsplat-core", version = "0.2.1" }
 wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]

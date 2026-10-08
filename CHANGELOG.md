@@ -4,6 +4,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+## 0.2.1 - 2026-10-08
+
+Patch release: camera-distortion correctness fixes. Each fix below corrected
+results that were silently wrong, not just errors that were reported.
+
 ### Fixed
 
 - **COLMAP camera export with self-calibrated distortion.** A `Pinhole`
