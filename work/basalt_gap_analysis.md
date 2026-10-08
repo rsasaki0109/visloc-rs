@@ -127,7 +127,7 @@ Basalt-equivalence is a **windowed-consistency** problem first, a mapping proble
    residual, marginalizing the outgoing keyframe on `R` (Basalt ICCV'21). Add FEJ discipline
    (point 3) in the same change — they belong together. Gate: reproduce MH_01-800f tracking
    ≥ 0.98 and Sim(3) ATE < 1.5 m / scale < 10 without regressing the 400f visual-only result
-   (matches `docs/next_development_plan.md` Priority 3/4 gates).
+   (matches `docs/archive/next_development_plan_2026-07.md` Priority 3/4 gates).
 2. **Marg-data + nonlinear factor recovery.** Emit a marginalization record per window step and
    add a `basalt_mapper`-style re-factorization (relative-pose / roll-pitch / BA-cov) to feed the
    existing Sim3 pose-graph and loop-closure stack. This is the "VI-SLAM == bounded VIO + global

@@ -134,7 +134,7 @@ Primary paths:
 - `docs/generated/inprocess_deep_slam_wallclock.md`
 - `tests/test_summarize_inprocess_deep_slam.py`
 
-Change set (2026-07-03): Phase 2 of `docs/next_development_plan.md` formalizes
+Change set (2026-07-03): Phase 2 of `docs/archive/next_development_plan_2026-07.md` formalizes
 the existing EuRoC MH_03_medium SfM-vs-COLMAP head-to-head
 (`docs/sfm_vs_colmap_benchmark.md`) as registry evidence: two run manifests
 under `benchmarks/registry/runs/euroc/sfm-vs-colmap-*`, the
@@ -144,7 +144,7 @@ COLMAP arm is an explicitly provenance-marked prior-run reference
 (`result_kind=external_rerun`), not reproduced this session; no new numbers
 were measured.
 
-Change set (2026-07-03): Phase 3 of `docs/next_development_plan.md` formalizes
+Change set (2026-07-03): Phase 3 of `docs/archive/next_development_plan_2026-07.md` formalizes
 the existing single-binary in-process deep-stereo-SLAM end-to-end wall-clock
 result (`docs/inprocess_slam_benchmark.md`, EuRoC MH_03_medium, 2700-frame) as
 registry evidence: two run manifests under

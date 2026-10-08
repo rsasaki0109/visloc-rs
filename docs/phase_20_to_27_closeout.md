@@ -130,7 +130,7 @@ remain reproducible.
 - `docs/superpoint_onnx_runtime_plan.md` (Phase-27 activation contract)
 - `target/euroc_phase*_*/SUMMARY.md` — per-phase empirical writeups
 - `CHANGELOG.md` Unreleased entries — release-notes-quality per-phase summaries
-- `PLAN.md` Phase-23 close-out table + reading order section
+- `docs/archive/plan_history_2026-05_to_09.md` Phase-23 close-out table + reading order section
 
 ### Tests
 - 576 workspace tests passing
@@ -309,7 +309,7 @@ grep ate_rigid_rmse_m target/euroc_phase26_V1_01_easy_strict_superpoint/summary.
 
 1. **This file** (`docs/phase_20_to_27_closeout.md`) for the
    one-page narrative.
-2. **`PLAN.md`** §"Phase-23 thread close-out" table for the per-phase
+2. **`docs/archive/plan_history_2026-05_to_09.md`** §"Phase-23 thread close-out" table for the per-phase
    ship/empirical-outcome status.
 3. **`docs/motion_based_vi_alignment.md`** for the long-form
    per-phase deep dives (~50 sections; skim the most recent first).

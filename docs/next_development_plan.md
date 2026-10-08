@@ -1,86 +1,58 @@
-# Next Development Plan (forward-looking, as of 2026-07-02)
+# Next Development Plan (as of 2026-10-08)
 
-This is a focused, prioritized plan for continuing `visloc-rs`. It complements the
-long historical log in [`PLAN.md`](../PLAN.md) and the staged
-[`docs/roadmap.md`](roadmap.md); read those for background. This file is the
-*short* answer to "what next".
+This is the short answer to "what next". Current state and the list of
+closed threads are in [`PLAN.md`](../PLAN.md). The previous version of this
+plan (2026-07-02) is archived at
+[`archive/next_development_plan_2026-07.md`](archive/next_development_plan_2026-07.md).
+All of its phases have since landed or been closed.
 
-## Where we are
+Scope rule for this round: **no new GPU work.** GPU paths (wgpu SfM, 3DGS,
+DPVO CUDA) stay as they are; nothing here depends on them.
 
-- Mature pure-Rust visual-localization / VO-SLAM / SfM foundation. All three
-  pillars (map-reuse localization, VO/SLAM building blocks, SfM) run with
-  registry-backed public-data measurements.
-- Latest committed milestone: **Sequential SfM self-calibration** — SfM from raw
-  images with joint-intrinsics BA and self-calibrated radial distortion
-  (PRs #30–#34).
-- Large **uncommitted branch** (~52 files, +7.8k lines, 2026-06-18→20):
-  public-release boundary cleanup, **benchmark registry v1 + claim matrix**,
-  **covisibility local BA**, **tracked-landmark-drop keyframe policy**,
-  **adaptive stereo depth gate**, seq02 loop-verifier A/B tooling, CI release
-  gates. This work is essentially complete and stabilizing — it is not yet on
-  `main`.
+## Track 1: Correctness and release hygiene
 
-## Known open threads (measured, not speculative)
+| Item | Status | Gate |
+| --- | --- | --- |
+| 0.2.1 patch release (distortion fixes) | Version bumped, CHANGELOG cut | Tag after main CI is green |
+| crates.io readiness | All 16 crates package; root package trimmed from ~83 MB to 0.87 MiB compressed with an `include` allowlist | `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` passes; then `cargo publish --workspace` (needs a crates.io token) |
+| BA distortion models | Pose/structure BA handles radial k1, k2 only. Extend to OPENCV p1/p2 and OPENCV_FISHEYE so BA optimizes the same model `Camera::project` measures | Finite-difference Jacobian tests and a synthetic BA round-trip per model; distortion-free and radial-only outputs stay bit-identical |
 
-| Id | Thread | Status |
-|----|--------|--------|
-| A | Covisibility local BA regresses MH_05 (tracking 0.565→0.220) while winning MH_01/MH_03 | opt-in only; cannot be defaulted |
-| B | Tracked-landmark-drop keyframe policy | A/B evidence-gathering; default off |
-| C | seq02 true loops are never proposed by VLAD | unsolved (needs offline vocab / learned global descriptor) |
-| D | Tight VI coupling for V103 / V203 / V2_03 | Phase 2 not started; vision-only ceiling confirmed |
+## Track 2: Sensor coverage (the empty cells in the README sensor table)
 
-## Plan (priority order)
+| Item | Status | Gate |
+| --- | --- | --- |
+| Monocular + IMU VIO on the Basalt port | Not started on the Basalt path | Synthetic mono-inertial test tracks with metric scale; stereo path bit-identical; then an EuRoC measurement (needs dataset access) |
+| GNSS fusion | Example-level prior only | Joint optimization of VO constraints and GNSS position factors with online ENU alignment, lever arm and outlier gating; synthetic ATE well below VO-only ATE |
 
-### Phase 0 — Land the uncommitted branch (highest EV, ~hours)
-The +7.8k-line branch is finished, valuable work sitting off `main`. Getting it
-committed with green CI is the single highest-EV move.
-- Pass `scripts/check.sh` (fmt + clippy + test + doc + registry + feature-matrix).
-- Commit in the reviewable P0/P1 groupings from `docs/release_change_sets.md`.
-- Push and confirm GitHub CI is green.
-- **Gate:** `git status --short` clean; CI green.
+## Track 3: Usability
 
-### Phase 1 — Kill the MH_05 covisibility-BA regression (top technical item)
-This decides whether online local BA can become a default path. Root cause is
-already measured: BA firing too early / too often on MH_05 plus no-local-landmark
-selection failures.
-- Levers: scene-scale-adaptive cadence (same shape as the min-depth fix),
-  window-selection quality gate, always-on write-back quality gate.
-- **Gate:** covisibility local BA beats the disabled baseline on MH_01/MH_03/MH_05
-  simultaneously before it is defaulted. Until then it stays honest opt-in.
+| Item | Status | Gate |
+| --- | --- | --- |
+| Python bindings (pyo3 + maturin) | Not started | Camera, Pose, COLMAP I/O, ATE evaluation from Python, with pytest coverage and a CI job |
+| ROS 2 node | Not started | Needs a ROS 2 toolchain to build and test. Design first, then implement where it can be verified |
 
-### Phase 2 — Close the SfM-vs-COLMAP head-to-head (high public value)
-With self-calibration landed, finish SfM as the README's fourth pillar.
-- Metric-video regime (EuRoC/KITTI, GT available): a registry-backed 5-metric
-  table — wall-clock / registration rate / ATE-vs-GT / reprojection / downstream
-  3DGS quality.
-- One-command reproduction: raw images → self-calibrated SfM → COLMAP export →
-  3DGS. Promote to README once registry-backed.
-- **Honest caveat to keep:** SfM has no standardized published per-sequence table,
-  so the claim form is same-tool head-to-head, not published-number-beating.
+## Track 4: Maintainability
 
-### Phase 3 — Real-time deep frontend polish (medium)
-In-process SP/LG via ONNX CUDA already runs. Harden the "single-binary,
-real-time deep stereo SLAM, pure Rust" claim into a registry-backed end-to-end
-wall-clock number that feeds both the SfM and VI comparisons.
+| Item | Status | Gate |
+| --- | --- | --- |
+| Planning docs | `PLAN.md` (233 KB) and the itemized 0.2.0 CHANGELOG (~4,800 lines) moved to [`archive/`](archive/); short handoff and changelog in their place | Docs link check passes |
+| Split very large source files | `examples/unordered_sfm_demo.rs` (22.5k lines), `pipelines/basalt/src/vio/aom.rs` (21.5k), `pipelines/slam/src/incremental_sfm.rs` (18.5k), `pipelines/slam/src/bundle.rs` (17k) | Pure moves into submodules; no behavior change; full test suite and parity/hash tests unchanged |
 
-### Phase 4 — v1.0 API stabilization (long-term)
-The `docs/api_stability.md` allowlist exists. Freeze the prelude / trait
-boundaries, write a migration guide, and move 0.1 → 0.x → 1.0.
+## Needs real data (not runnable from a dataset-less environment)
 
-### Deferred (only on explicit request)
-- **Tight VI coupling (Phase 2 of the ORB-SLAM3 battle plan):** the only path to
-  the V-room / V2_03 cells, but OpenVINS-class frontend surgery (blackout
-  bridging + reacquisition + velocity/bias co-estimation). Do not start until the
-  user asks to push V2_03. Keep the honest vision-only-ceiling framing in
-  `docs/euroc_loop_closure_benchmark.md`.
-- **seq02 loop closure:** blocked on an offline vocabulary or a learned global
-  descriptor. Prove candidate-stage recall (`scripts/eval_loop_retrieval_recall.py`)
-  before touching verifier/optimizer settings.
+These stay open, but each needs EuRoC / OpenLORIS access to measure:
+
+- **Real-time margin.** The slowest EuRoC sequence runs at RTF 1.06×. LM
+  inner iterations are about 80% of VIO wall time; any speed-up must be
+  checked against the VIO trajectory hash.
+- **OpenLORIS 10k rig SfM RMSE parity.** 0.3890 m vs COLMAP's 0.3843 m.
+- **Mono-inertial VIO ATE on EuRoC** once Track 2 lands.
 
 ## Guardrails (unchanged)
-- No mandatory OpenCV / ONNX / PyTorch / CUDA in default crates; learned/GPU paths
-  stay opt-in behind features or file-backed adapters.
-- Do not claim full SLAM, full loop closure, or leaderboard results; keep public
-  wording scoped to the registry and claim matrix.
-- Every behavior change updates README / progress / roadmap / interfaces /
-  decisions / CHANGELOG as applicable, then `scripts/check.sh`.
+
+- No mandatory OpenCV / ONNX / PyTorch / CUDA in default crates.
+- New behavior is opt-in until measured; default outputs stay bit-identical.
+- Claims are scoped to the benchmark registry and claim matrix; negative
+  results are recorded, not deleted.
+- Every behavior change updates README / CHANGELOG / the relevant `docs/`
+  page, then passes `scripts/check.sh`.
