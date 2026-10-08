@@ -34,6 +34,7 @@ rand = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 visloc-core = { path = "../../crates/core", version = "0.2.1" }
+visloc-fusion = { path = "../fusion", version = "0.2.1" }
 visloc-io = { path = "../../crates/io", version = "0.2.1" }
 visloc-localization = { path = "../localization", version = "0.2.1" }
 visloc-mapping = { path = "../mapping", version = "0.2.1" }

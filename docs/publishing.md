@@ -40,7 +40,7 @@ The order follows internal dependencies (optional ones marked `?`):
 - `visloc-io` depends on `visloc-core`, `visloc-vision`, `visloc-localization`, and `visloc-fusion`.
 - `visloc-tracking` depends on `visloc-core`, `visloc-vision`, and `visloc-localization`.
 - `visloc-mapping` depends on `visloc-core`, `visloc-vision`, and `visloc-tracking`.
-- `visloc-slam` depends on `visloc-core`, `visloc-vision`, `visloc-io`, `visloc-localization`, `visloc-tracking`, and `visloc-mapping`.
+- `visloc-slam` depends on `visloc-core`, `visloc-vision`, `visloc-io`, `visloc-fusion`, `visloc-localization`, `visloc-tracking`, and `visloc-mapping`.
 - `visloc-basalt` depends on `visloc-core`.
 - `visloc-gsplat-core` depends on `visloc-core` and `visloc-io?`.
 - `visloc-gsplat-render` depends on `visloc-gsplat-core`.

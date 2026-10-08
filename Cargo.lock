@@ -1687,6 +1687,7 @@ dependencies = [
  "rayon",
  "thiserror",
  "visloc-core",
+ "visloc-fusion",
  "visloc-io",
  "visloc-localization",
  "visloc-mapping",
