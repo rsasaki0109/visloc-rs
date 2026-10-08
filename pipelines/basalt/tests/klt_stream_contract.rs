@@ -295,3 +295,63 @@ fn direct_stream_records_stereo_essential_rejection_separately() {
             < output.created_track_ids.len()
     );
 }
+
+#[test]
+fn direct_stream_runs_monocular_without_cam1_or_stereo_stages() {
+    // A cam0-only calibration plus cam1-less frames is the `--mono` frontend:
+    // temporal KLT and replenishment run as usual, no stereo stage executes,
+    // and only camera-0 observations are emitted.
+    let mono_calibration = calibration().retain_cameras(1).unwrap();
+    let mut stream = DirectKltStream::new(mono_calibration, config()).unwrap();
+    let fixture = fixture();
+    let mut previous_ids = BTreeSet::new();
+    for (index, frame) in fixture.frames.iter().enumerate() {
+        let output = stream
+            .process_frame(StereoFrame::new(
+                frame.frame_id,
+                frame.timestamp_ns,
+                shifted_scene(frame.cam0_dx, frame.cam0_dy),
+                None,
+            ))
+            .unwrap();
+        assert!(!output.observations.is_empty());
+        assert!(output
+            .observations
+            .iter()
+            .all(|observation| observation.camera_id == 0));
+        // `stage_trace` is the static upstream stage order, so check the
+        // reject counters instead: no stereo stage may ever classify a track.
+        assert!(output.reject_counters.iter().all(|(reason, count)| {
+            *count == 0
+                || !matches!(
+                    reason,
+                    RejectReason::ExistingStereoForward(..)
+                        | RejectReason::ExistingStereoBackward(..)
+                        | RejectReason::ExistingStereoFbSquared
+                        | RejectReason::StereoForward(..)
+                        | RejectReason::StereoBackward(..)
+                        | RejectReason::StereoFbSquared
+                        | RejectReason::StereoBearingInvalid
+                        | RejectReason::StereoEssentialResidual
+                )
+        }));
+        if index > 0 {
+            assert!(!output.retained_track_ids.is_empty());
+            assert!(output
+                .retained_track_ids
+                .iter()
+                .all(|track_id| previous_ids.contains(track_id)));
+        }
+        previous_ids = output
+            .observations
+            .iter()
+            .map(|observation| observation.track_id)
+            .collect();
+    }
+
+    // A cam1 image without a camera-1 calibration is rejected rather than
+    // silently ignored.
+    let mut stream =
+        DirectKltStream::new(calibration().retain_cameras(1).unwrap(), config()).unwrap();
+    assert!(stream.process_frame(fixture_frame(0)).is_err());
+}

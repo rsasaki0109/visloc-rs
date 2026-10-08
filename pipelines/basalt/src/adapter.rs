@@ -56,47 +56,7 @@ impl BasaltVioEstimatorAdapter {
         let direct_config = direct_klt_config(config)?;
         let estimator_config = config.estimator_config()?;
         let frontend = DirectKltStream::new(calibration.clone(), direct_config)?;
-        let camera = *calibration
-            .camera(0)
-            .ok_or(BasaltAdapterError::MissingCamera0Calibration)?;
-        let estimator = BasaltVioEstimator::new(camera, estimator_config)
-            .with_camera_rig(calibration.cameras.clone(), calibration.t_imu_cam.clone())
-            .map_err(BasaltAdapterError::Estimator)?
-            .with_imu_noise(
-                ImuNoiseModel {
-                    // ImuPreintegrator injects per-sample covariance through
-                    // the continuous-density API.  Basalt's EuRoC contract
-                    // uses discrete sample covariance density² * rate, hence
-                    // the equivalent sqrt(rate) scaling here.
-                    // The pinned Basalt path keeps the continuous density in
-                    // Scalar throughout `std * sqrt(rate)`.  Preserve that
-                    // f32 boundary here before the value is stored in the
-                    // public f64 noise model; otherwise an f64 product cast
-                    // down by preintegration is one ulp below Eigen's
-                    // discrete covariance (e.g. 3d51b717 vs 3d51b718).
-                    gyro_density: sample_density_f32(
-                        calibration.gyro_noise_std,
-                        calibration.imu_update_rate_hz,
-                    ),
-                    accel_density: sample_density_f32(
-                        calibration.accel_noise_std,
-                        calibration.imu_update_rate_hz,
-                    ),
-                },
-                BiasRandomWalkNoise {
-                    // Basalt stores the *inverse* calibration standard
-                    // deviations as bias square-root weights, then divides
-                    // them by sqrt(dt) in the discrete random-walk rows.
-                    gyro_density: inverse_rms_weight(calibration.gyro_bias_std),
-                    accel_density: inverse_rms_weight(calibration.accel_bias_std),
-                },
-            )
-            .map_err(BasaltAdapterError::Estimator)?
-            .with_imu_calibration(
-                calibration.calib_accel_bias.clone(),
-                calibration.calib_gyro_bias.clone(),
-            )
-            .map_err(BasaltAdapterError::Estimator)?;
+        let estimator = vio_estimator_from_parts(calibration, estimator_config)?;
         Ok(Self {
             frontend,
             estimator,
@@ -389,6 +349,72 @@ impl BasaltVioEstimatorAdapter {
         consumer_timing.merge_from(self.estimator.timing_breakdown());
         Ok((producer_timing, consumer_timing))
     }
+}
+
+/// Builds the Basalt VIO estimator from the pinned calibration/config
+/// contracts exactly as [`BasaltVioEstimatorAdapter::from_config`] does.
+///
+/// The camera rig is taken verbatim from `calibration`, so a calibration
+/// that carries only camera 0 (see
+/// [`crate::BasaltCalibration::retain_cameras`]) yields the
+/// monocular-inertial estimator. Upstream Basalt's VIO is generic over the
+/// number of cameras: every new keyframe landmark is hosted in camera 0 and
+/// seeded by triangulating against any retained observation of the same
+/// track (another camera at the same time, or camera 0 at an earlier frame)
+/// whose IMU-propagated baseline passes the 5 cm gate.
+pub fn vio_estimator_from_calibration(
+    calibration: &crate::BasaltCalibration,
+    config: &BasaltConfig,
+) -> Result<BasaltVioEstimator, BasaltAdapterError> {
+    let estimator_config = config.estimator_config()?;
+    vio_estimator_from_parts(calibration, estimator_config)
+}
+
+fn vio_estimator_from_parts(
+    calibration: &crate::BasaltCalibration,
+    estimator_config: crate::vio::EstimatorConfig,
+) -> Result<BasaltVioEstimator, BasaltAdapterError> {
+    let camera = *calibration
+        .camera(0)
+        .ok_or(BasaltAdapterError::MissingCamera0Calibration)?;
+    BasaltVioEstimator::new(camera, estimator_config)
+        .with_camera_rig(calibration.cameras.clone(), calibration.t_imu_cam.clone())
+        .map_err(BasaltAdapterError::Estimator)?
+        .with_imu_noise(
+            ImuNoiseModel {
+                // ImuPreintegrator injects per-sample covariance through
+                // the continuous-density API.  Basalt's EuRoC contract
+                // uses discrete sample covariance density² * rate, hence
+                // the equivalent sqrt(rate) scaling here.
+                // The pinned Basalt path keeps the continuous density in
+                // Scalar throughout `std * sqrt(rate)`.  Preserve that
+                // f32 boundary here before the value is stored in the
+                // public f64 noise model; otherwise an f64 product cast
+                // down by preintegration is one ulp below Eigen's
+                // discrete covariance (e.g. 3d51b717 vs 3d51b718).
+                gyro_density: sample_density_f32(
+                    calibration.gyro_noise_std,
+                    calibration.imu_update_rate_hz,
+                ),
+                accel_density: sample_density_f32(
+                    calibration.accel_noise_std,
+                    calibration.imu_update_rate_hz,
+                ),
+            },
+            BiasRandomWalkNoise {
+                // Basalt stores the *inverse* calibration standard
+                // deviations as bias square-root weights, then divides
+                // them by sqrt(dt) in the discrete random-walk rows.
+                gyro_density: inverse_rms_weight(calibration.gyro_bias_std),
+                accel_density: inverse_rms_weight(calibration.accel_bias_std),
+            },
+        )
+        .map_err(BasaltAdapterError::Estimator)?
+        .with_imu_calibration(
+            calibration.calib_accel_bias.clone(),
+            calibration.calib_gyro_bias.clone(),
+        )
+        .map_err(BasaltAdapterError::Estimator)
 }
 
 /// One frontend-produced, estimator-bound packet queued between the two

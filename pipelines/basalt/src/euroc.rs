@@ -60,6 +60,7 @@ pub struct EurocSensorDataset {
     imu_samples: Vec<ImuSample>,
     calibration: BasaltCalibration,
     config: BasaltConfig,
+    monocular: bool,
 }
 
 impl EurocSensorDataset {
@@ -89,7 +90,37 @@ impl EurocSensorDataset {
         timing: &mut TimingBreakdown,
     ) -> Result<Self, EurocReaderError> {
         let started = timing.start();
-        let result = Self::open_impl(root, calibration_path, config_path, timing);
+        let result = Self::open_impl(root, calibration_path, config_path, false, timing);
+        timing.finish(TimingBucket::DatasetOpen, started);
+        result
+    }
+
+    /// Opens the recording as a monocular-inertial (cam0 + IMU) stream.
+    ///
+    /// `mav0/cam1` is never read (it may be absent), every cam0 manifest row
+    /// becomes a frame, every [`EurocSensorFrame::cam1`] is `None`, and the
+    /// calibration is reduced to camera 0 with
+    /// [`BasaltCalibration::retain_cameras`]. A stereo calibration file can
+    /// therefore be reused unchanged. The stereo [`Self::open`] path is not
+    /// affected by this mode.
+    pub fn open_monocular(
+        root: impl AsRef<Path>,
+        calibration_path: impl AsRef<Path>,
+        config_path: impl AsRef<Path>,
+    ) -> Result<Self, EurocReaderError> {
+        let mut timing = TimingBreakdown::default();
+        Self::open_monocular_with_timing(root, calibration_path, config_path, &mut timing)
+    }
+
+    /// [`Self::open_monocular`] with the optional setup timing buckets.
+    pub fn open_monocular_with_timing(
+        root: impl AsRef<Path>,
+        calibration_path: impl AsRef<Path>,
+        config_path: impl AsRef<Path>,
+        timing: &mut TimingBreakdown,
+    ) -> Result<Self, EurocReaderError> {
+        let started = timing.start();
+        let result = Self::open_impl(root, calibration_path, config_path, true, timing);
         timing.finish(TimingBucket::DatasetOpen, started);
         result
     }
@@ -98,6 +129,7 @@ impl EurocSensorDataset {
         root: impl AsRef<Path>,
         calibration_path: impl AsRef<Path>,
         config_path: impl AsRef<Path>,
+        monocular: bool,
         timing: &mut TimingBreakdown,
     ) -> Result<Self, EurocReaderError> {
         let root = root.as_ref().to_path_buf();
@@ -115,9 +147,14 @@ impl EurocSensorDataset {
         if cam0_images.is_empty() {
             return Err(EurocReaderError::EmptyManifest(cam0_dir.join("data.csv")));
         }
-        let cam1_images = timing.measure(TimingBucket::DatasetCsvParsing, || {
-            read_image_manifest(&cam1_dir.join("data.csv"), &cam1_dir)
-        })?;
+        // Monocular mode never touches cam1: no manifest, no intersection.
+        let cam1_images = if monocular {
+            Vec::new()
+        } else {
+            timing.measure(TimingBucket::DatasetCsvParsing, || {
+                read_image_manifest(&cam1_dir.join("data.csv"), &cam1_dir)
+            })?
+        };
         let mut cam1_by_timestamp = BTreeMap::new();
         for image in cam1_images {
             if cam1_by_timestamp
@@ -131,7 +168,9 @@ impl EurocSensorDataset {
             }
         }
         let cam0_manifest_count = cam0_images.len();
-        cam0_images.retain(|image| cam1_by_timestamp.contains_key(&image.timestamp_ns));
+        if !monocular {
+            cam0_images.retain(|image| cam1_by_timestamp.contains_key(&image.timestamp_ns));
+        }
         if cam0_images.is_empty() {
             return Err(EurocReaderError::EmptyStereoIntersection {
                 cam0: cam0_dir.join("data.csv"),
@@ -161,6 +200,12 @@ impl EurocSensorDataset {
             BasaltConfig::from_json(&config_json).map_err(EurocReaderError::from)
         })?;
 
+        let calibration = if monocular {
+            calibration.retain_cameras(1)?
+        } else {
+            calibration
+        };
+
         Ok(Self {
             root,
             cam0_images,
@@ -169,7 +214,13 @@ impl EurocSensorDataset {
             imu_samples,
             calibration,
             config,
+            monocular,
         })
+    }
+
+    /// True when opened with [`Self::open_monocular`] (cam0 + IMU only).
+    pub const fn is_monocular(&self) -> bool {
+        self.monocular
     }
 
     pub fn root(&self) -> &Path {
@@ -671,6 +722,40 @@ mod tests {
         assert_eq!(first.timestamp_ns, 200);
         assert_eq!(first.initialization_imu.unwrap().timestamp_ns, 200);
         assert!(first.cam1.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn monocular_reader_ignores_cam1_and_keeps_every_cam0_frame() {
+        let (root, calibration, config) = make_dataset();
+        // A cam1 manifest that would shrink the stereo intersection, then
+        // no cam1 tree at all: neither may affect the monocular stream.
+        write_file(
+            &root.join("mav0/cam1/data.csv"),
+            "#timestamp,filename\n200,200.png\n",
+        );
+        let stereo = EurocSensorDataset::open(&root, &calibration, &config).unwrap();
+        assert!(!stereo.is_monocular());
+        assert_eq!(stereo.frame_count(), 1);
+        fs::remove_dir_all(root.join("mav0/cam1")).unwrap();
+
+        let dataset = EurocSensorDataset::open_monocular(&root, &calibration, &config).unwrap();
+        assert!(dataset.is_monocular());
+        assert_eq!(dataset.frame_count(), 2);
+        assert_eq!(dataset.cam0_manifest_count(), 2);
+        assert_eq!(dataset.cam1_timestamp_count(), 0);
+        assert_eq!(dataset.calibration().cameras.len(), 1);
+        assert_eq!(dataset.calibration().t_imu_cam.len(), 1);
+        for index in 0..2 {
+            let frame = dataset.frame(index).unwrap();
+            assert!(frame.cam1.is_none());
+            assert!(frame.cam1_path.is_none());
+        }
+        let first = dataset.frame(0).unwrap();
+        assert_eq!(first.timestamp_ns, 100);
+        assert_eq!(first.initialization_imu.unwrap().timestamp_ns, 100);
+        assert_eq!(first.cam0.pixel(1, 0), Some(65_280));
+        assert!(EurocSensorDataset::open(&root, &calibration, &config).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
