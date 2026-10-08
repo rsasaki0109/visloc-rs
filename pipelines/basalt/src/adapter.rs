@@ -55,7 +55,8 @@ impl BasaltVioEstimatorAdapter {
     ) -> Result<Self, BasaltAdapterError> {
         let direct_config = direct_klt_config(config)?;
         let estimator_config = config.estimator_config()?;
-        let frontend = DirectKltStream::new(calibration.clone(), direct_config)?;
+        let frontend = DirectKltStream::new(calibration.clone(), direct_config)?
+            .with_multi_camera_options(config.multi_camera_flow_options()?)?;
         let estimator = vio_estimator_from_parts(calibration, estimator_config)?;
         Ok(Self {
             frontend,
@@ -708,11 +709,7 @@ pub fn direct_klt_config(config: &BasaltConfig) -> Result<DirectKltConfig, Confi
         }
     };
     Ok(DirectKltConfig {
-        imu_seed_rotation: config
-            .values
-            .get("config.optical_flow_imu_seed_rotation")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        imu_seed_rotation: config.optional_bool("config.optical_flow_imu_seed_rotation")?,
         pyramid_levels: positive_usize("config.optical_flow_levels")?,
         max_iterations: positive_usize("config.optical_flow_max_iterations")?,
         fb_squared_threshold: positive_f32("config.optical_flow_max_recovered_dist2")?,
@@ -760,6 +757,17 @@ mod tests {
         assert!((direct.fb_squared_threshold - 0.04).abs() < 1e-6);
         assert!((direct.essential_residual_threshold - 0.005).abs() < 1e-9);
         assert_eq!(direct.fast.cell_size, 50);
+        assert!(!direct.imu_seed_rotation);
+    }
+
+    #[test]
+    fn imu_seed_rotation_is_settable_from_a_config_file() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../configs/basalt/euroc_config.json"))
+                .unwrap();
+        value["value0"]["config.optical_flow_imu_seed_rotation"] = serde_json::json!(true);
+        let config = BasaltConfig::from_json(&value.to_string()).unwrap();
+        assert!(direct_klt_config(&config).unwrap().imu_seed_rotation);
     }
 
     #[test]

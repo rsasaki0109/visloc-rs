@@ -13601,6 +13601,89 @@ mod tests {
     }
 
     #[test]
+    fn cam1_hosted_landmark_rows_use_host_and_target_extrinsics() {
+        // Divergent rig like Project Aria's SLAM pair: cam1 = cam0 rotated 75
+        // degrees about x with a 0.138 m baseline.  A landmark hosted in cam1
+        // is observed by cam1 (host frame and a later frame) and by cam0 at
+        // the later frame.  Built from the true point, every visual row must
+        // vanish: the window has to use T_imu_cam1 for the host and the
+        // observing camera's extrinsic for each target.
+        let camera =
+            DoubleSphereCamera::new(241.6, 241.6, 379.0, 286.0, 0.0, 0.0, 758, 572).unwrap();
+        let t_imu_cam = vec![
+            SE3::identity(),
+            SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(75_f64.to_radians(), 0.0, 0.0)),
+                Vector3::new(0.004, -0.109, -0.085),
+            ),
+        ];
+        let states = vec![nav(0, 0.0), nav(1, 0.3)];
+        let point_host = Vector3::new(0.1, 1.5, 2.0);
+        let point_world = states[0]
+            .nav
+            .imu_to_world
+            .compose(&t_imu_cam[1])
+            .transform_point(&Point3::from(point_host));
+        let observe = |state_index: usize, camera_id: u16| {
+            let pose = states[state_index]
+                .nav
+                .imu_to_world
+                .compose(&t_imu_cam[camera_id as usize]);
+            let pixel = camera
+                .project(&pose.inverse().transform_point(&point_world))
+                .unwrap();
+            assert!(camera.contains_pixel(&pixel));
+            WindowObservation {
+                state_index,
+                camera_id,
+                pixel,
+            }
+        };
+        let landmark = WindowLandmark {
+            track_id: 7,
+            anchor_state_index: 0,
+            anchor_camera_id: 1,
+            direction: StereographicDirection::from_bearing(point_host.normalize()).unwrap(),
+            inverse_distance: 1.0 / point_host.norm(),
+            observations: vec![observe(0, 1), observe(1, 1), observe(1, 0)],
+        };
+        let visual_rows = |anchor_camera_id: u16, scalar_mode: ScalarMode| {
+            let mut landmark = landmark.clone();
+            landmark.anchor_camera_id = anchor_camera_id;
+            let mut problem = test_window(states.clone(), vec![landmark]);
+            problem.camera = camera;
+            problem.cameras = vec![camera, camera];
+            problem.t_imu_cam = t_imu_cam.clone();
+            problem.scalar_mode = scalar_mode;
+            problem
+                .linearize(&problem.initial_state())
+                .unwrap()
+                .factors
+                .into_iter()
+                .find(|factor| factor.kind == FactorKind::Visual)
+                .expect("one grouped visual factor")
+        };
+        for (scalar_mode, tolerance) in [
+            (ScalarMode::ExtendedF64, 1e-6),
+            (ScalarMode::UpstreamF32, 2e-2),
+        ] {
+            let rows = visual_rows(1, scalar_mode);
+            // Two rows per stored observation (the host identity included).
+            assert_eq!(rows.residual.len(), 6, "{scalar_mode:?}");
+            assert!(
+                rows.residual.norm() < tolerance,
+                "{scalar_mode:?}: residual {:?}",
+                rows.residual
+            );
+            assert!(rows.state_jacobian.norm() > 1.0);
+            assert!(rows.landmark_jacobian.norm() > 1.0);
+            // Negative control: the same parameters read in cam0 are wrong.
+            let wrong = visual_rows(0, scalar_mode);
+            assert!(wrong.residual.norm() > 10.0, "{scalar_mode:?}");
+        }
+    }
+
+    #[test]
     fn same_timestamp_stereo_rows_accumulate_both_pose_blocks() {
         // Same-camera identity remains zero, while the stereo observation
         // contributes two relative camera terms that cancel on the shared

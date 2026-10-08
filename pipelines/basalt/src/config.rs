@@ -1,4 +1,5 @@
 use crate::mapper::{GlobalBaConfig, MapperConfig, OfflineMapperConfig};
+use crate::stream::{MultiCameraFlowOptions, StereoMatchingGuess};
 use crate::vio::aom::LmConfig;
 use crate::vio::estimator::{EstimatorConfig, UrgentKeyframePolicy};
 use crate::vio::margdata::WindowPolicy;
@@ -66,6 +67,17 @@ const KEYS: &[&str] = &[
 const OPTIONAL_KEYS: &[&str] = &[
     "config.vio_urgent_kf_keypoints_thresh",
     "config.vio_urgent_min_frames_after_kf",
+    // Raw-gyro rotation seed for temporal cam0 KLT (default false).  It was
+    // already read by `adapter::direct_klt_config`, but only programmatic
+    // callers could set it because this list rejected it in a JSON file.
+    "config.optical_flow_imu_seed_rotation",
+    // Multi-camera extensions for divergent rigs (all default off); see
+    // `docs/lamaria_multicam.md`.
+    "config.optical_flow_matching_guess_type",
+    "config.optical_flow_matching_default_depth",
+    "config.optical_flow_detect_all_cameras",
+    "config.vio_landmarks_all_cameras",
+    "config.vio_kf_connectivity_all_cameras",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -159,6 +171,60 @@ impl BasaltConfig {
             initial_pose_weight: self.value("config.vio_init_pose_weight")?,
             initial_accel_bias_weight: self.value("config.vio_init_ba_weight")?,
             initial_gyro_bias_weight: self.value("config.vio_init_bg_weight")?,
+            landmarks_all_cameras: self.optional_bool("config.vio_landmarks_all_cameras")?,
+            kf_connectivity_all_cameras: self
+                .optional_bool("config.vio_kf_connectivity_all_cameras")?,
+        })
+    }
+    /// An optional boolean key; absent means `false`.
+    pub fn optional_bool(&self, key: &str) -> Result<bool, ConfigError> {
+        if self.values.contains_key(key) {
+            self.value(key)
+        } else {
+            Ok(false)
+        }
+    }
+    /// The opt-in multi-camera optical-flow options.  With none of the keys
+    /// present this is [`MultiCameraFlowOptions::default`], the pinned
+    /// cam0-centric frontend.
+    ///
+    /// * `config.optical_flow_matching_guess_type`: `"SAME_PIXEL"` (default)
+    ///   or `"REPROJ_FIX_DEPTH"`, as in newer upstream Basalt.
+    ///   `"REPROJ_AVG_DEPTH"` is not implemented and is rejected.
+    /// * `config.optical_flow_matching_default_depth`: metres along the cam0
+    ///   ray for `REPROJ_FIX_DEPTH` (default 2.0, upstream's default).
+    /// * `config.optical_flow_detect_all_cameras`: also replenish cam1.
+    pub fn multi_camera_flow_options(&self) -> Result<MultiCameraFlowOptions, ConfigError> {
+        let guess_key = "config.optical_flow_matching_guess_type";
+        let depth_key = "config.optical_flow_matching_default_depth";
+        let depth_m = if self.values.contains_key(depth_key) {
+            let depth: f64 = self.value(depth_key)?;
+            if !depth.is_finite() || depth <= 0.0 {
+                return Err(ConfigError::Value(format!(
+                    "{depth_key} must be finite and positive"
+                )));
+            }
+            depth
+        } else {
+            2.0
+        };
+        let stereo_guess = if self.values.contains_key(guess_key) {
+            let guess: String = self.value(guess_key)?;
+            match guess.as_str() {
+                "SAME_PIXEL" => StereoMatchingGuess::SamePixel,
+                "REPROJ_FIX_DEPTH" => StereoMatchingGuess::ReprojectFixedDepth { depth_m },
+                other => {
+                    return Err(ConfigError::Value(format!(
+                        "{guess_key}: unsupported value {other:?} (expected \"SAME_PIXEL\" or \"REPROJ_FIX_DEPTH\")"
+                    )))
+                }
+            }
+        } else {
+            StereoMatchingGuess::SamePixel
+        };
+        Ok(MultiCameraFlowOptions {
+            stereo_guess,
+            detect_all_cameras: self.optional_bool("config.optical_flow_detect_all_cameras")?,
         })
     }
     pub fn compat_profile(&self) -> Result<CompatProfile, ConfigError> {
@@ -281,6 +347,99 @@ mod tests {
                 min_frames_after_kf: 2,
             })
         );
+    }
+    #[test]
+    fn multi_camera_keys_default_off_and_parse() {
+        let pinned = BasaltConfig::from_json(FIX).unwrap();
+        assert!(pinned.multi_camera_flow_options().unwrap().is_default());
+        let e = pinned.estimator_config().unwrap();
+        assert!(!e.landmarks_all_cameras);
+        assert!(!e.kf_connectivity_all_cameras);
+
+        let mut v: Value = serde_json::from_str(FIX).unwrap();
+        v["value0"]["config.optical_flow_imu_seed_rotation"] = serde_json::json!(true);
+        v["value0"]["config.optical_flow_matching_guess_type"] =
+            serde_json::json!("REPROJ_FIX_DEPTH");
+        v["value0"]["config.optical_flow_matching_default_depth"] = serde_json::json!(3.5);
+        v["value0"]["config.optical_flow_detect_all_cameras"] = serde_json::json!(true);
+        v["value0"]["config.vio_landmarks_all_cameras"] = serde_json::json!(true);
+        v["value0"]["config.vio_kf_connectivity_all_cameras"] = serde_json::json!(true);
+        let c = BasaltConfig::from_json(&v.to_string()).unwrap();
+        assert!(c
+            .optional_bool("config.optical_flow_imu_seed_rotation")
+            .unwrap());
+        assert_eq!(
+            c.multi_camera_flow_options().unwrap(),
+            MultiCameraFlowOptions {
+                stereo_guess: StereoMatchingGuess::ReprojectFixedDepth { depth_m: 3.5 },
+                detect_all_cameras: true,
+            }
+        );
+        let e = c.estimator_config().unwrap();
+        assert!(e.landmarks_all_cameras);
+        assert!(e.kf_connectivity_all_cameras);
+
+        // Upstream's default depth is 2 m.
+        v["value0"]
+            .as_object_mut()
+            .unwrap()
+            .remove("config.optical_flow_matching_default_depth");
+        let c = BasaltConfig::from_json(&v.to_string()).unwrap();
+        assert_eq!(
+            c.multi_camera_flow_options().unwrap().stereo_guess,
+            StereoMatchingGuess::ReprojectFixedDepth { depth_m: 2.0 }
+        );
+        for bad in [
+            (
+                "config.optical_flow_matching_guess_type",
+                serde_json::json!("REPROJ_AVG_DEPTH"),
+            ),
+            (
+                "config.optical_flow_matching_default_depth",
+                serde_json::json!(-1.0),
+            ),
+            (
+                "config.optical_flow_detect_all_cameras",
+                serde_json::json!("yes"),
+            ),
+        ] {
+            let mut w = v.clone();
+            w["value0"][bad.0] = bad.1;
+            let c = BasaltConfig::from_json(&w.to_string()).unwrap();
+            assert!(
+                matches!(c.multi_camera_flow_options(), Err(ConfigError::Value(_))),
+                "{} accepted",
+                bad.0
+            );
+        }
+    }
+    #[test]
+    fn lamaria_multicam_variant_parses() {
+        let big = BasaltConfig::from_json(include_str!(
+            "../../../configs/basalt/variants/lamaria/euroc_config_big_window.json"
+        ))
+        .unwrap();
+        let multi = BasaltConfig::from_json(include_str!(
+            "../../../configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json"
+        ))
+        .unwrap();
+        assert!(big.multi_camera_flow_options().unwrap().is_default());
+        assert_eq!(
+            multi.multi_camera_flow_options().unwrap(),
+            MultiCameraFlowOptions {
+                stereo_guess: StereoMatchingGuess::ReprojectFixedDepth { depth_m: 2.0 },
+                detect_all_cameras: true,
+            }
+        );
+        let mut expected = big.estimator_config().unwrap();
+        expected.landmarks_all_cameras = true;
+        expected.kf_connectivity_all_cameras = true;
+        assert_eq!(multi.estimator_config().unwrap(), expected);
+        // Every other key is the big-window value.
+        for (key, value) in &big.values {
+            assert_eq!(multi.values.get(key), Some(value), "{key}");
+        }
+        assert_eq!(multi.values.len(), big.values.len() + 5);
     }
     #[test]
     fn compat_profile_has_no_out_of_json_extensions() {
