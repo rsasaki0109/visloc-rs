@@ -9,7 +9,7 @@
 # `cargo build --manifest-path ros2/visloc-ros2/Cargo.toml`.
 [package]
 name = "visloc-ros2"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
