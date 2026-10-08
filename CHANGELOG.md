@@ -23,6 +23,21 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Joint GNSS + visual-odometry fusion** (`visloc_slam::gnss_fusion`,
+  `visloc_slam::gnss_pose_graph`). VO relative-pose factors and GNSS
+  position factors are optimised together (full batch or a causal sliding
+  window) with an estimated GNSS-ENU-to-map alignment (yaw-only or full
+  rotation plus translation; scale and per-frame scale drift for monocular
+  VO), antenna lever arm, per-fix covariance, GNC outlier rejection with a
+  χ² gate, and dropout bridging. Analytic Jacobians with finite-difference
+  tests; RANSAC alignment bootstrap. GNSS fixes are matched to frame times by
+  `visloc_fusion::interpolate_gnss_fix` / `gnss_fix_covariance` (plus
+  `MeasurementBuffer::as_slice`). New `gnss_vo_fusion_demo` example and
+  `scripts/check_gnss_fusion_demo_outputs.sh`. Synthetic ~1 km loop: ATE
+  5.25 m (VO only) → 0.90 m fused (metric); 3.22 m (Sim(3)-aligned VO) →
+  0.37 m (monocular). Loosely coupled: receiver ENU positions only, no raw
+  pseudoranges and no IMU. See `docs/gnss_fusion.md`. `visloc-slam` now
+  depends directly on `visloc-fusion` (it already did through `visloc-io`).
 - **Monocular-inertial VIO on the Basalt port (experimental).**
   `basalt_euroc_vio_demo --mono` replays cam0 + IMU with the stereo
   calibration reduced to camera 0. The estimator needed no change: it already
