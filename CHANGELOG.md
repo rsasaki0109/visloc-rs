@@ -6,6 +6,9 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **`config.optical_flow_imu_seed_rotation` can be set from a Basalt config
+  JSON.** The adapter read the key, but `BasaltConfig::from_json` rejected it
+  as unknown, so only code could enable it.
 - **Bundle adjustment uses the camera's full lens model.** Pose/structure BA
   (serial, parallel, dense-QR assembly and the GNC residual vector) now
   linearises the same lens that `Camera::project` measures, with analytic
@@ -23,6 +26,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Multi-camera Basalt VIO for divergent rigs (opt-in, aimed at LaMAria /
+  Project Aria).** The VIO used only cam0 for new keypoints, landmark hosting
+  and keyframe decisions, and seeded the cam0→cam1 stereo KLT at the same
+  pixel, which on Aria's ~75°-divergent cameras found almost no matches. New
+  optional keys: `optical_flow_matching_guess_type = "REPROJ_FIX_DEPTH"` with
+  `optical_flow_matching_default_depth` (reprojection seed plus a predicted
+  patch warp), `optical_flow_detect_all_cameras` (cam1 keypoint
+  replenishment), `vio_landmarks_all_cameras` (cam1-hosted landmarks for
+  tracks cam0 never sees) and `vio_kf_connectivity_all_cameras`. LaMAria
+  variant `configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json`.
+  Synthetic Aria-like rig: RMS error 7.1 → 3.3 mm on a textured room, and
+  23.5 → 5.1 mm when cam0 faces a blank wall for 3 s. Not yet measured on
+  LaMAria; see `docs/lamaria_multicam.md`. Defaults are unchanged.
 - **Joint GNSS + visual-odometry fusion** (`visloc_slam::gnss_fusion`,
   `visloc_slam::gnss_pose_graph`). VO relative-pose factors and GNSS
   position factors are optimised together (full batch or a causal sliding
