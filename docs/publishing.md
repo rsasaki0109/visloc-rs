@@ -9,22 +9,22 @@ Use this order for crates.io releases:
 1. `visloc-core`
 2. `visloc-vision`
 3. `visloc-localization`
-4. `visloc-io`
-5. `visloc-tracking`
-6. `visloc-mapping`
-7. `visloc-slam`
-8. `visloc-fusion`
+4. `visloc-fusion`
+5. `visloc-io`
+6. `visloc-tracking`
+7. `visloc-mapping`
+8. `visloc-slam`
 9. `visloc-rs`
 
 The order follows internal dependencies:
 
 - `visloc-vision` depends on `visloc-core`.
 - `visloc-localization` depends on `visloc-core` and `visloc-vision`.
-- `visloc-io` depends on `visloc-core`, `visloc-vision`, and `visloc-localization`.
+- `visloc-fusion` depends on `visloc-core` and `visloc-localization`.
+- `visloc-io` depends on `visloc-core`, `visloc-vision`, `visloc-localization`, and `visloc-fusion`.
 - `visloc-tracking` depends on `visloc-core`, `visloc-vision`, and `visloc-localization`.
 - `visloc-mapping` depends on `visloc-core` and `visloc-tracking`.
-- `visloc-slam` depends on `visloc-core`, `visloc-localization`, `visloc-tracking`, and `visloc-mapping`.
-- `visloc-fusion` depends on `visloc-core` and `visloc-localization`.
+- `visloc-slam` depends on `visloc-core`, `visloc-vision`, `visloc-localization`, `visloc-fusion`, `visloc-io`, `visloc-tracking`, and `visloc-mapping`.
 - `visloc-rs` re-exports all workspace crates.
 
 ## Local Checks

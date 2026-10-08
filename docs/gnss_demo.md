@@ -43,6 +43,12 @@ tightly-coupled fusion remain intentionally out of scope for this demo. Loop
 closure, pose-graph, and BA experiments live in the separate SLAM examples and
 benchmark docs, not in the GNSS-prior tracking smoke path.
 
+For GNSS used as a *measurement* rather than a search prior — a joint
+optimization of VO relative-pose factors and GNSS position factors with an
+estimated ENU-to-map alignment, lever arm, per-fix covariance, outlier
+rejection, and dropout handling — see [GNSS + visual-odometry fusion](gnss_fusion.md)
+and `cargo run --example gnss_vo_fusion_demo`.
+
 ## CI Artifact
 
 CI runs `scripts/check_gnss_demo_outputs.sh` and uploads the checked output directory as the `gnss-demo-outputs` artifact. Download that artifact from a GitHub Actions run to inspect the exact dashboard and reports produced by CI.
