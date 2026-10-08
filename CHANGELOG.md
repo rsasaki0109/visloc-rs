@@ -79,6 +79,18 @@ All notable changes to `visloc-rs` will be documented here.
   `refine_intrinsics` now also refines OPENCV cameras (their lens terms stay
   fixed unless `refine_distortion` is set). Default off.
 
+### Changed
+
+- **Large source files split into submodules (no behavior change).**
+  `pipelines/slam/src/incremental_sfm.rs` (18.5k lines), `bundle.rs` (17k),
+  `examples/unordered_sfm_demo.rs` (22.5k, now
+  `examples/unordered_sfm_demo/main.rs` plus modules) and
+  `pipelines/basalt/src/vio/aom.rs` (21.5k) are now directories of files
+  mostly under 3k lines. Pure code moves: public paths, test names and test
+  counts are unchanged, and the Basalt parity arithmetic is untouched.
+- **Planning docs archived.** The long `PLAN.md` log and the itemized 0.2.0
+  change log moved to `docs/archive/`; `PLAN.md` is now a one-page handoff.
+
 ## 0.2.1 - 2026-10-08
 
 Patch release: camera-distortion correctness fixes. Each fix below corrected

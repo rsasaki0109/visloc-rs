@@ -36,7 +36,7 @@ DPVO CUDA) stay as they are; nothing here depends on them.
 | Item | Status | Gate |
 | --- | --- | --- |
 | Planning docs | Done: `PLAN.md` (233 KB) and the itemized 0.2.0 CHANGELOG (~4,800 lines) moved to [`archive/`](archive/); short handoff and changelog in their place | — |
-| Split very large source files | `examples/unordered_sfm_demo.rs` (22.5k lines), `pipelines/basalt/src/vio/aom.rs` (21.5k), `pipelines/slam/src/incremental_sfm.rs` (18.5k), `pipelines/slam/src/bundle.rs` (17k) | Pure moves into submodules; no behavior change; full test suite and parity/hash tests unchanged |
+| Split very large source files | Done: `incremental_sfm`, `bundle`, `unordered_sfm_demo` and `vio/aom` are now directories of submodules (pure moves; test names and counts unchanged, public API unchanged) | Remaining large files are single test modules (aom `tests.rs` 11k) whose test paths are used as filters; next candidates `rig_sfm.rs` (10.7k), `euroc_online_slam_vi_image_demo.rs` (10.2k), `integrate_rig_atlas_landmarks.rs` (9.6k) |
 
 ## Needs real data (not runnable from a dataset-less environment)
 
