@@ -46,7 +46,8 @@ see scripts/colab/readme_hero_courthouse.ipynb, which runs every step below.
         --out runs/courthouse --max-size 1280 --steps 30000 --normal-weight 0.005
     python scripts/make_readme_hero.py --src runs/courthouse \
         --work runs/courthouse/hero --scene-label "Tanks and Temples Courthouse" \
-        --elev 30 --radius-mult 1.15 --out docs/assets/hero_reconstruction.gif
+        --elev 40 --radius-mult 2.6 --target-height 0.25 --zoom 1.15 \
+        --out docs/assets/hero_reconstruction.gif
 
 The previous south-building hero was made the same way from
 `gsplat_photos --images <south-building>/images --out runs/sb --max-size 1024
@@ -486,6 +487,8 @@ def main():
                     help='orbit elevation (deg) above the horizontal camera ring')
     ap.add_argument('--radius-mult', type=float, default=1.35,
                     help='orbit radius as a multiple of the training-camera ring radius')
+    ap.add_argument('--center', choices=['points', 'cameras'], default='points',
+                    help='orbit centre: SfM points inside the camera ring, or the camera centroid')
     ap.add_argument('--phase0', type=float, default=45.0, help='orbit start angle (deg)')
     ap.add_argument('--target-height', type=float, default=0.5,
                     help='look-at height as a fraction between the low and high SfM point percentiles')
@@ -532,6 +535,15 @@ def main():
         first_img = nearest_cam + 1
     e1, e2 = build_basis(up)
     L = ring_radius
+    if args.center == 'points':
+        # Captures that walk unevenly around the subject bias the camera
+        # centroid; centre the orbit on the SfM points inside the camera ring
+        # instead (horizontally; the height stays on the camera plane).
+        rel = pos_pts - center
+        rel_h = rel - np.outer(rel @ up, up)
+        inner = np.linalg.norm(rel_h, axis=1) < L
+        if inner.sum() > 100:
+            center = center + np.median(rel_h[inner], axis=0)
     print(f'{len(q)} cameras, {len(pos_pts)} points, ring radius {L:.3f}, render {W}x{H}', flush=True)
 
     hh = (pos_pts - center) @ up
