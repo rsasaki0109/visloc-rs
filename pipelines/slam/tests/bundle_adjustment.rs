@@ -3814,3 +3814,66 @@ fn sparse_joint_intrinsics_matches_dense_with_huber_and_damping() {
         },
     );
 }
+
+/// Timing harness for the sparse joint intrinsics BA on a larger synthetic
+/// survey (`cargo test --release -p visloc-slam --test bundle_adjustment
+/// bench_sparse_joint -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn bench_sparse_joint_intrinsics() {
+    let truth = pinhole();
+    let n_cams = 300usize;
+    let mut ba = BundleAdjustment::new(Camera::pinhole(1, 640, 480, 510.0, 505.0, 322.0, 238.0));
+    let poses: Vec<(u64, Pose)> = (0..n_cams)
+        .map(|i| (i as u64, pose_at(Vector3::new(i as f64 * 0.2, 0.0, 0.0))))
+        .collect();
+    let mut n_obs = 0usize;
+    let mut lm_id = 100_000u64;
+    for i in 0..n_cams {
+        // 120 points ahead of camera i, seen by the cameras within +-4.
+        for j in 0..120 {
+            let a = (i * 120 + j) as f64;
+            let p = Point3::new(
+                i as f64 * 0.2 + (a * 0.37).sin() * 1.5,
+                (a * 0.61).cos() * 1.0,
+                6.0 + (a * 0.23).sin(),
+            );
+            ba.add_landmark(
+                lm_id,
+                Point3::new(p.x + 0.01 * a.sin(), p.y, p.z + 0.01 * a.cos()),
+            );
+            for k in i.saturating_sub(4)..(i + 5).min(n_cams) {
+                if let Some(uv) = truth.project(&poses[k].1.transform_world_point(&p)) {
+                    ba.add_observation(BaObservation {
+                        keyframe_id: k as u64,
+                        landmark_id: lm_id,
+                        xy: uv,
+                    });
+                    n_obs += 1;
+                }
+            }
+            lm_id += 1;
+        }
+    }
+    for (id, pose) in &poses {
+        ba.add_pose(*id, pose.clone());
+    }
+    ba.fix_pose(0);
+    ba.fix_pose(n_cams as u64 - 1);
+    let config = BaConfig {
+        refine_intrinsics: true,
+        linear_solver: LinearSolver::Sparse,
+        max_iterations: 5,
+        ..BaConfig::default()
+    };
+    let t = std::time::Instant::now();
+    let r = ba.optimize(&config).expect("sparse joint BA");
+    eprintln!(
+        "bench: {n_cams} cams, {} landmarks, {n_obs} obs: {} iterations in {:.3}s, cost {:.3e} -> {:.3e}",
+        ba.landmarks.len(),
+        r.iterations.len(),
+        t.elapsed().as_secs_f64(),
+        r.initial_cost,
+        r.final_cost
+    );
+}

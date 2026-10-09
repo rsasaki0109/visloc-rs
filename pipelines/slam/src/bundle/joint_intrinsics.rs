@@ -113,6 +113,7 @@ impl BundleAdjustment {
             } else {
                 self.camera.tangential_distortion()
             };
+            let t_build = std::time::Instant::now();
             let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
                 &pose_index,
                 &landmark_index,
@@ -123,6 +124,8 @@ impl BundleAdjustment {
                 sparse,
             );
             debug_assert_eq!(cam_dim_n, cam_dim);
+            let build_s = t_build.elapsed().as_secs_f64();
+            let t_solve = std::time::Instant::now();
             let (solved, h_ll_inv_cache) = match h_cc {
                 JointCameraHessian::Sparse {
                     pose_diag,
@@ -207,6 +210,8 @@ impl BundleAdjustment {
                     (solved.map_err(|_| ()), h_ll_inv_cache)
                 }
             };
+            let solve_s = t_solve.elapsed().as_secs_f64();
+            let t_rest = std::time::Instant::now();
             let delta_cam = match solved {
                 Ok(d) => d,
                 Err(_) => {
@@ -266,8 +271,16 @@ impl BundleAdjustment {
                 self.camera.params[j] += delta_cam[k_off + j];
             }
 
+            let t_cost = std::time::Instant::now();
             let cost_after = self.robust_cost_weighted(&kernel, None);
             let nonprojectable_after = self.nonprojectable_observation_count();
+            if std::env::var_os("VISLOC_JOINT_BA_TIMING").is_some() {
+                eprintln!(
+                    "joint-ba iter {iteration}: build {build_s:.3}s solve {solve_s:.3}s backsub+apply {:.3}s cost {:.3}s",
+                    (t_cost - t_rest).as_secs_f64(),
+                    t_cost.elapsed().as_secs_f64()
+                );
+            }
             let cost_accepted = match config.initial_lambda {
                 None => true,
                 Some(_) => cost_after < cost_before,
@@ -336,6 +349,241 @@ impl BundleAdjustment {
         })
     }
 
+    /// Residual and Jacobians (pose, landmark, camera block) of one monocular
+    /// observation for the joint intrinsics system; `None` when the point is
+    /// behind the camera (or not projectable through the tangential model).
+    #[allow(clippy::type_complexity)]
+    fn joint_mono_terms(
+        &self,
+        obs: &BaObservation,
+        (fx, fy, cx, cy): (f64, f64, f64, f64),
+        k_dim: usize,
+        dist: Option<(f64, f64)>,
+        tangential: Option<(f64, f64)>,
+    ) -> Option<(Vector2<f64>, Matrix2x6<f64>, Matrix2x3<f64>, DMatrix<f64>)> {
+        let pose = &self.poses[&obs.keyframe_id];
+        let point = &self.landmarks[&obs.landmark_id];
+        let xc = pose.transform_world_point(point);
+        if xc.z <= 0.0 {
+            return None;
+        }
+        let z_inv = 1.0 / xc.z;
+        let x = xc.x * z_inv;
+        let y = xc.y * z_inv;
+        let r2 = x * x + y * y;
+        // Radial distortion factor d = 1 + k1ﾂｷrﾂｲ + k2ﾂｷr竅ｴ and its radial
+        // derivative helper g = k1 + 2ﾂｷk2ﾂｷrﾂｲ (d=1, g=0 when distortion-free).
+        let (k1, k2) = dist.unwrap_or((0.0, 0.0));
+        let d = 1.0 + k1 * r2 + k2 * r2 * r2;
+        let g = k1 + 2.0 * k2 * r2;
+        let (xd, yd) = (x * d, y * d);
+        let predicted = Point2::new(fx * xd + cx, fy * yd + cy);
+        let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
+        let r_mat = pose
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        // J_ﾏ = diag(fx, fy) ﾂｷ D ﾂｷ 竏・x, y)/竏９_c, where the distortion Jacobian
+        //   D = [[d + 2xﾂｲg, 2xyg], [2xyg, d + 2yﾂｲg]]  (= I when distortion-free)
+        // and 竏・x, y)/竏９_c = (1/Z)ﾂｷ[[1, 0, -x], [0, 1, -y]].
+        let d11 = d + 2.0 * x * x * g;
+        let d12 = 2.0 * x * y * g;
+        let d22 = d + 2.0 * y * y * g;
+        let mut j_pi = Matrix2x3::<f64>::zeros();
+        j_pi[(0, 0)] = fx * d11 * z_inv;
+        j_pi[(0, 1)] = fx * d12 * z_inv;
+        j_pi[(0, 2)] = -fx * (d11 * x + d12 * y) * z_inv;
+        j_pi[(1, 0)] = fy * d12 * z_inv;
+        j_pi[(1, 1)] = fy * d22 * z_inv;
+        j_pi[(1, 2)] = -fy * (d12 * x + d22 * y) * z_inv;
+        let mut dx_dxi = Matrix3x6::<f64>::zeros();
+        dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
+        dx_dxi
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(-r_mat * skew(&point.coords)));
+        let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
+        let j_lm: Matrix2x3<f64> = j_pi * r_mat;
+        // 竏・predicted)/竏・ with K = (fx, fy, cx, cy[, k1, k2]) (2ﾃ楊_dim).
+        let mut j_k = DMatrix::<f64>::zeros(2, k_dim);
+        j_k[(0, 0)] = xd;
+        j_k[(0, 2)] = 1.0;
+        j_k[(1, 1)] = yd;
+        j_k[(1, 3)] = 1.0;
+        if k_dim == 6 {
+            j_k[(0, 4)] = fx * x * r2;
+            j_k[(0, 5)] = fx * x * r2 * r2;
+            j_k[(1, 4)] = fy * y * r2;
+            j_k[(1, 5)] = fy * y * r2 * r2;
+        }
+        // Tangential `(p1, p2)` (an `OpenCv` camera that carries them, or is
+        // refining them): the radial-only terms above are replaced by the
+        // full Brown-Conrady model. The residual is `Camera::project`'s and
+        // the point Jacobian its analytic derivative; the camera columns
+        // extend to `[.., k1, k2, p1, p2]` when `k_dim` is 8.
+        let (residual, j_pose, j_lm, j_k) = match tangential {
+            None => (residual, j_pose, j_lm, j_k),
+            Some((p1, p2)) => {
+                let Some((predicted, j_pi)) = self.camera.project_with_point_jacobian(&xc) else {
+                    return None;
+                };
+                let residual = predicted - obs.xy;
+                let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
+                let j_lm: Matrix2x3<f64> = j_pi * r_mat;
+                let xy2 = 2.0 * x * y;
+                let xd = x * d + p1 * xy2 + p2 * (r2 + 2.0 * x * x);
+                let yd = y * d + p1 * (r2 + 2.0 * y * y) + p2 * xy2;
+                let mut j_k = DMatrix::<f64>::zeros(2, k_dim);
+                j_k[(0, 0)] = xd;
+                j_k[(0, 2)] = 1.0;
+                j_k[(1, 1)] = yd;
+                j_k[(1, 3)] = 1.0;
+                if k_dim >= 6 {
+                    j_k[(0, 4)] = fx * x * r2;
+                    j_k[(0, 5)] = fx * x * r2 * r2;
+                    j_k[(1, 4)] = fy * y * r2;
+                    j_k[(1, 5)] = fy * y * r2 * r2;
+                }
+                if k_dim == 8 {
+                    j_k[(0, 6)] = fx * xy2;
+                    j_k[(0, 7)] = fx * (r2 + 2.0 * x * x);
+                    j_k[(1, 6)] = fy * (r2 + 2.0 * y * y);
+                    j_k[(1, 7)] = fy * xy2;
+                }
+                (residual, j_pose, j_lm, j_k)
+            }
+        };
+        Some((residual, j_pose, j_lm, j_k))
+    }
+
+    /// Parallel counterpart of the monocular half of
+    /// [`Self::build_joint_intrinsics_system`] for the sparse solve.
+    ///
+    /// Landmarks are processed in fixed-size waves: inside a wave each
+    /// landmark's observations are linearized on a rayon worker (its
+    /// `H_ll`, `b_l` and cross blocks are private to it), and the pose /
+    /// intrinsics contributions are then added serially in observation order,
+    /// so the result does not depend on the thread count. Observations of
+    /// fixed landmarks only feed the pose / intrinsics blocks.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn build_joint_sparse_parallel(
+        &self,
+        pose_index: &BTreeMap<u64, usize>,
+        landmark_index: &BTreeMap<u64, usize>,
+        kernel: &RobustKernel,
+        intr: (f64, f64, f64, f64),
+        k_dim: usize,
+        dist: Option<(f64, f64)>,
+        tangential: Option<(f64, f64)>,
+    ) -> (JointCameraHessian, DVector<f64>, Vec<JointLandmarkBlock>) {
+        use rayon::prelude::*;
+        let p_count = pose_index.len();
+        let k_off = p_count * 6;
+        // Observations grouped by free-landmark slot (fixed landmarks last).
+        let mut by_lm: Vec<Vec<usize>> = vec![Vec::new(); landmark_index.len() + 1];
+        for (i, obs) in self.observations.iter().enumerate() {
+            let slot = landmark_index
+                .get(&obs.landmark_id)
+                .copied()
+                .unwrap_or(landmark_index.len());
+            by_lm[slot].push(i);
+        }
+        let ids: Vec<u64> = landmark_index.keys().copied().collect();
+        let mut pose_diag = vec![Matrix6::<f64>::zeros(); p_count];
+        let mut pose_k = vec![DMatrix::<f64>::zeros(6, k_dim); p_count];
+        let mut kk = DMatrix::<f64>::zeros(k_dim, k_dim);
+        let mut b_c = DVector::<f64>::zeros(k_off + k_dim);
+        let mut lm_blocks: Vec<JointLandmarkBlock> = Vec::with_capacity(ids.len());
+
+        // One observation's pose / intrinsics share, scattered serially.
+        struct PoseShare {
+            pose: Option<usize>,
+            hpp: Matrix6<f64>,
+            bp: Vector6<f64>,
+            hpk: DMatrix<f64>,
+            hkk: DMatrix<f64>,
+            bk: DVector<f64>,
+        }
+        let linearize = |slot: usize| -> (Option<JointLandmarkBlock>, Vec<PoseShare>) {
+            let free = slot < ids.len();
+            let mut block = free.then(|| JointLandmarkBlock {
+                id: ids[slot],
+                h_ll: Matrix3::zeros(),
+                b_l: Vector3::zeros(),
+                cross: BTreeMap::new(),
+            });
+            let mut shares = Vec::with_capacity(by_lm[slot].len());
+            for &i in &by_lm[slot] {
+                let obs = &self.observations[i];
+                let Some((residual, j_pose, j_lm, j_k)) =
+                    self.joint_mono_terms(obs, intr, k_dim, dist, tangential)
+                else {
+                    continue;
+                };
+                let w = kernel.weight(residual.norm_squared());
+                let pose = pose_index.get(&obs.keyframe_id).copied();
+                let res2 = DVector::from_column_slice(&[residual.x, residual.y]);
+                let jkt = j_k.transpose();
+                let jp_dyn = DMatrix::from_iterator(2, 6, j_pose.iter().copied());
+                shares.push(PoseShare {
+                    pose,
+                    hpp: w * (j_pose.transpose() * j_pose),
+                    bp: w * (j_pose.transpose() * residual),
+                    hpk: w * (jp_dyn.transpose() * &j_k),
+                    hkk: w * (&jkt * &j_k),
+                    bk: w * (&jkt * &res2),
+                });
+                if let Some(block) = block.as_mut() {
+                    block.h_ll += w * (j_lm.transpose() * j_lm);
+                    block.b_l += w * (j_lm.transpose() * residual);
+                    if let Some(p) = pose {
+                        let cr = w * (j_pose.transpose() * j_lm);
+                        add_cross(
+                            &mut block.cross,
+                            p * 6,
+                            6,
+                            &DMatrix::from_fn(6, 3, |r, c| cr[(r, c)]),
+                        );
+                    }
+                    let jl_dyn = DMatrix::from_iterator(2, 3, j_lm.iter().copied());
+                    add_cross(&mut block.cross, k_off, k_dim, &(w * (&jkt * &jl_dyn)));
+                }
+            }
+            (block, shares)
+        };
+        let slots: Vec<usize> = (0..by_lm.len()).collect();
+        for wave in slots.chunks(JOINT_WAVE_LANDMARKS) {
+            let done: Vec<_> = wave.par_iter().map(|&slot| linearize(slot)).collect();
+            for (block, shares) in done {
+                for sh in shares {
+                    kk += &sh.hkk;
+                    for j in 0..k_dim {
+                        b_c[k_off + j] += sh.bk[j];
+                    }
+                    if let Some(p) = sh.pose {
+                        pose_diag[p] += sh.hpp;
+                        for r in 0..6 {
+                            b_c[p * 6 + r] += sh.bp[r];
+                        }
+                        pose_k[p] += &sh.hpk;
+                    }
+                }
+                if let Some(block) = block {
+                    lm_blocks.push(block);
+                }
+            }
+        }
+        (
+            JointCameraHessian::Sparse {
+                pose_diag,
+                pose_k,
+                kk,
+            },
+            b_c,
+            lm_blocks,
+        )
+    }
+
     /// Assemble the raw (un-damped) joint normal equations for
     /// [`Self::optimize_joint_intrinsics`]: the camera-block Hessian `H_cc`
     /// (poses then the 4 intrinsics) and gradient `b_c`, plus per-landmark
@@ -364,6 +612,18 @@ impl BundleAdjustment {
         let p_count = pose_index.len();
         let k_off = p_count * 6;
         let cam_dim = k_off + k_dim;
+        if sparse && self.stereo_observations.is_empty() {
+            let (h, b, lms) = self.build_joint_sparse_parallel(
+                pose_index,
+                landmark_index,
+                kernel,
+                (fx, fy, cx, cy),
+                k_dim,
+                dist,
+                tangential,
+            );
+            return (cam_dim, h, b, lms);
+        }
         let mut h_cc = if sparse {
             JointCameraHessian::Sparse {
                 pose_diag: vec![Matrix6::zeros(); p_count],
@@ -389,98 +649,10 @@ impl BundleAdjustment {
 
         // Monocular observations.
         for obs in &self.observations {
-            let pose = &self.poses[&obs.keyframe_id];
-            let point = &self.landmarks[&obs.landmark_id];
-            let xc = pose.transform_world_point(point);
-            if xc.z <= 0.0 {
+            let Some((residual, j_pose, j_lm, j_k)) =
+                self.joint_mono_terms(obs, (fx, fy, cx, cy), k_dim, dist, tangential)
+            else {
                 continue;
-            }
-            let z_inv = 1.0 / xc.z;
-            let x = xc.x * z_inv;
-            let y = xc.y * z_inv;
-            let r2 = x * x + y * y;
-            // Radial distortion factor d = 1 + k1ﾂｷrﾂｲ + k2ﾂｷr竅ｴ and its radial
-            // derivative helper g = k1 + 2ﾂｷk2ﾂｷrﾂｲ (d=1, g=0 when distortion-free).
-            let (k1, k2) = dist.unwrap_or((0.0, 0.0));
-            let d = 1.0 + k1 * r2 + k2 * r2 * r2;
-            let g = k1 + 2.0 * k2 * r2;
-            let (xd, yd) = (x * d, y * d);
-            let predicted = Point2::new(fx * xd + cx, fy * yd + cy);
-            let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
-            let r_mat = pose
-                .world_to_camera
-                .rotation
-                .to_rotation_matrix()
-                .into_inner();
-            // J_ﾏ = diag(fx, fy) ﾂｷ D ﾂｷ 竏・x, y)/竏９_c, where the distortion Jacobian
-            //   D = [[d + 2xﾂｲg, 2xyg], [2xyg, d + 2yﾂｲg]]  (= I when distortion-free)
-            // and 竏・x, y)/竏９_c = (1/Z)ﾂｷ[[1, 0, -x], [0, 1, -y]].
-            let d11 = d + 2.0 * x * x * g;
-            let d12 = 2.0 * x * y * g;
-            let d22 = d + 2.0 * y * y * g;
-            let mut j_pi = Matrix2x3::<f64>::zeros();
-            j_pi[(0, 0)] = fx * d11 * z_inv;
-            j_pi[(0, 1)] = fx * d12 * z_inv;
-            j_pi[(0, 2)] = -fx * (d11 * x + d12 * y) * z_inv;
-            j_pi[(1, 0)] = fy * d12 * z_inv;
-            j_pi[(1, 1)] = fy * d22 * z_inv;
-            j_pi[(1, 2)] = -fy * (d12 * x + d22 * y) * z_inv;
-            let mut dx_dxi = Matrix3x6::<f64>::zeros();
-            dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
-            dx_dxi
-                .fixed_view_mut::<3, 3>(0, 3)
-                .copy_from(&(-r_mat * skew(&point.coords)));
-            let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
-            let j_lm: Matrix2x3<f64> = j_pi * r_mat;
-            // 竏・predicted)/竏・ with K = (fx, fy, cx, cy[, k1, k2]) (2ﾃ楊_dim).
-            let mut j_k = DMatrix::<f64>::zeros(2, k_dim);
-            j_k[(0, 0)] = xd;
-            j_k[(0, 2)] = 1.0;
-            j_k[(1, 1)] = yd;
-            j_k[(1, 3)] = 1.0;
-            if k_dim == 6 {
-                j_k[(0, 4)] = fx * x * r2;
-                j_k[(0, 5)] = fx * x * r2 * r2;
-                j_k[(1, 4)] = fy * y * r2;
-                j_k[(1, 5)] = fy * y * r2 * r2;
-            }
-            // Tangential `(p1, p2)` (an `OpenCv` camera that carries them, or is
-            // refining them): the radial-only terms above are replaced by the
-            // full Brown-Conrady model. The residual is `Camera::project`'s and
-            // the point Jacobian its analytic derivative; the camera columns
-            // extend to `[.., k1, k2, p1, p2]` when `k_dim` is 8.
-            let (residual, j_pose, j_lm, j_k) = match tangential {
-                None => (residual, j_pose, j_lm, j_k),
-                Some((p1, p2)) => {
-                    let Some((predicted, j_pi)) = self.camera.project_with_point_jacobian(&xc)
-                    else {
-                        continue;
-                    };
-                    let residual = predicted - obs.xy;
-                    let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
-                    let j_lm: Matrix2x3<f64> = j_pi * r_mat;
-                    let xy2 = 2.0 * x * y;
-                    let xd = x * d + p1 * xy2 + p2 * (r2 + 2.0 * x * x);
-                    let yd = y * d + p1 * (r2 + 2.0 * y * y) + p2 * xy2;
-                    let mut j_k = DMatrix::<f64>::zeros(2, k_dim);
-                    j_k[(0, 0)] = xd;
-                    j_k[(0, 2)] = 1.0;
-                    j_k[(1, 1)] = yd;
-                    j_k[(1, 3)] = 1.0;
-                    if k_dim >= 6 {
-                        j_k[(0, 4)] = fx * x * r2;
-                        j_k[(0, 5)] = fx * x * r2 * r2;
-                        j_k[(1, 4)] = fy * y * r2;
-                        j_k[(1, 5)] = fy * y * r2 * r2;
-                    }
-                    if k_dim == 8 {
-                        j_k[(0, 6)] = fx * xy2;
-                        j_k[(0, 7)] = fx * (r2 + 2.0 * x * x);
-                        j_k[(1, 6)] = fy * (r2 + 2.0 * y * y);
-                        j_k[(1, 7)] = fy * xy2;
-                    }
-                    (residual, j_pose, j_lm, j_k)
-                }
             };
 
             let s = residual.x * residual.x + residual.y * residual.y;
@@ -633,6 +805,10 @@ impl BundleAdjustment {
     }
 }
 
+/// Landmarks per parallel wave of the sparse joint system build / elimination
+/// (bounds the per-wave buffers; the result does not depend on it).
+const JOINT_WAVE_LANDMARKS: usize = 8192;
+
 /// The reduced camera system of [`BundleAdjustment::optimize_joint_intrinsics`]
 /// before landmark elimination: dense, or (for `LinearSolver::Sparse`) as its
 /// structure — 6×6 pose diagonal blocks, a `6 × k` pose–intrinsics coupling per
@@ -729,9 +905,20 @@ fn solve_joint_sparse(
     for i in 0..k_dim {
         kk[(i, i)] += lambda;
     }
-    let mut b_reduced = -b_c;
-    let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
-    for lm in lm_blocks {
+    // Landmark elimination, in waves: each landmark's Schur products are
+    // computed on a rayon worker, then the 6×6 updates are bucketed by pose
+    // column and applied one column per worker (pose–intrinsics, intrinsics
+    // and gradient updates serially), always in landmark order, so the sums
+    // do not depend on the thread count.
+    use rayon::prelude::*;
+    struct LandmarkUpdate {
+        inv: Option<Matrix3<f64>>,
+        rhs: Vec<(usize, DVector<f64>)>,
+        pose_pose: Vec<(usize, usize, Matrix6<f64>)>,
+        pose_k: Vec<(usize, DMatrix<f64>)>,
+        kk: Option<DMatrix<f64>>,
+    }
+    let eliminate = |lm: &JointLandmarkBlock| -> LandmarkUpdate {
         let mut h_ll = lm.h_ll;
         if lambda > 0.0 {
             h_ll[(0, 0)] += lambda;
@@ -739,33 +926,65 @@ fn solve_joint_sparse(
             h_ll[(2, 2)] += lambda;
         }
         let inv = h_ll.try_inverse();
-        h_ll_inv_cache.push(inv);
-        let Some(inv) = inv else { continue };
+        let mut up = LandmarkUpdate {
+            inv,
+            rhs: Vec::new(),
+            pose_pose: Vec::new(),
+            pose_k: Vec::new(),
+            kk: None,
+        };
+        let Some(inv) = inv else { return up };
         for (&cs_a, a) in &lm.cross {
             let ah = a * inv;
-            let upd = &ah * lm.b_l;
-            for r in 0..a.nrows() {
-                b_reduced[cs_a + r] += upd[r];
-            }
+            up.rhs.push((cs_a, &ah * lm.b_l));
             for (&cs_b, b) in &lm.cross {
                 match (cs_a < k_off, cs_b < k_off) {
                     (true, true) if cs_a >= cs_b => {
                         let block = &ah * b.transpose();
-                        let entry = columns[cs_b / 6]
-                            .entry(cs_a / 6)
-                            .or_insert_with(Matrix6::zeros);
-                        for r in 0..6 {
-                            for c in 0..6 {
-                                entry[(r, c)] -= block[(r, c)];
-                            }
-                        }
+                        up.pose_pose.push((
+                            cs_b / 6,
+                            cs_a / 6,
+                            Matrix6::from_iterator(block.iter().copied()),
+                        ));
                     }
-                    (true, false) => pose_k[cs_a / 6] -= &ah * b.transpose(),
-                    (false, false) => kk -= &ah * b.transpose(),
+                    (true, false) => up.pose_k.push((cs_a / 6, &ah * b.transpose())),
+                    (false, false) => up.kk = Some(&ah * b.transpose()),
                     _ => {}
                 }
             }
         }
+        up
+    };
+    let mut b_reduced = -b_c;
+    let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
+    for wave in lm_blocks.chunks(JOINT_WAVE_LANDMARKS) {
+        let updates: Vec<LandmarkUpdate> = wave.par_iter().map(eliminate).collect();
+        let mut buckets: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); p_count];
+        for up in updates {
+            h_ll_inv_cache.push(up.inv);
+            for (cs, v) in up.rhs {
+                for r in 0..v.nrows() {
+                    b_reduced[cs + r] += v[r];
+                }
+            }
+            for (col, row, m) in up.pose_pose {
+                buckets[col].push((row, m));
+            }
+            for (p, m) in up.pose_k {
+                pose_k[p] -= m;
+            }
+            if let Some(m) = up.kk {
+                kk -= m;
+            }
+        }
+        columns
+            .par_iter_mut()
+            .zip(buckets)
+            .for_each(|(column, bucket)| {
+                for (row, m) in bucket {
+                    *column.entry(row).or_insert_with(Matrix6::zeros) -= m;
+                }
+            });
     }
 
     // [b_p | B] -> [y | Z] = A⁻¹ [b_p | B].
