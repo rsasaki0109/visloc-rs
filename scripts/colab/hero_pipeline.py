@@ -16,6 +16,14 @@ Driven from a terminal with the Colab CLI (github.com/googlecolab/google-colab-c
     colab download -s hero /content/out/hero_reconstruction.gif docs/assets/hero_reconstruction.gif
 
 or from scripts/colab/readme_hero_courthouse.ipynb.
+
+The current README hero (Hierarchical 3DGS SmallCity, A100 high-mem):
+
+    hero_pipeline.py --dataset h3dgs --scene small_city --max-size 1024 \
+        --exhaustive-max 600 --window 20 --retrieval 30 --steps 50000 \
+        --photos-args=--no-refine-intrinsics \
+        "--hero-flags=--elev 45 --radius-mult 1.4 --target-height 0.2 --zoom 0.9 \
+         --width 560 --colors 72 --filter-dist-mult 4 --filter-isolated 6 --point-size 2.5"
 """
 import argparse
 import glob
