@@ -25,7 +25,8 @@ Pipeline:
     the same renderer used elsewhere in the README. A copy of scene.ply is
     used, filtered with a KD-tree so only gaussians within a couple of the
     SfM point cloud's own nearest-neighbour spacings of some real triangulated
-    point survive (plus a roofline height cap and a large+low-opacity drop);
+    point survive (plus a roofline height cap, a size cap relative to the
+    scene and a large+low-opacity drop);
     this is what keeps the elevated orbit view -- which the ground-level
     training photos never saw -- from washing out in sky/ground floaters. The
     mesh is similarly cropped to the SfM point-cloud bounding box.
@@ -36,8 +37,8 @@ Pipeline:
   - Frames are alpha-crossfaded at the phase boundaries, labelled, and
     assembled into a palette-quantized GIF with ffmpeg.
 
-Current README hero (Tanks and Temples Courthouse; GPU run on Google Colab):
-see scripts/colab/readme_hero_courthouse.ipynb, which runs every step below.
+Tanks and Temples Courthouse (a whole town square; GPU run on Google Colab):
+scripts/colab/readme_hero_courthouse.ipynb runs every step below.
 
     pip install numpy scipy pillow moderngl plyfile
     cargo build --release -p visloc-gsplat-train --features gpu,euroc \
@@ -94,8 +95,9 @@ REVEAL_START_FRAC = 0.18  # fraction of points/frustums already visible at frame
 # not above the highest SfM point (+ a margin) along the scene's up axis,
 # and is not simultaneously large *and* low-opacity.
 FILTER_DIST_MULT = 2.5
-FILTER_LARGE_SCALE_RAW = 0.3   # raw (log-space) max-axis scale considered "large"
-FILTER_LOW_OPACITY_RAW = 0.0   # raw (logit-space) opacity considered "low" (sigmoid(0)=0.5)
+FILTER_MAX_SCALE_FRAC = 0.05   # drop any gaussian whose largest std exceeds this x ring radius
+FILTER_LARGE_SCALE_FRAC = 0.015  # ... and "large" ones (std above this x ring radius)
+FILTER_LOW_OPACITY_RAW = 0.0     # ... that are also low-opacity (raw logit < 0, i.e. alpha < 0.5)
 
 # World-space margins as fractions of the training-camera ring radius.
 UP_MARGIN_FRAC = 0.035     # splat roofline cap / mesh crop above the top SfM point
@@ -407,9 +409,6 @@ def frustum_segments(Ctr, Rtr, indices, scale=0.28, aspect=0.75):
 # elevated orbit view the ground-level training photos never covered)
 # ---------------------------------------------------------------------------
 
-NFLOAT_PLY = 62  # x,y,z,nx,ny,nz,f_dc(3),f_rest(45),opacity,scale(3),rot(4)
-
-
 def read_ply_header(f):
     header = b''
     while True:
@@ -420,33 +419,49 @@ def read_ply_header(f):
     return header
 
 
+def ply_float_columns(header):
+    """Column index of every `property float <name>` of a 3DGS PLY header."""
+    names = [l.split()[2].decode() for l in header.split(b'\n')
+             if l.startswith(b'property float')]
+    return {n: i for i, n in enumerate(names)}
+
+
 def filter_scene_ply(src_ply, out_ply, pos_pts, center, up, dist_mult, up_margin,
-                      large_scale_raw, low_opacity_raw):
+                      max_scale, large_scale, low_opacity_raw):
     """Keep a gaussian only if it is close to some real SfM point (kills the
     sky/ground floater smears an elevated, never-photographed viewpoint would
-    otherwise expose), is not above the reconstructed roofline, and is not
-    simultaneously large *and* low-opacity."""
+    otherwise expose), is not above the reconstructed roofline, is not huge
+    (world-space std above `max_scale`), and is not simultaneously large
+    (above `large_scale`) *and* low-opacity."""
     from scipy.spatial import cKDTree
 
     with open(src_ply, 'rb') as f:
         header = read_ply_header(f)
         data = np.fromfile(f, dtype='<f4')
-    arr = data.reshape(-1, NFLOAT_PLY)
+    col = ply_float_columns(header)
+    arr = data.reshape(-1, len(col))
     pos = arr[:, 0:3]
 
+    # Isolated SfM points (sky, reflections, far-away mismatches) are not
+    # support: drop points whose 8 nearest neighbours are unusually far.
     tree = cKDTree(pos_pts)
-    d_self, _ = tree.query(pos_pts, k=2, workers=-1)
-    med_spacing = np.median(d_self[:, 1])
+    d_knn, _ = tree.query(pos_pts, k=9, workers=-1)
+    spread = d_knn[:, 1:].mean(1)
+    support = pos_pts[spread < 3.0 * np.median(spread)]
+    tree = cKDTree(support)
+    med_spacing = np.median(d_knn[:, 1])
     dist_thr = dist_mult * med_spacing
     d_near, _ = tree.query(pos, k=1, workers=-1)
     keep = d_near < dist_thr
 
-    top = ((pos_pts - center) @ up).max()
+    top = np.percentile((support - center) @ up, 99.5)
     keep &= ((pos - center) @ up) < (top + up_margin)
 
-    maxraw_scale = arr[:, 52:55].max(1)
-    opacity_raw = arr[:, 51]
-    keep &= ~((maxraw_scale > large_scale_raw) & (opacity_raw < low_opacity_raw))
+    scale_cols = [col['scale_0'], col['scale_1'], col['scale_2']]
+    max_std = np.exp(arr[:, scale_cols].max(1))
+    opacity_raw = arr[:, col['opacity']]
+    keep &= max_std < max_scale
+    keep &= ~((max_std > large_scale) & (opacity_raw < low_opacity_raw))
 
     kept = arr[keep]
     lines = header.split(b'\n')
@@ -639,7 +654,8 @@ def main():
         filtered_ply = f'{work}/scene_filtered.ply'
         kept, total, dist_thr = filter_scene_ply(f'{src}/scene.ply', filtered_ply, pos_pts, center, up,
                                                   FILTER_DIST_MULT, UP_MARGIN_FRAC * L,
-                                                  FILTER_LARGE_SCALE_RAW, FILTER_LOW_OPACITY_RAW)
+                                                  FILTER_MAX_SCALE_FRAC * L, FILTER_LARGE_SCALE_FRAC * L,
+                                                  FILTER_LOW_OPACITY_RAW)
         print(f'splat filter: kept {kept}/{total} gaussians (dist_thr={dist_thr:.4f})', flush=True)
 
         splat_dir = f'{work}/splat_poses'
