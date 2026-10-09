@@ -290,12 +290,19 @@ Sweeping only `gyro_bias_std` in the variant-A calibration (Basalt's default
 | 2e-5 | 43.90 | 14.3 % | 15.5 % | 94.0 % | 7.6° | 2.95 m |
 | 1e-5 | 45.66 | 28.6 % | 20.3 % | 98.4 % | 6.4° | 2.67 m |
 | 5e-6 | 46.89 | 28.6 % | 21.9 % | **100 %** | 5.9° | 2.51 m |
-| 2e-6 | **49.00** | 28.6 % | **23.0 %** | **100 %** | **5.4°** | **2.31 m** |
-| OpenVINS (LaMAria demo estimate) | **49.86** | 28.6 % | 24.2 % | 99.7 % | 8.4° | 2.32 m |
+| 2e-6 | 49.00 | 28.6 % | 23.0 % | **100 %** | 5.4° | 2.31 m |
+| 1e-6 | **50.04** | 28.6 % | 23.8 % | **100 %** | **5.3°** | **2.23 m** |
+| OpenVINS (LaMAria demo estimate) | 49.86 | 28.6 % | **24.2 %** | 99.7 % | 8.4° | 2.32 m |
 
 Held-out check on R_11_5cp (5e-6): Score **63.71** (big-window baseline
 62.87, multicam 59.78), CP@1m 60 %, pGT R@1m 43.9 %, Sim(3) ATE 1.08 m
 (baseline 1.26 m) — the lever also fixes the one sequence where multicam lost.
+At 2e-6 R_11_5cp scores 63.19 (Sim(3) ATE 1.09 m), so it is flat across 2e-6–5e-6.
+
+At 1e-6 sequence_1_19 now matches OpenVINS on Score (50.04 vs 49.86, a gap
+within run-to-run noise) and beats it on yaw drift (5.3° vs 8.4°), Sim(3) ATE
+(2.23 m vs 2.32 m) and pGT R@5m (100 % vs 99.7 %); OpenVINS keeps a slight
+edge on pGT R@1m (24.2 % vs 23.8 %).
 
 Reading: letting the gyro bias wander lets the window explain systematic
 rotation error as bias and integrate it into yaw. Tightening the bias random
