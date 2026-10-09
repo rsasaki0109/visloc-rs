@@ -95,6 +95,12 @@ impl BundleAdjustment {
         let mut current_nonprojectable = self.nonprojectable_observation_count();
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let mut converged = false;
+        // `LinearSolver::Sparse`: keep the reduced camera system as a
+        // block-sparse pose part plus a dense intrinsics border and solve it
+        // with the block Cholesky (see `solve_joint_sparse`); `Dense` keeps
+        // the historical dense `(6 P + k)^2` solve byte-for-byte.
+        let sparse = config.linear_solver == LinearSolver::Sparse;
+        let mut block_cache: Option<crate::block_cholesky::BlockSymbolic> = None;
 
         for iteration in 0..config.max_iterations {
             // Current distortion (reflects the running k1, k2 estimate) drives the
@@ -114,72 +120,92 @@ impl BundleAdjustment {
                 k_dim,
                 dist,
                 tangential,
+                sparse,
             );
             debug_assert_eq!(cam_dim_n, cam_dim);
-
-            // Damped Schur reduction (Levenberg Iﾂｷﾎｻ on both the camera and the
-            // landmark diagonals, exactly as `solve_step`).
-            let mut s = h_cc.clone();
-            if lambda > 0.0 {
-                for d in 0..cam_dim {
-                    s[(d, d)] += lambda;
-                }
-            }
-            let mut b_reduced = -&b_c;
-            let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
-            for lm in &lm_blocks {
-                let mut h_ll = lm.h_ll;
-                if lambda > 0.0 {
-                    h_ll[(0, 0)] += lambda;
-                    h_ll[(1, 1)] += lambda;
-                    h_ll[(2, 2)] += lambda;
-                }
-                let inv = h_ll.try_inverse();
-                h_ll_inv_cache.push(inv);
-                let Some(inv) = inv else { continue };
-                // S -= ﾎ｣ cross_a^T ﾂｷ H_ll^{-1} ﾂｷ cross_b ; b += cross_a^T H_ll^{-1} b_l.
-                for (cs_a, a) in &lm.cross {
-                    let ah = a * inv; // (rows_a ﾃ・3)
-                    for (cs_b, b) in &lm.cross {
-                        let block = &ah * b.transpose(); // (rows_a ﾃ・rows_b)
-                        for r in 0..a.nrows() {
-                            for c in 0..b.nrows() {
-                                s[(cs_a + r, cs_b + c)] -= block[(r, c)];
+            let (solved, h_ll_inv_cache) = match h_cc {
+                JointCameraHessian::Sparse {
+                    pose_diag,
+                    pose_k,
+                    kk,
+                } => solve_joint_sparse(
+                    pose_diag,
+                    pose_k,
+                    kk,
+                    &b_c,
+                    &lm_blocks,
+                    lambda,
+                    config.shared_focal,
+                    &mut block_cache,
+                ),
+                JointCameraHessian::Dense(h_cc) => {
+                    // Damped Schur reduction (Levenberg Iﾂｷﾎｻ on both the camera and the
+                    // landmark diagonals, exactly as `solve_step`).
+                    let mut s = h_cc.clone();
+                    if lambda > 0.0 {
+                        for d in 0..cam_dim {
+                            s[(d, d)] += lambda;
+                        }
+                    }
+                    let mut b_reduced = -&b_c;
+                    let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> =
+                        Vec::with_capacity(lm_blocks.len());
+                    for lm in &lm_blocks {
+                        let mut h_ll = lm.h_ll;
+                        if lambda > 0.0 {
+                            h_ll[(0, 0)] += lambda;
+                            h_ll[(1, 1)] += lambda;
+                            h_ll[(2, 2)] += lambda;
+                        }
+                        let inv = h_ll.try_inverse();
+                        h_ll_inv_cache.push(inv);
+                        let Some(inv) = inv else { continue };
+                        // S -= ﾎ｣ cross_a^T ﾂｷ H_ll^{-1} ﾂｷ cross_b ; b += cross_a^T H_ll^{-1} b_l.
+                        for (cs_a, a) in &lm.cross {
+                            let ah = a * inv; // (rows_a ﾃ・3)
+                            for (cs_b, b) in &lm.cross {
+                                let block = &ah * b.transpose(); // (rows_a ﾃ・rows_b)
+                                for r in 0..a.nrows() {
+                                    for c in 0..b.nrows() {
+                                        s[(cs_a + r, cs_b + c)] -= block[(r, c)];
+                                    }
+                                }
+                            }
+                            let upd = &ah * lm.b_l; // (rows_a)
+                            for r in 0..a.nrows() {
+                                b_reduced[cs_a + r] += upd[r];
                             }
                         }
                     }
-                    let upd = &ah * lm.b_l; // (rows_a)
-                    for r in 0..a.nrows() {
-                        b_reduced[cs_a + r] += upd[r];
-                    }
-                }
-            }
 
-            let solved = if config.shared_focal {
-                // Reduce with T: full -> shared, fy (index k_off + 1) folded into
-                // fx (k_off): S' = T^T S T, b' = T^T b, delta = T delta'.
-                let fy = k_off + 1;
-                let map = |i: usize| {
-                    if i < fy {
-                        i
-                    } else if i == fy {
-                        k_off
+                    let solved = if config.shared_focal {
+                        // Reduce with T: full -> shared, fy (index k_off + 1) folded into
+                        // fx (k_off): S' = T^T S T, b' = T^T b, delta = T delta'.
+                        let fy = k_off + 1;
+                        let map = |i: usize| {
+                            if i < fy {
+                                i
+                            } else if i == fy {
+                                k_off
+                            } else {
+                                i - 1
+                            }
+                        };
+                        let mut s_red = DMatrix::<f64>::zeros(cam_dim - 1, cam_dim - 1);
+                        let mut b_red = DVector::<f64>::zeros(cam_dim - 1);
+                        for i in 0..cam_dim {
+                            b_red[map(i)] += b_reduced[i];
+                            for j in 0..cam_dim {
+                                s_red[(map(i), map(j))] += s[(i, j)];
+                            }
+                        }
+                        solve_normal_equations(&s_red, &b_red)
+                            .map(|d| DVector::<f64>::from_fn(cam_dim, |i, _| d[map(i)]))
                     } else {
-                        i - 1
-                    }
-                };
-                let mut s_red = DMatrix::<f64>::zeros(cam_dim - 1, cam_dim - 1);
-                let mut b_red = DVector::<f64>::zeros(cam_dim - 1);
-                for i in 0..cam_dim {
-                    b_red[map(i)] += b_reduced[i];
-                    for j in 0..cam_dim {
-                        s_red[(map(i), map(j))] += s[(i, j)];
-                    }
+                        solve_normal_equations(&s, &b_reduced)
+                    };
+                    (solved.map_err(|_| ()), h_ll_inv_cache)
                 }
-                solve_normal_equations(&s_red, &b_red)
-                    .map(|d| DVector::<f64>::from_fn(cam_dim, |i, _| d[map(i)]))
-            } else {
-                solve_normal_equations(&s, &b_reduced)
             };
             let delta_cam = match solved {
                 Ok(d) => d,
@@ -317,6 +343,7 @@ impl BundleAdjustment {
     /// column-start to `J盞_cam ﾂｷ J_lm`. Mirrors `build_normal_equations`'
     /// reprojection Jacobians, extended with the intrinsics columns
     /// `J_K = 竏・predicted)/竏・fx, fy, cx, cy)`.
+    #[allow(clippy::too_many_arguments)]
     fn build_joint_intrinsics_system(
         &self,
         pose_index: &BTreeMap<u64, usize>,
@@ -325,13 +352,27 @@ impl BundleAdjustment {
         k_dim: usize,
         dist: Option<(f64, f64)>,
         tangential: Option<(f64, f64)>,
-    ) -> (usize, DMatrix<f64>, DVector<f64>, Vec<JointLandmarkBlock>) {
+        sparse: bool,
+    ) -> (
+        usize,
+        JointCameraHessian,
+        DVector<f64>,
+        Vec<JointLandmarkBlock>,
+    ) {
         let intrinsics = self.intrinsics().expect("pinhole checked by caller");
         let (fx, fy, cx, cy) = intrinsics;
         let p_count = pose_index.len();
         let k_off = p_count * 6;
         let cam_dim = k_off + k_dim;
-        let mut h_cc = DMatrix::<f64>::zeros(cam_dim, cam_dim);
+        let mut h_cc = if sparse {
+            JointCameraHessian::Sparse {
+                pose_diag: vec![Matrix6::zeros(); p_count],
+                pose_k: vec![DMatrix::zeros(6, k_dim); p_count],
+                kk: DMatrix::zeros(k_dim, k_dim),
+            }
+        } else {
+            JointCameraHessian::Dense(DMatrix::<f64>::zeros(cam_dim, cam_dim))
+        };
         let mut b_c = DVector::<f64>::zeros(cam_dim);
         let mut lm_blocks: Vec<JointLandmarkBlock> = landmark_index
             .iter()
@@ -344,13 +385,7 @@ impl BundleAdjustment {
             .collect();
 
         // Accumulate a cameraﾃ幼amera block (rows_a ﾃ・cols_b) at (row_start, col_start).
-        let mut add_cc = |rs: usize, cs: usize, blk: &DMatrix<f64>| {
-            for r in 0..blk.nrows() {
-                for c in 0..blk.ncols() {
-                    h_cc[(rs + r, cs + c)] += blk[(r, c)];
-                }
-            }
-        };
+        let mut add_cc = |rs: usize, cs: usize, blk: &DMatrix<f64>| h_cc.add(rs, cs, k_off, blk);
 
         // Monocular observations.
         for obs in &self.observations {
@@ -596,4 +631,196 @@ impl BundleAdjustment {
 
         (cam_dim, h_cc, b_c, lm_blocks)
     }
+}
+
+/// The reduced camera system of [`BundleAdjustment::optimize_joint_intrinsics`]
+/// before landmark elimination: dense, or (for `LinearSolver::Sparse`) as its
+/// structure — 6×6 pose diagonal blocks, a `6 × k` pose–intrinsics coupling per
+/// pose, and the `k × k` intrinsics block (raw observations never couple two
+/// poses directly; that only happens through landmark elimination).
+pub(super) enum JointCameraHessian {
+    Dense(DMatrix<f64>),
+    Sparse {
+        pose_diag: Vec<Matrix6<f64>>,
+        pose_k: Vec<DMatrix<f64>>,
+        kk: DMatrix<f64>,
+    },
+}
+
+impl JointCameraHessian {
+    /// Add `blk` at `(rs, cs)` of the full `(6 P + k)` camera matrix. The
+    /// sparse form keeps only the lower arrow: the intrinsics-row copy of a
+    /// pose–intrinsics block (`rs == k_off`, `cs < k_off`) is implied.
+    fn add(&mut self, rs: usize, cs: usize, k_off: usize, blk: &DMatrix<f64>) {
+        match self {
+            Self::Dense(h) => {
+                for r in 0..blk.nrows() {
+                    for c in 0..blk.ncols() {
+                        h[(rs + r, cs + c)] += blk[(r, c)];
+                    }
+                }
+            }
+            Self::Sparse {
+                pose_diag,
+                pose_k,
+                kk,
+            } => match (rs < k_off, cs < k_off) {
+                (true, true) => {
+                    debug_assert_eq!(rs, cs, "raw joint system has no pose-pose blocks");
+                    let d = &mut pose_diag[rs / 6];
+                    for r in 0..6 {
+                        for c in 0..6 {
+                            d[(r, c)] += blk[(r, c)];
+                        }
+                    }
+                }
+                (true, false) => pose_k[rs / 6] += blk,
+                (false, true) => {}
+                (false, false) => *kk += blk,
+            },
+        }
+    }
+}
+
+/// One damped Levenberg–Marquardt step of the joint pose + intrinsics bundle
+/// adjustment, solved without ever forming the dense camera matrix.
+///
+/// After eliminating the landmarks, the camera system is an arrowhead
+/// `[[A, B], [Bᵀ, C]]`: `A` is block-sparse over the poses (a 6×6 block per
+/// pair of poses that share a landmark), `B` is the dense `6 P × k`
+/// pose–intrinsics coupling and `C` the `k × k` intrinsics block. `A` is
+/// factored once with the block Cholesky against the `k + 1` right-hand sides
+/// `[b_p | B]`, giving `y = A⁻¹ b_p` and `Z = A⁻¹ B`; the intrinsics step solves
+/// the small Schur complement `(C − Bᵀ Z) δk = b_k − Bᵀ y` (with `shared_focal`,
+/// `fy` folded into `fx` there, exactly as the dense path folds it), and the
+/// poses follow as `δp = y − Z δk`. Memory and time scale with the covisibility
+/// pattern instead of `(6 P)²` / `(6 P)³`.
+///
+/// Returns the full `(6 P + k)` camera step (or `Err` when a block is not
+/// positive-definite or the intrinsics block is singular, which the caller treats like the dense solve's failure)
+/// and the per-landmark damped `H_ll⁻¹` used for back-substitution.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn solve_joint_sparse(
+    pose_diag: Vec<Matrix6<f64>>,
+    pose_k: Vec<DMatrix<f64>>,
+    mut kk: DMatrix<f64>,
+    b_c: &DVector<f64>,
+    lm_blocks: &[JointLandmarkBlock],
+    lambda: f64,
+    shared_focal: bool,
+    cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+) -> (Result<DVector<f64>, ()>, Vec<Option<Matrix3<f64>>>) {
+    let p_count = pose_diag.len();
+    let k_off = p_count * 6;
+    let k_dim = kk.nrows();
+    // Lower block columns of A (row >= column), starting from the damped
+    // diagonal; B and C as dense blocks.
+    let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> = pose_diag
+        .into_iter()
+        .enumerate()
+        .map(|(p, mut d)| {
+            for i in 0..6 {
+                d[(i, i)] += lambda;
+            }
+            BTreeMap::from([(p, d)])
+        })
+        .collect();
+    let mut pose_k = pose_k;
+    for i in 0..k_dim {
+        kk[(i, i)] += lambda;
+    }
+    let mut b_reduced = -b_c;
+    let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
+    for lm in lm_blocks {
+        let mut h_ll = lm.h_ll;
+        if lambda > 0.0 {
+            h_ll[(0, 0)] += lambda;
+            h_ll[(1, 1)] += lambda;
+            h_ll[(2, 2)] += lambda;
+        }
+        let inv = h_ll.try_inverse();
+        h_ll_inv_cache.push(inv);
+        let Some(inv) = inv else { continue };
+        for (&cs_a, a) in &lm.cross {
+            let ah = a * inv;
+            let upd = &ah * lm.b_l;
+            for r in 0..a.nrows() {
+                b_reduced[cs_a + r] += upd[r];
+            }
+            for (&cs_b, b) in &lm.cross {
+                match (cs_a < k_off, cs_b < k_off) {
+                    (true, true) if cs_a >= cs_b => {
+                        let block = &ah * b.transpose();
+                        let entry = columns[cs_b / 6]
+                            .entry(cs_a / 6)
+                            .or_insert_with(Matrix6::zeros);
+                        for r in 0..6 {
+                            for c in 0..6 {
+                                entry[(r, c)] -= block[(r, c)];
+                            }
+                        }
+                    }
+                    (true, false) => pose_k[cs_a / 6] -= &ah * b.transpose(),
+                    (false, false) => kk -= &ah * b.transpose(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // [b_p | B] -> [y | Z] = A⁻¹ [b_p | B].
+    let (y, z) = if p_count > 0 {
+        let mut rhs = DMatrix::<f64>::zeros(k_off, 1 + k_dim);
+        for i in 0..k_off {
+            rhs[(i, 0)] = b_reduced[i];
+        }
+        for (p, blk) in pose_k.iter().enumerate() {
+            for r in 0..6 {
+                for c in 0..k_dim {
+                    rhs[(p * 6 + r, 1 + c)] = blk[(r, c)];
+                }
+            }
+        }
+        match crate::block_cholesky::solve_spd_blocks6_cached(cache, columns, &rhs) {
+            Ok(x) => (x.column(0).into_owned(), x.columns(1, k_dim).into_owned()),
+            Err(()) => return (Err(()), h_ll_inv_cache),
+        }
+    } else {
+        (DVector::zeros(0), DMatrix::zeros(0, k_dim))
+    };
+    // Bᵀ Z and Bᵀ y without materializing the dense B.
+    let mut bt_z = DMatrix::<f64>::zeros(k_dim, k_dim);
+    let mut bt_y = DVector::<f64>::zeros(k_dim);
+    for (p, blk) in pose_k.iter().enumerate() {
+        let zp = z.rows(p * 6, 6);
+        bt_z += blk.transpose() * zp;
+        bt_y += blk.transpose() * y.rows(p * 6, 6);
+    }
+    let s_k = &kk - bt_z;
+    let r_k = b_reduced.rows(k_off, k_dim) - bt_y;
+    let delta_k = if shared_focal {
+        // T folds fy (index 1) into fx (index 0): S' = Tᵀ S T, r' = Tᵀ r.
+        let map = |i: usize| if i == 0 || i == 1 { 0 } else { i - 1 };
+        let mut s_red = DMatrix::<f64>::zeros(k_dim - 1, k_dim - 1);
+        let mut r_red = DVector::<f64>::zeros(k_dim - 1);
+        for i in 0..k_dim {
+            r_red[map(i)] += r_k[i];
+            for j in 0..k_dim {
+                s_red[(map(i), map(j))] += s_k[(i, j)];
+            }
+        }
+        solve_normal_equations(&s_red, &r_red)
+            .map(|d| DVector::<f64>::from_fn(k_dim, |i, _| d[map(i)]))
+    } else {
+        solve_normal_equations(&s_k, &r_k)
+    };
+    let delta_k = match delta_k {
+        Ok(d) => d,
+        Err(_) => return (Err(()), h_ll_inv_cache),
+    };
+    let delta_p = &y - &z * &delta_k;
+    let mut delta = DVector::<f64>::zeros(k_off + k_dim);
+    delta.rows_mut(0, k_off).copy_from(&delta_p);
+    delta.rows_mut(k_off, k_dim).copy_from(&delta_k);
+    (Ok(delta), h_ll_inv_cache)
 }

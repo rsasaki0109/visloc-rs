@@ -42,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-size" => sfm.max_size = next()?.parse()?,
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
             "--no-refine-intrinsics" => sfm.refine_intrinsics = false,
-            // Above this many registered photos the (dense) intrinsics
-            // refinement is skipped.
+            // Skip the final intrinsics refinement above this many
+            // registered photos (default: never).
             "--refine-intrinsics-max" => sfm.refine_intrinsics_max_images = next()?.parse()?,
             // Match every pair up to this many photos; beyond it, a sliding
             // window of `--window` photos over the sorted file names.
