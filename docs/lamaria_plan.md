@@ -117,9 +117,12 @@ before/after on training sequences.
    changed seq_1_19 SE3 ATE only 19.304 → 19.244 m, and loosening
    `vio_init_pose_weight` 1e8 → 1e2 did nothing.
 4. **Use both cameras of the divergent Aria rig.** Status: **implemented and
-   measured on three training sequences (2026-10-09)** — Score 17.16 → 31.55
-   on sequence_1_19 and 28.85 → 33.46 on R_12_10cp, but 62.87 → 59.78 on
-   R_11_5cp, at ~1.45× the cost
+   measured on three training sequences (2026-10-09)**. Combined with a
+   tight gyro bias random walk (`gyro_bias_std` 1e-6 instead of Basalt's
+   1e-4, which removed a systematic yaw drift) it scores sequence_1_19
+   17.16 → 50.04 (OpenVINS demo estimate: 49.86), R_12_10cp 28.85 → 40.11 and
+   R_11_5cp 62.87 → 63.19–63.71, at ~1.45× the cost. Now the submission
+   driver's default
    ([`lamaria_multicam.md`](lamaria_multicam.md#measured-on-lamaria-training-sequences-2026-10-09)).
    The port is cam0-centric: it detects only in cam0, seeds the cam0→cam1
    stereo KLT at the same pixel (hundreds of pixels off on Aria's 75°-rotated

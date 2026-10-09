@@ -299,6 +299,21 @@ Held-out check on R_11_5cp (5e-6): Score **63.71** (big-window baseline
 (baseline 1.26 m) — the lever also fixes the one sequence where multicam lost.
 At 2e-6 R_11_5cp scores 63.19 (Sim(3) ATE 1.09 m), so it is flat across 2e-6–5e-6.
 
+Held-out check on R_12_10cp (10 control points):
+
+| R_12_10cp | Score | CP@1m | pGT R@1m | pGT R@5m | Sim(3) ATE |
+|---|---:|---:|---:|---:|---:|
+| big window, `gyro_bias_std` 1e-4 (baseline) | 28.85 | 10 % | 8.0 % | 65.7 % | 4.60 m |
+| multicam, 1e-4 | 33.46 | 10 % | 10.2 % | 65.4 % | 7.53 m |
+| multicam, 2e-6 | 39.62 | 10 % | 11.4 % | 81.6 % | 5.02 m |
+| multicam, 1e-6 | **40.11** | 10 % | **12.0 %** | **82.4 %** | 4.91 m |
+
+So on all three training sequences multicam + a tight gyro bias beats the
+big-window baseline: sequence_1_19 17.16 → 50.04, R_12_10cp 28.85 → 40.11,
+R_11_5cp 62.87 → 63.19–63.71. 1e-6 edges out 2e-6 on both sequences where
+both were run. `scripts/run_lamaria_test_submission.py` now defaults to the
+multicam config with `--gyro-bias-std 1e-6`.
+
 At 1e-6 sequence_1_19 now matches OpenVINS on Score (50.04 vs 49.86, a gap
 within run-to-run noise) and beats it on yaw drift (5.3° vs 8.4°), Sim(3) ATE
 (2.23 m vs 2.32 m) and pGT R@5m (100 % vs 99.7 %); OpenVINS keeps a slight

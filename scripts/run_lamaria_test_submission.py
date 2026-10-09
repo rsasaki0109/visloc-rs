@@ -7,7 +7,8 @@ whole per-sequence loop for a track:
 
     download ASL zip + pinhole calibration
       -> verify + extract -> rename `aria/` to `mav0/`
-      -> pinhole -> Basalt Double-Sphere calibration (variant A noise)
+      -> pinhole -> Basalt Double-Sphere calibration (variant A noise,
+         gyro bias random walk tightened to --gyro-bias-std)
       -> run the Basalt VIO
       -> convert the trajectory to the submission estimate
       -> append `slam/<sequence>.txt`, then delete the sequence data
@@ -25,13 +26,18 @@ Example:
     python scripts/run_lamaria_test_submission.py \
         --tracks 1 \
         --vio-exe E:/visloc-rs-runs/onlinefix_target/release/examples/basalt_euroc_vio_demo.exe \
-        --config configs/basalt/variants/lamaria/euroc_config_big_window.json \
+        --config configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json \
+        --gyro-bias-std 1e-6 \
         --work-dir E:/visloc-rs-runs/lamaria_submission/work \
         --slam-dir E:/visloc-rs-runs/lamaria_submission/slam \
         --threads 12
 
-The `euroc_config_big_window.json` variant is added by the LaMAria big-window
-PR; the default EuRoC config also works but scores lower on long sequences.
+Defaults are the best measured LaMAria setup (docs/lamaria_multicam.md): the
+multi-camera big-window config and `gyro_bias_std` 1e-6. On the training
+sequences this scores sequence_1_19 50.04, R_12_10cp 40.11 and R_11_5cp ~63,
+versus 17.16 / 28.85 / 62.87 for `euroc_config_big_window.json` with Basalt's
+default 1e-4. Pass `--config .../euroc_config_big_window.json --gyro-bias-std
+1e-4` to reproduce the earlier setup.
 """
 
 import argparse
@@ -106,9 +112,12 @@ def verify_and_extract(zip_path: Path, extract_dir: Path) -> Path:
     return inner
 
 
-def write_variant_a_calib(base_calib: Path, out: Path) -> None:
+def write_variant_a_calib(base_calib: Path, out: Path,
+                          gyro_bias_std: float | None = None) -> None:
     data = json.loads(base_calib.read_text())
     data["value0"].update(DEFAULT_VARIANT_A_NOISE)
+    if gyro_bias_std is not None:
+        data["value0"]["gyro_bias_std"] = [gyro_bias_std] * 3
     out.write_text(json.dumps(data, indent=4))
 
 
@@ -121,7 +130,10 @@ def main() -> int:
                         help="explicit sequence names (overrides --tracks)")
     parser.add_argument("--vio-exe", type=Path, required=True)
     parser.add_argument("--config", type=Path,
-                        default=Path("configs/basalt/variants/lamaria/euroc_config_big_window.json"))
+                        default=Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json"))
+    parser.add_argument("--gyro-bias-std", type=float, default=1e-6,
+                        help="gyro bias random walk written into the calibration "
+                             "(Basalt default 1e-4; 1e-6 measured best on LaMAria)")
     parser.add_argument("--threads", type=int, default=12)
     parser.add_argument("--work-dir", type=Path, default=Path("lamaria_submission/work"))
     parser.add_argument("--slam-dir", type=Path, default=Path("lamaria_submission/slam"))
@@ -167,7 +179,7 @@ def main() -> int:
             run([python, converter, "--pinhole-calib", pinhole, "--out", base_calib],
                 check=True)
             variant_a = calib_dir / f"{seq}_calib_variantA_default_noise.json"
-            write_variant_a_calib(base_calib, variant_a)
+            write_variant_a_calib(base_calib, variant_a, args.gyro_bias_std)
 
             log(f"{seq}: VIO")
             vio_out = work / "vio"
