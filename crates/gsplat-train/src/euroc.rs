@@ -494,6 +494,10 @@ pub fn apply_sift_override(cfg: &mut SiftConfig, kv: &str) -> Result<(), String>
         "aligned_octave0_upsample" => cfg.aligned_octave0_upsample = flag(),
         "subpixel_localization" => cfg.subpixel_localization = flag(),
         "subpixel_scale_refine" => cfg.subpixel_scale_refine = flag(),
+        "affine" => cfg.affine = flag(),
+        "multi_anisotropy" => cfg.multi_anisotropy = flag(),
+        "domain_size_pooling" => cfg.domain_size_pooling = flag(),
+        "max_keypoints" => cfg.max_keypoints = num()? as usize,
         _ => return Err(format!("--sift-opt: unknown key {key}")),
     }
     Ok(())

@@ -48,6 +48,9 @@ pub struct PhotoSfmConfig {
     pub gpu: bool,
     /// Refine the shared intrinsics in a final global bundle adjustment.
     pub refine_intrinsics: bool,
+    /// Extra SIFT `key=value` settings (see `euroc::apply_sift_override`),
+    /// e.g. `affine=1` / `domain_size_pooling=1` for wide-baseline captures.
+    pub sift_overrides: Vec<String>,
 }
 
 impl Default for PhotoSfmConfig {
@@ -62,6 +65,7 @@ impl Default for PhotoSfmConfig {
             eval_every: 8,
             gpu: true,
             refine_intrinsics: true,
+            sift_overrides: Vec::new(),
         }
     }
 }
@@ -288,7 +292,10 @@ pub fn build_photo_dataset(
         "descriptor_magnification=3",
         "max_orientations=2",
         "prefer_larger_scale=1",
-    ] {
+    ]
+    .into_iter()
+    .chain(cfg.sift_overrides.iter().map(String::as_str))
+    {
         apply_sift_override(&mut sift_cfg, o).map_err(EurocError::Sift)?;
     }
     let grays: Vec<Vec<f32>> = decoded
@@ -312,22 +319,39 @@ pub fn build_photo_dataset(
     } else {
         None
     };
-    let mut features = Vec::with_capacity(n);
-    for g in &grays {
-        let gray = GrayImage::new(width as usize, height as usize, g)
-            .map_err(|e| EurocError::Sift(format!("{e}")))?;
+    // The GPU extractor implements the isotropic DoG path only; affine shape
+    // estimation or domain-size pooling (wide-baseline settings) run on the
+    // CPU, one image per thread. Matching stays on the GPU either way.
+    #[cfg(feature = "gpu")]
+    let on_gpu = gpu_sift.is_some() && visloc_sift_gpu::SiftGpu::supports(&sift_cfg);
+    #[cfg(not(feature = "gpu"))]
+    let on_gpu = false;
+    let features: Vec<FeatureSet> = if on_gpu {
+        let mut features = Vec::with_capacity(n);
         #[cfg(feature = "gpu")]
-        let (kps, desc) = match gpu_sift.as_mut() {
-            Some(s) => s
+        for g in &grays {
+            let gray = GrayImage::new(width as usize, height as usize, g)
+                .map_err(|e| EurocError::Sift(format!("{e}")))?;
+            let (kps, desc) = gpu_sift
+                .as_mut()
+                .expect("on_gpu")
                 .extract(&gray, &sift_cfg)
-                .map_err(|e| EurocError::Sift(format!("{e}")))?,
-            None => extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?,
-        };
-        #[cfg(not(feature = "gpu"))]
-        let (kps, desc) =
-            extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
-        features.push(to_features(kps, desc));
-    }
+                .map_err(|e| EurocError::Sift(format!("{e}")))?;
+            features.push(to_features(kps, desc));
+        }
+        features
+    } else {
+        grays
+            .par_iter()
+            .map(|g| {
+                let gray = GrayImage::new(width as usize, height as usize, g)
+                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                let (kps, desc) =
+                    extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
+                Ok(to_features(kps, desc))
+            })
+            .collect::<Result<_, EurocError>>()?
+    };
     log(&format!(
         "sift: mean {} keypoints ({:.1} s)",
         features.iter().map(|f| f.keypoints.len()).sum::<usize>() / n.max(1),

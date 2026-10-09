@@ -4,6 +4,7 @@
 //! cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
 //!     --images <folder> --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
+//!     [--max-keypoints 4000] [--sift-opt key=value ...]
 //! ```
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, GPU SIFT/matching,
@@ -45,6 +46,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // window of `--window` photos over the sorted file names.
             "--exhaustive-max" => sfm.exhaustive_max = next()?.parse()?,
             "--window" => sfm.window = next()?.parse()?,
+            "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
+            // Extra SIFT settings, e.g. `--sift-opt affine=1 --sift-opt
+            // domain_size_pooling=1` for strongly oblique / wide-baseline photos.
+            "--sift-opt" => sfm.sift_overrides.push(next()?),
             "--cpu" => sfm.gpu = false,
             "--no-mesh" => mesh = false,
             "--normal-weight" => normal_weight = next()?.parse()?,
