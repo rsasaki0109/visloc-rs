@@ -3,7 +3,10 @@
 //! pair (i, i + d) for d in 1..=window.
 //!
 //! cargo run --release -p visloc-sift-gpu --features gpu --example match_gpu_bench -- \
-//!     --images <dir> [--max-images 40] [--window 5] [--max-keypoints 4000] [--cpu-pairs 20]
+//!     --images <dir> [--max-images 40] [--window 5] [--max-keypoints 4000] [--cpu-pairs 20] [--u8]
+//!
+//! `--u8` also times a u8 bank (`FeatureBank::upload_u8`) and reports how
+//! many of the f32 matches it keeps.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -96,6 +99,39 @@ fn main() {
     }
     println!("gpu match digest {digest:016x}");
 
+    if args.iter().any(|a| a == "--u8") {
+        let t = Instant::now();
+        let bank8 = FeatureBank::upload_u8(ctx, &sets).unwrap();
+        let t_up8 = t.elapsed().as_secs_f64();
+        let _ = matcher.match_pairs(ctx, &bank8, &pairs[..1], Some(0.8), true);
+        let t = Instant::now();
+        let g8 = matcher.match_pairs(ctx, &bank8, &pairs, Some(0.8), true);
+        let t8 = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let f8 = matcher.match_pairs(ctx, &bank8, &pairs, Some(0.8), false);
+        let tf8 = t.elapsed().as_secs_f64();
+        let (mut same, mut n32, mut n8) = (0usize, 0usize, 0usize);
+        for (a, b) in gpu.iter().zip(&g8) {
+            let s: std::collections::HashSet<(usize, usize)> =
+                a.iter().map(|m| (m.query_index, m.train_index)).collect();
+            n32 += a.len();
+            n8 += b.len();
+            same += b
+                .iter()
+                .filter(|m| s.contains(&(m.query_index, m.train_index)))
+                .count();
+        }
+        println!(
+            "u8: {} pairs in {:.3}s ({:.2} ms/pair, bank upload {:.3}s), forward-only {:.2} ms/pair, mean {} matches ({} forward)",
+            pairs.len(), t8, 1e3 * t8 / pairs.len() as f64, t_up8, 1e3 * tf8 / pairs.len() as f64,
+            n8 / pairs.len().max(1), f8.iter().map(Vec::len).sum::<usize>() / pairs.len().max(1)
+        );
+        println!(
+            "u8 vs f32: {same} shared of {n32} f32 / {n8} u8 matches ({:.2}% of f32 kept, {:.2}% of u8 new)",
+            100.0 * same as f64 / n32.max(1) as f64,
+            100.0 * (n8 - same) as f64 / n8.max(1) as f64
+        );
+    }
     let m = CrossCheckMatcher::new(BruteForceMatcher { ratio: Some(0.8) });
     let n = cpu_pairs.min(pairs.len());
     let t = Instant::now();
