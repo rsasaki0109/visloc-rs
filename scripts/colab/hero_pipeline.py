@@ -145,12 +145,29 @@ def setup_vulkan():
     os.environ['WGPU_BACKEND'] = 'vulkan'
 
 
+def undistort_one(job):
+    """Downscale one photo and undistort it with the dataset calibration."""
+    import cv2
+    import numpy as np
+    src, dst, max_size, calib_w, (fx, fy, cx, cy), dist = job
+    img = cv2.imread(src, cv2.IMREAD_COLOR)
+    k_scale = max_size / max(img.shape[:2]) * img.shape[1] / calib_w
+    img = cv2.resize(img, None, fx=max_size / max(img.shape[:2]), fy=max_size / max(img.shape[:2]),
+                     interpolation=cv2.INTER_AREA)
+    if any(abs(d) > 0 for d in dist):
+        k = np.array([[fx * k_scale, 0, cx * k_scale], [0, fy * k_scale, cy * k_scale], [0, 0, 1]])
+        img = cv2.undistort(img, k, np.array(dist))
+    cv2.imwrite(dst, img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--repo', default='https://github.com/rsasaki0109/visloc-rs.git')
     ap.add_argument('--branch', default='main')
+    ap.add_argument('--dataset', choices=['tnt', 'mill19'], default='tnt')
     ap.add_argument('--scene', default='Courthouse',
-                    help='zip name in hf.co/datasets/hongliu6/tanks_and_temples')
+                    help='tnt: zip name in hf.co/datasets/hongliu6/tanks_and_temples; '
+                         'mill19: building or rubble')
     ap.add_argument('--frame-stride', type=int, default=2)
     ap.add_argument('--max-size', type=int, default=1280)
     ap.add_argument('--exhaustive-max', type=int, default=600)
@@ -185,19 +202,55 @@ def main():
     bin_dir = f'{repo}/target/release/examples'
 
     # ---- photos ----
-    images = f'/content/data/{args.scene}_stride{args.frame_stride}'
-    if not os.path.isdir(images) or not os.listdir(images):
-        z = f'/content/data/{args.scene}.zip'
-        os.makedirs('/content/data', exist_ok=True)
-        if not os.path.exists(z):
-            sh(f'wget -q -O {z} "https://huggingface.co/datasets/hongliu6/tanks_and_temples/'
-               f'resolve/main/{args.scene}.zip"')
-        sh(f'cd /content/data && rm -rf {args.scene} && unzip -q {z}')
-        frames = sorted(glob.glob(f'/content/data/{args.scene}/*.jpg'))
-        os.makedirs(images, exist_ok=True)
-        for f in frames[::args.frame_stride]:
-            shutil.move(f, images)
-        shutil.rmtree(f'/content/data/{args.scene}')
+    focal_flag = ''
+    if args.dataset == 'tnt':
+        images = f'/content/data/{args.scene}_stride{args.frame_stride}'
+        label = f'Tanks and Temples {args.scene}'
+        if not os.path.isdir(images) or not os.listdir(images):
+            z = f'/content/data/{args.scene}.zip'
+            os.makedirs('/content/data', exist_ok=True)
+            if not os.path.exists(z):
+                sh(f'wget -q -O {z} "https://huggingface.co/datasets/hongliu6/tanks_and_temples/'
+                   f'resolve/main/{args.scene}.zip"')
+            sh(f'cd /content/data && rm -rf {args.scene} && unzip -q {z}')
+            frames = sorted(glob.glob(f'/content/data/{args.scene}/*.jpg'))
+            os.makedirs(images, exist_ok=True)
+            for f in frames[::args.frame_stride]:
+                shutil.move(f, images)
+            shutil.rmtree(f'/content/data/{args.scene}')
+    else:
+        # Mill-19 (Mega-NeRF): drone surveys, one camera; train + val photos.
+        name = args.scene.lower()
+        images = f'/content/data/mill19_{name}_stride{args.frame_stride}'
+        label = f'Mill-19 {name}'
+        root = f'/content/data/{name}-pixsfm'
+        if not os.path.isdir(root):
+            os.makedirs('/content/data', exist_ok=True)
+            sh(f'cd /content/data && wget -q -O - https://storage.cmusatyalab.org/mega-nerf-data/'
+               f'{name}-pixsfm.tgz | tar xz')
+        # The photos carry no EXIF and are not undistorted. Take the camera
+        # calibration (intrinsics + distortion only, no poses) from the
+        # dataset, downscale to --max-size and undistort with it; the final
+        # bundle adjustment still refines the focal length as usual.
+        import torch
+        meta = torch.load(sorted(glob.glob(f'{root}/train/metadata/*'))[0], map_location='cpu')
+        fx, fy, cx, cy = [float(v) for v in meta['intrinsics']]
+        w, h = int(meta['W']), int(meta['H'])
+        dist = [float(v) for v in meta.get('distortion', [])]
+        scale = args.max_size / max(w, h)
+        print(f'calibration {w}x{h} f=({fx:.1f},{fy:.1f}) c=({cx:.1f},{cy:.1f}) dist={dist}', flush=True)
+        if not os.path.isdir(images) or not os.listdir(images):
+            frames = sorted(glob.glob(f'{root}/train/rgbs/*') + glob.glob(f'{root}/val/rgbs/*'),
+                            key=os.path.basename)[::args.frame_stride]
+            os.makedirs(images, exist_ok=True)
+            jobs = [(f, f'{images}/{"" if f.split("/")[-3] == "train" else "val_"}'
+                        f'{os.path.splitext(os.path.basename(f))[0]}.jpg',
+                     args.max_size, w, (fx, fy, cx, cy), dist) for f in frames]
+            from multiprocessing import Pool
+            with Pool(os.cpu_count()) as pool:
+                pool.map(undistort_one, jobs, chunksize=8)
+        focal_flag = f'--focal {fx * scale:.2f}'
+        print(f'focal prior {fx * scale:.1f} px at --max-size {args.max_size}', flush=True)
     n_input = len(os.listdir(images))
     print(n_input, 'photos in', images, flush=True)
 
@@ -206,7 +259,7 @@ def main():
         t = time.time()
         sh(f'{bin_dir}/gsplat_photos --images {images} --out {run} --max-size {args.max_size} '
            f'--steps {args.steps} --normal-weight {args.normal_weight} '
-           f'--exhaustive-max {args.exhaustive_max} 2>&1 '
+           f'--exhaustive-max {args.exhaustive_max} {focal_flag} 2>&1 '
            f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local|TIMING|REGISTER)" '
            f'| tee {run}/gsplat_photos.log')
         print(f'gsplat_photos {time.time() - t:.0f}s', flush=True)
@@ -214,7 +267,7 @@ def main():
     # ---- hero GIF ----
     sh('pip -q install moderngl plyfile scipy pillow', quiet=True)
     sh(f'cd {repo} && python3 scripts/make_readme_hero.py --src {run} --work /content/hero '
-       f'--gsplat-eval {bin_dir}/gsplat_eval --scene-label "Tanks and Temples {args.scene}" '
+       f'--gsplat-eval {bin_dir}/gsplat_eval --scene-label "{label}" '
        f'--input-images {n_input} {args.hero_flags} --out /content/out/hero_reconstruction.gif '
        f'2>&1 | grep -v -E "^(  |frame=|\\[|ffmpeg version|Input|Output|Stream|Press)"')
     shutil.copy(f'{run}/gsplat_photos.log', '/content/out/gsplat_photos.log')

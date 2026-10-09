@@ -195,7 +195,14 @@ def fit_building_frame(q, t):
     cov = Cc.T @ Cc
     w, v = np.linalg.eigh(cov)
     up = v[:, 0]
-    if np.dot(up, up_cam_est.mean(axis=0)) < 0:
+    fwd = R[:, 2, :].mean(axis=0)
+    if abs(np.dot(up, fwd)) > 0.5 * np.linalg.norm(fwd):
+        # Mostly nadir cameras (aerial survey): image "up" is horizontal and
+        # varies with the flight-line direction, so take the sign from the
+        # viewing direction instead -- the cameras look down.
+        if np.dot(up, fwd) > 0:
+            up = -up
+    elif np.dot(up, up_cam_est.mean(axis=0)) < 0:
         up = -up
     up /= np.linalg.norm(up)
     rel = C - centroid
