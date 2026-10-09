@@ -12,6 +12,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/hero_vislam_lamaria.gif" alt="Visual-inertial SLAM on LaMAria sequence_1_19 (Project Aria glasses, 1.0 km city walk). Left: both Aria SLAM cameras with the points the VIO is tracking. Right: top-down trajectories growing in time against the pseudo ground truth: visloc-rs (blue) and OpenVINS (orange) stay on the route, Basalt with its upstream configuration (red) drifts away." width="720"><br>
+  <sub>Visual-inertial odometry on <a href="https://lamaria.ethz.ch">LaMAria</a> sequence_1_19: Project Aria glasses, 1.0 km city walk, 15 min, both SLAM cameras + IMU, no loop closure. LaMAria Score (official evaluator, higher is better): <b>visloc-rs 50.0</b>, OpenVINS 49.9 (estimate shipped with the LaMAria demo), Basalt with its upstream configuration 7.7 (run through this repository's parity-verified Basalt port). Trajectories are Sim(3)-aligned to the pseudo ground truth as the evaluator does. <a href="docs/lamaria_multicam.md">Details and the other training sequences</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling a whole city block (Hierarchical 3DGS SmallCity) from high above the rooftops, a viewpoint no input photo has: the sparse SfM point cloud of the surrounding streets and the 5,609 recovered camera frustums tracing the bicycle's path around the block pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, then dissolve into the extracted mesh." width="640"><br>
   <sub>5,822 photos of a city block &rarr; 5,609 camera poses &rarr; 5.0M-gaussian splat &rarr; 5.7M-triangle mesh, one <code>gsplat_photos</code> command, no COLMAP or Python, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
@@ -29,6 +34,7 @@ results plug into existing tools.
 | **Photo SfM** (unordered images) | ETH3D Electro 1,200 images: **3.46× faster**, **25% lower** camera-centre error; 9,996 / 10,008 cameras registered across all ten ETH3D many-view scenes | COLMAP 3.9 CPU |
 | **GPU SfM** (video frames) | EuRoC: **faster on 8/8** sequences (1.4–7.5×), **more accurate on 4/8**, equal on 1; COLMAP breaks on MH_05 (194 cm vs 2.6 cm) | COLMAP 4.1 CUDA |
 | **Stereo-inertial VI-SLAM** (Basalt port + online mapper) | **Real time on 11/11** EuRoC sequences on the dev machine (1.06–1.68×, thin margin on the slowest); **beats ORB-SLAM3 on 9/11** | ORB-SLAM3, Basalt |
+| **Egocentric VIO** (Project Aria, both SLAM cameras) | LaMAria sequence_1_19: **Score 50.0** vs OpenVINS 49.9 and upstream-config Basalt 7.7; above the earlier setup on all 3 training sequences measured | OpenVINS, Basalt |
 | **Photos → 3D Gaussian Splatting + mesh** | **Faster than brush on 5/5** benchmark scenes, PSNR within 0.05 dB on 4 | brush 0.3 |
 | **Localization against a prebuilt map** | OpenLORIS robot rig: **98.96%** of 1,250 held-out frames localized, median 2.9 mm; simulated house: 38 ms / frame | — |
 | **Stereo / RGB-D VO** | KITTI 00 **1.23 m** and 09 **2.07 m** (ORB-SLAM2: 1.3 m / 3.2 m); TUM fr1_xyz 1.4 cm | ORB-SLAM2 |

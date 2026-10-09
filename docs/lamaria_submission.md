@@ -39,15 +39,17 @@ RUSTFLAGS="-C target-feature=+avx2,+fma" \
 python scripts/run_lamaria_test_submission.py \
   --tracks 1 \
   --vio-exe target/release/examples/basalt_euroc_vio_demo \
-  --config configs/basalt/variants/lamaria/euroc_config_big_window.json \
+  --config configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json \
+  --gyro-bias-std 1e-6 \
   --work-dir /path/to/lamaria_submission/work \
   --slam-dir /path/to/lamaria_submission/slam \
   --threads 12
 ```
 
-`--config` defaults to the larger-window LaMAria variant
-(`euroc_config_big_window.json`); the stock EuRoC config runs faster but drifts
-more on long sequences.  `aria2c` is used with 16 connections when available
+`--config` defaults to the multi-camera big-window LaMAria variant
+(`euroc_config_big_window_multicam.json`) and `--gyro-bias-std` to 1e-6, the
+best measured setup ([`lamaria_multicam.md`](lamaria_multicam.md)); it is about
+1.45× slower than `euroc_config_big_window.json`.  `aria2c` is used with 16 connections when available
 (the server throttles a single connection), otherwise `urllib` is the fallback.
 
 On completion the driver writes `submission.zip` next to `--slam-dir` (i.e.
