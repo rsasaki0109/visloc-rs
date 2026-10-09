@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
 //!     --images <folder> --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
-//!     [--no-mesh] [--normal-weight 0.005] [--appearance]
+//!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //! ```
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, GPU SIFT/matching,
@@ -41,6 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-size" => sfm.max_size = next()?.parse()?,
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
             "--no-refine-intrinsics" => sfm.refine_intrinsics = false,
+            // Match every pair up to this many photos; beyond it, a sliding
+            // window of `--window` photos over the sorted file names.
+            "--exhaustive-max" => sfm.exhaustive_max = next()?.parse()?,
+            "--window" => sfm.window = next()?.parse()?,
             "--cpu" => sfm.gpu = false,
             "--no-mesh" => mesh = false,
             "--normal-weight" => normal_weight = next()?.parse()?,
