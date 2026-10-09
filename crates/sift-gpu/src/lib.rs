@@ -185,4 +185,115 @@ mod tests {
             }
         }
     }
+
+    /// Exact reference for a u8 bank: top-2 by the integer score
+    /// ||t||^2 - 2 q.t of the quantised descriptors, ties to the lower index.
+    fn cpu_u8_matches(
+        q: &[Vec<f32>],
+        t: &[Vec<f32>],
+        ratio: Option<f32>,
+    ) -> Vec<(usize, usize, f32)> {
+        let quant = |d: &Vec<f32>| -> Vec<i64> {
+            d.iter()
+                .map(|x| (x * 512.0).round().clamp(0.0, 255.0) as i64)
+                .collect()
+        };
+        let (q, t): (Vec<Vec<i64>>, Vec<Vec<i64>>) =
+            (q.iter().map(quant).collect(), t.iter().map(quant).collect());
+        let tn: Vec<i64> = t.iter().map(|v| v.iter().map(|x| x * x).sum()).collect();
+        let mut out = Vec::new();
+        for (qi, qv) in q.iter().enumerate() {
+            let qn: i64 = qv.iter().map(|x| x * x).sum();
+            let (mut best, mut s1, mut s2) = (usize::MAX, i64::MAX, i64::MAX);
+            for (ti, tv) in t.iter().enumerate() {
+                let s = tn[ti] - 2 * qv.iter().zip(tv).map(|(a, b)| a * b).sum::<i64>();
+                if s < s1 {
+                    (s2, s1, best) = (s1, s, ti);
+                } else if s < s2 {
+                    s2 = s;
+                }
+            }
+            if best == usize::MAX {
+                continue;
+            }
+            let dist = |s: i64| ((qn + s).max(0) as f32).sqrt() / 512.0;
+            if let (Some(r), true) = (ratio, t.len() >= 2) {
+                if dist(s1) >= r * dist(s2) {
+                    continue;
+                }
+            }
+            out.push((qi, best, dist(s1)));
+        }
+        out
+    }
+
+    #[test]
+    fn u8_matcher_matches_exact_cpu_reference() {
+        let Some(ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut rnd = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        // Coarse values, noisy copies for true matches, 130 rows to cross a
+        // 128-row tile.
+        let unit = |v: Vec<f32>| {
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.into_iter().map(|x| x / n).collect::<Vec<f32>>()
+        };
+        let a: Vec<Vec<f32>> = (0..130)
+            .map(|_| unit((0..128).map(|_| (rnd() * 4.0).floor()).collect()))
+            .collect();
+        let mut b: Vec<Vec<f32>> = a
+            .iter()
+            .rev()
+            .take(90)
+            .map(|d| unit(d.iter().map(|x| x + 0.05 * rnd()).collect()))
+            .collect();
+        b.extend((0..41).map(|_| unit((0..128).map(|_| (rnd() * 4.0).floor()).collect())));
+        // Exact duplicates: tied best scores, which go to the lower index.
+        b.push(b[5].clone());
+        b.push(b[0].clone());
+        let d: Vec<Vec<f32>> = vec![a[7].clone()];
+        let empty: Vec<Vec<f32>> = Vec::new();
+        let sets = [&a, &b, &d, &empty];
+        let bank = FeatureBank::upload_u8(&ctx, &sets.map(|s| s.as_slice())).unwrap();
+        let matcher = GpuMatcher::new(&ctx);
+        let pairs = [
+            (0usize, 1usize),
+            (1, 0),
+            (0, 0),
+            (0, 2),
+            (2, 0),
+            (3, 0),
+            (0, 3),
+        ];
+        for cross in [false, true] {
+            for ratio in [None, Some(0.8)] {
+                let gpu = matcher.match_pairs(&ctx, &bank, &pairs, ratio, cross);
+                for (p, &(i, j)) in pairs.iter().enumerate() {
+                    let mut cpu = cpu_u8_matches(sets[i], sets[j], ratio);
+                    if cross {
+                        let mut back = vec![usize::MAX; sets[j].len()];
+                        for &(qi, ti, _) in &cpu_u8_matches(sets[j], sets[i], ratio) {
+                            back[qi] = ti;
+                        }
+                        cpu.retain(|&(qi, ti, _)| back[ti] == qi);
+                    }
+                    let g: Vec<(usize, usize, u32)> = gpu[p]
+                        .iter()
+                        .map(|m| (m.query_index, m.train_index, m.distance.to_bits()))
+                        .collect();
+                    let c: Vec<(usize, usize, u32)> =
+                        cpu.iter().map(|&(q, t, d)| (q, t, d.to_bits())).collect();
+                    assert_eq!(g, c, "pair {i}->{j} ratio {ratio:?} cross {cross}");
+                }
+            }
+        }
+    }
 }

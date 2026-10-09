@@ -301,6 +301,119 @@ fn build_reduced_system_pattern(
     (point_free_frames, edges, point_pair_edge_idx)
 }
 
+/// Reduced camera systems with at least this many free frames are solved
+/// iteratively ([`pcg_blocks6`]) instead of by block Cholesky — COLMAP's own
+/// switch from Ceres' `SPARSE_SCHUR` to `ITERATIVE_SCHUR` past 1,000 images.
+/// The factor of a dense covisibility graph (e.g. a city block revisited in
+/// several passes) costs seconds to tens of seconds per LM step at that
+/// size, while a preconditioned CG solve stays linear in the number of
+/// camera pairs.
+const ITERATIVE_MIN_FREE_FRAMES: usize = 1000;
+/// [`ITERATIVE_MIN_FREE_FRAMES`], overridable with
+/// `VISLOC_PORT_ITERATIVE_MIN_FRAMES` for diagnostics / A-B runs.
+fn iterative_min_free_frames() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("VISLOC_PORT_ITERATIVE_MIN_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(ITERATIVE_MIN_FREE_FRAMES)
+    })
+}
+/// Relative residual at which [`pcg_blocks6`] stops (`‖r‖ ≤ tol · ‖b‖`).
+/// An inexact LM step is fine (the trust region absorbs it); Ceres'
+/// `ITERATIVE_SCHUR` default is a far looser `eta = 0.1`. With the
+/// iterative solve forced on from 100 free frames, a 553-image Courthouse
+/// replay at 1e-3 keeps all 543 images and puts every camera centre within
+/// 0.08 % of the scene extent of the block-Cholesky run (1e-2: one image
+/// fewer, 0.6 %).
+const PCG_RELATIVE_TOLERANCE: f64 = 1e-3;
+/// Iteration cap of [`pcg_blocks6`] (Ceres' `max_linear_solver_iterations`).
+const PCG_MAX_ITERATIONS: usize = 500;
+
+/// Solve the SPD block system given as lower block columns (`columns[j]`
+/// maps block row `i >= j` to `A_ij`, diagonal included) for the single
+/// right-hand side `rhs` by conjugate gradients with a block-Jacobi
+/// (inverse 6×6 diagonal) preconditioner — the camera-block analogue of
+/// Ceres' `SCHUR_JACOBI`. The matrix-vector product runs on rayon over
+/// symmetric block rows and every reduction is summed in block order, so
+/// the result does not depend on the thread count. `None` when a diagonal
+/// block is not positive definite or the iteration breaks down.
+fn pcg_blocks6(
+    columns: &[BTreeMap<usize, Matrix6<f64>>],
+    rhs: &DMatrix<f64>,
+) -> Option<DMatrix<f64>> {
+    let n = columns.len();
+    // Symmetric block rows: row i holds (j, A_ij) for every stored block.
+    let mut rows: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); n];
+    for (j, col) in columns.iter().enumerate() {
+        for (&i, blk) in col {
+            rows[i].push((j, *blk));
+            if i != j {
+                rows[j].push((i, blk.transpose()));
+            }
+        }
+    }
+    let precond: Vec<Matrix6<f64>> = columns
+        .par_iter()
+        .enumerate()
+        .map(|(j, col)| col.get(&j).and_then(|d| d.cholesky()).map(|c| c.inverse()))
+        .collect::<Option<Vec<_>>>()?;
+    let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
+        rows.par_iter()
+            .map(|row| {
+                row.iter()
+                    .fold(Vector6::zeros(), |acc, (j, blk)| acc + blk * x[*j])
+            })
+            .collect()
+    };
+    let dot = |a: &[Vector6<f64>], b: &[Vector6<f64>]| -> f64 {
+        let partial: Vec<f64> = a.par_iter().zip(b).map(|(x, y)| x.dot(y)).collect();
+        partial.iter().sum()
+    };
+    let b: Vec<Vector6<f64>> = (0..n)
+        .map(|i| Vector6::from_fn(|k, _| rhs[(i * 6 + k, 0)]))
+        .collect();
+    let b_norm = dot(&b, &b).sqrt();
+    let mut x = vec![Vector6::<f64>::zeros(); n];
+    if b_norm == 0.0 {
+        return Some(DMatrix::zeros(n * 6, 1));
+    }
+    let mut r = b;
+    let mut z: Vec<Vector6<f64>> = r.iter().zip(&precond).map(|(r, m)| m * r).collect();
+    let mut p = z.clone();
+    let mut rz = dot(&r, &z);
+    for _ in 0..PCG_MAX_ITERATIONS {
+        let ap = matvec(&p);
+        let pap = dot(&p, &ap);
+        if !pap.is_finite() || pap <= 0.0 {
+            return None;
+        }
+        let alpha = rz / pap;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        if dot(&r, &r).sqrt() <= PCG_RELATIVE_TOLERANCE * b_norm {
+            break;
+        }
+        z = r.iter().zip(&precond).map(|(r, m)| m * r).collect();
+        let rz_next = dot(&r, &z);
+        let beta = rz_next / rz;
+        rz = rz_next;
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
+    }
+    let mut out = DMatrix::<f64>::zeros(n * 6, 1);
+    for (i, xi) in x.iter().enumerate() {
+        for k in 0..6 {
+            out[(i * 6 + k, 0)] = xi[k];
+        }
+    }
+    Some(out)
+}
+
 /// Reduced camera systems with at least this many free frames are factored
 /// in a fill-reducing block order ([`crate::reordering`]); smaller ones (every
 /// local BA) keep the natural order, where fill is negligible.
@@ -1028,7 +1141,11 @@ fn solve_step(
     timings.assemble += t.elapsed();
 
     let t = Instant::now();
-    let solved = solve_spd_blocks6_cached(cache, columns, &rhs).ok()?;
+    let solved = if n_free >= iterative_min_free_frames() {
+        pcg_blocks6(&columns, &rhs)?
+    } else {
+        solve_spd_blocks6_cached(cache, columns, &rhs).ok()?
+    };
     let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
     for a in 0..n_free {
         for i in 0..6 {
@@ -1212,7 +1329,9 @@ pub(crate) fn optimize_with_tolerance(
     let mut cache: Option<BlockSymbolic> = None;
     // Fill-reducing block order of the reduced camera system (its pattern,
     // `problem.edges`, is fixed for this solve). Natural order otherwise.
-    let order: Option<Vec<u32>> = (problem.n_free_frames >= REORDER_MIN_FREE_FRAMES).then(|| {
+    let order: Option<Vec<u32>> = (problem.n_free_frames >= REORDER_MIN_FREE_FRAMES
+        && problem.n_free_frames < iterative_min_free_frames())
+    .then(|| {
         let t = Instant::now();
         let mut adjacency = vec![Vec::new(); problem.n_free_frames];
         for &(a, b) in &problem.edges {
@@ -2069,5 +2188,113 @@ mod tests {
             "expected Trivial (no outlier down-weighting) to be pulled off further than \
              SoftL1: soft={soft_err} trivial={trivial_err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod iterative_bench {
+    use super::*;
+
+    /// A reduced camera system shaped like a city block revisited in several
+    /// passes: each camera couples to its ±150 capture-order neighbours and
+    /// to 100 cameras of the other passes at the same place. Diagonally
+    /// dominant SPD by construction.
+    fn dense_covisibility_system(n: usize) -> Vec<BTreeMap<usize, Matrix6<f64>>> {
+        let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> = vec![BTreeMap::new(); n];
+        let mut add = |a: usize, b: usize, k: f64| {
+            let (lo, hi) = (a.min(b), a.max(b));
+            if lo != hi {
+                let blk =
+                    Matrix6::from_fn(|r, c| ((r * 7 + c * 3 + lo + hi) % 11) as f64 * 1e-3 * k);
+                columns[lo].insert(hi, blk);
+            }
+        };
+        for i in 0..n {
+            for d in 1..=150 {
+                if i + d < n {
+                    add(i, i + d, 1.0);
+                }
+            }
+            let place = i % (n / 4);
+            for k in 0..100 {
+                add(
+                    i,
+                    ((i / (n / 4) + 1 + k % 3) % 4) * (n / 4) + (place + k / 3) % (n / 4),
+                    0.5,
+                );
+            }
+        }
+        for (i, col) in columns.iter_mut().enumerate() {
+            col.insert(
+                i,
+                Matrix6::identity() * 10.0
+                    + Matrix6::from_fn(|r, c| if r == c { (i % 5) as f64 } else { 0.0 }),
+            );
+        }
+        columns
+    }
+
+    /// `cargo test --release -p visloc-slam --lib iterative_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn pcg_vs_block_cholesky_on_a_dense_covisibility_graph() {
+        let n = 2500;
+        let columns = dense_covisibility_system(n);
+        let edges: usize = columns.iter().map(|c| c.len() - 1).sum();
+        let rhs = DMatrix::<f64>::from_fn(n * 6, 1, |i, _| ((i * 13) % 17) as f64 - 8.0);
+
+        let t = Instant::now();
+        let x_pcg = pcg_blocks6(&columns, &rhs).expect("pcg");
+        let t_pcg = t.elapsed();
+
+        let t = Instant::now();
+        let mut adjacency = vec![Vec::new(); n];
+        for (j, col) in columns.iter().enumerate() {
+            for &i in col.keys().filter(|&&i| i != j) {
+                adjacency[i].push(j);
+                adjacency[j].push(i);
+            }
+        }
+        for a in adjacency.iter_mut() {
+            a.sort_unstable();
+        }
+        let elimination = crate::reordering::fast_fill_reducing_block_order(&adjacency);
+        let mut pos = vec![0usize; n];
+        for (k, &b) in elimination.iter().enumerate() {
+            pos[b] = k;
+        }
+        let mut permuted: Vec<BTreeMap<usize, Matrix6<f64>>> = vec![BTreeMap::new(); n];
+        for (j, col) in columns.iter().enumerate() {
+            for (&i, blk) in col {
+                let (pi, pj) = (pos[i], pos[j]);
+                if pi >= pj {
+                    permuted[pj].insert(pi, *blk);
+                } else {
+                    permuted[pi].insert(pj, blk.transpose());
+                }
+            }
+        }
+        let mut prhs = DMatrix::<f64>::zeros(n * 6, 1);
+        for i in 0..n {
+            for k in 0..6 {
+                prhs[(pos[i] * 6 + k, 0)] = rhs[(i * 6 + k, 0)];
+            }
+        }
+        let t_order = t.elapsed();
+        let t = Instant::now();
+        let mut cache = None;
+        let x_chol = solve_spd_blocks6_cached(&mut cache, permuted, &prhs).expect("cholesky");
+        let t_chol = t.elapsed();
+        let mut max_diff = 0.0f64;
+        for i in 0..n {
+            for k in 0..6 {
+                max_diff =
+                    max_diff.max((x_chol[(pos[i] * 6 + k, 0)] - x_pcg[(i * 6 + k, 0)]).abs());
+            }
+        }
+        eprintln!(
+            "{n} cameras, {edges} camera pairs: pcg {t_pcg:?}; order {t_order:?} + block cholesky {t_chol:?}; max |dx| diff {max_diff:.2e}"
+        );
+        assert!(max_diff < 1e-3 * x_pcg.amax().max(1.0));
     }
 }

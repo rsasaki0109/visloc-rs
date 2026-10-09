@@ -59,6 +59,11 @@ pub struct PhotoSfmConfig {
     /// Extra SIFT `key=value` settings (see `euroc::apply_sift_override`),
     /// e.g. `affine=1` / `domain_size_pooling=1` for wide-baseline captures.
     pub sift_overrides: Vec<String>,
+    /// Match on the GPU with descriptors quantised to u8 like COLMAP (exact
+    /// integer dot products): about 1.6x faster than f32 and a quarter of
+    /// the descriptor memory. Off: f32 descriptors. The CPU fallback always
+    /// matches f32.
+    pub match_u8: bool,
 }
 
 impl Default for PhotoSfmConfig {
@@ -76,6 +81,7 @@ impl Default for PhotoSfmConfig {
             refine_intrinsics_max_images: usize::MAX,
             retrieval_k: 0,
             sift_overrides: Vec::new(),
+            match_u8: true,
         }
     }
 }
@@ -97,6 +103,9 @@ pub struct PhotoSfmReport {
     pub mean_reprojection_px: f64,
 }
 
+/// Candidate pairs and their descriptor matches, awaiting verification.
+type MatchedChunk<'a> = (&'a [(usize, usize)], Vec<Vec<DescriptorMatch>>);
+
 const IMAGE_EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "JPG"];
 
 /// Image pairs `(i, j)`, `i < j`, joining every image to its `k` most similar
@@ -104,7 +113,6 @@ const IMAGE_EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "JPG"];
 /// vocabulary built from a subsample of all descriptors.
 fn retrieval_pairs(features: &[FeatureSet], k: usize) -> Vec<(usize, usize)> {
     use visloc_vision::place_recognition::{vlad, Vocabulary};
-    let n = features.len();
     // About 100k descriptors for the vocabulary, evenly from every image.
     let total: usize = features.iter().map(|f| f.descriptors.len()).sum();
     let step = (total / 100_000).max(1);
@@ -119,22 +127,44 @@ fn retrieval_pairs(features: &[FeatureSet], k: usize) -> Vec<(usize, usize)> {
         .par_iter()
         .map(|f| vlad(&f.descriptors, &vocab))
         .collect();
-    let mut pairs: Vec<(usize, usize)> = (0..n)
+    top_k_similar_pairs(&global, k)
+}
+
+/// Pairs `(i, j)`, `i < j`, joining every row of `global` to the `k` rows
+/// with the largest dot product. The similarities are computed as blocks of
+/// `global · globalᵀ` (a GEMM per block of rows), not row by row: a
+/// row-by-row scan streams every descriptor once per image, which is
+/// memory-bound past a few thousand images.
+fn top_k_similar_pairs(global: &[Vec<f32>], k: usize) -> Vec<(usize, usize)> {
+    const ROWS: usize = 64;
+    let n = global.len();
+    let dim = global.first().map_or(0, Vec::len);
+    if n < 2 || dim == 0 || global.iter().any(|g| g.len() != dim) {
+        return Vec::new();
+    }
+    // Column j of `all` is descriptor j.
+    let all = nalgebra::DMatrix::<f32>::from_fn(dim, n, |r, c| global[c][r]);
+    let starts: Vec<usize> = (0..n).step_by(ROWS).collect();
+    let mut pairs: Vec<(usize, usize)> = starts
         .into_par_iter()
-        .flat_map_iter(|i| {
-            let mut sims: Vec<(f32, usize)> = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| {
-                    let s: f32 = global[i].iter().zip(&global[j]).map(|(a, b)| a * b).sum();
-                    (s, j)
+        .flat_map_iter(|r0| {
+            let r1 = (r0 + ROWS).min(n);
+            let rows = nalgebra::DMatrix::<f32>::from_fn(r1 - r0, dim, |r, c| global[r0 + r][c]);
+            let sims = rows * &all;
+            (r0..r1)
+                .flat_map(|i| {
+                    let mut row: Vec<(f32, usize)> = (0..n)
+                        .filter(|&j| j != i)
+                        .map(|j| (sims[(i - r0, j)], j))
+                        .collect();
+                    let kk = k.min(row.len());
+                    if kk > 0 {
+                        row.select_nth_unstable_by(kk - 1, |a, b| b.0.total_cmp(&a.0));
+                    }
+                    row.truncate(kk);
+                    row.into_iter().map(move |(_, j)| (i.min(j), i.max(j)))
                 })
-                .collect();
-            let kk = k.min(sims.len());
-            if kk > 0 {
-                sims.select_nth_unstable_by(kk - 1, |a, b| b.0.total_cmp(&a.0));
-            }
-            sims.truncate(kk);
-            sims.into_iter().map(move |(_, j)| (i.min(j), i.max(j)))
+                .collect::<Vec<_>>()
         })
         .collect();
     pairs.sort_unstable();
@@ -447,11 +477,12 @@ pub fn build_photo_dataset(
             .as_ref()
             .map(|g| g.context().limits.max_storage_buffer_binding_size)
             .unwrap_or(u64::MAX);
+        let per_value = if cfg.match_u8 { 1 } else { 4 };
         let bytes = |i: usize| -> u64 {
             features[i]
                 .descriptors
                 .iter()
-                .map(|d| d.len() as u64 * 4)
+                .map(|d| d.len() as u64 * per_value)
                 .sum()
         };
         let total: u64 = (0..n).map(bytes).sum();
@@ -496,6 +527,36 @@ pub fn build_photo_dataset(
             .push((i, j));
     }
     let mut pairwise: Vec<PairwiseMatches> = Vec::new();
+    let (mut match_s, mut verify_s) = (0.0f64, 0.0f64);
+    // Verified matches of one matched chunk, and the CPU time spent.
+    let verify = |(chunk, dms): MatchedChunk| {
+        let t = std::time::Instant::now();
+        let v: Vec<PairwiseMatches> = chunk
+            .par_iter()
+            .zip(dms.into_par_iter())
+            .filter_map(|(&(i, j), dm)| {
+                verify_pair(
+                    &camera,
+                    &features[i],
+                    &features[j],
+                    &dm,
+                    cfg.min_matches,
+                    true,
+                    false,
+                )
+                .map(|matches| PairwiseMatches {
+                    image_i: i,
+                    image_j: j,
+                    matches,
+                    two_view_config: None,
+                    essential_matches: None,
+                    essential_matrix: None,
+                })
+            })
+            .collect();
+        (v, t.elapsed().as_secs_f64())
+    };
+    let mut pending: Option<MatchedChunk> = None;
     for ((bi, bj), group) in &groups {
         // Images of this block pair, and their index in the uploaded bank.
         let mut imgs: Vec<usize> = blocks[*bi].clone();
@@ -513,8 +574,12 @@ pub fn build_photo_dataset(
                 .iter()
                 .map(|&i| features[i].descriptors.as_slice())
                 .collect();
-            visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
-                .ok()
+            let bank = if cfg.match_u8 {
+                visloc_sift_gpu::FeatureBank::upload_u8(ctx, &sets)
+            } else {
+                visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
+            };
+            bank.ok()
                 .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
         });
         let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
@@ -529,36 +594,34 @@ pub fn build_photo_dataset(
                 .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
                 .collect()
         };
+        // Verify the previous chunk on the CPU while the next one matches.
         for chunk in group.chunks(1024) {
-            let dms = match_pairs(chunk);
-            pairwise.par_extend(chunk.par_iter().zip(dms.into_par_iter()).filter_map(
-                |(&(i, j), dm)| {
-                    verify_pair(
-                        &camera,
-                        &features[i],
-                        &features[j],
-                        &dm,
-                        cfg.min_matches,
-                        true,
-                        false,
-                    )
-                    .map(|matches| PairwiseMatches {
-                        image_i: i,
-                        image_j: j,
-                        matches,
-                        two_view_config: None,
-                        essential_matches: None,
-                        essential_matrix: None,
-                    })
+            let (dms, verified) = rayon::join(
+                || {
+                    let t = std::time::Instant::now();
+                    (match_pairs(chunk), t.elapsed().as_secs_f64())
                 },
-            ));
+                || pending.take().map(verify),
+            );
+            match_s += dms.1;
+            if let Some((v, secs)) = verified {
+                pairwise.extend(v);
+                verify_s += secs;
+            }
+            pending = Some((chunk, dms.0));
         }
     }
+    if let Some((v, secs)) = pending.take().map(verify) {
+        pairwise.extend(v);
+        verify_s += secs;
+    }
     log(&format!(
-        "{} verified of {} candidate pairs ({:.1} s)",
+        "{} verified of {} candidate pairs ({:.1} s; overlapped: match {:.1} s, verify {:.1} s)",
         pairwise.len(),
         candidates.len(),
-        t0.elapsed().as_secs_f64()
+        t0.elapsed().as_secs_f64(),
+        match_s,
+        verify_s
     ));
 
     // Mapper, then a global BA that also refines the intrinsics.
@@ -766,5 +829,113 @@ mod tests {
         jpeg.extend([0xFF, 0xDA, 0, 2]);
         assert_eq!(exif_focal_35mm(&jpeg), Some(26.0));
         assert_eq!(exif_focal_35mm(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
+    }
+
+    /// Unit vectors from a fixed LCG, so the similarities have no ties.
+    fn pseudo_random_rows(n: usize, dim: usize) -> Vec<Vec<f32>> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..n)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..dim)
+                    .map(|_| {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                    })
+                    .collect();
+                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                v.iter_mut().for_each(|x| *x /= norm);
+                v
+            })
+            .collect()
+    }
+
+    /// Row-by-row reference for `top_k_similar_pairs` (the previous
+    /// implementation's scan, parallel over rows).
+    fn naive_top_k(global: &[Vec<f32>], k: usize) -> Vec<(usize, usize)> {
+        use rayon::prelude::*;
+        let n = global.len();
+        let mut pairs: Vec<(usize, usize)> = (0..n)
+            .into_par_iter()
+            .flat_map_iter(|i| {
+                let mut sims: Vec<(f32, usize)> = (0..n)
+                    .filter(|&j| j != i)
+                    .map(|j| {
+                        let s: f32 = global[i].iter().zip(&global[j]).map(|(a, b)| a * b).sum();
+                        (s, j)
+                    })
+                    .collect();
+                sims.sort_by(|a, b| b.0.total_cmp(&a.0));
+                sims.truncate(k);
+                sims.into_iter().map(move |(_, j)| (i.min(j), i.max(j)))
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
+    #[test]
+    fn blocked_top_k_matches_the_row_by_row_scan() {
+        // 150 rows: more than two GEMM row blocks, the last one partial.
+        let global = pseudo_random_rows(150, 96);
+        for k in [1, 5, 30] {
+            assert_eq!(
+                super::top_k_similar_pairs(&global, k),
+                naive_top_k(&global, k),
+                "k = {k}"
+            );
+        }
+        assert!(super::top_k_similar_pairs(&global[..1], 5).is_empty());
+    }
+
+    /// SmallCity-sized similarity search (5,822 VLAD vectors of 64 x 128).
+    /// `cargo test --release -p visloc-gsplat-train --features euroc --lib
+    /// retrieval_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn retrieval_bench() {
+        let global = pseudo_random_rows(5822, 64 * 128);
+        let t = std::time::Instant::now();
+        let fast = super::top_k_similar_pairs(&global, 30);
+        let tf = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        let slow = naive_top_k(&global, 30);
+        let ts = t.elapsed().as_secs_f64();
+        println!("blocked GEMM {tf:.2} s, row-by-row {ts:.2} s");
+        assert_eq!(fast, slow);
+    }
+
+    /// Vocabulary and VLAD aggregation at SmallCity scale (100k vocabulary
+    /// samples; 300 of the 5,822 images of 4,000 SIFT descriptors).
+    #[test]
+    #[ignore]
+    fn vlad_bench() {
+        use rayon::prelude::*;
+        use visloc_vision::place_recognition::{vlad, Vocabulary};
+        let sample = pseudo_random_rows(100_000, 128);
+        let refs: Vec<&[f32]> = sample.iter().map(Vec::as_slice).collect();
+        let t = std::time::Instant::now();
+        let vocab = Vocabulary::build(&refs, 64, 10, 7).unwrap();
+        let bits = vocab
+            .centroids
+            .iter()
+            .flatten()
+            .fold(0u64, |h, x| h.rotate_left(5) ^ u64::from(x.to_bits()));
+        println!(
+            "vocabulary {:.2} s, centroid bits {bits:016x}",
+            t.elapsed().as_secs_f64()
+        );
+        let images: Vec<Vec<Vec<f32>>> = (0..300)
+            .map(|i| sample[i * 300..i * 300 + 4000].to_vec())
+            .collect();
+        let t = std::time::Instant::now();
+        let g: Vec<Vec<f32>> = images.par_iter().map(|d| vlad(d, &vocab)).collect();
+        println!(
+            "vlad of {} images {:.2} s",
+            g.len(),
+            t.elapsed().as_secs_f64()
+        );
     }
 }

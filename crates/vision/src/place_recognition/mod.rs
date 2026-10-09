@@ -91,16 +91,15 @@ impl Vocabulary {
         let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(k);
         let first = (rng.next_u64() as usize) % descriptors.len();
         centroids.push(descriptors[first].to_vec());
+        // Squared distance of every descriptor to its nearest chosen centroid,
+        // updated with each new centroid only (the min is exact, so this equals
+        // a full rescan over all chosen centroids).
+        let mut d2: Vec<f32> = vec![f32::INFINITY; descriptors.len()];
         while centroids.len() < k {
-            let d2: Vec<f32> = descriptors
-                .iter()
-                .map(|d| {
-                    centroids
-                        .iter()
-                        .map(|c| sq_distance(d, c))
-                        .fold(f32::INFINITY, f32::min)
-                })
-                .collect();
+            let newest = centroids.last().expect("seeded");
+            for (m, d) in d2.iter_mut().zip(descriptors) {
+                *m = m.min(sq_distance(d, newest));
+            }
             let total: f64 = d2.iter().map(|&v| v as f64).sum();
             if total <= 0.0 {
                 // All remaining descriptors coincide with a centroid; pad with a
