@@ -354,7 +354,7 @@ pub fn build_photo_dataset(
     let blocks: Vec<Vec<usize>> = {
         let limit = gpu_sift
             .as_ref()
-            .map(|g| g.context().limits.max_storage_buffer_binding_size as u64)
+            .map(|g| g.context().limits.max_storage_buffer_binding_size)
             .unwrap_or(u64::MAX);
         let bytes = |i: usize| -> u64 {
             features[i]
