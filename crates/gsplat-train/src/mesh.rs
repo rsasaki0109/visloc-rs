@@ -140,7 +140,35 @@ impl Tsdf {
 
         let (voxel, trunc, max_depth, carve) = (self.voxel, self.trunc, self.max_depth, self.carve);
         let r = f.view.rotation;
+        // Frustum culling: a voxel only changes when it projects into the
+        // image in front of the camera, so a block whose bounding sphere lies
+        // entirely outside one of the frustum's side / near planes is skipped
+        // without changing the result (depth cannot be culled: free-space
+        // carving reaches any distance behind empty pixels).
+        let planes = {
+            let (fx, fy, cx, cy) = (cam.fx, cam.fy, cam.cx, cam.cy);
+            let (wf, hf) = (w as f32, h as f32);
+            [
+                Vector3::new(fx, 0.0, cx),       // u >= 0
+                Vector3::new(-fx, 0.0, wf - cx), // u <= w
+                Vector3::new(0.0, fy, cy),       // v >= 0
+                Vector3::new(0.0, -fy, hf - cy), // v <= h
+                Vector3::new(0.0, 0.0, 1.0),     // z >= 0
+            ]
+            .map(|n| n.normalize())
+        };
+        let half = 0.5 * B as f32 * voxel;
+        let radius = half * 3.0f32.sqrt();
         self.blocks.par_iter_mut().for_each(|(key, blk)| {
+            let centre = Vector3::new(
+                (key[0] * B) as f32 * voxel + half,
+                (key[1] * B) as f32 * voxel + half,
+                (key[2] * B) as f32 * voxel + half,
+            );
+            let cc = r * centre + t;
+            if planes.iter().any(|n| n.dot(&cc) < -radius) {
+                return;
+            }
             for i in 0..BV {
                 let (lx, ly, lz) = (i as i32 % B, (i as i32 / B) % B, i as i32 / (B * B));
                 let p = Vector3::new(
@@ -507,6 +535,7 @@ pub fn extract_from_splat(
     let mut ctx = Some(ctx);
     let mut renderer: Option<(u32, u32, visloc_gsplat_render::Renderer)> = None;
     let t0 = std::time::Instant::now();
+    let (mut render_s, mut integrate_s) = (0.0f64, 0.0f64);
     for view in views {
         let (w, h) = (view.camera.width, view.camera.height);
         if renderer.as_ref().map(|r| (r.0, r.1)) != Some((w, h)) {
@@ -517,12 +546,16 @@ pub fn extract_from_splat(
             renderer = Some((w, h, visloc_gsplat_render::Renderer::new(c, scene, w, h)?));
         }
         let (_, _, r) = renderer.as_mut().expect("renderer set above");
+        let t = std::time::Instant::now();
         let (image, depth, _) = r.render_depth(view, [0.0, 0.0, 0.0]);
+        render_s += t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
         tsdf.integrate(&DepthFrame {
             view,
             depth: &depth,
             rgb: &image.rgb,
         });
+        integrate_s += t.elapsed().as_secs_f64();
     }
     let fused = t0.elapsed().as_secs_f64();
     let mut mesh = tsdf.extract();
@@ -532,7 +565,7 @@ pub fn extract_from_splat(
     }
     mesh.remove_small_components(opts.min_component);
     let summary = format!(
-        "mesh: {} views fused in {fused:.1} s (voxel {voxel:.4}, {} blocks), {raw} -> {} triangles",
+        "mesh: {} views fused in {fused:.1} s (render {render_s:.1} s, integrate {integrate_s:.1} s; voxel {voxel:.4}, {} blocks), {raw} -> {} triangles",
         views.len(),
         tsdf.num_blocks(),
         mesh.triangles.len()
