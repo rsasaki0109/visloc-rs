@@ -64,6 +64,11 @@ pub struct PhotoSfmConfig {
     /// the descriptor memory. Off: f32 descriptors. The CPU fallback always
     /// matches f32.
     pub match_u8: bool,
+    /// Treat near-black regions (every channel at most this value, larger
+    /// than a few pixels) as masked out, e.g. the people and cars some
+    /// datasets black out: the training images get alpha 0 there (grown by
+    /// a few pixels over JPEG ringing), for `TrainConfig::alpha_mask`.
+    pub mask_black: Option<u8>,
 }
 
 impl Default for PhotoSfmConfig {
@@ -82,6 +87,7 @@ impl Default for PhotoSfmConfig {
             retrieval_k: 0,
             sift_overrides: Vec::new(),
             match_u8: true,
+            mask_black: None,
         }
     }
 }
@@ -170,6 +176,42 @@ fn top_k_similar_pairs(global: &[Vec<f32>], k: usize) -> Vec<(usize, usize)> {
     pairs.sort_unstable();
     pairs.dedup();
     pairs
+}
+
+/// Pixels inside near-black regions of `img` (every channel at most `thr`):
+/// the near-black set opened by a 5x5 box (drops dark specks such as
+/// shadows and tyres), then grown by 2 pixels to cover JPEG ringing at the
+/// region edges.
+fn black_regions(img: &image::RgbImage, thr: u8) -> Vec<bool> {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let dark: Vec<bool> = img
+        .pixels()
+        .map(|p| p.0.iter().all(|&c| c <= thr))
+        .collect();
+    // Separable box filter: `all` = erosion, otherwise dilation.
+    let box2 = |m: &[bool], all: bool| -> Vec<bool> {
+        let r = 2isize;
+        let pass = |src: &[bool], horizontal: bool| -> Vec<bool> {
+            (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as isize, (i / w) as isize);
+                    let mut it = (-r..=r).filter_map(|d| {
+                        let (xx, yy) = if horizontal { (x + d, y) } else { (x, y + d) };
+                        (xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h)
+                            .then(|| src[yy as usize * w + xx as usize])
+                    });
+                    if all {
+                        it.all(|v| v)
+                    } else {
+                        it.any(|v| v)
+                    }
+                })
+                .collect()
+        };
+        pass(&pass(m, true), false)
+    };
+    let opened = box2(&box2(&dark, true), false);
+    box2(&opened, false)
 }
 
 /// EXIF `FocalLengthIn35mmFilm` of a JPEG, if present.
@@ -354,8 +396,18 @@ pub fn build_photo_dataset(
         .zip(&names)
         .map(|((img, _), name)| {
             let out = images_out.join(name);
-            img.save(&out)
-                .map_err(|source| EurocError::Image { path: out, source })
+            match cfg.mask_black {
+                None => img.save(&out),
+                Some(thr) => {
+                    let masked = black_regions(img, thr);
+                    let mut rgba = image::RgbaImage::new(img.width(), img.height());
+                    for ((o, p), &m) in rgba.pixels_mut().zip(img.pixels()).zip(&masked) {
+                        *o = image::Rgba([p[0], p[1], p[2], if m { 0 } else { 255 }]);
+                    }
+                    rgba.save(&out)
+                }
+            }
+            .map_err(|source| EurocError::Image { path: out, source })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let listing: String = names
@@ -937,5 +989,27 @@ mod tests {
             g.len(),
             t.elapsed().as_secs_f64()
         );
+    }
+
+    #[test]
+    fn black_regions_mask_blocks_not_specks() {
+        let mut img = image::RgbImage::from_pixel(40, 30, image::Rgb([120, 110, 100]));
+        // A blacked-out block with JPEG-like noise, and a 2x2 dark speck.
+        for y in 10..20 {
+            for x in 5..17 {
+                img.put_pixel(x, y, image::Rgb([(x % 3) as u8, 2, (y % 4) as u8]));
+            }
+        }
+        for (x, y) in [(30, 5), (31, 5), (30, 6), (31, 6)] {
+            img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+        }
+        let m = super::black_regions(&img, 12);
+        let at = |x: usize, y: usize| m[y * 40 + x];
+        assert!(at(10, 15) && at(5, 10) && at(16, 19));
+        // Grown by 2 pixels, no further.
+        assert!(at(3, 15) && at(18, 15) && at(10, 8) && at(10, 21));
+        assert!(!at(2, 15) && !at(19, 15) && !at(10, 7) && !at(10, 22));
+        assert!(!at(30, 5) && !at(31, 6));
+        assert_eq!(m.iter().filter(|&&v| v).count(), 16 * 14);
     }
 }

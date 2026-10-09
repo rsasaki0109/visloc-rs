@@ -207,4 +207,154 @@ mod tests {
         eprintln!("ssim grad worst error {worst:.2e} of max");
         assert!(worst < 1e-3, "worst relative error {worst}");
     }
+
+    /// Sum over valid window centres and channels of the SSIM map (11x11
+    /// gaussian, sigma 1.5, zero padding: the kernel's definition).
+    fn masked_ssim_sum(x: &[[f64; 3]], y: &[[f64; 3]], valid: &[bool], w: usize, h: usize) -> f64 {
+        let g: Vec<f64> = (-5..=5i32)
+            .map(|k| (-(k * k) as f64 / (2.0 * 1.5 * 1.5)).exp())
+            .collect();
+        let gs: f64 = g.iter().sum();
+        let (c1, c2) = (1e-4, 9e-4);
+        let mut total = 0.0;
+        for (q, _) in valid.iter().enumerate().filter(|(_, &v)| v) {
+            let (qx, qy) = ((q % w) as i32, (q / w) as i32);
+            for c in 0..3 {
+                let (mut mx, mut my, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                for dy in -5..=5i32 {
+                    for dx in -5..=5i32 {
+                        let (px, py) = (qx + dx, qy + dy);
+                        if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
+                            continue;
+                        }
+                        let wt = g[(dx + 5) as usize] * g[(dy + 5) as usize] / (gs * gs);
+                        let p = py as usize * w + px as usize;
+                        let (a, b) = (x[p][c], y[p][c]);
+                        mx += wt * a;
+                        my += wt * b;
+                        sxx += wt * a * a;
+                        syy += wt * b * b;
+                        sxy += wt * a * b;
+                    }
+                }
+                let (vx, vy, cxy) = (sxx - mx * mx, syy - my * my, sxy - mx * my);
+                total += (2.0 * mx * my + c1) * (2.0 * cxy + c2)
+                    / ((mx * mx + my * my + c1) * (vx + vy + c2));
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn masked_pixels_get_no_loss_gradient() {
+        let Some(ctx) = visloc_gsplat_render::try_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let (w, h) = (37u32, 29u32);
+        let n = (w * h) as usize;
+        let mut s = 0x0F1E_2D3C_4B5A_6978u64;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let render: Vec<[f32; 3]> = (0..n).map(|_| [rnd(), rnd(), rnd()]).collect();
+        let gt8: Vec<[u8; 3]> = (0..n)
+            .map(|_| {
+                [
+                    (rnd() * 255.0) as u8,
+                    (rnd() * 255.0) as u8,
+                    (rnd() * 255.0) as u8,
+                ]
+            })
+            .collect();
+        // A masked-out block, like a blacked-out car.
+        let valid: Vec<bool> = (0..n)
+            .map(|i| !((8..20).contains(&(i % w as usize)) && (6..15).contains(&(i / w as usize))))
+            .collect();
+        let packed: Vec<u32> = gt8
+            .iter()
+            .zip(&valid)
+            .map(|(p, &v)| {
+                p[0] as u32
+                    | (p[1] as u32) << 8
+                    | (p[2] as u32) << 16
+                    | (if v { 255 } else { 0 }) << 24
+            })
+            .collect();
+        let dev = &ctx.device;
+        let queue = &ctx.queue;
+        let rb = storage(dev, "render", n as u64 * 12);
+        queue.write_buffer(&rb, 0, bytemuck::cast_slice(&render));
+        let gb = storage(dev, "gt", n as u64 * 4);
+        queue.write_buffer(&gb, 0, bytemuck::cast_slice(&packed));
+        let db = storage(dev, "d_image", n as u64 * 12);
+        let k = SsimKernels::new(dev, w, h);
+        let lambda = 0.2;
+        k.set_weight(queue, lambda);
+        let binds = k.bind(dev, &rb, &gb, &db);
+        let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            k.encode(&mut pass, &binds);
+        }
+        queue.submit(Some(enc.finish()));
+        let staging = dev.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: n as u64 * 12,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&db, 0, &staging, 0, n as u64 * 12);
+        queue.submit(Some(enc.finish()));
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        dev.poll(wgpu::PollType::wait_indefinitely()).ok();
+        let gpu: Vec<f32> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap()).to_vec();
+
+        for (p, &v) in valid.iter().enumerate() {
+            if !v {
+                assert_eq!(&gpu[p * 3..p * 3 + 3], &[0.0; 3], "masked pixel {p}");
+            }
+        }
+        // Valid pixels, inside and at the edge of the mask's windows:
+        // -lambda/(3N) * d(sum of valid-centre SSIM)/dx by central differences.
+        let x: Vec<[f64; 3]> = render.iter().map(|p| p.map(|v| v as f64)).collect();
+        let y: Vec<[f64; 3]> = gt8.iter().map(|p| p.map(|v| v as f64 / 255.0)).collect();
+        let (wu, hu) = (w as usize, h as usize);
+        let scale = lambda as f64 / (3.0 * n as f64);
+        let mut worst = 0.0f64;
+        let mut max_grad = 0.0f64;
+        for &(px, py) in &[
+            (7usize, 10usize),
+            (21, 10),
+            (14, 16),
+            (3, 3),
+            (30, 25),
+            (14, 5),
+        ] {
+            let p = py * wu + px;
+            assert!(valid[p]);
+            for c in 0..3 {
+                let eps = 1e-4;
+                let (mut xp, mut xm) = (x.clone(), x.clone());
+                xp[p][c] += eps;
+                xm[p][c] -= eps;
+                let fd = (masked_ssim_sum(&xp, &y, &valid, wu, hu)
+                    - masked_ssim_sum(&xm, &y, &valid, wu, hu))
+                    / (2.0 * eps);
+                let want = -scale * fd;
+                max_grad = max_grad.max(want.abs());
+                worst = worst.max((want - gpu[p * 3 + c] as f64).abs());
+            }
+        }
+        eprintln!("masked ssim grad worst abs error {worst:.2e} (max {max_grad:.2e})");
+        assert!(
+            worst < 1e-3 * max_grad.max(1e-12) * 10.0,
+            "worst {worst} of {max_grad}"
+        );
+    }
 }

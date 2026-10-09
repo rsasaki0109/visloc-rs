@@ -138,13 +138,20 @@ fn read_image_names(path: &Path) -> Result<std::collections::HashMap<u64, String
 /// Load a view's image as row-major RGB in `[0, 1]`, checking it matches the
 /// camera's resolution.
 pub fn load_view_rgb(view: &View) -> Result<Vec<[f32; 3]>, DatasetError> {
-    let img = image::open(&view.image_path)
-        .map_err(|source| DatasetError::Image {
-            path: view.image_path.clone(),
-            source,
-        })?
-        .to_rgb8();
-    let (w, h) = img.dimensions();
+    Ok(load_view_rgb_mask(view)?.0)
+}
+
+/// Row-major RGB in `[0, 1]` and, if the image has alpha, the valid pixels.
+pub type RgbAndMask = (Vec<[f32; 3]>, Option<Vec<bool>>);
+
+/// [`load_view_rgb`] plus, when the image file has an alpha channel, which
+/// pixels are valid (alpha >= 128). Images without alpha give `None`.
+pub fn load_view_rgb_mask(view: &View) -> Result<RgbAndMask, DatasetError> {
+    let img = image::open(&view.image_path).map_err(|source| DatasetError::Image {
+        path: view.image_path.clone(),
+        source,
+    })?;
+    let (w, h) = (img.width(), img.height());
     let (want_w, want_h) = (view.camera.camera.width, view.camera.camera.height);
     if (w, h) != (want_w, want_h) {
         return Err(DatasetError::SizeMismatch {
@@ -155,7 +162,12 @@ pub fn load_view_rgb(view: &View) -> Result<Vec<[f32; 3]>, DatasetError> {
             want_h,
         });
     }
-    Ok(img
+    let valid = img
+        .color()
+        .has_alpha()
+        .then(|| img.to_rgba8().pixels().map(|p| p[3] >= 128).collect());
+    let rgb = img
+        .to_rgb8()
         .pixels()
         .map(|p| {
             [
@@ -164,5 +176,6 @@ pub fn load_view_rgb(view: &View) -> Result<Vec<[f32; 3]>, DatasetError> {
                 p[2] as f32 / 255.0,
             ]
         })
-        .collect())
+        .collect();
+    Ok((rgb, valid))
 }

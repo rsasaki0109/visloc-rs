@@ -4,7 +4,7 @@
 //! cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
 //!     --images <folder> --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
-//!     [--retrieval 30] [--max-keypoints 4000] [--sift-opt key=value ...] [--match-f32]
+//!     [--retrieval 30] [--max-keypoints 4000] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
 //! ```
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, GPU SIFT/matching,
@@ -17,10 +17,10 @@ use std::time::Instant;
 
 use visloc_gsplat_core::ply::save_ply;
 use visloc_gsplat_render::GpuContext;
-use visloc_gsplat_train::dataset::load_view_rgb;
+use visloc_gsplat_train::dataset::load_view_rgb_mask;
 use visloc_gsplat_train::init::seed_scene;
 use visloc_gsplat_train::mesh::{extract_from_splat, MeshOptions};
-use visloc_gsplat_train::metrics::psnr;
+use visloc_gsplat_train::metrics::psnr_masked;
 use visloc_gsplat_train::photos::{build_photo_dataset, PhotoSfmConfig};
 use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
@@ -53,6 +53,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // similar photos by appearance (VLAD), e.g. to join revisits.
             "--retrieval" => sfm.retrieval_k = next()?.parse()?,
             "--match-f32" => sfm.match_u8 = false,
+            // Leave near-black regions (channels <= N, e.g. blacked-out
+            // people and cars) out of the training loss and the PSNR.
+            "--mask-black" => sfm.mask_black = Some(next()?.parse()?),
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             // Extra SIFT settings, e.g. `--sift-opt affine=1 --sift-opt
             // domain_size_pooling=1` for strongly oblique / wide-baseline photos.
@@ -91,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         steps,
         normal_weight,
         appearance,
+        alpha_mask: sfm.mask_black.is_some(),
         ..TrainConfig::brush_preset()
     };
     let t_train = Instant::now();
@@ -108,7 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut sum = 0.0;
     for v in &dataset.eval {
-        sum += psnr(&trainer.render(&v.camera).rgb, &load_view_rgb(v)?);
+        let (gt, valid) = load_view_rgb_mask(v)?;
+        sum += psnr_masked(&trainer.render(&v.camera).rgb, &gt, valid.as_deref());
     }
     println!(
         "trained {steps} steps in {:.1}s; held-out psnr {:.2} over {} views",

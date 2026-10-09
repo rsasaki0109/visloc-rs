@@ -11,7 +11,7 @@ use visloc_gsplat_core::cpu_render::Image;
 use visloc_gsplat_core::gaussian::{Gaussian, Scene};
 use visloc_gsplat_render::{GpuContext, GpuError, GpuScene, PackedScene, PrefixScanner, Renderer};
 
-use crate::dataset::{load_view_rgb, Dataset, DatasetError, View};
+use crate::dataset::{load_view_rgb, load_view_rgb_mask, Dataset, DatasetError, View};
 use crate::densify::{BrushRefineConfig, DensifyConfig, DensifyReport, Group, Population};
 use crate::loss::{SsimBinds, SsimKernels};
 
@@ -62,6 +62,10 @@ pub struct TrainConfig {
     pub appearance_lr: f32,
     /// Pull of the transforms towards identity.
     pub appearance_reg: f32,
+    /// Leave out of the loss the pixels whose image alpha is below 128
+    /// (masked-out content, e.g. people and cars a dataset blacked out).
+    /// Images without alpha train every pixel. Off: alpha is ignored.
+    pub alpha_mask: bool,
 }
 
 impl Default for TrainConfig {
@@ -90,6 +94,7 @@ impl Default for TrainConfig {
             appearance: false,
             appearance_lr: 2e-3,
             appearance_reg: 1e-2,
+            alpha_mask: false,
         }
     }
 }
@@ -394,11 +399,15 @@ fn groups_2d(threads: u32) -> (u32, u32) {
     (x, g.div_ceil(x))
 }
 
-fn pack_rgba8(rgb: &[[f32; 3]]) -> Vec<u32> {
+/// Pack RGB as RGBA8 (R in the low byte); alpha 0 marks a pixel the loss
+/// leaves out (`valid` false), 255 one it trains.
+fn pack_rgba8(rgb: &[[f32; 3]], valid: Option<&[bool]>) -> Vec<u32> {
     rgb.iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-            c(p[0]) | (c(p[1]) << 8) | (c(p[2]) << 16) | (255 << 24)
+            let a = if valid.is_none_or(|v| v[i]) { 255 } else { 0 };
+            c(p[0]) | (c(p[1]) << 8) | (c(p[2]) << 16) | (a << 24)
         })
         .collect()
 }
@@ -514,7 +523,12 @@ impl Trainer {
         let gt = storage(&dev, "gt", npix * 4);
         let mut gt_host = Vec::with_capacity(views.len());
         for v in &views {
-            gt_host.push(pack_rgba8(&load_view_rgb(v)?));
+            if cfg.alpha_mask {
+                let (rgb, valid) = load_view_rgb_mask(v)?;
+                gt_host.push(pack_rgba8(&rgb, valid.as_deref()));
+            } else {
+                gt_host.push(pack_rgba8(&load_view_rgb(v)?, None));
+            }
         }
         let loss_pipeline = pipeline(
             &dev,
