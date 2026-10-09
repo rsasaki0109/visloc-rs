@@ -1,9 +1,11 @@
 # Multi-camera VIO for divergent rigs (LaMAria / Project Aria)
 
-**Status: implemented, opt-in, verified on synthetic data only. No LaMAria
-number has been measured yet** (the machine that did this work cannot reach
-the dataset). With the new keys absent, the Basalt port is bit-for-bit
-unchanged.
+**Status: implemented, opt-in, measured on three LaMAria training sequences
+(2026-10-09):** it raises Score on the two longer sequences (sequence_1_19
+17.16 → 31.55, R_12_10cp 28.85 → 33.46) and lowers it on the shortest
+(R_11_5cp 62.87 → 59.78); see
+[the measured table](#measured-on-lamaria-training-sequences-2026-10-09).
+With the new keys absent, the Basalt port is bit-for-bit unchanged.
 
 ## Diagnosis: the port is cam0-centric
 
@@ -212,6 +214,58 @@ Unit tests: `stream::tests::reprojected_stereo_seed_matches_independent_pinhole_
 `config::tests::multi_camera_keys_default_off_and_parse`,
 `config::tests::lamaria_multicam_variant_parses`,
 `adapter::tests::imu_seed_rotation_is_settable_from_a_config_file`.
+
+## Measured on LaMAria training sequences (2026-10-09)
+
+Run on the official LaMAria ASL training data with the unmodified `cvg/lamaria`
+evaluator (commit `238b6ca`, 2026-10-07): `evaluate_wrt_control_points`
+(Score, CP@1m) and `evaluate_wrt_pgt` (pose recall at 1 m / 5 m),
+`--corresponding_sensor imu`. Every row uses the same release binary (AVX2/FMA,
+`basalt-lm-workspace-reuse`), the variant-A calibration, `--pipeline
+--threads 4 --no-trace --no-marg-data`, VIO only (no mapper), on a 4-core
+cloud container. One run per cell.
+
+| Sequence (control points) | Config | Score | CP@1m | pGT R@1m | pGT R@5m | Wall | RT factor |
+|---|---|---:|---:|---:|---:|---:|---:|
+| R_11_5cp (5) | big window (baseline) | **62.87** | 60 % | **51.1 %** | 100 % | 761 s | 0.63× |
+| R_11_5cp (5) | multicam (all keys) | 59.78 | 40 % | 39.3 % | 100 % | 1112 s | 0.43× |
+| R_11_5cp (5) | multicam, no stereo seed | 56.85 | 40 % | 37.8 % | 100 % | 1103 s | 0.43× |
+| R_11_5cp (5) | multicam, no keyframe change | 60.26 | 60 % | 39.7 % | 100 % | 1100 s | 0.43× |
+| R_11_5cp (5) | stereo seed only (2 m) | 62.78 | 40 % | 24.8 % | 100 % | 744 s | 0.64× |
+| R_11_5cp (5) | stereo seed only (10 m) | 53.46 | 20 % | 14.2 % | 100 % | 756 s | 0.63× |
+| R_12_10cp (10) | big window (baseline) | 28.85 | 10 % | 8.0 % | **65.7 %** | 1547 s | 0.66× |
+| R_12_10cp (10) | multicam (all keys) | 33.46 | 10 % | **10.2 %** | 65.4 % | 2199 s | 0.46× |
+| R_12_10cp (10) | multicam, no stereo seed | **34.19** | 10 % | 9.3 % | 64.7 % | 2192 s | 0.46× |
+| sequence_1_19 (14) | big window (baseline) | 17.16 | 7.1 % | 4.6 % | 30.0 % | 1484 s | 0.62× |
+| sequence_1_19 (14) | multicam (all keys) | **31.55** | 7.1 % | **5.0 %** | **57.0 %** | 2206 s | 0.42× |
+| sequence_1_19 (14) | multicam, no stereo seed | _running_ | | | | | |
+
+RT factor = sensor duration (frames / 20 Hz) / wall time on this 4-core host.
+
+Reading:
+
+- **The multicam config wins on the two longer sequences and loses on the
+  shortest.** Score +4.6 on R_12_10cp and +14.4 (×1.8) on sequence_1_19,
+  where pose recall within 5 m nearly doubles (30 % → 57 %): using cam1's
+  field of view mostly cuts long-range drift. On R_11_5cp (5 control points)
+  every variant scores at or below the baseline, and pGT R@1m drops
+  51 % → 39 %.
+- **The stereo seed alone hurts fine accuracy on R_11_5cp** (pGT R@1m
+  51 % → 25 %; 10 m default depth is worse still), but removing it from the
+  full multicam config does not help there either (56.85). On R_12_10cp the
+  multicam configs with and without the seed are within run-to-run noise of
+  each other.
+- **The all-camera keyframe rule makes no measurable difference** on R_11_5cp.
+- **Noise caveat.** One run per cell. R_11_5cp has only five control points,
+  so one point flipping in or out of the 1 m band moves Score by many points;
+  pGT recall (thousands of poses) is the steadier signal there.
+- **Score vs Stage 0.** These Scores are not comparable with the numbers in
+  [`lamaria_stage0.md`](lamaria_stage0.md): the trajectories reproduce
+  (sequence_1_19 baseline pGT R@1m/5m 4.6 % / 30.0 %, identical to Stage 0),
+  but the current evaluator scores the same sequence_1_19 baseline 17.16
+  instead of 27.09. Compare only within this table.
+- **Cost.** The multicam config is ~1.45× slower (about 2× the observations
+  per frame); on this 4-core host neither config is real time.
 
 ## Measuring on LaMAria
 

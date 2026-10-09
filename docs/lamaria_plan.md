@@ -116,8 +116,11 @@ before/after on training sequences.
    (`BASALT_INIT_GRAVITY_WINDOW_MS`, branch `exp/lamaria-moving-start-init`)
    changed seq_1_19 SE3 ATE only 19.304 → 19.244 m, and loosening
    `vio_init_pose_weight` 1e8 → 1e2 did nothing.
-4. **Use both cameras of the divergent Aria rig.** Status: **implemented,
-   awaiting LaMAria measurement** ([`lamaria_multicam.md`](lamaria_multicam.md)).
+4. **Use both cameras of the divergent Aria rig.** Status: **implemented and
+   measured on three training sequences (2026-10-09)** — Score 17.16 → 31.55
+   on sequence_1_19 and 28.85 → 33.46 on R_12_10cp, but 62.87 → 59.78 on
+   R_11_5cp, at ~1.45× the cost
+   ([`lamaria_multicam.md`](lamaria_multicam.md#measured-on-lamaria-training-sequences-2026-10-09)).
    The port is cam0-centric: it detects only in cam0, seeds the cam0→cam1
    stereo KLT at the same pixel (hundreds of pixels off on Aria's 75°-rotated
    pair, so stereo mostly fails), hosts every landmark in cam0 and counts only
