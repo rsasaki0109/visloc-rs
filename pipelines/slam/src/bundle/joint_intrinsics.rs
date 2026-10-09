@@ -424,9 +424,7 @@ impl BundleAdjustment {
         let (residual, j_pose, j_lm, j_k) = match tangential {
             None => (residual, j_pose, j_lm, j_k),
             Some((p1, p2)) => {
-                let Some((predicted, j_pi)) = self.camera.project_with_point_jacobian(&xc) else {
-                    return None;
-                };
+                let (predicted, j_pi) = self.camera.project_with_point_jacobian(&xc)?;
                 let residual = predicted - obs.xy;
                 let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
                 let j_lm: Matrix2x3<f64> = j_pi * r_mat;
