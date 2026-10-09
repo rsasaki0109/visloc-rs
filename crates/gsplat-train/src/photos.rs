@@ -345,48 +345,123 @@ pub fn build_photo_dataset(
             .collect()
     };
     let t0 = std::time::Instant::now();
+    // GPU matching binds one image group's descriptors as a single storage
+    // buffer. When all of them exceed the device's binding limit (about 2 GiB:
+    // ~1,000 images at 4,000 SIFT keypoints), split the images into blocks of
+    // at most half the limit and match each block pair from a bank holding
+    // just those two blocks.
     #[cfg(feature = "gpu")]
-    let gpu_match = gpu_sift.as_ref().and_then(|g| {
-        let ctx = g.context();
-        let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
-        visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
-            .ok()
-            .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
-    });
-    let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
-        #[cfg(feature = "gpu")]
-        if let Some((ctx, bank, m)) = &gpu_match {
-            return m.match_pairs(ctx, bank, pairs, Some(0.8), true);
+    let blocks: Vec<Vec<usize>> = {
+        let limit = gpu_sift
+            .as_ref()
+            .map(|g| g.context().limits.max_storage_buffer_binding_size as u64)
+            .unwrap_or(u64::MAX);
+        let bytes = |i: usize| -> u64 {
+            features[i]
+                .descriptors
+                .iter()
+                .map(|d| d.len() as u64 * 4)
+                .sum()
+        };
+        let total: u64 = (0..n).map(bytes).sum();
+        if total <= limit {
+            vec![(0..n).collect()]
+        } else {
+            let mut blocks = vec![Vec::new()];
+            let mut acc = 0u64;
+            for i in 0..n {
+                if acc + bytes(i) > limit / 2 && !blocks.last().expect("non-empty").is_empty() {
+                    blocks.push(Vec::new());
+                    acc = 0;
+                }
+                acc += bytes(i);
+                blocks.last_mut().expect("non-empty").push(i);
+            }
+            log(&format!(
+                "gpu matching: {:.2} GiB of descriptors over the {:.2} GiB binding limit, {} blocks",
+                total as f64 / (1u64 << 30) as f64,
+                limit as f64 / (1u64 << 30) as f64,
+                blocks.len()
+            ));
+            blocks
         }
-        pairs
-            .par_iter()
-            .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
-            .collect()
     };
+    #[cfg(not(feature = "gpu"))]
+    let blocks: Vec<Vec<usize>> = vec![(0..n).collect()];
+    let mut block_of = vec![0usize; n];
+    for (b, imgs) in blocks.iter().enumerate() {
+        for &i in imgs {
+            block_of[i] = b;
+        }
+    }
+    // Candidate pairs grouped by block pair, in a deterministic order.
+    let mut groups: std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    for &(i, j) in &candidates {
+        let (bi, bj) = (block_of[i], block_of[j]);
+        groups
+            .entry((bi.min(bj), bi.max(bj)))
+            .or_default()
+            .push((i, j));
+    }
     let mut pairwise: Vec<PairwiseMatches> = Vec::new();
-    for chunk in candidates.chunks(1024) {
-        let dms = match_pairs(chunk);
-        pairwise.par_extend(chunk.par_iter().zip(dms.into_par_iter()).filter_map(
-            |(&(i, j), dm)| {
-                verify_pair(
-                    &camera,
-                    &features[i],
-                    &features[j],
-                    &dm,
-                    cfg.min_matches,
-                    true,
-                    false,
-                )
-                .map(|matches| PairwiseMatches {
-                    image_i: i,
-                    image_j: j,
-                    matches,
-                    two_view_config: None,
-                    essential_matches: None,
-                    essential_matrix: None,
-                })
-            },
-        ));
+    for ((bi, bj), group) in &groups {
+        // Images of this block pair, and their index in the uploaded bank.
+        let mut imgs: Vec<usize> = blocks[*bi].clone();
+        if bj != bi {
+            imgs.extend_from_slice(&blocks[*bj]);
+        }
+        let mut local = vec![usize::MAX; n];
+        for (k, &i) in imgs.iter().enumerate() {
+            local[i] = k;
+        }
+        #[cfg(feature = "gpu")]
+        let gpu_match = gpu_sift.as_ref().and_then(|g| {
+            let ctx = g.context();
+            let sets: Vec<&[Vec<f32>]> = imgs
+                .iter()
+                .map(|&i| features[i].descriptors.as_slice())
+                .collect();
+            visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
+                .ok()
+                .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
+        });
+        let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
+            #[cfg(feature = "gpu")]
+            if let Some((ctx, bank, m)) = &gpu_match {
+                let lp: Vec<(usize, usize)> =
+                    pairs.iter().map(|&(i, j)| (local[i], local[j])).collect();
+                return m.match_pairs(ctx, bank, &lp, Some(0.8), true);
+            }
+            pairs
+                .par_iter()
+                .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
+                .collect()
+        };
+        for chunk in group.chunks(1024) {
+            let dms = match_pairs(chunk);
+            pairwise.par_extend(chunk.par_iter().zip(dms.into_par_iter()).filter_map(
+                |(&(i, j), dm)| {
+                    verify_pair(
+                        &camera,
+                        &features[i],
+                        &features[j],
+                        &dm,
+                        cfg.min_matches,
+                        true,
+                        false,
+                    )
+                    .map(|matches| PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                        two_view_config: None,
+                        essential_matches: None,
+                        essential_matrix: None,
+                    })
+                },
+            ));
+        }
     }
     log(&format!(
         "{} verified of {} candidate pairs ({:.1} s)",
