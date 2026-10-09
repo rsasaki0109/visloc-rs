@@ -164,13 +164,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--repo', default='https://github.com/rsasaki0109/visloc-rs.git')
     ap.add_argument('--branch', default='main')
-    ap.add_argument('--dataset', choices=['tnt', 'mill19'], default='tnt')
+    ap.add_argument('--dataset', choices=['tnt', 'mill19', 'h3dgs'], default='tnt')
     ap.add_argument('--scene', default='Courthouse',
                     help='tnt: zip name in hf.co/datasets/hongliu6/tanks_and_temples; '
-                         'mill19: building or rubble')
+                         'mill19: building or rubble; h3dgs: small_city')
     ap.add_argument('--frame-stride', type=int, default=2)
     ap.add_argument('--max-size', type=int, default=1280)
     ap.add_argument('--exhaustive-max', type=int, default=600)
+    ap.add_argument('--window', type=int, default=20)
+    ap.add_argument('--retrieval', type=int, default=0)
     ap.add_argument('--steps', type=int, default=30000)
     ap.add_argument('--normal-weight', type=float, default=0.005)
     ap.add_argument('--run', default=None, help='run dir (default /content/runs/<scene>)')
@@ -218,6 +220,34 @@ def main():
             for f in frames[::args.frame_stride]:
                 shutil.move(f, images)
             shutil.rmtree(f'/content/data/{args.scene}')
+    elif args.dataset == 'h3dgs':
+        # Hierarchical 3DGS SmallCity: a city block filmed from a bicycle
+        # helmet with 6 GoPros in 4 passes. The release only ships the
+        # photos undistorted to its shared pinhole camera (people and cars
+        # blacked out); take that camera's focal length as the prior.
+        name = args.scene.lower()
+        images = f'/content/data/{name}_stride{args.frame_stride}'
+        label = 'Hierarchical 3DGS SmallCity' if name == 'small_city' else f'Hierarchical 3DGS {name}'
+        root = f'/content/data/{name}'
+        if not os.path.isdir(f'{root}/camera_calibration/rectified/images'):
+            os.makedirs('/content/data', exist_ok=True)
+            z = f'/content/data/{name}.zip'
+            if not os.path.exists(z):
+                sh(f'wget -q -O {z} https://repo-sam.inria.fr/fungraph/hierarchical-3d-gaussians/'
+                   f'datasets/full_scenes/{name}.zip')
+            sh(f'cd /content/data && unzip -q -o {z} "{name}/camera_calibration/rectified/images/*" '
+               f'"{name}/camera_calibration/aligned/sparse/0/cameras.bin"')
+        if not os.path.isdir(images) or not os.listdir(images):
+            frames = sorted(glob.glob(f'{root}/camera_calibration/rectified/images/*'))
+            os.makedirs(images, exist_ok=True)
+            for f in frames[::args.frame_stride]:
+                os.link(f, f'{images}/{os.path.basename(f)}')
+        import struct
+        b = open(f'{root}/camera_calibration/aligned/sparse/0/cameras.bin', 'rb').read()
+        _, model, w, h = struct.unpack_from('<iiQQ', b, 8)
+        fx = struct.unpack_from('<d', b, 32)[0]
+        print(f'release camera: model {model} {w}x{h} fx {fx:.1f}', flush=True)
+        focal_flag = f'--focal {fx * min(1.0, args.max_size / max(w, h)):.2f}'
     else:
         # Mill-19 (Mega-NeRF): drone surveys, one camera; train + val photos.
         name = args.scene.lower()
@@ -259,7 +289,7 @@ def main():
         t = time.time()
         sh(f'{bin_dir}/gsplat_photos --images {images} --out {run} --max-size {args.max_size} '
            f'--steps {args.steps} --normal-weight {args.normal_weight} '
-           f'--exhaustive-max {args.exhaustive_max} {focal_flag} 2>&1 '
+           f'--exhaustive-max {args.exhaustive_max} --window {args.window} --retrieval {args.retrieval} {focal_flag} 2>&1 '
            f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local|TIMING|REGISTER)" '
            f'| tee {run}/gsplat_photos.log')
         print(f'gsplat_photos {time.time() - t:.0f}s', flush=True)
