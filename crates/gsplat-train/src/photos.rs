@@ -48,6 +48,11 @@ pub struct PhotoSfmConfig {
     pub gpu: bool,
     /// Refine the shared intrinsics in a final global bundle adjustment.
     pub refine_intrinsics: bool,
+    /// Past `exhaustive_max`, also match every image with its `retrieval_k`
+    /// most similar images by VLAD appearance (0: window only). Connects
+    /// revisits that are far apart in file order, e.g. several passes
+    /// through the same streets.
+    pub retrieval_k: usize,
     /// Extra SIFT `key=value` settings (see `euroc::apply_sift_override`),
     /// e.g. `affine=1` / `domain_size_pooling=1` for wide-baseline captures.
     pub sift_overrides: Vec<String>,
@@ -65,6 +70,7 @@ impl Default for PhotoSfmConfig {
             eval_every: 8,
             gpu: true,
             refine_intrinsics: true,
+            retrieval_k: 0,
             sift_overrides: Vec::new(),
         }
     }
@@ -88,6 +94,49 @@ pub struct PhotoSfmReport {
 }
 
 const IMAGE_EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "JPG"];
+
+/// Image pairs `(i, j)`, `i < j`, joining every image to its `k` most similar
+/// images by the cosine similarity of VLAD descriptors over a 64-word
+/// vocabulary built from a subsample of all descriptors.
+fn retrieval_pairs(features: &[FeatureSet], k: usize) -> Vec<(usize, usize)> {
+    use visloc_vision::place_recognition::{vlad, Vocabulary};
+    let n = features.len();
+    // About 100k descriptors for the vocabulary, evenly from every image.
+    let total: usize = features.iter().map(|f| f.descriptors.len()).sum();
+    let step = (total / 100_000).max(1);
+    let sample: Vec<&[f32]> = features
+        .iter()
+        .flat_map(|f| f.descriptors.iter().step_by(step).map(Vec::as_slice))
+        .collect();
+    let Some(vocab) = Vocabulary::build(&sample, 64, 10, 7) else {
+        return Vec::new();
+    };
+    let global: Vec<Vec<f32>> = features
+        .par_iter()
+        .map(|f| vlad(&f.descriptors, &vocab))
+        .collect();
+    let mut pairs: Vec<(usize, usize)> = (0..n)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let mut sims: Vec<(f32, usize)> = (0..n)
+                .filter(|&j| j != i)
+                .map(|j| {
+                    let s: f32 = global[i].iter().zip(&global[j]).map(|(a, b)| a * b).sum();
+                    (s, j)
+                })
+                .collect();
+            let kk = k.min(sims.len());
+            if kk > 0 {
+                sims.select_nth_unstable_by(kk - 1, |a, b| b.0.total_cmp(&a.0));
+            }
+            sims.truncate(kk);
+            sims.into_iter().map(move |(_, j)| (i.min(j), i.max(j)))
+        })
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
 
 /// EXIF `FocalLengthIn35mmFilm` of a JPEG, if present.
 pub fn exif_focal_35mm(bytes: &[u8]) -> Option<f64> {
@@ -364,9 +413,23 @@ pub fn build_photo_dataset(
             .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
             .collect()
     } else {
-        (0..n)
+        let mut pairs: std::collections::BTreeSet<(usize, usize)> = (0..n)
             .flat_map(|i| ((i + 1)..(i + 1 + cfg.window).min(n)).map(move |j| (i, j)))
-            .collect()
+            .collect();
+        if cfg.retrieval_k > 0 {
+            let t = std::time::Instant::now();
+            let extra = retrieval_pairs(&features, cfg.retrieval_k);
+            let before = pairs.len();
+            pairs.extend(extra);
+            log(&format!(
+                "retrieval: VLAD top-{} added {} pairs to {} window pairs ({:.1} s)",
+                cfg.retrieval_k,
+                pairs.len() - before,
+                before,
+                t.elapsed().as_secs_f64()
+            ));
+        }
+        pairs.into_iter().collect()
     };
     let t0 = std::time::Instant::now();
     // GPU matching binds one image group's descriptors as a single storage
