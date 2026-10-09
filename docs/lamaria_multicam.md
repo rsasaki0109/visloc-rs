@@ -1,9 +1,11 @@
 # Multi-camera VIO for divergent rigs (LaMAria / Project Aria)
 
-**Status: implemented, opt-in, verified on synthetic data only. No LaMAria
-number has been measured yet** (the machine that did this work cannot reach
-the dataset). With the new keys absent, the Basalt port is bit-for-bit
-unchanged.
+**Status: implemented, opt-in, measured on three LaMAria training sequences
+(2026-10-09):** it raises Score on the two longer sequences (sequence_1_19
+17.16 → 31.55, R_12_10cp 28.85 → 33.46) and lowers it on the shortest
+(R_11_5cp 62.87 → 59.78); see
+[the measured table](#measured-on-lamaria-training-sequences-2026-10-09).
+With the new keys absent, the Basalt port is bit-for-bit unchanged.
 
 ## Diagnosis: the port is cam0-centric
 
@@ -212,6 +214,142 @@ Unit tests: `stream::tests::reprojected_stereo_seed_matches_independent_pinhole_
 `config::tests::multi_camera_keys_default_off_and_parse`,
 `config::tests::lamaria_multicam_variant_parses`,
 `adapter::tests::imu_seed_rotation_is_settable_from_a_config_file`.
+
+## Measured on LaMAria training sequences (2026-10-09)
+
+Run on the official LaMAria ASL training data with the unmodified `cvg/lamaria`
+evaluator (commit `238b6ca`, 2026-10-07): `evaluate_wrt_control_points`
+(Score, CP@1m) and `evaluate_wrt_pgt` (pose recall at 1 m / 5 m),
+`--corresponding_sensor imu`. Every row uses the same release binary (AVX2/FMA,
+`basalt-lm-workspace-reuse`), the variant-A calibration, `--pipeline
+--threads 4 --no-trace --no-marg-data`, VIO only (no mapper), on a 4-core
+cloud container. One run per cell.
+
+| Sequence (control points) | Config | Score | CP@1m | pGT R@1m | pGT R@5m | Wall | RT factor |
+|---|---|---:|---:|---:|---:|---:|---:|
+| R_11_5cp (5) | big window (baseline) | **62.87** | 60 % | **51.1 %** | 100 % | 761 s | 0.63× |
+| R_11_5cp (5) | multicam (all keys) | 59.78 | 40 % | 39.3 % | 100 % | 1112 s | 0.43× |
+| R_11_5cp (5) | multicam, no stereo seed | 56.85 | 40 % | 37.8 % | 100 % | 1103 s | 0.43× |
+| R_11_5cp (5) | multicam, no keyframe change | 60.26 | 60 % | 39.7 % | 100 % | 1100 s | 0.43× |
+| R_11_5cp (5) | stereo seed only (2 m) | 62.78 | 40 % | 24.8 % | 100 % | 744 s | 0.64× |
+| R_11_5cp (5) | stereo seed only (10 m) | 53.46 | 20 % | 14.2 % | 100 % | 756 s | 0.63× |
+| R_12_10cp (10) | big window (baseline) | 28.85 | 10 % | 8.0 % | **65.7 %** | 1547 s | 0.66× |
+| R_12_10cp (10) | multicam (all keys) | 33.46 | 10 % | **10.2 %** | 65.4 % | 2199 s | 0.46× |
+| R_12_10cp (10) | multicam, no stereo seed | **34.19** | 10 % | 9.3 % | 64.7 % | 2192 s | 0.46× |
+| sequence_1_19 (14) | big window (baseline) | 17.16 | 7.1 % | 4.6 % | 30.0 % | 1484 s | 0.62× |
+| sequence_1_19 (14) | multicam (all keys) | **31.55** | 7.1 % | **5.0 %** | **57.0 %** | 2206 s | 0.42× |
+| sequence_1_19 (14) | multicam, no stereo seed | 31.46 | 7.1 % | 5.1 % | 56.9 % | 2232 s | 0.41× |
+
+RT factor = sensor duration (frames / 20 Hz) / wall time on this 4-core host.
+
+Reading:
+
+- **The multicam config wins on the two longer sequences and loses on the
+  shortest.** Score +4.6 on R_12_10cp and +14.4 (×1.8) on sequence_1_19,
+  where pose recall within 5 m nearly doubles (30 % → 57 %): using cam1's
+  field of view mostly cuts long-range drift. On R_11_5cp (5 control points)
+  every variant scores at or below the baseline, and pGT R@1m drops
+  51 % → 39 %.
+- **The stereo seed alone hurts fine accuracy on R_11_5cp** (pGT R@1m
+  51 % → 25 %; 10 m default depth is worse still), but removing it from the
+  full multicam config does not help there either (56.85). On R_12_10cp the
+  multicam configs with and without the seed are within run-to-run noise of
+  each other.
+- **The all-camera keyframe rule makes no measurable difference** on R_11_5cp.
+- **Noise caveat.** One run per cell. R_11_5cp has only five control points,
+  so one point flipping in or out of the 1 m band moves Score by many points;
+  pGT recall (thousands of poses) is the steadier signal there.
+- **Score vs Stage 0.** These Scores are not comparable with the numbers in
+  [`lamaria_stage0.md`](lamaria_stage0.md): the trajectories reproduce
+  (sequence_1_19 baseline pGT R@1m/5m 4.6 % / 30.0 %, identical to Stage 0),
+  but the current evaluator scores the same sequence_1_19 baseline 17.16
+  instead of 27.09. Compare only within this table.
+- **Cost.** The multicam config is ~1.45× slower (about 2× the observations
+  per frame); on this 4-core host neither config is real time.
+
+## Gyro bias random walk: the lever that closes the gap to OpenVINS (2026-10-09)
+
+The LaMAria demo archive ships an OpenVINS estimate for sequence_1_19. Scored
+with the same evaluator it reaches **49.86** (CP@1m 28.6 %, pGT R@5m 99.7 %),
+well above the multicam result above. Comparing positions against the
+pseudo-GT (Sim(3)-aligned 60 s windows, `yaw range` = spread of the best local
+yaw correction over the run) showed why: our trajectories rotate steadily in
+yaw (multicam 14.2°, cam0-only 25.1° over 15 min) while OpenVINS stays within
+8.4°, and the drift has the same shape in every config — a systematic error,
+not noise.
+
+Sweeping only `gyro_bias_std` in the variant-A calibration (Basalt's default
+`1e-4`; Aria's factory value is `2.44e-4`) with the multicam config:
+
+| sequence_1_19, multicam | Score | CP@1m | pGT R@1m | pGT R@5m | Yaw range | Sim(3) ATE |
+|---|---:|---:|---:|---:|---:|---:|
+| `gyro_bias_std` 5e-4 | 20.35 | 7.1 % | 4.7 % | 38.6 % | 19.9° | — |
+| 2.44e-4 (Aria factory) | 24.70 | 7.1 % | 4.8 % | 45.0 % | 17.7° | — |
+| 1e-4 (variant A, current) | 31.55 | 7.1 % | 5.0 % | 57.0 % | 14.2° | 4.72 m |
+| 5e-5 | 37.58 | 14.3 % | 11.2 % | 88.3 % | 10.8° | 3.72 m |
+| 2e-5 | 43.90 | 14.3 % | 15.5 % | 94.0 % | 7.6° | 2.95 m |
+| 1e-5 | 45.66 | 28.6 % | 20.3 % | 98.4 % | 6.4° | 2.67 m |
+| 5e-6 | 46.89 | 28.6 % | 21.9 % | **100 %** | 5.9° | 2.51 m |
+| 2e-6 | 49.00 | 28.6 % | 23.0 % | **100 %** | 5.4° | 2.31 m |
+| 1e-6 | **50.04** | 28.6 % | 23.8 % | **100 %** | **5.3°** | **2.23 m** |
+| OpenVINS (LaMAria demo estimate) | 49.86 | 28.6 % | **24.2 %** | 99.7 % | 8.4° | 2.32 m |
+
+Held-out check on R_11_5cp (5e-6): Score **63.71** (big-window baseline
+62.87, multicam 59.78), CP@1m 60 %, pGT R@1m 43.9 %, Sim(3) ATE 1.08 m
+(baseline 1.26 m) — the lever also fixes the one sequence where multicam lost.
+At 2e-6 R_11_5cp scores 63.19 (Sim(3) ATE 1.09 m), so it is flat across 2e-6–5e-6.
+
+Held-out check on R_12_10cp (10 control points):
+
+| R_12_10cp | Score | CP@1m | pGT R@1m | pGT R@5m | Sim(3) ATE |
+|---|---:|---:|---:|---:|---:|
+| big window, `gyro_bias_std` 1e-4 (baseline) | 28.85 | 10 % | 8.0 % | 65.7 % | 4.60 m |
+| multicam, 1e-4 | 33.46 | 10 % | 10.2 % | 65.4 % | 7.53 m |
+| multicam, 2e-6 | 39.62 | 10 % | 11.4 % | 81.6 % | 5.02 m |
+| multicam, 1e-6 | **40.11** | 10 % | **12.0 %** | **82.4 %** | 4.91 m |
+
+So on all three training sequences multicam + a tight gyro bias beats the
+big-window baseline: sequence_1_19 17.16 → 50.04, R_12_10cp 28.85 → 40.11,
+R_11_5cp 62.87 → 63.19–63.71. 1e-6 edges out 2e-6 on both sequences where
+both were run. `scripts/run_lamaria_test_submission.py` now defaults to the
+multicam config with `--gyro-bias-std 1e-6`.
+
+At 1e-6 sequence_1_19 now matches OpenVINS on Score (50.04 vs 49.86, a gap
+within run-to-run noise) and beats it on yaw drift (5.3° vs 8.4°), Sim(3) ATE
+(2.23 m vs 2.32 m) and pGT R@5m (100 % vs 99.7 %); OpenVINS keeps a slight
+edge on pGT R@1m (24.2 % vs 23.8 %).
+
+Reading: letting the gyro bias wander lets the window explain systematic
+rotation error as bias and integrate it into yaw. Tightening the bias random
+walk well below Basalt's default pins the bias and roughly halves the yaw
+drift. This is a calibration-noise setting, not new code. It was tuned on
+sequence_1_19; R_11_5cp is the first held-out check, R_12_10cp is next.
+
+## README animation
+
+`docs/assets/hero_vislam_lamaria.gif` is rendered from the measured runs
+above (sequence_1_19): visloc-rs = multicam config + `gyro_bias_std` 1e-6
+(Score 50.04), OpenVINS = the estimate in the LaMAria demo archive (49.86),
+Basalt upstream configuration = `configs/basalt/variants/lamaria/euroc_config.json`
+(3-state / 7-keyframe window, cam0-centric defaults) with the variant-A
+calibration, run through this port (Score 7.72, Sim(3) ATE 13.8 m, yaw spread
+40.6°). All three are Sim(3)-aligned to the pseudo-GT for display, as the
+evaluator does.
+
+```bash
+basalt_euroc_vio_demo --euroc-dir sequence_1_19 \
+  --calibration sequence_1_19_calib_gb001.json \
+  --config configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json \
+  --out-dir out/gifbest --pipeline --no-trace --no-marg-data \
+  --dump-tracks gif_tracks.csv
+python scripts/render_vislam_gif.py --images sequence_1_19 --tracks gif_tracks.csv \
+  --gt sequence_1_19_pgt.txt \
+  --traj "visloc-rs=out/gifbest/sequence_1_19.txt@50.0" \
+  --traj "OpenVINS=demo/estimate/sequence_1_19.txt@49.9" \
+  --traj "Basalt (upstream config)=out/basalt_default/sequence_1_19.txt@7.7" \
+  --title "LaMAria sequence_1_19 · Project Aria · 1.0 km" \
+  --out docs/assets/hero_vislam_lamaria.gif
+```
 
 ## Measuring on LaMAria
 
