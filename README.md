@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling the south-building reconstruction from a viewpoint no input photo has: the sparse SfM point cloud and recovered camera frustums pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, then dissolve into the extracted mesh." width="640"><br>
-  <sub>128 raw photos &rarr; camera poses &rarr; Gaussian splat &rarr; mesh, one command, no COLMAP or Python, orbited from a viewpoint none of the input photos have. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
+  <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling the Tanks and Temples Courthouse reconstruction from high above the town square, a viewpoint no input photo has: the sparse SfM point cloud and the 550 recovered camera frustums ringing the building pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, then dissolve into the extracted mesh." width="640"><br>
+  <sub>553 raw video frames of a whole courthouse block &rarr; camera poses &rarr; Gaussian splat &rarr; mesh, one command, no COLMAP or Python, 34 min on a Colab L4, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
 
 ## In a nutshell
@@ -224,7 +224,7 @@ cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat
   <img src="docs/assets/photos_to_mesh.gif" alt="south-building: each raw input photo next to the trained Gaussian splat and the extracted mesh rendered from the same recovered pose" width="900">
 </p>
 
-The GIF above is the 128 raw south-building JPGs, each next to the trained Gaussian splat and the extracted mesh rendered from that photo's own recovered pose. Every image registered, focal refined from EXIF 796 px to 847.0 px (COLMAP: 847.2), held-out PSNR 22.77 at 30k steps, 37 min end to end ([GIF script](scripts/make_photos_demo_gif.py)). The orbiting GIF at the top of this page is the same run, viewed from a camera path none of the input photos have; its generator is [`scripts/make_readme_hero.py`](scripts/make_readme_hero.py).
+The GIF above is the 128 raw south-building JPGs, each next to the trained Gaussian splat and the extracted mesh rendered from that photo's own recovered pose. Every image registered, focal refined from EXIF 796 px to 847.0 px (COLMAP: 847.2), held-out PSNR 22.77 at 30k steps, 37 min end to end ([GIF script](scripts/make_photos_demo_gif.py)). The orbiting GIF at the top of this page is a larger scene: 553 frames (every 2nd) of the Tanks and Temples Courthouse capture, a walk around a whole courthouse block. 550 / 553 registered with 106,888 points, focal refined from 746.7 px to 798.3 px, held-out PSNR 20.67 at 30k steps, 1.47M-triangle mesh, 34 min end to end on a Google Colab L4 ([log](docs/media/hero/courthouse_gsplat_photos.log)). It is viewed from a camera path none of the input photos have; [`scripts/colab/hero_pipeline.py`](scripts/colab/hero_pipeline.py) reproduces it on a Colab GPU (from the terminal with the Colab CLI, or via [the notebook](scripts/colab/readme_hero_courthouse.ipynb)) and [`scripts/make_readme_hero.py`](scripts/make_readme_hero.py) renders the orbit.
 
 To reproduce the run and the GIF, use the raw `images/` of COLMAP's
 south-building dataset. `gsplat_photos` prints the focal refinement and

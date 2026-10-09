@@ -6,6 +6,9 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **README hero splat filter read the wrong PLY columns.** Its
+  large-and-transparent rule used SH coefficients as opacity and scale; the
+  columns are now looked up by name.
 - **`config.optical_flow_imu_seed_rotation` can be set from a Basalt config
   JSON.** The adapter read the key, but `BasaltConfig::from_json` rejected it
   as unknown, so only code could enable it.
@@ -25,6 +28,17 @@ All notable changes to `visloc-rs` will be documented here.
   decline distorted cameras and fall back to the regular solver.
 
 ### Added
+
+- **README hero on a larger scene: Tanks and Temples Courthouse.** 553
+  frames of a whole courthouse block, 550 registered, held-out PSNR 20.67,
+  34 min end to end on a Google Colab L4 with `gsplat_photos`.
+  `scripts/colab/hero_pipeline.py` runs the whole job on a Colab GPU (from
+  the terminal with the Colab CLI, or from
+  `scripts/colab/readme_hero_courthouse.ipynb`), adding the NVIDIA Vulkan
+  user-space driver when the VM lacks it. `scripts/make_readme_hero.py` is
+  now scene-agnostic (intrinsics from `cameras.txt`, margins relative to the
+  camera ring, orbit / filter flags, Linux + EGL), and `gsplat_photos`
+  gains `--exhaustive-max` / `--window`.
 
 - **Multi-camera Basalt VIO for divergent rigs (opt-in, aimed at LaMAria /
   Project Aria).** The VIO used only cam0 for new keypoints, landmark hosting

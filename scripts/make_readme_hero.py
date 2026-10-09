@@ -44,16 +44,18 @@ scripts/colab/readme_hero_courthouse.ipynb runs every step below.
     cargo build --release -p visloc-gsplat-train --features gpu,euroc \
         --example gsplat_photos --example gsplat_eval
     target/release/examples/gsplat_photos --images <Courthouse every 2nd frame> \
-        --out runs/courthouse --max-size 1280 --steps 30000 --normal-weight 0.005
+        --out runs/courthouse --max-size 1280 --steps 30000 --normal-weight 0.005 \
+        --exhaustive-max 600
     python scripts/make_readme_hero.py --src runs/courthouse \
         --work runs/courthouse/hero --scene-label "Tanks and Temples Courthouse" \
         --elev 40 --radius-mult 2.6 --target-height 0.25 --zoom 1.15 \
+        --filter-dist-mult 4 --filter-isolated 6 --point-size 3.5 \
         --out docs/assets/hero_reconstruction.gif
 
 The previous south-building hero was made the same way from
 `gsplat_photos --images <south-building>/images --out runs/sb --max-size 1024
 --steps 30000 --normal-weight 0.005` with `--src runs/sb --elev 18
---radius-mult 1.35 --width 560`.
+--radius-mult 1.35 --point-size 8 --width 560`.
 """
 import argparse
 import os
@@ -427,7 +429,7 @@ def ply_float_columns(header):
 
 
 def filter_scene_ply(src_ply, out_ply, pos_pts, center, up, dist_mult, up_margin,
-                      max_scale, large_scale, low_opacity_raw):
+                      max_scale, large_scale, low_opacity_raw, isolated_mult=3.0):
     """Keep a gaussian only if it is close to some real SfM point (kills the
     sky/ground floater smears an elevated, never-photographed viewpoint would
     otherwise expose), is not above the reconstructed roofline, is not huge
@@ -447,7 +449,7 @@ def filter_scene_ply(src_ply, out_ply, pos_pts, center, up, dist_mult, up_margin
     tree = cKDTree(pos_pts)
     d_knn, _ = tree.query(pos_pts, k=9, workers=-1)
     spread = d_knn[:, 1:].mean(1)
-    support = pos_pts[spread < 3.0 * np.median(spread)]
+    support = pos_pts[spread < isolated_mult * np.median(spread)]
     tree = cKDTree(support)
     med_spacing = np.median(d_knn[:, 1])
     dist_thr = dist_mult * med_spacing
@@ -508,6 +510,12 @@ def main():
     ap.add_argument('--target-height', type=float, default=0.5,
                     help='look-at height as a fraction between the low and high SfM point percentiles')
     ap.add_argument('--point-size', type=float, default=8.0, help='SfM point core size (px)')
+    ap.add_argument('--filter-dist-mult', type=float, default=FILTER_DIST_MULT,
+                    help='keep gaussians within this x the SfM median point spacing of a support point')
+    ap.add_argument('--filter-isolated', type=float, default=3.0,
+                    help='SfM points whose 8-NN spread exceeds this x the median are not support')
+    ap.add_argument('--filter-max-scale', type=float, default=FILTER_MAX_SCALE_FRAC,
+                    help='drop gaussians whose largest std exceeds this x the ring radius')
     ap.add_argument('--max-points', type=int, default=400000,
                     help='randomly subsample the SfM cloud above this many points (phase 1 only)')
     ap.add_argument('--skip-render', action='store_true', help='reuse frames already in --work')
@@ -653,9 +661,9 @@ def main():
         # Rust wgpu renderer, frames P1_END..P2_END+XF2-1 ----
         filtered_ply = f'{work}/scene_filtered.ply'
         kept, total, dist_thr = filter_scene_ply(f'{src}/scene.ply', filtered_ply, pos_pts, center, up,
-                                                  FILTER_DIST_MULT, UP_MARGIN_FRAC * L,
-                                                  FILTER_MAX_SCALE_FRAC * L, FILTER_LARGE_SCALE_FRAC * L,
-                                                  FILTER_LOW_OPACITY_RAW)
+                                                  args.filter_dist_mult, UP_MARGIN_FRAC * L,
+                                                  args.filter_max_scale * L, FILTER_LARGE_SCALE_FRAC * L,
+                                                  FILTER_LOW_OPACITY_RAW, args.filter_isolated)
         print(f'splat filter: kept {kept}/{total} gaussians (dist_thr={dist_thr:.4f})', flush=True)
 
         splat_dir = f'{work}/splat_poses'

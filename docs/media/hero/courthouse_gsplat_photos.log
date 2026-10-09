@@ -1,0 +1,43 @@
+553 images at 1280x720 (others dropped: 0)
+focal 746.7 px (EXIF 35 mm)
+sift: mean 4000 keypoints (12.8 s)
+16917 verified of 152628 candidate pairs (226.3 s)
+SUMMARY path_a_attempts=606 path_a_registered=562 path_b_attempts=0 path_b_registered=0 path_b_rejected_lt6_corrs=0
+colmap-port: 3 model(s), sizes [544, 22, 2]
+sfm: 550/553 registered, 106888 points, 0.865 px, focal 798.3 px (652.7 s)
+sfm done in 901.6s: 550/553 registered, focal 746.7 -> 798.3 px (EXIF 35 mm), 106888 points
+step   1000  l1 0.0262  gaussians 123770  (23s)
+step   2000  l1 0.0133  gaussians 148903  (36s)
+step   3000  l1 0.0103  gaussians 182002  (49s)
+step   4000  l1 0.0094  gaussians 223875  (64s)
+step   5000  l1 0.0087  gaussians 273791  (80s)
+step   6000  l1 0.0081  gaussians 331316  (98s)
+step   7000  l1 0.0076  gaussians 397670  (118s)
+step   8000  l1 0.0076  gaussians 471937  (143s)
+step   9000  l1 0.0070  gaussians 552624  (171s)
+step  10000  l1 0.0067  gaussians 639981  (201s)
+step  11000  l1 0.0065  gaussians 735071  (233s)
+step  12000  l1 0.0064  gaussians 839335  (267s)
+step  13000  l1 0.0059  gaussians 948103  (304s)
+step  14000  l1 0.0059  gaussians 1061159  (344s)
+step  15000  l1 0.0057  gaussians 1158920  (386s)
+step  16000  l1 0.0051  gaussians 1158920  (429s)
+step  17000  l1 0.0047  gaussians 1158920  (470s)
+step  18000  l1 0.0046  gaussians 1158920  (511s)
+step  19000  l1 0.0044  gaussians 1158920  (552s)
+step  20000  l1 0.0040  gaussians 1158920  (592s)
+step  21000  l1 0.0040  gaussians 1158920  (631s)
+step  22000  l1 0.0039  gaussians 1158920  (670s)
+step  23000  l1 0.0037  gaussians 1158920  (708s)
+step  24000  l1 0.0036  gaussians 1158920  (746s)
+step  25000  l1 0.0035  gaussians 1158920  (784s)
+step  26000  l1 0.0036  gaussians 1158920  (821s)
+step  27000  l1 0.0033  gaussians 1158920  (857s)
+step  28000  l1 0.0034  gaussians 1158920  (893s)
+step  29000  l1 0.0034  gaussians 1158920  (929s)
+step  30000  l1 0.0031  gaussians 1158920  (965s)
+trained 30000 steps in 966.8s; held-out psnr 20.67 over 69 views
+wrote /content/runs/courthouse/scene.ply
+mesh: 550 views fused in 145.3 s (voxel 0.0145, 223138 blocks), 3423222 -> 1468593 triangles
+wrote /content/runs/courthouse/mesh.ply
+total 2019.3s

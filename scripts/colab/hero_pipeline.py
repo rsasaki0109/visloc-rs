@@ -158,7 +158,8 @@ def main():
     ap.add_argument('--normal-weight', type=float, default=0.005)
     ap.add_argument('--run', default=None, help='run dir (default /content/runs/<scene>)')
     ap.add_argument('--hero-flags',
-                    default='--elev 40 --radius-mult 2.6 --target-height 0.25 --zoom 1.15 --width 640')
+                    default=('--elev 40 --radius-mult 2.6 --target-height 0.25 --zoom 1.15 --width 640 '
+                             '--filter-dist-mult 4 --filter-isolated 6 --point-size 3.5'))
     args = ap.parse_args()
 
     t_all = time.time()
@@ -206,7 +207,7 @@ def main():
         sh(f'{bin_dir}/gsplat_photos --images {images} --out {run} --max-size {args.max_size} '
            f'--steps {args.steps} --normal-weight {args.normal_weight} '
            f'--exhaustive-max {args.exhaustive_max} 2>&1 '
-           f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local)" '
+           f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local|TIMING|REGISTER)" '
            f'| tee {run}/gsplat_photos.log')
         print(f'gsplat_photos {time.time() - t:.0f}s', flush=True)
 
