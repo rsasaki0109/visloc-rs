@@ -828,7 +828,7 @@ fn triangulate_in_front(
         a[(2, column)] = curr.x * p_curr[(2, column)] - p_curr[(0, column)];
         a[(3, column)] = curr.y * p_curr[(2, column)] - p_curr[(1, column)];
     }
-    let svd = a.try_svd(true, true, f64::EPSILON * 5.0, 10_000)?;
+    let svd = a.try_svd(false, true, f64::EPSILON * 5.0, 10_000)?;
     let v_t = svd.v_t?;
     let solution = v_t.row(3);
     let w = solution[3];
@@ -844,10 +844,12 @@ fn triangulate_in_front(
 }
 
 /// Whether some decomposition of `essential` puts *every* correspondence in
-/// front of both cameras — exactly `recover_relative_pose_with_options(..,
-/// all indices, CheiralityOptions::default())` returning `best_score ==
-/// len` (the default options have no angle, ambiguity or depth-fraction
-/// gate), but stopping each candidate at its first failing point.
+/// front of both cameras, stopping each candidate pose at its first failing
+/// point. Called on every minimal-sample hypothesis of the five-point
+/// RANSAC, so it tests depths in closed form ([`depths_positive`]) rather
+/// than by the DLT triangulation of `recover_relative_pose_with_options`
+/// (one 4x4 SVD per point, most of the verification time). The two agree
+/// except for points within rounding of zero depth.
 fn all_in_front_for_some_pose(
     essential: &Matrix3<f64>,
     correspondences: &[TwoViewCorrespondence],
@@ -884,17 +886,42 @@ fn all_in_front_for_some_pose(
     let Some(points) = points else {
         return false;
     };
-    let p_prev = Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    let rays: Vec<(Vector3<f64>, Vector3<f64>)> = points
+        .iter()
+        .map(|(p, c)| {
+            (
+                Vector3::new(p.x, p.y, 1.0).normalize(),
+                Vector3::new(c.x, c.y, 1.0).normalize(),
+            )
+        })
+        .collect();
     [(r1, t_unit), (r1, -t_unit), (r2, t_unit), (r2, -t_unit)]
         .iter()
         .any(|(rotation, translation)| {
-            let mut p_curr = Matrix3x4::zeros();
-            p_curr.fixed_view_mut::<3, 3>(0, 0).copy_from(rotation);
-            p_curr.fixed_view_mut::<3, 1>(0, 3).copy_from(translation);
-            points.iter().all(|&(prev, curr)| {
-                triangulate_in_front(&p_prev, &p_curr, rotation, translation, prev, curr).is_some()
-            })
+            rays.iter()
+                .all(|(x1, x2)| depths_positive(rotation, translation, x1, x2))
         })
+}
+
+/// Whether the point seen along unit bearings `x1` (camera 1) and `x2`
+/// (camera 2, `X2 = R X1 + t`) lies in front of both cameras: the closed-form
+/// least-squares depths of `l2 x2 = l1 R x1 + t` are both positive. This is
+/// PoseLib's `check_cheirality` (min depth 0), the test COLMAP's five-point
+/// estimator gets from PoseLib; it needs no SVD.
+fn depths_positive(
+    rotation: &Matrix3<f64>,
+    translation: &Vector3<f64>,
+    x1: &Vector3<f64>,
+    x2: &Vector3<f64>,
+) -> bool {
+    let rx1 = rotation * x1;
+    let a = -rx1.dot(x2);
+    let b1 = -rx1.dot(translation);
+    let b2 = x2.dot(translation);
+    // Depths times 1 / (1 - a^2) > 0.
+    let lambda1 = b1 - a * b2;
+    let lambda2 = -a * b1 + b2;
+    lambda1 > 0.0 && lambda2 > 0.0
 }
 
 fn cheirality_score(

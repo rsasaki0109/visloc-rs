@@ -19,7 +19,7 @@ or from scripts/colab/readme_hero_courthouse.ipynb.
 
 The current README hero (Hierarchical 3DGS SmallCity, A100 high-mem):
 
-    hero_pipeline.py --dataset h3dgs --scene small_city --max-size 1024 \
+    hero_pipeline.py --dataset h3dgs --scene small_city --frame-stride 1 --max-size 1024 \
         --exhaustive-max 600 --window 20 --retrieval 30 --steps 50000 \
         --photos-args=--no-refine-intrinsics \
         "--hero-flags=--elev 45 --radius-mult 1.4 --target-height 0.2 --zoom 0.9 \
