@@ -199,7 +199,8 @@ pub(crate) fn fill_reducing_block_order(adjacency: &[Vec<usize>]) -> Vec<usize> 
 /// callers that order many large, well-behaved graphs (bundle-adjustment
 /// camera systems): nested dissection or RCM, whichever gives the smaller
 /// symbolic factor, and minimum degree only as a rescue when even that factor
-/// is more than a quarter of the dense lower triangle. Minimum degree's
+/// is more than a quarter of the dense lower triangle while the graph itself
+/// is still sparse. Minimum degree's
 /// explicit fill cliques dominate the cost on dense covisibility graphs
 /// (3,000 cameras with retrieval links: 2.8 s vs 0.1 s for nested dissection
 /// and <1 ms for RCM, whose factor was also the sparsest).
@@ -215,7 +216,12 @@ pub(crate) fn fast_fill_reducing_block_order(adjacency: &[Vec<usize>]) -> Vec<us
     } else {
         (rcm, rcm_nnz)
     };
-    if best_nnz <= dense_lower / 4 {
+    // A sparse-enough factor, or an already dense graph (more than 5 % of
+    // the lower triangle are edges: no order keeps that factor sparse, and
+    // minimum degree's fill cliques get slowest exactly there — 450k edges
+    // over 2,126 cameras took ~17 s per call on SmallCity).
+    let edges: usize = adjacency.iter().map(Vec::len).sum::<usize>() / 2;
+    if best_nnz <= dense_lower / 4 || edges.saturating_mul(20) > dense_lower {
         return best;
     }
     let md = minimum_degree_order(adjacency);
