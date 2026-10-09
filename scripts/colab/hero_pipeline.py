@@ -173,6 +173,8 @@ def main():
     ap.add_argument('--exhaustive-max', type=int, default=600)
     ap.add_argument('--window', type=int, default=20)
     ap.add_argument('--retrieval', type=int, default=0)
+    ap.add_argument('--photos-args', default='',
+                    help='extra gsplat_photos flags, e.g. --no-refine-intrinsics')
     ap.add_argument('--steps', type=int, default=30000)
     ap.add_argument('--normal-weight', type=float, default=0.005)
     ap.add_argument('--run', default=None, help='run dir (default /content/runs/<scene>)')
@@ -289,8 +291,9 @@ def main():
         t = time.time()
         sh(f'{bin_dir}/gsplat_photos --images {images} --out {run} --max-size {args.max_size} '
            f'--steps {args.steps} --normal-weight {args.normal_weight} '
-           f'--exhaustive-max {args.exhaustive_max} --window {args.window} --retrieval {args.retrieval} {focal_flag} 2>&1 '
-           f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local|TIMING|REGISTER)" '
+           f'--exhaustive-max {args.exhaustive_max} --window {args.window} --retrieval {args.retrieval} {focal_flag} '
+           f'{args.photos_args} 2>&1 '
+           f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local|TIMING)" '
            f'| tee {run}/gsplat_photos.log')
         print(f'gsplat_photos {time.time() - t:.0f}s', flush=True)
 
