@@ -506,6 +506,7 @@ pub fn solve(
     if config.image_ids.is_empty() {
         return false;
     }
+    let solve_started = std::time::Instant::now();
 
     let default_camera = recon
         .camera(
@@ -803,6 +804,11 @@ pub fn solve(
         let xyz: Point3<f64> = ba.landmarks[&point3d_id];
         recon.point3d_mut(point3d_id).xyz = xyz;
     }
+    eprintln!(
+        "TIMING ba_solve_total frames={} elapsed_ms={}",
+        frame_ids.len(),
+        solve_started.elapsed().as_millis()
+    );
 
     true
 }

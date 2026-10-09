@@ -844,8 +844,16 @@ impl IncrementalMapper {
         recon: &mut Reconstruction,
         graph: &CorrespondenceGraph,
     ) -> usize {
-        self.complete_tracks(tri_options, recon, graph)
-            + self.merge_tracks(tri_options, recon, graph)
+        let t = std::time::Instant::now();
+        let completed = self.complete_tracks(tri_options, recon, graph);
+        let complete_ms = t.elapsed().as_millis();
+        let t = std::time::Instant::now();
+        let merged = self.merge_tracks(tri_options, recon, graph);
+        eprintln!(
+            "TIMING complete_and_merge complete_ms={complete_ms} merge_ms={} completed={completed} merged={merged}",
+            t.elapsed().as_millis()
+        );
+        completed + merged
     }
 
     /// Port of `FindLocalBundle` (`.cc:1417-1421`, delegating to
@@ -914,7 +922,10 @@ impl IncrementalMapper {
                 }
             }
 
+            let t_lba = std::time::Instant::now();
             let ba_ok = bundle_adjustment::solve(ba_options, &config, recon);
+            let lba_ms = t_lba.elapsed().as_millis();
+            let t_lmc = std::time::Instant::now();
             report.num_adjusted_observations = config_image_ids
                 .iter()
                 .map(|&iid| recon.image(iid).num_points3d())
@@ -948,7 +959,13 @@ impl IncrementalMapper {
                 &mut self.obs,
                 image_id,
             );
+            eprintln!(
+                "TIMING local_parts ba_ms={lba_ms} merge_complete_ms={} points={}",
+                t_lmc.elapsed().as_millis(),
+                variable_ids.len()
+            );
         }
+        let t_lf = std::time::Instant::now();
 
         report.num_filtered_observations = self.obs.filter_points3d_in_images(
             recon,
@@ -964,6 +981,10 @@ impl IncrementalMapper {
             options.filter_max_reproj_error,
             options.filter_min_tri_angle_deg,
             &point3d_ids_vec,
+        );
+        eprintln!(
+            "TIMING local_filter elapsed_ms={}",
+            t_lf.elapsed().as_millis()
         );
 
         report
@@ -1087,13 +1108,29 @@ impl IncrementalMapper {
         recon: &mut Reconstruction,
         graph: &CorrespondenceGraph,
     ) {
+        let mut ms = [0u128; 4];
+        let t = std::time::Instant::now();
         self.complete_and_merge_tracks(tri_options, recon, graph);
+        ms[0] += t.elapsed().as_millis();
+        let t = std::time::Instant::now();
         self.retriangulate(tri_options, recon, graph);
+        ms[1] += t.elapsed().as_millis();
         for _ in 0..max_num_refinements {
             let num_observations: usize = recon.points3d().values().map(|p| p.track.len()).sum();
+            let t = std::time::Instant::now();
             self.adjust_global_bundle(ba_options, recon, graph);
+            ms[2] += t.elapsed().as_millis();
+            let t = std::time::Instant::now();
             let mut num_changed = self.complete_and_merge_tracks(tri_options, recon, graph);
+            ms[0] += t.elapsed().as_millis();
+            let t = std::time::Instant::now();
             num_changed += self.filter_points(options, recon, graph);
+            ms[3] += t.elapsed().as_millis();
+            eprintln!(
+                "TIMING global_refinement_parts complete_merge_ms={} retriangulate_ms={} \
+                 global_ba_ms={} filter_ms={}",
+                ms[0], ms[1], ms[2], ms[3]
+            );
             let changed = if num_observations == 0 {
                 0.0
             } else {
