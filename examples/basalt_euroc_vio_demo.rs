@@ -51,6 +51,10 @@ struct Args {
     decode_threads: usize,
     threads: Option<usize>,
     mono: bool,
+    /// `--dump-tracks FILE`: write every frame's tracked keypoints as CSV
+    /// (`frame_id,timestamp_ns,camera_id,track_id,x,y`), e.g. for rendering
+    /// tracking overlays. Off by default.
+    dump_tracks: Option<PathBuf>,
 }
 
 const NATIVE_COMPANION_BINDING_SCHEMA: &str = "basalt.rust.native_companion_binding.v1";
@@ -115,6 +119,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         None
     } else {
         Some(BufWriter::new(fs::File::create(&trace_path)?))
+    };
+    let mut tracks_writer = match args.dump_tracks.as_ref() {
+        Some(path) => {
+            let mut writer = BufWriter::new(fs::File::create(path)?);
+            writer.write_all(b"frame_id,timestamp_ns,camera_id,track_id,x,y\n")?;
+            Some(writer)
+        }
+        None => None,
     };
 
     let mut timing = TimingBreakdown::from_env();
@@ -195,6 +207,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     append_trajectory(&mut tum, &mut csv, &output);
                     if let Some(writer) = trace_writer.as_mut() {
                         writer.write_all(trace_json(&output).as_bytes())?;
+                    }
+                    if let Some(writer) = tracks_writer.as_mut() {
+                        for observation in &output.tracks.observations {
+                            writeln!(
+                                writer,
+                                "{},{},{},{},{:.2},{:.2}",
+                                observation.frame_id,
+                                observation.timestamp_ns,
+                                observation.camera_id,
+                                observation.track_id,
+                                observation.pixel.x,
+                                observation.pixel.y
+                            )?;
+                        }
                     }
                     // Basalt computes state-only marginalization on many frames, but its
                     // mapper queue receives MargData only for a selected KF removal.
@@ -345,6 +371,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(&trajectory_tum, tum)?;
         fs::write(&trajectory_csv, csv)?;
         if let Some(mut writer) = trace_writer {
+            writer.flush()?;
+        }
+        if let Some(mut writer) = tracks_writer {
             writer.flush()?;
         }
         Ok::<(), std::io::Error>(())
@@ -802,6 +831,7 @@ impl Args {
         let mut decode_threads = 3usize;
         let mut threads = None;
         let mut mono = false;
+        let mut dump_tracks = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let option = argument.to_string_lossy();
@@ -832,6 +862,9 @@ impl Args {
                     max_frames = Some(value);
                 }
                 "--no-trace" => no_trace = true,
+                "--dump-tracks" => {
+                    dump_tracks = Some(next_path(&mut arguments, &option)?);
+                }
                 "--no-marg-data" => no_marg_data = true,
                 "--retained-marg-diagnostics" => retained_marg_diagnostics = true,
                 "--native-companion-binding" => {
@@ -897,11 +930,12 @@ impl Args {
             decode_threads,
             threads,
             mono,
+            dump_tracks,
         })
     }
 
     fn usage() -> String {
-        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono]".into()
+        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--dump-tracks FILE]".into()
     }
 }
 
