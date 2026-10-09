@@ -301,6 +301,11 @@ fn build_reduced_system_pattern(
     (point_free_frames, edges, point_pair_edge_idx)
 }
 
+/// Reduced camera systems with at least this many free frames are factored
+/// in a fill-reducing block order ([`crate::reordering`]); smaller ones (every
+/// local BA) keep the natural order, where fill is negligible.
+const REORDER_MIN_FREE_FRAMES: usize = 64;
+
 fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
     if ba.poses.is_empty() {
         return Err(BaError::NoPoses);
@@ -791,6 +796,7 @@ struct PhaseTimings {
     evaluate_cost: Duration,
     linearize_calls: u32,
     trials: u32,
+    reorder: Duration,
 }
 
 /// Performance fix #2 (see [`build_reduced_system_pattern`] for fix #1):
@@ -970,6 +976,7 @@ fn solve_step(
     frame_bc_raw: &[Vector6<f64>],
     mu: f64,
     cache: &mut Option<BlockSymbolic>,
+    order: Option<&[u32]>,
     timings: &mut PhaseTimings,
 ) -> Option<(Vec<Vector6<f64>>, Vec<Vector3<f64>>, f64)> {
     let n_free = problem.n_free_frames;
@@ -994,17 +1001,28 @@ fn solve_step(
         }
     }
 
+    // Free frame `a` sits at block `pos(a)` of the factored system: the
+    // fill-reducing position when an order is given (large systems, see
+    // `REORDER_MIN_FREE_FRAMES`), else `a` itself.
+    let pos = |a: usize| order.map_or(a, |o| o[a] as usize);
     let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> = vec![BTreeMap::new(); n_free];
-    for (a, col) in columns.iter_mut().enumerate() {
-        col.insert(a, frame_diag[a]);
+    for (a, &diag) in frame_diag.iter().enumerate().take(n_free) {
+        columns[pos(a)].insert(pos(a), diag);
     }
+    // `val` is the (row b, column a) block, a < b. Keep the lower triangle
+    // of the permuted matrix: transpose when the permutation flips the pair.
     for (&(a, b), val) in edges.iter().zip(flat_offdiag) {
-        columns[a as usize].insert(b as usize, val);
+        let (pa, pb) = (pos(a as usize), pos(b as usize));
+        if pb >= pa {
+            columns[pa].insert(pb, val);
+        } else {
+            columns[pb].insert(pa, val.transpose());
+        }
     }
     let mut rhs = DMatrix::<f64>::zeros(n_free * 6, 1);
     for a in 0..n_free {
         for i in 0..6 {
-            rhs[(a * 6 + i, 0)] = frame_bc[a][i];
+            rhs[(pos(a) * 6 + i, 0)] = frame_bc[a][i];
         }
     }
     timings.assemble += t.elapsed();
@@ -1014,7 +1032,7 @@ fn solve_step(
     let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
     for a in 0..n_free {
         for i in 0..6 {
-            dx_frames[a][i] = solved[(a * 6 + i, 0)];
+            dx_frames[a][i] = solved[(pos(a) * 6 + i, 0)];
         }
     }
     timings.linsolve += t.elapsed();
@@ -1192,6 +1210,26 @@ pub(crate) fn optimize_with_tolerance(
     let mut radius = INITIAL_RADIUS;
     let mut decrease_factor = 2.0;
     let mut cache: Option<BlockSymbolic> = None;
+    // Fill-reducing block order of the reduced camera system (its pattern,
+    // `problem.edges`, is fixed for this solve). Natural order otherwise.
+    let order: Option<Vec<u32>> = (problem.n_free_frames >= REORDER_MIN_FREE_FRAMES).then(|| {
+        let t = Instant::now();
+        let mut adjacency = vec![Vec::new(); problem.n_free_frames];
+        for &(a, b) in &problem.edges {
+            adjacency[a as usize].push(b as usize);
+            adjacency[b as usize].push(a as usize);
+        }
+        for neighbours in adjacency.iter_mut() {
+            neighbours.sort_unstable();
+        }
+        let elimination = crate::reordering::fill_reducing_block_order(&adjacency);
+        let mut pos = vec![0u32; problem.n_free_frames];
+        for (k, &block) in elimination.iter().enumerate() {
+            pos[block] = k as u32;
+        }
+        timings.reorder += t.elapsed();
+        pos
+    });
     let mut iterations: Vec<BaIterationStats> = Vec::new();
     let mut trace_lines: Vec<String> = Vec::new();
     let mut converged = false;
@@ -1233,6 +1271,7 @@ pub(crate) fn optimize_with_tolerance(
             &frame_bc_raw,
             mu,
             &mut cache,
+            order.as_deref(),
             &mut timings,
         ) else {
             return Err(BaError::SingularSystem);
@@ -1305,7 +1344,7 @@ pub(crate) fn optimize_with_tolerance(
     }
 
     eprintln!(
-        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1}",
+        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1} reorder_ms={:.1}",
         timings.trials,
         timings.linearize_calls,
         problem.n_free_frames,
@@ -1318,6 +1357,7 @@ pub(crate) fn optimize_with_tolerance(
         timings.linsolve.as_secs_f64() * 1e3,
         timings.backsub.as_secs_f64() * 1e3,
         timings.evaluate_cost.as_secs_f64() * 1e3,
+        timings.reorder.as_secs_f64() * 1e3,
     );
     if iterations.len() >= 30 {
         for line in &trace_lines {

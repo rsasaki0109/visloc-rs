@@ -101,39 +101,7 @@ impl Reordering {
         );
         let n = dim / block_size;
         let adjacency = block_adjacency(n, block_size, triplets);
-
-        // Minimum degree is cheap to compute and reliably keeps its factor
-        // sparse, so cost it first and use it both as a baseline and to bound
-        // the costing of the others: a catastrophically bad geometric factor is
-        // then abandoned after only a few × MD's worth of counting instead of
-        // running to its full (e.g. `cubicle`-sized) blow-up.
-        let md = minimum_degree_order(&adjacency);
-        let md_nnz = symbolic_cholesky_nnz(&adjacency, &md);
-
-        // Prefer the two cheap, BFS-based geometric orderings: their balanced
-        // elimination trees *factorize* faster per nonzero than minimum degree's
-        // deeper, scattered tree, so a geometric ordering within a few × MD's
-        // fill is the better choice.
-        // Cap their counts at `RESCUE_FILL_RATIO × md_nnz`; a blown-up factor
-        // (dense ICP graphs such as `cubicle`/`rim`) trips the cap cheaply.
-        let cap = md_nnz.saturating_mul(RESCUE_FILL_RATIO);
-        let nested = nested_dissection_order(&adjacency);
-        let rcm = reverse_cuthill_mckee_order(&adjacency);
-        let nested_nnz = symbolic_cholesky_nnz_capped(&adjacency, &nested, cap);
-        let rcm_nnz = symbolic_cholesky_nnz_capped(&adjacency, &rcm, cap);
-
-        // Use the cheaper geometric ordering when it stays within the rescue
-        // ratio; otherwise both blew past it and minimum degree is the rescue.
-        let best_geometric = nested_nnz.min(rcm_nnz);
-        let chosen = if best_geometric <= cap {
-            if nested_nnz <= rcm_nnz {
-                nested
-            } else {
-                rcm
-            }
-        } else {
-            md
-        };
+        let chosen = fill_reducing_block_order(&adjacency);
         Self::from_block_order(&chosen, dim, block_size)
     }
 
@@ -184,6 +152,46 @@ impl Reordering {
             out[old] = permuted[i];
         }
         out
+    }
+}
+
+/// Fill-reducing elimination order of a block-adjacency graph
+/// (`adjacency[i]` = sorted neighbours of block `i`): the order
+/// [`Reordering::fill_reducing`] uses — nested dissection or RCM, whichever
+/// gives the smaller symbolic factor, with minimum degree as the rescue.
+/// `order[k]` is the original block eliminated `k`-th.
+pub(crate) fn fill_reducing_block_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
+    // Minimum degree is cheap to compute and reliably keeps its factor
+    // sparse, so cost it first and use it both as a baseline and to bound
+    // the costing of the others: a catastrophically bad geometric factor is
+    // then abandoned after only a few × MD's worth of counting instead of
+    // running to its full (e.g. `cubicle`-sized) blow-up.
+    let md = minimum_degree_order(adjacency);
+    let md_nnz = symbolic_cholesky_nnz(adjacency, &md);
+
+    // Prefer the two cheap, BFS-based geometric orderings: their balanced
+    // elimination trees *factorize* faster per nonzero than minimum degree's
+    // deeper, scattered tree, so a geometric ordering within a few × MD's
+    // fill is the better choice.
+    // Cap their counts at `RESCUE_FILL_RATIO × md_nnz`; a blown-up factor
+    // (dense ICP graphs such as `cubicle`/`rim`) trips the cap cheaply.
+    let cap = md_nnz.saturating_mul(RESCUE_FILL_RATIO);
+    let nested = nested_dissection_order(adjacency);
+    let rcm = reverse_cuthill_mckee_order(adjacency);
+    let nested_nnz = symbolic_cholesky_nnz_capped(adjacency, &nested, cap);
+    let rcm_nnz = symbolic_cholesky_nnz_capped(adjacency, &rcm, cap);
+
+    // Use the cheaper geometric ordering when it stays within the rescue
+    // ratio; otherwise both blew past it and minimum degree is the rescue.
+    let best_geometric = nested_nnz.min(rcm_nnz);
+    if best_geometric <= cap {
+        if nested_nnz <= rcm_nnz {
+            nested
+        } else {
+            rcm
+        }
+    } else {
+        md
     }
 }
 
