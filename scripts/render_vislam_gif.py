@@ -106,11 +106,12 @@ def main() -> int:
     parser.add_argument("--gt", type=Path, required=True)
     parser.add_argument("--traj", action="append", required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--frames", type=int, default=150, help="GIF frames")
-    parser.add_argument("--fps", type=float, default=10.0)
+    parser.add_argument("--frames", type=int, default=100, help="GIF frames")
+    parser.add_argument("--fps", type=float, default=8.0)
     parser.add_argument("--tail", type=int, default=6, help="camera frames of track tail")
     parser.add_argument("--title", default="")
-    parser.add_argument("--width", type=int, default=880)
+    parser.add_argument("--width", type=int, default=720)
+    parser.add_argument("--colors", type=int, default=64)
     args = parser.parse_args()
 
     gt = load_tum(args.gt)
@@ -145,6 +146,16 @@ def main() -> int:
     except OSError:
         font = ImageFont.load_default()
 
+    # Fixed palette: the camera images are greyscale, so grey levels plus the
+    # exact overlay/line colours keep every curve its legend colour.
+    accents = ["#000000", "#ffffff", "#cccccc", "#00dcff", "#ff3cdc"] + COLORS
+    levels = max(8, args.colors - len(accents))
+    entries = [tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) for h in accents]
+    entries += [(v, v, v) for v in np.linspace(0, 255, levels).astype(int)]
+    flat = [c for rgb in entries for c in rgb]
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(flat + flat[-3:] * (256 - len(entries)))
+
     frames = []
     for gi, (ts, pick) in enumerate(zip(sample_ts, picks)):
         # Left: two camera images with tracks.
@@ -160,14 +171,22 @@ def main() -> int:
             for k in range(max(0, pick - args.tail), pick + 1):
                 for c, tid, x, y in tracks.get(int(cam_ts[k]), []):
                     if c == cam:
-                        history[tid].append((x * sx, y * sy))
+                        history[tid].append((k, x * sx, y * sy))
             colour = (0, 220, 255) if cam == 0 else (255, 60, 220)
+            live = 0
             for tid, pts in history.items():
-                if len(pts) > 1:
-                    draw.line(pts, fill=colour, width=1)
-                x, y = pts[-1]
+                if pts[-1][0] != pick:
+                    continue  # track ended before this frame
+                live += 1
+                xy_pts = [(x, y) for _, x, y in pts]
+                if len(xy_pts) > 1:
+                    draw.line(xy_pts, fill=colour, width=1)
+                x, y = xy_pts[-1]
                 draw.ellipse((x - 2, y - 2, x + 2, y + 2), outline=colour)
-            draw.text((6, 4), f"cam{cam}  {len(history)} tracks", fill="white", font=font)
+            label = f"cam{cam}: {live} tracked points"
+            box = draw.textbbox((6, 4), label, font=font)
+            draw.rectangle((box[0] - 3, box[1] - 2, box[2] + 3, box[3] + 2), fill=(0, 0, 0))
+            draw.text((6, 4), label, fill="white", font=font)
             left.paste(image, (0, row * cam_h))
 
         # Right: trajectories up to this time.
@@ -190,7 +209,7 @@ def main() -> int:
         ax.set_aspect("equal")
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.legend(loc="lower left", fontsize=8, frameon=True)
+        ax.legend(loc="upper right", fontsize=8, frameon=True)
         elapsed = (ts - t0) / 1e9
         fig.text(0.02, 0.95, f"{args.title}   t = {elapsed:5.0f} s", fontsize=9)
         fig.canvas.draw()
@@ -201,7 +220,7 @@ def main() -> int:
         frame = Image.new("RGB", (args.width, height), "white")
         frame.paste(left, (0, 0))
         frame.paste(right.resize((map_w, height)), (img_w, 0))
-        frames.append(frame.quantize(colors=128, method=Image.Quantize.MEDIANCUT))
+        frames.append(frame.quantize(palette=palette, dither=Image.Dither.NONE))
         if gi % 25 == 0:
             print(f"frame {gi}/{len(sample_ts)}")
 

@@ -325,6 +325,32 @@ walk well below Basalt's default pins the bias and roughly halves the yaw
 drift. This is a calibration-noise setting, not new code. It was tuned on
 sequence_1_19; R_11_5cp is the first held-out check, R_12_10cp is next.
 
+## README animation
+
+`docs/assets/hero_vislam_lamaria.gif` is rendered from the measured runs
+above (sequence_1_19): visloc-rs = multicam config + `gyro_bias_std` 1e-6
+(Score 50.04), OpenVINS = the estimate in the LaMAria demo archive (49.86),
+Basalt upstream configuration = `configs/basalt/variants/lamaria/euroc_config.json`
+(3-state / 7-keyframe window, cam0-centric defaults) with the variant-A
+calibration, run through this port (Score 7.72, Sim(3) ATE 13.8 m, yaw spread
+40.6°). All three are Sim(3)-aligned to the pseudo-GT for display, as the
+evaluator does.
+
+```bash
+basalt_euroc_vio_demo --euroc-dir sequence_1_19 \
+  --calibration sequence_1_19_calib_gb001.json \
+  --config configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json \
+  --out-dir out/gifbest --pipeline --no-trace --no-marg-data \
+  --dump-tracks gif_tracks.csv
+python scripts/render_vislam_gif.py --images sequence_1_19 --tracks gif_tracks.csv \
+  --gt sequence_1_19_pgt.txt \
+  --traj "visloc-rs=out/gifbest/sequence_1_19.txt@50.0" \
+  --traj "OpenVINS=demo/estimate/sequence_1_19.txt@49.9" \
+  --traj "Basalt (upstream config)=out/basalt_default/sequence_1_19.txt@7.7" \
+  --title "LaMAria sequence_1_19 · Project Aria · 1.0 km" \
+  --out docs/assets/hero_vislam_lamaria.gif
+```
+
 ## Measuring on LaMAria
 
 Use the training sequences of [`lamaria_stage0.md`](lamaria_stage0.md)
