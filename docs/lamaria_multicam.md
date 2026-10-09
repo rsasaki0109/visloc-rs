@@ -238,7 +238,7 @@ cloud container. One run per cell.
 | R_12_10cp (10) | multicam, no stereo seed | **34.19** | 10 % | 9.3 % | 64.7 % | 2192 s | 0.46× |
 | sequence_1_19 (14) | big window (baseline) | 17.16 | 7.1 % | 4.6 % | 30.0 % | 1484 s | 0.62× |
 | sequence_1_19 (14) | multicam (all keys) | **31.55** | 7.1 % | **5.0 %** | **57.0 %** | 2206 s | 0.42× |
-| sequence_1_19 (14) | multicam, no stereo seed | _running_ | | | | | |
+| sequence_1_19 (14) | multicam, no stereo seed | 31.46 | 7.1 % | 5.1 % | 56.9 % | 2232 s | 0.41× |
 
 RT factor = sensor duration (frames / 20 Hz) / wall time on this 4-core host.
 
@@ -266,6 +266,42 @@ Reading:
   instead of 27.09. Compare only within this table.
 - **Cost.** The multicam config is ~1.45× slower (about 2× the observations
   per frame); on this 4-core host neither config is real time.
+
+## Gyro bias random walk: the lever that closes the gap to OpenVINS (2026-10-09)
+
+The LaMAria demo archive ships an OpenVINS estimate for sequence_1_19. Scored
+with the same evaluator it reaches **49.86** (CP@1m 28.6 %, pGT R@5m 99.7 %),
+well above the multicam result above. Comparing positions against the
+pseudo-GT (Sim(3)-aligned 60 s windows, `yaw range` = spread of the best local
+yaw correction over the run) showed why: our trajectories rotate steadily in
+yaw (multicam 14.2°, cam0-only 25.1° over 15 min) while OpenVINS stays within
+8.4°, and the drift has the same shape in every config — a systematic error,
+not noise.
+
+Sweeping only `gyro_bias_std` in the variant-A calibration (Basalt's default
+`1e-4`; Aria's factory value is `2.44e-4`) with the multicam config:
+
+| sequence_1_19, multicam | Score | CP@1m | pGT R@1m | pGT R@5m | Yaw range | Sim(3) ATE |
+|---|---:|---:|---:|---:|---:|---:|
+| `gyro_bias_std` 5e-4 | 20.35 | 7.1 % | 4.7 % | 38.6 % | 19.9° | — |
+| 2.44e-4 (Aria factory) | 24.70 | 7.1 % | 4.8 % | 45.0 % | 17.7° | — |
+| 1e-4 (variant A, current) | 31.55 | 7.1 % | 5.0 % | 57.0 % | 14.2° | 4.72 m |
+| 5e-5 | 37.58 | 14.3 % | 11.2 % | 88.3 % | 10.8° | 3.72 m |
+| 2e-5 | 43.90 | 14.3 % | 15.5 % | 94.0 % | 7.6° | 2.95 m |
+| 1e-5 | 45.66 | 28.6 % | 20.3 % | 98.4 % | 6.4° | 2.67 m |
+| 5e-6 | 46.89 | 28.6 % | 21.9 % | **100 %** | 5.9° | 2.51 m |
+| 2e-6 | **49.00** | 28.6 % | **23.0 %** | **100 %** | **5.4°** | **2.31 m** |
+| OpenVINS (LaMAria demo estimate) | **49.86** | 28.6 % | 24.2 % | 99.7 % | 8.4° | 2.32 m |
+
+Held-out check on R_11_5cp (5e-6): Score **63.71** (big-window baseline
+62.87, multicam 59.78), CP@1m 60 %, pGT R@1m 43.9 %, Sim(3) ATE 1.08 m
+(baseline 1.26 m) — the lever also fixes the one sequence where multicam lost.
+
+Reading: letting the gyro bias wander lets the window explain systematic
+rotation error as bias and integrate it into yaw. Tightening the bias random
+walk well below Basalt's default pins the bias and roughly halves the yaw
+drift. This is a calibration-noise setting, not new code. It was tuned on
+sequence_1_19; R_11_5cp is the first held-out check, R_12_10cp is next.
 
 ## Measuring on LaMAria
 
