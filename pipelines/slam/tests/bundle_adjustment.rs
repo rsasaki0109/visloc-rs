@@ -3842,10 +3842,10 @@ fn bench_sparse_joint_intrinsics() {
                 lm_id,
                 Point3::new(p.x + 0.01 * a.sin(), p.y, p.z + 0.01 * a.cos()),
             );
-            for k in i.saturating_sub(4)..(i + 5).min(n_cams) {
-                if let Some(uv) = truth.project(&poses[k].1.transform_world_point(&p)) {
+            for (kf_id, pose) in &poses[i.saturating_sub(4)..(i + 5).min(n_cams)] {
+                if let Some(uv) = truth.project(&pose.transform_world_point(&p)) {
                     ba.add_observation(BaObservation {
-                        keyframe_id: k as u64,
+                        keyframe_id: *kf_id,
                         landmark_id: lm_id,
                         xy: uv,
                     });
