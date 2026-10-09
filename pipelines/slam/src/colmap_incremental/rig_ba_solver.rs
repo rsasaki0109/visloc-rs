@@ -1222,7 +1222,7 @@ pub(crate) fn optimize_with_tolerance(
         for neighbours in adjacency.iter_mut() {
             neighbours.sort_unstable();
         }
-        let elimination = crate::reordering::fill_reducing_block_order(&adjacency);
+        let elimination = crate::reordering::fast_fill_reducing_block_order(&adjacency);
         let mut pos = vec![0u32; problem.n_free_frames];
         for (k, &block) in elimination.iter().enumerate() {
             pos[block] = k as u32;

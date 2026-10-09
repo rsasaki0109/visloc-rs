@@ -195,6 +195,37 @@ pub(crate) fn fill_reducing_block_order(adjacency: &[Vec<usize>]) -> Vec<usize> 
     }
 }
 
+/// [`fill_reducing_block_order`] without the minimum-degree baseline, for
+/// callers that order many large, well-behaved graphs (bundle-adjustment
+/// camera systems): nested dissection or RCM, whichever gives the smaller
+/// symbolic factor, and minimum degree only as a rescue when even that factor
+/// is more than a quarter of the dense lower triangle. Minimum degree's
+/// explicit fill cliques dominate the cost on dense covisibility graphs
+/// (3,000 cameras with retrieval links: 2.8 s vs 0.1 s for nested dissection
+/// and <1 ms for RCM, whose factor was also the sparsest).
+pub(crate) fn fast_fill_reducing_block_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
+    let n = adjacency.len();
+    let dense_lower = n.saturating_mul(n + 1) / 2;
+    let nested = nested_dissection_order(adjacency);
+    let rcm = reverse_cuthill_mckee_order(adjacency);
+    let nested_nnz = symbolic_cholesky_nnz_capped(adjacency, &nested, dense_lower);
+    let rcm_nnz = symbolic_cholesky_nnz_capped(adjacency, &rcm, dense_lower);
+    let (best, best_nnz) = if nested_nnz <= rcm_nnz {
+        (nested, nested_nnz)
+    } else {
+        (rcm, rcm_nnz)
+    };
+    if best_nnz <= dense_lower / 4 {
+        return best;
+    }
+    let md = minimum_degree_order(adjacency);
+    if symbolic_cholesky_nnz_capped(adjacency, &md, best_nnz) < best_nnz {
+        md
+    } else {
+        best
+    }
+}
+
 /// Build the symmetric block-adjacency graph: an undirected edge between two
 /// distinct blocks for every off-diagonal nonzero coupling them. Neighbour
 /// lists are sorted and deduplicated (via `BTreeSet`) for deterministic
@@ -936,5 +967,63 @@ mod tests {
             }
         }
         triplets
+    }
+}
+
+#[cfg(test)]
+mod ordering_cost_bench {
+    use super::*;
+
+    /// `cargo test --release -p visloc-slam --lib ordering_cost_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ordering_cost_on_a_camera_covisibility_graph() {
+        // 3,000 cameras along 4 passes of the same streets: each sees its
+        // +-25 neighbours in capture order plus 20 retrieval links to
+        // cameras of other passes at the same place.
+        let n = 3000usize;
+        let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+        let mut link = |a: usize, b: usize| {
+            if a != b {
+                sets[a].insert(b);
+                sets[b].insert(a);
+            }
+        };
+        for i in 0..n {
+            for d in 1..=25 {
+                if i + d < n {
+                    link(i, i + d);
+                }
+            }
+            let place = i % (n / 4);
+            for k in 0..20 {
+                let pass = (i / (n / 4) + 1 + k % 3) % 4;
+                link(i, (pass * (n / 4) + place + k / 3) % n);
+            }
+        }
+        let adjacency: Vec<Vec<usize>> =
+            sets.into_iter().map(|s| s.into_iter().collect()).collect();
+        let t = std::time::Instant::now();
+        let md = minimum_degree_order(&adjacency);
+        let t_md = t.elapsed();
+        let t = std::time::Instant::now();
+        let md_nnz = symbolic_cholesky_nnz(&adjacency, &md);
+        let t_md_nnz = t.elapsed();
+        let t = std::time::Instant::now();
+        let nd = nested_dissection_order(&adjacency);
+        let t_nd = t.elapsed();
+        let t = std::time::Instant::now();
+        let rcm = reverse_cuthill_mckee_order(&adjacency);
+        let t_rcm = t.elapsed();
+        let t = std::time::Instant::now();
+        let nd_nnz = symbolic_cholesky_nnz(&adjacency, &nd);
+        let rcm_nnz = symbolic_cholesky_nnz(&adjacency, &rcm);
+        let natural: Vec<usize> = (0..n).collect();
+        let nat_nnz = symbolic_cholesky_nnz(&adjacency, &natural);
+        let t_counts = t.elapsed();
+        eprintln!(
+            "md {:?} (nnz {md_nnz}, count {:?}); nd {:?} (nnz {nd_nnz}); rcm {:?} (nnz {rcm_nnz}); counts {:?}; natural nnz {nat_nnz}",
+            t_md, t_md_nnz, t_nd, t_rcm, t_counts
+        );
     }
 }
