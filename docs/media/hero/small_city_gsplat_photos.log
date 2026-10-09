@@ -1,0 +1,15 @@
+5822 images at 1024x690 (others dropped: 0)
+focal 487.0 px (--focal)
+sift: mean 3994 keypoints (107.7 s)
+retrieval: VLAD top-30 added 44063 pairs to 116230 window pairs (108.9 s)
+gpu matching: 11.09 GiB of descriptors over the 2.00 GiB binding limit, 12 blocks
+145793 verified of 160293 candidate pairs (759.1 s)
+SUMMARY path_a_attempts=6816 path_a_registered=5752 path_b_attempts=0 path_b_registered=0 path_b_rejected_lt6_corrs=0
+colmap-port: 8 model(s), sizes [5609, 25, 23, 23, 22, 22, 22, 22]
+sfm: 5609/5822 registered, 960849 points, 0.000 px, focal 487.0 px (10853.1 s)
+sfm done in 11854.0s: 5609/5822 registered, focal 487.0 -> 487.0 px (--focal), 960849 points
+trained 50000 steps in 1922.2s; held-out psnr 21.79 over 702 views
+wrote /content/runs/small_city/scene.ply
+mesh: 5609 views fused in 4161.7 s (voxel 0.0537, 1350145 blocks), 16930750 -> 5732782 triangles
+wrote /content/runs/small_city/mesh.ply
+total 17975.1s

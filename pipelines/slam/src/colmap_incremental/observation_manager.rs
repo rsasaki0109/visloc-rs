@@ -654,6 +654,11 @@ impl ObservationManager {
     }
 
     /// Port of `FilterPoints3DWithSmallTriangulationAngle` (`.cc:435-494`).
+    ///
+    /// Each point's keep/drop decision depends only on its own track and
+    /// position and on the (fixed) camera centres, so the decisions are made
+    /// in parallel and the deletions applied serially in `point3d_ids` order —
+    /// the same result as the serial loop.
     pub fn filter_points3d_with_small_triangulation_angle(
         &mut self,
         recon: &mut Reconstruction,
@@ -661,35 +666,44 @@ impl ObservationManager {
         min_tri_angle_deg: f64,
         point3d_ids: &[Point3DT],
     ) -> usize {
+        use rayon::prelude::*;
         let min_tri_angle_rad = min_tri_angle_deg.to_radians();
-        let mut num_filtered = 0;
-        let mut proj_centers: BTreeMap<ImageT, Point3<f64>> = BTreeMap::new();
-        for &point3d_id in point3d_ids {
-            if !recon.exists_point3d(point3d_id) {
-                continue;
-            }
-            let track = recon.point3d(point3d_id).track.clone();
-            let mut keep = false;
-            'outer: for i1 in 0..track.len() {
-                let img1 = track[i1].image_id;
-                let pc1 = *proj_centers
-                    .entry(img1)
-                    .or_insert_with(|| image_projection_center(recon, img1));
-                for track_el2 in track.iter().take(i1) {
-                    let img2 = track_el2.image_id;
-                    let pc2 = *proj_centers
-                        .entry(img2)
-                        .or_insert_with(|| image_projection_center(recon, img2));
-                    let angle =
-                        calculate_triangulation_angle(pc1, pc2, recon.point3d(point3d_id).xyz);
-                    if angle >= min_tri_angle_rad {
-                        keep = true;
-                        break 'outer;
+        let mut image_ids: Vec<ImageT> = point3d_ids
+            .iter()
+            .filter(|&&id| recon.exists_point3d(id))
+            .flat_map(|&id| recon.point3d(id).track.iter().map(|el| el.image_id))
+            .collect();
+        image_ids.sort_unstable();
+        image_ids.dedup();
+        let proj_centers: BTreeMap<ImageT, Point3<f64>> = image_ids
+            .iter()
+            .map(|&id| (id, image_projection_center(recon, id)))
+            .collect();
+        let recon_ref: &Reconstruction = recon;
+        let drop: Vec<Option<usize>> = point3d_ids
+            .par_iter()
+            .map(|&point3d_id| {
+                if !recon_ref.exists_point3d(point3d_id) {
+                    return None;
+                }
+                let point = recon_ref.point3d(point3d_id);
+                let track = &point.track;
+                for i1 in 0..track.len() {
+                    let pc1 = proj_centers[&track[i1].image_id];
+                    for track_el2 in track.iter().take(i1) {
+                        let pc2 = proj_centers[&track_el2.image_id];
+                        if calculate_triangulation_angle(pc1, pc2, point.xyz) >= min_tri_angle_rad {
+                            return None;
+                        }
                     }
                 }
-            }
-            if !keep {
-                num_filtered += track.len();
+                Some(track.len())
+            })
+            .collect();
+        let mut num_filtered = 0;
+        for (&point3d_id, d) in point3d_ids.iter().zip(drop) {
+            if let Some(track_len) = d {
+                num_filtered += track_len;
                 self.delete_point3d(recon, graph, point3d_id);
             }
         }
@@ -698,6 +712,10 @@ impl ObservationManager {
 
     /// Port of `FilterPoints3DWithLargeReprojectionError` (`.cc:496-585`),
     /// PIXEL error type only (the only one this port's callers use).
+    ///
+    /// Per-point decisions are computed in parallel (they read only that
+    /// point's track and the fixed poses) and applied serially in
+    /// `point3d_ids` order — the same result as the serial loop.
     pub fn filter_points3d_with_large_reprojection_error(
         &mut self,
         recon: &mut Reconstruction,
@@ -705,42 +723,63 @@ impl ObservationManager {
         max_error: f64,
         point3d_ids: &[Point3DT],
     ) -> usize {
-        let mut num_filtered = 0;
-        for &point3d_id in point3d_ids {
-            if !recon.exists_point3d(point3d_id) {
-                continue;
-            }
-            let track = recon.point3d(point3d_id).track.clone();
-            if track.len() < 2 {
-                num_filtered += track.len();
-                self.delete_point3d(recon, graph, point3d_id);
-                continue;
-            }
-            let xyz = recon.point3d(point3d_id).xyz;
-            let mut error_sum = 0.0;
-            let mut to_delete = Vec::new();
-            for el in &track {
-                let image = recon.image(el.image_id);
-                let camera = recon.camera(image.camera_id);
-                let xy = image.points2d[el.point2d_idx].xy;
-                let cam_from_world = image_cam_from_world(recon, el.image_id);
-                let err =
-                    calculate_squared_reprojection_error(xy, xyz, &cam_from_world, camera).sqrt();
-                if err > max_error {
-                    to_delete.push(*el);
+        use rayon::prelude::*;
+        enum Decision {
+            Skip,
+            DeletePoint(usize),
+            Prune(Vec<TrackElement>, f64),
+        }
+        let recon_ref: &Reconstruction = recon;
+        let decisions: Vec<Decision> = point3d_ids
+            .par_iter()
+            .map(|&point3d_id| {
+                if !recon_ref.exists_point3d(point3d_id) {
+                    return Decision::Skip;
+                }
+                let point = recon_ref.point3d(point3d_id);
+                let track = &point.track;
+                if track.len() < 2 {
+                    return Decision::DeletePoint(track.len());
+                }
+                let xyz = point.xyz;
+                let mut error_sum = 0.0;
+                let mut to_delete = Vec::new();
+                for el in track {
+                    let image = recon_ref.image(el.image_id);
+                    let camera = recon_ref.camera(image.camera_id);
+                    let xy = image.points2d[el.point2d_idx].xy;
+                    let cam_from_world = image_cam_from_world(recon_ref, el.image_id);
+                    let err =
+                        calculate_squared_reprojection_error(xy, xyz, &cam_from_world, camera)
+                            .sqrt();
+                    if err > max_error {
+                        to_delete.push(*el);
+                    } else {
+                        error_sum += err;
+                    }
+                }
+                if to_delete.len() + 1 >= track.len() {
+                    Decision::DeletePoint(track.len())
                 } else {
-                    error_sum += err;
+                    Decision::Prune(to_delete, error_sum / (track.len() as f64))
                 }
-            }
-            if to_delete.len() + 1 >= track.len() {
-                num_filtered += track.len();
-                self.delete_point3d(recon, graph, point3d_id);
-            } else {
-                num_filtered += to_delete.len();
-                for el in &to_delete {
-                    self.delete_observation(recon, graph, el.image_id, el.point2d_idx);
+            })
+            .collect();
+        let mut num_filtered = 0;
+        for (&point3d_id, decision) in point3d_ids.iter().zip(decisions) {
+            match decision {
+                Decision::Skip => {}
+                Decision::DeletePoint(track_len) => {
+                    num_filtered += track_len;
+                    self.delete_point3d(recon, graph, point3d_id);
                 }
-                recon.point3d_mut(point3d_id).error = error_sum / (track.len() as f64);
+                Decision::Prune(to_delete, error) => {
+                    num_filtered += to_delete.len();
+                    for el in &to_delete {
+                        self.delete_observation(recon, graph, el.image_id, el.point2d_idx);
+                    }
+                    recon.point3d_mut(point3d_id).error = error;
+                }
             }
         }
         num_filtered

@@ -262,8 +262,13 @@ fn reconstruct_sub_model(
         reg_next_success = false;
         let mut registered_image_id: Option<ImageT> = None;
 
+        let t_find = std::time::Instant::now();
         let next_images = mapper.find_next_images(mapper_options, recon);
+        let find_ms = t_find.elapsed().as_millis();
+        let t_reg = std::time::Instant::now();
+        let mut attempts = 0usize;
         for &candidate in &next_images {
+            attempts += 1;
             if mapper.register_next_image(
                 mapper_options,
                 recon,
@@ -275,6 +280,14 @@ fn reconstruct_sub_model(
                 break;
             }
         }
+        eprintln!(
+            "TIMING find_next_images elapsed_ms={find_ms} candidates={}",
+            next_images.len()
+        );
+        eprintln!(
+            "TIMING register_next_image elapsed_ms={} attempts={attempts} success={reg_next_success}",
+            t_reg.elapsed().as_millis()
+        );
 
         if reg_next_success {
             let image_id = registered_image_id.unwrap();

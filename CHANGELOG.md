@@ -6,6 +6,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **`gsplat_photos` panicked on large photo sets** (wgpu: descriptor bank
+  over `max_storage_buffer_binding_size`, e.g. 1,940 photos x 4,000 SIFT);
+  it now matches in blocks. The trainer's logged L1 no longer rounds to 0
+  on large images (2.8 MP), gradients were unaffected.
+- **README hero splat filter read the wrong PLY columns.** Its
+  large-and-transparent rule used SH coefficients as opacity and scale; the
+  columns are now looked up by name.
 - **`config.optical_flow_imu_seed_rotation` can be set from a Basalt config
   JSON.** The adapter read the key, but `BasaltConfig::from_json` rejected it
   as unknown, so only code could enable it.
@@ -25,6 +32,30 @@ All notable changes to `visloc-rs` will be documented here.
   decline distorted cameras and fall back to the regular solver.
 
 ### Added
+
+- **README hero on a city block: Hierarchical 3DGS SmallCity.** 5,822
+  photos, 5,609 registered with 960,849 points, held-out PSNR 21.79, 5.0M
+  gaussians and a 5.7M-triangle mesh from one `gsplat_photos` command on a
+  Google Colab A100 (earlier in this cycle: Tanks and Temples Courthouse,
+  553 frames). `scripts/colab/hero_pipeline.py` runs the whole job on a
+  Colab GPU (Tanks and Temples, Mill-19 and Hierarchical 3DGS scenes; from
+  the terminal with the Colab CLI or from
+  `scripts/colab/readme_hero_courthouse.ipynb`), adding the NVIDIA Vulkan
+  user-space driver when the VM lacks it. `scripts/make_readme_hero.py` is
+  scene-agnostic (intrinsics from `cameras.txt`, margins relative to the
+  camera ring, nadir-aware up axis, orbit / filter flags, Linux + EGL).
+- **`gsplat_photos` for large photo sets.** `--retrieval K` (VLAD top-K pairs
+  past `--exhaustive-max`), `--exhaustive-max`, `--window`,
+  `--max-keypoints`, `--sift-opt key=value` (wide-baseline `affine` /
+  `domain_size_pooling` run on the CPU) and `--refine-intrinsics-max`;
+  GPU matching splits the descriptor bank into blocks past the ~2 GiB
+  binding limit.
+- **Faster mapper and BA on large models.** The COLMAP-port mapper filters
+  points and completes / merges tracks in parallel (byte-identical
+  output), builds BA problems with less overhead, and factors reduced
+  camera systems of 64+ frames in a fill-reducing order (nested
+  dissection / RCM). The joint pose + intrinsics BA gained a block-sparse,
+  parallel solve (`LinearSolver::Sparse`, used by `gsplat_photos`).
 
 - **Multi-camera Basalt VIO for divergent rigs (opt-in, aimed at LaMAria /
   Project Aria).** The VIO used only cam0 for new keypoints, landmark hosting

@@ -506,6 +506,7 @@ pub fn solve(
     if config.image_ids.is_empty() {
         return false;
     }
+    let solve_started = std::time::Instant::now();
 
     let default_camera = recon
         .camera(
@@ -533,35 +534,51 @@ pub fn solve(
         }
     }
 
-    let mut added_points: BTreeSet<Point3DT> = BTreeSet::new();
-    for &image_id in &config.image_ids {
-        let image = recon.image(image_id);
-        let frame_id = image.frame_id;
-        let camera = recon.camera(image.camera_id).clone();
-        let sensor_from_rig = sensor_from_rig_for_image(recon, image_id);
-        for point2d in &image.points2d {
-            let Some(point3d_id) = point2d.point3d_id else {
-                continue;
-            };
-            added_points.insert(point3d_id);
-            ba.add_rig_observation(BaRigObservation {
-                keyframe_id: frame_id,
-                landmark_id: point3d_id,
-                xy: point2d.xy,
-                camera: camera.clone(),
-                sensor_from_rig: sensor_from_rig.clone(),
-            });
-        }
-    }
+    // The problem is assembled with rayon (observations per image, per-point
+    // decisions) and applied serially in the same order as the original
+    // serial loops, so `ba` is identical: observations image by image, then
+    // points ascending with their pulled-in observations.
+    use rayon::prelude::*;
+    let image_ids: Vec<ImageT> = config.image_ids.iter().copied().collect();
+    let per_image: Vec<Vec<BaRigObservation>> = image_ids
+        .par_iter()
+        .map(|&image_id| {
+            let image = recon.image(image_id);
+            let frame_id = image.frame_id;
+            let camera = recon.camera(image.camera_id);
+            let sensor_from_rig = sensor_from_rig_for_image(recon, image_id);
+            image
+                .points2d
+                .iter()
+                .filter_map(|point2d| {
+                    point2d.point3d_id.map(|point3d_id| BaRigObservation {
+                        keyframe_id: frame_id,
+                        landmark_id: point3d_id,
+                        xy: point2d.xy,
+                        camera: camera.clone(),
+                        sensor_from_rig: sensor_from_rig.clone(),
+                    })
+                })
+                .collect()
+        })
+        .collect();
     // Port of `DefaultBundleAdjuster`'s constructor calling `AddPointToProblem`
     // for every point in `config.VariablePoints()`/`config.ConstantPoints()`
     // (`bundle_adjustment_ceres.cc:616-621`), independent of whether that
     // point had any observation among `config.Images()` at all.
-    for &pid in &config.variable_point3d_ids {
-        added_points.insert(pid);
-    }
-    for &pid in &config.constant_point3d_ids {
-        added_points.insert(pid);
+    let mut added_points: Vec<Point3DT> = per_image
+        .iter()
+        .flatten()
+        .map(|o| o.landmark_id)
+        .chain(config.variable_point3d_ids.iter().copied())
+        .chain(config.constant_point3d_ids.iter().copied())
+        .collect();
+    added_points.par_sort_unstable();
+    added_points.dedup();
+    for obs in per_image {
+        for o in obs {
+            ba.add_rig_observation(o);
+        }
     }
 
     // Frames pulled in purely to hold a fixed, baked-constant pose for a
@@ -570,82 +587,100 @@ pub fn solve(
     // `frame_ids`, computed above from `config.image_ids` alone, is).
     let mut pulled_frame_ids: BTreeSet<FrameT> = BTreeSet::new();
 
-    for &point3d_id in &added_points {
-        let xyz = recon.point3d(point3d_id).xyz;
-        ba.add_landmark(point3d_id, xyz);
-        // Deviation 3: see module doc for the exact `ParameterizePoints`
-        // policy this reproduces.
-        let track_fully_in_window = recon
-            .point3d(point3d_id)
-            .track
-            .iter()
-            .all(|el| config.image_ids.contains(&el.image_id));
-        // Three-way `LocalBaPointPolicy` branch (see each variant's doc):
-        // `Colmap` and `VariableWithoutPullIn` both honor an explicit
-        // `add_variable_point` request unconditionally (the *variable vs.
-        // constant decision* is identical); `WindowOnly` only honors it when
-        // the track is already fully in the window. Only `Colmap` then
-        // pulls in the rest of the track as extra fixed-pose residuals;
-        // `VariableWithoutPullIn` (the actual pre-C2.6 rule, restored from
-        // `git show 053f6e4`) leaves the point free but optimizes it from
-        // only whichever observations already happen to be in this problem
-        // (its in-window observations) — the outside ones are simply never
-        // added, not pulled in with a fixed pose.
-        let explicit_variable = config.variable_point3d_ids.contains(&point3d_id);
-        let honor_explicit_variable = matches!(
-            options.local_ba_point_policy,
-            LocalBaPointPolicy::Colmap | LocalBaPointPolicy::VariableWithoutPullIn
-        );
-        // `ParameterizePoints` (`bundle_adjustment_ceres.cc:546`): a point is
-        // constant when `!refine_points3D` or when its track is longer than
-        // the number of observations added to this problem (the latter is
-        // exactly `!track_fully_in_window`).
-        let variable = options.refine_points3d
-            && !config.constant_point3d_ids.contains(&point3d_id)
-            && (track_fully_in_window || (honor_explicit_variable && explicit_variable));
-        if !variable {
+    struct PointPlan {
+        xyz: Point3<f64>,
+        variable: bool,
+        /// `(frame_id, observation)` pulled in from outside the window.
+        pulled: Vec<(FrameT, BaRigObservation)>,
+    }
+    let plans: Vec<PointPlan> = added_points
+        .par_iter()
+        .map(|&point3d_id| {
+            let point = recon.point3d(point3d_id);
+            // Deviation 3: see module doc for the exact `ParameterizePoints`
+            // policy this reproduces.
+            let track_fully_in_window = point
+                .track
+                .iter()
+                .all(|el| config.image_ids.contains(&el.image_id));
+            // Three-way `LocalBaPointPolicy` branch (see each variant's doc):
+            // `Colmap` and `VariableWithoutPullIn` both honor an explicit
+            // `add_variable_point` request unconditionally (the *variable vs.
+            // constant decision* is identical); `WindowOnly` only honors it
+            // when the track is already fully in the window. Only `Colmap`
+            // then pulls in the rest of the track as extra fixed-pose
+            // residuals; `VariableWithoutPullIn` (the actual pre-C2.6 rule,
+            // restored from `git show 053f6e4`) leaves the point free but
+            // optimizes it from only whichever observations already happen to
+            // be in this problem (its in-window observations) — the outside
+            // ones are simply never added, not pulled in with a fixed pose.
+            let explicit_variable = config.variable_point3d_ids.contains(&point3d_id);
+            let honor_explicit_variable = matches!(
+                options.local_ba_point_policy,
+                LocalBaPointPolicy::Colmap | LocalBaPointPolicy::VariableWithoutPullIn
+            );
+            // `ParameterizePoints` (`bundle_adjustment_ceres.cc:546`): a point
+            // is constant when `!refine_points3D` or when its track is longer
+            // than the number of observations added to this problem (the
+            // latter is exactly `!track_fully_in_window`).
+            let variable = options.refine_points3d
+                && !config.constant_point3d_ids.contains(&point3d_id)
+                && (track_fully_in_window || (honor_explicit_variable && explicit_variable));
+            let mut pulled = Vec::new();
+            if variable
+                && options.local_ba_point_policy == LocalBaPointPolicy::Colmap
+                && explicit_variable
+                && !track_fully_in_window
+            {
+                // `AddPointToProblem` (`bundle_adjustment_ceres.cc:819-879`):
+                // pull in every remaining track observation from images
+                // outside `config.Images()`, with that image's pose baked in
+                // as fixed data, so the point sees its *entire* track
+                // (matching `ParameterizePoints`'s `track.Length() ==
+                // num_observations` free condition exactly instead of only
+                // seeing the in-window subset).
+                for el in &point.track {
+                    if config.image_ids.contains(&el.image_id) {
+                        continue; // already added above (`AddImageToProblem`).
+                    }
+                    let image = recon.image(el.image_id);
+                    pulled.push((
+                        image.frame_id,
+                        BaRigObservation {
+                            keyframe_id: image.frame_id,
+                            landmark_id: point3d_id,
+                            xy: image.points2d[el.point2d_idx].xy,
+                            camera: recon.camera(image.camera_id).clone(),
+                            sensor_from_rig: sensor_from_rig_for_image(recon, el.image_id),
+                        },
+                    ));
+                }
+            }
+            PointPlan {
+                xyz: point.xyz,
+                variable,
+                pulled,
+            }
+        })
+        .collect();
+    for (&point3d_id, plan) in added_points.iter().zip(plans) {
+        ba.add_landmark(point3d_id, plan.xyz);
+        if !plan.variable {
             ba.fix_landmark(point3d_id);
             continue;
         }
-        if options.local_ba_point_policy == LocalBaPointPolicy::Colmap
-            && explicit_variable
-            && !track_fully_in_window
-        {
-            // `AddPointToProblem` (`bundle_adjustment_ceres.cc:819-879`):
-            // pull in every remaining track observation from images outside
-            // `config.Images()`, with that image's pose baked in as fixed
-            // data, so the point sees its *entire* track (matching
-            // `ParameterizePoints`'s `track.Length() == num_observations`
-            // free condition exactly instead of only seeing the in-window
-            // subset).
-            let track = recon.point3d(point3d_id).track.clone();
-            for el in &track {
-                if config.image_ids.contains(&el.image_id) {
-                    continue; // already added above (`AddImageToProblem`).
-                }
-                let image = recon.image(el.image_id);
-                let frame_id = image.frame_id;
-                if !frame_ids.contains(&frame_id) && pulled_frame_ids.insert(frame_id) {
-                    let rig_from_world = recon.frame(frame_id).rig_from_world().clone();
-                    ba.add_pose(
-                        frame_id,
-                        Pose {
-                            world_to_camera: rig_from_world,
-                        },
-                    );
-                    ba.fix_pose(frame_id);
-                }
-                let camera = recon.camera(image.camera_id).clone();
-                let sensor_from_rig = sensor_from_rig_for_image(recon, el.image_id);
-                let xy = image.points2d[el.point2d_idx].xy;
-                ba.add_rig_observation(BaRigObservation {
-                    keyframe_id: frame_id,
-                    landmark_id: point3d_id,
-                    xy,
-                    camera,
-                    sensor_from_rig,
-                });
+        for (frame_id, o) in plan.pulled {
+            if !frame_ids.contains(&frame_id) && pulled_frame_ids.insert(frame_id) {
+                let rig_from_world = recon.frame(frame_id).rig_from_world().clone();
+                ba.add_pose(
+                    frame_id,
+                    Pose {
+                        world_to_camera: rig_from_world,
+                    },
+                );
+                ba.fix_pose(frame_id);
             }
+            ba.add_rig_observation(o);
         }
     }
 
@@ -803,6 +838,11 @@ pub fn solve(
         let xyz: Point3<f64> = ba.landmarks[&point3d_id];
         recon.point3d_mut(point3d_id).xyz = xyz;
     }
+    eprintln!(
+        "TIMING ba_solve_total frames={} elapsed_ms={}",
+        frame_ids.len(),
+        solve_started.elapsed().as_millis()
+    );
 
     true
 }

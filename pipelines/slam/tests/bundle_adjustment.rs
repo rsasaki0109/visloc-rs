@@ -3637,3 +3637,243 @@ fn ba_refiner_skips_when_no_observations_align() {
     assert!(!refinement.refined);
     assert_eq!(refinement.reason, LocalRefinementReason::Noop);
 }
+
+/// A 10-camera, 80-point scene rendered through `truth`, then perturbed: a
+/// wrong camera, jittered free poses and landmarks. Two poses are fixed for
+/// the gauge; everything else (poses, points, intrinsics) is free, so the
+/// reduced camera system has real pose-pose coupling through landmarks.
+fn perturbed_many_view_bundle(truth: &Camera, start: &Camera) -> BundleAdjustment {
+    let mut ba = BundleAdjustment::new(start.clone());
+    let poses: Vec<(u64, Pose)> = (0..10)
+        .map(|i| {
+            let x = i as f64 * 0.4 - 1.8;
+            (
+                100 + i as u64,
+                pose_with_yaw(Vector3::new(x, 0.1 * (i % 3) as f64, 0.0), 0.04 * x),
+            )
+        })
+        .collect();
+    let points: Vec<(u64, Point3<f64>)> = (0..80)
+        .map(|j| {
+            let a = j as f64;
+            (
+                1000 + j as u64,
+                Point3::new(
+                    (a * 0.37).sin() * 2.5,
+                    (a * 0.61).cos() * 1.2,
+                    6.0 + (a * 0.23).sin() * 1.5,
+                ),
+            )
+        })
+        .collect();
+    for (k, (id, pose)) in poses.iter().enumerate() {
+        let jitter = if k < 2 {
+            Vector6::zeros()
+        } else {
+            let s = k as f64;
+            Vector6::new(
+                0.01 * s.sin(),
+                -0.01 * s.cos(),
+                0.008 * (2.0 * s).sin(),
+                0.003 * s.cos(),
+                -0.002 * s.sin(),
+                0.002 * (3.0 * s).cos(),
+            )
+        };
+        let mut p = pose.clone();
+        p.world_to_camera = p.world_to_camera.compose(&SE3::exp(&jitter));
+        ba.add_pose(*id, p);
+    }
+    for (id, point) in &points {
+        let a = *id as f64;
+        ba.add_landmark(
+            *id,
+            Point3::new(
+                point.x + 0.02 * a.sin(),
+                point.y - 0.02 * a.cos(),
+                point.z + 0.03 * (0.5 * a).sin(),
+            ),
+        );
+    }
+    for (kf_id, pose) in &poses {
+        for (lm_id, point) in &points {
+            let xc = pose.transform_world_point(point);
+            if let Some(uv) = truth.project(&xc) {
+                ba.add_observation(BaObservation {
+                    keyframe_id: *kf_id,
+                    landmark_id: *lm_id,
+                    xy: uv,
+                });
+            }
+        }
+    }
+    ba.fix_pose(100);
+    ba.fix_pose(109);
+    ba
+}
+
+/// The sparse arrowhead solve of the joint intrinsics BA must take the same
+/// LM steps as the dense solve (up to floating-point summation order).
+fn assert_sparse_joint_matches_dense(truth: &Camera, start: &Camera, base: BaConfig) {
+    let mut dense = perturbed_many_view_bundle(truth, start);
+    let mut sparse = perturbed_many_view_bundle(truth, start);
+    let cost_before = dense.cost();
+    let dense_result = dense
+        .optimize(&BaConfig {
+            linear_solver: LinearSolver::Dense,
+            ..base
+        })
+        .expect("dense joint BA");
+    let sparse_result = sparse
+        .optimize(&BaConfig {
+            linear_solver: LinearSolver::Sparse,
+            ..base
+        })
+        .expect("sparse joint BA");
+    assert_eq!(
+        dense_result.iterations.len(),
+        sparse_result.iterations.len(),
+        "same LM trajectory"
+    );
+    for (d, s) in dense_result
+        .iterations
+        .iter()
+        .zip(&sparse_result.iterations)
+    {
+        assert_eq!(d.step_accepted, s.step_accepted);
+    }
+    for (a, b) in dense.camera.params.iter().zip(&sparse.camera.params) {
+        assert!(
+            (a - b).abs() <= 1e-6 * a.abs().max(1.0),
+            "camera {:?} vs {:?}",
+            dense.camera.params,
+            sparse.camera.params
+        );
+    }
+    for (id, p) in &dense.poses {
+        let q = &sparse.poses[id];
+        let d = p
+            .world_to_camera
+            .inverse()
+            .compose(&q.world_to_camera)
+            .log();
+        assert!(d.norm() < 1e-7, "pose {id} differs by {}", d.norm());
+    }
+    for (id, p) in &dense.landmarks {
+        assert!((p - sparse.landmarks[id]).norm() < 1e-6, "landmark {id}");
+    }
+    assert!(
+        sparse.cost() < 1e-2 * cost_before,
+        "cost {} (was {cost_before})",
+        sparse.cost()
+    );
+}
+
+#[test]
+fn sparse_joint_intrinsics_matches_dense() {
+    let truth = pinhole();
+    let start = Camera::pinhole(1, 640, 480, 520.0, 512.0, 324.0, 236.0);
+    assert_sparse_joint_matches_dense(
+        &truth,
+        &start,
+        BaConfig {
+            refine_intrinsics: true,
+            ..BaConfig::default()
+        },
+    );
+}
+
+#[test]
+fn sparse_joint_intrinsics_matches_dense_with_shared_focal_and_distortion() {
+    let truth = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.05, 0.01);
+    let start = Camera::pinhole(1, 640, 480, 515.0, 508.0, 324.0, 236.0);
+    assert_sparse_joint_matches_dense(
+        &truth,
+        &start,
+        BaConfig {
+            refine_intrinsics: true,
+            refine_distortion: true,
+            shared_focal: true,
+            ..BaConfig::default()
+        },
+    );
+}
+
+#[test]
+fn sparse_joint_intrinsics_matches_dense_with_huber_and_damping() {
+    let truth = pinhole();
+    let start = Camera::pinhole(1, 640, 480, 490.0, 507.0, 317.0, 243.0);
+    assert_sparse_joint_matches_dense(
+        &truth,
+        &start,
+        BaConfig {
+            refine_intrinsics: true,
+            robust_kernel: RobustKernel::Huber { delta: 3.0 },
+            initial_lambda: Some(1e-3),
+            ..BaConfig::default()
+        },
+    );
+}
+
+/// Timing harness for the sparse joint intrinsics BA on a larger synthetic
+/// survey (`cargo test --release -p visloc-slam --test bundle_adjustment
+/// bench_sparse_joint -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn bench_sparse_joint_intrinsics() {
+    let truth = pinhole();
+    let n_cams = 300usize;
+    let mut ba = BundleAdjustment::new(Camera::pinhole(1, 640, 480, 510.0, 505.0, 322.0, 238.0));
+    let poses: Vec<(u64, Pose)> = (0..n_cams)
+        .map(|i| (i as u64, pose_at(Vector3::new(i as f64 * 0.2, 0.0, 0.0))))
+        .collect();
+    let mut n_obs = 0usize;
+    let mut lm_id = 100_000u64;
+    for i in 0..n_cams {
+        // 120 points ahead of camera i, seen by the cameras within +-4.
+        for j in 0..120 {
+            let a = (i * 120 + j) as f64;
+            let p = Point3::new(
+                i as f64 * 0.2 + (a * 0.37).sin() * 1.5,
+                (a * 0.61).cos() * 1.0,
+                6.0 + (a * 0.23).sin(),
+            );
+            ba.add_landmark(
+                lm_id,
+                Point3::new(p.x + 0.01 * a.sin(), p.y, p.z + 0.01 * a.cos()),
+            );
+            for (kf_id, pose) in &poses[i.saturating_sub(4)..(i + 5).min(n_cams)] {
+                if let Some(uv) = truth.project(&pose.transform_world_point(&p)) {
+                    ba.add_observation(BaObservation {
+                        keyframe_id: *kf_id,
+                        landmark_id: lm_id,
+                        xy: uv,
+                    });
+                    n_obs += 1;
+                }
+            }
+            lm_id += 1;
+        }
+    }
+    for (id, pose) in &poses {
+        ba.add_pose(*id, pose.clone());
+    }
+    ba.fix_pose(0);
+    ba.fix_pose(n_cams as u64 - 1);
+    let config = BaConfig {
+        refine_intrinsics: true,
+        linear_solver: LinearSolver::Sparse,
+        max_iterations: 5,
+        ..BaConfig::default()
+    };
+    let t = std::time::Instant::now();
+    let r = ba.optimize(&config).expect("sparse joint BA");
+    eprintln!(
+        "bench: {n_cams} cams, {} landmarks, {n_obs} obs: {} iterations in {:.3}s, cost {:.3e} -> {:.3e}",
+        ba.landmarks.len(),
+        r.iterations.len(),
+        t.elapsed().as_secs_f64(),
+        r.initial_cost,
+        r.final_cost
+    );
+}

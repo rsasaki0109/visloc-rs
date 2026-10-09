@@ -29,7 +29,7 @@
 //! inlier set (`TriangulationEstimator::Estimate` on the inlier views) and
 //! keeps expanding while the inlier support strictly improves.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use nalgebra::{DMatrix, Point2, Point3};
 use visloc_vision::two_view::CorrespondenceGraph;
@@ -114,6 +114,9 @@ pub struct IncrementalTriangulator {
     merge_trials: BTreeSet<(Point3DT, Point3DT)>,
     re_num_trials: BTreeMap<(ImageT, ImageT), usize>,
     modified_point3d_ids: BTreeSet<Point3DT>,
+    /// Points deleted / created by merges since the last drain (lets
+    /// `merge_tracks` invalidate speculative plans without rescanning).
+    merge_touched: Vec<Point3DT>,
 }
 
 impl IncrementalTriangulator {
@@ -348,6 +351,16 @@ impl IncrementalTriangulator {
     }
 
     /// Port of `CompleteTracks` (`.cc:249-262`).
+    ///
+    /// Speculatively parallel, with the serial loop's exact result: in waves,
+    /// every point's completion is first planned against the current state
+    /// on a rayon worker ([`plan_complete`] records each 2D point it looked
+    /// at and the observations it would add), then the plans are applied
+    /// serially in `point3d_ids` order. A point's BFS depends only on the
+    /// state of the 2D points it examines (registration, poses, cameras and
+    /// its own position are fixed during the pass), so a plan stays valid
+    /// unless one of those 2D points was claimed earlier in the pass; such a
+    /// point falls back to the serial [`Self::complete`].
     pub fn complete_tracks(
         &mut self,
         options: &Options,
@@ -356,10 +369,33 @@ impl IncrementalTriangulator {
         obs: &mut ObservationManager,
         point3d_ids: &[Point3DT],
     ) -> usize {
+        use rayon::prelude::*;
         self.clear_caches();
         let mut n = 0;
-        for &id in point3d_ids {
-            n += self.complete(options, recon, graph, obs, id);
+        let mut claimed: HashSet<(ImageT, Point2DT)> = HashSet::new();
+        for wave in point3d_ids.chunks(PLAN_WAVE) {
+            let recon_ref: &Reconstruction = recon;
+            let plans: Vec<Option<CompletePlan>> = wave
+                .par_iter()
+                .map(|&id| plan_complete(options, recon_ref, graph, id))
+                .collect();
+            for (&id, plan) in wave.iter().zip(plans) {
+                let Some(plan) = plan else { continue };
+                if plan.examined.iter().any(|key| claimed.contains(key)) {
+                    let before = recon.point3d(id).track.len();
+                    n += self.complete(options, recon, graph, obs, id);
+                    for el in &recon.point3d(id).track[before..] {
+                        claimed.insert((el.image_id, el.point2d_idx));
+                    }
+                    continue;
+                }
+                for el in plan.adds {
+                    obs.add_observation(recon, graph, id, el);
+                    self.modified_point3d_ids.insert(id);
+                    claimed.insert((el.image_id, el.point2d_idx));
+                    n += 1;
+                }
+            }
         }
         n
     }
@@ -377,6 +413,16 @@ impl IncrementalTriangulator {
     }
 
     /// Port of `MergeTracks` (`.cc:278-291`).
+    ///
+    /// Speculatively parallel, with the serial loop's exact result: each
+    /// point's first merge attempt is planned on a rayon worker against the
+    /// current state ([`plan_merge`]: the candidate pairs it would test and
+    /// whether any passes). Applying in `point3d_ids` order, a plan that found
+    /// no merge is final as long as neither the point nor any candidate it
+    /// tested was merged away earlier in the pass (the merge test of an
+    /// unchanged pair is deterministic and symmetric); its tested pairs are
+    /// recorded in `merge_trials` as the serial loop would. Every other point
+    /// runs the serial [`Self::merge`].
     pub fn merge_tracks(
         &mut self,
         options: &Options,
@@ -385,10 +431,38 @@ impl IncrementalTriangulator {
         obs: &mut ObservationManager,
         point3d_ids: &[Point3DT],
     ) -> usize {
+        use rayon::prelude::*;
         self.clear_caches();
         let mut n = 0;
-        for &id in point3d_ids {
-            n += self.merge(options, recon, graph, obs, id);
+        // Points created or deleted by merges in this pass.
+        let mut touched: HashSet<Point3DT> = HashSet::new();
+        for wave in point3d_ids.chunks(PLAN_WAVE) {
+            let recon_ref: &Reconstruction = recon;
+            let plans: Vec<Option<MergePlan>> = wave
+                .par_iter()
+                .map(|&id| plan_merge(options, recon_ref, graph, id))
+                .collect();
+            for (&id, plan) in wave.iter().zip(plans) {
+                let stale = match &plan {
+                    None => false, // point did not exist when planned (cannot reappear)
+                    Some(p) => {
+                        p.merges
+                            || touched.contains(&id)
+                            || p.candidates.iter().any(|c| touched.contains(c))
+                    }
+                };
+                if !stale {
+                    if let Some(p) = plan {
+                        for &c in &p.candidates {
+                            self.merge_trials
+                                .insert(if id < c { (id, c) } else { (c, id) });
+                        }
+                    }
+                    continue;
+                }
+                n += self.merge(options, recon, graph, obs, id);
+                touched.extend(self.merge_touched.drain(..));
+            }
         }
         n
     }
@@ -711,6 +785,8 @@ impl IncrementalTriangulator {
                 if merge_ok {
                     let num_merged = p3d.track.len() + corr_p3d.track.len();
                     let merged_id = obs.merge_points3d(recon, graph, point3d_id, corr_point3d_id);
+                    self.merge_touched
+                        .extend([point3d_id, corr_point3d_id, merged_id]);
                     self.modified_point3d_ids.remove(&point3d_id);
                     self.modified_point3d_ids.remove(&corr_point3d_id);
                     self.modified_point3d_ids.insert(merged_id);
@@ -803,6 +879,164 @@ impl IncrementalTriangulator {
         }
         num_completed
     }
+}
+
+/// Points per speculative planning wave of [`IncrementalTriangulator::complete_tracks`] /
+/// [`IncrementalTriangulator::merge_tracks`] (bounds plan memory; the result
+/// does not depend on it).
+const PLAN_WAVE: usize = 16_384;
+
+/// Read-only replay of [`IncrementalTriangulator::complete`]'s BFS.
+struct CompletePlan {
+    /// Every 2D point the BFS looked at beyond the point's own track.
+    examined: Vec<(ImageT, Point2DT)>,
+    /// Observations it would add, in the serial order.
+    adds: Vec<TrackElement>,
+}
+
+fn plan_complete(
+    options: &Options,
+    recon: &Reconstruction,
+    graph: &CorrespondenceGraph,
+    point3d_id: Point3DT,
+) -> Option<CompletePlan> {
+    if !recon.exists_point3d(point3d_id) {
+        return None;
+    }
+    let max_sq_reproj_error = options.complete_max_reproj_error * options.complete_max_reproj_error;
+    let xyz = recon.point3d(point3d_id).xyz;
+    let mut curr_queue: Vec<TrackElement> = recon.point3d(point3d_id).track.clone();
+    let mut next_queue: Vec<TrackElement> = Vec::new();
+    let mut visited: BTreeSet<(ImageT, Point2DT)> = curr_queue
+        .iter()
+        .map(|el| (el.image_id, el.point2d_idx))
+        .collect();
+    // 2D points this plan itself claims (the serial BFS sees them as taken
+    // once added).
+    let mut own: HashSet<(ImageT, Point2DT)> = HashSet::new();
+    let mut plan = CompletePlan {
+        examined: Vec::new(),
+        adds: Vec::new(),
+    };
+    let max_transitivity = options.complete_max_transitivity;
+    for transitivity in 1..=max_transitivity {
+        while let Some(elem) = curr_queue.pop() {
+            for corr in graph.find_correspondences(elem.image_id as usize, elem.point2d_idx) {
+                let key = (corr.image_id as ImageT, corr.point2d_idx);
+                if !visited.insert(key) {
+                    continue;
+                }
+                plan.examined.push(key);
+                let (corr_image_id, corr_point2d_idx) = key;
+                if !recon.is_image_registered(corr_image_id) {
+                    continue;
+                }
+                let image = recon.image(corr_image_id);
+                if image.points2d[corr_point2d_idx].has_point3d() || own.contains(&key) {
+                    continue;
+                }
+                let camera = recon.camera(image.camera_id);
+                if camera_has_bogus_params(
+                    camera,
+                    options.min_focal_length_ratio,
+                    options.max_focal_length_ratio,
+                    options.max_extra_param,
+                ) {
+                    continue;
+                }
+                let xy = image.points2d[corr_point2d_idx].xy;
+                let cam_from_world = image_cam_from_world(recon, corr_image_id);
+                let err = calculate_squared_reprojection_error(xy, xyz, &cam_from_world, camera);
+                if err > max_sq_reproj_error {
+                    continue;
+                }
+                let el = TrackElement {
+                    image_id: corr_image_id,
+                    point2d_idx: corr_point2d_idx,
+                };
+                own.insert(key);
+                plan.adds.push(el);
+                if transitivity < max_transitivity {
+                    next_queue.push(el);
+                }
+            }
+        }
+        if next_queue.is_empty() {
+            break;
+        }
+        std::mem::swap(&mut curr_queue, &mut next_queue);
+    }
+    Some(plan)
+}
+
+/// Read-only replay of one [`IncrementalTriangulator::try_merge_once`] call
+/// with an empty `merge_trials`.
+struct MergePlan {
+    /// Distinct candidate points it would test, in order.
+    candidates: Vec<Point3DT>,
+    /// Whether one of them passes the merge test (the serial path then runs).
+    merges: bool,
+}
+
+fn plan_merge(
+    options: &Options,
+    recon: &Reconstruction,
+    graph: &CorrespondenceGraph,
+    point3d_id: Point3DT,
+) -> Option<MergePlan> {
+    if !recon.exists_point3d(point3d_id) {
+        return None;
+    }
+    let max_sq_reproj_error = options.merge_max_reproj_error * options.merge_max_reproj_error;
+    let p3d = recon.point3d(point3d_id);
+    let mut seen: HashSet<Point3DT> = HashSet::new();
+    let mut plan = MergePlan {
+        candidates: Vec::new(),
+        merges: false,
+    };
+    for el in &p3d.track {
+        for corr in graph.find_correspondences(el.image_id as usize, el.point2d_idx) {
+            let corr_image_id = corr.image_id as ImageT;
+            if !recon.is_image_registered(corr_image_id) {
+                continue;
+            }
+            let Some(corr_point3d_id) =
+                recon.image(corr_image_id).points2d[corr.point2d_idx].point3d_id
+            else {
+                continue;
+            };
+            if corr_point3d_id == point3d_id || !seen.insert(corr_point3d_id) {
+                continue;
+            }
+            plan.candidates.push(corr_point3d_id);
+            let corr_p3d = recon.point3d(corr_point3d_id);
+            let n1 = p3d.track.len() as f64;
+            let n2 = corr_p3d.track.len() as f64;
+            let merged_xyz =
+                Point3::from((p3d.xyz.coords * n1 + corr_p3d.xyz.coords * n2) / (n1 + n2));
+            let merge_ok = [&p3d.track, &corr_p3d.track]
+                .into_iter()
+                .all(|check_track| {
+                    check_track.iter().all(|test_el| {
+                        let test_image = recon.image(test_el.image_id);
+                        let test_camera = recon.camera(test_image.camera_id);
+                        let test_xy = test_image.points2d[test_el.point2d_idx].xy;
+                        let test_cam_from_world = image_cam_from_world(recon, test_el.image_id);
+                        calculate_squared_reprojection_error(
+                            test_xy,
+                            merged_xyz,
+                            &test_cam_from_world,
+                            test_camera,
+                        ) <= max_sq_reproj_error
+                    })
+                });
+            if merge_ok {
+                plan.merges = true;
+                return Some(plan);
+            }
+        }
+    }
+    Some(plan)
 }
 
 fn angular_reprojection_error(

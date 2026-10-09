@@ -123,6 +123,15 @@ fn main() {
 
     let mut options = pipeline::PipelineOptions::default();
     options.mapper.random_seed = args.random_seed;
+    // `gsplat_photos` (single camera) uses COLMAP's own
+    // `Mapper.abs_pose_min_num_inliers = 30`; replay its exports with
+    // VISLOC_ABS_POSE_MIN_INLIERS=30.
+    if let Some(n) = std::env::var("VISLOC_ABS_POSE_MIN_INLIERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        options.mapper.abs_pose_min_num_inliers = n;
+    }
     options.mapper.pose_solver = match args.pose_solver.as_str() {
         "gp3p" => visloc_slam::colmap_incremental::mapper::PoseSolverBackend::Gp3p,
         "dlt6pt" => visloc_slam::colmap_incremental::mapper::PoseSolverBackend::Dlt6pt,

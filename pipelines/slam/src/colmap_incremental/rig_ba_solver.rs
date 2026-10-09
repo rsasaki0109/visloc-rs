@@ -129,7 +129,7 @@
 //! `BundleAdjustmentConfig`/`Gauge` mechanism (`set_constant_rig_from_world_pose`,
 //! `add_constant_point`, `fix_gauge`), unchanged by this backend swap.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use nalgebra::{DMatrix, Matrix3, Matrix6, Point2, Point3, SMatrix, Vector2, Vector3, Vector6};
@@ -153,12 +153,11 @@ const MAX_DIAGONAL: f64 = 1e32;
 
 /// One rig-reprojection observation, flattened to plain floats/indices — no
 /// `Camera`/`SE3` lookups by id anywhere in the per-observation hot loop.
-/// Sorted by `point_idx` in [`Problem::obs`] so a point's observations are a
+/// Grouped by point in [`Problem::obs`] so a point's observations are a
 /// contiguous slice.
 #[derive(Debug, Clone)]
 struct Obs {
     frame_idx: u32,
-    point_idx: u32,
     xy: Point2<f64>,
     fx: f64,
     fy: f64,
@@ -180,7 +179,7 @@ struct Problem {
     points: Vec<Point3<f64>>,
 
     obs: Vec<Obs>,
-    /// `[start, end)` into `obs` for each point, `obs` sorted by `point_idx`.
+    /// `[start, end)` into `obs` for each point (`obs` is grouped by point).
     point_obs_range: Vec<(u32, u32)>,
 
     /// Performance fix (see [`build_reduced_system_pattern`]'s doc): the
@@ -237,64 +236,75 @@ fn build_reduced_system_pattern(
     frame_fixed: &[bool],
     free_frame_slot: &[Option<u32>],
 ) -> (Vec<Vec<u32>>, Vec<(u32, u32)>, Vec<Vec<u32>>) {
-    let mut point_free_frames: Vec<Vec<u32>> = Vec::with_capacity(point_obs_range.len());
-    for &(start, end) in point_obs_range {
-        let mut frames: Vec<u32> = obs[start as usize..end as usize]
-            .iter()
-            .map(|o| o.frame_idx)
-            .filter(|&f| !frame_fixed[f as usize])
-            .collect();
-        frames.sort_unstable();
-        frames.dedup();
-        point_free_frames.push(frames);
-    }
-
-    let mut raw_pairs: Vec<(u32, u32)> = Vec::new();
-    for frames in &point_free_frames {
-        if frames.len() < 2 {
-            continue;
-        }
-        let slots: Vec<u32> = frames
+    // Per-point work runs on rayon; the outputs (sorted unique edge list,
+    // per-point free frames and pair -> edge indices) are pure functions of
+    // the input, so they match the serial construction exactly.
+    let point_free_frames: Vec<Vec<u32>> = point_obs_range
+        .par_iter()
+        .map(|&(start, end)| {
+            let mut frames: Vec<u32> = obs[start as usize..end as usize]
+                .iter()
+                .map(|o| o.frame_idx)
+                .filter(|&f| !frame_fixed[f as usize])
+                .collect();
+            frames.sort_unstable();
+            frames.dedup();
+            frames
+        })
+        .collect();
+    let slots_of = |frames: &[u32]| -> Vec<u32> {
+        frames
             .iter()
             .map(|&f| free_frame_slot[f as usize].expect("free"))
-            .collect();
-        for j in 1..slots.len() {
-            for i in 0..j {
-                raw_pairs.push((slots[i], slots[j]));
+            .collect()
+    };
+
+    let mut raw_pairs: Vec<(u32, u32)> = point_free_frames
+        .par_iter()
+        .filter(|frames| frames.len() >= 2)
+        .flat_map_iter(|frames| {
+            let slots = slots_of(frames);
+            let mut pairs = Vec::with_capacity(slots.len() * (slots.len() - 1) / 2);
+            for j in 1..slots.len() {
+                for i in 0..j {
+                    pairs.push((slots[i], slots[j]));
+                }
             }
-        }
-    }
-    raw_pairs.sort_unstable();
+            pairs
+        })
+        .collect();
+    raw_pairs.par_sort_unstable();
     raw_pairs.dedup();
     let edges = raw_pairs;
-    let edge_index: HashMap<(u32, u32), u32> = edges
-        .iter()
-        .enumerate()
-        .map(|(idx, &e)| (e, idx as u32))
-        .collect();
 
-    let mut point_pair_edge_idx: Vec<Vec<u32>> = Vec::with_capacity(point_free_frames.len());
-    for frames in &point_free_frames {
-        if frames.len() < 2 {
-            point_pair_edge_idx.push(Vec::new());
-            continue;
-        }
-        let slots: Vec<u32> = frames
-            .iter()
-            .map(|&f| free_frame_slot[f as usize].expect("free"))
-            .collect();
-        let n = slots.len();
-        let mut idxs = Vec::with_capacity(n * (n - 1) / 2);
-        for j in 1..n {
-            for i in 0..j {
-                idxs.push(edge_index[&(slots[i], slots[j])]);
+    let point_pair_edge_idx: Vec<Vec<u32>> = point_free_frames
+        .par_iter()
+        .map(|frames| {
+            if frames.len() < 2 {
+                return Vec::new();
             }
-        }
-        point_pair_edge_idx.push(idxs);
-    }
+            let slots = slots_of(frames);
+            let n = slots.len();
+            let mut idxs = Vec::with_capacity(n * (n - 1) / 2);
+            for j in 1..n {
+                for i in 0..j {
+                    let e = edges
+                        .binary_search(&(slots[i], slots[j]))
+                        .expect("pair is an edge");
+                    idxs.push(e as u32);
+                }
+            }
+            idxs
+        })
+        .collect();
 
     (point_free_frames, edges, point_pair_edge_idx)
 }
+
+/// Reduced camera systems with at least this many free frames are factored
+/// in a fill-reducing block order ([`crate::reordering`]); smaller ones (every
+/// local BA) keep the natural order, where fill is negligible.
+const REORDER_MIN_FREE_FRAMES: usize = 64;
 
 fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
     if ba.poses.is_empty() {
@@ -307,12 +317,8 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         return Err(BaError::NoObservations);
     }
 
+    // `BTreeMap` keys are ascending, so ids map to indices by binary search.
     let frame_ids: Vec<u64> = ba.poses.keys().copied().collect();
-    let frame_id_to_idx: HashMap<u64, u32> = frame_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i as u32))
-        .collect();
     let frame_fixed: Vec<bool> = frame_ids
         .iter()
         .map(|id| ba.fixed_poses.contains(id))
@@ -334,55 +340,68 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         .collect();
 
     let point_ids: Vec<u64> = ba.landmarks.keys().copied().collect();
-    let point_id_to_idx: HashMap<u64, u32> = point_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i as u32))
-        .collect();
     let point_fixed: Vec<bool> = point_ids
         .iter()
         .map(|id| ba.fixed_landmarks.contains(id))
         .collect();
-    let points: Vec<Point3<f64>> = point_ids.iter().map(|id| ba.landmarks[id]).collect();
+    let points: Vec<Point3<f64>> = ba.landmarks.values().copied().collect();
 
-    let mut obs: Vec<Obs> = Vec::with_capacity(ba.rig_observations.len());
-    for o in &ba.rig_observations {
-        let &frame_idx = frame_id_to_idx
-            .get(&o.keyframe_id)
-            .ok_or(BaError::MissingPose(o.keyframe_id))?;
-        let &point_idx = point_id_to_idx
-            .get(&o.landmark_id)
-            .ok_or(BaError::MissingLandmark(o.landmark_id))?;
-        let (fx, fy, cx, cy) = o
-            .camera
-            .intrinsics()
-            .ok_or(BaError::UnsupportedCameraModel)?;
-        obs.push(Obs {
-            frame_idx,
-            point_idx,
-            xy: o.xy,
-            fx,
-            fy,
-            cx,
-            cy,
-            sensor_from_rig: o.sensor_from_rig.clone(),
-        });
-    }
-    // Stable sort: ties (same point_idx) keep their original — i.e. caller
-    // (`ba.rig_observations`) — insertion order, so the resulting layout is
-    // a pure function of the input, independent of the sort algorithm.
-    obs.sort_by_key(|o| o.point_idx);
+    // (frame index, point index) per observation, in parallel; the first
+    // failing observation (in input order) decides the error, as before.
+    let indices: Vec<Result<(u32, u32), BaError>> = ba
+        .rig_observations
+        .par_iter()
+        .map(|o| {
+            let frame_idx = frame_ids
+                .binary_search(&o.keyframe_id)
+                .map_err(|_| BaError::MissingPose(o.keyframe_id))?;
+            let point_idx = point_ids
+                .binary_search(&o.landmark_id)
+                .map_err(|_| BaError::MissingLandmark(o.landmark_id))?;
+            o.camera
+                .intrinsics()
+                .ok_or(BaError::UnsupportedCameraModel)?;
+            Ok((frame_idx as u32, point_idx as u32))
+        })
+        .collect();
+    let indices: Vec<(u32, u32)> = indices.into_iter().collect::<Result<_, _>>()?;
 
+    // Stable counting sort by point index: observations of a point keep the
+    // caller's (`ba.rig_observations`) order, exactly like the stable
+    // `sort_by_key` this replaces, without moving the large `Obs` records.
     let mut point_obs_range = vec![(0u32, 0u32); point_ids.len()];
-    let mut i = 0usize;
-    while i < obs.len() {
-        let p = obs[i].point_idx as usize;
-        let start = i;
-        while i < obs.len() && obs[i].point_idx as usize == p {
-            i += 1;
-        }
-        point_obs_range[p] = (start as u32, i as u32);
+    for &(_, p) in &indices {
+        point_obs_range[p as usize].1 += 1;
     }
+    let mut start = 0u32;
+    for range in point_obs_range.iter_mut() {
+        let count = range.1;
+        *range = (start, start + count);
+        start += count;
+    }
+    let mut order = vec![0u32; indices.len()];
+    let mut next: Vec<u32> = point_obs_range.iter().map(|r| r.0).collect();
+    for (i, &(_, p)) in indices.iter().enumerate() {
+        order[next[p as usize] as usize] = i as u32;
+        next[p as usize] += 1;
+    }
+    let obs: Vec<Obs> = order
+        .par_iter()
+        .map(|&i| {
+            let o = &ba.rig_observations[i as usize];
+            let (frame_idx, _) = indices[i as usize];
+            let (fx, fy, cx, cy) = o.camera.intrinsics().expect("checked above");
+            Obs {
+                frame_idx,
+                xy: o.xy,
+                fx,
+                fy,
+                cx,
+                cy,
+                sensor_from_rig: o.sensor_from_rig.clone(),
+            }
+        })
+        .collect();
 
     let (point_free_frames, edges, point_pair_edge_idx) =
         build_reduced_system_pattern(&point_obs_range, &obs, &frame_fixed, &free_frame_slot);
@@ -777,6 +796,7 @@ struct PhaseTimings {
     evaluate_cost: Duration,
     linearize_calls: u32,
     trials: u32,
+    reorder: Duration,
 }
 
 /// Performance fix #2 (see [`build_reduced_system_pattern`] for fix #1):
@@ -956,6 +976,7 @@ fn solve_step(
     frame_bc_raw: &[Vector6<f64>],
     mu: f64,
     cache: &mut Option<BlockSymbolic>,
+    order: Option<&[u32]>,
     timings: &mut PhaseTimings,
 ) -> Option<(Vec<Vector6<f64>>, Vec<Vector3<f64>>, f64)> {
     let n_free = problem.n_free_frames;
@@ -980,17 +1001,28 @@ fn solve_step(
         }
     }
 
+    // Free frame `a` sits at block `pos(a)` of the factored system: the
+    // fill-reducing position when an order is given (large systems, see
+    // `REORDER_MIN_FREE_FRAMES`), else `a` itself.
+    let pos = |a: usize| order.map_or(a, |o| o[a] as usize);
     let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> = vec![BTreeMap::new(); n_free];
-    for (a, col) in columns.iter_mut().enumerate() {
-        col.insert(a, frame_diag[a]);
+    for (a, &diag) in frame_diag.iter().enumerate().take(n_free) {
+        columns[pos(a)].insert(pos(a), diag);
     }
+    // `val` is the (row b, column a) block, a < b. Keep the lower triangle
+    // of the permuted matrix: transpose when the permutation flips the pair.
     for (&(a, b), val) in edges.iter().zip(flat_offdiag) {
-        columns[a as usize].insert(b as usize, val);
+        let (pa, pb) = (pos(a as usize), pos(b as usize));
+        if pb >= pa {
+            columns[pa].insert(pb, val);
+        } else {
+            columns[pb].insert(pa, val.transpose());
+        }
     }
     let mut rhs = DMatrix::<f64>::zeros(n_free * 6, 1);
     for a in 0..n_free {
         for i in 0..6 {
-            rhs[(a * 6 + i, 0)] = frame_bc[a][i];
+            rhs[(pos(a) * 6 + i, 0)] = frame_bc[a][i];
         }
     }
     timings.assemble += t.elapsed();
@@ -1000,7 +1032,7 @@ fn solve_step(
     let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
     for a in 0..n_free {
         for i in 0..6 {
-            dx_frames[a][i] = solved[(a * 6 + i, 0)];
+            dx_frames[a][i] = solved[(pos(a) * 6 + i, 0)];
         }
     }
     timings.linsolve += t.elapsed();
@@ -1160,8 +1192,11 @@ pub(crate) fn optimize_with_tolerance(
     loss: LossFunction,
     gradient_tolerance_rel: Option<f64>,
 ) -> Result<BaResult, BaError> {
+    let t_build = Instant::now();
     let mut problem = build_problem(ba)?;
+    let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
     let mut timings = PhaseTimings::default();
+    let mut apply_ms = 0.0;
 
     let (mut half_cost, mut points_lin, mut frame_diag_raw, mut frame_bc_raw) = {
         let t = Instant::now();
@@ -1175,6 +1210,26 @@ pub(crate) fn optimize_with_tolerance(
     let mut radius = INITIAL_RADIUS;
     let mut decrease_factor = 2.0;
     let mut cache: Option<BlockSymbolic> = None;
+    // Fill-reducing block order of the reduced camera system (its pattern,
+    // `problem.edges`, is fixed for this solve). Natural order otherwise.
+    let order: Option<Vec<u32>> = (problem.n_free_frames >= REORDER_MIN_FREE_FRAMES).then(|| {
+        let t = Instant::now();
+        let mut adjacency = vec![Vec::new(); problem.n_free_frames];
+        for &(a, b) in &problem.edges {
+            adjacency[a as usize].push(b as usize);
+            adjacency[b as usize].push(a as usize);
+        }
+        for neighbours in adjacency.iter_mut() {
+            neighbours.sort_unstable();
+        }
+        let elimination = crate::reordering::fast_fill_reducing_block_order(&adjacency);
+        let mut pos = vec![0u32; problem.n_free_frames];
+        for (k, &block) in elimination.iter().enumerate() {
+            pos[block] = k as u32;
+        }
+        timings.reorder += t.elapsed();
+        pos
+    });
     let mut iterations: Vec<BaIterationStats> = Vec::new();
     let mut trace_lines: Vec<String> = Vec::new();
     let mut converged = false;
@@ -1216,11 +1271,14 @@ pub(crate) fn optimize_with_tolerance(
             &frame_bc_raw,
             mu,
             &mut cache,
+            order.as_deref(),
             &mut timings,
         ) else {
             return Err(BaError::SingularSystem);
         };
+        let t_apply = Instant::now();
         let (trial_poses, trial_points) = apply_step(&problem, &dx_frames, &dx_points);
+        apply_ms += t_apply.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         let trial_half_cost = 0.5 * evaluate_cost(&problem, &trial_poses, &trial_points, loss);
         timings.evaluate_cost += t.elapsed();
@@ -1286,7 +1344,7 @@ pub(crate) fn optimize_with_tolerance(
     }
 
     eprintln!(
-        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1}",
+        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1} reorder_ms={:.1}",
         timings.trials,
         timings.linearize_calls,
         problem.n_free_frames,
@@ -1299,6 +1357,7 @@ pub(crate) fn optimize_with_tolerance(
         timings.linsolve.as_secs_f64() * 1e3,
         timings.backsub.as_secs_f64() * 1e3,
         timings.evaluate_cost.as_secs_f64() * 1e3,
+        timings.reorder.as_secs_f64() * 1e3,
     );
     if iterations.len() >= 30 {
         for line in &trace_lines {

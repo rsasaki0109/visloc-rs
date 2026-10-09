@@ -48,6 +48,17 @@ pub struct PhotoSfmConfig {
     pub gpu: bool,
     /// Refine the shared intrinsics in a final global bundle adjustment.
     pub refine_intrinsics: bool,
+    /// Skip that refinement above this many registered images (its global
+    /// bundle adjustments dominate the SfM time on large models).
+    pub refine_intrinsics_max_images: usize,
+    /// Past `exhaustive_max`, also match every image with its `retrieval_k`
+    /// most similar images by VLAD appearance (0: window only). Connects
+    /// revisits that are far apart in file order, e.g. several passes
+    /// through the same streets.
+    pub retrieval_k: usize,
+    /// Extra SIFT `key=value` settings (see `euroc::apply_sift_override`),
+    /// e.g. `affine=1` / `domain_size_pooling=1` for wide-baseline captures.
+    pub sift_overrides: Vec<String>,
 }
 
 impl Default for PhotoSfmConfig {
@@ -62,6 +73,9 @@ impl Default for PhotoSfmConfig {
             eval_every: 8,
             gpu: true,
             refine_intrinsics: true,
+            refine_intrinsics_max_images: usize::MAX,
+            retrieval_k: 0,
+            sift_overrides: Vec::new(),
         }
     }
 }
@@ -84,6 +98,49 @@ pub struct PhotoSfmReport {
 }
 
 const IMAGE_EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "JPG"];
+
+/// Image pairs `(i, j)`, `i < j`, joining every image to its `k` most similar
+/// images by the cosine similarity of VLAD descriptors over a 64-word
+/// vocabulary built from a subsample of all descriptors.
+fn retrieval_pairs(features: &[FeatureSet], k: usize) -> Vec<(usize, usize)> {
+    use visloc_vision::place_recognition::{vlad, Vocabulary};
+    let n = features.len();
+    // About 100k descriptors for the vocabulary, evenly from every image.
+    let total: usize = features.iter().map(|f| f.descriptors.len()).sum();
+    let step = (total / 100_000).max(1);
+    let sample: Vec<&[f32]> = features
+        .iter()
+        .flat_map(|f| f.descriptors.iter().step_by(step).map(Vec::as_slice))
+        .collect();
+    let Some(vocab) = Vocabulary::build(&sample, 64, 10, 7) else {
+        return Vec::new();
+    };
+    let global: Vec<Vec<f32>> = features
+        .par_iter()
+        .map(|f| vlad(&f.descriptors, &vocab))
+        .collect();
+    let mut pairs: Vec<(usize, usize)> = (0..n)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let mut sims: Vec<(f32, usize)> = (0..n)
+                .filter(|&j| j != i)
+                .map(|j| {
+                    let s: f32 = global[i].iter().zip(&global[j]).map(|(a, b)| a * b).sum();
+                    (s, j)
+                })
+                .collect();
+            let kk = k.min(sims.len());
+            if kk > 0 {
+                sims.select_nth_unstable_by(kk - 1, |a, b| b.0.total_cmp(&a.0));
+            }
+            sims.truncate(kk);
+            sims.into_iter().map(move |(_, j)| (i.min(j), i.max(j)))
+        })
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
 
 /// EXIF `FocalLengthIn35mmFilm` of a JPEG, if present.
 pub fn exif_focal_35mm(bytes: &[u8]) -> Option<f64> {
@@ -288,7 +345,10 @@ pub fn build_photo_dataset(
         "descriptor_magnification=3",
         "max_orientations=2",
         "prefer_larger_scale=1",
-    ] {
+    ]
+    .into_iter()
+    .chain(cfg.sift_overrides.iter().map(String::as_str))
+    {
         apply_sift_override(&mut sift_cfg, o).map_err(EurocError::Sift)?;
     }
     let grays: Vec<Vec<f32>> = decoded
@@ -312,22 +372,39 @@ pub fn build_photo_dataset(
     } else {
         None
     };
-    let mut features = Vec::with_capacity(n);
-    for g in &grays {
-        let gray = GrayImage::new(width as usize, height as usize, g)
-            .map_err(|e| EurocError::Sift(format!("{e}")))?;
+    // The GPU extractor implements the isotropic DoG path only; affine shape
+    // estimation or domain-size pooling (wide-baseline settings) run on the
+    // CPU, one image per thread. Matching stays on the GPU either way.
+    #[cfg(feature = "gpu")]
+    let on_gpu = gpu_sift.is_some() && visloc_sift_gpu::SiftGpu::supports(&sift_cfg);
+    #[cfg(not(feature = "gpu"))]
+    let on_gpu = false;
+    let features: Vec<FeatureSet> = if on_gpu {
+        let mut features = Vec::with_capacity(n);
         #[cfg(feature = "gpu")]
-        let (kps, desc) = match gpu_sift.as_mut() {
-            Some(s) => s
+        for g in &grays {
+            let gray = GrayImage::new(width as usize, height as usize, g)
+                .map_err(|e| EurocError::Sift(format!("{e}")))?;
+            let (kps, desc) = gpu_sift
+                .as_mut()
+                .expect("on_gpu")
                 .extract(&gray, &sift_cfg)
-                .map_err(|e| EurocError::Sift(format!("{e}")))?,
-            None => extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?,
-        };
-        #[cfg(not(feature = "gpu"))]
-        let (kps, desc) =
-            extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
-        features.push(to_features(kps, desc));
-    }
+                .map_err(|e| EurocError::Sift(format!("{e}")))?;
+            features.push(to_features(kps, desc));
+        }
+        features
+    } else {
+        grays
+            .par_iter()
+            .map(|g| {
+                let gray = GrayImage::new(width as usize, height as usize, g)
+                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                let (kps, desc) =
+                    extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
+                Ok(to_features(kps, desc))
+            })
+            .collect::<Result<_, EurocError>>()?
+    };
     log(&format!(
         "sift: mean {} keypoints ({:.1} s)",
         features.iter().map(|f| f.keypoints.len()).sum::<usize>() / n.max(1),
@@ -340,53 +417,142 @@ pub fn build_photo_dataset(
             .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
             .collect()
     } else {
-        (0..n)
+        let mut pairs: std::collections::BTreeSet<(usize, usize)> = (0..n)
             .flat_map(|i| ((i + 1)..(i + 1 + cfg.window).min(n)).map(move |j| (i, j)))
-            .collect()
+            .collect();
+        if cfg.retrieval_k > 0 {
+            let t = std::time::Instant::now();
+            let extra = retrieval_pairs(&features, cfg.retrieval_k);
+            let before = pairs.len();
+            pairs.extend(extra);
+            log(&format!(
+                "retrieval: VLAD top-{} added {} pairs to {} window pairs ({:.1} s)",
+                cfg.retrieval_k,
+                pairs.len() - before,
+                before,
+                t.elapsed().as_secs_f64()
+            ));
+        }
+        pairs.into_iter().collect()
     };
     let t0 = std::time::Instant::now();
+    // GPU matching binds one image group's descriptors as a single storage
+    // buffer. When all of them exceed the device's binding limit (about 2 GiB:
+    // ~1,000 images at 4,000 SIFT keypoints), split the images into blocks of
+    // at most half the limit and match each block pair from a bank holding
+    // just those two blocks.
     #[cfg(feature = "gpu")]
-    let gpu_match = gpu_sift.as_ref().and_then(|g| {
-        let ctx = g.context();
-        let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
-        visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
-            .ok()
-            .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
-    });
-    let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
-        #[cfg(feature = "gpu")]
-        if let Some((ctx, bank, m)) = &gpu_match {
-            return m.match_pairs(ctx, bank, pairs, Some(0.8), true);
+    let blocks: Vec<Vec<usize>> = {
+        let limit = gpu_sift
+            .as_ref()
+            .map(|g| g.context().limits.max_storage_buffer_binding_size)
+            .unwrap_or(u64::MAX);
+        let bytes = |i: usize| -> u64 {
+            features[i]
+                .descriptors
+                .iter()
+                .map(|d| d.len() as u64 * 4)
+                .sum()
+        };
+        let total: u64 = (0..n).map(bytes).sum();
+        if total <= limit {
+            vec![(0..n).collect()]
+        } else {
+            let mut blocks = vec![Vec::new()];
+            let mut acc = 0u64;
+            for i in 0..n {
+                if acc + bytes(i) > limit / 2 && !blocks.last().expect("non-empty").is_empty() {
+                    blocks.push(Vec::new());
+                    acc = 0;
+                }
+                acc += bytes(i);
+                blocks.last_mut().expect("non-empty").push(i);
+            }
+            log(&format!(
+                "gpu matching: {:.2} GiB of descriptors over the {:.2} GiB binding limit, {} blocks",
+                total as f64 / (1u64 << 30) as f64,
+                limit as f64 / (1u64 << 30) as f64,
+                blocks.len()
+            ));
+            blocks
         }
-        pairs
-            .par_iter()
-            .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
-            .collect()
     };
+    #[cfg(not(feature = "gpu"))]
+    let blocks: Vec<Vec<usize>> = vec![(0..n).collect()];
+    let mut block_of = vec![0usize; n];
+    for (b, imgs) in blocks.iter().enumerate() {
+        for &i in imgs {
+            block_of[i] = b;
+        }
+    }
+    // Candidate pairs grouped by block pair, in a deterministic order.
+    let mut groups: std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    for &(i, j) in &candidates {
+        let (bi, bj) = (block_of[i], block_of[j]);
+        groups
+            .entry((bi.min(bj), bi.max(bj)))
+            .or_default()
+            .push((i, j));
+    }
     let mut pairwise: Vec<PairwiseMatches> = Vec::new();
-    for chunk in candidates.chunks(1024) {
-        let dms = match_pairs(chunk);
-        pairwise.par_extend(chunk.par_iter().zip(dms.into_par_iter()).filter_map(
-            |(&(i, j), dm)| {
-                verify_pair(
-                    &camera,
-                    &features[i],
-                    &features[j],
-                    &dm,
-                    cfg.min_matches,
-                    true,
-                    false,
-                )
-                .map(|matches| PairwiseMatches {
-                    image_i: i,
-                    image_j: j,
-                    matches,
-                    two_view_config: None,
-                    essential_matches: None,
-                    essential_matrix: None,
-                })
-            },
-        ));
+    for ((bi, bj), group) in &groups {
+        // Images of this block pair, and their index in the uploaded bank.
+        let mut imgs: Vec<usize> = blocks[*bi].clone();
+        if bj != bi {
+            imgs.extend_from_slice(&blocks[*bj]);
+        }
+        let mut local = vec![usize::MAX; n];
+        for (k, &i) in imgs.iter().enumerate() {
+            local[i] = k;
+        }
+        #[cfg(feature = "gpu")]
+        let gpu_match = gpu_sift.as_ref().and_then(|g| {
+            let ctx = g.context();
+            let sets: Vec<&[Vec<f32>]> = imgs
+                .iter()
+                .map(|&i| features[i].descriptors.as_slice())
+                .collect();
+            visloc_sift_gpu::FeatureBank::upload(ctx, &sets)
+                .ok()
+                .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
+        });
+        let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
+            #[cfg(feature = "gpu")]
+            if let Some((ctx, bank, m)) = &gpu_match {
+                let lp: Vec<(usize, usize)> =
+                    pairs.iter().map(|&(i, j)| (local[i], local[j])).collect();
+                return m.match_pairs(ctx, bank, &lp, Some(0.8), true);
+            }
+            pairs
+                .par_iter()
+                .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
+                .collect()
+        };
+        for chunk in group.chunks(1024) {
+            let dms = match_pairs(chunk);
+            pairwise.par_extend(chunk.par_iter().zip(dms.into_par_iter()).filter_map(
+                |(&(i, j), dm)| {
+                    verify_pair(
+                        &camera,
+                        &features[i],
+                        &features[j],
+                        &dm,
+                        cfg.min_matches,
+                        true,
+                        false,
+                    )
+                    .map(|matches| PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                        two_view_config: None,
+                        essential_matches: None,
+                        essential_matrix: None,
+                    })
+                },
+            ));
+        }
     }
     log(&format!(
         "{} verified of {} candidate pairs ({:.1} s)",
@@ -409,13 +575,23 @@ pub fn build_photo_dataset(
     )?;
     let (mut poses, mut tracks, mut reproj) = models.into_iter().next().expect("non-empty");
     let mut cam = camera.clone();
-    if cfg.refine_intrinsics {
-        let sfm_cfg = IncrementalSfmConfig {
+    let mapped = poses.iter().filter(|p| p.is_some()).count();
+    if cfg.refine_intrinsics && mapped > cfg.refine_intrinsics_max_images {
+        log(&format!(
+            "skipping intrinsics refinement: {mapped} images > --refine-intrinsics-max {}; \
+             keeping the prior focal",
+            cfg.refine_intrinsics_max_images
+        ));
+    } else if cfg.refine_intrinsics {
+        let mut sfm_cfg = IncrementalSfmConfig {
             min_seed_matches: cfg.min_matches,
             colmap_style_mapper: true,
             refine_intrinsics: true,
             ..IncrementalSfmConfig::default()
         };
+        // Block-sparse joint pose + intrinsics solve: scales with the
+        // covisibility pattern instead of a dense (6 * images)^2 system.
+        sfm_cfg.ba_config.linear_solver = visloc_slam::LinearSolver::Sparse;
         let r = visloc_slam::incremental_sfm_with_initial_poses(
             &camera,
             &features,
