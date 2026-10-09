@@ -48,6 +48,9 @@ pub struct PhotoSfmConfig {
     pub gpu: bool,
     /// Refine the shared intrinsics in a final global bundle adjustment.
     pub refine_intrinsics: bool,
+    /// Skip that refinement above this many registered images: it solves a
+    /// dense camera system (cubic in the image count; ~11 min at 550 images).
+    pub refine_intrinsics_max_images: usize,
     /// Past `exhaustive_max`, also match every image with its `retrieval_k`
     /// most similar images by VLAD appearance (0: window only). Connects
     /// revisits that are far apart in file order, e.g. several passes
@@ -70,6 +73,7 @@ impl Default for PhotoSfmConfig {
             eval_every: 8,
             gpu: true,
             refine_intrinsics: true,
+            refine_intrinsics_max_images: 1000,
             retrieval_k: 0,
             sift_overrides: Vec::new(),
         }
@@ -571,7 +575,16 @@ pub fn build_photo_dataset(
     )?;
     let (mut poses, mut tracks, mut reproj) = models.into_iter().next().expect("non-empty");
     let mut cam = camera.clone();
-    if cfg.refine_intrinsics {
+    let mapped = poses.iter().filter(|p| p.is_some()).count();
+    if cfg.refine_intrinsics && mapped > cfg.refine_intrinsics_max_images {
+        // The joint pose + intrinsics BA solves a dense (6 * images)^2 camera
+        // system: 653 s at 550 images, about (N / 550)^3 times that beyond.
+        log(&format!(
+            "skipping intrinsics refinement: {mapped} images > {} (its dense bundle \
+             adjustment grows with the cube of the image count); keeping the prior focal",
+            cfg.refine_intrinsics_max_images
+        ));
+    } else if cfg.refine_intrinsics {
         let sfm_cfg = IncrementalSfmConfig {
             min_seed_matches: cfg.min_matches,
             colmap_style_mapper: true,
