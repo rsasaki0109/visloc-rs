@@ -19,6 +19,7 @@
 
 pub mod bundle_adjustment;
 pub mod database_cache;
+pub mod id_map;
 pub mod incremental_triangulator;
 pub mod mapper;
 pub mod mapper_impl;

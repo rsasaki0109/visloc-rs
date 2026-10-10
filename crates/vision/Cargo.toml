@@ -28,6 +28,11 @@ default = []
 # validation gate and crates/vision/src/features/superpoint_onnx.rs for
 # the implementation.
 onnx-inference = ["dep:ort", "dep:ndarray", "dep:rayon", "dep:visloc-dpvo-cuda-runtime"]
+# Scores a fixed-budget PnP RANSAC's hypotheses on rayon (same result as the
+# serial loop: samples are still drawn in order from the seeded RNG and the
+# best hypothesis is still picked in iteration order). Enabled by
+# `visloc-slam`, which already depends on rayon.
+parallel = ["dep:rayon"]
 # Adds the CUDA execution provider: pulls the CUDA-enabled ONNX Runtime
 # binaries so `OnnxBackend::CudaThenCpu` runs SuperPoint on the GPU. Requires a
 # CUDA 12 runtime + cuDNN 9 at run time (add cuDNN to `LD_LIBRARY_PATH` if it is

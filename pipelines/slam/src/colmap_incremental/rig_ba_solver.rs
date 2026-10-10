@@ -212,9 +212,13 @@ struct Problem {
     /// `point_free_frames`, reused unchanged by every trial and every
     /// accepted step.
     shard_boundaries: Vec<usize>,
-    /// Built when the memory cap leaves [`elimination_shard_count`] below 8
-    /// (large, dense covisibility graphs): the elimination then runs in
-    /// parallel over its outputs instead (see [`ContributionIndex`]).
+    /// Built for large problems — from [`ITERATIVE_MIN_FREE_FRAMES`] free
+    /// frames, or when the memory cap leaves [`elimination_shard_count`]
+    /// below 8: the elimination then runs in parallel over its outputs
+    /// instead (see [`ContributionIndex`]), with the same arithmetic. On a
+    /// 1,375-frame / 338k-block synthetic city problem that is 3.2x faster
+    /// than 8 shards each zeroing and filling an `edges_len` buffer; on the
+    /// few-hundred-frame Courthouse problems the shards stay faster.
     contributions: Option<ContributionIndex>,
 }
 
@@ -327,36 +331,59 @@ fn build_reduced_system_pattern(
             .collect()
     };
 
-    let mut raw_pairs: Vec<(u32, u32)> = point_free_frames
-        .par_iter()
-        .filter(|frames| frames.len() >= 2)
-        .flat_map_iter(|frames| {
-            let slots = slots_of(frames);
-            let mut pairs = Vec::with_capacity(slots.len() * (slots.len() - 1) / 2);
-            for j in 1..slots.len() {
-                for i in 0..j {
-                    pairs.push((slots[i], slots[j]));
-                }
-            }
-            pairs
-        })
-        .collect();
-    raw_pairs.par_sort_unstable();
-    raw_pairs.dedup();
-    let edges = raw_pairs;
     let n_slots = free_frame_slot
         .iter()
         .flatten()
         .map(|&s| s as usize + 1)
         .max()
         .unwrap_or(0);
+    // The edges row by row: row `a` holds the slots `b > a` that share a
+    // point with `a`, sorted and deduplicated — the sorted unique pair list
+    // without materializing every pair. Each row gathers from the points
+    // observing its frame (`(point, position)` per slot).
+    let mut slot_off = vec![0usize; n_slots + 1];
+    for frames in &point_free_frames {
+        for &f in frames {
+            slot_off[free_frame_slot[f as usize].expect("free") as usize + 1] += 1;
+        }
+    }
+    for i in 1..slot_off.len() {
+        slot_off[i] += slot_off[i - 1];
+    }
+    let mut slot_points = vec![[0u32; 2]; slot_off[n_slots]];
+    let mut fill = slot_off.clone();
+    for (p, frames) in point_free_frames.iter().enumerate() {
+        for (k, &f) in frames.iter().enumerate() {
+            let s = free_frame_slot[f as usize].expect("free") as usize;
+            slot_points[fill[s]] = [p as u32, k as u32];
+            fill[s] += 1;
+        }
+    }
+    let rows: Vec<Vec<u32>> = (0..n_slots)
+        .into_par_iter()
+        .map(|a| {
+            let mut row: Vec<u32> = Vec::new();
+            for &[p, k] in &slot_points[slot_off[a]..slot_off[a + 1]] {
+                row.extend(
+                    point_free_frames[p as usize][k as usize + 1..]
+                        .iter()
+                        .map(|&f| free_frame_slot[f as usize].expect("free")),
+                );
+            }
+            row.sort_unstable();
+            row.dedup();
+            row
+        })
+        .collect();
     let mut row_off = vec![0usize; n_slots + 1];
-    for &(a, _) in &edges {
-        row_off[a as usize + 1] += 1;
+    for (a, row) in rows.iter().enumerate() {
+        row_off[a + 1] = row_off[a] + row.len();
     }
-    for i in 1..row_off.len() {
-        row_off[i] += row_off[i - 1];
+    let mut edges: Vec<(u32, u32)> = Vec::with_capacity(row_off[n_slots]);
+    for (a, row) in rows.iter().enumerate() {
+        edges.extend(row.iter().map(|&b| (a as u32, b)));
     }
+    drop(rows);
 
     let point_pair_edge_idx: Vec<Vec<u32>> = point_free_frames
         .par_iter()
@@ -672,7 +699,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
     let pattern_ms = t_start.elapsed().as_secs_f64() * 1e3 - setup_ms - obs_ms;
     let n_shards = elimination_shard_count(edges.len());
     let shard_boundaries = balanced_shard_boundaries(&point_free_frames, n_shards);
-    let contributions = (n_shards < 8).then(|| {
+    let contributions = (n_shards < 8 || n_free_frames >= ITERATIVE_MIN_FREE_FRAMES).then(|| {
         ContributionIndex::new(
             &point_free_frames,
             &free_frame_slot,
@@ -877,13 +904,12 @@ impl Corrector {
 /// (ascending, deduplicated); fixed frames contribute to `hpp`/`bp` (they
 /// still constrain the point) but never get a `diag`/`bc`/`hcp` slot (they
 /// have no variable to receive one).
+/// `f64`s per (point, free frame) block in [`linearize`]'s chunk buffer:
+/// the frame's `JᵀJ` (6×6, column-major) then its `−Jᵀr`.
+const FRAME_BLOCK: usize = 42;
+
 struct PointLin {
     frames: Vec<u32>,
-    /// `−Jᵀr` summed per free frame that observes this point (the pose-block
-    /// raw, mu-independent contribution — same convention as `bp`).
-    bc: Vec<Vector6<f64>>,
-    /// `JᵀJ` summed per free frame (raw, mu-independent).
-    diag: Vec<Matrix6<f64>>,
     /// `Jpose^T Jpoint` per free frame, only meaningful if `free`.
     hcp: Vec<SMatrix<f64, 6, 3>>,
     /// `JᵀJ` for the point block, only meaningful if `free`.
@@ -914,12 +940,12 @@ fn linearize_point(
     poses: &[SE3],
     target_frames: &[u32],
     loss: LossFunction,
+    frame_blocks: &mut [f64],
 ) -> (f64, PointLin) {
+    frame_blocks.fill(0.0);
     let mut cost = 0.0;
     let mut hpp = Matrix3::zeros();
     let mut bp = Vector3::zeros();
-    let mut bc: Vec<Vector6<f64>> = vec![Vector6::zeros(); target_frames.len()];
-    let mut diag: Vec<Matrix6<f64>> = vec![Matrix6::zeros(); target_frames.len()];
     let mut hcp: Vec<SMatrix<f64, 6, 3>> = vec![SMatrix::<f64, 6, 3>::zeros(); target_frames.len()];
 
     for o in obs_slice {
@@ -962,8 +988,16 @@ fn linearize_point(
             bp += -(j_point.transpose() * r);
         }
         if let Ok(slot) = target_frames.binary_search(&o.frame_idx) {
-            bc[slot] += -(j_pose.transpose() * r);
-            diag[slot] += j_pose.transpose() * j_pose;
+            let block = &mut frame_blocks[slot * FRAME_BLOCK..(slot + 1) * FRAME_BLOCK];
+            let (diag, bc) = block.split_at_mut(36);
+            let g = -(j_pose.transpose() * r);
+            let jtj = j_pose.transpose() * j_pose;
+            for (acc, v) in bc.iter_mut().zip(g.as_slice()) {
+                *acc += v;
+            }
+            for (acc, v) in diag.iter_mut().zip(jtj.as_slice()) {
+                *acc += v;
+            }
             if point_free {
                 hcp[slot] += j_pose.transpose() * j_point;
             }
@@ -974,8 +1008,6 @@ fn linearize_point(
         cost,
         PointLin {
             frames: target_frames.to_vec(),
-            bc,
-            diag,
             hcp,
             hpp,
             bp,
@@ -998,41 +1030,75 @@ fn linearize(
     problem: &Problem,
     loss: LossFunction,
 ) -> (f64, Vec<PointLin>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
-    let contributions: Vec<(f64, PointLin)> = problem
-        .points
-        .par_iter()
-        .enumerate()
-        .map(|(p, xyz)| {
-            let (start, end) = problem.point_obs_range[p];
-            linearize_point(
-                &problem.obs[start as usize..end as usize],
-                !problem.point_fixed[p],
-                xyz,
-                &problem.poses,
-                &problem.point_free_frames[p],
-                loss,
-            )
-        })
-        .collect();
-
-    // `contributions` is a plain `Vec` (already materialized by the ordered
-    // `collect()` above) — this final fold is a serial iterator, not a
-    // `rayon` reduction, so it is deterministic by construction regardless
-    // of `RAYON_NUM_THREADS` without needing any special chunking.
-    let full_cost: f64 = contributions.iter().map(|(c, _)| *c).sum();
-
+    // Points are linearized in parallel a chunk at a time; each point's
+    // per-frame `JᵀJ` / `−Jᵀr` (column-major, [`FRAME_BLOCK`] values) lands
+    // in a chunk buffer and is folded into the frame accumulators serially,
+    // in point order: the same additions as one fold over all points,
+    // without keeping ~2 GB of per-point blocks alive on a SmallCity-sized
+    // problem. The buffer is a zero-allocated `f64` vector that each point
+    // clears for itself, so no serial memset runs.
+    // Chunks hold about this many blocks (~2.8 MB), so the buffer stays in
+    // cache between the parallel fill and the serial fold.
+    const CHUNK_BLOCKS: usize = 8_192;
+    let n_points = problem.points.len();
+    let mut costs: Vec<f64> = Vec::with_capacity(n_points);
+    let mut points_lin = Vec::with_capacity(n_points);
     let mut frame_diag_raw = vec![Matrix6::<f64>::zeros(); problem.n_free_frames];
     let mut frame_bc_raw = vec![Vector6::<f64>::zeros(); problem.n_free_frames];
-    let mut points_lin = Vec::with_capacity(contributions.len());
-    for (_, pl) in contributions {
-        for (k, &fidx) in pl.frames.iter().enumerate() {
-            let slot = problem.free_frame_slot[fidx as usize].expect("frames in PointLin are free")
-                as usize;
-            frame_diag_raw[slot] += pl.diag[k];
-            frame_bc_raw[slot] += pl.bc[k];
+    let mut blocks: Vec<f64> = Vec::new();
+    let mut chunk_start = 0;
+    while chunk_start < n_points {
+        let mut chunk_end = chunk_start;
+        let mut total = 0;
+        while chunk_end < n_points && (chunk_end == chunk_start || total < CHUNK_BLOCKS) {
+            total += problem.point_free_frames[chunk_end].len();
+            chunk_end += 1;
         }
-        points_lin.push(pl);
+        let range = chunk_start..chunk_end;
+        chunk_start = chunk_end;
+        if blocks.len() < total * FRAME_BLOCK {
+            blocks = vec![0.0; total * FRAME_BLOCK];
+        }
+        let mut slices: Vec<&mut [f64]> = Vec::with_capacity(range.len());
+        let mut rest = &mut blocks[..total * FRAME_BLOCK];
+        for p in range.clone() {
+            let (head, tail) = rest.split_at_mut(problem.point_free_frames[p].len() * FRAME_BLOCK);
+            slices.push(head);
+            rest = tail;
+        }
+        let results: Vec<(f64, PointLin)> = range
+            .clone()
+            .into_par_iter()
+            .zip(slices)
+            .map(|(p, frame_blocks)| {
+                let (start, end) = problem.point_obs_range[p];
+                linearize_point(
+                    &problem.obs[start as usize..end as usize],
+                    !problem.point_fixed[p],
+                    &problem.points[p],
+                    &problem.poses,
+                    &problem.point_free_frames[p],
+                    loss,
+                    frame_blocks,
+                )
+            })
+            .collect();
+        let mut offset = 0;
+        for (cost, pl) in results {
+            for (k, &fidx) in pl.frames.iter().enumerate() {
+                let slot = problem.free_frame_slot[fidx as usize]
+                    .expect("frames in PointLin are free") as usize;
+                let block = &blocks[(offset + k) * FRAME_BLOCK..(offset + k + 1) * FRAME_BLOCK];
+                frame_diag_raw[slot] += Matrix6::from_column_slice(&block[..36]);
+                frame_bc_raw[slot] += Vector6::from_column_slice(&block[36..]);
+            }
+            offset += pl.frames.len();
+            costs.push(cost);
+            points_lin.push(pl);
+        }
     }
+    // A serial sum in point order, as before.
+    let full_cost: f64 = costs.iter().copied().sum();
 
     (full_cost, points_lin, frame_diag_raw, frame_bc_raw)
 }
@@ -1218,97 +1284,81 @@ fn eliminate_by_output(
             }
         })
         .collect();
-    // Sum `term(c)` over `contribs` (ascending point) grouped by shard.
-    fn grouped<T: Copy + std::ops::AddAssign + std::ops::SubAssign>(
-        zero: T,
-        contribs: impl Iterator<Item = (u32, T)>,
-    ) -> T {
-        let (mut total, mut acc, mut shard) = (zero, zero, None);
-        for (s, term) in contribs {
-            if shard != Some(s) {
-                if shard.is_some() {
-                    total += acc;
-                }
-                acc = zero;
-                shard = Some(s);
-            }
-            acc -= term;
-        }
-        if shard.is_some() {
-            total += acc;
-        }
-        total
-    }
-    // Row `s` of the off-diagonal blocks (edges `(s, _)`) collects, from
-    // each point observing `s` in ascending order, the pairs `(k, j > k)`
-    // with `k` at `s`: every edge sees its points in ascending order.
-    let mut flat_offdiag = vec![Matrix6::<f64>::zeros(); edges_len];
-    let mut rows: Vec<&mut [Matrix6<f64>]> = Vec::with_capacity(n_free);
-    let mut rest = flat_offdiag.as_mut_slice();
-    for s in 0..n_free {
-        let (row, tail) = rest.split_at_mut(index.row_off[s + 1] - index.row_off[s]);
-        rows.push(row);
-        rest = tail;
-    }
-    rows.into_par_iter().enumerate().for_each_init(
-        || (Vec::new(), Vec::new()),
-        |(acc, shard), (s, total)| {
-            acc.clear();
-            acc.resize(total.len(), Matrix6::<f64>::zeros());
-            shard.clear();
-            shard.resize(total.len(), None);
-            let base = index.row_off[s];
-            for &[p, k] in &index.slot[index.slot_off[s]..index.slot_off[s + 1]] {
-                let (p, k) = (p as usize, k as usize);
-                let Some(inv) = hpp_inv[p] else {
-                    continue;
-                };
-                let pl = &points_lin[p];
-                let point_shard = Some(index.point_shard[p]);
-                let pair_edge = &point_pair_edge_idx[p];
-                for j in k + 1..point_free_frames[p].len() {
-                    let e = pair_edge[j * (j - 1) / 2 + k] as usize - base;
-                    let term = (pl.hcp[j] * inv) * pl.hcp[k].transpose();
-                    if shard[e] != point_shard {
-                        if shard[e].is_some() {
-                            total[e] += acc[e];
-                        }
-                        acc[e] = Matrix6::zeros();
-                        shard[e] = point_shard;
-                    }
-                    acc[e] -= term;
-                }
-            }
-            for ((t, a), sh) in total.iter_mut().zip(acc.iter()).zip(shard.iter()) {
-                if sh.is_some() {
-                    *t += *a;
-                }
-            }
-        },
-    );
-    let (diag_delta, bc_delta): (Vec<Matrix6<f64>>, Vec<Vector6<f64>>) = (0..n_free)
+    // Row `s` (edges `(s, _)`), the diagonal block and the right-hand side
+    // of free frame `s` all come from the points observing `s`, in
+    // ascending order, so one pass computes them; each row is built in its
+    // own buffer and the rows are concatenated (zero-filling the full
+    // block array up front cost more than the elimination itself).
+    #[allow(clippy::type_complexity)]
+    let per_row: Vec<(Vec<Matrix6<f64>>, Matrix6<f64>, Vector6<f64>)> = (0..n_free)
         .into_par_iter()
-        .map(|slot| {
-            let range = &index.slot[index.slot_off[slot]..index.slot_off[slot + 1]];
-            let terms = || {
-                range.iter().filter_map(|&[p, k]| {
+        .map_init(
+            || (Vec::new(), Vec::new()),
+            |(acc, shard), s| {
+                let len = index.row_off[s + 1] - index.row_off[s];
+                let mut total = vec![Matrix6::<f64>::zeros(); len];
+                acc.clear();
+                acc.resize(len, Matrix6::<f64>::zeros());
+                shard.clear();
+                shard.resize(len, None);
+                let (mut diag_total, mut diag_acc) = (Matrix6::<f64>::zeros(), Matrix6::zeros());
+                let (mut bc_total, mut bc_acc) = (Vector6::<f64>::zeros(), Vector6::zeros());
+                let mut diag_shard = None;
+                let base = index.row_off[s];
+                for &[p, k] in &index.slot[index.slot_off[s]..index.slot_off[s + 1]] {
                     let (p, k) = (p as usize, k as usize);
-                    let inv = hpp_inv[p]?;
+                    let Some(inv) = hpp_inv[p] else {
+                        continue;
+                    };
                     let pl = &points_lin[p];
-                    Some((index.point_shard[p], pl.hcp[k] * inv, pl, k))
-                })
-            };
-            let diag = grouped(
-                Matrix6::zeros(),
-                terms().map(|(s, scaled, pl, k)| (s, scaled * pl.hcp[k].transpose())),
-            );
-            let bc = grouped(
-                Vector6::zeros(),
-                terms().map(|(s, scaled, pl, _)| (s, scaled * pl.bp)),
-            );
-            (diag, bc)
-        })
-        .unzip();
+                    let point_shard = Some(index.point_shard[p]);
+                    if diag_shard != point_shard {
+                        if diag_shard.is_some() {
+                            diag_total += diag_acc;
+                            bc_total += bc_acc;
+                        }
+                        diag_acc = Matrix6::zeros();
+                        bc_acc = Vector6::zeros();
+                        diag_shard = point_shard;
+                    }
+                    let scaled = pl.hcp[k] * inv;
+                    diag_acc -= scaled * pl.hcp[k].transpose();
+                    bc_acc -= scaled * pl.bp;
+                    let pair_edge = &point_pair_edge_idx[p];
+                    for j in k + 1..point_free_frames[p].len() {
+                        let e = pair_edge[j * (j - 1) / 2 + k] as usize - base;
+                        let term = (pl.hcp[j] * inv) * pl.hcp[k].transpose();
+                        if shard[e] != point_shard {
+                            if shard[e].is_some() {
+                                total[e] += acc[e];
+                            }
+                            acc[e] = Matrix6::zeros();
+                            shard[e] = point_shard;
+                        }
+                        acc[e] -= term;
+                    }
+                }
+                if diag_shard.is_some() {
+                    diag_total += diag_acc;
+                    bc_total += bc_acc;
+                }
+                for ((t, a), sh) in total.iter_mut().zip(acc.iter()).zip(shard.iter()) {
+                    if sh.is_some() {
+                        *t += *a;
+                    }
+                }
+                (total, diag_total, bc_total)
+            },
+        )
+        .collect();
+    let mut flat_offdiag = Vec::with_capacity(edges_len);
+    let mut diag_delta = Vec::with_capacity(n_free);
+    let mut bc_delta = Vec::with_capacity(n_free);
+    for (row, diag, bc) in per_row {
+        flat_offdiag.extend_from_slice(&row);
+        diag_delta.push(diag);
+        bc_delta.push(bc);
+    }
     (flat_offdiag, diag_delta, bc_delta)
 }
 
@@ -2282,6 +2332,109 @@ mod tests {
         eprintln!(
             "profile_synthetic_846f: iterations={} total_ms={elapsed_ms:.1} per_iter_ms={per_iter_ms:.1}",
             result.iterations.len()
+        );
+    }
+
+    /// SmallCity-shaped global BA (the shape that dominates the mapper on
+    /// large scenes): 5,500 frames driving down a street, 950k points each
+    /// seen from ~8 frames spread over up to a few hundred frames, so the
+    /// reduced camera system has ~2M off-diagonal blocks and runs PCG.
+    /// `VISLOC_BENCH_SCALE` (default 1) scales frames and points.
+    /// `#[ignore]`d — run explicitly: `cargo test --release -p visloc-slam
+    /// --lib rig_ba_solver::tests::profile_synthetic_city -- --ignored
+    /// --nocapture`, and read its `BA_PHASES` line.
+    #[test]
+    #[ignore]
+    fn profile_synthetic_city() {
+        let scale: f64 = std::env::var("VISLOC_BENCH_SCALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        let num_frames = (5500.0 * scale) as usize;
+        let num_points = (950_000.0 * scale) as usize;
+        let camera = Camera::pinhole(1, 1024, 768, 487.0, 487.0, 512.0, 384.0);
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut ba = BundleAdjustment::new(camera.clone());
+        // Frame k sits at z = 0.5 k looking down +z, swaying a little.
+        let poses: Vec<SE3> = (0..num_frames)
+            .map(|k| {
+                let z = 0.5 * k as f64;
+                let rotation = UnitQuaternion::from_euler_angles(0.0, 0.05 * (z * 0.01).sin(), 0.0);
+                let centre = Vector3::new(0.8 * (z * 0.02).sin(), 0.0, z);
+                SE3::new(rotation, -(rotation * centre))
+            })
+            .collect();
+        for (k, pose) in poses.iter().enumerate() {
+            let mut noisy = pose.clone();
+            if k > 0 {
+                noisy.translation += Vector3::new(0.01, -0.008, 0.012);
+            }
+            ba.add_pose(
+                k as u64,
+                Pose {
+                    world_to_camera: noisy,
+                },
+            );
+        }
+        ba.fix_pose(0);
+        let max_z = 0.5 * num_frames as f64;
+        for j in 0..num_points {
+            let point = Point3::new(
+                (rnd() - 0.5) * 40.0,
+                (rnd() - 0.5) * 12.0,
+                rnd() * (max_z + 60.0) - 10.0,
+            );
+            // Frames that see it in front of them and inside the image.
+            let first = ((point.z - 150.0) / 0.5).max(0.0) as usize;
+            let last = (((point.z - 2.0) / 0.5).max(0.0) as usize).min(num_frames);
+            if last <= first + 1 {
+                continue;
+            }
+            let mut observed = 0;
+            for _ in 0..8 {
+                let k = first + (rnd() * (last - first) as f64) as usize;
+                let p_cam = poses[k].transform_point(&point);
+                if p_cam.z <= 1.0 {
+                    continue;
+                }
+                let Some(xy) = camera.project(&p_cam) else {
+                    continue;
+                };
+                if xy.x < 0.0 || xy.x >= 1024.0 || xy.y < 0.0 || xy.y >= 768.0 {
+                    continue;
+                }
+                if observed == 0 {
+                    ba.add_landmark(j as u64, point + Vector3::new(0.02, 0.01, -0.02));
+                }
+                observed += 1;
+                ba.add_rig_observation(BaRigObservation {
+                    keyframe_id: k as u64,
+                    landmark_id: j as u64,
+                    xy: xy + nalgebra::Vector2::new(rnd() - 0.5, rnd() - 0.5),
+                    camera: camera.clone(),
+                    sensor_from_rig: SE3::identity(),
+                });
+            }
+        }
+        eprintln!(
+            "synthetic city: poses={} landmarks={} rig_observations={}",
+            ba.poses.len(),
+            ba.landmarks.len(),
+            ba.rig_observations.len()
+        );
+        let started = Instant::now();
+        let result = optimize_with_tolerance(&mut ba, 4, LossFunction::Trivial, Some(1.0))
+            .expect("synthetic city BA");
+        eprintln!(
+            "profile_synthetic_city: iterations={} total_ms={:.1}",
+            result.iterations.len(),
+            started.elapsed().as_secs_f64() * 1e3
         );
     }
 

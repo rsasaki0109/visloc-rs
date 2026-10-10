@@ -33,6 +33,17 @@ use std::time::Instant;
 
 use visloc_rs::slam::colmap_incremental::{pipeline, DatabaseCache};
 
+// Opt-in global allocator swap (`--features mimalloc-global`): the mapper's
+// bundle adjustments allocate and free gigabytes per call on large scenes.
+// Pure runtime substitution -- does not change any algorithm's output. With
+// `MIMALLOC_PURGE_DELAY=-1 MIMALLOC_ALLOW_LARGE_OS_PAGES=1` (keep freed
+// memory, huge pages) a Courthouse replay took 36.2 s instead of 38.9 s
+// with the system allocator (828k -> 715 page faults); mimalloc's default
+// purging was slower than the system allocator (41.6 s).
+#[cfg(feature = "mimalloc-global")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 struct Args {
     manifest: PathBuf,
     features_dir: PathBuf,

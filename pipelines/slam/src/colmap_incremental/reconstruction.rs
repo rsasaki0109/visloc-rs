@@ -19,6 +19,8 @@
 
 use std::collections::BTreeMap;
 
+use super::id_map::IdMap;
+
 use nalgebra::{Point2, Point3};
 
 use visloc_core::geometry::Pose;
@@ -127,9 +129,9 @@ impl Point3D {
 pub struct Reconstruction {
     rigs: BTreeMap<RigT, Rig>,
     cameras: BTreeMap<CameraT, Camera>,
-    frames: BTreeMap<FrameT, Frame>,
-    images: BTreeMap<ImageT, Image>,
-    points3d: BTreeMap<Point3DT, Point3D>,
+    frames: IdMap<Frame>,
+    images: IdMap<Image>,
+    points3d: IdMap<Point3D>,
     /// `reg_frame_ids_` (`reconstruction.h:298-300`): a vector (not a set),
     /// exactly as COLMAP documents, so registration order is preserved.
     reg_frame_ids: Vec<FrameT>,
@@ -229,13 +231,13 @@ impl Reconstruction {
     pub const fn cameras(&self) -> &BTreeMap<CameraT, Camera> {
         &self.cameras
     }
-    pub const fn frames(&self) -> &BTreeMap<FrameT, Frame> {
+    pub const fn frames(&self) -> &IdMap<Frame> {
         &self.frames
     }
-    pub const fn images(&self) -> &BTreeMap<ImageT, Image> {
+    pub const fn images(&self) -> &IdMap<Image> {
         &self.images
     }
-    pub const fn points3d(&self) -> &BTreeMap<Point3DT, Point3D> {
+    pub const fn points3d(&self) -> &IdMap<Point3D> {
         &self.points3d
     }
     /// Port of `RegFrameIds` (`reconstruction.h:91`).
