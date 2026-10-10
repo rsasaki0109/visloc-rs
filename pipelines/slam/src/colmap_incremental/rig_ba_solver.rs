@@ -1769,6 +1769,15 @@ pub(crate) fn optimize_with_tolerance(
             order.as_deref(),
             &mut timings,
         ) else {
+            eprintln!(
+                "BA_FAILED singular_system it={it} n_free_frames={} radius={radius:.6e} grad_inf_norm={grad_norm:.6e} linsolve_ms={:.1} pcg_iterations={}",
+                problem.n_free_frames,
+                timings.linsolve.as_secs_f64() * 1e3,
+                timings.pcg_iterations,
+            );
+            for line in &trace_lines {
+                eprintln!("{line}");
+            }
             return Err(BaError::SingularSystem);
         };
         let t_apply = Instant::now();
