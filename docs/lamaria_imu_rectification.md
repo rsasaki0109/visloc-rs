@@ -27,8 +27,12 @@ that LaMAria's `imu0` stream and `T_b_s` frames refer to. Images are untouched.
 - **Scoring**: the official `cvg/lamaria` evaluator, unmodified. Score and
   CP@1m come from the control points; pose recall comes from the pseudo-dense
   GT (not published for `sequence_5_11`).
-- One run per arm and sequence. Nothing was tuned against ground truth: the
-  factory model is applied as published.
+- One run per arm and sequence. The VIO is deterministic: re-running the
+  rectified `sequence_2_11` arm under a different CPU load (wall time 6,360 s
+  vs 7,448 s) gave a bit-identical `trajectory.tum`. Repeat runs therefore add
+  nothing. The remaining uncertainty is how sensitive the score is to small
+  input changes (see [IMU time offset](#imu-time-offset)). Nothing was tuned
+  against ground truth: the factory model is applied as published.
 
 ## Results
 
@@ -44,8 +48,7 @@ The score improves on all four sequences, and pose recall at 5 m improves by
 9–18 points on the three sequences with pseudo-GT. The one regression is
 `sequence_2_11`'s fraction within 1 m (CP@1m 16.7 → 11.1 %, pose R@1m
 16.3 → 5.6 %). There the better global shape (see below) trades against a
-section that the raw run happened to fit more tightly. With one run per arm,
-this cannot be told apart from run-to-run variation.
+section that the raw run happened to fit more tightly.
 
 ### Where the gain comes from (`sequence_2_11`)
 
@@ -64,6 +67,39 @@ the raw-IMU run (Score 38.10, ATE 3.71 m). Only 8.6 % of `sequence_2_11`'s
 poses have a revisit within 5 m more than 60 s apart, so loop closure has
 little to correct on this sequence. Reducing VIO drift is the lever for
 Medium/Long.
+
+## IMU time offset
+
+The factory record also gives per-sensor time offsets for `imu-right`
+(`TimeOffsetSec_Device_Gyro` 4.1 ms, `TimeOffsetSec_Device_Accel` 3.1 ms;
+`projectaria_tools` documents them only as "time offset device to gyroscope",
+without a sign convention). LaMAria's own tooling does not apply them: both
+`tools/vrs_to_asl_folder.py` (which writes the ASL IMU CSV) and the VI
+optimisation in `lamaria/utils/aria.py` take IMU timestamps as `DEVICE_TIME`
+unchanged. The VI optimisation does apply `raw_to_rectified_{accel,gyro}`,
+the same `R⁻¹ (raw − b)` model used here.
+
+Both signs were measured on `sequence_2_11` (rectified IMU, otherwise the
+same protocol). The shift moves every IMU timestamp; 4,145,618 ns is the gyro
+offset.
+
+| IMU shift | Score | CP@1m | Pose R@1m | Pose R@5m | ATE Sim3 RMSE | SE3 RMSE | Sim3 scale |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 (default) | 39.47 | 11.1 % | 5.6 % | 90.3 % | **3.10 m** | **3.86 m** | **0.981** |
+| +4.1 ms | **45.13** | **27.8 %** | **20.3 %** | 85.9 % | 3.94 m | 7.29 m | 0.951 |
+| −4.1 ms | 38.02 | 11.1 % | 14.5 % | **93.2 %** | 3.23 m | 4.16 m | 1.023 |
+
+The two signs disagree with each other, and the metrics disagree on which
+shift is best. +4.1 ms raises the Score by 5.7 because 5 rather than 2 of
+the 18 control points fall within 1 m. The same shift also gives the worst
+global trajectory: ATE +27 %, SE3 error nearly doubled, and the scale
+estimate 5 % short. −4.1 ms is close to the unshifted run on every metric.
+
+A ±4 ms perturbation thus moves the Score by several points in either
+direction without a consistent gain. That is also a measure of how sensitive
+a single-sequence Score is to small input changes. **The shift stays off**
+(the driver applies none). Adopting it would need a multi-sequence result
+that improves the trajectory, not only the control-point count.
 
 ## Reproducing
 
@@ -94,12 +130,10 @@ therefore available for a submission without touching ground truth.
 
 ## Open items
 
-1. **IMU time offset.** The factory record also gives per-sensor time offsets
-   for `imu-right` (`TimeOffsetSec_Device_Gyro` 4.1 ms,
-   `TimeOffsetSec_Device_Accel` 3.1 ms). It is not known whether the ASL
-   timestamps already include them. `rectify --shift-ns` can apply a shift, but
-   it has not been measured.
-2. **Re-tune `gyro_bias_std`.** The default of 1e-6 was chosen on raw IMU data;
+1. **Re-tune `gyro_bias_std`.** The default of 1e-6 was chosen on raw IMU data;
    with the bias removed up front, a looser value may now be better.
-3. **Short track and repeat runs.** No Short sequence was measured, and each
-   arm ran once.
+2. **Short track and more sequences per track.** No Short sequence was
+   measured. One sequence per track cannot separate a real gain from the
+   Score's sensitivity to small changes (see the time-offset table). The
+   4/4 direction of the rectification result, together with its trajectory
+   improvement, is the evidence that it is real.
