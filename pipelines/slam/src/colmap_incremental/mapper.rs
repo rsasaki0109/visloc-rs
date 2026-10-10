@@ -885,7 +885,9 @@ impl IncrementalMapper {
         point3d_ids: &BTreeSet<Point3DT>,
     ) -> LocalBundleAdjustmentReport {
         let mut report = LocalBundleAdjustmentReport::default();
+        let t_find = std::time::Instant::now();
         let local_bundle = self.find_local_bundle(options, recon, image_id);
+        let find_ms = t_find.elapsed().as_millis();
 
         let mut config = BundleAdjustmentConfig::new();
         let mut config_image_ids: Vec<ImageT> = Vec::new();
@@ -960,7 +962,7 @@ impl IncrementalMapper {
                 image_id,
             );
             eprintln!(
-                "TIMING local_parts ba_ms={lba_ms} merge_complete_ms={} points={}",
+                "TIMING local_parts find_ms={find_ms} ba_ms={lba_ms} merge_complete_ms={} points={}",
                 t_lmc.elapsed().as_millis(),
                 variable_ids.len()
             );
@@ -999,9 +1001,12 @@ impl IncrementalMapper {
         recon: &mut Reconstruction,
         graph: &CorrespondenceGraph,
     ) -> bool {
+        let t = std::time::Instant::now();
         self.obs
             .filter_observations_with_negative_depth(recon, graph);
+        let filter_ms = t.elapsed().as_millis();
 
+        let t = std::time::Instant::now();
         let mut config = BundleAdjustmentConfig::new();
         for &frame_id in recon.reg_frame_ids() {
             config.add_frame(recon, frame_id);
@@ -1022,7 +1027,13 @@ impl IncrementalMapper {
         config.fix_gauge(Gauge::OneFrameFromWorld);
         let num_images = config.num_images();
         let num_points = recon.num_points3d();
+        let config_ms = t.elapsed().as_millis();
+        let t = std::time::Instant::now();
         let ok = bundle_adjustment::solve(ba_options, &config, recon);
+        eprintln!(
+            "TIMING global_ba_parts filter_ms={filter_ms} config_ms={config_ms} solve_ms={}",
+            t.elapsed().as_millis()
+        );
         self.log_event(format!(
             "BA global images={} points={} ok={}",
             num_images, num_points, ok

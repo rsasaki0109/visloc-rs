@@ -208,6 +208,70 @@ struct Problem {
     /// `point_free_frames`, reused unchanged by every trial and every
     /// accepted step.
     shard_boundaries: Vec<usize>,
+    /// Built when the memory cap leaves [`elimination_shard_count`] below 8
+    /// (large, dense covisibility graphs): the elimination then runs in
+    /// parallel over its outputs instead (see [`ContributionIndex`]).
+    contributions: Option<ContributionIndex>,
+}
+
+/// Which points observe each free frame of the reduced camera system, in
+/// ascending point order, plus where each frame's off-diagonal row starts
+/// in `edges`. Lets [`eliminate_and_accumulate`] compute every row of the
+/// reduced system independently, in parallel, with exactly the additions
+/// (and their order) of the sharded loop.
+struct ContributionIndex {
+    /// `slot[slot_off[s]..slot_off[s + 1]]`: `(point, k)` for free slot `s`,
+    /// `k` the position of `s`'s frame in `point_free_frames[point]`.
+    slot_off: Vec<usize>,
+    slot: Vec<[u32; 2]>,
+    /// `edges[row_off[s]..row_off[s + 1]]` are the edges `(s, _)`.
+    row_off: Vec<usize>,
+    /// Shard of each point (the sharded loop's summation grouping).
+    point_shard: Vec<u32>,
+}
+
+impl ContributionIndex {
+    fn new(
+        point_free_frames: &[Vec<u32>],
+        free_frame_slot: &[Option<u32>],
+        edges: &[(u32, u32)],
+        n_free: usize,
+        shard_boundaries: &[usize],
+    ) -> Self {
+        let mut slot_off = vec![0usize; n_free + 1];
+        for frames in point_free_frames {
+            for &f in frames {
+                slot_off[free_frame_slot[f as usize].expect("free") as usize + 1] += 1;
+            }
+        }
+        for i in 1..slot_off.len() {
+            slot_off[i] += slot_off[i - 1];
+        }
+        let mut slot = vec![[0u32; 2]; slot_off[n_free]];
+        let mut slot_fill = slot_off.clone();
+        for (p, frames) in point_free_frames.iter().enumerate() {
+            for (k, &f) in frames.iter().enumerate() {
+                let s = free_frame_slot[f as usize].expect("free") as usize;
+                slot[slot_fill[s]] = [p as u32, k as u32];
+                slot_fill[s] += 1;
+            }
+        }
+        let row_off = (0..=n_free)
+            .map(|s| edges.partition_point(|&(a, _)| (a as usize) < s))
+            .collect();
+        let mut point_shard = vec![0u32; point_free_frames.len()];
+        for s in 0..shard_boundaries.len().saturating_sub(1) {
+            for v in &mut point_shard[shard_boundaries[s]..shard_boundaries[s + 1]] {
+                *v = s as u32;
+            }
+        }
+        Self {
+            slot_off,
+            slot,
+            row_off,
+            point_shard,
+        }
+    }
 }
 
 /// Performance fix (profiled on a 300-frame/2500-point/289k-observation
@@ -276,6 +340,19 @@ fn build_reduced_system_pattern(
     raw_pairs.par_sort_unstable();
     raw_pairs.dedup();
     let edges = raw_pairs;
+    let n_slots = free_frame_slot
+        .iter()
+        .flatten()
+        .map(|&s| s as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut row_off = vec![0usize; n_slots + 1];
+    for &(a, _) in &edges {
+        row_off[a as usize + 1] += 1;
+    }
+    for i in 1..row_off.len() {
+        row_off[i] += row_off[i - 1];
+    }
 
     let point_pair_edge_idx: Vec<Vec<u32>> = point_free_frames
         .par_iter()
@@ -283,15 +360,19 @@ fn build_reduced_system_pattern(
             if frames.len() < 2 {
                 return Vec::new();
             }
+            // Slots ascend with frames, so the pairs `(i, j > i)` walk
+            // edge row `slots[i]` forwards.
             let slots = slots_of(frames);
             let n = slots.len();
-            let mut idxs = Vec::with_capacity(n * (n - 1) / 2);
-            for j in 1..n {
-                for i in 0..j {
-                    let e = edges
-                        .binary_search(&(slots[i], slots[j]))
-                        .expect("pair is an edge");
-                    idxs.push(e as u32);
+            let mut idxs = vec![0u32; n * (n - 1) / 2];
+            for i in 0..n {
+                let a = slots[i] as usize;
+                let row = &edges[row_off[a]..row_off[a + 1]];
+                let mut pos = 0usize;
+                for j in i + 1..n {
+                    pos += row[pos..].partition_point(|&(_, b)| b < slots[j]);
+                    debug_assert_eq!(row[pos], (slots[i], slots[j]), "pair is an edge");
+                    idxs[j * (j - 1) / 2 + i] = (row_off[a] + pos) as u32;
                 }
             }
             idxs
@@ -344,7 +425,9 @@ fn pcg_blocks6(
     rhs: &DMatrix<f64>,
 ) -> Option<DMatrix<f64>> {
     let n = columns.len();
-    // Symmetric block rows: row i holds (j, A_ij) for every stored block.
+    // Symmetric block rows: row i holds (j, A_ij) for every stored block,
+    // ascending by j (blocks left of the diagonal come from earlier
+    // columns, then the diagonal and the rest of column i).
     let mut rows: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); n];
     for (j, col) in columns.iter().enumerate() {
         for (&i, blk) in col {
@@ -354,19 +437,57 @@ fn pcg_blocks6(
             }
         }
     }
-    let precond: Vec<Matrix6<f64>> = columns
-        .par_iter()
-        .enumerate()
-        .map(|(j, col)| col.get(&j).and_then(|d| d.cholesky()).map(|c| c.inverse()))
+    let mut row_off = Vec::with_capacity(n + 1);
+    row_off.push(0);
+    for row in &rows {
+        row_off.push(row_off.last().copied().unwrap_or(0) + row.len());
+    }
+    let entries: Vec<(usize, Matrix6<f64>)> = rows.into_iter().flatten().collect();
+    pcg_csr6(&row_off, &entries, rhs)
+}
+
+/// [`pcg_blocks6`] on the symmetric block rows in CSR form: row `i` is
+/// `entries[row_off[i]..row_off[i + 1]]`, `(column, A_ij)` ascending by
+/// column with the diagonal block included.
+fn pcg_csr6(
+    row_off: &[usize],
+    entries: &[(usize, Matrix6<f64>)],
+    rhs: &DMatrix<f64>,
+) -> Option<DMatrix<f64>> {
+    let n = row_off.len() - 1;
+    let diag: Vec<Matrix6<f64>> = (0..n)
+        .map(|i| {
+            entries[row_off[i]..row_off[i + 1]]
+                .iter()
+                .find(|(j, _)| *j == i)
+                .map(|(_, d)| *d)
+        })
         .collect::<Option<Vec<_>>>()?;
     let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
-        rows.par_iter()
-            .map(|row| {
-                row.iter()
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                entries[row_off[i]..row_off[i + 1]]
+                    .iter()
                     .fold(Vector6::zeros(), |acc, (j, blk)| acc + blk * x[*j])
             })
             .collect()
     };
+    pcg_core(&diag, matvec, rhs).map(|(x, _)| x)
+}
+
+/// [`pcg_blocks6`] with the matrix given by its diagonal blocks and a
+/// matrix-vector product.
+fn pcg_core(
+    diag: &[Matrix6<f64>],
+    matvec: impl Fn(&[Vector6<f64>]) -> Vec<Vector6<f64>>,
+    rhs: &DMatrix<f64>,
+) -> Option<(DMatrix<f64>, usize)> {
+    let n = diag.len();
+    let precond: Vec<Matrix6<f64>> = diag
+        .par_iter()
+        .map(|d| d.cholesky().map(|c| c.inverse()))
+        .collect::<Option<Vec<_>>>()?;
     let dot = |a: &[Vector6<f64>], b: &[Vector6<f64>]| -> f64 {
         let partial: Vec<f64> = a.par_iter().zip(b).map(|(x, y)| x.dot(y)).collect();
         partial.iter().sum()
@@ -377,13 +498,15 @@ fn pcg_blocks6(
     let b_norm = dot(&b, &b).sqrt();
     let mut x = vec![Vector6::<f64>::zeros(); n];
     if b_norm == 0.0 {
-        return Some(DMatrix::zeros(n * 6, 1));
+        return Some((DMatrix::zeros(n * 6, 1), 0));
     }
     let mut r = b;
     let mut z: Vec<Vector6<f64>> = r.iter().zip(&precond).map(|(r, m)| m * r).collect();
     let mut p = z.clone();
     let mut rz = dot(&r, &z);
+    let mut iterations = 0;
     for _ in 0..PCG_MAX_ITERATIONS {
+        iterations += 1;
         let ap = matvec(&p);
         let pap = dot(&p, &ap);
         if !pap.is_finite() || pap <= 0.0 {
@@ -411,7 +534,7 @@ fn pcg_blocks6(
             out[(i * 6 + k, 0)] = xi[k];
         }
     }
-    Some(out)
+    Some((out, iterations))
 }
 
 /// Reduced camera systems with at least this many free frames are factored
@@ -520,6 +643,15 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         build_reduced_system_pattern(&point_obs_range, &obs, &frame_fixed, &free_frame_slot);
     let n_shards = elimination_shard_count(edges.len());
     let shard_boundaries = balanced_shard_boundaries(&point_free_frames, n_shards);
+    let contributions = (n_shards < 8).then(|| {
+        ContributionIndex::new(
+            &point_free_frames,
+            &free_frame_slot,
+            &edges,
+            n_free_frames,
+            &shard_boundaries,
+        )
+    });
 
     Ok(Problem {
         frame_ids,
@@ -535,6 +667,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         edges,
         point_pair_edge_idx,
         shard_boundaries,
+        contributions,
     })
 }
 
@@ -910,6 +1043,7 @@ struct PhaseTimings {
     linearize_calls: u32,
     trials: u32,
     reorder: Duration,
+    pcg_iterations: usize,
 }
 
 /// Performance fix #2 (see [`build_reduced_system_pattern`] for fix #1):
@@ -942,6 +1076,9 @@ fn eliminate_and_accumulate(
     mu: f64,
 ) -> (Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
     let n_free = problem.n_free_frames;
+    if let Some(index) = &problem.contributions {
+        return eliminate_by_output(problem, index, points_lin, edges_len, mu);
+    }
     let n_shards = problem.shard_boundaries.len().saturating_sub(1).max(1);
 
     let shard_results: Vec<(Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>)> = (0
@@ -1011,6 +1148,130 @@ fn eliminate_and_accumulate(
             *a += b;
         }
     }
+    (flat_offdiag, diag_delta, bc_delta)
+}
+
+/// [`eliminate_and_accumulate`] computed per output block, in parallel:
+/// each off-diagonal block, diagonal block and right-hand side sums its
+/// points' contributions in ascending point order, starting a fresh partial
+/// sum at every shard boundary and adding the partial sums in shard order,
+/// which is exactly the sharded loop's arithmetic (it subtracts each
+/// shard's points in order into a zeroed per-shard buffer, then adds the
+/// buffers in shard order). Used when the per-shard buffers would not fit
+/// in memory more than a few at a time, where the sharded loop ran on as
+/// few as 2 threads.
+#[allow(clippy::type_complexity)]
+fn eliminate_by_output(
+    problem: &Problem,
+    index: &ContributionIndex,
+    points_lin: &[PointLin],
+    edges_len: usize,
+    mu: f64,
+) -> (Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
+    let n_free = problem.n_free_frames;
+    let (point_free_frames, point_pair_edge_idx) =
+        (&problem.point_free_frames, &problem.point_pair_edge_idx);
+    let hpp_inv: Vec<Option<Matrix3<f64>>> = points_lin
+        .par_iter()
+        .map(|pl| {
+            if !pl.free || pl.frames.is_empty() {
+                None
+            } else {
+                damped_hpp_inverse(&pl.hpp, mu)
+            }
+        })
+        .collect();
+    // Sum `term(c)` over `contribs` (ascending point) grouped by shard.
+    fn grouped<T: Copy + std::ops::AddAssign + std::ops::SubAssign>(
+        zero: T,
+        contribs: impl Iterator<Item = (u32, T)>,
+    ) -> T {
+        let (mut total, mut acc, mut shard) = (zero, zero, None);
+        for (s, term) in contribs {
+            if shard != Some(s) {
+                if shard.is_some() {
+                    total += acc;
+                }
+                acc = zero;
+                shard = Some(s);
+            }
+            acc -= term;
+        }
+        if shard.is_some() {
+            total += acc;
+        }
+        total
+    }
+    // Row `s` of the off-diagonal blocks (edges `(s, _)`) collects, from
+    // each point observing `s` in ascending order, the pairs `(k, j > k)`
+    // with `k` at `s`: every edge sees its points in ascending order.
+    let mut flat_offdiag = vec![Matrix6::<f64>::zeros(); edges_len];
+    let mut rows: Vec<&mut [Matrix6<f64>]> = Vec::with_capacity(n_free);
+    let mut rest = flat_offdiag.as_mut_slice();
+    for s in 0..n_free {
+        let (row, tail) = rest.split_at_mut(index.row_off[s + 1] - index.row_off[s]);
+        rows.push(row);
+        rest = tail;
+    }
+    rows.into_par_iter().enumerate().for_each_init(
+        || (Vec::new(), Vec::new()),
+        |(acc, shard), (s, total)| {
+            acc.clear();
+            acc.resize(total.len(), Matrix6::<f64>::zeros());
+            shard.clear();
+            shard.resize(total.len(), None);
+            let base = index.row_off[s];
+            for &[p, k] in &index.slot[index.slot_off[s]..index.slot_off[s + 1]] {
+                let (p, k) = (p as usize, k as usize);
+                let Some(inv) = hpp_inv[p] else {
+                    continue;
+                };
+                let pl = &points_lin[p];
+                let point_shard = Some(index.point_shard[p]);
+                let pair_edge = &point_pair_edge_idx[p];
+                for j in k + 1..point_free_frames[p].len() {
+                    let e = pair_edge[j * (j - 1) / 2 + k] as usize - base;
+                    let term = (pl.hcp[j] * inv) * pl.hcp[k].transpose();
+                    if shard[e] != point_shard {
+                        if shard[e].is_some() {
+                            total[e] += acc[e];
+                        }
+                        acc[e] = Matrix6::zeros();
+                        shard[e] = point_shard;
+                    }
+                    acc[e] -= term;
+                }
+            }
+            for ((t, a), sh) in total.iter_mut().zip(acc.iter()).zip(shard.iter()) {
+                if sh.is_some() {
+                    *t += *a;
+                }
+            }
+        },
+    );
+    let (diag_delta, bc_delta): (Vec<Matrix6<f64>>, Vec<Vector6<f64>>) = (0..n_free)
+        .into_par_iter()
+        .map(|slot| {
+            let range = &index.slot[index.slot_off[slot]..index.slot_off[slot + 1]];
+            let terms = || {
+                range.iter().filter_map(|&[p, k]| {
+                    let (p, k) = (p as usize, k as usize);
+                    let inv = hpp_inv[p]?;
+                    let pl = &points_lin[p];
+                    Some((index.point_shard[p], pl.hcp[k] * inv, pl, k))
+                })
+            };
+            let diag = grouped(
+                Matrix6::zeros(),
+                terms().map(|(s, scaled, pl, k)| (s, scaled * pl.hcp[k].transpose())),
+            );
+            let bc = grouped(
+                Vector6::zeros(),
+                terms().map(|(s, scaled, pl, _)| (s, scaled * pl.bp)),
+            );
+            (diag, bc)
+        })
+        .unzip();
     (flat_offdiag, diag_delta, bc_delta)
 }
 
@@ -1114,6 +1375,87 @@ fn solve_step(
         }
     }
 
+    if n_free >= iterative_min_free_frames() && order.is_none() {
+        // Iterative solve: the symmetric block rows straight from the edge
+        // list, built per row in parallel. Row `i` is its left blocks
+        // (edges `(a, i)`, ascending a), the diagonal, then its right
+        // blocks (edges `(i, b)`, ascending b, transposed): the rows, in
+        // the order, that `pcg_blocks6` derives from the column map.
+        let mut left_off = vec![0usize; n_free + 1];
+        for &(_, b) in edges {
+            left_off[b as usize + 1] += 1;
+        }
+        for i in 0..n_free {
+            left_off[i + 1] += left_off[i];
+        }
+        let mut left = vec![0u32; edges.len()];
+        let mut fill = left_off.clone();
+        for (e, &(_, b)) in edges.iter().enumerate() {
+            left[fill[b as usize]] = e as u32;
+            fill[b as usize] += 1;
+        }
+        // Edges ascend by (a, b): row a's right blocks are contiguous.
+        let mut right_off = vec![0usize; n_free + 1];
+        for &(a, _) in edges {
+            right_off[a as usize + 1] += 1;
+        }
+        for i in 0..n_free {
+            right_off[i + 1] += right_off[i];
+        }
+        let rows: Vec<Vec<(usize, Matrix6<f64>)>> = (0..n_free)
+            .into_par_iter()
+            .map(|i| {
+                let lefts = &left[left_off[i]..left_off[i + 1]];
+                let mut row = Vec::with_capacity(lefts.len() + 1 + right_off[i + 1] - right_off[i]);
+                row.extend(
+                    lefts
+                        .iter()
+                        .map(|&e| (edges[e as usize].0 as usize, flat_offdiag[e as usize])),
+                );
+                row.push((i, frame_diag[i]));
+                row.extend(
+                    (right_off[i]..right_off[i + 1])
+                        .map(|e| (edges[e].1 as usize, flat_offdiag[e].transpose())),
+                );
+                row
+            })
+            .collect();
+        let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
+            rows.par_iter()
+                .map(|row| {
+                    row.iter()
+                        .fold(Vector6::zeros(), |acc, (j, blk)| acc + blk * x[*j])
+                })
+                .collect()
+        };
+        let mut rhs = DMatrix::<f64>::zeros(n_free * 6, 1);
+        for a in 0..n_free {
+            for i in 0..6 {
+                rhs[(a * 6 + i, 0)] = frame_bc[a][i];
+            }
+        }
+        timings.assemble += t.elapsed();
+        let t = Instant::now();
+        let (solved, iterations) = pcg_core(&frame_diag, matvec, &rhs)?;
+        timings.pcg_iterations += iterations;
+        let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
+        for a in 0..n_free {
+            for i in 0..6 {
+                dx_frames[a][i] = solved[(a * 6 + i, 0)];
+            }
+        }
+        timings.linsolve += t.elapsed();
+        return Some(back_substitute(
+            problem,
+            points_lin,
+            frame_diag_raw,
+            frame_bc_raw,
+            dx_frames,
+            mu,
+            timings,
+        ));
+    }
+
     // Free frame `a` sits at block `pos(a)` of the factored system: the
     // fill-reducing position when an order is given (large systems, see
     // `REORDER_MIN_FREE_FRAMES`), else `a` itself.
@@ -1153,7 +1495,29 @@ fn solve_step(
         }
     }
     timings.linsolve += t.elapsed();
+    Some(back_substitute(
+        problem,
+        points_lin,
+        frame_diag_raw,
+        frame_bc_raw,
+        dx_frames,
+        mu,
+        timings,
+    ))
+}
 
+/// Free-point steps from the camera steps, and the LM model's predicted
+/// cost decrease, for [`solve_step`].
+fn back_substitute(
+    problem: &Problem,
+    points_lin: &[PointLin],
+    frame_diag_raw: &[Matrix6<f64>],
+    frame_bc_raw: &[Vector6<f64>],
+    dx_frames: Vec<Vector6<f64>>,
+    mu: f64,
+    timings: &mut PhaseTimings,
+) -> (Vec<Vector6<f64>>, Vec<Vector3<f64>>, f64) {
+    let n_free = problem.n_free_frames;
     let t = Instant::now();
     let dx_points: Vec<Vector3<f64>> = points_lin
         .par_iter()
@@ -1193,7 +1557,7 @@ fn solve_step(
     timings.backsub += t.elapsed();
     timings.trials += 1;
 
-    Some((dx_frames, dx_points, predicted))
+    (dx_frames, dx_points, predicted)
 }
 
 /// Residual-only (no Jacobian) total cost at a candidate `(poses, points)` —
@@ -1463,7 +1827,7 @@ pub(crate) fn optimize_with_tolerance(
     }
 
     eprintln!(
-        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1} reorder_ms={:.1}",
+        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1} reorder_ms={:.1} pcg_iterations={}",
         timings.trials,
         timings.linearize_calls,
         problem.n_free_frames,
@@ -1477,6 +1841,7 @@ pub(crate) fn optimize_with_tolerance(
         timings.backsub.as_secs_f64() * 1e3,
         timings.evaluate_cost.as_secs_f64() * 1e3,
         timings.reorder.as_secs_f64() * 1e3,
+        timings.pcg_iterations,
     );
     if iterations.len() >= 30 {
         for line in &trace_lines {
