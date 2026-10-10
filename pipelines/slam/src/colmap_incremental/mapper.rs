@@ -885,7 +885,9 @@ impl IncrementalMapper {
         point3d_ids: &BTreeSet<Point3DT>,
     ) -> LocalBundleAdjustmentReport {
         let mut report = LocalBundleAdjustmentReport::default();
+        let t_find = std::time::Instant::now();
         let local_bundle = self.find_local_bundle(options, recon, image_id);
+        let find_ms = t_find.elapsed().as_millis();
 
         let mut config = BundleAdjustmentConfig::new();
         let mut config_image_ids: Vec<ImageT> = Vec::new();
@@ -960,7 +962,7 @@ impl IncrementalMapper {
                 image_id,
             );
             eprintln!(
-                "TIMING local_parts ba_ms={lba_ms} merge_complete_ms={} points={}",
+                "TIMING local_parts find_ms={find_ms} ba_ms={lba_ms} merge_complete_ms={} points={}",
                 t_lmc.elapsed().as_millis(),
                 variable_ids.len()
             );
