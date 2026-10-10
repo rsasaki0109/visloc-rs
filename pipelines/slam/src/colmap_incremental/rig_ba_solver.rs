@@ -459,14 +459,12 @@ fn pcg_csr6(
     rhs: &DMatrix<f64>,
 ) -> Option<DMatrix<f64>> {
     let n = row_off.len() - 1;
-    let precond: Vec<Matrix6<f64>> = (0..n)
-        .into_par_iter()
+    let diag: Vec<Matrix6<f64>> = (0..n)
         .map(|i| {
             entries[row_off[i]..row_off[i + 1]]
                 .iter()
                 .find(|(j, _)| *j == i)
-                .and_then(|(_, d)| d.cholesky())
-                .map(|c| c.inverse())
+                .map(|(_, d)| *d)
         })
         .collect::<Option<Vec<_>>>()?;
     let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
@@ -479,6 +477,21 @@ fn pcg_csr6(
             })
             .collect()
     };
+    pcg_core(&diag, matvec, rhs)
+}
+
+/// [`pcg_blocks6`] with the matrix given by its diagonal blocks and a
+/// matrix-vector product.
+fn pcg_core(
+    diag: &[Matrix6<f64>],
+    matvec: impl Fn(&[Vector6<f64>]) -> Vec<Vector6<f64>>,
+    rhs: &DMatrix<f64>,
+) -> Option<DMatrix<f64>> {
+    let n = diag.len();
+    let precond: Vec<Matrix6<f64>> = diag
+        .par_iter()
+        .map(|d| d.cholesky().map(|c| c.inverse()))
+        .collect::<Option<Vec<_>>>()?;
     let dot = |a: &[Vector6<f64>], b: &[Vector6<f64>]| -> f64 {
         let partial: Vec<f64> = a.par_iter().zip(b).map(|(x, y)| x.dot(y)).collect();
         partial.iter().sum()
@@ -1167,6 +1180,22 @@ fn eliminate_by_output(
             }
         })
         .collect();
+    // `hcp[k] * hpp_inv` once per point and frame (the sharded loop's
+    // `hcp_scaled`, same product), at `scaled_off[p] + k`.
+    let mut scaled_off = Vec::with_capacity(points_lin.len() + 1);
+    scaled_off.push(0usize);
+    for pl in points_lin {
+        scaled_off.push(scaled_off.last().copied().unwrap_or(0) + pl.hcp.len());
+    }
+    let hcp_scaled: Vec<SMatrix<f64, 6, 3>> = points_lin
+        .par_iter()
+        .zip(&hpp_inv)
+        .flat_map_iter(|(pl, inv)| {
+            pl.hcp
+                .iter()
+                .map(move |h| inv.map_or_else(SMatrix::zeros, |inv| h * inv))
+        })
+        .collect();
     // Sum `term(c)` over `contribs` (ascending point) grouped by shard.
     fn grouped<T: Copy + std::ops::AddAssign + std::ops::SubAssign>(
         zero: T,
@@ -1194,10 +1223,11 @@ fn eliminate_by_output(
             let contribs = index.edge[index.edge_off[e]..index.edge_off[e + 1]]
                 .iter()
                 .filter_map(|&[p, i, j]| {
-                    let inv = hpp_inv[p as usize]?;
-                    let pl = &points_lin[p as usize];
-                    let term = (pl.hcp[j as usize] * inv) * pl.hcp[i as usize].transpose();
-                    Some((index.point_shard[p as usize], term))
+                    let p = p as usize;
+                    hpp_inv[p]?;
+                    let term = hcp_scaled[scaled_off[p] + j as usize]
+                        * points_lin[p].hcp[i as usize].transpose();
+                    Some((index.point_shard[p], term))
                 });
             grouped(Matrix6::zeros(), contribs)
         })
@@ -1208,10 +1238,10 @@ fn eliminate_by_output(
             let range = &index.slot[index.slot_off[slot]..index.slot_off[slot + 1]];
             let terms = || {
                 range.iter().filter_map(|&[p, k]| {
-                    let inv = hpp_inv[p as usize]?;
-                    let pl = &points_lin[p as usize];
-                    Some((index.point_shard[p as usize], pl.hcp[k as usize] * inv, pl))
-                        .map(|(s, scaled, pl)| (s, scaled, pl, k as usize))
+                    let (p, k) = (p as usize, k as usize);
+                    hpp_inv[p]?;
+                    let scaled = hcp_scaled[scaled_off[p] + k];
+                    Some((index.point_shard[p], scaled, &points_lin[p], k))
                 })
             };
             let diag = grouped(
@@ -1329,36 +1359,48 @@ fn solve_step(
     }
 
     if n_free >= iterative_min_free_frames() && order.is_none() {
-        // Iterative solve: the symmetric block rows straight from the edge
-        // list, each row ascending by column (blocks left of the diagonal,
-        // the diagonal, then the rest), exactly the rows `pcg_blocks6`
-        // derives from the column map, without building it.
-        let mut row_off = vec![0usize; n_free + 1];
-        for &(a, b) in edges {
-            row_off[a as usize + 1] += 1;
-            row_off[b as usize + 1] += 1;
+        // Iterative solve straight on the edge blocks: row `i` of the
+        // symmetric matrix is its left blocks (edges `(a, i)`, ascending
+        // a, as stored), the diagonal, then its right blocks (edges
+        // `(i, b)`, ascending b, transposed) -- the order `pcg_blocks6`
+        // sums a row in, without copying the blocks into rows.
+        let mut left_off = vec![0usize; n_free + 1];
+        for &(_, b) in edges {
+            left_off[b as usize + 1] += 1;
         }
         for i in 0..n_free {
-            row_off[i + 1] += row_off[i] + 1;
+            left_off[i + 1] += left_off[i];
         }
-        let mut entries = vec![(0usize, Matrix6::<f64>::zeros()); row_off[n_free]];
-        let mut fill = row_off.clone();
-        // Edges ascend by (a, b): row b receives its left blocks (a < b) in
-        // ascending a, and row a its right blocks in ascending b.
-        for (&(a, b), val) in edges.iter().zip(&flat_offdiag) {
-            let b = b as usize;
-            entries[fill[b]] = (a as usize, *val);
-            fill[b] += 1;
+        let mut left = vec![0u32; edges.len()];
+        let mut fill = left_off.clone();
+        for (e, &(_, b)) in edges.iter().enumerate() {
+            left[fill[b as usize]] = e as u32;
+            fill[b as usize] += 1;
         }
-        for (i, diag) in frame_diag.iter().enumerate() {
-            entries[fill[i]] = (i, *diag);
-            fill[i] += 1;
+        // Edges ascend by (a, b): row a's right blocks are contiguous.
+        let mut right_off = vec![0usize; n_free + 1];
+        for &(a, _) in edges {
+            right_off[a as usize + 1] += 1;
         }
-        for (&(a, b), val) in edges.iter().zip(&flat_offdiag) {
-            let a = a as usize;
-            entries[fill[a]] = (b as usize, val.transpose());
-            fill[a] += 1;
+        for i in 0..n_free {
+            right_off[i + 1] += right_off[i];
         }
+        let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
+            (0..n_free)
+                .into_par_iter()
+                .map(|i| {
+                    let mut acc = left[left_off[i]..left_off[i + 1]]
+                        .iter()
+                        .fold(Vector6::zeros(), |acc, &e| {
+                            acc + flat_offdiag[e as usize] * x[edges[e as usize].0 as usize]
+                        });
+                    acc += frame_diag[i] * x[i];
+                    (right_off[i]..right_off[i + 1]).fold(acc, |acc, e| {
+                        acc + flat_offdiag[e].transpose() * x[edges[e].1 as usize]
+                    })
+                })
+                .collect()
+        };
         let mut rhs = DMatrix::<f64>::zeros(n_free * 6, 1);
         for a in 0..n_free {
             for i in 0..6 {
@@ -1367,7 +1409,7 @@ fn solve_step(
         }
         timings.assemble += t.elapsed();
         let t = Instant::now();
-        let solved = pcg_csr6(&row_off, &entries, &rhs)?;
+        let solved = pcg_core(&frame_diag, matvec, &rhs)?;
         let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
         for a in 0..n_free {
             for i in 0..6 {
