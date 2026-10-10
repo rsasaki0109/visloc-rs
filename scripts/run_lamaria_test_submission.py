@@ -7,6 +7,8 @@ whole per-sequence loop for a track:
 
     download ASL zip + pinhole calibration
       -> verify + extract -> rename `aria/` to `mav0/`
+      -> apply Aria's factory IMU calibration to `imu0/data.csv` (read from
+         the first 4 MiB of the raw `.vrs`; `--no-imu-rectify` skips it)
       -> pinhole -> Basalt Double-Sphere calibration (variant A noise,
          gyro bias random walk tightened to --gyro-bias-std)
       -> run the Basalt VIO
@@ -38,6 +40,12 @@ sequences this scores sequence_1_19 50.04, R_12_10cp 40.11 and R_11_5cp ~63,
 versus 17.16 / 28.85 / 62.87 for `euroc_config_big_window.json` with Basalt's
 default 1e-4. Pass `--config .../euroc_config_big_window.json --gyro-bias-std
 1e-4` to reproduce the earlier setup.
+
+IMU rectification (docs/lamaria_imu_rectification.md) is on by default: on one
+training sequence per non-Short track it raises the score by +4.35 on average
+(Medium 37.72 -> 39.47, Long 24.14 -> 28.89, Low light 20.42 -> 26.42, Moving
+27.64 -> 32.56). If the `.vrs` header cannot be fetched or parsed the sequence
+falls back to the raw IMU with a WARN line rather than being dropped.
 """
 
 import argparse
@@ -49,6 +57,9 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aria_factory_imu_rectify import VRS_HEAD_BYTES, extract_record, rectify_csv  # noqa: E402
 
 TRACK_COUNTS = {1: 18, 2: 10, 3: 16, 4: 9, 5: 10}
 BASE_URL = "https://cvg-data.inf.ethz.ch/lamaria"
@@ -89,6 +100,30 @@ def download(url: str, dest: Path) -> None:
             return
     log(f"aria2c unavailable/failed; falling back to urllib for {url}")
     urllib.request.urlretrieve(url, dest)
+
+
+def download_head(url: str, dest: Path, nbytes: int) -> None:
+    """Fetch only the first `nbytes` of `url` (HTTP range request)."""
+    if dest.is_file() and dest.stat().st_size > 0:
+        return
+    request = urllib.request.Request(url, headers={"Range": f"bytes=0-{nbytes - 1}"})
+    with urllib.request.urlopen(request, timeout=300) as response:
+        # read(nbytes) also bounds a server that ignores Range and answers 200.
+        dest.write_bytes(response.read(nbytes))
+
+
+def rectify_imu(seq: str, inner: Path, work: Path, calib_dir: Path) -> None:
+    """Replace inner/mav0/imu0/data.csv with the factory-rectified IMU."""
+    head = work / "vrs_head.bin"
+    download_head(f"{BASE_URL}/raw_data/test/{seq}.vrs", head, VRS_HEAD_BYTES)
+    factory = extract_record(head.read_bytes())
+    (calib_dir / f"{seq}_factory_calib.json").write_text(json.dumps(factory, indent=1))
+    imu_csv = inner / "mav0" / "imu0" / "data.csv"
+    rectified = imu_csv.with_name("data_rectified.csv")
+    samples, gyro_bias, accel_bias = rectify_csv(factory, imu_csv, rectified)
+    rectified.replace(imu_csv)
+    log(f"{seq}: rectified {samples} IMU samples (serial {factory.get('Serial')}, "
+        f"gyro bias {gyro_bias.round(5).tolist()}, accel bias {accel_bias.round(4).tolist()})")
 
 
 def verify_and_extract(zip_path: Path, extract_dir: Path) -> Path:
@@ -134,6 +169,9 @@ def main() -> int:
     parser.add_argument("--gyro-bias-std", type=float, default=1e-6,
                         help="gyro bias random walk written into the calibration "
                              "(Basalt default 1e-4; 1e-6 measured best on LaMAria)")
+    parser.add_argument("--imu-rectify", action=argparse.BooleanOptionalAction, default=True,
+                        help="apply Aria's factory IMU calibration from the .vrs header "
+                             "(default on; docs/lamaria_imu_rectification.md)")
     parser.add_argument("--threads", type=int, default=12)
     parser.add_argument("--work-dir", type=Path, default=Path("lamaria_submission/work"))
     parser.add_argument("--slam-dir", type=Path, default=Path("lamaria_submission/slam"))
@@ -173,6 +211,13 @@ def main() -> int:
             except zipfile.BadZipFile:
                 download(f"{BASE_URL}/asl_folder/test/{seq}.zip", zip_path)
                 inner = verify_and_extract(zip_path, extract_dir)
+
+            if args.imu_rectify:
+                log(f"{seq}: IMU rectification")
+                try:
+                    rectify_imu(seq, inner, work, calib_dir)
+                except Exception as error:
+                    log(f"{seq}: WARN IMU rectification failed ({error!r}); using raw IMU")
 
             log(f"{seq}: calibration")
             base_calib = calib_dir / f"{seq}_calib.json"
