@@ -42,15 +42,17 @@ python scripts/run_lamaria_test_submission.py \
   --tracks 1 \
   --vio-exe target/release/examples/basalt_euroc_vio_demo \
   --config configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json \
-  --gyro-bias-std 1e-6 \
+  --gyro-bias-std 1e-7 \
   --work-dir /path/to/lamaria_submission/work \
   --slam-dir /path/to/lamaria_submission/slam \
   --threads 12
 ```
 
 `--config` defaults to the multi-camera big-window LaMAria variant
-(`euroc_config_big_window_multicam.json`) and `--gyro-bias-std` to 1e-6, the
-best measured setup ([`lamaria_multicam.md`](lamaria_multicam.md)); it is about
+(`euroc_config_big_window_multicam.json`) and `--gyro-bias-std` to 1e-7, the
+best measured setup ([`lamaria_multicam.md`](lamaria_multicam.md) for the
+config, [`lamaria_imu_rectification.md`](lamaria_imu_rectification.md#re-tuning-gyro_bias_std)
+for the value, which assumes the rectified IMU); it is about
 1.45× slower than `euroc_config_big_window.json`.  `aria2c` is used with 16 connections when available
 (the server throttles a single connection), otherwise `urllib` is the fallback.
 

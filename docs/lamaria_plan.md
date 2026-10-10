@@ -152,7 +152,12 @@ before/after on training sequences.
    categories (Medium 37.72 → 39.47, Long 24.14 → 28.89, Low light
    20.42 → 26.42, Moving 27.64 → 32.56; mean +4.35) with the multicam
    defaults unchanged
-   ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md)).
+   ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md)). The
+   factory IMU time offset (±4.1 ms) gave no consistent gain on sequence_2_11
+   and is not applied. The VIO is deterministic (a rerun is bit-identical).
+   With the rectified IMU, `gyro_bias_std` 1e-7 beats 1e-6 on average over
+   one sequence per track (+2.53; Long +6.87, Low light +6.00, Short +1.15,
+   Medium −1.11, Moving −0.29) and is now the driver default.
 
 ## 5. Test-set operational pipeline
 
