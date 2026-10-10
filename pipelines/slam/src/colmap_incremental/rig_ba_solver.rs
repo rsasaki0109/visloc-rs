@@ -401,6 +401,18 @@ fn iterative_min_free_frames() -> usize {
             .unwrap_or(ITERATIVE_MIN_FREE_FRAMES)
     })
 }
+/// Experimental Ceres-style `function_tolerance` (stop once an accepted
+/// step lowers the cost by less than this fraction), from
+/// `VISLOC_PORT_BA_FUNCTION_TOLERANCE`. Unset: no such stop, as COLMAP
+/// configures Ceres (`function_tolerance=0`).
+fn function_tolerance() -> Option<f64> {
+    static TOL: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *TOL.get_or_init(|| {
+        std::env::var("VISLOC_PORT_BA_FUNCTION_TOLERANCE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+}
 /// Relative residual at which [`pcg_blocks6`] stops (`‖r‖ ≤ tol · ‖b‖`).
 /// An inexact LM step is fine (the trust region absorbs it); Ceres'
 /// `ITERATIVE_SCHUR` default is a far looser `eta = 0.1`. With the
@@ -1819,6 +1831,7 @@ pub(crate) fn optimize_with_tolerance(
         ));
 
         if step_accepted {
+            let small_decrease = function_tolerance().is_some_and(|tol| actual < tol * half_cost);
             problem.poses = trial_poses;
             problem.points = trial_points;
             radius /= (1.0 / 3.0_f64).max(1.0 - (2.0 * rho - 1.0).powi(3));
@@ -1831,6 +1844,10 @@ pub(crate) fn optimize_with_tolerance(
             points_lin = pl;
             frame_diag_raw = fd;
             frame_bc_raw = fb;
+            if small_decrease {
+                converged = true;
+                break;
+            }
         } else {
             radius /= decrease_factor;
             decrease_factor *= 2.0;
