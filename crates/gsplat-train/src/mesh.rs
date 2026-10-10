@@ -66,6 +66,59 @@ pub struct Mesh {
     pub triangles: Vec<[u32; 3]>,
 }
 
+/// Max pyramid of `d + trunc` over a depth frame, +inf where the pixel
+/// has no fused surface (no depth, or beyond `max_depth`): an upper bound,
+/// over any pixel rectangle, of the depth behind which a voxel projecting
+/// there is left unchanged.
+struct FarPyramid {
+    levels: Vec<(Vec<f32>, usize, usize)>,
+}
+
+impl FarPyramid {
+    fn new(depth: &[f32], w: usize, h: usize, trunc: f32, max_depth: f32) -> Self {
+        let base: Vec<f32> = depth
+            .iter()
+            .map(|&d| {
+                if d > 0.0 && d <= max_depth {
+                    d + trunc
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect();
+        let mut levels = vec![(base, w, h)];
+        while let Some((prev, pw, ph)) = levels.last().filter(|l| l.1 > 1 || l.2 > 1) {
+            let (nw, nh) = (pw.div_ceil(2), ph.div_ceil(2));
+            let mut next = vec![f32::NEG_INFINITY; nw * nh];
+            for y in 0..*ph {
+                for x in 0..*pw {
+                    let c = &mut next[(y / 2) * nw + x / 2];
+                    *c = c.max(prev[y * pw + x]);
+                }
+            }
+            levels.push((next, nw, nh));
+        }
+        Self { levels }
+    }
+
+    /// Max over the pixels `u0..=u1` x `v0..=v1` (or an upper bound of it).
+    fn max(&self, u0: usize, v0: usize, u1: usize, v1: usize) -> f32 {
+        let mut l = 0;
+        while l + 1 < self.levels.len() && ((u1 >> l) - (u0 >> l) > 1 || (v1 >> l) - (v0 >> l) > 1)
+        {
+            l += 1;
+        }
+        let (cells, lw, _) = &self.levels[l];
+        let mut m = f32::NEG_INFINITY;
+        for y in (v0 >> l)..=(v1 >> l) {
+            for x in (u0 >> l)..=(u1 >> l) {
+                m = m.max(cells[y * lw + x]);
+            }
+        }
+        m
+    }
+}
+
 fn floor_div(a: i32, b: i32) -> i32 {
     a.div_euclid(b)
 }
@@ -108,6 +161,10 @@ impl Tsdf {
         // (samples along the ray no further apart than half a block).
         let step = (self.voxel * B as f32 * 0.5).min(self.trunc);
         let n_steps = (2.0 * self.trunc / step).ceil() as i32;
+        // Only blocks not allocated yet: after the first views almost every
+        // sample lands in an existing block, and collecting all of them into
+        // a set cost more than the fusion itself.
+        let blocks = &self.blocks;
         let needed: HashSet<[i32; 3]> = (0..h)
             .into_par_iter()
             .step_by(2)
@@ -125,10 +182,15 @@ impl Tsdf {
                     );
                     let p = rt * (pc - t);
                     let dir = (p - center).normalize();
+                    let mut last = None;
                     for k in 0..=n_steps {
                         let q = p + dir * (-self.trunc + k as f32 * step);
                         let v = self.voxel_of(q);
-                        out.push([floor_div(v[0], B), floor_div(v[1], B), floor_div(v[2], B)]);
+                        let key = [floor_div(v[0], B), floor_div(v[1], B), floor_div(v[2], B)];
+                        if last != Some(key) && !blocks.contains_key(&key) {
+                            out.push(key);
+                        }
+                        last = Some(key);
                     }
                 }
                 out
@@ -159,6 +221,49 @@ impl Tsdf {
         };
         let half = 0.5 * B as f32 * voxel;
         let radius = half * 3.0f32.sqrt();
+        // Occlusion culling: a voxel more than `trunc` behind the surface
+        // depth of its pixel is left unchanged, so a block whose nearest
+        // voxel lies behind every such depth over the pixels it projects to
+        // is skipped, again without changing the result.
+        let far = FarPyramid::new(f.depth, w, h, trunc, max_depth);
+        let occluded = |key: &[i32; 3]| -> bool {
+            let lo = Vector3::new(
+                (key[0] * B) as f32 + 0.5,
+                (key[1] * B) as f32 + 0.5,
+                (key[2] * B) as f32 + 0.5,
+            ) * voxel;
+            let span = (B - 1) as f32 * voxel;
+            let (mut umin, mut vmin, mut zmin) = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+            let (mut umax, mut vmax) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for c in 0..8 {
+                let p = lo
+                    + Vector3::new(
+                        (c & 1) as f32 * span,
+                        ((c >> 1) & 1) as f32 * span,
+                        ((c >> 2) & 1) as f32 * span,
+                    );
+                let pc = r * p + t;
+                if pc.z <= 1e-3 {
+                    return false;
+                }
+                let (u, v) = (cam.fx * pc.x / pc.z + cam.cx, cam.fy * pc.y / pc.z + cam.cy);
+                umin = umin.min(u);
+                umax = umax.max(u);
+                vmin = vmin.min(v);
+                vmax = vmax.max(v);
+                zmin = zmin.min(pc.z);
+            }
+            // Voxel centres project inside the corners' box (one pixel of
+            // slack for rounding); voxels outside the image are skipped
+            // anyway, so the box is clamped to it.
+            let clamp = |x: f32, n: usize| (x.floor().max(0.0) as usize).min(n - 1);
+            if umax < -1.0 || vmax < -1.0 || umin > w as f32 + 1.0 || vmin > h as f32 + 1.0 {
+                return false;
+            }
+            let (u0, u1) = (clamp(umin - 1.0, w), clamp(umax + 1.0, w));
+            let (v0, v1) = (clamp(vmin - 1.0, h), clamp(vmax + 1.0, h));
+            zmin * (1.0 - 1e-4) - 1e-4 * voxel > far.max(u0, v0, u1, v1)
+        };
         self.blocks.par_iter_mut().for_each(|(key, blk)| {
             let centre = Vector3::new(
                 (key[0] * B) as f32 * voxel + half,
@@ -166,7 +271,7 @@ impl Tsdf {
                 (key[2] * B) as f32 * voxel + half,
             );
             let cc = r * centre + t;
-            if planes.iter().any(|n| n.dot(&cc) < -radius) {
+            if planes.iter().any(|n| n.dot(&cc) < -radius) || occluded(key) {
                 return;
             }
             for i in 0..BV {
@@ -582,6 +687,45 @@ mod tests {
     use super::*;
     use nalgebra::Matrix3;
     use visloc_gsplat_core::camera::PinholeCamera;
+
+    #[test]
+    fn far_pyramid_bounds_every_rectangle() {
+        let (w, h) = (37usize, 23usize);
+        let mut s = 0x9E37_79B9u64;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f32 / (1u64 << 24) as f32
+        };
+        // Some pixels empty (0) or beyond max_depth: +inf.
+        let depth: Vec<f32> = (0..w * h)
+            .map(|_| match rnd() {
+                r if r < 0.1 => 0.0,
+                r if r < 0.15 => 50.0,
+                r => 10.0 * r,
+            })
+            .collect();
+        let (trunc, max_depth) = (0.3, 20.0);
+        let far = FarPyramid::new(&depth, w, h, trunc, max_depth);
+        for _ in 0..2000 {
+            let (a, b) = ((rnd() * w as f32) as usize, (rnd() * w as f32) as usize);
+            let (c, d) = ((rnd() * h as f32) as usize, (rnd() * h as f32) as usize);
+            let (u0, u1, v0, v1) = (a.min(b), a.max(b), c.min(d), c.max(d));
+            let mut truth = f32::NEG_INFINITY;
+            for v in v0..=v1 {
+                for u in u0..=u1 {
+                    let z = depth[v * w + u];
+                    truth = truth.max(if z > 0.0 && z <= max_depth {
+                        z + trunc
+                    } else {
+                        f32::INFINITY
+                    });
+                }
+            }
+            assert!(far.max(u0, v0, u1, v1) >= truth, "{u0}..{u1} x {v0}..{v1}");
+        }
+    }
 
     #[test]
     fn keeps_only_supported_triangles() {
