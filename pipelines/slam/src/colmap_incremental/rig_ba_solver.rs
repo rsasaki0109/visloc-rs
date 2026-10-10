@@ -1180,22 +1180,6 @@ fn eliminate_by_output(
             }
         })
         .collect();
-    // `hcp[k] * hpp_inv` once per point and frame (the sharded loop's
-    // `hcp_scaled`, same product), at `scaled_off[p] + k`.
-    let mut scaled_off = Vec::with_capacity(points_lin.len() + 1);
-    scaled_off.push(0usize);
-    for pl in points_lin {
-        scaled_off.push(scaled_off.last().copied().unwrap_or(0) + pl.hcp.len());
-    }
-    let hcp_scaled: Vec<SMatrix<f64, 6, 3>> = points_lin
-        .par_iter()
-        .zip(&hpp_inv)
-        .flat_map_iter(|(pl, inv)| {
-            pl.hcp
-                .iter()
-                .map(move |h| inv.map_or_else(SMatrix::zeros, |inv| h * inv))
-        })
-        .collect();
     // Sum `term(c)` over `contribs` (ascending point) grouped by shard.
     fn grouped<T: Copy + std::ops::AddAssign + std::ops::SubAssign>(
         zero: T,
@@ -1224,9 +1208,9 @@ fn eliminate_by_output(
                 .iter()
                 .filter_map(|&[p, i, j]| {
                     let p = p as usize;
-                    hpp_inv[p]?;
-                    let term = hcp_scaled[scaled_off[p] + j as usize]
-                        * points_lin[p].hcp[i as usize].transpose();
+                    let inv = hpp_inv[p]?;
+                    let pl = &points_lin[p];
+                    let term = (pl.hcp[j as usize] * inv) * pl.hcp[i as usize].transpose();
                     Some((index.point_shard[p], term))
                 });
             grouped(Matrix6::zeros(), contribs)
@@ -1239,9 +1223,9 @@ fn eliminate_by_output(
             let terms = || {
                 range.iter().filter_map(|&[p, k]| {
                     let (p, k) = (p as usize, k as usize);
-                    hpp_inv[p]?;
-                    let scaled = hcp_scaled[scaled_off[p] + k];
-                    Some((index.point_shard[p], scaled, &points_lin[p], k))
+                    let inv = hpp_inv[p]?;
+                    let pl = &points_lin[p];
+                    Some((index.point_shard[p], pl.hcp[k] * inv, pl, k))
                 })
             };
             let diag = grouped(
@@ -1359,11 +1343,11 @@ fn solve_step(
     }
 
     if n_free >= iterative_min_free_frames() && order.is_none() {
-        // Iterative solve straight on the edge blocks: row `i` of the
-        // symmetric matrix is its left blocks (edges `(a, i)`, ascending
-        // a, as stored), the diagonal, then its right blocks (edges
-        // `(i, b)`, ascending b, transposed) -- the order `pcg_blocks6`
-        // sums a row in, without copying the blocks into rows.
+        // Iterative solve: the symmetric block rows straight from the edge
+        // list, built per row in parallel. Row `i` is its left blocks
+        // (edges `(a, i)`, ascending a), the diagonal, then its right
+        // blocks (edges `(i, b)`, ascending b, transposed): the rows, in
+        // the order, that `pcg_blocks6` derives from the column map.
         let mut left_off = vec![0usize; n_free + 1];
         for &(_, b) in edges {
             left_off[b as usize + 1] += 1;
@@ -1385,19 +1369,29 @@ fn solve_step(
         for i in 0..n_free {
             right_off[i + 1] += right_off[i];
         }
-        let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
-            (0..n_free)
-                .into_par_iter()
-                .map(|i| {
-                    let mut acc = left[left_off[i]..left_off[i + 1]]
+        let rows: Vec<Vec<(usize, Matrix6<f64>)>> = (0..n_free)
+            .into_par_iter()
+            .map(|i| {
+                let lefts = &left[left_off[i]..left_off[i + 1]];
+                let mut row = Vec::with_capacity(lefts.len() + 1 + right_off[i + 1] - right_off[i]);
+                row.extend(
+                    lefts
                         .iter()
-                        .fold(Vector6::zeros(), |acc, &e| {
-                            acc + flat_offdiag[e as usize] * x[edges[e as usize].0 as usize]
-                        });
-                    acc += frame_diag[i] * x[i];
-                    (right_off[i]..right_off[i + 1]).fold(acc, |acc, e| {
-                        acc + flat_offdiag[e].transpose() * x[edges[e].1 as usize]
-                    })
+                        .map(|&e| (edges[e as usize].0 as usize, flat_offdiag[e as usize])),
+                );
+                row.push((i, frame_diag[i]));
+                row.extend(
+                    (right_off[i]..right_off[i + 1])
+                        .map(|e| (edges[e].1 as usize, flat_offdiag[e].transpose())),
+                );
+                row
+            })
+            .collect();
+        let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
+            rows.par_iter()
+                .map(|row| {
+                    row.iter()
+                        .fold(Vector6::zeros(), |acc, (j, blk)| acc + blk * x[*j])
                 })
                 .collect()
         };
