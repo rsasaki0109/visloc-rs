@@ -631,23 +631,44 @@ impl ObservationManager {
         recon: &mut Reconstruction,
         graph: &CorrespondenceGraph,
     ) -> usize {
+        // The depth tests run in parallel; the deletions are applied in the
+        // serial loop's order (frames, their images, then points2D). A
+        // deletion never moves a point, it can only delete one (clearing its
+        // other observations), so an observation is deleted exactly when the
+        // serial loop would: it still references the same point when reached.
+        use rayon::prelude::*;
+        let recon_ref: &Reconstruction = recon;
+        let image_ids: Vec<ImageT> = recon_ref
+            .reg_frame_ids()
+            .iter()
+            .flat_map(|&frame_id| recon_ref.frame(frame_id).image_ids())
+            .collect();
+        let candidates: Vec<(ImageT, usize, Point3DT)> = image_ids
+            .par_iter()
+            .flat_map_iter(|&image_id| {
+                let cam_from_world = image_cam_from_world(recon_ref, image_id);
+                recon_ref
+                    .image(image_id)
+                    .points2d
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(point2d_idx, p)| {
+                        let point3d_id = p.point3d_id?;
+                        let xyz = recon_ref.point3d(point3d_id).xyz;
+                        (!has_point_positive_depth(&cam_from_world, xyz)).then_some((
+                            image_id,
+                            point2d_idx,
+                            point3d_id,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         let mut num_filtered = 0;
-        let frame_ids = recon.reg_frame_ids().to_vec();
-        for frame_id in frame_ids {
-            let image_ids: Vec<ImageT> = recon.frame(frame_id).image_ids().collect();
-            for image_id in image_ids {
-                let cam_from_world = image_cam_from_world(recon, image_id);
-                let num_points2d = recon.image(image_id).num_points2d();
-                for point2d_idx in 0..num_points2d {
-                    let point3d_id = recon.image(image_id).points2d[point2d_idx].point3d_id;
-                    if let Some(point3d_id) = point3d_id {
-                        let xyz = recon.point3d(point3d_id).xyz;
-                        if !has_point_positive_depth(&cam_from_world, xyz) {
-                            self.delete_observation(recon, graph, image_id, point2d_idx);
-                            num_filtered += 1;
-                        }
-                    }
-                }
+        for (image_id, point2d_idx, point3d_id) in candidates {
+            if recon.image(image_id).points2d[point2d_idx].point3d_id == Some(point3d_id) {
+                self.delete_observation(recon, graph, image_id, point2d_idx);
+                num_filtered += 1;
             }
         }
         num_filtered
