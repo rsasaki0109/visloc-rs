@@ -236,46 +236,117 @@ impl IncrementalTriangulator {
             return 0;
         }
 
+        // Speculatively parallel, with the serial loop's exact result (as
+        // `complete_image`): each 2D point's step is planned against the
+        // state at the start of its wave ([`plan_triangulate_image_point`]),
+        // then applied serially in point order. A step reads only the
+        // 3D-point state of the 2D point and its correspondences (and the
+        // positions of existing 3D points, which no step moves), so its plan
+        // stays valid unless one of those 2D points got a 3D point earlier in
+        // the wave; such a step runs the serial code instead.
+        use rayon::prelude::*;
         let num_points2d = recon.image(image_id).num_points2d();
-        for point2d_idx in 0..num_points2d {
-            let (num_triangulated, mut corrs_data) = self.find(
-                options,
-                recon,
-                graph,
-                image_id,
-                point2d_idx,
-                options.max_transitivity,
-            );
-            if corrs_data.is_empty() {
-                continue;
-            }
-
-            let ref_corr = Self::corr_data(recon, image_id, point2d_idx);
-            if num_triangulated == 0 {
-                corrs_data.push(ref_corr);
-                num_tris += self.create(options, recon, graph, obs, &corrs_data);
-            } else {
-                num_tris += self.r#continue(options, recon, graph, obs, &ref_corr, &corrs_data);
-                // `Continue` may have just triangulated `ref_corr`'s own
-                // point2D (via `obs.add_observation`); COLMAP's
-                // `ref_corr_data.point2D` is a live pointer so `Create`'s
-                // internal `!HasPoint3D()` filter sees this automatically
-                // (`incremental_mapper.cc`-equivalent, `.cc:148-149`). This
-                // port's `CorrData` is a by-value snapshot (see the module
-                // doc's "no cached refs" rationale), so it must be
-                // re-fetched here or `Create` would filter on a stale
-                // `has_point3d=false` and try to re-triangulate an
-                // already-triangulated point2D — observed as a
-                // `delete_observation on a point2D without a point3D` panic
-                // on real tier-1000 data during this port's development
-                // (a duplicate track element from double-triangulating the
-                // same point2D), fixed here.
-                let ref_corr = Self::corr_data(recon, image_id, point2d_idx);
-                corrs_data.push(ref_corr);
-                num_tris += self.create(options, recon, graph, obs, &corrs_data);
+        let indices: Vec<Point2DT> = (0..num_points2d).collect();
+        let mut claimed: HashSet<(ImageT, Point2DT)> = HashSet::new();
+        for wave in indices.chunks(PLAN_WAVE) {
+            claimed.clear();
+            let recon_ref: &Reconstruction = recon;
+            let plans: Vec<TriangulatePlan> = wave
+                .par_iter()
+                .map(|&idx| plan_triangulate_image_point(options, recon_ref, graph, image_id, idx))
+                .collect();
+            for (&point2d_idx, plan) in wave.iter().zip(plans) {
+                if plan.examined.iter().any(|key| claimed.contains(key)) {
+                    let before: Vec<bool> = plan
+                        .examined
+                        .iter()
+                        .map(|&(i, p)| recon.image(i).points2d[p].has_point3d())
+                        .collect();
+                    num_tris += self.triangulate_image_point_serial(
+                        options,
+                        recon,
+                        graph,
+                        obs,
+                        image_id,
+                        point2d_idx,
+                    );
+                    for (&(i, p), had) in plan.examined.iter().zip(before) {
+                        if !had && recon.image(i).points2d[p].has_point3d() {
+                            claimed.insert((i, p));
+                        }
+                    }
+                    continue;
+                }
+                if let Some(point3d_id) = plan.join {
+                    let el = TrackElement {
+                        image_id,
+                        point2d_idx,
+                    };
+                    obs.add_observation(recon, graph, point3d_id, el);
+                    self.modified_point3d_ids.insert(point3d_id);
+                    claimed.insert((image_id, point2d_idx));
+                    num_tris += 1;
+                }
+                for (xyz, track) in plan.created {
+                    for el in &track {
+                        claimed.insert((el.image_id, el.point2d_idx));
+                    }
+                    num_tris += track.len();
+                    let point3d_id = obs.add_point3d(recon, graph, xyz, track);
+                    self.modified_point3d_ids.insert(point3d_id);
+                }
             }
         }
         num_tris
+    }
+
+    /// One 2D point of [`Self::triangulate_image`], serially (the original
+    /// loop body).
+    fn triangulate_image_point_serial(
+        &mut self,
+        options: &Options,
+        recon: &mut Reconstruction,
+        graph: &CorrespondenceGraph,
+        obs: &mut ObservationManager,
+        image_id: ImageT,
+        point2d_idx: Point2DT,
+    ) -> usize {
+        let (num_triangulated, mut corrs_data) = self.find(
+            options,
+            recon,
+            graph,
+            image_id,
+            point2d_idx,
+            options.max_transitivity,
+        );
+        if corrs_data.is_empty() {
+            return 0;
+        }
+
+        let ref_corr = Self::corr_data(recon, image_id, point2d_idx);
+        if num_triangulated == 0 {
+            corrs_data.push(ref_corr);
+            self.create(options, recon, graph, obs, &corrs_data)
+        } else {
+            let n = self.r#continue(options, recon, graph, obs, &ref_corr, &corrs_data);
+            // `Continue` may have just triangulated `ref_corr`'s own
+            // point2D (via `obs.add_observation`); COLMAP's
+            // `ref_corr_data.point2D` is a live pointer so `Create`'s
+            // internal `!HasPoint3D()` filter sees this automatically
+            // (`incremental_mapper.cc`-equivalent, `.cc:148-149`). This
+            // port's `CorrData` is a by-value snapshot (see the module
+            // doc's "no cached refs" rationale), so it must be
+            // re-fetched here or `Create` would filter on a stale
+            // `has_point3d=false` and try to re-triangulate an
+            // already-triangulated point2D — observed as a
+            // `delete_observation on a point2D without a point3D` panic
+            // on real tier-1000 data during this port's development
+            // (a duplicate track element from double-triangulating the
+            // same point2D), fixed here.
+            let ref_corr = Self::corr_data(recon, image_id, point2d_idx);
+            corrs_data.push(ref_corr);
+            n + self.create(options, recon, graph, obs, &corrs_data)
+        }
     }
 
     /// Port of `CompleteImage` (`.cc:159-247`).
@@ -995,6 +1066,153 @@ fn triangulate_new_point(
         })
         .collect();
     Some((xyz, track))
+}
+
+/// A planned step of [`IncrementalTriangulator::triangulate_image`] for one
+/// 2D point, computed against a snapshot of the reconstruction.
+struct TriangulatePlan {
+    /// The 2D point and every correspondence `find` returned: the step is
+    /// valid while none of them got a 3D point.
+    examined: Vec<(ImageT, Point2DT)>,
+    /// `Continue`: the existing 3D point the 2D point would join.
+    join: Option<Point3DT>,
+    /// `Create`: the new 3D points, round by round.
+    created: Vec<(Point3<f64>, Vec<TrackElement>)>,
+}
+
+/// Read-only replay of [`IncrementalTriangulator::triangulate_image_point_serial`]
+/// (`find`, `Continue`, `Create`).
+fn plan_triangulate_image_point(
+    options: &Options,
+    recon: &Reconstruction,
+    graph: &CorrespondenceGraph,
+    image_id: ImageT,
+    point2d_idx: Point2DT,
+) -> TriangulatePlan {
+    let found: Vec<(ImageT, Point2DT)> = if options.max_transitivity <= 1 {
+        graph
+            .find_correspondences(image_id as usize, point2d_idx)
+            .iter()
+            .map(|c| (c.image_id as ImageT, c.point2d_idx))
+            .collect()
+    } else {
+        graph
+            .extract_transitive_correspondences(
+                image_id as usize,
+                point2d_idx,
+                options.max_transitivity,
+            )
+            .into_iter()
+            .map(|c| (c.image_id as ImageT, c.point2d_idx))
+            .collect()
+    };
+    let mut plan = TriangulatePlan {
+        examined: std::iter::once((image_id, point2d_idx))
+            .chain(found.iter().copied())
+            .collect(),
+        join: None,
+        created: Vec::new(),
+    };
+    // `find`, without its bogus-camera cache (same answers).
+    let mut corrs_data = Vec::with_capacity(found.len() + 1);
+    let mut num_triangulated = 0;
+    for (corr_image_id, corr_point2d_idx) in found {
+        if !recon.is_image_registered(corr_image_id) {
+            continue;
+        }
+        let corr_camera = recon.camera(recon.image(corr_image_id).camera_id);
+        if camera_has_bogus_params(
+            corr_camera,
+            options.min_focal_length_ratio,
+            options.max_focal_length_ratio,
+            options.max_extra_param,
+        ) {
+            continue;
+        }
+        let corr = IncrementalTriangulator::corr_data(recon, corr_image_id, corr_point2d_idx);
+        if corr.has_point3d {
+            num_triangulated += 1;
+        }
+        corrs_data.push(corr);
+    }
+    if corrs_data.is_empty() {
+        return plan;
+    }
+    let mut ref_corr = IncrementalTriangulator::corr_data(recon, image_id, point2d_idx);
+    if num_triangulated > 0 && !ref_corr.has_point3d {
+        // `Continue`.
+        let mut best_angle_error = f64::MAX;
+        let mut best_point3d_id: Option<Point3DT> = None;
+        for corr in &corrs_data {
+            let Some(point3d_id) = corr.point3d_id else {
+                continue;
+            };
+            let angle_error = angular_reprojection_error(
+                ref_corr.xy,
+                recon.point3d(point3d_id).xyz,
+                &ref_corr.cam_from_world,
+                &ref_corr.camera,
+            );
+            if angle_error < best_angle_error {
+                best_angle_error = angle_error;
+                best_point3d_id = Some(point3d_id);
+            }
+        }
+        if let Some(point3d_id) = best_point3d_id {
+            if best_angle_error <= options.continue_max_angle_error.to_radians() {
+                plan.join = Some(point3d_id);
+                ref_corr.has_point3d = true;
+                ref_corr.point3d_id = Some(point3d_id);
+            }
+        }
+    }
+    corrs_data.push(ref_corr);
+    // `Create`; a 2D point a round put in a track has a 3D point from then on.
+    let mut current: Vec<CorrData> = corrs_data.into_iter().filter(|c| !c.has_point3d).collect();
+    const MAX_ROUNDS: usize = 200;
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        if rounds > MAX_ROUNDS || current.len() < 2 {
+            break;
+        }
+        if options.ignore_two_view_tracks && current.len() == 2 {
+            let c0 = &current[0];
+            if graph.is_two_view_observation(c0.image_id as usize, c0.point2d_idx) {
+                break;
+            }
+        }
+        let Some((xyz, inliers)) = estimate_triangulation(
+            &current,
+            ResidualType::Angular,
+            options.create_max_angle_error.to_radians(),
+            options.min_angle.to_radians(),
+        ) else {
+            break;
+        };
+        let track: Vec<TrackElement> = current
+            .iter()
+            .zip(&inliers)
+            .filter(|(_, &inlier)| inlier)
+            .map(|(corr, _)| TrackElement {
+                image_id: corr.image_id,
+                point2d_idx: corr.point2d_idx,
+            })
+            .collect();
+        let track_length = track.len();
+        let in_track: HashSet<(ImageT, Point2DT)> = track
+            .iter()
+            .map(|el| (el.image_id, el.point2d_idx))
+            .collect();
+        plan.created.push((xyz, track));
+        const MIN_RECURSIVE_TRACK_LENGTH: usize = 3;
+        if current.len() - track_length >= MIN_RECURSIVE_TRACK_LENGTH {
+            current.retain(|c| !in_track.contains(&(c.image_id, c.point2d_idx)));
+            continue;
+        }
+        break;
+    }
+    plan
 }
 
 fn plan_complete_image_point(
