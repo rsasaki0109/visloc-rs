@@ -145,6 +145,14 @@ before/after on training sequences.
    work rather than mapper tuning.
 7. **Runtime headroom.** 22 h of test data at ≥1× RT is required. VIO is
    already ~1.1× (near-uncontended); the mapper (lever 1) is the open item.
+8. **Aria factory IMU rectification.** Status: **measured on four
+   training sequences (2026-10-10), not yet in the submission driver.** The
+   ASL release ships raw IMU samples; applying the factory scale/misalignment
+   and bias from the `.vrs` header raises the Score on all four non-Short
+   categories (Medium 37.72 → 39.47, Long 24.14 → 28.89, Low light
+   20.42 → 26.42, Moving 27.64 → 32.56; mean +4.35) with the multicam
+   defaults unchanged
+   ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md)).
 
 ## 5. Test-set operational pipeline
 
@@ -176,6 +184,8 @@ before/after on training sequences.
 - [`lamaria_stage0.md`](lamaria_stage0.md) — method, results, mapper fixes.
 - [`lamaria_multicam.md`](lamaria_multicam.md) — multi-camera VIO for the
   divergent Aria rig (lever 4).
+- [`lamaria_imu_rectification.md`](lamaria_imu_rectification.md) — Aria
+  factory IMU rectification and per-category results (lever 8).
 - [`vi_slam_benchmarks.md`](vi_slam_benchmarks.md) — EuRoC VI-SLAM results.
 - [`vi_slam_global_consistency_plan.md`](vi_slam_global_consistency_plan.md) —
   global-consistency evidence and staged plan.
