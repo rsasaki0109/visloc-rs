@@ -214,20 +214,18 @@ struct Problem {
     contributions: Option<ContributionIndex>,
 }
 
-/// The inverse of `point_pair_edge_idx` / `point_free_frames`: which points
-/// contribute to each off-diagonal block and each free frame of the
-/// reduced camera system, in ascending point order. Lets
-/// [`eliminate_and_accumulate`] compute every output block independently,
-/// in parallel, with exactly the additions (and their order) of the
-/// sharded loop.
+/// Which points observe each free frame of the reduced camera system, in
+/// ascending point order, plus where each frame's off-diagonal row starts
+/// in `edges`. Lets [`eliminate_and_accumulate`] compute every row of the
+/// reduced system independently, in parallel, with exactly the additions
+/// (and their order) of the sharded loop.
 struct ContributionIndex {
-    /// `edge[edge_off[e]..edge_off[e + 1]]`: `(point, i, j)` for edge `e`,
-    /// `i`, `j` positions in `point_free_frames[point]`.
-    edge_off: Vec<usize>,
-    edge: Vec<[u32; 3]>,
-    /// `slot[slot_off[s]..slot_off[s + 1]]`: `(point, k)` for free slot `s`.
+    /// `slot[slot_off[s]..slot_off[s + 1]]`: `(point, k)` for free slot `s`,
+    /// `k` the position of `s`'s frame in `point_free_frames[point]`.
     slot_off: Vec<usize>,
     slot: Vec<[u32; 2]>,
+    /// `edges[row_off[s]..row_off[s + 1]]` are the edges `(s, _)`.
+    row_off: Vec<usize>,
     /// Shard of each point (the sharded loop's summation grouping).
     point_shard: Vec<u32>,
 }
@@ -235,50 +233,32 @@ struct ContributionIndex {
 impl ContributionIndex {
     fn new(
         point_free_frames: &[Vec<u32>],
-        point_pair_edge_idx: &[Vec<u32>],
         free_frame_slot: &[Option<u32>],
-        edges_len: usize,
+        edges: &[(u32, u32)],
         n_free: usize,
         shard_boundaries: &[usize],
     ) -> Self {
-        let mut edge_off = vec![0usize; edges_len + 1];
         let mut slot_off = vec![0usize; n_free + 1];
-        for (frames, idx) in point_free_frames.iter().zip(point_pair_edge_idx) {
-            for &e in idx {
-                edge_off[e as usize + 1] += 1;
-            }
+        for frames in point_free_frames {
             for &f in frames {
                 slot_off[free_frame_slot[f as usize].expect("free") as usize + 1] += 1;
             }
         }
-        for v in [&mut edge_off, &mut slot_off] {
-            for i in 1..v.len() {
-                v[i] += v[i - 1];
-            }
+        for i in 1..slot_off.len() {
+            slot_off[i] += slot_off[i - 1];
         }
-        let mut edge = vec![[0u32; 3]; edge_off[edges_len]];
         let mut slot = vec![[0u32; 2]; slot_off[n_free]];
-        let (mut edge_fill, mut slot_fill) = (edge_off.clone(), slot_off.clone());
-        for (p, (frames, idx)) in point_free_frames
-            .iter()
-            .zip(point_pair_edge_idx)
-            .enumerate()
-        {
-            let mut pair = 0usize;
-            for j in 1..frames.len() {
-                for i in 0..j {
-                    let e = idx[pair] as usize;
-                    edge[edge_fill[e]] = [p as u32, i as u32, j as u32];
-                    edge_fill[e] += 1;
-                    pair += 1;
-                }
-            }
+        let mut slot_fill = slot_off.clone();
+        for (p, frames) in point_free_frames.iter().enumerate() {
             for (k, &f) in frames.iter().enumerate() {
                 let s = free_frame_slot[f as usize].expect("free") as usize;
                 slot[slot_fill[s]] = [p as u32, k as u32];
                 slot_fill[s] += 1;
             }
         }
+        let row_off = (0..=n_free)
+            .map(|s| edges.partition_point(|&(a, _)| (a as usize) < s))
+            .collect();
         let mut point_shard = vec![0u32; point_free_frames.len()];
         for s in 0..shard_boundaries.len().saturating_sub(1) {
             for v in &mut point_shard[shard_boundaries[s]..shard_boundaries[s + 1]] {
@@ -286,10 +266,9 @@ impl ContributionIndex {
             }
         }
         Self {
-            edge_off,
-            edge,
             slot_off,
             slot,
+            row_off,
             point_shard,
         }
     }
@@ -361,6 +340,19 @@ fn build_reduced_system_pattern(
     raw_pairs.par_sort_unstable();
     raw_pairs.dedup();
     let edges = raw_pairs;
+    let n_slots = free_frame_slot
+        .iter()
+        .flatten()
+        .map(|&s| s as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut row_off = vec![0usize; n_slots + 1];
+    for &(a, _) in &edges {
+        row_off[a as usize + 1] += 1;
+    }
+    for i in 1..row_off.len() {
+        row_off[i] += row_off[i - 1];
+    }
 
     let point_pair_edge_idx: Vec<Vec<u32>> = point_free_frames
         .par_iter()
@@ -368,15 +360,19 @@ fn build_reduced_system_pattern(
             if frames.len() < 2 {
                 return Vec::new();
             }
+            // Slots ascend with frames, so the pairs `(i, j > i)` walk
+            // edge row `slots[i]` forwards.
             let slots = slots_of(frames);
             let n = slots.len();
-            let mut idxs = Vec::with_capacity(n * (n - 1) / 2);
-            for j in 1..n {
-                for i in 0..j {
-                    let e = edges
-                        .binary_search(&(slots[i], slots[j]))
-                        .expect("pair is an edge");
-                    idxs.push(e as u32);
+            let mut idxs = vec![0u32; n * (n - 1) / 2];
+            for i in 0..n {
+                let a = slots[i] as usize;
+                let row = &edges[row_off[a]..row_off[a + 1]];
+                let mut pos = 0usize;
+                for j in i + 1..n {
+                    pos += row[pos..].partition_point(|&(_, b)| b < slots[j]);
+                    debug_assert_eq!(row[pos], (slots[i], slots[j]), "pair is an edge");
+                    idxs[j * (j - 1) / 2 + i] = (row_off[a] + pos) as u32;
                 }
             }
             idxs
@@ -648,9 +644,8 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
     let contributions = (n_shards < 8).then(|| {
         ContributionIndex::new(
             &point_free_frames,
-            &point_pair_edge_idx,
             &free_frame_slot,
-            edges.len(),
+            &edges,
             n_free_frames,
             &shard_boundaries,
         )
@@ -1079,7 +1074,7 @@ fn eliminate_and_accumulate(
 ) -> (Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
     let n_free = problem.n_free_frames;
     if let Some(index) = &problem.contributions {
-        return eliminate_by_output(index, points_lin, edges_len, n_free, mu);
+        return eliminate_by_output(problem, index, points_lin, edges_len, mu);
     }
     let n_shards = problem.shard_boundaries.len().saturating_sub(1).max(1);
 
@@ -1164,12 +1159,15 @@ fn eliminate_and_accumulate(
 /// few as 2 threads.
 #[allow(clippy::type_complexity)]
 fn eliminate_by_output(
+    problem: &Problem,
     index: &ContributionIndex,
     points_lin: &[PointLin],
     edges_len: usize,
-    n_free: usize,
     mu: f64,
 ) -> (Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
+    let n_free = problem.n_free_frames;
+    let (point_free_frames, point_pair_edge_idx) =
+        (&problem.point_free_frames, &problem.point_pair_edge_idx);
     let hpp_inv: Vec<Option<Matrix3<f64>>> = points_lin
         .par_iter()
         .map(|pl| {
@@ -1201,21 +1199,53 @@ fn eliminate_by_output(
         }
         total
     }
-    let flat_offdiag: Vec<Matrix6<f64>> = (0..edges_len)
-        .into_par_iter()
-        .map(|e| {
-            let contribs = index.edge[index.edge_off[e]..index.edge_off[e + 1]]
-                .iter()
-                .filter_map(|&[p, i, j]| {
-                    let p = p as usize;
-                    let inv = hpp_inv[p]?;
-                    let pl = &points_lin[p];
-                    let term = (pl.hcp[j as usize] * inv) * pl.hcp[i as usize].transpose();
-                    Some((index.point_shard[p], term))
-                });
-            grouped(Matrix6::zeros(), contribs)
-        })
-        .collect();
+    // Row `s` of the off-diagonal blocks (edges `(s, _)`) collects, from
+    // each point observing `s` in ascending order, the pairs `(k, j > k)`
+    // with `k` at `s`: every edge sees its points in ascending order.
+    let mut flat_offdiag = vec![Matrix6::<f64>::zeros(); edges_len];
+    let mut rows: Vec<&mut [Matrix6<f64>]> = Vec::with_capacity(n_free);
+    let mut rest = flat_offdiag.as_mut_slice();
+    for s in 0..n_free {
+        let (row, tail) = rest.split_at_mut(index.row_off[s + 1] - index.row_off[s]);
+        rows.push(row);
+        rest = tail;
+    }
+    rows.into_par_iter().enumerate().for_each_init(
+        || (Vec::new(), Vec::new()),
+        |(acc, shard), (s, total)| {
+            acc.clear();
+            acc.resize(total.len(), Matrix6::<f64>::zeros());
+            shard.clear();
+            shard.resize(total.len(), None);
+            let base = index.row_off[s];
+            for &[p, k] in &index.slot[index.slot_off[s]..index.slot_off[s + 1]] {
+                let (p, k) = (p as usize, k as usize);
+                let Some(inv) = hpp_inv[p] else {
+                    continue;
+                };
+                let pl = &points_lin[p];
+                let point_shard = Some(index.point_shard[p]);
+                let pair_edge = &point_pair_edge_idx[p];
+                for j in k + 1..point_free_frames[p].len() {
+                    let e = pair_edge[j * (j - 1) / 2 + k] as usize - base;
+                    let term = (pl.hcp[j] * inv) * pl.hcp[k].transpose();
+                    if shard[e] != point_shard {
+                        if shard[e].is_some() {
+                            total[e] += acc[e];
+                        }
+                        acc[e] = Matrix6::zeros();
+                        shard[e] = point_shard;
+                    }
+                    acc[e] -= term;
+                }
+            }
+            for ((t, a), sh) in total.iter_mut().zip(acc.iter()).zip(shard.iter()) {
+                if sh.is_some() {
+                    *t += *a;
+                }
+            }
+        },
+    );
     let (diag_delta, bc_delta): (Vec<Matrix6<f64>>, Vec<Vector6<f64>>) = (0..n_free)
         .into_par_iter()
         .map(|slot| {
