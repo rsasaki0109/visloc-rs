@@ -19,11 +19,12 @@ or from scripts/colab/readme_hero_courthouse.ipynb.
 
 The current README hero (Hierarchical 3DGS SmallCity, A100 high-mem):
 
-    hero_pipeline.py --dataset h3dgs --scene small_city --max-size 1024 \
+    hero_pipeline.py --dataset h3dgs --scene small_city --frame-stride 1 --max-size 1024 \
         --exhaustive-max 600 --window 20 --retrieval 30 --steps 50000 \
         --photos-args=--no-refine-intrinsics \
         "--hero-flags=--elev 45 --radius-mult 1.4 --target-height 0.2 --zoom 0.9 \
-         --width 560 --colors 72 --filter-dist-mult 4 --filter-isolated 6 --point-size 2.5"
+         --width 560 --colors 72 --filter-dist-mult 4 --filter-isolated 6 --point-size 2.5 \
+         --ground-radius 0.15 --ground-min-alpha 0.7"
 """
 import argparse
 import glob
@@ -172,6 +173,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--repo', default='https://github.com/rsasaki0109/visloc-rs.git')
     ap.add_argument('--branch', default='main')
+    ap.add_argument('--no-fetch', action='store_true',
+                    help='build an existing /content/visloc-rs checkout as it is (e.g. with local patches)')
     ap.add_argument('--dataset', choices=['tnt', 'mill19', 'h3dgs'], default='tnt')
     ap.add_argument('--scene', default='Courthouse',
                     help='tnt: zip name in hf.co/datasets/hongliu6/tanks_and_temples; '
@@ -205,7 +208,7 @@ def main():
     repo = '/content/visloc-rs'
     if not os.path.isdir(repo):
         sh(f'git clone --depth 1 -b {args.branch} {args.repo} {repo}')
-    else:
+    elif not args.no_fetch:
         sh(f'cd {repo} && git fetch --depth 1 origin {args.branch} && git reset --hard FETCH_HEAD')
     t = time.time()
     sh(f'cd {repo} && cargo build --release -p visloc-gsplat-train --features gpu,euroc '
@@ -215,6 +218,8 @@ def main():
 
     # ---- photos ----
     focal_flag = ''
+    # Dataset-specific gsplat_photos flags.
+    dataset_flags = ''
     if args.dataset == 'tnt':
         images = f'/content/data/{args.scene}_stride{args.frame_stride}'
         label = f'Tanks and Temples {args.scene}'
@@ -258,6 +263,8 @@ def main():
         fx = struct.unpack_from('<d', b, 32)[0]
         print(f'release camera: model {model} {w}x{h} fx {fx:.1f}', flush=True)
         focal_flag = f'--focal {fx * min(1.0, args.max_size / max(w, h)):.2f}'
+        # People and cars are blacked out in these photos: train around them.
+        dataset_flags = '--mask-black 12'
     else:
         # Mill-19 (Mega-NeRF): drone surveys, one camera; train + val photos.
         name = args.scene.lower()
@@ -300,6 +307,7 @@ def main():
         sh(f'{bin_dir}/gsplat_photos --images {images} --out {run} --max-size {args.max_size} '
            f'--steps {args.steps} --normal-weight {args.normal_weight} '
            f'--exhaustive-max {args.exhaustive_max} --window {args.window} --retrieval {args.retrieval} {focal_flag} '
+           f'{dataset_flags} '
            f'{args.photos_args} 2>&1 '
            f'| grep --line-buffered -v -E "^(BA_|INIT_PAIR|BA global|BA local|TIMING)" '
            f'| tee {run}/gsplat_photos.log')

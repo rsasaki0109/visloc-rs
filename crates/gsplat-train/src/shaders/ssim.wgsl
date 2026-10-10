@@ -15,6 +15,9 @@
 // passes there, one channel at a time (keeps shared memory under 16 KiB).
 //   ssim_fwd: render + ground truth -> SSIM sum and the A, B, C maps
 //   ssim_bwd: A, B, C maps -> d_image += -lambda/(3N) * dS/dx
+// A masked-out pixel (ground-truth alpha below 128) neither centres a
+// window (its A, B, C are 0 and its SSIM is not summed) nor receives a
+// gradient.
 
 struct SsimUniforms {
     width: u32,
@@ -57,6 +60,10 @@ fn gauss_w(k: i32) -> f32 {
 
 fn gt_channel(i: u32, c: u32) -> f32 {
     return f32((gt[i] >> (8u * c)) & 0xFFu) / 255.0;
+}
+
+fn gt_valid(i: u32) -> bool {
+    return (gt[i] >> 24u) >= 128u;
 }
 
 // Global pixel of apron cell (ax, ay) of tile (tx, ty), or -1 when outside.
@@ -140,7 +147,7 @@ fn ssim_fwd(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
             syy = syy + w * hq[j + 3u];
             sxy = sxy + w * hq[j + 4u];
         }
-        if (inside) {
+        if (inside && gt_valid(py * su.width + px)) {
             let vx = sxx - mx * mx;
             let vy = syy - my * my;
             let cxy = sxy - mx * my;
@@ -155,6 +162,11 @@ fn ssim_fwd(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
                 (2.0 * my * b - 2.0 * my * a) / (cc * d) - s * (2.0 * mx / cc - 2.0 * mx / d);
             abc[i * 9u + c * 3u + 1u] = -s / d;
             abc[i * 9u + c * 3u + 2u] = 2.0 * a / (cc * d);
+        } else if (inside) {
+            let i = py * su.width + px;
+            abc[i * 9u + c * 3u + 0u] = 0.0;
+            abc[i * 9u + c * 3u + 1u] = 0.0;
+            abc[i * 9u + c * 3u + 2u] = 0.0;
         }
         // in0/in1/hq are reused by the next channel.
         workgroupBarrier();
@@ -223,7 +235,7 @@ fn ssim_bwd(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
             gb = gb + w * hq[j + 1u];
             gc = gc + w * hq[j + 2u];
         }
-        if (inside) {
+        if (inside && gt_valid(py * su.width + px)) {
             let i = py * su.width + px;
             let xv = render[i * 3u + c];
             let yv = gt_channel(i, c);

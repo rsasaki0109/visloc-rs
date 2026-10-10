@@ -8,19 +8,33 @@
 /// # Panics
 /// If the two images have different lengths.
 pub fn psnr(render: &[[f32; 3]], ground_truth: &[[f32; 3]]) -> f64 {
+    psnr_masked(render, ground_truth, None)
+}
+
+/// [`psnr`] over the pixels where `valid` is true (all of them for `None`),
+/// e.g. leaving out masked-out content. Infinite when no pixel is valid.
+///
+/// # Panics
+/// If the images (or the mask) have different lengths.
+pub fn psnr_masked(render: &[[f32; 3]], ground_truth: &[[f32; 3]], valid: Option<&[bool]>) -> f64 {
     assert_eq!(render.len(), ground_truth.len(), "image sizes differ");
-    if render.is_empty() {
-        return f64::INFINITY;
+    if let Some(v) = valid {
+        assert_eq!(v.len(), render.len(), "mask size differs");
     }
     let mut sum = 0.0f64;
-    for (r, g) in render.iter().zip(ground_truth) {
+    let mut n = 0usize;
+    for (i, (r, g)) in render.iter().zip(ground_truth).enumerate() {
+        if valid.is_some_and(|v| !v[i]) {
+            continue;
+        }
+        n += 1;
         for c in 0..3 {
             let d = (r[c].clamp(0.0, 1.0) - g[c]) as f64;
             sum += d * d;
         }
     }
-    let mse = sum / (render.len() * 3) as f64;
-    if mse == 0.0 {
+    let mse = sum / (n * 3).max(1) as f64;
+    if n == 0 || mse == 0.0 {
         f64::INFINITY
     } else {
         -10.0 * mse.log10()
@@ -191,6 +205,17 @@ mod tests {
         let gt = vec![[0.5f32; 3]; 16];
         let r = vec![[0.6f32; 3]; 16];
         assert!((psnr(&r, &gt) - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn psnr_masked_skips_invalid_pixels() {
+        let r = vec![[0.5f32; 3], [0.0; 3]];
+        let gt = vec![[0.6f32; 3], [1.0; 3]];
+        let full = psnr(&r, &gt);
+        let masked = psnr_masked(&r, &gt, Some(&[true, false]));
+        assert!((masked - 20.0).abs() < 1e-4, "{masked}");
+        assert!(full < masked);
+        assert!(psnr_masked(&r, &gt, Some(&[false, false])).is_infinite());
     }
 
     #[test]

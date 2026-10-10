@@ -12,7 +12,7 @@
 //! pose problem", IEEE-T-PAMI 26(6), 2004.
 
 use nalgebra::linalg::SymmetricEigen;
-use nalgebra::{DMatrix, Matrix3, Matrix3x2, Vector3};
+use nalgebra::{DMatrix, Matrix3, Matrix3x2, SMatrix, Vector3};
 
 /// Degree of the Nister determinant polynomial and its Sturm sequence.
 const N: usize = 10;
@@ -53,7 +53,10 @@ pub(crate) fn relpose_5pt(rays1: &[Vector3<f64>], rays2: &[Vector3<f64>]) -> Vec
     // eigenvalues (A = the n x 9 constraint matrix). This spans the same
     // four-dimensional subspace as COLMAP / PoseLib's
     // `fullPivHouseholderQr().matrixQ().rightCols(4)`.
-    let ata = m_transpose.transpose() * &m_transpose;
+    // Fixed-size from here on (no heap per RANSAC trial); same arithmetic.
+    let ata: SMatrix<f64, 9, 9> = (m_transpose.transpose() * &m_transpose)
+        .fixed_view::<9, 9>(0, 0)
+        .into_owned();
     // A degenerate minimal sample (coincident/collinear rays, a failed-to-
     // normalize bearing upstream) can put a NaN/Inf into `ata`.
     // `SymmetricEigen::new` calls the unbounded `try_new(.., max_niter=0)`
@@ -86,8 +89,8 @@ pub(crate) fn relpose_5pt(rays1: &[Vector3<f64>], rays2: &[Vector3<f64>]) -> Vec
     compute_trace_constraints(&n_basis, &mut coeffs);
 
     // Solve the 10x10 linear subsystem for the leading block.
-    let mut a_block = DMatrix::<f64>::zeros(10, 10);
-    let mut b_block = DMatrix::<f64>::zeros(10, 10);
+    let mut a_block = SMatrix::<f64, 10, 10>::zeros();
+    let mut b_block = SMatrix::<f64, 10, 10>::zeros();
     for i in 0..10 {
         for j in 0..10 {
             a_block[(i, j)] = coeffs[i][j];
