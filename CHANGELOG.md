@@ -156,6 +156,28 @@ All notable changes to `visloc-rs` will be documented here.
   global BA solves the reduced camera system with preconditioned CG
   (relative residual 1e-3, like COLMAP's `ITERATIVE_SCHUR`); smaller
   problems are unchanged.
+- **COLMAP-port mapper 2.2x faster on SmallCity** (5,822 photos: 3,866 ->
+  1,782 s). Most of it keeps the model byte-identical. Global BA's Schur
+  elimination now runs row by row, in parallel over its outputs, and its
+  problem build is 2.4x faster. `CompleteImage`, `TriangulateImage` and the
+  negative-depth filter are speculatively parallel. `FindLocalBundle`
+  indexes the image's shared points once. Together these bring the mapper
+  to 2,477 s. Two BA changes alter results:
+  - A failed linear solve is now an invalid step, as in Ceres: the trust
+    region shrinks and the solve continues, and five failures in a row end
+    it. Before, one failure discarded the whole BA, including every
+    accepted step.
+  - LM stops once an accepted step lowers the cost by less than 1e-5. This
+    deliberately deviates from COLMAP's `function_tolerance=0`; several
+    global BAs had crept to the 50-iteration cap at ~1e-6 relative decrease
+    per step. `VISLOC_PORT_BA_FUNCTION_TOLERANCE=0` restores COLMAP's
+    behaviour.
+
+  On SmallCity the main model keeps 5,569 of 5,583 images (scattered
+  marginal frames swap in and out) and 956,701 of 957,418 points, with
+  camera centres within 0.12 % (median) / 0.96 % (max) of the scene extent.
+  On Courthouse the one global BA that used to fail now succeeds: 544
+  images registered (was 543).
 - **Large source files split into submodules (no behavior change).**
   `pipelines/slam/src/incremental_sfm.rs` (18.5k lines), `bundle.rs` (17k),
   `examples/unordered_sfm_demo.rs` (22.5k, now
