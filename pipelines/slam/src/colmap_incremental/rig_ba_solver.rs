@@ -473,7 +473,7 @@ fn pcg_csr6(
             })
             .collect()
     };
-    pcg_core(&diag, matvec, rhs)
+    pcg_core(&diag, matvec, rhs).map(|(x, _)| x)
 }
 
 /// [`pcg_blocks6`] with the matrix given by its diagonal blocks and a
@@ -482,7 +482,7 @@ fn pcg_core(
     diag: &[Matrix6<f64>],
     matvec: impl Fn(&[Vector6<f64>]) -> Vec<Vector6<f64>>,
     rhs: &DMatrix<f64>,
-) -> Option<DMatrix<f64>> {
+) -> Option<(DMatrix<f64>, usize)> {
     let n = diag.len();
     let precond: Vec<Matrix6<f64>> = diag
         .par_iter()
@@ -498,13 +498,15 @@ fn pcg_core(
     let b_norm = dot(&b, &b).sqrt();
     let mut x = vec![Vector6::<f64>::zeros(); n];
     if b_norm == 0.0 {
-        return Some(DMatrix::zeros(n * 6, 1));
+        return Some((DMatrix::zeros(n * 6, 1), 0));
     }
     let mut r = b;
     let mut z: Vec<Vector6<f64>> = r.iter().zip(&precond).map(|(r, m)| m * r).collect();
     let mut p = z.clone();
     let mut rz = dot(&r, &z);
+    let mut iterations = 0;
     for _ in 0..PCG_MAX_ITERATIONS {
+        iterations += 1;
         let ap = matvec(&p);
         let pap = dot(&p, &ap);
         if !pap.is_finite() || pap <= 0.0 {
@@ -532,7 +534,7 @@ fn pcg_core(
             out[(i * 6 + k, 0)] = xi[k];
         }
     }
-    Some(out)
+    Some((out, iterations))
 }
 
 /// Reduced camera systems with at least this many free frames are factored
@@ -1041,6 +1043,7 @@ struct PhaseTimings {
     linearize_calls: u32,
     trials: u32,
     reorder: Duration,
+    pcg_iterations: usize,
 }
 
 /// Performance fix #2 (see [`build_reduced_system_pattern`] for fix #1):
@@ -1433,7 +1436,8 @@ fn solve_step(
         }
         timings.assemble += t.elapsed();
         let t = Instant::now();
-        let solved = pcg_core(&frame_diag, matvec, &rhs)?;
+        let (solved, iterations) = pcg_core(&frame_diag, matvec, &rhs)?;
+        timings.pcg_iterations += iterations;
         let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
         for a in 0..n_free {
             for i in 0..6 {
@@ -1823,7 +1827,7 @@ pub(crate) fn optimize_with_tolerance(
     }
 
     eprintln!(
-        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1} reorder_ms={:.1}",
+        "BA_PHASES trials={} linearize_calls={} n_free_frames={} n_points={} edges={} shards={} linearize_ms={:.1} eliminate_ms={:.1} assemble_ms={:.1} linsolve_ms={:.1} backsub_ms={:.1} evaluate_cost_ms={:.1} build_ms={build_ms:.1} apply_ms={apply_ms:.1} reorder_ms={:.1} pcg_iterations={}",
         timings.trials,
         timings.linearize_calls,
         problem.n_free_frames,
@@ -1837,6 +1841,7 @@ pub(crate) fn optimize_with_tolerance(
         timings.backsub.as_secs_f64() * 1e3,
         timings.evaluate_cost.as_secs_f64() * 1e3,
         timings.reorder.as_secs_f64() * 1e3,
+        timings.pcg_iterations,
     );
     if iterations.len() >= 30 {
         for line in &trace_lines {
