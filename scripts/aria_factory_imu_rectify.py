@@ -43,11 +43,14 @@ ASL_IMU_HEADER = (
 )
 
 
-def extract(args):
-    blob = open(args.vrs_head, "rb").read()
+VRS_HEAD_BYTES = 4 * 1024 * 1024
+
+
+def extract_record(blob: bytes) -> dict:
+    """Return the factory calibration JSON record embedded in a .vrs header."""
     key = blob.find(b'"ImuCalibrations"')
     if key < 0:
-        sys.exit(f"no ImuCalibrations record in {args.vrs_head}")
+        raise ValueError("no ImuCalibrations record in the .vrs header")
     # Walk back over enclosing '{' until one parses as a complete JSON object
     # that contains the IMU calibrations.
     decoder = json.JSONDecoder()
@@ -56,15 +59,11 @@ def extract(args):
         try:
             obj, _ = decoder.raw_decode(blob[start:].decode("latin1"))
             if "ImuCalibrations" in obj:
-                break
+                return obj
         except ValueError:
             pass
         start = blob.rfind(b"{", 0, start)
-    else:
-        sys.exit(f"could not parse the calibration record in {args.vrs_head}")
-    with open(args.out, "w") as f:
-        json.dump(obj, f, indent=1)
-    print(obj.get("Serial"), [c["Label"] for c in obj["ImuCalibrations"]])
+    raise ValueError("could not parse the calibration record in the .vrs header")
 
 
 def sensor_model(sensor):
@@ -73,29 +72,51 @@ def sensor_model(sensor):
     return bias, rect_inv
 
 
-def rectify(args):
-    calib = json.load(open(args.calib))
-    imus = [x for x in calib["ImuCalibrations"] if x["Label"] == args.label]
+def rectify_csv(calib: dict, inp, out, label="imu-right", part="both", shift_ns=0):
+    """Write `real = R^-1 (raw - b)` for every sample of an ASL IMU CSV.
+
+    Returns (samples, gyro bias, accel bias).
+    """
+    imus = [x for x in calib["ImuCalibrations"] if x["Label"] == label]
     if not imus:
-        sys.exit(f"no IMU labelled {args.label!r} in {args.calib}")
+        raise ValueError(f"no IMU labelled {label!r} in the calibration")
     bg, rg_inv = sensor_model(imus[0]["Gyroscope"])
     ba, ra_inv = sensor_model(imus[0]["Accelerometer"])
 
-    with open(args.inp) as f:
+    with open(inp) as f:
         header = f.readline()
-    data = np.loadtxt(args.inp, delimiter=",", comments="#")
-    ts = data[:, 0].astype(np.int64) + args.shift_ns
+    data = np.loadtxt(inp, delimiter=",", comments="#", ndmin=2)
+    ts = data[:, 0].astype(np.int64) + shift_ns
     gyro, acc = data[:, 1:4], data[:, 4:7]
-    if args.part in ("both", "gyro"):
+    if part in ("both", "gyro"):
         gyro = (rg_inv @ (gyro - bg).T).T
-    if args.part in ("both", "accel"):
+    if part in ("both", "accel"):
         acc = (ra_inv @ (acc - ba).T).T
 
-    with open(args.out, "w") as f:
+    with open(out, "w") as f:
         f.write(header if header.startswith("#") else ASL_IMU_HEADER)
         for t, g, a in zip(ts, gyro, acc):
             f.write(f"{t},{g[0]:.9g},{g[1]:.9g},{g[2]:.9g},{a[0]:.9g},{a[1]:.9g},{a[2]:.9g}\n")
-    print(f"wrote {args.out}: {len(ts)} samples, gyro bias {bg}, accel bias {ba}")
+    return len(ts), bg, ba
+
+
+def extract(args):
+    try:
+        obj = extract_record(open(args.vrs_head, "rb").read())
+    except ValueError as error:
+        sys.exit(f"{args.vrs_head}: {error}")
+    with open(args.out, "w") as f:
+        json.dump(obj, f, indent=1)
+    print(obj.get("Serial"), [c["Label"] for c in obj["ImuCalibrations"]])
+
+
+def rectify(args):
+    try:
+        n, bg, ba = rectify_csv(json.load(open(args.calib)), args.inp, args.out,
+                                args.label, args.part, args.shift_ns)
+    except ValueError as error:
+        sys.exit(f"{args.calib}: {error}")
+    print(f"wrote {args.out}: {n} samples, gyro bias {bg}, accel bias {ba}")
 
 
 def main():

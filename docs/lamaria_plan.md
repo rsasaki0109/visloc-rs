@@ -146,7 +146,7 @@ before/after on training sequences.
 7. **Runtime headroom.** 22 h of test data at ≥1× RT is required. VIO is
    already ~1.1× (near-uncontended); the mapper (lever 1) is the open item.
 8. **Aria factory IMU rectification.** Status: **measured on four
-   training sequences (2026-10-10), not yet in the submission driver.** The
+   training sequences (2026-10-10); on by default in the submission driver.** The
    ASL release ships raw IMU samples; applying the factory scale/misalignment
    and bias from the `.vrs` header raises the Score on all four non-Short
    categories (Medium 37.72 → 39.47, Long 24.14 → 28.89, Low light

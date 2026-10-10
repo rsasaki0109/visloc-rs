@@ -11,6 +11,8 @@ drives the whole per-sequence loop for one or more tracks:
 ```
 download ASL zip + pinhole calibration
   -> verify + extract -> rename `aria/` to `mav0/`
+  -> apply Aria's factory IMU calibration to `imu0/data.csv`
+     (first 4 MiB of the raw `.vrs`; `--no-imu-rectify` skips it)
   -> pinhole -> Basalt Double-Sphere calibration (variant-A IMU noise)
   -> run the Basalt VIO
   -> convert the trajectory to the submission estimate
@@ -51,6 +53,14 @@ python scripts/run_lamaria_test_submission.py \
 best measured setup ([`lamaria_multicam.md`](lamaria_multicam.md)); it is about
 1.45× slower than `euroc_config_big_window.json`.  `aria2c` is used with 16 connections when available
 (the server throttles a single connection), otherwise `urllib` is the fallback.
+
+IMU rectification is on by default
+([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md); +4.35 Score on
+average across one training sequence per non-Short track). It fetches only the
+first 4 MiB of `raw_data/test/<sequence>.vrs` with an HTTP range request, never
+the multi-GB recording, and saves the parsed record as
+`<work-dir>/calibrations/<sequence>_factory_calib.json`. If that fails, the
+sequence runs on the raw IMU and the log shows a `WARN` line.
 
 On completion the driver writes `submission.zip` next to `--slam-dir` (i.e.
 `<work-dir>/../submission.zip`) containing `slam/<sequence>.txt` for every

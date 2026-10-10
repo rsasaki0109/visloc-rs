@@ -82,21 +82,24 @@ Then run the VIO on `$SEQ_rect` exactly as on `$SEQ`.
 ## Applicability to the test set
 
 The test set's raw recordings are published too (`raw_data/test/<seq>.vrs`),
-and their headers carry the same record. `sequence_1_1` (test) and every
-training sequence above come from the same device (serial `1WM093701G1276`)
-with identical factory gyro/accel biases. The step is therefore available for
-a submission without touching ground truth.
+and their headers carry the same record. Test sequences `sequence_1_1` and
+`sequence_3_1` and every training sequence above come from the same device
+(serial `1WM093701G1276`) with identical factory gyro/accel biases. The step is
+therefore available for a submission without touching ground truth.
+
+`scripts/run_lamaria_test_submission.py` applies the rectification by default
+(`--no-imu-rectify` turns it off). It fetches `raw_data/test/<seq>.vrs`'s first
+4 MiB, rewrites `imu0/data.csv` in place, and falls back to the raw IMU with a
+`WARN` line if the header cannot be fetched or parsed.
 
 ## Open items
 
-1. **Wire into `run_lamaria_test_submission.py`.** Not yet done; the numbers
-   above were produced by a separate driver.
-2. **IMU time offset.** The factory record also gives per-sensor time offsets
+1. **IMU time offset.** The factory record also gives per-sensor time offsets
    for `imu-right` (`TimeOffsetSec_Device_Gyro` 4.1 ms,
    `TimeOffsetSec_Device_Accel` 3.1 ms). It is not known whether the ASL
    timestamps already include them. `rectify --shift-ns` can apply a shift, but
    it has not been measured.
-3. **Re-tune `gyro_bias_std`.** The default of 1e-6 was chosen on raw IMU data;
+2. **Re-tune `gyro_bias_std`.** The default of 1e-6 was chosen on raw IMU data;
    with the bias removed up front, a looser value may now be better.
-4. **Short track and repeat runs.** No Short sequence was measured, and each
+3. **Short track and repeat runs.** No Short sequence was measured, and each
    arm ran once.
