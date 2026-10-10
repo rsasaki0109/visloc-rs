@@ -553,6 +553,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         return Err(BaError::NoObservations);
     }
 
+    let t_start = Instant::now();
     // `BTreeMap` keys are ascending, so ids map to indices by binary search.
     let frame_ids: Vec<u64> = ba.poses.keys().copied().collect();
     let frame_fixed: Vec<bool> = frame_ids
@@ -582,6 +583,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         .collect();
     let points: Vec<Point3<f64>> = ba.landmarks.values().copied().collect();
 
+    let setup_ms = t_start.elapsed().as_secs_f64() * 1e3;
     // (frame index, point index) per observation, in parallel; the first
     // failing observation (in input order) decides the error, as before.
     let indices: Vec<Result<(u32, u32), BaError>> = ba
@@ -639,8 +641,10 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         })
         .collect();
 
+    let obs_ms = t_start.elapsed().as_secs_f64() * 1e3 - setup_ms;
     let (point_free_frames, edges, point_pair_edge_idx) =
         build_reduced_system_pattern(&point_obs_range, &obs, &frame_fixed, &free_frame_slot);
+    let pattern_ms = t_start.elapsed().as_secs_f64() * 1e3 - setup_ms - obs_ms;
     let n_shards = elimination_shard_count(edges.len());
     let shard_boundaries = balanced_shard_boundaries(&point_free_frames, n_shards);
     let contributions = (n_shards < 8).then(|| {
@@ -652,6 +656,14 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
             &shard_boundaries,
         )
     });
+
+    if n_free_frames >= 1000 {
+        let total_ms = t_start.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "BUILD_PARTS setup_ms={setup_ms:.1} obs_ms={obs_ms:.1} pattern_ms={pattern_ms:.1} index_ms={:.1}",
+            total_ms - setup_ms - obs_ms - pattern_ms
+        );
+    }
 
     Ok(Problem {
         frame_ids,
