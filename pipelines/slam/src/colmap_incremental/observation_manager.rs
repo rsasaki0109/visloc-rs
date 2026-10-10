@@ -185,7 +185,7 @@ const fn pair_key(a: ImageT, b: ImageT) -> (ImageT, ImageT) {
     }
 }
 
-/// FxHash-style hasher for the image-pair table's `(ImageT, ImageT)` keys
+/// FxHash-style hasher for small integer keys such as `(ImageT, ImageT)`
 /// (small trusted integers; no need for SipHash's DoS resistance).
 #[derive(Default, Clone, Copy)]
 pub struct IdPairHasher(u64);
@@ -201,6 +201,9 @@ impl std::hash::Hasher for IdPairHasher {
     }
     fn write_u64(&mut self, x: u64) {
         self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, x: usize) {
+        self.write_u64(x as u64);
     }
 }
 

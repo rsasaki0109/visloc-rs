@@ -36,7 +36,7 @@ use visloc_vision::two_view::CorrespondenceGraph;
 
 use super::observation_manager::{
     calculate_squared_reprojection_error, calculate_triangulation_angle, camera_has_bogus_params,
-    image_cam_from_world, ObservationManager,
+    image_cam_from_world, IdPairHasher, ObservationManager,
 };
 use super::reconstruction::{Camera, Reconstruction, TrackElement};
 use super::types::{CameraT, ImageT, Point2DT, Point3DT};
@@ -951,7 +951,7 @@ impl IncrementalTriangulator {
 
         let mut curr_queue: Vec<TrackElement> = recon.point3d(point3d_id).track.clone();
         let mut next_queue: Vec<TrackElement> = Vec::new();
-        let mut visited: BTreeSet<(ImageT, Point2DT)> = curr_queue
+        let mut visited: KeySet = curr_queue
             .iter()
             .map(|el| (el.image_id, el.point2d_idx))
             .collect();
@@ -1017,6 +1017,10 @@ impl IncrementalTriangulator {
 /// [`IncrementalTriangulator::merge_tracks`] (bounds plan memory; the result
 /// does not depend on it).
 const PLAN_WAVE: usize = 16_384;
+
+/// Visited set of the track-completion BFS (membership only; never
+/// iterated, so its order does not matter).
+type KeySet = HashSet<(ImageT, Point2DT), std::hash::BuildHasherDefault<IdPairHasher>>;
 
 /// Read-only replay of [`IncrementalTriangulator::complete`]'s BFS.
 struct CompletePlan {
@@ -1315,13 +1319,10 @@ fn plan_complete(
     let xyz = recon.point3d(point3d_id).xyz;
     let mut curr_queue: Vec<TrackElement> = recon.point3d(point3d_id).track.clone();
     let mut next_queue: Vec<TrackElement> = Vec::new();
-    let mut visited: BTreeSet<(ImageT, Point2DT)> = curr_queue
+    let mut visited: KeySet = curr_queue
         .iter()
         .map(|el| (el.image_id, el.point2d_idx))
         .collect();
-    // 2D points this plan itself claims (the serial BFS sees them as taken
-    // once added).
-    let mut own: HashSet<(ImageT, Point2DT)> = HashSet::new();
     let mut plan = CompletePlan {
         examined: Vec::new(),
         adds: Vec::new(),
@@ -1340,7 +1341,7 @@ fn plan_complete(
                     continue;
                 }
                 let image = recon.image(corr_image_id);
-                if image.points2d[corr_point2d_idx].has_point3d() || own.contains(&key) {
+                if image.points2d[corr_point2d_idx].has_point3d() {
                     continue;
                 }
                 let camera = recon.camera(image.camera_id);
@@ -1362,7 +1363,6 @@ fn plan_complete(
                     image_id: corr_image_id,
                     point2d_idx: corr_point2d_idx,
                 };
-                own.insert(key);
                 plan.adds.push(el);
                 if transitivity < max_transitivity {
                     next_queue.push(el);
