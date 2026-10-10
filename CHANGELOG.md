@@ -154,8 +154,8 @@ All notable changes to `visloc-rs` will be documented here.
   form instead of one SVD per point (same reports on the benchmarks).
   Approximate: past 1,000 free frames,
   global BA solves the reduced camera system with preconditioned CG
-  (relative residual 1e-3, like COLMAP's `ITERATIVE_SCHUR`); smaller
-  problems are unchanged.
+  (relative residual 1e-2; Ceres' `ITERATIVE_SCHUR` default is 0.1);
+  smaller problems are unchanged.
 - **COLMAP-port mapper 2.2x faster on SmallCity** (5,822 photos: 3,866 ->
   1,782 s). Most of it keeps the model byte-identical. Global BA's Schur
   elimination now runs row by row, in parallel over its outputs, and its
@@ -172,6 +172,13 @@ All notable changes to `visloc-rs` will be documented here.
     global BAs had crept to the 50-iteration cap at ~1e-6 relative decrease
     per step. `VISLOC_PORT_BA_FUNCTION_TOLERANCE=0` restores COLMAP's
     behaviour.
+  - The PCG relative residual tolerance is 1e-2 instead of 1e-3. On a
+    SmallCity mapper replay this halves the PCG iterations per global solve
+    (356 -> 190) and the mapper takes 1,184 s instead of 1,686 s. The main
+    model registers 5,599 images instead of 5,606, with a median
+    camera-centre difference of 0.2% of the scene extent, which is within
+    the spread of the other solver variants tried.
+    `VISLOC_PORT_PCG_TOL=1e-3` restores the previous tolerance.
 
   On SmallCity the main model keeps 5,569 of 5,583 images (scattered
   marginal frames swap in and out) and 956,701 of 957,418 points, with
