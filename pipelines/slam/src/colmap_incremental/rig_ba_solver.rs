@@ -331,36 +331,59 @@ fn build_reduced_system_pattern(
             .collect()
     };
 
-    let mut raw_pairs: Vec<(u32, u32)> = point_free_frames
-        .par_iter()
-        .filter(|frames| frames.len() >= 2)
-        .flat_map_iter(|frames| {
-            let slots = slots_of(frames);
-            let mut pairs = Vec::with_capacity(slots.len() * (slots.len() - 1) / 2);
-            for j in 1..slots.len() {
-                for i in 0..j {
-                    pairs.push((slots[i], slots[j]));
-                }
-            }
-            pairs
-        })
-        .collect();
-    raw_pairs.par_sort_unstable();
-    raw_pairs.dedup();
-    let edges = raw_pairs;
     let n_slots = free_frame_slot
         .iter()
         .flatten()
         .map(|&s| s as usize + 1)
         .max()
         .unwrap_or(0);
+    // The edges row by row: row `a` holds the slots `b > a` that share a
+    // point with `a`, sorted and deduplicated — the sorted unique pair list
+    // without materializing every pair. Each row gathers from the points
+    // observing its frame (`(point, position)` per slot).
+    let mut slot_off = vec![0usize; n_slots + 1];
+    for frames in &point_free_frames {
+        for &f in frames {
+            slot_off[free_frame_slot[f as usize].expect("free") as usize + 1] += 1;
+        }
+    }
+    for i in 1..slot_off.len() {
+        slot_off[i] += slot_off[i - 1];
+    }
+    let mut slot_points = vec![[0u32; 2]; slot_off[n_slots]];
+    let mut fill = slot_off.clone();
+    for (p, frames) in point_free_frames.iter().enumerate() {
+        for (k, &f) in frames.iter().enumerate() {
+            let s = free_frame_slot[f as usize].expect("free") as usize;
+            slot_points[fill[s]] = [p as u32, k as u32];
+            fill[s] += 1;
+        }
+    }
+    let rows: Vec<Vec<u32>> = (0..n_slots)
+        .into_par_iter()
+        .map(|a| {
+            let mut row: Vec<u32> = Vec::new();
+            for &[p, k] in &slot_points[slot_off[a]..slot_off[a + 1]] {
+                row.extend(
+                    point_free_frames[p as usize][k as usize + 1..]
+                        .iter()
+                        .map(|&f| free_frame_slot[f as usize].expect("free")),
+                );
+            }
+            row.sort_unstable();
+            row.dedup();
+            row
+        })
+        .collect();
     let mut row_off = vec![0usize; n_slots + 1];
-    for &(a, _) in &edges {
-        row_off[a as usize + 1] += 1;
+    for (a, row) in rows.iter().enumerate() {
+        row_off[a + 1] = row_off[a] + row.len();
     }
-    for i in 1..row_off.len() {
-        row_off[i] += row_off[i - 1];
+    let mut edges: Vec<(u32, u32)> = Vec::with_capacity(row_off[n_slots]);
+    for (a, row) in rows.iter().enumerate() {
+        edges.extend(row.iter().map(|&b| (a as u32, b)));
     }
+    drop(rows);
 
     let point_pair_edge_idx: Vec<Vec<u32>> = point_free_frames
         .par_iter()
