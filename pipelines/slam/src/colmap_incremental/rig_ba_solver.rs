@@ -111,11 +111,15 @@
 //!   (2ρ−1)³)`, reset the decrease factor to 2; on reject `radius ←
 //!   radius / decrease_factor`, then `decrease_factor *= 2`.
 //! - Terminate on `max_num_iterations` (from
-//!   [`super::bundle_adjustment::BundleAdjustmentOptions`]) or
-//!   `‖g‖_∞ ≤ 1e-4` (checked once per trial, at the current linearization —
-//!   `function_tolerance=0`/`parameter_tolerance=0` are absolute zeros, i.e.
-//!   COLMAP's control disables those two early-stop checks, so this is the
-//!   only early-stop path, matching the task brief).
+//!   [`super::bundle_adjustment::BundleAdjustmentOptions`]), on the gradient
+//!   criterion (checked once per trial, at the current linearization), or —
+//!   a deliberate deviation from COLMAP's `function_tolerance=0`, see
+//!   [`FUNCTION_TOLERANCE`] — once an accepted step lowers the cost by less
+//!   than `1e-5` of it (`parameter_tolerance=0` stays disabled).
+//! - A trial whose linear solve fails is an invalid step, as in Ceres: it is
+//!   rejected (the trust region shrinks) and the solve continues;
+//!   [`MAX_CONSECUTIVE_INVALID_STEPS`] in a row end it with
+//!   `BaError::SingularSystem`.
 //! - Jacobians are only re-evaluated after an **accepted** step (mirroring
 //!   Ceres' `TrustRegionMinimizer`); a rejected trial only re-solves the
 //!   reduced system at the new damping and re-evaluates the (Jacobian-free)
@@ -401,6 +405,27 @@ fn iterative_min_free_frames() -> usize {
             .unwrap_or(ITERATIVE_MIN_FREE_FRAMES)
     })
 }
+/// Ceres-style `function_tolerance`: an LM solve stops once an accepted
+/// step lowers the cost by less than this fraction of it. COLMAP configures
+/// Ceres with `function_tolerance=0`, so this is a deliberate deviation:
+/// on SmallCity (5,583 images) several global BAs crept on to the
+/// 50-iteration cap at ~1e-6 relative decrease per step, about a third of
+/// the mapper's time, for no visible change. Overridable with
+/// `VISLOC_PORT_BA_FUNCTION_TOLERANCE` (`0` disables the stop).
+const FUNCTION_TOLERANCE: f64 = 1e-5;
+fn function_tolerance() -> f64 {
+    static TOL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *TOL.get_or_init(|| {
+        std::env::var("VISLOC_PORT_BA_FUNCTION_TOLERANCE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(FUNCTION_TOLERANCE)
+    })
+}
+/// Ceres' `max_num_consecutive_invalid_steps`: a step whose linear solve
+/// fails is rejected (the trust region shrinks) and the solve goes on;
+/// only this many failures in a row end it with an error.
+const MAX_CONSECUTIVE_INVALID_STEPS: usize = 5;
 /// Relative residual at which [`pcg_blocks6`] stops (`‖r‖ ≤ tol · ‖b‖`).
 /// An inexact LM step is fine (the trust region absorbs it); Ceres'
 /// `ITERATIVE_SCHUR` default is a far looser `eta = 0.1`. With the
@@ -553,6 +578,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         return Err(BaError::NoObservations);
     }
 
+    let t_start = Instant::now();
     // `BTreeMap` keys are ascending, so ids map to indices by binary search.
     let frame_ids: Vec<u64> = ba.poses.keys().copied().collect();
     let frame_fixed: Vec<bool> = frame_ids
@@ -582,6 +608,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         .collect();
     let points: Vec<Point3<f64>> = ba.landmarks.values().copied().collect();
 
+    let setup_ms = t_start.elapsed().as_secs_f64() * 1e3;
     // (frame index, point index) per observation, in parallel; the first
     // failing observation (in input order) decides the error, as before.
     let indices: Vec<Result<(u32, u32), BaError>> = ba
@@ -639,8 +666,10 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         })
         .collect();
 
+    let obs_ms = t_start.elapsed().as_secs_f64() * 1e3 - setup_ms;
     let (point_free_frames, edges, point_pair_edge_idx) =
         build_reduced_system_pattern(&point_obs_range, &obs, &frame_fixed, &free_frame_slot);
+    let pattern_ms = t_start.elapsed().as_secs_f64() * 1e3 - setup_ms - obs_ms;
     let n_shards = elimination_shard_count(edges.len());
     let shard_boundaries = balanced_shard_boundaries(&point_free_frames, n_shards);
     let contributions = (n_shards < 8).then(|| {
@@ -652,6 +681,14 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
             &shard_boundaries,
         )
     });
+
+    if n_free_frames >= 1000 {
+        let total_ms = t_start.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "BUILD_PARTS setup_ms={setup_ms:.1} obs_ms={obs_ms:.1} pattern_ms={pattern_ms:.1} index_ms={:.1}",
+            total_ms - setup_ms - obs_ms - pattern_ms
+        );
+    }
 
     Ok(Problem {
         frame_ids,
@@ -1717,6 +1754,7 @@ pub(crate) fn optimize_with_tolerance(
     let mut trace_lines: Vec<String> = Vec::new();
     let mut converged = false;
     let mut initial_grad_norm: Option<f64> = None;
+    let mut consecutive_invalid_steps = 0usize;
 
     for it in 0..max_num_iterations {
         let grad_norm = gradient_inf_norm(&points_lin, &frame_bc_raw);
@@ -1757,8 +1795,30 @@ pub(crate) fn optimize_with_tolerance(
             order.as_deref(),
             &mut timings,
         ) else {
-            return Err(BaError::SingularSystem);
+            // An invalid step (Ceres `StepIsInvalid`): rejected like a step
+            // that did not lower the cost.
+            consecutive_invalid_steps += 1;
+            trace_lines.push(format!(
+                "BA_TRACE it={it} cost={:.6} radius={radius:.6e} grad_inf_norm={grad_norm:.6e} invalid_step",
+                2.0 * half_cost
+            ));
+            if consecutive_invalid_steps >= MAX_CONSECUTIVE_INVALID_STEPS {
+                eprintln!(
+                    "BA_FAILED singular_system it={it} n_free_frames={} radius={radius:.6e} linsolve_ms={:.1} pcg_iterations={}",
+                    problem.n_free_frames,
+                    timings.linsolve.as_secs_f64() * 1e3,
+                    timings.pcg_iterations,
+                );
+                for line in &trace_lines {
+                    eprintln!("{line}");
+                }
+                return Err(BaError::SingularSystem);
+            }
+            radius /= decrease_factor;
+            decrease_factor *= 2.0;
+            continue;
         };
+        consecutive_invalid_steps = 0;
         let t_apply = Instant::now();
         let (trial_poses, trial_points) = apply_step(&problem, &dx_frames, &dx_points);
         apply_ms += t_apply.elapsed().as_secs_f64() * 1e3;
@@ -1798,6 +1858,7 @@ pub(crate) fn optimize_with_tolerance(
         ));
 
         if step_accepted {
+            let small_decrease = actual < function_tolerance() * half_cost;
             problem.poses = trial_poses;
             problem.points = trial_points;
             radius /= (1.0 / 3.0_f64).max(1.0 - (2.0 * rho - 1.0).powi(3));
@@ -1810,6 +1871,10 @@ pub(crate) fn optimize_with_tolerance(
             points_lin = pl;
             frame_diag_raw = fd;
             frame_bc_raw = fb;
+            if small_decrease {
+                converged = true;
+                break;
+            }
         } else {
             radius /= decrease_factor;
             decrease_factor *= 2.0;

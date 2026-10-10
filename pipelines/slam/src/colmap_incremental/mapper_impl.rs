@@ -437,13 +437,23 @@ pub fn find_local_bundle(
 ) -> Vec<ImageT> {
     let image = recon.image(image_id);
     let mut shared: BTreeMap<ImageT, usize> = BTreeMap::new();
-    let mut point3d_ids = Vec::new();
+    // The image's 3D points, in its point2D order, and for every other
+    // image the positions (in that order) of the points it also observes.
+    let mut xyzs = Vec::new();
+    let mut points_of: std::collections::HashMap<ImageT, Vec<usize>> =
+        std::collections::HashMap::new();
     for p in &image.points2d {
         if let Some(pid) = p.point3d_id {
-            point3d_ids.push(pid);
-            for el in &recon.point3d(pid).track {
+            let point3d = recon.point3d(pid);
+            let k = xyzs.len();
+            xyzs.push(point3d.xyz);
+            for el in &point3d.track {
                 if el.image_id != image_id {
                     *shared.entry(el.image_id).or_insert(0) += 1;
+                    let list = points_of.entry(el.image_id).or_default();
+                    if list.last() != Some(&k) {
+                        list.push(k);
+                    }
                 }
             }
         }
@@ -467,21 +477,10 @@ pub fn find_local_bundle(
             break;
         }
         let other_center = cam_center(other_id);
-        let mut angles: Vec<f64> = Vec::new();
-        for &pid in &point3d_ids {
-            if recon
-                .point3d(pid)
-                .track
-                .iter()
-                .any(|el| el.image_id == other_id)
-            {
-                angles.push(calculate_triangulation_angle(
-                    this_center,
-                    other_center,
-                    recon.point3d(pid).xyz,
-                ));
-            }
-        }
+        let mut angles: Vec<f64> = points_of[&other_id]
+            .iter()
+            .map(|&k| calculate_triangulation_angle(this_center, other_center, xyzs[k]))
+            .collect();
         if angles.is_empty() {
             continue;
         }
