@@ -36,12 +36,14 @@
 //! parameters instead. This is semantically identical (same objects, same
 //! lookups), just passed explicitly rather than cached.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasherDefault;
 
 use nalgebra::{Point2, Point3};
 use visloc_core::geometry::SE3;
 use visloc_vision::two_view::CorrespondenceGraph;
 
+use super::id_map::IdMap;
 use super::reconstruction::{Camera, Reconstruction, TrackElement};
 use super::types::{FrameT, ImageT, Point2DT, Point3DT, SensorT};
 
@@ -169,8 +171,10 @@ pub struct ImageStat {
 /// `recon`/`graph` explicitly.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ObservationManager {
-    image_pair_stats: BTreeMap<(ImageT, ImageT), ImagePairStat>,
-    image_stats: BTreeMap<ImageT, ImageStat>,
+    /// Looked up once per correspondence of every observation the mapper
+    /// adds or removes; hashed, and sorted only for the snapshot.
+    image_pair_stats: HashMap<(ImageT, ImageT), ImagePairStat, BuildHasherDefault<IdPairHasher>>,
+    image_stats: IdMap<ImageStat>,
 }
 
 const fn pair_key(a: ImageT, b: ImageT) -> (ImageT, ImageT) {
@@ -178,6 +182,25 @@ const fn pair_key(a: ImageT, b: ImageT) -> (ImageT, ImageT) {
         (a, b)
     } else {
         (b, a)
+    }
+}
+
+/// FxHash-style hasher for the image-pair table's `(ImageT, ImageT)` keys
+/// (small trusted integers; no need for SipHash's DoS resistance).
+#[derive(Default, Clone, Copy)]
+pub struct IdPairHasher(u64);
+
+impl std::hash::Hasher for IdPairHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
 }
 
@@ -361,7 +384,7 @@ impl ObservationManager {
             .point3d_visibility_pyramid
             .score()
     }
-    pub const fn image_stats(&self) -> &BTreeMap<ImageT, ImageStat> {
+    pub const fn image_stats(&self) -> &IdMap<ImageStat> {
         &self.image_stats
     }
 
@@ -370,10 +393,13 @@ impl ObservationManager {
     /// `IncrementalTriangulator::Retriangulate` to find under-reconstructed
     /// pairs without holding a borrow of `self` across the caller's mutation.
     pub fn image_pair_stats_snapshot(&self) -> Vec<((ImageT, ImageT), (usize, usize))> {
-        self.image_pair_stats
+        let mut pairs: Vec<((ImageT, ImageT), (usize, usize))> = self
+            .image_pair_stats
             .iter()
             .map(|(&k, v)| (k, (v.num_tri_corrs, v.num_total_corrs)))
-            .collect()
+            .collect();
+        pairs.sort_unstable_by_key(|&(k, _)| k);
+        pairs
     }
 
     // ---- Visibility bookkeeping (`.cc:181-214`) ---------------------

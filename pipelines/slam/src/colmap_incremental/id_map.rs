@@ -135,6 +135,15 @@ impl<V: fmt::Debug> fmt::Debug for IdMap<V> {
     }
 }
 
+impl<V> std::ops::Index<&u64> for IdMap<V> {
+    type Output = V;
+
+    fn index(&self, id: &u64) -> &V {
+        self.get(id)
+            .unwrap_or_else(|| panic!("id {id} is not in the IdMap"))
+    }
+}
+
 impl<'a, V> IntoIterator for &'a IdMap<V> {
     type Item = (&'a u64, &'a V);
     type IntoIter = Box<dyn DoubleEndedIterator<Item = (&'a u64, &'a V)> + 'a>;
