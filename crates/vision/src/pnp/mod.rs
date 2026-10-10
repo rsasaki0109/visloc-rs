@@ -34,7 +34,7 @@ pub struct Correspondence2D3D {
     pub confidence: Option<f32>,
 }
 
-pub trait PoseEstimator {
+pub trait PoseEstimator: Sync {
     fn estimate_pose(
         &self,
         correspondences: &[Correspondence2D3D],

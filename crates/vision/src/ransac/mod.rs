@@ -340,6 +340,52 @@ where
         // Dynamic RANSAC termination (COLMAP `UpdateNumIterations`): with a
         // confidence target, the required sample count shrinks as the best
         // model's inlier ratio grows.
+        // A fixed budget (no early stop, no dynamic termination, uniform
+        // sampling) can draw every sample up front, in the same order from
+        // the same RNG, and score the hypotheses in parallel: picking the
+        // best in iteration order afterwards is the serial loop exactly.
+        #[cfg(feature = "parallel")]
+        if weighted.is_none()
+            && self.early_stop_inlier_ratio.is_none()
+            && self.confidence.is_none()
+            && self.iterations > 1
+        {
+            use rayon::prelude::*;
+            let samples: Vec<Vec<Correspondence2D3D>> = (0..self.iterations)
+                .map(|_| {
+                    let mut subset: Vec<usize> = sorted_indices[..n].to_vec();
+                    subset.shuffle(&mut rng);
+                    subset
+                        .iter()
+                        .take(sample_size)
+                        .map(|index| correspondences[*index].clone())
+                        .collect()
+                })
+                .collect();
+            let (estimator, threshold) = (&self.pose_estimator, self.reprojection_threshold);
+            let hypotheses: Vec<Option<(Pose, ReprojectionScore)>> = samples
+                .par_iter()
+                .map(|sample| {
+                    let pose = estimator.estimate_pose(sample, camera)?;
+                    let score = score_pose(camera, &pose, correspondences, threshold);
+                    Some((pose, score))
+                })
+                .collect();
+            for (pose, score) in hypotheses.into_iter().flatten() {
+                if score.inliers.len() > best_inliers.len()
+                    || (score.inliers.len() == best_inliers.len() && score.mean_error < best_error)
+                {
+                    best_pose = Some(pose);
+                    best_inliers = score.inliers;
+                    best_error = score.mean_error;
+                }
+            }
+            return RansacSearchResult {
+                best_pose,
+                best_inliers,
+            };
+        }
+
         let mut required_iterations = self.iterations.max(1);
         for iteration in 0..self.iterations {
             // PROSAC shrinking sample-set: m_k expands linearly from
@@ -891,5 +937,82 @@ mod tests {
             .estimate_with_pose_prior_and_weights(&correspondences, &camera, Some(&bad_prior), None)
             .unwrap();
         assert_eq!(no_prior.inliers, with_bad_prior.inliers);
+    }
+
+    /// The fixed-budget search (scored in parallel under the `parallel`
+    /// feature) returns exactly what the serial loop does; `confidence =
+    /// Some(1.0)` forces the serial loop without ever stopping it early.
+    #[test]
+    fn fixed_budget_search_matches_serial_loop() {
+        let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let truth = Pose {
+            world_to_camera: visloc_core::geometry::SE3::new(
+                UnitQuaternion::from_euler_angles(0.05, -0.1, 0.02),
+                Vector3::new(0.2, -0.1, 0.3),
+            ),
+        };
+        let mut state = 99u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let correspondences: Vec<Correspondence2D3D> = (0..300)
+            .filter_map(|i| {
+                let point = Point3::new(next() * 4.0 - 2.0, next() * 3.0 - 1.5, 4.0 + next() * 6.0);
+                let mut xy = visloc_core::geometry::reproject(&camera, &truth, &point)?;
+                if i % 4 == 0 {
+                    xy.x += 40.0 * (next() - 0.5);
+                    xy.y += 40.0 * (next() - 0.5);
+                }
+                Some(Correspondence2D3D {
+                    point2d: xy,
+                    point3d: point,
+                    confidence: None,
+                })
+            })
+            .collect();
+        let fixed = PnPRansac {
+            pose_estimator: crate::pnp::P3PGrunert,
+            pose_refiner: Some(crate::pnp::GaussNewtonPoseRefiner::default()),
+            iterations: 64,
+            reprojection_threshold: 2.0,
+            seed: 3,
+            early_stop_min_iterations: 0,
+            early_stop_inlier_ratio: None,
+            confidence: None,
+        };
+        let serial = PnPRansac {
+            confidence: Some(1.0),
+            ..fixed
+        };
+        let sample_size = fixed.pose_estimator.minimum_correspondences();
+        let search_a = fixed.search_best_pose(&correspondences, &camera, sample_size, None, None);
+        let search_b = serial.search_best_pose(&correspondences, &camera, sample_size, None, None);
+        assert!(
+            search_a.best_inliers.len() > 150,
+            "most points are inliers: {} of {}",
+            search_a.best_inliers.len(),
+            correspondences.len()
+        );
+        assert_eq!(search_a.best_inliers, search_b.best_inliers);
+        let (pa, pb) = (search_a.best_pose.unwrap(), search_b.best_pose.unwrap());
+        assert_eq!(
+            pa.world_to_camera.translation,
+            pb.world_to_camera.translation
+        );
+        assert_eq!(pa.world_to_camera.rotation, pb.world_to_camera.rotation);
+        let a = fixed.estimate(&correspondences, &camera).expect("pose");
+        let b = serial.estimate(&correspondences, &camera).expect("pose");
+        assert_eq!(a.inliers, b.inliers);
+        assert_eq!(
+            a.pose.world_to_camera.translation,
+            b.pose.world_to_camera.translation
+        );
+        assert_eq!(
+            a.pose.world_to_camera.rotation,
+            b.pose.world_to_camera.rotation
+        );
     }
 }

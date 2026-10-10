@@ -39,7 +39,7 @@ visloc-io = { path = "../../crates/io", version = "0.2.1" }
 visloc-localization = { path = "../localization", version = "0.2.1" }
 visloc-mapping = { path = "../mapping", version = "0.2.1" }
 visloc-tracking = { path = "../tracking", version = "0.2.1" }
-visloc-vision = { path = "../../crates/vision", version = "0.2.1" }
+visloc-vision = { path = "../../crates/vision", version = "0.2.1", features = ["parallel"] }
 ndarray = { version = "0.17", optional = true }
 
 [dev-dependencies]
