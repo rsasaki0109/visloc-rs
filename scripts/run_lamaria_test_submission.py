@@ -29,17 +29,19 @@ Example:
         --tracks 1 \
         --vio-exe E:/visloc-rs-runs/onlinefix_target/release/examples/basalt_euroc_vio_demo.exe \
         --config configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json \
-        --gyro-bias-std 1e-6 \
+        --gyro-bias-std 1e-7 \
         --work-dir E:/visloc-rs-runs/lamaria_submission/work \
         --slam-dir E:/visloc-rs-runs/lamaria_submission/slam \
         --threads 12
 
-Defaults are the best measured LaMAria setup (docs/lamaria_multicam.md): the
-multi-camera big-window config and `gyro_bias_std` 1e-6. On the training
-sequences this scores sequence_1_19 50.04, R_12_10cp 40.11 and R_11_5cp ~63,
-versus 17.16 / 28.85 / 62.87 for `euroc_config_big_window.json` with Basalt's
-default 1e-4. Pass `--config .../euroc_config_big_window.json --gyro-bias-std
-1e-4` to reproduce the earlier setup.
+Defaults are the best measured LaMAria setup: the multi-camera big-window
+config (docs/lamaria_multicam.md), the rectified IMU and `gyro_bias_std` 1e-7
+(docs/lamaria_imu_rectification.md). With the rectified IMU, 1e-7 beats the
+earlier 1e-6 by +2.53 Score on average over one training sequence per track
+(sequence_1_19 52.26, sequence_2_11 38.36, sequence_3_17 35.76, sequence_4_10
+32.42, sequence_5_11 32.27). Pass `--gyro-bias-std 1e-6 --no-imu-rectify` for
+the previous setup, or `--config .../euroc_config_big_window.json
+--gyro-bias-std 1e-4 --no-imu-rectify` for the original one.
 
 IMU rectification (docs/lamaria_imu_rectification.md) is on by default: on one
 training sequence per non-Short track it raises the score by +4.35 on average
@@ -166,9 +168,10 @@ def main() -> int:
     parser.add_argument("--vio-exe", type=Path, required=True)
     parser.add_argument("--config", type=Path,
                         default=Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json"))
-    parser.add_argument("--gyro-bias-std", type=float, default=1e-6,
+    parser.add_argument("--gyro-bias-std", type=float, default=1e-7,
                         help="gyro bias random walk written into the calibration "
-                             "(Basalt default 1e-4; 1e-6 measured best on LaMAria)")
+                             "(Basalt default 1e-4; 1e-7 measured best on LaMAria "
+                             "with the rectified IMU)")
     parser.add_argument("--imu-rectify", action=argparse.BooleanOptionalAction, default=True,
                         help="apply Aria's factory IMU calibration from the .vrs header "
                              "(default on; docs/lamaria_imu_rectification.md)")

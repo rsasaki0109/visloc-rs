@@ -22,8 +22,9 @@ that LaMAria's `imu0` stream and `T_b_s` frames refer to. Images are untouched.
 - **Both arms** use the submission defaults of
   `scripts/run_lamaria_test_submission.py`: VIO only (no mapper), config
   `configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json`,
-  variant-A noise, `gyro_bias_std = 1e-6`, 2 threads, as fast as possible. The
-  arms differ **only** in `imu0/data.csv` (raw vs rectified).
+  variant-A noise, `gyro_bias_std = 1e-6` (the default at the time; see
+  [Re-tuning](#re-tuning-gyro_bias_std) for 1e-7), 2 threads, as fast as
+  possible. The arms differ **only** in `imu0/data.csv` (raw vs rectified).
 - **Scoring**: the official `cvg/lamaria` evaluator, unmodified. Score and
   CP@1m come from the control points; pose recall comes from the pseudo-dense
   GT (not published for `sequence_5_11`).
@@ -67,6 +68,36 @@ the raw-IMU run (Score 38.10, ATE 3.71 m). Only 8.6 % of `sequence_2_11`'s
 poses have a revisit within 5 m more than 60 s apart, so loop closure has
 little to correct on this sequence. Reducing VIO drift is the lever for
 Medium/Long.
+
+## Re-tuning `gyro_bias_std`
+
+The earlier default of 1e-6 came from a sweep on the **raw** IMU
+([`lamaria_multicam.md`](lamaria_multicam.md)) that improved monotonically
+from 5e-4 down to 1e-6, the smallest value tried. With the rectified IMU, the
+sweep was extended to both sides of 1e-6, with the same protocol as above and
+one training sequence per track:
+
+| Sequence | Track | Score 1e-5 | Score 1e-6 | Score **1e-7** | ATE 1e-6 → 1e-7 | Pose R@5m 1e-6 → 1e-7 |
+|---|---|---:|---:|---:|---|---|
+| sequence_1_19 | Short | — | 51.10 | **52.26** | 2.25 → **2.17 m** | 100 → 100 % |
+| sequence_2_11 | Medium | 39.22 | **39.47** | 38.36 | **3.10** → 3.21 m | **90.3** → 89.8 % |
+| sequence_3_17 | Long | — | 28.89 | **35.76** | 6.72 → **4.63 m** | 65.5 → **86.2 %** |
+| sequence_4_10 | Low light | 28.93 | 26.42 | **32.42** | 4.63 → **3.58 m** | 66.6 → **86.2 %** |
+| sequence_5_11 | Moving platform | — | **32.56** | 32.27 | n/a | n/a |
+| **Mean** | | | 35.69 | **38.21 (+2.53)** | | |
+
+1e-7 gains the most on the long and dark sequences, where it is also a large
+trajectory improvement (ATE −31 % / −23 %, pose recall at 5 m +21 / +20
+points). That is well beyond the few-point Score sensitivity seen in the
+time-offset test below. On Medium and Moving it is within about a point,
+and the trajectory metrics move by less than 0.11 m. 1e-5 is worse than 1e-7
+on trajectory error on both sequences where it was run (ATE 3.51 vs 3.21 m
+and 4.52 vs 3.58 m), so the looser side was not pursued. **1e-7 is now the
+driver default.**
+
+On sequence_1_19, rectification at 1e-6 scores 51.10 against 50.04 for the
+raw IMU in `lamaria_multicam.md`. That raw run used an older build, so the
++1.06 is indicative only. Values below 1e-7 were not tried.
 
 ## IMU time offset
 
@@ -130,10 +161,9 @@ therefore available for a submission without touching ground truth.
 
 ## Open items
 
-1. **Re-tune `gyro_bias_std`.** The default of 1e-6 was chosen on raw IMU data;
-   with the bias removed up front, a looser value may now be better.
-2. **Short track and more sequences per track.** No Short sequence was
-   measured. One sequence per track cannot separate a real gain from the
-   Score's sensitivity to small changes (see the time-offset table). The
-   4/4 direction of the rectification result, together with its trajectory
-   improvement, is the evidence that it is real.
+1. **More sequences per track.** One sequence per track cannot separate a
+   real gain from the Score's sensitivity to small changes (see the
+   time-offset table). The evidence that rectification and 1e-7 are real is
+   their direction across tracks together with their trajectory
+   improvement.
+2. **Below 1e-7.** The sweep stops at 1e-7; smaller values were not tried.

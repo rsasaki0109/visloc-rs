@@ -312,7 +312,9 @@ So on all three training sequences multicam + a tight gyro bias beats the
 big-window baseline: sequence_1_19 17.16 → 50.04, R_12_10cp 28.85 → 40.11,
 R_11_5cp 62.87 → 63.19–63.71. 1e-6 edges out 2e-6 on both sequences where
 both were run. `scripts/run_lamaria_test_submission.py` now defaults to the
-multicam config with `--gyro-bias-std 1e-6`.
+multicam config with `--gyro-bias-std 1e-6`. (Superseded: with the
+factory-rectified IMU the sweep continues to 1e-7, now the default; see
+[`lamaria_imu_rectification.md`](lamaria_imu_rectification.md#re-tuning-gyro_bias_std).)
 
 At 1e-6 sequence_1_19 now matches OpenVINS on Score (50.04 vs 49.86, a gap
 within run-to-run noise) and beats it on yaw drift (5.3° vs 8.4°), Sim(3) ATE
