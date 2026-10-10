@@ -1284,97 +1284,81 @@ fn eliminate_by_output(
             }
         })
         .collect();
-    // Sum `term(c)` over `contribs` (ascending point) grouped by shard.
-    fn grouped<T: Copy + std::ops::AddAssign + std::ops::SubAssign>(
-        zero: T,
-        contribs: impl Iterator<Item = (u32, T)>,
-    ) -> T {
-        let (mut total, mut acc, mut shard) = (zero, zero, None);
-        for (s, term) in contribs {
-            if shard != Some(s) {
-                if shard.is_some() {
-                    total += acc;
-                }
-                acc = zero;
-                shard = Some(s);
-            }
-            acc -= term;
-        }
-        if shard.is_some() {
-            total += acc;
-        }
-        total
-    }
-    // Row `s` of the off-diagonal blocks (edges `(s, _)`) collects, from
-    // each point observing `s` in ascending order, the pairs `(k, j > k)`
-    // with `k` at `s`: every edge sees its points in ascending order.
-    let mut flat_offdiag = vec![Matrix6::<f64>::zeros(); edges_len];
-    let mut rows: Vec<&mut [Matrix6<f64>]> = Vec::with_capacity(n_free);
-    let mut rest = flat_offdiag.as_mut_slice();
-    for s in 0..n_free {
-        let (row, tail) = rest.split_at_mut(index.row_off[s + 1] - index.row_off[s]);
-        rows.push(row);
-        rest = tail;
-    }
-    rows.into_par_iter().enumerate().for_each_init(
-        || (Vec::new(), Vec::new()),
-        |(acc, shard), (s, total)| {
-            acc.clear();
-            acc.resize(total.len(), Matrix6::<f64>::zeros());
-            shard.clear();
-            shard.resize(total.len(), None);
-            let base = index.row_off[s];
-            for &[p, k] in &index.slot[index.slot_off[s]..index.slot_off[s + 1]] {
-                let (p, k) = (p as usize, k as usize);
-                let Some(inv) = hpp_inv[p] else {
-                    continue;
-                };
-                let pl = &points_lin[p];
-                let point_shard = Some(index.point_shard[p]);
-                let pair_edge = &point_pair_edge_idx[p];
-                for j in k + 1..point_free_frames[p].len() {
-                    let e = pair_edge[j * (j - 1) / 2 + k] as usize - base;
-                    let term = (pl.hcp[j] * inv) * pl.hcp[k].transpose();
-                    if shard[e] != point_shard {
-                        if shard[e].is_some() {
-                            total[e] += acc[e];
-                        }
-                        acc[e] = Matrix6::zeros();
-                        shard[e] = point_shard;
-                    }
-                    acc[e] -= term;
-                }
-            }
-            for ((t, a), sh) in total.iter_mut().zip(acc.iter()).zip(shard.iter()) {
-                if sh.is_some() {
-                    *t += *a;
-                }
-            }
-        },
-    );
-    let (diag_delta, bc_delta): (Vec<Matrix6<f64>>, Vec<Vector6<f64>>) = (0..n_free)
+    // Row `s` (edges `(s, _)`), the diagonal block and the right-hand side
+    // of free frame `s` all come from the points observing `s`, in
+    // ascending order, so one pass computes them; each row is built in its
+    // own buffer and the rows are concatenated (zero-filling the full
+    // block array up front cost more than the elimination itself).
+    #[allow(clippy::type_complexity)]
+    let per_row: Vec<(Vec<Matrix6<f64>>, Matrix6<f64>, Vector6<f64>)> = (0..n_free)
         .into_par_iter()
-        .map(|slot| {
-            let range = &index.slot[index.slot_off[slot]..index.slot_off[slot + 1]];
-            let terms = || {
-                range.iter().filter_map(|&[p, k]| {
+        .map_init(
+            || (Vec::new(), Vec::new()),
+            |(acc, shard), s| {
+                let len = index.row_off[s + 1] - index.row_off[s];
+                let mut total = vec![Matrix6::<f64>::zeros(); len];
+                acc.clear();
+                acc.resize(len, Matrix6::<f64>::zeros());
+                shard.clear();
+                shard.resize(len, None);
+                let (mut diag_total, mut diag_acc) = (Matrix6::<f64>::zeros(), Matrix6::zeros());
+                let (mut bc_total, mut bc_acc) = (Vector6::<f64>::zeros(), Vector6::zeros());
+                let mut diag_shard = None;
+                let base = index.row_off[s];
+                for &[p, k] in &index.slot[index.slot_off[s]..index.slot_off[s + 1]] {
                     let (p, k) = (p as usize, k as usize);
-                    let inv = hpp_inv[p]?;
+                    let Some(inv) = hpp_inv[p] else {
+                        continue;
+                    };
                     let pl = &points_lin[p];
-                    Some((index.point_shard[p], pl.hcp[k] * inv, pl, k))
-                })
-            };
-            let diag = grouped(
-                Matrix6::zeros(),
-                terms().map(|(s, scaled, pl, k)| (s, scaled * pl.hcp[k].transpose())),
-            );
-            let bc = grouped(
-                Vector6::zeros(),
-                terms().map(|(s, scaled, pl, _)| (s, scaled * pl.bp)),
-            );
-            (diag, bc)
-        })
-        .unzip();
+                    let point_shard = Some(index.point_shard[p]);
+                    if diag_shard != point_shard {
+                        if diag_shard.is_some() {
+                            diag_total += diag_acc;
+                            bc_total += bc_acc;
+                        }
+                        diag_acc = Matrix6::zeros();
+                        bc_acc = Vector6::zeros();
+                        diag_shard = point_shard;
+                    }
+                    let scaled = pl.hcp[k] * inv;
+                    diag_acc -= scaled * pl.hcp[k].transpose();
+                    bc_acc -= scaled * pl.bp;
+                    let pair_edge = &point_pair_edge_idx[p];
+                    for j in k + 1..point_free_frames[p].len() {
+                        let e = pair_edge[j * (j - 1) / 2 + k] as usize - base;
+                        let term = (pl.hcp[j] * inv) * pl.hcp[k].transpose();
+                        if shard[e] != point_shard {
+                            if shard[e].is_some() {
+                                total[e] += acc[e];
+                            }
+                            acc[e] = Matrix6::zeros();
+                            shard[e] = point_shard;
+                        }
+                        acc[e] -= term;
+                    }
+                }
+                if diag_shard.is_some() {
+                    diag_total += diag_acc;
+                    bc_total += bc_acc;
+                }
+                for ((t, a), sh) in total.iter_mut().zip(acc.iter()).zip(shard.iter()) {
+                    if sh.is_some() {
+                        *t += *a;
+                    }
+                }
+                (total, diag_total, bc_total)
+            },
+        )
+        .collect();
+    let mut flat_offdiag = Vec::with_capacity(edges_len);
+    let mut diag_delta = Vec::with_capacity(n_free);
+    let mut bc_delta = Vec::with_capacity(n_free);
+    for (row, diag, bc) in per_row {
+        flat_offdiag.extend_from_slice(&row);
+        diag_delta.push(diag);
+        bc_delta.push(bc);
+    }
     (flat_offdiag, diag_delta, bc_delta)
 }
 
