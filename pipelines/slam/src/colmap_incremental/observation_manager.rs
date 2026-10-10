@@ -36,7 +36,7 @@
 //! parameters instead. This is semantically identical (same objects, same
 //! lookups), just passed explicitly rather than cached.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
 use nalgebra::{Point2, Point3};
@@ -725,11 +725,13 @@ impl ObservationManager {
             .collect();
         image_ids.sort_unstable();
         image_ids.dedup();
-        let proj_centers: BTreeMap<ImageT, Point3<f64>> = image_ids
-            .iter()
-            .map(|&id| (id, image_projection_center(recon, id)))
-            .collect();
         let recon_ref: &Reconstruction = recon;
+        let proj_centers: IdMap<Point3<f64>> = image_ids
+            .par_iter()
+            .map(|&id| (id, image_projection_center(recon_ref, id)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
         let drop: Vec<Option<usize>> = point3d_ids
             .par_iter()
             .map(|&point3d_id| {

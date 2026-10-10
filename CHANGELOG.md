@@ -178,6 +178,19 @@ All notable changes to `visloc-rs` will be documented here.
   camera centres within 0.12 % (median) / 0.96 % (max) of the scene extent.
   On Courthouse the one global BA that used to fail now succeeds: 544
   images registered (was 543).
+- **Further mapper speed-ups (byte-identical output).** Courthouse replay:
+  47.6 -> ~34 s.
+  - The reconstruction's images, frames and 3D points live in id-indexed
+    tables instead of `BTreeMap`s. `Reconstruction::{images,frames,points3d}()`
+    now return `&IdMap<_>`, with the same read API.
+  - Global BA's linearization runs in cache-sized chunks, its edge pattern
+    is built per frame, and its elimination computes each row of the
+    reduced system in one pass. On a half-scale SmallCity-shaped benchmark
+    (`profile_synthetic_city`), linearization is 3-4x faster.
+  - The track-completion BFS uses a hashed visited set.
+  - A fixed-budget PnP RANSAC scores its hypotheses in parallel, behind
+    `visloc-vision`'s new `parallel` feature. `PoseEstimator` now requires
+    `Sync`.
 - **Large source files split into submodules (no behavior change).**
   `pipelines/slam/src/incremental_sfm.rs` (18.5k lines), `bundle.rs` (17k),
   `examples/unordered_sfm_demo.rs` (22.5k, now
