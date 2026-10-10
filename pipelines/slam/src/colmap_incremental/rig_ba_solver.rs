@@ -136,7 +136,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use nalgebra::{DMatrix, Matrix3, Matrix6, Point2, Point3, SMatrix, Vector2, Vector3, Vector6};
+use nalgebra::{
+    DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, SMatrix, Vector2, Vector3, Vector6,
+};
 use rayon::prelude::*;
 
 use visloc_core::geometry::SE3;
@@ -461,6 +463,106 @@ const MAX_CONSECUTIVE_INVALID_STEPS: usize = 5;
 /// 0.08 % of the scene extent of the block-Cholesky run (1e-2: one image
 /// fewer, 0.6 %).
 const PCG_RELATIVE_TOLERANCE: f64 = 1e-3;
+/// [`PCG_RELATIVE_TOLERANCE`], overridable with `VISLOC_PORT_PCG_TOL` for
+/// experiments.
+fn pcg_relative_tolerance() -> f64 {
+    static TOL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *TOL.get_or_init(|| {
+        std::env::var("VISLOC_PORT_PCG_TOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PCG_RELATIVE_TOLERANCE)
+    })
+}
+/// Frames per block of the cluster-Jacobi preconditioner
+/// (`VISLOC_PORT_PCG_CLUSTER`, experimental; 1, the default, is the
+/// per-frame block Jacobi, Ceres' `SCHUR_JACOBI`).
+fn pcg_cluster_size() -> usize {
+    static K: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("VISLOC_PORT_PCG_CLUSTER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .max(1)
+    })
+}
+
+/// Block-Jacobi preconditioner over runs of consecutive free frames: each
+/// run's dense `6m × 6m` block of the reduced camera matrix (diagonal
+/// blocks plus the off-diagonal blocks between frames of the run) is
+/// factored once and solved exactly per application. Consecutive frames of
+/// a video share most of their points, so a run captures the strongest
+/// couplings that per-frame blocks leave to the iteration.
+struct ClusterJacobi {
+    starts: Vec<usize>,
+    factors: Vec<nalgebra::Cholesky<f64, nalgebra::Dyn>>,
+}
+
+impl ClusterJacobi {
+    /// `edges` ascend by `(a, b)` with `flat_offdiag[e]` the `(row b,
+    /// column a)` block; `None` if a run's block is not positive definite.
+    fn new(
+        frame_diag: &[Matrix6<f64>],
+        edges: &[(u32, u32)],
+        right_off: &[usize],
+        flat_offdiag: &[Matrix6<f64>],
+        k: usize,
+    ) -> Option<Self> {
+        let n = frame_diag.len();
+        let starts: Vec<usize> = (0..n).step_by(k).chain(std::iter::once(n)).collect();
+        let factors = starts
+            .windows(2)
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|w| {
+                let (lo, hi) = (w[0], w[1]);
+                let m = hi - lo;
+                let mut dense = DMatrix::<f64>::zeros(6 * m, 6 * m);
+                for a in lo..hi {
+                    dense
+                        .fixed_view_mut::<6, 6>(6 * (a - lo), 6 * (a - lo))
+                        .copy_from(&frame_diag[a]);
+                    for e in right_off[a]..right_off[a + 1] {
+                        let b = edges[e].1 as usize;
+                        if b >= hi {
+                            break;
+                        }
+                        let blk = &flat_offdiag[e];
+                        dense
+                            .fixed_view_mut::<6, 6>(6 * (b - lo), 6 * (a - lo))
+                            .copy_from(blk);
+                        dense
+                            .fixed_view_mut::<6, 6>(6 * (a - lo), 6 * (b - lo))
+                            .copy_from(&blk.transpose());
+                    }
+                }
+                dense.cholesky()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { starts, factors })
+    }
+
+    fn apply(&self, r: &[Vector6<f64>]) -> Vec<Vector6<f64>> {
+        let parts: Vec<Vec<Vector6<f64>>> = self
+            .factors
+            .par_iter()
+            .enumerate()
+            .map(|(c, factor)| {
+                let (lo, hi) = (self.starts[c], self.starts[c + 1]);
+                let rhs = DVector::from_iterator(
+                    6 * (hi - lo),
+                    r[lo..hi].iter().flat_map(|v| v.iter().copied()),
+                );
+                let z = factor.solve(&rhs);
+                (0..hi - lo)
+                    .map(|i| Vector6::from_fn(|k, _| z[6 * i + k]))
+                    .collect()
+            })
+            .collect();
+        parts.concat()
+    }
+}
 /// Iteration cap of [`pcg_blocks6`] (Ceres' `max_linear_solver_iterations`).
 const PCG_MAX_ITERATIONS: usize = 500;
 
@@ -525,7 +627,7 @@ fn pcg_csr6(
             })
             .collect()
     };
-    pcg_core(&diag, matvec, rhs).map(|(x, _)| x)
+    pcg_core(&diag, matvec, rhs, None).map(|(x, _)| x)
 }
 
 /// [`pcg_blocks6`] with the matrix given by its diagonal blocks and a
@@ -534,12 +636,22 @@ fn pcg_core(
     diag: &[Matrix6<f64>],
     matvec: impl Fn(&[Vector6<f64>]) -> Vec<Vector6<f64>>,
     rhs: &DMatrix<f64>,
+    cluster: Option<&ClusterJacobi>,
 ) -> Option<(DMatrix<f64>, usize)> {
     let n = diag.len();
-    let precond: Vec<Matrix6<f64>> = diag
-        .par_iter()
-        .map(|d| d.cholesky().map(|c| c.inverse()))
-        .collect::<Option<Vec<_>>>()?;
+    let precond: Vec<Matrix6<f64>> = if cluster.is_some() {
+        Vec::new()
+    } else {
+        diag.par_iter()
+            .map(|d| d.cholesky().map(|c| c.inverse()))
+            .collect::<Option<Vec<_>>>()?
+    };
+    let apply_precond = |r: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
+        match cluster {
+            Some(c) => c.apply(r),
+            None => r.iter().zip(&precond).map(|(r, m)| m * r).collect(),
+        }
+    };
     let dot = |a: &[Vector6<f64>], b: &[Vector6<f64>]| -> f64 {
         let partial: Vec<f64> = a.par_iter().zip(b).map(|(x, y)| x.dot(y)).collect();
         partial.iter().sum()
@@ -553,7 +665,7 @@ fn pcg_core(
         return Some((DMatrix::zeros(n * 6, 1), 0));
     }
     let mut r = b;
-    let mut z: Vec<Vector6<f64>> = r.iter().zip(&precond).map(|(r, m)| m * r).collect();
+    let mut z: Vec<Vector6<f64>> = apply_precond(&r);
     let mut p = z.clone();
     let mut rz = dot(&r, &z);
     let mut iterations = 0;
@@ -569,10 +681,10 @@ fn pcg_core(
             x[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
         }
-        if dot(&r, &r).sqrt() <= PCG_RELATIVE_TOLERANCE * b_norm {
+        if dot(&r, &r).sqrt() <= pcg_relative_tolerance() * b_norm {
             break;
         }
-        z = r.iter().zip(&precond).map(|(r, m)| m * r).collect();
+        z = apply_precond(&r);
         let rz_next = dot(&r, &z);
         let beta = rz_next / rz;
         rz = rz_next;
@@ -1523,7 +1635,18 @@ fn solve_step(
         }
         timings.assemble += t.elapsed();
         let t = Instant::now();
-        let (solved, iterations) = pcg_core(&frame_diag, matvec, &rhs)?;
+        let cluster = (pcg_cluster_size() > 1)
+            .then(|| {
+                ClusterJacobi::new(
+                    &frame_diag,
+                    edges,
+                    &right_off,
+                    &flat_offdiag,
+                    pcg_cluster_size(),
+                )
+            })
+            .flatten();
+        let (solved, iterations) = pcg_core(&frame_diag, matvec, &rhs, cluster.as_ref())?;
         timings.pcg_iterations += iterations;
         let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
         for a in 0..n_free {
