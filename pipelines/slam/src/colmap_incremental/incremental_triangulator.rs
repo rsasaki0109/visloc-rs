@@ -298,56 +298,117 @@ impl IncrementalTriangulator {
             return 0;
         }
 
+        // Speculatively parallel, with the serial loop's exact result (as
+        // `complete_tracks`): every 2D point's step is planned against the
+        // current state on a rayon worker ([`plan_complete_image_point`]),
+        // then applied serially in point order. A plan stays valid unless a
+        // 2D point it examined got a 3D point earlier in the pass (or, for
+        // an existing point, its track grew); such a step falls back to the
+        // serial code.
+        use rayon::prelude::*;
         let num_points2d = recon.image(image_id).num_points2d();
-        for point2d_idx in 0..num_points2d {
-            let point3d_id = recon.image(image_id).points2d[point2d_idx].point3d_id;
-            if let Some(point3d_id) = point3d_id {
-                num_tris += self.complete(options, recon, graph, obs, point3d_id);
-                continue;
-            }
-            if options.ignore_two_view_tracks
-                && graph.is_two_view_observation(image_id as usize, point2d_idx)
-            {
-                continue;
-            }
-            let (num_triangulated, mut corrs_data) = self.find(
-                options,
-                recon,
-                graph,
-                image_id,
-                point2d_idx,
-                options.max_transitivity,
-            );
-            if num_triangulated > 0 || corrs_data.is_empty() {
-                continue;
-            }
-            let ref_corr = Self::corr_data(recon, image_id, point2d_idx);
-            corrs_data.push(ref_corr);
-
-            let max_error_px = options.complete_max_reproj_error;
-            let min_tri_angle_rad = options.min_angle.to_radians();
-            let Some((xyz, inliers)) = estimate_triangulation(
-                &corrs_data,
-                ResidualType::Reprojection,
-                max_error_px,
-                min_tri_angle_rad,
-            ) else {
-                continue;
-            };
-            let mut track = Vec::new();
-            for (i, corr) in corrs_data.iter().enumerate() {
-                if inliers[i] {
-                    track.push(TrackElement {
-                        image_id: corr.image_id,
-                        point2d_idx: corr.point2d_idx,
-                    });
-                    num_tris += 1;
+        let mut claimed: HashSet<(ImageT, Point2DT)> = HashSet::new();
+        let indices: Vec<Point2DT> = (0..num_points2d).collect();
+        for wave in indices.chunks(PLAN_WAVE) {
+            let recon_ref: &Reconstruction = recon;
+            let plans: Vec<ImagePointPlan> = wave
+                .par_iter()
+                .map(|&idx| plan_complete_image_point(options, recon_ref, graph, image_id, idx))
+                .collect();
+            for (&point2d_idx, plan) in wave.iter().zip(plans) {
+                match plan {
+                    ImagePointPlan::Complete {
+                        point3d_id,
+                        track_len,
+                        plan,
+                    } if recon.point3d(point3d_id).track.len() == track_len
+                        && !plan.examined.iter().any(|key| claimed.contains(key)) =>
+                    {
+                        for el in plan.adds {
+                            obs.add_observation(recon, graph, point3d_id, el);
+                            self.modified_point3d_ids.insert(point3d_id);
+                            claimed.insert((el.image_id, el.point2d_idx));
+                            num_tris += 1;
+                        }
+                    }
+                    ImagePointPlan::New { examined, point }
+                        if !examined.iter().any(|key| claimed.contains(key)) =>
+                    {
+                        if let Some((xyz, track)) = point {
+                            for el in &track {
+                                claimed.insert((el.image_id, el.point2d_idx));
+                            }
+                            num_tris += track.len();
+                            let point3d_id = obs.add_point3d(recon, graph, xyz, track);
+                            self.modified_point3d_ids.insert(point3d_id);
+                        }
+                    }
+                    _ => {
+                        num_tris += self.complete_image_point_serial(
+                            options,
+                            recon,
+                            graph,
+                            obs,
+                            image_id,
+                            point2d_idx,
+                            &mut claimed,
+                        );
+                    }
                 }
             }
-            let point3d_id = obs.add_point3d(recon, graph, xyz, track);
-            self.modified_point3d_ids.insert(point3d_id);
         }
         num_tris
+    }
+
+    /// One 2D point of [`Self::complete_image`], serially (the original loop
+    /// body); records the 2D points it gives a 3D point in `claimed`.
+    #[allow(clippy::too_many_arguments)]
+    fn complete_image_point_serial(
+        &mut self,
+        options: &Options,
+        recon: &mut Reconstruction,
+        graph: &CorrespondenceGraph,
+        obs: &mut ObservationManager,
+        image_id: ImageT,
+        point2d_idx: Point2DT,
+        claimed: &mut HashSet<(ImageT, Point2DT)>,
+    ) -> usize {
+        let point3d_id = recon.image(image_id).points2d[point2d_idx].point3d_id;
+        if let Some(point3d_id) = point3d_id {
+            let before = recon.point3d(point3d_id).track.len();
+            let n = self.complete(options, recon, graph, obs, point3d_id);
+            for el in &recon.point3d(point3d_id).track[before..] {
+                claimed.insert((el.image_id, el.point2d_idx));
+            }
+            return n;
+        }
+        if options.ignore_two_view_tracks
+            && graph.is_two_view_observation(image_id as usize, point2d_idx)
+        {
+            return 0;
+        }
+        let (num_triangulated, mut corrs_data) = self.find(
+            options,
+            recon,
+            graph,
+            image_id,
+            point2d_idx,
+            options.max_transitivity,
+        );
+        if num_triangulated > 0 || corrs_data.is_empty() {
+            return 0;
+        }
+        corrs_data.push(Self::corr_data(recon, image_id, point2d_idx));
+        let Some((xyz, track)) = triangulate_new_point(options, &corrs_data) else {
+            return 0;
+        };
+        for el in &track {
+            claimed.insert((el.image_id, el.point2d_idx));
+        }
+        let n = track.len();
+        let point3d_id = obs.add_point3d(recon, graph, xyz, track);
+        self.modified_point3d_ids.insert(point3d_id);
+        n
     }
 
     /// Port of `CompleteTracks` (`.cc:249-262`).
@@ -892,6 +953,135 @@ struct CompletePlan {
     examined: Vec<(ImageT, Point2DT)>,
     /// Observations it would add, in the serial order.
     adds: Vec<TrackElement>,
+}
+
+/// A planned step of [`IncrementalTriangulator::complete_image`] for one 2D
+/// point, computed against a snapshot of the reconstruction.
+enum ImagePointPlan {
+    /// The 2D point has a 3D point: its track completion, valid while the
+    /// track still has `track_len` elements.
+    Complete {
+        point3d_id: Point3DT,
+        track_len: usize,
+        plan: CompletePlan,
+    },
+    /// No 3D point: the new point it would triangulate (if any), valid
+    /// while none of `examined` (itself and its correspondences) changed.
+    New {
+        examined: Vec<(ImageT, Point2DT)>,
+        point: Option<(Point3<f64>, Vec<TrackElement>)>,
+    },
+}
+
+/// Triangulate a new point from `corrs_data` with the `complete_*`
+/// thresholds; the inlier track, as `complete_image` builds it.
+fn triangulate_new_point(
+    options: &Options,
+    corrs_data: &[CorrData],
+) -> Option<(Point3<f64>, Vec<TrackElement>)> {
+    let (xyz, inliers) = estimate_triangulation(
+        corrs_data,
+        ResidualType::Reprojection,
+        options.complete_max_reproj_error,
+        options.min_angle.to_radians(),
+    )?;
+    let track = corrs_data
+        .iter()
+        .zip(&inliers)
+        .filter(|(_, &inlier)| inlier)
+        .map(|(corr, _)| TrackElement {
+            image_id: corr.image_id,
+            point2d_idx: corr.point2d_idx,
+        })
+        .collect();
+    Some((xyz, track))
+}
+
+fn plan_complete_image_point(
+    options: &Options,
+    recon: &Reconstruction,
+    graph: &CorrespondenceGraph,
+    image_id: ImageT,
+    point2d_idx: Point2DT,
+) -> ImagePointPlan {
+    if let Some(point3d_id) = recon.image(image_id).points2d[point2d_idx].point3d_id {
+        return match plan_complete(options, recon, graph, point3d_id) {
+            Some(plan) => ImagePointPlan::Complete {
+                point3d_id,
+                track_len: recon.point3d(point3d_id).track.len(),
+                plan,
+            },
+            // A dangling reference: let the serial code handle it.
+            None => ImagePointPlan::New {
+                examined: vec![(image_id, point2d_idx)],
+                point: None,
+            },
+        };
+    }
+    let mut examined = vec![(image_id, point2d_idx)];
+    if options.ignore_two_view_tracks
+        && graph.is_two_view_observation(image_id as usize, point2d_idx)
+    {
+        return ImagePointPlan::New {
+            examined,
+            point: None,
+        };
+    }
+    // `find`, without its bogus-camera cache (same answers).
+    let found: Vec<(ImageT, Point2DT)> = if options.max_transitivity <= 1 {
+        graph
+            .find_correspondences(image_id as usize, point2d_idx)
+            .iter()
+            .map(|c| (c.image_id as ImageT, c.point2d_idx))
+            .collect()
+    } else {
+        graph
+            .extract_transitive_correspondences(
+                image_id as usize,
+                point2d_idx,
+                options.max_transitivity,
+            )
+            .into_iter()
+            .map(|c| (c.image_id as ImageT, c.point2d_idx))
+            .collect()
+    };
+    examined.extend(found.iter().copied());
+    let mut corrs_data = Vec::with_capacity(found.len() + 1);
+    let mut num_triangulated = 0;
+    for (corr_image_id, corr_point2d_idx) in found {
+        if !recon.is_image_registered(corr_image_id) {
+            continue;
+        }
+        let corr_camera = recon.camera(recon.image(corr_image_id).camera_id);
+        if camera_has_bogus_params(
+            corr_camera,
+            options.min_focal_length_ratio,
+            options.max_focal_length_ratio,
+            options.max_extra_param,
+        ) {
+            continue;
+        }
+        let corr = IncrementalTriangulator::corr_data(recon, corr_image_id, corr_point2d_idx);
+        if corr.has_point3d {
+            num_triangulated += 1;
+        }
+        corrs_data.push(corr);
+    }
+    if num_triangulated > 0 || corrs_data.is_empty() {
+        return ImagePointPlan::New {
+            examined,
+            point: None,
+        };
+    }
+    corrs_data.push(IncrementalTriangulator::corr_data(
+        recon,
+        image_id,
+        point2d_idx,
+    ));
+    ImagePointPlan::New {
+        examined,
+        point: triangulate_new_point(options, &corrs_data),
+    }
 }
 
 fn plan_complete(
