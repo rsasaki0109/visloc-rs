@@ -208,6 +208,91 @@ struct Problem {
     /// `point_free_frames`, reused unchanged by every trial and every
     /// accepted step.
     shard_boundaries: Vec<usize>,
+    /// Built when the memory cap leaves [`elimination_shard_count`] below 8
+    /// (large, dense covisibility graphs): the elimination then runs in
+    /// parallel over its outputs instead (see [`ContributionIndex`]).
+    contributions: Option<ContributionIndex>,
+}
+
+/// The inverse of `point_pair_edge_idx` / `point_free_frames`: which points
+/// contribute to each off-diagonal block and each free frame of the
+/// reduced camera system, in ascending point order. Lets
+/// [`eliminate_and_accumulate`] compute every output block independently,
+/// in parallel, with exactly the additions (and their order) of the
+/// sharded loop.
+struct ContributionIndex {
+    /// `edge[edge_off[e]..edge_off[e + 1]]`: `(point, i, j)` for edge `e`,
+    /// `i`, `j` positions in `point_free_frames[point]`.
+    edge_off: Vec<usize>,
+    edge: Vec<[u32; 3]>,
+    /// `slot[slot_off[s]..slot_off[s + 1]]`: `(point, k)` for free slot `s`.
+    slot_off: Vec<usize>,
+    slot: Vec<[u32; 2]>,
+    /// Shard of each point (the sharded loop's summation grouping).
+    point_shard: Vec<u32>,
+}
+
+impl ContributionIndex {
+    fn new(
+        point_free_frames: &[Vec<u32>],
+        point_pair_edge_idx: &[Vec<u32>],
+        free_frame_slot: &[Option<u32>],
+        edges_len: usize,
+        n_free: usize,
+        shard_boundaries: &[usize],
+    ) -> Self {
+        let mut edge_off = vec![0usize; edges_len + 1];
+        let mut slot_off = vec![0usize; n_free + 1];
+        for (frames, idx) in point_free_frames.iter().zip(point_pair_edge_idx) {
+            for &e in idx {
+                edge_off[e as usize + 1] += 1;
+            }
+            for &f in frames {
+                slot_off[free_frame_slot[f as usize].expect("free") as usize + 1] += 1;
+            }
+        }
+        for v in [&mut edge_off, &mut slot_off] {
+            for i in 1..v.len() {
+                v[i] += v[i - 1];
+            }
+        }
+        let mut edge = vec![[0u32; 3]; edge_off[edges_len]];
+        let mut slot = vec![[0u32; 2]; slot_off[n_free]];
+        let (mut edge_fill, mut slot_fill) = (edge_off.clone(), slot_off.clone());
+        for (p, (frames, idx)) in point_free_frames
+            .iter()
+            .zip(point_pair_edge_idx)
+            .enumerate()
+        {
+            let mut pair = 0usize;
+            for j in 1..frames.len() {
+                for i in 0..j {
+                    let e = idx[pair] as usize;
+                    edge[edge_fill[e]] = [p as u32, i as u32, j as u32];
+                    edge_fill[e] += 1;
+                    pair += 1;
+                }
+            }
+            for (k, &f) in frames.iter().enumerate() {
+                let s = free_frame_slot[f as usize].expect("free") as usize;
+                slot[slot_fill[s]] = [p as u32, k as u32];
+                slot_fill[s] += 1;
+            }
+        }
+        let mut point_shard = vec![0u32; point_free_frames.len()];
+        for s in 0..shard_boundaries.len().saturating_sub(1) {
+            for v in &mut point_shard[shard_boundaries[s]..shard_boundaries[s + 1]] {
+                *v = s as u32;
+            }
+        }
+        Self {
+            edge_off,
+            edge,
+            slot_off,
+            slot,
+            point_shard,
+        }
+    }
 }
 
 /// Performance fix (profiled on a 300-frame/2500-point/289k-observation
@@ -344,7 +429,9 @@ fn pcg_blocks6(
     rhs: &DMatrix<f64>,
 ) -> Option<DMatrix<f64>> {
     let n = columns.len();
-    // Symmetric block rows: row i holds (j, A_ij) for every stored block.
+    // Symmetric block rows: row i holds (j, A_ij) for every stored block,
+    // ascending by j (blocks left of the diagonal come from earlier
+    // columns, then the diagonal and the rest of column i).
     let mut rows: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); n];
     for (j, col) in columns.iter().enumerate() {
         for (&i, blk) in col {
@@ -354,15 +441,40 @@ fn pcg_blocks6(
             }
         }
     }
-    let precond: Vec<Matrix6<f64>> = columns
-        .par_iter()
-        .enumerate()
-        .map(|(j, col)| col.get(&j).and_then(|d| d.cholesky()).map(|c| c.inverse()))
+    let mut row_off = Vec::with_capacity(n + 1);
+    row_off.push(0);
+    for row in &rows {
+        row_off.push(row_off.last().copied().unwrap_or(0) + row.len());
+    }
+    let entries: Vec<(usize, Matrix6<f64>)> = rows.into_iter().flatten().collect();
+    pcg_csr6(&row_off, &entries, rhs)
+}
+
+/// [`pcg_blocks6`] on the symmetric block rows in CSR form: row `i` is
+/// `entries[row_off[i]..row_off[i + 1]]`, `(column, A_ij)` ascending by
+/// column with the diagonal block included.
+fn pcg_csr6(
+    row_off: &[usize],
+    entries: &[(usize, Matrix6<f64>)],
+    rhs: &DMatrix<f64>,
+) -> Option<DMatrix<f64>> {
+    let n = row_off.len() - 1;
+    let precond: Vec<Matrix6<f64>> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            entries[row_off[i]..row_off[i + 1]]
+                .iter()
+                .find(|(j, _)| *j == i)
+                .and_then(|(_, d)| d.cholesky())
+                .map(|c| c.inverse())
+        })
         .collect::<Option<Vec<_>>>()?;
     let matvec = |x: &[Vector6<f64>]| -> Vec<Vector6<f64>> {
-        rows.par_iter()
-            .map(|row| {
-                row.iter()
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                entries[row_off[i]..row_off[i + 1]]
+                    .iter()
                     .fold(Vector6::zeros(), |acc, (j, blk)| acc + blk * x[*j])
             })
             .collect()
@@ -520,6 +632,16 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         build_reduced_system_pattern(&point_obs_range, &obs, &frame_fixed, &free_frame_slot);
     let n_shards = elimination_shard_count(edges.len());
     let shard_boundaries = balanced_shard_boundaries(&point_free_frames, n_shards);
+    let contributions = (n_shards < 8).then(|| {
+        ContributionIndex::new(
+            &point_free_frames,
+            &point_pair_edge_idx,
+            &free_frame_slot,
+            edges.len(),
+            n_free_frames,
+            &shard_boundaries,
+        )
+    });
 
     Ok(Problem {
         frame_ids,
@@ -535,6 +657,7 @@ fn build_problem(ba: &BundleAdjustment) -> Result<Problem, BaError> {
         edges,
         point_pair_edge_idx,
         shard_boundaries,
+        contributions,
     })
 }
 
@@ -942,6 +1065,9 @@ fn eliminate_and_accumulate(
     mu: f64,
 ) -> (Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
     let n_free = problem.n_free_frames;
+    if let Some(index) = &problem.contributions {
+        return eliminate_by_output(index, points_lin, edges_len, n_free, mu);
+    }
     let n_shards = problem.shard_boundaries.len().saturating_sub(1).max(1);
 
     let shard_results: Vec<(Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>)> = (0
@@ -1011,6 +1137,94 @@ fn eliminate_and_accumulate(
             *a += b;
         }
     }
+    (flat_offdiag, diag_delta, bc_delta)
+}
+
+/// [`eliminate_and_accumulate`] computed per output block, in parallel:
+/// each off-diagonal block, diagonal block and right-hand side sums its
+/// points' contributions in ascending point order, starting a fresh partial
+/// sum at every shard boundary and adding the partial sums in shard order,
+/// which is exactly the sharded loop's arithmetic (it subtracts each
+/// shard's points in order into a zeroed per-shard buffer, then adds the
+/// buffers in shard order). Used when the per-shard buffers would not fit
+/// in memory more than a few at a time, where the sharded loop ran on as
+/// few as 2 threads.
+#[allow(clippy::type_complexity)]
+fn eliminate_by_output(
+    index: &ContributionIndex,
+    points_lin: &[PointLin],
+    edges_len: usize,
+    n_free: usize,
+    mu: f64,
+) -> (Vec<Matrix6<f64>>, Vec<Matrix6<f64>>, Vec<Vector6<f64>>) {
+    let hpp_inv: Vec<Option<Matrix3<f64>>> = points_lin
+        .par_iter()
+        .map(|pl| {
+            if !pl.free || pl.frames.is_empty() {
+                None
+            } else {
+                damped_hpp_inverse(&pl.hpp, mu)
+            }
+        })
+        .collect();
+    // Sum `term(c)` over `contribs` (ascending point) grouped by shard.
+    fn grouped<T: Copy + std::ops::AddAssign + std::ops::SubAssign>(
+        zero: T,
+        contribs: impl Iterator<Item = (u32, T)>,
+    ) -> T {
+        let (mut total, mut acc, mut shard) = (zero, zero, None);
+        for (s, term) in contribs {
+            if shard != Some(s) {
+                if shard.is_some() {
+                    total += acc;
+                }
+                acc = zero;
+                shard = Some(s);
+            }
+            acc -= term;
+        }
+        if shard.is_some() {
+            total += acc;
+        }
+        total
+    }
+    let flat_offdiag: Vec<Matrix6<f64>> = (0..edges_len)
+        .into_par_iter()
+        .map(|e| {
+            let contribs = index.edge[index.edge_off[e]..index.edge_off[e + 1]]
+                .iter()
+                .filter_map(|&[p, i, j]| {
+                    let inv = hpp_inv[p as usize]?;
+                    let pl = &points_lin[p as usize];
+                    let term = (pl.hcp[j as usize] * inv) * pl.hcp[i as usize].transpose();
+                    Some((index.point_shard[p as usize], term))
+                });
+            grouped(Matrix6::zeros(), contribs)
+        })
+        .collect();
+    let (diag_delta, bc_delta): (Vec<Matrix6<f64>>, Vec<Vector6<f64>>) = (0..n_free)
+        .into_par_iter()
+        .map(|slot| {
+            let range = &index.slot[index.slot_off[slot]..index.slot_off[slot + 1]];
+            let terms = || {
+                range.iter().filter_map(|&[p, k]| {
+                    let inv = hpp_inv[p as usize]?;
+                    let pl = &points_lin[p as usize];
+                    Some((index.point_shard[p as usize], pl.hcp[k as usize] * inv, pl))
+                        .map(|(s, scaled, pl)| (s, scaled, pl, k as usize))
+                })
+            };
+            let diag = grouped(
+                Matrix6::zeros(),
+                terms().map(|(s, scaled, pl, k)| (s, scaled * pl.hcp[k].transpose())),
+            );
+            let bc = grouped(
+                Vector6::zeros(),
+                terms().map(|(s, scaled, pl, _)| (s, scaled * pl.bp)),
+            );
+            (diag, bc)
+        })
+        .unzip();
     (flat_offdiag, diag_delta, bc_delta)
 }
 
@@ -1114,6 +1328,64 @@ fn solve_step(
         }
     }
 
+    if n_free >= iterative_min_free_frames() && order.is_none() {
+        // Iterative solve: the symmetric block rows straight from the edge
+        // list, each row ascending by column (blocks left of the diagonal,
+        // the diagonal, then the rest), exactly the rows `pcg_blocks6`
+        // derives from the column map, without building it.
+        let mut row_off = vec![0usize; n_free + 1];
+        for &(a, b) in edges {
+            row_off[a as usize + 1] += 1;
+            row_off[b as usize + 1] += 1;
+        }
+        for i in 0..n_free {
+            row_off[i + 1] += row_off[i] + 1;
+        }
+        let mut entries = vec![(0usize, Matrix6::<f64>::zeros()); row_off[n_free]];
+        let mut fill = row_off.clone();
+        // Edges ascend by (a, b): row b receives its left blocks (a < b) in
+        // ascending a, and row a its right blocks in ascending b.
+        for (&(a, b), val) in edges.iter().zip(&flat_offdiag) {
+            let b = b as usize;
+            entries[fill[b]] = (a as usize, *val);
+            fill[b] += 1;
+        }
+        for (i, diag) in frame_diag.iter().enumerate() {
+            entries[fill[i]] = (i, *diag);
+            fill[i] += 1;
+        }
+        for (&(a, b), val) in edges.iter().zip(&flat_offdiag) {
+            let a = a as usize;
+            entries[fill[a]] = (b as usize, val.transpose());
+            fill[a] += 1;
+        }
+        let mut rhs = DMatrix::<f64>::zeros(n_free * 6, 1);
+        for a in 0..n_free {
+            for i in 0..6 {
+                rhs[(a * 6 + i, 0)] = frame_bc[a][i];
+            }
+        }
+        timings.assemble += t.elapsed();
+        let t = Instant::now();
+        let solved = pcg_csr6(&row_off, &entries, &rhs)?;
+        let mut dx_frames = vec![Vector6::<f64>::zeros(); n_free];
+        for a in 0..n_free {
+            for i in 0..6 {
+                dx_frames[a][i] = solved[(a * 6 + i, 0)];
+            }
+        }
+        timings.linsolve += t.elapsed();
+        return Some(back_substitute(
+            problem,
+            points_lin,
+            frame_diag_raw,
+            frame_bc_raw,
+            dx_frames,
+            mu,
+            timings,
+        ));
+    }
+
     // Free frame `a` sits at block `pos(a)` of the factored system: the
     // fill-reducing position when an order is given (large systems, see
     // `REORDER_MIN_FREE_FRAMES`), else `a` itself.
@@ -1153,7 +1425,29 @@ fn solve_step(
         }
     }
     timings.linsolve += t.elapsed();
+    Some(back_substitute(
+        problem,
+        points_lin,
+        frame_diag_raw,
+        frame_bc_raw,
+        dx_frames,
+        mu,
+        timings,
+    ))
+}
 
+/// Free-point steps from the camera steps, and the LM model's predicted
+/// cost decrease, for [`solve_step`].
+fn back_substitute(
+    problem: &Problem,
+    points_lin: &[PointLin],
+    frame_diag_raw: &[Matrix6<f64>],
+    frame_bc_raw: &[Vector6<f64>],
+    dx_frames: Vec<Vector6<f64>>,
+    mu: f64,
+    timings: &mut PhaseTimings,
+) -> (Vec<Vector6<f64>>, Vec<Vector3<f64>>, f64) {
+    let n_free = problem.n_free_frames;
     let t = Instant::now();
     let dx_points: Vec<Vector3<f64>> = points_lin
         .par_iter()
@@ -1193,7 +1487,7 @@ fn solve_step(
     timings.backsub += t.elapsed();
     timings.trials += 1;
 
-    Some((dx_frames, dx_points, predicted))
+    (dx_frames, dx_points, predicted)
 }
 
 /// Residual-only (no Jacobian) total cost at a candidate `(poses, points)` —
