@@ -463,14 +463,17 @@ def ground_band(pos, cams, up, radius, tol, extent):
 
 def filter_scene_ply(src_ply, out_ply, pos_pts, center, up, dist_mult, up_margin,
                       max_scale, large_scale, low_opacity_raw, isolated_mult=3.0,
-                      cams=None, ground_radius=0.0, ground_tol=0.5):
+                      cams=None, ground_radius=0.0, ground_tol=0.5, ground_min_alpha=0.0):
     """Keep a gaussian only if it is close to some real SfM point (kills the
     sky/ground floater smears an elevated, never-photographed viewpoint would
     otherwise expose), is not above the reconstructed roofline, is not huge
     (world-space std above `max_scale`), and is not simultaneously large
     (above `large_scale`) *and* low-opacity. With `ground_radius` > 0, the
     ground under the camera path (`ground_band`) is kept without SfM
-    support."""
+    support, and with `ground_min_alpha` > 0 its opacity is raised to at
+    least that: trained from street level, road splats are thin layers that
+    only add up to opaque at grazing angles, and from above the background
+    shows through."""
     from scipy.spatial import cKDTree
 
     with open(src_ply, 'rb') as f:
@@ -498,6 +501,10 @@ def filter_scene_ply(src_ply, out_ply, pos_pts, center, up, dist_mult, up_margin
             print(f'ground band: {int((ground & ~keep).sum())} gaussians without SfM support kept '
                   f'(ground {offset:.4f} below the cameras)', flush=True)
             keep |= ground
+            if ground_min_alpha > 0:
+                floor = np.log(ground_min_alpha / (1 - ground_min_alpha))
+                op = arr[:, col['opacity']]
+                arr[:, col['opacity']] = np.where(ground, np.maximum(op, floor), op)
 
     top = np.percentile((support - center) @ up, 99.5)
     keep &= ((pos - center) @ up) < (top + up_margin)
@@ -564,6 +571,9 @@ def main():
                          'camera path, without SfM support (road surface); 0 = off')
     ap.add_argument('--ground-tol', type=float, default=0.5,
                     help='ground band half-height as a multiple of the camera height above it')
+    ap.add_argument('--ground-min-alpha', type=float, default=0.0,
+                    help='raise the opacity of the ground band splats to at least this (0 = keep), '
+                         'so the road reads from above')
     ap.add_argument('--max-points', type=int, default=400000,
                     help='randomly subsample the SfM cloud above this many points (phase 1 only)')
     ap.add_argument('--skip-render', action='store_true', help='reuse frames already in --work')
@@ -712,7 +722,8 @@ def main():
                                                   args.filter_dist_mult, UP_MARGIN_FRAC * L,
                                                   args.filter_max_scale * L, FILTER_LARGE_SCALE_FRAC * L,
                                                   FILTER_LOW_OPACITY_RAW, args.filter_isolated,
-                                                  Ctr, args.ground_radius * L, args.ground_tol)
+                                                  Ctr, args.ground_radius * L, args.ground_tol,
+                                                  args.ground_min_alpha)
         print(f'splat filter: kept {kept}/{total} gaussians (dist_thr={dist_thr:.4f})', flush=True)
 
         splat_dir = f'{work}/splat_poses'

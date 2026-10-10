@@ -23,7 +23,8 @@ The current README hero (Hierarchical 3DGS SmallCity, A100 high-mem):
         --exhaustive-max 600 --window 20 --retrieval 30 --steps 50000 \
         --photos-args=--no-refine-intrinsics \
         "--hero-flags=--elev 45 --radius-mult 1.4 --target-height 0.2 --zoom 0.9 \
-         --width 560 --colors 72 --filter-dist-mult 4 --filter-isolated 6 --point-size 2.5"
+         --width 560 --colors 72 --filter-dist-mult 4 --filter-isolated 6 --point-size 2.5 \
+         --ground-radius 0.15 --ground-min-alpha 0.7"
 """
 import argparse
 import glob
