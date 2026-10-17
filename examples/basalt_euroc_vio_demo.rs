@@ -20,6 +20,7 @@
 //! `docs/mono_inertial_vio.md`. Without it the stereo replay is unchanged.
 
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -34,6 +35,74 @@ use visloc_basalt::{
     BasaltAdapterError, BasaltAdapterOutput, BasaltNavState, BasaltVioEstimatorAdapter,
     EurocSensorDataset, TimingBreakdown, TimingBucket,
 };
+use visloc_core::geometry::SE3;
+
+/// `--mono-vo` refined trajectories. The online `trajectory.tum` holds each
+/// frame's pose when it entered the window; ORB-SLAM3 and our DPVO demo
+/// instead write refined poses, so for a like-for-like comparison this keeps
+/// (a) each frame's last in-window pose and (b) each frame's pose relative to
+/// its reference keyframe, composed with that keyframe's last pose (the
+/// `SaveTrajectoryEuRoC` convention).
+#[derive(Default)]
+struct RefinedTrajectory {
+    timestamps: BTreeMap<u64, i64>,
+    last_pose: BTreeMap<u64, SE3>,
+    reference: BTreeMap<u64, (u64, SE3)>,
+}
+
+impl RefinedTrajectory {
+    fn update(&mut self, output: &BasaltAdapterOutput) {
+        let frames = &output.estimator.window_frames;
+        for frame in frames {
+            self.timestamps.insert(frame.frame_id, frame.timestamp_ns);
+            self.last_pose
+                .insert(frame.frame_id, frame.imu_to_world.clone());
+            // Newest keyframe at or before this frame in the current window.
+            let reference = frames
+                .iter()
+                .filter(|other| other.is_keyframe && other.frame_id <= frame.frame_id)
+                .max_by_key(|other| other.frame_id);
+            if let Some(kf) = reference {
+                let relative = kf.imu_to_world.inverse().compose(&frame.imu_to_world);
+                self.reference
+                    .insert(frame.frame_id, (kf.frame_id, relative));
+            }
+        }
+    }
+
+    fn tum(&self, keyframe_relative: bool) -> String {
+        let mut out = String::new();
+        for (frame_id, timestamp_ns) in &self.timestamps {
+            let pose = if keyframe_relative {
+                match self.reference.get(frame_id) {
+                    Some((kf, relative)) => match self.last_pose.get(kf) {
+                        Some(kf_pose) => kf_pose.compose(relative),
+                        None => continue,
+                    },
+                    None => continue,
+                }
+            } else {
+                match self.last_pose.get(frame_id) {
+                    Some(pose) => pose.clone(),
+                    None => continue,
+                }
+            };
+            let q = pose.rotation.quaternion();
+            out.push_str(&format!(
+                "{:.9} {:.9} {:.9} {:.9} {:.12} {:.12} {:.12} {:.12}\n",
+                *timestamp_ns as f64 * 1.0e-9,
+                pose.translation.x,
+                pose.translation.y,
+                pose.translation.z,
+                q.i,
+                q.j,
+                q.k,
+                q.w
+            ));
+        }
+        out
+    }
+}
 
 #[derive(Debug)]
 struct Args {
@@ -51,6 +120,11 @@ struct Args {
     decode_threads: usize,
     threads: Option<usize>,
     mono: bool,
+    /// `--mono-vo`: cam0 only and no IMU (visual-only odometry,
+    /// `config.vio_visual_only`; `docs/mono_visual_only_vio.md`). Frames
+    /// before the two-view bootstrap are left out of the trajectory, and the
+    /// trajectory is the camera (not IMU) pose, at arbitrary scale.
+    mono_vo: bool,
     /// `--dump-tracks FILE`: write every frame's tracked keypoints as CSV
     /// (`frame_id,timestamp_ns,camera_id,track_id,x,y`), e.g. for rendering
     /// tracking overlays. Off by default.
@@ -150,8 +224,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             EurocSensorDataset::open_monocular(&args.euroc_dir, &args.calibration, &args.config)?
         }
     };
-    let mut adapter =
-        BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
+    let visual_only_config = args.mono_vo.then(|| {
+        let mut config = dataset.config().clone();
+        config.values.insert(
+            "config.vio_visual_only".into(),
+            serde_json::Value::Bool(true),
+        );
+        config
+    });
+    let mut adapter = BasaltVioEstimatorAdapter::from_config(
+        dataset.calibration(),
+        visual_only_config.as_ref().unwrap_or(dataset.config()),
+    )?;
+    let skip_uninitialized = args.mono_vo;
     adapter
         .estimator
         .set_lean_marg_data(!args.retained_marg_diagnostics);
@@ -173,6 +258,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut mapper_packet_ordinal = 0u64;
     let mut native_companion_bound = false;
     let mut demo_index = 0usize;
+    let mut refined = RefinedTrajectory::default();
 
     let mode = adapter_process_mode(args.no_trace, args.no_marg_data);
     let (retain_marg_data, retain_trace) = match mode {
@@ -204,7 +290,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .measure(
                 TimingBucket::DemoOutput,
                 || -> Result<(), Box<dyn std::error::Error>> {
-                    append_trajectory(&mut tum, &mut csv, &output);
+                    // Visual-only frames held before the bootstrap carry no
+                    // estimate (`active_state_count == 0`).
+                    if !(skip_uninitialized && output.estimator.active_state_count == 0) {
+                        append_trajectory(&mut tum, &mut csv, &output);
+                    }
+                    if skip_uninitialized {
+                        refined.update(&output);
+                    }
                     if let Some(writer) = trace_writer.as_mut() {
                         writer.write_all(trace_json(&output).as_bytes())?;
                     }
@@ -363,10 +456,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     // Only the opt-in monocular replay adds a line, so the stereo summary
     // stays byte-identical for existing tooling.
-    if dataset.is_monocular() {
+    if args.mono_vo {
+        summary.push_str("camera_mode=mono_visual_only\n");
+    } else if dataset.is_monocular() {
         summary.push_str("camera_mode=mono_inertial\n");
     }
 
+    if args.mono_vo {
+        fs::write(
+            args.out_dir.join("trajectory_refined_window.tum"),
+            refined.tum(false),
+        )?;
+        fs::write(
+            args.out_dir.join("trajectory_refined_kf.tum"),
+            refined.tum(true),
+        )?;
+    }
     timing.measure(TimingBucket::DemoTrajectoryOutput, || {
         fs::write(&trajectory_tum, tum)?;
         fs::write(&trajectory_csv, csv)?;
@@ -831,6 +936,7 @@ impl Args {
         let mut decode_threads = 3usize;
         let mut threads = None;
         let mut mono = false;
+        let mut mono_vo = false;
         let mut dump_tracks = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
@@ -872,6 +978,10 @@ impl Args {
                 }
                 "--pipeline" => pipeline = true,
                 "--mono" => mono = true,
+                "--mono-vo" => {
+                    mono = true;
+                    mono_vo = true;
+                }
                 "--pipeline-capacity" => {
                     let value = arguments
                         .next()
@@ -930,12 +1040,13 @@ impl Args {
             decode_threads,
             threads,
             mono,
+            mono_vo,
             dump_tracks,
         })
     }
 
     fn usage() -> String {
-        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--dump-tracks FILE]".into()
+        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE]".into()
     }
 }
 
@@ -1102,7 +1213,18 @@ mod tests {
             "--mono",
         ]);
         assert!(args.mono);
+        assert!(!args.mono_vo);
         assert!(Args::usage().contains("--mono"));
+
+        let args = parse(&[
+            "--euroc-dir",
+            "dataset",
+            "--calibration",
+            "calib.json",
+            "--mono-vo",
+        ]);
+        assert!(args.mono && args.mono_vo);
+        assert!(Args::usage().contains("--mono-vo"));
     }
 
     #[test]
