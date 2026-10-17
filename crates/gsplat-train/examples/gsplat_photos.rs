@@ -5,7 +5,7 @@
 //!     --images <folder> --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
-//!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba]
+//!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect]
 //! ```
 //!
 //! SIFT runs on the GPU (`visloc_sift_gpu::VlfeatSiftGpu`, an f32 port of
@@ -13,7 +13,11 @@
 //! on the CPU. The mapper extends its largest model with the images it left
 //! out (its `complete_largest_model`) unless `--no-complete-model`.
 //! `--gpu-ba` also solves the mapper's large bundle adjustments on the GPU
-//! (docs/gpu_bundle_adjustment.md).
+//! (docs/gpu_bundle_adjustment.md). `--equirect` takes 2:1 equirectangular
+//! (360°) panoramas: each is cut into six 90° cube faces, at most
+//! `--max-size` square, which are reconstructed and trained on as pinhole
+//! images (`--window` then counts panoramas). Without it, a folder of
+//! panoramas gets a warning: the pinhole model cannot fit them.
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, SIFT, GPU matching,
 //! the COLMAP-port mapper, intrinsics refinement), brush-strategy training,
@@ -78,6 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The defaults, kept for older command lines.
             "--gpu-sift" => sfm.gpu_sift = true,
             "--complete-model" => sfm.complete_model = true,
+            // 360° panoramas -> six cube faces each.
+            "--equirect" => sfm.equirect = true,
             "--no-mesh" => mesh = false,
             "--normal-weight" => normal_weight = next()?.parse()?,
             // Per-photo colour correction (varying exposure / white balance).

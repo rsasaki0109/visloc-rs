@@ -4,6 +4,46 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **`gsplat_photos --equirect`: 360° panoramas as cube faces** (#301).
+  `PhotoSfmConfig::equirect` cuts each 2:1 equirectangular panorama into
+  six 90° cube faces (`visloc_gsplat_train::equirect`), at most `max_size`
+  square, before SfM and training. Their focal length `size / 2` is exact
+  and stays fixed. Faces of one panorama are not matched with each other,
+  and the window counts panoramas. The faces are still separate cameras.
+  The log reports how far apart each panorama's face centres land. Off by
+  default.
+  - Five synthetic room panoramas (`equirect_end_to_end`, an ignored
+    test): all 30 faces register. Relative rotations are within 0.13° of
+    the truth, and panorama distances within 0.4 mm over 0.58 m spacing.
+  - The five real panoramas of the
+    [ScanVan example](https://github.com/ScanVan/sfs-framework-example)
+    (CPU, `--steps 0`): the four side faces of every panorama register;
+    the up and down faces (sky, the camera mount) do not. Panorama
+    distances match ScanVan's own trajectory within 0.4%. As pinhole
+    images the same panoramas reconstruct nothing.
+  - The same five on an RTX 5080 (GPU SIFT and matching, 30k steps): the
+    same 20 faces register, and SfM, training and the mesh take 5 to
+    14 min depending on the host. The held-out panorama (the first, a
+    step behind every training one) renders at 17.8 to 22.2 dB per face
+    (19.2 dB mean), the training faces at 35 to 38 dB. The buildings
+    land where they should. The losses are thin branches, and the lens
+    rims and camera mount that move with the camera (`gsplat_photos`
+    takes no mask for them).
+  - With `equirect`, the held-out views are whole panoramas. Every 8th
+    registered face would have held out the same face of every
+    panorama: on ScanVan it took 3 of the 5 front faces, which left the
+    view ahead with two training images.
+- **A warning for panoramas fed as pinhole photos.** When at least half the
+  images look equirectangular, `build_photo_dataset` logs a warning that
+  points to `--equirect`. An image counts when it is 2:1 with left and
+  right edges that meet and smooth pole rows, or when its metadata says
+  equirectangular (Photo Sphere XMP). Outputs are unchanged. It flags
+  three stitched Poly Haven panoramas and none of the 128 south-building
+  photos or their 2:1 crops. It misses the ScanVan panoramas, whose left
+  and right edges are lens rims that do not meet.
+
 ### Fixed
 
 - **COLMAP-port mapper: resuming a reconstruction with 3D points

@@ -313,6 +313,19 @@ The pipeline has three stages:
    `--normal-weight 0.005` depth-normal loss makes surfaces smoother for
    -0.2 dB.
 
+**360° cameras.** `--equirect` takes a folder of 2:1 equirectangular
+panoramas and cuts each one into its six 90° cube faces, at most
+`--max-size` square. The faces then go through the three stages as pinhole
+images with their exact focal length held fixed. Faces of one panorama are
+never matched with each other, and `--window` counts panoramas. Each face
+is still solved as its own camera, with nothing tying the six to one
+centre. The log reports how far apart they land, as a fraction of the
+spacing between panoramas, so panoramas taken from almost the same spot
+(slow video) can still fail to reconstruct. Without `--equirect`, a folder
+that looks like panoramas gets a warning: 2:1 images whose left and right
+edges meet and whose top and bottom rows are poles, or whose metadata says
+equirectangular. The pinhole model gives no usable result on them.
+
 ## Visual-Inertial SLAM (Basalt Rust port)
 
 A separate, faithful Rust port of upstream
