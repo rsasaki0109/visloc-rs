@@ -104,6 +104,32 @@ All notable changes to `visloc-rs` will be documented here.
   photos or their 2:1 crops. It misses the ScanVan panoramas, whose left
   and right edges are lens rims that do not meet.
 
+### Changed
+
+- **visloc-basalt builds and runs on wasm32-unknown-unknown.** Natively
+  everything is identical, and the crate's tests pass unchanged.
+  - The libstdc++ bucket arithmetic is width independent.
+  - The diagnostic probes skip the environment and process id where there
+    are none.
+  - `mul_add` goes through a `fused_mul_add` that inlines on wasm. The
+    software `fmaf` it replaced took 40% of a frame.
+  - `BasaltVioEstimator::landmark_positions_world` exposes the window's
+    landmarks for display.
+  - FAST rejects a pixel from its four compass pixels before reading the
+    rest of the circle, as OpenCV does: identical detections, 9–18% less
+    time per VIO frame.
+  - `BasaltVioEstimatorAdapter::process_tracks_no_trace` runs the estimator
+    on tracks from another frontend, and `DirectKltStream::cam0_tracks`
+    exposes the tracks' patch transforms.
+  - `config.vio_imu_noise_per_step` (opt-in, default off): the IMU noise is
+    discretized by each preintegration step's length. Basalt injects the
+    per-sample noise into every step, which undercounts the short steps at
+    each frame interval's edges: a third of the covariance with one IMU
+    sample per frame (60 Hz IMU at 60 fps), whose overconfident IMU took
+    ADVIO at 60 fps from 2.65 m to 7.0 m. With it, 4.3 m and 2 resets
+    instead of 13; at 30 Hz neutral. A test checks the covariance no
+    longer depends on where an interval's samples fall.
+
 ### Fixed
 
 - **Mesh: empty for cameras close together looking out.** The TSDF voxel
@@ -129,7 +155,15 @@ All notable changes to `visloc-rs` will be documented here.
   is on in `gsplat_photos` and `gsplat_euroc`; it registered no image on
   south-building, ScanVan or EuRoC V1_01 (CPU, the README settings),
   whose results are unchanged.
-
+- **visloc-basalt: `vio_min_triangulation_dist` was ignored.** The VIO's
+  landmark baseline gate was hard-coded at 5 cm; it now reads the
+  configuration value, as upstream does. The pinned EuRoC file says 5 cm,
+  so its results are unchanged.
+- **visloc-basalt: `vio_obs_std_dev` and `vio_obs_huber_thresh` were
+  ignored.** The visual residuals were weighted with a hard-coded 0.5 px
+  standard deviation and 1 px Huber threshold; they now read the
+  configuration, as upstream does. The pinned EuRoC file has the same
+  values, so its results are unchanged.
 - **COLMAP-port mapper: resuming a reconstruction with 3D points
   panicked.** `ObservationManager::new` counted the existing observations
   before the visibility pyramids were sized. The constructor now sizes

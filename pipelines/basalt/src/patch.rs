@@ -1,6 +1,7 @@
 //! Mean-normalized Basalt `Pattern51` patches and inverse-compositional
 //! Jacobians.
 
+use crate::fma::FusedMulAdd;
 use nalgebra::{SMatrix, SVector, Vector2, Vector3};
 
 use crate::{pattern::Pattern51, pyramid::RawU16Image, update::AffineCompact2f};
@@ -49,7 +50,8 @@ impl MeanNormalizedPatch51 {
                     // Eigen's fixed 1x2-by-2x3 product emits a plain first
                     // product followed by an FMA for the SE(2) rotation
                     // column.  Keep that contraction order explicit.
-                    jacobian[(index, 2)] = gradient_y.mul_add(*offset_x, gradient_x * (-*offset_y));
+                    jacobian[(index, 2)] =
+                        gradient_y.fused_mul_add(*offset_x, gradient_x * (-*offset_y));
                     valid_samples += 1;
                 }
             }
@@ -193,7 +195,7 @@ fn hessian_fma(jacobian: &PatchJacobian51) -> SMatrix<f32, 3, 3> {
         for column in 0..3 {
             let mut value = 0.0_f32;
             for sample in 0..Pattern51::SAMPLE_COUNT {
-                value = jacobian[(sample, row)].mul_add(jacobian[(sample, column)], value);
+                value = jacobian[(sample, row)].fused_mul_add(jacobian[(sample, column)], value);
             }
             hessian[(row, column)] = value;
         }
@@ -210,8 +212,8 @@ fn hessian_inverse_jacobian_product(
     for row in 0..3 {
         for sample in 0..Pattern51::SAMPLE_COUNT {
             let value = inverse[(row, 1)] * jacobian[(sample, 1)];
-            let value = inverse[(row, 2)].mul_add(jacobian[(sample, 2)], value);
-            let value = inverse[(row, 0)].mul_add(jacobian[(sample, 0)], value);
+            let value = inverse[(row, 2)].fused_mul_add(jacobian[(sample, 2)], value);
+            let value = inverse[(row, 0)].fused_mul_add(jacobian[(sample, 0)], value);
             product[(row, sample)] = value;
         }
     }
@@ -249,95 +251,95 @@ fn gemv_packet8_row(matrix: &PatchInverseJacobian51, residual: &PatchData51, row
     // Eigen's generated fixed-size kernel.
     let lane0 = {
         let value = coefficients[4] * samples[4];
-        let value = coefficients[5].mul_add(samples[5], value);
-        coefficients[3].mul_add(samples[3], value)
+        let value = coefficients[5].fused_mul_add(samples[5], value);
+        coefficients[3].fused_mul_add(samples[3], value)
     };
     let lane1 = {
         let value = coefficients[1] * samples[1];
-        let value = coefficients[2].mul_add(samples[2], value);
-        coefficients[0].mul_add(samples[0], value)
+        let value = coefficients[2].fused_mul_add(samples[2], value);
+        coefficients[0].fused_mul_add(samples[0], value)
     };
     let lane2 = {
         let value = coefficients[11] * samples[11];
-        coefficients[12].mul_add(samples[12], value)
+        coefficients[12].fused_mul_add(samples[12], value)
     };
     let lane3 = {
         let value = coefficients[9] * samples[9];
-        coefficients[10].mul_add(samples[10], value)
+        coefficients[10].fused_mul_add(samples[10], value)
     };
     let lane4 = {
         let value = coefficients[7] * samples[7];
-        let value = coefficients[8].mul_add(samples[8], value);
-        coefficients[6].mul_add(samples[6], value)
+        let value = coefficients[8].fused_mul_add(samples[8], value);
+        coefficients[6].fused_mul_add(samples[6], value)
     };
     let lane5 = {
         let value = coefficients[17] * samples[17];
-        let value = coefficients[18].mul_add(samples[18], value);
-        coefficients[16].mul_add(samples[16], value)
+        let value = coefficients[18].fused_mul_add(samples[18], value);
+        coefficients[16].fused_mul_add(samples[16], value)
     };
     let lane6 = {
         let value = coefficients[14] * samples[14];
-        let value = coefficients[15].mul_add(samples[15], value);
-        coefficients[13].mul_add(samples[13], value)
+        let value = coefficients[15].fused_mul_add(samples[15], value);
+        coefficients[13].fused_mul_add(samples[13], value)
     };
     let lane7 = {
         let value = coefficients[24] * samples[24];
-        coefficients[25].mul_add(samples[25], value)
+        coefficients[25].fused_mul_add(samples[25], value)
     };
     let lane8 = {
         let value = coefficients[22] * samples[22];
-        coefficients[23].mul_add(samples[23], value)
+        coefficients[23].fused_mul_add(samples[23], value)
     };
     let lane9 = {
         let value = coefficients[20] * samples[20];
-        let value = coefficients[21].mul_add(samples[21], value);
-        coefficients[19].mul_add(samples[19], value)
+        let value = coefficients[21].fused_mul_add(samples[21], value);
+        coefficients[19].fused_mul_add(samples[19], value)
     };
     let lane10 = {
         let value = coefficients[30] * samples[30];
-        let value = coefficients[31].mul_add(samples[31], value);
-        coefficients[29].mul_add(samples[29], value)
+        let value = coefficients[31].fused_mul_add(samples[31], value);
+        coefficients[29].fused_mul_add(samples[29], value)
     };
     let lane11 = {
         let value = coefficients[27] * samples[27];
-        let value = coefficients[28].mul_add(samples[28], value);
-        coefficients[26].mul_add(samples[26], value)
+        let value = coefficients[28].fused_mul_add(samples[28], value);
+        coefficients[26].fused_mul_add(samples[26], value)
     };
     let lane12 = {
         let value = coefficients[35] * samples[35];
-        coefficients[36].mul_add(samples[36], value)
+        coefficients[36].fused_mul_add(samples[36], value)
     };
     let lane13 = {
         let value = coefficients[37] * samples[37];
-        coefficients[38].mul_add(samples[38], value)
+        coefficients[38].fused_mul_add(samples[38], value)
     };
     let lane14 = {
         let value = coefficients[33] * samples[33];
-        let value = coefficients[34].mul_add(samples[34], value);
-        coefficients[32].mul_add(samples[32], value)
+        let value = coefficients[34].fused_mul_add(samples[34], value);
+        coefficients[32].fused_mul_add(samples[32], value)
     };
     let lane15 = {
         let value = coefficients[43] * samples[43];
-        let value = coefficients[44].mul_add(samples[44], value);
-        coefficients[42].mul_add(samples[42], value)
+        let value = coefficients[44].fused_mul_add(samples[44], value);
+        coefficients[42].fused_mul_add(samples[42], value)
     };
     let lane16 = {
         let value = coefficients[40] * samples[40];
-        let value = coefficients[41].mul_add(samples[41], value);
-        coefficients[39].mul_add(samples[39], value)
+        let value = coefficients[41].fused_mul_add(samples[41], value);
+        coefficients[39].fused_mul_add(samples[39], value)
     };
     let lane17 = {
         let value = coefficients[48] * samples[48];
-        coefficients[49].mul_add(samples[49], value)
+        coefficients[49].fused_mul_add(samples[49], value)
     };
     let lane18 = {
         let value = coefficients[50] * samples[50];
-        coefficients[51].mul_add(samples[51], value)
+        coefficients[51].fused_mul_add(samples[51], value)
     };
     let lane19 = {
         let value = coefficients[46] * samples[46];
-        let value = coefficients[47].mul_add(samples[47], value);
-        coefficients[45].mul_add(samples[45], value)
+        let value = coefficients[47].fused_mul_add(samples[47], value);
+        coefficients[45].fused_mul_add(samples[45], value)
     };
 
     // Horizontal reduction, including every intermediate parenthesis, from
@@ -411,13 +413,13 @@ fn ldlt_inverse(input: SMatrix<f32, 3, 3>) -> Option<SMatrix<f32, 3, 3>> {
             }
             let mut diagonal_update = 0.0_f32;
             for column in 0..k {
-                diagonal_update = matrix[(k, column)].mul_add(temp[column], diagonal_update);
+                diagonal_update = matrix[(k, column)].fused_mul_add(temp[column], diagonal_update);
             }
             matrix[(k, k)] -= diagonal_update;
             for row in (k + 1)..3 {
                 let mut update = 0.0_f32;
                 for column in 0..k {
-                    update = matrix[(row, column)].mul_add(temp[column], update);
+                    update = matrix[(row, column)].fused_mul_add(temp[column], update);
                 }
                 matrix[(row, k)] -= update;
             }
@@ -449,7 +451,7 @@ fn ldlt_inverse(input: SMatrix<f32, 3, 3>) -> Option<SMatrix<f32, 3, 3>> {
             let coefficient = matrix[(below, row)];
             for column in 0..3 {
                 result[(below, column)] =
-                    (-coefficient).mul_add(row_value[column], result[(below, column)]);
+                    (-coefficient).fused_mul_add(row_value[column], result[(below, column)]);
             }
         }
     }
@@ -471,7 +473,7 @@ fn ldlt_inverse(input: SMatrix<f32, 3, 3>) -> Option<SMatrix<f32, 3, 3>> {
             for offset in 0..known {
                 let coefficient = matrix[(row + 1 + offset, row)];
                 let value = result[(row + 1 + offset, column)];
-                dot = coefficient.mul_add(value, dot);
+                dot = coefficient.fused_mul_add(value, dot);
             }
             result[(row, column)] -= dot;
         }
