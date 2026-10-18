@@ -1,0 +1,53 @@
+[package]
+name = "visloc-wasm"
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "visloc-rs in the browser: live monocular-inertial VIO (the Basalt port) on a phone's camera and IMU, compiled to WebAssembly."
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/rsasaki0109/visloc-rs"
+readme = "README.md"
+publish = false
+
+# Standalone workspace, like `bindings/python`: excluded from the root
+# workspace (see `exclude` in the root Cargo.toml) so the wasm-bindgen
+# dependencies and the nightly threaded build stay out of the root lockfile
+# and its MSRV / deny / package gates. Depends on the workspace crates by
+# path. The session itself also builds natively (`examples/advio.rs` replays
+# a phone recording through it).
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# rayon on Web Workers (wasm-bindgen-rayon): needs a nightly toolchain with
+# `-C target-feature=+atomics,+bulk-memory` and `-Z build-std` (see
+# build.sh), and a cross-origin isolated page (COOP/COEP headers).
+threads = ["dep:wasm-bindgen-rayon"]
+
+[dependencies]
+nalgebra = "0.33"
+rayon = "1"
+serde_json = "1"
+visloc-basalt = { path = "../../pipelines/basalt" }
+visloc-core = { path = "../../crates/core" }
+wgpu = "30"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-rayon = { version = "1", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
