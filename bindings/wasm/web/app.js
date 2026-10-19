@@ -23,8 +23,10 @@ const prefs = {
   width: Number(localStorage.getItem("visloc-vio-width") || 360),
   watchdog: localStorage.getItem("visloc-vio-watchdog") !== "0",
   stillStart: localStorage.getItem("visloc-vio-still") !== "0",
-  fps60: localStorage.getItem("visloc-vio-60fps") === "1",
-  track60: localStorage.getItem("visloc-vio-track60") === "1",
+  // 60 fps, every frame tracked: on unless turned off. New keys: the
+  // settings sheet saved every option under the old off default.
+  fps60: localStorage.getItem("visloc-vio-60fps:v2") !== "0",
+  track60: localStorage.getItem("visloc-vio-track60:v2") !== "0",
   tracks: localStorage.getItem("visloc-vio-tracks") === "1",
   overlayLeadMs: Number(localStorage.getItem("visloc-vio-overlay-lead") || 0),
   light: localStorage.getItem("visloc-vio-light") || "auto", // "auto" | "on" | "off"
@@ -1691,8 +1693,8 @@ $("b-apply").onclick = () => {
   localStorage.setItem("visloc-vio-width", String(prefs.width));
   localStorage.setItem("visloc-vio-watchdog", prefs.watchdog ? "1" : "0");
   localStorage.setItem("visloc-vio-still", prefs.stillStart ? "1" : "0");
-  localStorage.setItem("visloc-vio-60fps", prefs.fps60 ? "1" : "0");
-  localStorage.setItem("visloc-vio-track60", prefs.track60 ? "1" : "0");
+  localStorage.setItem("visloc-vio-60fps:v2", prefs.fps60 ? "1" : "0");
+  localStorage.setItem("visloc-vio-track60:v2", prefs.track60 ? "1" : "0");
   localStorage.setItem("visloc-vio-gpu", prefs.gpu ? "1" : "0");
   localStorage.setItem("visloc-vio-threads", prefs.threads ? "1" : "0");
   localStorage.setItem("visloc-vio-landmarks", prefs.landmarks ? "1" : "0");

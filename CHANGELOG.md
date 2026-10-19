@@ -108,7 +108,8 @@ All notable changes to `visloc-rs` will be documented here.
   sensors, on iPhone Safari and Android Chrome.
   - **Calibration per phone:** Client Hints model or iPhone screen family,
     with intrinsics from the 35 mm-equivalent focal length. The camera-IMU
-    time offset is estimated online and saved per phone.
+    time offset is estimated online and saved per phone (−25 ms until
+    measured).
   - **Watchdog:** a diverged estimate is restarted and re-anchored to the
     last good pose.
   - **Page:** AR overlay, map, wasm threads when cross-origin isolated, and
@@ -140,8 +141,7 @@ All notable changes to `visloc-rs` will be documented here.
   - **Coasting:** frames without a landmark after some were seen report
     `"coast"`, and the page keeps drawing the IMU's pose ("Coasting on
     IMU") instead of showing "Initializing". ⚙ → "Film at 60 fps" captures
-    at 60 fps (half the longest exposure, so less blur in fast moves) and
-    tracks every other frame.
+    at 60 fps (half the longest exposure, so less blur in fast moves).
   - **Frontend on the GPU:** the pyramid, the frame-to-frame KLT and the
     grid FAST run as WGSL compute shaders with wgpu (WebGPU in the
     browser, Vulkan or Metal natively; ⚙ → "Track points on the GPU", on
@@ -153,12 +153,14 @@ All notable changes to `visloc-rs` will be documented here.
     `advio` take `--gpu`; `examples/gpu_check.rs` compares the two. The
     worker runs the GPU frontend one frame ahead of the estimator, so the
     GPU's round trip overlaps the estimate (same poses).
-  - **60 Hz:** ⚙ → "…and track every frame at 60 Hz" tracks every frame of
-    a 60 fps camera, which on two iPhone recordings kept more landmarks in
-    view than the same frames at 30 Hz (172 against 94) without a reset,
-    once the IMU noise fix below is in. Recordings keep every camera frame
-    (`replay --every 2` replays one at 30 Hz), the rig carries
-    `frameRateHz`, and `--estimate-every 2` estimates every other frame.
+  - **60 Hz:** filming at 60 fps and tracking every frame are on by
+    default (⚙ → "Film at 60 fps", "…and track every frame at 60 Hz").
+    Tracking every frame of a 60 fps camera kept more landmarks in view on
+    two iPhone recordings than the same frames at 30 Hz (172 against 94)
+    without a reset, once the IMU noise fix below is in. Recordings keep
+    every camera frame (`replay --every 2` replays one at 30 Hz), the rig
+    carries `frameRateHz`, and `--estimate-every 2` estimates every other
+    frame.
     The session's watchdog, still start and coasting are timed in seconds
     instead of frames.
   - **Android phones:** profiles for the Galaxy Note20 Ultra / Note20 and

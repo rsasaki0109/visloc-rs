@@ -124,13 +124,17 @@ export async function detectDevice() {
   };
 }
 
+/** Camera timestamps relative to the motion events', ms, before the time
+ * sync has measured a phone (it moves the offset by 15 ms or more). */
+export const DEFAULT_TIME_OFFSET_MS = -25;
+
 /** The default calibration for a device (before any per-device override). */
 export function defaultCalibration(device) {
   return {
     focal35: device.focal35,
     // Camera timestamps relative to the motion events', ms (added to frame
-    // times). With requestVideoFrameCallback capture times this is near 0.
-    timeOffsetMs: 0,
+    // times).
+    timeOffsetMs: DEFAULT_TIME_OFFSET_MS,
     noiseScale: 1,
     cameraOffset: device.cameraOffset,
     // null: decide from the device orientation (see app.js).
@@ -146,10 +150,11 @@ export function defaultCalibration(device) {
 }
 
 /** Saved overrides for this device, merged over the defaults. A saved
- * focal length that is just the default it was saved under (the page saves
- * the whole calibration, e.g. when the time sync moves the offset) gives way
- * to a newer profile; one set by hand stays. Saves from before
- * `baseFocal35` was recorded had the generic 26 mm default. */
+ * focal length or time offset that is just the default it was saved under
+ * (the page saves the whole calibration, e.g. when the time sync moves the
+ * offset) gives way to a newer default; one measured or set by hand stays.
+ * Saves from before `baseFocal35` / `baseTimeOffsetMs` were recorded had
+ * the generic 26 mm and 0 ms. */
 export function loadCalibration(device) {
   const base = defaultCalibration(device);
   try {
@@ -157,7 +162,11 @@ export function loadCalibration(device) {
     if (saved.focal35 != null && saved.focal35 === (saved.baseFocal35 ?? 26) && saved.focal35 !== device.focal35) {
       delete saved.focal35;
     }
+    if (saved.timeOffsetMs != null && saved.timeOffsetMs === (saved.baseTimeOffsetMs ?? 0) && saved.timeOffsetMs !== DEFAULT_TIME_OFFSET_MS) {
+      delete saved.timeOffsetMs;
+    }
     delete saved.baseFocal35;
+    delete saved.baseTimeOffsetMs;
     return { ...base, ...saved };
   } catch {
     return base;
@@ -165,7 +174,7 @@ export function loadCalibration(device) {
 }
 
 export function saveCalibration(device, calibration) {
-  const saved = { ...calibration, baseFocal35: device.focal35 };
+  const saved = { ...calibration, baseFocal35: device.focal35, baseTimeOffsetMs: DEFAULT_TIME_OFFSET_MS };
   localStorage.setItem(`visloc-vio-calib:${device.key}`, JSON.stringify(saved));
 }
 

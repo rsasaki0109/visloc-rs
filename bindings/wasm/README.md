@@ -90,8 +90,10 @@ Two values are measured on the phone instead:
 
 - **Accelerometer sign:** checked against the device orientation. iOS
   reports gravity instead of specific force (the opposite sign).
-- **Camera-IMU time offset:** estimated online (`src/sync.rs`). Once it has
-  seen enough rotation, the page shifts the frame timestamps, saves the
+- **Camera-IMU time offset:** estimated online (`src/sync.rs`). Until a
+  phone has been measured, the page assumes −25 ms (a saved offset that was
+  only the earlier 0 ms default gives way to it). Once the sync has seen
+  enough rotation, the page shifts the frame timestamps, saves the
   offset for that phone, and restarts tracking. On ADVIO it recovers
   injected ±60 ms errors to within 3–6 ms (correlation 0.96–0.99). That
   matters: an offset 30 ms off doubles the error, and 60 ms off resets
@@ -255,14 +257,15 @@ for the pyramid.
 
 iOS offers no exposure control to the page (the camera's capabilities list
 frame rate, zoom, focus distance, torch and white balance only). A frame's
-exposure cannot outlast the frame, so ⚙ → "Film at 60 fps" halves the
-longest exposure, and with it the blur of a fast move, at the cost of more
-noise. One A/B on an iPhone, two recordings with similar motion (median
-0.25 and 0.23 rad/s), tracking every other frame: at 60 fps the
-forward-backward check dropped 5.9% of the points a frame against 19.2% at
-30 fps, leaving 187 landmarks in view against 73, and 2% of the frames
-coasting against 16%. A second pair agreed (14.8% against 27.4%). ⚙ →
-"…and track every frame at 60 Hz" tracks them all; see "60 Hz".
+exposure cannot outlast the frame, so ⚙ → "Film at 60 fps" (on by
+default) halves the longest exposure, and with it the blur of a fast move,
+at the cost of more noise. One A/B on an iPhone, two recordings with
+similar motion (median 0.25 and 0.23 rad/s), tracking every other frame:
+at 60 fps the forward-backward check dropped 5.9% of the points a frame
+against 19.2% at 30 fps, leaving 187 landmarks in view against 73, and 2%
+of the frames coasting against 16%. A second pair agreed (14.8% against
+27.4%). ⚙ → "…and track every frame at 60 Hz" (also on by default) tracks
+them all; see "60 Hz".
 
 ## 60 Hz
 
@@ -476,8 +479,9 @@ For tracking at 60 fps:
 - **Not every frame:** on ADVIO, which is filmed at 60 fps, tracking every
   frame gave a mean ATE of 7.0 m and 13 resets against 2.65 m and 2 at
   30 fps; with the keyframe spacing and the window doubled to span the
-  same time, 6.4 m and 6 resets. The estimator is tuned for 30 fps, so the
-  60 fps option films at 60 and tracks at 30.
+  same time, 6.4 m and 6 resets. The cause was the IMU noise model (see
+  "60 Hz"); with `vio_imu_noise_per_step` the page films and tracks every
+  frame at 60 fps by default.
 - **WebGPU** suits the frontend (pyramid, KLT and FAST are per-pixel and
   per-point work), not the estimator (small dense solves in a sequential
   loop). The frontend now runs there; see "The frontend on the GPU".
