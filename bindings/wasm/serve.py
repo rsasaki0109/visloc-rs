@@ -56,6 +56,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Cache-Control", "no-cache")
+        # The page sends telemetry and uploads only where it sees this.
+        self.send_header("X-Visloc-Server", "telemetry, upload")
         self.send_header("Accept-Ranges", "bytes")
         super().end_headers()
 

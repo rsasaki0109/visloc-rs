@@ -5,7 +5,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three";
 import { detectDevice, loadCalibration, saveCalibration, clearCalibration, defaultCalibration, intrinsics, IMU_DEFAULT } from "./profiles.js";
 import { recordingBlob } from "./recording.js";
-import { emit, flush, sessionId, environment, enabled as telemetryOn, text } from "./telemetry.js";
+import { emit, flush, sessionId, environment, enabled as telemetryOn, hasServer, text } from "./telemetry.js";
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -38,6 +38,7 @@ let workerReady = null; // { threaded, threads, webgpu }
 let frontendGpu = null; // the GPU tracking points (its description), or null
 let workerCreatedAt = 0;
 let running = false;
+let serverHere = true; // serve.py, with telemetry and uploads (see hasServer)
 let stream = null;
 let rig = null;
 let accelSign = 1;
@@ -199,7 +200,7 @@ function describeDevice(el) {
     ["IMU noise", `x${calib.noiseScale}`],
     ["build", workerReady ? (workerReady.threaded ? `wasm threads x${workerReady.threads}` : "wasm, 1 thread") : "loading…"],
     ["points", frontendGpu ? `GPU (${frontendGpu})` : "CPU"],
-    ["diagnostics", telemetryOn ? sessionId : "off"],
+    ["diagnostics", telemetryOn && serverHere ? sessionId : "off"],
   ];
   el.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
@@ -1747,6 +1748,12 @@ $("b-map").onclick = () => {
 };
 $("b-map").setAttribute("aria-pressed", String(mapVisible));
 $("b-upload").onclick = upload;
+// A static host (GitHub Pages) takes neither uploads nor telemetry; the
+// recording can still be downloaded.
+hasServer.then((yes) => {
+  serverHere = yes;
+  $("b-upload").hidden = !yes;
+});
 $("b-close-rec").onclick = () => ($("rec-sheet").hidden = true);
 
 boot();

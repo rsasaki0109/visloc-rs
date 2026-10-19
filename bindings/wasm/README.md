@@ -45,6 +45,13 @@ single-threaded build. A tab the phone resumes keeps the code it loaded, so
 when the page comes back to the foreground with the served files changed,
 it reloads itself.
 
+The page also works as a static site: `./deploy_pages.sh <remote>` pushes
+it, with both builds and the demo if `web/demo` exists, to a `gh-pages`
+branch for GitHub Pages. Static hosts cannot send COOP/COEP, so a service
+worker (`web/coi-sw.js`) adds them in the browser, after one reload on the
+first visit. Telemetry and uploads need `serve.py` and are off elsewhere:
+the page looks for the `X-Visloc-Server` header that `serve.py` sends.
+
 The sensor-free demo (`web/demo/`, not in git) is built from an ADVIO
 sequence (CC BY-NC 4.0):
 

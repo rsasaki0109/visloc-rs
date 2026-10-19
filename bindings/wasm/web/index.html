@@ -5,6 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0e1012">
 <title>visloc-rs · live VIO in the browser</title>
+<script>
+  // On a static host (GitHub Pages) the page is not cross-origin isolated:
+  // coi-sw.js adds the headers, from the next load on (one reload a tab
+  // session at most, so a browser that ignores them does not loop).
+  if (!self.crossOriginIsolated && window.isSecureContext && navigator.serviceWorker) {
+    navigator.serviceWorker.register("coi-sw.js").then(() => navigator.serviceWorker.ready).then(() => {
+      if (!sessionStorage.getItem("coi-reloaded")) {
+        sessionStorage.setItem("coi-reloaded", "1");
+        location.reload();
+      }
+    }, (err) => console.warn("cross-origin isolation service worker:", err));
+  }
+</script>
 <style>
   :root {
     --stage: #0e1012;
@@ -225,7 +238,7 @@
   <button class="big" id="b-start">Start camera &amp; motion sensors</button>
   <button class="ghost" id="b-demo">Watch a demo (recorded iPhone walk, no sensors needed)</button>
   <div class="err" id="start-err"></div>
-  <p class="note">Calibration is loaded for your phone model where known (focal length from the manufacturer's 35&nbsp;mm-equivalent figure). Tune it under ⚙ if tracking drifts. Uses wasm threads when the page is cross-origin isolated. The page sends diagnostics to the demo server (timings, counters, errors and phone model; no images); <code>?telemetry=0</code> turns that off.</p>
+  <p class="note">Calibration is loaded for your phone model where known (focal length from the manufacturer's 35&nbsp;mm-equivalent figure). Tune it under ⚙ if tracking drifts. Uses wasm threads when the page is cross-origin isolated. Served by <code>serve.py</code>, the page sends it diagnostics (timings, counters, errors and phone model; no images); <code>?telemetry=0</code> turns that off.</p>
 </section>
 
 <section class="sheet" id="settings-sheet" hidden>

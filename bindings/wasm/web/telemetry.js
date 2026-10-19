@@ -11,12 +11,23 @@ const MAX_QUEUED = 600;
 const queue = [];
 let batches = 0, lost = 0, failures = 0;
 
+// serve.py marks its responses. A static host (GitHub Pages) has nowhere to
+// send events: there they are dropped.
+export const hasServer = fetch("./", { method: "HEAD", cache: "no-store" })
+  .then((r) => r.headers.has("x-visloc-server"))
+  .catch(() => false);
+let server = null; // unknown until the probe answers; events wait
+hasServer.then((yes) => {
+  server = yes;
+  if (!yes) queue.length = 0;
+});
+
 const repeats = new Map();
 
 /** Queues an event; errors and stalls are sent at once. An error repeating
  * (say, every frame) is sent five times, then every hundredth time. */
 export function emit(type, data = {}) {
-  if (!enabled) return;
+  if (!enabled || server === false) return;
   if (type === "error" || type === "console") {
     const key = `${type}:${data.message}`.slice(0, 300);
     const count = (repeats.get(key) ?? 0) + 1;
@@ -32,7 +43,7 @@ export function emit(type, data = {}) {
 /** Sends the queued events (with `beacon`, in a way that survives the page
  * being closed). */
 export function flush(beacon = false) {
-  if (!enabled || !queue.length) return;
+  if (!enabled || !server || !queue.length) return;
   const events = queue.splice(0);
   const body = JSON.stringify({ session: sessionId, batch: batches++, lost, failures, events });
   if (beacon && navigator.sendBeacon?.("telemetry", body)) return;
