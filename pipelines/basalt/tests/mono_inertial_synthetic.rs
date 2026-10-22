@@ -952,6 +952,35 @@ fn visual_only_mono_ignores_imu_and_matches_without_marg_data() {
     }
 }
 
+/// A packet the normal path would reject is rejected before the visual-only
+/// bootstrap holds it, so the held reference is always replayable.
+#[test]
+fn visual_only_validates_packets_before_holding_them() {
+    let calibration = mono_calibration();
+    let mut estimator =
+        vio_estimator_from_calibration(&calibration, &visual_only_config()).unwrap();
+    let observation = |track_id: u64, frame_id: u64| TrackObservation {
+        track_id,
+        frame_id,
+        timestamp_ns: START_NS,
+        camera_id: 0,
+        pixel: nalgebra::Point2::new(300.0 + track_id as f64, 200.0),
+    };
+    let wrong_frame = [observation(0, 0), observation(1, 7)];
+    let error = estimator
+        .process(0, START_NS, &wrong_frame, &[])
+        .unwrap_err();
+    assert!(error.contains("does not match current frame"), "{error}");
+    let duplicate = [observation(0, 0), observation(0, 0)];
+    let error = estimator.process(0, START_NS, &duplicate, &[]).unwrap_err();
+    assert!(error.contains("duplicate current observation"), "{error}");
+    // Neither rejected packet was held: the valid one at the same timestamp
+    // is accepted, not refused as non-monotonic.
+    let valid = [observation(0, 0), observation(1, 0)];
+    let output = estimator.process(0, START_NS, &valid, &[]).unwrap();
+    assert_eq!(output.active_state_count, 0);
+}
+
 #[test]
 #[ignore = "release-only: about 40x slower unoptimized; run `cargo test --release -p visloc-basalt --test mono_inertial_synthetic -- --include-ignored`"]
 fn visual_only_mono_noisy_tracks_stay_consistent() {

@@ -1034,20 +1034,7 @@ impl BasaltVioEstimator {
             return Err("non-monotonic frame timestamp".into());
         }
         if let Some(mut images) = images {
-            if images.iter().any(|image| {
-                image.frame_id != frame_id
-                    || image.timestamp_ns != timestamp_ns
-                    || !image.is_valid()
-            }) {
-                return Err("invalid raw optical-flow image payload".into());
-            }
-            images.sort_by_key(|image| image.camera_id);
-            if images
-                .windows(2)
-                .any(|pair| pair[0].camera_id == pair[1].camera_id)
-            {
-                return Err("duplicate raw optical-flow camera payload".into());
-            }
+            Self::validate_raw_images(frame_id, timestamp_ns, &mut images)?;
             self.of_images.insert(frame_id, images);
         }
         let earth_rotation_body = self.earth_rotation_in_body();
@@ -2300,6 +2287,29 @@ impl BasaltVioEstimator {
         keyframes
     }
 
+    /// Check a packet's raw optical-flow images against its frame and sort
+    /// them by camera.  Shared by the normal path and the visual-only
+    /// bootstrap, which holds packets before the normal path sees them.
+    fn validate_raw_images(
+        frame_id: u64,
+        timestamp_ns: i64,
+        images: &mut [OfImageData],
+    ) -> Result<(), String> {
+        if images.iter().any(|image| {
+            image.frame_id != frame_id || image.timestamp_ns != timestamp_ns || !image.is_valid()
+        }) {
+            return Err("invalid raw optical-flow image payload".into());
+        }
+        images.sort_by_key(|image| image.camera_id);
+        if images
+            .windows(2)
+            .any(|pair| pair[0].camera_id == pair[1].camera_id)
+        {
+            return Err("duplicate raw optical-flow camera payload".into());
+        }
+        Ok(())
+    }
+
     /// Validate the current packet's frame/camera identity before any
     /// association/history mutation. The frame id carried by an observation
     /// is part of the upstream `TimeCamId` and must agree with the enclosing
@@ -3211,7 +3221,7 @@ impl BasaltVioEstimator {
         frame_id: u64,
         timestamp_ns: i64,
         observations: &[TrackObservation],
-        images: Option<Vec<OfImageData>>,
+        mut images: Option<Vec<OfImageData>>,
         retain_marg_data: bool,
         retain_trace: bool,
     ) -> Result<EstimatorOutput, String> {
@@ -3222,6 +3232,13 @@ impl BasaltVioEstimator {
         {
             return Err("non-monotonic frame timestamp".into());
         }
+        // Validate before holding: a held packet is replayed through
+        // `process_impl` only after the gauge is set, when a late rejection
+        // would leave the bootstrap half done.
+        if let Some(images) = images.as_mut() {
+            Self::validate_raw_images(frame_id, timestamp_ns, images)?;
+        }
+        Self::validate_current_observation_identities(frame_id, timestamp_ns, observations)?;
         self.vo.last_held_timestamp_ns = Some(timestamp_ns);
         let held = VisualOnlyReference {
             frame_id,

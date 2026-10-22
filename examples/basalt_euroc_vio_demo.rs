@@ -236,7 +236,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         dataset.calibration(),
         visual_only_config.as_ref().unwrap_or(dataset.config()),
     )?;
-    let skip_uninitialized = args.mono_vo;
+    // Visual-only output handling follows the estimator's effective mode,
+    // so `config.vio_visual_only: true` with `--mono` behaves like `--mono-vo`.
+    let visual_only = adapter.estimator.config.visual_only;
+    let skip_uninitialized = visual_only;
     adapter
         .estimator
         .set_lean_marg_data(!args.retained_marg_diagnostics);
@@ -456,13 +459,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     // Only the opt-in monocular replay adds a line, so the stereo summary
     // stays byte-identical for existing tooling.
-    if args.mono_vo {
+    if visual_only {
         summary.push_str("camera_mode=mono_visual_only\n");
     } else if dataset.is_monocular() {
         summary.push_str("camera_mode=mono_inertial\n");
     }
 
-    if args.mono_vo {
+    if visual_only {
         fs::write(
             args.out_dir.join("trajectory_refined_window.tum"),
             refined.tum(false),

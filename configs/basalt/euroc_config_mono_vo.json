@@ -35,6 +35,7 @@
         "config.vio_init_bg_weight": 100.0,
         "config.vio_marg_lost_landmarks": true,
         "config.vio_kf_marg_feature_ratio": 0.1,
+        "config.vio_visual_only": true,
         "config.mapper_obs_std_dev": 0.25,
         "config.mapper_obs_huber_thresh": 1.5,
         "config.mapper_detection_num_points": 800,
