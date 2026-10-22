@@ -4,7 +4,7 @@
 //!
 //! cargo run --release -p visloc-sift-gpu --features gpu --example sift_dump_features -- \
 //!     --images <dir> --frames 0,40,55,56,57 --out <dir> \
-//!     [--keypoints 4000] [--l1-root] [--magnification 3] [--max-orientations 2] [--prefer-larger-scale]
+//!     [--keypoints 4000] [--l1-root] [--magnification 3] [--max-orientations 2] [--prefer-larger-scale] [--full-pyramid]
 
 use std::path::PathBuf;
 
@@ -46,6 +46,9 @@ fn main() {
     }
     if flag(&args, "--prefer-larger-scale") {
         config.prefer_larger_scale = true;
+    }
+    if flag(&args, "--full-pyramid") {
+        config.full_pyramid = true;
     }
     if flag(&args, "--aligned-octave0") {
         config.aligned_octave0_upsample = true;

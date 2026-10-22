@@ -31,7 +31,7 @@ mod vlfeat;
 #[cfg(feature = "gpu")]
 pub use descriptor_matcher::WgpuDescriptorMatcher;
 #[cfg(feature = "gpu")]
-pub use extractor::{SiftGpu, SiftGpuError};
+pub use extractor::{SiftGpu, SiftGpuError, SiftGpuTimings};
 #[cfg(feature = "gpu")]
 pub use matcher::{FeatureBank, GpuMatcher};
 #[cfg(feature = "gpu")]
@@ -68,12 +68,15 @@ mod tests {
     }
 
     fn compare(config: &SiftConfig) {
+        compare_size(config, 192, 128);
+    }
+
+    fn compare_size(config: &SiftConfig, w: usize, h: usize) {
         let Some(ctx) = try_context() else {
             eprintln!("no GPU adapter; skipping");
             return;
         };
         let mut gpu = SiftGpu::new(ctx);
-        let (w, h) = (192, 128);
         let px = texture(w, h);
         let img = GrayImage::new(w, h, &px).unwrap();
         let (ck, cd) = extract_sift(&img, config).unwrap();
@@ -113,6 +116,30 @@ mod tests {
     }
 
     #[test]
+    fn matches_cpu_unaligned_size() {
+        compare_size(&SiftConfig::default(), 193, 129);
+    }
+
+    #[test]
+    fn matches_cpu_full_pyramid() {
+        compare(&SiftConfig {
+            max_keypoints: 40,
+            full_pyramid: true,
+            ..SiftConfig::default()
+        });
+    }
+
+    #[test]
+    fn matches_cpu_prefer_larger_scale() {
+        compare(&SiftConfig {
+            max_keypoints: 40,
+            full_pyramid: true,
+            prefer_larger_scale: true,
+            ..SiftConfig::default()
+        });
+    }
+
+    #[test]
     fn matches_cpu_capped_l1root() {
         compare(&SiftConfig {
             max_keypoints: 40,
@@ -120,6 +147,47 @@ mod tests {
             normalization: SiftNormalization::L1Root,
             ..SiftConfig::default()
         });
+    }
+
+    #[test]
+    fn async_extraction_matches_sync_api() {
+        let Some(ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let mut gpu = SiftGpu::new(ctx);
+        let (w, h) = (192, 128);
+        let pixels = texture(w, h);
+        let image = GrayImage::new(w, h, &pixels).unwrap();
+        let config = SiftConfig {
+            max_keypoints: 40,
+            ..SiftConfig::default()
+        };
+        let synchronous = gpu.extract(&image, &config).unwrap();
+        let asynchronous = pollster::block_on(gpu.extract_async(&image, &config)).unwrap();
+        assert_eq!(synchronous, asynchronous);
+    }
+
+    #[test]
+    fn pooled_buffers_handle_alternating_image_sizes() {
+        let Some(ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let mut gpu = SiftGpu::new(ctx);
+        let config = SiftConfig {
+            max_keypoints: 32,
+            ..SiftConfig::default()
+        };
+        for (width, height) in [(192, 128), (256, 160), (160, 128), (256, 160)] {
+            let pixels = texture(width, height);
+            let image = GrayImage::new(width, height, &pixels).unwrap();
+            let (keypoints, descriptors) = gpu.extract(&image, &config).unwrap();
+            assert_eq!(keypoints.len(), descriptors.len());
+            assert!(keypoints.len() <= config.max_keypoints);
+            assert!(descriptors.iter().all(|descriptor| descriptor.len() == 128));
+            assert!(gpu.pooled_buffer_bytes() > 0);
+        }
     }
 
     #[test]

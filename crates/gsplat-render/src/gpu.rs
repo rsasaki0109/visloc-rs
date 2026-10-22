@@ -73,7 +73,8 @@ impl GpuContext {
         // the conservative WebGPU defaults (e.g. 256 MiB buffers).
         let limits = adapter.limits();
         // Subgroup ops are used by the backward pass (training) when present.
-        let features = adapter.features() & wgpu::Features::SUBGROUP;
+        let features =
+            adapter.features() & (wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY);
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("visloc-gsplat-render"),
