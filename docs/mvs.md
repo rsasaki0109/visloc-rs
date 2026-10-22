@@ -665,6 +665,39 @@ accuracy and completeness are at 2 cm; times cover the whole run
   the scene (terrace got 2.3 cm, office 0.31 cm). It now comes from the
   median depth, with a second, coarser level for far pixels (see Mesh).
 
+### Against APD-MVS on the same GPU (r54)
+
+APD-MVS's released code (whoiszzj/APD-MVS at `38660f3`, built for the
+L4's compute capability 8.9) on the same five scenes and ground-truth
+poses, its input from its `colmap2mvsnet.py` at half resolution (3104 px)
+as its README does for ETH3D, against visloc-mvs's defaults at 3200 px
+(commit `74dde86`). Each cloud comes from its own pipeline's fusion. F1 at
+2 cm, with accuracy / completeness; the last column is APD-MVS's own
+reported F1:
+
+| Scene | visloc-mvs | APD-MVS | APD-MVS reported | Time, visloc-mvs | Time, APD-MVS |
+|---|---|---|---|---|---|
+| terrace | **91.2%** (95.8 / 87.1) | 88.4% (96.4 / 81.7) | 90.51% | 4:21 | 16:48 |
+| office | 80.6% (82.6 / 78.8) | **88.8%** (92.3 / 85.6) | 90.68% | 4:19 | 20:28 |
+| kicker | 83.8% (83.4 / 84.3) | **88.4%** (90.0 / 86.9) | 87.38% | 5:29 | 33:47 |
+| playground | 69.5% (79.5 / 61.7) | **77.7%** (84.5 / 72.0) | 80.15% | 7:15 | 34:36 |
+| facade | 67.3% (76.6 / 59.9) | **72.6%** (80.6 / 66.0) | 75.64% | 15:00 | 1:16:47 |
+| **Mean / total** | 78.5% | **83.2%** | 84.87% | 36:24 | 3:02:26 |
+
+- **The gap is real and in weak texture.** APD-MVS leads by 4.6 to 8.2
+  points on office, kicker, playground and facade, on accuracy and
+  completeness both; visloc-mvs leads on terrace by 2.8 points, on
+  completeness. Over the five scenes it is 4.7 points ahead.
+- **The reproduction is close to the paper.** 1.7 points below APD-MVS's
+  reported mean over these scenes (kicker 1.0 above, the others 1.9 to
+  3.1 below); the half resolution and the evaluator's version may account
+  for it.
+- **visloc-mvs is 5.0 times faster** in total (3.9 to 6.2 times per
+  scene). APD-MVS's input conversion adds 0.5 to 2.5 minutes per scene.
+- **office loses on accuracy most** (82.6% against 92.3%): the planes
+  visloc-mvs puts on weak texture are wrong rather than missing.
+  **playground loses on completeness most** (61.7% against 72.0%).
+
 ### One scale and the planar prior
 
 One run at commit `21b6596`: one scale, the photometric pass, the planar
