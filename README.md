@@ -70,7 +70,7 @@ the docs record open gaps.
 | --- | --- | --- | --- | --- |
 | Monocular, unordered photos | SfM, 3DGS, mesh | **Benchmarked** | ETH3D Electro 1,200: 3.46× faster than COLMAP CPU, 3.50 vs 4.68 cm | `unordered_sfm_demo`, `gsplat_photos` |
 | Monocular video | SfM | **Benchmarked** | EuRoC: faster than COLMAP 4.1 CUDA on 8/8 sequences, more accurate on 4/8 | `gsplat_euroc` |
-| Posed photos (a COLMAP sparse model) | Dense MVS | Experimental | ETH3D high-res training, all 13 scenes at 3200 px on one L4: F1 83.7% at 2 cm in 74 min (ACMMP 83.42%, ACMP 79.79%, ACMM 78.86%, COLMAP 67.66%); ACMMP's released code on the same L4 matches its F1 over six scenes in 4.0× the time; end to end from the photos (`gsplat_photos` SfM, then MVS, aligned to the ground-truth cameras) 81.5% over the 13 scenes; aligned by the camera centres alone, 76.3% against COLMAP 4.2.1 CUDA's 57.4% on the 10 scenes it finished, 6.4× faster | `visloc-mvs` example `mvs` ([notes](docs/mvs.md)) |
+| Posed photos (a COLMAP sparse model) | Dense MVS | Experimental | ETH3D high-res training, 13 scenes at 3200 px on one L4: F1 83.7% at 2 cm in 74 min (ACMMP 83.42%), 4× faster than ACMMP's code on the same GPU; 81.5% end to end from the photos | `visloc-mvs` example `mvs` ([notes](docs/mvs.md)) |
 | Monocular video | VO (DPVO port) | Experimental | MH_01 prefix 0.16 m, about 2× DPVO's published error; CPU only | `euroc_dpvo_vo_demo` |
 | Monocular + IMU | VIO (Basalt port) | Experimental | Runs end to end; synthetic tests recover metric scale within 0.3% at 5–9 mm RMS over 5–7 m paths; no EuRoC result yet | `basalt_euroc_vio_demo --mono` ([notes](docs/mono_inertial_vio.md)) |
 | Stereo | VO / SLAM | **Benchmarked** | KITTI seq00 1.23 m and seq09 2.07 m, vs 1.3 m and 3.2 m for ORB-SLAM2 | `deep_stereo_slam`, `online_slam_stereo_vo_kitti_demo` |
@@ -148,36 +148,16 @@ matches, the GLOMAP paper's setup, and the scoring follows that paper:
 | COLMAP incremental | 50.4 / 75.2 / 81.7 | 445 / 454 | 200.7 s |
 | COLMAP global (GLOMAP) | 51.6 / 75.5 / 81.7 | 454 / 454 | 184.4 s |
 
-On visloc-rs's own matches it leads both at every threshold: 53.1 / 78.9 /
-85.7, against COLMAP's three-run means of 50.2 / 75.1 / 82.0 (incremental)
-and 51.3 / 75.0 / 81.1 (global). The global mapper still registers more
-images; completing the largest model, now on by default in
-`gsplat_photos`, closes most of that gap. In a later run on COLMAP's
-matches, it took visloc-rs to 452 of 454 images and 53.7 / 79.9 / 86.9,
-ahead of COLMAP's incremental mapper (51.3 / 76.3 / 82.9) and its global
-mapper. The global mapper failed on one scene in that run; without that
-scene the means are 53.7 / 79.7 / 86.7 against 52.7 / 76.3 / 82.7. GPU
-SIFT, also the default now, extracts those features at the same AUC (53.1 /
-78.9 / 85.7): 10.0 s for the 13 scenes on an RTX 3090, against 92.4 s on 13
-CPU threads of the same machine. On an L4, the GPU of the COLMAP CUDA runs,
-it took 16.3 s with decoding against COLMAP's 22.2 s, and features, matches
-and mapper together took 73.4 s against COLMAP's 225.0 s. On a large capture,
-the 5,822 SmallCity photos, both mappers get visloc-rs's matches and 32 CPU
-threads: visloc-rs maps it in 21.7 min, and COLMAP's global mapper had not
-finished after 94 min, when a 100-minute cap stopped it.
-Per-scene tables, the SmallCity stages, the run-to-run spread and the caveats
-are in the [ETH3D AUC benchmark](docs/eth3d_auc_benchmark.md).
+On visloc-rs's own matches (GPU SIFT, the default) it leads both at every
+threshold: 53.1 / 78.9 / 85.7. On the 5,822 SmallCity photos, visloc-rs maps
+in 21.7 min; COLMAP's global mapper had not finished after 94 min. Per-scene
+tables, timings and caveats: [ETH3D AUC benchmark](docs/eth3d_auc_benchmark.md).
 
 ### Large connected collections
 
-On the connected OpenLORIS 10k stress set, streamed VLAD + LSH cuts visloc-rs
-candidate generation from 49:49 to **8:51 (5.63×)** (a retrieval A/B, not an
-end-to-end COLMAP comparison; frozen measurements and output hashes in
-[`m6-ann-streaming.json`](benchmarks/electro/m6-ann-streaming.json)). The
-experimental observation-backed atlas preserves the connected frame counts and
-meets the p95 target, but **RMSE parity is still open** (0.3890 m vs the
-0.3843 m COLMAP control); the native diagnostic completes all 17 stages
-**20.41×** faster with **17.0%** lower peak RSS. Full tables and caveats:
+On the connected OpenLORIS 10k stress set, streamed VLAD + LSH cuts candidate
+generation from 49:49 to **8:51 (5.63×)**; **RMSE parity with COLMAP is still
+open** (0.3890 m vs 0.3843 m). Full tables and caveats:
 [SfM benchmark details](docs/sfm_benchmarks.md).
 
 ### GPU SfM vs COLMAP (CUDA) on EuRoC
@@ -211,22 +191,8 @@ MH_05 failed in both runs. visloc-rs is deterministic.
 </p>
 <p align="center"><sub>EuRoC MH_05, same 200 frames, same GPU. COLMAP breaks (ATE 193.7 cm, 764 s), visloc-rs stays at <b>2.58 cm</b> in <b>102 s</b>. The visloc-rs poses then train a 3D Gaussian Splatting scene: raw frames to splat in pure Rust + wgpu, no COLMAP. <a href="scripts/make_euroc_vs_colmap_gif.py">Script</a>.</sub></p>
 
-Configuration, caveats and the ablation that got here:
-[EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
-
-To reproduce the table, run this per sequence. The script also runs
-COLMAP, unless `--ours-only` is given:
-
-```bash
-cargo build --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_euroc
-python scripts/benchmark_euroc_vs_colmap.py MH_01_easy \
-  --euroc-root <EuRoC dir with <seq>/mav0> --colmap <colmap exe> \
-  --ours-exe target/release/examples/gsplat_euroc --out-root <out> --tag _final \
-  --ours-args "--mapper colmap-port --sift-l1-root --keep-planar --verify-min-inliers 15 --sift-opt descriptor_magnification=3 --sift-opt max_orientations=2 --keypoints 4000 --sift-opt prefer_larger_scale=1 --register-gated"
-```
-
-Registration and ATE are deterministic for visloc-rs. Times depend on the
-machine.
+Configuration, caveats, the ablation and the command that reproduces the
+table: [EuRoC GPU SfM vs COLMAP](docs/euroc_gpu_sfm_vs_colmap.md).
 
 ### Run the SfM demo
 
@@ -262,103 +228,32 @@ cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat
   --images /path/to/my_photos --out /path/to/runs/my-scene
 ```
 
-The same pipeline can also be run from a web browser. A small local server
-(`visloc_web`, standard library only) lets you pick the photo folder, start a
-run, and follow its progress and log. When the run ends you can turn the
-recovered cameras and points in 3D and download `scene.ply`, `mesh.ply` and
-the COLMAP model. It can also open an existing output folder just to view it.
-
-```bash
-cargo build --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos
-cargo run --release --example visloc_web -- --port 8080   # then open http://127.0.0.1:8080
-```
-
-The server listens on 127.0.0.1 only. Pass `--host` to serve on another
-address, but anyone who can reach the server can start runs and download run
-outputs.
-
 <p align="center">
   <img src="docs/assets/photos_to_mesh.gif" alt="south-building: each raw input photo next to the trained Gaussian splat and the extracted mesh rendered from the same recovered pose" width="900">
 </p>
 
-The GIF above is the 128 raw south-building JPGs, each next to the trained Gaussian splat and the extracted mesh rendered from that photo's own recovered pose. Every image registered, focal refined from EXIF 796 px to 847.0 px (COLMAP: 847.2), held-out PSNR 22.77 at 30k steps, 37 min end to end ([GIF script](scripts/make_photos_demo_gif.py)). The orbiting GIF at the top of this page is a whole city block: the 5,822 photos of the Hierarchical 3DGS SmallCity capture (six helmet-mounted GoPros on a bicycle, four passes around the block; the release ships them undistorted to one pinhole camera with people and cars blacked out, and its focal length is used as the prior). `gsplat_photos` registered 5,583 / 5,822 photos with 957,418 points (window + VLAD retrieval matching, `--retrieval 30`), trained a 4.7M-gaussian splat to held-out PSNR 24.09 over 698 views (`--mask-black 12` leaves the blacked-out pixels out of the loss and the PSNR) and fused a 5.9M-triangle mesh: 2.5 h end to end on a Google Colab A100 (SfM 82 min, training 30 min, mesh 34 min; [log](docs/media/hero/small_city_gsplat_photos.log)), half the 5 h of the same job before this release's matching, mapper, bundle-adjustment and TSDF speed-ups. Replaying the current mapper on `gsplat_photos`' matches registers 5,816 photos, and against the release's own metric COLMAP model (a reference, not ground truth; [`scripts/score_smallcity_reference.py`](scripts/score_smallcity_reference.py), after a Sim(3) fit) the camera centres land within a median 0.15 m, 0.16 m and 0.65 m for mapper seeds 0, 1 and 2 (p90 0.28 m, 0.35 m and 1.52 m); seed 2 keeps a 4% scale drift between the four passes. Trained from street level, the road is thin splats that turn opaque only at grazing angles, so the orbit shows the street band around the camera path at no less than 70% opacity (`--ground-min-alpha 0.7`); that is a display choice, not the trained scene. [`scripts/colab/hero_pipeline.py`](scripts/colab/hero_pipeline.py) reproduces it on a Colab GPU (from the terminal with the Colab CLI, or via [the notebook](scripts/colab/readme_hero_courthouse.ipynb)) and [`scripts/make_readme_hero.py`](scripts/make_readme_hero.py) renders the orbit; the previous hero, Tanks and Temples Courthouse (553 frames, 34 min on an L4), is kept in [its log](docs/media/hero/courthouse_gsplat_photos.log).
+<p align="center"><sub>COLMAP's south-building, 128 raw JPGs: each photo next to the trained splat and the mesh rendered from its recovered pose. Every image registered, held-out PSNR 22.77, 37 min end to end.</sub></p>
 
-To reproduce the run and the GIF, use the raw `images/` of COLMAP's
-south-building dataset. `gsplat_photos` prints the focal refinement and
-the held-out PSNR:
-
-```bash
-cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
-  --images <south-building>/images --out runs/sb --max-size 1024 --steps 30000 --normal-weight 0.005
-cargo run --release -p visloc-gsplat-train --features gpu --example gsplat_eval -- \
-  --ply runs/sb/scene.ply --data runs/sb --eval-every 1 --save-dir runs/sb/renders
-python scripts/make_photos_demo_gif.py --run runs/sb --out photos_to_mesh.gif --every 3 --panel-width 300 --fps 6
-```
-
-The pipeline has three stages:
-
-1. **SfM.** Takes the focal length from EXIF, then runs SIFT and matching
-   on the GPU (`--cpu-sift` extracts on the CPU), two-view verification
-   and the COLMAP-port mapper (the configuration that beats COLMAP on EuRoC
-   above). A final bundle adjustment refines the intrinsics. A COLMAP text
-   model is written to `sparse/0`, so brush and Inria 3DGS can use the
-   result too.
-2. **Training.** brush's refine strategy on the hand-written wgpu forward
-   and backward passes. On the same GPU, at 30k steps, it is faster than
-   brush 0.3 on all five benchmark scenes (14–30%). PSNR is within
-   0.05 dB of brush on four of them; details in
-   [the 3DGS plan](docs/rust_3dgs_plan.md). Reproduce the table with
-   [`scripts/benchmark_gsplat_vs_brush.py`](scripts/benchmark_gsplat_vs_brush.py);
-   the dataset layout and the command are in its header.
-3. **Mesh.** Median-depth rendering, TSDF fusion and surface nets. Surfaces
-   with no SfM point nearby, such as the sky, are dropped. The
-   `--normal-weight 0.005` depth-normal loss makes surfaces smoother for
-   -0.2 dB.
-
-**360° cameras.** `--equirect` takes a folder of 2:1 equirectangular
-panoramas and cuts each one into its six 90° cube faces, at most
-`--max-size` square. The faces then go through the three stages as pinhole
-images with their exact focal length held fixed, the six of a panorama as
-one rig: one pose per panorama, the faces at its centre
-(`--equirect-independent-faces` solves them as separate cameras). Faces of
-one panorama are never matched with each other, and `--window` counts
-panoramas. `--equirect-native` runs SfM on the panoramas themselves as
-equirectangular cameras (COLMAP's `EQUIRECTANGULAR`), at most
-`2 x --max-size` wide: several times faster, with fewer points. Either way
-training sees the cube faces that see SfM points; a camera mount or selfie
-stick below the camera is left out. Panoramas taken from almost the same
-spot (slow video) have too little parallax to reconstruct: space the
-frames out. Without `--equirect`, a folder
-that looks like panoramas gets a warning: 2:1 images whose left and right
-edges meet and whose top and bottom rows are poles, or whose metadata says
-equirectangular. The pinhole model gives no usable result on them.
-
-To train on panoramas that another tool already solved (such as COLMAP
-4.1), point `gsplat_train --data <colmap_root>` at the model: for
-an `EQUIRECTANGULAR` camera it cuts the same cube faces (`--max-face-size`,
-`--min-face-points`, `--faces-dir`), holds out every 8th panorama whole, and
-reads `sparse/0` as text or binary.
+The pipeline runs SfM (EXIF focal, GPU SIFT and matching, the COLMAP-port
+mapper, intrinsics refined by the final bundle adjustment; a COLMAP model is
+written to `sparse/0`), trains with brush's refine strategy on hand-written
+wgpu passes (faster than brush 0.3 on 5/5 benchmark scenes), and fuses a
+mesh from median depths. `--equirect` takes 360° panoramas, and `visloc_web`
+runs the same pipeline from a browser. Stages, the hero runs, 360° cameras,
+the web UI and the reproduction commands:
+[photos to splat and mesh](docs/photos_to_splat.md).
 
 ## Visual-Inertial SLAM (Basalt Rust port)
 
-A separate, faithful Rust port of upstream
+A faithful Rust port of upstream
 [Basalt](https://github.com/VladyslavUsenko/basalt) commit `0f3b2b52` — a
 tightly-coupled stereo-inertial VIO estimator plus a keyframe/loop-closure
 mapper — in [`pipelines/basalt`](pipelines/basalt). On upstream Basalt's own
 inputs it matches native Basalt's ATE to **within 0.1%** on all 11 EuRoC
-sequences (**1.13×** runtime, **0.56×** peak RSS). With EuRoC's official
-calibration, the mapper now runs **online** — a dedicated thread ingesting
-each keyframe as the VIO produces it, not a separate offline batch job — and
-beats measured ORB-SLAM3 (full-trajectory SE(3) ATE) on **9 of 11** EuRoC
-sequences; on the development machine (12-thread CPU) the VIO+mapper
-pipeline now also runs at **real time on all 11/11 sequences** (RTF
-1.06–1.68, dataset duration / VIO wall time). The slowest sequences have
-only a few percent of headroom, so RTF can dip below 1.0 depending on
-machine state (one later clean MH_01 run measured 0.95). This is the
-result of a `vio_max_iterations` reduction (7 -> 5, small accuracy-gated
-change) plus two zero-accuracy-risk, bit-identical build-level changes (a
-fat-LTO/single-codegen-unit/no-unwind-tables build profile and the
-`mimalloc` global allocator) — see "VI-SLAM speed" below.
+sequences. With EuRoC's official calibration, the mapper runs **online**
+beside the VIO, beats measured ORB-SLAM3 (full-trajectory SE(3) ATE) on
+**9 of 11** EuRoC sequences, and runs in **real time on all 11** on the
+development machine (RTF 1.06–1.68; the slowest have little headroom).
 
 <p align="center">
   <img src="docs/assets/basalt_online_vs_orbslam3_trajectories.png" alt="EuRoC top-down trajectories: visloc-rs online VI-SLAM vs ORB-SLAM3 vs ground truth, all SE(3)-aligned" width="820"><br>
@@ -383,7 +278,7 @@ fat-LTO/single-codegen-unit/no-unwind-tables build profile and the
   <img src="docs/assets/basalt_online_vs_orbslam3.png" alt="Bar chart of full-trajectory SE(3) ATE, visloc-rs online VI-SLAM vs measured ORB-SLAM3, across all 11 EuRoC sequences" width="820">
 </p>
 
-<p align="center"><sub>9/11 wins; full-trajectory ATE translation RMSE in metres, lower is better, same protocol as the prior offline-mapper result. The mapper thread never blocked the VIO thread on any sequence — see the <a href="docs/vi_slam_benchmarks.md">VI-SLAM benchmark details</a> for the per-sequence RTF/lag/loop/RSS numbers. <b>Real time on all 11/11 sequences</b>: RTF (dataset duration / VIO wall time) is now 1.06-1.68x, clean (no other job sharing the machine, verified), up from 0.09-0.38x before this session's `--pipeline`-by-default change and later work. Getting there needed one accuracy-gated change, `vio_max_iterations` 7 -> 5 (the LM solver's own inner loop, ~78-82% of VIO wall time, is the dominant cost; fewer iterations cuts it proportionally): 9/11 wins held, but V2_01_easy's ATE grew from 0.015 to 0.017 (+12%, 3-run median) and V1_03_difficult's from 0.020 to 0.021 (+5%, 3-run median) — both still comfortably beat ORB-SLAM3 (2.3x and 1.3x margin respectively). On top of that, two build-level changes carry zero accuracy risk (bit-identical VIO trajectory, verified by SHA-256): a `release-rt` Cargo profile (fat LTO, one codegen unit, no unwind tables) and the `mimalloc` global allocator (the LM trial loop allocates a scratch buffer per factor per trial). MH_04_difficult and MH_05_difficult remain the two losses vs ORB-SLAM3 — VIO tracking-robustness limits on fast/motion-blurred sequences, not a speed or mapper issue. The prior offline (batch, 2-18 min / 3-6 GB) mapper path still exists, unchanged and byte-for-byte untouched, for parity/comparison. Parity evidence: <a href="work/m11_basalt_faithful_port_final_closure_20260914.md">faithful-port closure report</a> and <a href="benchmarks/basalt/README.md">upstream oracle / provenance</a>; design and next steps: <a href="docs/basalt_online_mapper_design.md">online mapper design</a> and <a href="docs/vi_slam_global_consistency_plan.md">global-consistency plan</a>.</sub></p>
+<p align="center"><sub>9/11 wins; full-trajectory ATE translation RMSE in metres, lower is better. MH_04 and MH_05 remain the two losses (VIO tracking robustness on fast, blurred motion). Per-sequence RTF, lag and memory, the speed changes and the parity evidence: <a href="docs/vi_slam_benchmarks.md">VI-SLAM benchmark details</a>.</sub></p>
 
 ### Project Aria glasses (LaMAria)
 
@@ -420,73 +315,30 @@ the leaderboard and the steps that led here: [LaMAria plan](docs/lamaria_plan.md
 
 ### Run the VI-SLAM demo
 
-Build with AVX2/FMA, the `release-rt` profile (fat LTO, one codegen unit, no
-unwind tables — bit-identical to the default `release` profile, just faster
-codegen; only used for this real-time-focused example) and the `mimalloc`
-global allocator, then replay a EuRoC sequence through the online VIO +
-mapper — the calibration and config are checked into the repo,
-`--euroc-dir` is an external dataset path. This is the build the RTF numbers
-above were measured with; a plain `cargo build --release` (no `--profile
-release-rt`, no `mimalloc-global`) also works and is still correct, just
-slower (the two levers above are additive, ~2-2.5x combined on this
-machine):
+Replay a EuRoC sequence through the online VIO + mapper (the calibration and
+config are in the repo; `--euroc-dir` is an external dataset):
 
 ```bash
-RUSTFLAGS="-C target-feature=+avx2,+fma" \
-  cargo build --profile release-rt --example basalt_euroc_online_slam_demo \
-  --features basalt-lm-workspace-reuse,mimalloc-global
-
 RUSTFLAGS="-C target-feature=+avx2,+fma" \
   cargo run --profile release-rt --example basalt_euroc_online_slam_demo \
   --features basalt-lm-workspace-reuse,mimalloc-global -- \
   --euroc-dir /path/to/MH_01_easy \
   --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
-  --out-dir target/basalt_mh01_online \
-  --max-frames 80
+  --out-dir target/basalt_mh01_online
 ```
 
-This writes `trajectory_online.tum` (the full-frame trajectory, mapper
-corrections propagated to every VIO frame — what the table above scores),
-`trajectory_online_kf.tum` (keyframes only), and `timing_breakdown_online.json`
-(RTF, mapper queue lag, loop/trigger counts, peak RSS). The original offline
-VIO + batch-mapper commands are unchanged and still documented in the
+It writes `trajectory_online.tum` (what the table above scores),
+`trajectory_online_kf.tum` and `timing_breakdown_online.json`. The
+`release-rt` profile and `mimalloc` give the real-time numbers; a plain
+`--release` build is correct, just slower. The offline VIO + batch-mapper
+commands and `--pipeline` / `--threads` are in the
 [VI-SLAM benchmark details](docs/vi_slam_benchmarks.md#run-it).
-
-`--pipeline` runs the frontend (dataset decode + optical flow) and the
-estimator on two threads instead of one -- mirroring upstream Basalt's
-`OpticalFlow` thread / estimator thread split -- and `--threads N` sizes
-the `rayon` pool used by the frontend's per-track temporal KLT and the
-estimator's per-landmark LM reduction (unset lets `rayon` size itself to
-`std::thread::available_parallelism()`). Both are pure wall-clock
-optimizations: every frame is still processed in the same order with the
-same arithmetic, so `trajectory.tum` is byte-for-byte identical to a serial
-`--threads 1` run given the same inputs (verified on MH_03/MH_04). The
-online demo enables `--pipeline` by default for this reason -- pass
-`--no-pipeline` to restore the serial path; the VIO demo below still
-defaults to serial and takes `--pipeline` as an opt-in flag.
-
-```bash
-cargo run --release --example basalt_euroc_vio_demo --features basalt-lm-workspace-reuse -- \
-  --euroc-dir /path/to/MH_01_easy \
-  --calibration benchmarks/basalt/release_inputs/euroc_ds_calib.json \
-  --config configs/basalt/euroc_config.json \
-  --out-dir target/basalt_mh01 \
-  --pipeline --pipeline-capacity 4 --threads 12
-```
 
 ## Localize against a map
 
-Smallest end-to-end: localize a synthetic query against a 1-landmark map.
-
-```bash
-cargo build
-cargo run --example localize_dummy
-```
-
-Load a real COLMAP model and localize a query photo against it (downloads ~100 MB
-on first run). Datasets are external inputs and are not bundled with this
-repository. Fetch the dataset once:
+Load a real COLMAP model and localize a query photo against it. Fetch COLMAP's
+south-building dataset once (about 100 MB):
 
 ```bash
 mkdir -p ~/datasets/south-building && cd ~/datasets/south-building && \
@@ -495,7 +347,7 @@ mkdir -p ~/datasets/south-building && cd ~/datasets/south-building && \
   unzip south-building.zip
 ```
 
-Then, from the repository root, localize a query photo against the sparse model:
+Then, from the repository root:
 
 ```bash
 cargo run --release --features image-io --example deep_localization_demo -- \
@@ -563,11 +415,11 @@ The headline snapshot is registry-backed by
 see the [registered run evidence](docs/generated/registered_runs.md) and
 [scoped claim matrix](docs/generated/benchmark_claim_matrix.md).
 
-- **KITTI multi-sequence published-baseline comparison** — one uniform full-stack config over 00/02/05/06/07/09; narrow published-baseline wins on seq00 (**1.23 m vs ORB-SLAM2 1.3 m**) and seq09 (**2.07 m vs ORB-SLAM2 3.2 m**), with seq00/05/06 in the OV2SLAM-RT accuracy band. This is not a leaderboard or ORB-SLAM3 claim; the run also records real-world frontend failure-mode fixes.
-- **EuRoC MH_03 / MH_05 full pipeline** — stereo visual loop-closure + BA on MH_03 / MH_05: **0.057 m / 0.072 m** ATE. The claim matrix marks ORB-SLAM3 comparisons as behind (**~2.4x / ~1.4x**), OV2SLAM as near, and VINS-Fusion stereo as a stereo-only win; this is not a tight-VIO claim.
-- **TUM RGB-D fr1_xyz / fr1_desk** — indoor handheld via **virtual stereo** (depth as a synthetic right image, zero backend changes): **0.014 m / 0.026 m** ATE, compared against published ORB-SLAM2 RGB-D ranges in the claim matrix; loop closure is a **6x** lever on the revisit-heavy desk.
-- **Sequential SfM vs COLMAP (metric video)** — same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) - **~117x faster, ~17-33x more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.)
-- **Unordered SfM (real photo collections)** — Orderless monocular photos -> VLAD view graph -> incremental reconstruction (robust multi-seed init, P3P register, scale-gauge-fixed BA, iterative track filter), vs **COLMAP's own model** with an independent SuperPoint frontend: **COLMAP South Building** (128 photos) **128/128 reg, 1.09 cm**; **Gerrard Hall** (100 photos, 5616x3744 OPENCV) **98/100, 0.68 cm** (3/100 single-seed) - both **0.1 % of extent**. EuRoC V2_03 orbit **31/31, 1.08 cm**
+- **KITTI multi-sequence** — one config over 00/02/05/06/07/09: seq00 **1.23 m** and seq09 **2.07 m**, against ORB-SLAM2's published 1.3 m and 3.2 m ([details](docs/kitti_multiseq_benchmark.md)).
+- **EuRoC MH_03 / MH_05 stereo loop closure + BA** — **0.057 m / 0.072 m** ATE; behind ORB-SLAM3 (~2.4× / ~1.4×), near OV2SLAM.
+- **TUM RGB-D fr1_xyz / fr1_desk** via virtual stereo — **0.014 m / 0.026 m** ATE ([details](docs/tum_rgbd_benchmark.md)).
+- **Sequential SfM vs COLMAP** on a 2,700-frame EuRoC flight — stereo VO + loop SfM **6 min, 0.13 m, metric** against COLMAP mono incremental **11.7 h, 2.18 m, scale-free** ([details](docs/sfm_vs_colmap_benchmark.md)).
+- **Unordered SfM (real photo collections)** — orderless photos -> VLAD view graph -> incremental reconstruction, vs **COLMAP's own model**: South Building **128/128, 1.09 cm**; Gerrard Hall **98/100, 0.68 cm** (both 0.1% of extent).
 
 ## Documentation
 
