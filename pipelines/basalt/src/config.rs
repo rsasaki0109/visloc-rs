@@ -86,6 +86,9 @@ const OPTIONAL_KEYS: &[&str] = &[
     // Latitude in degrees for Earth-rotation compensation of the gyro
     // (absent: off); see `EstimatorConfig::earth_rotation_up_rad_s`.
     "config.vio_earth_rotation_latitude_deg",
+    // Monocular visual-only odometry (default false); see
+    // `docs/mono_visual_only_vio.md`.
+    "config.vio_visual_only",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -184,6 +187,7 @@ impl BasaltConfig {
                 .optional_bool("config.vio_kf_connectivity_all_cameras")?,
             outlier_filter: self.outlier_filter()?,
             earth_rotation_up_rad_s: self.earth_rotation_up_rad_s()?,
+            visual_only: self.optional_bool("config.vio_visual_only")?,
         })
     }
     /// `config.vio_earth_rotation_latitude_deg`: `w_e sin(latitude)`, or 0
