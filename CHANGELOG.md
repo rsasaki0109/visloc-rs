@@ -134,6 +134,116 @@ All notable changes to `visloc-rs` will be documented here.
   three stitched Poly Haven panoramas and none of the 128 south-building
   photos or their 2:1 crops. It misses the ScanVan panoramas, whose left
   and right edges are lens rims that do not meet.
+- **Live monocular-inertial VIO in a phone browser** (`bindings/wasm`). The
+  Basalt port's VIO runs as WebAssembly on the phone's camera and motion
+  sensors, on iPhone Safari and Android Chrome.
+  - **Calibration per phone:** Client Hints model or iPhone screen family,
+    with intrinsics from the 35 mm-equivalent focal length. The camera-IMU
+    time offset is estimated online and saved per phone (−25 ms until
+    measured).
+  - **Watchdog:** a diverged estimate is restarted and re-anchored to the
+    last good pose.
+  - **Page:** AR overlay, map, wasm threads when cross-origin isolated, and
+    session recording and upload.
+  - **Telemetry:** the page reports clocks, frame and IMU flow, worker
+    state, resets, stalls and errors to the serving host
+    (`telemetry/<session>.jsonl`). The sync estimate also measures the
+    camera-IMU rotation.
+  - **iOS:** WebKit's gyroscope axis order (alpha / beta / gamma about x /
+    y / z), corrected automatically from the camera where a phone
+    disagrees. The main lens is chosen over the virtual multi-camera.
+  - **IMU only:** a button that freezes the map and moves it by the motion
+    sensors alone, to check the camera-IMU calibration by eye.
+  - **Phone defaults:** a 28 px feature grid, a 1 cm triangulation
+    baseline, a keyframe allowed every 2 frames with 2 non-keyframe states
+    in the window, bias random walks 30x stiffer than the white noise's
+    scaling, and the first attitude from 0.5 s of motion samples instead of
+    one. On ADVIO, against the EuRoC file's values: mean ATE 2.6 m instead
+    of 4.7 m, 2 resets in four walks instead of 8. On three iPhone
+    recordings: 93 landmarks in view against 85 before the keyframe change.
+  - **Still start:** each start and restart waits (up to 2 s) for the
+    phone to be held still, judged from the tracked points' motion after
+    the gyroscope's rotation, and takes its attitude from the still frames.
+    Basalt assumes a start at rest; on 60 starts over iPhone recordings
+    with the phone moving, 27% diverged within 3 s. The page only corrects
+    the camera-IMU time offset by 15 ms or more (estimates swing by ±8 ms,
+    and each correction restarts tracking). `replay` reports why the
+    frontend dropped tracks.
+  - **Coasting:** frames without a landmark after some were seen report
+    `"coast"`, and the page keeps drawing the IMU's pose ("Coasting on
+    IMU") instead of showing "Initializing". ⚙ → "Film at 60 fps" captures
+    at 60 fps (half the longest exposure, so less blur in fast moves).
+  - **Frontend on the GPU:** the pyramid, the frame-to-frame KLT and the
+    grid FAST run as WGSL compute shaders with wgpu (WebGPU in the
+    browser, Vulkan or Metal natively; ⚙ → "Track points on the GPU", on
+    where WebGPU exists), one submission and one readback a frame; the
+    estimator stays on the CPU. From the same tracks it keeps and loses the
+    same points as the CPU frontend (4 differ in 28,356; positions agree
+    to 0.002 px), and end to end ADVIO stays at 2.65 m. A GPU error falls
+    back to the CPU frontend. `replay` and
+    `advio` take `--gpu`; `examples/gpu_check.rs` compares the two. The
+    worker runs the GPU frontend one frame ahead of the estimator, so the
+    GPU's round trip overlaps the estimate (same poses).
+  - **60 Hz:** filming at 60 fps and tracking every frame are on by
+    default (⚙ → "Film at 60 fps", "…and track every frame at 60 Hz").
+    Tracking every frame of a 60 fps camera kept more landmarks in view on
+    two iPhone recordings than the same frames at 30 Hz (172 against 94)
+    without a reset, once the IMU noise fix below is in. Recordings keep
+    every camera frame (`replay --every 2` replays one at 30 Hz), the rig
+    carries `frameRateHz`, and `--estimate-every 2` estimates every other
+    frame.
+    The session's watchdog, still start and coasting are timed in seconds
+    instead of frames.
+  - **Android phones:** profiles for the Galaxy Note20 Ultra / Note20 and
+    the Nothing Phone (4a) Pro (24 mm). The page takes the lowest-numbered
+    back camera (Chrome's default on the Note20 Ultra was the ultra-wide),
+    defaults the gyroscope's axis order by browser (Chrome on Android now
+    reports WebKit's order, Firefox the spec's), waits up to 10 s for the
+    first motion events, and reports each frame's brightness and contrast.
+  - **Lighter tracking for slower phones:** ⚙ → "Lighter tracking…" (on
+    by default in Firefox, which has no WebGPU and took 68–120 ms a frame
+    on Android) sets a feature grid of a tenth of the frame's short side, at
+    most 3 solver iterations, and the estimator on every other frame. Natively
+    it costs 2.4x less a frame on iPhone recordings, with 10 resets against
+    15 but ADVIO's mean ATE at 3.7 m against 2.6 m.
+  - **Overlay matched to the image:** the AR view is drawn at the pose of
+    the image that will be on screen when it appears (a display refresh
+    ahead, less the camera's measured latency to the page; ⚙ → "Overlay
+    timing" fine-tunes it), carried forward from the last estimate by the
+    gyroscope and velocity, the camera's lever arm included, and the
+    tracked points, which belong to an older frame, are hidden unless asked
+    for, then turned onto the frame on screen.
+  - **ADVIO results** (iPhone, browser-like 60 Hz IMU): 1.9–4.1 m ATE over
+    142–244 m walks, 98–99% of frames tracking (ARKit: 1.2–2.6 m).
+  - **Speed:** about 14–17 ms a frame natively on one thread at 360 x 640.
+    The page reports whether the phone offers WebGPU and the main
+    thread's time to read a frame back.
+
+### Changed
+
+- **visloc-basalt builds and runs on wasm32-unknown-unknown.** Natively
+  everything is identical, and the crate's tests pass unchanged.
+  - The libstdc++ bucket arithmetic is width independent.
+  - The diagnostic probes skip the environment and process id where there
+    are none.
+  - `mul_add` goes through a `fused_mul_add` that inlines on wasm. The
+    software `fmaf` it replaced took 40% of a frame.
+  - `BasaltVioEstimator::landmark_positions_world` exposes the window's
+    landmarks for display.
+  - FAST rejects a pixel from its four compass pixels before reading the
+    rest of the circle, as OpenCV does: identical detections, 9–18% less
+    time per VIO frame.
+  - `BasaltVioEstimatorAdapter::process_tracks_no_trace` runs the estimator
+    on tracks from another frontend, and `DirectKltStream::cam0_tracks`
+    exposes the tracks' patch transforms.
+  - `config.vio_imu_noise_per_step` (opt-in, default off): the IMU noise is
+    discretized by each preintegration step's length. Basalt injects the
+    per-sample noise into every step, which undercounts the short steps at
+    each frame interval's edges: a third of the covariance with one IMU
+    sample per frame (60 Hz IMU at 60 fps), whose overconfident IMU took
+    ADVIO at 60 fps from 2.65 m to 7.0 m. With it, 4.3 m and 2 resets
+    instead of 13; at 30 Hz neutral. A test checks the covariance no
+    longer depends on where an interval's samples fall.
 
 ### Fixed
 
@@ -207,7 +317,15 @@ All notable changes to `visloc-rs` will be documented here.
   is on in `gsplat_photos` and `gsplat_euroc`; it registered no image on
   south-building, ScanVan or EuRoC V1_01 (CPU, the README settings),
   whose results are unchanged.
-
+- **visloc-basalt: `vio_min_triangulation_dist` was ignored.** The VIO's
+  landmark baseline gate was hard-coded at 5 cm; it now reads the
+  configuration value, as upstream does. The pinned EuRoC file says 5 cm,
+  so its results are unchanged.
+- **visloc-basalt: `vio_obs_std_dev` and `vio_obs_huber_thresh` were
+  ignored.** The visual residuals were weighted with a hard-coded 0.5 px
+  standard deviation and 1 px Huber threshold; they now read the
+  configuration, as upstream does. The pinned EuRoC file has the same
+  values, so its results are unchanged.
 - **COLMAP-port mapper: resuming a reconstruction with 3D points
   panicked.** `ObservationManager::new` counted the existing observations
   before the visibility pyramids were sized. The constructor now sizes

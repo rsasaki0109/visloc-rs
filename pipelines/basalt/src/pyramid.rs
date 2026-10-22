@@ -6,6 +6,7 @@
 //! `(accumulator + 128) >> 8`. `max_level` is an index, so a pyramid built
 //! with `max_level = N` contains levels `0..=N`.
 
+use crate::fma::FusedMulAdd;
 use nalgebra::Vector2;
 use thiserror::Error;
 
@@ -223,9 +224,9 @@ fn bilinear_fma(p00: f32, p01: f32, p10: f32, p11: f32, dx: f32, dy: f32) -> f32
     let ddx = 1.0 - dx;
     let ddy = 1.0 - dy;
     let term1 = ddx * dy * p01;
-    let acc = (ddx * ddy).mul_add(p00, term1);
-    let acc = (dx * ddy).mul_add(p10, acc);
-    (dx * dy).mul_add(p11, acc)
+    let acc = (ddx * ddy).fused_mul_add(p00, term1);
+    let acc = (dx * ddy).fused_mul_add(p10, acc);
+    (dx * dy).fused_mul_add(p11, acc)
 }
 
 /// A pyramid whose level indices are exactly `0..=max_level`.

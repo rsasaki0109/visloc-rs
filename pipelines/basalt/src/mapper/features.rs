@@ -7,6 +7,7 @@
 //! `goodFeaturesToTrack`-equivalent detector; orientation and descriptors read
 //! the original u16 samples exactly as Basalt does.
 
+use crate::fma::FusedMulAdd;
 use std::{
     collections::BTreeMap,
     sync::OnceLock,
@@ -988,7 +989,7 @@ fn triangulate2(
     // with the negated second product.  Keep that FMA placement: the
     // reciprocal is measurably different for the near-degenerate rows even
     // when the rounded determinant itself prints as the same f64.
-    let determinant = a00.mul_add(a11, -(a10 * a01));
+    let determinant = a00.fused_mul_add(a11, -(a10 * a01));
     if determinant.abs() <= f64::EPSILON {
         return None;
     }
@@ -1000,8 +1001,8 @@ fn triangulate2(
     let inverse01 = -a01 * invdet;
     let inverse10 = -a10 * invdet;
     let inverse11 = a00 * invdet;
-    let lambda0 = inverse01.mul_add(b1, inverse00 * b0);
-    let lambda1 = inverse11.mul_add(b1, inverse10 * b0);
+    let lambda0 = inverse01.fused_mul_add(b1, inverse00 * b0);
+    let lambda1 = inverse11.fused_mul_add(b1, inverse10 * b0);
     // Keep Eigen's two temporaries and grouping: OpenGV computes `xm` first,
     // `xn = t12 + lambda[1] * f2_unrotated` second, then `(xm + xn) / 2`.
     // Associating this as `(xm + t12) + ...` changes the last bits of every
@@ -1009,9 +1010,9 @@ fn triangulate2(
     // trust-region path.
     let xm = lambda0 * left;
     let xn = Vector3::new(
-        right_unrotated[0].mul_add(lambda1, translation[0]),
-        right_unrotated[1].mul_add(lambda1, translation[1]),
-        right_unrotated[2].mul_add(lambda1, translation[2]),
+        right_unrotated[0].fused_mul_add(lambda1, translation[0]),
+        right_unrotated[1].fused_mul_add(lambda1, translation[1]),
+        right_unrotated[2].fused_mul_add(lambda1, translation[2]),
     );
     Some((xm + xn) / 2.0)
 }
@@ -1023,7 +1024,7 @@ fn triangulate2(
 #[inline(always)]
 fn opengv_eigen_dot3(left: &Vector3<f64>, right: &Vector3<f64>) -> f64 {
     let first_two = left[0] * right[0] + left[1] * right[1];
-    left[2].mul_add(right[2], first_two)
+    left[2].fused_mul_add(right[2], first_two)
 }
 
 /// Eigen's fixed-size `Vector3d::norm()` squares the first two lanes as a
@@ -1031,7 +1032,7 @@ fn opengv_eigen_dot3(left: &Vector3<f64>, right: &Vector3<f64>) -> f64 {
 #[inline(always)]
 fn opengv_eigen_norm3(value: &Vector3<f64>) -> f64 {
     let first_two = value[0] * value[0] + value[1] * value[1];
-    value[2].mul_add(value[2], first_two).sqrt()
+    value[2].fused_mul_add(value[2], first_two).sqrt()
 }
 
 /// Fixed 3x3-by-3x1 Eigen product with the same AVX row packet and scalar
@@ -1041,17 +1042,17 @@ fn opengv_eigen_norm3(value: &Vector3<f64>) -> f64 {
 #[inline(always)]
 fn opengv_eigen_matvec3(matrix: Matrix3<f64>, value: Vector3<f64>) -> Vector3<f64> {
     Vector3::new(
-        matrix[(0, 2)].mul_add(
+        matrix[(0, 2)].fused_mul_add(
             value[2],
-            matrix[(0, 1)].mul_add(value[1], matrix[(0, 0)] * value[0]),
+            matrix[(0, 1)].fused_mul_add(value[1], matrix[(0, 0)] * value[0]),
         ),
-        matrix[(1, 2)].mul_add(
+        matrix[(1, 2)].fused_mul_add(
             value[2],
-            matrix[(1, 1)].mul_add(value[1], matrix[(1, 0)] * value[0]),
+            matrix[(1, 1)].fused_mul_add(value[1], matrix[(1, 0)] * value[0]),
         ),
-        matrix[(2, 2)].mul_add(
+        matrix[(2, 2)].fused_mul_add(
             value[2],
-            matrix[(2, 1)].mul_add(value[1], matrix[(2, 0)] * value[0]),
+            matrix[(2, 1)].fused_mul_add(value[1], matrix[(2, 0)] * value[0]),
         ),
     )
 }
@@ -1062,22 +1063,22 @@ fn opengv_eigen_matvec3(matrix: Matrix3<f64>, value: Vector3<f64>) -> Vector3<f6
 #[inline(always)]
 fn opengv_eigen_mat34_vec4(matrix: SMatrix<f64, 3, 4>, value: Vector4<f64>) -> Vector3<f64> {
     Vector3::new(
-        matrix[(0, 3)].mul_add(
+        matrix[(0, 3)].fused_mul_add(
             value[3],
-            matrix[(0, 2)].mul_add(
+            matrix[(0, 2)].fused_mul_add(
                 value[2],
-                matrix[(0, 1)].mul_add(value[1], matrix[(0, 0)] * value[0]),
+                matrix[(0, 1)].fused_mul_add(value[1], matrix[(0, 0)] * value[0]),
             ),
         ),
-        matrix[(1, 3)].mul_add(
+        matrix[(1, 3)].fused_mul_add(
             value[3],
-            matrix[(1, 2)].mul_add(
+            matrix[(1, 2)].fused_mul_add(
                 value[2],
-                matrix[(1, 1)].mul_add(value[1], matrix[(1, 0)] * value[0]),
+                matrix[(1, 1)].fused_mul_add(value[1], matrix[(1, 0)] * value[0]),
             ),
         ),
-        matrix[(2, 2)].mul_add(value[2], matrix[(2, 3)] * value[3])
-            + matrix[(2, 0)].mul_add(value[0], matrix[(2, 1)] * value[1]),
+        matrix[(2, 2)].fused_mul_add(value[2], matrix[(2, 3)] * value[3])
+            + matrix[(2, 0)].fused_mul_add(value[0], matrix[(2, 1)] * value[1]),
     )
 }
 
@@ -1322,19 +1323,19 @@ fn opengv_cayley2rot(cayley: Vector3<f64>) -> Matrix3<f64> {
     let c0 = cayley[0];
     let c1 = cayley[1];
     let c2 = cayley[2];
-    let one_plus_c0sq = c0.mul_add(c0, 1.0);
-    let one_minus_c0sq = (-c0).mul_add(c0, 1.0);
-    let scale = c2.mul_add(c2, c1.mul_add(c1, one_plus_c0sq));
+    let one_plus_c0sq = c0.fused_mul_add(c0, 1.0);
+    let one_minus_c0sq = (-c0).fused_mul_add(c0, 1.0);
+    let scale = c2.fused_mul_add(c2, c1.fused_mul_add(c1, one_plus_c0sq));
     let inv_scale = 1.0 / scale;
-    let r00 = (-c2).mul_add(c2, (-c1).mul_add(c1, one_plus_c0sq));
-    let r11 = (-c2).mul_add(c2, c1.mul_add(c1, one_minus_c0sq));
-    let r22 = c2.mul_add(c2, (-c1).mul_add(c1, one_minus_c0sq));
-    let r01 = c0.mul_add(c1, -c2) * 2.0;
-    let r02 = c0.mul_add(c2, c1) * 2.0;
-    let r10 = c0.mul_add(c1, c2) * 2.0;
-    let r12 = c1.mul_add(c2, -c0) * 2.0;
-    let r20 = c0.mul_add(c2, -c1) * 2.0;
-    let r21 = c1.mul_add(c2, c0) * 2.0;
+    let r00 = (-c2).fused_mul_add(c2, (-c1).fused_mul_add(c1, one_plus_c0sq));
+    let r11 = (-c2).fused_mul_add(c2, c1.fused_mul_add(c1, one_minus_c0sq));
+    let r22 = c2.fused_mul_add(c2, (-c1).fused_mul_add(c1, one_minus_c0sq));
+    let r01 = c0.fused_mul_add(c1, -c2) * 2.0;
+    let r02 = c0.fused_mul_add(c2, c1) * 2.0;
+    let r10 = c0.fused_mul_add(c1, c2) * 2.0;
+    let r12 = c1.fused_mul_add(c2, -c0) * 2.0;
+    let r20 = c0.fused_mul_add(c2, -c1) * 2.0;
+    let r21 = c1.fused_mul_add(c2, c0) * 2.0;
     Matrix3::new(
         inv_scale * r00,
         inv_scale * r01,

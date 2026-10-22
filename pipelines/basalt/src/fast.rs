@@ -445,6 +445,30 @@ fn fast_score_without_nms(
 
     let center = raw_to_u8(image.pixel(x, y)?) as i16;
     let threshold = i16::from(threshold);
+    // A run of 9 of the 16 circle pixels always holds two neighbouring
+    // compass pixels (indices 0, 4, 8, 12), so a pixel with no such pair on
+    // the same side of the threshold has no run: OpenCV's quick rejection,
+    // exact, and it skips the other twelve reads for most pixels.
+    let mut compass_bright = 0_u8;
+    let mut compass_dark = 0_u8;
+    for (bit, index) in [0, 4, 8, 12].into_iter().enumerate() {
+        let (dx, dy) = FAST_CIRCLE[index];
+        let (px, py) = (x as i32 + dx, y as i32 + dy);
+        if px < 0 || py < 0 {
+            return None;
+        }
+        let difference = center - raw_to_u8(image.pixel(px as usize, py as usize)?) as i16;
+        if difference < -threshold {
+            compass_bright |= 1 << bit;
+        }
+        if difference > threshold {
+            compass_dark |= 1 << bit;
+        }
+    }
+    let neighbouring_pair = |mask: u8| mask & (mask >> 1 | mask << 3) & 0xf != 0;
+    if !neighbouring_pair(compass_bright) && !neighbouring_pair(compass_dark) {
+        return None;
+    }
     let mut differences = [0_i16; 24];
     let mut bright_mask = 0_u16;
     let mut dark_mask = 0_u16;

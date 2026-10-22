@@ -23,6 +23,7 @@ use super::aom::{
 use super::landmarks::{sophus_so3_product, InverseDistanceLandmark, StereographicDirection};
 use super::scalar::ScalarMode;
 use crate::camera::DoubleSphereCamera;
+use crate::fma::FusedMulAdd;
 use crate::imu::{
     preintegration_f32_expression_trace, preintegration_f32_rotation_producer_trace,
     preintegration_f32_stages_fej_mode, preintegration_residual_f32,
@@ -41,7 +42,6 @@ use serde_json::{json, Value as JsonValue};
 use std::{
     cell::Cell,
     collections::{BTreeMap, HashMap},
-    env,
     ffi::{OsStr, OsString},
     fmt::Write as FmtWrite,
     fs,
@@ -644,10 +644,19 @@ fn cached_u64_filter(
     })
 }
 
+/// The process environment, or none where there is none:
+/// `std::env::vars_os` panics on wasm32-unknown-unknown (the browser build).
+fn environment() -> impl Iterator<Item = (OsString, OsString)> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    return std::env::vars_os();
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    return std::iter::empty();
+}
+
 fn diagnostic_env_snapshot_from_current() -> DiagnosticEnvSnapshot {
     let mut values = HashMap::new();
     let mut active = false;
-    for (key, value) in env::vars_os() {
+    for (key, value) in environment() {
         active |= diagnostic_env_key_requires_fallback(&key);
         if let Some(canonical) = cached_env_key(&key) {
             // Windows environment names are case-insensitive.  If an unusual
@@ -1126,7 +1135,7 @@ fn json_trial_native_geometry(problem: &WindowProblem, state: &DVector<f64>) -> 
                     landmark.inverse_distance as f32,
                 ),
                 nalgebra::Vector2::new(observation.pixel.x as f32, observation.pixel.y as f32),
-                FactorConfig::default(),
+                problem.factor_config,
             );
             let raw = result.map(|(raw, _)| {
                 [
@@ -2632,6 +2641,8 @@ pub struct WindowProblem {
     pub gravity_world: Vector3<f64>,
     /// Internal numeric owner. Public estimator/API values remain f64.
     pub scalar_mode: ScalarMode,
+    /// Visual residual weighting (`vio_obs_std_dev`, `vio_obs_huber_thresh`).
+    pub factor_config: FactorConfig,
 }
 
 const LM_TOKEN_FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
@@ -3643,7 +3654,7 @@ impl WindowProblem {
                         point.inverse_distance as f32,
                     ),
                     nalgebra::Vector2::new(observation.pixel.x as f32, observation.pixel.y as f32),
-                    FactorConfig::default(),
+                    self.factor_config,
                 );
                 Ok(result.map(|(_, cost)| cost))
             })
@@ -4528,7 +4539,7 @@ impl WindowProblem {
                         same_time_cam_id,
                         self.visual_block_is_linearized(landmark.anchor_state_index)?
                             || self.visual_block_is_linearized(observation.state_index)?,
-                        FactorConfig::default(),
+                        self.factor_config,
                     )
                 } else {
                     anchored_visual_reprojection_factor_with_time_cam(
@@ -4681,7 +4692,7 @@ impl WindowProblem {
                         same_time_cam_id,
                         base.visual_block_is_linearized(landmark.anchor_state_index)?
                             || base.visual_block_is_linearized(observation.state_index)?,
-                        FactorConfig::default(),
+                        base.factor_config,
                     )
                 } else {
                     anchored_visual_reprojection_factor_with_time_cam(
@@ -4808,7 +4819,7 @@ impl WindowProblem {
                         same_time_cam_id,
                         self.visual_block_is_linearized(landmark.anchor_state_index)?
                             || self.visual_block_is_linearized(observation.state_index)?,
-                        FactorConfig::default(),
+                        self.factor_config,
                     )
                 } else {
                     anchored_visual_reprojection_factor_with_time_cam(
@@ -5282,11 +5293,11 @@ impl WindowProblem {
         for row in 0..20 {
             let mut value = 0.0_f32;
             for column in 0..21 {
-                value =
-                    (jacobian[(row, column)] as f32).mul_add(current_point[column] as f32, value);
+                value = (jacobian[(row, column)] as f32)
+                    .fused_mul_add(current_point[column] as f32, value);
             }
             // Eigen's packet store is `pmadd(c, alpha=1, mld.b)`.
-            let value = value.mul_add(1.0_f32, stored_rhs[row] as f32);
+            let value = value.fused_mul_add(1.0_f32, stored_rhs[row] as f32);
             result[row] = value as f64;
         }
 
@@ -5315,9 +5326,9 @@ impl WindowProblem {
         DVector::from_fn(39, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..39 {
-                value = (jacobian[(row, col)] as f32).mul_add(delta[col] as f32, value);
+                value = (jacobian[(row, col)] as f32).fused_mul_add(delta[col] as f32, value);
             }
-            value.mul_add(1.0, stored_rhs[row] as f32) as f64
+            value.fused_mul_add(1.0, stored_rhs[row] as f32) as f64
         })
     }
 
@@ -5331,9 +5342,9 @@ impl WindowProblem {
         DVector::from_fn(45, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..45 {
-                value = (jacobian[(row, col)] as f32).mul_add(delta[col] as f32, value);
+                value = (jacobian[(row, col)] as f32).fused_mul_add(delta[col] as f32, value);
             }
-            f64::from(value.mul_add(1.0, stored_rhs[row] as f32))
+            f64::from(value.fused_mul_add(1.0, stored_rhs[row] as f32))
         })
     }
 
@@ -5347,9 +5358,9 @@ impl WindowProblem {
         DVector::from_fn(51, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..51 {
-                value = (jacobian[(row, col)] as f32).mul_add(delta[col] as f32, value);
+                value = (jacobian[(row, col)] as f32).fused_mul_add(delta[col] as f32, value);
             }
-            f64::from(value.mul_add(1.0, stored_rhs[row] as f32))
+            f64::from(value.fused_mul_add(1.0, stored_rhs[row] as f32))
         })
     }
 
@@ -5363,9 +5374,9 @@ impl WindowProblem {
         DVector::from_fn(57, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..57 {
-                value = (jacobian[(row, col)] as f32).mul_add(delta[col] as f32, value);
+                value = (jacobian[(row, col)] as f32).fused_mul_add(delta[col] as f32, value);
             }
-            f64::from(value.mul_add(1.0, stored_rhs[row] as f32))
+            f64::from(value.fused_mul_add(1.0, stored_rhs[row] as f32))
         })
     }
 
@@ -5387,9 +5398,9 @@ impl WindowProblem {
         for row in 0..20 {
             let mut value = 0.0_f32;
             for column in 0..21 {
-                value = jacobian[(row, column)].mul_add(keep_delta[column], value);
+                value = jacobian[(row, column)].fused_mul_add(keep_delta[column], value);
             }
-            result[row] = value.mul_add(-1.0_f32, stored_rhs[row]);
+            result[row] = value.fused_mul_add(-1.0_f32, stored_rhs[row]);
         }
 
         let mut value = 0.0_f32;
@@ -5413,13 +5424,13 @@ impl WindowProblem {
             let mut value = 0.0_f32;
             for col in 0..27 {
                 value = if row < 24 {
-                    jacobian[(row, col)].mul_add(keep_delta[col], value)
+                    jacobian[(row, col)].fused_mul_add(keep_delta[col], value)
                 } else {
                     Self::prior_mul_add_separate_f32(value, jacobian[(row, col)], keep_delta[col])
                 };
             }
             if row < 24 {
-                value.mul_add(-1.0, stored_rhs[row])
+                value.fused_mul_add(-1.0, stored_rhs[row])
             } else {
                 stored_rhs[row] - value
             }
@@ -5439,9 +5450,9 @@ impl WindowProblem {
         DVector::from_fn(33, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..33 {
-                value = jacobian[(row, col)].mul_add(keep_delta[col], value);
+                value = jacobian[(row, col)].fused_mul_add(keep_delta[col], value);
             }
-            stored_rhs[row] - value.mul_add(1.0, 0.0)
+            stored_rhs[row] - value.fused_mul_add(1.0, 0.0)
         })
     }
 
@@ -5457,7 +5468,7 @@ impl WindowProblem {
         DVector::from_fn(39, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..39 {
-                value = jacobian[(row, col)].mul_add(keep_delta[col], value);
+                value = jacobian[(row, col)].fused_mul_add(keep_delta[col], value);
             }
             stored_rhs[row] - value
         })
@@ -5476,7 +5487,7 @@ impl WindowProblem {
         DVector::from_fn(45, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..45 {
-                value = jacobian[(row, col)].mul_add(keep_delta[col], value);
+                value = jacobian[(row, col)].fused_mul_add(keep_delta[col], value);
             }
             stored_rhs[row] - value
         })
@@ -5495,7 +5506,7 @@ impl WindowProblem {
         DVector::from_fn(51, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..51 {
-                value = jacobian[(row, col)].mul_add(keep_delta[col], value);
+                value = jacobian[(row, col)].fused_mul_add(keep_delta[col], value);
             }
             stored_rhs[row] - value
         })
@@ -5511,7 +5522,7 @@ impl WindowProblem {
         DVector::from_fn(57, |row, _| {
             let mut value = 0.0_f32;
             for col in 0..57 {
-                value = jacobian[(row, col)].mul_add(keep_delta[col], value);
+                value = jacobian[(row, col)].fused_mul_add(keep_delta[col], value);
             }
             stored_rhs[row] - value
         })
@@ -5542,9 +5553,9 @@ impl WindowProblem {
             // vfma231ss for every depth (0x3925f8), then vfma213ss (0x392605).
             // With 27 columns, the entire depth is one block.
             for col in 0..27 {
-                value = (jacobian[(row, col)] as f32).mul_add(delta[col] as f32, value);
+                value = (jacobian[(row, col)] as f32).fused_mul_add(delta[col] as f32, value);
             }
-            f64::from(value.mul_add(1.0, stored_rhs[row] as f32))
+            f64::from(value.fused_mul_add(1.0, stored_rhs[row] as f32))
         })
     }
 
@@ -5559,9 +5570,9 @@ impl WindowProblem {
             let mut value = 0.0_f32;
             // Native 392310, depth <= 127: one FMA block including scalar tails.
             for col in 0..33 {
-                value = (jacobian[(row, col)] as f32).mul_add(delta[col] as f32, value);
+                value = (jacobian[(row, col)] as f32).fused_mul_add(delta[col] as f32, value);
             }
-            f64::from(value.mul_add(1.0, stored_rhs[row] as f32))
+            f64::from(value.fused_mul_add(1.0, stored_rhs[row] as f32))
         })
     }
 
@@ -6368,7 +6379,7 @@ fn imu_f64_atan_small_grouped_positive(y: f64, x: f64) -> Option<f64> {
     if q_hi > IMU_F64_ATAN_SMALL_MAX_RATIO {
         return None;
     }
-    let residual = (-q_hi).mul_add(scaled_x, scaled_y);
+    let residual = (-q_hi).fused_mul_add(scaled_x, scaled_y);
     let q_lo = residual / scaled_x;
     let q2 = q_hi * q_hi;
     let q3 = q2 * q_hi;
@@ -7151,7 +7162,7 @@ fn prior_inner_product_21_f32(left: &[f32], right: &[f32]) -> f32 {
     let half: [f32; 4] = std::array::from_fn(|i| lanes[i] + lanes[i + 4]);
     let mut sum = (half[0] + half[2]) + (half[1] + half[3]);
     for i in 16..21 {
-        sum = right[i].mul_add(left[i], sum);
+        sum = right[i].fused_mul_add(left[i], sum);
     }
     sum
 }
@@ -7164,14 +7175,14 @@ fn prior_inner_product_51_f32(left: &[f32], right: &[f32]) -> f32 {
     assert_eq!(left.len(), 51);
     assert_eq!(right.len(), 51);
     let lanes: [f32; 8] = std::array::from_fn(|i| {
-        let first_fifth = left[i + 32].mul_add(right[i + 32], left[i] * right[i]);
-        let second_sixth = left[i + 40].mul_add(right[i + 40], left[i + 8] * right[i + 8]);
+        let first_fifth = left[i + 32].fused_mul_add(right[i + 32], left[i] * right[i]);
+        let second_sixth = left[i + 40].fused_mul_add(right[i + 40], left[i + 8] * right[i + 8]);
         first_fifth + ((left[i + 16] * right[i + 16] + left[i + 24] * right[i + 24]) + second_sixth)
     });
     let half: [f32; 4] = std::array::from_fn(|i| lanes[i] + lanes[i + 4]);
     let mut total = (half[0] + half[2]) + (half[1] + half[3]);
     for i in 48..51 {
-        total = right[i].mul_add(left[i], total);
+        total = right[i].fused_mul_add(left[i], total);
     }
     total
 }
@@ -7180,13 +7191,13 @@ fn prior_inner_product_57_f32(left: &[f32], right: &[f32]) -> f32 {
     assert_eq!(left.len(), 57);
     assert_eq!(right.len(), 57);
     let lanes: [f32; 8] = std::array::from_fn(|i| {
-        let first_fifth = left[i + 32].mul_add(right[i + 32], left[i] * right[i]);
-        let second_sixth = left[i + 40].mul_add(right[i + 40], left[i + 8] * right[i + 8]);
-        let third_seventh = left[i + 48].mul_add(right[i + 48], left[i + 16] * right[i + 16]);
+        let first_fifth = left[i + 32].fused_mul_add(right[i + 32], left[i] * right[i]);
+        let second_sixth = left[i + 40].fused_mul_add(right[i + 40], left[i + 8] * right[i + 8]);
+        let third_seventh = left[i + 48].fused_mul_add(right[i + 48], left[i + 16] * right[i + 16]);
         first_fifth + ((third_seventh + left[i + 24] * right[i + 24]) + second_sixth)
     });
     let half: [f32; 4] = std::array::from_fn(|i| lanes[i] + lanes[i + 4]);
-    right[56].mul_add(left[56], (half[0] + half[2]) + (half[1] + half[3]))
+    right[56].fused_mul_add(left[56], (half[0] + half[2]) + (half[1] + half[3]))
 }
 
 fn upstream_marginal_prior_error_57_candidate(
@@ -7202,8 +7213,8 @@ fn upstream_marginal_prior_error_57_candidate(
         for col in 0..57 {
             let j = jacobian[(row, col)] as f32;
             let d = delta[col] as f32;
-            left[row] = j.mul_add(d, left[row]);
-            right[row] = (0.5_f32 * j).mul_add(d, right[row]);
+            left[row] = j.fused_mul_add(d, left[row]);
+            right[row] = (0.5_f32 * j).fused_mul_add(d, right[row]);
         }
         right[row] += rhs[row] as f32;
     }
@@ -7223,8 +7234,8 @@ fn upstream_marginal_prior_error_51_candidate(
         for col in 0..51 {
             let j = jacobian[(row, col)] as f32;
             let d = delta[col] as f32;
-            left[row] = j.mul_add(d, left[row]);
-            right[row] = (0.5_f32 * j).mul_add(d, right[row]);
+            left[row] = j.fused_mul_add(d, left[row]);
+            right[row] = (0.5_f32 * j).fused_mul_add(d, right[row]);
         }
         right[row] += rhs[row] as f32;
     }
@@ -7258,8 +7269,8 @@ fn upstream_marginal_prior_error(
             for col in 0..size {
                 let j = jacobian[(row, col)] as f32;
                 let d = delta[col] as f32;
-                left[row] = j.mul_add(d, left[row]);
-                right[row] = (0.5_f32 * j).mul_add(d, right[row]);
+                left[row] = j.fused_mul_add(d, left[row]);
+                right[row] = (0.5_f32 * j).fused_mul_add(d, right[row]);
             }
             right[row] += rhs[row] as f32;
         }
@@ -7267,7 +7278,7 @@ fn upstream_marginal_prior_error(
             // The 45-row Eigen inner-product kernel fuses packet five into packet
             // one, then adds the middle three packets before the Packet8 predux.
             std::array::from_fn(|i| {
-                let first_and_fifth = left[i + 32].mul_add(right[i + 32], left[i] * right[i]);
+                let first_and_fifth = left[i + 32].fused_mul_add(right[i + 32], left[i] * right[i]);
                 let middle = left[i + 8] * right[i + 8]
                     + (left[i + 16] * right[i + 16] + left[i + 24] * right[i + 24]);
                 first_and_fifth + middle
@@ -7282,7 +7293,7 @@ fn upstream_marginal_prior_error(
         let mut total = (half[0] + half[2]) + (half[1] + half[3]);
         let tail_start = if size == 45 { 40 } else { 32 };
         for i in tail_start..size {
-            total = right[i].mul_add(left[i], total);
+            total = right[i].fused_mul_add(left[i], total);
         }
         return total as f64;
     }
@@ -8465,14 +8476,14 @@ fn upstream_f32_packet8_mul_add(
     accumulator: UpstreamF32Packet8,
 ) -> UpstreamF32Packet8 {
     UpstreamF32Packet8([
-        lhs.0[0].mul_add(rhs.0[0], accumulator.0[0]),
-        lhs.0[1].mul_add(rhs.0[1], accumulator.0[1]),
-        lhs.0[2].mul_add(rhs.0[2], accumulator.0[2]),
-        lhs.0[3].mul_add(rhs.0[3], accumulator.0[3]),
-        lhs.0[4].mul_add(rhs.0[4], accumulator.0[4]),
-        lhs.0[5].mul_add(rhs.0[5], accumulator.0[5]),
-        lhs.0[6].mul_add(rhs.0[6], accumulator.0[6]),
-        lhs.0[7].mul_add(rhs.0[7], accumulator.0[7]),
+        lhs.0[0].fused_mul_add(rhs.0[0], accumulator.0[0]),
+        lhs.0[1].fused_mul_add(rhs.0[1], accumulator.0[1]),
+        lhs.0[2].fused_mul_add(rhs.0[2], accumulator.0[2]),
+        lhs.0[3].fused_mul_add(rhs.0[3], accumulator.0[3]),
+        lhs.0[4].fused_mul_add(rhs.0[4], accumulator.0[4]),
+        lhs.0[5].fused_mul_add(rhs.0[5], accumulator.0[5]),
+        lhs.0[6].fused_mul_add(rhs.0[6], accumulator.0[6]),
+        lhs.0[7].fused_mul_add(rhs.0[7], accumulator.0[7]),
     ])
 }
 
@@ -8496,14 +8507,14 @@ fn upstream_f32_packet8_sub_scaled(data: &mut [f32], start: usize, source: &[f32
         let destination = upstream_f32_packet8_load(data, start + offset);
         let source_packet = upstream_f32_packet8_load(source, offset);
         let updated = UpstreamF32Packet8([
-            negative_scalar.mul_add(source_packet.0[0], destination.0[0]),
-            negative_scalar.mul_add(source_packet.0[1], destination.0[1]),
-            negative_scalar.mul_add(source_packet.0[2], destination.0[2]),
-            negative_scalar.mul_add(source_packet.0[3], destination.0[3]),
-            negative_scalar.mul_add(source_packet.0[4], destination.0[4]),
-            negative_scalar.mul_add(source_packet.0[5], destination.0[5]),
-            negative_scalar.mul_add(source_packet.0[6], destination.0[6]),
-            negative_scalar.mul_add(source_packet.0[7], destination.0[7]),
+            negative_scalar.fused_mul_add(source_packet.0[0], destination.0[0]),
+            negative_scalar.fused_mul_add(source_packet.0[1], destination.0[1]),
+            negative_scalar.fused_mul_add(source_packet.0[2], destination.0[2]),
+            negative_scalar.fused_mul_add(source_packet.0[3], destination.0[3]),
+            negative_scalar.fused_mul_add(source_packet.0[4], destination.0[4]),
+            negative_scalar.fused_mul_add(source_packet.0[5], destination.0[5]),
+            negative_scalar.fused_mul_add(source_packet.0[6], destination.0[6]),
+            negative_scalar.fused_mul_add(source_packet.0[7], destination.0[7]),
         ]);
         upstream_f32_packet8_store(data, start + offset, updated);
         offset += 8;
@@ -8535,7 +8546,7 @@ fn upstream_f32_packet8_sub_scaled_fma_head(
     let negative_scalar = -scalar;
     let head = ((8 - (start & 7)) & 7).min(len);
     for offset in 0..head {
-        data[start + offset] = negative_scalar.mul_add(source[offset], data[start + offset]);
+        data[start + offset] = negative_scalar.fused_mul_add(source[offset], data[start + offset]);
     }
     let packet_end = head + ((len - head) / 8) * 8;
     let mut offset = head;
@@ -8543,20 +8554,20 @@ fn upstream_f32_packet8_sub_scaled_fma_head(
         let destination = upstream_f32_packet8_load(data, start + offset);
         let source_packet = upstream_f32_packet8_load(source, offset);
         let updated = UpstreamF32Packet8([
-            negative_scalar.mul_add(source_packet.0[0], destination.0[0]),
-            negative_scalar.mul_add(source_packet.0[1], destination.0[1]),
-            negative_scalar.mul_add(source_packet.0[2], destination.0[2]),
-            negative_scalar.mul_add(source_packet.0[3], destination.0[3]),
-            negative_scalar.mul_add(source_packet.0[4], destination.0[4]),
-            negative_scalar.mul_add(source_packet.0[5], destination.0[5]),
-            negative_scalar.mul_add(source_packet.0[6], destination.0[6]),
-            negative_scalar.mul_add(source_packet.0[7], destination.0[7]),
+            negative_scalar.fused_mul_add(source_packet.0[0], destination.0[0]),
+            negative_scalar.fused_mul_add(source_packet.0[1], destination.0[1]),
+            negative_scalar.fused_mul_add(source_packet.0[2], destination.0[2]),
+            negative_scalar.fused_mul_add(source_packet.0[3], destination.0[3]),
+            negative_scalar.fused_mul_add(source_packet.0[4], destination.0[4]),
+            negative_scalar.fused_mul_add(source_packet.0[5], destination.0[5]),
+            negative_scalar.fused_mul_add(source_packet.0[6], destination.0[6]),
+            negative_scalar.fused_mul_add(source_packet.0[7], destination.0[7]),
         ]);
         upstream_f32_packet8_store(data, start + offset, updated);
         offset += 8;
     }
     while offset < len {
-        data[start + offset] = negative_scalar.mul_add(source[offset], data[start + offset]);
+        data[start + offset] = negative_scalar.fused_mul_add(source[offset], data[start + offset]);
         offset += 1;
     }
 }
@@ -8585,10 +8596,10 @@ fn upstream_f32_packet_mul_add(
     accumulator: UpstreamF32Packet4,
 ) -> UpstreamF32Packet4 {
     UpstreamF32Packet4([
-        lhs.0[0].mul_add(rhs.0[0], accumulator.0[0]),
-        lhs.0[1].mul_add(rhs.0[1], accumulator.0[1]),
-        lhs.0[2].mul_add(rhs.0[2], accumulator.0[2]),
-        lhs.0[3].mul_add(rhs.0[3], accumulator.0[3]),
+        lhs.0[0].fused_mul_add(rhs.0[0], accumulator.0[0]),
+        lhs.0[1].fused_mul_add(rhs.0[1], accumulator.0[1]),
+        lhs.0[2].fused_mul_add(rhs.0[2], accumulator.0[2]),
+        lhs.0[3].fused_mul_add(rhs.0[3], accumulator.0[3]),
     ])
 }
 
@@ -8733,7 +8744,7 @@ fn upstream_f32_packet8_squared_norm(data: &[f32], start: usize, len: usize) -> 
         }
         result = upstream_f32_packet8_reduce(packet_result);
         for index in start..aligned_start {
-            result = data[index].mul_add(data[index], result);
+            result = data[index].fused_mul_add(data[index], result);
         }
         // GCC's pinned Eigen build vectorizes a four-coefficient remainder as
         // `vmulps` followed by scalar `vaddss` instructions.  Any remainder
@@ -8743,7 +8754,7 @@ fn upstream_f32_packet8_squared_norm(data: &[f32], start: usize, len: usize) -> 
             result += data[index] * data[index];
         }
         for index in scalar_packet_end..end {
-            result = data[index].mul_add(data[index], result);
+            result = data[index].fused_mul_add(data[index], result);
         }
     } else {
         result = data[start] * data[start];
@@ -8752,7 +8763,7 @@ fn upstream_f32_packet8_squared_norm(data: &[f32], start: usize, len: usize) -> 
             result += data[index] * data[index];
         }
         for index in scalar_packet_end..end {
-            result = data[index].mul_add(data[index], result);
+            result = data[index].fused_mul_add(data[index], result);
         }
     }
     result
@@ -8835,10 +8846,10 @@ fn upstream_f32_norm_packet4_variant(
     }
     let mut result = upstream_f32_packet_reduce(packet_result);
     for index in start..aligned_start {
-        result = data[index].mul_add(data[index], result);
+        result = data[index].fused_mul_add(data[index], result);
     }
     for index in aligned_end..(start + len) {
-        result = data[index].mul_add(data[index], result);
+        result = data[index].fused_mul_add(data[index], result);
     }
     result
 }
@@ -9159,7 +9170,7 @@ fn upstream_f32_packet8_gemv_workspace(
                 );
             }
             for offset in (full_col_end + if len - full_col_end >= 4 { 4 } else { 0 })..len {
-                result = qj[base + offset].mul_add(essential[offset], result);
+                result = qj[base + offset].fused_mul_add(essential[offset], result);
             }
             workspace[row + lane] = result;
         }
@@ -9192,7 +9203,7 @@ fn upstream_f32_packet8_gemv_workspace(
                 );
             }
             for offset in (full_col_end + if len - full_col_end >= 4 { 4 } else { 0 })..len {
-                result = qj[base + offset].mul_add(essential[offset], result);
+                result = qj[base + offset].fused_mul_add(essential[offset], result);
             }
             workspace[row + lane] = result;
         }
@@ -9225,7 +9236,7 @@ fn upstream_f32_packet8_gemv_workspace(
                 );
             }
             for offset in (full_col_end + if len - full_col_end >= 4 { 4 } else { 0 })..len {
-                result = qj[base + offset].mul_add(essential[offset], result);
+                result = qj[base + offset].fused_mul_add(essential[offset], result);
             }
             workspace[row + lane] = result;
         }
@@ -9263,7 +9274,7 @@ fn upstream_f32_packet8_gemv_workspace(
             result += upstream_f32_packet_reduce(half);
         }
         for offset in half_col_end..len {
-            result = qj[base + offset].mul_add(essential[offset], result);
+            result = qj[base + offset].fused_mul_add(essential[offset], result);
         }
         workspace[row] = result;
         row += 1;
@@ -9288,7 +9299,7 @@ fn upstream_f32_packet8_rhs_dot(lhs: &[f32], rhs: &[f32], rhs_start: usize, len:
         }
         let mut result = lhs[0] * rhs[rhs_start];
         for offset in 1..len {
-            result = lhs[offset].mul_add(rhs[rhs_start + offset], result);
+            result = lhs[offset].fused_mul_add(rhs[rhs_start + offset], result);
         }
         return result;
     }
@@ -9368,7 +9379,7 @@ fn upstream_f32_packet8_rhs_dot(lhs: &[f32], rhs: &[f32], rhs_start: usize, len:
     }
     let mut result = upstream_f32_packet8_reduce(packet0);
     for offset in packet_end..len {
-        result = lhs[offset].mul_add(rhs[rhs_start + offset], result);
+        result = lhs[offset].fused_mul_add(rhs[rhs_start + offset], result);
     }
     result
 }
@@ -9443,7 +9454,7 @@ fn upstream_f32_householder_beta(c0: f32, tail_sq_norm: f32) -> f32 {
     // the tail norm with a fused multiply-add.  Keep this as one explicit
     // operation at the scalar boundary; the sign convention is applied by
     // the caller after taking the positive square root.
-    c0.mul_add(c0, tail_sq_norm).sqrt()
+    c0.fused_mul_add(c0, tail_sq_norm).sqrt()
 }
 
 /// Safe f32 emulation of Eigen 5.0.1's packetized SqrtToSqrt path.
@@ -9737,14 +9748,15 @@ fn sqrt_marginalize_upstream_f32_packet(
                         for requested_head in 0..8 {
                             let mut candidate = qj[base..base + rows].to_vec();
                             candidate[row_start] =
-                                (-tau).mul_add(workspace_value, candidate[row_start]);
+                                (-tau).fused_mul_add(workspace_value, candidate[row_start]);
                             let head = requested_head.min(tail_len);
                             let packet_end = head + ((tail_len - head) / 8) * 8;
                             for offset in 0..head {
-                                candidate[row_start + 1 + offset] = (-workspace_value).mul_add(
-                                    scaled_essential[offset],
-                                    candidate[row_start + 1 + offset],
-                                );
+                                candidate[row_start + 1 + offset] = (-workspace_value)
+                                    .fused_mul_add(
+                                        scaled_essential[offset],
+                                        candidate[row_start + 1 + offset],
+                                    );
                             }
                             let mut offset = head;
                             while offset < packet_end {
@@ -9752,14 +9764,14 @@ fn sqrt_marginalize_upstream_f32_packet(
                                     upstream_f32_packet8_load(&candidate, row_start + 1 + offset);
                                 let source = upstream_f32_packet8_load(&scaled_essential, offset);
                                 let updated = UpstreamF32Packet8([
-                                    (-workspace_value).mul_add(source.0[0], destination.0[0]),
-                                    (-workspace_value).mul_add(source.0[1], destination.0[1]),
-                                    (-workspace_value).mul_add(source.0[2], destination.0[2]),
-                                    (-workspace_value).mul_add(source.0[3], destination.0[3]),
-                                    (-workspace_value).mul_add(source.0[4], destination.0[4]),
-                                    (-workspace_value).mul_add(source.0[5], destination.0[5]),
-                                    (-workspace_value).mul_add(source.0[6], destination.0[6]),
-                                    (-workspace_value).mul_add(source.0[7], destination.0[7]),
+                                    (-workspace_value).fused_mul_add(source.0[0], destination.0[0]),
+                                    (-workspace_value).fused_mul_add(source.0[1], destination.0[1]),
+                                    (-workspace_value).fused_mul_add(source.0[2], destination.0[2]),
+                                    (-workspace_value).fused_mul_add(source.0[3], destination.0[3]),
+                                    (-workspace_value).fused_mul_add(source.0[4], destination.0[4]),
+                                    (-workspace_value).fused_mul_add(source.0[5], destination.0[5]),
+                                    (-workspace_value).fused_mul_add(source.0[6], destination.0[6]),
+                                    (-workspace_value).fused_mul_add(source.0[7], destination.0[7]),
                                 ]);
                                 upstream_f32_packet8_store(
                                     &mut candidate,
@@ -9769,21 +9781,23 @@ fn sqrt_marginalize_upstream_f32_packet(
                                 offset += 8;
                             }
                             while offset < tail_len {
-                                candidate[row_start + 1 + offset] = (-workspace_value).mul_add(
-                                    scaled_essential[offset],
-                                    candidate[row_start + 1 + offset],
-                                );
+                                candidate[row_start + 1 + offset] = (-workspace_value)
+                                    .fused_mul_add(
+                                        scaled_essential[offset],
+                                        candidate[row_start + 1 + offset],
+                                    );
                                 offset += 1;
                             }
                             eprint!(" {:016x}", upstream_f32_bits_hash(&candidate));
                         }
                         eprintln!();
                         let mut direct = qj[base..base + rows].to_vec();
-                        direct[row_start] = (-tau).mul_add(workspace_value, direct[row_start]);
+                        direct[row_start] =
+                            (-tau).fused_mul_add(workspace_value, direct[row_start]);
                         let direct_scale = -tau * workspace_value;
                         for offset in 0..tail_len {
                             direct[row_start + 1 + offset] = direct_scale
-                                .mul_add(essential[offset], direct[row_start + 1 + offset]);
+                                .fused_mul_add(essential[offset], direct[row_start + 1 + offset]);
                         }
                         eprintln!(
                             "trace_stage9_outer_direct {:016x}",
@@ -9796,7 +9810,7 @@ fn sqrt_marginalize_upstream_f32_packet(
                         let mut workspace_value = workspace[trailing_offset];
                         workspace_value += qj[trailing * rows + row_start];
                         qj[trailing * rows + row_start] =
-                            (-tau).mul_add(workspace_value, qj[trailing * rows + row_start]);
+                            (-tau).fused_mul_add(workspace_value, qj[trailing * rows + row_start]);
                         upstream_f32_packet8_sub_scaled(
                             &mut qj,
                             trailing_tail_start,
@@ -9843,7 +9857,7 @@ fn sqrt_marginalize_upstream_f32_packet(
                     let mut workspace =
                         upstream_f32_packet8_rhs_dot(&essential, &qr, row_start + 1, tail_len);
                     workspace += qr[row_start];
-                    qr[row_start] = (-tau).mul_add(workspace, qr[row_start]);
+                    qr[row_start] = (-tau).fused_mul_add(workspace, qr[row_start]);
                     let scaled_essential = upstream_f32_packet_scale(&essential, tau);
                     upstream_f32_packet8_sub_scaled_fma_head(
                         &mut qr,
@@ -10830,6 +10844,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
+            factor_config: FactorConfig::default(),
         }
     }
 
@@ -12225,6 +12240,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
+            factor_config: FactorConfig::default(),
         };
         assert_eq!(problem.state_dof(), 36);
         let x = problem.initial_state();
@@ -12265,6 +12281,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
+            factor_config: FactorConfig::default(),
         };
         let mut step = DVector::zeros(NAV_STATE_DOF);
         step[0] = 0.3;
@@ -12357,6 +12374,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
+            factor_config: FactorConfig::default(),
         };
         let second_increment = DVector::from_column_slice(&[
             0.8693182_f64,
@@ -12583,6 +12601,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
+            factor_config: FactorConfig::default(),
         };
         let step =
             DVector::from_iterator(NAV_STATE_DOF, increment_bits.into_iter().map(f64_from_bits));
@@ -12764,6 +12783,7 @@ mod tests {
                 anchor_point: None,
                 gravity_world: Vector3::zeros(),
                 scalar_mode: ScalarMode::UpstreamF32,
+                factor_config: FactorConfig::default(),
             }
         };
         let raw_pose = pose_from_bits(
@@ -13286,6 +13306,7 @@ mod tests {
             anchor_point: Some(DVector::zeros(15)),
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
+            factor_config: FactorConfig::default(),
         };
         let x = problem.initial_state();
         let factors = problem.linearize(&x).unwrap().factors;
@@ -13321,6 +13342,7 @@ mod tests {
             anchor_point: Some(DVector::zeros(15)),
             gravity_world: Vector3::new(0.0, 0.0, -9.81),
             scalar_mode: ScalarMode::ExtendedF64,
+            factor_config: FactorConfig::default(),
         };
         let factors = problem.linearize(&problem.initial_state()).unwrap().factors;
         let anchor = factors.iter().find(|factor| factor.rows() == 15).unwrap();
@@ -13381,6 +13403,7 @@ mod tests {
             anchor_point: Some(DVector::zeros(15)),
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
+            factor_config: FactorConfig::default(),
         };
         let initial = problem.initial_state();
         let linearization = problem.linearize(&initial).unwrap();
@@ -13581,6 +13604,7 @@ mod tests {
             anchor_point: Some(DVector::zeros(15)),
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
+            factor_config: FactorConfig::default(),
         };
         let before =
             problem.landmarks[0].direction.bearing() / problem.landmarks[0].inverse_distance;
@@ -13742,6 +13766,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
+            factor_config: FactorConfig::default(),
         };
         let factor = problem
             .linearize(&problem.initial_state())
@@ -13836,6 +13861,7 @@ mod tests {
             anchor_point: None,
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
+            factor_config: FactorConfig::default(),
         };
         let state = problem.initial_state();
         let factor = problem

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0e1012">
+<title>visloc-rs · live VIO in the browser</title>
+<script>
+  // On a static host (GitHub Pages) the page is not cross-origin isolated:
+  // coi-sw.js adds the headers, from the next load on (one reload a tab
+  // session at most, so a browser that ignores them does not loop).
+  if (!self.crossOriginIsolated && window.isSecureContext && navigator.serviceWorker) {
+    navigator.serviceWorker.register("coi-sw.js").then(() => navigator.serviceWorker.ready).then(() => {
+      if (!sessionStorage.getItem("coi-reloaded")) {
+        sessionStorage.setItem("coi-reloaded", "1");
+        location.reload();
+      }
+    }, (err) => console.warn("cross-origin isolation service worker:", err));
+  }
+</script>
+<style>
+  :root {
+    --stage: #0e1012;
+    --panel: rgba(24, 27, 31, 0.86);
+    --panel-solid: #181b1f;
+    --ink: #e8eae6;
+    --muted: #9aa3ac;
+    --line: #343a41;
+    --accent: #e0835c;
+    --accent-ink: #1a1c1f;
+    --chip: #2b3036;
+    --good: #6cc48a;
+    --warn: #e6b450;
+    --bad: #e5655b;
+    --imu: #6aa8e8;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--stage);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button { font: inherit; color: inherit; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Live view: camera, AR overlay, tracked points. */
+  #live { position: fixed; inset: 0; }
+  #live video, #live canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #live video { object-fit: cover; background: #000; }
+  #ar, #tracks { pointer-events: none; }
+
+  /* Top status. */
+  .hud {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    left: 10px; right: 10px;
+    display: grid; gap: 6px;
+    pointer-events: none;
+  }
+  .status {
+    justify-self: start;
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 12px 6px 10px; font-size: 14px; font-weight: 600;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .status .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .status[data-state="track"] .dot { background: var(--good); }
+  .status[data-state="init"] .dot, .status[data-state="coast"] .dot { background: var(--warn); }
+  .status[data-state="reset"] .dot, .status[data-state="error"] .dot { background: var(--bad); }
+  .status[data-state="imu"] .dot { background: var(--imu); }
+  .status .sub { font-weight: 400; color: var(--muted); font-size: 13px; }
+  .metrics {
+    justify-self: start;
+    display: flex; flex-wrap: wrap; gap: 4px 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 5px 10px; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .metrics b { color: var(--ink); font-weight: 500; }
+  .rec { color: var(--bad); font-weight: 600; }
+
+  /* Bottom: map + controls. */
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 0 10px calc(env(safe-area-inset-bottom, 0px) + 10px);
+    display: grid; gap: 8px;
+  }
+  .map {
+    position: relative;
+    height: 34vh; max-height: 340px;
+    background: rgba(14, 16, 18, 0.82); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .map canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  .map[hidden] { display: none; }
+  .map .tag {
+    position: absolute; left: 8px; top: 6px; font-family: var(--mono); font-size: 11px; color: var(--muted);
+    pointer-events: none;
+  }
+  .map .follow {
+    position: absolute; right: 6px; top: 6px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--chip); font-size: 12px; padding: 4px 8px; cursor: pointer;
+  }
+  .controls { display: grid; grid-template-columns: 1fr 1fr 1.25fr 1.1fr 0.9fr 0.65fr; gap: 6px; }
+  .controls button {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+    padding: 12px 4px; font-size: 13.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .controls button:disabled { opacity: 0.45; }
+  .controls button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  #b-rec[aria-pressed="true"] { border-color: var(--bad); color: var(--bad); }
+  #b-map[aria-pressed="true"] { border-color: var(--accent); }
+  #b-imu[aria-pressed="true"] { border-color: var(--imu); color: var(--imu); }
+
+  /* Sheets: start, settings, recording. */
+  .sheet {
+    position: fixed; inset: auto 0 0 0;
+    max-height: 88vh; overflow: auto;
+    background: var(--panel-solid); border-top: 1px solid var(--line);
+    border-radius: 14px 14px 0 0;
+    padding: 18px 18px calc(env(safe-area-inset-bottom, 0px) + 18px);
+    display: grid; gap: 14px;
+    -webkit-user-select: text; user-select: text;
+  }
+  .sheet[hidden] { display: none; }
+  .sheet h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: 0.01em; text-wrap: balance; }
+  .sheet h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .sheet p { margin: 0; font-size: 14px; line-height: 1.5; color: var(--muted); }
+  .sheet ul { margin: 0; padding-left: 18px; font-size: 14px; line-height: 1.55; color: var(--muted); }
+  .device {
+    display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    background: var(--chip); border-radius: 8px; padding: 10px 12px;
+  }
+  .device dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+  .big {
+    border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-ink);
+    padding: 15px; font-size: 17px; font-weight: 700; cursor: pointer;
+  }
+  .big:disabled { opacity: 0.5; }
+  .ghost { border: 1px solid var(--line); border-radius: 10px; background: var(--chip); padding: 11px; font-size: 15px; cursor: pointer; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .field { display: grid; gap: 6px; font-size: 14px; }
+  .field .label { display: flex; justify-content: space-between; color: var(--muted); }
+  .field .label output { font-family: var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; }
+  .field input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .field select, .field input[type="number"] {
+    font: inherit; font-size: 15px; color: var(--ink); background: var(--chip);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; width: 100%;
+  }
+  .check { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .check input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .note { font-size: 12.5px; color: var(--muted); line-height: 1.5; border-top: 1px solid var(--line); padding-top: 10px; }
+  .note a { color: var(--accent); }
+  .err { color: var(--bad); font-size: 14px; }
+  .toast {
+    position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; max-width: 80vw; text-align: center;
+    pointer-events: none; opacity: 0; transition: opacity 0.3s;
+  }
+  .toast.show { opacity: 1; }
+  .debug {
+    position: fixed; left: 10px; right: 10px; top: calc(env(safe-area-inset-top, 0px) + 84px);
+    margin: 0; padding: 6px 8px; max-height: 46vh; overflow: hidden;
+    background: rgba(14, 16, 18, 0.8); border: 1px solid var(--line); border-radius: 8px;
+    font-family: var(--mono); font-size: 10px; line-height: 1.35; color: var(--ink);
+    white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none;
+  }
+  .progress { height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; }
+  .progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+  @media (orientation: landscape) and (max-height: 500px) {
+    .map { height: 44vh; }
+  }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.js" } }
+</script>
+</head>
+<body>
+<div id="live">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="ar"></canvas>
+  <canvas id="tracks"></canvas>
+</div>
+
+<div class="hud" aria-live="polite">
+  <div class="status" id="status" data-state="idle"><span class="dot"></span><span id="status-text">Ready</span><span class="sub" id="status-sub"></span></div>
+  <div class="metrics" id="metrics" hidden>
+    <span><b id="m-fps">–</b> fps</span>
+    <span><b id="m-ms">–</b> ms</span>
+    <span>pts <b id="m-pts">–</b></span>
+    <span>imu <b id="m-imu">–</b> Hz</span>
+    <span>dist <b id="m-dist">–</b></span>
+    <span>v <b id="m-speed">–</b></span>
+    <span id="m-rec" class="rec" hidden>● REC <span id="m-rec-t">0</span>s</span>
+  </div>
+</div>
+
+<div class="dock">
+  <div class="map" id="map-wrap" hidden>
+    <canvas id="map"></canvas>
+    <span class="tag" id="map-tag">map · metres</span>
+    <button class="follow" id="follow" aria-pressed="true">following</button>
+  </div>
+  <div class="controls" id="controls" hidden>
+    <button id="b-stop">Stop</button>
+    <button id="b-reset">Reset</button>
+    <button id="b-imu" aria-pressed="false" title="Ignore the camera: move the frozen map by the motion sensors alone">IMU only</button>
+    <button id="b-rec" aria-pressed="false">Record</button>
+    <button id="b-map" aria-pressed="true">Map</button>
+    <button id="b-set" aria-label="Settings">⚙</button>
+  </div>
+</div>
+
+<section class="sheet" id="start-sheet">
+  <h1>Live visual-inertial odometry, in your browser</h1>
+  <p>This page runs <b>visloc-rs</b>'s Rust port of Basalt's monocular-inertial VIO, compiled to WebAssembly, on your phone's camera and motion sensors. It tracks the phone in metric 3D. The camera images stay on the phone.</p>
+  <dl class="device" id="device"></dl>
+  <ul>
+    <li>Hold the phone <b>upright, in portrait</b>.</li>
+    <li>To start, <b>move it side to side</b> (half a metre or so) while pointing at a textured scene. A static start can't recover scale.</li>
+    <li>Then walk around. The cube stays put in the world (tap the view to move it in front of you), and the map shows your path.</li>
+    <li><b>IMU only</b> ignores the camera: the map freezes and moves by the motion sensors alone. Points that stay on their features while you turn the phone mean the camera and IMU agree.</li>
+  </ul>
+  <button class="big" id="b-start">Start camera &amp; motion sensors</button>
+  <button class="ghost" id="b-demo">Watch a demo (recorded iPhone walk, no sensors needed)</button>
+  <div class="err" id="start-err"></div>
+  <p class="note">Calibration is loaded for your phone model where known (focal length from the manufacturer's 35&nbsp;mm-equivalent figure). Tune it under ⚙ if tracking drifts. Uses wasm threads when the page is cross-origin isolated. Served by <code>serve.py</code>, the page sends it diagnostics (timings, counters, errors and phone model; no images); <code>?telemetry=0</code> turns that off.</p>
+</section>
+
+<section class="sheet" id="settings-sheet" hidden>
+  <h2>Calibration for this phone</h2>
+  <dl class="device" id="device2"></dl>
+  <label class="field"><span class="label">Main camera focal length (35&nbsp;mm equiv.)<output id="o-focal"></output></span>
+    <input type="range" id="i-focal" min="13" max="40" step="0.5"></label>
+  <p class="note" id="sync-info"></p>
+  <label class="field"><span class="label">Camera time offset (set automatically)<output id="o-td"></output></span>
+    <input type="range" id="i-td" min="-150" max="150" step="5"></label>
+  <label class="field"><span class="label">IMU noise scale<output id="o-noise"></output></span>
+    <input type="range" id="i-noise" min="0.5" max="6" step="0.25"></label>
+  <label class="field"><span class="label">Overlay timing (+ draws for a later image; applies at once)<output id="o-lead"></output></span>
+    <input type="range" id="i-lead" min="-50" max="50" step="2"></label>
+  <label class="field"><span class="label">Tracking resolution (width, px)</span>
+    <select id="i-width"><option value="240">240 (fastest)</option><option value="300">300</option><option value="360" selected>360</option><option value="480">480 (slowest)</option></select></label>
+  <label class="field"><span class="label">Lighter tracking for slower phones (fewer points, estimating every other frame)</span>
+    <select id="i-light"><option value="auto" selected>Auto (on in Firefox)</option><option value="on">On</option><option value="off">Off</option></select></label>
+  <label class="field"><span class="label">Accelerometer sign</span>
+    <select id="i-sign"><option value="auto">auto (from device orientation)</option><option value="1">as reported (+g up)</option><option value="-1">inverted</option></select></label>
+  <label class="field"><span class="label">Gyroscope axes (corrected automatically)</span>
+    <select id="i-gyro"><option value="w3c">W3C: alpha about z (Android)</option><option value="webkit">WebKit: alpha about x (iOS)</option></select></label>
+  <label class="check"><input type="checkbox" id="i-watchdog" checked> Restart automatically when tracking diverges</label>
+  <label class="check"><input type="checkbox" id="i-still" checked> Wait for the phone to be held still before (re)starting</label>
+  <label class="check"><input type="checkbox" id="i-fps60"> Film at 60 fps, track every other frame (half the motion blur, more noise)</label>
+  <label class="check"><input type="checkbox" id="i-track60"> …and track every frame at 60 Hz (recordings always keep every frame)</label>
+  <label class="check"><input type="checkbox" id="i-gpu" checked> Track points on the GPU (WebGPU) when available</label>
+  <label class="check"><input type="checkbox" id="i-threads" checked> Use wasm threads when available</label>
+  <label class="check"><input type="checkbox" id="i-landmarks" checked> Show landmarks in the camera view</label>
+  <label class="check"><input type="checkbox" id="i-tracks"> Show tracked points (turned onto the frame on screen)</label>
+  <div class="row2">
+    <button class="ghost" id="b-default">Phone defaults</button>
+    <button class="big" id="b-apply">Save &amp; restart</button>
+  </div>
+  <p class="note">Settings are saved on this phone, for this model. Changes restart tracking.</p>
+  <button class="ghost" id="b-close-set">Close</button>
+</section>
+
+<section class="sheet" id="rec-sheet" hidden>
+  <h2>Recording</h2>
+  <p id="rec-info"></p>
+  <div class="progress" hidden id="up-progress"><i></i></div>
+  <div class="row2">
+    <button class="big" id="b-upload">Upload to the demo server</button>
+    <a class="ghost" id="b-download" download="session.vrec" style="text-align:center;text-decoration:none">Download</a>
+  </div>
+  <p class="note">A recording holds the grey frames and motion samples this page fed to the VIO, plus your phone's calibration, so the session can be replayed and tuned offline (<code>cargo run --example replay</code>). Uploading sends it only to the server hosting this page.</p>
+  <button class="ghost" id="b-close-rec">Close</button>
+</section>
+
+<pre class="debug" id="debug" hidden></pre>
+<div class="toast" id="toast"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

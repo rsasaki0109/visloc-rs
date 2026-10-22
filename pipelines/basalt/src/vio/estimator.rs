@@ -1,6 +1,6 @@
 use super::aom::{
     q2_f32_normal_system, set_active_diagnostic_projection_event, sophus_rotate_step_packet_f32,
-    DiagnosticProjectionEvent, LmConfig, WhitenedFactorRowStack,
+    DiagnosticProjectionEvent, FactorConfig, LmConfig, WhitenedFactorRowStack,
 };
 use super::landmarks::{
     triangulate_dlt, triangulate_dlt_rig_f32, triangulate_dlt_rig_f32_traced, BearingObservation,
@@ -23,8 +23,9 @@ use super::window::{
     POSE_DOF,
 };
 use crate::camera::DoubleSphereCamera;
+use crate::fma::FusedMulAdd;
 use crate::imu::{
-    integrate_between, BiasRandomWalkNoise, ImuDStateUpdateTrace, ImuNoiseModel,
+    integrate_between_with, BiasRandomWalkNoise, ImuDStateUpdateTrace, ImuNoiseModel,
     ImuPreintegratedDelta, ImuPreintegrator,
 };
 use crate::streaming::{BasaltStream, VisionFrame, WindowPhase};
@@ -61,6 +62,13 @@ pub struct EstimatorConfig {
     /// Upstream `vio_new_kf_keypoints_thresh`, applied to camera-0 tracks
     /// that already have a landmark versus all accepted camera-0 tracks.
     pub new_kf_keypoints_threshold: f64,
+    /// Upstream `vio_min_triangulation_dist`: the least distance (m) between
+    /// two observations of a track for them to triangulate a new landmark.
+    pub min_triangulation_distance: f64,
+    /// Upstream `vio_obs_std_dev` (pixels) and `vio_obs_huber_thresh`: the
+    /// visual residuals' standard deviation and Huber threshold.
+    pub observation_stddev: f64,
+    pub observation_huber: f64,
     /// Opt-in adaptive keyframe spacing (not upstream).  When the connected
     /// ratio falls below `threshold`, a keyframe may be taken once
     /// `frames_after_kf > min_frames_after_kf` instead of the regular
@@ -104,6 +112,19 @@ pub struct EstimatorConfig {
     /// alone: it would need the north direction, and gravity keeps the tilt
     /// it causes observable.  `0.0` keeps the pinned behaviour.
     pub earth_rotation_up_rad_s: f64,
+    /// Opt-in (not upstream; `config.vio_imu_noise_per_step`).  Upstream
+    /// injects the IMU's discrete per-sample noise (density² · rate) into
+    /// every preintegration step and scales it by dt², which is right only
+    /// for steps one sample period long.  The steps that start and end each
+    /// frame interval are shorter, so an interval's covariance falls short of
+    /// the continuous model by a share that depends on how many samples it
+    /// holds: about 0.83 with two samples (a 60 Hz IMU at 30 fps) and 0.67
+    /// with one (60 Hz at 60 fps), and it swings with where the samples land.
+    /// `true` makes the noise densities continuous (the adapter passes them
+    /// without the √rate) and gives each step variance for its own length,
+    /// density² · dt, so the covariance does not depend on how an interval
+    /// is split.  `false` keeps the pinned behaviour.
+    pub imu_noise_per_step: bool,
 }
 
 /// Earth's sidereal rotation rate (WGS-84), rad/s.
@@ -128,6 +149,9 @@ impl Default for EstimatorConfig {
             window: WindowPolicy::default(),
             min_frames_after_kf: 5,
             new_kf_keypoints_threshold: 0.7,
+            min_triangulation_distance: 0.05,
+            observation_stddev: 0.5,
+            observation_huber: 1.0,
             urgent_kf: None,
             solver: LmConfig::default(),
             initial_pose_weight: 1.0e8,
@@ -137,6 +161,7 @@ impl Default for EstimatorConfig {
             kf_connectivity_all_cameras: false,
             outlier_filter: None,
             earth_rotation_up_rad_s: 0.0,
+            imu_noise_per_step: false,
         }
     }
 }
@@ -737,6 +762,26 @@ impl BasaltVioEstimator {
         counts
     }
 
+    /// Diagnostic: world position of every landmark that is not removed and
+    /// whose host keyframe is still in the window (the host's IMU pose
+    /// composed with its camera's `T_imu_cam`, applied to the landmark's
+    /// inverse-distance point), keyed by landmark id. Read-only, e.g. to
+    /// draw the map; it does not touch solver state.
+    pub fn landmark_positions_world(&self) -> Vec<(u64, Vector3<f64>)> {
+        self.landmarks
+            .landmarks
+            .iter()
+            .filter(|(_, record)| record.status != LandmarkStatus::Removed)
+            .filter_map(|(&id, record)| {
+                let landmark = &record.landmark;
+                let point = landmark.position_in_anchor()?;
+                let imu_pose = self.pose_for_frame(landmark.anchor_pose)?;
+                let camera = self.camera_pose(&imu_pose, landmark.anchor_camera_id)?;
+                Some((id, camera.transform_point(&Point3::from(point)).coords))
+            })
+            .collect()
+    }
+
     pub(crate) const fn no_output_mode_active(&self) -> bool {
         self.lean_no_output_mode
     }
@@ -1010,6 +1055,7 @@ impl BasaltVioEstimator {
                     previous_nav.accel_bias_m_s2,
                     self.imu_noise,
                     self.config.scalar_mode,
+                    self.config.imu_noise_per_step,
                 )
             })
             .unwrap_or((None, false));
@@ -1798,7 +1844,7 @@ impl BasaltVioEstimator {
                     } else {
                         baseline.norm()
                     };
-                    if baseline_norm < 0.05 {
+                    if baseline_norm < self.config.min_triangulation_distance {
                         if capture_triangulation {
                             triangulation_attempts.push(json!({
                                 "candidate_index": candidate_index,
@@ -2454,6 +2500,11 @@ impl BasaltVioEstimator {
                 .gravity_world
                 .unwrap_or_else(|| Vector3::new(0.0, 0.0, -9.81)),
             scalar_mode: self.config.scalar_mode,
+            factor_config: FactorConfig {
+                observation_stddev: self.config.observation_stddev,
+                huber_delta: self.config.observation_huber,
+                ..FactorConfig::default()
+            },
         }
     }
 
@@ -4374,21 +4425,39 @@ fn integrate_interval(
     bias_accel: Vector3<f64>,
     noise: ImuNoiseModel,
     scalar_mode: ScalarMode,
+    noise_per_step: bool,
 ) -> (Option<ImuPreintegratedDelta>, bool) {
     if scalar_mode == ScalarMode::UpstreamF32 {
-        return integrate_queue_f32(samples, start_ns, end_ns, bias_gyro, bias_accel, noise);
+        return integrate_queue_f32(
+            samples,
+            start_ns,
+            end_ns,
+            bias_gyro,
+            bias_accel,
+            noise,
+            noise_per_step,
+        );
     }
-    match integrate_between(
+    match integrate_between_with(
         samples,
         start_ns,
         end_ns,
         bias_gyro,
         bias_accel,
         Some(noise),
+        noise_per_step,
     ) {
         Ok(delta) => (Some(delta), false),
         Err(_) => (
-            fallback_integrate(samples, start_ns, end_ns, bias_gyro, bias_accel, noise),
+            fallback_integrate(
+                samples,
+                start_ns,
+                end_ns,
+                bias_gyro,
+                bias_accel,
+                noise,
+                noise_per_step,
+            ),
             true,
         ),
     }
@@ -4553,11 +4622,14 @@ fn fallback_integrate(
     bias_gyro: Vector3<f64>,
     bias_accel: Vector3<f64>,
     noise: ImuNoiseModel,
+    noise_per_step: bool,
 ) -> Option<ImuPreintegratedDelta> {
     if samples.is_empty() || end_ns <= start_ns {
         return None;
     }
-    let mut preintegrator = ImuPreintegrator::new(bias_gyro, bias_accel).with_noise(noise)?;
+    let mut preintegrator = ImuPreintegrator::new(bias_gyro, bias_accel)
+        .with_noise(noise)?
+        .with_per_step_noise(noise_per_step);
     let selected = samples
         .iter()
         .filter(|sample| sample.timestamp_ns > start_ns && sample.timestamp_ns <= end_ns)
@@ -4608,6 +4680,7 @@ fn integrate_queue_f32(
     bias_gyro: Vector3<f64>,
     bias_accel: Vector3<f64>,
     noise: ImuNoiseModel,
+    noise_per_step: bool,
 ) -> (Option<ImuPreintegratedDelta>, bool) {
     if samples.is_empty() || end_ns <= start_ns {
         return (None, true);
@@ -4628,6 +4701,7 @@ fn integrate_queue_f32(
         bias_gyro.map(|value| value as f32),
         bias_accel.map(|value| value as f32),
         noise,
+        noise_per_step,
     );
     let mut update_trace = Vec::new();
     let mut previous_timestamp = start_ns;
@@ -4714,14 +4788,22 @@ struct F32ImuState {
     d_position_ba: Matrix3<f32>,
     covariance: F32Matrix9,
     noise: ImuNoiseModel,
+    /// [`EstimatorConfig::imu_noise_per_step`].
+    noise_per_step: bool,
     last_f: SMatrix<f32, 9, 9>,
     last_g: F32Matrix9x3,
     last_f_old_bg: F32Matrix9x3,
 }
 
 impl F32ImuState {
-    fn new(bias_gyro: Vector3<f32>, bias_accel: Vector3<f32>, noise: ImuNoiseModel) -> Self {
+    fn new(
+        bias_gyro: Vector3<f32>,
+        bias_accel: Vector3<f32>,
+        noise: ImuNoiseModel,
+        noise_per_step: bool,
+    ) -> Self {
         Self {
+            noise_per_step,
             rotation: UnitQuaternion::identity(),
             velocity: Vector3::zeros(),
             position: Vector3::zeros(),
@@ -4765,7 +4847,7 @@ impl F32ImuState {
         // ordinary vector-product association.  Keep this general expression
         // independent of frame/sample values; it is the same kernel for every
         // IMU packet and preserves the frame-1 endpoint.
-        self.velocity.x = accel_world.x.mul_add(dt, old_velocity.x);
+        self.velocity.x = accel_world.x.fused_mul_add(dt, old_velocity.x);
         self.velocity.y = old_velocity.y + accel_world.y * dt;
         self.velocity.z = old_velocity.z + accel_world.z * dt;
         let dtheta = omega * dt;
@@ -4845,8 +4927,14 @@ impl F32ImuState {
         // pinned IntegratedImuMeasurement::integrate.  The former Rust path
         // used a left-only `r_half * hat(accel)` surrogate here; it is not
         // the header's covariance contract once the body rotates.
-        let accel_density = self.noise.accel_density as f32;
-        let gyro_density = self.noise.gyro_density as f32;
+        let mut accel_density = self.noise.accel_density as f32;
+        let mut gyro_density = self.noise.gyro_density as f32;
+        if self.noise_per_step {
+            // Continuous densities: this step's own discrete noise.
+            let per_step = 1.0_f32 / dt.sqrt();
+            accel_density *= per_step;
+            gyro_density *= per_step;
+        }
         let cov_f = f;
         let accel_noise = a;
         let gyro_noise = g;
@@ -4926,8 +5014,8 @@ fn eigen_matrix_product_f32(left: Matrix3<f32>, right: Matrix3<f32>) -> Matrix3<
     for col in 0..3 {
         for row in 0..3 {
             let mut value = left[(row, 1)] * right[(1, col)];
-            value = left[(row, 2)].mul_add(right[(2, col)], value);
-            value = left[(row, 0)].mul_add(right[(0, col)], value);
+            value = left[(row, 2)].fused_mul_add(right[(2, col)], value);
+            value = left[(row, 0)].fused_mul_add(right[(0, col)], value);
             result[(row, col)] = value;
         }
     }
@@ -4948,10 +5036,11 @@ fn eigen_covariance_fc_product_f32(left: F32Matrix9, right: F32Matrix9) -> F32Ma
     // depth-pair packets. 0x490c00 merges halves before the ninth FMA.
     // This is NOT the schedule of the following F*C*F^T assignment.
     for col in 0..8 {
-        let p: [f32; 8] = std::array::from_fn(|k| left[(8, k)].mul_add(right[(k, col)], 0.0_f32));
+        let p: [f32; 8] =
+            std::array::from_fn(|k| left[(8, k)].fused_mul_add(right[(k, col)], 0.0_f32));
         let even = (p[0] + p[2]) + (p[4] + p[6]);
         let odd = (p[1] + p[3]) + (p[5] + p[7]);
-        result[(8, col)] = left[(8, 8)].mul_add(right[(8, col)], odd + even);
+        result[(8, col)] = left[(8, 8)].fused_mul_add(right[(8, col)], odd + even);
     }
     result
 }
@@ -4961,19 +5050,19 @@ fn eigen_matrix_product_9_f32(left: F32Matrix9, right: F32Matrix9) -> F32Matrix9
     for col in 0..9 {
         for row in 0..8 {
             let value = if col < 8 {
-                let mut even = left[(row, 0)].mul_add(right[(0, col)], 0.0_f32);
-                even = left[(row, 2)].mul_add(right[(2, col)], even);
-                even = left[(row, 4)].mul_add(right[(4, col)], even);
-                even = left[(row, 6)].mul_add(right[(6, col)], even);
-                let mut odd = left[(row, 1)].mul_add(right[(1, col)], 0.0_f32);
-                odd = left[(row, 3)].mul_add(right[(3, col)], odd);
-                odd = left[(row, 5)].mul_add(right[(5, col)], odd);
-                odd = left[(row, 7)].mul_add(right[(7, col)], odd);
-                left[(row, 8)].mul_add(right[(8, col)], even + odd)
+                let mut even = left[(row, 0)].fused_mul_add(right[(0, col)], 0.0_f32);
+                even = left[(row, 2)].fused_mul_add(right[(2, col)], even);
+                even = left[(row, 4)].fused_mul_add(right[(4, col)], even);
+                even = left[(row, 6)].fused_mul_add(right[(6, col)], even);
+                let mut odd = left[(row, 1)].fused_mul_add(right[(1, col)], 0.0_f32);
+                odd = left[(row, 3)].fused_mul_add(right[(3, col)], odd);
+                odd = left[(row, 5)].fused_mul_add(right[(5, col)], odd);
+                odd = left[(row, 7)].fused_mul_add(right[(7, col)], odd);
+                left[(row, 8)].fused_mul_add(right[(8, col)], even + odd)
             } else {
-                let mut value = left[(row, 0)].mul_add(right[(0, col)], 0.0_f32);
+                let mut value = left[(row, 0)].fused_mul_add(right[(0, col)], 0.0_f32);
                 for k in 1..9 {
-                    value = left[(row, k)].mul_add(right[(k, col)], value);
+                    value = left[(row, k)].fused_mul_add(right[(k, col)], value);
                 }
                 value
             };
@@ -4983,9 +5072,9 @@ fn eigen_matrix_product_9_f32(left: F32Matrix9, right: F32Matrix9) -> F32Matrix9
         // kernel.  Its scalar ninth-row tail walks k in source order for
         // every output column; the packet body above retains the even/odd
         // accumulators used by the 8-row kernel.
-        let mut value = left[(8, 0)].mul_add(right[(0, col)], 0.0_f32);
+        let mut value = left[(8, 0)].fused_mul_add(right[(0, col)], 0.0_f32);
         for k in 1..9 {
-            value = left[(8, k)].mul_add(right[(k, col)], value);
+            value = left[(8, k)].fused_mul_add(right[(k, col)], value);
         }
         result[(8, col)] = value;
     }
@@ -5000,7 +5089,7 @@ fn eigen_matrix_product_9x3_f32(left: F32Matrix9, right: F32Matrix9x3) -> F32Mat
         for row in 0..9 {
             let mut value = 0.0_f32;
             for k in 0..9 {
-                value = left[(row, k)].mul_add(right[(k, col)], value);
+                value = left[(row, k)].fused_mul_add(right[(k, col)], value);
             }
             result[(row, col)] = value;
         }
@@ -5023,7 +5112,7 @@ fn eigen_matrix_product_9x3_add_f32(
             result[(row, col)] = if row == 8 {
                 seed + value
             } else {
-                value.mul_add(1.0_f32, seed)
+                value.fused_mul_add(1.0_f32, seed)
             };
         }
     }
@@ -5086,7 +5175,7 @@ fn eigen_weighted_gram_accumulate_f32(
                 // update when the 4-column GEMM writes into an existing
                 // matrix. The row-tail packet follows the same boundary.
                 destination[(row, col)] =
-                    term[(row, col)].mul_add(1.0_f32, destination[(row, col)]);
+                    term[(row, col)].fused_mul_add(1.0_f32, destination[(row, col)]);
             } else {
                 // The final scalar column takes Eigen's scalar `+= alpha*C`
                 // path rather than the packet FMA accumulator.
@@ -5107,17 +5196,17 @@ fn eigen_weighted_gram_assignment_term_f32(noise: F32Matrix9x3, variance: f32) -
     for col in 0..9 {
         for row in 0..9 {
             if col == 8 {
-                let p0 = scaled[(row, 0)].mul_add(noise[(col, 0)], 0.0_f32);
-                let p1 = scaled[(row, 1)].mul_add(noise[(col, 1)], 0.0_f32);
+                let p0 = scaled[(row, 0)].fused_mul_add(noise[(col, 0)], 0.0_f32);
+                let p1 = scaled[(row, 1)].fused_mul_add(noise[(col, 1)], 0.0_f32);
                 // Eigen's one-column packet tail keeps the first two
                 // products as independent accumulators, then contracts the
                 // third product into their sum.  This is `(p0 + p1) +FMA
                 // p2`, rather than adding a separately materialized p2.
-                term[(row, col)] = scaled[(row, 2)].mul_add(noise[(col, 2)], p0 + p1);
+                term[(row, col)] = scaled[(row, 2)].fused_mul_add(noise[(col, 2)], p0 + p1);
             } else {
-                let mut value = scaled[(row, 0)].mul_add(noise[(col, 0)], 0.0_f32);
-                value = scaled[(row, 1)].mul_add(noise[(col, 1)], value);
-                value = scaled[(row, 2)].mul_add(noise[(col, 2)], value);
+                let mut value = scaled[(row, 0)].fused_mul_add(noise[(col, 0)], 0.0_f32);
+                value = scaled[(row, 1)].fused_mul_add(noise[(col, 1)], value);
+                value = scaled[(row, 2)].fused_mul_add(noise[(col, 2)], value);
                 term[(row, col)] = value;
             }
         }
@@ -5135,17 +5224,17 @@ fn eigen_weighted_gram_term_f32(noise: F32Matrix9x3, variance: f32) -> F32Matrix
     let mut term = F32Matrix9::zeros();
     for col in 0..9 {
         for row in 0..9 {
-            let mut value = scaled[(row, 0)].mul_add(noise[(col, 0)], 0.0);
+            let mut value = scaled[(row, 0)].fused_mul_add(noise[(col, 0)], 0.0);
             if row == 8 && col < 8 {
                 // Eigen's 9x3 tail uses Packet8f for the first two depth
                 // values, then predux_half_dowto4 (low + high) before the
                 // remaining half-packet FMA.
-                let p1 = scaled[(row, 1)].mul_add(noise[(col, 1)], 0.0);
+                let p1 = scaled[(row, 1)].fused_mul_add(noise[(col, 1)], 0.0);
                 value += p1;
-                value = scaled[(row, 2)].mul_add(noise[(col, 2)], value);
+                value = scaled[(row, 2)].fused_mul_add(noise[(col, 2)], value);
             } else {
                 for k in 1..3 {
-                    value = scaled[(row, k)].mul_add(noise[(col, k)], value);
+                    value = scaled[(row, k)].fused_mul_add(noise[(col, k)], value);
                 }
             }
             term[(row, col)] = value;
@@ -5214,22 +5303,22 @@ fn eigen_quaternion_matrix_f32(q: UnitQuaternion<f32>) -> Matrix3<f32> {
     // Keep the diagonal add/subtract boundaries separate.
     Matrix3::new(
         1.0 - (tyy + tzz),
-        tz.mul_add(-q.w, txy),
-        ty.mul_add(q.w, txz),
-        q.w.mul_add(tz, txy),
+        tz.fused_mul_add(-q.w, txy),
+        ty.fused_mul_add(q.w, txz),
+        q.w.fused_mul_add(tz, txy),
         1.0 - (txx + tzz),
-        q.w.mul_add(-tx, tyz),
-        ty.mul_add(-q.w, txz),
-        q.w.mul_add(tx, tyz),
+        q.w.fused_mul_add(-tx, tyz),
+        ty.fused_mul_add(-q.w, txz),
+        q.w.fused_mul_add(tx, tyz),
         1.0 - (txx + tyy),
     )
 }
 
 fn eigen_mat_vec_f32(m: Matrix3<f32>, v: Vector3<f32>) -> Vector3<f32> {
     Vector3::new(
-        m[(0, 0)].mul_add(v.x, m[(0, 2)].mul_add(v.z, m[(0, 1)] * v.y)),
-        m[(1, 0)].mul_add(v.x, m[(1, 2)].mul_add(v.z, m[(1, 1)] * v.y)),
-        m[(2, 0)].mul_add(v.x, m[(2, 2)].mul_add(v.z, m[(2, 1)] * v.y)),
+        m[(0, 0)].fused_mul_add(v.x, m[(0, 2)].fused_mul_add(v.z, m[(0, 1)] * v.y)),
+        m[(1, 0)].fused_mul_add(v.x, m[(1, 2)].fused_mul_add(v.z, m[(1, 1)] * v.y)),
+        m[(2, 0)].fused_mul_add(v.x, m[(2, 2)].fused_mul_add(v.z, m[(2, 1)] * v.y)),
     )
 }
 
@@ -5248,21 +5337,21 @@ fn sophus_rotate_f32(rotation: UnitQuaternion<f32>, point: Vector3<f32>) -> Vect
     // multiply-subtract and each q.w/point lane as a fused multiply-add;
     // spell those boundaries explicitly so nalgebra cannot choose a
     // different scalar association.
-    let uv_x = q.j.mul_add(point.z, -(q.k * point.y));
-    let uv_y = q.k.mul_add(point.x, -(q.i * point.z));
-    let uv_z = q.i.mul_add(point.y, -(q.j * point.x));
+    let uv_x = q.j.fused_mul_add(point.z, -(q.k * point.y));
+    let uv_y = q.k.fused_mul_add(point.x, -(q.i * point.z));
+    let uv_z = q.i.fused_mul_add(point.y, -(q.j * point.x));
     let uv2_x = uv_x + uv_x;
     let uv2_y = uv_y + uv_y;
     let uv2_z = uv_z + uv_z;
 
-    let cross_x = q.j.mul_add(uv2_z, -(q.k * uv2_y));
-    let cross_y = q.k.mul_add(uv2_x, -(q.i * uv2_z));
-    let cross_z = q.i.mul_add(uv2_y, -(q.j * uv2_x));
+    let cross_x = q.j.fused_mul_add(uv2_z, -(q.k * uv2_y));
+    let cross_y = q.k.fused_mul_add(uv2_x, -(q.i * uv2_z));
+    let cross_z = q.i.fused_mul_add(uv2_y, -(q.j * uv2_x));
 
     Vector3::new(
-        q.w.mul_add(uv2_x, point.x) + cross_x,
-        q.w.mul_add(uv2_y, point.y) + cross_y,
-        q.w.mul_add(uv2_z, point.z) + cross_z,
+        q.w.fused_mul_add(uv2_x, point.x) + cross_x,
+        q.w.fused_mul_add(uv2_y, point.y) + cross_y,
+        q.w.fused_mul_add(uv2_z, point.z) + cross_z,
     )
 }
 
@@ -5278,9 +5367,9 @@ fn predict_velocity_f32(
     rotated_delta_velocity: Vector3<f32>,
 ) -> Vector3<f32> {
     Vector3::new(
-        gravity.x.mul_add(dt, velocity0.x) + rotated_delta_velocity.x,
-        gravity.y.mul_add(dt, velocity0.y) + rotated_delta_velocity.y,
-        gravity.z.mul_add(dt, velocity0.z) + rotated_delta_velocity.z,
+        gravity.x.fused_mul_add(dt, velocity0.x) + rotated_delta_velocity.x,
+        gravity.y.fused_mul_add(dt, velocity0.y) + rotated_delta_velocity.y,
+        gravity.z.fused_mul_add(dt, velocity0.z) + rotated_delta_velocity.z,
     )
 }
 
@@ -5307,14 +5396,14 @@ fn integrate_position_f32(
 ) -> Vector3<f32> {
     let accel_half_dt = (accel_world * 0.5_f32) * dt;
     let position_after_velocity = Vector3::new(
-        velocity0.x.mul_add(dt, position0.x),
-        velocity0.y.mul_add(dt, position0.y),
-        velocity0.z.mul_add(dt, position0.z),
+        velocity0.x.fused_mul_add(dt, position0.x),
+        velocity0.y.fused_mul_add(dt, position0.y),
+        velocity0.z.fused_mul_add(dt, position0.z),
     );
     Vector3::new(
-        accel_half_dt.x.mul_add(dt, position_after_velocity.x),
-        accel_half_dt.y.mul_add(dt, position_after_velocity.y),
-        accel_half_dt.z.mul_add(dt, position_after_velocity.z),
+        accel_half_dt.x.fused_mul_add(dt, position_after_velocity.x),
+        accel_half_dt.y.fused_mul_add(dt, position_after_velocity.y),
+        accel_half_dt.z.fused_mul_add(dt, position_after_velocity.z),
     )
 }
 
@@ -5424,14 +5513,20 @@ fn predict_nav(
             (0.5_f32 * g.z) * dt,
         );
         let position_after_velocity = Vector3::new(
-            v0.x.mul_add(dt, t0.x),
-            v0.y.mul_add(dt, t0.y),
-            v0.z.mul_add(dt, t0.z),
+            v0.x.fused_mul_add(dt, t0.x),
+            v0.y.fused_mul_add(dt, t0.y),
+            v0.z.fused_mul_add(dt, t0.z),
         );
         let position_after_gravity = Vector3::new(
-            gravity_half_dt.x.mul_add(dt, position_after_velocity.x),
-            gravity_half_dt.y.mul_add(dt, position_after_velocity.y),
-            gravity_half_dt.z.mul_add(dt, position_after_velocity.z),
+            gravity_half_dt
+                .x
+                .fused_mul_add(dt, position_after_velocity.x),
+            gravity_half_dt
+                .y
+                .fused_mul_add(dt, position_after_velocity.y),
+            gravity_half_dt
+                .z
+                .fused_mul_add(dt, position_after_velocity.z),
         );
         let translation = Vector3::new(
             position_after_gravity.x + rotated_delta_position.x,
@@ -7038,6 +7133,7 @@ mod tests {
             Vector3::zeros(),
             Vector3::zeros(),
             noise,
+            false,
         )
         .unwrap();
         let mut reference = ImuPreintegrator::new(Vector3::zeros(), Vector3::zeros())
@@ -7118,6 +7214,7 @@ mod tests {
                 gyro_density: 0.000282 * (200.0_f64).sqrt(),
                 accel_density: 0.016 * (200.0_f64).sqrt(),
             },
+            false,
         );
         let delta = delta.expect("golden interval must integrate");
         assert!(!fallback);
@@ -7165,6 +7262,7 @@ mod tests {
                 gyro_density: 1.0,
                 accel_density: 1.0,
             },
+            false,
         )
         .unwrap();
         assert!((delta.delta_time - 20.0e-9).abs() < 1.0e-15);
@@ -7839,5 +7937,63 @@ mod tests {
         }
         assert!(first.states.len() <= 3);
         assert!(last.unwrap().marg_data.aom_sqrt_jacobian.cols >= 15);
+    }
+
+    /// An interval's IMU covariance must not depend on where the samples fall
+    /// in it. With `imu_noise_per_step` it does not; the pinned per-sample
+    /// noise falls short when steps are shorter than a sample period.
+    #[test]
+    fn per_step_imu_noise_does_not_depend_on_how_an_interval_is_split() {
+        // At rest and without gravity, so no rotation noise leaks into the
+        // velocity: each block is one density's integral alone.
+        let at = |t_ns: i64| ImuSample::new(t_ns, Vector3::zeros(), Vector3::zeros());
+        let end = 33_333_333;
+        // Two full 60 Hz periods, and the same interval cut at 5 ms.
+        let whole = [at(16_666_667), at(end)];
+        let split = [at(5_000_000), at(21_666_667), at(end)];
+        let blocks = |samples: &[ImuSample], noise: ImuNoiseModel, per_step: bool| {
+            let (delta, _) = integrate_queue_f32(
+                samples,
+                0,
+                end,
+                Vector3::zeros(),
+                Vector3::zeros(),
+                noise,
+                per_step,
+            );
+            let covariance = delta.expect("the interval integrates").covariance;
+            // Rows are [position, rotation, velocity].
+            (covariance[(3, 3)], covariance[(6, 6)])
+        };
+        let continuous = ImuNoiseModel {
+            gyro_density: 0.01,
+            accel_density: 0.1,
+        };
+        let (rotation_whole, velocity_whole) = blocks(&whole, continuous, true);
+        let (rotation_split, velocity_split) = blocks(&split, continuous, true);
+        let seconds = end as f64 * 1e-9;
+        for (value, density) in [
+            (rotation_whole, 0.01),
+            (rotation_split, 0.01),
+            (velocity_whole, 0.1),
+            (velocity_split, 0.1),
+        ] {
+            let expected = density * density * seconds;
+            assert!(
+                (value - expected).abs() <= 1e-4 * expected,
+                "{value} vs {expected}"
+            );
+        }
+        let sampled = ImuNoiseModel {
+            gyro_density: 0.01 * 60.0_f64.sqrt(),
+            accel_density: 0.1 * 60.0_f64.sqrt(),
+        };
+        let (pinned_whole, _) = blocks(&whole, sampled, false);
+        let (pinned_split, _) = blocks(&split, sampled, false);
+        assert!((pinned_whole - 0.01 * 0.01 * seconds).abs() <= 1e-3 * pinned_whole);
+        assert!(
+            pinned_split < 0.85 * pinned_whole,
+            "{pinned_split} vs {pinned_whole}"
+        );
     }
 }

@@ -346,6 +346,14 @@ impl DirectKltStream {
         self.tracks.keys().copied().collect()
     }
 
+    /// Each active track's camera-0 patch transform and creation frame, in
+    /// track id order.
+    pub fn cam0_tracks(&self) -> impl Iterator<Item = (TrackId, AffineCompact2f, FrameId)> + '_ {
+        self.tracks
+            .iter()
+            .filter_map(|(&id, track)| track.cam0.map(|cam0| (id, cam0, track.created_frame_id)))
+    }
+
     pub const fn next_track_id(&self) -> TrackId {
         self.next_track_id
     }

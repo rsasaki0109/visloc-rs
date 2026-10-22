@@ -1,6 +1,7 @@
 //! Model cost-decrease evaluation (f64, f32 and QR-payload reuse).
 
 use super::*;
+use crate::fma::FusedMulAdd;
 
 /// Compute the model-cost decrease for a linearized row stack after the
 /// eliminated landmark block is back-substituted.
@@ -167,8 +168,8 @@ fn evaluate_model_decrease_factor(
             return FactorEvaluation::Failure;
         }
         let x2 = rhs[2] / d2;
-        let x1 = (-r[(1, 2)]).mul_add(x2, rhs[1]) / d1;
-        let row0_dot = r[(0, 2)].mul_add(x2, r[(0, 1)] * x1);
+        let x1 = (-r[(1, 2)]).fused_mul_add(x2, rhs[1]) / d1;
+        let row0_dot = r[(0, 2)].fused_mul_add(x2, r[(0, 1)] * x1);
         let x0 = (rhs[0] - row0_dot) / d0;
         landmark_inc[0] = -x0;
         landmark_inc[1] = -x1;
@@ -348,7 +349,7 @@ fn eigen_imu_15x30_gemv_f32(jacobian: &DMatrix<f32>, step: &DVector<f32>) -> DVe
     let mut result = DVector::<f32>::zeros(IMU_LOCAL_ROWS);
     for column in 0..IMU_LOCAL_COLS {
         for row in 0..IMU_LOCAL_ROWS {
-            result[row] = jacobian[(row, column)].mul_add(step[column], result[row]);
+            result[row] = jacobian[(row, column)].fused_mul_add(step[column], result[row]);
         }
     }
     result
@@ -362,13 +363,13 @@ fn eigen_imu_15_model_dot_f32(increment: &DVector<f32>, residual: &DVector<f32>)
     assert_eq!(increment.len(), IMU_LOCAL_ROWS);
     assert_eq!(residual.len(), IMU_LOCAL_ROWS);
     let lanes: [f32; 8] = std::array::from_fn(|index| {
-        let right = 0.5_f32.mul_add(increment[index], residual[index]);
+        let right = 0.5_f32.fused_mul_add(increment[index], residual[index]);
         increment[index] * right
     });
     let mut value = eigen_predux8_f32(lanes);
     for index in 8..IMU_LOCAL_ROWS {
-        let right = 0.5_f32.mul_add(increment[index], residual[index]);
-        value = increment[index].mul_add(right, value);
+        let right = 0.5_f32.fused_mul_add(increment[index], residual[index]);
+        value = increment[index].fused_mul_add(right, value);
     }
     value
 }
@@ -380,10 +381,10 @@ pub(super) fn prior39_model_f32(j: &DMatrix<f32>, rhs: &DVector<f32>, step: &DVe
     let mut inc = [0.0_f32; 39];
     for row in 0..39 {
         for col in 0..39 {
-            inc[row] = j[(row, col)].mul_add(step[col], inc[row]);
+            inc[row] = j[(row, col)].fused_mul_add(step[col], inc[row]);
         }
     }
-    let right: [f32; 39] = std::array::from_fn(|i| 0.5_f32.mul_add(inc[i], rhs[i]));
+    let right: [f32; 39] = std::array::from_fn(|i| 0.5_f32.fused_mul_add(inc[i], rhs[i]));
     let products: [f32; 32] = std::array::from_fn(|i| -inc[i] * right[i]);
     let lanes: [f32; 8] = std::array::from_fn(|i| {
         products[i] + ((products[i + 16] + products[i + 24]) + products[i + 8])
@@ -392,7 +393,7 @@ pub(super) fn prior39_model_f32(j: &DMatrix<f32>, rhs: &DVector<f32>, step: &DVe
     let mut total = (half[0] + half[2]) + (half[1] + half[3]);
     // Native 39f0dd half FMA, then 39f0e3 vfnmadd231ss.
     for i in 32..39 {
-        total = (-inc[i]).mul_add(right[i], total);
+        total = (-inc[i]).fused_mul_add(right[i], total);
     }
     total
 }
@@ -407,19 +408,19 @@ pub(super) fn prior45_model_f32(j: &DMatrix<f32>, rhs: &DVector<f32>, step: &DVe
     let mut inc = [0.0_f32; 45];
     for row in 0..45 {
         for col in 0..45 {
-            inc[row] = j[(row, col)].mul_add(step[col], inc[row]);
+            inc[row] = j[(row, col)].fused_mul_add(step[col], inc[row]);
         }
     }
-    let right: [f32; 45] = std::array::from_fn(|i| 0.5_f32.mul_add(inc[i], rhs[i]));
+    let right: [f32; 45] = std::array::from_fn(|i| 0.5_f32.fused_mul_add(inc[i], rhs[i]));
     let lanes: [f32; 8] = std::array::from_fn(|i| {
-        let first_and_fifth = (-inc[i + 32]).mul_add(right[i + 32], -inc[i] * right[i]);
+        let first_and_fifth = (-inc[i + 32]).fused_mul_add(right[i + 32], -inc[i] * right[i]);
         let middle = (-inc[i + 8] * right[i + 8])
             + ((-inc[i + 16] * right[i + 16]) + (-inc[i + 24] * right[i + 24]));
         first_and_fifth + middle
     });
     let mut total = eigen_predux8_f32(lanes);
     for i in 40..45 {
-        total = (-inc[i]).mul_add(right[i], total);
+        total = (-inc[i]).fused_mul_add(right[i], total);
     }
     total
 }
@@ -584,8 +585,8 @@ pub(super) fn reduced_model_cost_decrease_f32(
     let mut linear = 0.0_f32;
     let mut quadratic = 0.0_f32;
     for index in 0..step.len() {
-        linear = step[index].mul_add(reduced.b[index], linear);
-        quadratic = step[index].mul_add(h_step[index], quadratic);
+        linear = step[index].fused_mul_add(reduced.b[index], linear);
+        quadratic = step[index].fused_mul_add(h_step[index], quadratic);
     }
     let decrease = -(linear + 0.5_f32 * quadratic);
     decrease.is_finite().then_some(decrease as f64)
@@ -615,7 +616,7 @@ pub(super) fn reduced_model_cost_decrease_with_q1_constant_f32(
         let mut squared_norm = 0.0_f32;
         for row in 0..entry.q1_residual_len() {
             let residual = entry.q1_residual_value(row);
-            squared_norm = residual.mul_add(residual, squared_norm);
+            squared_norm = residual.fused_mul_add(residual, squared_norm);
         }
         let factor_constant = 0.5_f32 * squared_norm;
         q1_constant = add_f32_exact(q1_constant, factor_constant);
@@ -696,8 +697,8 @@ pub(super) fn qr_payload_model_dot_reuse_f32<Q1: QrModelQ1ViewF32>(
             return None;
         }
         let x2 = rhs[2] / d2;
-        let x1 = (-upper_r[(1, 2)]).mul_add(x2, rhs[1]) / d1;
-        let row0_dot = upper_r[(0, 2)].mul_add(x2, upper_r[(0, 1)] * x1);
+        let x1 = (-upper_r[(1, 2)]).fused_mul_add(x2, rhs[1]) / d1;
+        let row0_dot = upper_r[(0, 2)].fused_mul_add(x2, upper_r[(0, 1)] * x1);
         let x0 = (rhs[0] - row0_dot) / d0;
         landmark_inc[0] = -x0;
         landmark_inc[1] = -x1;
