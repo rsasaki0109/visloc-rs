@@ -405,9 +405,12 @@ def main() -> int:
                 log(f"{seq}: WARN {candidates[0].name} missing; submitting {trajectory.name}")
             if args.ba_chain:
                 log(f"{seq}: BA chain (track {track})")
-                trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
-                                       ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
-                                       args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"))
+                try:
+                    trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
+                                           ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
+                                           args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"))
+                except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
+                    log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
 
             run([python, estimate_converter, "--in-tum", trajectory,
                  "--out-estimate", estimate], check=True)

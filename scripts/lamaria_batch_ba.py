@@ -1771,8 +1771,11 @@ def cmd_loop_correct(a):
             edges.append(e)
     print(f"{inv.max() + 1 if len(inv) else 0} revisit image pairs: {len(edges)} loop edges, {gated} more over the "
           f"drift gate", flush=True)
-    if not edges:
-        sys.exit("no loop edges")
+    if not edges:  # nothing to close: the solve's trajectory as it is
+        import shutil
+        shutil.copyfile(a.tum, a.out)
+        print("no loop edges: trajectory unchanged", flush=True)
+        return
     dev = np.array([e[5] for e in edges])
     print(f"  disagreement with the solve: median {np.median(dev):.2f} m, p90 {np.percentile(dev, 90):.2f} m",
           flush=True)
