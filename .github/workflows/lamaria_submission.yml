@@ -17,9 +17,9 @@ on:
         options: [training, test]
         default: training
       sequences:
-        description: Sequence names, space-separated (empty with the test split = all 63)
+        description: Sequence names, space-separated (empty with the test split = all 63; e.g. sequence_1_20 for a training check)
         type: string
-        default: sequence_1_20
+        default: ""
       max_parallel:
         description: Sequences at a time (spares the ETH server)
         type: number
@@ -91,7 +91,7 @@ jobs:
     timeout-minutes: 355
     strategy:
       fail-fast: false
-      max-parallel: ${{ inputs.max_parallel }}
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '8') }}  # a number, also when dispatched as text
       matrix:
         sequence: ${{ fromJSON(needs.plan.outputs.sequences) }}
     steps:
