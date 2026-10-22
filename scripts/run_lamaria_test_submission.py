@@ -92,6 +92,12 @@ BA gets the calibration with the factory camera rig, since it estimates the
 camera rotations itself. It needs numpy, scipy, opencv-python, gtsam and
 numba, and about 2 GB of disk per sequence on top of the images.
 
+A VIO that diverges (faster than 30 m/s over a twentieth of its seconds) runs
+again with both cameras' features (`MULTICAM`): on test sequence_1_9 the
+default config's VIO runs away from the first seconds (3 km away after a
+minute) while the same config with both cameras' features stays on a walk.
+If the BA chain still fails, the VIO trajectory is submitted.
+
 `--stream` extracts the ASL zip over HTTP range requests instead of
 downloading it first (scripts/http_zip.py), so a sequence needs its images'
 size on disk, not twice that: what a GitHub runner can hold
@@ -231,6 +237,42 @@ def estimator_command(args, inner: Path, calibration: Path, out_dir: Path,
                 trajectories[1:] if submit_vio else trajectories)
     return ([args.vio_exe, *common, "--pipeline", "--no-trace", "--no-marg-data"],
             [out_dir / "trajectory.tum"])
+
+
+# Both cameras' features in the VIO (docs/lamaria_multicam.md): the fallback for a VIO that diverged
+MULTICAM = {
+    "config.optical_flow_detect_all_cameras": True,
+    "config.optical_flow_matching_default_depth": 2.0,
+    "config.optical_flow_matching_guess_type": "REPROJ_FIX_DEPTH",
+    "config.vio_kf_connectivity_all_cameras": True,
+    "config.vio_landmarks_all_cameras": True,
+}
+DIVERGED_SPEED = 30.0  # m/s; a tram or a funicular stays well below
+
+
+def diverged(tum: Path, speed: float = DIVERGED_SPEED) -> bool:
+    """Whether the trajectory moves faster than `speed` over a twentieth or more of its seconds."""
+    rows = [[float(v) for v in line.split()[:4]] for line in tum.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+    fast = total = 0
+    j = 0
+    for i, (t, x, y, z) in enumerate(rows):
+        while j < len(rows) and rows[j][0] < t + 1.0:
+            j += 1
+        if j == len(rows):
+            break
+        u, a, b, c = rows[j]
+        total += 1
+        fast += ((a - x) ** 2 + (b - y) ** 2 + (c - z) ** 2) ** 0.5 / (u - t) > speed
+    return total > 0 and fast > total / 20
+
+
+def multicam_config(config: Path, out: Path) -> Path:
+    """`config` with both cameras' features."""
+    data = json.loads(config.read_text())
+    data["value0"].update(MULTICAM)
+    out.write_text(json.dumps(data, indent=4))
+    return out
 
 
 def verify_and_extract(zip_path: Path, extract_dir: Path) -> Path:
@@ -403,6 +445,14 @@ def main() -> int:
                 continue
             if trajectory != candidates[0]:
                 log(f"{seq}: WARN {candidates[0].name} missing; submitting {trajectory.name}")
+            if diverged(trajectory):  # test sequence_1_9: the default config's VIO runs away from the start
+                fallback = multicam_config(config, work / f"{config.stem}_multicam.json")
+                log(f"{seq}: WARN the VIO diverged; again with both cameras' features ({fallback.name})")
+                command, candidates = estimator_command(args, inner, variant_a, vio_out, fallback, submit_vio)
+                run(command, check=True)
+                trajectory = next(t for t in candidates if t.is_file())
+                if diverged(trajectory):
+                    log(f"{seq}: WARN the VIO diverged again")
             if args.ba_chain:
                 log(f"{seq}: BA chain (track {track})")
                 try:

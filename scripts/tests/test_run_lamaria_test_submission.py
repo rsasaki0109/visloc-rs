@@ -73,5 +73,31 @@ class TrackTests(unittest.TestCase):
             self.assertTrue((repo / config).is_file(), config)
 
 
+
+class DivergenceTests(unittest.TestCase):
+    def write(self, speed, seconds=60, rate=20):
+        import tempfile
+        path = Path(tempfile.mkdtemp()) / "trajectory.tum"
+        path.write_text("".join(f"{i / rate:.3f} {speed(i / rate):.3f} 0 0 0 0 0 1\n" for i in range(seconds * rate)))
+        return path
+
+    def test_a_walk_or_a_tram_is_not_divergence(self):
+        self.assertFalse(submission.diverged(self.write(lambda t: 1.4 * t)))
+        self.assertFalse(submission.diverged(self.write(lambda t: 20.0 * t)))
+
+    def test_a_runaway_is(self):
+        self.assertTrue(submission.diverged(self.write(lambda t: 3.0 * t * t)))
+
+    def test_the_multicam_fallback_keeps_the_config(self):
+        import json
+        import tempfile
+        repo = Path(__file__).resolve().parents[2]
+        out = submission.multicam_config(repo / submission.BA_CHAIN_LOW_LIGHT_CONFIG,
+                                         Path(tempfile.mkdtemp()) / "c.json")
+        cfg = json.loads(out.read_text())["value0"]
+        self.assertTrue(cfg["config.vio_landmarks_all_cameras"])
+        self.assertEqual(cfg["config.optical_flow_max_recovered_dist2"], 0.25)  # the low-light setting stays
+
+
 if __name__ == "__main__":
     unittest.main()
