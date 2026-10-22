@@ -30,10 +30,10 @@ updates:
       # broke the old 1.83 MSRV image-io build; re-evaluate now that the MSRV is 1.88.
       - dependency-name: "image"
         versions: [">0.25.5"]
-      # wide 1.x (and its safe_arch 1.x) requires Rust 1.89, above the 1.88
-      # MSRV, and renames `cmp_lt` to `simd_lt`. Bump with an MSRV change.
+      # wide 0.8 and later (and safe_arch 1.x) require Rust 1.89, above the
+      # 1.88 MSRV, and rename `cmp_lt` to `simd_lt`. Bump with an MSRV change.
       - dependency-name: "wide"
-        versions: [">=1"]
+        versions: [">=0.8"]
       # ort 2.0 release candidates break the API between candidates
       # (rc.14: `Session::builder` takes an `&Environment`). Bump
       # deliberately and re-check the ONNX models, not via Dependabot.
