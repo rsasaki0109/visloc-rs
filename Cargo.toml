@@ -89,7 +89,7 @@ thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
 wgpu = "30"
-wide = "0.7"
+wide = "0.8"
 
 [features]
 default = []
