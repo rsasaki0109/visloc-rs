@@ -65,11 +65,14 @@ fn emit_json_number(value: Option<f64>) -> String {
     value.map_or_else(|| "null".to_owned(), |v| format!("{v:.6}"))
 }
 
+/// One worker result: GPU seconds, keypoint count, width, height.
+type WorkerResult = (f64, usize, usize, usize);
+
 fn run_worker_bench(paths: &[PathBuf], max_keypoints: usize, workers: usize, jsonl: bool) {
     assert!(!paths.is_empty(), "no benchmark images found");
     let next = AtomicUsize::new(0);
     let start_gate = Barrier::new(workers + 1);
-    let results: Vec<Mutex<Option<(f64, usize, usize, usize)>>> =
+    let results: Vec<Mutex<Option<WorkerResult>>> =
         (0..paths.len()).map(|_| Mutex::new(None)).collect();
     let config = SiftConfig {
         max_keypoints,

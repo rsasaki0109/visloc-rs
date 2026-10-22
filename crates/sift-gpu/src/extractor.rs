@@ -10,16 +10,17 @@ use visloc_vision::features::sift::{
     GrayImage, SiftConfig, SiftDetector, SiftKeypoint, SiftNormalization,
 };
 
+/// Map result and the waker of the future waiting for it.
+type MapState = (
+    Option<Result<(), wgpu::BufferAsyncError>>,
+    Option<std::task::Waker>,
+);
+
 async fn map_buffer_async(
     device: &wgpu::Device,
     slice: wgpu::BufferSlice<'_>,
 ) -> Result<(), wgpu::BufferAsyncError> {
-    let completion: Arc<
-        Mutex<(
-            Option<Result<(), wgpu::BufferAsyncError>>,
-            Option<std::task::Waker>,
-        )>,
-    > = Arc::new(Mutex::new((None, None)));
+    let completion: Arc<Mutex<MapState>> = Arc::new(Mutex::new((None, None)));
     let callback_state = Arc::clone(&completion);
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let mut state = callback_state.lock().expect("map callback lock");
@@ -98,6 +99,25 @@ struct TimestampProfiler {
     staging: wgpu::Buffer,
 }
 
+/// Largest capacity a pooled buffer may grow to. Pooled buffers are bound
+/// whole, so a grown buffer must still fit the binding limit for its usage.
+fn growth_limit(limits: &wgpu::Limits, usage: wgpu::BufferUsages) -> u64 {
+    let mut limit = limits.max_buffer_size;
+    if usage.contains(wgpu::BufferUsages::STORAGE) {
+        limit = limit.min(limits.max_storage_buffer_binding_size);
+    }
+    if usage.contains(wgpu::BufferUsages::UNIFORM) {
+        limit = limit.min(limits.max_uniform_buffer_binding_size);
+    }
+    limit
+}
+
+/// Capacity for a pooled buffer of `old` bytes that must now hold `needed`:
+/// doubled to amortize growth, but not past `limit` and never below `needed`.
+fn grown_capacity(old: Option<u64>, needed: u64, limit: u64) -> u64 {
+    old.map_or(needed, |old| needed.max(old.saturating_mul(2).min(limit)))
+}
+
 #[derive(Default)]
 struct BufferPool {
     ids: HashMap<String, usize>,
@@ -125,9 +145,8 @@ impl BufferPool {
             .as_ref()
             .is_none_or(|(_, size, old_usage)| *size < needed || !old_usage.contains(usage));
         if replace {
-            let size = self.entries[id]
-                .as_ref()
-                .map_or(needed, |(_, size, _)| needed.max(size.saturating_mul(2)));
+            let old = self.entries[id].as_ref().map(|(_, size, _)| *size);
+            let size = grown_capacity(old, needed, growth_limit(&device.limits(), usage));
             self.entries[id] = Some((
                 Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(label),
@@ -1668,7 +1687,6 @@ fn select_keypoints(raw: Vec<RawKp>, config: &SiftConfig) -> Vec<SiftKeypoint> {
     }
 
     let canonical = |r: &RawKp| (r.octave, r.level, r.y, r.x, r.bin);
-    let mut raw = raw;
     if !config.prefer_larger_scale {
         // Rank raw records directly so only the selected prefix is mapped.
         let compare = |a: &RawKp, b: &RawKp| {
@@ -1791,4 +1809,51 @@ fn select_candidates(candidates: Vec<CandidateRec>, config: &SiftConfig) -> Vec<
     }
 
     ranked.into_iter().map(|r| r.candidate).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grown_capacity, growth_limit};
+
+    #[test]
+    fn pooled_growth_doubles_but_stays_within_the_binding_limit() {
+        let mib = 1u64 << 20;
+        assert_eq!(grown_capacity(None, 10 * mib, 128 * mib), 10 * mib);
+        assert_eq!(
+            grown_capacity(Some(10 * mib), 11 * mib, 128 * mib),
+            20 * mib
+        );
+        // 77 MiB doubled would be 154 MiB, past a 128 MiB storage binding
+        // limit, although the 80 MiB the image needs fits.
+        assert_eq!(
+            grown_capacity(Some(77 * mib), 80 * mib, 128 * mib),
+            128 * mib
+        );
+        // A request past the limit is passed through; wgpu reports it.
+        assert_eq!(
+            grown_capacity(Some(100 * mib), 200 * mib, 128 * mib),
+            200 * mib
+        );
+    }
+
+    #[test]
+    fn growth_limit_follows_the_binding_kind() {
+        let limits = wgpu::Limits::downlevel_defaults();
+        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+        let staging = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
+        assert_eq!(
+            growth_limit(&limits, storage),
+            limits
+                .max_storage_buffer_binding_size
+                .min(limits.max_buffer_size)
+        );
+        assert_eq!(
+            growth_limit(&limits, uniform),
+            limits
+                .max_uniform_buffer_binding_size
+                .min(limits.max_buffer_size)
+        );
+        assert_eq!(growth_limit(&limits, staging), limits.max_buffer_size);
+    }
 }
