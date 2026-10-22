@@ -7,7 +7,7 @@ All notable changes to `visloc-rs` will be documented here.
 ### Added
 
 - **`visloc-mvs`: two more parts of APD-MVS's pipeline for
-  `--deformable`** (CPU only, off by default).
+  `--deformable`** (off by default; local refinement is CPU only).
   `--deformable-local-refine` (`Deformable::local_refine`) moves each
   pixel's depth after a deformable pass to the lowest cost within 5
   disparity steps if that beats its own by 0.1.

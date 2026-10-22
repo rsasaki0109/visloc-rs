@@ -47,7 +47,7 @@ pub struct Deformable {
     /// After each deformable pass, moves every pixel's depth to the lowest
     /// cost within `LOCAL_REFINE_STEPS` disparity steps along its ray
     /// (normal fixed) if that beats its own by `LOCAL_REFINE_GAIN`
-    /// (APD's `LocalRefine`).
+    /// (APD's `LocalRefine`). CPU only.
     pub local_refine: bool,
     /// In a deformable pass, the median filter skips weak pixels and takes
     /// the median of a pixel and its strong neighbours only, over ACMM's

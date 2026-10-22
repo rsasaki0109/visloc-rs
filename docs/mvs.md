@@ -840,8 +840,9 @@ only the anchors' planes and a plane fitted to them. On an L4 at
 - **Time:** about 3.5 times the defaults on these scenes (12 and 14
   minutes with the debug statistics on).
 
-**Two more parts of APD's pipeline** (CPU only, on top of
-`--deformable`; [notes](apd_mvs_code_notes.md), §5.2 and §5.3):
+**Two more parts of APD's pipeline** (on top of `--deformable`; the
+strong median runs on the GPU too, local refinement on the CPU only;
+[notes](apd_mvs_code_notes.md), §5.2 and §5.3):
 `--deformable-local-refine` moves each pixel's depth, after every
 deformable pass, to the lowest cost within 5 disparity steps along its
 ray if that beats its own by 0.1. `--deformable-strong-median` makes the
@@ -863,8 +864,8 @@ ground-truth poses, CPU (4 threads), F1 at 1, 2 and 5 cm:
   pixels' depths into their strong neighbours'. It ends 0.2 point above
   the defaults, within run-to-run noise, in 1.8 times the time.
 - **Local refinement does nothing here**, alone or with the median.
-- These are 400 px runs on one scene. Whether the strong median pays at
-  3200 px needs it on the GPU path, which it is not yet.
+- These are 400 px runs on one scene; the strong median now runs on the
+  GPU path as well, for 3200 px runs.
 
 ### Fusion settings
 

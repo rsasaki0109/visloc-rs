@@ -26,8 +26,8 @@
 //! APD-MVS's deformable patches for weak-texture pixels at the finer
 //! scales (experimental: below the defaults on ETH3D, see docs/mvs.md);
 //! `--deformable-local-refine` and `--deformable-strong-median` add APD's
-//! local refinement and strong-only median filter to those passes (CPU
-//! only).
+//! local refinement (CPU only) and strong-only median filter to those
+//! passes.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -155,8 +155,8 @@ fn main() {
         "--deformable-local-refine and --deformable-strong-median need --deformable"
     );
     assert!(
-        !(use_gpu && (local_refine || strong_median)),
-        "--deformable-local-refine and --deformable-strong-median run on the CPU only"
+        !(use_gpu && local_refine),
+        "--deformable-local-refine runs on the CPU only"
     );
     let restorer = match restorer.as_str() {
         "infinity" => DetailRestorer::Infinity(detail_threshold),
