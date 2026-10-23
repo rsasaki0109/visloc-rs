@@ -464,6 +464,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if dataset.is_monocular() {
         summary.push_str("camera_mode=mono_inertial\n");
     }
+    if let Some(stats) = adapter.platform_stats() {
+        summary.push_str(&format!(
+            "platform_rides={}\nplatform_ride_frames={}\nplatform_dropped_observations={}\n",
+            stats.rides, stats.ride_frames, stats.dropped_observations
+        ));
+    }
 
     if visual_only {
         fs::write(
