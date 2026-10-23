@@ -25,8 +25,16 @@ class HttpFile(io.RawIOBase):
 
     def __init__(self, url):
         self.url = url
-        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
-            self.size = int(r.headers["Content-Length"])
+        for attempt in range(8):  # the server sometimes stalls for minutes (TLS handshake timeouts)
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
+                    self.size = int(r.headers["Content-Length"])
+                break
+            except OSError as e:
+                if attempt == 7:
+                    raise
+                print(f"retry {attempt} HEAD {url}: {e!r}", file=sys.stderr, flush=True)
+                time.sleep(2 ** attempt)
         self.pos = 0
         self.buf_start = 0
         self.buf = b""
