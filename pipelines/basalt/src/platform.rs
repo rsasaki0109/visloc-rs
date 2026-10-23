@@ -28,15 +28,16 @@ use crate::calibration::BasaltCalibration;
 use crate::camera::DoubleSphereCamera;
 use crate::types::{CameraId, ImuSample, TrackId, TrackObservation};
 
-/// Frames between the two bearings compared (0.5 s at 20 Hz).
-pub const SPAN: u64 = 10;
+/// Frames between the two bearings compared (0.3 s at 20 Hz: the street
+/// through a tram's windows leaves the image within a second).
+pub const SPAN: u64 = 6;
 /// Motion beyond the rotation from which a track shows translation.
 pub const PARALLAX_DEG: f64 = 2.0;
 /// Epipolar-plane residual (sine of the angle) of a translation inlier.
 pub const EPIPOLAR_SIN: f64 = 0.015;
 /// Translation inliers a camera needs for ride evidence, in count and share.
-pub const MIN_INLIERS: usize = 12;
-pub const MIN_INLIER_SHARE: f64 = 0.2;
+pub const MIN_INLIERS: usize = 8;
+pub const MIN_INLIER_SHARE: f64 = 0.15;
 /// Accelerometer-norm standard deviation (m/s^2, over [`QUIET_WINDOW_S`])
 /// below which no steps are taken.
 pub const QUIET_STD: f64 = 0.6;
@@ -50,6 +51,65 @@ pub const EVIDENCE_OFF: usize = 4;
 pub const MIN_PASSED: usize = 10;
 const RANSAC_ITERATIONS: usize = 100;
 
+/// The thresholds above; `VISLOC_PLATFORM_PARAMS` (e.g. `span=6,min_inliers=8`)
+/// overrides them for experiments.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlatformParams {
+    pub span: u64,
+    pub parallax_deg: f64,
+    pub epipolar_sin: f64,
+    pub min_inliers: usize,
+    pub min_inlier_share: f64,
+    pub evidence_frames: usize,
+    pub evidence_on: usize,
+    pub evidence_off: usize,
+}
+
+impl Default for PlatformParams {
+    fn default() -> Self {
+        Self {
+            span: SPAN,
+            parallax_deg: PARALLAX_DEG,
+            epipolar_sin: EPIPOLAR_SIN,
+            min_inliers: MIN_INLIERS,
+            min_inlier_share: MIN_INLIER_SHARE,
+            evidence_frames: EVIDENCE_FRAMES,
+            evidence_on: EVIDENCE_ON,
+            evidence_off: EVIDENCE_OFF,
+        }
+    }
+}
+
+impl PlatformParams {
+    fn from_env() -> Self {
+        let mut p = Self::default();
+        let Ok(spec) = std::env::var("VISLOC_PLATFORM_PARAMS") else {
+            return p;
+        };
+        for item in spec.split(',') {
+            let Some((key, value)) = item.split_once('=') else {
+                continue;
+            };
+            let v: f64 = value.trim().parse().unwrap_or(f64::NAN);
+            if !v.is_finite() {
+                continue;
+            }
+            match key.trim() {
+                "span" => p.span = v as u64,
+                "parallax_deg" => p.parallax_deg = v,
+                "epipolar_sin" => p.epipolar_sin = v,
+                "min_inliers" => p.min_inliers = v as usize,
+                "min_inlier_share" => p.min_inlier_share = v,
+                "evidence_frames" => p.evidence_frames = v as usize,
+                "evidence_on" => p.evidence_on = v as usize,
+                "evidence_off" => p.evidence_off = v as usize,
+                _ => {}
+            }
+        }
+        p
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlatformStats {
     pub frames: u64,
@@ -60,6 +120,7 @@ pub struct PlatformStats {
 
 #[derive(Debug, Clone)]
 pub struct PlatformFilter {
+    p: PlatformParams,
     cameras: Vec<DoubleSphereCamera>,
     imu_from_cam: Vec<UnitQuaternion<f64>>,
     /// World-from-IMU rotation integrated from the gyroscope, per frame.
@@ -83,6 +144,7 @@ pub struct PlatformFilter {
 impl PlatformFilter {
     pub fn new(calibration: &BasaltCalibration) -> Self {
         Self {
+            p: PlatformParams::from_env(),
             cameras: calibration.cameras.clone(),
             imu_from_cam: calibration.t_imu_cam.iter().map(|t| t.rotation).collect(),
             rotations: VecDeque::new(),
@@ -117,7 +179,7 @@ impl PlatformFilter {
         self.frame += 1;
         self.stats.frames += 1;
         self.rotations.push_back((frame, self.rotation));
-        while self.rotations.len() > SPAN as usize + 1 {
+        while self.rotations.len() > self.p.span as usize + 1 {
             self.rotations.pop_front();
         }
         for observation in observations.iter() {
@@ -134,7 +196,7 @@ impl PlatformFilter {
                 .entry((observation.camera_id, observation.track_id))
                 .or_default();
             entry.push_back((frame, bearing));
-            while entry.len() > SPAN as usize + 1 {
+            while entry.len() > self.p.span as usize + 1 {
                 entry.pop_front();
             }
         }
@@ -145,20 +207,20 @@ impl PlatformFilter {
 
         let quiet = self.quiet();
         let mut evidence = false;
-        if frame >= SPAN {
+        if frame >= self.p.span {
             for camera in 0..self.cameras.len() {
                 evidence |= self.classify(camera as CameraId, frame) && quiet;
             }
         }
         self.evidence.push_back(evidence);
-        while self.evidence.len() > EVIDENCE_FRAMES {
+        while self.evidence.len() > self.p.evidence_frames {
             self.evidence.pop_front();
         }
         let count = self.evidence.iter().filter(|e| **e).count();
-        if !self.ride && quiet && count >= EVIDENCE_ON {
+        if !self.ride && quiet && count >= self.p.evidence_on {
             self.ride = true;
             self.stats.rides += 1;
-        } else if self.ride && (!quiet || count <= EVIDENCE_OFF) {
+        } else if self.ride && (!quiet || count <= self.p.evidence_off) {
             self.ride = false;
         }
         if self.log {
@@ -236,13 +298,17 @@ impl PlatformFilter {
     /// Fits the street's translation in one camera; true when it is evidence
     /// of a ride. Inliers join the street set.
     fn classify(&mut self, camera: CameraId, frame: u64) -> bool {
-        let Some(&(_, then)) = self.rotations.iter().find(|(f, _)| *f == frame - SPAN) else {
+        let Some(&(_, then)) = self
+            .rotations
+            .iter()
+            .find(|(f, _)| *f == frame - self.p.span)
+        else {
             return false;
         };
         let imu_from_cam = self.imu_from_cam[camera as usize];
         // c(now) <- c(then): R_ic^T R_wi(now)^T R_wi(then) R_ic.
         let rotation = imu_from_cam.inverse() * self.rotation.inverse() * then * imu_from_cam;
-        let parallax_cos = PARALLAX_DEG.to_radians().cos();
+        let parallax_cos = self.p.parallax_deg.to_radians().cos();
         let mut evaluated = 0usize;
         let mut planes: Vec<(TrackId, Vector3<f64>)> = Vec::new();
         for ((cam, track), entry) in &self.history {
@@ -252,7 +318,7 @@ impl PlatformFilter {
             let Some(&(first, old)) = entry.front() else {
                 continue;
             };
-            if first != frame - SPAN {
+            if first != frame - self.p.span {
                 continue;
             }
             let now = entry.back().map(|(_, b)| *b).unwrap_or(old);
@@ -268,7 +334,7 @@ impl PlatformFilter {
                 planes.push((*track, normal / norm));
             }
         }
-        if planes.len() < MIN_INLIERS.max(2) {
+        if planes.len() < self.p.min_inliers.max(2) {
             return false;
         }
         let mut best: Vec<usize> = Vec::new();
@@ -285,7 +351,7 @@ impl PlatformFilter {
             }
             let t = t / tn;
             let inliers: Vec<usize> = (0..planes.len())
-                .filter(|&i| planes[i].1.dot(&t).abs() < EPIPOLAR_SIN)
+                .filter(|&i| planes[i].1.dot(&t).abs() < self.p.epipolar_sin)
                 .collect();
             if inliers.len() > best.len() {
                 best = inliers;
@@ -294,8 +360,8 @@ impl PlatformFilter {
         if let Some(slot) = self.last_inliers.get_mut(camera as usize) {
             *slot = (best.len(), evaluated);
         }
-        let evidence =
-            best.len() >= MIN_INLIERS && best.len() as f64 >= MIN_INLIER_SHARE * evaluated as f64;
+        let evidence = best.len() >= self.p.min_inliers
+            && best.len() as f64 >= self.p.min_inlier_share * evaluated as f64;
         if evidence {
             for &i in &best {
                 self.street.insert(planes[i].0);
