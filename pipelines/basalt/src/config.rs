@@ -86,6 +86,10 @@ const OPTIONAL_KEYS: &[&str] = &[
     // Latitude in degrees for Earth-rotation compensation of the gyro
     // (absent: off); see `EstimatorConfig::earth_rotation_up_rad_s`.
     "config.vio_earth_rotation_latitude_deg",
+    // Moving-platform filter (default false): during a ride, only the
+    // tracks that move with the street reach the estimator; see
+    // `crate::platform`.
+    "config.vio_platform_filter",
     // Monocular visual-only odometry (default false); see
     // `docs/mono_visual_only_vio.md`.
     "config.vio_visual_only",

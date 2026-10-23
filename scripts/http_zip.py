@@ -9,6 +9,7 @@ A member already on disk with the right size is skipped, so a rerun resumes.
 A LaMAria test sequence is up to 29 GB, more than a CI runner can hold twice.
 """
 import argparse
+import http.client
 import io
 import os
 import sys
@@ -30,7 +31,7 @@ class HttpFile(io.RawIOBase):
                 with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
                     self.size = int(r.headers["Content-Length"])
                 break
-            except OSError as e:
+            except (OSError, http.client.HTTPException) as e:
                 if attempt == 7:
                     raise
                 print(f"retry {attempt} HEAD {url}: {e!r}", file=sys.stderr, flush=True)
@@ -62,7 +63,7 @@ class HttpFile(io.RawIOBase):
                 if r.status == 206 and len(data) == end - start + 1:
                     return data
                 error = f"status {r.status}, {len(data)} of {end - start + 1} bytes"
-            except OSError as e:
+            except (OSError, http.client.HTTPException) as e:  # IncompleteRead: the connection dropped mid-body
                 error = repr(e)
             print(f"retry {attempt} at {start}: {error}", file=sys.stderr, flush=True)
             time.sleep(2 ** attempt)
