@@ -87,6 +87,20 @@ on sequence_4_10 but −11.0 on the Medium sequence
 ([`lamaria_klt_threshold.md`](lamaria_klt_threshold.md)). `--low-light-config
 none` uses `--config` there too.
 
+Moving-platform sequences (track 5) run the VIO with the platform filter
+(`config.vio_platform_filter`, [`platform.rs`](../pipelines/basalt/src/platform.rs);
+`--platform-tracks` with no values turns it off). On a tram the cabin's
+features say the head stands still and outweigh the street seen through the
+windows, so the VIO shortens or stops the ride. When the accelerometer shows
+no steps and enough tracks move with one translation beyond the gyro's
+rotation, only those tracks reach the estimator. With the BA chain (GitHub
+Actions, same commit, filter off / on): sequence_5_11 60.29 / **66.38**,
+sequence_5_12 **7.41** / 5.98. On sequence_5_12 the chord across the tram
+(CPs at 18 s and 208 s) comes out at 0.59 / **0.95** of the survey; its score
+stays set by the last four minutes, whose chords are 21-50 % too long either
+way. On the test set's trams seen through a door's windows (sequence_5_5,
+5_9) too few street tracks last for the filter to turn on.
+
 IMU rectification is on by default
 ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md); +4.35 Score on
 average across one training sequence per non-Short track). It fetches only the

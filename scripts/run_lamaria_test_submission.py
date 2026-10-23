@@ -130,7 +130,7 @@ TRACK_COUNTS = {1: 18, 2: 10, 3: 16, 4: 9, 5: 10}
 # Tracks whose VIO trajectory is submitted even with --slam-exe (Short, Long, Low light).
 DEFAULT_VIO_TRACKS = (1, 3, 4)
 LOW_LIGHT_TRACK = 4
-DEFAULT_PLATFORM_TRACKS = ()
+DEFAULT_PLATFORM_TRACKS = (5,)  # Moving platform: docs/lamaria_submission.md
 DEFAULT_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json")
 DEFAULT_LOW_LIGHT_CONFIG = Path(
     "configs/basalt/variants/lamaria/euroc_config_big_window_multicam_lowlight.json")
@@ -370,7 +370,7 @@ def main() -> int:
     parser.add_argument("--platform-tracks", type=int, nargs="*", default=list(DEFAULT_PLATFORM_TRACKS),
                         choices=sorted(TRACK_COUNTS),
                         help="tracks whose VIO keeps a vehicle's cabin out during rides "
-                             "(config.vio_platform_filter; pipelines/basalt/src/platform.rs)")
+                             "(config.vio_platform_filter; default 5; no values: none)")
     parser.add_argument("--low-light-config",
                         help=f"config for Low light (track 4) sequences (default {DEFAULT_LOW_LIGHT_CONFIG}; "
                              f"with --ba-chain {BA_CHAIN_LOW_LIGHT_CONFIG}); 'none' uses --config")
