@@ -99,5 +99,26 @@ class DivergenceTests(unittest.TestCase):
         self.assertEqual(cfg["config.optical_flow_max_recovered_dist2"], 0.25)  # the low-light setting stays
 
 
+    def test_a_late_start_trims_the_manifests_and_links_the_images(self):
+        import tempfile
+        root = Path(tempfile.mkdtemp())
+        inner = root / "seq"
+        for cam in ("cam0", "cam1"):
+            (inner / "mav0" / cam / "data").mkdir(parents=True)
+            (inner / "mav0" / cam / "data.csv").write_text(
+                "#timestamp [ns],filename\n" + "".join(f"{t * 50_000_000},{t}.png\n" for t in range(1000)))
+        (inner / "mav0" / "imu0").mkdir(parents=True)
+        (inner / "mav0" / "imu0" / "data.csv").write_text(
+            "#timestamp [ns],w\n" + "".join(f"{t * 1_000_000},0\n" for t in range(50_000)))
+        late = submission.late_start(inner, root / "late", 10)
+        cam = (late / "mav0" / "cam1" / "data.csv").read_text().splitlines()
+        self.assertEqual(cam[0], "#timestamp [ns],filename")
+        self.assertEqual(cam[1], "10000000000,200.png")
+        self.assertEqual(len(cam), 801)
+        imu = (late / "mav0" / "imu0" / "data.csv").read_text().splitlines()
+        self.assertEqual(imu[1].split(",")[0], "9900000000")  # a tenth of a second before the first image
+        self.assertEqual((late / "mav0" / "cam0" / "data").resolve(), (inner / "mav0" / "cam0" / "data").resolve())
+
+
 if __name__ == "__main__":
     unittest.main()

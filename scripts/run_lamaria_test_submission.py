@@ -96,6 +96,10 @@ A VIO that diverges (faster than 30 m/s over a twentieth of its seconds) runs
 again with both cameras' features (`MULTICAM`): on test sequence_1_9 the
 default config's VIO runs away from the first seconds (3 km away after a
 minute) while the same config with both cameras' features stays on a walk.
+If it still diverges, it starts again 10, 30 or 60 s into the recording
+(`LATE_STARTS_S`): on test sequence_1_15 the head shakes at up to 2 rad/s
+over the first seconds and both configs run away from there, while either
+one started 10 s later holds. The poses before that start are then missing.
 If the BA chain still fails, the VIO trajectory is submitted.
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
@@ -265,6 +269,32 @@ def diverged(tum: Path, speed: float = DIVERGED_SPEED) -> bool:
         total += 1
         fast += ((a - x) ** 2 + (b - y) ** 2 + (c - z) ** 2) ** 0.5 / (u - t) > speed
     return total > 0 and fast > total / 20
+
+
+LATE_STARTS_S = (10, 30, 60)  # where a VIO that diverges from the first seconds starts again
+
+
+def late_start(inner: Path, out: Path, seconds: float) -> Path:
+    """An EuRoC folder of `inner` that starts `seconds` into the recording: trimmed manifests,
+    the images linked."""
+    t0 = None
+    for cam in ("cam0", "cam1"):
+        (out / "mav0" / cam).mkdir(parents=True, exist_ok=True)
+        rows = [r for r in (inner / "mav0" / cam / "data.csv").read_text().splitlines() if r.strip()]
+        head = [r for r in rows if r.startswith("#")]
+        frames = [r for r in rows if not r.startswith("#")]
+        if t0 is None:
+            t0 = int(frames[0].split(",")[0]) + int(seconds * 1e9)
+        (out / "mav0" / cam / "data.csv").write_text(
+            "\n".join(head + [r for r in frames if int(r.split(",")[0]) >= t0]) + "\n")
+        link = out / "mav0" / cam / "data"
+        if not link.exists():
+            link.symlink_to((inner / "mav0" / cam / "data").resolve(), target_is_directory=True)
+    (out / "mav0" / "imu0").mkdir(parents=True, exist_ok=True)
+    rows = (inner / "mav0" / "imu0" / "data.csv").read_text().splitlines()
+    (out / "mav0" / "imu0" / "data.csv").write_text("\n".join(
+        r for r in rows if r.startswith("#") or (r.strip() and int(r.split(",")[0]) >= t0 - 100_000_000)) + "\n")
+    return out
 
 
 def multicam_config(config: Path, out: Path) -> Path:
@@ -451,8 +481,17 @@ def main() -> int:
                 command, candidates = estimator_command(args, inner, variant_a, vio_out, fallback, submit_vio)
                 run(command, check=True)
                 trajectory = next(t for t in candidates if t.is_file())
-                if diverged(trajectory):
-                    log(f"{seq}: WARN the VIO diverged again")
+                for seconds in LATE_STARTS_S:  # test sequence_1_15: the head shakes over the first seconds
+                    if not diverged(trajectory):
+                        break
+                    log(f"{seq}: WARN the VIO diverged again; starting it {seconds} s into the recording")
+                    late = late_start(inner, work / f"late_{seconds}", seconds)
+                    command, candidates = estimator_command(args, late, variant_a, vio_out, fallback, submit_vio)
+                    run(command, check=True)
+                    trajectory = next(t for t in candidates if t.is_file())
+                else:
+                    if diverged(trajectory):
+                        log(f"{seq}: WARN the VIO diverged at every start")
             if args.ba_chain:
                 log(f"{seq}: BA chain (track {track})")
                 try:
