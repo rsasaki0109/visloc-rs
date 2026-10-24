@@ -655,7 +655,9 @@ model (the same as r49's), all on the images resampled onto one camera:
   view's depth range comes from the points it observes; with the SfM's
   points 1.21% of the scan's visible surface falls outside it, against
   0.31% with the ground truth's (14% in one view). Taking the points its
-  source views observe as well (projected into it) leaves 0.79% outside.
+  source views observe as well (projected into it) leaves 0.79% outside,
+  but scores 56.7% (80.8 / 43.6) against C's 57.0%: the narrower ranges
+  are not where the 1.3 points go (the option was not kept).
 - **The single focal length costs about 0.5 point.**
 - The resampling onto one camera is not measured here (all four runs use
   it); r51 found it costs nothing on electro.

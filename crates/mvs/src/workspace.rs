@@ -40,12 +40,6 @@ pub struct WorkspaceOptions {
     /// `ComputeDepthRanges`: 1%, 99%, 25%).
     pub depth_quantiles: (f64, f64),
     pub depth_stretch: f64,
-    /// The depth range also counts the points the view's source views
-    /// observe that project into it (in front of it), not only its own:
-    /// a sparse model whose tracks miss part of what a view sees (a
-    /// nearby ground, a far facade) otherwise leaves those surfaces
-    /// outside the range. The median depth stays the view's own.
-    pub depth_from_sources: bool,
 }
 
 impl Default for WorkspaceOptions {
@@ -55,7 +49,6 @@ impl Default for WorkspaceOptions {
             num_sources: 10,
             depth_quantiles: (0.01, 0.99),
             depth_stretch: 0.25,
-            depth_from_sources: false,
         }
     }
 }
@@ -188,7 +181,7 @@ impl Workspace {
                 let sy = f64::from(rgb.height()) / f64::from(camera.height);
                 let rotation = image.rotation();
                 let translation = image.translation();
-                let (mut depth_range, median_depth) =
+                let (depth_range, median_depth) =
                     depth_range(model, image, &rotation, &translation, options).ok_or_else(
                         || WorkspaceError::NoDepthRange {
                             name: image.name.clone(),
@@ -210,22 +203,6 @@ impl Workspace {
                 // Best score first; ties by index, so the order is fixed.
                 candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
                 candidates.truncate(options.num_sources);
-                if options.depth_from_sources {
-                    let sources: Vec<&crate::model::Image> = candidates
-                        .iter()
-                        .map(|&(view, _)| &model.images[view])
-                        .collect();
-                    if let Some(range) = depth_range_with_sources(
-                        model,
-                        image,
-                        &sources,
-                        ((fx, fy, cx, cy), (camera.width, camera.height)),
-                        (&rotation, &translation),
-                        options,
-                    ) {
-                        depth_range = range;
-                    }
-                }
                 Ok(View {
                     name: image.name.clone(),
                     width: rgb.width() as usize,
@@ -355,111 +332,9 @@ fn depth_range(
     ))
 }
 
-/// The depth range of `image` (as [`depth_range`]) from the points it
-/// observes and those its `sources` observe that project into it, in
-/// front of it, with the camera `(fx, fy, cx, cy)` of size `(w, h)`.
-fn depth_range_with_sources(
-    model: &SparseModel,
-    image: &crate::model::Image,
-    sources: &[&crate::model::Image],
-    ((fx, fy, cx, cy), (w, h)): ((f64, f64, f64, f64), (u32, u32)),
-    (rotation, translation): (&Matrix3<f64>, &Vector3<f64>),
-    options: &WorkspaceOptions,
-) -> Option<(f32, f32)> {
-    let own: std::collections::BTreeSet<u64> =
-        image.point3d_ids.iter().flatten().copied().collect();
-    let mut ids = own.clone();
-    for source in sources {
-        ids.extend(source.point3d_ids.iter().flatten().copied());
-    }
-    let mut depths: Vec<f64> = ids
-        .iter()
-        .filter_map(|id| model.points.get(id).map(|point| (id, point)))
-        .filter_map(|(id, point)| {
-            let x = rotation * point.xyz + translation;
-            if x.z <= 0.0 {
-                return None;
-            }
-            if own.contains(id) {
-                return Some(x.z);
-            }
-            let (u, v) = (fx * x.x / x.z + cx, fy * x.y / x.z + cy);
-            (u >= 0.0 && v >= 0.0 && u < f64::from(w) && v < f64::from(h)).then_some(x.z)
-        })
-        .collect();
-    if depths.is_empty() {
-        return None;
-    }
-    depths.sort_by(f64::total_cmp);
-    let at = |q: f64| depths[((depths.len() - 1) as f64 * q).round() as usize];
-    let (lo, hi) = options.depth_quantiles;
-    Some((
-        (at(lo) * (1.0 - options.depth_stretch)) as f32,
-        (at(hi) * (1.0 + options.depth_stretch)) as f32,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A view whose own track misses a near point gets it from a source
-    /// view that observes it, if it projects into the view; a point
-    /// behind the view or outside its image does not count.
-    #[test]
-    fn source_points_widen_the_depth_range_only_where_they_project() {
-        use crate::model::{Image, Point3D};
-        let point = |id: u64, x: f64, y: f64, z: f64| {
-            (
-                id,
-                Point3D {
-                    id,
-                    xyz: Vector3::new(x, y, z),
-                },
-            )
-        };
-        let image = |id: u32, ids: &[u64]| Image {
-            id,
-            camera_id: 1,
-            name: format!("{id}.png"),
-            qvec: [1.0, 0.0, 0.0, 0.0],
-            tvec: [0.0, 0.0, 0.0],
-            point3d_ids: ids.iter().map(|&i| Some(i)).collect(),
-        };
-        let model = SparseModel {
-            cameras: HashMap::new(),
-            images: vec![image(1, &[1, 2, 3]), image(2, &[1, 4, 5, 6])],
-            points: [
-                point(1, 0.0, 0.0, 10.0),
-                point(2, 0.1, 0.0, 12.0),
-                point(3, 0.0, 0.1, 14.0),
-                point(4, 0.0, 0.0, 2.0),   // near, in view
-                point(5, 0.0, 0.0, -1.0),  // behind
-                point(6, 100.0, 0.0, 1.0), // outside the image
-            ]
-            .into_iter()
-            .collect(),
-        };
-        let options = WorkspaceOptions {
-            depth_quantiles: (0.0, 1.0),
-            depth_stretch: 0.0,
-            ..WorkspaceOptions::default()
-        };
-        let (r, t) = (Matrix3::identity(), Vector3::zeros());
-        let own = depth_range(&model, &model.images[0], &r, &t, &options).unwrap();
-        assert_eq!(own.0, (10.0, 14.0));
-        let camera = ((100.0, 100.0, 50.0, 50.0), (100, 100));
-        let with = depth_range_with_sources(
-            &model,
-            &model.images[0],
-            &[&model.images[1]],
-            camera,
-            (&r, &t),
-            &options,
-        )
-        .unwrap();
-        assert_eq!(with, (2.0, 14.0));
-    }
 
     #[test]
     fn pair_score_peaks_at_five_degrees() {
