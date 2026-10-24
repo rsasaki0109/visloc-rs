@@ -102,6 +102,11 @@ cargo run --example localize_dummy
 Full options for each are in the sections below; `scripts/check.sh` runs the
 complete local quality gate (`fmt`, `clippy`, `test`, `doc`).
 
+**Prebuilt binaries:** each [release](https://github.com/rsasaki0109/visloc-rs/releases)
+attaches `gsplat_photos`, `visloc_mvs`, `colmap_incremental_mapper` and
+`visloc_web` for Linux x86_64, Windows x86_64 and macOS (Apple silicon), so
+the photo pipeline runs without a Rust toolchain.
+
 ## Structure from Motion
 
 visloc-rs registers **9,996/10,008 cameras (99.88%)** across every ETH3D
