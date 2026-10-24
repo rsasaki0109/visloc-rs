@@ -1,6 +1,7 @@
 //! `BundleAdjustment` joint pose / landmark / intrinsics refinement.
 
 use super::*;
+use nalgebra::{Dyn, OMatrix, U6};
 
 impl BundleAdjustment {
     /// Bundle adjustment that carries the shared pinhole intrinsics
@@ -101,6 +102,7 @@ impl BundleAdjustment {
         // the historical dense `(6 P + k)^2` solve byte-for-byte.
         let sparse = config.linear_solver == LinearSolver::Sparse;
         let mut block_cache: Option<crate::block_cholesky::BlockSymbolic> = None;
+        let mut system: Option<(JointCameraHessian, DVector<f64>, Vec<JointLandmarkBlock>)> = None;
 
         for iteration in 0..config.max_iterations {
             // Current distortion (reflects the running k1, k2 estimate) drives the
@@ -114,16 +116,23 @@ impl BundleAdjustment {
                 self.camera.tangential_distortion()
             };
             let t_build = std::time::Instant::now();
-            let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
-                &pose_index,
-                &landmark_index,
-                &kernel,
-                k_dim,
-                dist,
-                tangential,
-                sparse,
-            );
-            debug_assert_eq!(cam_dim_n, cam_dim);
+            // A rejected (or failed) step restores the poses, landmarks and
+            // intrinsics, so the next iteration's linearization would be
+            // identical: reuse it and only re-solve with the larger damping.
+            if system.is_none() {
+                let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
+                    &pose_index,
+                    &landmark_index,
+                    &kernel,
+                    k_dim,
+                    dist,
+                    tangential,
+                    sparse,
+                );
+                debug_assert_eq!(cam_dim_n, cam_dim);
+                system = Some((h_cc, b_c, lm_blocks));
+            }
+            let (h_cc, b_c, lm_blocks) = system.as_ref().expect("built above");
             let build_s = t_build.elapsed().as_secs_f64();
             let t_solve = std::time::Instant::now();
             let (solved, h_ll_inv_cache) = match h_cc {
@@ -132,11 +141,11 @@ impl BundleAdjustment {
                     pose_k,
                     kk,
                 } => solve_joint_sparse(
-                    pose_diag,
-                    pose_k,
-                    kk,
-                    &b_c,
-                    &lm_blocks,
+                    pose_diag.clone(),
+                    pose_k.clone(),
+                    kk.clone(),
+                    b_c,
+                    lm_blocks,
                     lambda,
                     config.shared_focal,
                     &mut block_cache,
@@ -150,10 +159,10 @@ impl BundleAdjustment {
                             s[(d, d)] += lambda;
                         }
                     }
-                    let mut b_reduced = -&b_c;
+                    let mut b_reduced = -b_c;
                     let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> =
                         Vec::with_capacity(lm_blocks.len());
-                    for lm in &lm_blocks {
+                    for lm in lm_blocks {
                         let mut h_ll = lm.h_ll;
                         if lambda > 0.0 {
                             h_ll[(0, 0)] += lambda;
@@ -318,6 +327,7 @@ impl BundleAdjustment {
                 lambda,
                 step_accepted: true,
             });
+            system = None;
             current_cost = cost_after;
             current_nonprojectable = nonprojectable_after;
             if config.initial_lambda.is_some() {
@@ -914,7 +924,7 @@ fn solve_joint_sparse(
         rhs_pose: Vec<(usize, Vector6<f64>)>,
         rhs_k: Option<(usize, DVector<f64>)>,
         pose_pose: Vec<(usize, usize, Matrix6<f64>)>,
-        pose_k: Vec<(usize, DMatrix<f64>)>,
+        pose_k: Vec<(usize, OMatrix<f64, U6, Dyn>)>,
         kk: Option<DMatrix<f64>>,
     }
     // A landmark's pose blocks are 6×3: as fixed-size matrices their Schur
@@ -953,11 +963,7 @@ fn solve_joint_sparse(
                 up.pose_pose.push((cs_b / 6, cs_a / 6, ah * b.transpose()));
             }
             if let Some((_, b)) = intrinsics {
-                let m = ah * b.transpose();
-                up.pose_k.push((
-                    cs_a / 6,
-                    DMatrix::from_column_slice(6, m.ncols(), m.as_slice()),
-                ));
+                up.pose_k.push((cs_a / 6, ah * b.transpose()));
             }
         }
         if let Some((&cs_k, a)) = intrinsics {
@@ -971,26 +977,27 @@ fn solve_joint_sparse(
     let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
     for wave in lm_blocks.chunks(JOINT_WAVE_LANDMARKS) {
         let updates: Vec<LandmarkUpdate> = wave.par_iter().map(eliminate).collect();
-        let mut buckets: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); p_count];
-        for up in updates {
+        // The buckets borrow the 6×6 updates instead of copying them.
+        let mut buckets: Vec<Vec<(usize, &Matrix6<f64>)>> = vec![Vec::new(); p_count];
+        for up in &updates {
             h_ll_inv_cache.push(up.inv);
-            for (cs, v) in up.rhs_pose {
+            for (cs, v) in &up.rhs_pose {
                 for r in 0..6 {
                     b_reduced[cs + r] += v[r];
                 }
             }
-            if let Some((cs, v)) = up.rhs_k {
+            if let Some((cs, v)) = &up.rhs_k {
                 for r in 0..v.nrows() {
                     b_reduced[cs + r] += v[r];
                 }
             }
-            for (col, row, m) in up.pose_pose {
-                buckets[col].push((row, m));
+            for (col, row, m) in &up.pose_pose {
+                buckets[*col].push((*row, m));
             }
-            for (p, m) in up.pose_k {
-                pose_k[p] -= m;
+            for (p, m) in &up.pose_k {
+                pose_k[*p] -= m;
             }
-            if let Some(m) = up.kk {
+            if let Some(m) = &up.kk {
                 kk -= m;
             }
         }
