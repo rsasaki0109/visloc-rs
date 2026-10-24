@@ -100,6 +100,10 @@ If it still diverges, it starts again 10, 30 or 60 s into the recording
 (`LATE_STARTS_S`): on test sequence_1_15 the head shakes at up to 2 rad/s
 over the first seconds and both configs run away from there, while either
 one started 10 s later holds. The poses before that start are then missing.
+On a walking track (not Moving platform) averaging more than 4 m/s over
+10 s counts as diverging too (`runaway`; test sequence_4_2 ran away for
+60 s at up to 12 m/s from 10 s), and the last starts follow the end of the
+runaway; if every start fails, the attempt that ran away least is used.
 If the BA chain still fails, the VIO trajectory is submitted.
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
@@ -273,6 +277,45 @@ def diverged(tum: Path, speed: float = DIVERGED_SPEED) -> bool:
 
 
 LATE_STARTS_S = (10, 30, 60)  # where a VIO that diverges from the first seconds starts again
+WALK_SPEED = 4.0  # m/s held over RUNAWAY_WINDOW_S: nobody walks that fast for 10 s
+RUNAWAY_WINDOW_S = 10.0
+MOVING_TRACK = 5
+
+
+def runaway(tum: Path, speed: float = WALK_SPEED, window: float = RUNAWAY_WINDOW_S):
+    """(seconds, end): how many seconds start a `window` over which the trajectory averages more
+    than `speed`, and the trajectory time at which the last such window ends (None without)."""
+    rows = [[float(v) for v in line.split()[:4]] for line in tum.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+    fast, end, j = 0, None, 0
+    for i, (t, x, y, z) in enumerate(rows):
+        while j < len(rows) and rows[j][0] < t + window:
+            j += 1
+        if j == len(rows):
+            break
+        u, a, b, c = rows[j]
+        if ((a - x) ** 2 + (b - y) ** 2 + (c - z) ** 2) ** 0.5 / (u - t) > speed:
+            fast += 1
+            end = u
+    seconds = fast / ((len(rows) - 1) / (rows[-1][0] - rows[0][0])) if fast else 0.0
+    return seconds, end
+
+
+def vio_failure(tum: Path, track: int) -> float:
+    """0 for a usable VIO trajectory, else how badly it failed: diverged (inf), or the seconds of a
+    walking track's trajectory that run away at more than WALK_SPEED (test sequence_4_2: 60 s at up
+    to 12 m/s, under the divergence check's twentieth)."""
+    if diverged(tum):
+        return float("inf")
+    return 0.0 if track == MOVING_TRACK else runaway(tum)[0]
+
+
+def recording_start(inner: Path) -> float:
+    """The first cam0 frame's time in seconds."""
+    for row in (inner / "mav0" / "cam0" / "data.csv").read_text().splitlines():
+        if row.strip() and not row.startswith("#"):
+            return int(row.split(",")[0]) * 1e-9
+    raise RuntimeError(f"no frames in {inner}")
 
 
 def late_start(inner: Path, out: Path, seconds: float) -> Path:
@@ -295,6 +338,12 @@ def late_start(inner: Path, out: Path, seconds: float) -> Path:
     rows = (inner / "mav0" / "imu0" / "data.csv").read_text().splitlines()
     (out / "mav0" / "imu0" / "data.csv").write_text("\n".join(
         r for r in rows if r.startswith("#") or (r.strip() and int(r.split(",")[0]) >= t0 - 100_000_000)) + "\n")
+    return out
+
+
+def keep_attempt(trajectory: Path, out: Path) -> Path:
+    """A copy of a VIO attempt's trajectory, which the next attempt overwrites."""
+    shutil.copyfile(trajectory, out)
     return out
 
 
@@ -488,23 +537,34 @@ def main() -> int:
                 continue
             if trajectory != candidates[0]:
                 log(f"{seq}: WARN {candidates[0].name} missing; submitting {trajectory.name}")
-            if diverged(trajectory):  # test sequence_1_9: the default config's VIO runs away from the start
+            if vio_failure(trajectory, track):  # test sequence_1_9: the default config's VIO runs away from the start
+                attempts = [(vio_failure(trajectory, track), keep_attempt(trajectory, work / "vio_default.tum"))]
                 fallback = multicam_config(config, work / f"{config.stem}_multicam.json")
                 log(f"{seq}: WARN the VIO diverged; again with both cameras' features ({fallback.name})")
                 command, candidates = estimator_command(args, inner, variant_a, vio_out, fallback, submit_vio)
                 run(command, check=True)
                 trajectory = next(t for t in candidates if t.is_file())
-                for seconds in LATE_STARTS_S:  # test sequence_1_15: the head shakes over the first seconds
-                    if not diverged(trajectory):
-                        break
-                    log(f"{seq}: WARN the VIO diverged again; starting it {seconds} s into the recording")
-                    late = late_start(inner, work / f"late_{seconds}", seconds)
+                starts, tried, after_runaway = list(LATE_STARTS_S), 0, False
+                while vio_failure(trajectory, track) and starts:  # test sequence_1_15: the head shakes over the first seconds
+                    attempts.append((vio_failure(trajectory, track),
+                                     keep_attempt(trajectory, work / f"vio_from_{tried}.tum")))
+                    tried = starts.pop(0)
+                    log(f"{seq}: WARN the VIO diverged again; starting it {tried} s into the recording")
+                    late = late_start(inner, work / f"late_{tried}", tried)
                     command, candidates = estimator_command(args, late, variant_a, vio_out, fallback, submit_vio)
                     run(command, check=True)
                     trajectory = next(t for t in candidates if t.is_file())
-                else:
-                    if diverged(trajectory):
-                        log(f"{seq}: WARN the VIO diverged at every start")
+                    end = runaway(trajectory)[1]
+                    if (not starts and not after_runaway and track != MOVING_TRACK and end is not None
+                            and vio_failure(trajectory, track)):
+                        after_runaway = True  # test sequence_4_2: once more, 5 s after the runaway ends
+                        starts.append(round(end - recording_start(inner) + 5))
+                failure = vio_failure(trajectory, track)
+                if failure:
+                    attempts.append((failure, keep_attempt(trajectory, work / f"vio_from_{tried:.0f}.tum")))
+                    failure, trajectory = min(attempts, key=lambda a: a[0])
+                    log(f"{seq}: WARN the VIO diverged at every start; submitting {trajectory.name} "
+                        f"({failure:.0f} s run away)")
             if args.ba_chain:
                 log(f"{seq}: BA chain (track {track})")
                 try:

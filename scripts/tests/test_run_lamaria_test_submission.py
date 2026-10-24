@@ -88,6 +88,17 @@ class DivergenceTests(unittest.TestCase):
     def test_a_runaway_is(self):
         self.assertTrue(submission.diverged(self.write(lambda t: 3.0 * t * t)))
 
+    def test_a_walk_that_runs_away_for_a_while_fails_on_a_walking_track_only(self):
+        # 1.4 m/s, then 10 m/s from 20 s to 40 s (test sequence_4_2), then walking again
+        walk = self.write(lambda t: 1.4 * t + 8.6 * min(max(t - 20.0, 0.0), 20.0), seconds=120)
+        self.assertFalse(submission.diverged(walk))
+        seconds, end = submission.runaway(walk)
+        self.assertGreater(seconds, 15)
+        self.assertAlmostEqual(end, 45.0, delta=6.0)
+        self.assertGreater(submission.vio_failure(walk, 4), 0)
+        self.assertEqual(submission.vio_failure(walk, submission.MOVING_TRACK), 0)  # a tram may do that
+        self.assertEqual(submission.vio_failure(self.write(lambda t: 1.4 * t, seconds=120), 4), 0)
+
     def test_the_multicam_fallback_keeps_the_config(self):
         import json
         import tempfile
