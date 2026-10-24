@@ -628,6 +628,52 @@ SfM registered 44 of 45 images, as the replays had (largest centre error
     that the current matching does not find (guided matching, for
     example). Neither is tried yet.
 
+### playground end to end: where the points go (CPU, 800 px)
+
+playground loses the most end to end (r49, orientations: 60.7% against
+69.5% with the ground-truth poses), most of it accuracy (67.3% against
+79.5%), although its SfM cameras are within 0.16 cm (median, 0.4 cm at
+most) of the ground truth and its intrinsics are the ground truth's (held
+fixed). A local diagnosis at 800 px on the CPU (F1 at 2 cm, ground-truth
+scan) swaps one input at a time between the ground truth and r49a's SfM
+model (the same as r49's), all on the images resampled onto one camera:
+
+| Run | Poses | Camera | Sparse points | F1 (accuracy / completeness) |
+|---|---|---|---|---|
+| B | ground truth | ground truth (fx ≠ fy) | ground truth | 61.4% (85.6 / 47.9) |
+| E | ground truth | SfM (fx = fy) | ground truth | 60.9% (85.4 / 47.3) |
+| D | SfM | SfM | ground truth | 58.3% (80.8 / 45.6) |
+| C | SfM | SfM | SfM | 57.0% (80.9 / 44.0) |
+
+- **The poses cost about 2.6 points, all of it accuracy.** The centres are
+  right, but each camera's rotation is off by 0.02 to 0.03° (per axis,
+  in no consistent direction): the scan's points land a median 1.0 px
+  (at 3200 px) from where the ground-truth pose puts them. The SfM
+  extracts its features at 3200 px; a run at 4800 px ran out of memory on
+  this 15 GB machine.
+- **The sparse points cost about 1.3 points**, mostly completeness. Each
+  view's depth range comes from the points it observes; with the SfM's
+  points 1.21% of the scan's visible surface falls outside it, against
+  0.31% with the ground truth's (14% in one view). Taking the points its
+  source views observe as well (projected into it) leaves 0.79% outside,
+  but scores 56.7% (80.8 / 43.6) against C's 57.0%: the narrower ranges
+  are not where the 1.3 points go (the option was not kept).
+- **The single focal length costs about 0.5 point.**
+- The resampling onto one camera is not measured here (all four runs use
+  it); r51 found it costs nothing on electro.
+- **Neither a keypoint refinement nor the camera's fy removes the rotation
+  error** (a Python prototype on the same model). The SfM model already
+  fits its observations to 0.17 px (median); refining each track's
+  observations at full resolution (pyramidal LK from its first
+  observation, forward-backward checked: a quarter of them kept, moved a
+  median 0.64 px at 3200 px) and re-running the BA takes the median
+  relative-rotation error against the ground truth from 0.0409° to
+  0.0406°, and the ground truth's fy (0.03% below fx) to 0.0404°. As on
+  electro, where a BA started from the ground-truth poses lands on the
+  mapper's, the error is in the observations themselves: the next test
+  is features extracted at full resolution, which needs more memory than
+  this machine has.
+
 ### Against ACMMP on the same GPU
 
 ACMMP's released code (GhiXu/ACMMP, built for the L4) on the same
@@ -664,6 +710,39 @@ accuracy and completeness are at 2 cm; times cover the whole run
   taken from the views' depth-range midpoints, which reach far behind
   the scene (terrace got 2.3 cm, office 0.31 cm). It now comes from the
   median depth, with a second, coarser level for far pixels (see Mesh).
+
+### Against APD-MVS on the same GPU (r54)
+
+APD-MVS's released code (whoiszzj/APD-MVS at `38660f3`, built for the
+L4's compute capability 8.9) on the same five scenes and ground-truth
+poses, its input from its `colmap2mvsnet.py` at half resolution (3104 px)
+as its README does for ETH3D, against visloc-mvs's defaults at 3200 px
+(commit `74dde86`). Each cloud comes from its own pipeline's fusion. F1 at
+2 cm, with accuracy / completeness; the last column is APD-MVS's own
+reported F1:
+
+| Scene | visloc-mvs | APD-MVS | APD-MVS reported | Time, visloc-mvs | Time, APD-MVS |
+|---|---|---|---|---|---|
+| terrace | **91.2%** (95.8 / 87.1) | 88.4% (96.4 / 81.7) | 90.51% | 4:21 | 16:48 |
+| office | 80.6% (82.6 / 78.8) | **88.8%** (92.3 / 85.6) | 90.68% | 4:19 | 20:28 |
+| kicker | 83.8% (83.4 / 84.3) | **88.4%** (90.0 / 86.9) | 87.38% | 5:29 | 33:47 |
+| playground | 69.5% (79.5 / 61.7) | **77.7%** (84.5 / 72.0) | 80.15% | 7:15 | 34:36 |
+| facade | 67.3% (76.6 / 59.9) | **72.6%** (80.6 / 66.0) | 75.64% | 15:00 | 1:16:47 |
+| **Mean / total** | 78.5% | **83.2%** | 84.87% | 36:24 | 3:02:26 |
+
+- **The gap is real and in weak texture.** APD-MVS leads by 4.6 to 8.2
+  points on office, kicker, playground and facade, on accuracy and
+  completeness both; visloc-mvs leads on terrace by 2.8 points, on
+  completeness. Over the five scenes it is 4.7 points ahead.
+- **The reproduction is close to the paper.** 1.7 points below APD-MVS's
+  reported mean over these scenes (kicker 1.0 above, the others 1.9 to
+  3.1 below); the half resolution and the evaluator's version may account
+  for it.
+- **visloc-mvs is 5.0 times faster** in total (3.9 to 6.2 times per
+  scene). APD-MVS's input conversion adds 0.5 to 2.5 minutes per scene.
+- **office loses on accuracy most** (82.6% against 92.3%): the planes
+  visloc-mvs puts on weak texture are wrong rather than missing.
+  **playground loses on completeness most** (61.7% against 72.0%).
 
 ### One scale and the planar prior
 
@@ -807,8 +886,9 @@ only the anchors' planes and a plane fitted to them. On an L4 at
 - **Time:** about 3.5 times the defaults on these scenes (12 and 14
   minutes with the debug statistics on).
 
-**Two more parts of APD's pipeline** (CPU only, on top of
-`--deformable`; [notes](apd_mvs_code_notes.md), §5.2 and §5.3):
+**Two more parts of APD's pipeline** (on top of `--deformable`; the
+strong median runs on the GPU too, local refinement on the CPU only;
+[notes](apd_mvs_code_notes.md), §5.2 and §5.3):
 `--deformable-local-refine` moves each pixel's depth, after every
 deformable pass, to the lowest cost within 5 disparity steps along its
 ray if that beats its own by 0.1. `--deformable-strong-median` makes the
@@ -830,8 +910,8 @@ ground-truth poses, CPU (4 threads), F1 at 1, 2 and 5 cm:
   pixels' depths into their strong neighbours'. It ends 0.2 point above
   the defaults, within run-to-run noise, in 1.8 times the time.
 - **Local refinement does nothing here**, alone or with the median.
-- These are 400 px runs on one scene. Whether the strong median pays at
-  3200 px needs it on the GPU path, which it is not yet.
+- These are 400 px runs on one scene; the strong median now runs on the
+  GPU path as well, for 3200 px runs.
 
 ### Fusion settings
 

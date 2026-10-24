@@ -9,7 +9,7 @@ use visloc_gsplat_render::{GpuContext, GpuError};
 
 use crate::deformable::{self, Class, Deformable, MAX_ANCHORS};
 use crate::patch_match::{
-    finish_depth_map, DepthMap, DetailRestorer, PatchMatchOptions, ViewSelection, MAX_COST,
+    finish_pass_depth_map, DepthMap, DetailRestorer, PatchMatchOptions, ViewSelection, MAX_COST,
     MAX_SOURCES,
 };
 use crate::planar_prior::{PlanarPrior, PlanarPriorOptions};
@@ -104,6 +104,10 @@ pub struct GpuPatchMatch {
     find_anchors: wgpu::ComputePipeline,
 }
 
+/// A GPU pass's planes, costs, the pixels sorted for the next pass (empty
+/// unless asked for) and, in a deformable pass, the classes it ran with.
+type PassOutput = (Vec<[f32; 4]>, Vec<f32>, Vec<Class>, Option<Vec<Class>>);
+
 impl GpuPatchMatch {
     /// Creates a device (`GpuContext::new`) and compiles the shaders.
     pub fn new() -> Result<Self, GpuError> {
@@ -157,11 +161,17 @@ impl GpuPatchMatch {
         prior: Option<&[DepthMap]>,
     ) -> DepthMap {
         let start = prior.map(|maps| &maps[view]);
-        let (planes, costs, classes) =
+        let (planes, costs, classes, pass_classes) =
             self.run(ws, view, options, prior, start, None, DetailRestorer::Off);
         DepthMap {
             classes,
-            ..finish_depth_map(&ws.views[view], &planes, costs, options)
+            ..finish_pass_depth_map(
+                &ws.views[view],
+                &planes,
+                costs,
+                options,
+                pass_classes.as_deref(),
+            )
         }
     }
 
@@ -174,11 +184,17 @@ impl GpuPatchMatch {
         start: &DepthMap,
         restorer: DetailRestorer,
     ) -> DepthMap {
-        let (planes, costs, classes) =
+        let (planes, costs, classes, pass_classes) =
             self.run(ws, view, options, None, Some(start), None, restorer);
         DepthMap {
             classes,
-            ..finish_depth_map(&ws.views[view], &planes, costs, options)
+            ..finish_pass_depth_map(
+                &ws.views[view],
+                &planes,
+                costs,
+                options,
+                pass_classes.as_deref(),
+            )
         }
     }
 
@@ -192,7 +208,7 @@ impl GpuPatchMatch {
         start: &DepthMap,
         prior: &PlanarPrior,
     ) -> DepthMap {
-        let (planes, costs, classes) = self.run(
+        let (planes, costs, classes, pass_classes) = self.run(
             ws,
             view,
             options,
@@ -203,7 +219,13 @@ impl GpuPatchMatch {
         );
         DepthMap {
             classes,
-            ..finish_depth_map(&ws.views[view], &planes, costs, options)
+            ..finish_pass_depth_map(
+                &ws.views[view],
+                &planes,
+                costs,
+                options,
+                pass_classes.as_deref(),
+            )
         }
     }
 
@@ -221,7 +243,7 @@ impl GpuPatchMatch {
             sort_pixels: None,
             ..options.clone()
         };
-        let (_, mut costs, _) = self.run(
+        let (_, mut costs, _, _) = self.run(
             ws,
             view,
             &first_pass,
@@ -255,7 +277,7 @@ impl GpuPatchMatch {
         start: Option<&DepthMap>,
         planar: Option<(&PlanarPriorOptions, &PlanarPrior)>,
         restorer: DetailRestorer,
-    ) -> (Vec<[f32; 4]>, Vec<f32>, Vec<Class>) {
+    ) -> PassOutput {
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let reference = &ws.views[view];
@@ -739,6 +761,7 @@ impl GpuPatchMatch {
                 })
                 .collect()
         };
+        let mut pass_classes = None;
         if let Some(d) = deformable {
             // The start's classes if the pass that made it sorted them,
             // else the start's pixels sorted now; each pixel's nearest
@@ -760,6 +783,7 @@ impl GpuPatchMatch {
                 classify(anchor_slot)
             };
             let nearest = deformable::nearest_strong(&classes, w, h, d.nearest_radius);
+            pass_classes = Some(classes.clone());
             queue.write_buffer(&nearest_buf, 0, bytemuck::cast_slice(&nearest));
             let anchors_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mvs-find-anchors"),
@@ -835,7 +859,7 @@ impl GpuPatchMatch {
                 total[0]
             );
         }
-        (planes, costs, classes)
+        (planes, costs, classes, pass_classes)
     }
 }
 
@@ -1013,6 +1037,42 @@ mod tests {
             before > 10.0 * after,
             "plain {before} vs deformable {after}"
         );
+    }
+
+    /// On the GPU the strong-only median filters with the pass's classes:
+    /// a pass whose pixels are all weak keeps every depth as estimated,
+    /// and one whose pixels are all strong filters every depth.
+    #[test]
+    fn gpu_strong_median_follows_the_pass_classes() {
+        let Some(ctx) = visloc_gsplat_render::try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let gpu = GpuPatchMatch::with_context(ctx);
+        let (ws, _) = textureless_scene();
+        let options = PatchMatchOptions::default();
+        let start = gpu.estimate(&ws, 0, &options, None);
+        let with_classes = |class: Class| DepthMap {
+            classes: vec![class; start.depth.len()],
+            ..start.clone()
+        };
+        let deformable = |strong_median: bool, median_filter: bool| PatchMatchOptions {
+            deformable: Some(crate::deformable::Deformable {
+                strong_median,
+                ..crate::deformable::Deformable::default()
+            }),
+            median_filter,
+            ..options.clone()
+        };
+        let run = |o: &PatchMatchOptions, class: Class| {
+            gpu.estimate_from(&ws, 0, o, &with_classes(class), DetailRestorer::Off)
+        };
+        let weak_median = run(&deformable(true, true), Class::Weak);
+        let weak_unfiltered = run(&deformable(false, false), Class::Weak);
+        assert_eq!(weak_median.depth, weak_unfiltered.depth);
+        let strong_median = run(&deformable(true, true), Class::Strong);
+        let strong_unfiltered = run(&deformable(false, false), Class::Strong);
+        assert_ne!(strong_median.depth, strong_unfiltered.depth);
     }
 
     /// `deformable_passes_take_the_start_classes` on the GPU.

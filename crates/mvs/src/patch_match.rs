@@ -1486,20 +1486,18 @@ impl<'a> Context<'a> {
     /// pass's deformable settings ask for them.
     fn finish(&self, state: &State) -> DepthMap {
         let deformable = self.options.deformable.as_ref();
-        let strong_median = self
-            .classes
-            .as_ref()
-            .filter(|_| deformable.is_some_and(|d| d.strong_median));
-        let mut map = match strong_median {
-            None => self.depth_map(state),
-            Some(classes) => {
-                let mut map = self.depth_map_unfiltered(state);
-                if self.options.median_filter {
-                    map.depth = strong_median_filter(&map.depth, classes, map.width, map.height);
-                }
-                map
-            }
-        };
+        let planes: Vec<[f32; 4]> = state
+            .plane
+            .iter()
+            .map(|p| [p.n[0], p.n[1], p.n[2], p.rho])
+            .collect();
+        let mut map = finish_pass_depth_map(
+            self.reference,
+            &planes,
+            state.cost.clone(),
+            self.options,
+            self.classes.as_deref(),
+        );
         let refine = deformable.is_some_and(|d| d.local_refine);
         let sort = self.options.sort_pixels.as_ref();
         if sort.is_some() || refine {
@@ -1715,29 +1713,6 @@ impl<'a> Context<'a> {
         }
         patches
     }
-
-    fn depth_map(&self, state: &State) -> DepthMap {
-        let planes: Vec<[f32; 4]> = state
-            .plane
-            .iter()
-            .map(|p| [p.n[0], p.n[1], p.n[2], p.rho])
-            .collect();
-        finish_depth_map(self.reference, &planes, state.cost.clone(), self.options)
-    }
-
-    /// [`Self::depth_map`] without its median filter.
-    fn depth_map_unfiltered(&self, state: &State) -> DepthMap {
-        let planes: Vec<[f32; 4]> = state
-            .plane
-            .iter()
-            .map(|p| [p.n[0], p.n[1], p.n[2], p.rho])
-            .collect();
-        let options = PatchMatchOptions {
-            median_filter: false,
-            ..self.options.clone()
-        };
-        finish_depth_map(self.reference, &planes, state.cost.clone(), &options)
-    }
 }
 
 /// The depth map of `reference` from per-pixel planes `(n, rho)` and costs
@@ -1784,6 +1759,33 @@ pub(crate) fn finish_depth_map(
         cost,
         classes: Vec::new(),
     }
+}
+
+/// [`finish_depth_map`] for a pass whose pixels were sorted into
+/// `pass_classes` (a deformable pass): with `Deformable::strong_median` the
+/// median filter is APD-MVS's strong-only one ([`strong_median_filter`]).
+/// Shared with the GPU path.
+pub(crate) fn finish_pass_depth_map(
+    reference: &View,
+    planes: &[[f32; 4]],
+    cost: Vec<f32>,
+    options: &PatchMatchOptions,
+    pass_classes: Option<&[Class]>,
+) -> DepthMap {
+    let strong_median =
+        pass_classes.filter(|_| options.deformable.as_ref().is_some_and(|d| d.strong_median));
+    let Some(classes) = strong_median else {
+        return finish_depth_map(reference, planes, cost, options);
+    };
+    let unfiltered = PatchMatchOptions {
+        median_filter: false,
+        ..options.clone()
+    };
+    let mut map = finish_depth_map(reference, planes, cost, &unfiltered);
+    if options.median_filter {
+        map.depth = strong_median_filter(&map.depth, classes, map.width, map.height);
+    }
+    map
 }
 
 /// The eight sampling regions as pixel offsets, all of the other
