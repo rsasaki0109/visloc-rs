@@ -24,6 +24,10 @@ on:
         description: Sequences at a time (spares the ETH server)
         type: number
         default: 8
+      driver_args:
+        description: Extra arguments for the driver (e.g. --platform-tracks 5)
+        type: string
+        default: ""
 
 env:
   SPLIT: ${{ inputs.split }}
@@ -127,12 +131,14 @@ jobs:
           path: bin
 
       - name: Run ${{ matrix.sequence }}
+        env:
+          DRIVER_ARGS: ${{ inputs.driver_args }}
         run: |
           chmod +x bin/basalt_euroc_vio_demo
           python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
             --sequences ${{ matrix.sequence }} --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
             --threads 4 --ba-jobs 4 --ba-threads 2 \
-            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs
+            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs $DRIVER_ARGS
           test -s out/slam/${{ matrix.sequence }}.txt
 
       - name: Upload the estimate

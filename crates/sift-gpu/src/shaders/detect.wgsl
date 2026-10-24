@@ -59,44 +59,64 @@ fn dog_at(level: u32, x: i32, y: i32) -> f32 {
     return dogs[level * p.w * p.h + yi * p.w + xi];
 }
 
-// One thread per interior pixel of DoG level `z + 1`.
-@compute @workgroup_size(16, 16)
-fn extrema(@builtin(global_invocation_id) g: vec3<u32>) {
-    let x = i32(g.x);
-    let y = i32(g.y);
-    if (x < 1 || y < 1 || x >= i32(p.w) - 1 || y >= i32(p.h) - 1) {
-        return;
-    }
-    let level = g.z + 1u;
-    let v = dog_at(level, x, y);
+// Unclamped access for extrema interior loops. The caller has already
+// confined x/y and level such that every 3x3x3 neighbor is in bounds.
+fn dog_raw(level: u32, x: i32, y: i32) -> f32 {
+    return dogs[level * p.w * p.h + u32(y) * p.w + u32(x)];
+}
+
+// Test one DoG level at an interior pixel. Returns after the first
+// non-extremum so the caller can continue with the next level.
+fn detect_level(level: u32, x: i32, y: i32) {
+    let v = dog_raw(level, x, y);
     if (abs(v) < p.contrast) {
         return;
     }
     var is_min = true;
     var is_max = true;
-    for (var dz = 0u; dz < 3u; dz = dz + 1u) {
-        for (var dy = -1; dy <= 1; dy = dy + 1) {
-            for (var dx = -1; dx <= 1; dx = dx + 1) {
-                if (dz == 1u && dx == 0 && dy == 0) {
-                    continue;
-                }
-                let n = dog_at(level + dz - 1u, x + dx, y + dy);
-                if (n >= v) {
-                    is_max = false;
-                }
-                if (n <= v) {
-                    is_min = false;
-                }
+    // Check the same-level axis neighbors first, then the vertical neighbor,
+    // then diagonals. Visiting the center DoG level first makes the common
+    // reject case exit sooner than the original z-major nested loops.
+    let offsets = array<vec2<i32>, 9>(
+        vec2<i32>(1, 0),
+        vec2<i32>(-1, 0),
+        vec2<i32>(0, 1),
+        vec2<i32>(0, -1),
+        vec2<i32>(0, 0),
+        vec2<i32>(1, 1),
+        vec2<i32>(1, -1),
+        vec2<i32>(-1, 1),
+        vec2<i32>(-1, -1),
+    );
+    for (var dzi = 0u; dzi < 3u; dzi = dzi + 1u) {
+        let dz = (dzi + 1u) % 3u;
+        for (var i = 0u; i < 9u; i = i + 1u) {
+            let dx = offsets[i].x;
+            let dy = offsets[i].y;
+            if (dz == 1u && dx == 0 && dy == 0) {
+                continue;
+            }
+            let n = dog_raw(level + dz - 1u, x + dx, y + dy);
+            if (n >= v) {
+                is_max = false;
+            }
+            if (n <= v) {
+                is_min = false;
+            }
+            // A candidate with both a larger and a smaller neighbor can
+            // no longer be an extremum; skip the rest of its neighborhood.
+            if (!is_min && !is_max) {
+                return;
             }
         }
     }
     if (!(is_min || is_max)) {
         return;
     }
-    let dxx = dog_at(level, x + 1, y) + dog_at(level, x - 1, y) - 2.0 * v;
-    let dyy = dog_at(level, x, y + 1) + dog_at(level, x, y - 1) - 2.0 * v;
-    let dxy = (dog_at(level, x + 1, y + 1) - dog_at(level, x + 1, y - 1)
-        - dog_at(level, x - 1, y + 1) + dog_at(level, x - 1, y - 1)) / 4.0;
+    let dxx = dog_raw(level, x + 1, y) + dog_raw(level, x - 1, y) - 2.0 * v;
+    let dyy = dog_raw(level, x, y + 1) + dog_raw(level, x, y - 1) - 2.0 * v;
+    let dxy = (dog_raw(level, x + 1, y + 1) - dog_raw(level, x + 1, y - 1)
+        - dog_raw(level, x - 1, y + 1) + dog_raw(level, x - 1, y - 1)) / 4.0;
     let tr = dxx + dyy;
     let det = dxx * dyy - dxy * dxy;
     let e1 = p.edge + 1.0;
@@ -106,7 +126,7 @@ fn extrema(@builtin(global_invocation_id) g: vec3<u32>) {
     if (p.subpixel == 0u) {
         let slot = atomicAdd(&counters[p.octave], 1u);
         if (slot < p.cand_cap) {
-            cands[slot] = Candidate(g.x, g.y, level, v, 0.0, 0.0, 0.0);
+            cands[slot] = Candidate(u32(x), u32(y), level, v, 0.0, 0.0, 0.0);
         }
         return;
     }
@@ -126,19 +146,19 @@ fn extrema(@builtin(global_invocation_id) g: vec3<u32>) {
     var os = 0.0;
     for (var iteration = 0u; iteration < 5u; iteration = iteration + 1u) {
         // Each Newton fit is relative to the current integer sample.
-        dv = dog_at(clevel, cx, cy);
-        gx = 0.5 * (dog_at(clevel, cx + 1, cy) - dog_at(clevel, cx - 1, cy));
-        gy = 0.5 * (dog_at(clevel, cx, cy + 1) - dog_at(clevel, cx, cy - 1));
-        gs = 0.5 * (dog_at(clevel + 1u, cx, cy) - dog_at(clevel - 1u, cx, cy));
-        hxx = dog_at(clevel, cx + 1, cy) + dog_at(clevel, cx - 1, cy) - 2.0 * dv;
-        hyy = dog_at(clevel, cx, cy + 1) + dog_at(clevel, cx, cy - 1) - 2.0 * dv;
-        let hss = dog_at(clevel + 1u, cx, cy) + dog_at(clevel - 1u, cx, cy) - 2.0 * dv;
-        hxy = (dog_at(clevel, cx + 1, cy + 1) - dog_at(clevel, cx + 1, cy - 1)
-            - dog_at(clevel, cx - 1, cy + 1) + dog_at(clevel, cx - 1, cy - 1)) / 4.0;
-        let hxs = (dog_at(clevel + 1u, cx + 1, cy) - dog_at(clevel + 1u, cx - 1, cy)
-            - dog_at(clevel - 1u, cx + 1, cy) + dog_at(clevel - 1u, cx - 1, cy)) / 4.0;
-        let hys = (dog_at(clevel + 1u, cx, cy + 1) - dog_at(clevel + 1u, cx, cy - 1)
-            - dog_at(clevel - 1u, cx, cy + 1) + dog_at(clevel - 1u, cx, cy - 1)) / 4.0;
+        dv = dog_raw(clevel, cx, cy);
+        gx = 0.5 * (dog_raw(clevel, cx + 1, cy) - dog_raw(clevel, cx - 1, cy));
+        gy = 0.5 * (dog_raw(clevel, cx, cy + 1) - dog_raw(clevel, cx, cy - 1));
+        gs = 0.5 * (dog_raw(clevel + 1u, cx, cy) - dog_raw(clevel - 1u, cx, cy));
+        hxx = dog_raw(clevel, cx + 1, cy) + dog_raw(clevel, cx - 1, cy) - 2.0 * dv;
+        hyy = dog_raw(clevel, cx, cy + 1) + dog_raw(clevel, cx, cy - 1) - 2.0 * dv;
+        let hss = dog_raw(clevel + 1u, cx, cy) + dog_raw(clevel - 1u, cx, cy) - 2.0 * dv;
+        hxy = (dog_raw(clevel, cx + 1, cy + 1) - dog_raw(clevel, cx + 1, cy - 1)
+            - dog_raw(clevel, cx - 1, cy + 1) + dog_raw(clevel, cx - 1, cy - 1)) / 4.0;
+        let hxs = (dog_raw(clevel + 1u, cx + 1, cy) - dog_raw(clevel + 1u, cx - 1, cy)
+            - dog_raw(clevel - 1u, cx + 1, cy) + dog_raw(clevel - 1u, cx - 1, cy)) / 4.0;
+        let hys = (dog_raw(clevel + 1u, cx, cy + 1) - dog_raw(clevel + 1u, cx, cy - 1)
+            - dog_raw(clevel - 1u, cx, cy + 1) + dog_raw(clevel - 1u, cx, cy - 1)) / 4.0;
 
         // Symmetric adjugate / Cramer's rule: H * offset = -gradient.
         let cxx = hyy * hss - hys * hys;
@@ -191,6 +211,20 @@ fn extrema(@builtin(global_invocation_id) g: vec3<u32>) {
     let slot = atomicAdd(&counters[p.octave], 1u);
     if (slot < p.cand_cap) {
         cands[slot] = Candidate(u32(cx), u32(cy), clevel, refined, ox, oy, os);
+    }
+}
+
+// One thread per interior pixel; walk the overlapping DoG levels in z so
+// their neighborhoods can share cache lines.
+@compute @workgroup_size(16, 16)
+fn extrema(@builtin(global_invocation_id) g: vec3<u32>) {
+    let x = i32(g.x);
+    let y = i32(g.y);
+    if (x < 1 || y < 1 || x >= i32(p.w) - 1 || y >= i32(p.h) - 1) {
+        return;
+    }
+    for (var level = 1u; level < p.num_dog_levels - 1u; level = level + 1u) {
+        detect_level(level, x, y);
     }
 }
 

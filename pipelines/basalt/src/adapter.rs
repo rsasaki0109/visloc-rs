@@ -45,6 +45,9 @@ pub struct BasaltVioEstimatorAdapter {
     /// to this (it runs concurrently with, and ahead of, the estimator
     /// thread), so it always seeds with zero bias.
     last_gyro_bias: Vector3<f64>,
+    /// `config.vio_platform_filter`: keeps a vehicle's cabin out of the
+    /// estimator (see `crate::platform`).
+    platform: Option<crate::platform::PlatformFilter>,
 }
 
 impl BasaltVioEstimatorAdapter {
@@ -58,12 +61,23 @@ impl BasaltVioEstimatorAdapter {
         let frontend = DirectKltStream::new(calibration.clone(), direct_config)?
             .with_multi_camera_options(config.multi_camera_flow_options()?)?;
         let estimator = vio_estimator_from_parts(calibration, estimator_config)?;
+        let platform = config
+            .optional_bool("config.vio_platform_filter")?
+            .then(|| crate::platform::PlatformFilter::new(calibration));
         Ok(Self {
             frontend,
             estimator,
             timing: TimingBreakdown::from_env(),
             last_gyro_bias: Vector3::zeros(),
+            platform,
         })
+    }
+
+    /// The moving-platform filter's counters, when it is on.
+    pub fn platform_stats(&self) -> Option<&crate::platform::PlatformStats> {
+        self.platform
+            .as_ref()
+            .map(crate::platform::PlatformFilter::stats)
     }
 
     /// Returns the optional cumulative timing breakdown for this adapter.
@@ -171,7 +185,10 @@ impl BasaltVioEstimatorAdapter {
         );
         self.timing
             .finish(TimingBucket::AdapterFrontend, frontend_started);
-        let tracks = tracks_result?;
+        let mut tracks = tracks_result?;
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
         let estimator_started = self.timing.start();
         let estimator_result = self.estimator.process_adapter_frame(
             tracks.frame.frame_id,
@@ -265,6 +282,7 @@ impl BasaltVioEstimatorAdapter {
         )>(capacity.max(decode_worker_count));
         let next_decode_index = std::sync::atomic::AtomicUsize::new(0);
         let frontend = &mut self.frontend;
+        let platform = &mut self.platform;
         let estimator = &mut self.estimator;
 
         let (decode_timings, producer_timing, producer_result, mut consumer_timing, consumer_error) =
@@ -292,6 +310,7 @@ impl BasaltVioEstimatorAdapter {
                 let producer_handle = scope.spawn(move || {
                     run_pipeline_frontend(
                         frontend,
+                        platform,
                         frame_count,
                         &decode_receiver,
                         retain_marg_data,
@@ -480,6 +499,7 @@ fn run_pipeline_decode_worker(
 /// function's signature).
 fn run_pipeline_frontend(
     frontend: &mut DirectKltStream,
+    platform: &mut Option<crate::platform::PlatformFilter>,
     frame_count: usize,
     decode_receiver: &mpsc::Receiver<(usize, Result<EurocSensorFrame, BasaltAdapterError>)>,
     retain_marg_data: bool,
@@ -558,13 +578,16 @@ fn run_pipeline_frontend(
             &mut timing,
         );
         timing.finish(TimingBucket::AdapterFrontend, frontend_started);
-        let tracks = match tracks_result {
+        let mut tracks = match tracks_result {
             Ok(tracks) => tracks,
             Err(error) => {
                 let _ = sender.send(Err(BasaltAdapterError::from(error)));
                 return (timing, Ok(()));
             }
         };
+        if let Some(platform) = platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
         let packet = PipelineFrontendPacket {
             tracks,
             imu: frame.imu,

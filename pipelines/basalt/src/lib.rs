@@ -38,6 +38,7 @@ pub mod mapper;
 pub mod mapper_online;
 pub mod patch;
 pub mod pattern;
+pub mod platform;
 pub mod provenance;
 pub mod pyramid;
 pub mod rt_priority;

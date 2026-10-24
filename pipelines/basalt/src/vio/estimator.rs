@@ -18,9 +18,9 @@ use super::window::{
     diagnostic_env_active, diagnostic_env_snapshot, flatten_nav_with_mode, flatten_pose_with_mode,
     marginalize_mixed_prior_with_mode, projected_rows, projected_rows_native_q2, stack_rows,
     take_diagnostic_prior_pre, visual_state_pose_with_mode, write_blocks_with_mode,
-    WindowBlockKind, WindowDiagnostics, WindowImuLink, WindowLandmark, WindowObservation,
-    WindowPose, WindowPrior, WindowProblem, WindowSolveResult, WindowState, NAV_STATE_DOF,
-    POSE_DOF,
+    VisualOnlyPrior, WindowBlockKind, WindowDiagnostics, WindowImuLink, WindowLandmark,
+    WindowObservation, WindowPose, WindowPrior, WindowProblem, WindowSolveResult, WindowState,
+    NAV_STATE_DOF, POSE_DOF,
 };
 use crate::camera::DoubleSphereCamera;
 use crate::imu::{
@@ -29,7 +29,9 @@ use crate::imu::{
 };
 use crate::streaming::{BasaltStream, VisionFrame, WindowPhase};
 use crate::{BasaltNavState, ImuSample, TimingBreakdown, TimingBucket, TrackId, TrackObservation};
-use nalgebra::{DVector, Matrix3, Point2, Point3, Quaternion, SMatrix, UnitQuaternion, Vector3};
+use nalgebra::{
+    DMatrix, DVector, Matrix3, Point2, Point3, Quaternion, SMatrix, UnitQuaternion, Vector3,
+};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
@@ -104,6 +106,13 @@ pub struct EstimatorConfig {
     /// alone: it would need the north direction, and gravity keeps the tilt
     /// it causes observable.  `0.0` keeps the pinned behaviour.
     pub earth_rotation_up_rad_s: f64,
+    /// Opt-in (not upstream; `config.vio_visual_only`).  Monocular visual-only
+    /// odometry: IMU input is ignored, the window starts from a two-view
+    /// bootstrap, new frames are predicted with a constant-velocity model,
+    /// triangulation uses a parallax gate instead of the metric 5 cm gate, and
+    /// the gauge is 7-DoF (see `docs/mono_visual_only_vio.md`).  `false` keeps
+    /// every IMU path unchanged.
+    pub visual_only: bool,
 }
 
 /// Earth's sidereal rotation rate (WGS-84), rad/s.
@@ -137,6 +146,7 @@ impl Default for EstimatorConfig {
             kf_connectivity_all_cameras: false,
             outlier_filter: None,
             earth_rotation_up_rad_s: 0.0,
+            visual_only: false,
         }
     }
 }
@@ -145,6 +155,48 @@ impl Default for EstimatorConfig {
 pub struct UrgentKeyframePolicy {
     pub threshold: f64,
     pub min_frames_after_kf: u64,
+}
+
+/// Visual-only mode: minimum cam0 tracks shared with the reference frame, and
+/// minimum two-view inliers, for a bootstrap (ORB-SLAM's monocular
+/// initializer also asks for at least 50 triangulated points).
+const VO_MIN_BOOTSTRAP_TRACKS: usize = 50;
+/// Median two-view parallax required to bootstrap (ORB-SLAM: 1 deg).
+const VO_MIN_BOOTSTRAP_PARALLAX_DEG: f64 = 1.0;
+/// OpenGV `1 - cos` inlier threshold for the bootstrap RANSAC (about 0.16 deg,
+/// 1.3 px at EuRoC's focal length).
+const VO_BOOTSTRAP_RANSAC_THRESHOLD: f64 = 4.0e-6;
+/// Visual-only triangulation: a candidate pair needs this ray parallax in
+/// place of the metric 5 cm baseline gate. ORB-SLAM's new-map-point check is
+/// about 1.1 deg, but Basalt only triangulates from the active window, so at
+/// 1 deg over half the tracks never became landmarks (keyframes then fired at
+/// the minimum spacing); 0.25 deg was measured best on EuRoC MH
+/// (`docs/mono_visual_only_vio.md`). Inverse depth keeps far points safe.
+const VO_MIN_TRIANGULATION_PARALLAX_DEG: f64 = 0.25;
+/// Visual-only inverse-distance ceiling in units of the bootstrap median
+/// depth (upstream's metric gate is rho < 3 m^-1).
+const VO_MAX_INVERSE_DISTANCE: f64 = 10.0;
+
+#[derive(Debug, Default)]
+struct VisualOnlyState {
+    /// Held-back frame the bootstrap measures parallax against.
+    reference: Option<VisualOnlyReference>,
+    /// Timestamp of the newest held-back frame (monotonicity before the window
+    /// has a state).
+    last_held_timestamp_ns: Option<i64>,
+    bootstrapped: bool,
+    /// Pose the next `process_impl` call must use instead of a prediction
+    /// (the two bootstrap frames).
+    forced_prediction: Option<BasaltNavState>,
+    gauge: Option<VisualOnlyPrior>,
+}
+
+#[derive(Debug)]
+struct VisualOnlyReference {
+    frame_id: u64,
+    timestamp_ns: i64,
+    observations: Vec<TrackObservation>,
+    images: Option<Vec<OfImageData>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,6 +247,19 @@ pub struct EstimatorOutput {
     /// True when the half-open sensor interval could not be interpolated at
     /// its camera boundary and used the Basalt queue-compatible fallback.
     pub imu_integration_fallback: bool,
+    /// Every frame in the active window after this step (keyframe poses
+    /// first, then states), so callers can keep each frame's latest refined
+    /// pose rather than only the newest frame's online estimate.
+    pub window_frames: Vec<WindowFramePose>,
+}
+
+/// One active-window frame in [`EstimatorOutput::window_frames`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowFramePose {
+    pub frame_id: u64,
+    pub timestamp_ns: i64,
+    pub imu_to_world: SE3,
+    pub is_keyframe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -484,6 +549,8 @@ pub struct BasaltVioEstimator {
     prior: Option<WindowPrior>,
     anchor_point: Option<DVector<f64>>,
     gravity_world: Option<Vector3<f64>>,
+    /// Visual-only bootstrap and gauge state (`EstimatorConfig::visual_only`).
+    vo: VisualOnlyState,
     /// Mirrors upstream `SqrtKeypointVioEstimator::opt_started`: the first
     /// four inserted states are prediction/observation accumulation only;
     /// optimization starts once the fifth state makes `frame_states.size() >
@@ -607,6 +674,7 @@ impl BasaltVioEstimator {
             imu_links: Vec::new(),
             prior: None,
             anchor_point: None,
+            vo: VisualOnlyState::default(),
             // Basalt's VIO constructor uses the fixed world gravity vector;
             // it is not estimated from the first packet.  Keeping it as an
             // option preserves the existing test/configuration seam, while
@@ -658,6 +726,23 @@ impl BasaltVioEstimator {
                 cameras.len(),
                 t_imu_cam.len()
             ));
+        }
+        if self.config.visual_only {
+            // Without an IMU the world has an arbitrary scale, so a metric
+            // camera-IMU lever arm cannot be applied: the body frame is the
+            // camera and `nav.imu_to_world` is the camera-to-world pose.  A
+            // second camera would need a metric baseline (stereo), which this
+            // mode does not model.
+            if cameras.len() != 1 {
+                return Err(format!(
+                    "visual-only mode supports exactly one camera, got {}",
+                    cameras.len()
+                ));
+            }
+            self.camera = cameras[0];
+            self.camera_models = cameras;
+            self.t_imu_cam = vec![SE3::identity()];
+            return Ok(self);
         }
         self.camera = cameras[0];
         self.camera_models = cameras;
@@ -919,6 +1004,23 @@ impl BasaltVioEstimator {
                     .into(),
             );
         }
+        if self.config.visual_only && !self.vo.bootstrapped && self.vo.forced_prediction.is_none() {
+            return self.visual_only_bootstrap(
+                frame_id,
+                timestamp_ns,
+                observations,
+                images,
+                retain_marg_data,
+                retain_trace,
+            );
+        }
+        // Visual-only mode ignores IMU input entirely (no initialization,
+        // propagation or IMU factors), so its result cannot depend on it.
+        let (imu, initialization_imu) = if self.config.visual_only {
+            (&[][..], None)
+        } else {
+            (imu, initialization_imu)
+        };
         let entering_no_output_mode = !retain_marg_data && !retain_trace;
         let retain_marg_sidecar = diagnostic_env_snapshot().margdata_sidecar.is_some();
         // Any compatibility/probe variable opts out of the lean path.  This
@@ -932,20 +1034,7 @@ impl BasaltVioEstimator {
             return Err("non-monotonic frame timestamp".into());
         }
         if let Some(mut images) = images {
-            if images.iter().any(|image| {
-                image.frame_id != frame_id
-                    || image.timestamp_ns != timestamp_ns
-                    || !image.is_valid()
-            }) {
-                return Err("invalid raw optical-flow image payload".into());
-            }
-            images.sort_by_key(|image| image.camera_id);
-            if images
-                .windows(2)
-                .any(|pair| pair[0].camera_id == pair[1].camera_id)
-            {
-                return Err("duplicate raw optical-flow camera payload".into());
-            }
+            Self::validate_raw_images(frame_id, timestamp_ns, &mut images)?;
             self.of_images.insert(frame_id, images);
         }
         let earth_rotation_body = self.earth_rotation_in_body();
@@ -997,6 +1086,7 @@ impl BasaltVioEstimator {
         let initialization_output =
             (retain_trace_payload && previous_timestamp.is_none()).then(|| previous_nav.clone());
         let (imu_delta, imu_integration_fallback) = previous_timestamp
+            .filter(|_| !self.config.visual_only)
             .map(|previous| {
                 integrate_interval(
                     &calibrated_imu,
@@ -1013,13 +1103,17 @@ impl BasaltVioEstimator {
                 )
             })
             .unwrap_or((None, false));
-        let predicted_nav = predict_nav(
-            &previous_nav,
-            imu_delta.as_ref(),
-            self.gravity_world
-                .unwrap_or_else(|| Vector3::new(0.0, 0.0, -9.81)),
-            self.config.scalar_mode,
-        );
+        let predicted_nav = if self.config.visual_only {
+            self.visual_only_prediction(timestamp_ns, observations)
+        } else {
+            predict_nav(
+                &previous_nav,
+                imu_delta.as_ref(),
+                self.gravity_world
+                    .unwrap_or_else(|| Vector3::new(0.0, 0.0, -9.81)),
+                self.config.scalar_mode,
+            )
+        };
         let imu_propagation = retain_trace_payload
             .then(|| {
                 previous_timestamp.and_then(|interval_start_ns| {
@@ -1523,6 +1617,22 @@ impl BasaltVioEstimator {
             marg_data: marg,
             window: window_diagnostics,
             imu_integration_fallback,
+            window_frames: self
+                .window_poses
+                .iter()
+                .map(|pose| WindowFramePose {
+                    frame_id: pose.frame_id,
+                    timestamp_ns: pose.timestamp_ns,
+                    imu_to_world: pose.pose.clone(),
+                    is_keyframe: pose.is_keyframe,
+                })
+                .chain(self.window_states.iter().map(|state| WindowFramePose {
+                    frame_id: state.frame_id,
+                    timestamp_ns: state.timestamp_ns,
+                    imu_to_world: state.nav.imu_to_world.clone(),
+                    is_keyframe: state.is_keyframe,
+                }))
+                .collect(),
         })
     }
 
@@ -1798,7 +1908,17 @@ impl BasaltVioEstimator {
                     } else {
                         baseline.norm()
                     };
-                    if baseline_norm < 0.05 {
+                    let rejected = if self.config.visual_only {
+                        // Scale-free gate: parallax between the two world rays.
+                        let target_ray = target_history.pose.rotation * target_bearing.normalize();
+                        let candidate_ray =
+                            candidate.pose.rotation * candidate.raw_bearing.normalize();
+                        target_ray.angle(&candidate_ray).to_degrees()
+                            < VO_MIN_TRIANGULATION_PARALLAX_DEG
+                    } else {
+                        baseline_norm < 0.05
+                    };
+                    if rejected {
                         if capture_triangulation {
                             triangulation_attempts.push(json!({
                                 "candidate_index": candidate_index,
@@ -1968,9 +2088,14 @@ impl BasaltVioEstimator {
                     if let Some((direction, inverse_distance)) = triangulated_candidate {
                         // The upstream homogeneous result is accepted only
                         // for finite 0 < rho < 3.
+                        let max_inverse_distance = if self.config.visual_only {
+                            VO_MAX_INVERSE_DISTANCE
+                        } else {
+                            3.0
+                        };
                         if inverse_distance.is_finite()
                             && inverse_distance > 0.0
-                            && inverse_distance < 3.0
+                            && inverse_distance < max_inverse_distance
                         {
                             triangulated = Some((direction, inverse_distance));
                             selected_attempt = Some(candidate_index);
@@ -2160,6 +2285,29 @@ impl BasaltVioEstimator {
         keyframes.sort_unstable();
         keyframes.dedup();
         keyframes
+    }
+
+    /// Check a packet's raw optical-flow images against its frame and sort
+    /// them by camera.  Shared by the normal path and the visual-only
+    /// bootstrap, which holds packets before the normal path sees them.
+    fn validate_raw_images(
+        frame_id: u64,
+        timestamp_ns: i64,
+        images: &mut [OfImageData],
+    ) -> Result<(), String> {
+        if images.iter().any(|image| {
+            image.frame_id != frame_id || image.timestamp_ns != timestamp_ns || !image.is_valid()
+        }) {
+            return Err("invalid raw optical-flow image payload".into());
+        }
+        images.sort_by_key(|image| image.camera_id);
+        if images
+            .windows(2)
+            .any(|pair| pair[0].camera_id == pair[1].camera_id)
+        {
+            return Err("duplicate raw optical-flow camera payload".into());
+        }
+        Ok(())
     }
 
     /// Validate the current packet's frame/camera identity before any
@@ -2454,6 +2602,11 @@ impl BasaltVioEstimator {
                 .gravity_world
                 .unwrap_or_else(|| Vector3::new(0.0, 0.0, -9.81)),
             scalar_mode: self.config.scalar_mode,
+            visual_only: if self.config.visual_only {
+                self.vo.gauge.clone()
+            } else {
+                None
+            },
         }
     }
 
@@ -3054,6 +3207,360 @@ impl BasaltVioEstimator {
     /// versus camera-0 tracks without one.  With the opt-in
     /// `kf_connectivity_all_cameras`, distinct tracks observed by any camera
     /// are counted instead (a stereo track counts once).
+    /// Visual-only two-view bootstrap (`docs/mono_visual_only_vio.md`; the idea
+    /// of ORB-SLAM's monocular initialization, C++ reference
+    /// `Tracking::MonocularInitialization` / `TwoViewReconstruction`). Frames
+    /// are held back until one shares enough cam0 tracks with a reference frame
+    /// and has enough parallax. The reference (identity pose) and that frame
+    /// (relative pose scaled to scene median depth 1) then enter the window as
+    /// the first two keyframes. Deviation: a 5-point essential RANSAC on
+    /// bearings (the in-crate OpenGV solver) replaces ORB-SLAM's parallel
+    /// homography/fundamental model selection.
+    fn visual_only_bootstrap(
+        &mut self,
+        frame_id: u64,
+        timestamp_ns: i64,
+        observations: &[TrackObservation],
+        mut images: Option<Vec<OfImageData>>,
+        retain_marg_data: bool,
+        retain_trace: bool,
+    ) -> Result<EstimatorOutput, String> {
+        if self
+            .vo
+            .last_held_timestamp_ns
+            .is_some_and(|previous| timestamp_ns <= previous)
+        {
+            return Err("non-monotonic frame timestamp".into());
+        }
+        // Validate before holding: a held packet is replayed through
+        // `process_impl` only after the gauge is set, when a late rejection
+        // would leave the bootstrap half done.
+        if let Some(images) = images.as_mut() {
+            Self::validate_raw_images(frame_id, timestamp_ns, images)?;
+        }
+        Self::validate_current_observation_identities(frame_id, timestamp_ns, observations)?;
+        self.vo.last_held_timestamp_ns = Some(timestamp_ns);
+        let held = VisualOnlyReference {
+            frame_id,
+            timestamp_ns,
+            observations: observations.to_vec(),
+            images,
+        };
+        let Some(reference) = self.vo.reference.as_ref() else {
+            self.vo.reference = Some(held);
+            return Ok(self.visual_only_pending_output(frame_id, observations));
+        };
+        let reference_pixels = reference
+            .observations
+            .iter()
+            .filter(|observation| observation.camera_id == 0)
+            .map(|observation| (observation.track_id, observation.pixel))
+            .collect::<BTreeMap<_, _>>();
+        let mut current = observations
+            .iter()
+            .filter(|observation| observation.camera_id == 0)
+            .collect::<Vec<_>>();
+        current.sort_by_key(|observation| observation.track_id);
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        for observation in current {
+            let Some(reference_pixel) = reference_pixels.get(&observation.track_id) else {
+                continue;
+            };
+            if let (Some(a), Some(b)) = (
+                self.bearing_from_pixel(0, reference_pixel),
+                self.bearing_from_pixel(0, &observation.pixel),
+            ) {
+                left.push(a);
+                right.push(b);
+            }
+        }
+        let Some(camera_ref_cur) = visual_only_two_view(&left, &right) else {
+            // Keep waiting for parallax unless the reference has lost too
+            // many tracks to ever bootstrap; then restart from this frame.
+            if left.len() < VO_MIN_BOOTSTRAP_TRACKS || 2 * left.len() < reference_pixels.len() {
+                self.vo.reference = Some(held);
+            }
+            return Ok(self.visual_only_pending_output(frame_id, observations));
+        };
+        let Some(t_imu_cam) = self.camera_to_imu(0).cloned() else {
+            return Err("visual-only mode needs a camera-0 extrinsic".into());
+        };
+        // World = reference body frame: T_w_cref = T_imu_cam, and
+        // T_w_icur = T_w_cref * T_cref_ccur * T_cam_imu.  In visual-only mode
+        // `with_camera_rig` sets T_imu_cam to identity (body = camera).
+        let imu_to_world = t_imu_cam
+            .compose(&camera_ref_cur)
+            .compose(&t_imu_cam.inverse());
+        let baseline = imu_to_world.translation.norm();
+        if !baseline.is_finite() || baseline <= f64::EPSILON {
+            return Ok(self.visual_only_pending_output(frame_id, observations));
+        }
+        self.vo.gauge = Some(VisualOnlyPrior {
+            scale_frame_id: frame_id,
+            scale_position: imu_to_world.translation,
+            scale_direction: imu_to_world.translation / baseline,
+        });
+        let reference = self.vo.reference.take().expect("reference checked above");
+        self.vo.bootstrapped = true;
+        self.take_kf = true;
+        self.vo.forced_prediction = Some(BasaltNavState::default());
+        self.process_impl(
+            reference.frame_id,
+            reference.timestamp_ns,
+            &reference.observations,
+            &[],
+            None,
+            reference.images,
+            retain_marg_data,
+            retain_trace,
+        )?;
+        self.take_kf = true;
+        self.vo.forced_prediction = Some(BasaltNavState {
+            imu_to_world,
+            ..BasaltNavState::default()
+        });
+        self.process_impl(
+            held.frame_id,
+            held.timestamp_ns,
+            &held.observations,
+            &[],
+            None,
+            held.images,
+            retain_marg_data,
+            retain_trace,
+        )
+    }
+
+    /// Output for a frame held back before the visual-only bootstrap: no
+    /// active state (`active_state_count == 0` marks it as uninitialized) and
+    /// the identity pose, which callers must not report as an estimate.
+    fn visual_only_pending_output(
+        &self,
+        frame_id: u64,
+        observations: &[TrackObservation],
+    ) -> EstimatorOutput {
+        let mut tracks = observations
+            .iter()
+            .filter(|observation| observation.camera_id == 0)
+            .map(|observation| observation.track_id)
+            .collect::<Vec<_>>();
+        tracks.sort_unstable();
+        tracks.dedup();
+        EstimatorOutput {
+            frame_id,
+            state: BasaltNavState::default(),
+            is_keyframe: false,
+            connected_cam0: 0,
+            unconnected_cam0: tracks.len(),
+            active_state_count: 0,
+            active_pose_count: 0,
+            state_trace: EstimatorStateTrace {
+                state_from: None,
+                initialization_output: None,
+                predicted_state: BasaltNavState::default(),
+                post_opt_state: BasaltNavState::default(),
+                imu_propagation: None,
+                imu_integration_fallback: false,
+            },
+            phases: Vec::new(),
+            marg_data: MargData::empty(),
+            window: WindowDiagnostics {
+                attempted: false,
+                state_dof: 0,
+                factor_count: 0,
+                factor_rows: 0,
+                landmark_count: 0,
+                imu_link_count: 0,
+                prior_rows: 0,
+                prior_factor_rows: 0,
+                visual_factor_rows: 0,
+                imu_factor_rows: 0,
+                bias_factor_rows: 0,
+                prior_cost: 0.0,
+                visual_cost: 0.0,
+                imu_cost: 0.0,
+                bias_cost: 0.0,
+                imu_links: Vec::new(),
+                lm: Vec::new(),
+                status: "visual_only_bootstrap_pending".into(),
+                failure: None,
+                state_writeback: false,
+                landmark_writeback: 0,
+                prior_carry: false,
+            },
+            imu_integration_fallback: false,
+            window_frames: Vec::new(),
+        }
+    }
+
+    /// Visual-only prediction (M2), after ORB-SLAM's `TrackWithMotionModel`:
+    /// the forced bootstrap pose, else a constant-velocity extrapolation of the
+    /// last two window states (scaled by elapsed time) refined by a robust
+    /// motion-only fit to the active landmarks. Basalt keeps each state's first
+    /// linearization point (FEJ), so a good first estimate matters more here
+    /// than in VIO, where the IMU supplies it. Velocity and biases stay zero:
+    /// nothing observes them without an IMU.
+    fn visual_only_prediction(
+        &mut self,
+        timestamp_ns: i64,
+        observations: &[TrackObservation],
+    ) -> BasaltNavState {
+        if let Some(nav) = self.vo.forced_prediction.take() {
+            return nav;
+        }
+        let count = self.window_states.len();
+        let Some(last) = self.window_states.last() else {
+            return BasaltNavState {
+                imu_to_world: self.nav.imu_to_world.clone(),
+                ..BasaltNavState::default()
+            };
+        };
+        let mut imu_to_world = last.nav.imu_to_world.clone();
+        if count >= 2 {
+            let previous = &self.window_states[count - 2];
+            let dt_previous = (last.timestamp_ns - previous.timestamp_ns) as f64;
+            let dt = (timestamp_ns - last.timestamp_ns) as f64;
+            if dt_previous > 0.0 && dt > 0.0 {
+                let ratio = dt / dt_previous;
+                let delta = previous
+                    .nav
+                    .imu_to_world
+                    .inverse()
+                    .compose(&last.nav.imu_to_world);
+                let step = SE3::new(
+                    UnitQuaternion::from_scaled_axis(delta.rotation.scaled_axis() * ratio),
+                    delta.translation * ratio,
+                );
+                imu_to_world = imu_to_world.compose(&step);
+            }
+        }
+        BasaltNavState {
+            imu_to_world: self.visual_only_refine_pose(imu_to_world, observations),
+            ..BasaltNavState::default()
+        }
+    }
+
+    /// Motion-only refinement of `imu_to_world` against cam0 observations of
+    /// active landmarks: Gauss-Newton on pixel reprojection error with Huber
+    /// weights (2 px) and a numerical Jacobian over a right-multiplied SE3
+    /// increment. Returns the input unchanged with too few landmarks or if the
+    /// fit does not lower the robust cost.
+    fn visual_only_refine_pose(&self, initial: SE3, observations: &[TrackObservation]) -> SE3 {
+        const MIN_POINTS: usize = 12;
+        const HUBER_PX: f64 = 2.0;
+        let (Some(camera), Some(t_imu_cam)) = (self.camera_model(0), self.camera_to_imu(0)) else {
+            return initial;
+        };
+        let mut correspondences = observations
+            .iter()
+            .filter(|observation| observation.camera_id == 0)
+            .filter_map(|observation| {
+                let active = self
+                    .landmarks
+                    .landmarks
+                    .get(&observation.track_id)
+                    .is_some_and(|record| record.status != LandmarkStatus::Removed);
+                let point = self.landmark_world.get(&observation.track_id)?;
+                active.then_some((observation.track_id, *point, observation.pixel))
+            })
+            .collect::<Vec<_>>();
+        correspondences.sort_by_key(|(track_id, _, _)| *track_id);
+        if correspondences.len() < MIN_POINTS {
+            return initial;
+        }
+        let residuals = |pose: &SE3| -> Option<Vec<f64>> {
+            let world_to_camera = pose.compose(t_imu_cam).inverse();
+            let mut out = Vec::with_capacity(2 * correspondences.len());
+            for (_, point, pixel) in &correspondences {
+                match camera.project(&world_to_camera.transform_point(point)) {
+                    Some(projected) => {
+                        out.push(projected.x - pixel.x);
+                        out.push(projected.y - pixel.y);
+                    }
+                    // Behind the camera: a large constant residual so the
+                    // point is down-weighted instead of failing the fit.
+                    None => out.extend([1.0e3, 1.0e3]),
+                }
+            }
+            Some(out)
+        };
+        let robust_cost = |r: &[f64]| -> f64 {
+            r.chunks(2)
+                .map(|pair| {
+                    let e = (pair[0] * pair[0] + pair[1] * pair[1]).sqrt();
+                    if e <= HUBER_PX {
+                        0.5 * e * e
+                    } else {
+                        HUBER_PX * (e - 0.5 * HUBER_PX)
+                    }
+                })
+                .sum()
+        };
+        let perturb = |pose: &SE3, delta: &SMatrix<f64, 6, 1>| -> SE3 {
+            pose.compose(&SE3::new(
+                UnitQuaternion::from_scaled_axis(Vector3::new(delta[3], delta[4], delta[5])),
+                Vector3::new(delta[0], delta[1], delta[2]),
+            ))
+        };
+        let Some(mut current) = residuals(&initial) else {
+            return initial;
+        };
+        let initial_cost = robust_cost(&current);
+        let mut pose = initial.clone();
+        let mut cost = initial_cost;
+        for _ in 0..10 {
+            let h = 1.0e-6;
+            let mut jacobian = DMatrix::<f64>::zeros(current.len(), 6);
+            for column in 0..6 {
+                let mut delta = SMatrix::<f64, 6, 1>::zeros();
+                delta[column] = h;
+                let (Some(plus), Some(minus)) = (
+                    residuals(&perturb(&pose, &delta)),
+                    residuals(&perturb(&pose, &(-delta))),
+                ) else {
+                    return initial;
+                };
+                for row in 0..current.len() {
+                    jacobian[(row, column)] = (plus[row] - minus[row]) / (2.0 * h);
+                }
+            }
+            let mut weights = DVector::<f64>::zeros(current.len());
+            for (index, pair) in current.chunks(2).enumerate() {
+                let e = (pair[0] * pair[0] + pair[1] * pair[1]).sqrt();
+                let w = if e <= HUBER_PX { 1.0 } else { HUBER_PX / e };
+                weights[2 * index] = w;
+                weights[2 * index + 1] = w;
+            }
+            let r = DVector::from_vec(current.clone());
+            let jtw = jacobian.transpose() * DMatrix::from_diagonal(&weights);
+            let normal = &jtw * &jacobian;
+            let rhs = -(&jtw * r);
+            let Some(step) = normal.cholesky().map(|cholesky| cholesky.solve(&rhs)) else {
+                break;
+            };
+            let step = SMatrix::<f64, 6, 1>::from_iterator(step.iter().copied());
+            let candidate = perturb(&pose, &step);
+            let Some(candidate_residuals) = residuals(&candidate) else {
+                break;
+            };
+            let candidate_cost = robust_cost(&candidate_residuals);
+            if !candidate_cost.is_finite() || candidate_cost >= cost {
+                break;
+            }
+            pose = candidate;
+            current = candidate_residuals;
+            cost = candidate_cost;
+            if step.amax() < 1.0e-10 {
+                break;
+            }
+        }
+        if cost < initial_cost {
+            pose
+        } else {
+            initial
+        }
+    }
+
     fn cam0_connectivity(&self, observations: &[TrackObservation]) -> (usize, usize) {
         let all_cameras = self.config.kf_connectivity_all_cameras;
         let mut track_ids = observations
@@ -3154,7 +3661,10 @@ impl BasaltVioEstimator {
         } else {
             0
         };
-        let prefix = prior_factor_count.min(factors.len());
+        // The visual-only factor follows the prior/anchor factor.
+        let visual_only_count =
+            usize::from(problem.visual_only.is_some() && !problem.states.is_empty());
+        let prefix = (prior_factor_count + visual_only_count).min(factors.len());
         let imu_factor_count = problem
             .imu_links
             .len()
@@ -4222,7 +4732,9 @@ impl BasaltVioEstimator {
             // link after the active-window shift.  Keep the richer Rust
             // diagnostic value on state-only records, but make the actual
             // queue packet field follow that wire contract exactly.
-            used_imu: if self.last_kf_to_marg.is_empty() {
+            used_imu: if self.config.visual_only {
+                false
+            } else if self.last_kf_to_marg.is_empty() {
                 !self.imu_links.is_empty()
             } else {
                 true
@@ -4459,6 +4971,67 @@ fn calibrate_accel_f32(params: &[f64], raw: Vector3<f32>) -> Vector3<f32> {
 /// IMU packet at or after the camera timestamp defines roll/pitch by rotating
 /// its specific-force direction to world +Z; position, velocity, and biases
 /// start at zero.  No IMU interval is integrated before this first state.
+/// Relative camera pose `T_cref_ccur` from matched unit bearings for the
+/// visual-only bootstrap, with translation scaled so the median depth of the
+/// triangulated inliers (in the reference camera) is 1. `None` unless there
+/// are enough inliers, 90% of them triangulate in front of both cameras, and
+/// the median parallax reaches `VO_MIN_BOOTSTRAP_PARALLAX_DEG`.
+fn visual_only_two_view(left: &[Vector3<f64>], right: &[Vector3<f64>]) -> Option<SE3> {
+    if left.len() < VO_MIN_BOOTSTRAP_TRACKS {
+        return None;
+    }
+    let (rotation, translation, inliers) = crate::mapper::features::relative_pose_from_bearings(
+        left,
+        right,
+        VO_BOOTSTRAP_RANSAC_THRESHOLD,
+        0x5eed,
+    )?;
+    if inliers.len() < VO_MIN_BOOTSTRAP_TRACKS {
+        return None;
+    }
+    // p_ref = R p_cur + t: depths (a, b) minimize |a l - (b R r + t)|.
+    let (mut depths, mut parallax, mut positive) = (Vec::new(), Vec::new(), 0usize);
+    for &index in &inliers {
+        let l = left[index].normalize();
+        let r = rotation * right[index].normalize();
+        let lr = l.dot(&r);
+        let det = lr * lr - 1.0;
+        if det.abs() < 1e-12 {
+            continue;
+        }
+        let lt = l.dot(&translation);
+        let rt = r.dot(&translation);
+        let a = (lr * rt - lt) / det;
+        let b = (rt - lr * lt) / det;
+        if a > 0.0 && b > 0.0 {
+            positive += 1;
+            depths.push(a);
+            parallax.push(l.angle(&r).to_degrees());
+        }
+    }
+    if 10 * positive < 9 * inliers.len() || depths.is_empty() {
+        return None;
+    }
+    let median = |values: &mut Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    };
+    if median(&mut parallax) < VO_MIN_BOOTSTRAP_PARALLAX_DEG {
+        return None;
+    }
+    let depth = median(&mut depths);
+    (depth.is_finite() && depth > 0.0).then(|| {
+        SE3::new(
+            // The solver's rotation is orthonormal; nalgebra's iterative
+            // `from_matrix` can fail to converge near 180 deg.
+            UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(
+                rotation,
+            )),
+            translation / depth,
+        )
+    })
+}
+
 fn initial_nav_from_imu(
     timestamp_ns: i64,
     samples: &[ImuSample],
