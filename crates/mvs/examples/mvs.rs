@@ -6,7 +6,7 @@
 //! cargo run --release -p visloc-mvs --example mvs -- \
 //!     --sparse <dir with cameras.txt/images.txt/points3D.txt> \
 //!     --images <image dir> --out <dir> [--max-image-size 3200] \
-//!     [--sources 10] [--iterations 3] [--geom-passes 2] [--geom-iterations 3] \
+//!     [--sources 10] [--depth-from-sources] [--iterations 3] [--geom-passes 2] [--geom-iterations 3] \
 //!     [--scales 3] [--gpu] \
 //!     [--view-selection confidence|sampled] [--init-top-k 3] \
 //!     [--restorer infinity|start|off] [--detail-threshold 0.1] [--no-planar-prior] \
@@ -71,6 +71,7 @@ fn main() {
             "--out" => out = Some(PathBuf::from(value())),
             "--max-image-size" => ws_options.max_image_size = Some(value().parse().unwrap()),
             "--sources" => ws_options.num_sources = value().parse().unwrap(),
+            "--depth-from-sources" => ws_options.depth_from_sources = true,
             "--iterations" => pm_options.iterations = value().parse().unwrap(),
             "--view-selection" => {
                 pm_options.view_selection = match value().as_str() {
