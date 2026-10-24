@@ -44,6 +44,15 @@ class StepsTest(unittest.TestCase):
         self.assertNotIn("--gyro-rw-warmup", p["online"])
         self.assertEqual(chain.result("w", 4), Path("w/online.tum"))
 
+    def test_a_daylit_low_light_sequence_runs_the_day_options(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
+                                                low_light=False)}
+        self.assertEqual(list(p), list(plan(2)))
+        self.assertNotIn("--clahe", p["features"])
+        self.assertEqual(value(p["online"], "--gyro-rw-warmup"), "10")
+        self.assertEqual(chain.result("w", 4, low_light=False), Path("w/ba2.tum"))
+
     def test_no_focal_lengths_on_the_moving_platform(self):
         for cmd in plan(5).values():
             self.assertNotIn("--est-focal", cmd)

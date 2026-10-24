@@ -134,6 +134,9 @@ TRACK_COUNTS = {1: 18, 2: 10, 3: 16, 4: 9, 5: 10}
 # Tracks whose VIO trajectory is submitted even with --slam-exe (Short, Long, Low light).
 DEFAULT_VIO_TRACKS = (1, 3, 4)
 LOW_LIGHT_TRACK = 4
+# Mean cam0 grey level from which a Low light sequence runs the day options: the eight day training
+# sequences average 74-88, the two low-light ones 26-29 (docs/lamaria_submission.md)
+DAYLIT_BRIGHTNESS = 70.0
 DEFAULT_PLATFORM_TRACKS = (5,)  # Moving platform: docs/lamaria_submission.md
 DEFAULT_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json")
 DEFAULT_LOW_LIGHT_CONFIG = Path(
@@ -310,6 +313,16 @@ def vio_failure(tum: Path, track: int) -> float:
     return 0.0 if track == MOVING_TRACK else runaway(tum)[0]
 
 
+def mean_brightness(cam_dir: Path, samples: int = 60) -> float:
+    """The mean grey level of `samples` images spread over the recording."""
+    import cv2  # the BA's dependency; only the Low light track needs it here
+    rows = [r for r in (cam_dir / "data.csv").read_text().splitlines() if r.strip() and not r.startswith("#")]
+    picked = rows[::max(1, len(rows) // samples)][:samples]
+    levels = [cv2.imread(str(cam_dir / "data" / r.split(",")[1].strip()), cv2.IMREAD_GRAYSCALE).mean()
+              for r in picked]
+    return sum(levels) / len(levels)
+
+
 def recording_start(inner: Path) -> float:
     """The first cam0 frame's time in seconds."""
     for row in (inner / "mav0" / "cam0" / "data.csv").read_text().splitlines():
@@ -455,8 +468,8 @@ def main() -> int:
         parser.error("one of --slam-exe or --vio-exe is required")
 
     args.config = args.config or (BA_CHAIN_CONFIG if args.ba_chain else DEFAULT_CONFIG)
-    low_light = args.low_light_config or str(BA_CHAIN_LOW_LIGHT_CONFIG if args.ba_chain else DEFAULT_LOW_LIGHT_CONFIG)
-    low_light_config = None if low_light.lower() == "none" else Path(low_light)
+    low_light_arg = args.low_light_config or str(BA_CHAIN_LOW_LIGHT_CONFIG if args.ba_chain else DEFAULT_LOW_LIGHT_CONFIG)
+    low_light_config = None if low_light_arg.lower() == "none" else Path(low_light_arg)
     sequences = args.sequences or track_sequences(args.tracks)
     args.slam_dir.mkdir(parents=True, exist_ok=True)
     calib_dir = args.work_dir / "calibrations"
@@ -518,8 +531,12 @@ def main() -> int:
                 log(f"{seq}: camera rig rotated by {refinement['rig_rotation_deg']} deg")
 
             track = sequence_track(seq)
-            config = (low_light_config if track == LOW_LIGHT_TRACK and low_light_config
-                      else args.config)
+            low_light = track == LOW_LIGHT_TRACK
+            if low_light:  # test sequence_4_1, 4_4, 4_8 and 4_9 are shot in dusk or overcast daylight
+                brightness = mean_brightness(inner / "mav0" / "cam0")
+                low_light = brightness < DAYLIT_BRIGHTNESS
+                log(f"{seq}: mean grey level {brightness:.1f}: {'low-light' if low_light else 'day'} options")
+            config = low_light_config if low_light and low_light_config else args.config
             if track in args.platform_tracks:
                 config = config_with(config, work / f"{config.stem}_platform.json",
                                      {"config.vio_platform_filter": True})
@@ -570,7 +587,8 @@ def main() -> int:
                 try:
                     trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
-                                           args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"))
+                                           args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
+                                           low_light=low_light)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
 
