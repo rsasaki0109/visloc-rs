@@ -659,6 +659,18 @@ model (the same as r49's), all on the images resampled onto one camera:
 - **The single focal length costs about 0.5 point.**
 - The resampling onto one camera is not measured here (all four runs use
   it); r51 found it costs nothing on electro.
+- **Neither a keypoint refinement nor the camera's fy removes the rotation
+  error** (a Python prototype on the same model). The SfM model already
+  fits its observations to 0.17 px (median); refining each track's
+  observations at full resolution (pyramidal LK from its first
+  observation, forward-backward checked: a quarter of them kept, moved a
+  median 0.64 px at 3200 px) and re-running the BA takes the median
+  relative-rotation error against the ground truth from 0.0409° to
+  0.0406°, and the ground truth's fy (0.03% below fx) to 0.0404°. As on
+  electro, where a BA started from the ground-truth poses lands on the
+  mapper's, the error is in the observations themselves: the next test
+  is features extracted at full resolution, which needs more memory than
+  this machine has.
 
 ### Against ACMMP on the same GPU
 
