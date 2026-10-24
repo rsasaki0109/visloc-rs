@@ -1,0 +1,131 @@
+name: release
+
+# Prebuilt command-line binaries for a version tag: `gsplat_photos` (photos
+# to SfM, splats and a mesh), `visloc_mvs` (dense multi-view stereo),
+# `colmap_incremental_mapper` and `visloc_web` (the browser UI, which runs
+# the `gsplat_photos` next to it). A `v*` tag push builds them; a manual run
+# rebuilds an existing tag's release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v0.3.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Create the release from the CHANGELOG section
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          # The section between "## <version>" and the next "## " heading.
+          awk -v v="$version" '
+            $0 ~ "^## " v "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "See CHANGELOG.md." > notes.md; fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --title "visloc-rs $version" --notes-file notes.md --verify-tag
+          fi
+
+  binaries:
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 for an older glibc (2.35), so the Linux binaries also
+          # run on Ubuntu 22.04 / Debian 12 and newer.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release --locked -p visloc-gsplat-train --features "gpu euroc" --example gsplat_photos
+          cargo build --release --locked -p visloc-mvs --features gpu --example mvs
+          cargo build --release --locked -p visloc-rs --example colmap_incremental_mapper --example visloc_web
+
+      - name: Package
+        shell: bash
+        run: |
+          exe=""
+          if [ "${{ runner.os }}" = "Windows" ]; then exe=".exe"; fi
+          name="visloc-rs-${TAG}-${{ matrix.target }}"
+          mkdir "$name"
+          src=target/release/examples
+          cp "$src/gsplat_photos$exe" "$src/colmap_incremental_mapper$exe" "$src/visloc_web$exe" "$name/"
+          # `mvs` is the example's name in the repository; ship it under a
+          # name that says what it is.
+          cp "$src/mvs$exe" "$name/visloc_mvs$exe"
+          cp LICENSE-MIT LICENSE-APACHE "$name/"
+          cat > "$name/README.txt" <<EOF
+          visloc-rs ${TAG} (${{ matrix.target }})
+          https://github.com/rsasaki0109/visloc-rs
+
+          gsplat_photos              photos -> SfM (COLMAP model), 3D Gaussian splats and a mesh
+                                     (gsplat_photos --help; docs/photos_to_splat.md)
+          visloc_mvs                 dense multi-view stereo from a COLMAP model
+                                     (the repository's "mvs" example; docs/mvs.md)
+          colmap_incremental_mapper  the COLMAP-port incremental mapper
+          visloc_web                 browser UI for gsplat_photos on http://127.0.0.1:8080
+                                     (keep it in the same folder as gsplat_photos)
+
+          GPU paths use wgpu (Vulkan, Metal or DirectX 12); --cpu runs gsplat_photos'
+          SfM on the CPU. Licensed under MIT or Apache-2.0.
+          EOF
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$name.zip" "$name" > /dev/null
+            archive="$name.zip"
+          else
+            tar czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload to the release
+        shell: bash
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber

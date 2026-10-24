@@ -4,6 +4,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **Prebuilt binaries on every release** (`.github/workflows/release.yml`).
+  A `v*` tag push creates the GitHub release from that version's CHANGELOG
+  section and attaches `gsplat_photos`, `visloc_mvs` (the `mvs` example),
+  `colmap_incremental_mapper` and `visloc_web`, built with their GPU
+  features, for Linux x86_64 (built on Ubuntu 22.04, glibc 2.35), Windows
+  x86_64 and macOS on Apple silicon, as `.tar.gz` / `.zip` with SHA-256
+  sums. A manual run (`workflow_dispatch`, input `tag`) builds an existing
+  tag, e.g. `v0.3.0`.
+
 ## 0.3.0 - 2026-10-24
 
 ### Highlights
