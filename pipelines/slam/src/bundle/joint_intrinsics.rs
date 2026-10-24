@@ -102,6 +102,7 @@ impl BundleAdjustment {
         // the historical dense `(6 P + k)^2` solve byte-for-byte.
         let sparse = config.linear_solver == LinearSolver::Sparse;
         let mut block_cache: Option<crate::block_cholesky::BlockSymbolic> = None;
+        let mut pose_order: Option<Vec<usize>> = None;
         let mut system: Option<(JointCameraHessian, DVector<f64>, Vec<JointLandmarkBlock>)> = None;
 
         for iteration in 0..config.max_iterations {
@@ -149,6 +150,7 @@ impl BundleAdjustment {
                     lambda,
                     config.shared_focal,
                     &mut block_cache,
+                    &mut pose_order,
                 ),
                 JointCameraHessian::Dense(h_cc) => {
                     // Damped Schur reduction (Levenberg Iﾂｷﾎｻ on both the camera and the
@@ -817,6 +819,10 @@ impl BundleAdjustment {
 /// (bounds the per-wave buffers; the result does not depend on it).
 const JOINT_WAVE_LANDMARKS: usize = 8192;
 
+/// Free poses from which the sparse joint solve factors its pose system in a
+/// fill-reducing order (smaller systems keep the natural order).
+const JOINT_REORDER_MIN_POSES: usize = 64;
+
 /// The reduced camera system of [`BundleAdjustment::optimize_joint_intrinsics`]
 /// before landmark elimination: dense, or (for `LinearSolver::Sparse`) as its
 /// structure — 6×6 pose diagonal blocks, a `6 × k` pose–intrinsics coupling per
@@ -893,6 +899,7 @@ fn solve_joint_sparse(
     lambda: f64,
     shared_focal: bool,
     cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+    order: &mut Option<Vec<usize>>,
 ) -> (Result<DVector<f64>, ()>, Vec<Option<Matrix3<f64>>>) {
     let p_count = pose_diag.len();
     let k_off = p_count * 6;
@@ -1024,8 +1031,69 @@ fn solve_joint_sparse(
                 }
             }
         }
+        // Large systems are factored in a fill-reducing pose order (the
+        // pattern is fixed for the whole BA, so it is computed once); in the
+        // natural order the retrieval links of a large photo set fill the
+        // factor almost completely.
+        if p_count >= JOINT_REORDER_MIN_POSES
+            && order.as_ref().is_none_or(|pos| pos.len() != p_count)
+        {
+            let mut adjacency = vec![Vec::new(); p_count];
+            for (col, rows) in columns.iter().enumerate() {
+                for &row in rows.keys().filter(|&&row| row > col) {
+                    adjacency[col].push(row);
+                    adjacency[row].push(col);
+                }
+            }
+            for neighbours in adjacency.iter_mut() {
+                neighbours.sort_unstable();
+            }
+            let elimination = crate::reordering::fast_fill_reducing_block_order(&adjacency);
+            let mut pos = vec![0; p_count];
+            for (k, &block) in elimination.iter().enumerate() {
+                pos[block] = k;
+            }
+            *order = Some(pos);
+        }
+        let pos = order
+            .as_deref()
+            .filter(|_| p_count >= JOINT_REORDER_MIN_POSES);
+        let (columns, rhs) = match pos {
+            None => (columns, rhs),
+            Some(pos) => {
+                let mut permuted: Vec<BTreeMap<usize, Matrix6<f64>>> =
+                    vec![BTreeMap::new(); p_count];
+                for (col, rows) in columns.into_iter().enumerate() {
+                    for (row, m) in rows {
+                        let (r, c) = (pos[row], pos[col]);
+                        if r >= c {
+                            permuted[c].insert(r, m);
+                        } else {
+                            permuted[r].insert(c, m.transpose());
+                        }
+                    }
+                }
+                let mut moved = DMatrix::<f64>::zeros(k_off, 1 + k_dim);
+                for (p, &q) in pos.iter().enumerate() {
+                    moved.rows_mut(q * 6, 6).copy_from(&rhs.rows(p * 6, 6));
+                }
+                (permuted, moved)
+            }
+        };
         match crate::block_cholesky::solve_spd_blocks6_cached(cache, columns, &rhs) {
-            Ok(x) => (x.column(0).into_owned(), x.columns(1, k_dim).into_owned()),
+            Ok(x) => {
+                let x = match pos {
+                    None => x,
+                    Some(pos) => {
+                        let mut back = DMatrix::<f64>::zeros(k_off, 1 + k_dim);
+                        for (p, &q) in pos.iter().enumerate() {
+                            back.rows_mut(p * 6, 6).copy_from(&x.rows(q * 6, 6));
+                        }
+                        back
+                    }
+                };
+                (x.column(0).into_owned(), x.columns(1, k_dim).into_owned())
+            }
             Err(()) => return (Err(()), h_ll_inv_cache),
         }
     } else {
