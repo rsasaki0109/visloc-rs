@@ -911,11 +911,15 @@ fn solve_joint_sparse(
     use rayon::prelude::*;
     struct LandmarkUpdate {
         inv: Option<Matrix3<f64>>,
-        rhs: Vec<(usize, DVector<f64>)>,
+        rhs_pose: Vec<(usize, Vector6<f64>)>,
+        rhs_k: Option<(usize, DVector<f64>)>,
         pose_pose: Vec<(usize, usize, Matrix6<f64>)>,
         pose_k: Vec<(usize, DMatrix<f64>)>,
         kk: Option<DMatrix<f64>>,
     }
+    // A landmark's pose blocks are 6×3: as fixed-size matrices their Schur
+    // products need no heap allocation (the same small-matrix arithmetic
+    // as the dynamic ones, so the sums are unchanged).
     let eliminate = |lm: &JointLandmarkBlock| -> LandmarkUpdate {
         let mut h_ll = lm.h_ll;
         if lambda > 0.0 {
@@ -926,30 +930,40 @@ fn solve_joint_sparse(
         let inv = h_ll.try_inverse();
         let mut up = LandmarkUpdate {
             inv,
-            rhs: Vec::new(),
+            rhs_pose: Vec::new(),
+            rhs_k: None,
             pose_pose: Vec::new(),
             pose_k: Vec::new(),
             kk: None,
         };
         let Some(inv) = inv else { return up };
-        for (&cs_a, a) in &lm.cross {
-            let ah = a * inv;
-            up.rhs.push((cs_a, &ah * lm.b_l));
-            for (&cs_b, b) in &lm.cross {
-                match (cs_a < k_off, cs_b < k_off) {
-                    (true, true) if cs_a >= cs_b => {
-                        let block = &ah * b.transpose();
-                        up.pose_pose.push((
-                            cs_b / 6,
-                            cs_a / 6,
-                            Matrix6::from_iterator(block.iter().copied()),
-                        ));
-                    }
-                    (true, false) => up.pose_k.push((cs_a / 6, &ah * b.transpose())),
-                    (false, false) => up.kk = Some(&ah * b.transpose()),
-                    _ => {}
-                }
+        let poses: Vec<(usize, Matrix6x3<f64>, Matrix6x3<f64>)> = lm
+            .cross
+            .iter()
+            .filter(|(&cs, _)| cs < k_off)
+            .map(|(&cs, a)| {
+                let a = a.fixed_view::<6, 3>(0, 0).into_owned();
+                (cs, a, a * inv)
+            })
+            .collect();
+        let intrinsics = lm.cross.iter().find(|(&cs, _)| cs >= k_off);
+        for (i, &(cs_a, _, ah)) in poses.iter().enumerate() {
+            up.rhs_pose.push((cs_a, ah * lm.b_l));
+            for &(cs_b, b, _) in &poses[..=i] {
+                up.pose_pose.push((cs_b / 6, cs_a / 6, ah * b.transpose()));
             }
+            if let Some((_, b)) = intrinsics {
+                let m = ah * b.transpose();
+                up.pose_k.push((
+                    cs_a / 6,
+                    DMatrix::from_column_slice(6, m.ncols(), m.as_slice()),
+                ));
+            }
+        }
+        if let Some((&cs_k, a)) = intrinsics {
+            let ah = a * inv;
+            up.rhs_k = Some((cs_k, &ah * lm.b_l));
+            up.kk = Some(&ah * a.transpose());
         }
         up
     };
@@ -960,7 +974,12 @@ fn solve_joint_sparse(
         let mut buckets: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); p_count];
         for up in updates {
             h_ll_inv_cache.push(up.inv);
-            for (cs, v) in up.rhs {
+            for (cs, v) in up.rhs_pose {
+                for r in 0..6 {
+                    b_reduced[cs + r] += v[r];
+                }
+            }
+            if let Some((cs, v)) = up.rhs_k {
                 for r in 0..v.nrows() {
                     b_reduced[cs + r] += v[r];
                 }
