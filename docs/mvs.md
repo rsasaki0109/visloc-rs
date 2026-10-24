@@ -628,6 +628,38 @@ SfM registered 44 of 45 images, as the replays had (largest centre error
     that the current matching does not find (guided matching, for
     example). Neither is tried yet.
 
+### playground end to end: where the points go (CPU, 800 px)
+
+playground loses the most end to end (r49, orientations: 60.7% against
+69.5% with the ground-truth poses), most of it accuracy (67.3% against
+79.5%), although its SfM cameras are within 0.16 cm (median, 0.4 cm at
+most) of the ground truth and its intrinsics are the ground truth's (held
+fixed). A local diagnosis at 800 px on the CPU (F1 at 2 cm, ground-truth
+scan) swaps one input at a time between the ground truth and r49a's SfM
+model (the same as r49's), all on the images resampled onto one camera:
+
+| Run | Poses | Camera | Sparse points | F1 (accuracy / completeness) |
+|---|---|---|---|---|
+| B | ground truth | ground truth (fx ≠ fy) | ground truth | 61.4% (85.6 / 47.9) |
+| E | ground truth | SfM (fx = fy) | ground truth | 60.9% (85.4 / 47.3) |
+| D | SfM | SfM | ground truth | 58.3% (80.8 / 45.6) |
+| C | SfM | SfM | SfM | 57.0% (80.9 / 44.0) |
+
+- **The poses cost about 2.6 points, all of it accuracy.** The centres are
+  right, but each camera's rotation is off by 0.02 to 0.03° (per axis,
+  in no consistent direction): the scan's points land a median 1.0 px
+  (at 3200 px) from where the ground-truth pose puts them. The SfM
+  extracts its features at 3200 px; a run at 4800 px ran out of memory on
+  this 15 GB machine.
+- **The sparse points cost about 1.3 points**, mostly completeness. Each
+  view's depth range comes from the points it observes; with the SfM's
+  points 1.21% of the scan's visible surface falls outside it, against
+  0.31% with the ground truth's (14% in one view). Taking the points its
+  source views observe as well (projected into it) leaves 0.79% outside.
+- **The single focal length costs about 0.5 point.**
+- The resampling onto one camera is not measured here (all four runs use
+  it); r51 found it costs nothing on electro.
+
 ### Against ACMMP on the same GPU
 
 ACMMP's released code (GhiXu/ACMMP, built for the L4) on the same
