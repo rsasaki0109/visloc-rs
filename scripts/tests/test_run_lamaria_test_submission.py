@@ -110,6 +110,22 @@ class DivergenceTests(unittest.TestCase):
         self.assertEqual(cfg["config.optical_flow_max_recovered_dist2"], 0.25)  # the low-light setting stays
 
 
+    def test_mean_brightness_reads_the_manifests_images(self):
+        import tempfile
+        import numpy as np
+        try:
+            import cv2
+        except ImportError:
+            self.skipTest("opencv not installed")
+        cam = Path(tempfile.mkdtemp()) / "cam0"
+        (cam / "data").mkdir(parents=True)
+        rows = []
+        for i, level in enumerate((20, 80, 140)):
+            cv2.imwrite(str(cam / "data" / f"{i}.png"), np.full((8, 8), level, np.uint8))
+            rows.append(f"{i},{i}.png")
+        (cam / "data.csv").write_text("#timestamp [ns],filename\n" + "\n".join(rows) + "\n")
+        self.assertAlmostEqual(submission.mean_brightness(cam), 80.0)
+
     def test_a_late_start_trims_the_manifests_and_links_the_images(self):
         import tempfile
         root = Path(tempfile.mkdtemp())

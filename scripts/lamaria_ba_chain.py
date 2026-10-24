@@ -31,10 +31,12 @@ BA = Path(__file__).resolve().parent / "lamaria_batch_ba.py"
 WARMUP = ["--gyro-rw-warmup", "10", "--gyro-rw-warmup-s", "300"]
 
 
-def steps(mav0, vio, imu, calib, track, work, jobs):
-    """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order."""
+def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None):
+    """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
+
+    `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight)."""
     work = Path(work)
-    low = track == LOW_LIGHT
+    low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
     solve += [] if track == MOVING else ["--est-focal"]
     feats = ["--clahe", "--denoise", "7"] if low else []
@@ -62,15 +64,17 @@ def steps(mav0, vio, imu, calib, track, work, jobs):
     return out
 
 
-def result(work, track):
+def result(work, track, low_light=None):
     """The trajectory the chain ends with."""
-    return Path(work) / ("online.tum" if track == LOW_LIGHT else "ba2.tum")
+    low = track == LOW_LIGHT if low_light is None else low_light
+    return Path(work) / ("online.tum" if low else "ba2.tum")
 
 
-def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA):
+def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
+              low_light=None):
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
-    for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs):
+    for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -85,7 +89,7 @@ def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python
             done.touch()
         log(f"{name}: {time.time() - t0:.0f} s")
     (work / "matches.npz").unlink(missing_ok=True)  # 0.2 GB, not needed once the chain has run
-    shutil.copyfile(result(work, track), out)
+    shutil.copyfile(result(work, track, low_light), out)
     return Path(out)
 
 
@@ -100,9 +104,11 @@ def main():
     p.add_argument("--out", required=True, help="the chain's trajectory (TUM)")
     p.add_argument("--jobs", type=int, default=4, help="processes for features, match and loops")
     p.add_argument("--threads", type=int, default=2, help="threads for the online windows and the pass")
+    p.add_argument("--daylit", action="store_true", help="day options on a Low light sequence shot in daylight")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
-              log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True))
+              log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
+              low_light=False if a.daylit else None)
 
 
 if __name__ == "__main__":

@@ -87,6 +87,18 @@ on sequence_4_10 but −11.0 on the Medium sequence
 ([`lamaria_klt_threshold.md`](lamaria_klt_threshold.md)). `--low-light-config
 none` uses `--config` there too.
 
+Not every Low light sequence is dark. The two low-light training sequences
+average a grey level of 26-29 on cam0 (60 images spread over the recording),
+the eight day training sequences 74-88, and test sequence_4_1, 4_4, 4_8 and
+4_9, shot at dusk or under an overcast sky, 74-75. A Low light sequence that
+averages 70 or more (`DAYLIT_BRIGHTNESS`) runs the day options: `--config`
+for the VIO, and the BA chain's day steps (plain SIFT, the warm-up, the batch
+pass). By day both are measured to help: the 0.5 px KLT threshold costs the
+Medium sequence 11 points, and the pass adds 4-9 points on four of the six
+walking day sequences ([lamaria_batch_ba.md](lamaria_batch_ba.md#the-first-minutes-online)).
+The other test sequences of the track (grey level 27-60) keep the low-light
+options.
+
 Moving-platform sequences (track 5) run the VIO with the platform filter
 (`config.vio_platform_filter`, [`platform.rs`](../pipelines/basalt/src/platform.rs);
 `--platform-tracks` with no values turns it off). On a tram the cabin's
