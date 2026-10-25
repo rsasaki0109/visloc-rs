@@ -4,6 +4,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+## 0.3.1 - 2026-10-25
+
+Patch release: `--help` on the release binaries, fewer cameras left far off
+by `gsplat_photos`' intrinsics refinement, and prebuilt binaries attached
+to every release.
+
 ### Fixed
 
 - **`--help` on the release binaries' command-line tools.** `visloc_mvs`

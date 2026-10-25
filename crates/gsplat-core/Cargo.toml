@@ -27,8 +27,8 @@ mesh = ["dep:rayon"]
 nalgebra = { workspace = true }
 rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
-visloc-core = { path = "../core", version = "0.3.0" }
-visloc-io = { path = "../io", version = "0.3.0", optional = true }
+visloc-core = { path = "../core", version = "0.3.1" }
+visloc-io = { path = "../io", version = "0.3.1", optional = true }
 
 [dev-dependencies]
 image = { version = "=0.25.5", default-features = false, features = ["png"] }

@@ -460,14 +460,14 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "visloc-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "visloc-fusion"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-io"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "thiserror",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-localization"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-py"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "numpy",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-tracking"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-vision"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "rand",
