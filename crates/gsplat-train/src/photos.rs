@@ -1134,6 +1134,14 @@ pub fn build_photo_dataset(
         // Block-sparse joint pose + intrinsics solve: scales with the
         // covisibility pattern instead of a dense (6 * images)^2 system.
         sfm_cfg.ba_config.linear_solver = visloc_slam::LinearSolver::Sparse;
+        // Start the Levenberg–Marquardt damping at 1e4 instead of 1e-4. The
+        // damping is absolute and a photo set's Hessian diagonals are
+        // 1e4–1e8, so 1e-4 is no damping: the first steps swing cameras by up
+        // to a radian and are rejected until λ reaches the Hessian's scale.
+        // On three 500-image SmallCity subsets this keeps a segment the
+        // mapper left bent from staying 1–3 m off (max error 282 → 23 cm on
+        // one, within about a centimetre on the other two).
+        sfm_cfg.ba_config.initial_lambda = Some(1e4);
         let r = visloc_slam::incremental_sfm_with_initial_poses(
             &cam,
             &features,
