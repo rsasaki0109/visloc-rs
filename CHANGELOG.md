@@ -4,6 +4,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **`--help` on the release binaries' command-line tools.** `visloc_mvs`
+  (the `mvs` example), `gsplat_photos` and `colmap_incremental_mapper`
+  print their options with `-h` / `--help`. `visloc_mvs` panicked on it
+  ("unknown argument --help"), `gsplat_photos` stopped with the same error
+  and the mapper panicked on the missing `--manifest`. A missing or unknown
+  argument now prints the message (with the usage for `visloc_mvs` and the
+  mapper) and exits with status 2 instead of a panic and a backtrace.
+
 ### Changed
 
 - **`gsplat_photos` damps its intrinsics refinement from the start.** The

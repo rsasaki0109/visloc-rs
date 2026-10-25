@@ -41,6 +41,42 @@ use visloc_gsplat_train::metrics::psnr_masked;
 use visloc_gsplat_train::photos::{build_photo_dataset, PhotoSfmConfig};
 use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
+const USAGE: &str = "\
+usage: gsplat_photos --images <folder> --out <work dir> [options]
+
+A folder of photos -> camera poses (COLMAP model in <out>/sparse/0),
+3D Gaussian splats (<out>/scene.ply) and a mesh (<out>/mesh.ply).
+
+training:
+  --steps 30000            training steps (0: SfM only)
+  --no-mesh                skip the mesh
+  --normal-weight 0        normal regularisation weight (e.g. 0.005)
+  --appearance             per-photo colour correction
+  --mask-black N           leave near-black pixels (channels <= N) out of the loss
+SfM:
+  --max-size 1600          longest image side
+  --focal PX               focal length prior (default: EXIF, else 1.2 x the long side)
+  --principal-point CX,CY  principal point prior (default: image centre)
+  --no-refine-intrinsics   keep the intrinsics fixed
+  --refine-intrinsics-max N  skip the final intrinsics refinement above N photos
+  --exhaustive-max 300     match every pair up to this many photos
+  --window 20              past --exhaustive-max: match a sliding window
+  --retrieval K            past --exhaustive-max: also the K most similar photos
+  --max-keypoints 8192     SIFT keypoints per image
+  --sift-opt key=value     extra SIFT settings (repeatable)
+  --match-f32              match f32 descriptors instead of COLMAP's u8 ones
+  --no-complete-model      leave the largest model as the mapper built it
+360-degree panoramas:
+  --equirect               cut each panorama into six cube faces (one rig)
+  --equirect-independent-faces  solve each face as its own camera
+  --equirect-native        SfM on the panoramas as equirectangular cameras
+devices:
+  --cpu                    extract SIFT and match on the CPU
+  --cpu-sift               extract SIFT on the CPU
+  --gpu-ba                 solve large bundle adjustments on the GPU
+
+See docs/photos_to_splat.md.";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut images: Option<PathBuf> = None;
@@ -53,6 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
             "--images" => images = Some(PathBuf::from(next()?)),
             "--out" => out = Some(PathBuf::from(next()?)),
             "--steps" => steps = next()?.parse()?,
@@ -104,11 +144,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--normal-weight" => normal_weight = next()?.parse()?,
             // Per-photo colour correction (varying exposure / white balance).
             "--appearance" => appearance = true,
-            other => return Err(format!("unknown argument {other}").into()),
+            other => return Err(format!("unknown argument {other} (--help lists them)").into()),
         }
     }
-    let images = images.ok_or("--images <folder> is required")?;
-    let out = out.ok_or("--out <work dir> is required")?;
+    let images = images.ok_or("--images <folder> is required (--help for usage)")?;
+    let out = out.ok_or("--out <work dir> is required (--help for usage)")?;
     std::fs::create_dir_all(&out)?;
     let t0 = Instant::now();
 
