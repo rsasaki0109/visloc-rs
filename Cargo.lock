@@ -1524,7 +1524,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visloc-ba-gpu"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "nalgebra",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-basalt"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.23.1",
  "image",
@@ -1554,14 +1554,14 @@ dependencies = [
 
 [[package]]
 name = "visloc-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "visloc-dpvo-cuda-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libloading 0.9.0",
  "ndarray",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-fusion"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-gsplat-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "nalgebra",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-gsplat-render"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "image",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-gsplat-train"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "image",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-io"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "nalgebra",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-localization"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -1645,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-mapping"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-mvs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "delaunator",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-rs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "memmap2",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-sift-gpu"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "image",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-slam"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "nalgebra-sparse",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-tracking"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "visloc-core",
@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "visloc-vision"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nalgebra",
  "ndarray",
