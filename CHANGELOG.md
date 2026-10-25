@@ -4,6 +4,35 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Changed
+
+- **`gsplat_photos` damps its intrinsics refinement from the start.** The
+  joint pose + intrinsics BA after the mapper starts Levenberg–Marquardt at
+  λ = 1e4 instead of 1e-4. The damping is absolute and a photo set's
+  Hessian diagonals are 1e4–1e8, so 1e-4 was no damping: its first steps
+  swung cameras by up to a radian and were rejected until λ reached that
+  scale.
+  - **Three 500-image SmallCity pass-1 subsets**, camera centres against
+    the release's COLMAP model (Sim(3) refit on errors under three times
+    the median), median / p90 / max:
+
+    | Subset | before | after |
+    |---|---|---|
+    | 0–499 | 13.6 / 22.6 / 282 cm (4 cameras over 1 m) | 12.1 / 17.3 / 23 cm (none) |
+    | 500–999 | 23.8 / 29.2 / 66 cm | 24.9 / 30.8 / 69 cm |
+    | 1000–1499 | 8.6 / 16.1 / 22 cm | 7.9 / 15.2 / 21 cm |
+
+  - **Playground** (38 images, ETH3D ground truth): centre error median
+    0.30 cm against 0.26 cm, maximum 0.6 cm against 0.8 cm.
+  - **Why the first subset needed it:** the mapper starts from images 66
+    and 324, a revisit 3.5 m apart, because consecutive photos are too
+    close for COLMAP's 16° initial-pair angle. Its model leaves image 66
+    32 m off and images 319–352 bent by up to 29 m; the refinement pulls
+    them back, and with the damping it no longer stops halfway. Starting
+    from nearby photos instead (an 8° initial-pair angle, or a pair at most
+    30 photos apart) avoids the bend but leaves a 18 cm median on that
+    subset: the revisit pair also closes the loop, so neither is used.
+
 ### Added
 
 - **Prebuilt binaries on every release** (`.github/workflows/release.yml`).
