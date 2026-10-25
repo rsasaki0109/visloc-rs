@@ -22,8 +22,14 @@ All notable changes to `visloc-rs` will be documented here.
     | 500–999 | 23.8 / 29.2 / 66 cm | 24.9 / 30.8 / 69 cm |
     | 1000–1499 | 8.6 / 16.1 / 22 cm | 7.9 / 15.2 / 21 cm |
 
-  - **Playground** (38 images, ETH3D ground truth): centre error median
-    0.30 cm against 0.26 cm, maximum 0.6 cm against 0.8 cm.
+  - **ETH3D DSLR, all 13 training scenes** (one camera per scene, 1,600 px,
+    the focal started 5% off, ground-truth poses): the same images register
+    and the scores barely move. Means over the scenes before → after:
+    relative rotation 0.084° → 0.085°, camera-centre median 0.76 → 0.79 cm,
+    p90 1.38 → 1.42 cm, maximum 3.99 → 3.86 cm. meadow is the largest
+    change either way (median 4.0 → 4.5 cm), then facade (1.71 → 1.61 cm),
+    office (maximum 6.4 → 4.3 cm) and playground (0.26 → 0.30 cm); seven
+    scenes are unchanged.
   - **Why the first subset needed it:** the mapper starts from images 66
     and 324, a revisit 3.5 m apart, because consecutive photos are too
     close for COLMAP's 16° initial-pair angle. Its model leaves image 66
