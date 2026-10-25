@@ -28,9 +28,10 @@ All notable changes to `visloc-rs` will be documented here.
     and 324, a revisit 3.5 m apart, because consecutive photos are too
     close for COLMAP's 16° initial-pair angle. Its model leaves image 66
     32 m off and images 319–352 bent by up to 29 m; the refinement pulls
-    them back, and with the damping it no longer stops halfway. A 8°
-    initial-pair angle avoids the bend (no camera over 1 m) but doubles
-    the median error on that subset, so it is not used.
+    them back, and with the damping it no longer stops halfway. Starting
+    from nearby photos instead (an 8° initial-pair angle, or a pair at most
+    30 photos apart) avoids the bend but leaves a 18 cm median on that
+    subset: the revisit pair also closes the loop, so neither is used.
 
 ### Added
 
