@@ -91,6 +91,28 @@ class EvaluateMapLocalizationTests(unittest.TestCase):
         result = MODULE.evaluate("gt", moved, reference, 1_000)
         self.assertLess(result["translation_m"]["max"], 1e-9)
 
+    def test_inlier_filter_keeps_poses_accepted_at_the_threshold(self) -> None:
+        estimate = MODULE.load_tum_seconds  # keep the parser's rounding in the loop
+        with tempfile.TemporaryDirectory() as directory:
+            tum = Path(directory) / "localization.tum"
+            tum.write_text(
+                "1403636579.963555584 0 0 0 0 0 0 1\n"
+                "1403636580.013555456 1 0 0 0 0 0 1\n"
+                "1403636580.063555584 2 0 0 0 0 0 1\n",
+                encoding="utf-8",
+            )
+            per_frame = Path(directory) / "per_frame.csv"
+            per_frame.write_text(
+                "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms\n"
+                "1403636579963555584,true,false,800,60,45,0.75,70\n"
+                "1403636580013555456,true,false,800,40,22,0.55,70\n"
+                "1403636580063555584,true,false,800,90,30,0.33,70\n"
+                "1403636580113555456,false,false,800,10,4,0.40,70\n",
+                encoding="utf-8",
+            )
+            kept = MODULE.filter_by_inliers(estimate(tum), per_frame, 30)
+        self.assertEqual(sorted(position[0] for position, _ in kept.values()), [0.0, 2.0])
+
 
 if __name__ == "__main__":
     unittest.main()

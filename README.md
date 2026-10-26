@@ -395,9 +395,11 @@ cargo run --release --example basalt_euroc_localize_demo -- \
 `target/mh01_map/sparse` is an ordinary COLMAP model (the Double Sphere
 cameras are saved as fitted `OPENCV_FISHEYE`). `localization.tum` holds IMU
 poses in the map's frame, the convention of the SLAM demo's trajectories.
-Against an MH_01 map, MH_02 (a different flight) localizes 87.4% of its
-images at 2.0 cm RMSE against ground truth, 94.1% at 2.2 cm with
-`--min-inliers 12`; see the [EuRoC map-localization results](docs/basalt_map_localization.md).
+Against an MH_01 map, MH_02 (a different flight) localizes 81.2% of its
+images at 1.8 cm RMSE against ground truth. Over eight cross-session EuRoC
+queries no accepted pose is more than 25 cm off; how many images localize
+depends on how much of the flight the map covers. See the
+[EuRoC map-localization results](docs/basalt_map_localization.md).
 
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the
