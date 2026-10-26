@@ -55,6 +55,29 @@ Together the four gain 13.7 points (the track +1.6). Low light is the only
 track where visloc-rs beats GroundedSLAM on some sequences (4_1, and 4_2:
 55.9 against 43.7).
 
+## Against GroundedSLAM, sequence by sequence
+
+The leaderboard's per-sequence scores (2026-10-26, submission 3): visloc-rs
+beats GroundedSLAM on 17 of the 63 sequences, 8 of them Long. The 19
+sequences it trails by more than 20 points make up 8.0 of the 9.4 points
+between the means (each sequence weighs 1 / (5 × its track's count)); the
+other 44 add up to 1.4. By track, the gap's share of the mean: Moving 3.00,
+Short 2.50, Medium 1.37, Low light 1.37, Long 1.15. The largest single ones are
+sequence_5_9 (1.0 against 60.6, a tram seen through a door's windows: 1.2
+points of the mean), 4_8 (57.0 against 84.4; the day options cost it 12
+points, see above), 1_2, 4_3 and 1_16.
+
+On Short, 8 of the 18 sequences trail by more than 20: sequence_1_1, 1_2,
+1_3, 1_4, 1_11, 1_13, 1_16 and 1_17. They are the fast walks along open
+streets: 1.1–1.4 m/s, 270–670 m across, against mostly 0.75–1.16 m/s and
+160–280 m for the ten close to GroundedSLAM (the score correlates −0.74 with
+the walking speed, −0.59 with the path length; GroundedSLAM's own −0.68 and
+−0.45). Most keep pose recall at 5 m near 100 % but put few CPs within 1 m,
+the slow scale and heading drift of a long one-way walk with distant
+features. Training R_12_10cp is such a walk, and [Matching again after the
+pass](lamaria_batch_ba.md#matching-again-after-the-pass) takes it from 61.09
+to 64.30.
+
 ## Notes for the next round
 
 - **The same input scores differently on a rerun.** Unchanged sequences rerun

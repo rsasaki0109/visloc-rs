@@ -15,9 +15,11 @@ the leaderboard track (1 Short, 2 Medium, 3 Long, 4 Low light, 5 Moving platform
 - by day: the gyro bias random walk ten times looser over the first minutes (online and pass) and ten times
   looser throughout in the pass.
 
---rematch (by day) matches the keyframes and finds the revisits once more after the pass, guided by the pass's
-trajectory instead of the VIO, and solves again from there with those matches: training R_12_10cp, whose VIO
-heading drifts 0.78 deg/min, goes from 61.09 to 64.30 (the same solve with the VIO's matches: 60.48).
+--rematch (by day; the submission driver's default) matches the keyframes and finds the revisits once more after
+the pass, guided by the pass's trajectory instead of the VIO, and solves again from there with those matches:
+training R_12_10cp, whose VIO heading drifts 0.78 deg/min, goes from 61.09 to 64.30 (the same solve with the
+VIO's matches: 60.48), the eight day training sequences from 64.50 to 64.76 on average
+(docs/lamaria_batch_ba.md#matching-again-after-the-pass).
 
 A step whose output exists is skipped, so an interrupted run resumes; the online result and the pass are only
 taken as done once their step finished.
