@@ -437,9 +437,9 @@ def main() -> int:
                         choices=sorted(TRACK_COUNTS),
                         help="tracks whose VIO keeps a vehicle's cabin out during rides "
                              "(config.vio_platform_filter; default 5; no values: none)")
-    parser.add_argument("--platform-multicam", action=argparse.BooleanOptionalAction, default=False,
+    parser.add_argument("--platform-multicam", action=argparse.BooleanOptionalAction, default=True,
                         help="on --platform-tracks, the VIO tracks both cameras' features (MULTICAM), so the "
-                             "filter sees the street through the windows on either side")
+                             "filter sees the street through the windows on either side (default on)")
     parser.add_argument("--low-light-config",
                         help=f"config for Low light (track 4) sequences (default {DEFAULT_LOW_LIGHT_CONFIG}; "
                              f"with --ba-chain {BA_CHAIN_LOW_LIGHT_CONFIG}); 'none' uses --config")
