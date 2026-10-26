@@ -57,6 +57,24 @@ class StepsTest(unittest.TestCase):
         for cmd in plan(5).values():
             self.assertNotIn("--est-focal", cmd)
 
+    def test_the_rematch_follows_the_pass_by_day_only(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True)}
+        self.assertEqual(list(p)[-3:], ["rematch", "rematch loops", "solve with the new matches"])
+        for name in ("rematch", "rematch loops"):
+            self.assertEqual(value(p[name], "--vio"), str(Path("w/ba2.tum")))
+            self.assertEqual(value(p[name], "--work"), str(Path("w/rematch")))
+        self.assertEqual(value(p["rematch"], "--tau-slope"), "0.3")
+        solve = p["solve with the new matches"]
+        self.assertEqual(value(solve, "--work"), str(Path("w/rematch")))
+        self.assertEqual(value(solve, "--out"), str(Path("w/ba3.tum")))
+        self.assertIn("--loops", solve)
+        self.assertEqual(value(solve, "--gyro-rw-scale"), "10")
+        self.assertEqual(chain.result("w", 2, rematch=True), Path("w/ba3.tum"))
+        low = [name for name, *_ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4, rematch=True)]
+        self.assertEqual(low, ["features", "match", "loops", "online"])
+        self.assertEqual(chain.result("w", 4, rematch=True), Path("w/online.tum"))
+
 
 FAKE_BA = textwrap.dedent('''
     import sys
@@ -82,6 +100,23 @@ class ResumeTest(unittest.TestCase):
             self.assertEqual(calls, ["features", "match", "loops", "online", "solve", "loop-correct", "solve"])
             self.assertEqual(out.read_text(), "solve")  # the pass's last solve
             self.assertFalse((work / "matches.npz").exists())
+
+    def test_the_rematch_reads_the_same_features_and_ends_the_chain(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "fake_ba.py"
+            fake.write_text(FAKE_BA)
+            work, out = Path(d) / "work", Path(d) / "out.tum"
+            for _ in range(2):
+                chain.run_chain("mav0", "vio.tum", "imu.csv", "calib.json", 1, work, out, ba=fake, log=lambda m: None,
+                                rematch=True)
+            calls = (work / "calls.txt").read_text().split() + (work / "rematch" / "calls.txt").read_text().split()
+            self.assertEqual(calls, ["features", "match", "loops", "online", "solve", "loop-correct", "solve",
+                                     "match", "loops", "solve"])
+            self.assertEqual((work / "rematch" / "features.npz").read_text(), "features")
+            self.assertEqual(out, chain.run_chain("mav0", "vio.tum", "imu.csv", "calib.json", 1, work, out, ba=fake,
+                                                  log=lambda m: None, rematch=True))
+            self.assertEqual((work / "ba3.tum").read_text(), "solve")
+            self.assertFalse((work / "rematch" / "matches.npz").exists())
 
 
 if __name__ == "__main__":
