@@ -437,6 +437,9 @@ def main() -> int:
                         choices=sorted(TRACK_COUNTS),
                         help="tracks whose VIO keeps a vehicle's cabin out during rides "
                              "(config.vio_platform_filter; default 5; no values: none)")
+    parser.add_argument("--platform-multicam", action=argparse.BooleanOptionalAction, default=False,
+                        help="on --platform-tracks, the VIO tracks both cameras' features (MULTICAM), so the "
+                             "filter sees the street through the windows on either side")
     parser.add_argument("--low-light-config",
                         help=f"config for Low light (track 4) sequences (default {DEFAULT_LOW_LIGHT_CONFIG}; "
                              f"with --ba-chain {BA_CHAIN_LOW_LIGHT_CONFIG}); 'none' uses --config")
@@ -548,6 +551,8 @@ def main() -> int:
             if track in args.platform_tracks:
                 config = config_with(config, work / f"{config.stem}_platform.json",
                                      {"config.vio_platform_filter": True})
+                if args.platform_multicam:  # test sequence_5_9: the tram's street is in cam1's door window
+                    config = multicam_config(config, work / f"{config.stem}_multicam.json")
             submit_vio = track in args.vio_tracks or args.ba_chain  # the BA chain starts from the VIO
             log(f"{seq}: {'VIO' if submit_vio or not args.slam_exe else 'VIO + online mapper'}"
                 f", config {config.name}")
