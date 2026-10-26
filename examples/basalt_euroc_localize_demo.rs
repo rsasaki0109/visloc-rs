@@ -175,7 +175,9 @@ impl Args {
             max_points: None,
             max_hamming: 70,
             ratio: Some(0.8),
-            min_inliers: 20,
+            // Below 30 inliers wrong poses appear on EuRoC (25 cm to 3.6 m
+            // off at 20); see docs/basalt_map_localization.md.
+            min_inliers: 30,
             reprojection_px: 3.0,
             ransac_iterations: 1000,
             prior_radius_m: None,
@@ -438,7 +440,7 @@ mod tests {
         assert_eq!(args.ratio, None);
         assert_eq!(args.prior_radius_m, Some(4.0));
         assert_eq!(args.camera, 1);
-        assert_eq!(args.min_inliers, 20);
+        assert_eq!(args.min_inliers, 30);
     }
 
     fn descriptor(seed: usize) -> [u8; 32] {

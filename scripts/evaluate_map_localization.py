@@ -13,13 +13,19 @@ Modes:
   gt      estimate vs ground truth after an SE(3) Umeyama fit on the estimate
           itself (the usual ATE).
   fixed   estimate vs ground truth through a map->GT transform fitted once on
-          another trajectory (`--align-est` vs `--align-gt`), typically the SLAM
+          another trajectory (`--align-estimate` vs `--align-ground-truth`), the SLAM
           run that built the map. Nothing is fitted to the scored poses, so this
           is the honest cross-session number.
+
+Without `--prior-radius-m`, `basalt_euroc_localize_demo` localizes every image
+independently with a fixed RANSAC seed, so one run at a low `--min-inliers`
+contains the result of every higher threshold: `--per-frame` with
+`--min-inliers N` keeps the poses whose logged inlier count is at least N.
 """
 
 import argparse
 import bisect
+import csv
 import json
 from pathlib import Path
 
@@ -88,6 +94,24 @@ def associate(estimate, reference, max_diff_ns):
         if abs(nearest - timestamp) <= max_diff_ns:
             pairs.append((timestamp, nearest))
     return pairs
+
+
+def filter_by_inliers(estimate, per_frame_path, min_inliers, max_diff_ns=1_000_000):
+    """Keep the poses whose `per_frame.csv` row succeeded with >= min_inliers."""
+    keep = set()
+    keys = sorted(estimate)
+    with Path(per_frame_path).open(encoding="utf-8", newline="") as stream:
+        for row in csv.DictReader(stream):
+            if row["success"] != "true" or int(row["inliers"]) < min_inliers:
+                continue
+            timestamp = int(row["timestamp_ns"])
+            index = bisect.bisect_left(keys, timestamp)
+            candidates = keys[max(index - 1, 0) : index + 1]
+            if candidates:
+                nearest = min(candidates, key=lambda key: abs(key - timestamp))
+                if abs(nearest - timestamp) <= max_diff_ns:
+                    keep.add(nearest)
+    return {timestamp: pose for timestamp, pose in estimate.items() if timestamp in keep}
 
 
 def umeyama_se3(source, target):
@@ -167,13 +191,21 @@ def main():
     parser.add_argument("--align-estimate", type=Path, help="fixed: TUM defining map->GT")
     parser.add_argument("--align-ground-truth", type=Path, help="fixed: GT csv for --align-estimate")
     parser.add_argument("--queries", type=int, help="query image count, adds localized_rate")
+    parser.add_argument("--per-frame", type=Path, help="the run's per_frame.csv, for --min-inliers")
+    parser.add_argument(
+        "--min-inliers", type=int, help="score only poses accepted with at least this many inliers"
+    )
     parser.add_argument("--max-diff-ns", type=int, default=10_000_000)
     parser.add_argument("--out-json", type=Path)
     args = parser.parse_args()
     if args.mode == "fixed" and not (args.align_estimate and args.align_ground_truth):
         parser.error("--mode fixed needs --align-estimate and --align-ground-truth")
+    if (args.min_inliers is None) != (args.per_frame is None):
+        parser.error("--min-inliers and --per-frame go together")
 
     estimate = load_tum_seconds(args.estimate)
+    if args.min_inliers is not None:
+        estimate = filter_by_inliers(estimate, args.per_frame, args.min_inliers)
     if args.mode == "direct":
         reference = load_tum_seconds(args.reference)
     else:

@@ -13,8 +13,9 @@ All notable changes to `visloc-rs` will be documented here.
   `landmark_descriptors.txt`, `images.csv` and `map.json` (IMU-from-camera
   extrinsics). The new `basalt_euroc_localize_demo` runs each image of a
   EuRoC sequence through the mapper's own ORB frontend, matches it to the
-  map by Hamming distance, estimates the pose with P3P RANSAC, and writes
-  IMU poses in the map frame to `localization.tum`.
+  map by Hamming distance, estimates the pose with P3P RANSAC, accepts it
+  with at least 30 inliers (`--min-inliers`), and writes IMU poses in the
+  map frame to `localization.tum`.
   - The Double Sphere cameras are saved as COLMAP `OPENCV_FISHEYE` with
     `k1..k4` fitted over the field of view (`fit_opencv_fisheye`; at most
     0.0003 px from the Double Sphere projection over the EuRoC cam0
@@ -23,11 +24,14 @@ All notable changes to `visloc-rs` will be documented here.
   - Library: `NfrMapper::localization_map` (`visloc-basalt`),
     `write_landmark_descriptors_txt` (`visloc-io`),
     `euroc::read_camera_manifest` / `read_camera_image`.
-  - EuRoC: against an MH_01 map, MH_02 localizes 87.4% of its images at
-    2.0 cm RMSE against ground truth (94.1% at 2.2 cm with
-    `--min-inliers 12`), MH_01 itself 99.6% at the map's own 1.6 cm;
+  - EuRoC, one map per environment (MH_01, V1_01, V2_01) queried with the
+    other eight sequences: no accepted pose is more than 25 cm off; MH_02
+    localizes 81.2% of its images at 1.8 cm RMSE against ground truth,
+    and flights the map barely covers far fewer (MH_04: 4.6%). Below 30
+    inliers wrong poses appear (at 20, up to 3.6 m off on V2_02).
     `docs/basalt_map_localization.md`, scored by the new
-    `scripts/evaluate_map_localization.py`.
+    `scripts/evaluate_map_localization.py` (`--per-frame --min-inliers`
+    scores any threshold from one run).
 
 ## 0.3.1 - 2026-10-25
 
