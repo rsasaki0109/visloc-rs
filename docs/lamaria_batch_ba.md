@@ -1580,6 +1580,71 @@ keeps the online result. [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_c
 runs these steps per track and reproduces the scratch runs: sequence_1_20
 online 81.79, after the pass 86.20.
 
+### Matching again after the pass
+
+The Short test sequences furthest behind GroundedSLAM are fast walks (1.1–1.4
+m/s) along open streets, 270–670 m across, where the sequences close to it
+mostly wander within 160–280 m at 0.75–1.16 m/s
+([lamaria_test_results.md](lamaria_test_results.md#against-groundedslam-sequence-by-sequence)).
+Training R_12_10cp (1WM093701G1276, 17 minutes, 604 m across, 1.18 m/s, wide
+streets and distant buildings) is one of them. Through the test pipeline:
+
+| Stage | CP Score | CP recall at 1 m | Pose recall at 5 m |
+|---|---:|---:|---:|
+| VIO | 22.85 | 0 % | 43.8 % |
+| Online | 60.75 | 40 % | 100 % |
+| Loop-corrected after the pass's first solve | 62.82 | 50 % | 100 % |
+| The pass with the revisits (submitted) | 61.09 | 40 % | 100 % |
+
+The VIO's heading drifts linearly, +13.1° over 1,011 s (0.78°/min; the VIO
+of sequence_1_20, 2_12, 3_18 and 4_11 drifts 0.14–0.32°/min), since the
+windows do not settle the gyroscope bias. The pass's bias, [3.3, 20.6,
+4.2]·10⁻⁴ rad/s, matches one fitted against the pseudo-GT ([3.6, 20.9,
+3.8]·10⁻⁴ over 120 s windows on average), and the chain leaves 1.5° of the
+heading drift. What is left are slow swings of the local scale (0.979–1.026
+in 120 s windows) and of the heading (−1.2° … +0.7°); within a window the
+error is 0.18 m. Corrected per 60 s
+window from the pseudo-GT (diagnosis only), the scale alone gives 68.69, the
+heading alone 65.82, both 96.09.
+
+Matching once more, guided by the pass's trajectory (the same band and
+revisit search), then one more solve with the revisits, started from the
+pass's result:
+
+| Matches guided by | CP Score |
+|---|---:|
+| The VIO (as in the chain; the extra solve alone) | 60.48 |
+| The pass's trajectory | **64.30** |
+| The pseudo-GT, filled in between its 5 Hz poses with the VIO (diagnosis only) | 64.53 |
+
+The band lets the VIO's drift choose matches that agree with it ([Matching
+guided by a drifting VIO](#matching-guided-by-a-drifting-vio)); the pass's
+trajectory does as well as the pseudo-GT, so better guidance gets no more
+here. The accelerometer bias moves by 0.06 m/s² (z) over the first two
+minutes, but loosening its random walk there like the gyroscope's (×10,
+decaying over 300 s) does not help (64.08).
+
+`lamaria_ba_chain.py --rematch` adds these steps by day (work/rematch, result
+ba3.tum), and the submission driver runs them by default. On the eight day
+training sequences, one GitHub Actions run (the pass, then matched again
+from the same VIO):
+
+| Sequence | The pass | Matched again |
+|---|---:|---:|
+| sequence_1_19 | 81.75 | 82.25 |
+| sequence_1_20 | 86.21 | 86.98 |
+| sequence_2_11 | 88.84 | 89.02 |
+| sequence_2_12 | 51.96 | 51.97 |
+| sequence_3_17 | 79.88 | 80.03 |
+| sequence_3_18 | 54.33 | 54.28 |
+| sequence_5_11 | 66.27 | 66.77 |
+| sequence_5_12 | 6.77 | 6.76 |
+| **Mean** | 64.50 | **64.76** |
+
+None loses more than 0.05; the gain is large only where the VIO's heading
+drifts fast, as on R_12_10cp. sequence_2_12, whose heading goes wrong in its
+first minutes, does not move.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO

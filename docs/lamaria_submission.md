@@ -116,6 +116,17 @@ stays set by the last four minutes, whose chords are 21-50 % too long either
 way. On the test set's trams seen through a door's windows (sequence_5_5,
 5_9) too few street tracks last for the filter to turn on.
 
+By day the BA chain matches the keyframes once more after its batch pass,
+guided by the pass's trajectory instead of the VIO, and solves again
+(`--ba-rematch`, on by default; `--no-ba-rematch` skips it). The matching
+band admits the matches that agree with the guide's drift, and the pass's
+heading drifts far less than the VIO's. On the eight day training sequences
+(GitHub Actions, one run, before / after): mean 64.50 / 64.76, no sequence
+down by more than 0.05; on training R_12_10cp, a fast walk along open streets
+like the Short test sequences that score lowest, 61.09 / 64.30
+([lamaria_batch_ba.md](lamaria_batch_ba.md#matching-again-after-the-pass)). It
+adds 10-20 minutes per sequence on a runner.
+
 IMU rectification is on by default
 ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md); +4.35 Score on
 average across one training sequence per non-Short track). It fetches only the

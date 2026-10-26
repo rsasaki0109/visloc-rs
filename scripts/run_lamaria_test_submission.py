@@ -105,6 +105,10 @@ On a walking track (not Moving platform) averaging more than 4 m/s over
 60 s at up to 12 m/s from 10 s), and the last starts follow the end of the
 runaway; if every start fails, the attempt that ran away least is used.
 If the BA chain still fails, the VIO trajectory is submitted.
+By day the chain then matches once more after its pass, guided by the pass's
+trajectory, and solves again (lamaria_ba_chain.py --rematch; `--no-ba-rematch`
+skips it): +0.26 on the eight day training sequences, +3.21 on R_12_10cp,
+whose VIO heading drifts most.
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
 downloading it first (scripts/http_zip.py), so a sequence needs its images'
@@ -439,6 +443,10 @@ def main() -> int:
     parser.add_argument("--ba-chain", action="store_true",
                         help="run the visual-inertial BA (scripts/lamaria_ba_chain.py) behind the VIO and "
                              "submit its trajectory")
+    parser.add_argument("--ba-rematch", action=argparse.BooleanOptionalAction, default=True,
+                        help="--ba-chain: by day, match again guided by the pass and solve again (lamaria_ba_chain.py "
+                             "--rematch; default on); with --log-dir the pass's estimate before it is kept as "
+                             "<log-dir>/<sequence>/ba2_estimate.txt")
     parser.add_argument("--ba-jobs", type=int, default=4, help="--ba-chain: processes for features, match, loops")
     parser.add_argument("--ba-threads", type=int, default=2, help="--ba-chain: threads for its solves")
     parser.add_argument("--gyro-bias-std", type=float, default=1e-7,
@@ -588,9 +596,14 @@ def main() -> int:
                     trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
                                            args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
-                                           low_light=low_light)
+                                           low_light=low_light, rematch=args.ba_rematch)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
+                before = work / "ba" / "ba2.tum"
+                if args.ba_rematch and args.log_dir and (work / "ba" / "ba3.tum").is_file() and before.is_file():
+                    (args.log_dir / seq).mkdir(parents=True, exist_ok=True)  # to score the rematch against
+                    run([python, estimate_converter, "--in-tum", before,
+                         "--out-estimate", args.log_dir / seq / "ba2_estimate.txt"], check=True)
 
             run([python, estimate_converter, "--in-tum", trajectory,
                  "--out-estimate", estimate], check=True)
