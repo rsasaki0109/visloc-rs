@@ -493,6 +493,22 @@ fn wait_for_image(path: &Path) {
     }
 }
 
+/// Reads one EuRoC camera stream's `data.csv` (for example `mav0/cam0`)
+/// without the IMU stream or the Basalt JSON inputs [`EurocSensorDataset`]
+/// needs, e.g. to localize the images of another sequence against a saved map.
+pub fn read_camera_manifest(
+    camera_dir: impl AsRef<Path>,
+) -> Result<Vec<EurocImageEntry>, EurocReaderError> {
+    let camera_dir = camera_dir.as_ref();
+    read_image_manifest(&camera_dir.join("data.csv"), camera_dir)
+}
+
+/// Decodes one EuRoC PNG into the 16-bit image the Basalt frontends consume,
+/// with the same conversion as [`EurocSensorDataset::frame`].
+pub fn read_camera_image(path: impl AsRef<Path>) -> Result<RawU16Image, EurocReaderError> {
+    read_raw_u16_png(path.as_ref())
+}
+
 fn read_raw_u16_png(path: &Path) -> Result<RawU16Image, EurocReaderError> {
     wait_for_image(path);
     let dynamic = image::open(path).map_err(|source| EurocReaderError::Image {

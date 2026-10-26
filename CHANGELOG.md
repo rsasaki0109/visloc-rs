@@ -4,6 +4,28 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **Save a VI-SLAM map and localize against it.**
+  `basalt_euroc_online_slam_demo --save-map DIR` saves the online
+  mapper's final map: keyframe poses, ORB landmarks and their
+  descriptors, as a COLMAP text model (`DIR/sparse`) with
+  `landmark_descriptors.txt`, `images.csv` and `map.json` (IMU-from-camera
+  extrinsics). The new `basalt_euroc_localize_demo` runs each image of a
+  EuRoC sequence through the mapper's own ORB frontend, matches it to the
+  map by Hamming distance, estimates the pose with P3P RANSAC, and writes
+  IMU poses in the map frame to `localization.tum`.
+  - The Double Sphere cameras are saved as COLMAP `OPENCV_FISHEYE` with
+    `k1..k4` fitted over the field of view (`fit_opencv_fisheye`; at most
+    0.0003 px from the Double Sphere projection over the EuRoC cam0
+    calibration's 57° half field of view), so the model also opens in
+    COLMAP.
+  - Library: `NfrMapper::localization_map` (`visloc-basalt`),
+    `write_landmark_descriptors_txt` (`visloc-io`),
+    `euroc::read_camera_manifest` / `read_camera_image`.
+  - Checked on synthetic data only (save, load and localize a new
+    viewpoint to under 1 mm); no EuRoC localization result yet.
+
 ## 0.3.1 - 2026-10-25
 
 Patch release: `--help` on the release binaries, fewer cameras left far off

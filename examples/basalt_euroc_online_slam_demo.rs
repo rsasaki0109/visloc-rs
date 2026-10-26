@@ -29,6 +29,13 @@
 //!   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
 //!   --out-dir target/basalt_mh01_online --optimize-every-k 100 --periodic-iterations 4
 //! ```
+//!
+//! `--save-map DIR` also saves the final map (keyframe poses, ORB landmarks
+//! and descriptors, as a COLMAP text model plus descriptor store) for
+//! `basalt_euroc_localize_demo`; see `examples/basalt_map/map_files.rs`.
+
+#[path = "basalt_map/map_files.rs"]
+mod map_files;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -68,6 +75,8 @@ struct Args {
     out_dir: PathBuf,
     /// Optional per-frame frontend tracking diagnostics CSV.
     frontend_stats_csv: Option<PathBuf>,
+    /// Save the final map for localization (`map_files` layout).
+    save_map: Option<PathBuf>,
     max_frames: Option<usize>,
     optimize_every_k: usize,
     periodic_iterations: usize,
@@ -800,6 +809,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         args.out_dir.join("timing_breakdown_online.json"),
         serde_json::to_string_pretty(&summary)?,
     )?;
+    if let Some(map_dir) = &args.save_map {
+        let mapper = online_mapper.inner();
+        let calibration = mapper
+            .calibration
+            .as_ref()
+            .ok_or("--save-map: the mapper has no calibration")?;
+        let export = mapper.localization_map()?;
+        let saved = map_files::save(
+            map_dir,
+            &export,
+            calibration,
+            mapper.feature_config.max_points,
+        )?;
+        eprintln!(
+            "saved map: images={} landmarks={} observations={} -> {}",
+            saved["images"],
+            saved["landmarks"],
+            saved["observations"],
+            map_dir.display(),
+        );
+    }
     println!("{}", serde_json::to_string_pretty(&summary)?);
     eprintln!(
         "pacing={} rtf={:.3} vio_wall={:.1}s total_wall={:.1}s max_queue_depth={} \
@@ -1070,6 +1100,7 @@ impl Args {
         let mut config = PathBuf::from("configs/basalt/euroc_config.json");
         let mut out_dir = PathBuf::from("target/basalt_euroc_online_slam_demo");
         let mut frontend_stats_csv = None;
+        let mut save_map = None;
         let mut max_frames = None;
         let mut optimize_every_k = OnlineMapperConfig::default().optimize_every_k;
         let mut periodic_iterations = OnlineMapperConfig::default().periodic_iterations;
@@ -1125,6 +1156,7 @@ impl Args {
                 "--frontend-stats-csv" => {
                     frontend_stats_csv = Some(PathBuf::from(next(&mut arguments, &option)?))
                 }
+                "--save-map" => save_map = Some(PathBuf::from(next(&mut arguments, &option)?)),
                 "--max-frames" => {
                     max_frames = Some(
                         next(&mut arguments, &option)?
@@ -1325,6 +1357,7 @@ impl Args {
             config,
             out_dir,
             frontend_stats_csv,
+            save_map,
             max_frames,
             optimize_every_k,
             periodic_iterations,
@@ -1367,7 +1400,7 @@ impl Args {
          [--periodic-iterations N] [--realtime | --as-fast-as-possible] \
          [--pipeline | --no-pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] \
          [--mapper-queue-capacity N] [--retained-marg-diagnostics] [--num-opt-iter N] \
-         [--match-top-k N] [--frontend-stats-csv <path>] \
+         [--match-top-k N] [--frontend-stats-csv <path>] [--save-map DIR] \
          [--projection-rematch] [--local-mapping] [--imu-seed-klt] \
          [--projection-host-window N] [--projection-radius PX] \
          [--loop-match-max-rot-error DEG] \
@@ -1452,6 +1485,7 @@ mod tests {
             .expect("parses");
         assert!(!args.realtime);
         assert_eq!(args.frontend_stats_csv, None);
+        assert_eq!(args.save_map, None);
         assert_eq!(
             args.optimize_every_k,
             OnlineMapperConfig::default().optimize_every_k
@@ -1531,6 +1565,23 @@ mod tests {
         let args = Args::parse(base.into_iter().chain(["--imu-seed-klt"]).map(Into::into))
             .expect("parses");
         assert!(args.imu_seed_klt);
+    }
+
+    #[test]
+    fn parser_accepts_save_map() {
+        let args = Args::parse(
+            [
+                "--euroc-dir",
+                "d",
+                "--calibration",
+                "c.json",
+                "--save-map",
+                "maps/mh01",
+            ]
+            .map(Into::into),
+        )
+        .expect("parses");
+        assert_eq!(args.save_map, Some(PathBuf::from("maps/mh01")));
     }
 
     #[test]
