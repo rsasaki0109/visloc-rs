@@ -373,6 +373,31 @@ cargo run --release --features image-io --example deep_localization_demo -- \
 | KITTI revisit scanner | `python scripts/run_kitti_deep_vo_revisit_smoke.py` | Public KITTI 00 revisit smoke (downloads start/revisit slices) |
 | Full local quality gate | `scripts/check.sh` | `fmt` + `clippy` + `test` + `doc` in one command |
 
+### Save a VI-SLAM map and localize against it
+
+The stereo-inertial SLAM demo can save its final map, and a second sequence of
+the same place can then be localized against it, image by image, without
+running SLAM again:
+
+```bash
+# 1. Map MH_01 and save the map (COLMAP text model + ORB descriptors)
+cargo run --release --example basalt_euroc_online_slam_demo -- \
+  --euroc-dir /path/to/MH_01_easy \
+  --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --out-dir target/mh01_slam --save-map target/mh01_map
+
+# 2. Localize MH_02's cam0 images against it
+cargo run --release --example basalt_euroc_localize_demo -- \
+  --map target/mh01_map --euroc-dir /path/to/MH_02_easy --out-dir target/mh02_on_mh01
+```
+
+`target/mh01_map/sparse` is an ordinary COLMAP model (the Double Sphere
+cameras are saved as fitted `OPENCV_FISHEYE`). `localization.tum` holds IMU
+poses in the map's frame, the convention of the SLAM demo's trajectories.
+This path is checked on synthetic data only so far; there is no EuRoC
+localization result yet.
+
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the
 [archived README details](docs/readme_details.md#demos).
