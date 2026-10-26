@@ -14,8 +14,8 @@ use common::*;
 use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
 use visloc_ros2::image::mono8_image;
 use visloc_ros2::msgs::{
-    DiagnosticArray, Header, Image, Imu, Int32, Odometry, PoseStamped, PoseWithCovarianceStamped,
-    Time,
+    DiagnosticArray, Header, Image, Imu, Int32, Odometry, PoseStamped, PoseWithCovariance,
+    PoseWithCovarianceStamped, TfMessage, Time,
 };
 
 /// A per-process, per-test domain id in RustDDS's usable range.
@@ -275,4 +275,128 @@ fn localize_node_publishes_pose_for_rendered_query() {
     assert!(inliers.iter().any(|&n| n >= 30), "inliers {inliers:?}");
     let status = &diagnostics.last().unwrap().status[0];
     assert!(status.values.iter().any(|kv| kv.key == "inliers"));
+}
+
+#[test]
+fn map_localize_node_publishes_map_to_odom_for_a_stationary_robot() {
+    use nalgebra::{UnitQuaternion, Vector3};
+    use visloc_core::geometry::SE3;
+
+    let domain = domain_id(3);
+    let dir =
+        std::env::temp_dir().join(format!("visloc_ros2_dds_basalt_map_{}", std::process::id()));
+    write_basalt_map(&dir);
+    let mut node = spawn_node(
+        env!("CARGO_BIN_EXE_visloc_map_localize_node"),
+        &[
+            "--map".into(),
+            dir.display().to_string(),
+            "--domain-id".into(),
+            domain.to_string(),
+            "--localize-every".into(),
+            "1".into(),
+            "--remap".into(),
+            "image=/camera/image_raw".into(),
+        ],
+    );
+
+    let mut test_node = RosNode::new(domain, "/", "map_localize_test_driver").unwrap();
+    let image_pub = test_node
+        .publisher::<Image>("/camera/image_raw", output_qos(2))
+        .unwrap();
+    let odom_pub = test_node
+        .publisher::<Odometry>("odom", output_qos(10))
+        .unwrap();
+    let tf_sub = test_node
+        .subscription::<TfMessage>("/tf", sensor_qos(10))
+        .unwrap();
+    let pose_sub = test_node
+        .subscription::<PoseWithCovarianceStamped>("map_pose", sensor_qos(10))
+        .unwrap();
+    let (tf_tx, tf_rx) = mpsc::channel();
+    spawn_receiver("tf-rx", tf_sub, move |msg: TfMessage| {
+        let _ = tf_tx.send(msg);
+    })
+    .unwrap();
+    let (pose_tx, pose_rx) = mpsc::channel();
+    spawn_receiver(
+        "map-pose-rx",
+        pose_sub,
+        move |msg: PoseWithCovarianceStamped| {
+            let _ = pose_tx.send(msg);
+        },
+    )
+    .unwrap();
+
+    // The robot stands still at this odometry pose while its camera sees the
+    // map image, i.e. the body is at the map origin: map -> odom is the
+    // inverse of the odometry pose.
+    let odom_from_body = SE3::new(
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
+        Vector3::new(1.0, 2.0, 0.0),
+    );
+    let expected = odom_from_body.inverse();
+    let image = basalt_map_image();
+    let started = Instant::now();
+    let (mut tf, mut pose) = (None, None);
+    let mut sent = 0i64;
+    while started.elapsed() < Duration::from_secs(60) && (tf.is_none() || pose.is_none()) {
+        node.assert_running();
+        let stamp = Time::from_nanos(START_NS + sent * CAMERA_PERIOD_NS);
+        publish_logged(
+            &odom_pub,
+            Odometry {
+                header: Header::new(stamp, "odom"),
+                child_frame_id: "imu_link".into(),
+                pose: PoseWithCovariance {
+                    pose: visloc_ros2::vio::ros_pose(&odom_from_body),
+                    ..PoseWithCovariance::default()
+                },
+                ..Odometry::default()
+            },
+            "odom",
+        );
+        publish_logged(
+            &image_pub,
+            mono8_image(
+                Header::new(stamp, "camera"),
+                BASALT_MAP_WIDTH as u32,
+                BASALT_MAP_HEIGHT as u32,
+                image.clone(),
+            ),
+            "image",
+        );
+        sent += 1;
+        std::thread::sleep(Duration::from_millis(250));
+        if let Some(msg) = tf_rx.try_iter().last() {
+            tf = Some(msg);
+        }
+        if let Some(msg) = pose_rx.try_iter().last() {
+            pose = Some(msg);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let tf = tf.unwrap_or_else(|| panic!("no /tf after sending {sent} frames"));
+    let transform = &tf.transforms[0];
+    assert_eq!(transform.header.frame_id, "map");
+    assert_eq!(transform.child_frame_id, "odom");
+    let t = transform.transform.translation;
+    assert!(
+        (Vector3::new(t.x, t.y, t.z) - expected.translation).norm() < 0.01,
+        "map -> odom {t:?}, expected {:?}",
+        expected.translation
+    );
+    let q = transform.transform.rotation;
+    let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q.w, q.x, q.y, q.z));
+    assert!(rotation.angle_to(&expected.rotation) < 0.01, "{rotation:?}");
+
+    let pose = pose.unwrap_or_else(|| panic!("no map_pose after sending {sent} frames"));
+    assert_eq!(pose.header.frame_id, "map");
+    let p = pose.pose.pose.position;
+    assert!(
+        p.x.abs() < 0.01 && p.y.abs() < 0.01 && p.z.abs() < 0.01,
+        "map pose {p:?}"
+    );
+    assert!(pose.pose.covariance.0[0] > 0.0);
 }

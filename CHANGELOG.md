@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`visloc_map_localize_node` (ROS 2): robot-style localization in a saved
+  SLAM map.** Run next to `visloc_vio_node`, it localizes every 5th camera
+  image against a map from `basalt_euroc_online_slam_demo --save-map`,
+  pairs each fix with the VIO odometry of the same stamp, and publishes
+  `/tf` `map -> odom` (REP-105), `map_pose` (body pose in the map, position
+  covariance 3 cm + 2.5 cm per metre since the last fix) and
+  `/diagnostics`. EuRoC MH_02 replayed over DDS against an MH_01 map: a map
+  pose for 99.8% of frames at 2.18 cm RMSE (5.6 cm max) at half speed;
+  at real time on 4 cores the VIO node drops 9.5% of frames.
+  `visloc_vision::matching::HammingMatcher` (binary descriptors as 0/1
+  floats) is now shared by the node and the localize example.
+
 - **Save a VI-SLAM map and localize against it.**
   `basalt_euroc_online_slam_demo --save-map DIR` saves the online
   mapper's final map: keyframe poses, ORB landmarks and their

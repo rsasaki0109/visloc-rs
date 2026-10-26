@@ -4,9 +4,10 @@
 //! Loads a map saved by `basalt_euroc_online_slam_demo --save-map`,
 //! subscribes `image` (the camera the map's localization uses, raw) and
 //! `odom` (`nav_msgs/Odometry` of the gravity-aligned VIO, e.g.
-//! `visloc_vio_node`), and publishes `/tf` (`map -> odom`, REP-105), `pose`
-//! (the body pose in the map, `geometry_msgs/PoseWithCovarianceStamped`) and
-//! `/diagnostics`. Run with `--help` for parameters.
+//! `visloc_vio_node`), and publishes `/tf` (`map -> odom`, REP-105),
+//! `map_pose` (the body pose in the map,
+//! `geometry_msgs/PoseWithCovarianceStamped`; not `pose`, which
+//! `visloc_vio_node` already publishes) and `/diagnostics`. Run with `--help` for parameters.
 
 use std::path::PathBuf;
 use std::process;
@@ -52,7 +53,7 @@ PARAMETERS (--name value  or  -p name:=value):
 TOPICS (remap with --remap from=to or -r from:=to):
   in : image (sensor_msgs/Image, raw), odom (nav_msgs/Odometry, gravity-aligned VIO;
        its header.frame_id and child_frame_id name the odometry and body frames)
-  out: /tf (map_frame -> odometry frame), pose (geometry_msgs/PoseWithCovarianceStamped,
+  out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
        body pose in map_frame, once anchored), /diagnostics (diagnostic_msgs/DiagnosticArray)
 ";
 
@@ -97,7 +98,7 @@ fn run() -> Result<(), String> {
     let image_topic = args.topic("image");
     let odom_topic = args.topic("odom");
     let tf_topic = args.topic("/tf");
-    let pose_topic = args.topic("pose");
+    let pose_topic = args.topic("map_pose");
     let diagnostics_topic = args.topic("/diagnostics");
     args.finish()?;
 
@@ -144,7 +145,7 @@ fn run() -> Result<(), String> {
                 }
                 let mut pose = map_pose_msg(&anchored, &map_frame, &options);
                 pose.header.stamp = msg.header.stamp;
-                publish_logged(&pose_pub, pose, "pose");
+                publish_logged(&pose_pub, pose, "map_pose");
             }
         })?;
     }

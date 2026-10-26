@@ -424,7 +424,7 @@ python -c "import visloc; print(visloc.Camera('PINHOLE', 640, 480, [500, 500, 32
 
 ### ROS 2
 
-[`ros2/visloc-ros2`](ros2/visloc-ros2/README.md) has two ROS 2 nodes built on
+[`ros2/visloc-ros2`](ros2/visloc-ros2/README.md) has three ROS 2 nodes built on
 the pure-Rust `ros2-client` (RustDDS), so building them needs no ROS install:
 
 - `visloc_vio_node` runs the Basalt stereo-inertial VIO on two
@@ -433,6 +433,10 @@ the pure-Rust `ros2-client` (RustDDS), so building them needs no ROS install:
 - `visloc_localize_node` localizes `sensor_msgs/Image` frames against a COLMAP
   map and publishes `PoseWithCovarianceStamped`, an inlier count and
   diagnostics.
+- `visloc_map_localize_node` localizes a robot in a map saved by the
+  stereo-inertial SLAM (`--save-map`): next to `visloc_vio_node` it publishes
+  `/tf` `map -> odom` and the body pose in the map. EuRoC MH_02 replayed over
+  DDS against an MH_01 map: a map pose for 99.8% of frames at 2.2 cm RMSE.
 
 ```bash
 cd ros2/visloc-ros2 && cargo build --release

@@ -205,6 +205,18 @@ removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
 
+### On a robot (ROS 2)
+
+`ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
+and `MapAnchor` next to `visloc_vio_node` and publishes `/tf` `map -> odom`
+(REP-105) and `map_pose`, with a position covariance of 3 cm + 2.5 cm per
+metre travelled since the last fix (the growth measured above). MH_02
+replayed over DDS against the MH_01 map, localizing every 5th image: a map
+pose for 99.8% of frames at 2.18 / 5.6 cm (RMSE / max) at half speed, 0.13
+cm behind the offline run because each pose is published before its own
+frame's fix is in. Details in
+[the node's README](../ros2/visloc-ros2/README.md#visloc_map_localize_node).
+
 ## Reproduce
 
 ```bash
