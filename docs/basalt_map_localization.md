@@ -16,6 +16,13 @@ localize is set mostly by how much of the query flight the map covers: from
 never saw. MH_01 against its own map localizes 98.4% and agrees with the SLAM
 trajectory to 2.4 mm (median).
 
+**With VIO** (`--vio`, [below](#anchoring-the-vio-to-the-map)), every
+frame gets a map pose once two fixes agree: MH_02 99.8% of frames at 2.0 cm
+RMSE (5.7 cm worst) localizing only every 5th image, at 0.83× real time on 4
+cores. Between rare fixes the VIO drifts; each pose comes with the time and
+distance since its last fix, and the poses within 2 m and 5 s of one are never
+more than 13 cm off on any sequence.
+
 ## Setup
 
 - **Data.** EuRoC ASL format. ETH's Research Collection rate-limited this
@@ -133,6 +140,71 @@ It barely raises the localized rate. Combined with a low inlier threshold it
 accepts wrong poses, since with fewer candidates the nearest /
 second-nearest ratio test also passes wrong matches.
 
+## Anchoring the VIO to the map
+
+Image localization gives a pose only for the images that match the map. With
+`--vio --calibration FILE --config FILE`, the Basalt stereo-inertial VIO runs
+on every frame of the query sequence and every `--localize-every`-th image is
+localized. `visloc_localization::MapAnchor` turns the accepted localizations
+(fixes) into the transform from the VIO frame to the map frame:
+
+- Both frames are gravity-aligned, so the transform is a yaw and a
+  translation, averaged over the fixes of the last 5 s.
+- It starts once two consecutive fixes agree (within 10 cm and 3°).
+- A fix is accepted only within 15 cm and 3° of where the current transform
+  puts the VIO pose, widened by 5 cm and 1° per metre the VIO travelled since
+  the last accepted fix; three agreeing rejected fixes in a row replace the
+  transform (a VIO jump).
+
+Every frame after the start gets a map pose in `trajectory_map.tum`;
+`trajectory_map.csv` adds `seconds_since_fix` and `metres_since_fix`, how
+long and how far the VIO has carried the pose since the transform's newest
+fix.
+
+### Results (`--localize-every 5`)
+
+Same maps, queries and scoring as above (fixed map→ground-truth alignment).
+"Fresh" poses are those within 2 m and 5 s of their last fix.
+
+| Query → map | Localization alone | VIO + map: frames with a pose | RMSE / max | Fresh poses: frames | RMSE / max | Speed |
+|---|---|---|---|---|---|---|
+| MH_02 → MH_01 | 81.2% | 99.8% | 2.0 / 5.7 cm | 95.6% | 1.9 / 5.3 cm | 0.83× real time |
+| MH_03 → MH_01 | 47.4% | 99.8% | 5.0 / 10.9 cm | 52.7% | 3.7 / 9.2 cm | 0.80× |
+| MH_04 → MH_01 | 4.6% | 73.1% | 23.0 / 47.1 cm | 7.1% | 5.1 / 6.7 cm | 0.88× |
+| MH_05 → MH_01 | 7.8% | 77.1% | 14.4 / 27.6 cm | 10.5% | 5.6 / 9.6 cm | 0.88× |
+| V1_02 → V1_01 | 28.5% | 93.9% | 3.5 / 6.4 cm | 59.3% | 3.1 / 6.4 cm | 1.03× |
+| V1_03 → V1_01 | 10.9% | 99.8% | 6.7 / 13.5 cm | 32.1% | 2.9 / 6.9 cm | 1.21× |
+| V2_02 → V2_01 | 20.3% | 99.8% | 4.2 / 12.6 cm | 49.0% | 3.6 / 12.6 cm | 1.20× |
+| V2_03 → V2_01 | 0.4% | never anchored | — | — | — | 1.41× |
+
+"Localization alone" localizes every image (previous section); the VIO runs
+localize every 5th. Localizing every image instead gives the same accuracy
+(MH_02: 2.0 / 5.9 cm) at half the speed; it does anchor V2_03 (77.7% of
+frames, 24.2 / 68.6 cm, its 4 fixes too few to hold the VIO, which alone
+drifts 24 cm), where every 5th image yields too few fixes for two to agree.
+Speed is the whole pipeline (image decoding, VIO, ORB extraction,
+localization) on the 4-core machine; matching against the larger MH_01 map
+is the slower part.
+
+**Error grows with the distance since the last fix.** Pooled over all seven
+anchored queries:
+
+| VIO travel since the last fix | Share of poses | RMSE | 95th percentile | > 25 cm off |
+|---|---|---|---|---|
+| 0–0.5 m | 39.9% | 2.7 cm | 5.4 cm | 0 |
+| 0.5–2 m | 21.2% | 5.1 cm | 8.9 cm | 0 |
+| 2–5 m | 18.5% | 8.0 cm | 15.8 cm | 0.6% |
+| 5–10 m | 13.0% | 11.8 cm | 22.9 cm | 1.5% |
+| > 10 m | 7.4% | 27.0 cm | 44.7 cm | 37% |
+
+Where the map covers the flight (MH_02, MH_03, V1_02, V1_03, V2_02) fixes
+keep coming and every pose stays within 13.5 cm. Where it barely does
+(MH_04, MH_05, V2_03) the VIO carries the pose for tens of metres and errors
+reach decimetres. Keeping only fresh poses (within 2 m and 5 s of a fix)
+removes them: no fresh pose is more than 12.6 cm off on any sequence, at
+either cadence. The time limit matters for V2_03, whose VIO drifts quickly
+even over short distances.
+
 ## Reproduce
 
 ```bash
@@ -165,11 +237,30 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
 `--mode direct --reference runs/mh01_slam/trajectory_online.tum` compares a
 localization with the SLAM trajectory in the map frame, without alignment.
 
+VIO anchored to the map, scored the same way:
+
+```bash
+target/release/examples/basalt_euroc_localize_demo \
+  --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_vio \
+  --vio --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --localize-every 5
+
+python3 scripts/evaluate_map_localization.py --mode fixed \
+  --estimate runs/mh02_vio/trajectory_map.tum \
+  --reference $D/MH_02_easy/mav0/state_groundtruth_estimate0/data.csv \
+  --align-estimate runs/mh01_slam/trajectory_online.tum \
+  --align-ground-truth $D/MH_01_easy/mav0/state_groundtruth_estimate0/data.csv \
+  --queries 3040
+```
+
 ## Limits
 
 - One map per environment, built from its "easy" flight; a map merged from
   several flights would cover more of each room (MH_04/MH_05 especially).
-- cam0 only; each image is localized independently (no tracking or motion
-  model between frames).
+- cam0 only. Without `--vio` each image is localized independently; with it
+  the anchor is a yaw + translation offset averaged over 5 s, not a joint
+  optimization of VIO and map, so its error grows between fixes as measured
+  above.
 - The online mapper's background optimization depends on thread timing, so
   a rerun may build a slightly different map.

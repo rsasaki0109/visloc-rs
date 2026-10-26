@@ -46,7 +46,10 @@
 //! - `per_frame.csv`: per localization attempt, success, matches, inliers,
 //!   latency and, with `--vio`, what the anchor did with the fix.
 //! - With `--vio`: `trajectory_map.tum`, every anchored frame's IMU pose in
-//!   the map frame; `trajectory_vio.tum`, the raw VIO in its own frame.
+//!   the map frame; `trajectory_map.csv`, the same poses with the time and
+//!   VIO distance since the anchor's newest fix (the fused error grows with
+//!   them, so use them to judge a pose); `trajectory_vio.tum`, the raw VIO in
+//!   its own frame.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -514,6 +517,8 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let (mut fixes_tum, mut map_tum, mut vio_tum) =
         (header.to_owned(), header.to_owned(), header.to_owned());
     let mut csv = String::from(CSV_HEADER);
+    let mut map_csv =
+        String::from("timestamp_ns,tx,ty,tz,qx,qy,qz,qw,seconds_since_fix,metres_since_fix\n");
     let mut latencies = Vec::new();
     let (mut attempts, mut localized, mut anchored) = (0_usize, 0_usize, 0_usize);
     let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
@@ -558,8 +563,24 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
             *outcomes.entry(outcome).or_default() += 1;
             csv_row(&mut csv, timestamp_ns, &attempt, outcome);
         }
-        if let Some(map_from_imu) = anchor.map_from_body(&odom_from_imu) {
+        if let (Some(map_from_imu), Some((fix_ns, fix_position))) =
+            (anchor.map_from_body(&odom_from_imu), anchor.last_fix())
+        {
             map_tum.push_str(&tum_line(timestamp_ns, &map_from_imu));
+            let (t, q) = (map_from_imu.translation, map_from_imu.rotation.quaternion());
+            writeln!(
+                map_csv,
+                "{timestamp_ns},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.3},{:.3}",
+                t.x,
+                t.y,
+                t.z,
+                q.i,
+                q.j,
+                q.k,
+                q.w,
+                (timestamp_ns - fix_ns) as f64 * 1e-9,
+                (odom_from_imu.translation - fix_position).norm(),
+            )?;
             anchored += 1;
         }
     }
@@ -568,6 +589,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     fs::create_dir_all(&args.out_dir)?;
     fs::write(args.out_dir.join("localization.tum"), fixes_tum)?;
     fs::write(args.out_dir.join("trajectory_map.tum"), map_tum)?;
+    fs::write(args.out_dir.join("trajectory_map.csv"), map_csv)?;
     fs::write(args.out_dir.join("trajectory_vio.tum"), vio_tum)?;
     fs::write(args.out_dir.join("per_frame.csv"), csv)?;
     println!(

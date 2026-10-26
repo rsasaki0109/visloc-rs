@@ -185,6 +185,16 @@ impl MapAnchor {
         self.offset.as_ref().map(Offset::se3)
     }
 
+    /// Timestamp and odometry position of the newest fix the offset uses.
+    /// The error of [`Self::map_from_body`] grows with the odometry travel
+    /// (and time) since this fix, so callers can use it to judge a pose.
+    pub fn last_fix(&self) -> Option<(i64, Vector3<f64>)> {
+        self.offset?;
+        self.window
+            .back()
+            .map(|fix| (fix.timestamp_ns, fix.odom_position))
+    }
+
     /// An odometry pose expressed in the map frame, once anchored.
     pub fn map_from_body(&self, odom_from_body: &SE3) -> Option<SE3> {
         self.map_from_odom()
@@ -338,6 +348,7 @@ mod tests {
             fix_at(&mut anchor, 0, &truth(), Vector3::zeros()),
             FixOutcome::Pending
         );
+        assert_eq!(anchor.last_fix(), None);
         assert_eq!(
             fix_at(&mut anchor, 1, &truth(), Vector3::zeros()),
             FixOutcome::Initialized
@@ -345,6 +356,10 @@ mod tests {
         assert_eq!(
             fix_at(&mut anchor, 2, &truth(), Vector3::zeros()),
             FixOutcome::Accepted
+        );
+        assert_eq!(
+            anchor.last_fix(),
+            Some((2 * SECOND / 10, odom(2).translation))
         );
         for index in [3, 10, 40] {
             let pose = anchor.map_from_body(&odom(index)).expect("anchored");

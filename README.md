@@ -398,7 +398,10 @@ poses in the map's frame, the convention of the SLAM demo's trajectories.
 Against an MH_01 map, MH_02 (a different flight) localizes 81.2% of its
 images at 1.8 cm RMSE against ground truth. Over eight cross-session EuRoC
 queries no accepted pose is more than 25 cm off; how many images localize
-depends on how much of the flight the map covers. See the
+depends on how much of the flight the map covers. Add `--vio --calibration
+FILE --config FILE` to run the stereo-inertial VIO alongside and anchor it to
+the map: every frame then gets a map pose (MH_02: 99.8% at 2.0 cm RMSE,
+localizing every 5th image). See the
 [EuRoC map-localization results](docs/basalt_map_localization.md).
 
 More runnable demos and the full index are in the
