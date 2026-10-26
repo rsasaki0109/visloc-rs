@@ -94,7 +94,7 @@ sequences only (test scores are only obtainable by submission).
 | M2 | Medium/Long consistency | loop-closure/mapper holds at km scale; mean Short/Medium/Long Score clearly above 27.7; no >2 km drift blow-up | not started |
 | M3 | Low-light robustness | low-light training sequences score comparably to Short; no tracking loss | not started |
 | M4 | Moving-platform handling | moving-platform training sequences tracked without divergence | not started |
-| M5 | Full test submission | all 63 sequences processed at ≥1× RT, `slam/<seq>.txt` built, submitted within the 24 h rate limit | not started |
+| M5 | Full test submission | all 63 sequences processed at ≥1× RT, `slam/<seq>.txt` built, submitted within the 24 h rate limit | **done**: three submissions on GitHub Actions, mean 51.5 → 52.9, fourth on the leaderboard ([lamaria_test_results.md](lamaria_test_results.md)) |
 
 ## 4. Levers (a-priori, ranked)
 
