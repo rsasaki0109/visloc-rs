@@ -59,7 +59,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use visloc_basalt::euroc::{read_camera_image, read_camera_manifest};
 use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
@@ -70,88 +69,12 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationResult, QueryImage};
 use visloc_rs::localization::{FixOutcome, MapAnchor, MapAnchorConfig};
+use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_rs::{
-    AllLandmarksSelector, DescriptorMatch, LocalizationConfig, LocalizationPipeline, Matcher,
-    PnPRansac, RadiusLandmarkSelector,
+    AllLandmarksSelector, LocalizationConfig, LocalizationPipeline, PnPRansac,
+    RadiusLandmarkSelector,
 };
-
-/// Brute-force Hamming matcher over binary descriptors stored as `0.0`/`1.0`
-/// floats (any value `>= 0.5` is a set bit). For such descriptors squared L2
-/// distance equals Hamming distance, but packing them to 256-bit words and
-/// counting bits is far faster than the float kernel.
-#[derive(Debug, Clone)]
-struct HammingMatcher {
-    /// Largest accepted Hamming distance.
-    max_distance: u32,
-    /// Accept only when `best < ratio * second_best`.
-    ratio: Option<f32>,
-}
-
-fn pack_bits(descriptor: &[f32]) -> Vec<u64> {
-    let mut words = vec![0_u64; descriptor.len().div_ceil(64)];
-    for (bit, value) in descriptor.iter().enumerate() {
-        if *value >= 0.5 {
-            words[bit / 64] |= 1 << (bit % 64);
-        }
-    }
-    words
-}
-
-impl Matcher for HammingMatcher {
-    fn match_descriptors(&self, query: &[Vec<f32>], train: &[Vec<f32>]) -> Vec<DescriptorMatch> {
-        let Some(dimension) = query.first().map(Vec::len) else {
-            return Vec::new();
-        };
-        let train_bits = train
-            .iter()
-            .map(|descriptor| (descriptor.len() == dimension).then(|| pack_bits(descriptor)))
-            .collect::<Vec<_>>();
-        query
-            .par_iter()
-            .enumerate()
-            .filter_map(|(query_index, descriptor)| {
-                if descriptor.len() != dimension {
-                    return None;
-                }
-                let bits = pack_bits(descriptor);
-                let (mut best, mut second) = ((u32::MAX, 0_usize), u32::MAX);
-                for (train_index, train) in train_bits.iter().enumerate() {
-                    let Some(train) = train else { continue };
-                    let distance = bits
-                        .iter()
-                        .zip(train)
-                        .map(|(a, b)| (a ^ b).count_ones())
-                        .sum::<u32>();
-                    if distance < best.0 {
-                        second = best.0;
-                        best = (distance, train_index);
-                    } else if distance < second {
-                        second = distance;
-                    }
-                }
-                let (distance, train_index) = best;
-                if distance > self.max_distance {
-                    return None;
-                }
-                let second = (second != u32::MAX).then_some(second as f32);
-                if let (Some(ratio), Some(second)) = (self.ratio, second) {
-                    if distance as f32 >= ratio * second {
-                        return None;
-                    }
-                }
-                Some(DescriptorMatch {
-                    query_index,
-                    train_index,
-                    distance: distance as f32,
-                    second_best_distance: second,
-                    ratio: second.map(|second| distance as f32 / second.max(1.0)),
-                    confidence: None,
-                })
-            })
-            .collect()
-    }
-}
 
 type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
 
@@ -684,25 +607,6 @@ mod tests {
             state ^= state << 17;
             state as u8
         })
-    }
-
-    #[test]
-    fn hamming_matcher_applies_distance_cap_and_ratio() {
-        let unpack = |bits: &[u8; 32]| orb_descriptor_to_f32(bits);
-        let train = (0..4)
-            .map(|seed| unpack(&descriptor(seed)))
-            .collect::<Vec<_>>();
-        let mut near = descriptor(2);
-        near[0] ^= 0b0000_0111;
-        let query = vec![unpack(&near), unpack(&descriptor(99))];
-        let matcher = HammingMatcher {
-            max_distance: 70,
-            ratio: Some(0.8),
-        };
-        let matches = matcher.match_descriptors(&query, &train);
-        assert_eq!(matches.len(), 1);
-        assert_eq!((matches[0].query_index, matches[0].train_index), (0, 2));
-        assert_eq!(matches[0].distance, 3.0);
     }
 
     fn euroc_calibration() -> BasaltCalibration {
