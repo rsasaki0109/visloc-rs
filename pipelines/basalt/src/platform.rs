@@ -63,6 +63,12 @@ pub struct PlatformParams {
     pub evidence_frames: usize,
     pub evidence_on: usize,
     pub evidence_off: usize,
+    /// A ride ends only when the steps come back, not when the evidence fades.
+    pub hold: bool,
+    /// During a ride, translation inliers join the street from this many on.
+    pub ride_min_inliers: usize,
+    /// During a ride, the cabin stays out even below [`MIN_PASSED`].
+    pub strict: bool,
 }
 
 impl Default for PlatformParams {
@@ -76,6 +82,9 @@ impl Default for PlatformParams {
             evidence_frames: EVIDENCE_FRAMES,
             evidence_on: EVIDENCE_ON,
             evidence_off: EVIDENCE_OFF,
+            hold: false,
+            ride_min_inliers: usize::MAX,
+            strict: false,
         }
     }
 }
@@ -103,6 +112,9 @@ impl PlatformParams {
                 "evidence_frames" => p.evidence_frames = v as usize,
                 "evidence_on" => p.evidence_on = v as usize,
                 "evidence_off" => p.evidence_off = v as usize,
+                "hold" => p.hold = v != 0.0,
+                "ride_min_inliers" => p.ride_min_inliers = v as usize,
+                "strict" => p.strict = v != 0.0,
                 _ => {}
             }
         }
@@ -220,7 +232,7 @@ impl PlatformFilter {
         if !self.ride && quiet && count >= self.p.evidence_on {
             self.ride = true;
             self.stats.rides += 1;
-        } else if self.ride && (!quiet || count <= self.p.evidence_off) {
+        } else if self.ride && (!quiet || (!self.p.hold && count <= self.p.evidence_off)) {
             self.ride = false;
         }
         if self.log {
@@ -242,7 +254,7 @@ impl PlatformFilter {
                 .iter()
                 .filter(|o| self.street.contains(&o.track_id))
                 .count();
-            if passed >= MIN_PASSED {
+            if passed >= MIN_PASSED || self.p.strict {
                 self.stats.ride_frames += 1;
                 let before = observations.len();
                 observations.retain(|o| self.street.contains(&o.track_id));
@@ -362,7 +374,7 @@ impl PlatformFilter {
         }
         let evidence = best.len() >= self.p.min_inliers
             && best.len() as f64 >= self.p.min_inlier_share * evaluated as f64;
-        if evidence {
+        if evidence || (self.ride && best.len() >= self.p.ride_min_inliers) {
             for &i in &best {
                 self.street.insert(planes[i].0);
             }
