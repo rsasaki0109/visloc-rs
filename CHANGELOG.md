@@ -23,8 +23,11 @@ All notable changes to `visloc-rs` will be documented here.
   - Library: `NfrMapper::localization_map` (`visloc-basalt`),
     `write_landmark_descriptors_txt` (`visloc-io`),
     `euroc::read_camera_manifest` / `read_camera_image`.
-  - Checked on synthetic data only (save, load and localize a new
-    viewpoint to under 1 mm); no EuRoC localization result yet.
+  - EuRoC: against an MH_01 map, MH_02 localizes 87.4% of its images at
+    2.0 cm RMSE against ground truth (94.1% at 2.2 cm with
+    `--min-inliers 12`), MH_01 itself 99.6% at the map's own 1.6 cm;
+    `docs/basalt_map_localization.md`, scored by the new
+    `scripts/evaluate_map_localization.py`.
 
 ## 0.3.1 - 2026-10-25
 
