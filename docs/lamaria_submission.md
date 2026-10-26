@@ -113,8 +113,21 @@ Actions, same commit, filter off / on): sequence_5_11 60.29 / **66.38**,
 sequence_5_12 **7.41** / 5.98. On sequence_5_12 the chord across the tram
 (CPs at 18 s and 208 s) comes out at 0.59 / **0.95** of the survey; its score
 stays set by the last four minutes, whose chords are 21-50 % too long either
-way. On the test set's trams seen through a door's windows (sequence_5_5,
-5_9) too few street tracks last for the filter to turn on.
+way.
+
+On the test set's trams seen through a door's windows the street is often in
+cam1's view, and the default VIO tracks cam0's features only: on
+sequence_5_9 the filter kept the cabin out for 499 of the ride's ~1,900
+frames and the submitted trajectory has no ride. With both cameras' features
+(`MULTICAM`, `--platform-multicam`, on by default on the platform tracks) it
+keeps it out for 1,283 frames on a window around the ride, and after the BA
+chain the 5.2-7.0 min ride covers 450 m (chord 332 m) instead of 142 m (91
+m). sequence_5_5 and 5_6 do not change: through their door windows too few
+street tracks last even with both cameras (sequence_5_5: 29 m over its
+90 s ride), and holding the ride until the steps come back adds motion
+after it that is not there. On the training sequences (GitHub Actions,
+before / after): sequence_5_11 66.77 / 65.94, sequence_5_12 6.76 / 6.27,
+within a rerun's spread.
 
 By day the BA chain matches the keyframes once more after its batch pass,
 guided by the pass's trajectory instead of the VIO, and solves again
