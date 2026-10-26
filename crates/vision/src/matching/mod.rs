@@ -1,7 +1,9 @@
+mod hamming;
 pub mod ivf;
 pub mod mutual_softmax;
 mod quantized;
 
+pub use hamming::HammingMatcher;
 pub use ivf::{IvfConfig, IvfMatcher};
 pub use mutual_softmax::{MutualSoftmaxConfig, MutualSoftmaxMatcher};
 
