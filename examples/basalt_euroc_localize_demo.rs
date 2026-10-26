@@ -24,12 +24,32 @@
 //!   --map target/mh01_map --euroc-dir /data/MH_02_easy --out-dir target/mh02_on_mh01
 //! ```
 //!
+//! With `--vio --calibration FILE --config FILE`, the stereo-inertial Basalt
+//! VIO also runs on the sequence, and every `--localize-every`-th image is
+//! localized. Accepted fixes anchor the VIO to the map
+//! (`visloc_localization::MapAnchor`: a gravity-aligned yaw + translation
+//! offset, gated against outliers), so every frame gets a map-frame pose once
+//! the anchor is set, including the frames the map does not localize.
+//!
+//! ```text
+//! cargo run --release --example basalt_euroc_localize_demo -- \
+//!   --map target/mh01_map --euroc-dir /data/MH_03_medium --out-dir target/mh03_vio \
+//!   --vio --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+//!   --config configs/basalt/variants/official_euroc_ds/euroc_config.json
+//! ```
+//!
 //! Outputs, under `--out-dir`:
 //!
 //! - `localization.tum`: IMU poses of the localized images in the map's world
 //!   frame, `timestamp tx ty tz qx qy qz qw` with the image timestamp, the
 //!   convention of the SLAM demo's `trajectory_*.tum`.
-//! - `per_frame.csv`: per image, success, matches, inliers and latency.
+//! - `per_frame.csv`: per localization attempt, success, matches, inliers,
+//!   latency and, with `--vio`, what the anchor did with the fix.
+//! - With `--vio`: `trajectory_map.tum`, every anchored frame's IMU pose in
+//!   the map frame; `trajectory_map.csv`, the same poses with the time and
+//!   VIO distance since the anchor's newest fix (the fused error grows with
+//!   them, so use them to judge a pose); `trajectory_vio.tum`, the raw VIO in
+//!   its own frame.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -46,8 +66,10 @@ use visloc_basalt::mapper::{
     orb_descriptor_to_f32,
 };
 use visloc_basalt::pyramid::RawU16Image;
+use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationResult, QueryImage};
+use visloc_rs::localization::{FixOutcome, MapAnchor, MapAnchorConfig};
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_rs::{
     AllLandmarksSelector, DescriptorMatch, LocalizationConfig, LocalizationPipeline, Matcher,
@@ -148,6 +170,12 @@ struct Args {
     reprojection_px: f64,
     ransac_iterations: usize,
     prior_radius_m: Option<f64>,
+    /// Run the Basalt VIO alongside and anchor it to the map.
+    vio: bool,
+    calibration: Option<PathBuf>,
+    config: Option<PathBuf>,
+    /// With `--vio`, localize every N-th frame.
+    localize_every: usize,
 }
 
 impl Args {
@@ -155,7 +183,8 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
-         [--prior-radius-m M]"
+         [--prior-radius-m M] \
+         [--vio --calibration FILE --config FILE [--localize-every N]]"
             .into()
     }
 
@@ -181,6 +210,10 @@ impl Args {
             reprojection_px: 3.0,
             ransac_iterations: 1000,
             prior_radius_m: None,
+            vio: false,
+            calibration: None,
+            config: None,
+            localize_every: 1,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -216,6 +249,10 @@ impl Args {
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
+                "--vio" => args.vio = true,
+                "--calibration" => args.calibration = Some(PathBuf::from(value()?)),
+                "--config" => args.config = Some(PathBuf::from(value()?)),
+                "--localize-every" => args.localize_every = number(&option, value()?)?,
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -224,6 +261,19 @@ impl Args {
             euroc_dir.ok_or_else(|| format!("--euroc-dir is required\n\n{}", Self::usage()))?;
         if args.stride == 0 {
             return Err("--stride must be positive".into());
+        }
+        if args.vio {
+            if args.calibration.is_none() || args.config.is_none() {
+                return Err("--vio needs --calibration and --config".into());
+            }
+            if args.stride != 1 {
+                return Err("--vio runs on every frame; use --localize-every, not --stride".into());
+            }
+            if args.localize_every == 0 {
+                return Err("--localize-every must be positive".into());
+            }
+        } else if args.localize_every != 1 || args.calibration.is_some() || args.config.is_some() {
+            return Err("--localize-every, --calibration and --config need --vio".into());
         }
         Ok(args)
     }
@@ -290,28 +340,128 @@ fn tum_line(timestamp_ns: i64, world_from_imu: &SE3) -> String {
     )
 }
 
-fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let saved = map_files::load(&args.map)?;
-    let camera = saved
-        .map
-        .cameras
-        .get(&localization_camera_id(args.camera))
-        .cloned()
-        .ok_or_else(|| format!("camera {} is not in the map", args.camera))?;
-    let imu_from_camera = saved
-        .imu_from_camera
-        .get(usize::from(args.camera))
-        .cloned()
-        .ok_or_else(|| format!("map.json has no extrinsics for camera {}", args.camera))?;
-    let camera_from_imu = imu_from_camera.inverse();
-    let max_points = args.max_points.unwrap_or(saved.max_points);
-    eprintln!(
-        "map: images={} landmarks={} descriptors={}",
-        saved.map.keyframes.len(),
-        saved.map.landmarks.len(),
-        saved.descriptors.len()
-    );
+/// One localization attempt on one image.
+struct Attempt {
+    result: LocalizationResult,
+    used_prior: bool,
+    keypoints: usize,
+    latency_ms: f64,
+    /// The localized IMU pose in the map frame, when accepted.
+    world_from_imu: Option<SE3>,
+}
 
+/// The saved map plus everything needed to localize one image against it.
+struct Localizer {
+    map: map_files::SavedMap,
+    camera: Camera,
+    camera_from_imu: SE3,
+    max_points: usize,
+    pipeline: Pipeline,
+    prior_radius_m: Option<f64>,
+    previous: Option<Pose>,
+}
+
+impl Localizer {
+    fn load(args: &Args) -> Result<Self, Box<dyn std::error::Error>> {
+        let map = map_files::load(&args.map)?;
+        let camera = map
+            .map
+            .cameras
+            .get(&localization_camera_id(args.camera))
+            .cloned()
+            .ok_or_else(|| format!("camera {} is not in the map", args.camera))?;
+        let imu_from_camera = map
+            .imu_from_camera
+            .get(usize::from(args.camera))
+            .cloned()
+            .ok_or_else(|| format!("map.json has no extrinsics for camera {}", args.camera))?;
+        eprintln!(
+            "map: images={} landmarks={} descriptors={}",
+            map.map.keyframes.len(),
+            map.map.landmarks.len(),
+            map.descriptors.len()
+        );
+        Ok(Self {
+            max_points: args.max_points.unwrap_or(map.max_points),
+            map,
+            camera,
+            camera_from_imu: imu_from_camera.inverse(),
+            pipeline: pipeline(args),
+            prior_radius_m: args.prior_radius_m,
+            previous: None,
+        })
+    }
+
+    fn localize(&mut self, image: &RawU16Image) -> Result<Attempt, Box<dyn std::error::Error>> {
+        let started = Instant::now();
+        let query = query_image(image, &self.camera, self.max_points)?;
+        let prior_result = self
+            .previous
+            .as_ref()
+            .zip(self.prior_radius_m)
+            .map(|(pose, radius)| {
+                self.pipeline
+                    .localize_with_candidate_selector_and_descriptor_store(
+                        &query,
+                        &self.map.map,
+                        &self.map.descriptors,
+                        RadiusLandmarkSelector::new(pose.camera_center_world(), radius),
+                    )
+            });
+        let used_prior = prior_result.as_ref().is_some_and(accepted);
+        let result = match prior_result {
+            Some(result) if used_prior => result,
+            _ => self.pipeline.localize_with_descriptor_store(
+                &query,
+                &self.map.map,
+                &self.map.descriptors,
+            ),
+        };
+        let latency_ms = started.elapsed().as_secs_f64() * 1e3;
+        let success = accepted(&result);
+        self.previous = success.then(|| result.pose.clone()).flatten();
+        let world_from_imu = self
+            .previous
+            .as_ref()
+            .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
+        Ok(Attempt {
+            keypoints: query.keypoints.len(),
+            result,
+            used_prior,
+            latency_ms,
+            world_from_imu,
+        })
+    }
+}
+
+const CSV_HEADER: &str =
+    "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms,anchor\n";
+
+fn csv_row(csv: &mut String, timestamp_ns: i64, attempt: &Attempt, anchor: &str) {
+    let _ = writeln!(
+        csv,
+        "{},{},{},{},{},{},{:.4},{:.2},{anchor}",
+        timestamp_ns,
+        attempt.world_from_imu.is_some(),
+        attempt.used_prior,
+        attempt.keypoints,
+        attempt.result.match_count,
+        attempt.result.inlier_count,
+        attempt.result.inlier_ratio,
+        attempt.latency_ms
+    );
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values.get(values.len() / 2).copied().unwrap_or(0.0)
+}
+
+fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let mut localizer = Localizer::load(args)?;
+    if args.vio {
+        return run_vio(args, &mut localizer);
+    }
     let camera_dir = args
         .euroc_dir
         .join("mav0")
@@ -321,67 +471,131 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         .step_by(args.stride)
         .take(args.max_frames.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
-    let pipeline = pipeline(args);
 
     let mut tum = String::from("# timestamp tx ty tz qx qy qz qw\n");
-    let mut csv = String::from(
-        "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms\n",
-    );
-    let mut previous: Option<Pose> = None;
+    let mut csv = String::from(CSV_HEADER);
     let mut latencies = Vec::with_capacity(images.len());
     let mut localized = 0_usize;
     for entry in &images {
-        let image = read_camera_image(&entry.path)?;
-        let started = Instant::now();
-        let query = query_image(&image, &camera, max_points)?;
-        let prior_result = previous
-            .as_ref()
-            .zip(args.prior_radius_m)
-            .map(|(pose, radius)| {
-                pipeline.localize_with_candidate_selector_and_descriptor_store(
-                    &query,
-                    &saved.map,
-                    &saved.descriptors,
-                    RadiusLandmarkSelector::new(pose.camera_center_world(), radius),
-                )
-            });
-        let used_prior = prior_result.as_ref().is_some_and(accepted);
-        let result = match prior_result {
-            Some(result) if used_prior => result,
-            _ => pipeline.localize_with_descriptor_store(&query, &saved.map, &saved.descriptors),
-        };
-        let latency_ms = started.elapsed().as_secs_f64() * 1e3;
-        latencies.push(latency_ms);
-
-        let success = accepted(&result);
-        if let (true, Some(pose)) = (success, result.pose.as_ref()) {
-            let world_from_imu = pose.camera_to_world().compose(&camera_from_imu);
-            tum.push_str(&tum_line(entry.timestamp_ns, &world_from_imu));
+        let attempt = localizer.localize(&read_camera_image(&entry.path)?)?;
+        latencies.push(attempt.latency_ms);
+        if let Some(world_from_imu) = &attempt.world_from_imu {
+            tum.push_str(&tum_line(entry.timestamp_ns, world_from_imu));
             localized += 1;
         }
-        previous = success.then(|| result.pose.clone()).flatten();
-        writeln!(
-            csv,
-            "{},{},{},{},{},{},{:.4},{:.2}",
-            entry.timestamp_ns,
-            success,
-            used_prior,
-            query.keypoints.len(),
-            result.match_count,
-            result.inlier_count,
-            result.inlier_ratio,
-            latency_ms
-        )?;
+        csv_row(&mut csv, entry.timestamp_ns, &attempt, "-");
     }
 
     fs::create_dir_all(&args.out_dir)?;
     fs::write(args.out_dir.join("localization.tum"), tum)?;
     fs::write(args.out_dir.join("per_frame.csv"), csv)?;
-    latencies.sort_by(f64::total_cmp);
-    let median_latency_ms = latencies.get(latencies.len() / 2).copied().unwrap_or(0.0);
     println!(
-        "localized {localized}/{} images (median {median_latency_ms:.1} ms/image) -> {}",
+        "localized {localized}/{} images (median {:.1} ms/image) -> {}",
         images.len(),
+        median(latencies),
+        args.out_dir.display()
+    );
+    Ok(())
+}
+
+/// Runs the Basalt VIO on every frame and anchors it to the map with the
+/// fixes from every `--localize-every`-th frame.
+fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::error::Error>> {
+    let calibration = args.calibration.as_ref().expect("checked by Args::parse");
+    let config = args.config.as_ref().expect("checked by Args::parse");
+    let dataset = EurocSensorDataset::open(&args.euroc_dir, calibration, config)?;
+    let mut adapter =
+        BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
+    adapter.estimator.set_lean_marg_data(true);
+    let mut anchor = MapAnchor::new(MapAnchorConfig::default());
+    let frames = args
+        .max_frames
+        .unwrap_or(usize::MAX)
+        .min(dataset.frame_count());
+
+    let header = "# timestamp tx ty tz qx qy qz qw\n";
+    let (mut fixes_tum, mut map_tum, mut vio_tum) =
+        (header.to_owned(), header.to_owned(), header.to_owned());
+    let mut csv = String::from(CSV_HEADER);
+    let mut map_csv =
+        String::from("timestamp_ns,tx,ty,tz,qx,qy,qz,qw,seconds_since_fix,metres_since_fix\n");
+    let mut latencies = Vec::new();
+    let (mut attempts, mut localized, mut anchored) = (0_usize, 0_usize, 0_usize);
+    let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
+    let started = Instant::now();
+    for index in 0..frames {
+        let frame = dataset.frame(index)?;
+        let timestamp_ns = frame.timestamp_ns;
+        let attempt = if index % args.localize_every == 0 {
+            let image = match args.camera {
+                0 => Some(&frame.cam0),
+                _ => frame.cam1.as_ref(),
+            }
+            .ok_or("this frame has no image for --camera")?;
+            Some(localizer.localize(image)?)
+        } else {
+            None
+        };
+        let odom_from_imu = adapter
+            .process_without_marg_data_no_trace(frame)?
+            .estimator
+            .state
+            .imu_to_world;
+        vio_tum.push_str(&tum_line(timestamp_ns, &odom_from_imu));
+
+        if let Some(attempt) = attempt {
+            attempts += 1;
+            latencies.push(attempt.latency_ms);
+            let outcome = match &attempt.world_from_imu {
+                Some(map_from_imu) => {
+                    localized += 1;
+                    fixes_tum.push_str(&tum_line(timestamp_ns, map_from_imu));
+                    match anchor.add_fix(timestamp_ns, map_from_imu, &odom_from_imu) {
+                        FixOutcome::Pending => "pending",
+                        FixOutcome::Initialized => "initialized",
+                        FixOutcome::Accepted => "accepted",
+                        FixOutcome::Rejected => "rejected",
+                        FixOutcome::Reanchored => "reanchored",
+                    }
+                }
+                None => "-",
+            };
+            *outcomes.entry(outcome).or_default() += 1;
+            csv_row(&mut csv, timestamp_ns, &attempt, outcome);
+        }
+        if let (Some(map_from_imu), Some((fix_ns, fix_position))) =
+            (anchor.map_from_body(&odom_from_imu), anchor.last_fix())
+        {
+            map_tum.push_str(&tum_line(timestamp_ns, &map_from_imu));
+            let (t, q) = (map_from_imu.translation, map_from_imu.rotation.quaternion());
+            writeln!(
+                map_csv,
+                "{timestamp_ns},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.3},{:.3}",
+                t.x,
+                t.y,
+                t.z,
+                q.i,
+                q.j,
+                q.k,
+                q.w,
+                (timestamp_ns - fix_ns) as f64 * 1e-9,
+                (odom_from_imu.translation - fix_position).norm(),
+            )?;
+            anchored += 1;
+        }
+    }
+    let wall_s = started.elapsed().as_secs_f64();
+
+    fs::create_dir_all(&args.out_dir)?;
+    fs::write(args.out_dir.join("localization.tum"), fixes_tum)?;
+    fs::write(args.out_dir.join("trajectory_map.tum"), map_tum)?;
+    fs::write(args.out_dir.join("trajectory_map.csv"), map_csv)?;
+    fs::write(args.out_dir.join("trajectory_vio.tum"), vio_tum)?;
+    fs::write(args.out_dir.join("per_frame.csv"), csv)?;
+    println!(
+        "frames {frames}, localized {localized}/{attempts} attempts (median {:.1} ms), \
+         anchored {anchored}/{frames} frames, fixes {outcomes:?}, {wall_s:.1} s -> {}",
+        median(latencies),
         args.out_dir.display()
     );
     Ok(())
@@ -441,6 +655,24 @@ mod tests {
         assert_eq!(args.prior_radius_m, Some(4.0));
         assert_eq!(args.camera, 1);
         assert_eq!(args.min_inliers, 30);
+    }
+
+    #[test]
+    fn parser_checks_the_vio_options() {
+        let base = ["--map", "m", "--euroc-dir", "d"];
+        let with = |extra: &[&str]| parse(&base.iter().chain(extra).copied().collect::<Vec<_>>());
+        assert!(with(&["--vio"]).is_err());
+        assert!(with(&["--vio", "--calibration", "c.json"]).is_err());
+        assert!(with(&["--localize-every", "5"]).is_err());
+        assert!(with(&["--calibration", "c.json"]).is_err());
+        let vio = ["--vio", "--calibration", "c.json", "--config", "k.json"];
+        assert!(with(&[&vio[..], &["--stride", "2"]].concat()).is_err());
+        assert!(with(&[&vio[..], &["--localize-every", "0"]].concat()).is_err());
+        let args = with(&[&vio[..], &["--localize-every", "5"]].concat()).expect("parses");
+        assert!(args.vio);
+        assert_eq!(args.localize_every, 5);
+        assert_eq!(args.config, Some(PathBuf::from("k.json")));
+        assert_eq!(with(&[]).expect("parses").localize_every, 1);
     }
 
     fn descriptor(seed: usize) -> [u8; 32] {

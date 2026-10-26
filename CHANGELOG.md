@@ -32,6 +32,16 @@ All notable changes to `visloc-rs` will be documented here.
     `docs/basalt_map_localization.md`, scored by the new
     `scripts/evaluate_map_localization.py` (`--per-frame --min-inliers`
     scores any threshold from one run).
+  - `--vio --calibration FILE --config FILE` runs the Basalt
+    stereo-inertial VIO on the query sequence and anchors it to the map
+    with the fixes of every `--localize-every`-th image
+    (`visloc_localization::MapAnchor`: a gated, gravity-aligned yaw +
+    translation offset). Every frame gets a map pose in
+    `trajectory_map.tum`; `trajectory_map.csv` adds the time and distance
+    since the last fix. MH_02: 99.8% of frames at 2.0 cm RMSE localizing
+    every 5th image, at 0.83× real time on 4 cores; on all seven anchored
+    queries no pose within 2 m and 5 s of a fix is more than 12.6 cm off,
+    while poses carried tens of metres between rare fixes reach decimetres.
 
 ## 0.3.1 - 2026-10-25
 

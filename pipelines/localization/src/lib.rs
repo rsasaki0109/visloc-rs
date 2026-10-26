@@ -11,6 +11,7 @@
 //! candidate selectors, matchers, and pose estimators are all replaceable.
 
 mod correspondence;
+mod map_anchor;
 
 use std::collections::HashSet;
 
@@ -30,6 +31,7 @@ pub use correspondence::{
     CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector,
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
+pub use map_anchor::{FixOutcome, MapAnchor, MapAnchorConfig};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {
