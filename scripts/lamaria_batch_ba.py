@@ -5,10 +5,12 @@ The Basalt VIO keeps a sliding window of short KLT tracks, so its heading and
 scale drift slowly over a sequence. This tool refines the VIO trajectory
 afterwards with one batch optimization over the whole sequence:
 
-  features  SIFT on every --kf-step-th VIO frame, both cameras.
+  features  SIFT on every --kf-step-th VIO frame, both cameras (or learned
+            keypoints on the GPU, --extractor aliked|disk|superpoint).
   match     epipolar matching between keyframes up to 256 keyframes (128 s
             at the default 2 Hz) and 200 m apart, guided by the VIO's
-            relative poses.
+            relative poses (learned features: LightGlue's matches within
+            the same epipolar band).
   solve     union-find tracks -> midpoint triangulation -> Levenberg-Marquardt
             over every keyframe's pose, velocity and IMU biases, every
             landmark, and each camera's IMU-camera rotation (one per eighth
@@ -25,7 +27,8 @@ correction of the surrounding keyframes (TUM, seconds, world_from_imu), plus a
 JSON summary with the estimated camera rotations. No ground truth is used.
 
 Requirements: numpy, scipy, opencv-python (SIFT), gtsam (IMU factors); numba is optional
-and makes the matching about 30 times faster.
+and makes the matching about 30 times faster. The learned features need torch and
+LightGlue (https://github.com/cvg/LightGlue).
 The cameras must be pinhole (the ASL release's undistorted images; a Basalt
 double-sphere model with xi = alpha = 0).
 
@@ -105,6 +108,12 @@ def load_features(work, desc=True):
     return f["kf_ns"], f["offsets"], f["xy"], f["desc"] if desc else None
 
 
+def feature_kind(work):
+    """The extractor of a features.npz ("sift" for those written before it was recorded) and its image sizes."""
+    f = np.load(os.path.join(work, "features.npz"))
+    return (str(f["extractor"]) if "extractor" in f else "sift"), (f["image_wh"] if "image_wh" in f else None)
+
+
 def keyframe_poses(kf_ns, vio):
     vio_ns, vio_p, vio_r = load_tum(vio)
     idx = np.searchsorted(vio_ns, kf_ns)
@@ -139,6 +148,40 @@ def _sift_worker(task):
     return xy, des, size
 
 
+# learned keypoints and descriptors (LightGlue's extractors, on the GPU), matched by LightGlue
+LEARNED = ("aliked", "disk", "superpoint")
+
+
+def _device(name):
+    import torch
+    return torch.device(name or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+
+def _learned_features(a, paths):
+    """Keypoints (float32), descriptors (float16) and image sizes of a learned extractor; a thread pool reads
+    and preprocesses the images while the GPU runs."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import torch
+    from lightglue import ALIKED, DISK, SuperPoint
+    device = _device(a.device)
+    conf = {"max_num_keypoints": a.num_features}
+    if a.detection_threshold is not None:
+        conf["detection_threshold"] = a.detection_threshold
+    ext = {"aliked": ALIKED, "disk": DISK, "superpoint": SuperPoint}[a.extractor](**conf).eval().to(device)
+    res = []
+    with ThreadPoolExecutor(a.jobs) as pool:
+        for k, im in enumerate(pool.map(lambda p: _sift_image(p, a.clahe, a.denoise, a.denoise_window), paths)):
+            x = torch.from_numpy(im).to(device)[None, None].float() / 255
+            with torch.inference_mode():
+                f = ext.extract(x, resize=a.resize or None)
+            res.append((f["keypoints"][0].cpu().numpy().astype(np.float32),
+                        f["descriptors"][0].cpu().numpy().astype(np.float16), im.shape[::-1]))
+            if k % 2000 == 0:
+                print(f"  {k}/{len(paths)} images", flush=True)
+    return res
+
+
 def cmd_features(a):
     os.makedirs(a.work, exist_ok=True)
     vio_ns, _, _ = load_tum(a.vio)
@@ -150,17 +193,23 @@ def cmd_features(a):
     usable = [t for t in sorted(set(frames[0]) & set(frames[1])) if t in vio_set]
     kf_ns = np.array(usable[::a.kf_step], dtype=np.int64)
     print(f"{len(usable)} stereo frames with a VIO pose, {len(kf_ns)} keyframes", flush=True)
-    tasks = [(os.path.join(a.mav0, f"cam{c}", "data", frames[c][int(t)]), a.num_features, a.clahe, a.denoise,
-              a.denoise_window) for t in kf_ns for c in range(2)]
+    paths = [os.path.join(a.mav0, f"cam{c}", "data", frames[c][int(t)]) for t in kf_ns for c in range(2)]
     t0 = time.time()
-    with mp.Pool(a.jobs) as pool:
-        res = pool.map(_sift_worker, tasks, chunksize=8)
+    extra = {}
+    if a.extractor == "sift":
+        with mp.Pool(a.jobs) as pool:
+            res = pool.map(_sift_worker, [(p, a.num_features, a.clahe, a.denoise, a.denoise_window) for p in paths],
+                           chunksize=8)
+    else:  # no keypoint size: the solve's --sigma-size leaves these observations at --pixel-sigma
+        res = [(xy, des, np.full(len(xy), np.nan, np.float32), wh) for xy, des, wh in _learned_features(a, paths)]
+        extra = {"image_wh": np.array([r[3] for r in res], np.int32)}
     counts = np.array([len(r[0]) for r in res], dtype=np.int64)
     offsets = np.concatenate([[0], np.cumsum(counts)])
     np.savez(os.path.join(a.work, "features.npz"), kf_ns=kf_ns, offsets=offsets,
              xy=np.concatenate([r[0] for r in res]), desc=np.concatenate([r[1] for r in res]),
-             size=np.concatenate([r[2] for r in res]))
-    print(f"features: {offsets[-1]} keypoints, {counts.mean():.0f}/image, {time.time() - t0:.0f} s", flush=True)
+             size=np.concatenate([r[2] for r in res]), extractor=np.array(a.extractor), **extra)
+    print(f"features ({a.extractor}): {offsets[-1]} keypoints, {counts.mean():.0f}/image, {time.time() - t0:.0f} s",
+          flush=True)
 
 
 # ----------------------------------------------------------------------------- matching
@@ -178,7 +227,8 @@ def _cam_pose(k, c):
 def _image(k, c):
     i = 2 * k + c
     s, e = _G["offsets"][i], _G["offsets"][i + 1]
-    return _G["xy"][s:e], _G["desc"][s:e]
+    d = _G["desc"][s:e]
+    return _G["xy"][s:e], d.astype(np.float32) if d.dtype == np.float16 else d
 
 
 def _best_two(keys, vals, n):
@@ -267,7 +317,7 @@ def _match_worker(pair):
     xa = (np.c_[xya, np.ones(len(xya))] @ np.linalg.inv(_G["cams"][ca]["K"]).T).astype(np.float32)
     xb = (np.c_[xyb, np.ones(len(xyb))] @ np.linalg.inv(_G["cams"][cb]["K"]).T).astype(np.float32)
     use_rot = np.linalg.norm(t_ba) <= 0.05
-    if njit is not None:
+    if njit is not None and da.dtype == np.uint8:  # SIFT; learned descriptors take the numpy path below
         mat = r_ba if use_rot else np.array([[0, -t_ba[2], t_ba[1]], [t_ba[2], 0, -t_ba[0]],
                                              [-t_ba[1], t_ba[0], 0]]) @ r_ba
         return pair, _match_kernel(xa, xb, np.ascontiguousarray(da), np.ascontiguousarray(db),
@@ -285,8 +335,12 @@ def _match_worker(pair):
     ia, ib = np.nonzero(dist < tau / fb)
     if len(ia) == 0:
         return pair, empty
-    diff = da[ia].astype(np.int32) - db[ib].astype(np.int32)
-    dd = np.sqrt((diff * diff).sum(1).astype(np.float32))
+    if da.dtype == np.uint8:
+        diff = da[ia].astype(np.int32) - db[ib].astype(np.int32)
+        dd = np.sqrt((diff * diff).sum(1).astype(np.float32))
+    else:
+        diff = da[ia] - db[ib]
+        dd = np.sqrt((diff * diff).sum(1))
     best_a, second_a = _best_two(ia, dd, len(xya))
     best_b, _ = _best_two(ib, dd, len(xyb))
     rows = np.flatnonzero(best_a >= 0)
@@ -297,12 +351,144 @@ def _match_worker(pair):
     return pair, np.c_[rows[ok], j[ok]].astype(np.int32)
 
 
+def _matcher(choice, extractor):
+    """--matcher auto: LightGlue for learned features, the ratio test for SIFT."""
+    if choice == "auto":
+        return "ratio" if extractor == "sift" else "lightglue"
+    if choice == "lightglue" and extractor == "sift":
+        sys.exit("LightGlue matches the learned features only (features --extractor)")
+    return choice
+
+
+def _max_desc(value, extractor):
+    """--max-desc: SIFT's L2 distance of 300 by default; no limit on the unit-length learned descriptors."""
+    return value if value is not None else 300.0 if extractor == "sift" else np.inf
+
+
+def _band_dist(ka, ca, kb, cb, xya, xyb):
+    """Distance of each correspondence from the VIO's epipolar line in b, or from the rotation-only prediction
+    when the cameras are within 5 cm (normalized image units of b, as in _match_worker)."""
+    r_wa, t_wa = _cam_pose(ka, ca)
+    r_wb, t_wb = _cam_pose(kb, cb)
+    r_ba = r_wb.T @ r_wa
+    t_ba = r_wb.T @ (t_wa - t_wb)
+    xa = np.c_[xya, np.ones(len(xya))] @ np.linalg.inv(_G["cams"][ca]["K"]).T
+    xb = np.c_[xyb, np.ones(len(xyb))] @ np.linalg.inv(_G["cams"][cb]["K"]).T
+    if np.linalg.norm(t_ba) <= 0.05:
+        pred = xa @ r_ba.T
+        return np.linalg.norm(pred[:, :2] / np.maximum(pred[:, 2:3], 1e-3) - xb[:, :2], axis=1)
+    lines = xa @ (skew(t_ba) @ r_ba).T
+    lines /= np.hypot(lines[:, 0], lines[:, 1])[:, None]
+    return np.abs((lines * xb).sum(1))
+
+
+def _lightglue_batch(lg, fa, fb, mixed):
+    """LightGlue on a batch of image pairs: all nine layers (no early stopping or point pruning). One pair per
+    call takes about 27 ms on an 8 GB GPU whatever the number of keypoints (512-1,024): the per-call latency,
+    which a batch amortizes. Images with the same number of keypoints on each side (a learned extractor's top
+    --num-features, features --detection-threshold 0) batch as they are: 16 pairs of 1,024 keypoints take
+    about 9 ms per pair in half precision. Otherwise the padding is masked out, and the masked attention is as
+    slow as one pair per call. Returns each pair's matches."""
+    import torch
+    from lightglue.lightglue import filter_matches, normalize_keypoints, sigmoid_log_double_softmax
+    na = [f["keypoints"].shape[1] for f in fa]
+    nb = [f["keypoints"].shape[1] for f in fb]
+    dev = fa[0]["keypoints"].device
+
+    def stack(fs, key, n):
+        out = fs[0][key].new_zeros((len(fs), n) + fs[0][key].shape[2:])
+        for i, f in enumerate(fs):
+            out[i, :f[key].shape[1]] = f[key][0]
+        return out
+
+    padded = len(set(na)) > 1 or len(set(nb)) > 1
+    m_a = torch.arange(max(na), device=dev)[None] < torch.tensor(na, device=dev)[:, None]
+    m_b = torch.arange(max(nb), device=dev)[None] < torch.tensor(nb, device=dev)[:, None]
+    size_a = torch.cat([f["image_size"] for f in fa]) if "image_size" in fa[0] else None
+    size_b = torch.cat([f["image_size"] for f in fb]) if "image_size" in fb[0] else None
+    with torch.inference_mode(), torch.autocast(device_type=dev.type, enabled=mixed):
+        da, db = lg.input_proj(stack(fa, "descriptors", max(na))), lg.input_proj(stack(fb, "descriptors", max(nb)))
+        ea = lg.posenc(normalize_keypoints(stack(fa, "keypoints", max(na)), size_a))
+        eb = lg.posenc(normalize_keypoints(stack(fb, "keypoints", max(nb)), size_b))
+        for layer in lg.transformers:  # masks B x 1 x M x 1: they broadcast over the attention heads
+            da, db = (layer.masked_forward(da, db, ea, eb, m_a[:, None, :, None], m_b[:, None, :, None]) if padded
+                      else layer(da, db, ea, eb))
+        assign = lg.log_assignment[-1]
+        pa, pb = assign.final_proj(da), assign.final_proj(db)
+        sim = torch.einsum("bmd,bnd->bmn", pa, pb) / pa.shape[-1] ** 0.5
+        if padded:
+            sim = sim.masked_fill(~(m_a[:, :, None] & m_b[:, None, :]), -1e4)  # the padding takes no share
+        scores = sigmoid_log_double_softmax(sim, assign.matchability(da), assign.matchability(db)).float()
+    out = []
+    for i in range(len(fa)):  # row na[i] and column nb[i] are padding or the dustbins: filter_matches drops them
+        m0 = filter_matches(scores[i:i + 1, :na[i] + 1, :nb[i] + 1], lg.conf.filter_threshold)[0][0]
+        valid = m0 > -1
+        out.append(torch.stack([torch.nonzero(valid)[:, 0], m0[valid]], -1))
+    return [o.cpu().numpy().astype(np.int32) for o in out]
+
+
+def _lightglue_pairs(tasks, a, cache_images=1200):
+    """LightGlue's matches of every image pair (ka, ca, kb, cb, ...), in order, --lg-batch pairs per call. The
+    features of the last cache_images images used stay on the GPU."""
+    from collections import OrderedDict
+    from itertools import islice
+
+    import torch
+    from lightglue import LightGlue
+    device = _device(a.device)
+    mixed = a.lg_mp and device.type == "cuda"
+    lg = LightGlue(features=_G["extractor"], filter_threshold=a.lg_threshold).eval().to(device)
+    cache = OrderedDict()
+
+    def feats(i):
+        if i in cache:
+            cache.move_to_end(i)
+            return cache[i]
+        s, e = _G["offsets"][i], _G["offsets"][i + 1]
+        f = {"keypoints": torch.from_numpy(np.ascontiguousarray(_G["xy"][s:e])).to(device)[None],
+             "descriptors": torch.from_numpy(np.asarray(_G["desc"][s:e], np.float16 if mixed else np.float32))
+             .to(device)[None]}
+        if _G["image_wh"] is not None:
+            f["image_size"] = torch.tensor(_G["image_wh"][i], dtype=torch.float32, device=device)[None]
+        cache[i] = f
+        if len(cache) > cache_images:
+            cache.popitem(last=False)
+        return f
+
+    tasks = iter(tasks)
+    while chunk := list(islice(tasks, a.lg_batch)):
+        fa = [feats(2 * t[0] + t[1]) for t in chunk]
+        fb = [feats(2 * t[2] + t[3]) for t in chunk]
+        out = [np.zeros((0, 2), np.int32)] * len(chunk)
+        ok = [i for i in range(len(chunk)) if fa[i]["keypoints"].shape[1] and fb[i]["keypoints"].shape[1]]
+        if ok:
+            for i, m in zip(ok, _lightglue_batch(lg, [fa[i] for i in ok], [fb[i] for i in ok], mixed)):
+                out[i] = m
+        yield from zip(chunk, out)
+
+
+def _lightglue_guided(pairs, a, count):
+    """LightGlue's matches within the VIO's epipolar band of each pair (the band of _match_worker)."""
+    off = _G["offsets"]
+    for pair, m in _lightglue_pairs(pairs, a):
+        count[0] += len(m)
+        if len(m):
+            ka, ca, kb, cb, tau = pair
+            xya, xyb = _G["xy"][off[2 * ka + ca]:], _G["xy"][off[2 * kb + cb]:]
+            m = m[_band_dist(ka, ca, kb, cb, xya[m[:, 0]], xyb[m[:, 1]]) < tau / _G["cams"][cb]["K"][0, 0]]
+        count[1] += len(m)
+        yield pair, m
+
+
 def cmd_match(a):
+    from contextlib import nullcontext
     kf_ns, offsets, xy, desc = load_features(a.work)
+    extractor, image_wh = feature_kind(a.work)
+    matcher = _matcher(a.matcher, extractor)
     cams, _ = load_calib(a.calib)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r,
-              ratio=a.ratio, max_desc=a.max_desc)
+              ratio=a.ratio, max_desc=_max_desc(a.max_desc, extractor), extractor=extractor, image_wh=image_wh)
     offs = [int(x) for x in a.offsets.split(",")]
     cos_max = np.cos(np.radians(a.max_axis_angle))
     pairs = []
@@ -319,11 +505,12 @@ def cmd_match(a):
                     if ra[:, 2] @ rb[:, 2] < cos_max or np.linalg.norm(ta - tb) > a.max_dist:
                         continue
                     pairs.append((ka, ca, kb, cb, min(a.tau0 + a.tau_slope * d, a.tau_max)))
-    print(f"{n} keyframes, {len(pairs)} image pairs to match", flush=True)
+    print(f"{n} keyframes, {len(pairs)} image pairs to match ({extractor}, {matcher})", flush=True)
     t0 = time.time()
-    out_pairs, out_matches = [], []
-    with mp.Pool(a.jobs) as pool:
-        for i, (pair, m) in enumerate(pool.imap(_match_worker, pairs, chunksize=16)):
+    out_pairs, out_matches, count = [], [], [0, 0]
+    with mp.Pool(a.jobs) if matcher == "ratio" else nullcontext() as pool:
+        results = pool.imap(_match_worker, pairs, chunksize=16) if pool else _lightglue_guided(pairs, a, count)
+        for i, (pair, m) in enumerate(results):
             if len(m):
                 out_pairs.append(np.array(pair[:4], np.int32)[None].repeat(len(m), 0))
                 out_matches.append(m)
@@ -331,6 +518,8 @@ def cmd_match(a):
                 print(f"  {i}/{len(pairs)} pairs, {time.time() - t0:.0f} s", flush=True)
     np.savez(os.path.join(a.work, "matches.npz"), pairs=np.concatenate(out_pairs),
              matches=np.concatenate(out_matches))
+    if matcher == "lightglue":
+        print(f"  LightGlue: {count[0]} matches, {count[1]} within the epipolar band", flush=True)
     print(f"matches: {sum(len(m) for m in out_matches)} over {len(out_pairs)} pairs, "
           f"{time.time() - t0:.0f} s", flush=True)
 
@@ -346,8 +535,8 @@ def _unguided_matches(da, db, ratio, max_desc, method=None):
         try:
             import cv2  # noqa: F401
             method = "cv2"
-        except ImportError:
-            method = "numba" if njit is not None else "numpy"
+        except ImportError:  # the numba kernel takes SIFT's bytes only
+            method = "numba" if njit is not None and da.dtype == np.uint8 else "numpy"
     if method == "cv2":
         import cv2
         fa, fb = np.ascontiguousarray(da, np.float32), np.ascontiguousarray(db, np.float32)
@@ -377,8 +566,9 @@ def _unguided_matches(da, db, ratio, max_desc, method=None):
     return np.c_[rows[ok], j[ok]].astype(np.int32)
 
 
-def _loop_worker(task):
-    """A revisit candidate: unguided matching, essential-matrix RANSAC, and a rotation check."""
+def _loop_worker(task, m=None):
+    """A revisit candidate: unguided matching (or LightGlue's matches m), essential-matrix RANSAC, and a
+    rotation check."""
     import cv2
     cv2.setNumThreads(1)  # one thread per pool process
     ka, ca, kb, cb = task
@@ -387,7 +577,8 @@ def _loop_worker(task):
     empty = np.zeros((0, 2), np.int32)
     if len(xya) < _G["min_inliers"] or len(xyb) < _G["min_inliers"]:
         return task, empty, 0
-    m = _unguided_matches(da, db, _G["ratio"], _G["max_desc"])
+    if m is None:
+        m = _unguided_matches(da, db, _G["ratio"], _G["max_desc"])
     if len(m) < _G["min_inliers"]:
         return task, empty, 0
     pa = (np.c_[xya[m[:, 0]], np.ones(len(m))] @ np.linalg.inv(_G["cams"][ca]["K"]).T)[:, :2]
@@ -406,11 +597,15 @@ def _loop_worker(task):
 
 
 def cmd_loops(a):
+    from contextlib import nullcontext
     kf_ns, offsets, xy, desc = load_features(a.work)
+    extractor, image_wh = feature_kind(a.work)
+    matcher = _matcher(a.matcher, extractor)
     cams, _ = load_calib(a.calib)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r, ratio=a.ratio,
-              max_desc=a.max_desc, min_inliers=a.min_inliers, max_rot=a.max_rot)
+              max_desc=_max_desc(a.max_desc, extractor), min_inliers=a.min_inliers, max_rot=a.max_rot,
+              extractor=extractor, image_wh=image_wh)
     n = len(kf_ns)
     axes = np.array([[_cam_pose(k, c)[0][:, 2] for c in range(2)] for k in range(n)])
     ks = np.arange(0, n, a.step)
@@ -419,11 +614,14 @@ def cmd_loops(a):
     cos_max = np.cos(np.radians(a.max_axis_angle))
     tasks = [(int(ks[i]), ca, int(ks[j]), cb) for i, j in zip(ia, ib) for ca in range(2) for cb in range(2)
              if axes[ks[i], ca] @ axes[ks[j], cb] >= cos_max]
-    print(f"{len(ia)} revisit keyframe pairs, {len(tasks)} image pairs to verify", flush=True)
+    print(f"{len(ia)} revisit keyframe pairs, {len(tasks)} image pairs to verify ({extractor}, {matcher})",
+          flush=True)
     t0 = time.time()
     out_pairs, out_matches, by_rotation = [], [], 0
-    with mp.Pool(a.jobs) as pool:
-        for task, m, ninl in pool.imap(_loop_worker, tasks, chunksize=8):
+    with mp.Pool(a.jobs) if matcher == "ratio" else nullcontext() as pool:
+        results = (pool.imap(_loop_worker, tasks, chunksize=8) if pool else
+                   (_loop_worker(task, m) for task, m in _lightglue_pairs(tasks, a)))
+        for task, m, ninl in results:
             by_rotation += ninl < 0
             if len(m):
                 out_pairs.append(np.array(task, np.int32)[None].repeat(len(m), 0))
@@ -1816,6 +2014,23 @@ def main():
                    help="non-local means denoising strength h before detection (low light, e.g. 7; 0: off)")
     f.add_argument("--denoise-window", type=int, default=21,
                    help="its search window (px); 11 takes about 40 %% less time than 21")
+    f.add_argument("--extractor", choices=("sift", *LEARNED), default="sift",
+                   help="SIFT (OpenCV), or learned keypoints on the GPU (LightGlue's extractors; --num-features "
+                        "keypoints at most); match and loops then use LightGlue")
+    f.add_argument("--detection-threshold", type=float, default=None,
+                   help="learned extractors: keypoint score threshold (default: the extractor's)")
+    f.add_argument("--resize", type=int, default=0,
+                   help="learned extractors: resize the longer image side to this before detection (0: as recorded)")
+    f.add_argument("--device", default="", help="torch device of the learned extractors (default: cuda if there)")
+
+    def lightglue_args(s):  # match and loops with learned features
+        s.add_argument("--matcher", choices=("auto", "ratio", "lightglue"), default="auto",
+                       help="auto: LightGlue for learned features, the ratio test for SIFT")
+        s.add_argument("--device", default="", help="torch device of LightGlue (default: cuda if there)")
+        s.add_argument("--lg-threshold", type=float, default=0.1, help="LightGlue's match score threshold")
+        s.add_argument("--lg-batch", type=int, default=16, help="image pairs per LightGlue call")
+        s.add_argument("--lg-mp", action=argparse.BooleanOptionalAction, default=True,
+                       help="LightGlue in mixed precision on the GPU")
     m = sub.add_parser("match", help="VIO-guided epipolar matching between keyframes")
     m.add_argument("--work", required=True)
     m.add_argument("--vio", required=True)
@@ -1828,8 +2043,10 @@ def main():
     m.add_argument("--tau-slope", type=float, default=0.1, help="band growth per keyframe offset (px)")
     m.add_argument("--tau-max", type=float, default=6.0)
     m.add_argument("--ratio", type=float, default=0.8, help="descriptor ratio test within the band")
-    m.add_argument("--max-desc", type=float, default=300.0, help="maximum SIFT L2 distance")
+    m.add_argument("--max-desc", type=float, default=None,
+                   help="maximum descriptor L2 distance of the ratio test (default: 300 for SIFT, none for learned)")
     m.add_argument("--jobs", type=int, default=2)
+    lightglue_args(m)
     lp = sub.add_parser("loops", help="verified matches between revisits of the same place")
     lp.add_argument("--work", required=True)
     lp.add_argument("--vio", required=True)
@@ -1839,10 +2056,12 @@ def main():
     lp.add_argument("--max-axis-angle", type=float, default=60.0)
     lp.add_argument("--step", type=int, default=2, help="candidate keyframe stride")
     lp.add_argument("--ratio", type=float, default=0.8)
-    lp.add_argument("--max-desc", type=float, default=300.0)
+    lp.add_argument("--max-desc", type=float, default=None,
+                    help="maximum descriptor L2 distance of the ratio test (default: 300 for SIFT, none for learned)")
     lp.add_argument("--min-inliers", type=int, default=25, help="essential-matrix inliers to accept a pair")
     lp.add_argument("--max-rot", type=float, default=10.0, help="largest disagreement with the VIO rotation (deg)")
     lp.add_argument("--jobs", type=int, default=2)
+    lightglue_args(lp)
     def solve_args(s):  # shared by solve and online
         s.add_argument("--work", required=True)
         s.add_argument("--imu", required=True, help="IMU csv (ns, gyro, accel) as the VIO used it")
