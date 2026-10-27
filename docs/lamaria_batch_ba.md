@@ -1680,6 +1680,78 @@ None loses more than 0.05; the gain is large only where the VIO's heading
 drifts fast, as on R_12_10cp. sequence_2_12, whose heading goes wrong in its
 first minutes, does not move.
 
+### Learned features
+
+SIFT rarely finds a landmark again as the view changes (see [Where the second
+sequences' heading drift comes from](#where-the-second-sequences-heading-drift-comes-from)).
+`features --extractor aliked|disk|superpoint` replaces it with one of
+[LightGlue](https://github.com/cvg/LightGlue)'s learned extractors on the GPU,
+and `match` and `loops` then match with LightGlue instead of the ratio test.
+The VIO's epipolar band stays as the filter of LightGlue's matches, and `loops`
+keeps its essential-matrix check. The learned keypoints have no size, so their
+observations keep `--pixel-sigma`. (SuperPoint's weights are licensed for
+non-commercial use only; ALIKED's and DISK's are not restricted.)
+
+Each extractor keeps its 1,024 best keypoints per image (`--num-features 1024
+--detection-threshold 0`). With the same number in every image, LightGlue
+matches 16 image pairs per call: one pair per call takes about 27 ms on an 8 GB
+GPU whatever the number of keypoints, 16 pairs of 1,024 keypoints 9 ms per pair
+in half precision (98.8 % of the matches of LightGlue one pair at a time).
+sequence_3_18's 97,000–103,000 image pairs take 15–16 min, against 73 s for
+SIFT's ratio test on eight cores.
+
+[`scripts/lamaria_track_stats.py`](../scripts/lamaria_track_stats.py) counts
+how often a solve's landmarks are found again. It projects each landmark into
+both cameras of every keyframe within 32 of its observed span; of the keyframes
+where it lands inside an image, it counts those that observe it. For SIFT on
+sequence_3_18 that is 7.8 % (the 8.9 % above came from a smaller count, 564,507
+keyframes against 17.2 million). Each variant below runs the pass's first solve
+(`ba1`) from the chain's online result, with the chain's options and its own
+features and VIO-guided matches. (On this machine the chain itself ends at
+54.27 on sequence_3_18, 64.61 on R_12_10cp and 88.65 on sequence_1_20, against
+54.28, 64.30 and 86.98 on GitHub Actions.)
+
+| sequence_3_18 | SIFT | ALIKED | DISK | SuperPoint |
+|---|---:|---:|---:|---:|
+| Keyframes that see a landmark and observe it | 7.8 % | 7.8 % | 7.8 % | 7.5 % |
+| Keyframes per landmark, mean (99th percentile) | 3.07 (14) | 2.83 (10) | 2.96 (11) | 2.72 (10) |
+| Landmarks | 439,618 | 387,907 | 467,008 | 343,315 |
+| Tracks dropped with two features in one image | 12,095 | 54,182 | 35,068 | 36,811 |
+| Not observed, a keypoint within 3 px | 23.8 % | 12.9 % | 13.2 % | 15.3 % |
+| Cost per observation | 0.14 | 0.32 | 0.37 | 0.45 |
+| CP Score | **54.35** | 49.02 | 48.75 | 49.22 |
+| Pose recall at 1 m | **41.2 %** | 32.0 % | 29.3 % | 35.8 % |
+
+| R_12_10cp | SIFT | ALIKED | DISK | SuperPoint |
+|---|---:|---:|---:|---:|
+| Keyframes that see a landmark and observe it | 7.0 % | 7.1 % | 7.1 % | 6.7 % |
+| Keyframes per landmark, mean (99th percentile) | 3.03 (14) | 2.91 (11) | 3.08 (12) | 2.67 (9) |
+| Landmarks | 179,017 | 181,794 | 223,316 | 158,822 |
+| Tracks dropped with two features in one image | 6,540 | 24,726 | 17,692 | 17,928 |
+| Not observed, a keypoint within 3 px | 25.1 % | 14.0 % | 11.8 % | 16.2 % |
+| Cost per observation | 0.14 | 0.30 | 0.35 | 0.45 |
+| CP Score | 63.27 | **68.15** | 62.02 | 64.42 |
+| Pose recall at 1 m | 51.3 % | **84.3 %** | 51.8 % | 59.6 % |
+
+"Not observed, a keypoint within 3 px" is the share of the images that see a
+landmark without observing it where a keypoint lies within 3 px of its
+projection; at their densities, chance alone gives about 9 % for SIFT and 7 %
+for the learned keypoints.
+
+None of them finds the landmarks again more often, and the longest tracks get
+shorter. The learned detectors fire at the same point less often than SIFT as
+the view changes; their keypoints are less precise (2.1–3.3 times SIFT's cost
+per observation, as on sequence_4_10's window in [Low light: features after
+denoising](#low-light-features-after-denoising)); and LightGlue's matches
+disagree more between image pairs, so 2.7–4.5 times as many tracks are
+dropped. ALIKED on sequence_1_20 gives the same picture (7.4 % against 7.5 %,
+first solve 87.53 against 88.00).
+
+The first solve's score follows none of this: ALIKED loses 5.3 on
+sequence_3_18 and gains 4.9 on R_12_10cp, where DISK loses 1.3 and SuperPoint
+gains 1.2. As the tracks are no longer than SIFT's, the eight day sequences were
+not run.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
@@ -1771,6 +1843,17 @@ python scripts/lamaria_batch_ba.py solve --work work/$S --vio out/$S.lc.tum --ca
   takes the estimates from the states.
 - **Keypoint sizes.** `solve --sigma-size 2.7 --sigma-size-pow 0.35` gives
   larger keypoints a larger pixel sigma (`features` stores the sizes).
+- **Learned features.** `features --extractor aliked|disk|superpoint
+  --num-features 1024 --detection-threshold 0` needs torch and LightGlue (tried
+  with cvg/LightGlue 5a650c4 and torch 2.14.1 on CUDA 13.0); `match` and `loops`
+  then match with LightGlue (`--lg-batch` pairs per call, `--lg-threshold`,
+  `--no-lg-mp` for single precision; `--matcher ratio` for the ratio test, whose
+  `--max-desc` is then unlimited). `lamaria_ba_chain.py --features` passes the
+  extractor to the features step. They do not find the landmarks again more
+  often (see [Learned features](#learned-features)).
+- **Track statistics.** `scripts/lamaria_track_stats.py --states
+  ba1_states.npz --calib CALIB --work WORK` prints how often a solve's landmarks
+  are observed where they are visible, and the track lengths.
 - **Recommended.** The [table above](#with-the-focal-lengths-the-keypoint-sizes-and-denoising)
   uses `--est-focal --sigma-size 2.7 --sigma-size-pow 0.35` in both solves,
   `features --clahe --denoise 7` in low light, and no `--est-focal` on the

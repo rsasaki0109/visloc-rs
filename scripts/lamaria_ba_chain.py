@@ -37,16 +37,20 @@ BA = Path(__file__).resolve().parent / "lamaria_batch_ba.py"
 WARMUP = ["--gyro-rw-warmup", "10", "--gyro-rw-warmup-s", "300"]
 
 
-def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False):
+def steps(mav0, vio, imu, calib, track, work, jobs, low_light=None, rematch=False, features="sift",
+          num_features=None):
     """(name, lamaria_batch_ba.py arguments, output that marks it done, threaded) per step, in order.
 
     `low_light` overrides the track's choice of the low-light options (a Low light sequence shot in daylight);
-    `rematch` adds the matching guided by the pass and a solve with its matches (in work/rematch)."""
+    `rematch` adds the matching guided by the pass and a solve with its matches (in work/rematch);
+    `features` picks the keypoints: "sift", or a learned extractor that match and loops pair with LightGlue."""
     work = Path(work)
     low = track == LOW_LIGHT if low_light is None else low_light
     solve = ["--imu", imu, "--calib", calib, "--sigma-size", "2.7", "--sigma-size-pow", "0.35"]
     solve += [] if track == MOVING else ["--est-focal"]
     feats = ["--clahe", "--denoise", "7"] if low else []
+    feats += [] if features == "sift" else ["--extractor", features]
+    feats += [] if num_features is None else ["--num-features", str(num_features)]
     out = [
         ("features", ["features", "--mav0", mav0, "--vio", vio, "--work", work, "--jobs", jobs, *feats],
          work / "features.npz", False),
@@ -88,14 +92,15 @@ def result(work, track, low_light=None, rematch=False):
 
 
 def run_chain(mav0, vio, imu, calib, track, work, out, jobs=4, threads=2, python=sys.executable, log=print, ba=BA,
-              low_light=None, rematch=False):
+              low_light=None, rematch=False, features="sift", num_features=None):
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     if rematch:  # the second matching reads the same keypoints
         (work / "rematch").mkdir(exist_ok=True)
         if not (work / "rematch" / "features.npz").is_symlink():
             (work / "rematch" / "features.npz").symlink_to(Path("..") / "features.npz")
-    for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch):
+    for name, cmd, done, threaded in steps(mav0, vio, imu, calib, track, work, jobs, low_light, rematch, features,
+                                           num_features):
         if done.exists():
             log(f"{name}: done before, skipped")
             continue
@@ -128,10 +133,14 @@ def main():
     p.add_argument("--threads", type=int, default=2, help="threads for the online windows and the pass")
     p.add_argument("--daylit", action="store_true", help="day options on a Low light sequence shot in daylight")
     p.add_argument("--rematch", action="store_true", help="by day, match again guided by the pass and solve again")
+    p.add_argument("--features", choices=("sift", "aliked", "disk", "superpoint"), default="sift",
+                   help="the keypoints: SIFT, or learned ones on the GPU, matched by LightGlue")
+    p.add_argument("--num-features", type=int, default=None, help="keypoints per image (default: the features step's)")
     a = p.parse_args()
     run_chain(a.mav0, a.vio, a.imu, a.calib, a.track, a.work, a.out, a.jobs, a.threads,
               log=lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True),
-              low_light=False if a.daylit else None, rematch=a.rematch)
+              low_light=False if a.daylit else None, rematch=a.rematch, features=a.features,
+              num_features=a.num_features)
 
 
 if __name__ == "__main__":

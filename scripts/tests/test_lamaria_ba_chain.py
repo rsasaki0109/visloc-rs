@@ -57,6 +57,17 @@ class StepsTest(unittest.TestCase):
         for cmd in plan(5).values():
             self.assertNotIn("--est-focal", cmd)
 
+    def test_learned_features_go_to_the_features_step_only(self):
+        self.assertNotIn("--extractor", plan(2)["features"])
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True,
+                                                features="aliked", num_features=2048)}
+        self.assertEqual(value(p["features"], "--extractor"), "aliked")
+        self.assertEqual(value(p["features"], "--num-features"), "2048")
+        for name, cmd in p.items():  # match, loops and the rematch read the extractor from features.npz
+            if name != "features":
+                self.assertNotIn("--extractor", cmd)
+
     def test_the_rematch_follows_the_pass_by_day_only(self):
         p = {name: [str(c) for c in cmd]
              for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True)}
