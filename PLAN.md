@@ -12,10 +12,14 @@ verbatim in
 Read it before retrying a lever: many levers have already been measured and
 rejected there.
 
-## Current status (2026-10-08)
+## Current status (2026-10-27)
 
-- Latest release: **0.2.1** (camera-distortion correctness fixes on top of
-  0.2.0). See [`CHANGELOG.md`](CHANGELOG.md).
+- Latest release: **0.3.0** (tagged, with prebuilt binaries); main is at
+  **0.3.1** (CHANGELOG cut, not tagged). See [`CHANGELOG.md`](CHANGELOG.md).
+- Moving to a local GPU machine: the handovers are
+  [`docs/photos_sfm_handover.md`](docs/photos_sfm_handover.md) (photos to
+  SfM / MVS / 3DGS, release, evaluation scripts) and
+  [`docs/lamaria_gpu_handover.md`](docs/lamaria_gpu_handover.md) (LaMAria).
 - MSRV 1.88, `unsafe` forbidden, no mandatory ML or GPU runtime in the
   default build.
 - All 16 workspace crates package for crates.io (`cargo package --workspace`);
