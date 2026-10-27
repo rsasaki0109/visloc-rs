@@ -358,7 +358,9 @@ pub mod prelude {
         read_colmap_binary_model, read_colmap_text_model, write_colmap_binary_model,
         write_colmap_text_model, ColmapError, ColmapMapProviderError,
     };
-    pub use crate::io::descriptors::{read_landmark_descriptors_txt, DescriptorStoreError};
+    pub use crate::io::descriptors::{
+        read_landmark_descriptors_txt, write_landmark_descriptors_txt, DescriptorStoreError,
+    };
     #[cfg(feature = "image-io")]
     pub use crate::io::images::{
         common_image_sequence_summary, decode_common_image, parse_timestamp_nanoseconds_txt,

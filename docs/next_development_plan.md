@@ -14,8 +14,13 @@ DPVO CUDA) stay as they are; nothing here depends on them.
 | Item | Status | Gate |
 | --- | --- | --- |
 | 0.2.1 patch release (distortion fixes) | Done: version bumped, CHANGELOG cut | Tag `v0.2.1` after main CI is green |
+| 0.3.0 release | Done: every crate bumped to 0.3.0, CHANGELOG cut (highlights; the itemized log in [`archive/changelog_0.3.0_full.md`](archive/changelog_0.3.0_full.md)) | Tag `v0.3.0` after main CI is green; publish (crates.io / PyPI tokens) |
+| 0.3.1 patch release | Done: every crate bumped to 0.3.1, CHANGELOG cut (`--help` on the release binaries, the intrinsics-refinement damping, the release workflow) | Tag `v0.3.1` after main CI is green; the `release` workflow then builds the binaries |
+| `gsplat_photos` intrinsics refinement: damping | Done: the joint BA starts at λ = 1e4 (see CHANGELOG). Tried and not used: damping scaled by the Hessian's diagonal (Marquardt, λ₀ = 1e-4: 0–499 subset 10.0 cm median but 23 cameras over 1 m), λ ÷ 3 after an accepted step, 10 iterations instead of 20 | — |
+| SmallCity 0–499: mapper initial pair across a revisit | Closed, not changed. The COLMAP-port mapper (as COLMAP) starts from images 66 and 324, 258 photos apart, because consecutive photos fail the 16° initial-pair angle; its model leaves image 66 32 m off and 319–352 bent by up to 29 m, which the intrinsics refinement (λ₀ = 1e4) pulls back to a 12.1 cm median, 23 cm max. Starting from a pair at most 30 photos apart (a prototype `init_max_image_gap`) avoids the bend but ends at 17.8 cm median, 71 cm max on that subset (23.4 / 8.1 cm against 24.9 / 7.9 cm on the other two): the revisit pair also closes the loop. An 8° angle behaves the same way (18.5 cm) | — |
+| SmallCity 500–999: 24.9 cm median after `gsplat_photos` | Diagnosed, not changed. Locally consistent (3–5 cm after a Sim(3) refit per 100 photos), but the scale varies by ±2% with the period of the route around the block (±1% on 0–499, ±0.5% on 1000–1499), so the loop is warped. The self-calibrated focal length is 485.4 px against the release model's 486.97 (0–499: 488.8, 1000–1499: 484.6), and that subset's fx and fy end 0.9% apart (release: 0.02%). Holding the release model's intrinsics fixed gives 14.5 cm median and a ±1.3% warp, so the focal length explains about half of it. A shared focal length (`BaConfig::shared_focal`) leaves 500–999 at 24.5 cm and 1000–1499 at 8.1 cm but brings back 28 cameras over 1 m on 0–499, so it is not used | Better-conditioned focal length on street captures (e.g. a prior from EXIF when it is trusted), checked on all three subsets and ETH3D |
 | crates.io readiness | Done: all 16 crates package and verify-build from their packaged sources; root package trimmed from ~83 MB to 0.87 MiB compressed with an `include` allowlist | `cargo publish --workspace` (needs a crates.io token) |
-| BA distortion models | Done: pose/structure BA linearises every lens model (OPENCV, FULL_OPENCV, the fisheye models, FOV, Double Sphere); opt-in p1/p2 self-calibration. Open: rig observations still project with a pinhole; matrix-free / GPU backends fall back for distorted cameras | Follow-up: lens model in rig BA |
+| BA distortion models | Done: pose/structure BA linearises every lens model (OPENCV, FULL_OPENCV, the fisheye models, FOV, Double Sphere); opt-in p1/p2 self-calibration; rig observations use the sensor's lens too (2026-10-22). Open: matrix-free / GPU backends fall back for distorted cameras | `rig_sfm` on a distorted rig re-measured (OpenLORIS) |
 
 ## Track 2: Sensor coverage (the empty cells in the README sensor table)
 
@@ -48,6 +53,60 @@ These stay open, but each needs EuRoC / OpenLORIS access to measure:
 - **OpenLORIS 10k rig SfM RMSE parity.** 0.3890 m vs COLMAP's 0.3843 m.
 - **Mono-inertial VIO ATE on EuRoC** (the code is in; only the measurement is missing).
 - **GNSS fusion on real data** (for example KITTI raw OXTS as the GNSS source).
+
+## On hold: GPU work (ETH3D MVS)
+
+Recorded 2026-10-22. The ETH3D MVS and end-to-end work that followed this
+plan ran on rented GPU pods; it is paused until the next round. Nothing below
+is started.
+
+**Where it stands** (ETH3D high-res training, 13 scenes, F1 at 2 cm; details
+in [`mvs.md`](mvs.md)):
+
+- visloc-mvs with ground-truth poses: **83.7%**. ACMMP reports 83.42%,
+  HPM-MVS 84.58%, APD-MVS 86.84%. On the same L4, ACMMP's released code
+  matches visloc-mvs's F1 over six scenes in four times the time
+  ([`mvs.md`](mvs.md#against-acmmp-on-the-same-gpu)).
+- End to end (gsplat_photos SfM, aligned to the ground truth, then
+  visloc-mvs): **81.5%**. Aligned by the camera centres alone, 76.3%
+  against 57.4% for COLMAP 4.2.1 CUDA's SfM and MVS on the 10 scenes it
+  finished.
+  The 13-scene end-to-end figure combines runs r49 to r53; it has not been
+  re-measured on one commit since #312 and #313.
+- The gap to APD-MVS is mostly four weakly textured scenes (r37, against
+  APD's reported scores): office −11.7, playground −10.4, facade −8.1,
+  kicker −5.1 points, about 2.7 of the 3.2 points of the mean. office loses
+  on accuracy (wrong planes), playground on completeness.
+- Already tried and not adopted: APD-MVS's deformable patches alone, and
+  HPM-MVS's sampling, KNN prior and hierarchical priors
+  ([`mvs.md`](mvs.md#tried-and-not-adopted-apd-mvss-deformable-patches)).
+
+**Items, in the recommended order** (costs from earlier L4 runs: 13 scenes
+of visloc-mvs end to end take about 2 hours, about $1.3):
+
+| Item | What | Pod time (L4) | Cost |
+| --- | --- | --- | --- |
+| 1. APD-MVS on the same GPU | Done (r54, 2026-10-22, $2.7): on terrace, office, kicker, playground and facade APD-MVS scores 83.2% at 2 cm against visloc-mvs's 78.5% (its paper: 84.87%), ahead by 4.6 to 8.2 points on the four weakly textured scenes and behind on terrace, in 5.0 times the time ([`mvs.md`](mvs.md#against-apd-mvs-on-the-same-gpu-r54)). Depth maps were not kept | — | — |
+| 2. APD's pipeline, not just its patches | A state-gated weak-pixel path next to the existing one: ambiguity-based weak/strong classification, coplanarity-verified anchors, candidates drawn only from anchor planes and a RANSAC-fitted plane, local refinement after each pass ([notes](apd_mvs_code_notes.md), §7, items 1–4). Started on CPU (2026-10-22): APD's strong-only median recovers the 2.4 points the deformable patches lose on office at 400 px, ending level with the defaults; its local refinement adds nothing ([`mvs.md`](mvs.md#tried-and-not-adopted-apd-mvss-deformable-patches)). Next: the strong median on the GPU, then 3200 px | about 10 runs, mostly subsets | $10–15 |
+| 3. 13-scene re-measure | End to end and with ground-truth poses on one commit of current main | about 2 h | about $1.3 |
+| 4. Official test set | Submit to the ETH3D high-res test benchmark, the only basis for a ranking claim | — | — |
+
+Total, with failed starts and idle time: under about $25.
+
+Not GPU work, but open from the same thread: electro's last unregistered
+image (DSC_9291) and DSC_9292's 1.8 cm offset, diagnosed locally on the r49a
+L4 exports ([`mvs.md`](mvs.md#electro-what-the-unregistered-images-cost-r51)).
+
+**How the pod runs were done.** One RunPod NVIDIA L4 pod per run, from a
+CUDA base image. The pod's start script checks out the branch at a fixed
+commit and builds it. It receives the ETH3D archives (and, for end-to-end
+runs, exported SfM models) through a token-protected upload server on port
+8001, and serves `/workspace/out` (logs, scores, clouds) on port 8000. It runs
+the official `ETH3DMultiViewEvaluation`, then deletes itself 20 minutes after
+finishing or failing, and after a hard time limit. The deploy, upload and
+fetch scripts lived in the agent's session scratchpad and are not in the
+repository. The RunPod API key and the upload token come from the
+environment and are never committed.
 
 ## Guardrails (unchanged)
 

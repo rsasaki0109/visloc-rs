@@ -34,7 +34,9 @@ use std::borrow::Cow;
 
 use rayon::prelude::*;
 
-use crate::deformable::{self, Class, Deformable, Draws, MAX_ANCHORS};
+use crate::deformable::{
+    self, Class, Deformable, Draws, LOCAL_REFINE_GAIN, LOCAL_REFINE_STEPS, MAX_ANCHORS,
+};
 use crate::planar_prior::{PlanarPrior, PlanarPriorOptions};
 use crate::workspace::{View, Workspace};
 
@@ -247,7 +249,7 @@ pub fn estimate(
         Some(maps) => ctx.state_from(&maps[view], None),
     };
     if let (Some(maps), Some(d)) = (prior, &options.deformable) {
-        ctx.anchors = Some(ctx.start_anchors(&state, &maps[view], d));
+        ctx.start_deformable(&state, &maps[view], d);
     }
     for iteration in 0..options.iterations {
         for color in [0, 1] {
@@ -295,7 +297,7 @@ pub fn estimate_from(
     let mut ctx = Context::new(reference, sources, options, view as u32, false);
     let mut state = ctx.state_from(start, None);
     if let Some(d) = &options.deformable {
-        ctx.anchors = Some(ctx.start_anchors(&state, start, d));
+        ctx.start_deformable(&state, start, d);
     }
     ctx.restore = match restorer {
         DetailRestorer::Off => None,
@@ -345,7 +347,7 @@ pub fn estimate_with_prior(
     ctx.prior = Some(Prior::new(prior, prior_options, reference.depth_range));
     let mut state = ctx.state_from(start, Some((prior, prior_options.credible_cost)));
     if let Some(d) = &options.deformable {
-        ctx.anchors = Some(ctx.start_anchors(&state, start, d));
+        ctx.start_deformable(&state, start, d);
     }
     for iteration in 0..options.iterations {
         for color in [0, 1] {
@@ -632,6 +634,8 @@ struct Context<'a> {
     restore: Option<(Vec<f32>, f32)>,
     /// The weak pixels' anchors when the pass has deformable patches.
     anchors: Option<Anchors>,
+    /// The pass's pixel classes when it has deformable patches.
+    classes: Option<Vec<Class>>,
     fx: f32,
     fy: f32,
     cx: f32,
@@ -680,6 +684,7 @@ impl<'a> Context<'a> {
             prior: None,
             restore: None,
             anchors: None,
+            classes: None,
             fx: reference.fx as f32,
             fy: reference.fy as f32,
             cx: reference.cx as f32,
@@ -1462,21 +1467,50 @@ impl<'a> Context<'a> {
 
     /// The anchors of a pass from `start`: its classes if the pass that
     /// made it sorted them, else `state`'s (the pass's start) sorted now.
-    fn start_anchors(&self, state: &State, start: &DepthMap, options: &Deformable) -> Anchors {
+    /// The pass's classes (`start`'s, as the pass that made it sorted them,
+    /// else sorted now) and the weak pixels' anchors.
+    fn start_deformable(&mut self, state: &State, start: &DepthMap, options: &Deformable) {
         let (w, h) = (self.reference.width, self.reference.height);
-        if start.classes.len() == w * h {
-            self.find_anchors(state, &start.classes, options)
+        let classes = if start.classes.len() == w * h {
+            start.classes.clone()
         } else {
-            let classes = self.sort_pixels(state, options);
-            self.find_anchors(state, &classes, options)
-        }
+            self.sort_pixels(state, options.sweep, Some(options), false)
+                .0
+        };
+        self.anchors = Some(self.find_anchors(state, &classes, options));
+        self.classes = Some(classes);
     }
 
-    /// `state`'s depth map, its pixels sorted if the options ask for it.
+    /// `state`'s depth map, its pixels sorted if the options ask for it,
+    /// with APD's strong-only median filter and local refinement if the
+    /// pass's deformable settings ask for them.
     fn finish(&self, state: &State) -> DepthMap {
-        let mut map = self.depth_map(state);
-        if let Some(d) = &self.options.sort_pixels {
-            map.classes = self.sort_pixels(state, d);
+        let deformable = self.options.deformable.as_ref();
+        let planes: Vec<[f32; 4]> = state
+            .plane
+            .iter()
+            .map(|p| [p.n[0], p.n[1], p.n[2], p.rho])
+            .collect();
+        let mut map = finish_pass_depth_map(
+            self.reference,
+            &planes,
+            state.cost.clone(),
+            self.options,
+            self.classes.as_deref(),
+        );
+        let refine = deformable.is_some_and(|d| d.local_refine);
+        let sort = self.options.sort_pixels.as_ref();
+        if sort.is_some() || refine {
+            let sweep = sort.map_or(0, |d| d.sweep).max(LOCAL_REFINE_STEPS);
+            let (classes, refined) = self.sort_pixels(state, sweep, sort, refine);
+            if sort.is_some() {
+                map.classes = classes;
+            }
+            for (depth, refined) in map.depth.iter_mut().zip(refined) {
+                if let (Some(d), true) = (refined, *depth > 0.0) {
+                    *depth = d;
+                }
+            }
         }
         map
     }
@@ -1485,8 +1519,17 @@ impl<'a> Context<'a> {
     /// (the mean of the views it matches best at its depth, plus the
     /// geometric terms in a geometric pass) at `2 sweep + 1` depths one
     /// pseudo-disparity step apart along its ray, normal fixed, sorts it
-    /// ([`deformable::classify`]).
-    fn sort_pixels(&self, state: &State, options: &Deformable) -> Vec<Class> {
+    /// ([`deformable::classify`]) when `classify` is given (else every
+    /// pixel is `Unknown`). With `refine`, also each pixel's depth at the
+    /// lowest of those costs within `LOCAL_REFINE_STEPS` steps, if it beats
+    /// the pixel's own by `LOCAL_REFINE_GAIN` (APD's `LocalRefine`).
+    fn sort_pixels(
+        &self,
+        state: &State,
+        sweep: i32,
+        classify: Option<&Deformable>,
+        refine: bool,
+    ) -> (Vec<Class>, Vec<Option<f32>>) {
         let (w, h) = (self.reference.width, self.reference.height);
         let n = self.sources.len();
         let center = self.reference.center();
@@ -1501,23 +1544,23 @@ impl<'a> Context<'a> {
         };
         let k = self.options.init_top_k.clamp(1, n.max(1));
         let border = 6;
-        let classes: Vec<Class> = (0..h)
+        let sorted_pixels: Vec<(Class, Option<f32>)> = (0..h)
             .into_par_iter()
             .flat_map_iter(|y| {
                 let (mut photo, mut geo) = ([0.0; MAX_SOURCES], [0.0; MAX_SOURCES]);
-                let mut costs = vec![0.0f32; (2 * options.sweep + 1) as usize];
+                let mut costs = vec![0.0f32; (2 * sweep + 1) as usize];
                 let mut sorted = Vec::with_capacity(n);
                 (0..w)
                     .map(|x| {
                         if n == 0 || x < border || y < border || x + border >= w || y + border >= h
                         {
-                            return Class::Unknown;
+                            return (Class::Unknown, None);
                         }
                         let i = y * w + x;
                         let ray = self.ray(x, y);
                         let plane = state.plane[i];
                         let Some(depth) = plane.depth(ray) else {
-                            return Class::Unknown;
+                            return (Class::Unknown, None);
                         };
                         let patch = self.ref_patch(x, y);
                         // The curve's views: the best `init_top_k` at the
@@ -1532,7 +1575,7 @@ impl<'a> Context<'a> {
                         let patch = patch.uniform();
                         let disparity = self.fx * baseline / depth;
                         for (m, cost) in costs.iter_mut().enumerate() {
-                            let step = disparity + (m as i32 - options.sweep) as f32;
+                            let step = disparity + (m as i32 - sweep) as f32;
                             let d = self.fx * baseline / step;
                             *cost =
                                 if step <= 0.0 || !(self.depth_min..=self.depth_max).contains(&d) {
@@ -1555,12 +1598,28 @@ impl<'a> Context<'a> {
                                     (total / k as f32).min(MAX_COST)
                                 };
                         }
-                        deformable::classify(&costs, options)
+                        let class = classify.map_or(Class::Unknown, |options| {
+                            deformable::classify(&costs, options)
+                        });
+                        let refined = refine
+                            .then(|| {
+                                let center = sweep as usize;
+                                let r = LOCAL_REFINE_STEPS as usize;
+                                let (m, best) = (center - r..=center + r)
+                                    .map(|m| (m, costs[m]))
+                                    .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))?;
+                                (costs[center] - best > LOCAL_REFINE_GAIN).then(|| {
+                                    let step = disparity + (m as i32 - sweep) as f32;
+                                    self.fx * baseline / step
+                                })
+                            })
+                            .flatten();
+                        (class, refined)
                     })
                     .collect::<Vec<_>>()
             })
             .collect();
-        classes
+        sorted_pixels.into_iter().unzip()
     }
 
     /// APD-MVS's anchors: a weak pixel of `classes` keeps the strong
@@ -1654,15 +1713,6 @@ impl<'a> Context<'a> {
         }
         patches
     }
-
-    fn depth_map(&self, state: &State) -> DepthMap {
-        let planes: Vec<[f32; 4]> = state
-            .plane
-            .iter()
-            .map(|p| [p.n[0], p.n[1], p.n[2], p.rho])
-            .collect();
-        finish_depth_map(self.reference, &planes, state.cost.clone(), self.options)
-    }
 }
 
 /// The depth map of `reference` from per-pixel planes `(n, rho)` and costs
@@ -1709,6 +1759,33 @@ pub(crate) fn finish_depth_map(
         cost,
         classes: Vec::new(),
     }
+}
+
+/// [`finish_depth_map`] for a pass whose pixels were sorted into
+/// `pass_classes` (a deformable pass): with `Deformable::strong_median` the
+/// median filter is APD-MVS's strong-only one ([`strong_median_filter`]).
+/// Shared with the GPU path.
+pub(crate) fn finish_pass_depth_map(
+    reference: &View,
+    planes: &[[f32; 4]],
+    cost: Vec<f32>,
+    options: &PatchMatchOptions,
+    pass_classes: Option<&[Class]>,
+) -> DepthMap {
+    let strong_median =
+        pass_classes.filter(|_| options.deformable.as_ref().is_some_and(|d| d.strong_median));
+    let Some(classes) = strong_median else {
+        return finish_depth_map(reference, planes, cost, options);
+    };
+    let unfiltered = PatchMatchOptions {
+        median_filter: false,
+        ..options.clone()
+    };
+    let mut map = finish_depth_map(reference, planes, cost, &unfiltered);
+    if options.median_filter {
+        map.depth = strong_median_filter(&map.depth, classes, map.width, map.height);
+    }
+    map
 }
 
 /// The eight sampling regions as pixel offsets, all of the other
@@ -1810,6 +1887,68 @@ fn median_filter_5x5(depth: &[f32], w: usize, h: usize) -> Vec<f32> {
                     }
                     window.sort_by(f32::total_cmp);
                     window[window.len() / 2]
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// APD-MVS's median filter for a deformable pass: a weak pixel keeps its
+/// depth; any other takes the median of its own depth and those of its
+/// strong neighbours in ACMM's 20-pixel pattern (the mean of the two middle
+/// values for an even count).
+fn strong_median_filter(depth: &[f32], classes: &[Class], w: usize, h: usize) -> Vec<f32> {
+    const OFFSETS: [(i32, i32); 20] = [
+        (0, -1),
+        (0, 1),
+        (0, -3),
+        (0, 3),
+        (0, -5),
+        (0, 5),
+        (-1, 0),
+        (1, 0),
+        (-3, 0),
+        (3, 0),
+        (-5, 0),
+        (5, 0),
+        (-2, -1),
+        (-2, 1),
+        (2, -1),
+        (2, 1),
+        (-1, -2),
+        (1, -2),
+        (-1, 2),
+        (1, 2),
+    ];
+    (0..h)
+        .into_par_iter()
+        .flat_map_iter(|y| {
+            let mut window = Vec::with_capacity(OFFSETS.len() + 1);
+            (0..w)
+                .map(|x| {
+                    let i = y * w + x;
+                    if depth[i] <= 0.0 || classes[i] == Class::Weak {
+                        return depth[i];
+                    }
+                    window.clear();
+                    window.push(depth[i]);
+                    for &(dx, dy) in &OFFSETS {
+                        let (sx, sy) = (x as i32 + dx, y as i32 + dy);
+                        if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
+                            continue;
+                        }
+                        let j = sy as usize * w + sx as usize;
+                        if classes[j] == Class::Strong && depth[j] > 0.0 {
+                            window.push(depth[j]);
+                        }
+                    }
+                    window.sort_by(f32::total_cmp);
+                    let m = window.len() / 2;
+                    if window.len() % 2 == 0 {
+                        0.5 * (window[m - 1] + window[m])
+                    } else {
+                        window[m]
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -2138,6 +2277,120 @@ mod tests {
         let plain = estimate_from(&ws, 0, &options, &photometric, DetailRestorer::Off);
         let strong = estimate_from(&ws, 0, &deformable, &all_strong, DetailRestorer::Off);
         assert_eq!(strong.depth, plain.depth);
+    }
+
+    /// APD's median skips weak pixels and counts only strong neighbours.
+    #[test]
+    fn the_strong_median_skips_weak_pixels_and_neighbours() {
+        let (w, h) = (11, 11);
+        let mut depth = vec![2.0f32; w * h];
+        let mut classes = vec![Class::Strong; w * h];
+        let c = 5 * w + 5;
+        depth[c] = 3.0; // a strong outlier among strong pixels
+        let weak = 2 * w + 2;
+        depth[weak] = 9.0;
+        classes[weak] = Class::Weak;
+        // Weak neighbours with another depth do not vote.
+        for &j in &[c - 1, c + 1, c - w, c + w] {
+            depth[j] = 7.0;
+            classes[j] = Class::Weak;
+        }
+        let filtered = strong_median_filter(&depth, &classes, w, h);
+        assert_eq!(filtered[c], 2.0);
+        assert_eq!(filtered[weak], 9.0);
+        assert_eq!(filtered[c - 1], 7.0);
+        // An even count averages the two middle values.
+        let mut pair = vec![0.0f32; w * h];
+        let mut pair_classes = vec![Class::Unknown; w * h];
+        pair[c] = 1.0;
+        pair[c + 1] = 2.0;
+        pair_classes[c + 1] = Class::Strong;
+        assert_eq!(strong_median_filter(&pair, &pair_classes, w, h)[c], 1.5);
+    }
+
+    /// APD's local refinement moves a depth a few disparity steps off the
+    /// true plane back onto it, and leaves the true depths alone.
+    #[test]
+    fn local_refinement_moves_depths_back_onto_the_plane() {
+        let ws = plane_scene();
+        let truth = plane_scene_truth(&ws, 0);
+        let options = PatchMatchOptions::default();
+        let reference = &ws.views[0];
+        let sources: Vec<Source<'_>> = reference
+            .sources
+            .iter()
+            .map(|&s| Source::new(reference, &ws.views[s], None))
+            .collect();
+        let ctx = Context::new(reference, sources, &options, 0, false);
+        let state = ctx.state_from(&truth, None);
+        let (_, kept) = ctx.sort_pixels(&state, LOCAL_REFINE_STEPS, None, true);
+        let moved = kept.iter().filter(|d| d.is_some()).count();
+        assert!(
+            moved * 100 < kept.len(),
+            "{moved} of {} true depths moved",
+            kept.len()
+        );
+        // Two pseudo-disparity steps nearer, as the refinement steps.
+        let center = reference.center();
+        let baseline = ctx
+            .sources
+            .iter()
+            .map(|s| (s.view.center() - center).norm() as f32)
+            .sum::<f32>()
+            / ctx.sources.len() as f32;
+        let off = DepthMap {
+            depth: truth
+                .depth
+                .iter()
+                .map(|&d| {
+                    let disparity = ctx.fx * baseline / d;
+                    ctx.fx * baseline / (disparity + 2.0)
+                })
+                .collect(),
+            ..truth.clone()
+        };
+        let state = ctx.state_from(&off, None);
+        let (_, refined) = ctx.sort_pixels(&state, LOCAL_REFINE_STEPS, None, true);
+        let (mut back, mut total) = (0, 0);
+        for (r, &t) in refined.iter().zip(&truth.depth) {
+            if t <= 0.0 {
+                continue;
+            }
+            total += 1;
+            if r.is_some_and(|d| (d - t).abs() < 1.0e-3 * t) {
+                back += 1;
+            }
+        }
+        assert!(
+            back * 2 > total,
+            "{back} of {total} depths moved back onto the plane"
+        );
+    }
+
+    /// The deformable pass with APD's local refinement still fills the
+    /// textureless region, a little better. (The strong-only median leaves
+    /// the region's weak pixels unfiltered, as APD does.)
+    #[test]
+    fn deformable_patches_with_local_refinement_fill_a_textureless_region() {
+        use crate::planar_prior::{mean_relative_error, textureless_scene};
+        let (ws, inner) = textureless_scene();
+        let options = PatchMatchOptions::default();
+        let photometric = estimate(&ws, 0, &options, None);
+        let truth = plane_scene_truth(&ws, 0);
+        let error = |local_refine: bool| {
+            let deformable = PatchMatchOptions {
+                deformable: Some(Deformable {
+                    local_refine,
+                    ..Deformable::default()
+                }),
+                ..options.clone()
+            };
+            let map = estimate_from(&ws, 0, &deformable, &photometric, DetailRestorer::Off);
+            mean_relative_error(&map, &truth, &inner)
+        };
+        let (without, with) = (error(false), error(true));
+        assert!(with < 0.015, "with local refinement: {with}");
+        assert!(with <= without, "{with} with, {without} without");
     }
 
     #[test]

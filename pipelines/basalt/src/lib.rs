@@ -39,6 +39,7 @@ pub mod mapper;
 pub mod mapper_online;
 pub mod patch;
 pub mod pattern;
+pub mod platform;
 pub mod provenance;
 pub mod pyramid;
 pub mod rt_priority;
@@ -52,7 +53,8 @@ pub mod vio;
 
 pub use adapter::{
     direct_klt_config, vio_estimator_from_calibration, BasaltAdapterError, BasaltAdapterOutput,
-    BasaltVioEstimatorAdapter,
+    BasaltFrontendPacket, BasaltVioEstimatorAdapter, BasaltVioEstimatorStage,
+    BasaltVioFrontendStage,
 };
 pub use calibration::{BasaltCalibration, CalibrationError};
 pub use camera::{CameraModelError, DoubleSphereCamera};

@@ -98,15 +98,20 @@ impl RawU16Image {
         if !self.in_bounds(point, 0.0) {
             return None;
         }
+        Some(self.interp_in_bounds(point))
+    }
+
+    /// [`Self::interp`] for a point the caller has already checked with
+    /// [`Self::in_bounds`] (any border `>= 0`).
+    #[inline]
+    pub(crate) fn interp_in_bounds(&self, point: Vector2<f32>) -> f32 {
         let ix = point.x as usize;
         let iy = point.y as usize;
         let dx = point.x - ix as f32;
         let dy = point.y - iy as f32;
-        let p00 = self.pixels[iy * self.width + ix] as f32;
-        let p01 = self.pixels[(iy + 1) * self.width + ix] as f32;
-        let p10 = self.pixels[iy * self.width + ix + 1] as f32;
-        let p11 = self.pixels[(iy + 1) * self.width + ix + 1] as f32;
-        Some(bilinear_fma(p00, p01, p10, p11, dx, dy))
+        let [p00, p10] = self.pixel_pair(ix, iy);
+        let [p01, p11] = self.pixel_pair(ix, iy + 1);
+        bilinear_fma(p00, p01, p10, p11, dx, dy)
     }
 
     /// Returns `[value, dvalue/dx, dvalue/dy]` using Basalt's central-
@@ -115,28 +120,55 @@ impl RawU16Image {
         if !self.in_bounds(point, 1.0) {
             return None;
         }
-        let value = self.interp(point)?;
+        Some(self.interp_grad_in_bounds(point))
+    }
+
+    /// [`Self::interp_grad`] for a point the caller has already checked with
+    /// [`Self::in_bounds`] (any border `>= 1`). The five bilinear samples
+    /// share one 4x4 neighbourhood, which is read once.
+    #[inline]
+    pub(crate) fn interp_grad_in_bounds(&self, point: Vector2<f32>) -> [f32; 3] {
         let ix = point.x as usize;
         let iy = point.y as usize;
         let dx = point.x - ix as f32;
         let dy = point.y - iy as f32;
-        let bilinear = |x0: usize, y0: usize| {
-            let p00 = self.pixels[y0 * self.width + x0] as f32;
-            let p01 = self.pixels[(y0 + 1) * self.width + x0] as f32;
-            let p10 = self.pixels[y0 * self.width + x0 + 1] as f32;
-            let p11 = self.pixels[(y0 + 1) * self.width + x0 + 1] as f32;
-            bilinear_fma(p00, p01, p10, p11, dx, dy)
-        };
+        // Rows iy-1 and iy+2 need columns ix..=ix+1; rows iy and iy+1 need
+        // ix-1..=ix+2.
+        let [above0, above1] = self.pixel_pair(ix, iy - 1);
+        let [row_m, row0, row1, row2] = self.pixel_quad(ix - 1, iy);
+        let [next_m, next0, next1, next2] = self.pixel_quad(ix - 1, iy + 1);
+        let [below0, below1] = self.pixel_pair(ix, iy + 2);
 
-        let value_x_minus = bilinear(ix - 1, iy);
-        let value_x_plus = bilinear(ix + 1, iy);
-        let value_y_minus = bilinear(ix, iy - 1);
-        let value_y_plus = bilinear(ix, iy + 1);
-        Some([
+        let value = bilinear_fma(row0, next0, row1, next1, dx, dy);
+        let value_x_minus = bilinear_fma(row_m, next_m, row0, next0, dx, dy);
+        let value_x_plus = bilinear_fma(row1, next1, row2, next2, dx, dy);
+        let value_y_minus = bilinear_fma(above0, row0, above1, row1, dx, dy);
+        let value_y_plus = bilinear_fma(next0, below0, next1, below1, dx, dy);
+        [
             value,
             0.5 * (value_x_plus - value_x_minus),
             0.5 * (value_y_plus - value_y_minus),
-        ])
+        ]
+    }
+
+    /// Pixels `(x, y)` and `(x + 1, y)`.
+    #[inline(always)]
+    fn pixel_pair(&self, x: usize, y: usize) -> [f32; 2] {
+        let start = y * self.width + x;
+        let row: &[u16; 2] = self.pixels[start..start + 2]
+            .try_into()
+            .expect("two pixels");
+        row.map(f32::from)
+    }
+
+    /// Pixels `(x, y)` to `(x + 3, y)`.
+    #[inline(always)]
+    fn pixel_quad(&self, x: usize, y: usize) -> [f32; 4] {
+        let start = y * self.width + x;
+        let row: &[u16; 4] = self.pixels[start..start + 4]
+            .try_into()
+            .expect("four pixels");
+        row.map(f32::from)
     }
 
     /// Applies the pinned Basalt 5x5 binomial filter and decimates by two.
@@ -299,6 +331,67 @@ pub enum ImageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-optimization `interp` / `interp_grad`: one bounds-checked
+    /// read per pixel, five independent bilinear samples.
+    fn reference_bilinear(image: &RawU16Image, point: Vector2<f32>, x0: usize, y0: usize) -> f32 {
+        let dx = point.x - (point.x as usize) as f32;
+        let dy = point.y - (point.y as usize) as f32;
+        let p00 = image.pixels[y0 * image.width + x0] as f32;
+        let p01 = image.pixels[(y0 + 1) * image.width + x0] as f32;
+        let p10 = image.pixels[y0 * image.width + x0 + 1] as f32;
+        let p11 = image.pixels[(y0 + 1) * image.width + x0 + 1] as f32;
+        bilinear_fma(p00, p01, p10, p11, dx, dy)
+    }
+
+    fn reference_interp_grad(image: &RawU16Image, point: Vector2<f32>) -> [f32; 3] {
+        let (ix, iy) = (point.x as usize, point.y as usize);
+        let bilinear = |x0, y0| reference_bilinear(image, point, x0, y0);
+        [
+            bilinear(ix, iy),
+            0.5 * (bilinear(ix + 1, iy) - bilinear(ix - 1, iy)),
+            0.5 * (bilinear(ix, iy + 1) - bilinear(ix, iy - 1)),
+        ]
+    }
+
+    #[test]
+    fn interpolation_matches_the_reference_bit_for_bit() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let image = RawU16Image::from_fn(37, 29, |_, _| next() as u16).unwrap();
+        let mut checked = 0;
+        for _ in 0..20_000 {
+            let point = Vector2::new(
+                (next() % 40_000) as f32 / 1000.0 - 1.0,
+                (next() % 32_000) as f32 / 1000.0 - 1.0,
+            );
+            if image.in_bounds(point, 0.0) {
+                let (ix, iy) = (point.x as usize, point.y as usize);
+                assert_eq!(
+                    image.interp(point).map(f32::to_bits),
+                    Some(reference_bilinear(&image, point, ix, iy).to_bits())
+                );
+            } else {
+                assert_eq!(image.interp(point), None);
+            }
+            if image.in_bounds(point, 1.0) {
+                assert_eq!(
+                    image.interp_grad(point).map(|v| v.map(f32::to_bits)),
+                    Some(reference_interp_grad(&image, point).map(f32::to_bits)),
+                    "{point:?}"
+                );
+                checked += 1;
+            } else {
+                assert_eq!(image.interp_grad(point), None);
+            }
+        }
+        assert!(checked > 10_000);
+    }
 
     #[test]
     fn border_reflection_matches_basalt101() {

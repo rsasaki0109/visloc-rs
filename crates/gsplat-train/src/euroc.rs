@@ -347,10 +347,13 @@ pub(crate) fn run_colmap_port(
     let mut options = PipelineOptions::default();
     // The port's default (8) is a rig-benchmark control override; use
     // COLMAP's own `Mapper.abs_pose_min_num_inliers` for single cameras,
-    // and COLMAP 4's structure-less registration fallback.
+    // and COLMAP 4's structure-less registration fallback, checked against
+    // the tracks its matches continue (on ETH3D it otherwise placed
+    // kicker's DSC_6487 66° off and electro's images up to 3 m off).
     let mut applied = vec![
         "abs_pose_min_num_inliers=30".to_string(),
         "structure_less_registration_fallback=1".to_string(),
+        "structure_less_min_verified=10".to_string(),
     ];
     applied.extend(mapper_overrides.iter().cloned());
     for o in &applied {

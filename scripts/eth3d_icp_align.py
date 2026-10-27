@@ -70,6 +70,8 @@ def read_scan(mlp_path, samples, rng):
             r'filename="([^"]+)".*?<MLMatrix44>(.*?)</MLMatrix44>', text, re.S):
         m = np.array([float(v) for v in matrix.split()]).reshape(4, 4)
         p = xyz(read_ply(base + name)[1])
+        # Some scans (relief_2's) hold non-finite points.
+        p = p[np.isfinite(p).all(1)]
         parts.append(p @ m[:3, :3].T + m[:3, 3])
     scan = np.concatenate(parts)
     if len(scan) > samples:
@@ -104,7 +106,8 @@ def main():
     rng = np.random.default_rng(0)
     header, vertices, rest = read_ply(recon_path)
     points = xyz(vertices)
-    sample = points[rng.choice(len(points), min(opts["--samples"], len(points)), replace=False)]
+    finite = points[np.isfinite(points).all(1)]
+    sample = finite[rng.choice(len(finite), min(opts["--samples"], len(finite)), replace=False)]
     scan = read_scan(mlp_path, 4 * opts["--samples"], rng)
     tree = cKDTree(scan)
 

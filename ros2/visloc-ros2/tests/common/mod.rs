@@ -296,3 +296,91 @@ pub fn synthetic_localize_core() -> LocalizeCore {
     let (map, store) = synthetic_map(&options);
     LocalizeCore::new(map, store, Some(1), options).unwrap()
 }
+
+/// Image size of the synthetic saved Basalt map.
+pub const BASALT_MAP_WIDTH: usize = 752;
+pub const BASALT_MAP_HEIGHT: usize = 480;
+
+/// The image the synthetic Basalt map was built from; localizing it gives
+/// the identity camera pose.
+pub fn basalt_map_image() -> Vec<u8> {
+    texture(BASALT_MAP_WIDTH, BASALT_MAP_HEIGHT, 11)
+}
+
+/// Writes a map in the `basalt_euroc_online_slam_demo --save-map` layout:
+/// one pinhole camera at the map origin with `T_imu_cam = I`, and one
+/// landmark per ORB corner of [`basalt_map_image`] (the mapper's own
+/// frontend, so the node extracts the same descriptors), back-projected to
+/// one of several depths.
+pub fn write_basalt_map(dir: &std::path::Path) {
+    use visloc_basalt::mapper::{
+        compute_angles, compute_descriptors, detect_keypoints_mapping, orb_descriptor_to_f32,
+    };
+    use visloc_core::geometry::{Pose, SE3};
+    use visloc_core::types::{CameraModel, Frame, Keyframe, Observation};
+
+    let pixels = basalt_map_image()
+        .iter()
+        .map(|&value| u16::from(value) << 8)
+        .collect();
+    let image =
+        visloc_basalt::RawU16Image::new(BASALT_MAP_WIDTH, BASALT_MAP_HEIGHT, pixels).unwrap();
+    let corners = detect_keypoints_mapping(&image, 800);
+    let angles = compute_angles(&image, &corners, true);
+    let descriptors = compute_descriptors(&image, &corners, &angles).unwrap();
+    assert!(corners.len() > 200, "{} ORB corners", corners.len());
+
+    let camera = Camera {
+        id: 1,
+        model: CameraModel::Pinhole,
+        width: BASALT_MAP_WIDTH as u32,
+        height: BASALT_MAP_HEIGHT as u32,
+        params: vec![420.0, 420.0, 376.0, 240.0],
+    };
+    let mut map = VisualMap::new();
+    map.cameras.insert(1, camera);
+    let mut frame = Frame::new(1, 1);
+    frame.pose = Some(Pose {
+        world_to_camera: SE3::identity(),
+    });
+    let mut keyframe = Keyframe {
+        frame,
+        observations: Vec::new(),
+    };
+    let mut store = LandmarkDescriptorStore::new();
+    for (index, (corner, descriptor)) in corners.iter().zip(&descriptors).enumerate() {
+        let depth = 3.0 + 0.5 * ((index * 7) % 5) as f64;
+        let point = Point3::new(
+            (corner.x - 376.0) / 420.0 * depth,
+            (corner.y - 240.0) / 420.0 * depth,
+            depth,
+        );
+        let observation = Observation {
+            frame_id: 1,
+            landmark_id: index as u64,
+            keypoint_index: index,
+            xy: *corner,
+        };
+        keyframe.frame.keypoints.push(*corner);
+        keyframe.observations.push(observation.clone());
+        let mut landmark = Landmark::new(index as u64, point);
+        landmark.observations.push(observation);
+        map.landmarks.insert(index as u64, landmark);
+        store.insert(index as u64, orb_descriptor_to_f32(descriptor));
+    }
+    map.keyframes.insert(1, keyframe);
+    std::fs::create_dir_all(dir).unwrap();
+    visloc_io::colmap::write_colmap_text_model(&map, dir.join("sparse")).unwrap();
+    visloc_io::descriptors::write_landmark_descriptors_txt(
+        &store,
+        dir.join("landmark_descriptors.txt"),
+    )
+    .unwrap();
+    let summary = serde_json::json!({
+        "schema": visloc_ros2::map_localize::MAP_SCHEMA,
+        "feature_max_points": 800,
+        "cameras": [{"camera_id": 1, "t_imu_cam": {
+            "translation": [0.0, 0.0, 0.0], "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]}}],
+    });
+    std::fs::write(dir.join("map.json"), summary.to_string()).unwrap();
+}

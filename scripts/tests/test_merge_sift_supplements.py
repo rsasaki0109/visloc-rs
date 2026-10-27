@@ -64,7 +64,9 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from merge_sift_supplements import publish_file
 def interrupted_chunks():
-    yield b'x' * 10000
+    # Larger than io's write buffer (8 KiB before Python 3.14, 128 KiB
+    # since), so the bytes reach the file before the kill.
+    yield b'x' * (1 << 20)
     print('staged', flush=True)
     sys.stdin.read(1)
 publish_file(Path(sys.argv[2]) / 'output' / 'a_features.txt',

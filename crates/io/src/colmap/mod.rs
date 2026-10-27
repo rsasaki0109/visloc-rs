@@ -1110,9 +1110,10 @@ pub fn parse_images_txt(contents: &str) -> Result<Vec<Keyframe>, ColmapError> {
 }
 
 pub fn parse_cameras_bin(contents: &[u8]) -> Result<Vec<Camera>, ColmapError> {
-    // A camera record contains the fixed fields plus at least the three
-    // parameters required by every model accepted by `camera_model_from_colmap_id`.
-    const MIN_CAMERA_RECORD_BYTES: usize = 4 + 4 + 8 + 8 + (3 * 8);
+    // A camera record contains the fixed fields plus at least the two
+    // parameters required by every model accepted by `camera_model_from_colmap_id`
+    // (EQUIRECTANGULAR's width and height; the others take three or more).
+    const MIN_CAMERA_RECORD_BYTES: usize = 4 + 4 + 8 + 8 + (2 * 8);
     let mut reader = BinaryReader::new("cameras.bin", contents);
     let camera_count = reader.read_count_with_min_bytes("camera_count", MIN_CAMERA_RECORD_BYTES)?;
     let mut cameras = Vec::new();
@@ -1148,6 +1149,22 @@ pub fn parse_cameras_bin(contents: &[u8]) -> Result<Vec<Camera>, ColmapError> {
 }
 
 pub fn parse_images_bin(contents: &[u8]) -> Result<Vec<Keyframe>, ColmapError> {
+    Ok(parse_images_bin_records(contents)?
+        .into_iter()
+        .map(|(keyframe, _name)| keyframe)
+        .collect())
+}
+
+/// `(IMAGE_ID, NAME)` of every image in an `images.bin`, in file order.
+/// [`parse_images_bin`] drops the names (a [`Keyframe`] has none).
+pub fn parse_images_bin_names(contents: &[u8]) -> Result<Vec<(u64, String)>, ColmapError> {
+    Ok(parse_images_bin_records(contents)?
+        .into_iter()
+        .map(|(keyframe, name)| (keyframe.frame.id, name))
+        .collect())
+}
+
+fn parse_images_bin_records(contents: &[u8]) -> Result<Vec<(Keyframe, String)>, ColmapError> {
     // An image with an empty NAME and no POINTS2D still occupies these fixed
     // fields. Each POINTS2D entry is two f64 coordinates plus one i64 id.
     const MIN_IMAGE_RECORD_BYTES: usize = 4 + (7 * 8) + 4 + 1 + 8;
@@ -1167,7 +1184,7 @@ pub fn parse_images_bin(contents: &[u8]) -> Result<Vec<Keyframe>, ColmapError> {
         let ty = reader.read_f64()?;
         let tz = reader.read_f64()?;
         let camera_id = reader.read_u32()? as u64;
-        reader.read_null_terminated_string()?;
+        let name = reader.read_null_terminated_string()?;
 
         let mut frame = Frame::new(frame_id, camera_id);
         frame.pose = Some(Pose::from_world_to_camera(
@@ -1194,10 +1211,13 @@ pub fn parse_images_bin(contents: &[u8]) -> Result<Vec<Keyframe>, ColmapError> {
             }
         }
 
-        keyframes.push(Keyframe {
-            frame,
-            observations,
-        });
+        keyframes.push((
+            Keyframe {
+                frame,
+                observations,
+            },
+            name,
+        ));
     }
 
     reader.finish()?;
@@ -1205,6 +1225,17 @@ pub fn parse_images_bin(contents: &[u8]) -> Result<Vec<Keyframe>, ColmapError> {
 }
 
 pub fn parse_points3d_bin(contents: &[u8]) -> Result<Vec<Landmark>, ColmapError> {
+    Ok(parse_points3d_bin_with_colors(contents)?
+        .into_iter()
+        .map(|(landmark, _rgb)| landmark)
+        .collect())
+}
+
+/// [`parse_points3d_bin`] with each point's `[R, G, B]` colour, which a
+/// [`Landmark`] does not carry.
+pub fn parse_points3d_bin_with_colors(
+    contents: &[u8],
+) -> Result<Vec<(Landmark, [u8; 3])>, ColmapError> {
     // A POINT3D record contains id, xyz, RGB, error, and track_length before
     // its variable-length track entries. Each track entry is (image_id,
     // point2D_idx), two u32 values.
@@ -1219,7 +1250,7 @@ pub fn parse_points3d_bin(contents: &[u8]) -> Result<Vec<Landmark>, ColmapError>
     for _ in 0..point_count {
         let id = reader.read_u64()?;
         let position = Point3::new(reader.read_f64()?, reader.read_f64()?, reader.read_f64()?);
-        reader.skip(3)?;
+        let rgb = reader.read_array::<3>()?;
         let _error = reader.read_f64()?;
         let track_length =
             reader.read_count_with_min_bytes("track_length", POINT3D_TRACK_ENTRY_BYTES)?;
@@ -1227,7 +1258,7 @@ pub fn parse_points3d_bin(contents: &[u8]) -> Result<Vec<Landmark>, ColmapError>
             let _image_id = reader.read_u32()?;
             let _point2d_index = reader.read_u32()?;
         }
-        landmarks.push(Landmark::new(id, position));
+        landmarks.push((Landmark::new(id, position), rgb));
     }
 
     reader.finish()?;
@@ -1665,10 +1696,6 @@ impl<'a> BinaryReader<'a> {
             .to_owned();
         self.offset += 1;
         Ok(name)
-    }
-
-    fn skip(&mut self, byte_count: usize) -> Result<(), ColmapError> {
-        self.read_bytes(byte_count).map(|_| ())
     }
 
     fn finish(&self) -> Result<(), ColmapError> {

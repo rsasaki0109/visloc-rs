@@ -80,6 +80,41 @@ with a 0.5 px instead of 0.2 px KLT round-trip threshold: it raises the VIO on
 sequence_4_10 from 34.49 to 39.00 but costs 11 points on the Medium sequence,
 so it is limited to that track (docs/lamaria_klt_threshold.md). Pass
 `--low-light-config none` to use `--config` there too.
+
+`--ba-chain` runs the visual-inertial bundle adjustment of
+scripts/lamaria_ba_chain.py behind the VIO and submits its trajectory: SIFT
+keyframes, matching and revisits guided by the VIO, the online windows and, by
+day, one batch pass (docs/lamaria_batch_ba.md#the-first-minutes-online). On
+the ten training sequences it averages 64.35 per track. The VIO is then
+Basalt's default window, `euroc_config.json` (`euroc_config_lowlight.json` in
+low light), unless `--config` / `--low-light-config` say otherwise, and the
+BA gets the calibration with the factory camera rig, since it estimates the
+camera rotations itself. It needs numpy, scipy, opencv-python, gtsam and
+numba, and about 2 GB of disk per sequence on top of the images.
+
+A VIO that diverges (faster than 30 m/s over a twentieth of its seconds) runs
+again with both cameras' features (`MULTICAM`): on test sequence_1_9 the
+default config's VIO runs away from the first seconds (3 km away after a
+minute) while the same config with both cameras' features stays on a walk.
+If it still diverges, it starts again 10, 30 or 60 s into the recording
+(`LATE_STARTS_S`): on test sequence_1_15 the head shakes at up to 2 rad/s
+over the first seconds and both configs run away from there, while either
+one started 10 s later holds. The poses before that start are then missing.
+On a walking track (not Moving platform) averaging more than 4 m/s over
+10 s counts as diverging too (`runaway`; test sequence_4_2 ran away for
+60 s at up to 12 m/s from 10 s), and the last starts follow the end of the
+runaway; if every start fails, the attempt that ran away least is used.
+If the BA chain still fails, the VIO trajectory is submitted.
+By day the chain then matches once more after its pass, guided by the pass's
+trajectory, and solves again (lamaria_ba_chain.py --rematch; `--no-ba-rematch`
+skips it): +0.26 on the eight day training sequences, +3.21 on R_12_10cp,
+whose VIO heading drifts most.
+
+`--stream` extracts the ASL zip over HTTP range requests instead of
+downloading it first (scripts/http_zip.py), so a sequence needs its images'
+size on disk, not twice that: what a GitHub runner can hold
+(.github/workflows/lamaria_submission.yml). `--log-dir` keeps the BA chain's
+step logs of each sequence before its work directory is deleted.
 """
 
 import argparse
@@ -95,14 +130,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aria_factory_imu_rectify import VRS_HEAD_BYTES, extract_record, rectify_csv  # noqa: E402
 from aria_device_refinement import lookup as device_refinement, rotate_rig  # noqa: E402
+from lamaria_ba_chain import run_chain  # noqa: E402
+import http_zip  # noqa: E402
 
 LOOP_MATCH_MAX_ROT_ERROR_DEG = 5
 TRACK_COUNTS = {1: 18, 2: 10, 3: 16, 4: 9, 5: 10}
 # Tracks whose VIO trajectory is submitted even with --slam-exe (Short, Long, Low light).
 DEFAULT_VIO_TRACKS = (1, 3, 4)
 LOW_LIGHT_TRACK = 4
+# Mean cam0 grey level from which a Low light sequence runs the day options: the eight day training
+# sequences average 74-88, the two low-light ones 26-29 (docs/lamaria_submission.md)
+DAYLIT_BRIGHTNESS = 70.0
+DEFAULT_PLATFORM_TRACKS = (5,)  # Moving platform: docs/lamaria_submission.md
+DEFAULT_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json")
 DEFAULT_LOW_LIGHT_CONFIG = Path(
     "configs/basalt/variants/lamaria/euroc_config_big_window_multicam_lowlight.json")
+# the VIO of the --ba-chain (the real-time chain's): Basalt's default window
+BA_CHAIN_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config.json")
+BA_CHAIN_LOW_LIGHT_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config_lowlight.json")
 BASE_URL = "https://cvg-data.inf.ethz.ch/lamaria"
 DEFAULT_VARIANT_A_NOISE = {
     "accel_noise_std": [0.016] * 3,
@@ -154,14 +199,14 @@ def download_head(url: str, dest: Path, nbytes: int) -> None:
 
 
 def rectify_imu(seq: str, inner: Path, work: Path, calib_dir: Path,
-                refine: bool = False):
+                refine: bool = False, split: str = "test"):
     """Replace inner/mav0/imu0/data.csv with the factory-rectified IMU.
 
     With `refine`, a known device's IMU is also re-aligned in time, and its
     refinement (see aria_device_refinement.py) is returned for the camera rig.
     """
     head = work / "vrs_head.bin"
-    download_head(f"{BASE_URL}/raw_data/test/{seq}.vrs", head, VRS_HEAD_BYTES)
+    download_head(f"{BASE_URL}/raw_data/{split}/{seq}.vrs", head, VRS_HEAD_BYTES)
     factory = extract_record(head.read_bytes())
     (calib_dir / f"{seq}_factory_calib.json").write_text(json.dumps(factory, indent=1))
     refinement = device_refinement(factory) if refine else None
@@ -210,6 +255,128 @@ def estimator_command(args, inner: Path, calibration: Path, out_dir: Path,
             [out_dir / "trajectory.tum"])
 
 
+# Both cameras' features in the VIO (docs/lamaria_multicam.md): the fallback for a VIO that diverged
+MULTICAM = {
+    "config.optical_flow_detect_all_cameras": True,
+    "config.optical_flow_matching_default_depth": 2.0,
+    "config.optical_flow_matching_guess_type": "REPROJ_FIX_DEPTH",
+    "config.vio_kf_connectivity_all_cameras": True,
+    "config.vio_landmarks_all_cameras": True,
+}
+DIVERGED_SPEED = 30.0  # m/s; a tram or a funicular stays well below
+
+
+def diverged(tum: Path, speed: float = DIVERGED_SPEED) -> bool:
+    """Whether the trajectory moves faster than `speed` over a twentieth or more of its seconds."""
+    rows = [[float(v) for v in line.split()[:4]] for line in tum.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+    fast = total = 0
+    j = 0
+    for i, (t, x, y, z) in enumerate(rows):
+        while j < len(rows) and rows[j][0] < t + 1.0:
+            j += 1
+        if j == len(rows):
+            break
+        u, a, b, c = rows[j]
+        total += 1
+        fast += ((a - x) ** 2 + (b - y) ** 2 + (c - z) ** 2) ** 0.5 / (u - t) > speed
+    return total > 0 and fast > total / 20
+
+
+LATE_STARTS_S = (10, 30, 60)  # where a VIO that diverges from the first seconds starts again
+WALK_SPEED = 4.0  # m/s held over RUNAWAY_WINDOW_S: nobody walks that fast for 10 s
+RUNAWAY_WINDOW_S = 10.0
+MOVING_TRACK = 5
+
+
+def runaway(tum: Path, speed: float = WALK_SPEED, window: float = RUNAWAY_WINDOW_S):
+    """(seconds, end): how many seconds start a `window` over which the trajectory averages more
+    than `speed`, and the trajectory time at which the last such window ends (None without)."""
+    rows = [[float(v) for v in line.split()[:4]] for line in tum.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+    fast, end, j = 0, None, 0
+    for i, (t, x, y, z) in enumerate(rows):
+        while j < len(rows) and rows[j][0] < t + window:
+            j += 1
+        if j == len(rows):
+            break
+        u, a, b, c = rows[j]
+        if ((a - x) ** 2 + (b - y) ** 2 + (c - z) ** 2) ** 0.5 / (u - t) > speed:
+            fast += 1
+            end = u
+    seconds = fast / ((len(rows) - 1) / (rows[-1][0] - rows[0][0])) if fast else 0.0
+    return seconds, end
+
+
+def vio_failure(tum: Path, track: int) -> float:
+    """0 for a usable VIO trajectory, else how badly it failed: diverged (inf), or the seconds of a
+    walking track's trajectory that run away at more than WALK_SPEED (test sequence_4_2: 60 s at up
+    to 12 m/s, under the divergence check's twentieth)."""
+    if diverged(tum):
+        return float("inf")
+    return 0.0 if track == MOVING_TRACK else runaway(tum)[0]
+
+
+def mean_brightness(cam_dir: Path, samples: int = 60) -> float:
+    """The mean grey level of `samples` images spread over the recording."""
+    import cv2  # the BA's dependency; only the Low light track needs it here
+    rows = [r for r in (cam_dir / "data.csv").read_text().splitlines() if r.strip() and not r.startswith("#")]
+    picked = rows[::max(1, len(rows) // samples)][:samples]
+    levels = [cv2.imread(str(cam_dir / "data" / r.split(",")[1].strip()), cv2.IMREAD_GRAYSCALE).mean()
+              for r in picked]
+    return sum(levels) / len(levels)
+
+
+def recording_start(inner: Path) -> float:
+    """The first cam0 frame's time in seconds."""
+    for row in (inner / "mav0" / "cam0" / "data.csv").read_text().splitlines():
+        if row.strip() and not row.startswith("#"):
+            return int(row.split(",")[0]) * 1e-9
+    raise RuntimeError(f"no frames in {inner}")
+
+
+def late_start(inner: Path, out: Path, seconds: float) -> Path:
+    """An EuRoC folder of `inner` that starts `seconds` into the recording: trimmed manifests,
+    the images linked."""
+    t0 = None
+    for cam in ("cam0", "cam1"):
+        (out / "mav0" / cam).mkdir(parents=True, exist_ok=True)
+        rows = [r for r in (inner / "mav0" / cam / "data.csv").read_text().splitlines() if r.strip()]
+        head = [r for r in rows if r.startswith("#")]
+        frames = [r for r in rows if not r.startswith("#")]
+        if t0 is None:
+            t0 = int(frames[0].split(",")[0]) + int(seconds * 1e9)
+        (out / "mav0" / cam / "data.csv").write_text(
+            "\n".join(head + [r for r in frames if int(r.split(",")[0]) >= t0]) + "\n")
+        link = out / "mav0" / cam / "data"
+        if not link.exists():
+            link.symlink_to((inner / "mav0" / cam / "data").resolve(), target_is_directory=True)
+    (out / "mav0" / "imu0").mkdir(parents=True, exist_ok=True)
+    rows = (inner / "mav0" / "imu0" / "data.csv").read_text().splitlines()
+    (out / "mav0" / "imu0" / "data.csv").write_text("\n".join(
+        r for r in rows if r.startswith("#") or (r.strip() and int(r.split(",")[0]) >= t0 - 100_000_000)) + "\n")
+    return out
+
+
+def keep_attempt(trajectory: Path, out: Path) -> Path:
+    """A copy of a VIO attempt's trajectory, which the next attempt overwrites."""
+    shutil.copyfile(trajectory, out)
+    return out
+
+
+def multicam_config(config: Path, out: Path) -> Path:
+    """`config` with both cameras' features."""
+    return config_with(config, out, MULTICAM)
+
+
+def config_with(config: Path, out: Path, values: dict) -> Path:
+    """`config` with `values` set."""
+    data = json.loads(config.read_text())
+    data["value0"].update(values)
+    out.write_text(json.dumps(data, indent=4))
+    return out
+
+
 def verify_and_extract(zip_path: Path, extract_dir: Path) -> Path:
     try:
         with zipfile.ZipFile(zip_path) as archive:
@@ -219,6 +386,11 @@ def verify_and_extract(zip_path: Path, extract_dir: Path) -> Path:
         log(f"corrupt zip {zip_path}; deleting for a fresh retry")
         zip_path.unlink(missing_ok=True)
         raise
+    return sequence_dir(extract_dir)
+
+
+def sequence_dir(extract_dir: Path) -> Path:
+    """The extracted sequence, its `aria/` renamed to `mav0/`."""
     inner = next((p for p in extract_dir.iterdir() if p.is_dir()), None)
     if inner is None:
         raise RuntimeError(f"no extracted directory under {extract_dir}")
@@ -247,19 +419,39 @@ def main() -> int:
                         choices=sorted(TRACK_COUNTS))
     parser.add_argument("--sequences", nargs="*", default=None,
                         help="explicit sequence names (overrides --tracks)")
+    parser.add_argument("--split", choices=("test", "training"), default="test",
+                        help="dataset split to download from; 'training' runs the same pipeline on "
+                             "training sequences (with --sequences), to score it with the evaluator")
     parser.add_argument("--vio-exe", type=Path,
                         help="basalt_euroc_vio_demo: VIO only")
     parser.add_argument("--slam-exe", type=Path,
                         help="basalt_euroc_online_slam_demo: VIO + online mapper (recommended; "
                              "takes precedence over --vio-exe except on --vio-tracks)")
     parser.add_argument("--config", type=Path,
-                        default=Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json"))
+                        help=f"VIO config (default {DEFAULT_CONFIG}; with --ba-chain {BA_CHAIN_CONFIG})")
     parser.add_argument("--vio-tracks", type=int, nargs="*", default=list(DEFAULT_VIO_TRACKS),
                         choices=sorted(TRACK_COUNTS),
                         help="tracks whose VIO trajectory is submitted instead of the online "
                              "mapper's (default: 1 3 4; no values: the mapper everywhere)")
-    parser.add_argument("--low-light-config", default=str(DEFAULT_LOW_LIGHT_CONFIG),
-                        help="config for Low light (track 4) sequences; 'none' uses --config")
+    parser.add_argument("--platform-tracks", type=int, nargs="*", default=list(DEFAULT_PLATFORM_TRACKS),
+                        choices=sorted(TRACK_COUNTS),
+                        help="tracks whose VIO keeps a vehicle's cabin out during rides "
+                             "(config.vio_platform_filter; default 5; no values: none)")
+    parser.add_argument("--platform-multicam", action=argparse.BooleanOptionalAction, default=True,
+                        help="on --platform-tracks, the VIO tracks both cameras' features (MULTICAM), so the "
+                             "filter sees the street through the windows on either side (default on)")
+    parser.add_argument("--low-light-config",
+                        help=f"config for Low light (track 4) sequences (default {DEFAULT_LOW_LIGHT_CONFIG}; "
+                             f"with --ba-chain {BA_CHAIN_LOW_LIGHT_CONFIG}); 'none' uses --config")
+    parser.add_argument("--ba-chain", action="store_true",
+                        help="run the visual-inertial BA (scripts/lamaria_ba_chain.py) behind the VIO and "
+                             "submit its trajectory")
+    parser.add_argument("--ba-rematch", action=argparse.BooleanOptionalAction, default=True,
+                        help="--ba-chain: by day, match again guided by the pass and solve again (lamaria_ba_chain.py "
+                             "--rematch; default on); with --log-dir the pass's estimate before it is kept as "
+                             "<log-dir>/<sequence>/ba2_estimate.txt")
+    parser.add_argument("--ba-jobs", type=int, default=4, help="--ba-chain: processes for features, match, loops")
+    parser.add_argument("--ba-threads", type=int, default=2, help="--ba-chain: threads for its solves")
     parser.add_argument("--gyro-bias-std", type=float, default=1e-7,
                         help="gyro bias random walk written into the calibration "
                              "(Basalt default 1e-4; 1e-7 measured best on LaMAria "
@@ -276,14 +468,19 @@ def main() -> int:
     parser.add_argument("--work-dir", type=Path, default=Path("lamaria_submission/work"))
     parser.add_argument("--slam-dir", type=Path, default=Path("lamaria_submission/slam"))
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--stream", action="store_true",
+                        help="extract the ASL zip over HTTP range requests instead of downloading it")
+    parser.add_argument("--log-dir", type=Path,
+                        help="keep each sequence's BA chain step logs under <log-dir>/<sequence>")
     parser.add_argument("--keep-data", action="store_true",
                         help="keep downloaded/extracted sequence data after each run")
     args = parser.parse_args()
     if not (args.slam_exe or args.vio_exe):
         parser.error("one of --slam-exe or --vio-exe is required")
 
-    low_light_config = (None if args.low_light_config.lower() == "none"
-                        else Path(args.low_light_config))
+    args.config = args.config or (BA_CHAIN_CONFIG if args.ba_chain else DEFAULT_CONFIG)
+    low_light_arg = args.low_light_config or str(BA_CHAIN_LOW_LIGHT_CONFIG if args.ba_chain else DEFAULT_LOW_LIGHT_CONFIG)
+    low_light_config = None if low_light_arg.lower() == "none" else Path(low_light_arg)
     sequences = args.sequences or track_sequences(args.tracks)
     args.slam_dir.mkdir(parents=True, exist_ok=True)
     calib_dir = args.work_dir / "calibrations"
@@ -303,25 +500,30 @@ def main() -> int:
         try:
             log(f"{seq}: download")
             pinhole = work / "pinhole.json"
-            download(f"{BASE_URL}/pinhole_calibrations/test/{seq}.json", pinhole)
-            zip_path = work / f"{seq}.zip"
-            download(f"{BASE_URL}/asl_folder/test/{seq}.zip", zip_path)
-
-            log(f"{seq}: extract")
+            download(f"{BASE_URL}/pinhole_calibrations/{args.split}/{seq}.json", pinhole)
+            zip_url = f"{BASE_URL}/asl_folder/{args.split}/{seq}.zip"
             extract_dir = work / "extracted"
             extract_dir.mkdir(exist_ok=True)
-            try:
-                inner = verify_and_extract(zip_path, extract_dir)
-            except zipfile.BadZipFile:
-                download(f"{BASE_URL}/asl_folder/test/{seq}.zip", zip_path)
-                inner = verify_and_extract(zip_path, extract_dir)
+            if args.stream:
+                log(f"{seq}: extract over HTTP")
+                http_zip.extract(zip_url, extract_dir, log=lambda m, seq=seq: log(f"{seq}: {m}"))
+                inner = sequence_dir(extract_dir)
+            else:
+                zip_path = work / f"{seq}.zip"
+                download(zip_url, zip_path)
+                log(f"{seq}: extract")
+                try:
+                    inner = verify_and_extract(zip_path, extract_dir)
+                except zipfile.BadZipFile:
+                    download(zip_url, zip_path)
+                    inner = verify_and_extract(zip_path, extract_dir)
 
             refinement = None
             if args.imu_rectify:
                 log(f"{seq}: IMU rectification")
                 try:
                     refinement = rectify_imu(seq, inner, work, calib_dir,
-                                             refine=args.device_refinement)
+                                             refine=args.device_refinement, split=args.split)
                 except Exception as error:
                     log(f"{seq}: WARN IMU rectification failed ({error!r}); using raw IMU")
 
@@ -331,6 +533,8 @@ def main() -> int:
                 check=True)
             variant_a = calib_dir / f"{seq}_calib_variantA_default_noise.json"
             write_variant_a_calib(base_calib, variant_a, args.gyro_bias_std)
+            ba_calib = calib_dir / f"{seq}_calib_ba.json"  # the factory rig: the BA estimates the rotations
+            write_variant_a_calib(base_calib, ba_calib, args.gyro_bias_std)
             if refinement:
                 variant_a.write_text(json.dumps(
                     rotate_rig(json.loads(variant_a.read_text()),
@@ -338,9 +542,18 @@ def main() -> int:
                 log(f"{seq}: camera rig rotated by {refinement['rig_rotation_deg']} deg")
 
             track = sequence_track(seq)
-            config = (low_light_config if track == LOW_LIGHT_TRACK and low_light_config
-                      else args.config)
-            submit_vio = track in args.vio_tracks
+            low_light = track == LOW_LIGHT_TRACK
+            if low_light:  # test sequence_4_1, 4_4, 4_8 and 4_9 are shot in dusk or overcast daylight
+                brightness = mean_brightness(inner / "mav0" / "cam0")
+                low_light = brightness < DAYLIT_BRIGHTNESS
+                log(f"{seq}: mean grey level {brightness:.1f}: {'low-light' if low_light else 'day'} options")
+            config = low_light_config if low_light and low_light_config else args.config
+            if track in args.platform_tracks:
+                config = config_with(config, work / f"{config.stem}_platform.json",
+                                     {"config.vio_platform_filter": True})
+                if args.platform_multicam:  # test sequence_5_9: the tram's street is in cam1's door window
+                    config = multicam_config(config, work / f"{config.stem}_multicam.json")
+            submit_vio = track in args.vio_tracks or args.ba_chain  # the BA chain starts from the VIO
             log(f"{seq}: {'VIO' if submit_vio or not args.slam_exe else 'VIO + online mapper'}"
                 f", config {config.name}")
             vio_out = work / "vio"
@@ -354,6 +567,48 @@ def main() -> int:
                 continue
             if trajectory != candidates[0]:
                 log(f"{seq}: WARN {candidates[0].name} missing; submitting {trajectory.name}")
+            if vio_failure(trajectory, track):  # test sequence_1_9: the default config's VIO runs away from the start
+                attempts = [(vio_failure(trajectory, track), keep_attempt(trajectory, work / "vio_default.tum"))]
+                fallback = multicam_config(config, work / f"{config.stem}_multicam.json")
+                log(f"{seq}: WARN the VIO diverged; again with both cameras' features ({fallback.name})")
+                command, candidates = estimator_command(args, inner, variant_a, vio_out, fallback, submit_vio)
+                run(command, check=True)
+                trajectory = next(t for t in candidates if t.is_file())
+                starts, tried, after_runaway = list(LATE_STARTS_S), 0, False
+                while vio_failure(trajectory, track) and starts:  # test sequence_1_15: the head shakes over the first seconds
+                    attempts.append((vio_failure(trajectory, track),
+                                     keep_attempt(trajectory, work / f"vio_from_{tried}.tum")))
+                    tried = starts.pop(0)
+                    log(f"{seq}: WARN the VIO diverged again; starting it {tried} s into the recording")
+                    late = late_start(inner, work / f"late_{tried}", tried)
+                    command, candidates = estimator_command(args, late, variant_a, vio_out, fallback, submit_vio)
+                    run(command, check=True)
+                    trajectory = next(t for t in candidates if t.is_file())
+                    end = runaway(trajectory)[1]
+                    if (not starts and not after_runaway and track != MOVING_TRACK and end is not None
+                            and vio_failure(trajectory, track)):
+                        after_runaway = True  # test sequence_4_2: once more, 5 s after the runaway ends
+                        starts.append(round(end - recording_start(inner) + 5))
+                failure = vio_failure(trajectory, track)
+                if failure:
+                    attempts.append((failure, keep_attempt(trajectory, work / f"vio_from_{tried:.0f}.tum")))
+                    failure, trajectory = min(attempts, key=lambda a: a[0])
+                    log(f"{seq}: WARN the VIO diverged at every start; submitting {trajectory.name} "
+                        f"({failure:.0f} s run away)")
+            if args.ba_chain:
+                log(f"{seq}: BA chain (track {track})")
+                try:
+                    trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
+                                           ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
+                                           args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
+                                           low_light=low_light, rematch=args.ba_rematch)
+                except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
+                    log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
+                before = work / "ba" / "ba2.tum"
+                if args.ba_rematch and args.log_dir and (work / "ba" / "ba3.tum").is_file() and before.is_file():
+                    (args.log_dir / seq).mkdir(parents=True, exist_ok=True)  # to score the rematch against
+                    run([python, estimate_converter, "--in-tum", before,
+                         "--out-estimate", args.log_dir / seq / "ba2_estimate.txt"], check=True)
 
             run([python, estimate_converter, "--in-tum", trajectory,
                  "--out-estimate", estimate], check=True)
@@ -364,6 +619,10 @@ def main() -> int:
         except Exception as error:  # keep the loop going across sequences
             log(f"{seq}: EXCEPTION {error!r}")
         finally:
+            if args.log_dir:
+                for step_log in sorted((work / "ba").glob("*.log")):
+                    (args.log_dir / seq).mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(step_log, args.log_dir / seq / step_log.name)
             # Always reclaim the sequence's download/extract work so a failure
             # cannot accumulate disk across the whole track.
             if not args.keep_data:

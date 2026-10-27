@@ -1081,6 +1081,12 @@ pub fn build_photo_dataset(
     if cfg.complete_model {
         port_overrides.push("complete_largest_model=1".into());
     }
+    // The converged final global BA on every model, not only from 1,000
+    // frames: images registered from few tracks (structure-less, next to
+    // views panned from one spot) stay a few tenths of a degree off after
+    // the incremental loop's capped BAs. On ETH3D electro it takes three
+    // such images from 0.17-0.27° to 0.02-0.05°.
+    port_overrides.push("ba_global_final_converge_min_frames=0".into());
     // Face `k`'s `sensor_from_rig`: the panorama (rig) frame to the face's.
     let rig: Option<Vec<nalgebra::Matrix3<f64>>> =
         (cfg.equirect && cfg.equirect_rig && faces.is_none()).then(|| {
@@ -1128,6 +1134,14 @@ pub fn build_photo_dataset(
         // Block-sparse joint pose + intrinsics solve: scales with the
         // covisibility pattern instead of a dense (6 * images)^2 system.
         sfm_cfg.ba_config.linear_solver = visloc_slam::LinearSolver::Sparse;
+        // Start the Levenberg–Marquardt damping at 1e4 instead of 1e-4. The
+        // damping is absolute and a photo set's Hessian diagonals are
+        // 1e4–1e8, so 1e-4 is no damping: the first steps swing cameras by up
+        // to a radian and are rejected until λ reaches the Hessian's scale.
+        // On three 500-image SmallCity subsets this keeps a segment the
+        // mapper left bent from staying 1–3 m off (max error 282 → 23 cm on
+        // one, within about a centimetre on the other two).
+        sfm_cfg.ba_config.initial_lambda = Some(1e4);
         let r = visloc_slam::incremental_sfm_with_initial_poses(
             &cam,
             &features,
@@ -1189,17 +1203,11 @@ pub fn build_photo_dataset(
     // `equirect_native`, where every face of a registered panorama has a
     // pose whether or not anything in it was matched.
     let face_support: Option<Vec<usize>> = if faces.is_some() {
-        let axes: Vec<Vector3<f64>> = equirect::cube_face_rotations()
-            .iter()
-            .map(|(_, r)| r.column(2).into_owned())
-            .collect();
+        let axes = equirect::face_axes();
         let mut counts = vec![0usize; 6 * n];
         for &(pano, _, px) in tracks.iter().flat_map(|t| &t.observations) {
             if let Some(ray) = camera.unit_ray_from_pixel(&px) {
-                let face = (0..6)
-                    .max_by(|&a, &b| ray.dot(&axes[a]).total_cmp(&ray.dot(&axes[b])))
-                    .expect("six faces");
-                counts[6 * pano + face] += 1;
+                counts[6 * pano + equirect::nearest_face(&axes, &ray)] += 1;
             }
         }
         Some(counts)
@@ -1221,18 +1229,9 @@ pub fn build_photo_dataset(
             let face_poses: Vec<Option<visloc_core::geometry::Pose>> = poses
                 .iter()
                 .flat_map(|pose| {
-                    rotations.iter().map(move |(_, r)| {
-                        pose.as_ref().map(|pose| {
-                            let face_from_pano = nalgebra::UnitQuaternion::from_rotation_matrix(
-                                &nalgebra::Rotation3::from_matrix_unchecked(r.transpose()),
-                            );
-                            let w2c = &pose.world_to_camera;
-                            visloc_core::geometry::Pose::from_world_to_camera(
-                                face_from_pano * w2c.rotation,
-                                face_from_pano * w2c.translation,
-                            )
-                        })
-                    })
+                    rotations
+                        .iter()
+                        .map(move |(_, r)| pose.as_ref().map(|pose| equirect::face_pose(pose, r)))
                 })
                 .collect();
             (face_poses, face_names, face_camera, size, size, 6)

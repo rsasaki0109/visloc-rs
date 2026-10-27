@@ -37,6 +37,11 @@ Per-sequence calibration/config variants for the Project Aria LaMAria benchmark
   only: it raises the VIO on sequence_4_10 from 34.49 to 39.00 but costs 11
   points on sequence_2_11 (Medium); see
   [`docs/lamaria_klt_threshold.md`](../../../docs/lamaria_klt_threshold.md).
+- `euroc_config_lowlight.json`: `euroc_config.json` (default window) with the
+  same 0.5 px threshold, for the real-time chain in low light: it takes
+  1.5 CPU seconds per second of recording on sequence_4_10 and scores 35.66
+  there and 41.95 on sequence_4_11 (big window: 38.99, 36.37); see
+  [`docs/lamaria_batch_ba.md`](../../../docs/lamaria_batch_ba.md#real-time).
 
 ## Why the big window
 

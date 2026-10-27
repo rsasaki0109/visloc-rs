@@ -2,20 +2,32 @@
 //!
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features gpu --example gsplat_train -- \
-//!     --data <colmap_root> --steps 7000 --out scene.ply [--eval-every 1000]
+//!     --data <colmap_root> --steps 7000 --out scene.ply [--eval-every 1000] \
+//!     [--max-face-size 1600] [--min-face-points 15] [--faces-dir <dir>]
 //! ```
 //!
-//! Initialises from `sparse/0/points3D.txt`, holds out every 8th view (the
-//! brush / Inria split), trains on the rest and reports eval PSNR with the
-//! same renderer and metric as `gsplat_eval`.
+//! Initialises from `sparse/0/points3D.txt` (or `points3D.bin`; the model may
+//! be text or binary), holds out every 8th view (the brush / Inria split),
+//! trains on the rest and reports eval PSNR with the same renderer and
+//! metric as `gsplat_eval`.
+//!
+//! A model whose camera is `EQUIRECTANGULAR` (360° panoramas, as COLMAP 4.1
+//! writes it) is trained on the six 90° cube faces of every panorama, the
+//! ones `gsplat_photos --equirect` uses: a face is at most `--max-face-size`
+//! px square, is left out if it sees fewer than `--min-face-points` of the
+//! model's points, and is written as a PNG to `--faces-dir` (default
+//! `<colmap_root>/equirect_faces`). Every 8th panorama is held out, with all
+//! its faces.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use visloc_gsplat_core::ply::save_ply;
 use visloc_gsplat_render::GpuContext;
-use visloc_gsplat_train::dataset::{load_colmap_dataset, load_view_rgb};
-use visloc_gsplat_train::init::{read_points3d_txt, seed_scene};
+use visloc_gsplat_train::dataset::{
+    find_model_dir, load_colmap_dataset_with, load_view_rgb, EquirectOptions,
+};
+use visloc_gsplat_train::init::{read_points3d, seed_scene};
 use visloc_gsplat_train::metrics::psnr;
 use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
@@ -29,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut init_ply: Option<PathBuf> = None;
     let mut brush_strategy = false;
     let mut max_gaussians: Option<usize> = None;
+    let mut equirect = EquirectOptions::default();
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -51,6 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--normal-start" => cfg.normal_start = next()?.parse()?,
             // Per-image affine colour correction (exposure / white balance).
             "--appearance" => cfg.appearance = true,
+            "--max-face-size" => equirect.max_face_size = next()?.parse()?,
+            "--min-face-points" => equirect.min_face_points = next()?.parse()?,
+            "--faces-dir" => equirect.faces_dir = Some(PathBuf::from(next()?)),
             "--init-ply" => init_ply = Some(PathBuf::from(next()?)),
             "--export-steps" => {
                 export_steps = next()?
@@ -89,12 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let dataset = load_colmap_dataset(&data, Some(8))?;
-    let model = [data.join("sparse").join("0"), data.join("sparse")]
-        .into_iter()
-        .find(|d| d.join("points3D.txt").exists())
-        .ok_or("no sparse/0/points3D.txt")?;
-    let points = read_points3d_txt(model.join("points3D.txt"))?;
+    let dataset = load_colmap_dataset_with(&data, Some(8), &equirect, &mut |m| println!("{m}"))?;
+    let points = read_points3d(find_model_dir(&data)?)?;
     let init = match &init_ply {
         Some(p) => visloc_gsplat_core::ply::load_ply(p)?,
         None => seed_scene(&points, 3),

@@ -143,6 +143,7 @@ use nalgebra::{
 use rayon::prelude::*;
 
 use visloc_core::geometry::SE3;
+use visloc_core::types::{Camera, CameraModel};
 
 use crate::ba_accel::ReducedCameraSystem;
 use crate::block_cholesky::{solve_spd_blocks6_cached, BlockSymbolic};
@@ -1515,10 +1516,29 @@ impl From<&BaRigObservation> for RigObs {
             keyframe_id: o.keyframe_id,
             landmark_id: o.landmark_id,
             xy: o.xy,
-            intrinsics: o.camera.intrinsics(),
+            intrinsics: distortion_free_intrinsics(&o.camera),
             sensor_from_rig: o.sensor_from_rig.clone(),
         }
     }
+}
+
+/// The pinhole intrinsics of a camera without lens distortion; `None` for
+/// any other, so a distorted sensor is reported as unsupported instead of
+/// being solved as a pinhole.
+fn distortion_free_intrinsics(camera: &Camera) -> Option<(f64, f64, f64, f64)> {
+    let first_lens_param = match camera.model {
+        CameraModel::Pinhole | CameraModel::SimplePinhole => return camera.intrinsics(),
+        CameraModel::SimpleRadial | CameraModel::Radial => 3,
+        CameraModel::OpenCv | CameraModel::FullOpenCv => 4,
+        _ => return None,
+    };
+    camera
+        .params
+        .iter()
+        .skip(first_lens_param)
+        .all(|&value| value == 0.0)
+        .then(|| camera.intrinsics())
+        .flatten()
 }
 
 /// Frames and points of a solve as flat arrays, ids ascending: what

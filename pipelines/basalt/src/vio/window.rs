@@ -2643,7 +2643,30 @@ pub struct WindowProblem {
     pub scalar_mode: ScalarMode,
     /// Visual residual weighting (`vio_obs_std_dev`, `vio_obs_huber_thresh`).
     pub factor_config: FactorConfig,
+    /// Visual-only (no IMU) gauge rows; `None` on every IMU path, which then
+    /// builds exactly the factors it always did.
+    pub visual_only: Option<VisualOnlyPrior>,
 }
+
+/// Visual-only monocular mode (`config.vio_visual_only`, not upstream; see
+/// `docs/mono_visual_only_vio.md`). Without an IMU the window's gauge is 7-DoF:
+/// position, full rotation and scale. The initial anchor therefore also pins
+/// roll/pitch, and while no marginal prior exists one row pins the scale-frame
+/// position along `scale_direction` (the two-view baseline). Velocity and bias
+/// columns of every state get a weak prior towards zero: without IMU factors
+/// nothing else touches them, so the prior keeps them non-singular and does
+/// not move any pose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualOnlyPrior {
+    /// Second bootstrap keyframe; its position carries the scale gauge.
+    pub scale_frame_id: u64,
+    pub scale_position: Vector3<f64>,
+    /// Unit vector along the bootstrap baseline.
+    pub scale_direction: Vector3<f64>,
+}
+
+/// Square-root weight of the visual-only velocity/bias rows.
+const VISUAL_ONLY_DECOUPLED_WEIGHT: f64 = 1.0;
 
 const LM_TOKEN_FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
 const LM_TOKEN_FNV_PRIME: u64 = 1_099_511_628_211;
@@ -3726,6 +3749,11 @@ impl WindowProblem {
             },
             |prior| self.marginal_prior_reduced_cost(state, prior),
         );
+        let prior = if self.visual_only.is_some() {
+            prior + self.visual_only_objective(|index| self.block_nav(state, index))
+        } else {
+            prior
+        };
         self.trial_objective_f32(
             |index, visual| {
                 if visual {
@@ -4880,6 +4908,64 @@ impl WindowProblem {
         }
     }
 
+    /// The visual-only rows (see [`VisualOnlyPrior`]): velocity/bias of every
+    /// state towards zero, plus the scale row while no marginal prior exists.
+    /// Placed right after the prior/anchor factor in every factor list.
+    fn visual_only_factor(
+        &self,
+        nav_of: impl Fn(usize) -> Option<BasaltNavState>,
+    ) -> Option<WhitenedFactorRowStack> {
+        let gauge = self.visual_only.as_ref()?;
+        if self.states.is_empty() {
+            return None;
+        }
+        let scale_index = self
+            .prior
+            .is_none()
+            .then(|| self.block_index_for(gauge.scale_frame_id, WindowBlockKind::State))
+            .flatten();
+        let rows = 9 * self.states.len() + usize::from(scale_index.is_some());
+        let mut jacobian = DMatrix::zeros(rows, self.state_dof());
+        let mut rhs = DVector::zeros(rows);
+        let w = VISUAL_ONLY_DECOUPLED_WEIGHT;
+        for state_index in 0..self.states.len() {
+            let offset = self.state_offset(state_index);
+            let nav = nav_of(self.poses.len() + state_index)?;
+            let values = nav
+                .velocity_world_m_s
+                .iter()
+                .chain(nav.gyro_bias_rad_s.iter())
+                .chain(nav.accel_bias_m_s2.iter());
+            for (local, value) in values.enumerate() {
+                let row = 9 * state_index + local;
+                jacobian[(row, offset + 6 + local)] = w;
+                rhs[row] = w * value;
+            }
+        }
+        if let Some(index) = scale_index {
+            let offset = self.block_offset(index, WindowBlockKind::State);
+            let nav = nav_of(index)?;
+            let pose_weight = self.initial_pose_weight.sqrt();
+            let row = rows - 1;
+            for axis in 0..3 {
+                jacobian[(row, offset + axis)] = pose_weight * gauge.scale_direction[axis];
+            }
+            rhs[row] = pose_weight
+                * gauge
+                    .scale_direction
+                    .dot(&(nav.imu_to_world.translation - gauge.scale_position));
+        }
+        prior_factor(jacobian, rhs)
+    }
+
+    /// Objective of [`Self::visual_only_factor`] (0 on IMU paths), added to the
+    /// prior term of the f32 trial objective so the trial cost matches the
+    /// linearized cost.
+    fn visual_only_objective(&self, nav_of: impl Fn(usize) -> Option<BasaltNavState>) -> f64 {
+        self.visual_only_factor(nav_of)
+            .map_or(0.0, |factor| factor.objective_cost)
+    }
+
     fn prior_factors(&self, state: &DVector<f64>) -> Vec<WhitenedFactorRowStack> {
         let mut factors = Vec::new();
         if let Some(prior) = &self.prior {
@@ -5030,6 +5116,11 @@ impl WindowProblem {
                     }
                     // Basalt fixes yaw while leaving roll/pitch to gravity.
                     jacobian[(5, 5)] = pose_weight;
+                    if self.visual_only.is_some() {
+                        // No gravity without an IMU: pin roll/pitch too.
+                        jacobian[(3, 3)] = pose_weight;
+                        jacobian[(4, 4)] = pose_weight;
+                    }
                     // Preserve the upstream assignment in
                     // sqrt_keypoint_vio.cpp: vio_init_ba_weight is written to
                     // columns 9..11 and vio_init_bg_weight to columns 12..14.
@@ -5079,6 +5170,9 @@ impl WindowProblem {
                     }
                 }
             }
+        }
+        if let Some(factor) = self.visual_only_factor(|index| self.block_nav(state, index)) {
+            factors.push(factor);
         }
         factors
     }
@@ -5190,6 +5284,10 @@ impl WindowProblem {
                         jacobian[(axis, axis)] = pose_weight;
                     }
                     jacobian[(5, 5)] = pose_weight;
+                    if base.visual_only.is_some() {
+                        jacobian[(3, 3)] = pose_weight;
+                        jacobian[(4, 4)] = pose_weight;
+                    }
                     for axis in 0..3 {
                         jacobian[(9 + axis, 9 + axis)] = accel_bias_weight;
                         jacobian[(12 + axis, 12 + axis)] = gyro_bias_weight;
@@ -5226,6 +5324,9 @@ impl WindowProblem {
                     }
                 }
             }
+        }
+        if let Some(factor) = base.visual_only_factor(|index| values.block_nav(index)) {
+            factors.push(factor);
         }
         factors
     }
@@ -6599,6 +6700,14 @@ impl WindowTrialView<'_, '_> {
                 },
                 |prior| self.base.marginal_prior_reduced_cost_view(self, prior),
             );
+            let prior = if self.base.visual_only.is_some() {
+                prior
+                    + self
+                        .base
+                        .visual_only_objective(|index| self.block_nav(index))
+            } else {
+                prior
+            };
             return self.base.trial_objective_f32(
                 |index, visual| {
                     if visual {
@@ -6829,14 +6938,20 @@ impl LmProblem for WindowProblem {
         }
         let layout = self.layout();
         let mut factors = self.prior_factors(state);
-        for landmark_index in 0..self.landmarks.len() {
-            if let Some(factor) = self.visual_factor(state, landmark_index) {
+        // As in `linearize_view`: each landmark's factor is a pure function
+        // of the shared read-only state and its own index, so building them
+        // in parallel and appending the results in ascending landmark order
+        // yields the identical factor list (and every downstream rounding
+        // tree) as the sequential loop.
+        let visual_factors: Vec<Option<WhitenedFactorRowStack>> = (0..self.landmarks.len())
+            .into_par_iter()
+            .map(|landmark_index| {
                 // The clean UpstreamF32 reducer may retain one compact Q1/R
                 // payload per visual block.  Carry identity explicitly so
                 // that future trial recovery is mapped by landmark rather
                 // than inferred from factor order; callers without this
                 // optional metadata remain on the legacy path.
-                factors.push(
+                self.visual_factor(state, landmark_index).map(|factor| {
                     factor
                         .with_landmark_metadata(
                             landmark_index,
@@ -6848,10 +6963,11 @@ impl LmProblem for WindowProblem {
                                 .iter()
                                 .map(|observation| (observation.state_index, observation.camera_id))
                                 .collect(),
-                        ),
-                );
-            }
-        }
+                        )
+                })
+            })
+            .collect();
+        factors.extend(visual_factors.into_iter().flatten());
         for link in self.imu_links.iter().cloned() {
             if let Some(factor) = self.imu_factor(state, link.clone()) {
                 factors.push(factor);
@@ -10845,6 +10961,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         }
     }
 
@@ -12241,6 +12358,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         assert_eq!(problem.state_dof(), 36);
         let x = problem.initial_state();
@@ -12282,6 +12400,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let mut step = DVector::zeros(NAV_STATE_DOF);
         step[0] = 0.3;
@@ -12375,6 +12494,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let second_increment = DVector::from_column_slice(&[
             0.8693182_f64,
@@ -12602,6 +12722,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let step =
             DVector::from_iterator(NAV_STATE_DOF, increment_bits.into_iter().map(f64_from_bits));
@@ -12784,6 +12905,7 @@ mod tests {
                 gravity_world: Vector3::zeros(),
                 scalar_mode: ScalarMode::UpstreamF32,
                 factor_config: FactorConfig::default(),
+                visual_only: None,
             }
         };
         let raw_pose = pose_from_bits(
@@ -13307,6 +13429,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let x = problem.initial_state();
         let factors = problem.linearize(&x).unwrap().factors;
@@ -13343,6 +13466,7 @@ mod tests {
             gravity_world: Vector3::new(0.0, 0.0, -9.81),
             scalar_mode: ScalarMode::ExtendedF64,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let factors = problem.linearize(&problem.initial_state()).unwrap().factors;
         let anchor = factors.iter().find(|factor| factor.rows() == 15).unwrap();
@@ -13404,6 +13528,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let initial = problem.initial_state();
         let linearization = problem.linearize(&initial).unwrap();
@@ -13605,6 +13730,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::ExtendedF64,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let before =
             problem.landmarks[0].direction.bearing() / problem.landmarks[0].inverse_distance;
@@ -13767,6 +13893,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let factor = problem
             .linearize(&problem.initial_state())
@@ -13862,6 +13989,7 @@ mod tests {
             gravity_world: Vector3::zeros(),
             scalar_mode: ScalarMode::UpstreamF32,
             factor_config: FactorConfig::default(),
+            visual_only: None,
         };
         let state = problem.initial_state();
         let factor = problem

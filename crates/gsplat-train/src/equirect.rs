@@ -7,7 +7,8 @@
 //! (up at the top). Directions are in the camera convention the rest of the
 //! crate uses: x right, y down, z forward.
 
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
+use visloc_core::geometry::Pose;
 
 /// The six cube faces: a name and the rotation taking a direction in the
 /// face camera's frame to the panorama's frame (its columns are the face
@@ -74,6 +75,35 @@ pub fn cube_face(pano: &image::RgbImage, rotation: &Matrix3<f64>, size: u32) -> 
         }
     }
     face
+}
+
+/// The optical axis of each cube face in the panorama's frame, in
+/// [`cube_face_rotations`] order.
+pub fn face_axes() -> [Vector3<f64>; 6] {
+    cube_face_rotations().map(|(_, r)| r.column(2).into_owned())
+}
+
+/// The cube face (an index into [`cube_face_rotations`]) whose axis lies
+/// closest to `ray`, a direction in the panorama's frame; `axes` is
+/// [`face_axes`].
+pub fn nearest_face(axes: &[Vector3<f64>; 6], ray: &Vector3<f64>) -> usize {
+    (0..6)
+        .max_by(|&a, &b| ray.dot(&axes[a]).total_cmp(&ray.dot(&axes[b])))
+        .expect("six faces")
+}
+
+/// The pose of the cube face with rotation `face_rotation` (as in
+/// [`cube_face_rotations`]) of a panorama posed `pano`: the same centre, the
+/// face's fixed rotation behind the panorama's.
+pub fn face_pose(pano: &Pose, face_rotation: &Matrix3<f64>) -> Pose {
+    let face_from_pano = UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(
+        face_rotation.transpose(),
+    ));
+    let w2c = &pano.world_to_camera;
+    Pose::from_world_to_camera(
+        face_from_pano * w2c.rotation,
+        face_from_pano * w2c.translation,
+    )
 }
 
 /// Whether `img` looks like an equirectangular panorama: 2:1 within 1%, its
@@ -226,5 +256,54 @@ mod tests {
         );
         assert!(metadata_says_equirectangular(&jpeg));
         assert!(!metadata_says_equirectangular(&[0xFF, 0xD8, 0xFF, 0xDA]));
+    }
+
+    /// A pose that is not special in any axis: no face's rotation commutes
+    /// with it, and its translation is not along a face axis.
+    fn awkward_pose() -> Pose {
+        Pose::from_world_to_camera(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.3, -0.5, 0.2) * 1.7),
+            Vector3::new(0.4, -1.3, 2.1),
+        )
+    }
+
+    #[test]
+    fn a_point_on_a_face_axis_lands_at_that_faces_centre() {
+        // The world point at distance 3 along face k's axis, seen from the
+        // panorama at `pano`, projects to the middle of face k's image.
+        // Catches a face rotation applied transposed (R for R^T), applied on
+        // the wrong side of the panorama's rotation, or a translation left
+        // unrotated: each moves some face's point off its centre pixel.
+        let pano = awkward_pose();
+        let w2c = &pano.world_to_camera;
+        let centre = -(w2c.rotation.inverse() * w2c.translation);
+        for ((name, r), axis) in cube_face_rotations().iter().zip(face_axes()) {
+            let world = centre + w2c.rotation.inverse() * (axis * 3.0);
+            let face = face_pose(&pano, r).world_to_camera;
+            let p = face.rotation * world + face.translation;
+            assert!(p.z > 0.0, "{name}: behind the face camera");
+            assert!(p.x.abs() < 1e-9 && p.y.abs() < 1e-9, "{name}: {p:?}");
+            assert!((p.z - 3.0).abs() < 1e-9, "{name}: {p:?}");
+            // Same optical centre as the panorama.
+            let c = -(face.rotation.inverse() * face.translation);
+            assert!((c - centre).norm() < 1e-9, "{name}: centre moved");
+        }
+    }
+
+    #[test]
+    fn the_nearest_face_of_an_axis_is_that_face() {
+        let axes = face_axes();
+        for (k, a) in axes.iter().enumerate() {
+            assert_eq!(nearest_face(&axes, a), k);
+            // Tilted a little toward another face, still this one.
+            let tilted = a + axes[(k + 1) % 6] * 0.3;
+            assert_eq!(nearest_face(&axes, &tilted), k, "face {k}");
+        }
+        // Up is image -y; a ray mostly up and a little ahead is the up face.
+        let up = cube_face_rotations()
+            .iter()
+            .position(|(n, _)| *n == "up")
+            .unwrap();
+        assert_eq!(nearest_face(&axes, &Vector3::new(0.1, -0.9, 0.3)), up);
     }
 }

@@ -145,6 +145,7 @@ fn cam0_and_cam1_visual_residuals_are_zero_with_rig_extrinsics() {
         gravity_world: Vector3::new(0.0, 0.0, -9.81),
         scalar_mode: ScalarMode::ExtendedF64,
         factor_config: FactorConfig::default(),
+        visual_only: None,
     };
     let factors = problem.linearize(&problem.initial_state()).unwrap().factors;
     let visual = factors.iter().find(|factor| factor.rows() == 4).unwrap();

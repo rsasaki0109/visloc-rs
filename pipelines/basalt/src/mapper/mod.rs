@@ -10,6 +10,7 @@ pub use imu_factor::{
     imu_preintegration_relative_pose_factor, refine_pair_velocities, VelocityPair,
 };
 pub mod imu_ba;
+pub mod localization_map;
 pub mod session;
 pub mod triangulation;
 
@@ -26,6 +27,10 @@ pub use features::{
     query_bow_candidates, unproject_rays, BowEntry, BowQueryCandidate, FeaturePipelineError,
     MapperImageFeatures, MapperImageId, StereoFeatureMatch, TemporalMatchStage,
     TemporalRansacResult,
+};
+pub use localization_map::{
+    fit_opencv_fisheye, localization_camera_id, orb_descriptor_to_f32, FisheyeFit,
+    LocalizationMapError, LocalizationMapExport, LocalizationMapImage,
 };
 pub use session::{
     NfrMapper, NfrMapperCurrentPoints, NfrMapperDetectionReport, NfrMapperError,

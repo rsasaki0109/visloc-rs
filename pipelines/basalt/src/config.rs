@@ -89,6 +89,13 @@ const OPTIONAL_KEYS: &[&str] = &[
     // IMU noise discretized by each preintegration step's length (default
     // false); see `EstimatorConfig::imu_noise_per_step`.
     "config.vio_imu_noise_per_step",
+    // Moving-platform filter (default false): during a ride, only the
+    // tracks that move with the street reach the estimator; see
+    // `crate::platform`.
+    "config.vio_platform_filter",
+    // Monocular visual-only odometry (default false); see
+    // `docs/mono_visual_only_vio.md`.
+    "config.vio_visual_only",
 ];
 #[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
@@ -191,6 +198,7 @@ impl BasaltConfig {
             outlier_filter: self.outlier_filter()?,
             earth_rotation_up_rad_s: self.earth_rotation_up_rad_s()?,
             imu_noise_per_step: self.optional_bool("config.vio_imu_noise_per_step")?,
+            visual_only: self.optional_bool("config.vio_visual_only")?,
         })
     }
     /// `config.vio_earth_rotation_latitude_deg`: `w_e sin(latitude)`, or 0

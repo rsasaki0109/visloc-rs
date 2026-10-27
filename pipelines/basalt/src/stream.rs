@@ -19,7 +19,7 @@
 //! because the corresponding cam0 ID failed. They have separate trace entries
 //! so the new-point sequence above remains visible.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use nalgebra::{Matrix2, Matrix3, Point2, Point3, UnitQuaternion, Vector2, Vector3};
 use rayon::prelude::*;
@@ -46,6 +46,9 @@ pub struct DirectKltConfig {
     pub fast: GridFastConfig,
     /// Opt-in raw-gyro rotation initialization for temporal cam0 KLT.
     pub imu_seed_rotation: bool,
+    /// Patch pattern scale: 1 for Basalt's `Pattern51` (the default), 2 for
+    /// `Pattern52`, the same layout at twice the size.
+    pub pattern_scale: f32,
 }
 
 impl Default for DirectKltConfig {
@@ -57,6 +60,7 @@ impl Default for DirectKltConfig {
             essential_residual_threshold: 0.005,
             fast: GridFastConfig::default(),
             imu_seed_rotation: false,
+            pattern_scale: 1.0,
         }
     }
 }
@@ -265,6 +269,8 @@ pub struct DirectKltStream {
     multi_camera: MultiCameraFlowOptions,
     detector: GridFastDetector,
     previous: Option<FramePyramids>,
+    /// Source patches already sampled from `previous` (see [`PatchCache`]).
+    previous_patches: PatchCache,
     previous_frame: Option<BasaltFrame>,
     tracks: BTreeMap<TrackId, ActiveTrack>,
     next_track_id: TrackId,
@@ -307,6 +313,7 @@ impl DirectKltStream {
             config,
             multi_camera: MultiCameraFlowOptions::default(),
             previous: None,
+            previous_patches: PatchCache::default(),
             previous_frame: None,
             tracks: BTreeMap::new(),
             next_track_id: 0,
@@ -465,6 +472,9 @@ impl DirectKltStream {
 
         let old_tracks = std::mem::take(&mut self.tracks);
         let mut current_tracks = BTreeMap::new();
+        // Patches sampled from this frame's images at this frame's track
+        // positions, which the next frame's forward searches start from.
+        let mut current_patches = PatchCache::default();
         let mut retained_track_ids = Vec::new();
         let mut rejected_track_ids = Vec::new();
 
@@ -507,10 +517,17 @@ impl DirectKltStream {
                         &self.config,
                         camera0,
                         theta_cam0,
+                        &self.previous_patches,
                     )
                 })
                 .collect();
             for result in results {
+                if let Some((position, patches)) = result.cam0_patches {
+                    current_patches.insert(0, position, patches);
+                }
+                if let Some((position, patches)) = result.cam1_patches {
+                    current_patches.insert(1, position, patches);
+                }
                 match result.cam0_classification {
                     Some(Cam0Classification::Retained) => retained_track_ids.push(result.track_id),
                     Some(Cam0Classification::Rejected(reason)) => {
@@ -598,7 +615,18 @@ impl DirectKltStream {
                 };
                 let forward = match seed {
                     None => {
-                        track_direction(&current.cam0, current_cam1, cam0_transform, &self.config)
+                        let mut patches = Vec::new();
+                        let forward = track_direction_recording(
+                            &current.cam0,
+                            current_cam1,
+                            cam0_transform,
+                            &self.config,
+                            &mut patches,
+                        );
+                        if forward.is_ok() {
+                            current_patches.insert(0, *cam0_transform.translation(), patches);
+                        }
+                        forward
                     }
                     // The cam1 patch is sampled through the predicted local
                     // cam0->cam1 warp, so the SE(2) search only has to absorb
@@ -623,7 +651,18 @@ impl DirectKltStream {
                 // same-pixel path keeps upstream's seed at the cam1 match.
                 let backward = match seed {
                     None => {
-                        track_direction(current_cam1, &current.cam0, stereo_transform, &self.config)
+                        let mut patches = Vec::new();
+                        let backward = track_direction_recording(
+                            current_cam1,
+                            &current.cam0,
+                            stereo_transform,
+                            &self.config,
+                            &mut patches,
+                        );
+                        if backward.is_ok() {
+                            current_patches.insert(1, *stereo_transform.translation(), patches);
+                        }
+                        backward
                     }
                     Some((_, warp)) => track_direction_from_warped_seed(
                         current_cam1,
@@ -754,6 +793,7 @@ impl DirectKltStream {
         self.cumulative_rejects.merge_from(&counters);
         self.tracks = current_tracks;
         self.previous = Some(current);
+        self.previous_patches = current_patches;
         let output = TrackFrameOutput {
             frame: BasaltFrame::new(frame.frame_id, frame.timestamp_ns, 0),
             observations,
@@ -790,6 +830,41 @@ struct TemporalTrackResult {
     cam0_classification: Option<Cam0Classification>,
     cam1: Option<AffineCompact2f>,
     cam1_reject: Option<RejectReason>,
+    /// The retained tracks' backward-search source patches, sampled from
+    /// the current images at the new positions.
+    cam0_patches: Option<(Vector2<f32>, LevelPatches)>,
+    cam1_patches: Option<(Vector2<f32>, LevelPatches)>,
+}
+
+/// One source patch per pyramid level, in the order
+/// [`track_direction_from_seed_impl`] visits the levels (coarsest first).
+type LevelPatches = Vec<MeanNormalizedPatch51>;
+
+/// Source patches sampled from one frame's images, by camera and exact
+/// position. A patch depends only on the image level, the position and the
+/// pattern scale, so the backward search that ends a frame's tracking (and
+/// the stereo search of a new point) samples exactly the patches the next
+/// frame's forward search needs from the same image at the same position.
+/// Reusing them skips half of the patch sampling and changes no value.
+#[derive(Debug, Clone, Default)]
+struct PatchCache {
+    patches: HashMap<(u8, u32, u32), LevelPatches>,
+}
+
+impl PatchCache {
+    fn key(camera: u8, position: Vector2<f32>) -> (u8, u32, u32) {
+        (camera, position.x.to_bits(), position.y.to_bits())
+    }
+
+    fn insert(&mut self, camera: u8, position: Vector2<f32>, patches: LevelPatches) {
+        self.patches.insert(Self::key(camera, position), patches);
+    }
+
+    fn get(&self, camera: u8, position: Vector2<f32>) -> Option<&[MeanNormalizedPatch51]> {
+        self.patches
+            .get(&Self::key(camera, position))
+            .map(Vec::as_slice)
+    }
 }
 
 /// Integrates raw gyro samples in the IMU frame using rectangular integration
@@ -852,10 +927,12 @@ fn temporal_track_update(
     config: &DirectKltConfig,
     camera0: Option<&DoubleSphereCamera>,
     theta_cam0: Option<Vector3<f32>>,
+    previous_patches: &PatchCache,
 ) -> TemporalTrackResult {
     // `FrameToFrameOpticalFlow::trackPoints` runs once for each camera map.
     // Do not gate the cam1 search on cam0 success.
     let mut cam0_classification = None;
+    let mut cam0_patches = None;
     let cam0 = old_track.cam0.and_then(|old_cam0| {
         // `source_position` anchors the reference patch sampled from the OLD
         // image and must stay at the point's true previous-frame pixel; only
@@ -873,12 +950,17 @@ fn temporal_track_update(
             })
             .unwrap_or(*old_cam0.translation());
         let seeded_initial = AffineCompact2f::new(*old_cam0.linear(), predicted_position);
-        let frame_transform = match track_direction_from_seed(
+        let frame_transform = match track_direction_from_seed_impl(
             &previous.cam0,
             &current.cam0,
             *old_cam0.translation(),
             seeded_initial,
+            false,
             config,
+            previous_patches.get(0, *old_cam0.translation()),
+            None,
+            #[cfg(test)]
+            None,
         ) {
             Ok(transform) => transform,
             Err(failure) => {
@@ -889,40 +971,61 @@ fn temporal_track_update(
             }
         };
 
-        let recovered =
-            match track_direction(&current.cam0, &previous.cam0, frame_transform, config) {
-                Ok(transform) => transform,
-                Err(failure) => {
-                    cam0_classification = Some(Cam0Classification::Rejected(
-                        RejectReason::FrameBackward(failure),
-                    ));
-                    return None;
-                }
-            };
+        let mut patches = Vec::new();
+        let recovered = match track_direction_recording(
+            &current.cam0,
+            &previous.cam0,
+            frame_transform,
+            config,
+            &mut patches,
+        ) {
+            Ok(transform) => transform,
+            Err(failure) => {
+                cam0_classification = Some(Cam0Classification::Rejected(
+                    RejectReason::FrameBackward(failure),
+                ));
+                return None;
+            }
+        };
         let fb_squared = (old_cam0.translation() - recovered.translation()).norm_squared();
         if fb_squared >= config.fb_squared_threshold {
             cam0_classification = Some(Cam0Classification::Rejected(RejectReason::FrameFbSquared));
             None
         } else {
             cam0_classification = Some(Cam0Classification::Retained);
+            cam0_patches = Some((*frame_transform.translation(), patches));
             Some(frame_transform)
         }
     });
 
     let mut cam1_reject = None;
+    let mut cam1_patches = None;
     let cam1 = match (
         old_track.cam1,
         previous.cam1.as_ref(),
         current.cam1.as_ref(),
     ) {
         (Some(old_cam1), Some(previous_cam1), Some(current_cam1)) => {
-            match track_direction(previous_cam1, current_cam1, old_cam1, config) {
+            match track_direction_from_seed_impl(
+                previous_cam1,
+                current_cam1,
+                *old_cam1.translation(),
+                old_cam1,
+                false,
+                config,
+                previous_patches.get(1, *old_cam1.translation()),
+                None,
+                #[cfg(test)]
+                None,
+            ) {
                 Ok(stereo_transform) => {
-                    let recovered = match track_direction(
+                    let mut patches = Vec::new();
+                    let recovered = match track_direction_recording(
                         current_cam1,
                         previous_cam1,
                         stereo_transform,
                         config,
+                        &mut patches,
                     ) {
                         Ok(transform) => Some(transform),
                         Err(failure) => {
@@ -937,6 +1040,7 @@ fn temporal_track_update(
                             cam1_reject = Some(RejectReason::ExistingStereoFbSquared);
                             None
                         } else {
+                            cam1_patches = Some((*stereo_transform.translation(), patches));
                             Some(stereo_transform)
                         }
                     })
@@ -957,6 +1061,8 @@ fn temporal_track_update(
         cam0_classification,
         cam1,
         cam1_reject,
+        cam0_patches,
+        cam1_patches,
     }
 }
 
@@ -975,6 +1081,29 @@ fn track_direction(
     )
 }
 
+/// [`track_direction`] that also returns the source patches it sampled
+/// (complete only when it succeeds), for [`PatchCache`].
+fn track_direction_recording(
+    old_pyramid: &RawU16Pyramid,
+    current_pyramid: &RawU16Pyramid,
+    old_transform: AffineCompact2f,
+    config: &DirectKltConfig,
+    patches: &mut LevelPatches,
+) -> Result<AffineCompact2f, KltFailure> {
+    track_direction_from_seed_impl(
+        old_pyramid,
+        current_pyramid,
+        *old_transform.translation(),
+        old_transform,
+        false,
+        config,
+        None,
+        Some(patches),
+        #[cfg(test)]
+        None,
+    )
+}
+
 fn track_direction_from_seed(
     old_pyramid: &RawU16Pyramid,
     current_pyramid: &RawU16Pyramid,
@@ -989,6 +1118,8 @@ fn track_direction_from_seed(
         initial_transform,
         false,
         config,
+        None,
+        None,
         #[cfg(test)]
         None,
     )
@@ -1012,6 +1143,8 @@ fn track_direction_from_warped_seed(
         initial_transform,
         true,
         config,
+        None,
+        None,
         #[cfg(test)]
         None,
     )
@@ -1048,6 +1181,8 @@ fn track_direction_from_seed_with_observer(
         initial_transform,
         false,
         config,
+        None,
+        None,
         Some(observer),
     )
 }
@@ -1059,6 +1194,11 @@ fn track_direction_from_seed_impl(
     initial_transform: AffineCompact2f,
     search_from_initial_linear: bool,
     config: &DirectKltConfig,
+    // Source patches sampled earlier from `old_pyramid` at
+    // `source_position` (see `PatchCache`), and where to put the ones this
+    // search samples.
+    cached_patches: Option<&[MeanNormalizedPatch51]>,
+    mut record_patches: Option<&mut LevelPatches>,
     #[cfg(test)] mut observer: Option<&mut dyn KltIterationObserver>,
 ) -> Result<AffineCompact2f, KltFailure> {
     // Basalt resets the linear part for the current IC search. The previous
@@ -1074,7 +1214,9 @@ fn track_direction_from_seed_impl(
         (*initial_transform.linear(), Matrix2::identity())
     };
     let mut transform = AffineCompact2f::new(search_linear, *initial_transform.translation());
-    for level in (0..=config.pyramid_levels).rev() {
+    let cached_patches =
+        cached_patches.filter(|patches| patches.len() == config.pyramid_levels + 1);
+    for (visit, level) in (0..=config.pyramid_levels).rev().enumerate() {
         let scale = (1_u32 << level) as f32;
         let old_position = source_position / scale;
         let level_image = old_pyramid
@@ -1083,7 +1225,15 @@ fn track_direction_from_seed_impl(
         let current_image = current_pyramid
             .level(level)
             .ok_or(KltFailure::TargetOutOfBounds)?;
-        let patch = MeanNormalizedPatch51::from_image(level_image, old_position);
+        let mut sampled = None;
+        let patch: &MeanNormalizedPatch51 = match cached_patches {
+            Some(patches) => &patches[visit],
+            None => sampled.insert(MeanNormalizedPatch51::from_image_scaled(
+                level_image,
+                old_position,
+                config.pattern_scale,
+            )),
+        };
         if !patch.valid {
             return Err(KltFailure::SourcePatchInvalid);
         }
@@ -1107,7 +1257,7 @@ fn track_direction_from_seed_impl(
                 observer.record_iteration(
                     level,
                     iteration,
-                    &patch,
+                    patch,
                     &residual,
                     increment,
                     before,
@@ -1118,6 +1268,13 @@ fn track_direction_from_seed_impl(
             if !current_image.in_bounds(*level_transform.translation(), 2.0) {
                 return Err(KltFailure::TargetOutOfBounds);
             }
+        }
+        if let Some(record) = record_patches.as_deref_mut() {
+            record.push(match (sampled, cached_patches) {
+                (Some(sampled), _) => sampled,
+                (None, Some(patches)) => patches[visit].clone(),
+                (None, None) => unreachable!("a level's patch is cached or sampled"),
+            });
         }
         transform = AffineCompact2f::new(
             *level_transform.linear(),
@@ -1542,6 +1699,59 @@ mod tests {
             .iter()
             .filter(|o| cam1_born.iter().any(|born| born.track_id == o.track_id))
             .all(|o| o.camera_id == 1));
+    }
+
+    #[test]
+    fn reusing_source_patches_changes_no_output() {
+        let (width, height) = (240_usize, 160_usize);
+        let camera = DoubleSphereCamera::new(
+            120.0,
+            120.0,
+            120.0,
+            80.0,
+            0.0,
+            0.0,
+            width as u32,
+            height as u32,
+        )
+        .unwrap();
+        let mut calibration = synthetic_calibration(camera);
+        calibration.resolutions = vec![(width as u32, height as u32); 2];
+        calibration.t_imu_cam[1].translation.x = 0.1;
+        let config = DirectKltConfig {
+            pyramid_levels: 2,
+            fast: GridFastConfig {
+                cell_size: 40,
+                edge_threshold: 8,
+                ..GridFastConfig::default()
+            },
+            ..DirectKltConfig::default()
+        };
+        let frame = |id: u64| {
+            let dx = id as usize;
+            StereoFrame::new(
+                id,
+                1_000 + id as i64,
+                tile_image(width, height, 7, dx),
+                Some(half_shared_cam1(width, height, dx)),
+            )
+        };
+        let mut cached = DirectKltStream::new(calibration.clone(), config).unwrap();
+        let mut uncached = DirectKltStream::new(calibration, config).unwrap();
+        let mut reused = 0;
+        for id in 0..8 {
+            if id > 0 {
+                reused += cached.previous_patches.patches.len();
+            }
+            uncached.previous_patches = PatchCache::default();
+            let with_cache = cached.process_frame(frame(id)).unwrap();
+            let without = uncached.process_frame(frame(id)).unwrap();
+            assert_eq!(with_cache.observations, without.observations, "frame {id}");
+            assert_eq!(with_cache.retained_track_ids, without.retained_track_ids);
+            assert_eq!(with_cache.rejected_track_ids, without.rejected_track_ids);
+            assert_eq!(with_cache.reject_counters, without.reject_counters);
+        }
+        assert!(reused > 50, "only {reused} cached patch sets");
     }
 
     #[test]

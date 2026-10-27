@@ -10,6 +10,7 @@ needed to build or run them**, and they still join an ordinary ROS 2 graph.
 |---|---|
 | `visloc_vio_node` | Stereo-inertial VIO: the repository's faithful Basalt port (`pipelines/basalt`) fed from two `sensor_msgs/Image` streams and `sensor_msgs/Imu`. Publishes odometry, pose, path and TF. |
 | `visloc_localize_node` | Map-based localization: loads a COLMAP model plus a landmark descriptor store at start, extracts SIFT on each incoming image, matches against the map and solves PnP-RANSAC. Publishes the camera pose, inlier count and diagnostics. |
+| `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and anchors the VIO odometry to it. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
 
 This crate is **not** a member of the root Cargo workspace (it is listed in
 the root `[workspace] exclude` and declares its own `[workspace]`), has its
@@ -72,11 +73,13 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `publish_tf`, `publish_path` | `true` | |
 | `path_max_length` | `2000` | |
 | `stereo_sync_tolerance_ms` | `2.0` | max left/right stamp difference |
-| `frame_queue` | `4` | paired frames waiting for the estimator (drop-oldest) |
+| `frame_queue` | `1` | paired frames waiting for the frontend (drop-oldest) |
+| `frontend_threads` | `2` | worker threads of the KLT frontend (`0`: share the estimator's pool) |
 | `imu_buffer` | `4000` | buffered IMU samples (drop-oldest) |
 | `image_qos_depth`, `imu_qos_depth` | `5`, `400` | subscription history depth |
 | `urgent_keyframes` | `true` | the demo's urgent-keyframe defaults |
 | `imu_seed_klt` | `false` | `config.optical_flow_imu_seed_rotation` |
+| `max_iterations` | `3` | LM iterations per frame, overriding `config.vio_max_iterations` (`0` keeps the config's); see the replay results below |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -84,15 +87,24 @@ Data flow and threading: one receive thread per subscription decodes images
 (mono8 / mono16 / rgb8 / bgr8 / rgba8 / bgra8; colour is converted with
 BT.601 luma; 8-bit is widened `u16 = u8 << 8` exactly like the EuRoC
 reader) and hands them to a stereo synchronizer (closest stamp within the
-tolerance). Paired frames go into a bounded drop-oldest queue. The estimator
-thread releases a frame only once IMU data reaches its stamp, and passes it
-the half-open IMU interval `(previous frame, this frame]`, which is the
-`EurocSensorFrame` contract. If the estimator falls behind, the oldest
-frames are dropped. The IMU interval of the next processed frame still
-starts at the last processed frame, so preintegration stays contiguous.
-`cam_time_offset_ns` from the calibration is added to camera stamps. On an
-estimator error the node logs it, rebuilds the estimator and
-re-initializes from IMU.
+tolerance). Paired frames go into a bounded drop-oldest queue. A frame is
+released only once IMU data reaches its stamp, with the half-open IMU
+interval `(previous frame, this frame]`, which is the `EurocSensorFrame`
+contract. As in upstream Basalt, KLT tracking and the estimator run on two
+threads: the frontend thread tracks frame N+1 (on its own pool of
+`frontend_threads` workers) while the estimator thread solves frame N and
+publishes. The frontend hands each tracked frame over directly, so it is at
+most one frame ahead. If the estimator falls behind, the queued frames are
+dropped, oldest first, before tracking. The newest frame is processed next
+and latency stays bounded. The IMU interval of the next processed frame
+still starts at the last processed frame, so preintegration stays
+contiguous. The two-thread split gives the same estimates as running both
+stages in turn (`tests/core_pipeline.rs` checks this). The `imu_seed_klt`
+seed is the exception: it uses the latest gyro bias the estimator has
+published, not the previous frame's. `cam_time_offset_ns` from the
+calibration is added to camera stamps. On an estimator error the node logs
+it, rebuilds both stages and re-initializes from IMU. Every 10 s it logs
+the dropped-frame counts and the frontend/estimator time per frame.
 
 ## `visloc_localize_node`
 
@@ -141,6 +153,122 @@ poorly.
 Images whose size differs from the camera are rejected (reported as a
 failure), not rescaled.
 
+## `visloc_map_localize_node`
+
+Localization against a map built and saved by the repository's
+stereo-inertial SLAM, the way a robot localizes in a prebuilt map: run it
+next to `visloc_vio_node`, and it publishes the `map -> odom` transform that
+places the VIO's drifting `odom` frame in the map (REP-105). Together with
+the VIO's `odom -> imu_link`, every frame has a map pose.
+
+```sh
+# Once: map the place and save the map (repository root)
+cargo run --release --example basalt_euroc_online_slam_demo -- \
+  --euroc-dir /data/MH_01_easy \
+  --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --out-dir runs/mh01_slam --save-map runs/mh01_map
+
+# On the robot
+visloc_vio_node --calibration .../euroc_ds_calib.json --config .../euroc_config.json \
+  --remap left/image_raw=/cam0/image_raw --remap right/image_raw=/cam1/image_raw --remap imu=/imu0
+visloc_map_localize_node --map runs/mh01_map --remap image=/cam0/image_raw
+```
+
+Every `localize_every`-th image goes through the SLAM mapper's own ORB
+frontend, is matched to the map's landmarks by Hamming distance and solved
+with P3P RANSAC; a pose with at least `min_inliers` inliers is a *fix*.
+Until the anchor exists, every keypoint is compared with every landmark.
+After that, the anchor and the odometry at the image's stamp predict the
+pose (the node waits up to `prior_wait_ms` for that odometry). Each landmark
+is projected with the predicted pose and compared only with the keypoints
+within `projection_radius` pixels. If that does not localize, the node
+falls back to the map-wide search. On EuRoC this cuts matching and PnP from
+about 50 ms to 4 ms per image, and doubles the inliers (169 vs 81 on
+MH_02 against the MH_01 map). Both searches pack the map's descriptors once
+(`visloc_localization::BinaryLandmarkIndex`).
+Each fix is paired with the odometry pose of the same stamp (the VIO node
+stamps its odometry with the left image's stamp; a fix that arrives before
+its odometry waits for it, and a stamp between two odometry poses at most
+0.2 s apart is interpolated) and fed to `visloc_localization::MapAnchor`:
+
+- the transform is a yaw and a translation (both frames are gravity-aligned),
+  averaged over the fixes of the last 5 s;
+- it starts once two consecutive fixes agree;
+- it accepts a fix within 15 cm / 3 deg of where it puts the odometry pose,
+  widened by 5 cm / 1 deg per metre travelled since the last accepted fix;
+  three agreeing rejected fixes in a row replace it (a VIO jump).
+
+Between fixes the VIO carries the pose, so its error grows with the distance
+since the last fix. The published covariance follows that
+(`position_stddev + position_stddev_per_m * metres_since_fix`, fitted to
+EuRoC), and `/diagnostics` reports `seconds_since_fix` and
+`metres_since_fix`. See `docs/basalt_map_localization.md` for the
+measurements behind the defaults.
+
+| topic | type | dir | notes |
+|---|---|---|---|
+| `image` | `sensor_msgs/Image` | in | raw images of the map's `camera` (cam0 by default), the same stream the VIO uses |
+| `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of the body (IMU) frame, e.g. `visloc_vio_node`'s; its `header.frame_id` names the odometry frame |
+| `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once anchored |
+| `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once anchored (not `pose`, which `visloc_vio_node` publishes) |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, anchored, seconds/metres since the last fix, pending fixes |
+
+| parameter | default | |
+|---|---|---|
+| `map` | required | directory written by `--save-map` (`map.json`, `sparse/`, `landmark_descriptors.txt`) |
+| `camera` | `0` | Basalt camera index of `image` |
+| `map_frame` | `map` | |
+| `publish_tf` | `true` | |
+| `localize_every` | `5` | localize every N-th received image |
+| `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
+| `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
+| `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
+| `projection_radius` | `20` px | once anchored, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
+| `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
+| `match_threads` | `1` | threads of the map-wide search |
+| `max_points` | the map's | ORB keypoints per image |
+| `position_stddev`, `position_stddev_per_m` | `0.03` m, `0.025` m/m | published position 1-sigma |
+| `orientation_stddev` | `0.02` rad | |
+| `image_queue` | `1` | images waiting while one is localized (drop-oldest) |
+| `domain_id`, `node_name` | | as above |
+
+**EuRoC, replayed over DDS.** A RustDDS player published MH_02's stereo
+images and IMU to `visloc_vio_node` and `visloc_map_localize_node` (map
+built from MH_01), all three processes on one 4-core Xeon. Scored against
+ground truth as in `docs/basalt_map_localization.md`. Latency runs from the
+player publishing a frame to its `map_pose` arriving back:
+
+| replay speed | VIO frames processed | `map_pose` published | RMSE / max | latency p50 / p90 / max |
+|---|---|---|---|---|
+| 0.5x | 3,040 / 3,040 | 99.8% of frames | 2.06 / 5.2 cm | 54 / 72 / 137 ms |
+| 1.0x | 3,035 / 3,040 (5 dropped behind) | 99.6% of frames | 2.05 / 5.2 cm | 49 / 90 / 195 ms |
+| 1.0x, before the changes below | 2,743 / 3,040 (297 dropped behind) | 90.0% of frames | 2.02 / 5.9 cm | 171 / 271 / 339 ms |
+
+Three runs at 1.0x dropped 1, 5 and 14 frames. The offline
+`basalt_euroc_localize_demo --vio --localize-every 5` gives 99.8% at 2.05 /
+5.7 cm on the same data. These changes made the real-time run possible on
+4 cores:
+
+- The VIO frontend and estimator run on separate threads (see above).
+- The estimator is about 26% faster with a bit-identical trajectory: two
+  serial loops of its LM iteration (the linearization and the model cost
+  decrease) now run per landmark in parallel.
+- The KLT frontend is about 38% faster, also bit-identical (12.3 to 7.6 ms
+  per frame).
+- The node runs 3 LM iterations per frame instead of the config's 5
+  (`max_iterations`). On the eight EuRoC sequences in
+  `docs/basalt_map_localization.md`, the VIO's ATE changed by at most
+  0.13 cm. The estimator got 15-30% faster.
+- Localization uses the projection search once anchored.
+
+The remaining drops are in MH_02's busiest stretch, where the estimator
+still takes up to about 100 ms on a frame while sharing the cores with the
+player and the map node. There the node drops frames instead of falling
+behind. A dropped frame gets no pose, and drops did not change the VIO's
+accuracy. With the VIO node alone at 0.3x, the latency is about 47 ms: the
+frontend, the estimator and the DDS transport.
+
 ## Running inside a ROS 2 graph
 
 * **Discovery / domain**: standard SPDP multicast discovery on
@@ -151,9 +279,19 @@ failure), not rescaled.
 * **RMW interoperability**: RustDDS speaks standard RTPS 2.x with CDR
   (`CDR_LE`) payloads and ROS 2's topic/type mangling (`rt/<topic>`,
   `sensor_msgs::msg::dds_::Image_`). That is what `rmw_fastrtps_cpp` (the
-  default in Humble/Jazzy) and `rmw_cyclonedds_cpp` use, and `ros2-client`
-  is maintained against both. `rmw_zenoh` is a different protocol and is
-  not supported by these binaries.
+  default in Humble/Jazzy) and `rmw_cyclonedds_cpp` use. Both are tested
+  against ROS 2 Jazzy, see [below](#tested-against-ros-2-jazzy). `rmw_zenoh`
+  is a different protocol and is not supported by these binaries.
+* **Topic names** are resolved like `rclcpp` does: a relative name goes
+  under the node namespace (`odom` is `/odom`, or `/robot1/odom` with
+  `-r __ns:=/robot1`), and an absolute one (`/tf`) is kept. The nodes
+  resolve names before handing them to `ros2-client` 0.11, whose own
+  resolution would publish `rt//odom` in the root namespace, a topic only
+  other `ros2-client` nodes see.
+* **Startup**: discovery between these nodes and a newly started ROS 2
+  publisher takes about 1.5 s, and samples published before it completes
+  are lost (volatile QoS). Start the nodes first and give a bag player a
+  head start, e.g. `ros2 bag play --delay 3`.
 * **Message layouts** are hand-written serde mirrors of the ROS IDL
   (`src/msgs.rs`), and they match the Humble through Kilted definitions. Unit
   tests pin the CDR bytes against hand-assembled references (alignment,
@@ -174,6 +312,48 @@ failure), not rescaled.
   services, no `--params-file`, and no lifecycle node. Security (SROS2)
   is off.
 
+## Tested against ROS 2 Jazzy
+
+On Ubuntu 24.04 with ROS 2 Jazzy from `packages.ros.org` (`rmw_fastrtps_cpp`
+8.4 / Fast DDS 2.14, and `rmw_cyclonedds_cpp` 2.2 / Cyclone DDS 0.10), on
+one host, with both RMWs:
+
+* `ros2 topic list -t` / `ros2 node list` show the nodes and their topics
+  with the right names and types, also in a namespace.
+* `ros2 topic echo` decodes `odom`, `map_pose` and `/diagnostics`, and
+  `ros2 topic hz` sees full-rate `odom` and 752x480 images.
+* `ros2 run tf2_ros tf2_echo map imu_link` resolves the chain `map -> odom`
+  (from `visloc_map_localize_node`) and `odom -> imu_link` (from
+  `visloc_vio_node`).
+* The nodes run on a rosbag2: EuRoC MH_02 converted with
+  `tools/euroc_to_rosbag2.py` and played with `ros2 bag play`, with the
+  outputs recorded by `ros2 bag record` and scored with
+  `tools/bag_to_tum.py`. The bag publishers can be reliable (the
+  default) or best-effort (`--qos-profile-overrides-path`).
+
+| `ros2 bag play` MH_02 at 1.0x | `map_pose` published | RMSE / max |
+|---|---|---|
+| Fast DDS | 99.7% of frames | 2.06 / 5.2 cm |
+| Cyclone DDS | 98.7% of frames | 2.06 / 6.0 cm |
+
+These are the same accuracy as the RustDDS replay above. The Fast DDS run
+used `--delay 3`; the Cyclone run had none and lost the first 1.6 s of
+images to discovery. To reproduce:
+
+```sh
+source /opt/ros/jazzy/setup.bash
+python3 tools/euroc_to_rosbag2.py /data/MH_02_easy mh02_bag     # needs Pillow
+visloc_vio_node --calibration .../euroc_ds_calib.json --config .../euroc_config.json \
+  --ros-args -r left/image_raw:=/cam0/image_raw -r right/image_raw:=/cam1/image_raw -r imu:=/imu0 &
+visloc_map_localize_node --map runs/mh01_map --ros-args -r image:=/cam0/image_raw &
+ros2 bag record -o out /odom /map_pose /tf &
+ros2 bag play mh02_bag --delay 3
+python3 tools/bag_to_tum.py out /map_pose map_pose.tum
+```
+
+Not covered: RViz (no display was available), Humble, several hosts on a
+real network, and live sensors.
+
 ## Tests
 
 ```sh
@@ -190,10 +370,13 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   alignment is correct. It also localizes a rendered query against a
   synthetic three-depth-slab COLMAP map (written to disk and read back) and
   recovers the 0.16 m camera translation within 2 cm.
-* `dds_nodes` spawns the real `visloc_vio_node` / `visloc_localize_node`
-  binaries on a private domain id, and drives them from a `ros2-client`
-  test node with synthetic images and IMU. It asserts that `odom`/`pose`,
-  and `pose`/`inlier_count`/`/diagnostics`, arrive with sane content. These
+* `dds_nodes` spawns the real `visloc_vio_node` / `visloc_localize_node` /
+  `visloc_map_localize_node` binaries on a private domain id, and drives
+  them from a `ros2-client` test node with synthetic images, IMU and
+  odometry. It asserts that `odom`/`pose`, `pose`/`inlier_count`/
+  `/diagnostics`, and `/tf` (`map -> odom`) / `map_pose` arrive with sane
+  content; the last against a saved map written from the ORB corners of a
+  synthetic image, with a stationary odometry pose to recover. These
   tests need UDP multicast on loopback. They pass in an Ubuntu 24.04
   development container with no ROS installed. GitHub's `ubuntu-latest`
   runners are expected to work too, since `ros2-client`'s own CI runs
@@ -202,14 +385,14 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
 
 ## Limits (read before relying on this)
 
-* **Not tested against a real ROS 2 installation.** Interop with
-  `rmw_fastrtps_cpp` / `rmw_cyclonedds_cpp` follows from RTPS/CDR
-  conformance and the pinned byte layouts, but it has only been exercised
-  RustDDS-to-RustDDS. Please report results with `ros2 topic echo`, RViz
-  and a rosbag.
+* **Tested with ROS 2 Jazzy on one host only**
+  ([above](#tested-against-ros-2-jazzy)). It has not been tested with RViz,
+  Humble, several hosts on a real network, or live sensors. Please
+  report results.
 * VIO accuracy is the Basalt port's (see the root README's EuRoC results).
-  The node adds no tuning. It has only been run on synthetic data here, not
-  on a live sensor or a replayed EuRoC bag.
+  The node adds no tuning. It has been run on synthetic data and on EuRoC
+  MH_02, both replayed over DDS by a RustDDS player and played from a
+  rosbag2, not on a live sensor.
 * `nav_msgs/Odometry` covariances are zero (unknown): the marginalized
   Basalt window does not expose a calibrated per-frame covariance.
 * The localization covariance is a fixed, configurable diagonal, not an
@@ -222,3 +405,9 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   Real SfM maps are fine; a map of a single wall is not.
 * The camera/IMU time offset is taken from the calibration
   (`cam_time_offset_ns`) and not estimated online.
+* `visloc_map_localize_node` needs gravity-aligned odometry (z up), as a
+  VIO provides; planar wheel odometry without roll/pitch would need its
+  frames aligned to gravity. Its map is the stereo-inertial SLAM's (ORB),
+  not a COLMAP/SIFT model. The anchor is a filtered yaw + translation
+  offset, not a joint optimization with the VIO, so the pose error grows
+  between fixes where the map does not cover the route.

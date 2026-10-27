@@ -65,10 +65,28 @@ pub fn qualified_name(namespace: &str, name: &str) -> String {
     format!("{}/{name}", namespace.trim_end_matches('/'))
 }
 
+/// The absolute name of topic `name` for a node in `namespace`: absolute
+/// names are kept, relative ones are put under the namespace (`odom` is
+/// `/odom` in the root namespace, `/robot1/odom` in `/robot1`).
+///
+/// `ros2-client` 0.11 resolves a relative name by prefixing the namespace
+/// and a separator, which in the root namespace yields the DDS topic
+/// `rt//odom` instead of ROS 2's `rt/odom`; such a topic matches only other
+/// `ros2-client` nodes. Names are therefore resolved here and passed on
+/// absolute.
+pub fn resolve_topic_name(namespace: &str, name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_owned()
+    } else {
+        qualified_name(namespace, name)
+    }
+}
+
 /// A ROS 2 node over RustDDS with a background spinner thread.
 pub struct RosNode {
     pub node: Node,
     pub context: Context,
+    namespace: String,
     _spinner: Option<JoinHandle<()>>,
 }
 
@@ -97,6 +115,7 @@ impl RosNode {
         Ok(Self {
             node,
             context,
+            namespace: namespace.to_owned(),
             _spinner: Some(handle),
         })
     }
@@ -106,8 +125,9 @@ impl RosNode {
         topic_name: &str,
         qos: &QosProfile,
     ) -> Result<ros2_client::dds::rustdds::Topic, String> {
+        let resolved = resolve_topic_name(&self.namespace, topic_name);
         let name =
-            Name::parse(topic_name).map_err(|error| format!("topic `{topic_name}`: {error:?}"))?;
+            Name::parse(&resolved).map_err(|error| format!("topic `{resolved}`: {error:?}"))?;
         self.node
             .create_topic(&name, MessageTypeName::new(M::PACKAGE, M::TYPE), qos)
             .map_err(|error| format!("topic `{topic_name}`: {error:?}"))
@@ -179,5 +199,42 @@ where
 {
     if let Err(error) = publisher.publish(message) {
         eprintln!("publish {what} failed: {error:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_topics_resolve_under_the_namespace() {
+        assert_eq!(resolve_topic_name("/", "odom"), "/odom");
+        assert_eq!(resolve_topic_name("/", "left/image_raw"), "/left/image_raw");
+        assert_eq!(resolve_topic_name("/robot1", "odom"), "/robot1/odom");
+        assert_eq!(resolve_topic_name("/robot1/", "odom"), "/robot1/odom");
+        assert_eq!(resolve_topic_name("/robot1", "/tf"), "/tf");
+        assert_eq!(
+            resolve_topic_name("/", "/cam0/image_raw"),
+            "/cam0/image_raw"
+        );
+    }
+
+    #[test]
+    fn resolved_names_map_to_ros2_dds_topic_names() {
+        let node = NodeName::new("/", "n").unwrap();
+        let robot = NodeName::new("/robot1", "n").unwrap();
+        let dds = |namespace: &str, node: &NodeName, name: &str| {
+            Name::parse(&resolve_topic_name(namespace, name))
+                .unwrap()
+                .to_dds_name("rt", node, "")
+        };
+        assert_eq!(dds("/", &node, "odom"), "rt/odom");
+        assert_eq!(dds("/", &node, "/tf"), "rt/tf");
+        assert_eq!(dds("/robot1", &robot, "odom"), "rt/robot1/odom");
+        // What ros2-client 0.11 makes of the relative name on its own.
+        assert_eq!(
+            Name::parse("odom").unwrap().to_dds_name("rt", &node, ""),
+            "rt//odom"
+        );
     }
 }

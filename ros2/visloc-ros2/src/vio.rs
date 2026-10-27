@@ -7,13 +7,19 @@
 //! the node runs the lean VIO path (`process_without_marg_data_no_trace`),
 //! which the adapter documents as numerically identical to the
 //! MargData-retaining path for the trajectory.
+//!
+//! [`VioCore::into_stages`] splits the core into a [`VioFrontend`] (KLT
+//! tracking) and a [`VioBackend`] (the estimator step) so the node can run
+//! them on two threads, tracking frame `N+1` while the estimator solves
+//! frame `N`, with the same results as [`VioCore::process`].
 
 use std::collections::VecDeque;
 
 use nalgebra::{UnitQuaternion, Vector3};
 use serde_json::json;
 use visloc_basalt::{
-    config::BasaltConfig, BasaltCalibration, BasaltVioEstimatorAdapter, EurocSensorFrame,
+    config::BasaltConfig, BasaltAdapterOutput, BasaltCalibration, BasaltFrontendPacket,
+    BasaltVioEstimatorAdapter, BasaltVioEstimatorStage, BasaltVioFrontendStage, EurocSensorFrame,
     ImuSample, RawU16Image,
 };
 use visloc_core::geometry::SE3;
@@ -32,6 +38,8 @@ pub struct VioOptions {
     pub urgent_keyframes: bool,
     /// Seed KLT with the IMU rotation (`config.optical_flow_imu_seed_rotation`).
     pub imu_seed_klt: bool,
+    /// Overrides `config.vio_max_iterations` (LM iterations per frame).
+    pub max_iterations: Option<u32>,
 }
 
 impl Default for VioOptions {
@@ -39,6 +47,7 @@ impl Default for VioOptions {
         Self {
             urgent_keyframes: true,
             imu_seed_klt: false,
+            max_iterations: None,
         }
     }
 }
@@ -110,6 +119,11 @@ impl VioCore {
                 json!(true),
             );
         }
+        if let Some(iterations) = options.max_iterations {
+            config
+                .values
+                .insert("config.vio_max_iterations".to_string(), json!(iterations));
+        }
         if options.urgent_keyframes {
             // Same defaults as `basalt_euroc_online_slam_demo` (config wins).
             for (key, value) in [
@@ -155,53 +169,191 @@ impl VioCore {
 
     /// Runs one stereo frame through frontend + estimator.
     pub fn process(&mut self, packet: SensorPacket<RawU16Image>) -> Result<VioEstimate, VioError> {
-        for (index, image) in [&packet.left, &packet.right].into_iter().enumerate() {
-            if let Some(expected) = self.expected_resolution(index) {
-                let actual = (image.width(), image.height());
-                if actual != expected {
-                    return Err(VioError {
-                        message: format!(
-                            "cam{index} image is {}x{}, calibration expects {}x{}",
-                            actual.0, actual.1, expected.0, expected.1
-                        ),
-                        needs_reset: false,
-                    });
-                }
-            }
-        }
-        let angular_velocity = packet.imu.last().map(|sample| sample.gyro_rad_s);
-        let frame_id = self.next_frame_id;
-        let frame = EurocSensorFrame {
-            frame_id,
-            timestamp_ns: packet.stamp_ns,
-            cam0: packet.left,
-            cam1: Some(packet.right),
-            cam0_path: Default::default(),
-            cam1_path: None,
-            imu: packet.imu,
-            initialization_imu: packet.initialization_imu,
-        };
+        check_resolution(&self.calibration, &packet)?;
+        let header = FrameHeader::new(self.next_frame_id, &packet);
         let output = self
             .adapter
-            .process_without_marg_data_no_trace(frame)
-            .map_err(|error| VioError {
-                message: format!("Basalt VIO: {error}"),
-                needs_reset: true,
-            })?;
+            .process_without_marg_data_no_trace(euroc_frame(header.frame_id, packet))
+            .map_err(basalt_error)?;
         self.next_frame_id += 1;
-        let state = &output.estimator.state;
-        Ok(VioEstimate {
+        Ok(header.estimate(&output))
+    }
+
+    /// Splits the core into its frontend and estimator halves, for running
+    /// them on two threads. Feeding every [`VioFrontend::track`] result in
+    /// order to [`VioBackend::estimate`] gives the estimates
+    /// [`VioCore::process`] would, provided `track` gets the gyro bias of the
+    /// previous estimate (only `imu_seed_klt` reads it).
+    pub fn into_stages(self) -> (VioFrontend, VioBackend) {
+        let (frontend, backend) = self.adapter.into_stages();
+        (
+            VioFrontend {
+                calibration: self.calibration.clone(),
+                config: self.config.clone(),
+                stage: frontend,
+                next_frame_id: self.next_frame_id,
+            },
+            VioBackend {
+                calibration: self.calibration,
+                config: self.config,
+                stage: backend,
+            },
+        )
+    }
+}
+
+/// The KLT frontend half of [`VioCore::into_stages`].
+pub struct VioFrontend {
+    calibration: BasaltCalibration,
+    config: BasaltConfig,
+    stage: BasaltVioFrontendStage,
+    next_frame_id: u64,
+}
+
+impl VioFrontend {
+    /// Tracks one stereo frame. `gyro_bias` is the latest estimate from the
+    /// backend (zero before the first); it only bias-corrects the
+    /// `imu_seed_klt` rotation seed. A `needs_reset` error means both halves
+    /// must be reset.
+    pub fn track(
+        &mut self,
+        packet: SensorPacket<RawU16Image>,
+        gyro_bias: Vector3<f64>,
+    ) -> Result<TrackedFrame, VioError> {
+        check_resolution(&self.calibration, &packet)?;
+        let header = FrameHeader::new(self.next_frame_id, &packet);
+        let tracks = self
+            .stage
+            .process(euroc_frame(header.frame_id, packet), gyro_bias)
+            .map_err(basalt_error)?;
+        self.next_frame_id += 1;
+        Ok(TrackedFrame { header, tracks })
+    }
+
+    /// Drops all tracks; the next frame starts a new stream.
+    pub fn reset(&mut self) -> Result<(), String> {
+        self.stage = BasaltVioEstimatorAdapter::from_config(&self.calibration, &self.config)
+            .map_err(|error| format!("frontend reset: {error}"))?
+            .into_stages()
+            .0;
+        Ok(())
+    }
+}
+
+/// The estimator half of [`VioCore::into_stages`].
+pub struct VioBackend {
+    calibration: BasaltCalibration,
+    config: BasaltConfig,
+    stage: BasaltVioEstimatorStage,
+}
+
+impl VioBackend {
+    /// Runs the estimator step of one tracked frame; frames must arrive in
+    /// the order [`VioFrontend::track`] produced them.
+    pub fn estimate(&mut self, frame: TrackedFrame) -> Result<VioEstimate, VioError> {
+        let output = self.stage.process(frame.tracks).map_err(basalt_error)?;
+        Ok(frame.header.estimate(&output))
+    }
+
+    /// Drops all estimator state; the next frame re-initializes from IMU.
+    pub fn reset(&mut self) -> Result<(), String> {
+        self.stage = BasaltVioEstimatorAdapter::from_config(&self.calibration, &self.config)
+            .map_err(|error| format!("estimator reset: {error}"))?
+            .into_stages()
+            .1;
+        Ok(())
+    }
+}
+
+/// One frame tracked by [`VioFrontend`], bound for [`VioBackend`].
+pub struct TrackedFrame {
+    header: FrameHeader,
+    tracks: BasaltFrontendPacket,
+}
+
+impl TrackedFrame {
+    pub const fn frame_id(&self) -> u64 {
+        self.header.frame_id
+    }
+}
+
+/// The per-frame values a [`VioEstimate`] carries besides the estimator
+/// state.
+struct FrameHeader {
+    frame_id: u64,
+    stamp_ns: i64,
+    header_stamp_ns: i64,
+    angular_velocity: Option<Vector3<f64>>,
+}
+
+impl FrameHeader {
+    fn new(frame_id: u64, packet: &SensorPacket<RawU16Image>) -> Self {
+        Self {
             frame_id,
             stamp_ns: packet.stamp_ns,
             header_stamp_ns: packet.header_stamp_ns,
+            angular_velocity: packet.imu.last().map(|sample| sample.gyro_rad_s),
+        }
+    }
+
+    fn estimate(&self, output: &BasaltAdapterOutput) -> VioEstimate {
+        let state = &output.estimator.state;
+        VioEstimate {
+            frame_id: self.frame_id,
+            stamp_ns: self.stamp_ns,
+            header_stamp_ns: self.header_stamp_ns,
             imu_to_world: state.imu_to_world.clone(),
             velocity_world: state.velocity_world_m_s,
             gyro_bias: state.gyro_bias_rad_s,
             accel_bias: state.accel_bias_m_s2,
-            angular_velocity_body: angular_velocity.map(|gyro| gyro - state.gyro_bias_rad_s),
+            angular_velocity_body: self
+                .angular_velocity
+                .map(|gyro| gyro - state.gyro_bias_rad_s),
             is_keyframe: output.estimator.is_keyframe,
             observation_count: output.tracks.observations.len(),
-        })
+        }
+    }
+}
+
+fn check_resolution(
+    calibration: &BasaltCalibration,
+    packet: &SensorPacket<RawU16Image>,
+) -> Result<(), VioError> {
+    for (index, image) in [&packet.left, &packet.right].into_iter().enumerate() {
+        if let Some((width, height)) = calibration.resolutions.get(index) {
+            let expected = (*width as usize, *height as usize);
+            let actual = (image.width(), image.height());
+            if actual != expected {
+                return Err(VioError {
+                    message: format!(
+                        "cam{index} image is {}x{}, calibration expects {}x{}",
+                        actual.0, actual.1, expected.0, expected.1
+                    ),
+                    needs_reset: false,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn euroc_frame(frame_id: u64, packet: SensorPacket<RawU16Image>) -> EurocSensorFrame {
+    EurocSensorFrame {
+        frame_id,
+        timestamp_ns: packet.stamp_ns,
+        cam0: packet.left,
+        cam1: Some(packet.right),
+        cam0_path: Default::default(),
+        cam1_path: None,
+        imu: packet.imu,
+        initialization_imu: packet.initialization_imu,
+    }
+}
+
+fn basalt_error(error: impl std::fmt::Display) -> VioError {
+    VioError {
+        message: format!("Basalt VIO: {error}"),
+        needs_reset: true,
     }
 }
 
@@ -375,6 +527,36 @@ impl PathAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_layer_onto_the_config() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |name: &str| {
+            std::fs::read_to_string(
+                root.join("configs/basalt/variants/official_euroc_ds")
+                    .join(name),
+            )
+            .unwrap()
+        };
+        let (calibration, config) = (read("euroc_ds_calib.json"), read("euroc_config.json"));
+        let value = |core: &VioCore, key: &str| core.config.values.get(key).cloned();
+
+        let core = VioCore::from_json(&calibration, &config, &VioOptions::default()).unwrap();
+        assert_eq!(value(&core, "config.vio_max_iterations"), Some(json!(5)));
+        assert_eq!(
+            value(&core, "config.vio_urgent_min_frames_after_kf"),
+            Some(json!(2))
+        );
+
+        let options = VioOptions {
+            urgent_keyframes: false,
+            max_iterations: Some(3),
+            ..VioOptions::default()
+        };
+        let core = VioCore::from_json(&calibration, &config, &options).unwrap();
+        assert_eq!(value(&core, "config.vio_max_iterations"), Some(json!(3)));
+        assert_eq!(value(&core, "config.vio_urgent_min_frames_after_kf"), None);
+    }
 
     fn estimate() -> VioEstimate {
         VioEstimate {

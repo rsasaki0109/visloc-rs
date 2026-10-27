@@ -12,23 +12,38 @@ named inline; nothing is tuned against ground truth unless stated.
 - **Sensors**: Project Aria, 2 SLAM cameras (ASL release: pinhole-undistorted
   ~758×572, fx≈241 → ~115° HFOV) + IMU 1 kHz. Sequences run 0.5–2.9 km / 5–48
   min; the test set is 63 sequences (Short 18, Medium 10, Long 16, Low light 9,
-  Moving platform 10).
+  Moving platform 10). The raw VRS recordings also carry 1 Hz GPS fixes
+  (2.5 m median error against the pseudo-GT on sequence_4_10); by decision we
+  do not use them, nor any other sensor beyond the two SLAM cameras and the
+  IMU, so that the method stays visual-inertial like the leaderboard's.
 - **Metric** (`cvg/lamaria` evaluator, unmodified): a robust Sim(3) alignment to
   surveyed control points, then a per-control-point piecewise score (20 points
   below 5 cm, decaying to 0 at 10 m). Report: **Score** 0–100, **CP@1m** recall,
   and `evaluate_wrt_pgt` pose recall at 1 m/5 m (pseudo-GT), using the same
   Sim(3). Submission is TUM `ns`, `world_from_imu`, all image timestamps, zipped
   as `slam/<seq>.txt`, with a 24 h submission rate limit.
-- **Headlines on the leaderboard (bino+imu track, as recorded 2026-09-15)**:
+- **Headlines on the leaderboard (Score per challenge, test set, as shown on
+  2026-10-17)**. Aria's SLAM is the LaMAria team's run of the closed-source
+  Aria system, from which the pseudo-GT pipeline is initialized. The page
+  recorded on 2026-09-15 listed microSLAM at 64.5–85.6; it now shows the
+  numbers below. Our rows are training sequences (batch BA with the
+  revisits, lever 14), not a submission: one per track, the ones the method
+  was developed on, and in the last row both per track:
 
-  | Method | Short | Medium | Long | Low light | Moving |
-  |---|---:|---:|---:|---:|---:|
-  | Aria's own SLAM (proprietary, non-causal) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 |
-  | microSLAM (mono) | 64.5 | 74.5 | 82.3 | 78.3 | 85.6 |
-  | GroundedSI / RoboCap (bino+IMU; avg 62.3 — per their arXiv 2610.07217 report, unverified) | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 |
-  | **Ours (training, R_11_5cp VIO+mapper)** | **57.66** | — | — | — | — |
-  | Best academic (OpenVINS+Maplab) | 27.7 | 23.4 | 12.8 | 19.8 | 13.9 |
-  | OKVIS2 | 20.0 | 11.6 | 2.6 | 14.5 | 4.7 |
+  | Method | Sensors | Short | Medium | Long | Low light | Moving | Mean |
+  |---|---|---:|---:|---:|---:|---:|---:|
+  | Aria's SLAM (closed source) | bino + IMU | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
+  | GroundedSLAM | bino + IMU | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 | 62.3 |
+  | AnonSLAM | mono + IMU | 43.3 | 33.6 | 30.0 | 41.7 | 19.1 | 33.5 |
+  | Mighty Camera | mono + IMU | 57.1 | 38.8 | 18.5 | 36.9 | 15.8 | 33.4 |
+  | OpenVINS+Maplab | bino + IMU | 27.7 | 23.4 | 12.8 | 19.8 | 13.9 | 19.5 |
+  | microSLAM | mono | 35.8 | 20.3 | 10.0 | 22.9 | 4.9 | 18.8 |
+  | OKVIS2 | bino + IMU | 20.0 | 11.6 | 2.6 | 14.5 | 4.7 | 10.7 |
+  | Ours, eight rotation segments (training: 1_19, 2_11, 3_17, 4_10, 5_11) | bino + IMU | 87.22 | 77.31 | 60.00 | 49.52 | 57.15 | 66.24 |
+  | Ours, + focal lengths, keypoint sizes, low-light denoising (training) | bino + IMU | 84.14 | 81.26 | 65.38 | 63.99 | 57.70 | 70.49 |
+  | Ours, + matches up to 128 s apart (training) | bino + IMU | 83.15 | 83.83 | 65.41 | 67.81 | 57.17 | 71.47 |
+  | **Ours, + 60 solver iterations (30 in low light; training)** | bino + IMU | 88.16 | **85.46** | **71.43** | 67.81 | **60.32** | 74.64 |
+  | Ours, the same, two training sequences per track | bino + IMU | 68.58 | 53.14 | 53.78 | 62.15 | 34.03 | 54.34 |
 
 - Test data must be **streamed and deleted** (~862 GB total; server throttles
   per connection — use `aria2c -x16`, ~57 MB/s, from the official file list).
@@ -75,11 +90,11 @@ sequences only (test scores are only obtainable by submission).
 | # | Milestone | Exit criterion | Status |
 |---|---|---|---|
 | M0 | Stage 0: first official scores; mapper usable at scale | R_11_5cp 49.65 VIO / 57.66 mapper; sequence_1_19 VIO 12.75; mapper perf/memory fixes merged | **done** (PR #156) |
-| M1 | Beat the best academic baseline on Short | mapper-scored sequences ≥ 27.7, toward microSLAM's 64.5 — already **R_11_5cp VIO-only 63.19** (CP@1m 60 %) with the larger window, and sequence_1_19 VIO-only 27.09 (default window: R_11 49.65 / seq_1_19 12.75) | in progress |
+| M1 | Beat the best academic baseline on Short | mapper-scored sequences ≥ 27.7, toward GroundedSLAM's 80.2 — already **R_11_5cp VIO-only 63.19** (CP@1m 60 %) with the larger window, and sequence_1_19 VIO-only 27.09 (default window: R_11 49.65 / seq_1_19 12.75) | in progress |
 | M2 | Medium/Long consistency | loop-closure/mapper holds at km scale; mean Short/Medium/Long Score clearly above 27.7; no >2 km drift blow-up | not started |
 | M3 | Low-light robustness | low-light training sequences score comparably to Short; no tracking loss | not started |
 | M4 | Moving-platform handling | moving-platform training sequences tracked without divergence | not started |
-| M5 | Full test submission | all 63 sequences processed at ≥1× RT, `slam/<seq>.txt` built, submitted within the 24 h rate limit | not started |
+| M5 | Full test submission | all 63 sequences processed at ≥1× RT, `slam/<seq>.txt` built, submitted within the 24 h rate limit | **done**: three submissions on GitHub Actions, mean 51.5 → 52.9, fourth on the leaderboard ([lamaria_test_results.md](lamaria_test_results.md)) |
 
 ## 4. Levers (a-priori, ranked)
 
@@ -213,17 +228,133 @@ before/after on training sequences.
 13. **Remaining scale error on Moving platform.** sequence_5_11's VIO
    measures the route about 6 % short, with or without the funicular ride.
    Removing its fitted scale drift alone would be worth about +15 there, the
-   largest gain left on any track; the cause is still open.
+   largest gain left on any track; the cause is still open. The batch BA
+   (lever 14) halves the fitted scale drift (−5.4 % → −2.5 % without PB2).
+14. **Offline batch VI bundle adjustment.** Status: **measured on one
+   training sequence per track and on sequence_1_20 (2026-10-17).**
+   `scripts/lamaria_batch_ba.py` refines the VIO trajectory afterwards: SIFT
+   on 2 Hz keyframes, matches up to 128 s apart (32 s at first) under the
+   VIO's epipolar geometry, and one Levenberg-Marquardt solve over every
+   keyframe (pose, velocity and IMU biases with GTSAM's preintegrated
+   factors), every landmark and each camera's IMU-camera rotation, with no
+   ground truth. On
+   1WM093701G1276 both cameras turn by about 0.1° against the IMU during a
+   recording, so the solve estimates the rotations in eight time segments.
+   It raises the mean over the five tracks to **64.36** (2026-10-17; 61.41
+   with one rotation per camera, 59.81 before the 3 px outlier threshold of
+   its last iterations), against 50.77 for the refined VIO and 53.27 for the
+   per-track VIO or mapper; sequence_3_17 gains 9.9 and sequence_5_11 loses
+   3.6 from the segments. Closing the revisits with a pose graph
+   (`loop-correct`) and solving again from the corrected trajectory brings
+   the mean to **66.24** (sequence_2_11: 71.18 → 77.31; 63.12 with one
+   rotation per camera). It keeps the slow heading drift and the global
+   scale of its starting trajectory: these are flat directions of its
+   objective. `--modes yaw` corrects a start that drifts by degrees
+   (sequence_1_20: 44.4 → 76.1) but costs points where the start is already
+   good, so it stays opt-in. The G1276 sequences keep 1.4–3.5 % of scale
+   drift; on sequence_2_11 the BA itself creates it (a solve started at the
+   pseudo-GT drifts as much, the VIO does not). Keyframes at 4 Hz, estimated
+   camera translations, Earth's rotation, a loose first rotation prior and
+   leaving out the cross-camera matches did not raise the mean. The drift
+   follows the ratio of the image's angular scale to the gyroscope's:
+   estimating each camera's focal length per time segment (`--est-focal`;
+   +0.3–0.4 % on 1WM093701G1276 by day, −0.04 % at night, −0.1 % on
+   1WM09370081264) with the pixel noise growing with the SIFT keypoint size,
+   and non-local means before CLAHE in low light (sequence_4_10:
+   49.52 → 63.99, scale drift +3.5 % → +0.8 %), raise the mean to **70.49**
+   (2026-10-17); sequence_2_11 reaches 81.26 with a pose recall of 98 %. The
+   focal lengths go wrong on the moving platform, which keeps the
+   calibration. Matching keyframes up to 256 steps (128 s) and 200 m apart
+   instead of 64 steps and 80 m raises the mean to **71.47** (sequence_4_10:
+   67.81; the second Low light sequence, sequence_4_11, 54.09 → 56.49).
+   Letting each solve run 60 iterations instead of 30 (30 in low light)
+   raises it to **74.64** (2026-10-18): the extra iterations move the
+   solution along nearly flat drift directions, which helps the seven day
+   and moving-platform sequences by 1.4–6.0 and costs the two low-light ones
+   4.2–8.9. On the second training sequence of each track the mean is only
+   34.03: sequence_1_20, 2_12 and 3_18 keep their VIO's heading drift
+   of 4–8°, which these one-way routes give no revisit to correct and their
+   far-apart views too few matches to measure; a start with that drift
+   removed (from the pseudo-GT, diagnosis only) scores 55 instead of 21 on
+   sequence_2_12, but no pGT-free change tried reaches it. sequence_5_12
+   starts with a tram ride that the VIO and the BA halve (7.73)
+   ([`lamaria_batch_ba.md`](lamaria_batch_ba.md)). An online mode
+   (`online`, 2026-10-18) solves the latest 240 s every 30 s, each window
+   warm-started from the one before and seeing no later data: it raises the
+   mean over the ten training sequences from 54.34 to **56.42**
+   (sequence_1_20 49.00 → 65.37, sequence_3_18 36.13 → 57.87, both low-light
+   ones +2.0 and +4.5), with the heading error of the one-way routes a half
+   to a third of the batch's; the revisit-rich sequence_1_19 drops from
+   88.16 to 75.73, sequence_2_12 and the moving platform stay. Its windows
+   keep up with the data on 4 cores, and with Basalt's default
+   configuration the whole chain (VIO, SIFT, matching, revisits at stride
+   4, windows) takes about 3.9 cores: sequence_2_11 scores 72.48 that way,
+   against 83.12 from the big-window VIO, which runs at 0.42 times real time
+   ([Online mode](lamaria_batch_ba.md#online-mode)). The batch steps run
+   once more after the recording from the online trajectory keep its
+   heading and add the revisits: sequence_1_20 73.03, sequence_3_18 67.39,
+   sequence_3_17 75.57. In low light that pass drifts again (4_10: 69.79 →
+   51.44), so low light keeps the online result; chosen by track, the mean
+   over the ten sequences is **59.70** (Short 76.12, Medium 51.06, Long
+   71.48, Low light 65.41, Moving platform 34.41;
+   [Online, then one batch pass](lamaria_batch_ba.md#online-then-one-batch-pass)).
+   The whole chain from Basalt's default VIO (`euroc_config`, in low light
+   `euroc_config_lowlight`), causal and within 4 cores, averages **52.19**
+   over the ten sequences (2026-10-19), against 54.34 for the batch pipeline
+   after the recording; with the pass after the recording 55.34. That VIO
+   keeps sequence_2_12's heading (online 56.41, against 19.87 from the big
+   window) but fails on sequence_3_17 (11.20). Averaging the two chains'
+   results helps where they agree (sequence_2_11 91.52) and lands between
+   them where one fails, but needs both chains and is not used ([the
+   real-time chain on all ten
+   sequences](lamaria_batch_ba.md#the-real-time-chain-on-all-ten-sequences)).
+   That chain failed on sequence_3_17 because its matching followed the
+   drifting VIO: the epipolar band (at most 6 px) let the guide pick the
+   matches that agree with its drift. With `match --tau-slope 0.3 --tau-max
+   20` it averages **60.54** online (2026-10-19), above the big-window
+   pipeline after the recording (59.70), and **61.19** with the pass after
+   the recording (sequence_1_20 81.53, sequence_2_11 89.84, sequence_3_17
+   74.95, sequence_4_11 71.07); sequence_2_12, whose VIO heading was good,
+   falls to 37.75 ([Matching guided by a drifting
+   VIO](lamaria_batch_ba.md#matching-guided-by-a-drifting-vio)). What the
+   band changed were the matches 96–256 keyframes apart, and nearly all of
+   them are wrong (2026-10-20: no peak at the pseudo-GT's epipolar lines on
+   six sequences): matching only up to 64 keyframes, sequence_3_17 scores
+   76.8 with either band and the windows hold the heading within ±0.55° on
+   the five day sequences whose VIO drifts, but the wrong matches had held
+   the starts of sequence_2_12 and 4_11, and the mean falls to 55.20 /
+   56.76. A looser gyro bias random walk mends those starts and costs the
+   others; a prior on the VIO's rotation changes nothing. The wide band with
+   the far offsets stays ([Matches far apart are
+   wrong](lamaria_batch_ba.md#matches-far-apart-are-wrong)).
+   What the far matches had held was the warm-up: the gyro bias moves in
+   the first minutes of a recording. A random walk ten times looser at the
+   start, decaying over 300 s (`--gyro-rw-warmup`), mends sequence_2_12's
+   start (online 37.75 → 56.00) and, by day with the pass (whose random
+   walk is ten times looser throughout), the chain averages **64.35**
+   (2026-10-20; Short 83.78, Medium 69.81, Long 67.40), above
+   GroundedSLAM's 62.3; low light keeps the online result without it
+   ([The first minutes, online](lamaria_batch_ba.md#the-first-minutes-online)).
 
 ## 5. Test-set operational pipeline
 
 1. Download one sequence with `aria2c -x16` from the official test file list.
+   `scripts/run_lamaria_test_submission.py --split training --sequences ...`
+   runs the same steps on training sequences, so the result can be scored.
 2. Run VIO (`--pipeline --threads 12`, variant-A default IMU noise), then the
    mapper (`--temporal-seed 7`; reduced-points config if it exceeds ~1 h or
    ~12 GB RSS).
 3. Propagate corrections (`scripts/propagate_basalt_mapper_corrections.py`) and
    convert to the submission format
-   (`scripts/basalt_tum_to_lamaria_estimate.py`).
+   (`scripts/basalt_tum_to_lamaria_estimate.py`). For the batch BA (lever
+   14), start `scripts/lamaria_batch_ba.py` from the VIO trajectory:
+   `features`, `match`, `loops`, `solve --save-states`, `loop-correct`, and
+   a second `solve --loops` from the corrected trajectory, with the options
+   of [its Usage](lamaria_batch_ba.md#usage) (low light: denoised features
+   and 30 iterations; moving platform: no `--est-focal`). On 4 cores that
+   takes about 15 min for the features (30 with the denoising), 2–7 min for
+   the matching, 3–6 min for `loops`, and 10–40 min per solve at 30
+   iterations, up to twice that at the default 60.
 4. Delete the sequence data; add `slam/<seq>.txt` to the submission zip.
 5. Submit via <https://lamaria.ethz.ch/login> (24 h rate limit).
 
@@ -251,6 +382,8 @@ before/after on training sequences.
   the rectified IMU, per-track results and cost (lever 9).
 - [`lamaria_drift_analysis.md`](lamaria_drift_analysis.md) — CP error
   analysis: funicular ride, heading and scale drift (lever 10).
+- [`lamaria_batch_ba.md`](lamaria_batch_ba.md) — offline batch VI bundle
+  adjustment, per-camera rotations, slow heading drift (lever 14).
 - [`vi_slam_benchmarks.md`](vi_slam_benchmarks.md) — EuRoC VI-SLAM results.
 - [`vi_slam_global_consistency_plan.md`](vi_slam_global_consistency_plan.md) —
   global-consistency evidence and staged plan.

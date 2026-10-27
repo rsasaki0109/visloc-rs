@@ -45,6 +45,9 @@ pub struct BasaltVioEstimatorAdapter {
     /// to this (it runs concurrently with, and ahead of, the estimator
     /// thread), so it always seeds with zero bias.
     last_gyro_bias: Vector3<f64>,
+    /// `config.vio_platform_filter`: keeps a vehicle's cabin out of the
+    /// estimator (see `crate::platform`).
+    platform: Option<crate::platform::PlatformFilter>,
 }
 
 impl BasaltVioEstimatorAdapter {
@@ -58,12 +61,23 @@ impl BasaltVioEstimatorAdapter {
         let frontend = DirectKltStream::new(calibration.clone(), direct_config)?
             .with_multi_camera_options(config.multi_camera_flow_options()?)?;
         let estimator = vio_estimator_from_parts(calibration, estimator_config)?;
+        let platform = config
+            .optional_bool("config.vio_platform_filter")?
+            .then(|| crate::platform::PlatformFilter::new(calibration));
         Ok(Self {
             frontend,
             estimator,
             timing: TimingBreakdown::from_env(),
             last_gyro_bias: Vector3::zeros(),
+            platform,
         })
+    }
+
+    /// The moving-platform filter's counters, when it is on.
+    pub fn platform_stats(&self) -> Option<&crate::platform::PlatformStats> {
+        self.platform
+            .as_ref()
+            .map(crate::platform::PlatformFilter::stats)
     }
 
     /// Returns the optional cumulative timing breakdown for this adapter.
@@ -209,7 +223,10 @@ impl BasaltVioEstimatorAdapter {
         );
         self.timing
             .finish(TimingBucket::AdapterFrontend, frontend_started);
-        let tracks = tracks_result?;
+        let mut tracks = tracks_result?;
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
         let estimator_started = self.timing.start();
         let estimator_result = self.estimator.process_adapter_frame(
             tracks.frame.frame_id,
@@ -303,6 +320,7 @@ impl BasaltVioEstimatorAdapter {
         )>(capacity.max(decode_worker_count));
         let next_decode_index = std::sync::atomic::AtomicUsize::new(0);
         let frontend = &mut self.frontend;
+        let platform = &mut self.platform;
         let estimator = &mut self.estimator;
 
         let (decode_timings, producer_timing, producer_result, mut consumer_timing, consumer_error) =
@@ -330,6 +348,7 @@ impl BasaltVioEstimatorAdapter {
                 let producer_handle = scope.spawn(move || {
                     run_pipeline_frontend(
                         frontend,
+                        platform,
                         frame_count,
                         &decode_receiver,
                         retain_marg_data,
@@ -387,6 +406,113 @@ impl BasaltVioEstimatorAdapter {
         }
         consumer_timing.merge_from(self.estimator.timing_breakdown());
         Ok((producer_timing, consumer_timing))
+    }
+
+    /// Splits the adapter into its frontend and estimator halves so a live
+    /// caller (a ROS node, say) can run them on two threads of its own,
+    /// overlapping frontend tracking of frame `N+1` with the estimator step
+    /// of frame `N`, as [`Self::process_euroc_stream_pipelined`] does for a
+    /// recorded EuRoC sequence.
+    ///
+    /// Both stages run the lean path of
+    /// [`Self::process_without_marg_data_no_trace`]. Feeding every frame to
+    /// [`BasaltVioFrontendStage::process`] and its packets, in order, to
+    /// [`BasaltVioEstimatorStage::process`] gives exactly that path's
+    /// results, except that the frontend's optional IMU rotation seed
+    /// (`config.optical_flow_imu_seed_rotation`) uses whichever gyro bias
+    /// the caller passes rather than the estimator's estimate from the
+    /// previous frame.
+    pub fn into_stages(self) -> (BasaltVioFrontendStage, BasaltVioEstimatorStage) {
+        (
+            BasaltVioFrontendStage {
+                frontend: self.frontend,
+                platform: self.platform,
+                timing: self.timing,
+            },
+            BasaltVioEstimatorStage {
+                estimator: self.estimator,
+            },
+        )
+    }
+}
+
+/// Frontend tracking output of one frame, bound for
+/// [`BasaltVioEstimatorStage::process`].
+#[derive(Debug)]
+pub struct BasaltFrontendPacket {
+    pub tracks: TrackFrameOutput,
+    imu: Vec<ImuSample>,
+    initialization_imu: Option<ImuSample>,
+}
+
+/// The frontend half of [`BasaltVioEstimatorAdapter::into_stages`].
+#[derive(Debug)]
+pub struct BasaltVioFrontendStage {
+    frontend: DirectKltStream,
+    platform: Option<crate::platform::PlatformFilter>,
+    timing: TimingBreakdown,
+}
+
+impl BasaltVioFrontendStage {
+    /// Tracks one frame. `gyro_bias` (IMU frame, rad/s) bias-corrects the
+    /// optional IMU rotation seed; pass the latest estimate the estimator
+    /// stage has produced, or zero.
+    pub fn process(
+        &mut self,
+        frame: EurocSensorFrame,
+        gyro_bias: Vector3<f64>,
+    ) -> Result<BasaltFrontendPacket, BasaltAdapterError> {
+        let stereo =
+            crate::StereoFrame::new(frame.frame_id, frame.timestamp_ns, frame.cam0, frame.cam1);
+        let mut tracks = self.frontend.process_frame_with_timing_imu(
+            stereo,
+            &frame.imu,
+            gyro_bias,
+            &mut self.timing,
+        )?;
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
+        Ok(BasaltFrontendPacket {
+            tracks,
+            imu: frame.imu,
+            initialization_imu: frame.initialization_imu,
+        })
+    }
+}
+
+/// The estimator half of [`BasaltVioEstimatorAdapter::into_stages`].
+#[derive(Debug)]
+pub struct BasaltVioEstimatorStage {
+    estimator: BasaltVioEstimator,
+}
+
+impl BasaltVioEstimatorStage {
+    /// Runs the estimator step for one frontend packet; packets must arrive
+    /// in the order the frontend stage produced them.
+    pub fn process(
+        &mut self,
+        packet: BasaltFrontendPacket,
+    ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
+        let imu_count = packet.imu.len();
+        let estimator = self
+            .estimator
+            .process_adapter_frame(
+                packet.tracks.frame.frame_id,
+                packet.tracks.frame.timestamp_ns,
+                &packet.tracks.observations,
+                &packet.imu,
+                packet.initialization_imu,
+                None,
+                false,
+                false,
+            )
+            .map_err(BasaltAdapterError::Estimator)?;
+        Ok(BasaltAdapterOutput {
+            tracks: packet.tracks,
+            estimator,
+            imu_count,
+        })
     }
 }
 
@@ -523,6 +649,7 @@ fn run_pipeline_decode_worker(
 /// function's signature).
 fn run_pipeline_frontend(
     frontend: &mut DirectKltStream,
+    platform: &mut Option<crate::platform::PlatformFilter>,
     frame_count: usize,
     decode_receiver: &mpsc::Receiver<(usize, Result<EurocSensorFrame, BasaltAdapterError>)>,
     retain_marg_data: bool,
@@ -601,13 +728,16 @@ fn run_pipeline_frontend(
             &mut timing,
         );
         timing.finish(TimingBucket::AdapterFrontend, frontend_started);
-        let tracks = match tracks_result {
+        let mut tracks = match tracks_result {
             Ok(tracks) => tracks,
             Err(error) => {
                 let _ = sender.send(Err(BasaltAdapterError::from(error)));
                 return (timing, Ok(()));
             }
         };
+        if let Some(platform) = platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
         let packet = PipelineFrontendPacket {
             tracks,
             imu: frame.imu,
@@ -751,8 +881,18 @@ pub fn direct_klt_config(config: &BasaltConfig) -> Result<DirectKltConfig, Confi
             Err(ConfigError::Value(format!("{key} must be positive")))
         }
     };
+    let pattern_scale = match config.value::<i64>("config.optical_flow_pattern")? {
+        51 => 1.0,
+        52 => 2.0,
+        other => {
+            return Err(ConfigError::Value(format!(
+                "config.optical_flow_pattern: {other} is not supported (51 or 52)"
+            )))
+        }
+    };
     Ok(DirectKltConfig {
         imu_seed_rotation: config.optional_bool("config.optical_flow_imu_seed_rotation")?,
+        pattern_scale,
         pyramid_levels: positive_usize("config.optical_flow_levels")?,
         max_iterations: positive_usize("config.optical_flow_max_iterations")?,
         fb_squared_threshold: positive_f32("config.optical_flow_max_recovered_dist2")?,
@@ -811,6 +951,21 @@ mod tests {
         value["value0"]["config.optical_flow_imu_seed_rotation"] = serde_json::json!(true);
         let config = BasaltConfig::from_json(&value.to_string()).unwrap();
         assert!(direct_klt_config(&config).unwrap().imu_seed_rotation);
+    }
+
+    #[test]
+    fn optical_flow_pattern_selects_the_patch_scale() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../configs/basalt/euroc_config.json"))
+                .unwrap();
+        let mut scale = |pattern: i64| {
+            value["value0"]["config.optical_flow_pattern"] = serde_json::json!(pattern);
+            let config = BasaltConfig::from_json(&value.to_string()).unwrap();
+            direct_klt_config(&config).map(|direct| direct.pattern_scale)
+        };
+        assert_eq!(scale(51).unwrap(), 1.0);
+        assert_eq!(scale(52).unwrap(), 2.0);
+        assert!(scale(24).is_err());
     }
 
     #[test]

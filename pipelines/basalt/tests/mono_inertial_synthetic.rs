@@ -658,6 +658,348 @@ fn monocular_inertial_vio_smoke() {
     );
 }
 
+/// The default (IMU) configuration fed the same monocular scene with the IMU
+/// removed. Without an IMU delta `predict_nav` keeps the previous pose, every
+/// triangulation baseline stays under the 5 cm gate, no landmark is created and
+/// nothing moves the pose. Monocular input without an IMU needs
+/// `config.vio_visual_only` (tests below).
+#[test]
+fn monocular_without_imu_never_bootstraps() {
+    let mut scenario = moving_scenario(0x5eed_1234_abcd_0006);
+    scenario.seconds = 2.0;
+    scenario.target_tracks = 40;
+    scenario.replenish_below = 30;
+    let mut source = ideal_track_source(&scenario);
+    let mut positions: Vec<Vector3<f64>> = Vec::new();
+    let summary = run_with(&scenario, |mut event: FrameEvent<'_>, rng: &mut Rng| {
+        event.imu.clear();
+        event.initialization_imu = None;
+        let output = source(event, rng);
+        positions.push(output.state.imu_to_world.translation);
+        output
+    });
+    report("mono_without_imu", &summary);
+
+    assert_eq!(
+        summary.first_visual_frame, None,
+        "a visual factor entered the window"
+    );
+    assert_eq!(summary.max_visual_rows, 0);
+    assert!(
+        positions.iter().all(|p| (p - positions[0]).norm() == 0.0),
+        "the pose moved without IMU or landmarks"
+    );
+}
+
+/// Visual-only monocular odometry (`docs/mono_visual_only_vio.md`)
+/// (`config.vio_visual_only`), fed ideal KLT-like tracks and no IMU.
+struct VisualOnlyRun {
+    frames: usize,
+    initialized_frames: usize,
+    first_initialized_frame: Option<usize>,
+    keyframes: usize,
+    max_visual_rows: usize,
+    /// Sim3-aligned camera-position RMS error over initialized frames (m).
+    sim3_rms: f64,
+    /// Fitted Sim3 scale over the first and second half of the initialized
+    /// frames (scale drift shows up as a ratio away from 1).
+    scale_first_half: f64,
+    scale_second_half: f64,
+    path_length: f64,
+    /// Per initialized frame: (frame, estimated, true) camera position.
+    positions: Vec<(usize, Vector3<f64>, Vector3<f64>)>,
+}
+
+fn visual_only_config() -> BasaltConfig {
+    let mut config = euroc_config();
+    config.values.insert(
+        "config.vio_visual_only".into(),
+        serde_json::Value::Bool(true),
+    );
+    config
+}
+
+/// Umeyama similarity `truth ~ s R est + t`; returns (s, aligned RMS).
+fn umeyama_sim3(est: &[Vector3<f64>], truth: &[Vector3<f64>]) -> (f64, f64) {
+    let n = est.len() as f64;
+    let mean_e = est.iter().sum::<Vector3<f64>>() / n;
+    let mean_t = truth.iter().sum::<Vector3<f64>>() / n;
+    let mut cov = Matrix3::zeros();
+    let mut var_e = 0.0;
+    for (e, t) in est.iter().zip(truth) {
+        cov += (t - mean_t) * (e - mean_e).transpose();
+        var_e += (e - mean_e).norm_squared();
+    }
+    cov /= n;
+    var_e /= n;
+    let svd = cov.svd(true, true);
+    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
+    let mut d = Matrix3::identity();
+    if (u * v_t).determinant() < 0.0 {
+        d[(2, 2)] = -1.0;
+    }
+    let rotation = u * d * v_t;
+    let scale = (svd.singular_values.component_mul(&d.diagonal())).sum() / var_e;
+    let translation = mean_t - scale * rotation * mean_e;
+    let sq = est
+        .iter()
+        .zip(truth)
+        .map(|(e, t)| (scale * rotation * e + translation - t).norm_squared())
+        .sum::<f64>();
+    (scale, (sq / n).sqrt())
+}
+
+/// How the visual-only run feeds the estimator.
+#[derive(Clone, Copy, Default)]
+struct VisualOnlyFeed {
+    /// Also pass (constant, gravity-only) IMU samples, which visual-only mode
+    /// must ignore.
+    with_imu: bool,
+    /// Use `process_without_marg_data` instead of `process`.
+    without_marg_data: bool,
+}
+
+fn run_visual_only(scenario: &Scenario) -> VisualOnlyRun {
+    run_visual_only_with(scenario, &visual_only_config(), VisualOnlyFeed::default())
+}
+
+fn run_visual_only_with(
+    scenario: &Scenario,
+    config: &BasaltConfig,
+    feed: VisualOnlyFeed,
+) -> VisualOnlyRun {
+    let calibration = mono_calibration();
+    let mut estimator = vio_estimator_from_calibration(&calibration, config).unwrap();
+    let mut rng = Rng(scenario.seed);
+    let mut tracks: Vec<Track> = Vec::new();
+    let mut next_track_id = 0_u64;
+    let frames = (scenario.seconds * 20.0).round() as usize;
+    let mut run = VisualOnlyRun {
+        frames,
+        initialized_frames: 0,
+        first_initialized_frame: None,
+        keyframes: 0,
+        max_visual_rows: 0,
+        sim3_rms: f64::NAN,
+        scale_first_half: f64::NAN,
+        scale_second_half: f64::NAN,
+        path_length: 0.0,
+        positions: Vec::new(),
+    };
+    let (mut estimated, mut truth): (Vec<Vector3<f64>>, Vec<Vector3<f64>>) =
+        (Vec::new(), Vec::new());
+    for frame in 0..frames {
+        let timestamp_ns = START_NS + frame as i64 * IMU_PER_FRAME * IMU_PERIOD_NS;
+        let t = (timestamp_ns - START_NS) as f64 * 1e-9;
+        let imu_pose = scenario.motion.imu_pose(t);
+        let camera_pose = imu_pose.compose(&camera_to_imu());
+        tracks.retain(|track| {
+            project(&camera_pose, &track.point_world).is_some()
+                && rng.uniform() >= scenario.track_drop_probability
+        });
+        if tracks.len() < scenario.replenish_below {
+            while tracks.len() < scenario.target_tracks {
+                tracks.push(spawn_track(&mut rng, &camera_pose, next_track_id));
+                next_track_id += 1;
+            }
+        }
+        let observations = tracks
+            .iter()
+            .map(|track| {
+                let pixel = project(&camera_pose, &track.point_world).unwrap();
+                TrackObservation {
+                    track_id: track.id,
+                    frame_id: frame as u64,
+                    timestamp_ns,
+                    camera_id: 0,
+                    pixel: nalgebra::Point2::new(
+                        pixel.x + scenario.pixel_noise * rng.gaussian(),
+                        pixel.y + scenario.pixel_noise * rng.gaussian(),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let imu = if feed.with_imu {
+            (0..IMU_PER_FRAME)
+                .map(|k| ImuSample {
+                    timestamp_ns: timestamp_ns - (IMU_PER_FRAME - 1 - k) * IMU_PERIOD_NS,
+                    accel_m_s2: Vector3::new(0.0, 0.0, GRAVITY),
+                    gyro_rad_s: Vector3::zeros(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let output = if feed.without_marg_data {
+            estimator.process_without_marg_data(frame as u64, timestamp_ns, &observations, &imu)
+        } else {
+            estimator.process(frame as u64, timestamp_ns, &observations, &imu)
+        }
+        .unwrap_or_else(|error| panic!("frame {frame}: {error}"));
+        if !feed.without_marg_data {
+            output
+                .marg_data
+                .validate_contract()
+                .unwrap_or_else(|error| panic!("frame {frame}: invalid MargData: {error}"));
+        }
+        if output.active_state_count == 0 {
+            continue;
+        }
+        run.first_initialized_frame.get_or_insert(frame);
+        run.initialized_frames += 1;
+        run.keyframes += usize::from(output.is_keyframe);
+        run.max_visual_rows = run.max_visual_rows.max(output.window.visual_factor_rows);
+        let position = output.state.imu_to_world.translation;
+        assert!(
+            position.iter().all(|value| value.is_finite()),
+            "frame {frame}"
+        );
+        // Visual-only mode estimates the camera pose (body = camera).
+        let true_position = camera_pose.translation;
+        if let Some(previous) = truth.last() {
+            run.path_length += (true_position - previous).norm();
+        }
+        estimated.push(position);
+        truth.push(true_position);
+        run.positions.push((frame, position, true_position));
+    }
+    if estimated.len() >= 6 {
+        run.sim3_rms = umeyama_sim3(&estimated, &truth).1;
+        let half = estimated.len() / 2;
+        run.scale_first_half = umeyama_sim3(&estimated[..half], &truth[..half]).0;
+        run.scale_second_half = umeyama_sim3(&estimated[half..], &truth[half..]).0;
+    }
+    run
+}
+
+fn report_visual_only(name: &str, run: &VisualOnlyRun) {
+    eprintln!(
+        "{name}: frames={} initialized={} first_initialized={:?} keyframes={} \
+         max_visual_rows={} path={:.3} m sim3_rms={:.5} m scale_halves={:.4}/{:.4}",
+        run.frames,
+        run.initialized_frames,
+        run.first_initialized_frame,
+        run.keyframes,
+        run.max_visual_rows,
+        run.path_length,
+        run.sim3_rms,
+        run.scale_first_half,
+        run.scale_second_half,
+    );
+}
+
+fn slow_scenario(seed: u64, pixel_noise: f64) -> Scenario {
+    Scenario {
+        motion: Motion {
+            amplitude: Vector3::new(0.8, 1.0, 0.3),
+            frequency: Vector3::new(0.7, 0.9, 1.1),
+            angle_amplitude: Vector3::new(0.05, 0.05, 0.2),
+            angle_frequency: Vector3::new(0.6, 0.8, 0.7),
+            rest_seconds: 0.0,
+        },
+        seconds: 8.0,
+        accel_bias: Vector3::zeros(),
+        gyro_bias: Vector3::zeros(),
+        accel_noise: 0.0,
+        gyro_noise: 0.0,
+        pixel_noise,
+        track_drop_probability: 0.02,
+        target_tracks: 150,
+        replenish_below: 110,
+        seed,
+    }
+}
+
+/// KAT: exact tracks give the camera trajectory exactly up to one similarity
+/// (no scale drift), once the two-view bootstrap has enough parallax.
+#[test]
+fn visual_only_mono_exact_tracks_recover_trajectory_up_to_similarity() {
+    let mut scenario = slow_scenario(0x5eed_1234_abcd_0101, 0.0);
+    scenario.seconds = 3.0;
+    let run = run_visual_only(&scenario);
+    report_visual_only("visual_only_exact", &run);
+    let first = run.first_initialized_frame.expect("never bootstrapped");
+    assert!(first < 30, "bootstrap frame {first}");
+    assert!(run.max_visual_rows > 100);
+    assert!(run.keyframes > 3, "keyframes {}", run.keyframes);
+    assert!(run.path_length > 0.5, "path {}", run.path_length);
+    assert!(run.sim3_rms < 1e-5, "sim3 rms {}", run.sim3_rms);
+    let drift = run.scale_second_half / run.scale_first_half - 1.0;
+    assert!(drift.abs() < 1e-5, "scale drift {drift}");
+}
+
+/// Visual-only mode ignores IMU input, and the MargData and no-MargData paths
+/// solve identically.
+#[test]
+fn visual_only_mono_ignores_imu_and_matches_without_marg_data() {
+    let mut scenario = slow_scenario(0x5eed_1234_abcd_0102, 0.3);
+    scenario.seconds = 2.5;
+    let config = visual_only_config();
+    let base = run_visual_only_with(&scenario, &config, VisualOnlyFeed::default());
+    assert!(base.initialized_frames > 10);
+    for feed in [
+        VisualOnlyFeed {
+            with_imu: true,
+            ..VisualOnlyFeed::default()
+        },
+        VisualOnlyFeed {
+            without_marg_data: true,
+            ..VisualOnlyFeed::default()
+        },
+    ] {
+        let other = run_visual_only_with(&scenario, &config, feed);
+        assert_eq!(base.positions, other.positions);
+    }
+}
+
+/// A packet the normal path would reject is rejected before the visual-only
+/// bootstrap holds it, so the held reference is always replayable.
+#[test]
+fn visual_only_validates_packets_before_holding_them() {
+    let calibration = mono_calibration();
+    let mut estimator =
+        vio_estimator_from_calibration(&calibration, &visual_only_config()).unwrap();
+    let observation = |track_id: u64, frame_id: u64| TrackObservation {
+        track_id,
+        frame_id,
+        timestamp_ns: START_NS,
+        camera_id: 0,
+        pixel: nalgebra::Point2::new(300.0 + track_id as f64, 200.0),
+    };
+    let wrong_frame = [observation(0, 0), observation(1, 7)];
+    let error = estimator
+        .process(0, START_NS, &wrong_frame, &[])
+        .unwrap_err();
+    assert!(error.contains("does not match current frame"), "{error}");
+    let duplicate = [observation(0, 0), observation(0, 0)];
+    let error = estimator.process(0, START_NS, &duplicate, &[]).unwrap_err();
+    assert!(error.contains("duplicate current observation"), "{error}");
+    // Neither rejected packet was held: the valid one at the same timestamp
+    // is accepted, not refused as non-monotonic.
+    let valid = [observation(0, 0), observation(1, 0)];
+    let output = estimator.process(0, START_NS, &valid, &[]).unwrap();
+    assert_eq!(output.active_state_count, 0);
+}
+
+#[test]
+#[ignore = "release-only: about 40x slower unoptimized; run `cargo test --release -p visloc-basalt --test mono_inertial_synthetic -- --include-ignored`"]
+fn visual_only_mono_noisy_tracks_stay_consistent() {
+    let scenario = slow_scenario(0x5eed_1234_abcd_0103, 0.5);
+    let run = run_visual_only(&scenario);
+    report_visual_only("visual_only_noisy", &run);
+    assert!(run.first_initialized_frame.expect("never bootstrapped") < 40);
+    assert!(run.initialized_frames + 40 > run.frames);
+    let relative_rms = run.sim3_rms / run.path_length;
+    assert!(
+        relative_rms < 0.01,
+        "sim3 rms {} over {} m",
+        run.sim3_rms,
+        run.path_length
+    );
+    let drift = run.scale_second_half / run.scale_first_half - 1.0;
+    assert!(drift.abs() < 0.05, "scale drift {drift}");
+}
+
 #[test]
 #[ignore = "release-only: about 40x slower unoptimized; run `cargo test --release -p visloc-basalt --test mono_inertial_synthetic -- --include-ignored`"]
 fn monocular_inertial_vio_tracks_with_metric_scale() {

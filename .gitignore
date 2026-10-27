@@ -1,4 +1,6 @@
 /target/
+# The ROS 2 nodes are a separate Cargo workspace with their own build dir.
+/ros2/visloc-ros2/target/
 **/*.rs.bk
 # Benchmark datasets fetched by scripts/fetch_pgo_g2o_datasets.sh
 /datasets/

@@ -17,7 +17,7 @@ pub struct ColoredPoint {
     pub rgb: [u8; 3],
 }
 
-/// Errors reading `points3D.txt`.
+/// Errors reading `points3D.txt` or `points3D.bin`.
 #[derive(Debug, thiserror::Error)]
 pub enum PointsError {
     #[error("reading {path}: {source}")]
@@ -30,6 +30,13 @@ pub enum PointsError {
         path: std::path::PathBuf,
         line: usize,
     },
+    #[error("{path}: {source}")]
+    Binary {
+        path: std::path::PathBuf,
+        source: visloc_io::colmap::ColmapError,
+    },
+    #[error("no points3D.txt or points3D.bin in {0}")]
+    NoPoints(std::path::PathBuf),
 }
 
 /// Read a COLMAP text `points3D.txt` (`ID X Y Z R G B ERROR TRACK[]`).
@@ -61,6 +68,45 @@ pub fn read_points3d_txt(path: impl AsRef<Path>) -> Result<Vec<ColoredPoint>, Po
         });
     }
     Ok(out)
+}
+
+/// Read a COLMAP binary `points3D.bin` (see [`read_points3d_txt`]).
+pub fn read_points3d_bin(path: impl AsRef<Path>) -> Result<Vec<ColoredPoint>, PointsError> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path).map_err(|source| PointsError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let points = visloc_io::colmap::parse_points3d_bin_with_colors(&bytes).map_err(|source| {
+        PointsError::Binary {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    Ok(points
+        .into_iter()
+        .map(|(landmark, rgb)| ColoredPoint {
+            position: Vector3::new(
+                landmark.position.x as f32,
+                landmark.position.y as f32,
+                landmark.position.z as f32,
+            ),
+            rgb,
+        })
+        .collect())
+}
+
+/// The points of a COLMAP model directory: `points3D.txt` if present, else
+/// `points3D.bin`.
+pub fn read_points3d(model_dir: impl AsRef<Path>) -> Result<Vec<ColoredPoint>, PointsError> {
+    let dir = model_dir.as_ref();
+    if dir.join("points3D.txt").exists() {
+        read_points3d_txt(dir.join("points3D.txt"))
+    } else if dir.join("points3D.bin").exists() {
+        read_points3d_bin(dir.join("points3D.bin"))
+    } else {
+        Err(PointsError::NoPoints(dir.to_path_buf()))
+    }
 }
 
 /// Mean distance from each point to its `k` nearest other points, via a
@@ -294,5 +340,71 @@ mod tests {
         assert!((c[0] - 1.0).abs() < 1e-5 && (c[2] - 0.0).abs() < 1e-5);
         assert_eq!(g.sh_rest.len(), 45);
         assert!(g.sh_is_consistent());
+    }
+
+    #[test]
+    fn binary_points_load_like_their_text_twin() {
+        // The same three points as points3D.txt and points3D.bin, each with a
+        // different colour (no channel order or point order can hide).
+        let pts = [
+            (7u64, [1.5f64, -2.0, 3.25], [255u8, 128, 0]),
+            (9, [0.0, 4.0, -5.5], [3, 200, 77]),
+            (12, [-1.0, 0.5, 8.0], [90, 91, 250]),
+        ];
+        let dir = std::env::temp_dir().join(format!("visloc_points_twin_{}", std::process::id()));
+        let (txt, bin) = (dir.join("txt"), dir.join("bin"));
+        for d in [&txt, &bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut text = String::from("# 3D point list\n");
+        let mut bytes = (pts.len() as u64).to_le_bytes().to_vec();
+        for (id, xyz, rgb) in pts {
+            text += &format!(
+                "{id} {} {} {} {} {} {} 0.5 1 0\n",
+                xyz[0], xyz[1], xyz[2], rgb[0], rgb[1], rgb[2]
+            );
+            bytes.extend(id.to_le_bytes());
+            for v in xyz {
+                bytes.extend(v.to_le_bytes());
+            }
+            bytes.extend(rgb);
+            bytes.extend(0.5f64.to_le_bytes());
+            bytes.extend(1u64.to_le_bytes());
+            bytes.extend(1u32.to_le_bytes());
+            bytes.extend(0u32.to_le_bytes());
+        }
+        std::fs::write(txt.join("points3D.txt"), text).unwrap();
+        std::fs::write(bin.join("points3D.bin"), &bytes).unwrap();
+
+        let from_txt = read_points3d(&txt).unwrap();
+        let from_bin = read_points3d(&bin).unwrap();
+        assert_eq!(from_txt.len(), 3);
+        assert_eq!(from_bin.len(), 3);
+        for ((t, b), (_, xyz, rgb)) in from_txt.iter().zip(&from_bin).zip(pts) {
+            assert_eq!(t.position, b.position);
+            assert_eq!(t.rgb, b.rgb);
+            assert_eq!(b.rgb, rgb);
+            assert_eq!(
+                b.position,
+                Vector3::new(xyz[0] as f32, xyz[1] as f32, xyz[2] as f32)
+            );
+        }
+        // Text wins when both exist; neither is an error naming the folder.
+        std::fs::write(bin.join("points3D.txt"), "# none\n").unwrap();
+        assert!(read_points3d(&bin).unwrap().is_empty());
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(matches!(
+            read_points3d(&empty),
+            Err(PointsError::NoPoints(_))
+        ));
+        // A truncated binary file is an error, not a short point list.
+        std::fs::remove_file(bin.join("points3D.txt")).unwrap();
+        std::fs::write(bin.join("points3D.bin"), &bytes[..bytes.len() - 3]).unwrap();
+        assert!(matches!(
+            read_points3d(&bin),
+            Err(PointsError::Binary { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,17 +2,29 @@
 """Move a COLMAP text model into a reference model's frame.
 
     align_colmap_model.py EST_DIR REF_IMAGES_TXT OUT_DIR [--names IMAGE_NAMES_TXT]
+                          [--centres]
 
-Fits the Sim(3) taking EST_DIR's camera centres onto those of the
-reference images with the same file names (compared without directories),
-refits once without the cameras more than three times the median error
-off, and writes the model with its poses and points transformed to
-OUT_DIR. Observations and tracks are kept as they are, so a dense
-reconstruction from OUT_DIR lands in the reference frame (ETH3D's laser
-scans, for example). With ``--names`` (a ``gsplat_photos`` run's
-``image_names.txt``: working name, original path), images are matched and
-written under their original file names. Prints the fit: matched cameras, scale and centre
-errors in reference units. Needs numpy.
+Fits the Sim(3) taking EST_DIR's cameras onto the reference images with
+the same file names (compared without directories) and writes the model
+with its poses and points transformed to OUT_DIR. Observations and
+tracks are kept as they are, so a dense reconstruction from OUT_DIR lands
+in the reference frame (ETH3D's laser scans, for example). With
+``--names`` (a ``gsplat_photos`` run's ``image_names.txt``: working name,
+original path), images are matched and written under their original file
+names.
+
+The camera centres are fitted first, refitted once without the cameras
+more than three times the median error off. The rotation then comes from
+the cameras' orientations (the chordal mean of R_ref^T R_est over the
+cameras kept by the centre fit, refitted once without those more than
+three times the median angle off), and the scale and translation from the
+centres under it, fitted on the cameras the orientations keep and refitted
+once without centres beyond three times the median error: centres nearly
+in one plane, as on ETH3D's meadow, fix the tilt poorly, and one camera a
+few centimetres off can tilt the cloud by a degree. ``--centres`` keeps
+the centres' fit, the alignment before the orientations were used
+(``--rotations``, their old switch, is accepted). Prints the fit: matched cameras, scale, centre errors in
+reference units and the rotation's change. Needs numpy.
 """
 from __future__ import annotations
 
@@ -24,6 +36,10 @@ import numpy as np
 
 
 def quat_to_r(qw, qx, qy, qz):
+    # Normalized: ETH3D's quaternions carry six digits, and the angles taken
+    # by arccos near the identity magnify their norm's error to 0.1 deg.
+    n = np.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    qw, qx, qy, qz = qw / n, qx / n, qy / n, qz / n
     return np.array([
         [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
         [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
@@ -78,8 +94,20 @@ def sim3(ref, est):
     return scale, rot, mr - scale * rot @ me
 
 
+def mean_rotation(rs):
+    """The rotation nearest the mean of `rs` (chordal L2 mean)."""
+    u, _, vt = np.linalg.svd(sum(rs))
+    return u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+
+
+def angle_deg(r):
+    return np.degrees(np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0)))
+
+
 def main():
     args = sys.argv[1:]
+    rotations = "--centres" not in args
+    args = [a for a in args if a not in ("--centres", "--rotations")]
     original = {}
     if "--names" in args:
         k = args.index("--names")
@@ -96,7 +124,9 @@ def main():
     for tokens, _ in est:
         name = " ".join(tokens[9:])
         tokens[9:] = [original.get(name, name)]
-    ref = {os.path.basename(" ".join(t[9:])): centre(t) for t, _ in read_images(ref_path)}
+    ref_images = read_images(ref_path)
+    ref = {os.path.basename(" ".join(t[9:])): centre(t) for t, _ in ref_images}
+    ref_rot = {os.path.basename(" ".join(t[9:])): quat_to_r(*map(float, t[1:5])) for t, _ in ref_images}
     names = [os.path.basename(" ".join(t[9:])) for t, _ in est]
     common = [k for k, n in enumerate(names) if n in ref]
     if len(common) < 3:
@@ -109,6 +139,38 @@ def main():
     if not keep.all() and keep.sum() >= 3:
         s, rot, t = sim3(a[keep], b[keep])
         err = np.linalg.norm(a - (s * b @ rot.T + t), axis=1)
+    note = ""
+    if rotations:
+        # Camera k: R_ref = R_est rot^T, so rot = R_ref^T R_est.
+        rs = [ref_rot[names[k]].T @ quat_to_r(*map(float, est[k][0][1:5])) for k in common]
+        used = [i for i in range(len(common)) if keep[i]]
+        mean = mean_rotation([rs[i] for i in used])
+        off = np.array([angle_deg(rs[i] @ mean.T) for i in used])
+        if (off > 3 * np.median(off) + 1e-9).any():
+            used = [i for i, o in zip(used, off) if o <= 3 * np.median(off) + 1e-9]
+            mean = mean_rotation([rs[i] for i in used])
+        change = angle_deg(mean @ rot.T)
+        rot = mean
+
+        def scale_translation(k):
+            ma, mb = a[k].mean(0), b[k].mean(0)
+            rb = (b[k] - mb) @ rot.T
+            sk = ((a[k] - ma) * rb).sum() / (rb**2).sum()
+            return sk, ma - sk * rot @ mb
+
+        # Scale and translation from the cameras whose orientations agree,
+        # then refitted once without centres beyond three times the median
+        # error: a part of the model bent away from the rest (the far end of
+        # ETH3D's facade) would otherwise pull the whole cloud along.
+        keep = np.zeros(len(common), bool)
+        keep[used] = True
+        s, t = scale_translation(keep)
+        err = np.linalg.norm(a - (s * b @ rot.T + t), axis=1)
+        keep = err <= 3 * np.median(err) + 1e-12
+        if keep.sum() >= 3:
+            s, t = scale_translation(keep)
+            err = np.linalg.norm(a - (s * b @ rot.T + t), axis=1)
+        note = f"; rotation from {len(used)} cameras' orientations, {change:.3f} deg from the centres' fit"
 
     os.makedirs(out_dir, exist_ok=True)
     shutil.copy(os.path.join(est_dir, "cameras.txt"), os.path.join(out_dir, "cameras.txt"))
@@ -132,7 +194,7 @@ def main():
             f.write(" ".join([tokens[0], *(f"{v:.17g}" for v in x), *tokens[4:]]) + "\n")
     print(f"aligned {len(common)} of {len(est)} images to the reference ({len(ref)}): "
           f"scale {s:.6g}, centre error median {np.median(err):.4f}, max {err.max():.4f} "
-          f"({int((~keep).sum())} left out of the fit)")
+          f"({int((~keep).sum())} left out of the fit){note}")
 
 
 if __name__ == "__main__":

@@ -62,10 +62,35 @@ struct Args {
     gpu_ba: bool,
 }
 
+const USAGE: &str = "\
+usage: colmap_incremental_mapper --manifest <rig manifest> --features-dir <dir> \
+--pairs-export <VISLOC-COLMAP-1 .bin> --out-colmap <dir> [options]
+
+Runs the COLMAP-port incremental mapper on an export (gsplat_photos writes one
+to <out>/port) and writes <out-colmap>/model/<k>/{cameras,images,points3D}.txt
+and <out-colmap>/mapper.log. Mapper options recorded next to the manifest
+(mapper_options.txt) are applied.
+
+options:
+  --random-seed 0  --pose-solver gp3p|dlt6pt
+  --local-ba-point-policy colmap|window|nopull
+  --init-image1 ID --init-image2 ID   force the initial pair
+  --gpu-ba 1                          large bundle adjustments on the GPU";
+
+/// Print `message` and the usage, then exit with status 2.
+fn usage_error(message: &str) -> ! {
+    eprintln!("{message}\n\n{USAGE}");
+    std::process::exit(2)
+}
+
 fn parse_args() -> Args {
     let mut flags: HashMap<String, String> = HashMap::new();
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
+        if arg == "-h" || arg == "--help" {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
         let Some(name) = arg.strip_prefix("--") else {
             continue;
         };
@@ -77,7 +102,7 @@ fn parse_args() -> Args {
         PathBuf::from(
             flags
                 .get(key)
-                .unwrap_or_else(|| panic!("missing required --{key}")),
+                .unwrap_or_else(|| usage_error(&format!("missing required --{key}"))),
         )
     };
 

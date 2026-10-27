@@ -51,6 +51,9 @@ The scoring follows the GLOMAP paper.
   photo and EuRoC pipelines turn it on. `gsplat_photos` now also writes
   `complete_largest_model=1`. The Results tables predate it; its effect is
   under [Completing the largest model](#completing-the-largest-model).
+  It writes `structure_less_min_verified=10` too, which the tables
+  predate as well
+  ([Checking structure-less registrations](#checking-structure-less-registrations)).
 - **Metrics:**
   - AUC at 1°, 3° and 5° of the relative pose error over every pair of
     ground-truth images. The error is the larger of the rotation angle and
@@ -214,6 +217,95 @@ change from run to run:
   the six left-out photos, so the model stays byte for byte as it was, and
   the mapper takes 1% longer.
 - The rows are in `benchmarks/eth3d_auc_complete/`.
+
+## Checking structure-less registrations
+
+A structure-less registration (COLMAP 4's 2D–2D fallback, used by the
+completing pass too) can land far off with nothing in its own numbers to
+show it. ETH3D runs:
+- **kicker on an L4:** r47 placed DSC_6487 66° and 1.3 m off. Its 175
+  matches go to two registered images, 149 and 17. The GR6P RANSAC found
+  a rival pose with 166 inliers against the right one's 170. Replayed
+  from the L4's matches, seeds 0 and 1 kept the wrong one (66° and 77°
+  off) and seeds 2 to 5 the right one.
+- **electro on COLMAP's matches:** DSC_9290, DSC_9291 and DSC_9298 come
+  out 17 cm to 3.2 m off, depending on the seed.
+
+The inliers whose match continues a triangulated track give an
+independent check: the new pose should reproject those tracks' 3D points.
+With `structure_less_min_verified=N` (0 by default; `gsplat_photos` and
+`gsplat_euroc` write 10) the registration is refused unless at least N of
+those points reproject within `abs_pose_max_error` and they are at least
+70% of the points checked. The mapper log's `REGISTER path=SL` and
+`REJECT path=SL` lines give the inliers per registered image and the
+points verified.
+
+Mapper replays of the 13 scenes' exported matches, seeds 0 to 2. Each
+case is the registered images and the largest camera-centre error after a
+Sim(3), check off → on:
+
+| Matches | Scene | Off | On |
+|---|---|---|---|
+| COLMAP's (1600 px) | electro | 44–45 of 45, 0.08–3.2 m | 40 of 45, 5.5 cm |
+| | meadow | 15, 11–26 cm | 14–15, 10–15 cm |
+| | pipes, office | unchanged (pipes verifies all of 17 to 19 points, office 22 to 28 of 28) | |
+| visloc-rs's (3200 px, L4) | kicker | 31, 5.6 cm–1.5 m | 30, 0.8 cm |
+| visloc-rs's (3200 px, software Vulkan) | kicker | 31, 4.9 cm–1.5 m | 30, 0.8–1.0 cm |
+| | meadow | 15, 7.8–23 cm | 14–15, 7.8–23 cm |
+
+- **The other scenes do not change**, bit for bit: they register no image
+  structure-less.
+- **What the check costs:** kicker loses DSC_6487 even in the runs that
+  placed it right (2 to 4 continuing tracks are too few to verify). It
+  sees only 46 of the scan's points, and its loss improves the rest of
+  the model (largest error 5.2 → 0.8 cm). meadow's DSC_6553 stays where its
+  tracks verify (12 of 13) and goes where they do not (2 of 13, 4 cm off).
+
+### Views panned from one spot
+
+On electro (visloc-rs's L4 matches) DSC_9289, DSC_9290 and DSC_9298 look
+at ground that, among the registered images, only DSC_9293 to DSC_9295
+see. Those three were taken from one spot, 5 cm apart:
+- **No 3D points there.** The three views triangulate nothing in that
+  area, so the images reach too few 3D points for PnP (6 to 30).
+- **No distance either.** Their 2D–2D matches fix the direction from
+  that spot but hardly the distance. GR6P put DSC_9289 15 cm off
+  (distance × 0.83, direction within 0.55°), DSC_9290 9 cm and DSC_9298
+  36 cm, and the check refused all three.
+
+With the check on, a structure-less pose now gets two more rules:
+- **A second try when the check fails.** GR6P's rotation and direction
+  are kept, and the distance is taken from the continuing tracks. That
+  is one degree of freedom, so the check on those tracks stays nearly
+  independent. The pose is then refined on the 2D–2D inliers' epipolar
+  errors alone, and the distance is chosen again. The mapper log writes
+  `RESCUE path=SL`.
+- **Parallax.** Half the inliers must see their point at 1.5° or more,
+  for the GR6P pose and the second try alike. Matches to a view taken
+  from the same spot satisfy the epipolar constraint wherever the camera
+  is. DSC_9291, 8 cm from DSC_9292, has about 160 such matches and about
+  30 wrong ones, which put it 6.6 m off. In the replays 8 to 13% of its
+  inliers have parallax (once 85%, where its tracks failed), against 72
+  to 99% for the poses kept. In one replay (seed 3) its GR6P pose had
+  passed the track check (19 of 22) once its neighbours were in.
+
+Mapper replays of visloc-rs's L4 matches, seeds 0 to 2; registered images
+and the largest camera-centre error:
+
+| Scene | Before | After |
+|---|---|---|
+| electro | 41 of 45, 1.3–1.8 cm | 44 of 45, 1.7–2.3 cm |
+| meadow | 14–15, 20–22 cm | 15, 21–22 cm |
+| kicker | 30, 0.8 cm | 30, 0.8 cm |
+
+- **electro, seeds 3 and 4:** 44 of 45, 1.7 and 1.8 cm. DSC_9291 stays out.
+- **meadow:** seed 1 now keeps DSC_6553 as seeds 0 and 2 do. The 21 cm
+  is its other outlier, the same in every seed.
+- **The other ten scenes** register no image structure-less and do not
+  change.
+- **What it is worth:** with the ground-truth poses, electro's MVS
+  scores 89.4% F1 at 2 cm with all 45 images and 80.6% without the four
+  ([mvs.md](mvs.md#electro-what-the-unregistered-images-cost-r51)).
 
 ## Where visloc-rs trails
 

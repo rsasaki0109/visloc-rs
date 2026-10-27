@@ -9,7 +9,8 @@ use visloc_core::types::{
 };
 use visloc_io::colmap::{
     format_cameras_txt, format_images_txt, format_points3d_txt, parse_cameras_bin,
-    parse_cameras_txt, parse_images_bin, parse_images_txt, parse_points3d_bin, parse_points3d_txt,
+    parse_cameras_txt, parse_images_bin, parse_images_bin_names, parse_images_txt,
+    parse_points3d_bin, parse_points3d_bin_with_colors, parse_points3d_txt,
     read_colmap_binary_model, read_colmap_text_model, write_colmap_binary_model,
     write_colmap_text_model, ColmapError, ColmapMapProvider, ColmapMapProviderError,
 };
@@ -64,6 +65,29 @@ fn parses_colmap_cameras_bin() {
 }
 
 #[test]
+fn parses_a_lone_equirectangular_camera_bin() {
+    // COLMAP 4.1's EQUIRECTANGULAR (model 17) has two parameters, so a model
+    // with only that camera is the smallest cameras.bin there is.
+    let mut bytes = Vec::new();
+    push_u64(&mut bytes, 1);
+    push_u32(&mut bytes, 1);
+    push_i32(&mut bytes, 17);
+    push_u64(&mut bytes, 4096);
+    push_u64(&mut bytes, 2048);
+    for value in [4096.0, 2048.0] {
+        push_f64(&mut bytes, value);
+    }
+    let cameras = parse_cameras_bin(&bytes).unwrap();
+    assert_eq!(cameras, vec![Camera::equirectangular(1, 4096, 2048)]);
+    // The count is still checked against what is left of the file.
+    assert_invalid_binary(
+        parse_cameras_bin(&bytes[..bytes.len() - 8]),
+        "cameras.bin",
+        "remaining",
+    );
+}
+
+#[test]
 fn parses_colmap_points3d_txt() {
     let landmarks = parse_points3d_txt(include_str!("fixtures/colmap_text/points3D.txt")).unwrap();
 
@@ -83,6 +107,36 @@ fn parses_colmap_points3d_bin() {
     assert_eq!(landmarks[0].position.x, 1.0);
     assert_eq!(landmarks[1].id, 1001);
     assert_eq!(landmarks[1].position.z, 4.0);
+}
+
+#[test]
+fn parses_colmap_images_bin_names() {
+    // The names `parse_images_bin` drops, keyed by image id, in file order.
+    let names = parse_images_bin_names(&images_bin()).unwrap();
+    assert_eq!(
+        names,
+        vec![
+            (10, "image_a.jpg".to_string()),
+            (11, "image_b.jpg".to_string())
+        ]
+    );
+    // Same bounds checks as the full parse.
+    let mut truncated = images_bin();
+    truncated.truncate(truncated.len() - 4);
+    assert!(parse_images_bin_names(&truncated).is_err());
+}
+
+#[test]
+fn parses_colmap_points3d_bin_colors() {
+    // `parse_points3d_bin` skips the RGB bytes; this keeps them, in the
+    // file's R, G, B order, and returns the same landmarks.
+    let with_colors = parse_points3d_bin_with_colors(&points3d_bin()).unwrap();
+    let landmarks = parse_points3d_bin(&points3d_bin()).unwrap();
+    assert_eq!(with_colors.len(), 2);
+    for ((landmark, rgb), plain) in with_colors.iter().zip(&landmarks) {
+        assert_eq!(landmark, plain);
+        assert_eq!(*rgb, [255, 128, 0]);
+    }
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! `BundleAdjustment` joint pose / landmark / intrinsics refinement.
 
 use super::*;
+use nalgebra::{Dyn, OMatrix, U6};
 
 impl BundleAdjustment {
     /// Bundle adjustment that carries the shared pinhole intrinsics
@@ -101,6 +102,8 @@ impl BundleAdjustment {
         // the historical dense `(6 P + k)^2` solve byte-for-byte.
         let sparse = config.linear_solver == LinearSolver::Sparse;
         let mut block_cache: Option<crate::block_cholesky::BlockSymbolic> = None;
+        let mut pose_order: Option<Vec<usize>> = None;
+        let mut system: Option<(JointCameraHessian, DVector<f64>, Vec<JointLandmarkBlock>)> = None;
 
         for iteration in 0..config.max_iterations {
             // Current distortion (reflects the running k1, k2 estimate) drives the
@@ -114,16 +117,23 @@ impl BundleAdjustment {
                 self.camera.tangential_distortion()
             };
             let t_build = std::time::Instant::now();
-            let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
-                &pose_index,
-                &landmark_index,
-                &kernel,
-                k_dim,
-                dist,
-                tangential,
-                sparse,
-            );
-            debug_assert_eq!(cam_dim_n, cam_dim);
+            // A rejected (or failed) step restores the poses, landmarks and
+            // intrinsics, so the next iteration's linearization would be
+            // identical: reuse it and only re-solve with the larger damping.
+            if system.is_none() {
+                let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
+                    &pose_index,
+                    &landmark_index,
+                    &kernel,
+                    k_dim,
+                    dist,
+                    tangential,
+                    sparse,
+                );
+                debug_assert_eq!(cam_dim_n, cam_dim);
+                system = Some((h_cc, b_c, lm_blocks));
+            }
+            let (h_cc, b_c, lm_blocks) = system.as_ref().expect("built above");
             let build_s = t_build.elapsed().as_secs_f64();
             let t_solve = std::time::Instant::now();
             let (solved, h_ll_inv_cache) = match h_cc {
@@ -132,14 +142,15 @@ impl BundleAdjustment {
                     pose_k,
                     kk,
                 } => solve_joint_sparse(
-                    pose_diag,
-                    pose_k,
-                    kk,
-                    &b_c,
-                    &lm_blocks,
+                    pose_diag.clone(),
+                    pose_k.clone(),
+                    kk.clone(),
+                    b_c,
+                    lm_blocks,
                     lambda,
                     config.shared_focal,
                     &mut block_cache,
+                    &mut pose_order,
                 ),
                 JointCameraHessian::Dense(h_cc) => {
                     // Damped Schur reduction (Levenberg Iﾂｷﾎｻ on both the camera and the
@@ -150,10 +161,10 @@ impl BundleAdjustment {
                             s[(d, d)] += lambda;
                         }
                     }
-                    let mut b_reduced = -&b_c;
+                    let mut b_reduced = -b_c;
                     let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> =
                         Vec::with_capacity(lm_blocks.len());
-                    for lm in &lm_blocks {
+                    for lm in lm_blocks {
                         let mut h_ll = lm.h_ll;
                         if lambda > 0.0 {
                             h_ll[(0, 0)] += lambda;
@@ -318,6 +329,7 @@ impl BundleAdjustment {
                 lambda,
                 step_accepted: true,
             });
+            system = None;
             current_cost = cost_after;
             current_nonprojectable = nonprojectable_after;
             if config.initial_lambda.is_some() {
@@ -807,6 +819,10 @@ impl BundleAdjustment {
 /// (bounds the per-wave buffers; the result does not depend on it).
 const JOINT_WAVE_LANDMARKS: usize = 8192;
 
+/// Free poses from which the sparse joint solve factors its pose system in a
+/// fill-reducing order (smaller systems keep the natural order).
+const JOINT_REORDER_MIN_POSES: usize = 64;
+
 /// The reduced camera system of [`BundleAdjustment::optimize_joint_intrinsics`]
 /// before landmark elimination: dense, or (for `LinearSolver::Sparse`) as its
 /// structure — 6×6 pose diagonal blocks, a `6 × k` pose–intrinsics coupling per
@@ -883,6 +899,7 @@ fn solve_joint_sparse(
     lambda: f64,
     shared_focal: bool,
     cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+    order: &mut Option<Vec<usize>>,
 ) -> (Result<DVector<f64>, ()>, Vec<Option<Matrix3<f64>>>) {
     let p_count = pose_diag.len();
     let k_off = p_count * 6;
@@ -911,11 +928,15 @@ fn solve_joint_sparse(
     use rayon::prelude::*;
     struct LandmarkUpdate {
         inv: Option<Matrix3<f64>>,
-        rhs: Vec<(usize, DVector<f64>)>,
+        rhs_pose: Vec<(usize, Vector6<f64>)>,
+        rhs_k: Option<(usize, DVector<f64>)>,
         pose_pose: Vec<(usize, usize, Matrix6<f64>)>,
-        pose_k: Vec<(usize, DMatrix<f64>)>,
+        pose_k: Vec<(usize, OMatrix<f64, U6, Dyn>)>,
         kk: Option<DMatrix<f64>>,
     }
+    // A landmark's pose blocks are 6×3: as fixed-size matrices their Schur
+    // products need no heap allocation (the same small-matrix arithmetic
+    // as the dynamic ones, so the sums are unchanged).
     let eliminate = |lm: &JointLandmarkBlock| -> LandmarkUpdate {
         let mut h_ll = lm.h_ll;
         if lambda > 0.0 {
@@ -926,30 +947,36 @@ fn solve_joint_sparse(
         let inv = h_ll.try_inverse();
         let mut up = LandmarkUpdate {
             inv,
-            rhs: Vec::new(),
+            rhs_pose: Vec::new(),
+            rhs_k: None,
             pose_pose: Vec::new(),
             pose_k: Vec::new(),
             kk: None,
         };
         let Some(inv) = inv else { return up };
-        for (&cs_a, a) in &lm.cross {
-            let ah = a * inv;
-            up.rhs.push((cs_a, &ah * lm.b_l));
-            for (&cs_b, b) in &lm.cross {
-                match (cs_a < k_off, cs_b < k_off) {
-                    (true, true) if cs_a >= cs_b => {
-                        let block = &ah * b.transpose();
-                        up.pose_pose.push((
-                            cs_b / 6,
-                            cs_a / 6,
-                            Matrix6::from_iterator(block.iter().copied()),
-                        ));
-                    }
-                    (true, false) => up.pose_k.push((cs_a / 6, &ah * b.transpose())),
-                    (false, false) => up.kk = Some(&ah * b.transpose()),
-                    _ => {}
-                }
+        let poses: Vec<(usize, Matrix6x3<f64>, Matrix6x3<f64>)> = lm
+            .cross
+            .iter()
+            .filter(|(&cs, _)| cs < k_off)
+            .map(|(&cs, a)| {
+                let a = a.fixed_view::<6, 3>(0, 0).into_owned();
+                (cs, a, a * inv)
+            })
+            .collect();
+        let intrinsics = lm.cross.iter().find(|(&cs, _)| cs >= k_off);
+        for (i, &(cs_a, _, ah)) in poses.iter().enumerate() {
+            up.rhs_pose.push((cs_a, ah * lm.b_l));
+            for &(cs_b, b, _) in &poses[..=i] {
+                up.pose_pose.push((cs_b / 6, cs_a / 6, ah * b.transpose()));
             }
+            if let Some((_, b)) = intrinsics {
+                up.pose_k.push((cs_a / 6, ah * b.transpose()));
+            }
+        }
+        if let Some((&cs_k, a)) = intrinsics {
+            let ah = a * inv;
+            up.rhs_k = Some((cs_k, &ah * lm.b_l));
+            up.kk = Some(&ah * a.transpose());
         }
         up
     };
@@ -957,21 +984,27 @@ fn solve_joint_sparse(
     let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
     for wave in lm_blocks.chunks(JOINT_WAVE_LANDMARKS) {
         let updates: Vec<LandmarkUpdate> = wave.par_iter().map(eliminate).collect();
-        let mut buckets: Vec<Vec<(usize, Matrix6<f64>)>> = vec![Vec::new(); p_count];
-        for up in updates {
+        // The buckets borrow the 6×6 updates instead of copying them.
+        let mut buckets: Vec<Vec<(usize, &Matrix6<f64>)>> = vec![Vec::new(); p_count];
+        for up in &updates {
             h_ll_inv_cache.push(up.inv);
-            for (cs, v) in up.rhs {
+            for (cs, v) in &up.rhs_pose {
+                for r in 0..6 {
+                    b_reduced[cs + r] += v[r];
+                }
+            }
+            if let Some((cs, v)) = &up.rhs_k {
                 for r in 0..v.nrows() {
                     b_reduced[cs + r] += v[r];
                 }
             }
-            for (col, row, m) in up.pose_pose {
-                buckets[col].push((row, m));
+            for (col, row, m) in &up.pose_pose {
+                buckets[*col].push((*row, m));
             }
-            for (p, m) in up.pose_k {
-                pose_k[p] -= m;
+            for (p, m) in &up.pose_k {
+                pose_k[*p] -= m;
             }
-            if let Some(m) = up.kk {
+            if let Some(m) = &up.kk {
                 kk -= m;
             }
         }
@@ -998,8 +1031,69 @@ fn solve_joint_sparse(
                 }
             }
         }
+        // Large systems are factored in a fill-reducing pose order (the
+        // pattern is fixed for the whole BA, so it is computed once); in the
+        // natural order the retrieval links of a large photo set fill the
+        // factor almost completely.
+        if p_count >= JOINT_REORDER_MIN_POSES
+            && order.as_ref().is_none_or(|pos| pos.len() != p_count)
+        {
+            let mut adjacency = vec![Vec::new(); p_count];
+            for (col, rows) in columns.iter().enumerate() {
+                for &row in rows.keys().filter(|&&row| row > col) {
+                    adjacency[col].push(row);
+                    adjacency[row].push(col);
+                }
+            }
+            for neighbours in adjacency.iter_mut() {
+                neighbours.sort_unstable();
+            }
+            let elimination = crate::reordering::fast_fill_reducing_block_order(&adjacency);
+            let mut pos = vec![0; p_count];
+            for (k, &block) in elimination.iter().enumerate() {
+                pos[block] = k;
+            }
+            *order = Some(pos);
+        }
+        let pos = order
+            .as_deref()
+            .filter(|_| p_count >= JOINT_REORDER_MIN_POSES);
+        let (columns, rhs) = match pos {
+            None => (columns, rhs),
+            Some(pos) => {
+                let mut permuted: Vec<BTreeMap<usize, Matrix6<f64>>> =
+                    vec![BTreeMap::new(); p_count];
+                for (col, rows) in columns.into_iter().enumerate() {
+                    for (row, m) in rows {
+                        let (r, c) = (pos[row], pos[col]);
+                        if r >= c {
+                            permuted[c].insert(r, m);
+                        } else {
+                            permuted[r].insert(c, m.transpose());
+                        }
+                    }
+                }
+                let mut moved = DMatrix::<f64>::zeros(k_off, 1 + k_dim);
+                for (p, &q) in pos.iter().enumerate() {
+                    moved.rows_mut(q * 6, 6).copy_from(&rhs.rows(p * 6, 6));
+                }
+                (permuted, moved)
+            }
+        };
         match crate::block_cholesky::solve_spd_blocks6_cached(cache, columns, &rhs) {
-            Ok(x) => (x.column(0).into_owned(), x.columns(1, k_dim).into_owned()),
+            Ok(x) => {
+                let x = match pos {
+                    None => x,
+                    Some(pos) => {
+                        let mut back = DMatrix::<f64>::zeros(k_off, 1 + k_dim);
+                        for (p, &q) in pos.iter().enumerate() {
+                            back.rows_mut(p * 6, 6).copy_from(&x.rows(q * 6, 6));
+                        }
+                        back
+                    }
+                };
+                (x.column(0).into_owned(), x.columns(1, k_dim).into_owned())
+            }
             Err(()) => return (Err(()), h_ll_inv_cache),
         }
     } else {

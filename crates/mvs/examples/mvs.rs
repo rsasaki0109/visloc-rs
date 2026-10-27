@@ -13,7 +13,7 @@
 //!     [--save-depth] [--save-maps | --load-maps] [--min-consistent 1] \
 //!     [--max-reproj 2] [--max-depth-diff 0.01] [--max-normal-angle 10] \
 //!     [--min-mean-consistency 0.15] [--no-average] \
-//!     [--deformable] \
+//!     [--deformable] [--deformable-local-refine] [--deformable-strong-median] \
 //!     [--mesh] [--mesh-voxel <world units>] [--mesh-voxel-pixels 1] [--mesh-levels 2] [--mesh-min-weight 1]
 //! ```
 //!
@@ -24,7 +24,10 @@
 //! depths that source views agree with in a TSDF (voxels of one pixel's
 //! footprint by default), extracted with surface nets. `--deformable` adds
 //! APD-MVS's deformable patches for weak-texture pixels at the finer
-//! scales (experimental: below the defaults on ETH3D, see docs/mvs.md).
+//! scales (experimental: below the defaults on ETH3D, see docs/mvs.md);
+//! `--deformable-local-refine` and `--deformable-strong-median` add APD's
+//! local refinement (CPU only) and strong-only median filter to those
+//! passes.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -36,6 +39,34 @@ use visloc_mvs::{
     PlanarPrior, PlanarPriorOptions, TsdfMesher, ViewSelection, Workspace, WorkspaceOptions,
 };
 
+const USAGE: &str = "\
+usage: visloc_mvs --sparse <dir with cameras.txt/images.txt/points3D.txt> \
+--images <image dir> --out <dir> [options]
+
+Dense multi-view stereo on a COLMAP sparse model with undistorted (pinhole)
+images; writes <out>/fused.ply (and mesh.ply with --mesh).
+
+options:
+  --max-image-size 3200  --sources 10  --iterations 3  --scales 3  --gpu
+  --geom-passes 2  --geom-iterations 3  --no-planar-prior
+  --view-selection confidence|sampled  --init-top-k 3
+  --restorer infinity|start|off  --detail-threshold 0.1
+  --save-depth  --save-maps | --load-maps
+  --min-consistent 1  --max-reproj 2  --max-depth-diff 0.01
+  --max-normal-angle 10  --min-mean-consistency 0.15  --no-average
+  --deformable  --deformable-local-refine  --deformable-strong-median
+  --mesh  --mesh-voxel <world units>  --mesh-voxel-pixels 1  --mesh-levels 2
+  --mesh-min-weight 1  --mesh-trunc <voxels>  --mesh-min-component <faces>
+  --mesh-no-free-space  --mesh-full-cells
+
+See docs/mvs.md.";
+
+/// Print `message` and the usage, then exit with status 2.
+fn usage_error(message: &str) -> ! {
+    eprintln!("{message}\n\n{USAGE}");
+    std::process::exit(2)
+}
+
 fn main() {
     let mut sparse = None;
     let mut images = None;
@@ -45,6 +76,8 @@ fn main() {
     let fusion_options = FusionOptions::default();
     let mut mesh_options: Option<MeshOptions> = None;
     let mut deformable = false;
+    let mut local_refine = false;
+    let mut strong_median = false;
     let mut geom_passes = 2usize;
     let mut geom_iterations = None;
     let mut scales = 3usize;
@@ -59,8 +92,15 @@ fn main() {
     let mut fusion_options = fusion_options;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        let mut value = || args.next().unwrap_or_else(|| panic!("{arg} needs a value"));
+        let mut value = || {
+            args.next()
+                .unwrap_or_else(|| usage_error(&format!("{arg} needs a value")))
+        };
         match arg.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return;
+            }
             "--sparse" => sparse = Some(PathBuf::from(value())),
             "--images" => images = Some(PathBuf::from(value())),
             "--out" => out = Some(PathBuf::from(value())),
@@ -95,6 +135,8 @@ fn main() {
             }
             "--no-average" => fusion_options.average = false,
             "--deformable" => deformable = true,
+            "--deformable-local-refine" => local_refine = true,
+            "--deformable-strong-median" => strong_median = true,
             "--mesh" => {
                 mesh_options.get_or_insert_with(MeshOptions::default);
             }
@@ -136,13 +178,21 @@ fn main() {
                     .get_or_insert_with(MeshOptions::default)
                     .min_weight = value().parse().unwrap()
             }
-            other => panic!("unknown argument {other}"),
+            other => usage_error(&format!("unknown argument {other}")),
         }
     }
-    let sparse = sparse.expect("--sparse is required");
-    let images = images.expect("--images is required");
-    let out = out.expect("--out is required");
+    let sparse = sparse.unwrap_or_else(|| usage_error("--sparse is required"));
+    let images = images.unwrap_or_else(|| usage_error("--images is required"));
+    let out = out.unwrap_or_else(|| usage_error("--out is required"));
     let planar_prior = planar_prior.unwrap_or(true);
+    assert!(
+        deformable || !(local_refine || strong_median),
+        "--deformable-local-refine and --deformable-strong-median need --deformable"
+    );
+    assert!(
+        !(use_gpu && local_refine),
+        "--deformable-local-refine runs on the CPU only"
+    );
     let restorer = match restorer.as_str() {
         "infinity" => DetailRestorer::Infinity(detail_threshold),
         "start" => DetailRestorer::Start(detail_threshold),
@@ -228,7 +278,11 @@ fn main() {
             .collect()
     } else if scales > 1 {
         let options = MultiScaleOptions {
-            deformable: deformable.then(Deformable::default),
+            deformable: deformable.then(|| Deformable {
+                local_refine,
+                strong_median,
+                ..Deformable::default()
+            }),
             geom_iterations: geom_iterations.unwrap_or(pm_options.iterations),
             patch_match: pm_options,
             scales,

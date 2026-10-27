@@ -1,0 +1,179 @@
+# The LaMAria submission (scripts/run_lamaria_test_submission.py --ba-chain), one job per sequence.
+#
+# Each job extracts its sequence from the ETH server over HTTP range requests (up to 29 GB of images,
+# no zip stored), runs the VIO and the BA chain and uploads `slam/<sequence>.txt`; the last job zips
+# them into the submission. Run it by hand (Actions > LaMAria submission > Run workflow): a training
+# sequence to check a run against the evaluator, or the test split (sequences left empty: all 63).
+# Uploading the zip to https://lamaria.ethz.ch stays by hand. On sequence_1_20 a job takes 38 min
+# (extraction, VIO and the chain) and scores 86.21, as on a workstation (86.20).
+name: LaMAria submission
+
+on:
+  workflow_dispatch:
+    inputs:
+      split:
+        description: Dataset split
+        type: choice
+        options: [training, test]
+        default: training
+      sequences:
+        description: Sequence names, space-separated (empty with the test split = all 63; e.g. sequence_1_20 for a training check)
+        type: string
+        default: ""
+      max_parallel:
+        description: Sequences at a time (spares the ETH server)
+        type: number
+        default: 8
+      driver_args:
+        description: Extra arguments for the driver (e.g. --platform-tracks 5)
+        type: string
+        default: ""
+
+env:
+  SPLIT: ${{ inputs.split }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      sequences: ${{ steps.plan.outputs.sequences }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - id: plan
+        name: Sequences
+        env:
+          SEQUENCES: ${{ inputs.sequences }}
+        run: |
+          python -m pip install --quiet --disable-pip-version-check numpy==2.5.3
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os, re, sys
+          sys.path.insert(0, "scripts")
+          from run_lamaria_test_submission import TRACK_COUNTS, track_sequences
+          seqs = os.environ["SEQUENCES"].split()
+          if not seqs and os.environ["SPLIT"] == "test":
+              seqs = track_sequences(TRACK_COUNTS)
+          if not seqs or any(not re.fullmatch(r"sequence_[1-5]_\d+", s) for s in seqs):
+              sys.exit(f"bad sequences: {seqs}")
+          print("sequences=" + json.dumps(seqs))
+          EOF
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: lamaria-release-rt
+
+      - name: Build the VIO
+        run: cargo build --locked --profile release-rt --example basalt_euroc_vio_demo
+
+      - name: Upload the VIO
+        uses: actions/upload-artifact@v7
+        with:
+          name: basalt-euroc-vio-demo
+          path: target/release-rt/examples/basalt_euroc_vio_demo
+          if-no-files-found: error
+          retention-days: 7
+
+  sequence:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '8') }}  # a number, also when dispatched as text
+      matrix:
+        sequence: ${{ fromJSON(needs.plan.outputs.sequences) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Make room
+        # the preinstalled SDKs take about 30 GB; the work goes where most space is left
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
+          df -h / /mnt
+          if [ "$(df --output=avail /mnt | tail -1)" -gt "$(df --output=avail / | tail -1)" ]; then
+            sudo mkdir -p /mnt/lamaria && sudo chown "$USER" /mnt/lamaria && echo "WORK=/mnt/lamaria" >> "$GITHUB_ENV"
+          else
+            echo "WORK=$RUNNER_TEMP/lamaria" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the BA's dependencies
+        run: |
+          python -m pip install --quiet --disable-pip-version-check \
+            numpy==2.5.3 scipy==1.18.1 opencv-python-headless==5.0.0.93 gtsam==4.3.0 numba==0.68.0
+
+      - name: Download the VIO
+        uses: actions/download-artifact@v8
+        with:
+          name: basalt-euroc-vio-demo
+          path: bin
+
+      - name: Run ${{ matrix.sequence }}
+        env:
+          DRIVER_ARGS: ${{ inputs.driver_args }}
+        run: |
+          chmod +x bin/basalt_euroc_vio_demo
+          python scripts/run_lamaria_test_submission.py --split "$SPLIT" \
+            --sequences ${{ matrix.sequence }} --vio-exe bin/basalt_euroc_vio_demo --ba-chain --stream \
+            --threads 4 --ba-jobs 4 --ba-threads 2 \
+            --work-dir "$WORK/work" --slam-dir out/slam --log-dir out/logs $DRIVER_ARGS
+          test -s out/slam/${{ matrix.sequence }}.txt
+
+      - name: Upload the estimate
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: estimate-${{ matrix.sequence }}
+          path: |
+            out/slam/*.txt
+            out/logs
+          if-no-files-found: warn
+          retention-days: 14
+
+  package:
+    needs: sequence
+    if: always() && needs.sequence.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the estimates
+        uses: actions/download-artifact@v8
+        with:
+          pattern: estimate-*
+          path: estimates
+
+      - name: Zip slam/<sequence>.txt
+        run: |
+          mkdir slam
+          find estimates -path '*/slam/*.txt' -exec cp {} slam/ \;
+          ls slam | wc -l
+          zip -q -r submission.zip slam
+
+      - name: Upload the submission
+        uses: actions/upload-artifact@v7
+        with:
+          name: submission
+          path: submission.zip
+          if-no-files-found: error
+          retention-days: 30

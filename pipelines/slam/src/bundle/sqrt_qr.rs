@@ -962,12 +962,22 @@ pub(crate) fn rig_residual_jacobians(
     pose: &Pose,
     point_world: &Point3<f64>,
 ) -> Option<(Vector2<f64>, Matrix2x6<f64>, Matrix2x3<f64>)> {
+    if matches!(observation.camera.model, CameraModel::Unknown(_)) {
+        return None;
+    }
     let intrinsics = observation.camera.intrinsics()?;
     let point_rig = pose.transform_world_point(point_world);
     let point_sensor = observation.sensor_from_rig.transform_point(&point_rig);
-    let predicted = project_pinhole(&intrinsics, &point_sensor)?;
+    // The sensor's own lens, as for monocular observations; a distortion-free
+    // pinhole keeps the historical closed form bit for bit.
+    let (predicted, projection) = match MonoProjection::for_camera(&observation.camera) {
+        MonoProjection::Pinhole => (
+            project_pinhole(&intrinsics, &point_sensor)?,
+            pinhole_projection_jacobian(&intrinsics, &point_sensor)?,
+        ),
+        lens => mono_project_with_jacobian(lens, &intrinsics, &point_sensor)?,
+    };
     let residual = predicted - observation.xy;
-    let projection = pinhole_projection_jacobian(&intrinsics, &point_sensor)?;
     let rotation_world_to_rig = pose
         .world_to_camera
         .rotation

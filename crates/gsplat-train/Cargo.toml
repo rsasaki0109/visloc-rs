@@ -21,7 +21,7 @@ default = []
 # `visloc-gsplat-render/gpu`: needs Rust >= 1.85, so it is opt-in.
 gpu = ["visloc-gsplat-render/gpu", "visloc-gsplat-core/mesh", "dep:rayon", "dep:wgpu", "dep:bytemuck", "dep:visloc-sift-gpu", "visloc-sift-gpu?/gpu", "dep:visloc-ba-gpu", "visloc-ba-gpu?/gpu"]
 # Raw EuRoC -> dataset via visloc-rs SIFT + incremental SfM (no COLMAP/Python).
-euroc = ["dep:rayon", "dep:visloc-core", "dep:visloc-io", "dep:visloc-slam", "dep:visloc-vision"]
+euroc = ["dep:rayon", "dep:visloc-slam", "dep:visloc-vision"]
 
 [dependencies]
 bytemuck = { workspace = true, optional = true }
@@ -29,14 +29,14 @@ image = { version = "=0.25.5", default-features = false, features = ["png", "jpe
 nalgebra = { workspace = true }
 rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
-visloc-gsplat-core = { path = "../gsplat-core", version = "0.2.1", features = ["colmap-io"] }
-visloc-core = { path = "../core", version = "0.2.1", optional = true }
-visloc-gsplat-render = { path = "../gsplat-render", version = "0.2.1" }
-visloc-io = { path = "../io", version = "0.2.1", optional = true }
-visloc-ba-gpu = { path = "../ba-gpu", version = "0.2.1", optional = true }
-visloc-sift-gpu = { path = "../sift-gpu", version = "0.2.1", optional = true }
-visloc-slam = { path = "../../pipelines/slam", version = "0.2.1", optional = true }
-visloc-vision = { path = "../vision", version = "0.2.1", optional = true }
+visloc-gsplat-core = { path = "../gsplat-core", version = "0.3.1", features = ["colmap-io"] }
+visloc-core = { path = "../core", version = "0.3.1" }
+visloc-gsplat-render = { path = "../gsplat-render", version = "0.3.1" }
+visloc-io = { path = "../io", version = "0.3.1" }
+visloc-ba-gpu = { path = "../ba-gpu", version = "0.3.1", optional = true }
+visloc-sift-gpu = { path = "../sift-gpu", version = "0.3.1", optional = true }
+visloc-slam = { path = "../../pipelines/slam", version = "0.3.1", optional = true }
+visloc-vision = { path = "../vision", version = "0.3.1", optional = true }
 wgpu = { workspace = true, optional = true }
 
 [[example]]

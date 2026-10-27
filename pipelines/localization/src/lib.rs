@@ -10,7 +10,9 @@
 //! diagnostics-rich localization results. Map providers, descriptor providers,
 //! candidate selectors, matchers, and pose estimators are all replaceable.
 
+mod binary_index;
 mod correspondence;
+mod map_anchor;
 
 use std::collections::HashSet;
 
@@ -25,11 +27,13 @@ use visloc_vision::matching::{BruteForceMatcher, Matcher};
 use visloc_vision::pnp::Correspondence2D3D;
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 
+pub use binary_index::{BinaryLandmarkIndex, BinaryMatchGates, PackedDescriptors};
 pub use correspondence::{
     AllLandmarksSelector, CandidateSelector, CorrespondenceBuildError, CorrespondenceBuilder,
     CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector,
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
+pub use map_anchor::{FixOutcome, MapAnchor, MapAnchorConfig};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {
@@ -990,7 +994,7 @@ where
             Ok(correspondence_set) => correspondence_set,
             Err(error) => return result_from_correspondence_error(error),
         };
-        self.estimate_and_gate(query, correspondence_set, Some(pose_prior))
+        self.estimate_and_gate(&query.camera, correspondence_set, Some(pose_prior))
     }
 
     /// Stage-3 local-map refinement: given an already-successful `estimated`
@@ -1157,7 +1161,7 @@ where
         ) {
             return None;
         }
-        Some(self.estimate_and_gate(&query, correspondence_set, Some(estimated_pose)))
+        Some(self.estimate_and_gate(&query.camera, correspondence_set, Some(estimated_pose)))
     }
 
     fn run_localization<S2>(
@@ -1182,7 +1186,18 @@ where
                 return result_from_correspondence_error(error);
             }
         };
-        self.estimate_and_gate(query, correspondence_set, pose_prior)
+        self.estimate_and_gate(&query.camera, correspondence_set, pose_prior)
+    }
+
+    /// Pose estimation and quality gate over correspondences built outside
+    /// the pipeline, e.g. by [`BinaryLandmarkIndex`]: the same tail as every
+    /// `localize_*` method, so results are gated identically.
+    pub fn localize_correspondences(
+        &self,
+        camera: &Camera,
+        correspondence_set: CorrespondenceSet,
+    ) -> LocalizationResult {
+        self.estimate_and_gate(camera, correspondence_set, None)
     }
 
     /// Shared tail of both `run_localization` (appearance-global) and
@@ -1193,7 +1208,7 @@ where
     /// correspondence-building strategies.
     fn estimate_and_gate(
         &self,
-        query: &QueryImage,
+        camera: &Camera,
         correspondence_set: CorrespondenceSet,
         pose_prior: Option<&Pose>,
     ) -> LocalizationResult {
@@ -1206,19 +1221,19 @@ where
         let pose_report = if pose_prior.is_some() {
             self.pose_estimator.estimate_with_pose_prior_and_weights(
                 &correspondence_set.correspondences,
-                &query.camera,
+                camera,
                 pose_prior,
                 confidence_weights.as_deref(),
             )
         } else if let Some(weights) = confidence_weights.as_deref() {
             self.pose_estimator.estimate_with_weights(
                 &correspondence_set.correspondences,
-                &query.camera,
+                camera,
                 weights,
             )
         } else {
             self.pose_estimator
-                .estimate(&correspondence_set.correspondences, &query.camera)
+                .estimate(&correspondence_set.correspondences, camera)
         };
 
         let Some(report) = pose_report else {
@@ -1232,7 +1247,7 @@ where
             );
             if let Some(diagnostics) = self
                 .pose_estimator
-                .failure_diagnostics(&correspondence_set.correspondences, &query.camera)
+                .failure_diagnostics(&correspondence_set.correspondences, camera)
             {
                 return result.with_pose_failure_diagnostics(diagnostics);
             }

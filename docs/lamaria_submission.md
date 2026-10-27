@@ -24,6 +24,9 @@ download ASL zip + pinhole calibration
 It is resumable: a sequence whose estimate already exists in `--slam-dir` is
 skipped, so an interrupted run can be restarted unchanged.
 
+The test-set scores of the submissions so far, and what changed between them,
+are in [lamaria_test_results.md](lamaria_test_results.md).
+
 ## Track layout
 
 | track | leaderboard track | sequences | count |
@@ -86,6 +89,59 @@ whose KLT round-trip threshold is 0.5 px instead of 0.2 px. It is worth +4.5
 on sequence_4_10 but −11.0 on the Medium sequence
 ([`lamaria_klt_threshold.md`](lamaria_klt_threshold.md)). `--low-light-config
 none` uses `--config` there too.
+
+Not every Low light sequence is dark. The two low-light training sequences
+average a grey level of 26-29 on cam0 (60 images spread over the recording),
+the eight day training sequences 74-88, and test sequence_4_1, 4_4, 4_8 and
+4_9, shot at dusk or under an overcast sky, 74-75. A Low light sequence that
+averages 70 or more (`DAYLIT_BRIGHTNESS`) runs the day options: `--config`
+for the VIO, and the BA chain's day steps (plain SIFT, the warm-up, the batch
+pass). By day both are measured to help: the 0.5 px KLT threshold costs the
+Medium sequence 11 points, and the pass adds 4-9 points on four of the six
+walking day sequences ([lamaria_batch_ba.md](lamaria_batch_ba.md#the-first-minutes-online)).
+The other test sequences of the track (grey level 27-60) keep the low-light
+options.
+
+Moving-platform sequences (track 5) run the VIO with the platform filter
+(`config.vio_platform_filter`, [`platform.rs`](../pipelines/basalt/src/platform.rs);
+`--platform-tracks` with no values turns it off). On a tram the cabin's
+features say the head stands still and outweigh the street seen through the
+windows, so the VIO shortens or stops the ride. When the accelerometer shows
+no steps and enough tracks move with one translation beyond the gyro's
+rotation, only those tracks reach the estimator. With the BA chain (GitHub
+Actions, same commit, filter off / on): sequence_5_11 60.29 / **66.38**,
+sequence_5_12 **7.41** / 5.98. On sequence_5_12 the chord across the tram
+(CPs at 18 s and 208 s) comes out at 0.59 / **0.95** of the survey; its score
+stays set by the last four minutes, whose chords are 21-50 % too long either
+way.
+
+On the test set's trams seen through a door's windows the street is often in
+cam1's view, and the default VIO tracks cam0's features only: on
+sequence_5_9 the filter kept the cabin out for 499 of the ride's ~1,900
+frames and the submitted trajectory has no ride. With both cameras' features
+(`MULTICAM`, `--platform-multicam`, on by default on the platform tracks) it
+keeps it out for 1,283 frames on a window around the ride, and after the BA
+chain the 5.2-7.0 min ride covers 450 m (chord 332 m) instead of 142 m (91
+m). sequence_5_5 and 5_6 do not change: through their door windows too few
+street tracks last even with both cameras (sequence_5_5: 29 m over its
+90 s ride), and holding the ride until the steps come back adds motion
+after it that is not there. On the training sequences (GitHub Actions,
+before / after): sequence_5_11 66.77 / 65.94, sequence_5_12 6.76 / 6.27,
+within a rerun's spread. On the test set it takes the track from 26.9 to 30.6
+(submission 4, [lamaria_test_results.md](lamaria_test_results.md#what-changed-between-the-submissions)),
+though it costs sequence_5_4 its first ride.
+
+By day the BA chain matches the keyframes once more after its batch pass,
+guided by the pass's trajectory instead of the VIO, and solves again
+(`--ba-rematch`, on by default; `--no-ba-rematch` skips it). The matching
+band admits the matches that agree with the guide's drift, and the pass's
+heading drifts far less than the VIO's. On the eight day training sequences
+(GitHub Actions, one run, before / after): mean 64.50 / 64.76, no sequence
+down by more than 0.05; on training R_12_10cp, a fast walk along open streets
+like the Short test sequences that score lowest, 61.09 / 64.30
+([lamaria_batch_ba.md](lamaria_batch_ba.md#matching-again-after-the-pass)). It
+adds 10-20 minutes per sequence on a runner. On the test set it moves the day
+trajectories by 0.3 m or less (submission 4).
 
 IMU rectification is on by default
 ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md); +4.35 Score on

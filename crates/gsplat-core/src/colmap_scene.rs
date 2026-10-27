@@ -50,18 +50,26 @@ pub struct ColmapScene {
 /// full point set and is better done by the trainer).
 pub const DEFAULT_SEED_LOG_SCALE: f32 = -3.0;
 
+/// Read a COLMAP model directory: text if `cameras.txt` is present, else
+/// binary.
+pub fn read_visual_map(
+    model_dir: impl AsRef<std::path::Path>,
+) -> Result<visloc_core::types::VisualMap, ColmapError> {
+    let dir = model_dir.as_ref();
+    if dir.join("cameras.txt").exists() {
+        read_colmap_text_model(dir)
+    } else {
+        read_colmap_binary_model(dir)
+    }
+}
+
 /// Load a COLMAP model from a directory (text if present, else binary) into a
 /// 3DGS scene seed.
 pub fn load_colmap_scene(
     model_dir: impl AsRef<std::path::Path>,
     seed_log_scale: f32,
 ) -> Result<ColmapScene, ColmapSceneError> {
-    let dir = model_dir.as_ref();
-    let map = if dir.join("cameras.txt").exists() {
-        read_colmap_text_model(dir)?
-    } else {
-        read_colmap_binary_model(dir)?
-    };
+    let map = read_visual_map(model_dir)?;
     scene_from_visual_map(&map, seed_log_scale)
 }
 
@@ -70,32 +78,9 @@ pub fn scene_from_visual_map(
     map: &visloc_core::types::VisualMap,
     seed_log_scale: f32,
 ) -> Result<ColmapScene, ColmapSceneError> {
-    if map.landmarks.is_empty() {
-        return Err(ColmapSceneError::NoLandmarks);
-    }
+    let scene = seed_scene_from_landmarks(map, seed_log_scale)?;
     if map.keyframes.is_empty() {
         return Err(ColmapSceneError::NoImages);
-    }
-
-    // Seed gaussians from the sparse landmarks (degree 0, neutral grey).
-    let mut landmark_ids: Vec<_> = map.landmarks.keys().copied().collect();
-    landmark_ids.sort_unstable();
-    let mut gaussians = Vec::with_capacity(landmark_ids.len());
-    for id in landmark_ids {
-        let lm = &map.landmarks[&id];
-        gaussians.push(Gaussian {
-            mean: Vector3::new(
-                lm.position.x as f32,
-                lm.position.y as f32,
-                lm.position.z as f32,
-            ),
-            scale_log: Vector3::new(seed_log_scale, seed_log_scale, seed_log_scale),
-            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-            opacity_logit: 0.0,
-            sh_dc: [0.0; 3],
-            sh_rest: Vec::new(),
-            sh_degree: 0,
-        });
     }
 
     // Camera views from the registered keyframes.
@@ -123,11 +108,45 @@ pub fn scene_from_visual_map(
     }
 
     Ok(ColmapScene {
-        scene: Scene::new(gaussians, 0),
+        scene,
         views,
         image_names,
         image_ids,
     })
+}
+
+/// The seed [`Scene`] of a map: one isotropic degree-0 gaussian per landmark
+/// (neutral grey), in landmark-id order.
+pub fn seed_scene_from_landmarks(
+    map: &visloc_core::types::VisualMap,
+    seed_log_scale: f32,
+) -> Result<Scene, ColmapSceneError> {
+    if map.landmarks.is_empty() {
+        return Err(ColmapSceneError::NoLandmarks);
+    }
+
+    // Seed gaussians from the sparse landmarks (degree 0, neutral grey).
+    let mut landmark_ids: Vec<_> = map.landmarks.keys().copied().collect();
+    landmark_ids.sort_unstable();
+    let mut gaussians = Vec::with_capacity(landmark_ids.len());
+    for id in landmark_ids {
+        let lm = &map.landmarks[&id];
+        gaussians.push(Gaussian {
+            mean: Vector3::new(
+                lm.position.x as f32,
+                lm.position.y as f32,
+                lm.position.z as f32,
+            ),
+            scale_log: Vector3::new(seed_log_scale, seed_log_scale, seed_log_scale),
+            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            opacity_logit: 0.0,
+            sh_dc: [0.0; 3],
+            sh_rest: Vec::new(),
+            sh_degree: 0,
+        });
+    }
+
+    Ok(Scene::new(gaussians, 0))
 }
 
 /// Build a rendering [`CameraView`] from a visloc camera and pose.

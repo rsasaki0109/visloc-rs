@@ -169,3 +169,143 @@ fn arbitrary_sensor_factors_refine_one_shared_body_pose() {
     assert!(result.final_cost < initial_cost * 1.0e-6);
     assert!(final_center_error < initial_center_error * 1.0e-3);
 }
+
+fn distorted_rig_sensors() -> [(Camera, SE3); 2] {
+    [
+        (
+            Camera {
+                id: 1,
+                model: CameraModel::OpenCv,
+                width: 848,
+                height: 800,
+                params: vec![285.0, 286.0, 425.5, 398.5, -0.15, 0.05, 0.004, -0.003],
+            },
+            SE3::identity(),
+        ),
+        (
+            Camera::opencv_fisheye(
+                2,
+                848,
+                800,
+                284.8,
+                286.1,
+                428.0,
+                397.5,
+                [0.05, -0.02, 0.01, 0.0],
+            ),
+            SE3::new(
+                UnitQuaternion::from_euler_angles(0.0, 0.3, 0.0),
+                Vector3::new(-0.20, 0.0, 0.0),
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn rig_residuals_project_through_the_sensor_lens() {
+    let pose = Pose::from_world_to_camera(
+        UnitQuaternion::from_euler_angles(0.02, -0.03, 0.01),
+        Vector3::new(0.1, -0.05, 0.2),
+    );
+    for (camera, sensor_from_rig) in distorted_rig_sensors() {
+        for point in [
+            Point3::new(0.4, -0.3, 3.0),
+            Point3::new(-1.1, 0.6, 2.5),
+            Point3::new(0.9, 0.8, 4.2),
+        ] {
+            let observation = BaRigObservation {
+                keyframe_id: 0,
+                landmark_id: 0,
+                xy: Point2::new(400.0, 380.0),
+                camera: camera.clone(),
+                sensor_from_rig: sensor_from_rig.clone(),
+            };
+            let project = |p: &Point3<f64>| {
+                camera
+                    .project(&sensor_from_rig.transform_point(&pose.transform_world_point(p)))
+                    .unwrap()
+            };
+            let (residual, _, j_landmark) =
+                rig_residual_jacobians(&observation, &pose, &point).unwrap();
+            assert_eq!(residual, project(&point) - observation.xy);
+            let h = 1.0e-6;
+            for axis in 0..3 {
+                let mut plus = point;
+                let mut minus = point;
+                plus[axis] += h;
+                minus[axis] -= h;
+                let numeric = (project(&plus) - project(&minus)) / (2.0 * h);
+                for row in 0..2 {
+                    let analytic = j_landmark[(row, axis)];
+                    assert!(
+                        (analytic - numeric[row]).abs() < 1.0e-5 * (1.0 + analytic.abs()),
+                        "{:?}: d{row}/d{axis} {analytic} vs {}",
+                        camera.model,
+                        numeric[row]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn distorted_sensor_factors_refine_one_shared_body_pose() {
+    let sensors = distorted_rig_sensors();
+    let truth = [
+        Pose::identity(),
+        Pose::from_world_to_camera(
+            UnitQuaternion::from_euler_angles(0.01, -0.04, 0.02),
+            Vector3::new(-0.35, 0.03, 0.01),
+        ),
+    ];
+    let mut problem = BundleAdjustment::new(sensors[0].0.clone());
+    problem.add_pose(0, truth[0].clone());
+    problem.add_pose(
+        1,
+        Pose::from_world_to_camera(
+            UnitQuaternion::from_euler_angles(0.03, -0.01, -0.01),
+            Vector3::new(-0.27, -0.02, 0.04),
+        ),
+    );
+    problem.fix_pose(0);
+    for landmark in 0..24u64 {
+        let point = Point3::new(
+            (landmark % 6) as f64 * 0.25 - 0.6,
+            (landmark / 6) as f64 * 0.22 - 0.3,
+            4.0 + (landmark % 5) as f64 * 0.15,
+        );
+        problem.add_landmark(
+            landmark,
+            Point3::from(point.coords + Vector3::new(0.02, -0.01, 0.03)),
+        );
+        for (frame, frame_pose) in truth.iter().enumerate() {
+            for (camera, sensor_from_rig) in &sensors {
+                let point_rig = frame_pose.transform_world_point(&point);
+                let pixel = camera
+                    .project(&sensor_from_rig.transform_point(&point_rig))
+                    .unwrap();
+                problem.add_rig_observation(BaRigObservation {
+                    keyframe_id: frame as u64,
+                    landmark_id: landmark,
+                    xy: pixel,
+                    camera: camera.clone(),
+                    sensor_from_rig: sensor_from_rig.clone(),
+                });
+            }
+        }
+    }
+    let initial_cost = problem.cost();
+    let initial_center_error =
+        (problem.poses[&1].camera_center_world() - truth[1].camera_center_world()).norm();
+    let result = problem
+        .optimize(&BaConfig {
+            max_iterations: 30,
+            ..BaConfig::default()
+        })
+        .unwrap();
+    let final_center_error =
+        (problem.poses[&1].camera_center_world() - truth[1].camera_center_world()).norm();
+    assert!(result.final_cost < initial_cost * 1.0e-6);
+    assert!(final_center_error < initial_center_error * 1.0e-3);
+}

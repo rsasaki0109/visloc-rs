@@ -2062,6 +2062,66 @@ fn opengv_optimize_pose(
     }
 }
 
+/// Relative pose `T_left_right` (`p_left = R * p_right + t`) from matched
+/// unit bearings, with the same OpenGV Stewenius 5-point RANSAC and nonlinear
+/// refinement the mapper uses in [`run_opengv_ransac`]. Correspondence `i`
+/// pairs `left[i]` with `right[i]`; `threshold` is OpenGV's `1 - cos` angular
+/// error. Returns the refined rotation, unit translation and refined inlier
+/// indices, or `None` with fewer than eight correspondences or no model.
+/// Used by the visual-only two-view bootstrap (`docs/mono_visual_only_vio.md`).
+pub(crate) fn relative_pose_from_bearings(
+    left: &[Vector3<f64>],
+    right: &[Vector3<f64>],
+    threshold: f64,
+    seed: u32,
+) -> Option<(Matrix3<f64>, Vector3<f64>, Vec<usize>)> {
+    if left.len() != right.len() || left.len() < OPENGV_RANSAC_SAMPLE_SIZE {
+        return None;
+    }
+    let ray = |v: &Vector3<f64>| {
+        let v = v.normalize();
+        [v.x, v.y, v.z, 0.0]
+    };
+    let left_rays = left.iter().map(ray).collect::<Vec<_>>();
+    let right_rays = right.iter().map(ray).collect::<Vec<_>>();
+    let matches = (0..left.len() as u64)
+        .map(|index| DescriptorMatch {
+            left: index,
+            right: index,
+            distance: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut rng = OpenGvMt19937::new(seed);
+    let mut shuffled = (0..matches.len()).collect::<Vec<_>>();
+    let (mut iterations, mut skipped, mut k) = (0_usize, 0_usize, 1.0_f64);
+    let mut best: Option<(RelativePoseModel, Vec<usize>)> = None;
+    while (iterations as f64) < k && skipped < OPENGV_RANSAC_MAX_ITERATIONS * 10 {
+        let sample = opengv_draw_sample(&mut shuffled, OPENGV_RANSAC_SAMPLE_SIZE, &mut rng);
+        let Some(model) = stewenius_model_from_sample(&left_rays, &right_rays, &matches, &sample)
+        else {
+            skipped += 1;
+            continue;
+        };
+        let inliers = relative_pose_inliers(&left_rays, &right_rays, &matches, model, threshold);
+        if best.as_ref().is_none_or(|(_, b)| inliers.len() > b.len()) {
+            let weight = inliers.len() as f64 / matches.len() as f64;
+            let no_outliers = (1.0 - weight.powi(OPENGV_RANSAC_SAMPLE_SIZE as i32))
+                .clamp(f64::EPSILON, 1.0 - f64::EPSILON);
+            k = (1.0 - OPENGV_RANSAC_PROBABILITY).ln() / no_outliers.ln();
+            best = Some((model, inliers));
+        }
+        iterations += 1;
+        if iterations > OPENGV_RANSAC_MAX_ITERATIONS {
+            break;
+        }
+    }
+    let (model, inliers) = best?;
+    let refined = opengv_optimize_pose(model, &left_rays, &right_rays, &matches, &inliers);
+    let inliers = relative_pose_inliers(&left_rays, &right_rays, &matches, refined, threshold);
+    let norm = refined.translation.norm();
+    (norm > f64::EPSILON).then(|| (refined.rotation, refined.translation / norm, inliers))
+}
+
 fn run_opengv_ransac(
     left: &MapperImageFeatures,
     right: &MapperImageFeatures,
@@ -2546,6 +2606,37 @@ mod tests {
         // GCC 11.4's std::uniform_int_distribution<int>(0, INT_MAX),
         // including the 624-value mt19937 twist boundary.
         assert_eq!(hash, 4_040_478_949_708_829_921);
+    }
+
+    #[test]
+    fn relative_pose_from_bearings_recovers_left_from_right_pose() {
+        // KAT: exact bearings of points seen from two cameras give back
+        // T_left_right (p_left = R p_right + t) with unit t, and every
+        // correspondence is an inlier. Pins the direction convention used by
+        // the visual-only bootstrap.
+        let rotation = nalgebra::Rotation3::from_euler_angles(0.02, -0.05, 0.03).into_inner();
+        let translation = Vector3::new(0.3, -0.1, 0.05);
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for i in 0..60 {
+            let f = i as f64;
+            let p_left = Vector3::new(
+                (f * 0.37).sin() * 1.5,
+                (f * 0.71).cos() * 1.0,
+                3.0 + (f * 0.53).sin() * 1.5,
+            );
+            let p_right = rotation.transpose() * (p_left - translation);
+            left.push(p_left.normalize());
+            right.push(p_right.normalize());
+        }
+        let (r, t, inliers) =
+            super::relative_pose_from_bearings(&left, &right, 5e-5, 42).expect("model");
+        assert_eq!(inliers.len(), 60);
+        assert!((r - rotation).abs().max() < 1e-6, "rotation {r}");
+        assert!(
+            (t - translation.normalize()).norm() < 1e-6,
+            "translation {t}"
+        );
     }
 
     /// Regression test for a panic ("Matrix index out of bounds" at

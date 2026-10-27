@@ -44,7 +44,23 @@ pub struct Deformable {
     /// A weak pixel's cost: this times its window's plus the rest times the
     /// anchors' mean (APD: 0.25).
     pub center_weight: f32,
+    /// After each deformable pass, moves every pixel's depth to the lowest
+    /// cost within `LOCAL_REFINE_STEPS` disparity steps along its ray
+    /// (normal fixed) if that beats its own by `LOCAL_REFINE_GAIN`
+    /// (APD's `LocalRefine`). CPU only.
+    pub local_refine: bool,
+    /// In a deformable pass, the median filter skips weak pixels and takes
+    /// the median of a pixel and its strong neighbours only, over ACMM's
+    /// 20-pixel pattern (APD's `CheckerboardFilterStrong`), instead of the
+    /// 5×5 median of every depth.
+    pub strong_median: bool,
 }
+
+/// Disparity steps on either side that `Deformable::local_refine` tries.
+pub(crate) const LOCAL_REFINE_STEPS: i32 = 5;
+
+/// Cost gain `Deformable::local_refine` needs to move a depth.
+pub(crate) const LOCAL_REFINE_GAIN: f32 = 0.1;
 
 impl Default for Deformable {
     fn default() -> Self {
@@ -59,6 +75,8 @@ impl Default for Deformable {
             ransac_threshold: 0.0075,
             min_inliers: 6,
             center_weight: 0.25,
+            local_refine: false,
+            strong_median: false,
         }
     }
 }

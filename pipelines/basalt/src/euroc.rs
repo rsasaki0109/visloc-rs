@@ -475,7 +475,42 @@ fn parse_f64(path: &Path, line: usize, value: &str) -> Result<f64, EurocReaderEr
     })
 }
 
+/// For a dataset written while the VIO reads it: with `BASALT_EUROC_WAIT_S` set, a frame whose PNG is not
+/// there yet is waited for, up to that many seconds, instead of failing. The writer must create each PNG
+/// atomically (write elsewhere, then rename).
+fn wait_for_image(path: &Path) {
+    static WAIT_S: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    let wait = *WAIT_S.get_or_init(|| {
+        std::env::var("BASALT_EUROC_WAIT_S")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    });
+    if let Some(limit) = wait {
+        let start = std::time::Instant::now();
+        while !path.exists() && start.elapsed().as_secs_f64() < limit {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// Reads one EuRoC camera stream's `data.csv` (for example `mav0/cam0`)
+/// without the IMU stream or the Basalt JSON inputs [`EurocSensorDataset`]
+/// needs, e.g. to localize the images of another sequence against a saved map.
+pub fn read_camera_manifest(
+    camera_dir: impl AsRef<Path>,
+) -> Result<Vec<EurocImageEntry>, EurocReaderError> {
+    let camera_dir = camera_dir.as_ref();
+    read_image_manifest(&camera_dir.join("data.csv"), camera_dir)
+}
+
+/// Decodes one EuRoC PNG into the 16-bit image the Basalt frontends consume,
+/// with the same conversion as [`EurocSensorDataset::frame`].
+pub fn read_camera_image(path: impl AsRef<Path>) -> Result<RawU16Image, EurocReaderError> {
+    read_raw_u16_png(path.as_ref())
+}
+
 fn read_raw_u16_png(path: &Path) -> Result<RawU16Image, EurocReaderError> {
+    wait_for_image(path);
     let dynamic = image::open(path).map_err(|source| EurocReaderError::Image {
         path: path.to_path_buf(),
         source,
@@ -487,6 +522,7 @@ fn read_raw_u16_png_timed(
     path: &Path,
     timing: &mut TimingBreakdown,
 ) -> Result<RawU16Image, EurocReaderError> {
+    wait_for_image(path);
     let dynamic = timing.measure(TimingBucket::DatasetPngOpenDecode, || {
         image::open(path).map_err(|source| EurocReaderError::Image {
             path: path.to_path_buf(),
