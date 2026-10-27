@@ -6927,14 +6927,20 @@ impl LmProblem for WindowProblem {
         }
         let layout = self.layout();
         let mut factors = self.prior_factors(state);
-        for landmark_index in 0..self.landmarks.len() {
-            if let Some(factor) = self.visual_factor(state, landmark_index) {
+        // As in `linearize_view`: each landmark's factor is a pure function
+        // of the shared read-only state and its own index, so building them
+        // in parallel and appending the results in ascending landmark order
+        // yields the identical factor list (and every downstream rounding
+        // tree) as the sequential loop.
+        let visual_factors: Vec<Option<WhitenedFactorRowStack>> = (0..self.landmarks.len())
+            .into_par_iter()
+            .map(|landmark_index| {
                 // The clean UpstreamF32 reducer may retain one compact Q1/R
                 // payload per visual block.  Carry identity explicitly so
                 // that future trial recovery is mapped by landmark rather
                 // than inferred from factor order; callers without this
                 // optional metadata remain on the legacy path.
-                factors.push(
+                self.visual_factor(state, landmark_index).map(|factor| {
                     factor
                         .with_landmark_metadata(
                             landmark_index,
@@ -6946,10 +6952,11 @@ impl LmProblem for WindowProblem {
                                 .iter()
                                 .map(|observation| (observation.state_index, observation.camera_id))
                                 .collect(),
-                        ),
-                );
-            }
-        }
+                        )
+                })
+            })
+            .collect();
+        factors.extend(visual_factors.into_iter().flatten());
         for link in self.imu_links.iter().cloned() {
             if let Some(factor) = self.imu_factor(state, link.clone()) {
                 factors.push(factor);

@@ -369,6 +369,113 @@ impl BasaltVioEstimatorAdapter {
         consumer_timing.merge_from(self.estimator.timing_breakdown());
         Ok((producer_timing, consumer_timing))
     }
+
+    /// Splits the adapter into its frontend and estimator halves so a live
+    /// caller (a ROS node, say) can run them on two threads of its own,
+    /// overlapping frontend tracking of frame `N+1` with the estimator step
+    /// of frame `N`, as [`Self::process_euroc_stream_pipelined`] does for a
+    /// recorded EuRoC sequence.
+    ///
+    /// Both stages run the lean path of
+    /// [`Self::process_without_marg_data_no_trace`]. Feeding every frame to
+    /// [`BasaltVioFrontendStage::process`] and its packets, in order, to
+    /// [`BasaltVioEstimatorStage::process`] gives exactly that path's
+    /// results, except that the frontend's optional IMU rotation seed
+    /// (`config.optical_flow_imu_seed_rotation`) uses whichever gyro bias
+    /// the caller passes rather than the estimator's estimate from the
+    /// previous frame.
+    pub fn into_stages(self) -> (BasaltVioFrontendStage, BasaltVioEstimatorStage) {
+        (
+            BasaltVioFrontendStage {
+                frontend: self.frontend,
+                platform: self.platform,
+                timing: self.timing,
+            },
+            BasaltVioEstimatorStage {
+                estimator: self.estimator,
+            },
+        )
+    }
+}
+
+/// Frontend tracking output of one frame, bound for
+/// [`BasaltVioEstimatorStage::process`].
+#[derive(Debug)]
+pub struct BasaltFrontendPacket {
+    pub tracks: TrackFrameOutput,
+    imu: Vec<ImuSample>,
+    initialization_imu: Option<ImuSample>,
+}
+
+/// The frontend half of [`BasaltVioEstimatorAdapter::into_stages`].
+#[derive(Debug)]
+pub struct BasaltVioFrontendStage {
+    frontend: DirectKltStream,
+    platform: Option<crate::platform::PlatformFilter>,
+    timing: TimingBreakdown,
+}
+
+impl BasaltVioFrontendStage {
+    /// Tracks one frame. `gyro_bias` (IMU frame, rad/s) bias-corrects the
+    /// optional IMU rotation seed; pass the latest estimate the estimator
+    /// stage has produced, or zero.
+    pub fn process(
+        &mut self,
+        frame: EurocSensorFrame,
+        gyro_bias: Vector3<f64>,
+    ) -> Result<BasaltFrontendPacket, BasaltAdapterError> {
+        let stereo =
+            crate::StereoFrame::new(frame.frame_id, frame.timestamp_ns, frame.cam0, frame.cam1);
+        let mut tracks = self.frontend.process_frame_with_timing_imu(
+            stereo,
+            &frame.imu,
+            gyro_bias,
+            &mut self.timing,
+        )?;
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
+        Ok(BasaltFrontendPacket {
+            tracks,
+            imu: frame.imu,
+            initialization_imu: frame.initialization_imu,
+        })
+    }
+}
+
+/// The estimator half of [`BasaltVioEstimatorAdapter::into_stages`].
+#[derive(Debug)]
+pub struct BasaltVioEstimatorStage {
+    estimator: BasaltVioEstimator,
+}
+
+impl BasaltVioEstimatorStage {
+    /// Runs the estimator step for one frontend packet; packets must arrive
+    /// in the order the frontend stage produced them.
+    pub fn process(
+        &mut self,
+        packet: BasaltFrontendPacket,
+    ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
+        let imu_count = packet.imu.len();
+        let estimator = self
+            .estimator
+            .process_adapter_frame(
+                packet.tracks.frame.frame_id,
+                packet.tracks.frame.timestamp_ns,
+                &packet.tracks.observations,
+                &packet.imu,
+                packet.initialization_imu,
+                None,
+                false,
+                false,
+            )
+            .map_err(BasaltAdapterError::Estimator)?;
+        Ok(BasaltAdapterOutput {
+            tracks: packet.tracks,
+            estimator,
+            imu_count,
+        })
+    }
 }
 
 /// Builds the Basalt VIO estimator from the pinned calibration/config
