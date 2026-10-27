@@ -1192,6 +1192,37 @@ sequence_5_12 stays at 0.81 m (4.1 %) to the end; the CP chords there are
 off by the turns (+21°, −68°, +23°). Rescaling the end by 0.8 (diagnosis)
 gives 14.18: the walk after the ride still drifts from 2 m to 15 m.
 
+### Finding the rides the VIO missed
+
+On the test set, sequence_5_5 and 5_6 still score 3.1 and 2.4 with both
+cameras' features (submission 4, [lamaria_test_results.md](lamaria_test_results.md)):
+through a door's windows too few street tracks last, and the VIO and the BA
+keep the cabin's standstill (sequence_5_5: about 35 m from 10.5 to 12.7 min).
+The IMU shows such a ride without ground truth. Over 10 s windows, compare
+the trajectory's velocity change with the accelerometer integrated in the
+trajectory's orientation, its body-frame bias and the gravity vector fitted by
+least squares on the windows outside the runs without steps (the 1.4–2.6 Hz
+band of the accelerometer norm under 0.05 (m/s²)² for 30 s or more). On the
+walks the two agree within 0.23–0.29 m/s at the median. In 3–4 windows of a
+missed ride they differ by more than 1 m/s (sequence_5_5, 5_6, and 5_9 in
+submission 3); in none of a ride the trajectory keeps (sequence_5_9 in
+submission 4, training sequence_5_11 and 5_12).
+
+Bridging such a ride with the IMU is not accurate enough, though.
+Dead-reckoned from the trajectory's state where the run starts, the
+gyroscope bias fitted to meet its orientation where the run ends and a
+constant acceleration to meet its velocity there, the ride between training
+sequence_5_12's CPs at 18 s and 208 s comes out 433 m against 257 m surveyed
+(the trajectory: 263 m), and sequence_5_11's between 9 s and 264 s 167 m
+against 203 m (the trajectory: 173 m). About 1° of tilt while the vehicle
+accelerates is enough ([The rides, again](#the-rides-again)). The
+trajectory's own orientation is no better: inside a missed ride the VIO tilts
+to explain the vehicle's acceleration away, and dead reckoning in it gives
+sequence_5_9's ride 265 m, against the 447 m of the run that kept it. Nor does
+the velocity check see a wrong speed held constant, which is how
+sequence_5_11's trajectory stays 15 % short and still passes. The chain does
+not bridge rides.
+
 ### Low light: matching guided by the solve
 
 Matching the low-light sequences again, guided by the pipeline's final
