@@ -445,7 +445,8 @@ timestamps run about 300 ms behind its IMU clock (`--td-ms`).
 cargo run --release --example advio -- ~/datasets/advio/advio-02 --td-ms -300 --noise-scale 3 --bias-scale 0.1
 ```
 
-Time per frame with the phone defaults:
+Time per frame with the phone defaults, measured before upstream's faster
+KLT frontend (#354):
 
 | Build | ADVIO, 360 x 640 | iPhone recording, 360 x 480 |
 | --- | ---: | ---: |
@@ -454,16 +455,20 @@ Time per frame with the phone defaults:
 | Chrome, 4 wasm threads | ~22 ms | |
 | iPhone 16 Pro / 17 class, 3 wasm threads (28 px, 5 cm) | | 18 ms median |
 
+#354 takes 20–26% off a frame in wasm (Node, three iPhone recordings:
+24.2 → 18.0, 29.7 → 22.4 and 19.0 → 15.2 ms) and about 19% natively, with
+the same poses to the last digit.
+
 The Chrome figure is for the demo, which tracks every frame of its 30 fps
 video. `web/node_replay.mjs` checks the wasm build against the native
 replay: they end 1 mm apart after 4.6 m of advio-13, and 0.3 m apart after
 12.5 m of the demo. They are not bit-identical because wasm uses Rust's
 libm, and the difference grows with the number of landmarks.
 
-Where the time goes, natively on one thread on two iPhone recordings: the
-frontend takes 7.4 ms a frame whatever the scene (temporal KLT 3–5 ms,
-FAST replenishment 2.4–4.5 ms, the pyramid 0.1 ms), and the estimator
-3–9 ms, growing with the landmarks in view (most of it the per-landmark
+Where the time went before #354, natively on one thread on two iPhone
+recordings: the frontend took 7.4 ms a frame whatever the scene (temporal
+KLT 3–5 ms, FAST replenishment 2.4–4.5 ms, the pyramid 0.1 ms), and the
+estimator 3–9 ms, growing with the landmarks in view (most of it the per-landmark
 reduction inside its 7 Levenberg-Marquardt iterations; up to 21 ms on a
 keyframe with marginalization). On the phone a frame took 7–42 ms over a
 70 s session, 18 ms typically, more with more landmarks; in its last
@@ -472,7 +477,9 @@ natively.
 
 For tracking at 60 fps:
 
-- **Exact FAST rejection** (below) took 9–18% off natively and 11% in wasm.
+- **Exact FAST rejection** from the four compass pixels took 9–18% off
+  natively and 11% in wasm; upstream's faster frontend (#354) does the same
+  and more.
 - **Fewer iterations:** `vio_max_iterations` 3 instead of 7 takes 27% off
   and left 4 resets on the phone recordings instead of 9, but advio-02
   went from 2.65 m to 5.3 m (mean 3.4 m), so it stays at 7.
@@ -486,7 +493,7 @@ For tracking at 60 fps:
   per-point work), not the estimator (small dense solves in a sequential
   loop). The frontend now runs there; see "The frontend on the GPU".
 
-Six changes in `pipelines/basalt`. All are identical natively with the
+Five changes in `pipelines/basalt`. All are identical natively with the
 pinned configuration, and the crate's tests pass unchanged.
 
 - **Hash buckets:** the 64-bit libstdc++ bucket arithmetic is now width
@@ -496,10 +503,6 @@ pinned configuration, and the crate's tests pass unchanged.
 - **`fused_mul_add` (`src/fma.rs`):** WebAssembly has no scalar FMA, so
   each `f32::mul_add` was an out-of-line software `fmaf`, 40% of a frame.
   On wasm it is now an inline f64 multiply-add.
-- **FAST quick rejection (`src/fast.rs`):** a run of 9 of the 16 circle
-  pixels always holds two neighbouring compass pixels, so a pixel without
-  such a pair is rejected after 4 reads instead of 16, as OpenCV does. The
-  detections, and so the trajectories, are identical.
 - **`vio_min_triangulation_dist`:** the VIO's landmark baseline gate was
   hard-coded at 5 cm. It now reads the configuration value, as upstream
   does (the pinned EuRoC file says 5 cm).

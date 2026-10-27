@@ -4580,7 +4580,7 @@ impl WindowProblem {
                         observation.pixel,
                         same_timestamp,
                         same_time_cam_id,
-                        FactorConfig::default(),
+                        self.factor_config,
                     )
                 };
                 factor.map(|factor| (*observation, Some(factor)))
@@ -4733,7 +4733,7 @@ impl WindowProblem {
                         observation.pixel,
                         same_timestamp,
                         same_time_cam_id,
-                        FactorConfig::default(),
+                        base.factor_config,
                     )
                 };
                 factor.map(|factor| (*observation, factor))
@@ -4860,7 +4860,7 @@ impl WindowProblem {
                         observation.pixel,
                         same_timestamp,
                         same_time_cam_id,
-                        FactorConfig::default(),
+                        self.factor_config,
                     )
                 };
                 factor.map(|factor| (*observation, factor))

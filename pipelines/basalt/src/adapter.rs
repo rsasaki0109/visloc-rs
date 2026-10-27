@@ -138,11 +138,14 @@ impl BasaltVioEstimatorAdapter {
     /// one of the two frontends for an adapter's lifetime.
     pub fn process_tracks_no_trace(
         &mut self,
-        tracks: TrackFrameOutput,
+        mut tracks: TrackFrameOutput,
         imu: &[ImuSample],
         initialization_imu: Option<ImuSample>,
     ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
         let started = self.timing.start();
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(imu, &mut tracks.observations);
+        }
         let estimator_started = self.timing.start();
         let estimator = self
             .estimator
