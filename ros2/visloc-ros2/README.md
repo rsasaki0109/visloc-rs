@@ -279,9 +279,19 @@ frontend, the estimator and the DDS transport.
 * **RMW interoperability**: RustDDS speaks standard RTPS 2.x with CDR
   (`CDR_LE`) payloads and ROS 2's topic/type mangling (`rt/<topic>`,
   `sensor_msgs::msg::dds_::Image_`). That is what `rmw_fastrtps_cpp` (the
-  default in Humble/Jazzy) and `rmw_cyclonedds_cpp` use, and `ros2-client`
-  is maintained against both. `rmw_zenoh` is a different protocol and is
-  not supported by these binaries.
+  default in Humble/Jazzy) and `rmw_cyclonedds_cpp` use. Both are tested
+  against ROS 2 Jazzy, see [below](#tested-against-ros-2-jazzy). `rmw_zenoh`
+  is a different protocol and is not supported by these binaries.
+* **Topic names** are resolved like `rclcpp` does: a relative name goes
+  under the node namespace (`odom` is `/odom`, or `/robot1/odom` with
+  `-r __ns:=/robot1`), and an absolute one (`/tf`) is kept. The nodes
+  resolve names before handing them to `ros2-client` 0.11, whose own
+  resolution would publish `rt//odom` in the root namespace, a topic only
+  other `ros2-client` nodes see.
+* **Startup**: discovery between these nodes and a newly started ROS 2
+  publisher takes about 1.5 s, and samples published before it completes
+  are lost (volatile QoS). Start the nodes first and give a bag player a
+  head start, e.g. `ros2 bag play --delay 3`.
 * **Message layouts** are hand-written serde mirrors of the ROS IDL
   (`src/msgs.rs`), and they match the Humble through Kilted definitions. Unit
   tests pin the CDR bytes against hand-assembled references (alignment,
@@ -301,6 +311,48 @@ frontend, the estimator and the DDS transport.
 * Parameters are command-line only. There are no runtime parameter
   services, no `--params-file`, and no lifecycle node. Security (SROS2)
   is off.
+
+## Tested against ROS 2 Jazzy
+
+On Ubuntu 24.04 with ROS 2 Jazzy from `packages.ros.org` (`rmw_fastrtps_cpp`
+8.4 / Fast DDS 2.14, and `rmw_cyclonedds_cpp` 2.2 / Cyclone DDS 0.10), on
+one host, with both RMWs:
+
+* `ros2 topic list -t` / `ros2 node list` show the nodes and their topics
+  with the right names and types, also in a namespace.
+* `ros2 topic echo` decodes `odom`, `map_pose` and `/diagnostics`, and
+  `ros2 topic hz` sees full-rate `odom` and 752x480 images.
+* `ros2 run tf2_ros tf2_echo map imu_link` resolves the chain `map -> odom`
+  (from `visloc_map_localize_node`) and `odom -> imu_link` (from
+  `visloc_vio_node`).
+* The nodes run on a rosbag2: EuRoC MH_02 converted with
+  `tools/euroc_to_rosbag2.py` and played with `ros2 bag play`, with the
+  outputs recorded by `ros2 bag record` and scored with
+  `tools/bag_to_tum.py`. The bag publishers can be reliable (the
+  default) or best-effort (`--qos-profile-overrides-path`).
+
+| `ros2 bag play` MH_02 at 1.0x | `map_pose` published | RMSE / max |
+|---|---|---|
+| Fast DDS | 99.7% of frames | 2.06 / 5.2 cm |
+| Cyclone DDS | 98.7% of frames | 2.06 / 6.0 cm |
+
+These are the same accuracy as the RustDDS replay above. The Fast DDS run
+used `--delay 3`; the Cyclone run had none and lost the first 1.6 s of
+images to discovery. To reproduce:
+
+```sh
+source /opt/ros/jazzy/setup.bash
+python3 tools/euroc_to_rosbag2.py /data/MH_02_easy mh02_bag     # needs Pillow
+visloc_vio_node --calibration .../euroc_ds_calib.json --config .../euroc_config.json \
+  --ros-args -r left/image_raw:=/cam0/image_raw -r right/image_raw:=/cam1/image_raw -r imu:=/imu0 &
+visloc_map_localize_node --map runs/mh01_map --ros-args -r image:=/cam0/image_raw &
+ros2 bag record -o out /odom /map_pose /tf &
+ros2 bag play mh02_bag --delay 3
+python3 tools/bag_to_tum.py out /map_pose map_pose.tum
+```
+
+Not covered: RViz (no display was available), Humble, several hosts on a
+real network, and live sensors.
 
 ## Tests
 
@@ -333,15 +385,14 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
 
 ## Limits (read before relying on this)
 
-* **Not tested against a real ROS 2 installation.** Interop with
-  `rmw_fastrtps_cpp` / `rmw_cyclonedds_cpp` follows from RTPS/CDR
-  conformance and the pinned byte layouts, but it has only been exercised
-  RustDDS-to-RustDDS. Please report results with `ros2 topic echo`, RViz
-  and a rosbag.
+* **Tested with ROS 2 Jazzy on one host only**
+  ([above](#tested-against-ros-2-jazzy)). It has not been tested with RViz,
+  Humble, several hosts on a real network, or live sensors. Please
+  report results.
 * VIO accuracy is the Basalt port's (see the root README's EuRoC results).
   The node adds no tuning. It has been run on synthetic data and on EuRoC
-  MH_02 replayed over DDS by a RustDDS player (above), not on a live
-  sensor.
+  MH_02, both replayed over DDS by a RustDDS player and played from a
+  rosbag2, not on a live sensor.
 * `nav_msgs/Odometry` covariances are zero (unknown): the marginalized
   Basalt window does not expose a calibrated per-frame covariance.
 * The localization covariance is a fixed, configurable diagonal, not an
