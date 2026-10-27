@@ -13,6 +13,7 @@
 mod binary_index;
 mod correspondence;
 mod map_anchor;
+mod map_merge;
 
 use std::collections::HashSet;
 
@@ -34,6 +35,9 @@ pub use correspondence::{
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
 pub use map_anchor::{FixOutcome, MapAnchor, MapAnchorConfig};
+pub use map_merge::{
+    merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {

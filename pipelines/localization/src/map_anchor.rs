@@ -88,17 +88,17 @@ pub enum FixOutcome {
 
 /// Four-degree-of-freedom transform: `p_map = Rz(yaw) * p_odom + translation`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Offset {
-    yaw: f64,
-    translation: Vector3<f64>,
+pub(crate) struct Offset {
+    pub(crate) yaw: f64,
+    pub(crate) translation: Vector3<f64>,
 }
 
 impl Offset {
-    fn rotation(&self) -> UnitQuaternion<f64> {
+    pub(crate) fn rotation(&self) -> UnitQuaternion<f64> {
         UnitQuaternion::from_axis_angle(&Vector3::z_axis(), self.yaw)
     }
 
-    fn se3(&self) -> SE3 {
+    pub(crate) fn se3(&self) -> SE3 {
         SE3::new(self.rotation(), self.translation)
     }
 }
@@ -113,12 +113,12 @@ struct Fix {
     yaw: f64,
 }
 
-fn yaw_of(rotation: &UnitQuaternion<f64>) -> f64 {
+pub(crate) fn yaw_of(rotation: &UnitQuaternion<f64>) -> f64 {
     let matrix = rotation.to_rotation_matrix();
     matrix[(1, 0)].atan2(matrix[(0, 0)])
 }
 
-fn wrap_angle(angle: f64) -> f64 {
+pub(crate) fn wrap_angle(angle: f64) -> f64 {
     (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 

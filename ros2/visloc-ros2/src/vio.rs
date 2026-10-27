@@ -413,6 +413,30 @@ fn ros_vector(v: &Vector3<f64>) -> RosVector3 {
     }
 }
 
+/// The estimate of a frame rigidly attached to the IMU, `imu_from_base`
+/// away (e.g. a robot's `base_link`): `imu_to_world` becomes that frame's
+/// pose, `velocity_world` its origin's velocity and `angular_velocity_body`
+/// is expressed in it. Without an angular velocity the lever arm's
+/// contribution to the velocity is left out.
+pub fn rebase(estimate: &VioEstimate, imu_from_base: &SE3) -> VioEstimate {
+    let world_from_imu = estimate.imu_to_world.rotation;
+    let lever_world = world_from_imu * imu_from_base.translation;
+    let velocity_world = estimate.velocity_world
+        + estimate
+            .angular_velocity_body
+            .map_or_else(Vector3::zeros, |omega| {
+                (world_from_imu * omega).cross(&lever_world)
+            });
+    VioEstimate {
+        imu_to_world: estimate.imu_to_world.compose(imu_from_base),
+        velocity_world,
+        angular_velocity_body: estimate
+            .angular_velocity_body
+            .map(|omega| imu_from_base.rotation.inverse() * omega),
+        ..estimate.clone()
+    }
+}
+
 /// Builds the node's outputs for one estimate.
 pub fn odometry_msg(estimate: &VioEstimate, frames: &VioFrames) -> Odometry {
     let header = Header::new(
@@ -597,6 +621,29 @@ mod tests {
         let q = odom.pose.pose.orientation;
         assert!((q.z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
         assert!((q.w - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_rebased_estimate_describes_the_attached_frame() {
+        // A base frame 1 m ahead of the IMU (world +y), yawed -90 deg from it.
+        let imu_from_base = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, -std::f64::consts::FRAC_PI_2),
+            Vector3::new(1.0, 0.0, 0.0),
+        );
+        let base = rebase(&estimate(), &imu_from_base);
+        assert!((base.imu_to_world.translation - Vector3::new(1.0, 3.0, 3.0)).norm() < 1e-12);
+        assert!(base.imu_to_world.rotation.angle() < 1e-12);
+        // Turning at 0.5 rad/s about z swings that point towards -x.
+        assert!((base.velocity_world - Vector3::new(-0.5, 1.0, 0.0)).norm() < 1e-12);
+        let frames = VioFrames {
+            odom_frame: "odom".into(),
+            body_frame: "base_link".into(),
+        };
+        let odom = odometry_msg(&base, &frames);
+        assert_eq!(odom.child_frame_id, "base_link");
+        assert!((odom.twist.twist.linear.x + 0.5).abs() < 1e-12);
+        assert!((odom.twist.twist.linear.y - 1.0).abs() < 1e-12);
+        assert!((odom.twist.twist.angular.z - 0.5).abs() < 1e-12);
     }
 
     #[test]

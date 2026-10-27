@@ -60,6 +60,17 @@ pub fn output_qos(depth: usize) -> QosProfile {
         })
 }
 
+/// `/tf_static` subscription QoS, as `tf2_ros::StaticListenerQoS`: reliable,
+/// transient-local, keep-last 100. Transient-local durability is what
+/// delivers the transforms a `robot_state_publisher` or
+/// `static_transform_publisher` sent before this node started.
+pub fn static_tf_qos() -> QosProfile {
+    QosProfile::subscription_default()
+        .reliability_reliable(WhenFull::Wait(std::time::Duration::from_millis(20)))
+        .durability(Durability::TransientLocal)
+        .history(History::KeepLast { depth: 100 })
+}
+
 /// `/ns/name` for logging (`/name` in the root namespace).
 pub fn qualified_name(namespace: &str, name: &str) -> String {
     format!("{}/{name}", namespace.trim_end_matches('/'))
