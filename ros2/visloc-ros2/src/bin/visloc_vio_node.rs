@@ -50,6 +50,8 @@ PARAMETERS (--name value  or  -p name:=value):
   imu_qos_depth          subscription history depth for IMU                     [400]
   urgent_keyframes       demo's urgent-keyframe spacing defaults                 [true]
   imu_seed_klt           seed KLT with the IMU rotation                          [false]
+  max_iterations         LM iterations per frame; overrides config.vio_max_iterations
+                         (0: keep the config's)                                  [3]
   domain_id              DDS domain (default: $ROS_DOMAIN_ID or 0)
   node_name              node name                                              [visloc_vio]
 
@@ -194,6 +196,7 @@ fn run() -> Result<(), String> {
     let options = VioOptions {
         urgent_keyframes: args.flag("urgent_keyframes", true)?,
         imu_seed_klt: args.flag("imu_seed_klt", false)?,
+        max_iterations: Some(args.parsed_or("max_iterations", 3u32)?).filter(|&n| n > 0),
     };
     let domain_id = args.domain_id()?;
     let node_name = args
