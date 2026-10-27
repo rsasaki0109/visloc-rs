@@ -6,15 +6,21 @@
 //! <map_dir>/
 //!   sparse/{cameras,images,points3D}.txt  COLMAP text model, mapper world frame
 //!   landmark_descriptors.txt              LANDMARK_ID + 256 ORB bits as 0/1
-//!   images.csv                            IMAGE_ID -> mapper frame, camera, timestamp
-//!   map.json                              T_imu_cam per camera, fit errors, counts
+//!   images.csv                            IMAGE_ID -> mapper frame, camera, timestamp, session
+//!   map.json                              T_imu_cam per camera, fit errors, counts, sessions
 //! ```
 //!
 //! The COLMAP model opens in COLMAP itself; `map.json` adds what COLMAP has no
 //! field for, the IMU-from-camera extrinsics, so a localized camera pose can be
 //! reported as an IMU pose comparable with the SLAM trajectories.
+//!
+//! A map merged by `basalt_map_merge` holds several mapping sessions in the
+//! first one's world frame: `map.json`'s `sessions` lists them with the
+//! transform from each session's own world, and `images.csv`'s `session`
+//! column says which session an image came from (maps saved before the column
+//! existed read as session 0).
 
-// The writer and the reader example each use one half of this module.
+// The writer, the reader and the merger examples each use part of this module.
 #![allow(dead_code)]
 
 use std::fs;
@@ -48,15 +54,30 @@ pub struct SavedMap {
     pub imu_from_camera: Vec<SE3>,
     /// Detector budget the map's keyframes were built with.
     pub max_points: usize,
+    /// `map.json` as read.
+    pub summary: Value,
+    /// `images.csv`, empty when the file is missing.
+    pub images: Vec<ImageRow>,
 }
 
-fn se3_json(pose: &SE3) -> Value {
+/// One row of `images.csv`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRow {
+    pub image_id: u64,
+    pub frame_id: u64,
+    pub cam_id: u16,
+    pub timestamp_ns: Option<i64>,
+    /// Index into `map.json`'s `sessions`.
+    pub session: usize,
+}
+
+pub fn se3_json(pose: &SE3) -> Value {
     let q = pose.rotation.quaternion();
     let t = pose.translation;
     json!({"translation": [t.x, t.y, t.z], "quaternion_wxyz": [q.w, q.i, q.j, q.k]})
 }
 
-fn se3_from_json(value: &Value) -> Option<SE3> {
+pub fn se3_from_json(value: &Value) -> Option<SE3> {
     let numbers = |key: &str| -> Option<Vec<f64>> {
         value
             .get(key)?
@@ -73,31 +94,25 @@ fn se3_from_json(value: &Value) -> Option<SE3> {
     ))
 }
 
-/// Writes `export` under `map_dir`; returns the `map.json` summary.
+/// Writes `export` under `map_dir` as a one-session map; returns the
+/// `map.json` summary.
 pub fn save(
     map_dir: &Path,
     export: &LocalizationMapExport,
     calibration: &BasaltCalibration,
     max_points: usize,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    fs::create_dir_all(map_dir)?;
-    write_colmap_text_model(&export.map, sparse_dir(map_dir))?;
-    write_landmark_descriptors_txt(&export.descriptors, descriptors_path(map_dir))?;
-
-    let mut images_csv = String::from("image_id,frame_id,cam_id,timestamp_ns\n");
-    for image in &export.images {
-        images_csv.push_str(&format!(
-            "{},{},{},{}\n",
-            image.image_id,
-            image.frame_id,
-            image.cam_id,
-            image
-                .timestamp_ns
-                .map_or_else(String::new, |value| value.to_string()),
-        ));
-    }
-    fs::write(map_dir.join("images.csv"), images_csv)?;
-
+    let images = export
+        .images
+        .iter()
+        .map(|image| ImageRow {
+            image_id: image.image_id,
+            frame_id: image.frame_id,
+            cam_id: image.cam_id,
+            timestamp_ns: image.timestamp_ns,
+            session: 0,
+        })
+        .collect::<Vec<_>>();
     let cameras = export
         .camera_fits
         .iter()
@@ -119,20 +134,80 @@ pub fn save(
         "world_frame": "Basalt mapper world (gravity-aligned VIO world of the mapped sequence)",
         "feature_max_points": max_points,
         "cameras": cameras,
-        "images": export.map.keyframes.len(),
-        "landmarks": export.map.landmarks.len(),
-        "observations": export
-            .map
-            .landmarks
-            .values()
-            .map(|landmark| landmark.observations.len())
-            .sum::<usize>(),
     });
+    write(map_dir, &export.map, &export.descriptors, &images, summary)
+}
+
+/// Writes a map under `map_dir`: the COLMAP model, the descriptors,
+/// `images` as `images.csv` and `summary` as `map.json`, with its image,
+/// landmark and observation counts set; returns the written summary.
+pub fn write(
+    map_dir: &Path,
+    map: &VisualMap,
+    descriptors: &LandmarkDescriptorStore,
+    images: &[ImageRow],
+    mut summary: Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    fs::create_dir_all(map_dir)?;
+    write_colmap_text_model(map, sparse_dir(map_dir))?;
+    write_landmark_descriptors_txt(descriptors, descriptors_path(map_dir))?;
+
+    let mut images_csv = String::from("image_id,frame_id,cam_id,timestamp_ns,session\n");
+    for image in images {
+        images_csv.push_str(&format!(
+            "{},{},{},{},{}\n",
+            image.image_id,
+            image.frame_id,
+            image.cam_id,
+            image
+                .timestamp_ns
+                .map_or_else(String::new, |value| value.to_string()),
+            image.session,
+        ));
+    }
+    fs::write(map_dir.join("images.csv"), images_csv)?;
+
+    summary["images"] = json!(map.keyframes.len());
+    summary["landmarks"] = json!(map.landmarks.len());
+    summary["observations"] = json!(map
+        .landmarks
+        .values()
+        .map(|landmark| landmark.observations.len())
+        .sum::<usize>());
     fs::write(
         map_dir.join("map.json"),
         serde_json::to_string_pretty(&summary)?,
     )?;
     Ok(summary)
+}
+
+/// Reads `images.csv`; a missing `session` column reads as session 0.
+pub fn read_images(path: &Path) -> Result<Vec<ImageRow>, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(path)?;
+    text.lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+            let bad = || format!("{}: bad row {line:?}", path.display());
+            if fields.len() < 4 {
+                return Err(bad().into());
+            }
+            Ok(ImageRow {
+                image_id: fields[0].parse().map_err(|_| bad())?,
+                frame_id: fields[1].parse().map_err(|_| bad())?,
+                cam_id: fields[2].parse().map_err(|_| bad())?,
+                timestamp_ns: match fields[3] {
+                    "" => None,
+                    value => Some(value.parse().map_err(|_| bad())?),
+                },
+                session: match fields.get(4) {
+                    None | Some(&"") => 0,
+                    Some(value) => value.parse().map_err(|_| bad())?,
+                },
+            })
+        })
+        .collect()
 }
 
 pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
@@ -160,6 +235,12 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         .get("feature_max_points")
         .and_then(Value::as_u64)
         .ok_or("map.json: missing feature_max_points")? as usize;
+    let images_path = map_dir.join("images.csv");
+    let images = if images_path.exists() {
+        read_images(&images_path)?
+    } else {
+        Vec::new()
+    };
 
     let provider = ColmapMapProvider::from_text_model_dir_with_descriptors_validated(
         sparse_dir(map_dir),
@@ -174,5 +255,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         descriptors,
         imu_from_camera,
         max_points,
+        summary,
+        images,
     })
 }

@@ -1,10 +1,11 @@
 //! `visloc_map_localize_node`: robot-style localization against a saved
-//! Basalt map, anchored to VIO odometry.
+//! Basalt map, anchored to odometry.
 //!
 //! Loads a map saved by `basalt_euroc_online_slam_demo --save-map`,
 //! subscribes `image` (the camera the map's localization uses, raw) and
-//! `odom` (`nav_msgs/Odometry` of the gravity-aligned VIO, e.g.
-//! `visloc_vio_node`), and publishes `/tf` (`map -> odom`, REP-105),
+//! `odom` (`nav_msgs/Odometry`, gravity-aligned: a VIO such as
+//! `visloc_vio_node`, or a ground robot's wheel odometry on level floors),
+//! and publishes `/tf` (`map -> odom`, REP-105),
 //! `map_pose` (the body pose in the map,
 //! `geometry_msgs/PoseWithCovarianceStamped`; not `pose`, which
 //! `visloc_vio_node` already publishes) and `/diagnostics`. Run with `--help` for parameters.
@@ -15,7 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
+use visloc_ros2::dds::{
+    output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
+};
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
     fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_pose_msg, map_to_odom_tf,
@@ -25,9 +28,10 @@ use visloc_ros2::map_localize::{
 use visloc_ros2::msgs::{DiagnosticArray, Image, Odometry, PoseWithCovarianceStamped, TfMessage};
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::queue::DropOldestQueue;
+use visloc_ros2::tf_tree::StaticTransforms;
 
 const USAGE: &str = "\
-visloc_map_localize_node -- localization against a saved Basalt map, anchored to VIO odometry
+visloc_map_localize_node -- localization against a saved Basalt map, anchored to odometry
 
 USAGE:
   visloc_map_localize_node --map <dir from basalt_euroc_online_slam_demo --save-map> [options]
@@ -36,6 +40,11 @@ PARAMETERS (--name value  or  -p name:=value):
   map                    saved map directory (map.json, sparse/, landmark_descriptors.txt) [required]
   camera                 Basalt camera index of the image topic                       [0]
   map_frame              frame of the map; parent of the published map -> odom       [map]
+  extrinsics             where the camera sits on the odometry's body (child_frame_id):
+                         map = the map's IMU-from-camera (body = the map's IMU, as
+                         from visloc_vio_node); tf = /tf_static from the image's
+                         frame to the body frame (e.g. base_link)                   [map]
+  camera_frame           with extrinsics tf: the camera's frame       [the image's frame_id]
   publish_tf             publish /tf map_frame -> odometry frame                      [true]
   localize_every         localize every N-th received image                           [5]
   min_inliers            minimum PnP inliers to accept a fix                          [30]
@@ -58,8 +67,9 @@ PARAMETERS (--name value  or  -p name:=value):
   node_name              node name                                                    [visloc_map_localize]
 
 TOPICS (remap with --remap from=to or -r from:=to):
-  in : image (sensor_msgs/Image, raw), odom (nav_msgs/Odometry, gravity-aligned VIO;
-       its header.frame_id and child_frame_id name the odometry and body frames)
+  in : image (sensor_msgs/Image, raw), odom (nav_msgs/Odometry, gravity-aligned;
+       its header.frame_id and child_frame_id name the odometry and body frames),
+       /tf_static (tf2_msgs/TFMessage, with extrinsics tf)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
        body pose in map_frame, once anchored), /diagnostics (diagnostic_msgs/DiagnosticArray)
 ";
@@ -80,6 +90,12 @@ fn run() -> Result<(), String> {
     let map_dir = PathBuf::from(args.required("map")?);
     let camera = args.parsed_or("camera", 0u16)?;
     let map_frame = args.string_or("map_frame", "map");
+    let extrinsics_from_tf = match args.string_or("extrinsics", "map").as_str() {
+        "map" => false,
+        "tf" => true,
+        other => return Err(format!("extrinsics: expected map or tf, got {other:?}")),
+    };
+    let camera_frame = args.string("camera_frame");
     let publish_tf = args.flag("publish_tf", true)?;
     let localize_every = args.parsed_or("localize_every", 5u64)?.max(1);
     let mut options = MapLocalizeOptions::default();
@@ -112,6 +128,7 @@ fn run() -> Result<(), String> {
     let image_topic = args.topic("image");
     let odom_topic = args.topic("odom");
     let tf_topic = args.topic("/tf");
+    let tf_static_topic = args.topic("/tf_static");
     let pose_topic = args.topic("map_pose");
     let diagnostics_topic = args.topic("/diagnostics");
     args.finish()?;
@@ -135,6 +152,20 @@ fn run() -> Result<(), String> {
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
     let diagnostics_pub = ros.publisher::<DiagnosticArray>(&diagnostics_topic, output_qos(10))?;
+    // With extrinsics from tf: the static transforms, and the odometry's
+    // body frame.
+    let transforms = Arc::new(Mutex::new(StaticTransforms::new()));
+    let body_frame = Arc::new(Mutex::new(None::<String>));
+    if extrinsics_from_tf {
+        let transforms = Arc::clone(&transforms);
+        let tf_static_sub = ros.subscription::<TfMessage>(&tf_static_topic, static_tf_qos())?;
+        spawn_receiver("tf-static-rx", tf_static_sub, move |msg: TfMessage| {
+            transforms
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(&msg);
+        })?;
+    }
 
     // Odometry: pair with fixes, then publish map -> odom and the map pose.
     let odom_messages = Arc::new(AtomicU64::new(0));
@@ -142,10 +173,17 @@ fn run() -> Result<(), String> {
         let core = Arc::clone(&core);
         let odom_arrived = Arc::clone(&odom_arrived);
         let odom_messages = Arc::clone(&odom_messages);
+        let body_frame = Arc::clone(&body_frame);
         let map_frame = map_frame.clone();
         let options = options.clone();
         spawn_receiver("odom-rx", odom_sub, move |msg: Odometry| {
             odom_messages.fetch_add(1, Ordering::Relaxed);
+            if extrinsics_from_tf {
+                let mut body = body_frame.lock().unwrap_or_else(|e| e.into_inner());
+                if body.as_deref() != Some(msg.child_frame_id.as_str()) {
+                    *body = Some(msg.child_frame_id.clone());
+                }
+            }
             let stamp_ns = msg.header.stamp.to_nanos();
             let (events, anchored) = core
                 .lock()
@@ -199,17 +237,34 @@ fn run() -> Result<(), String> {
         attempts += 1;
         let stamp = msg.header.stamp;
         let started = Instant::now();
-        let features = decode_luma(&msg)
-            .and_then(|luma| luma.to_basalt())
-            .map_err(|error| format!("image decode: {error}"))
-            .and_then(|image| localizer.extract(&image));
+        let camera_from_body = if extrinsics_from_tf {
+            let camera = camera_frame.as_deref().unwrap_or(&msg.header.frame_id);
+            let body = body_frame.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            body.ok_or_else(|| "no odometry yet to name the body frame".to_owned())
+                .and_then(|body| {
+                    transforms
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .lookup(camera, &body)
+                        .ok_or_else(|| format!("no /tf_static transform {camera} <- {body}"))
+                })
+        } else {
+            Ok(localizer.camera_from_imu().clone())
+        };
+        let features = camera_from_body.and_then(|camera_from_body| {
+            decode_luma(&msg)
+                .and_then(|luma| luma.to_basalt())
+                .map_err(|error| format!("image decode: {error}"))
+                .and_then(|image| localizer.extract(&image))
+                .map(|features| (features, camera_from_body))
+        });
         let mut fix = match features {
-            Ok(features) => {
-                // The VIO usually publishes this frame's odometry while the
+            Ok((features, camera_from_body)) => {
+                // The odometry of this frame usually arrives while the
                 // features are extracted; wait for it briefly rather than
                 // lose the prior.
                 let prior = wait_for_prior(&core, &odom_arrived, stamp.to_nanos(), prior_wait);
-                localizer.localize_features(&features, prior.as_ref())
+                localizer.localize_features_with(&features, prior.as_ref(), &camera_from_body)
             }
             Err(failure) => Fix::failed(failure),
         };
