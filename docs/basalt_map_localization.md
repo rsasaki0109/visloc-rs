@@ -215,9 +215,9 @@ anchored, it matches each landmark only against the keypoints near the
 landmark's projection from the predicted pose, so localization costs about 4
 ms per image after ORB extraction. MH_02 was replayed over DDS against the
 MH_01 map, localizing every 5th image, with all processes on 4 cores. At
-real time, 96.2% of frames got a map pose, at 1.92 / 5.1 cm (RMSE / max)
-and a median latency of 86 ms; the VIO dropped the rest in its busiest
-stretches. At half speed, 99.8% of frames got a pose, at 2.07 / 5.2 cm.
+real time, 99.6% of frames got a map pose, at 2.05 / 5.2 cm (RMSE / max)
+and a median latency of 49 ms; the VIO dropped the rest in its busiest
+stretch. At half speed, 99.8% of frames got a pose, at 2.06 / 5.2 cm.
 Details in
 [the node's README](../ros2/visloc-ros2/README.md#visloc_map_localize_node).
 

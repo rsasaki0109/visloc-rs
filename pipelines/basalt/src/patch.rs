@@ -52,17 +52,16 @@ impl MeanNormalizedPatch51 {
             let offset = Vector2::new(*offset_x, *offset_y);
             let sample_position = position + offset;
             if image.in_bounds(sample_position, 2.0) {
-                if let Some([value, gradient_x, gradient_y]) = image.interp_grad(sample_position) {
-                    data[index] = value;
-                    sum += value;
-                    jacobian[(index, 0)] = gradient_x;
-                    jacobian[(index, 1)] = gradient_y;
-                    // Eigen's fixed 1x2-by-2x3 product emits a plain first
-                    // product followed by an FMA for the SE(2) rotation
-                    // column.  Keep that contraction order explicit.
-                    jacobian[(index, 2)] = gradient_y.mul_add(*offset_x, gradient_x * (-*offset_y));
-                    valid_samples += 1;
-                }
+                let [value, gradient_x, gradient_y] = image.interp_grad_in_bounds(sample_position);
+                data[index] = value;
+                sum += value;
+                jacobian[(index, 0)] = gradient_x;
+                jacobian[(index, 1)] = gradient_y;
+                // Eigen's fixed 1x2-by-2x3 product emits a plain first
+                // product followed by an FMA for the SE(2) rotation
+                // column.  Keep that contraction order explicit.
+                jacobian[(index, 2)] = gradient_y.mul_add(*offset_x, gradient_x * (-*offset_y));
+                valid_samples += 1;
             }
         }
 
@@ -159,11 +158,10 @@ impl MeanNormalizedPatch51 {
 
         for (index, point) in transformed.iter().enumerate() {
             if image.in_bounds(*point, 2.0) {
-                if let Some(value) = image.interp(*point) {
-                    residual[index] = value;
-                    sum += value;
-                    valid_target_samples += 1;
-                }
+                let value = image.interp_in_bounds(*point);
+                residual[index] = value;
+                sum += value;
+                valid_target_samples += 1;
             }
         }
 

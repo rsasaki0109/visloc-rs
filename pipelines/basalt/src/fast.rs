@@ -158,6 +158,10 @@ impl GridFastDetector {
         // of recomputing as many as eight neighbour scores for every
         // candidate pixel.
         let mut score_grid = vec![0_i16; cell * cell];
+        // The cell's pixels as u8, read once instead of per ring sample and
+        // per threshold; `None` for a cell that does not fit in the image
+        // (not produced by `detect`), which keeps the per-pixel path.
+        let cell_pixels = CellPixels::new(image, x0, y0, cell);
         while selected < self.config.points_per_cell && threshold >= self.config.min_threshold {
             let mut candidates = Vec::new();
             // `cv::FAST` never examines the three-pixel border of its
@@ -170,9 +174,11 @@ impl GridFastDetector {
             score_grid.fill(0);
             for y in y0 + 3..y0 + cell - 3 {
                 for x in x0 + 3..x0 + cell - 3 {
-                    if let Some(score) =
-                        fast_score_without_nms(image, x, y, threshold, x0, y0, cell)
-                    {
+                    let score = match &cell_pixels {
+                        Some(pixels) => pixels.score(x - x0, y - y0, threshold),
+                        None => fast_score_without_nms(image, x, y, threshold, x0, y0, cell),
+                    };
+                    if let Some(score) = score {
                         score_grid[(y - y0) * cell + (x - x0)] = score;
                     }
                 }
@@ -468,6 +474,80 @@ fn fast_score_without_nms(
         return None;
     }
 
+    Some(arc_score(&mut differences))
+}
+
+/// One grid cell's pixels converted to u8, for scoring every pixel of the
+/// cell at several thresholds. [`CellPixels::score`] returns exactly what
+/// [`fast_score_without_nms`] returns for the same pixel.
+struct CellPixels {
+    pixels: Vec<u8>,
+    cell: usize,
+    /// `FAST_CIRCLE` as offsets into `pixels`.
+    ring: [isize; 16],
+}
+
+impl CellPixels {
+    fn new(image: &RawU16Image, x0: usize, y0: usize, cell: usize) -> Option<Self> {
+        if x0 + cell > image.width() || y0 + cell > image.height() {
+            return None;
+        }
+        let mut pixels = Vec::with_capacity(cell * cell);
+        for row in image
+            .pixels()
+            .chunks_exact(image.width())
+            .skip(y0)
+            .take(cell)
+        {
+            pixels.extend(row[x0..x0 + cell].iter().map(|&pixel| raw_to_u8(pixel)));
+        }
+        let ring = FAST_CIRCLE.map(|(dx, dy)| dy as isize * cell as isize + dx as isize);
+        Some(Self { pixels, cell, ring })
+    }
+
+    /// The FAST-9 score of local pixel `(x, y)`, which must be at least
+    /// three pixels inside the cell, at `threshold`.
+    #[inline]
+    fn score(&self, x: usize, y: usize, threshold: u8) -> Option<i16> {
+        let index = (y * self.cell + x) as isize;
+        let center = i16::from(self.pixels[index as usize]);
+        let threshold = i16::from(threshold);
+        let sample = |k: usize| i16::from(self.pixels[(index + self.ring[k]) as usize]);
+        // Any nine contiguous ring pixels include at least two of the four
+        // at 0, 4, 8 and 12, so a pixel with fewer than two bright and fewer
+        // than two dark among those cannot pass `has_circular_run9`.
+        let (mut bright, mut dark) = (0, 0);
+        for k in [0, 4, 8, 12] {
+            let difference = center - sample(k);
+            bright += i32::from(difference < -threshold);
+            dark += i32::from(difference > threshold);
+        }
+        if bright < 2 && dark < 2 {
+            return None;
+        }
+        let mut differences = [0_i16; 24];
+        let mut bright_mask = 0_u16;
+        let mut dark_mask = 0_u16;
+        for (k, difference) in differences.iter_mut().take(16).enumerate() {
+            *difference = center - sample(k);
+            if *difference < -threshold {
+                bright_mask |= 1 << k;
+            }
+            if *difference > threshold {
+                dark_mask |= 1 << k;
+            }
+        }
+        if !has_circular_run9(bright_mask) && !has_circular_run9(dark_mask) {
+            return None;
+        }
+        Some(arc_score(&mut differences))
+    }
+}
+
+/// The FAST-9 score from the 16 ring differences (`differences[..16]`;
+/// the rest is scratch), as in [`fast_score_without_nms`].
+#[inline]
+fn arc_score(differences: &mut [i16; 24]) -> i16 {
     let (head, wrap) = differences.split_at_mut(16);
     wrap.copy_from_slice(&head[..8]);
     let mut score = i16::MIN;
@@ -484,7 +564,7 @@ fn fast_score_without_nms(
         score = score.max(min_difference - 1);
         score = score.max(-max_difference - 1);
     }
-    Some(score)
+    score
 }
 
 #[inline]
@@ -637,6 +717,41 @@ mod tests {
         assert!(points
             .iter()
             .any(|p| (p.x - 32.0).abs() < 2.0 && (p.y - 32.0).abs() < 2.0));
+    }
+
+    #[test]
+    fn cell_pixel_scores_match_the_per_pixel_score() {
+        // Pseudo-random texture with flat patches, offset inside a larger
+        // image so the cell origin is not the image origin.
+        let (x0, y0, cell) = (7, 5, 50);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let image = RawU16Image::from_fn(70, 64, |x, y| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let flat = (x / 9 + y / 7) % 3 == 0;
+            let value = if flat { 120 } else { (state & 0xff) as u16 };
+            (value << 8) | (state >> 56) as u16
+        })
+        .unwrap();
+        let pixels = CellPixels::new(&image, x0, y0, cell).unwrap();
+        let mut corners = 0;
+        for threshold in 1..=80_u8 {
+            for y in 3..cell - 3 {
+                for x in 3..cell - 3 {
+                    let expected =
+                        fast_score_without_nms(&image, x0 + x, y0 + y, threshold, x0, y0, cell);
+                    assert_eq!(
+                        pixels.score(x, y, threshold),
+                        expected,
+                        "threshold={threshold} x={x} y={y}"
+                    );
+                    corners += usize::from(expected.is_some());
+                }
+            }
+        }
+        assert!(corners > 1000, "{corners}");
+        assert!(CellPixels::new(&image, 30, 20, cell).is_none());
     }
 
     #[test]

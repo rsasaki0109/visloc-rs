@@ -38,6 +38,8 @@ pub struct VioOptions {
     pub urgent_keyframes: bool,
     /// Seed KLT with the IMU rotation (`config.optical_flow_imu_seed_rotation`).
     pub imu_seed_klt: bool,
+    /// Overrides `config.vio_max_iterations` (LM iterations per frame).
+    pub max_iterations: Option<u32>,
 }
 
 impl Default for VioOptions {
@@ -45,6 +47,7 @@ impl Default for VioOptions {
         Self {
             urgent_keyframes: true,
             imu_seed_klt: false,
+            max_iterations: None,
         }
     }
 }
@@ -115,6 +118,11 @@ impl VioCore {
                 "config.optical_flow_imu_seed_rotation".to_string(),
                 json!(true),
             );
+        }
+        if let Some(iterations) = options.max_iterations {
+            config
+                .values
+                .insert("config.vio_max_iterations".to_string(), json!(iterations));
         }
         if options.urgent_keyframes {
             // Same defaults as `basalt_euroc_online_slam_demo` (config wins).
@@ -519,6 +527,36 @@ impl PathAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_layer_onto_the_config() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |name: &str| {
+            std::fs::read_to_string(
+                root.join("configs/basalt/variants/official_euroc_ds")
+                    .join(name),
+            )
+            .unwrap()
+        };
+        let (calibration, config) = (read("euroc_ds_calib.json"), read("euroc_config.json"));
+        let value = |core: &VioCore, key: &str| core.config.values.get(key).cloned();
+
+        let core = VioCore::from_json(&calibration, &config, &VioOptions::default()).unwrap();
+        assert_eq!(value(&core, "config.vio_max_iterations"), Some(json!(5)));
+        assert_eq!(
+            value(&core, "config.vio_urgent_min_frames_after_kf"),
+            Some(json!(2))
+        );
+
+        let options = VioOptions {
+            urgent_keyframes: false,
+            max_iterations: Some(3),
+            ..VioOptions::default()
+        };
+        let core = VioCore::from_json(&calibration, &config, &options).unwrap();
+        assert_eq!(value(&core, "config.vio_max_iterations"), Some(json!(3)));
+        assert_eq!(value(&core, "config.vio_urgent_min_frames_after_kf"), None);
+    }
 
     fn estimate() -> VioEstimate {
         VioEstimate {

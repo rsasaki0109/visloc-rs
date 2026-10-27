@@ -79,6 +79,7 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `image_qos_depth`, `imu_qos_depth` | `5`, `400` | subscription history depth |
 | `urgent_keyframes` | `true` | the demo's urgent-keyframe defaults |
 | `imu_seed_klt` | `false` | `config.optical_flow_imu_seed_rotation` |
+| `max_iterations` | `3` | LM iterations per frame, overriding `config.vio_max_iterations` (`0` keeps the config's); see the replay results below |
 | `domain_id` | `$ROS_DOMAIN_ID` or 0 | |
 | `node_name` | `visloc_vio` | also `-r __node:=...`, `-r __ns:=...` |
 
@@ -240,27 +241,33 @@ player publishing a frame to its `map_pose` arriving back:
 
 | replay speed | VIO frames processed | `map_pose` published | RMSE / max | latency p50 / p90 / max |
 |---|---|---|---|---|
-| 0.5x | 3,040 / 3,040 | 99.8% of frames | 2.07 / 5.2 cm | 62 / 83 / 208 ms |
-| 1.0x | 2,930 / 3,040 (110 dropped behind) | 96.2% of frames | 1.92 / 5.1 cm | 86 / 149 / 327 ms |
+| 0.5x | 3,040 / 3,040 | 99.8% of frames | 2.06 / 5.2 cm | 54 / 72 / 137 ms |
+| 1.0x | 3,035 / 3,040 (5 dropped behind) | 99.6% of frames | 2.05 / 5.2 cm | 49 / 90 / 195 ms |
 | 1.0x, before the changes below | 2,743 / 3,040 (297 dropped behind) | 90.0% of frames | 2.02 / 5.9 cm | 171 / 271 / 339 ms |
 
-The offline `basalt_euroc_localize_demo --vio --localize-every 5` gives
-99.8% at 2.05 / 5.7 cm on the same data. Three changes made the real-time
-run possible on 4 cores:
+Three runs at 1.0x dropped 1, 5 and 14 frames. The offline
+`basalt_euroc_localize_demo --vio --localize-every 5` gives 99.8% at 2.05 /
+5.7 cm on the same data. These changes made the real-time run possible on
+4 cores:
 
 - The VIO frontend and estimator run on separate threads (see above).
-- Two serial loops of the estimator's LM iteration (the linearization and
-  the model cost decrease) now run per landmark in parallel. On MH_02 this
-  cuts the estimator from 30.0 to 22.1 ms per frame, with a bit-identical
-  trajectory.
+- The estimator is about 26% faster with a bit-identical trajectory: two
+  serial loops of its LM iteration (the linearization and the model cost
+  decrease) now run per landmark in parallel.
+- The KLT frontend is about 38% faster, also bit-identical (12.3 to 7.6 ms
+  per frame).
+- The node runs 3 LM iterations per frame instead of the config's 5
+  (`max_iterations`). On the eight EuRoC sequences in
+  `docs/basalt_map_localization.md`, the VIO's ATE changed by at most
+  0.13 cm. The estimator got 15-30% faster.
 - Localization uses the projection search once anchored.
 
-At 1.0x the estimator still takes 40-65 ms per frame in MH_02's busiest
-stretches while sharing the cores with the player and the map node. There
-the node drops frames instead of falling behind. A dropped frame gets no
-pose, and the drops did not change the VIO's accuracy. With the VIO node
-alone at 0.3x, the latency is about 47 ms: the frontend, the estimator and
-the DDS transport.
+The remaining drops are in MH_02's busiest stretch, where the estimator
+still takes up to about 100 ms on a frame while sharing the cores with the
+player and the map node. There the node drops frames instead of falling
+behind. A dropped frame gets no pose, and drops did not change the VIO's
+accuracy. With the VIO node alone at 0.3x, the latency is about 47 ms: the
+frontend, the estimator and the DDS transport.
 
 ## Running inside a ROS 2 graph
 

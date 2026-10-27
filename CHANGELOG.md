@@ -9,9 +9,9 @@ All notable changes to `visloc-rs` will be documented here.
 - **Real-time map localization (ROS 2).** `visloc_vio_node` and
   `visloc_map_localize_node` now keep up with EuRoC MH_02 replayed over DDS
   at real time against an MH_01 map, with all three processes on 4 cores.
-  96.2% of frames get a map pose (was 90.0%), at 1.92 cm RMSE (5.1 cm max).
-  The median latency from frame to `map_pose` is 86 ms (was 171 ms) and the
-  90th percentile 149 ms (was 271 ms).
+  99.6% of frames get a map pose (was 90.0%), at 2.05 cm RMSE (5.2 cm max).
+  The median latency from frame to `map_pose` is 49 ms (was 171 ms) and the
+  90th percentile 90 ms (was 271 ms).
   - `visloc_vio_node` runs KLT tracking and the estimator on two threads, as
     upstream Basalt does: `BasaltVioEstimatorAdapter::into_stages` splits
     it into `BasaltVioFrontendStage` / `BasaltVioEstimatorStage`, and
@@ -83,11 +83,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **Basalt KLT frontend about 38% faster, bit-identical.** The five bilinear
+  samples of an interpolated gradient now share one neighbourhood read. FAST
+  replenishment converts each grid cell to u8 once and rejects pixels with a
+  cardinal-pixel test before the full ring test (2.6 to 0.6 ms per frame).
+  Each frame's backward searches already sample the source patches the
+  next frame's forward searches need, so those patches are cached by camera
+  and exact position and reused. MH_02 on 4 cores: 12.3 to 7.6 ms per
+  frame, with a byte-identical trajectory.
 - **Basalt VIO estimator about 26% faster, bit-identical.** The LM
   iteration's linearization and its model cost decrease (on the retained
   QR payload path) evaluate landmarks in parallel and combine them in the
   original order. MH_02 on 4 cores: 30.0 to 22.1 ms per frame (115 to 76 ms
   at worst), with a byte-identical trajectory.
+- `visloc_vio_node` runs 3 LM iterations per frame by default (new
+  parameter `max_iterations`, overriding `config.vio_max_iterations`, which
+  the EuRoC config sets to 5). On eight EuRoC sequences the VIO's ATE moved
+  by at most 0.13 cm, and the estimator got 15-30% faster. `0` keeps the
+  config's value.
 - `visloc_vio_node`: `frame_queue` defaults to 1 (was 4), and the frontend
   hands frames to the estimator without buffering. When the estimator falls
   behind, the node drops older frames before tracking instead of building
