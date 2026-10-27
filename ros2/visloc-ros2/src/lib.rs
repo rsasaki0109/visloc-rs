@@ -26,4 +26,5 @@ pub mod msgs;
 pub mod params;
 pub mod queue;
 pub mod sync;
+pub mod tf_tree;
 pub mod vio;

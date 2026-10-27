@@ -17,6 +17,49 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Merging maps of several flights.** `basalt_map_merge --base A --add B
+  --out AB` registers saved SLAM maps of the same place to the first one
+  and writes one map in its frame. `visloc_localization::register_map`
+  localizes the added map's keyframes in the base map and keeps the yaw +
+  translation that at least 3 of them agree on;
+  `visloc_localization::merge_maps` renumbers the added map, moves it and
+  fuses its landmarks that coincide with base landmarks. The merged map
+  loads like any saved map (`basalt_euroc_localize_demo`,
+  `visloc_map_localize_node`); `map.json` lists the sessions and
+  `images.csv` gains a `session` column. On EuRoC, MH_04 against MH_01
+  merged with MH_05 localizes 55.8% of its images (4.6% against MH_01) and
+  the anchored VIO gives 99.7% of frames a pose at 9.5 cm RMSE (73.1% at
+  23.0 cm). An added map keeps its own error: MH_05 against MH_01 + MH_04
+  gets 99.8% of frames (77.1%) and half the median error, but a worse tail
+  where MH_04's part of the map is 25 cm off. Results and limits in
+  `docs/basalt_map_localization.md`.
+
+- **Ground robots (ROS 2): `base_link` and wheel odometry.**
+  - `visloc_vio_node -p base_frame:=base_link` publishes `odom -> base_link`
+    (REP-105) instead of `odom -> imu_link`: odometry, pose, path and `/tf`
+    for the base, placed by the `/tf_static` transform between the IMU's
+    frame (`body_frame`) and the base. `visloc_ros2::vio::rebase` moves an
+    estimate, velocity included, to a frame rigidly attached to the IMU.
+  - `visloc_map_localize_node -p extrinsics:=tf` takes the camera's
+    position on the robot from `/tf_static` (image `frame_id` to the
+    odometry's `child_frame_id`) instead of the map's IMU-from-camera, so
+    any gravity-aligned odometry can be anchored, e.g. wheel odometry on a
+    level floor. New parameter `camera_frame`.
+  - `visloc_ros2::tf_tree::StaticTransforms` composes static transform
+    chains like tf2; the nodes subscribe to `/tf_static` transient-local,
+    as `tf2_ros` does.
+  - On ROS 2 Jazzy, with `static_transform_publisher` providing
+    `base_link -> imu0 -> cam0`, EuRoC MH_02 against the MH_01 map: the VIO
+    publishing `base_link` gives a map pose for 99.5% of frames at
+    2.21 cm RMSE; simulated wheel odometry (98.7 cm ATE on its own) 98.3%
+    at 3.45 cm.
+
+- **The real-time ROS 2 map localization is validated on all eight EuRoC
+  query sequences** (rosbag2 at 1.0x, Fast DDS): within 1.2 points of the
+  offline `basalt_euroc_localize_demo --vio` on the share of frames with a
+  map pose (V2_03 never anchors, as offline), with no VIO reset and at most
+  27 dropped frames per sequence; table in `ros2/visloc-ros2/README.md`.
+
 - **The ROS 2 nodes are tested against ROS 2 Jazzy** with both
   `rmw_fastrtps_cpp` and `rmw_cyclonedds_cpp`, on one host:
   - `ros2 topic` / `ros2 node` see the nodes and decode their messages.

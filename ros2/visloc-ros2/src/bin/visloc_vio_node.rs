@@ -16,14 +16,17 @@ use std::time::{Duration, Instant};
 use nalgebra::Vector3;
 
 use visloc_basalt::RawU16Image;
-use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
+use visloc_ros2::dds::{
+    output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
+};
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::msgs::{Image, Imu, Odometry, Path, PoseStamped, TfMessage};
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::sync::{SensorPacket, VioInputs};
+use visloc_ros2::tf_tree::StaticTransforms;
 use visloc_ros2::vio::{
-    imu_sample_from_msg, odometry_msg, pose_stamped_msg, tf_msg, PathAccumulator, TrackedFrame,
-    VioCore, VioError, VioFrames, VioFrontend, VioOptions,
+    imu_sample_from_msg, odometry_msg, pose_stamped_msg, rebase, tf_msg, PathAccumulator,
+    TrackedFrame, VioCore, VioError, VioFrames, VioFrontend, VioOptions,
 };
 
 const USAGE: &str = "\
@@ -37,8 +40,11 @@ PARAMETERS (--name value  or  -p name:=value):
   calibration            Basalt calibration JSON (same file as the EuRoC demo)   [required]
   config                 Basalt VIO config JSON (same file as the EuRoC demo)    [required]
   odom_frame             header.frame_id of the outputs                          [odom]
-  body_frame             child_frame_id (Basalt body = IMU frame)                [imu_link]
-  publish_tf             publish odom_frame -> body_frame on /tf                 [true]
+  body_frame             the IMU's frame (Basalt's body); child_frame_id of the
+                         outputs unless base_frame is set                        [imu_link]
+  base_frame             publish this frame's pose instead (e.g. base_link, REP-105),
+                         placed relative to body_frame by /tf_static             [none]
+  publish_tf             publish odom_frame -> child frame on /tf                [true]
   publish_path           publish nav_msgs/Path                                   [true]
   path_max_length        poses kept in the published path (drop-oldest)          [2000]
   stereo_sync_tolerance_ms  max |t_left - t_right| for a stereo pair             [2.0]
@@ -56,7 +62,8 @@ PARAMETERS (--name value  or  -p name:=value):
   node_name              node name                                              [visloc_vio]
 
 TOPICS (remap with --remap from=to or -r from:=to):
-  in : left/image_raw, right/image_raw (sensor_msgs/Image), imu (sensor_msgs/Imu)
+  in : left/image_raw, right/image_raw (sensor_msgs/Image), imu (sensor_msgs/Imu),
+       /tf_static (tf2_msgs/TFMessage, with base_frame)
   out: odom (nav_msgs/Odometry), pose (geometry_msgs/PoseStamped),
        path (nav_msgs/Path), /tf (tf2_msgs/TFMessage)
 ";
@@ -184,6 +191,14 @@ fn run() -> Result<(), String> {
         odom_frame: args.string_or("odom_frame", "odom"),
         body_frame: args.string_or("body_frame", "imu_link"),
     };
+    let base_frame = args.string("base_frame").filter(|frame| !frame.is_empty());
+    // The frames of the outputs: the base frame's pose when there is one.
+    let output_frames = VioFrames {
+        odom_frame: frames.odom_frame.clone(),
+        body_frame: base_frame
+            .clone()
+            .unwrap_or_else(|| frames.body_frame.clone()),
+    };
     let publish_tf = args.flag("publish_tf", true)?;
     let publish_path = args.flag("publish_path", true)?;
     let path_max_length = args.parsed_or("path_max_length", 2000usize)?;
@@ -211,6 +226,7 @@ fn run() -> Result<(), String> {
     let pose_topic = args.topic("pose");
     let path_topic = args.topic("path");
     let tf_topic = args.topic("/tf");
+    let tf_static_topic = args.topic("/tf_static");
     args.finish()?;
 
     let read = |path: &str| {
@@ -251,6 +267,18 @@ fn run() -> Result<(), String> {
     } else {
         None
     };
+
+    let transforms = Arc::new(Mutex::new(StaticTransforms::new()));
+    if base_frame.is_some() {
+        let transforms = Arc::clone(&transforms);
+        let tf_static_sub = ros.subscription::<TfMessage>(&tf_static_topic, static_tf_qos())?;
+        spawn_receiver("tf-static-rx", tf_static_sub, move |msg: TfMessage| {
+            transforms
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(&msg);
+        })?;
+    }
 
     for (side, subscription) in [(0usize, left_sub), (1usize, right_sub)] {
         let shared = Arc::clone(&shared);
@@ -343,6 +371,7 @@ fn run() -> Result<(), String> {
     let mut processed = 0u64;
     let mut generation = 0u64;
     let mut error_log = RateLimitedLog::new(Duration::from_secs(2));
+    let mut tf_log = RateLimitedLog::new(Duration::from_secs(5));
     let mut last_status = Instant::now();
     let mut estimator_time = StageTime::default();
     loop {
@@ -388,15 +417,34 @@ fn run() -> Result<(), String> {
                     eprintln!("visloc_vio_node: first pose published");
                 }
                 *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = estimate.gyro_bias;
-                publish_logged(&odom_pub, odometry_msg(&estimate, &frames), "odom");
-                let pose = pose_stamped_msg(&estimate, &frames);
+                let estimate = match &base_frame {
+                    None => estimate,
+                    Some(base) => {
+                        let imu_from_base = transforms
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .lookup(&frames.body_frame, base);
+                        let Some(imu_from_base) = imu_from_base else {
+                            tf_log.log(|| {
+                                format!(
+                                    "no /tf_static transform {} <- {base} yet; not publishing",
+                                    frames.body_frame
+                                )
+                            });
+                            continue;
+                        };
+                        rebase(&estimate, &imu_from_base)
+                    }
+                };
+                publish_logged(&odom_pub, odometry_msg(&estimate, &output_frames), "odom");
+                let pose = pose_stamped_msg(&estimate, &output_frames);
                 if let Some(path_pub) = &path_pub {
                     path.push(pose.clone());
-                    publish_logged(path_pub, path.msg(&frames.odom_frame), "path");
+                    publish_logged(path_pub, path.msg(&output_frames.odom_frame), "path");
                 }
                 publish_logged(&pose_pub, pose, "pose");
                 if let Some(tf_pub) = &tf_pub {
-                    publish_logged(tf_pub, tf_msg(&estimate, &frames), "tf");
+                    publish_logged(tf_pub, tf_msg(&estimate, &output_frames), "tf");
                 }
             }
             Err(error) => {

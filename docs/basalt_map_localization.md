@@ -218,8 +218,108 @@ MH_01 map, localizing every 5th image, with all processes on 4 cores. At
 real time, 99.6% of frames got a map pose, at 2.05 / 5.2 cm (RMSE / max)
 and a median latency of 49 ms; the VIO dropped the rest in its busiest
 stretch. At half speed, 99.8% of frames got a pose, at 2.06 / 5.2 cm.
-Details in
+Played from a rosbag2 at real time, all eight queries above come within 1.2
+points of the offline `--vio --localize-every 5` share of frames with a map
+pose. On a ground robot, the VIO can publish `base_link` and the map node
+can take the camera's position from `/tf_static`, so wheel odometry can be
+anchored too. Details in
 [the node's README](../ros2/visloc-ros2/README.md#visloc_map_localize_node).
+
+## Merging maps of several flights
+
+How many images localize is set mostly by how much of the query flight the
+map covers (see the results above). `basalt_map_merge`
+adds maps of other flights of the same room to a map, in the first map's
+frame:
+
+```bash
+target/release/examples/basalt_map_merge \
+  --base runs/mh01_map --add runs/mh04_map --out runs/mh01_mh04_map
+```
+
+Each added map is registered to the merged map so far
+(`visloc_localization::register_map`). Every keyframe of the added map is
+localized in it like a camera image, using its landmark observations as the
+keypoints and their descriptors. A keyframe counts with at least 15
+inliers: a keyframe has only the keypoints that became landmarks, fewer than
+an image. The transform (yaw and translation, as both maps are
+gravity-aligned) is the one most localized keyframes agree with, within
+25 cm and 2°, refitted to them; fewer than 3 agreeing keyframes fail the
+merge. `merge_maps` then moves the added map into the base frame and
+renumbers it, and fuses each added landmark that lies within 10 cm of a
+base landmark with a descriptor within 50 bits into that landmark. The
+merged map is an ordinary saved map: `basalt_euroc_localize_demo` and
+`visloc_map_localize_node` load it unchanged, and since it keeps the base
+map's frame, the base map's alignment to ground truth still scores it.
+`map.json` lists the sessions with their transforms and registration
+statistics, and `images.csv` gains a `session` column.
+
+Each pair below merges the room's map with the SLAM map of one more flight
+and is queried with the room's remaining flight, which is in neither map
+(maps built and scored as above). "Coverage" is the share of the query's
+poses within 0.5 m of a map flight's pose looking the same way:
+
+| Query → map | Coverage | Localized (alone) | VIO + map: frames with a pose | RMSE / median / max | > 25 cm |
+|---|---|---|---|---|---|
+| MH_04 → MH_01 | 0.1% | 4.6% | 73.1% | 23.0 / 14.8 / 47.1 cm | 418 |
+| MH_04 → **MH_01 + MH_05** | 58.5% | **55.8%** | **99.7%** | **9.5 / 7.3 / 22.0 cm** | **0** |
+| MH_05 → MH_01 | 0.1% | 7.8% | 77.1% | 14.4 / 12.0 / 27.6 cm | 33 |
+| MH_05 → **MH_01 + MH_04** | 53.9% | **43.7%** | **99.8%** | 16.6 / **6.7** / 49.6 cm | 343 |
+| V1_02 → V1_01 | 48.4% | 28.5% | 93.9% | 3.5 / 3.3 / 6.4 cm | 0 |
+| V1_02 → V1_01 + V1_03 | 70.1% | 28.5% | 93.9% | 3.2 / 3.0 / 6.1 cm | 0 |
+| V1_03 → V1_01 | 39.3% | 10.9% | 99.8% | 6.7 / 4.4 / 13.5 cm | 0 |
+| V1_03 → V1_01 + V1_02 | 67.1% | 13.1% | 99.8% | 6.3 / 4.4 / 12.2 cm | 0 |
+| V2_02 → V2_01 | 35.5% | 20.3% | 99.8% | 4.2 / 2.2 / 12.6 cm | 0 |
+| V2_02 → V2_01 + V2_03 | 59.3% | 18.4% | 99.8% | 4.3 / 2.3 / 12.6 cm | 0 |
+| V2_03 → V2_01 | 29.7% | 0.4% | never anchored | — | — |
+| V2_03 → V2_01 + V2_02 | 49.4% | 0.3% | never anchored | — | — |
+| MH_02 → MH_01 | 65.8% | 81.2% | 99.8% | 2.05 / 1.56 / 5.7 cm | 0 |
+| MH_02 → MH_01 + MH_04 | 65.8% | 80.1% | 99.8% | 2.09 / 1.67 / 5.7 cm | 0 |
+
+How each added map registered, against the transform implied by fitting
+each flight's SLAM trajectory to ground truth (that reference is only as
+good as the two fits, i.e. the maps' own errors):
+
+| Added map → base | Its SLAM error (RMSE / max) | Keyframes localized, agreeing | Off the reference over the added flight (mean / max) |
+|---|---|---|---|
+| MH_04 → MH_01 | 7.1 / 18.0 cm | 28 of 706, all | 10.4 / 24.7 cm |
+| MH_05 → MH_01 | 6.3 / 14.6 cm | 60 of 764, all | 5.3 / 11.4 cm |
+| V1_02 → V1_01 | 1.3 / 2.6 cm | 245 of 730, all | 2.3 / 2.5 cm |
+| V1_03 → V1_01 | 2.0 / 4.6 cm | 74 of 1,000, all | 2.9 / 4.3 cm |
+| V2_02 → V2_01 | 1.2 / 3.2 cm | 323 of 978, 322 | 1.5 / 1.9 cm |
+| V2_03 → V2_01 | 4.4 / 22.2 cm | 7 of 940, all | 2.9 / 4.1 cm |
+
+Every merge registered, and no keyframe agreed with a wrong transform.
+What a merge buys depends on the added map:
+
+- **Where the map lacked coverage and the added flight is good, merging
+  works.** MH_04 and MH_05 fly through parts of the hall MH_01 never saw.
+  With the other difficult flight merged in, 6 to 12 times as many images
+  localize. The VIO anchors within 0.25 s instead of after 26-27 s, so
+  99.7-99.8% of frames get a map pose. MH_04's error falls from 23.0 to
+  9.5 cm RMSE, with no pose 25 cm off (418 before).
+- **An added map is only as accurate as itself and its registration.**
+  MH_04's own map is 7.1 cm RMSE from ground truth (MH_01's: 1.5 cm). It
+  was registered on the small part of the hall it shares with MH_01, and
+  away from there it sits up to 25 cm off. MH_05's median error halved
+  (12.0 to 6.7 cm). But from 70 to 80 s, where only MH_04's part of the
+  map covers the flight (MH_01's localizes none of those images), the
+  fixes are 25 cm off. The anchor followed them after a stretch the VIO
+  had carried alone, and two later fixes were rejected before it
+  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo an added map's own
+  distortion; a joint optimization of the merged sessions (not done) would.
+- **Coverage is not the limit for the fast Vicon flights.** V1_02 and V2_02
+  gain 20-24 points of coverage from V1_03 and V2_03, but no images: the
+  difficult flights' maps barely localize them (V1_02 against the V1_03
+  map alone: 26 of 1,710 images). V2_03, conversely, does not localize
+  against any map, even with V2_02's in the merge.
+- **Added landmarks cost a few percent where they add nothing.** The
+  matching's nearest/second-nearest ratio test also sees the added
+  landmarks. Where an added map brings little, 1-9% of the images that
+  localized against the base map stop doing so (MH_02 with MH_04:
+  2,468 to 2,435; V2_02 with V2_03: 477 to 433). Fusing more aggressively
+  (30 cm, 70 bits) recovered 9 of those 44 images on V2_02, and not fusing
+  lost 2 more. Merge flights that cover new ground with a good map.
 
 ## Reproduce
 
@@ -270,10 +370,30 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   --queries 3040
 ```
 
+A merged map (`cargo build ... --example basalt_map_merge`), queried with
+the flight left out of it and scored with the base map's alignment:
+
+```bash
+target/release/examples/basalt_euroc_online_slam_demo --euroc-dir $D/MH_04_difficult \
+  --calibration ... --config ... --out-dir runs/mh04_slam --save-map runs/mh04_map
+target/release/examples/basalt_map_merge \
+  --base runs/mh01_map --add runs/mh04_map --out runs/mh01_mh04_map
+target/release/examples/basalt_euroc_localize_demo \
+  --map runs/mh01_mh04_map --euroc-dir $D/MH_05_difficult --out-dir runs/mh05_on_merged
+python3 scripts/evaluate_map_localization.py --mode fixed \
+  --estimate runs/mh05_on_merged/localization.tum \
+  --reference $D/MH_05_difficult/mav0/state_groundtruth_estimate0/data.csv \
+  --align-estimate runs/mh01_slam/trajectory_online.tum \
+  --align-ground-truth $D/MH_01_easy/mav0/state_groundtruth_estimate0/data.csv \
+  --queries 2273
+```
+
 ## Limits
 
-- One map per environment, built from its "easy" flight; a map merged from
-  several flights would cover more of each room (MH_04/MH_05 especially).
+- One map per environment, built from its "easy" flight, except in
+  [Merging maps of several flights](#merging-maps-of-several-flights). Merged
+  maps are registered rigidly, so an added flight's own map error stays in
+  the merged map.
 - cam0 only. Without `--vio` each image is localized independently; with it
   the anchor is a yaw + translation offset averaged over 5 s, not a joint
   optimization of VIO and map, so its error grows between fixes as measured

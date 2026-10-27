@@ -56,10 +56,11 @@ of the node's output.
 | `left/image_raw` | `sensor_msgs/Image` | in | cam0 of the calibration (reference camera) |
 | `right/image_raw` | `sensor_msgs/Image` | in | cam1 |
 | `imu` | `sensor_msgs/Imu` | in | `angular_velocity` (rad/s) and `linear_acceleration` (m/s²) in the IMU frame of the calibration; orientation ignored |
-| `odom` | `nav_msgs/Odometry` | out | pose of the IMU (body) in a gravity-aligned, z-up `odom` frame; twist in the body frame |
+| `/tf_static` | `tf2_msgs/TFMessage` | in | only with `base_frame`: where the base sits relative to `body_frame` |
+| `odom` | `nav_msgs/Odometry` | out | pose of the IMU (body), or of `base_frame`, in a gravity-aligned, z-up `odom` frame; twist in that frame |
 | `pose` | `geometry_msgs/PoseStamped` | out | same pose |
 | `path` | `nav_msgs/Path` | out | last `path_max_length` poses |
-| `/tf` | `tf2_msgs/TFMessage` | out | `odom_frame -> body_frame` |
+| `/tf` | `tf2_msgs/TFMessage` | out | `odom_frame -> body_frame`, or `odom_frame -> base_frame` |
 
 Output stamps are the left image's header stamps.
 
@@ -69,7 +70,8 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 |---|---|---|
 | `calibration` | required | Basalt calibration JSON |
 | `config` | required | Basalt VIO config JSON |
-| `odom_frame` / `body_frame` | `odom` / `imu_link` | output frame ids |
+| `odom_frame` / `body_frame` | `odom` / `imu_link` | output frame ids; `body_frame` is the IMU's frame |
+| `base_frame` | none | publish this frame's pose instead of the IMU's, e.g. `base_link` (REP-105 `odom -> base_link`), placed by the `/tf_static` transform between `body_frame` and it; nothing is published until that transform arrives |
 | `publish_tf`, `publish_path` | `true` | |
 | `path_max_length` | `2000` | |
 | `stereo_sync_tolerance_ms` | `2.0` | max left/right stamp difference |
@@ -209,16 +211,19 @@ measurements behind the defaults.
 | topic | type | dir | notes |
 |---|---|---|---|
 | `image` | `sensor_msgs/Image` | in | raw images of the map's `camera` (cam0 by default), the same stream the VIO uses |
-| `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of the body (IMU) frame, e.g. `visloc_vio_node`'s; its `header.frame_id` names the odometry frame |
+| `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of a body frame, e.g. `visloc_vio_node`'s or a ground robot's wheel odometry; its `header.frame_id` names the odometry frame and its `child_frame_id` the body |
+| `/tf_static` | `tf2_msgs/TFMessage` | in | only with `extrinsics tf`: where the camera sits relative to the body |
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once anchored |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once anchored (not `pose`, which `visloc_vio_node` publishes) |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, anchored, seconds/metres since the last fix, pending fixes |
 
 | parameter | default | |
 |---|---|---|
-| `map` | required | directory written by `--save-map` (`map.json`, `sparse/`, `landmark_descriptors.txt`) |
+| `map` | required | directory written by `--save-map` (`map.json`, `sparse/`, `landmark_descriptors.txt`), or a map merged from several flights by `basalt_map_merge` (see `docs/basalt_map_localization.md`) |
 | `camera` | `0` | Basalt camera index of `image` |
 | `map_frame` | `map` | |
+| `extrinsics` | `map` | where the camera sits relative to the odometry's body: `map` takes the map's IMU-from-camera (`map.json`; the body is the map's IMU, as with `visloc_vio_node`'s default output); `tf` looks up the `/tf_static` transform from the camera's frame to the odometry's `child_frame_id`, e.g. `base_link` (see [on a ground robot](#on-a-ground-robot)) |
+| `camera_frame` | the image's `frame_id` | with `extrinsics tf`, the camera's frame |
 | `publish_tf` | `true` | |
 | `localize_every` | `5` | localize every N-th received image |
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
@@ -351,8 +356,89 @@ ros2 bag play mh02_bag --delay 3
 python3 tools/bag_to_tum.py out /map_pose map_pose.tum
 ```
 
+**All eight EuRoC queries.** The same setup (Fast DDS, 1.0x, `--delay 3`)
+on every query sequence of `docs/basalt_map_localization.md`, each against
+its room's map, next to the offline
+`basalt_euroc_localize_demo --vio --localize-every 5`:
+
+| query → map | VIO frames dropped | `map_pose` published (offline) | RMSE / max (offline) | first fix |
+|---|---|---|---|---|
+| MH_02 → MH_01 | 2 | 99.7% (99.8%) | 2.0 / 5.2 cm (2.0 / 5.7) | 0.4 s |
+| MH_03 → MH_01 | 19 | 99.0% (99.8%) | 4.3 / 23.0 cm (5.0 / 10.9) | 0.3 s |
+| MH_04 → MH_01 | 2 | 73.4% (73.1%) | 19.5 / 38.2 cm (23.0 / 47.1) | 27.0 s |
+| MH_05 → MH_01 | 0 | 77.0% (77.1%) | 17.6 / 30.3 cm (14.4 / 27.6) | 26.1 s |
+| V1_02 → V1_01 | 5 | 93.5% (93.9%) | 3.4 / 5.8 cm (3.5 / 6.4) | 5.3 s |
+| V1_03 → V1_01 | 12 | 99.1% (99.8%) | 4.3 / 11.7 cm (6.7 / 13.5) | 0.3 s |
+| V2_02 → V2_01 | 27 | 98.6% (99.8%) | 3.5 / 14.1 cm (4.2 / 12.6) | 0.3 s |
+| V2_03 → V2_01 | 0 | never anchored (same offline) | — | — |
+
+No run reset the VIO, and none dropped more than 1.2% of its frames. The
+node's results follow the offline ones, also where those are poor:
+
+- MH_04 and MH_05 fly through parts of the hall the MH_01 map never saw.
+  The anchor starts only after 26-27 s, and the VIO carries the pose
+  through long stretches without a fix.
+- V2_03 localized 1 of 350 images and never anchored. Offline, 0.4% of its
+  images localize.
+- MH_03's worst pose, 23 cm off, comes after 35 s without a fix where the
+  flight leaves the map. There the node's VIO (3 LM iterations, see above)
+  drifted further than the offline run's (5). The first two fixes after
+  the gap were rejected and the third re-anchored; offline, none were
+  rejected.
+
+Read the bag once before playing it (`cat bag/*.mcap > /dev/null`), as
+every run above did. Played straight after a reboot, MH_02 lost 1,106 of
+its 3,040 frames: reads from the cold disk made the playback bursty, and
+the VIO's one-frame queue dropped the bursts. An MH_05 run with the test
+suite compiling on the same cores dropped 194 frames; the run above dropped
+none.
+
 Not covered: RViz (no display was available), Humble, several hosts on a
 real network, and live sensors.
+
+## On a ground robot
+
+A ground robot's frames follow REP-105: `map -> odom -> base_link`, with
+each sensor fixed to `base_link` on `/tf_static` (from
+`robot_state_publisher` and the URDF, or `static_transform_publisher`).
+Both nodes fit into that tree:
+
+- `visloc_vio_node -p body_frame:=<IMU frame> -p base_frame:=base_link`
+  publishes `odom -> base_link`: the odometry's `child_frame_id` is
+  `base_link` and its twist is `base_link`'s, from the `/tf_static`
+  transform between the IMU's frame and `base_link`. Without
+  `base_frame`, the node publishes `odom -> imu_link`. On a robot that
+  gives the IMU frame a second parent next to `base_link -> imu_link`,
+  which tf2 does not allow.
+- `visloc_map_localize_node -p extrinsics:=tf` takes the camera's position
+  from `/tf_static` (from the image's `frame_id` to the odometry's
+  `child_frame_id`) instead of the map's IMU-from-camera calibration. The
+  odometry's body can then be any frame. Wheel odometry works as well as
+  the VIO: on a level floor its `odom` frame is gravity-aligned (z up),
+  and the anchor only estimates a yaw and a translation.
+
+The map is still built by the stereo-inertial SLAM, and the localized camera
+must be the map's camera.
+
+Tested with ROS 2 Jazzy on EuRoC MH_02 against the MH_01 map, played at
+1.0x. Two `static_transform_publisher`s provided `base_link -> imu0` (the
+IMU 10 cm ahead of, 5 cm to the right of and 25 cm above the base, yawed
+90°) and `imu0 -> cam0` (the calibration). `map_pose` is then `base_link`'s
+pose; it is scored after moving it back to the IMU:
+
+| odometry | `map_pose` published | RMSE / max | the odometry alone |
+|---|---|---|---|
+| `visloc_vio_node`, `base_frame:=base_link` | 99.5% of frames | 2.21 / 6.6 cm | 4.4 cm |
+| simulated wheel odometry, 20 Hz | 98.3% of frames | 3.45 / 7.8 cm | 98.7 cm |
+
+"The odometry alone" is its ATE after a rigid fit to ground truth. Both
+nodes received the transforms from rclcpp's transient-local `/tf_static`
+publishers. In the VIO run, `tf2_echo map imu0` resolved
+`map -> odom -> base_link -> imu0`. The wheel odometry is simulated
+(`base_link`'s ground-truth path with a 2% scale error and a yaw error
+growing by 0.5° per metre), because no wheeled-robot data with a
+stereo-inertial map was at hand. Real wheel odometry on an uneven floor
+also tilts, which this does not model.
 
 ## Tests
 
@@ -376,7 +462,9 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   odometry. It asserts that `odom`/`pose`, `pose`/`inlier_count`/
   `/diagnostics`, and `/tf` (`map -> odom`) / `map_pose` arrive with sane
   content; the last against a saved map written from the ORB corners of a
-  synthetic image, with a stationary odometry pose to recover. These
+  synthetic image, with a stationary odometry pose to recover, once with
+  the map's extrinsics and once with `extrinsics tf` and a `base_link`
+  camera offset published once on a transient-local `/tf_static`. These
   tests need UDP multicast on loopback. They pass in an Ubuntu 24.04
   development container with no ROS installed. GitHub's `ubuntu-latest`
   runners are expected to work too, since `ros2-client`'s own CI runs
@@ -390,9 +478,9 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   Humble, several hosts on a real network, or live sensors. Please
   report results.
 * VIO accuracy is the Basalt port's (see the root README's EuRoC results).
-  The node adds no tuning. It has been run on synthetic data and on EuRoC
-  MH_02, both replayed over DDS by a RustDDS player and played from a
-  rosbag2, not on a live sensor.
+  The node adds no tuning. It has been run on synthetic data and on all
+  eight EuRoC query sequences, replayed over DDS by a RustDDS player (MH_02)
+  and played from a rosbag2, not on a live sensor.
 * `nav_msgs/Odometry` covariances are zero (unknown): the marginalized
   Basalt window does not expose a calibrated per-frame covariance.
 * The localization covariance is a fixed, configurable diagonal, not an
@@ -406,8 +494,12 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
 * The camera/IMU time offset is taken from the calibration
   (`cam_time_offset_ns`) and not estimated online.
 * `visloc_map_localize_node` needs gravity-aligned odometry (z up), as a
-  VIO provides; planar wheel odometry without roll/pitch would need its
-  frames aligned to gravity. Its map is the stereo-inertial SLAM's (ORB),
+  VIO provides. Planar wheel odometry qualifies on level floors only; on a
+  ramp its missing pitch and height change are errors the anchor can only
+  correct at fixes. It has been tested with simulated, not real, wheel
+  odometry ([above](#on-a-ground-robot)). Camera extrinsics come from the
+  map or from `/tf_static`, which is read as static: a camera that moves
+  on the robot (pan-tilt) is not supported. Its map is the stereo-inertial SLAM's (ORB),
   not a COLMAP/SIFT model. The anchor is a filtered yaw + translation
   offset, not a joint optimization with the VIO, so the pose error grows
   between fixes where the map does not cover the route.

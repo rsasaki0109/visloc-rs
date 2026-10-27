@@ -366,14 +366,31 @@ impl MapLocalizer {
         }
     }
 
-    /// Matches and solves one image's features. With a `prior` (and a
-    /// projection radius) the projection search runs first and the
-    /// map-wide one only if it fails.
+    /// `T_camera_imu` from the map's calibration.
+    pub const fn camera_from_imu(&self) -> &SE3 {
+        &self.camera_from_imu
+    }
+
+    /// Matches and solves one image's features, for a body that is the
+    /// map's IMU. With a `prior` (and a projection radius) the projection
+    /// search runs first and the map-wide one only if it fails.
     pub fn localize_features(&self, features: &ImageFeatures, prior: Option<&SE3>) -> Fix {
+        self.localize_features_with(features, prior, &self.camera_from_imu)
+    }
+
+    /// [`Self::localize_features`] for a body `camera_from_body` away from
+    /// the camera (e.g. a robot's `base_link`, from `/tf_static`); `prior`
+    /// and the fix are that body's poses.
+    pub fn localize_features_with(
+        &self,
+        features: &ImageFeatures,
+        prior: Option<&SE3>,
+        camera_from_body: &SE3,
+    ) -> Fix {
         let started = Instant::now();
         let projection = prior.zip(self.projection_radius_px).map(|(prior, radius)| {
             let pose = MapPose {
-                world_to_camera: self.camera_from_imu.compose(&prior.inverse()),
+                world_to_camera: camera_from_body.compose(&prior.inverse()),
             };
             self.solve(
                 Matching::Projection,
@@ -386,6 +403,7 @@ impl MapLocalizer {
                     self.gates,
                 ),
                 features,
+                camera_from_body,
             )
         });
         let mut fix = match projection {
@@ -399,6 +417,7 @@ impl MapLocalizer {
                     self.match_threads,
                 ),
                 features,
+                camera_from_body,
             ),
         };
         fix.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -410,6 +429,7 @@ impl MapLocalizer {
         matching: Matching,
         correspondences: visloc_localization::CorrespondenceSet,
         features: &ImageFeatures,
+        camera_from_body: &SE3,
     ) -> Fix {
         let result = self
             .pipeline
@@ -417,7 +437,7 @@ impl MapLocalizer {
         let map_from_body = (result.success)
             .then_some(result.pose.as_ref())
             .flatten()
-            .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
+            .map(|pose| pose.camera_to_world().compose(camera_from_body));
         Fix {
             failure: map_from_body.is_none().then(|| {
                 result.failure_reason.as_ref().map_or_else(
