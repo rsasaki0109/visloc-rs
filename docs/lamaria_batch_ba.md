@@ -1119,7 +1119,11 @@ would fix it. Nor do these:
   in 11 stretches (285 s of 1,689 s), to 0.37° per frame. The shift between two
   frames' line-direction histograms 8–40 s apart follows the true change of
   the solve's heading error at a correlation of 0.35 at most, 0.34–0.71° off at
-  the median, and its mean rate over the sequence misses the drift.
+  the median, and its mean rate over the sequence misses the drift. On
+  training R_12_10cp (cam0 at 2 Hz) the histograms of 10 s windows 30–180 s
+  apart differ by 1.5–2.6° at the median even by the pseudo-GT, against
+  0.15–0.18° of change in the heading error, and by the solve their shift
+  does not follow it (correlation −0.19 … 0.00).
 
 Over a one-way route, the heading beyond a minute is the integrated
 gyroscope's, and the cameras and the IMU leave its bias undetermined.
