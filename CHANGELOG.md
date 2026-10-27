@@ -4,7 +4,30 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **ROS 2 nodes: relative topics were invisible to ROS 2.** `ros2-client`
+  0.11 resolves a relative topic name in the root namespace to the DDS
+  topic `rt//odom` instead of `rt/odom`. Only other `ros2-client` nodes
+  saw those topics, so a ROS 2 subscriber to `/odom`, `/map_pose`,
+  `/pose` or `/path`, or a camera driver publishing `/left/image_raw`,
+  never connected; only the absolute `/tf` and `/diagnostics` did. The
+  nodes now resolve names under their namespace themselves (`odom` is
+  `/odom`, `/robot1/odom` with `-r __ns:=/robot1`).
+
 ### Added
+
+- **The ROS 2 nodes are tested against ROS 2 Jazzy** with both
+  `rmw_fastrtps_cpp` and `rmw_cyclonedds_cpp`, on one host:
+  - `ros2 topic` / `ros2 node` see the nodes and decode their messages.
+  - `tf2_echo map imu_link` resolves the REP-105 chain.
+  - EuRoC MH_02 played from a rosbag2 into the VIO and map nodes, with
+    reliable or best-effort publishers, gets a map pose for 98.7-99.7% of
+    frames at 2.06 cm RMSE.
+  - New helper scripts, both run with a sourced ROS 2 environment:
+    `ros2/visloc-ros2/tools/euroc_to_rosbag2.py` converts a EuRoC sequence
+    to a bag, and `tools/bag_to_tum.py` writes a recorded pose topic as a
+    TUM trajectory.
 
 - **Real-time map localization (ROS 2).** `visloc_vio_node` and
   `visloc_map_localize_node` now keep up with EuRoC MH_02 replayed over DDS
