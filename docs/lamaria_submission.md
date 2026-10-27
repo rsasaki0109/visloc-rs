@@ -127,7 +127,9 @@ street tracks last even with both cameras (sequence_5_5: 29 m over its
 90 s ride), and holding the ride until the steps come back adds motion
 after it that is not there. On the training sequences (GitHub Actions,
 before / after): sequence_5_11 66.77 / 65.94, sequence_5_12 6.76 / 6.27,
-within a rerun's spread.
+within a rerun's spread. On the test set it takes the track from 26.9 to 30.6
+(submission 4, [lamaria_test_results.md](lamaria_test_results.md#what-changed-between-the-submissions)),
+though it costs sequence_5_4 its first ride.
 
 By day the BA chain matches the keyframes once more after its batch pass,
 guided by the pass's trajectory instead of the VIO, and solves again
@@ -138,7 +140,8 @@ heading drifts far less than the VIO's. On the eight day training sequences
 down by more than 0.05; on training R_12_10cp, a fast walk along open streets
 like the Short test sequences that score lowest, 61.09 / 64.30
 ([lamaria_batch_ba.md](lamaria_batch_ba.md#matching-again-after-the-pass)). It
-adds 10-20 minutes per sequence on a runner.
+adds 10-20 minutes per sequence on a runner. On the test set it moves the day
+trajectories by 0.3 m or less (submission 4).
 
 IMU rectification is on by default
 ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md); +4.35 Score on
