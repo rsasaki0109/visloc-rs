@@ -140,6 +140,33 @@ It barely raises the localized rate. Combined with a low inlier threshold it
 accepts wrong poses, since with fewer candidates the nearest /
 second-nearest ratio test also passes wrong matches.
 
+### Duplicate landmarks and the ratio test
+
+The ratio test rejects a keypoint whose two nearest landmark descriptors are
+about equally close. A map can hold several landmarks for one physical
+point: the SLAM's tracks break and restart, and a map
+[merged from several flights](#merging-maps-of-several-flights) holds each
+session's landmarks. Those duplicates have nearly the same descriptor, so
+the ratio test rejects keypoints of exactly the points the map knows twice.
+With `--duplicate-radius-m R` (`duplicate_radius` in
+`visloc_map_localize_node`), landmarks within R of the best one count as
+the same point. The ratio test then compares the best landmark with the
+best one farther away (`BinaryLandmarkIndex::with_duplicate_radius`):
+
+| Query → map | off | 5 cm | 10 cm | 20 cm |
+|---|---|---|---|---|
+| MH_02 → MH_01 | 81.2% (max 16.8 cm) | 82.3% (8.1 cm) | 83.1% (7.6 cm) | 83.7% (8.7 cm) |
+| V2_02 → V2_01 | 20.3% | | 21.0% | |
+| V2_02 → V2_01 + V2_03 (merged) | 18.4% | 19.0% | 19.3% | 19.6% |
+
+The RMSE stays within 0.1 cm (1.75-1.83 cm on MH_02, 2.1-2.2 cm on V2_02),
+and no pose is more than 10 cm off. The gain is small and it is off by
+default, which keeps the tables on this page reproducible; 10 cm matches the
+fusion radius of `basalt_map_merge`. The demo now matches map-wide through
+`BinaryLandmarkIndex`, which gives the same matches as before (MH_02's
+`localization.tum` is byte-identical) at a median 67 ms per image instead
+of 86 ms.
+
 ## Anchoring the VIO to the map
 
 Image localization gives a pose only for the images that match the map. With
@@ -318,8 +345,10 @@ What a merge buys depends on the added map:
   landmarks. Where an added map brings little, 1-9% of the images that
   localized against the base map stop doing so (MH_02 with MH_04:
   2,468 to 2,435; V2_02 with V2_03: 477 to 433). Fusing more aggressively
-  (30 cm, 70 bits) recovered 9 of those 44 images on V2_02, and not fusing
-  lost 2 more. Merge flights that cover new ground with a good map.
+  (30 cm, 70 bits) recovered 9 of those 44 images on V2_02, not fusing
+  lost 2 more, and `--duplicate-radius-m 0.1` recovers 20
+  ([above](#duplicate-landmarks-and-the-ratio-test)).
+  Merge flights that cover new ground with a good map.
 
 ## Reproduce
 

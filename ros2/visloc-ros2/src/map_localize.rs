@@ -69,6 +69,11 @@ pub struct MapLocalizeOptions {
     pub projection_radius_px: Option<f64>,
     /// Threads of the map-wide search.
     pub match_threads: usize,
+    /// Map-wide search: landmarks closer than this to the best one count as
+    /// the same point in the ratio test
+    /// (`BinaryLandmarkIndex::with_duplicate_radius`); `None` is the plain
+    /// ratio test.
+    pub duplicate_radius_m: Option<f64>,
     pub anchor: MapAnchorConfig,
     /// Odometry poses kept for pairing with fixes.
     pub odom_history_s: f64,
@@ -93,6 +98,7 @@ impl Default for MapLocalizeOptions {
             reprojection_px: 3.0,
             projection_radius_px: Some(20.0),
             match_threads: 1,
+            duplicate_radius_m: None,
             anchor: MapAnchorConfig::default(),
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,
@@ -282,7 +288,8 @@ impl MapLocalizer {
             ratio: options.ratio,
         };
         Ok(Self {
-            index: BinaryLandmarkIndex::new(&map.map, &map.descriptors),
+            index: BinaryLandmarkIndex::new(&map.map, &map.descriptors)
+                .with_duplicate_radius(options.duplicate_radius_m.unwrap_or(0.0)),
             max_points: options.max_points.unwrap_or(map.max_points),
             map,
             camera,

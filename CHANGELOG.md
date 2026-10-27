@@ -120,6 +120,17 @@ All notable changes to `visloc-rs` will be documented here.
     The page reports whether the phone offers WebGPU and the main
     thread's time to read a frame back.
 
+- **Duplicate-tolerant ratio test.**
+  `BinaryLandmarkIndex::with_duplicate_radius` makes the map-wide search
+  compare the best landmark with the best one farther than a radius from
+  it. Landmarks of one physical point (broken SLAM tracks, sessions of a
+  merged map) then no longer reject each other's matches. Off by default.
+  Enable it with `basalt_euroc_localize_demo --duplicate-radius-m` or
+  `visloc_map_localize_node -p duplicate_radius:=...`. At 10 cm, MH_02
+  against MH_01 localizes 83.1% of its images (81.2%), with the worst pose
+  7.6 cm off instead of 16.8 cm. V2_02 against V2_01 merged with V2_03 goes
+  from 18.4% to 19.3%.
+
 - **Merging maps of several flights.** `basalt_map_merge --base A --add B
   --out AB` registers saved SLAM maps of the same place to the first one
   and writes one map in its frame. `visloc_localization::register_map`
@@ -272,6 +283,10 @@ All notable changes to `visloc-rs` will be documented here.
     ADVIO at 60 fps from 2.65 m to 7.0 m. With it, 4.3 m and 2 resets
     instead of 13; at 30 Hz neutral. A test checks the covariance no
     longer depends on where an interval's samples fall.
+
+- `basalt_euroc_localize_demo` matches map-wide through
+  `BinaryLandmarkIndex`: the same matches as before (byte-identical
+  output on MH_02), at a median 67 ms per image instead of 86 ms.
 
 - **Basalt KLT frontend about 38% faster, bit-identical.** The five bilinear
   samples of an interpolated gradient now share one neighbourhood read. FAST

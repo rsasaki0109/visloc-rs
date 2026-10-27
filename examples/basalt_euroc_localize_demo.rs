@@ -72,7 +72,9 @@ use visloc_basalt::pyramid::RawU16Image;
 use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationResult, QueryImage};
-use visloc_rs::localization::{FixOutcome, MapAnchor, MapAnchorConfig};
+use visloc_rs::localization::{
+    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, MapAnchor, MapAnchorConfig,
+};
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_rs::{
@@ -97,6 +99,8 @@ struct Args {
     reprojection_px: f64,
     ransac_iterations: usize,
     prior_radius_m: Option<f64>,
+    /// Map landmarks closer than this count as one point in the ratio test.
+    duplicate_radius_m: Option<f64>,
     /// Run the Basalt VIO alongside and anchor it to the map.
     vio: bool,
     calibration: Option<PathBuf>,
@@ -112,7 +116,7 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
-         [--prior-radius-m M] \
+         [--prior-radius-m M] [--duplicate-radius-m M] \
          [--vio --calibration FILE --config FILE [--localize-every N]] [--dump-inliers FILE]"
             .into()
     }
@@ -139,6 +143,7 @@ impl Args {
             reprojection_px: 3.0,
             ransac_iterations: 1000,
             prior_radius_m: None,
+            duplicate_radius_m: None,
             vio: false,
             calibration: None,
             config: None,
@@ -179,6 +184,9 @@ impl Args {
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
+                "--duplicate-radius-m" => {
+                    args.duplicate_radius_m = Some(number(&option, value()?)?);
+                }
                 "--vio" => args.vio = true,
                 "--calibration" => args.calibration = Some(PathBuf::from(value()?)),
                 "--config" => args.config = Some(PathBuf::from(value()?)),
@@ -290,6 +298,10 @@ struct Localizer {
     camera_from_imu: SE3,
     max_points: usize,
     pipeline: Pipeline,
+    /// The map's descriptors packed for the map-wide search, which gives
+    /// the pipeline's correspondences (tested in `visloc-localization`).
+    index: BinaryLandmarkIndex,
+    gates: BinaryMatchGates,
     prior_radius_m: Option<f64>,
     previous: Option<Pose>,
 }
@@ -314,12 +326,19 @@ impl Localizer {
             map.map.landmarks.len(),
             map.descriptors.len()
         );
+        let index = BinaryLandmarkIndex::new(&map.map, &map.descriptors)
+            .with_duplicate_radius(args.duplicate_radius_m.unwrap_or(0.0));
         Ok(Self {
             max_points: args.max_points.unwrap_or(map.max_points),
             map,
             camera,
             camera_from_imu: imu_from_camera.inverse(),
             pipeline: pipeline(args),
+            index,
+            gates: BinaryMatchGates {
+                max_distance: args.max_hamming,
+                ratio: args.ratio,
+            },
             prior_radius_m: args.prior_radius_m,
             previous: None,
         })
@@ -344,10 +363,14 @@ impl Localizer {
         let used_prior = prior_result.as_ref().is_some_and(accepted);
         let result = match prior_result {
             Some(result) if used_prior => result,
-            _ => self.pipeline.localize_with_descriptor_store(
-                &query,
-                &self.map.map,
-                &self.map.descriptors,
+            _ => self.pipeline.localize_correspondences(
+                &self.camera,
+                self.index.match_all(
+                    &query.keypoints,
+                    &self.index.pack_query(&query.descriptors),
+                    self.gates,
+                    1,
+                ),
             ),
         };
         let latency_ms = started.elapsed().as_secs_f64() * 1e3;
