@@ -1806,6 +1806,7 @@ version = "0.3.1"
 dependencies = [
  "futures",
  "nalgebra",
+ "rayon",
  "ros2-client",
  "serde",
  "serde_json",

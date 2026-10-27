@@ -5,7 +5,11 @@
 //! Same path as `basalt_euroc_localize_demo --vio`
 //! (`docs/basalt_map_localization.md`): each localized image goes through the
 //! Basalt mapper's own ORB frontend, is matched to the map's landmark
-//! descriptors by Hamming distance and solved with P3P RANSAC; an accepted
+//! descriptors by Hamming distance and solved with P3P RANSAC. Once anchored,
+//! the anchor and odometry predict the pose, and matching only compares each
+//! landmark with the keypoints near its predicted projection (falling back
+//! to the map-wide search when that fails), which keeps localization cheap
+//! enough to run next to the VIO in real time; an accepted
 //! pose (a *fix*) is paired with the odometry pose at the same stamp and fed
 //! to [`MapAnchor`], which keeps the `map -> odom` transform (REP-105). Every
 //! odometry pose is then reported in the map frame, with the time and
@@ -27,13 +31,13 @@ use visloc_basalt::mapper::{
     orb_descriptor_to_f32,
 };
 use visloc_basalt::RawU16Image;
-use visloc_core::geometry::SE3;
-use visloc_core::types::{Camera, LandmarkDescriptorStore, QueryImage, VisualMap};
+use visloc_core::geometry::{Pose as MapPose, SE3};
+use visloc_core::types::{Camera, LandmarkDescriptorStore, VisualMap};
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::read_landmark_descriptors_txt;
 use visloc_localization::{
-    AllLandmarksSelector, FixOutcome, LocalizationConfig, LocalizationPipeline, MapAnchor,
-    MapAnchorConfig,
+    AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, LocalizationConfig,
+    LocalizationPipeline, MapAnchor, MapAnchorConfig, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
@@ -60,6 +64,11 @@ pub struct MapLocalizeOptions {
     pub min_inliers: usize,
     pub ransac_iterations: usize,
     pub reprojection_px: f64,
+    /// Once anchored: search radius around each landmark's predicted
+    /// projection; `None` always matches map-wide.
+    pub projection_radius_px: Option<f64>,
+    /// Threads of the map-wide search.
+    pub match_threads: usize,
     pub anchor: MapAnchorConfig,
     /// Odometry poses kept for pairing with fixes.
     pub odom_history_s: f64,
@@ -82,6 +91,8 @@ impl Default for MapLocalizeOptions {
             min_inliers: 30,
             ransac_iterations: 1000,
             reprojection_px: 3.0,
+            projection_radius_px: Some(20.0),
+            match_threads: 1,
             anchor: MapAnchorConfig::default(),
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,
@@ -162,11 +173,32 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
 
 type Pipeline = LocalizationPipeline<HammingMatcher, AllLandmarksSelector, PnPRansac<P3PGrunert>>;
 
+/// How the 2D-3D matches of a localization attempt were found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matching {
+    /// Every keypoint against every map landmark.
+    Global,
+    /// Each landmark against the keypoints near its projection from the
+    /// pose predicted by the anchor and odometry.
+    Projection,
+}
+
+impl Matching {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Projection => "projection",
+        }
+    }
+}
+
 /// One localization attempt.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fix {
     /// The body (IMU) pose in the map frame, when accepted.
     pub map_from_body: Option<SE3>,
+    /// The search of the final attempt; `None` when matching did not run.
+    pub matching: Option<Matching>,
     pub keypoints: usize,
     pub matches: usize,
     pub inliers: usize,
@@ -174,12 +206,38 @@ pub struct Fix {
     pub failure: Option<String>,
 }
 
+impl Fix {
+    /// An attempt that failed before matching.
+    pub const fn failed(failure: String) -> Self {
+        Self {
+            map_from_body: None,
+            matching: None,
+            keypoints: 0,
+            matches: 0,
+            inliers: 0,
+            elapsed_ms: 0.0,
+            failure: Some(failure),
+        }
+    }
+}
+
+/// ORB features of one image, ready for [`MapLocalizer::localize_features`].
+pub struct ImageFeatures {
+    pub keypoints: Vec<nalgebra::Point2<f64>>,
+    descriptors: PackedDescriptors,
+    pub extract_ms: f64,
+}
+
 /// Localizes one camera's images against a [`SavedBasaltMap`].
 pub struct MapLocalizer {
     map: SavedBasaltMap,
+    index: BinaryLandmarkIndex,
     camera: Camera,
     camera_from_imu: SE3,
     max_points: usize,
+    gates: BinaryMatchGates,
+    projection_radius_px: Option<f64>,
+    match_threads: usize,
     pipeline: Pipeline,
 }
 
@@ -217,15 +275,24 @@ impl MapLocalizer {
             early_stop_inlier_ratio: None,
             confidence: Some(0.999),
         };
+        // The pipeline only estimates and gates poses; matching goes through
+        // the packed index with the same gates.
         let matcher = HammingMatcher {
             max_distance: options.max_hamming,
             ratio: options.ratio,
         };
         Ok(Self {
+            index: BinaryLandmarkIndex::new(&map.map, &map.descriptors),
             max_points: options.max_points.unwrap_or(map.max_points),
             map,
             camera,
             camera_from_imu,
+            gates: BinaryMatchGates {
+                max_distance: options.max_hamming,
+                ratio: options.ratio,
+            },
+            projection_radius_px: options.projection_radius_px,
+            match_threads: options.match_threads.max(1),
             pipeline: LocalizationPipeline::with_pose_estimator(
                 matcher,
                 AllLandmarksSelector,
@@ -243,67 +310,110 @@ impl MapLocalizer {
         &self.camera
     }
 
-    /// Localizes one raw image with the mapper's ORB frontend.
-    pub fn localize(&self, image: &RawU16Image) -> Fix {
+    /// Localizes one raw image; `prior` is the body pose in the map
+    /// predicted for it (see [`AnchorCore::prior`]).
+    pub fn localize(&self, image: &RawU16Image, prior: Option<&SE3>) -> Fix {
         let started = Instant::now();
-        if (image.width(), image.height())
-            != (self.camera.width as usize, self.camera.height as usize)
-        {
-            return Fix {
-                map_from_body: None,
-                keypoints: 0,
-                matches: 0,
-                inliers: 0,
-                elapsed_ms: 0.0,
-                failure: Some(format!(
-                    "image is {}x{}, the map camera {}x{}",
-                    image.width(),
-                    image.height(),
-                    self.camera.width,
-                    self.camera.height
-                )),
-            };
-        }
-        let corners = detect_keypoints_mapping(image, self.max_points);
-        let angles = compute_angles(image, &corners, true);
-        let descriptors = match compute_descriptors(image, &corners, &angles) {
-            Ok(descriptors) => descriptors,
-            Err(error) => {
-                return Fix {
-                    map_from_body: None,
-                    keypoints: corners.len(),
-                    matches: 0,
-                    inliers: 0,
-                    elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
-                    failure: Some(format!("ORB descriptors: {error}")),
-                }
-            }
+        let mut fix = match self.extract(image) {
+            Ok(features) => self.localize_features(&features, prior),
+            Err(failure) => Fix::failed(failure),
         };
-        let mut fix = self.localize_features(
-            corners,
-            descriptors.iter().map(orb_descriptor_to_f32).collect(),
-        );
         fix.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         fix
     }
 
-    /// Localizes already extracted keypoints and unpacked ORB descriptors.
-    pub fn localize_features(
+    /// Runs the mapper's ORB frontend on one raw image; the error is the
+    /// failure reason.
+    pub fn extract(&self, image: &RawU16Image) -> Result<ImageFeatures, String> {
+        let started = Instant::now();
+        if (image.width(), image.height())
+            != (self.camera.width as usize, self.camera.height as usize)
+        {
+            return Err(format!(
+                "image is {}x{}, the map camera {}x{}",
+                image.width(),
+                image.height(),
+                self.camera.width,
+                self.camera.height
+            ));
+        }
+        let corners = detect_keypoints_mapping(image, self.max_points);
+        let angles = compute_angles(image, &corners, true);
+        let descriptors = compute_descriptors(image, &corners, &angles)
+            .map_err(|error| format!("ORB descriptors: {error}"))?;
+        let descriptors = descriptors
+            .iter()
+            .map(orb_descriptor_to_f32)
+            .collect::<Vec<_>>();
+        Ok(ImageFeatures {
+            descriptors: self.index.pack_query(&descriptors),
+            keypoints: corners,
+            extract_ms: started.elapsed().as_secs_f64() * 1e3,
+        })
+    }
+
+    /// Features from keypoints and unpacked binary descriptors (one `0.0` /
+    /// `1.0` per bit) extracted elsewhere.
+    pub fn features(
         &self,
         keypoints: Vec<nalgebra::Point2<f64>>,
-        descriptors: Vec<Vec<f32>>,
-    ) -> Fix {
-        let started = Instant::now();
-        let query = QueryImage {
-            camera: self.camera.clone(),
+        descriptors: &[Vec<f32>],
+    ) -> ImageFeatures {
+        ImageFeatures {
+            descriptors: self.index.pack_query(descriptors),
             keypoints,
-            descriptors,
+            extract_ms: 0.0,
+        }
+    }
+
+    /// Matches and solves one image's features. With a `prior` (and a
+    /// projection radius) the projection search runs first and the
+    /// map-wide one only if it fails.
+    pub fn localize_features(&self, features: &ImageFeatures, prior: Option<&SE3>) -> Fix {
+        let started = Instant::now();
+        let projection = prior.zip(self.projection_radius_px).map(|(prior, radius)| {
+            let pose = MapPose {
+                world_to_camera: self.camera_from_imu.compose(&prior.inverse()),
+            };
+            self.solve(
+                Matching::Projection,
+                self.index.match_projected(
+                    &self.camera,
+                    &pose,
+                    &features.keypoints,
+                    &features.descriptors,
+                    radius,
+                    self.gates,
+                ),
+                features,
+            )
+        });
+        let mut fix = match projection {
+            Some(fix) if fix.map_from_body.is_some() => fix,
+            _ => self.solve(
+                Matching::Global,
+                self.index.match_all(
+                    &features.keypoints,
+                    &features.descriptors,
+                    self.gates,
+                    self.match_threads,
+                ),
+                features,
+            ),
         };
-        let result = self.pipeline.localize_with_descriptor_store(
-            &query,
-            &self.map.map,
-            &self.map.descriptors,
-        );
+        fix.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+        fix
+    }
+
+    fn solve(
+        &self,
+        matching: Matching,
+        correspondences: visloc_localization::CorrespondenceSet,
+        features: &ImageFeatures,
+    ) -> Fix {
+        let result = self
+            .pipeline
+            .localize_correspondences(&self.camera, correspondences);
         let map_from_body = (result.success)
             .then_some(result.pose.as_ref())
             .flatten()
@@ -316,10 +426,11 @@ impl MapLocalizer {
                 )
             }),
             map_from_body,
-            keypoints: query.keypoints.len(),
+            matching: Some(matching),
+            keypoints: features.keypoints.len(),
             matches: result.match_count,
             inliers: result.inlier_count,
-            elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
+            elapsed_ms: 0.0,
         }
     }
 }
@@ -483,6 +594,21 @@ impl AnchorCore {
         (events, self.latest_anchored())
     }
 
+    /// The body pose in the map at `stamp_ns` that the anchor and odometry
+    /// predict, as a localization prior; [`OdomLookup::Unavailable`] before
+    /// anchoring.
+    pub fn prior(&self, stamp_ns: i64) -> OdomLookup {
+        let Some(map_from_odom) = self.anchor.map_from_odom() else {
+            return OdomLookup::Unavailable;
+        };
+        match self.odom.lookup(stamp_ns, self.max_gap_ns) {
+            OdomLookup::Pose(odom_from_body) => {
+                OdomLookup::Pose(map_from_odom.compose(&odom_from_body))
+            }
+            other => other,
+        }
+    }
+
     /// The newest odometry pose in the map frame, once anchored.
     pub fn latest_anchored(&self) -> Option<AnchoredPose> {
         let (stamp_ns, odom_from_body) = self.latest_odom.as_ref()?;
@@ -608,6 +734,10 @@ pub fn map_diagnostics_msg(
                 value("inliers", fix.inliers.to_string()),
                 value("matches", fix.matches.to_string()),
                 value("keypoints", fix.keypoints.to_string()),
+                value(
+                    "matching",
+                    fix.matching.map_or("", Matching::name).to_owned(),
+                ),
                 value("processing_ms", format!("{:.2}", fix.elapsed_ms)),
                 value("failure", fix.failure.clone().unwrap_or_default()),
                 value("anchored", anchored.is_some().to_string()),
@@ -857,15 +987,38 @@ mod tests {
                 descriptors.push(descriptor(index));
             }
         }
-        let fix = localizer.localize_features(keypoints, descriptors);
+        let features = localizer.features(keypoints, &descriptors);
+        let fix = localizer.localize_features(&features, None);
+        assert_eq!(fix.matching, Some(Matching::Global));
         assert!(fix.inliers >= 90, "{fix:?}");
         let estimate = fix.map_from_body.expect("localized");
         assert!((estimate.translation - map_from_body.translation).norm() < 1e-3);
         assert!(estimate.rotation.angle_to(&map_from_body.rotation) < 1e-3);
 
+        // With a prior a few centimetres and a degree off, the projection
+        // search finds the same pose.
+        let prior = map_from_body.compose(&SE3::new(
+            UnitQuaternion::from_euler_angles(0.01, -0.01, 0.005),
+            Vector3::new(0.03, -0.02, 0.01),
+        ));
+        let fix = localizer.localize_features(&features, Some(&prior));
+        assert_eq!(fix.matching, Some(Matching::Projection));
+        assert!(fix.inliers >= 90, "{fix:?}");
+        let estimate = fix.map_from_body.expect("localized");
+        assert!((estimate.translation - map_from_body.translation).norm() < 1e-3);
+
+        // A prior far off finds nothing nearby; the map-wide search recovers.
+        let wrong = map_from_body.compose(&SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.6),
+            Vector3::zeros(),
+        ));
+        let fix = localizer.localize_features(&features, Some(&wrong));
+        assert_eq!(fix.matching, Some(Matching::Global));
+        assert!(fix.map_from_body.is_some(), "{fix:?}");
+
         // A wrong-sized image is reported, not localized.
         let image = RawU16Image::new(64, 48, vec![0; 64 * 48]).expect("image");
-        let fix = localizer.localize(&image);
+        let fix = localizer.localize(&image, None);
         assert!(fix.map_from_body.is_none());
         assert!(fix.failure.expect("reason").contains("64x48"));
     }
