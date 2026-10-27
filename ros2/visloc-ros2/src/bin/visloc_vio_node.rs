@@ -4,20 +4,26 @@
 //! `imu` (`sensor_msgs/Imu`); publishes `odom` (`nav_msgs/Odometry`), `pose`
 //! (`geometry_msgs/PoseStamped`), `path` (`nav_msgs/Path`) and optionally
 //! `/tf`. Run with `--help` for parameters.
+//!
+//! KLT tracking runs on its own thread, one frame ahead of the estimator
+//! (the main thread), as upstream Basalt's optical-flow and VIO threads do.
 
 use std::process;
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+use nalgebra::Vector3;
 
 use visloc_basalt::RawU16Image;
 use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::msgs::{Image, Imu, Odometry, Path, PoseStamped, TfMessage};
 use visloc_ros2::params::NodeArgs;
-use visloc_ros2::sync::VioInputs;
+use visloc_ros2::sync::{SensorPacket, VioInputs};
 use visloc_ros2::vio::{
-    imu_sample_from_msg, odometry_msg, pose_stamped_msg, tf_msg, PathAccumulator, VioCore,
-    VioFrames, VioOptions,
+    imu_sample_from_msg, odometry_msg, pose_stamped_msg, tf_msg, PathAccumulator, TrackedFrame,
+    VioCore, VioError, VioFrames, VioFrontend, VioOptions,
 };
 
 const USAGE: &str = "\
@@ -36,7 +42,9 @@ PARAMETERS (--name value  or  -p name:=value):
   publish_path           publish nav_msgs/Path                                   [true]
   path_max_length        poses kept in the published path (drop-oldest)          [2000]
   stereo_sync_tolerance_ms  max |t_left - t_right| for a stereo pair             [2.0]
-  frame_queue            paired frames buffered for the estimator (drop-oldest)  [4]
+  frame_queue            paired frames waiting for the frontend (drop-oldest)    [1]
+  frontend_threads       worker threads of the KLT frontend (0: shared with the
+                         estimator's pool)                                       [2]
   imu_buffer             IMU samples buffered (drop-oldest)                      [4000]
   image_qos_depth        subscription history depth for images                  [5]
   imu_qos_depth          subscription history depth for IMU                     [400]
@@ -59,19 +67,72 @@ fn main() {
 }
 
 struct Shared {
-    inputs: Mutex<VioInputs<RawU16Image>>,
+    inputs: Mutex<Inputs>,
     ready: Condvar,
+    /// Gyro bias of the latest estimate, for the frontend's `imu_seed_klt`.
+    gyro_bias: Mutex<Vector3<f64>>,
+    /// Frontend tracking times since the last status line.
+    frontend_time: Mutex<StageTime>,
+}
+
+/// Processing times of one pipeline stage over a status period.
+#[derive(Default)]
+struct StageTime {
+    count: u32,
+    total: Duration,
+    max: Duration,
+}
+
+impl StageTime {
+    fn add(&mut self, elapsed: Duration) {
+        self.count += 1;
+        self.total += elapsed;
+        self.max = self.max.max(elapsed);
+    }
+
+    /// `avg/max ms` and resets the period.
+    fn take(&mut self) -> String {
+        let summary = format!(
+            "{:.1}/{:.1} ms",
+            self.total.as_secs_f64() * 1e3 / f64::from(self.count.max(1)),
+            self.max.as_secs_f64() * 1e3
+        );
+        *self = Self::default();
+        summary
+    }
+}
+
+/// Sensor inputs plus the stream generation: a VIO reset bumps the
+/// generation together with restarting the input stream, so every packet
+/// popped afterwards belongs to the new stream and both threads can tell
+/// stale work from current work.
+struct Inputs {
+    vio: VioInputs<RawU16Image>,
+    generation: u64,
 }
 
 impl Shared {
     fn with<R>(&self, f: impl FnOnce(&mut VioInputs<RawU16Image>) -> R) -> R {
         let mut guard = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
-        let result = f(&mut guard);
+        let result = f(&mut guard.vio);
         drop(guard);
         self.ready.notify_one();
         result
     }
+
+    /// Restarts the input stream and returns the new generation.
+    fn restart_stream(&self) -> u64 {
+        let mut guard = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        guard.vio.reset_stream();
+        guard.generation += 1;
+        *self.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = Vector3::zeros();
+        guard.generation
+    }
 }
+
+/// Frontend-thread output: a tracked frame, or a tracking error for the
+/// estimator thread to handle, tagged with the stream generation.
+type FrontendResult = (u64, Result<TrackedFrame, VioError>);
 
 /// Logs at most once per `period` per call site.
 struct RateLimitedLog {
@@ -125,7 +186,8 @@ fn run() -> Result<(), String> {
     let publish_path = args.flag("publish_path", true)?;
     let path_max_length = args.parsed_or("path_max_length", 2000usize)?;
     let tolerance_ms = args.parsed_or("stereo_sync_tolerance_ms", 2.0f64)?;
-    let frame_queue = args.parsed_or("frame_queue", 4usize)?;
+    let frame_queue = args.parsed_or("frame_queue", 1usize)?;
+    let frontend_threads = args.parsed_or("frontend_threads", 2usize)?;
     let imu_buffer = args.parsed_or("imu_buffer", 4000usize)?;
     let image_depth = args.parsed_or("image_qos_depth", 5usize)?;
     let imu_depth = args.parsed_or("imu_qos_depth", 400usize)?;
@@ -151,18 +213,24 @@ fn run() -> Result<(), String> {
     let read = |path: &str| {
         std::fs::read_to_string(path).map_err(|error| format!("reading {path}: {error}"))
     };
-    let mut core = VioCore::from_json(&read(&calibration_path)?, &read(&config_path)?, &options)?;
+    let core = VioCore::from_json(&read(&calibration_path)?, &read(&config_path)?, &options)?;
     let expected = [core.expected_resolution(0), core.expected_resolution(1)];
     let shared = Arc::new(Shared {
-        inputs: Mutex::new(VioInputs::new(
-            (tolerance_ms * 1e6).round() as i64,
-            8,
-            frame_queue,
-            imu_buffer,
-            core.cam_time_offset_ns(),
-        )),
+        inputs: Mutex::new(Inputs {
+            vio: VioInputs::new(
+                (tolerance_ms * 1e6).round() as i64,
+                8,
+                frame_queue,
+                imu_buffer,
+                core.cam_time_offset_ns(),
+            ),
+            generation: 0,
+        }),
         ready: Condvar::new(),
+        gyro_bias: Mutex::new(Vector3::zeros()),
+        frontend_time: Mutex::new(StageTime::default()),
     });
+    let (frontend, mut backend) = core.into_stages();
 
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let left_sub = ros.subscription::<Image>(&left_topic, sensor_qos(image_depth))?;
@@ -238,48 +306,85 @@ fn run() -> Result<(), String> {
         },
     );
 
+    // Frontend thread: KLT-track frames in order and hand them over. The
+    // hand-over blocks rather than drops: every tracked frame carries the
+    // IMU since the previous one, so the estimator must see all of them.
+    // It is a rendezvous, so the frontend tracks at most one frame ahead;
+    // when the estimator falls behind, frames wait (and drop-oldest) in the
+    // inputs instead, before tracking, which keeps the newest frame next
+    // and bounds the latency.
+    let (tracked_tx, tracked_rx) = mpsc::sync_channel::<FrontendResult>(0);
+    {
+        let shared = Arc::clone(&shared);
+        // Its own rayon pool keeps the frontend's parallel loops from
+        // queueing behind the estimator's in the global pool.
+        let pool = (frontend_threads > 0)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(frontend_threads)
+                    .thread_name(|index| format!("vio-klt-{index}"))
+                    .build()
+            })
+            .transpose()
+            .map_err(|error| format!("frontend thread pool: {error}"))?;
+        std::thread::Builder::new()
+            .name("vio-frontend".into())
+            .spawn(move || match pool {
+                Some(pool) => pool.install(|| run_frontend(frontend, &shared, &tracked_tx)),
+                None => run_frontend(frontend, &shared, &tracked_tx),
+            })
+            .map_err(|error| format!("spawning the frontend thread: {error}"))?;
+    }
+
     let mut path = PathAccumulator::new(path_max_length);
     let mut processed = 0u64;
-    let mut waiting_log = RateLimitedLog::new(Duration::from_secs(5));
+    let mut generation = 0u64;
     let mut error_log = RateLimitedLog::new(Duration::from_secs(2));
     let mut last_status = Instant::now();
+    let mut estimator_time = StageTime::default();
     loop {
-        let packet = {
-            let guard = shared.inputs.lock().unwrap_or_else(|e| e.into_inner());
-            let (mut guard, timeout) = shared
-                .ready
-                .wait_timeout_while(guard, Duration::from_secs(1), |inputs| {
-                    !inputs.front_ready()
-                })
-                .unwrap_or_else(|e| e.into_inner());
-            if timeout.timed_out() && guard.queued_frames() > 0 {
-                waiting_log
-                    .log(|| "stereo frames queued but IMU has not reached their stamp yet".into());
-            }
-            guard.pop_ready()
-        };
+        let received = tracked_rx.recv_timeout(Duration::from_secs(1));
         if last_status.elapsed() >= Duration::from_secs(10) {
             let stats = shared.with(|inputs| inputs.stats());
+            let frontend_time = shared
+                .frontend_time
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
             eprintln!(
                 "visloc_vio_node: processed={processed} pairs={} dropped_behind={} \
-                 sync_dropped={} imu_out_of_order={} imu_evicted={}",
+                 sync_dropped={} imu_out_of_order={} imu_evicted={} \
+                 frontend={frontend_time} estimator={} (avg/max)",
                 stats.pairs,
                 stats.frames_dropped_behind,
                 stats.sync_dropped,
                 stats.imu_out_of_order,
-                stats.imu_evicted
+                stats.imu_evicted,
+                estimator_time.take(),
             );
             last_status = Instant::now();
         }
-        let Some(packet) = packet else {
-            continue;
+        let (frame_generation, tracked) = match received {
+            Ok(received) => received,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("the frontend thread stopped".into())
+            }
         };
-        match core.process(packet) {
+        if frame_generation != generation {
+            // Tracked before the last reset.
+            continue;
+        }
+        let started = Instant::now();
+        let estimated = tracked.and_then(|frame| backend.estimate(frame));
+        estimator_time.add(started.elapsed());
+        match estimated {
             Ok(estimate) => {
                 processed += 1;
                 if processed == 1 {
                     eprintln!("visloc_vio_node: first pose published");
                 }
+                *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner()) = estimate.gyro_bias;
                 publish_logged(&odom_pub, odometry_msg(&estimate, &frames), "odom");
                 let pose = pose_stamped_msg(&estimate, &frames);
                 if let Some(path_pub) = &path_pub {
@@ -294,12 +399,63 @@ fn run() -> Result<(), String> {
             Err(error) => {
                 error_log.log(|| format!("{error}"));
                 if error.needs_reset {
-                    core.reset()?;
-                    shared.with(|inputs| inputs.reset_stream());
+                    // The frontend resets itself when it pops the first
+                    // frame of the new generation.
+                    generation = shared.restart_stream();
+                    backend.reset()?;
                     path.clear();
                     eprintln!("visloc_vio_node: estimator reset; re-initializing from IMU");
                 }
             }
+        }
+    }
+}
+
+/// Frontend-thread body: pops synchronized frames, tracks them and sends
+/// them to the estimator thread in order. Returns when that thread hangs up.
+fn run_frontend(
+    mut frontend: VioFrontend,
+    shared: &Shared,
+    tracked_tx: &mpsc::SyncSender<FrontendResult>,
+) {
+    let mut generation = 0u64;
+    let mut waiting_log = RateLimitedLog::new(Duration::from_secs(5));
+    loop {
+        let (packet, packet_generation): (Option<SensorPacket<RawU16Image>>, u64) = {
+            let guard = shared.inputs.lock().unwrap_or_else(|e| e.into_inner());
+            let (mut guard, timeout) = shared
+                .ready
+                .wait_timeout_while(guard, Duration::from_secs(1), |inputs| {
+                    !inputs.vio.front_ready()
+                })
+                .unwrap_or_else(|e| e.into_inner());
+            if timeout.timed_out() && guard.vio.queued_frames() > 0 {
+                waiting_log
+                    .log(|| "stereo frames queued but IMU has not reached their stamp yet".into());
+            }
+            (guard.vio.pop_ready(), guard.generation)
+        };
+        let Some(packet) = packet else {
+            continue;
+        };
+        if packet_generation != generation {
+            if let Err(error) = frontend.reset() {
+                eprintln!("visloc_vio_node: {error}");
+                return;
+            }
+            generation = packet_generation;
+        }
+        let gyro_bias = *shared.gyro_bias.lock().unwrap_or_else(|e| e.into_inner());
+        // Errors go to the estimator thread too, which owns resets.
+        let started = Instant::now();
+        let tracked = frontend.track(packet, gyro_bias);
+        shared
+            .frontend_time
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .add(started.elapsed());
+        if tracked_tx.send((generation, tracked)).is_err() {
+            return;
         }
     }
 }

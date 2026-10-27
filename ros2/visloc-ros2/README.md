@@ -73,7 +73,8 @@ Parameters (`--name value`, `--name=value` or `--ros-args -p name:=value`):
 | `publish_tf`, `publish_path` | `true` | |
 | `path_max_length` | `2000` | |
 | `stereo_sync_tolerance_ms` | `2.0` | max left/right stamp difference |
-| `frame_queue` | `4` | paired frames waiting for the estimator (drop-oldest) |
+| `frame_queue` | `1` | paired frames waiting for the frontend (drop-oldest) |
+| `frontend_threads` | `2` | worker threads of the KLT frontend (`0`: share the estimator's pool) |
 | `imu_buffer` | `4000` | buffered IMU samples (drop-oldest) |
 | `image_qos_depth`, `imu_qos_depth` | `5`, `400` | subscription history depth |
 | `urgent_keyframes` | `true` | the demo's urgent-keyframe defaults |
@@ -85,15 +86,24 @@ Data flow and threading: one receive thread per subscription decodes images
 (mono8 / mono16 / rgb8 / bgr8 / rgba8 / bgra8; colour is converted with
 BT.601 luma; 8-bit is widened `u16 = u8 << 8` exactly like the EuRoC
 reader) and hands them to a stereo synchronizer (closest stamp within the
-tolerance). Paired frames go into a bounded drop-oldest queue. The estimator
-thread releases a frame only once IMU data reaches its stamp, and passes it
-the half-open IMU interval `(previous frame, this frame]`, which is the
-`EurocSensorFrame` contract. If the estimator falls behind, the oldest
-frames are dropped. The IMU interval of the next processed frame still
-starts at the last processed frame, so preintegration stays contiguous.
-`cam_time_offset_ns` from the calibration is added to camera stamps. On an
-estimator error the node logs it, rebuilds the estimator and
-re-initializes from IMU.
+tolerance). Paired frames go into a bounded drop-oldest queue. A frame is
+released only once IMU data reaches its stamp, with the half-open IMU
+interval `(previous frame, this frame]`, which is the `EurocSensorFrame`
+contract. As in upstream Basalt, KLT tracking and the estimator run on two
+threads: the frontend thread tracks frame N+1 (on its own pool of
+`frontend_threads` workers) while the estimator thread solves frame N and
+publishes. The frontend hands each tracked frame over directly, so it is at
+most one frame ahead. If the estimator falls behind, the queued frames are
+dropped, oldest first, before tracking. The newest frame is processed next
+and latency stays bounded. The IMU interval of the next processed frame
+still starts at the last processed frame, so preintegration stays
+contiguous. The two-thread split gives the same estimates as running both
+stages in turn (`tests/core_pipeline.rs` checks this). The `imu_seed_klt`
+seed is the exception: it uses the latest gyro bias the estimator has
+published, not the previous frame's. `cam_time_offset_ns` from the
+calibration is added to camera stamps. On an estimator error the node logs
+it, rebuilds both stages and re-initializes from IMU. Every 10 s it logs
+the dropped-frame counts and the frontend/estimator time per frame.
 
 ## `visloc_localize_node`
 
@@ -167,6 +177,15 @@ visloc_map_localize_node --map runs/mh01_map --remap image=/cam0/image_raw
 Every `localize_every`-th image goes through the SLAM mapper's own ORB
 frontend, is matched to the map's landmarks by Hamming distance and solved
 with P3P RANSAC; a pose with at least `min_inliers` inliers is a *fix*.
+Until the anchor exists, every keypoint is compared with every landmark.
+After that, the anchor and the odometry at the image's stamp predict the
+pose (the node waits up to `prior_wait_ms` for that odometry). Each landmark
+is projected with the predicted pose and compared only with the keypoints
+within `projection_radius` pixels. If that does not localize, the node
+falls back to the map-wide search. On EuRoC this cuts matching and PnP from
+about 50 ms to 4 ms per image, and doubles the inliers (169 vs 81 on
+MH_02 against the MH_01 map). Both searches pack the map's descriptors once
+(`visloc_localization::BinaryLandmarkIndex`).
 Each fix is paired with the odometry pose of the same stamp (the VIO node
 stamps its odometry with the left image's stamp; a fix that arrives before
 its odometry waits for it, and a stamp between two odometry poses at most
@@ -192,7 +211,7 @@ measurements behind the defaults.
 | `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of the body (IMU) frame, e.g. `visloc_vio_node`'s; its `header.frame_id` names the odometry frame |
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once anchored |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once anchored (not `pose`, which `visloc_vio_node` publishes) |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, time, anchored, seconds/metres since the last fix, pending fixes |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, anchored, seconds/metres since the last fix, pending fixes |
 
 | parameter | default | |
 |---|---|---|
@@ -204,6 +223,9 @@ measurements behind the defaults.
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
+| `projection_radius` | `20` px | once anchored, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
+| `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
+| `match_threads` | `1` | threads of the map-wide search |
 | `max_points` | the map's | ORB keypoints per image |
 | `position_stddev`, `position_stddev_per_m` | `0.03` m, `0.025` m/m | published position 1-sigma |
 | `orientation_stddev` | `0.02` rad | |
@@ -213,19 +235,32 @@ measurements behind the defaults.
 **EuRoC, replayed over DDS.** A RustDDS player published MH_02's stereo
 images and IMU to `visloc_vio_node` and `visloc_map_localize_node` (map
 built from MH_01), all three processes on one 4-core Xeon. Scored against
-ground truth as in `docs/basalt_map_localization.md`:
+ground truth as in `docs/basalt_map_localization.md`. Latency runs from the
+player publishing a frame to its `map_pose` arriving back:
 
-| replay speed | VIO frames processed | `map_pose` published | RMSE / max |
-|---|---|---|---|
-| 0.5x | 3,040 / 3,040 | 99.8% of frames | 2.18 / 5.6 cm |
-| 1.0x | 2,752 / 3,040 (288 dropped behind) | 90.3% of frames | 1.99 / 5.3 cm |
+| replay speed | VIO frames processed | `map_pose` published | RMSE / max | latency p50 / p90 / max |
+|---|---|---|---|---|
+| 0.5x | 3,040 / 3,040 | 99.8% of frames | 2.07 / 5.2 cm | 62 / 83 / 208 ms |
+| 1.0x | 2,930 / 3,040 (110 dropped behind) | 96.2% of frames | 1.92 / 5.1 cm | 86 / 149 / 327 ms |
+| 1.0x, before the changes below | 2,743 / 3,040 (297 dropped behind) | 90.0% of frames | 2.02 / 5.9 cm | 171 / 271 / 339 ms |
 
 The offline `basalt_euroc_localize_demo --vio --localize-every 5` gives
-99.8% at 2.05 / 5.7 cm on the same data; the node is 0.13 cm worse because
-it publishes a frame's map pose as soon as its odometry arrives, while that
-frame's own fix (about 83 ms of localization) is still running. At real
-time the three processes overload the 4 cores and the VIO node drops frames
-(those frames get no pose); localization itself kept up (no image dropped).
+99.8% at 2.05 / 5.7 cm on the same data. Three changes made the real-time
+run possible on 4 cores:
+
+- The VIO frontend and estimator run on separate threads (see above).
+- Two serial loops of the estimator's LM iteration (the linearization and
+  the model cost decrease) now run per landmark in parallel. On MH_02 this
+  cuts the estimator from 30.0 to 22.1 ms per frame, with a bit-identical
+  trajectory.
+- Localization uses the projection search once anchored.
+
+At 1.0x the estimator still takes 40-65 ms per frame in MH_02's busiest
+stretches while sharing the cores with the player and the map node. There
+the node drops frames instead of falling behind. A dropped frame gets no
+pose, and the drops did not change the VIO's accuracy. With the VIO node
+alone at 0.3x, the latency is about 47 ms: the frontend, the estimator and
+the DDS transport.
 
 ## Running inside a ROS 2 graph
 

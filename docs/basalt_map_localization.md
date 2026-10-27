@@ -210,11 +210,15 @@ even over short distances.
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
 and `MapAnchor` next to `visloc_vio_node` and publishes `/tf` `map -> odom`
 (REP-105) and `map_pose`, with a position covariance of 3 cm + 2.5 cm per
-metre travelled since the last fix (the growth measured above). MH_02
-replayed over DDS against the MH_01 map, localizing every 5th image: a map
-pose for 99.8% of frames at 2.18 / 5.6 cm (RMSE / max) at half speed, 0.13
-cm behind the offline run because each pose is published before its own
-frame's fix is in. Details in
+metre travelled since the last fix (the growth measured above). Once
+anchored, it matches each landmark only against the keypoints near the
+landmark's projection from the predicted pose, so localization costs about 4
+ms per image after ORB extraction. MH_02 was replayed over DDS against the
+MH_01 map, localizing every 5th image, with all processes on 4 cores. At
+real time, 96.2% of frames got a map pose, at 1.92 / 5.1 cm (RMSE / max)
+and a median latency of 86 ms; the VIO dropped the rest in its busiest
+stretches. At half speed, 99.8% of frames got a pose, at 2.07 / 5.2 cm.
+Details in
 [the node's README](../ros2/visloc-ros2/README.md#visloc_map_localize_node).
 
 ## Reproduce

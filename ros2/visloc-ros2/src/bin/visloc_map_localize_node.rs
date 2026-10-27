@@ -12,14 +12,15 @@
 use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
     fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_pose_msg, map_to_odom_tf,
-    se3_from_ros, AnchorCore, Fix, FixEvent, MapLocalizeOptions, MapLocalizer,
+    se3_from_ros, AnchorCore, Fix, FixEvent, MapLocalizeOptions, MapLocalizer, Matching,
+    OdomLookup,
 };
 use visloc_ros2::msgs::{DiagnosticArray, Image, Odometry, PoseWithCovarianceStamped, TfMessage};
 use visloc_ros2::params::NodeArgs;
@@ -42,6 +43,12 @@ PARAMETERS (--name value  or  -p name:=value):
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
   reprojection_threshold PnP inlier threshold in pixels                               [3.0]
+  projection_radius      once anchored, match each landmark only with keypoints this
+                         close (px) to its projection from the predicted pose; on
+                         failure, and with <= 0 always, match map-wide             [20]
+  prior_wait_ms          longest wait for the odometry of an image's stamp before
+                         matching map-wide instead                                    [300]
+  match_threads          threads of the map-wide search                               [1]
   max_points             ORB keypoints per image                                      [the map's]
   position_stddev        published 1-sigma position at a fix (m)                      [0.03]
   position_stddev_per_m  ... plus this per metre of VIO travel since the fix          [0.025]
@@ -82,6 +89,13 @@ fn run() -> Result<(), String> {
     options.ratio = (ratio > 0.0).then_some(ratio);
     options.ransac_iterations = args.parsed_or("ransac_iterations", options.ransac_iterations)?;
     options.reprojection_px = args.parsed_or("reprojection_threshold", options.reprojection_px)?;
+    let radius = args.parsed_or(
+        "projection_radius",
+        options.projection_radius_px.unwrap_or(0.0),
+    )?;
+    options.projection_radius_px = (radius > 0.0).then_some(radius);
+    let prior_wait = Duration::from_millis(args.parsed_or("prior_wait_ms", 300u64)?);
+    options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
     options.max_points = args.parsed::<usize>("max_points")?;
     options.position_stddev_m = args.parsed_or("position_stddev", options.position_stddev_m)?;
     options.position_stddev_per_m =
@@ -112,6 +126,8 @@ fn run() -> Result<(), String> {
     );
     let localizer = MapLocalizer::new(map, camera, &options)?;
     let core = Arc::new(Mutex::new(AnchorCore::new(&options)));
+    // Notified on every odometry message, for images waiting for theirs.
+    let odom_arrived = Arc::new(Condvar::new());
 
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let image_sub = ros.subscription::<Image>(&image_topic, sensor_qos(2))?;
@@ -124,6 +140,7 @@ fn run() -> Result<(), String> {
     let odom_messages = Arc::new(AtomicU64::new(0));
     {
         let core = Arc::clone(&core);
+        let odom_arrived = Arc::clone(&odom_arrived);
         let odom_messages = Arc::clone(&odom_messages);
         let map_frame = map_frame.clone();
         let options = options.clone();
@@ -134,6 +151,7 @@ fn run() -> Result<(), String> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .add_odom(stamp_ns, se3_from_ros(&msg.pose.pose));
+            odom_arrived.notify_all();
             log_events(&events);
             if let Some(anchored) = anchored {
                 if publish_tf {
@@ -173,24 +191,32 @@ fn run() -> Result<(), String> {
         },
     );
 
-    let (mut attempts, mut localized) = (0u64, 0u64);
+    let (mut attempts, mut localized, mut projected) = (0u64, 0u64, 0u64);
     loop {
         let Some(msg) = queue.pop_timeout(Duration::from_secs(1)) else {
             continue;
         };
         attempts += 1;
         let stamp = msg.header.stamp;
-        let fix = match decode_luma(&msg).and_then(|luma| luma.to_basalt()) {
-            Ok(image) => localizer.localize(&image),
-            Err(error) => Fix {
-                map_from_body: None,
-                keypoints: 0,
-                matches: 0,
-                inliers: 0,
-                elapsed_ms: 0.0,
-                failure: Some(format!("image decode: {error}")),
-            },
+        let started = Instant::now();
+        let features = decode_luma(&msg)
+            .and_then(|luma| luma.to_basalt())
+            .map_err(|error| format!("image decode: {error}"))
+            .and_then(|image| localizer.extract(&image));
+        let mut fix = match features {
+            Ok(features) => {
+                // The VIO usually publishes this frame's odometry while the
+                // features are extracted; wait for it briefly rather than
+                // lose the prior.
+                let prior = wait_for_prior(&core, &odom_arrived, stamp.to_nanos(), prior_wait);
+                localizer.localize_features(&features, prior.as_ref())
+            }
+            Err(failure) => Fix::failed(failure),
         };
+        fix.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+        if fix.matching == Some(Matching::Projection) {
+            projected += 1;
+        }
         let (anchored, pending) = {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map_from_body) = &fix.map_from_body {
@@ -208,12 +234,13 @@ fn run() -> Result<(), String> {
         if attempts <= 3 || attempts.is_multiple_of(50) {
             eprintln!(
                 "visloc_map_localize_node: attempt {attempts}: localized={} inliers={} \
-                 matches={} keypoints={} {:.1} ms (localized {localized}/{attempts}, \
-                 dropped images {}, odom messages {}, anchored {}){}",
+                 matches={} keypoints={} matching={} {:.1} ms (localized {localized}/{attempts}, \
+                 {projected} by projection, dropped images {}, odom messages {}, anchored {}){}",
                 fix.map_from_body.is_some(),
                 fix.inliers,
                 fix.matches,
                 fix.keypoints,
+                fix.matching.map_or("none", |m| m.name()),
                 fix.elapsed_ms,
                 queue.dropped(),
                 odom_messages.load(Ordering::Relaxed),
@@ -223,6 +250,35 @@ fn run() -> Result<(), String> {
                     .map(|reason| format!(" reason={reason}"))
                     .unwrap_or_default(),
             );
+        }
+    }
+}
+
+/// The anchor's prediction of the body pose at `stamp_ns`, waiting up to
+/// `timeout` for the odometry of that stamp. `None` before anchoring, or
+/// when the odometry does not arrive in time.
+fn wait_for_prior(
+    core: &Mutex<AnchorCore>,
+    odom_arrived: &Condvar,
+    stamp_ns: i64,
+    timeout: Duration,
+) -> Option<visloc_core::geometry::SE3> {
+    let deadline = Instant::now() + timeout;
+    let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        match core.prior(stamp_ns) {
+            OdomLookup::Pose(prior) => return Some(prior),
+            OdomLookup::Unavailable => return None,
+            OdomLookup::NotYet => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return None;
+                }
+                core = odom_arrived
+                    .wait_timeout(core, deadline - now)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
         }
     }
 }
