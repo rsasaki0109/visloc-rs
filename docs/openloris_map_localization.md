@@ -411,9 +411,12 @@ scored like the demo's:
   odometry was 4.67 cm instead of 3.25 cm.
 - **One run of six lost `/tf_static`.** In one office1-7 run,
   `visloc_vio_node` never received the transient-local `base_link -> imu0`
-  and published no odometry. Rerun unchanged, it received it. The cause
-  (between the RustDDS reader and Fast DDS's transient-local writer) is not
-  found.
+  and published no odometry. A probe with the nodes' reader
+  (`ros2/visloc-ros2/examples/tf_static_probe.rs`), started 200 times next
+  to freshly started `static_transform_publisher`s, had nothing after 30 s
+  in 4 cases. A second reader in the same node gets them, so both nodes
+  now subscribe again while a transform they need is missing; with that,
+  300 of 300 probes had both transforms.
 
 ## Reproduce
 

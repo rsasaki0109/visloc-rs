@@ -47,6 +47,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **ROS 2 nodes: a missed `/tf_static` stalled them for good.** A RustDDS
+  reader sometimes never receives a transient-local writer's samples: a
+  probe with the nodes' `/tf_static` reader
+  (`ros2/visloc-ros2/examples/tf_static_probe.rs`), started 200 times next
+  to freshly started `static_transform_publisher`s, had nothing after 30 s
+  in 4 cases, and in one OpenLORIS-Scene replay `visloc_vio_node`
+  published no odometry. A second reader in the same node receives them.
+  `visloc_vio_node` (`base_frame`) and `visloc_map_localize_node`
+  (`extrinsics tf`) now subscribe again while a transform they need is
+  missing (`dds::StaticTfListener`): 5 s after the first subscription,
+  then with doubling waits, at most six times. With that, 300 of 300
+  probes had both transforms.
 - **Saving a map from a lens wider than the Double Sphere model failed.**
   The map export fits COLMAP's `OPENCV_FISHEYE` to each Double Sphere
   camera. It gave up when an image corner did not unproject, which happens
@@ -91,9 +103,7 @@ All notable changes to `visloc-rs` will be documented here.
   `visloc_map_localize_node` (`extrinsics:=tf`, `weak_gate_m:=0.05`)
   against the scale-corrected maps of other sessions, it gives 2.47 and 3.25
   cm RMSE with the wheel odometry and 1.51 and 2.22 cm with
-  `visloc_vio_node`, within 0.4 cm of the offline demo. In one of six runs
-  the VIO node never received the transient-local `/tf_static` from an
-  rclcpp publisher; a restart received it.
+  `visloc_vio_node`, within 0.4 cm of the offline demo.
 - **`calibrate_wheel_offset.py` levels the body frame.** Planar wheel
   odometry keeps its body level, so a tilt in the extrinsic moves the IMU
   sideways, by 1.6 cm per degree with OpenLORIS-Scene's camera 0.9 m above
