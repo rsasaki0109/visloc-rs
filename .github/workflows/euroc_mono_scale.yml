@@ -148,9 +148,10 @@ jobs:
           for mode in stereo mono; do
             flag=""; [ "$mode" = mono ] && flag=--mono
             mkdir -p "out/$mode/$SEQ"
-            # a failed run still gets its row (the report marks the missing trajectory)
+            # a failed run still gets its row (the report marks the missing trajectory);
+            # without marginalization dumps (GBs per sequence) the trajectory is the same
             bin/basalt_euroc_vio_demo --euroc-dir "$WORK/$SEQ" --calibration "$CALIB" \
-              --config "$CONFIG" --out-dir "out/$mode/$SEQ" $flag --no-trace \
+              --config "$CONFIG" --out-dir "out/$mode/$SEQ" $flag --no-trace --no-marg-data \
               > "out/$mode/$SEQ.log" 2>&1 || echo "::warning::$mode $SEQ exited with $?"
           done
 
