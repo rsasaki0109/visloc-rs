@@ -15,6 +15,9 @@
 //!
 //! Times are returned in seconds from the first video frame. Only the file's
 //! end is read, so the trailer alone (its last bytes) also works.
+//!
+//! The metadata record (id 0x101) also holds each lens's factory
+//! calibration as `_`-separated text ([`InsvLens`]; docs/insta360_lens.md).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -43,6 +46,39 @@ pub struct InsvTelemetry {
     pub frame_times: Vec<f64>,
     /// Each video frame's exposure time, seconds.
     pub exposure: Vec<f64>,
+    /// The lenses' calibration, front lens (the first video stream) first;
+    /// empty when the metadata has none in the layout [`InsvLens`] reads.
+    pub lenses: Vec<InsvLens>,
+}
+
+/// One lens's factory calibration from the metadata record, in the pixels of
+/// the calibration's full-resolution lens image (5376 square on an X5).
+///
+/// The unified (Mei) model: a ray `(x, y, z)` in the lens frame (x right,
+/// y down, z along the optical axis) goes to `(x, y) / (z + xi |ray|)`,
+/// then radial distortion `1 + k1 r² + k2 r⁴ + k3 r⁶` and tangential
+/// `p1, p2` (OpenCV's), then `fx, fy, cx, cy`. The video's lens image is
+/// the square around `(cx, cy)` that spans the 200° image circle
+/// (`circle_radius`) edge to edge, scaled to the video's size: checked on
+/// an X5 against the image circle's black edge, perspective views made
+/// from the frames, and the two lenses' overlap (docs/insta360_lens.md).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsvLens {
+    pub xi: f64,
+    pub fx: f64,
+    pub fy: f64,
+    pub cx: f64,
+    pub cy: f64,
+    pub radial: [f64; 3],
+    pub tangential: [f64; 2],
+    /// The radius of the 200° image circle.
+    pub circle_radius: f64,
+    /// The lens's orientation on the camera as recorded (three angles in
+    /// degrees; their convention is not decoded).
+    pub angles: [f64; 3],
+    /// The lens's position on the camera as recorded (metres; the back lens
+    /// sits about 3 cm behind the front one).
+    pub translation: [f64; 3],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -150,8 +186,8 @@ pub fn parse_trailer(trailer: &[u8], path: &Path) -> Result<InsvTelemetry, InsvE
         imu.accel.push(Vector3::new(v[0], v[1], v[2]) * accel_scale);
         imu.gyro.push(Vector3::new(v[3], v[4], v[5]) * gyro_scale);
     }
-    let camera = find(RECORD_METADATA).and_then(|m| {
-        let text = String::from_utf8_lossy(m);
+    let metadata = find(RECORD_METADATA).map(String::from_utf8_lossy);
+    let camera = metadata.as_deref().and_then(|text| {
         let start = text.find("Insta360")?;
         let name: String = text[start..]
             .chars()
@@ -164,7 +200,62 @@ pub fn parse_trailer(trailer: &[u8], path: &Path) -> Result<InsvTelemetry, InsvE
         imu,
         frame_times: frames.iter().map(|&(t, _)| seconds(t)).collect(),
         exposure: frames.iter().map(|&(_, e)| e).collect(),
+        lenses: metadata.as_deref().map(parse_lenses).unwrap_or_default(),
     })
+}
+
+/// The lenses in the metadata's text: the unified-model string
+/// `2_` then per lens `xi_fx_fy_cx_cy_` three angles, three translations,
+/// `k1_k2_k3_p1_p2_` and the calibration image's width, height and a code
+/// (19 fields; then one more field), and the image circles' radii from the
+/// `p2_` string (per lens `radius_cx_cy_` three angles), matched by centre.
+fn parse_lenses(text: &str) -> Vec<InsvLens> {
+    const PER_LENS: usize = 19;
+    let runs = || {
+        text.split(|c: char| !c.is_ascii_graphic())
+            .filter(|r| r.len() > 20)
+    };
+    let numbers = |s: &str| -> Option<Vec<f64>> { s.split('_').map(|t| t.parse().ok()).collect() };
+    let circles: Vec<[f64; 3]> = runs()
+        .find_map(|r| {
+            let v = numbers(&r[r.find("p2_")? + 3..])?;
+            (v.len() >= 12).then(|| [[v[0], v[1], v[2]], [v[6], v[7], v[8]]].to_vec())
+        })
+        .unwrap_or_default();
+    // The string may follow a printable length byte of the record's framing.
+    let Some(v) = runs().find_map(|r| {
+        r.match_indices("2_").find_map(|(i, _)| {
+            if r[..i].ends_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-') {
+                return None;
+            }
+            let v = numbers(&r[i..])?;
+            (v.len() == 2 + 2 * PER_LENS).then_some(v)
+        })
+    }) else {
+        return Vec::new();
+    };
+    let lenses: Option<Vec<InsvLens>> = (0..2)
+        .map(|i| {
+            let b = &v[1 + i * PER_LENS..1 + (i + 1) * PER_LENS];
+            let (cx, cy) = (b[3], b[4]);
+            let circle = circles
+                .iter()
+                .find(|c| (c[1] - cx).abs() < 1.0 && (c[2] - cy).abs() < 1.0)?;
+            Some(InsvLens {
+                xi: b[0],
+                fx: b[1],
+                fy: b[2],
+                cx,
+                cy,
+                angles: [b[5], b[6], b[7]],
+                translation: [b[8], b[9], b[10]],
+                radial: [b[11], b[12], b[13]],
+                tangential: [b[14], b[15]],
+                circle_radius: circle[0],
+            })
+        })
+        .collect();
+    lenses.unwrap_or_default()
 }
 
 /// `(id, data)` of every record in the trailer's index.
@@ -265,6 +356,36 @@ mod tests {
         assert!((t.imu.accel[0].y + STANDARD_GRAVITY).abs() < 1e-12);
         assert!((t.imu.gyro[0].x - 10f64.to_radians()).abs() < 1e-12);
         assert!((t.imu.gyro[0].y + 20f64.to_radians()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parses_the_lens_calibration() {
+        // The X5's layout with made-up values; a printable byte ('J', a
+        // length) right before the unified-model string.
+        let text = "\u{a}\u{e}SERIAL\u{12}\u{b}Insta360 X5\u{1a}\u{5}v1.0*\
+            p2_2650.000_2700.000_2680.000_0.400_-0.200_89.800_\
+            2651.000_8080.000_2675.000_-0.400_-0.200_91.100_10752_5376_11111\u{0}\
+            \u{2a}J2_2.000000_4270.000_4271.000_2700.000_2680.000_0.400_-0.200_89.800_\
+            0.000000_0.000000_0.000000_0.18_2.08_-3.2_-0.0003_-0.0016_10752_5376_113_\
+            2.000000_4274.000_4275.000_8080.000_2675.000_-0.400_-0.200_91.100_\
+            -0.001_0.0004_-0.032_0.17_2.1_-3.3_-0.0015_0.0004_10752_5376_113_197632\u{0}";
+        let lenses = parse_lenses(text);
+        assert_eq!(lenses.len(), 2);
+        let (front, back) = (&lenses[0], &lenses[1]);
+        assert_eq!((front.xi, front.fx, front.fy), (2.0, 4270.0, 4271.0));
+        assert_eq!(
+            (front.cx, front.cy, front.circle_radius),
+            (2700.0, 2680.0, 2650.0)
+        );
+        assert_eq!(front.radial, [0.18, 2.08, -3.2]);
+        assert_eq!(front.tangential, [-0.0003, -0.0016]);
+        assert_eq!(back.cx, 8080.0);
+        assert_eq!(back.circle_radius, 2651.0);
+        assert_eq!(back.translation, [-0.001, 0.0004, -0.032]);
+        assert_eq!(back.angles, [-0.4, -0.2, 91.1]);
+        // Without the circles' string there is no lens image to map to.
+        let no_circles = text.replace("p2_", "q2_");
+        assert!(parse_lenses(&no_circles).is_empty());
     }
 
     #[test]

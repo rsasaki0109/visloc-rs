@@ -20,6 +20,17 @@ All notable changes to `visloc-rs` will be documented here.
   frames of an OverMaps360 walk the metric model agrees with the dataset's
   IMU scale within 0.01%. The `imu_metric_scale` example runs the estimator
   on any COLMAP model.
+- **`gsplat_photos --insv`: Insta360 video straight to a metric model.**
+  The input is the video's raw dual-fisheye frames, both lenses side by
+  side (one ffmpeg command), with no Insta360 Studio export.
+
+  - `visloc_io::insv` reads each lens's factory calibration (unified model)
+    from the `.insv` metadata. The video's lens image is the square spanning
+    the 200° image circle around the calibrated centre
+    (docs/insta360_lens.md).
+  - `visloc_gsplat_train::dual_fisheye` cuts each lens into five 90° faces
+    within 90° of its axis. The faces of a lens are solved as one rig, and
+    the video's IMU scales the result to metres.
 
 ### Fixed
 

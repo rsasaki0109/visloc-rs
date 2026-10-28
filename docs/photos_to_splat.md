@@ -92,6 +92,21 @@ that looks like panoramas gets a warning: 2:1 images whose left and right
 edges meet and whose top and bottom rows are poles, or whose metadata says
 equirectangular. The pinhole model gives no usable result on them.
 
+`--insv VIDEO.insv` takes an Insta360's raw dual-fisheye frames instead of
+panoramas. Each image has the two lenses side by side, front lens on the
+left, as ffmpeg's `hstack` of the video's two streams produces.
+
+- **Faces.** Each lens is cut into five 90° faces, at most `--max-size`
+  square: one along its axis and four tilted 45° from it. All of them stay
+  within 90° of the axis. The cut uses the lens calibration in the video's
+  metadata ([insta360_lens.md](insta360_lens.md)).
+- **Rigs.** The faces of a lens are solved as one rig. The two lenses are
+  separate cameras, so nothing is stitched, and `--window` counts lenses
+  (two per frame).
+- **Scale.** The video's IMU scales the model to metres (next section).
+- **Cameras.** The calibration is decoded for the X5; videos from other
+  cameras stop with an error.
+
 ## Metric scale from the camera's IMU
 
 SfM leaves the model in arbitrary units. When the photos are frames of a

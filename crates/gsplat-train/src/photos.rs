@@ -23,10 +23,13 @@
 //! [`PhotoSfmConfig::equirect_native`] instead runs the stages on the
 //! panoramas themselves as equirectangular cameras and poses the faces
 //! from them. Either way training sees the faces that see SfM points.
+//! [`PhotoSfmConfig::insv`] takes an Insta360's dual-fisheye frames instead:
+//! each lens is cut into five 90° faces with the calibration in the video's
+//! metadata ([`crate::dual_fisheye`]), the faces of a lens solved as one rig.
 
 use std::path::{Path, PathBuf};
 
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Matrix3, Point2, Point3, Vector3};
 use rayon::prelude::*;
 use visloc_core::types::Camera;
 use visloc_gsplat_core::colmap_scene::camera_view_from;
@@ -40,6 +43,7 @@ use visloc_vision::features::FeatureSet;
 use visloc_vision::matching::DescriptorMatch;
 
 use crate::dataset::{Dataset, View};
+use crate::dual_fisheye::{self, FisheyeLens};
 use crate::equirect;
 use crate::euroc::{
     apply_sift_override, cpu_matches, read_port_camera, run_colmap_port, verify_pair, EurocError,
@@ -142,6 +146,17 @@ pub struct PhotoSfmConfig {
     /// With `imu`: the frame period (seconds per frame number) the search
     /// starts from (default: the IMU span over the largest frame number).
     pub imu_frame_period: Option<f64>,
+    /// The images are dual-fisheye frames of this Insta360 video: its two
+    /// lenses side by side, front lens (first video stream) on the left
+    /// (ffmpeg's `hstack` of the streams; docs/photos_to_splat.md). Each
+    /// lens is cut into five 90° faces (at most `max_size` square) with the
+    /// lens calibration in the video's metadata
+    /// ([`crate::dual_fisheye`]); the faces of a lens are solved as one rig,
+    /// the two lenses as separate cameras, with the exact focal length held
+    /// fixed (no `focal_px`, no intrinsics refinement). The video's IMU
+    /// gives the model metric scale unless `imu` names another log; only
+    /// the front lens's poses go into it. Not with `equirect`.
+    pub insv: Option<PathBuf>,
 }
 
 impl Default for PhotoSfmConfig {
@@ -174,6 +189,7 @@ impl Default for PhotoSfmConfig {
             equirect_native: false,
             imu: None,
             imu_frame_period: None,
+            insv: None,
         }
     }
 }
@@ -487,24 +503,29 @@ fn frame_number(path: &Path) -> Option<i64> {
 }
 
 /// Metres per SfM unit from `imu` ([`PhotoSfmConfig::imu`]). Image `i` comes
-/// from `sources[i / per_source]`; with cube faces (`per_source` 6) each
-/// panorama's first registered face, turned back by its face rotation, is
-/// the panorama's camera.
+/// from source `i / per_source`, `per_source` being the number of
+/// `face_rotations` (face frame to source frame; none: one image per
+/// source); each source's first registered face, turned back by its face
+/// rotation, is the source's camera. Sources that are `None` (a
+/// dual-fisheye frame's back lens) are left out.
 fn imu_metric_scale(
     imu: &Path,
-    sources: &[PathBuf],
+    sources: &[Option<&Path>],
     poses: &[Option<visloc_core::geometry::Pose>],
-    per_source: usize,
+    face_rotations: &[Matrix3<f64>],
     cfg: &PhotoSfmConfig,
     out_dir: &Path,
     log: &mut dyn FnMut(&str),
 ) -> Result<f64, EurocError> {
     let (csv, source) =
         visloc_io::imu_csv::read_imu_file(imu).map_err(|e| EurocError::Sfm(format!("imu: {e}")))?;
-    let rotations = equirect::cube_face_rotations();
+    let per_source = face_rotations.len().max(1);
     let mut frames = Vec::new();
     let mut unnumbered = 0;
     for (s, source) in sources.iter().enumerate() {
+        let Some(source) = source else {
+            continue;
+        };
         let Some((k, pose)) =
             (0..per_source).find_map(|k| poses.get(s * per_source + k)?.as_ref().map(|p| (k, p)))
         else {
@@ -516,12 +537,8 @@ fn imu_metric_scale(
         };
         let face_cw = *pose.world_to_camera.rotation.to_rotation_matrix().matrix();
         // A face's world-to-camera rotation is its rotation's transpose times
-        // the panorama's (`equirect::face_pose`).
-        let r_cw = if per_source == 6 {
-            rotations[k].1 * face_cw
-        } else {
-            face_cw
-        };
+        // the source's (`equirect::face_pose`).
+        let r_cw = face_rotations.get(k).map_or(face_cw, |r| r * face_cw);
         frames.push(ScaleFrame {
             number,
             rotation: r_cw.transpose(),
@@ -622,7 +639,11 @@ pub fn build_photo_dataset(
         .collect();
     files.sort();
     // Two panoramas already give faces that overlap.
-    let min_images = if cfg.equirect { 2 } else { 3 };
+    let min_images = if cfg.equirect || cfg.insv.is_some() {
+        2
+    } else {
+        3
+    };
     if files.len() < min_images {
         return Err(EurocError::Sfm(format!(
             "need at least {min_images} images in {}, found {}",
@@ -635,6 +656,52 @@ pub fn build_photo_dataset(
             "equirect: the cube faces' focal length is fixed; drop focal_px (--focal)".into(),
         ));
     }
+    // The lenses of dual-fisheye frames, from the video's metadata.
+    let lenses: Option<Vec<visloc_io::insv::InsvLens>> = match &cfg.insv {
+        None => None,
+        Some(_) if cfg.equirect => {
+            return Err(EurocError::Sfm(
+                "insv: the frames are dual fisheye, not equirectangular; drop equirect".into(),
+            ))
+        }
+        Some(_) if cfg.focal_px.is_some() => {
+            return Err(EurocError::Sfm(
+                "insv: the lens faces' focal length is fixed; drop focal_px (--focal)".into(),
+            ))
+        }
+        Some(path) => {
+            let t = visloc_io::insv::read_insv_telemetry(path)
+                .map_err(|e| EurocError::Sfm(format!("insv: {e}")))?;
+            if t.lenses.len() != 2 {
+                return Err(EurocError::Sfm(format!(
+                    "insv: no lens calibration in {}'s metadata (decoded for the X5's layout; \
+                     docs/insta360_lens.md)",
+                    path.display()
+                )));
+            }
+            log(&format!(
+                "insv: {} lenses, xi {:.2}, fx {:.1} / {:.1}, image circles {:.1} / {:.1} px \
+                 (calibration pixels)",
+                t.camera.as_deref().unwrap_or("Insta360"),
+                t.lenses[0].xi,
+                t.lenses[0].fx,
+                t.lenses[1].fx,
+                t.lenses[0].circle_radius,
+                t.lenses[1].circle_radius
+            ));
+            Some(t.lenses)
+        }
+    };
+    // The side of the faces at a lens image's resolution on its axis, for a
+    // dual-fisheye frame `height` pixels high.
+    let natural_face = |height: u32| -> u32 {
+        lenses.as_deref().map_or(height, |l| {
+            l.iter()
+                .map(|lens| dual_fisheye::natural_face_size(&FisheyeLens::from_insv(lens, height)))
+                .max()
+                .unwrap_or(height)
+        })
+    };
 
     // Read, decode (oriented), scale, and read the EXIF focal and whether
     // the metadata names a 360° panorama, in parallel.
@@ -646,8 +713,15 @@ pub fn build_photo_dataset(
             let img = load_oriented(p, &bytes)?;
             let (w, h) = img.dimensions();
             // A panorama is scaled for its faces (a quarter of its width) to
-            // be at most `max_size`.
-            let long = if cfg.equirect { w / 4 } else { w.max(h) };
+            // be at most `max_size`, a dual-fisheye frame for its faces at
+            // the lenses' resolution on their axes.
+            let long = if cfg.equirect {
+                w / 4
+            } else if lenses.is_some() {
+                natural_face(h)
+            } else {
+                w.max(h)
+            };
             let s = (cfg.max_size as f64 / long.max(1) as f64).min(1.0);
             let img = if s < 1.0 {
                 resize_triangle(
@@ -665,7 +739,7 @@ pub fn build_photo_dataset(
         })
         .collect::<Result<_, _>>()?;
     let (decoded, tagged_360): (Vec<_>, Vec<bool>) = loaded.into_iter().unzip();
-    if !cfg.equirect {
+    if !cfg.equirect && lenses.is_none() {
         let panoramas = decoded
             .par_iter()
             .zip(&tagged_360)
@@ -717,9 +791,58 @@ pub fn build_photo_dataset(
         t_load.elapsed().as_secs_f64()
     ));
     // Each panorama -> its six cube faces, consecutive, in panorama order:
-    // image `i` comes from source image `i / per_source`.
-    let per_source = if cfg.equirect { 6 } else { 1 };
-    let (labels, decoded, width, height, panoramas) = if cfg.equirect {
+    // image `i` comes from source `i / per_source`. A dual-fisheye frame is
+    // two sources, its front lens's five faces then its back lens's.
+    let per_source = if cfg.equirect {
+        6
+    } else if lenses.is_some() {
+        5
+    } else {
+        1
+    };
+    let (labels, decoded, width, height, panoramas) = if let Some(lenses) = &lenses {
+        if width.abs_diff(2 * height) as f64 > 0.01 * width as f64 {
+            return Err(EurocError::Sfm(format!(
+                "insv: the frames are {width}x{height}, not two square lenses side by side"
+            )));
+        }
+        let size = natural_face(height).min(cfg.max_size).max(1);
+        let faces = dual_fisheye::lens_face_rotations();
+        let lens_models: Vec<FisheyeLens> = lenses
+            .iter()
+            .map(|l| FisheyeLens::from_insv(l, height))
+            .collect();
+        let decoded: Vec<(image::RgbImage, Option<f64>)> = decoded
+            .into_par_iter()
+            .map(|(frame, _)| {
+                let mut out = Vec::with_capacity(2 * faces.len());
+                for (lens, x0) in lens_models.iter().zip([0, width - height]) {
+                    let half = image::imageops::crop_imm(&frame, x0, 0, height, height).to_image();
+                    for (_, r) in &faces {
+                        out.push((dual_fisheye::lens_face(&half, lens, r, size), None));
+                    }
+                }
+                out
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut labels = Vec::with_capacity(decoded.len());
+        for f in &files {
+            for lens in ["front lens", "back lens"] {
+                for (face, _) in &faces {
+                    labels.push(format!("{} {lens} {face}", f.display()));
+                }
+            }
+        }
+        log(&format!(
+            "insv: {} lens faces of {size}x{size} px from {} dual-fisheye frames",
+            decoded.len(),
+            files.len()
+        ));
+        (labels, decoded, size, size, None)
+    } else if cfg.equirect {
         if width.abs_diff(2 * height) as f64 > 0.01 * width as f64 {
             return Err(EurocError::Sfm(format!(
                 "equirect: the panoramas are {width}x{height}, not 2:1"
@@ -779,6 +902,7 @@ pub fn build_photo_dataset(
     f35s.sort_by(f64::total_cmp);
     let (focal_prior, focal_source) = match (cfg.focal_px, f35s.get(f35s.len() / 2)) {
         _ if cfg.equirect => (width as f64 / 2.0, "cube face, 90° field of view"),
+        _ if lenses.is_some() => (width as f64 / 2.0, "lens face, 90° field of view"),
         (Some(f), _) => (f, "--focal"),
         (None, Some(f35)) => (f35 / 36.0 * long, "EXIF 35 mm"),
         (None, None) => (1.2 * long, "prior 1.2 x long side"),
@@ -1197,8 +1321,8 @@ pub fn build_photo_dataset(
         verify_s
     ));
 
-    // A cube face's intrinsics are exact.
-    let refine_intrinsics = cfg.refine_intrinsics && !cfg.equirect;
+    // A cube or lens face's intrinsics are exact.
+    let refine_intrinsics = cfg.refine_intrinsics && !cfg.equirect && lenses.is_none();
     // Past matching only the intrinsics refinement reads the descriptors
     // (13 GB for SmallCity at 4,000 SIFT); without it, free them before the
     // mapper.
@@ -1233,14 +1357,23 @@ pub fn build_photo_dataset(
     // the incremental loop's capped BAs. On ETH3D electro it takes three
     // such images from 0.17-0.27° to 0.02-0.05°.
     port_overrides.push("ba_global_final_converge_min_frames=0".into());
-    // Face `k`'s `sensor_from_rig`: the panorama (rig) frame to the face's.
-    let rig: Option<Vec<nalgebra::Matrix3<f64>>> =
+    // Face `k`'s `sensor_from_rig`: the panorama's or lens's (rig) frame to
+    // the face's.
+    let rig: Option<Vec<nalgebra::Matrix3<f64>>> = if lenses.is_some() {
+        Some(
+            dual_fisheye::lens_face_rotations()
+                .iter()
+                .map(|(_, r)| r.transpose())
+                .collect(),
+        )
+    } else {
         (cfg.equirect && cfg.equirect_rig && faces.is_none()).then(|| {
             equirect::cube_face_rotations()
                 .iter()
                 .map(|(_, r)| r.transpose())
                 .collect()
-        });
+        })
+    };
     let models = run_colmap_port(
         out_dir,
         &camera,
@@ -1327,8 +1460,33 @@ pub fn build_photo_dataset(
     // Metric scale from an IMU log, applied before anything is built from
     // the model (points, cube-face poses, training views, sparse/0).
     let mut metric_scale = None;
-    if let Some(imu) = &cfg.imu {
-        let scale = imu_metric_scale(imu, &files, &poses, per_source, cfg, out_dir, log)?;
+    if let Some(imu) = cfg.imu.as_ref().or(cfg.insv.as_ref()) {
+        // Sources and their faces' rotations (face frame to source frame);
+        // a dual-fisheye frame's back lens is left out.
+        let (sources, face_rotations): (Vec<Option<&Path>>, Vec<Matrix3<f64>>) = match per_source {
+            5 => (
+                files
+                    .iter()
+                    .flat_map(|f| [Some(f.as_path()), None])
+                    .collect(),
+                dual_fisheye::lens_face_rotations()
+                    .iter()
+                    .map(|(_, r)| *r)
+                    .collect(),
+            ),
+            6 => (
+                files.iter().map(|f| Some(f.as_path())).collect(),
+                equirect::cube_face_rotations()
+                    .iter()
+                    .map(|(_, r)| *r)
+                    .collect(),
+            ),
+            _ => (
+                files.iter().map(|f| Some(f.as_path())).collect(),
+                Vec::new(),
+            ),
+        };
+        let scale = imu_metric_scale(imu, &sources, &poses, &face_rotations, cfg, out_dir, log)?;
         for pose in poses.iter_mut().flatten() {
             pose.world_to_camera.translation *= scale;
         }

@@ -7,6 +7,7 @@
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
+//!     [--insv VIDEO.insv] [--imu FILE [--imu-frame-period S]]
 //! ```
 //!
 //! SIFT runs on the GPU (`visloc_sift_gpu::VlfeatSiftGpu`, an f32 port of
@@ -23,6 +24,11 @@
 //! panoramas themselves as equirectangular cameras instead, and poses the
 //! faces for training from them. Without `--equirect`, a folder of
 //! panoramas gets a warning: the pinhole model cannot fit them.
+//! `--insv` takes an Insta360's dual-fisheye frames instead (both lenses
+//! side by side, e.g. ffmpeg's `hstack` of the video's two streams): each
+//! lens is cut into five 90° faces with the lens calibration in the video's
+//! metadata, the faces of a lens solved as one rig, and the video's IMU
+//! scales the model to metres (docs/photos_to_splat.md).
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, SIFT, GPU matching,
 //! the COLMAP-port mapper, intrinsics refinement), brush-strategy training,
@@ -70,8 +76,12 @@ SfM:
   --equirect               cut each panorama into six cube faces (one rig)
   --equirect-independent-faces  solve each face as its own camera
   --equirect-native        SfM on the panoramas as equirectangular cameras
+  --insv VIDEO.insv        the photos are this Insta360 video's dual-fisheye frames (lenses
+                           side by side): five faces per lens from its lens calibration;
+                           its IMU scales the model to metres
 metric scale (video frames named by frame number):
-  --imu FILE               IMU log of the camera (CSV: SI, EuRoC or OverMaps360 counts);
+  --imu FILE               IMU log of the camera (Insta360 .insv, or CSV: SI, EuRoC or
+                           OverMaps360 counts);
                            scales the model to metres (<out>/imu_scale.txt)
   --imu-frame-period S     seconds per frame number to start the timing search from
 devices:
@@ -146,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--equirect-native" => sfm.equirect_native = true,
             // Scale the model to metres from the camera's IMU log.
             "--imu" => sfm.imu = Some(PathBuf::from(next()?)),
+            "--insv" => sfm.insv = Some(PathBuf::from(next()?)),
             "--imu-frame-period" => sfm.imu_frame_period = Some(next()?.parse()?),
             "--no-mesh" => mesh = false,
             "--normal-weight" => normal_weight = next()?.parse()?,
