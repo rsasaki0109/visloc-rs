@@ -232,6 +232,7 @@ measurements behind the defaults.
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
 | `projection_radius` | `20` px | once anchored, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
+| `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the anchor's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
@@ -254,7 +255,7 @@ player publishing a frame to its `map_pose` arriving back:
 | 1.0x, before the changes below | 2,743 / 3,040 (297 dropped behind) | 90.0% of frames | 2.02 / 5.9 cm | 171 / 271 / 339 ms |
 
 Three runs at 1.0x dropped 1, 5 and 14 frames. The offline
-`basalt_euroc_localize_demo --vio --localize-every 5` gives 99.8% at 2.05 /
+`basalt_euroc_localize_demo --vio --localize-every 5 --projection-radius-px 0` gives 99.8% at 2.05 /
 5.7 cm on the same data. These changes made the real-time run possible on
 4 cores:
 
@@ -408,7 +409,7 @@ python3 tools/bag_to_tum.py out /map_pose map_pose.tum
 **All eight EuRoC queries.** The same setup (Fast DDS, 1.0x, `--delay 3`)
 on every query sequence of `docs/basalt_map_localization.md`, each against
 its room's map, next to the offline
-`basalt_euroc_localize_demo --vio --localize-every 5`:
+`basalt_euroc_localize_demo --vio --localize-every 5 --projection-radius-px 0`:
 
 | query → map | VIO frames dropped | `map_pose` published (offline) | RMSE / max (offline) | first fix |
 |---|---|---|---|---|

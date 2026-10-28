@@ -21,12 +21,12 @@ frame gets a map pose once two fixes agree: MH_02 99.8% of frames at 2.0 cm
 RMSE (5.7 cm worst) localizing only every 5th image, at 0.83× real time on 4
 cores. Between rare fixes the VIO drifts; each pose comes with the time and
 distance since its last fix, and the poses within 2 m and 5 s of one are never
-more than 13 cm off on any sequence. Matching each image around the
-landmarks' projections from the anchored VIO's prediction
-(`--projection-radius-px 20`, [below](#matching-around-the-predicted-projections))
-makes the fixes far more frequent: 98% of MH_02's images match the map
-instead of 81%, and the longest stretch without a match falls from 7.3 s to
-1.2 s.
+more than 13 cm off on any sequence. By default the demo then matches each
+image around the landmarks' projections from the anchored VIO's prediction
+([below](#matching-around-the-predicted-projections)), as the ROS 2 node
+does. That makes the fixes far more frequent: 98% of MH_02's images match
+the map instead of 81%. Localization runs in half the time, and the VIO +
+map error falls on 6 of the 7 anchored queries.
 
 ## Setup
 
@@ -172,6 +172,51 @@ fusion radius of `basalt_map_merge`. The demo now matches map-wide through
 `localization.tum` is byte-identical) at a median 67 ms per image instead
 of 86 ms.
 
+### Keyframe retrieval before the map-wide search
+
+`--retrieval-keyframes N` first matches each image only among the landmarks
+of the `N` map keyframes that look most like it, and falls back to the whole
+map when that does not localize. `visloc_localization::KeyframeRetrieval`
+picks the keyframes as follows:
+
+- Each keyframe is described by the binary descriptors of its landmarks,
+  hashed to visual words: bits at fixed positions, the scheme of Basalt's
+  `HashBow`.
+- The keyframes are ranked by histogram intersection of the words, through
+  an inverted index.
+
+Fewer candidate landmarks means fewer near-misses for the ratio test to
+reject. With 10 keyframes and 12-bit words:
+
+| Query → map | Images that localize, map-wide | With retrieval | Of those, localized by the retrieved landmarks alone |
+|---|---|---|---|
+| MH_02 → MH_01 | 81.2% | 81.3% | 49% |
+| MH_03 → MH_01 | 47.4% | 47.5% | 80% |
+| MH_04 → MH_01 | 4.6% | 4.9% | 75% |
+| MH_05 → MH_01 | 7.8% | 8.4% | 53% |
+| V1_02 → V1_01 | 28.5% | 29.2% | 34% |
+| V1_03 → V1_01 | 10.9% | 11.1% | 16% |
+| V2_02 → V2_01 | 20.3% | 21.2% | 51% |
+| V2_03 → V2_01 | 0.4% | 0.8% | 94% |
+
+What these show:
+
+- **The gain is small on these maps.** It is 0.1 to 0.9 points, and the
+  poses are as accurate as without retrieval.
+- **It saves time when it hits.** An image the retrieved landmarks localize
+  skips the map-wide search. With 16-bit words on MH_02 (every 5th image)
+  the median time per image fell from 69 to 51 ms.
+- **A larger map gains more.** On the OpenLORIS office map merged from
+  three sessions ([OpenLORIS-Scene](openloris_map_localization.md)),
+  office1-6 localizes alone in 4.6% of its images with retrieval, against
+  2.9% without. The same images localize in 6.7% against the one session
+  that saw them.
+- **It does not reach images whose views the map lacks.** MH_04's first
+  fix still comes 27 s in.
+- **It is most useful on a map grown over many sessions.** It cuts the
+  map-wide search there by 40% ([below](#lifelong-use-appending-each-session)).
+  It stays off by default.
+
 ## Anchoring the VIO to the map
 
 Image localization gives a pose only for the images that match the map. With
@@ -196,7 +241,10 @@ fix.
 ### Results (`--localize-every 5`)
 
 Same maps, queries and scoring as above (fixed map→ground-truth alignment).
-"Fresh" poses are those within 2 m and 5 s of their last fix.
+"Fresh" poses are those within 2 m and 5 s of their last fix. These runs
+match every image map-wide (`--projection-radius-px 0`); the demo's default
+now also matches around the predicted projections, compared
+[below](#matching-around-the-predicted-projections).
 
 | Query → map | Localization alone | VIO + map: frames with a pose | RMSE / max | Fresh poses: frames | RMSE / max | Speed |
 |---|---|---|---|---|---|---|
@@ -263,32 +311,58 @@ would more fixes where the map does cover the flight
 
 ### Matching around the predicted projections
 
-Once the anchor is set, it and the VIO predict each image's pose. With
-`--projection-radius-px PX`, every landmark the predicted camera sees is
-matched only against the keypoints within `PX` pixels of its predicted
+Once the anchor is set, it and the VIO predict each image's pose. Every
+landmark the predicted camera sees is then matched only against the
+keypoints within `--projection-radius-px` (20) pixels of its predicted
 projection (`BinaryLandmarkIndex::match_projected`), with the map-wide
-search as the fallback. `visloc_map_localize_node` has always done this
+search as the fallback. This is the demo's default with `--vio` or
+`--odometry`. `visloc_map_localize_node` has always done it
 (`projection_radius`, 20 px). The ratio test then compares a landmark with
 the few keypoints near its projection instead of the whole image, so many
-more correct matches pass it. With 20 px:
+more correct matches pass it.
 
-| Query → map, localizing | Images that localize | Longest stretch without one | Median inliers | VIO + map RMSE / max | Fixes > 10 cm off | Localization per image |
-|---|---|---|---|---|---|---|
-| MH_02 → MH_01, every image | 81.2% → **98.2%** | 7.3 s → **1.2 s** | 78 → 148 | 2.03 / 5.9 → **1.94 / 5.0 cm** | 1 → 2 | 77 → 31 ms |
-| MH_02 → MH_01, every 5th | 81.6% → 98.4% | 7.5 s → 1.8 s | 77 → 150 | 2.05 / 5.7 → 2.00 / 5.6 cm | 1 → 0 | 81 → 31 ms |
-| V2_02 → V2_01, every image | 20.3% → **60.4%** | 14.5 s → 9.4 s | 47 → 57 | 4.13 / 12.2 → **3.33 / 12.3 cm** | 0 → 22 | 45 → 30 ms |
-| V2_02 → V2_01, every 5th | 21.1% → 60.6% | 14.8 s → 11.3 s | 47 → 56 | 4.24 / 12.6 → 3.44 / 12.0 cm | 0 → 5 | 47 → 30 ms |
+All eight queries, localizing every 5th image, map-wide only
+(`--projection-radius-px 0`) → around the projections:
 
-"Images that localize" is the share of the images tried; the share of
-frames with a map pose does not change (99.8–99.97%). Per-image times are
-medians (ORB extraction, matching, PnP).
+| Query → map | Images that localize | VIO + map RMSE / max | Localization per image |
+|---|---|---|---|
+| MH_02 → MH_01 | 81.6% → **98.4%** | 2.05 / 5.7 → 2.00 / 5.6 cm | 81 → 31 ms |
+| MH_03 → MH_01 | 47.2% → 55.4% | 4.97 / 10.9 → **4.49 / 10.6 cm** | 84 → 37 ms |
+| MH_04 → MH_01 | 4.4% → 9.3% | 23.0 / 47.1 → 22.5 / 44.1 cm | 78 → 58 ms |
+| MH_05 → MH_01 | 8.4% → 11.9% | 14.4 / 27.6 → **15.9** / 27.7 cm | 76 → 53 ms |
+| V1_02 → V1_01 | 28.9% → **54.4%** | 3.47 / 6.4 → 3.33 / 5.9 cm | 65 → 32 ms |
+| V1_03 → V1_01 | 10.5% → 24.2% | 6.66 / 13.5 → **4.60 / 9.6 cm** | 63 → 36 ms |
+| V2_02 → V2_01 | 21.1% → **56.4%** | 4.24 / 12.6 → **3.51 / 12.0 cm** | 47 → 32 ms |
+| V2_03 → V2_01 | 0.3% → 0.3% | never anchored, either way | |
 
-On V2_02 the extra fixes are less accurate than the map-wide ones: 22 of
-1,419 are 10–19 cm off (none of 477 without projection), mostly fixes with
-40–60 inliers. The anchor averages the fixes of the last 5 s, so the VIO +
-map poses still improve and their worst error does not grow. The other six
-queries were not rerun with projection matching, so the option stays off by
-default.
+"Images that localize" is the share of the images tried. The share of frames
+with a map pose does not change. Per-image times are medians of ORB
+extraction, matching and PnP, from runs three at a time on 4 cores.
+
+What these show:
+
+- **Six of the seven anchored queries improve.** On MH_05 the error rises by
+  1.5 cm although its fixes are accurate (none more than 10 cm off). The map
+  covers only part of that flight, and the extra fixes in the covered part
+  move the anchor shortly before the VIO leaves it.
+- **Some extra fixes are 10–32 cm off, mostly on V2_02 (5 of 265).** The
+  anchor averages the fixes of the last 5 s and gates each one, so the
+  VIO + map poses still improve and their worst error does not grow.
+  Replaying the recorded runs through `MapAnchor` with stricter rules for
+  projection fixes (an inlier ratio of at least 0.6, at least 50 inliers,
+  or a 6–8 cm gate) moves the VIO + map RMSE by 0.1 cm or less.
+- **A stale prediction is not trusted.** After a long gap the anchored VIO
+  has drifted, and the projection search can lock onto a wrong pose that
+  agrees with the drifted prediction. MH_03, localizing every image, gave
+  three fixes 16–42 cm off right after a 27 s gap; the gate accepted the
+  16 cm one, and the worst VIO + map pose was 16.4 cm off. So the
+  prediction is used only within `--projection-fresh-s` (5) seconds and
+  `--projection-fresh-m` (2) metres of odometry travel after the anchor's
+  newest fix, the "fresh" limits above. Otherwise the image is matched
+  map-wide. With that limit MH_03's worst pose is 10.2 cm (9.7 map-wide
+  only). V2_03, localizing every image, goes from 28.3 to 23.9 cm (24.2
+  map-wide only). The ROS 2 node applies the same limits
+  (`projection_fresh_s`, `projection_fresh_m`).
 
 ### On a robot (ROS 2)
 
@@ -442,6 +516,47 @@ against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
 better than the constraints a deformation would use. Where they do not
 (MH_04's far end), there is nothing to fit.
 
+### Lifelong use: appending each session
+
+A robot that maps each session (the SLAM's `--save-map`) and merges it into
+its map grows the map one session at a time. The merged map stays in the
+first session's frame, so poses from earlier sessions stay valid. On the
+Machine Hall, in flight order:
+
+| Map | Registration of the added session | Keyframe images / landmarks |
+|---|---|---|
+| MH_01 | — | 1,132 / 15,483 |
+| + MH_02 | 860 of 974 keyframes localize, 2.9 cm residual | 2,106 / 27,646 |
+| + MH_03 | 441 of 874, 3.3 cm | 2,980 / 35,037 |
+| + MH_04 | 67 of 706, 6.7 cm | 3,686 / 41,157 |
+
+Each later flight, localized against the map as it stood (VIO + map,
+every 5th image, the defaults):
+
+| Query → map | Images that localize alone | VIO + map: frames, RMSE / max |
+|---|---|---|
+| MH_04 → MH_01 | 4.6% | 73.2%, 22.5 / 44.1 cm |
+| MH_04 → MH_01..03 | 7.7% | 73.2%, 22.2 / 45.1 cm |
+| MH_05 → MH_01 | 7.8% | 77.1%, 15.9 / 27.7 cm |
+| MH_05 → MH_01..03 | 10.7% | 77.6%, 16.0 / 28.0 cm |
+| MH_05 → MH_01..04 | **43.2%** | **99.8%, 11.5 / 28.4 cm** |
+
+What these show:
+
+- **A session helps only where it went.** MH_02 and MH_03 fly where MH_01
+  already did, and add little for MH_04 and MH_05. MH_04 explores the part
+  of the hall MH_05 needs: with it, MH_05 is anchored for the whole flight.
+- **The map grows with every session.** Landmark fusion merges 2-12% of an
+  added session's landmarks into existing ones, so the map still grows by
+  6,000-12,000 landmarks a session. The map-wide search slows with it:
+  MH_05's median time per image goes from 61 ms against MH_01 to 125 ms
+  against the four-session map (every 5th image, one run at a time).
+- **Keyframe retrieval pays for itself on the larger map**
+  ([above](#keyframe-retrieval-before-the-map-wide-search)). With
+  `--retrieval-keyframes 10 --retrieval-bits 16` the median falls to
+  74 ms, while 43.7% of the images localize instead of 43.3%. Against
+  MH_01 alone, where most images match neither way, it costs about 6 ms.
+
 ## Reproduce
 
 ```bash
@@ -474,14 +589,15 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
 `--mode direct --reference runs/mh01_slam/trajectory_online.tum` compares a
 localization with the SLAM trajectory in the map frame, without alignment.
 
-VIO anchored to the map, scored the same way:
+VIO anchored to the map, scored the same way (drop `--projection-radius-px 0`
+for the default, matching around the predicted projections):
 
 ```bash
 target/release/examples/basalt_euroc_localize_demo \
   --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_vio \
   --vio --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
-  --localize-every 5
+  --localize-every 5 --projection-radius-px 0
 
 python3 scripts/evaluate_map_localization.py --mode fixed \
   --estimate runs/mh02_vio/trajectory_map.tum \

@@ -12,6 +12,7 @@
 
 mod binary_index;
 mod correspondence;
+mod keyframe_retrieval;
 mod map_anchor;
 mod map_merge;
 
@@ -34,6 +35,7 @@ pub use correspondence::{
     CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector,
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
+pub use keyframe_retrieval::KeyframeRetrieval;
 pub use map_anchor::{FixOutcome, MapAnchor, MapAnchorConfig};
 pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
