@@ -32,9 +32,9 @@
 //! trajectory is
 //! the IMU pose (`T_w_i`), as `basalt_euroc_vio_demo` writes it; for
 //! `--mono-vo` runs, whose trajectory is the camera pose, pass
-//! `--trajectory-is-camera`. Writes `objects.csv` (static) and
-//! `ground_objects.csv` (on the ground) next to the boxes unless `--out`
-//! names the first.
+//! `--trajectory-is-camera`. Writes `objects.csv` (static),
+//! `ground_objects.csv` (on the ground) and `ground_tracks.csv` (their feet,
+//! frame by frame) next to the boxes unless `--out` names the first.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -47,8 +47,8 @@ use nalgebra::{
 use visloc_rs::objects::{
     estimate_static_object, place_on_local_ground, plausible_height, plausible_size,
     summarize_ground_track, triangulate, BBox, BearingObservation, BoxFitParams, BoxRays,
-    GroundParams, GroundView, ObjectEstimate, PathGround, TriangulationParams, COCO_CLASSES,
-    MOVABLE_COCO_CLASSES,
+    GroundParams, GroundTrackParams, GroundView, ObjectEstimate, PathGround, TriangulationParams,
+    COCO_CLASSES, MOVABLE_COCO_CLASSES,
 };
 
 struct Args {
@@ -306,9 +306,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let out = out.with_file_name("ground_objects.csv");
-    let csv = ground_objects(&boxes, &scene, &poses, &calibration, &camera_pose)?;
+    let (csv, frames) = ground_objects(&boxes, &scene, &poses, &calibration, &camera_pose)?;
     fs::write(&out, csv)?;
     println!("objects on the ground: {}", out.display());
+    let out = out.with_file_name("ground_tracks.csv");
+    fs::write(&out, frames)?;
+    println!("their feet, frame by frame: {}", out.display());
     Ok(())
 }
 
@@ -320,7 +323,7 @@ fn ground_objects(
     poses: &[(i64, Isometry3<f64>)],
     calibration: &visloc_basalt::BasaltCalibration,
     camera_pose: &dyn Fn(i64, u16) -> Option<Isometry3<f64>>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(String, String), Box<dyn std::error::Error>> {
     let camera = calibration.camera(0).ok_or("no camera 0")?;
     let (width, height) = calibration.resolutions[0];
     let (width, height) = (f64::from(width), f64::from(height));
@@ -342,7 +345,10 @@ fn ground_objects(
         }
     }
     let mut csv = String::from(
-        "object_id,class_id,class,frames,seconds,camera_height,ground_shift,x,y,z,height,width,distance,speed,scale_source,plausible\n",
+        "object_id,class_id,class,frames,seconds,camera_height,ground_shift,x,y,z,height,width,distance,speed,speed_sigma,moving,scale_source,plausible\n",
+    );
+    let mut frames_csv = String::from(
+        "object_id,class_id,timestamp_ns,x,y,z,camera_x,camera_y,camera_z,height,width,distance\n",
     );
     println!(
         "\n{:>6} {:<12} {:>6} {:>7}  {:>8}  {:>6}  {:>13}  {:>8}  {:>7}  plausible",
@@ -413,10 +419,33 @@ fn ground_objects(
         }
         let mut camera_heights: Vec<f64> =
             views.iter().map(|v| v.camera_center.z - ground).collect();
-        let Some(track) = summarize_ground_track(object_id, class_id, &placed, MIN_GROUND_SECONDS)
-        else {
+        let Some(track) = summarize_ground_track(
+            object_id,
+            class_id,
+            &placed,
+            &GroundTrackParams {
+                min_seconds: MIN_GROUND_SECONDS,
+                ..GroundTrackParams::default()
+            },
+        ) else {
             continue;
         };
+        for o in &placed {
+            writeln!(
+                frames_csv,
+                "{object_id},{class_id},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2}",
+                o.timestamp_ns,
+                o.contact.x,
+                o.contact.y,
+                o.contact.z,
+                o.camera.x,
+                o.camera.y,
+                o.camera.z,
+                o.height,
+                o.width,
+                o.distance
+            )?;
+        }
         // Where it stands: the median of its contact points.
         let median = |axis: usize| {
             let mut v: Vec<f64> = track.path.iter().map(|(_, p)| p[axis]).collect();
@@ -444,7 +473,7 @@ fn ground_objects(
         );
         writeln!(
             csv,
-            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{shift:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3},ground_contact,{plausible}",
+            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{shift:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3},{:.3},{},ground_contact,{plausible}",
             placed.len(),
             position.x,
             position.y,
@@ -452,10 +481,12 @@ fn ground_objects(
             track.height,
             track.width,
             track.distance,
-            track.speed
+            track.speed,
+            track.speed_sigma,
+            track.moving
         )?;
     }
-    Ok(csv)
+    Ok((csv, frames_csv))
 }
 
 /// The pose nearest to `timestamp_ns`, if one is within 1 ms. The demo
