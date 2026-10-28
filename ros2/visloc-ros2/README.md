@@ -216,6 +216,7 @@ measurements behind the defaults.
 | `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once anchored |
 | `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once anchored (not `pose`, which `visloc_vio_node` publishes) |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, anchored, seconds/metres since the last fix, pending fixes |
+| `map_cloud` | `sensor_msgs/PointCloud2` | out | the map's landmarks in `map_frame`, published once at start, transient-local (a late subscriber such as RViz still gets it) |
 
 | parameter | default | |
 |---|---|---|
@@ -225,6 +226,7 @@ measurements behind the defaults.
 | `extrinsics` | `map` | where the camera sits relative to the odometry's body: `map` takes the map's IMU-from-camera (`map.json`; the body is the map's IMU, as with `visloc_vio_node`'s default output); `tf` looks up the `/tf_static` transform from the camera's frame to the odometry's `child_frame_id`, e.g. `base_link` (see [on a ground robot](#on-a-ground-robot)) |
 | `camera_frame` | the image's `frame_id` | with `extrinsics tf`, the camera's frame |
 | `publish_tf` | `true` | |
+| `publish_map_cloud` | `true` | publish `map_cloud` |
 | `localize_every` | `5` | localize every N-th received image |
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
@@ -274,6 +276,52 @@ player and the map node. There the node drops frames instead of falling
 behind. A dropped frame gets no pose, and drops did not change the VIO's
 accuracy. With the VIO node alone at 0.3x, the latency is about 47 ms: the
 frontend, the estimator and the DDS transport.
+
+## Launch file, URDF and RViz
+
+`launch/map_localization.launch.py` starts the whole stack:
+
+- `robot_state_publisher` with a URDF;
+- `visloc_vio_node`, publishing `odom -> base_link`;
+- `visloc_map_localize_node`, with the camera extrinsics from `/tf_static`;
+- RViz (`rviz:=true`) with `launch/rviz/map_localization.rviz`. It shows
+  the map's landmarks, the VIO path, the map pose with its covariance, the
+  TF tree and the camera image, and follows `base_link`.
+
+The nodes are plain binaries, not a colcon package, so `bin_dir` defaults to
+this crate's `target/release`.
+
+```sh
+source /opt/ros/jazzy/setup.bash
+ros2 launch ros2/visloc-ros2/launch/map_localization.launch.py map:=runs/mh01_map rviz:=true
+ros2 bag play mh02_bag --delay 3      # or the robot's drivers
+```
+
+| argument | default | |
+|---|---|---|
+| `map` | required | saved or merged map |
+| `calibration`, `config` | the EuRoC files | Basalt calibration and VIO config |
+| `urdf` | `launch/euroc_rig.urdf` | robot description for `robot_state_publisher` |
+| `left_topic`, `right_topic`, `imu_topic` | `/cam0/image_raw`, `/cam1/image_raw`, `/imu0` | sensor topics; the left camera is the map's |
+| `imu_frame`, `base_frame` | `imu0`, `base_link` | the IMU's and the base's links in the URDF |
+| `use_vio` | `true` | `false`: another node (e.g. wheel odometry) publishes `odom_topic` |
+| `odom_topic` | `/odom` | the odometry the map localization anchors |
+| `bin_dir` | `ros2/visloc-ros2/target/release` | where the node binaries are |
+| `rviz`, `rviz_config` | `false`, `launch/rviz/map_localization.rviz` | |
+
+`tools/calib_to_urdf.py` writes a URDF of a Basalt rig: `base_link`, the
+IMU, and each camera's optical frame from the calibration's `T_imu_cam`.
+`launch/euroc_rig.urdf` is the EuRoC rig made with it, with `base_link` at
+the IMU. On a robot, use the robot's own URDF, with the IMU and camera
+links named as the IMU and image messages' `frame_id`s.
+
+Tested with ROS 2 Jazzy on EuRoC MH_02 against the MH_01 map, played at
+1.0x. Through the launch file, 99.6% of frames get a map pose at 2.06 /
+5.2 cm RMSE / max, the same as the nodes started by hand. With RViz
+rendering in software on the same 4 cores (under Xvfb), the VIO dropped 11
+of 3,040 frames:
+
+![RViz: the MH_01 map's landmarks, the VIO path and the map pose during MH_02](../../docs/assets/ros2_map_localization_rviz.png)
 
 ## Running inside a ROS 2 graph
 
@@ -394,8 +442,8 @@ the VIO's one-frame queue dropped the bursts. An MH_05 run with the test
 suite compiling on the same cores dropped 194 frames; the run above dropped
 none.
 
-Not covered: RViz (no display was available), Humble, several hosts on a
-real network, and live sensors.
+Not covered: Humble, several hosts on a real network, and live sensors. RViz
+was run under Xvfb only ([launch file](#launch-file-urdf-and-rviz)).
 
 ## On a ground robot
 
@@ -475,8 +523,9 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
 ## Limits (read before relying on this)
 
 * **Tested with ROS 2 Jazzy on one host only**
-  ([above](#tested-against-ros-2-jazzy)). It has not been tested with RViz,
-  Humble, several hosts on a real network, or live sensors. Please
+  ([above](#tested-against-ros-2-jazzy)), RViz included (under Xvfb). It
+  has not been tested with Humble, several hosts on a real network, or live
+  sensors. Please
   report results.
 * VIO accuracy is the Basalt port's (see the root README's EuRoC results).
   The node adds no tuning. It has been run on synthetic data and on all

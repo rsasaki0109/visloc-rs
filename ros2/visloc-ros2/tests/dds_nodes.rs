@@ -14,8 +14,8 @@ use common::*;
 use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
 use visloc_ros2::image::mono8_image;
 use visloc_ros2::msgs::{
-    DiagnosticArray, Header, Image, Imu, Int32, Odometry, PoseStamped, PoseWithCovariance,
-    PoseWithCovarianceStamped, TfMessage, Time,
+    DiagnosticArray, Header, Image, Imu, Int32, Odometry, PointCloud2, PoseStamped,
+    PoseWithCovariance, PoseWithCovarianceStamped, TfMessage, Time,
 };
 
 /// A per-process, per-test domain id in RustDDS's usable range.
@@ -318,6 +318,23 @@ fn map_localize_node_publishes_map_to_odom_for_a_stationary_robot() {
         let _ = tf_tx.send(msg);
     })
     .unwrap();
+    // Subscribed after the node published its map cloud: transient-local
+    // durability still delivers it.
+    std::thread::sleep(Duration::from_secs(2));
+    let cloud_sub = test_node
+        .subscription::<PointCloud2>(
+            "map_cloud",
+            ros2_client::QosProfile::subscription_default()
+                .reliability_reliable(ros2_client::qos::WhenFull::Wait(Duration::from_millis(20)))
+                .durability(ros2_client::qos::Durability::TransientLocal)
+                .history(ros2_client::qos::History::KeepLast { depth: 1 }),
+        )
+        .unwrap();
+    let (cloud_tx, cloud_rx) = mpsc::channel();
+    spawn_receiver("map-cloud-rx", cloud_sub, move |msg: PointCloud2| {
+        let _ = cloud_tx.send(msg);
+    })
+    .unwrap();
     let (pose_tx, pose_rx) = mpsc::channel();
     spawn_receiver(
         "map-pose-rx",
@@ -376,6 +393,13 @@ fn map_localize_node_publishes_map_to_odom_for_a_stationary_robot() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+
+    let cloud = cloud_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("map_cloud reaches a late transient-local subscriber");
+    assert_eq!(cloud.header.frame_id, "map");
+    assert!(cloud.width > 200, "{} points", cloud.width);
+    assert_eq!(cloud.data.len(), 12 * cloud.width as usize);
 
     let tf = tf.unwrap_or_else(|| panic!("no /tf after sending {sent} frames"));
     let transform = &tf.transforms[0];

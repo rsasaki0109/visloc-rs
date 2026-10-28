@@ -23,6 +23,7 @@ macro_rules! impl_message {
 
 impl_message!(
     msgs::Image,
+    msgs::PointCloud2,
     msgs::CameraInfo,
     msgs::Imu,
     msgs::PoseStamped,
@@ -69,6 +70,18 @@ pub fn static_tf_qos() -> QosProfile {
         .reliability_reliable(WhenFull::Wait(std::time::Duration::from_millis(20)))
         .durability(Durability::TransientLocal)
         .history(History::KeepLast { depth: 100 })
+}
+
+/// Latched output QoS: reliable, transient-local, keep-last `depth`. A late
+/// subscriber that asks for transient-local durability (RViz can) still
+/// receives what was published before it joined, e.g. a static map cloud.
+pub fn latched_qos(depth: usize) -> QosProfile {
+    QosProfile::publisher_default()
+        .reliability_reliable(WhenFull::Wait(std::time::Duration::from_millis(20)))
+        .durability(Durability::TransientLocal)
+        .history(History::KeepLast {
+            depth: depth.max(1),
+        })
 }
 
 /// `/ns/name` for logging (`/name` in the root namespace).
