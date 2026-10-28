@@ -307,7 +307,9 @@ Played from a rosbag2 at real time, all eight queries above come within 1.2
 points of the offline `--vio --localize-every 5` share of frames with a map
 pose. On a ground robot, the VIO can publish `base_link` and the map node
 can take the camera's position from `/tf_static`, so wheel odometry can be
-anchored too. `ros2/visloc-ros2/launch/map_localization.launch.py` starts
+anchored too; [OpenLORIS-Scene](openloris_map_localization.md) measures that
+with a real robot's wheel odometry, and the VIO, over four days in an office.
+`ros2/visloc-ros2/launch/map_localization.launch.py` starts
 both nodes, `robot_state_publisher` with the rig's URDF, and RViz, where the
 map node's latched `map_cloud` shows the map's landmarks. Details in
 [the node's README](../ros2/visloc-ros2/README.md#visloc_map_localize_node).

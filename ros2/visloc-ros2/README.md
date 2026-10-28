@@ -487,7 +487,11 @@ publishers. In the VIO run, `tf2_echo map imu0` resolved
 (`base_link`'s ground-truth path with a 2% scale error and a yaw error
 growing by 0.5° per metre), because no wheeled-robot data with a
 stereo-inertial map was at hand. Real wheel odometry on an uneven floor
-also tilts, which this does not model.
+also tilts, which this does not model. Offline, `basalt_euroc_localize_demo
+--odometry` has since anchored a real robot's wheel odometry
+([OpenLORIS-Scene](../../docs/openloris_map_localization.md)): 7–12 cm,
+against 3 cm for the VIO, because it drifts in in-place turns that the
+map does not see.
 
 ## Tests
 

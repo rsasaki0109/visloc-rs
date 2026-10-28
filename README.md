@@ -83,11 +83,13 @@ the docs record open gaps.
 | RGB-D (as virtual stereo) | VO | **Benchmarked** | TUM fr1_xyz 0.014 m, fr1_desk 0.026 m (about 1.3–1.6× ORB-SLAM2 RGB-D) | [TUM RGB-D](docs/tum_rgbd_benchmark.md) |
 | Multi-camera rig | SfM | Experimental | OpenLORIS 10k: 9,998/10,000 registered; RMSE parity with COLMAP still open | `generalized_rig_sfm` |
 | Robot rig cameras vs. a prebuilt map | Relocalization | **Benchmarked** | OpenLORIS (robot-mounted rig): 98.96% of 1,250 held-out frames localized against a map built from other frames, median 2.9 mm | `localize_openloris_map` |
+| Wheeled robot: stereo + IMU (RealSense T265), wheel odometry | Localization in a saved SLAM map, odometry anchored to it | **Benchmarked** | OpenLORIS-Scene office, other sessions up to 2.8 days later with furniture moved: VIO + map gives 79–99% of frames a map pose at 2.9–3.5 cm, wheel odometry + map 7–12 cm; no fix across a day/night lighting change | `scripts/openloris_to_euroc.py`, `basalt_euroc_localize_demo --vio` or `--odometry` ([notes](docs/openloris_map_localization.md)) |
 | Robot camera sequence vs. a prebuilt map | Sequential map-matching localization | **Benchmarked** (simulation) | RNE house (drjohnson): 387/400 frames at 5.6 cm ATE, 38 ms per frame (median) with `--gpu --motion-model`. RNE checker corridor: 203/400 at 1.57 m, limited by repetitive texture | `localize_rne_map_sequence` |
 | Camera + GNSS prior | Tracking | Example only | Synthetic smoke test; no tight GNSS fusion | `track_sequence_with_gnss_prior` |
 | VO + GNSS positions | Joint pose-graph fusion | Experimental (synthetic) | ~1 km synthetic loop: ATE 5.25 m (VO only) → 0.90 m fused; multipath jumps rejected, 15 s dropout bridged. Loosely coupled (receiver ENU positions; no raw pseudoranges, no IMU) | `gnss_vo_fusion_demo` ([notes](docs/gnss_fusion.md)) |
 
-LiDAR and wheel odometry are not supported.
+LiDAR is not supported. Wheel odometry is supported only as the odometry
+anchored to a map (above); it is not fused into the VIO.
 
 ## Try it
 
@@ -408,7 +410,11 @@ FILE --config FILE` to run the stereo-inertial VIO alongside and anchor it to
 the map: every frame then gets a map pose (MH_02: 99.8% at 2.0 cm RMSE,
 localizing every 5th image). With `--projection-radius-px 20` as well, each
 image is matched around where the anchored VIO predicts the landmarks, and
-98% of MH_02's images match the map instead of 81%. Maps of several flights of a place merge into
+98% of MH_02's images match the map instead of 81%. On a real wheeled
+robot (OpenLORIS-Scene, a RealSense T265), sessions days apart in a
+rearranged office localize the same way, and `--odometry FILE` anchors the
+robot's wheel odometry instead of the VIO; see
+[the OpenLORIS results](docs/openloris_map_localization.md). Maps of several flights of a place merge into
 one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
 with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
 the [EuRoC map-localization results](docs/basalt_map_localization.md).

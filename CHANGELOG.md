@@ -6,6 +6,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **Saving a map from a lens wider than the Double Sphere model failed.**
+  The map export fits COLMAP's `OPENCV_FISHEYE` to each Double Sphere
+  camera. It gave up when an image corner did not unproject, which happens
+  with a RealSense T265's fisheyes. The corner is now moved toward the
+  principal point until it unprojects, so the fit covers the model's
+  domain: 0.03 px over 118° for the T265. EuRoC maps are unchanged.
+
 - **visloc-basalt: `vio_min_triangulation_dist` was ignored.** The VIO's
   landmark baseline gate was hard-coded at 5 cm; it now reads the
   configuration value, as upstream does. The pinned EuRoC file says 5 cm,
@@ -35,6 +42,27 @@ All notable changes to `visloc-rs` will be documented here.
   `/odom`, `/robot1/odom` with `-r __ns:=/robot1`).
 
 ### Added
+
+- **Map-based localization on a real wheeled robot (OpenLORIS-Scene).**
+  `scripts/openloris_to_euroc.py` converts an OpenLORIS-Scene sequence's
+  T265 data to the EuRoC layout with a Basalt calibration:
+  - the fisheyes are resampled to a Double Sphere camera;
+  - the accelerometer is interpolated to the gyro;
+  - the ground truth (`base_link`) is moved to the IMU.
+
+  `basalt_euroc_localize_demo --odometry FILE [--imu-from-body ...]`
+  anchors an external odometry, such as the robot's wheel odometry, to the
+  map instead of the VIO.
+
+  `docs/openloris_map_localization.md` reports the office scene, seven
+  sessions over four days:
+  - Sessions with the same lighting, up to 2.8 days later with furniture
+    moved, get a map pose for 79–99% of frames at 2.9–3.5 cm with the VIO.
+    With the wheel odometry they get 7–12 cm, because it drifts in in-place
+    turns.
+  - No session localizes across the day/night lighting change.
+  - Maps of opposite driving directions merge through a session that turns
+    in place.
 
 - **README: map-based localization animation.** EuRoC MH_02 with the VIO
   anchored to the MH_01 map: the map-frame trajectory (a pose for every

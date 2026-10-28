@@ -54,6 +54,13 @@
 //!   VIO distance since the anchor's newest fix (the fused error grows with
 //!   them, so use them to judge a pose); `trajectory_vio.tum`, the raw VIO in
 //!   its own frame.
+//! - With `--odometry FILE` instead of `--vio`: `trajectory_map.tum` and
+//!   `.csv` as above, and `trajectory_odometry.tum`, the odometry at the
+//!   image stamps. `FILE` is a TUM trajectory of a body (e.g. a wheeled
+//!   robot's `base_link` in its odometry frame), interpolated at each image
+//!   stamp; `--imu-from-body tx,ty,tz,qx,qy,qz,qw` places the body in the
+//!   map's IMU frame. The odometry frame must be gravity-aligned (z up), as
+//!   planar wheel odometry on a level floor is.
 //! - With `--dump-inliers FILE`: per accepted localization, one CSV row per
 //!   PnP inlier, `timestamp_ns,x,y,landmark_id` (the query keypoint in
 //!   pixels and the map landmark it matched), e.g. for drawing the matches.
@@ -66,7 +73,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nalgebra::Point2;
+use nalgebra::{Point2, Quaternion, UnitQuaternion, Vector3};
 use visloc_basalt::euroc::{read_camera_image, read_camera_manifest};
 use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
@@ -109,10 +116,14 @@ struct Args {
     vio: bool,
     calibration: Option<PathBuf>,
     config: Option<PathBuf>,
-    /// With `--vio`, localize every N-th frame.
+    /// Anchor this odometry (TUM, a body's poses) instead of the VIO.
+    odometry: Option<PathBuf>,
+    /// With `--odometry`: the body's pose in the IMU frame, `T_imu_body`.
+    imu_from_body: Option<SE3>,
+    /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
-    /// With `--vio`, match by projection from the anchored VIO's prediction
-    /// first, within this radius.
+    /// With `--vio` or `--odometry`, match by projection from the anchored
+    /// odometry's prediction first, within this radius.
     projection_radius_px: Option<f64>,
     /// Write each accepted localization's inliers here.
     dump_inliers: Option<PathBuf>,
@@ -124,8 +135,9 @@ impl Args {
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
          [--prior-radius-m M] [--duplicate-radius-m M] \
-         [--vio --calibration FILE --config FILE [--localize-every N] \
-         [--projection-radius-px PX]] [--dump-inliers FILE]"
+         [--vio --calibration FILE --config FILE | --odometry FILE \
+         [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
+         [--projection-radius-px PX] [--dump-inliers FILE]"
             .into()
     }
 
@@ -155,6 +167,8 @@ impl Args {
             vio: false,
             calibration: None,
             config: None,
+            odometry: None,
+            imu_from_body: None,
             localize_every: 1,
             projection_radius_px: None,
             dump_inliers: None,
@@ -199,6 +213,21 @@ impl Args {
                 "--vio" => args.vio = true,
                 "--calibration" => args.calibration = Some(PathBuf::from(value()?)),
                 "--config" => args.config = Some(PathBuf::from(value()?)),
+                "--odometry" => args.odometry = Some(PathBuf::from(value()?)),
+                "--imu-from-body" => {
+                    let value = value()?;
+                    let numbers = value
+                        .split(',')
+                        .map(|field| number::<f64>(&option, field.trim().to_owned()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let [tx, ty, tz, qx, qy, qz, qw] = numbers[..] else {
+                        return Err(format!("{option}: expected tx,ty,tz,qx,qy,qz,qw"));
+                    };
+                    args.imu_from_body = Some(SE3::new(
+                        UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz)),
+                        Vector3::new(tx, ty, tz),
+                    ));
+                }
                 "--localize-every" => args.localize_every = number(&option, value()?)?,
                 "--projection-radius-px" => {
                     args.projection_radius_px = Some(number(&option, value()?)?);
@@ -213,24 +242,29 @@ impl Args {
         if args.stride == 0 {
             return Err("--stride must be positive".into());
         }
-        if args.vio {
-            if args.calibration.is_none() || args.config.is_none() {
-                return Err("--vio needs --calibration and --config".into());
-            }
+        if args.vio && args.odometry.is_some() {
+            return Err("--vio and --odometry are alternatives".into());
+        }
+        if args.vio != (args.calibration.is_some() && args.config.is_some())
+            || args.calibration.is_some() != args.config.is_some()
+        {
+            return Err("--vio needs --calibration and --config, which need --vio".into());
+        }
+        if args.imu_from_body.is_some() && args.odometry.is_none() {
+            return Err("--imu-from-body needs --odometry".into());
+        }
+        if args.vio || args.odometry.is_some() {
             if args.stride != 1 {
-                return Err("--vio runs on every frame; use --localize-every, not --stride".into());
+                return Err(
+                    "an anchored run sees every frame; use --localize-every, not --stride".into(),
+                );
             }
             if args.localize_every == 0 {
                 return Err("--localize-every must be positive".into());
             }
-        } else if args.localize_every != 1
-            || args.calibration.is_some()
-            || args.config.is_some()
-            || args.projection_radius_px.is_some()
-        {
+        } else if args.localize_every != 1 || args.projection_radius_px.is_some() {
             return Err(
-                "--localize-every, --calibration, --config and --projection-radius-px need --vio"
-                    .into(),
+                "--localize-every and --projection-radius-px need --vio or --odometry".into(),
             );
         }
         Ok(args)
@@ -485,6 +519,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.vio {
         return run_vio(args, &mut localizer);
     }
+    if let Some(path) = &args.odometry {
+        return run_odometry(args, &mut localizer, path);
+    }
     let camera_dir = args
         .euroc_dir
         .join("mav0")
@@ -526,6 +563,142 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Odometry anchored to the map, frame by frame: the fixes, the anchor and
+/// every output file of `--vio` / `--odometry`.
+struct AnchoredRun {
+    anchor: MapAnchor,
+    fixes_tum: String,
+    map_tum: String,
+    odometry_tum: String,
+    csv: String,
+    inliers: String,
+    map_csv: String,
+    latencies: Vec<f64>,
+    attempts: usize,
+    localized: usize,
+    anchored: usize,
+    frames: usize,
+    outcomes: std::collections::BTreeMap<&'static str, usize>,
+    started: Instant,
+}
+
+impl AnchoredRun {
+    fn new() -> Self {
+        let header = "# timestamp tx ty tz qx qy qz qw\n";
+        Self {
+            anchor: MapAnchor::new(MapAnchorConfig::default()),
+            fixes_tum: header.to_owned(),
+            map_tum: header.to_owned(),
+            odometry_tum: header.to_owned(),
+            csv: String::from(CSV_HEADER),
+            inliers: String::from(INLIERS_HEADER),
+            map_csv: String::from(
+                "timestamp_ns,tx,ty,tz,qx,qy,qz,qw,seconds_since_fix,metres_since_fix\n",
+            ),
+            latencies: Vec::new(),
+            attempts: 0,
+            localized: 0,
+            anchored: 0,
+            frames: 0,
+            outcomes: std::collections::BTreeMap::new(),
+            started: Instant::now(),
+        }
+    }
+
+    /// One frame: the odometry's IMU pose and, on a frame to localize, its
+    /// image.
+    fn frame(
+        &mut self,
+        localizer: &mut Localizer,
+        timestamp_ns: i64,
+        odom_from_imu: &SE3,
+        image: Option<&RawU16Image>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.frames += 1;
+        self.odometry_tum
+            .push_str(&tum_line(timestamp_ns, odom_from_imu));
+        // The anchor as it stands before this image's fix predicts its pose.
+        let predicted = self.anchor.map_from_body(odom_from_imu);
+        if let Some(image) = image {
+            let attempt = localizer.localize(image, predicted.as_ref())?;
+            self.attempts += 1;
+            self.latencies.push(attempt.latency_ms);
+            let outcome = match &attempt.world_from_imu {
+                Some(map_from_imu) => {
+                    self.localized += 1;
+                    self.fixes_tum
+                        .push_str(&tum_line(timestamp_ns, map_from_imu));
+                    match self
+                        .anchor
+                        .add_fix(timestamp_ns, map_from_imu, odom_from_imu)
+                    {
+                        FixOutcome::Pending => "pending",
+                        FixOutcome::Initialized => "initialized",
+                        FixOutcome::Accepted => "accepted",
+                        FixOutcome::Rejected => "rejected",
+                        FixOutcome::Reanchored => "reanchored",
+                    }
+                }
+                None => "-",
+            };
+            *self.outcomes.entry(outcome).or_default() += 1;
+            csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
+            inlier_rows(&mut self.inliers, timestamp_ns, &attempt);
+        }
+        if let (Some(map_from_imu), Some((fix_ns, fix_position))) = (
+            self.anchor.map_from_body(odom_from_imu),
+            self.anchor.last_fix(),
+        ) {
+            self.map_tum
+                .push_str(&tum_line(timestamp_ns, &map_from_imu));
+            let (t, q) = (map_from_imu.translation, map_from_imu.rotation.quaternion());
+            writeln!(
+                self.map_csv,
+                "{timestamp_ns},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.3},{:.3}",
+                t.x,
+                t.y,
+                t.z,
+                q.i,
+                q.j,
+                q.k,
+                q.w,
+                (timestamp_ns - fix_ns) as f64 * 1e-9,
+                (odom_from_imu.translation - fix_position).norm(),
+            )?;
+            self.anchored += 1;
+        }
+        Ok(())
+    }
+
+    /// Writes the outputs; the odometry's own trajectory goes to
+    /// `odometry_file`.
+    fn finish(self, args: &Args, odometry_file: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let wall_s = self.started.elapsed().as_secs_f64();
+        fs::create_dir_all(&args.out_dir)?;
+        fs::write(args.out_dir.join("localization.tum"), self.fixes_tum)?;
+        fs::write(args.out_dir.join("trajectory_map.tum"), self.map_tum)?;
+        fs::write(args.out_dir.join("trajectory_map.csv"), self.map_csv)?;
+        fs::write(args.out_dir.join(odometry_file), self.odometry_tum)?;
+        fs::write(args.out_dir.join("per_frame.csv"), self.csv)?;
+        if let Some(path) = &args.dump_inliers {
+            fs::write(path, self.inliers)?;
+        }
+        println!(
+            "frames {}, localized {}/{} attempts (median {:.1} ms), anchored {}/{} frames, \
+             fixes {:?}, {wall_s:.1} s -> {}",
+            self.frames,
+            self.localized,
+            self.attempts,
+            median(self.latencies),
+            self.anchored,
+            self.frames,
+            self.outcomes,
+            args.out_dir.display()
+        );
+        Ok(())
+    }
+}
+
 /// Runs the Basalt VIO on every frame and anchors it to the map with the
 /// fixes from every `--localize-every`-th frame.
 fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::error::Error>> {
@@ -535,23 +708,12 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let mut adapter =
         BasaltVioEstimatorAdapter::from_config(dataset.calibration(), dataset.config())?;
     adapter.estimator.set_lean_marg_data(true);
-    let mut anchor = MapAnchor::new(MapAnchorConfig::default());
     let frames = args
         .max_frames
         .unwrap_or(usize::MAX)
         .min(dataset.frame_count());
 
-    let header = "# timestamp tx ty tz qx qy qz qw\n";
-    let (mut fixes_tum, mut map_tum, mut vio_tum) =
-        (header.to_owned(), header.to_owned(), header.to_owned());
-    let mut csv = String::from(CSV_HEADER);
-    let mut inliers = String::from(INLIERS_HEADER);
-    let mut map_csv =
-        String::from("timestamp_ns,tx,ty,tz,qx,qy,qz,qw,seconds_since_fix,metres_since_fix\n");
-    let mut latencies = Vec::new();
-    let (mut attempts, mut localized, mut anchored) = (0_usize, 0_usize, 0_usize);
-    let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
-    let started = Instant::now();
+    let mut run = AnchoredRun::new();
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
@@ -570,73 +732,101 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
             .estimator
             .state
             .imu_to_world;
-        vio_tum.push_str(&tum_line(timestamp_ns, &odom_from_imu));
-        // The anchor as it stands before this image's fix predicts its pose.
-        let predicted = anchor.map_from_body(&odom_from_imu);
-        let attempt = image
-            .map(|image| localizer.localize(&image, predicted.as_ref()))
+        run.frame(localizer, timestamp_ns, &odom_from_imu, image.as_ref())?;
+    }
+    run.finish(args, "trajectory_vio.tum")
+}
+
+/// Anchors an external odometry (`--odometry`, e.g. a robot's wheel
+/// odometry) to the map instead of the VIO: each camera image takes the
+/// odometry pose interpolated at its stamp, and every `--localize-every`-th
+/// image is localized.
+fn run_odometry(
+    args: &Args,
+    localizer: &mut Localizer,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let odometry = read_tum_ns(path)?;
+    let body_from_imu = args
+        .imu_from_body
+        .as_ref()
+        .map_or_else(SE3::identity, SE3::inverse);
+    let camera_dir = args
+        .euroc_dir
+        .join("mav0")
+        .join(format!("cam{}", args.camera));
+    let images = read_camera_manifest(&camera_dir)?
+        .into_iter()
+        .take(args.max_frames.unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+
+    let mut run = AnchoredRun::new();
+    for (index, entry) in images.iter().enumerate() {
+        let Some(odom_from_body) = interpolate_pose(&odometry, entry.timestamp_ns) else {
+            continue;
+        };
+        let odom_from_imu = odom_from_body.compose(&body_from_imu);
+        let image = (index % args.localize_every == 0)
+            .then(|| read_camera_image(&entry.path))
             .transpose()?;
-
-        if let Some(attempt) = attempt {
-            attempts += 1;
-            latencies.push(attempt.latency_ms);
-            let outcome = match &attempt.world_from_imu {
-                Some(map_from_imu) => {
-                    localized += 1;
-                    fixes_tum.push_str(&tum_line(timestamp_ns, map_from_imu));
-                    match anchor.add_fix(timestamp_ns, map_from_imu, &odom_from_imu) {
-                        FixOutcome::Pending => "pending",
-                        FixOutcome::Initialized => "initialized",
-                        FixOutcome::Accepted => "accepted",
-                        FixOutcome::Rejected => "rejected",
-                        FixOutcome::Reanchored => "reanchored",
-                    }
-                }
-                None => "-",
-            };
-            *outcomes.entry(outcome).or_default() += 1;
-            csv_row(&mut csv, timestamp_ns, &attempt, outcome);
-            inlier_rows(&mut inliers, timestamp_ns, &attempt);
-        }
-        if let (Some(map_from_imu), Some((fix_ns, fix_position))) =
-            (anchor.map_from_body(&odom_from_imu), anchor.last_fix())
-        {
-            map_tum.push_str(&tum_line(timestamp_ns, &map_from_imu));
-            let (t, q) = (map_from_imu.translation, map_from_imu.rotation.quaternion());
-            writeln!(
-                map_csv,
-                "{timestamp_ns},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.3},{:.3}",
-                t.x,
-                t.y,
-                t.z,
-                q.i,
-                q.j,
-                q.k,
-                q.w,
-                (timestamp_ns - fix_ns) as f64 * 1e-9,
-                (odom_from_imu.translation - fix_position).norm(),
-            )?;
-            anchored += 1;
-        }
+        run.frame(
+            localizer,
+            entry.timestamp_ns,
+            &odom_from_imu,
+            image.as_ref(),
+        )?;
     }
-    let wall_s = started.elapsed().as_secs_f64();
+    run.finish(args, "trajectory_odometry.tum")
+}
 
-    fs::create_dir_all(&args.out_dir)?;
-    fs::write(args.out_dir.join("localization.tum"), fixes_tum)?;
-    fs::write(args.out_dir.join("trajectory_map.tum"), map_tum)?;
-    fs::write(args.out_dir.join("trajectory_map.csv"), map_csv)?;
-    fs::write(args.out_dir.join("trajectory_vio.tum"), vio_tum)?;
-    fs::write(args.out_dir.join("per_frame.csv"), csv)?;
-    if let Some(path) = &args.dump_inliers {
-        fs::write(path, inliers)?;
+/// A TUM trajectory (`timestamp tx ty tz qx qy qz qw`, seconds) with exact
+/// nanosecond stamps.
+fn read_tum_ns(path: &std::path::Path) -> Result<Vec<(i64, SE3)>, Box<dyn std::error::Error>> {
+    let mut poses = Vec::new();
+    for (line_index, line) in fs::read_to_string(path)?.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let bad = || format!("{}:{}: expected a TUM pose", path.display(), line_index + 1);
+        if fields.len() < 8 {
+            return Err(bad().into());
+        }
+        let (seconds, fraction) = fields[0].split_once('.').unwrap_or((fields[0], ""));
+        let fraction = format!("{fraction:0<9}");
+        let timestamp_ns = seconds.parse::<i64>().map_err(|_| bad())? * 1_000_000_000
+            + fraction[..9].parse::<i64>().map_err(|_| bad())?;
+        let values = fields[1..8]
+            .iter()
+            .map(|field| field.parse::<f64>().map_err(|_| bad()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rotation = UnitQuaternion::from_quaternion(Quaternion::new(
+            values[6], values[3], values[4], values[5],
+        ));
+        poses.push((
+            timestamp_ns,
+            SE3::new(rotation, Vector3::new(values[0], values[1], values[2])),
+        ));
     }
-    println!(
-        "frames {frames}, localized {localized}/{attempts} attempts (median {:.1} ms), \
-         anchored {anchored}/{frames} frames, fixes {outcomes:?}, {wall_s:.1} s -> {}",
-        median(latencies),
-        args.out_dir.display()
-    );
-    Ok(())
+    poses.sort_by_key(|(timestamp_ns, _)| *timestamp_ns);
+    Ok(poses)
+}
+
+/// The pose at `timestamp_ns`, interpolated between the two poses around
+/// it (linear translation, slerp rotation); `None` outside the trajectory.
+fn interpolate_pose(poses: &[(i64, SE3)], timestamp_ns: i64) -> Option<SE3> {
+    let after = poses.partition_point(|(t, _)| *t < timestamp_ns);
+    let (t1, pose1) = poses.get(after)?;
+    if *t1 == timestamp_ns {
+        return Some(pose1.clone());
+    }
+    let (t0, pose0) = poses.get(after.checked_sub(1)?)?;
+    let s = (timestamp_ns - t0) as f64 / (t1 - t0) as f64;
+    Some(SE3::new(
+        pose0.rotation.slerp(&pose1.rotation, s),
+        pose0.translation + (pose1.translation - pose0.translation) * s,
+    ))
 }
 
 fn main() {
@@ -715,6 +905,62 @@ mod tests {
         let args = with(&[&vio[..], &["--projection-radius-px", "20"]].concat()).expect("parses");
         assert_eq!(args.projection_radius_px, Some(20.0));
         assert_eq!(with(&[]).expect("parses").localize_every, 1);
+    }
+
+    #[test]
+    fn parser_checks_the_odometry_options() {
+        let base = ["--map", "m", "--euroc-dir", "d"];
+        let with = |extra: &[&str]| parse(&base.iter().chain(extra).copied().collect::<Vec<_>>());
+        let args = with(&[
+            "--odometry",
+            "odom.tum",
+            "--imu-from-body",
+            "0.1,0,0.3,0,0,0.7071068,0.7071068",
+            "--localize-every",
+            "5",
+            "--projection-radius-px",
+            "20",
+        ])
+        .expect("parses");
+        assert_eq!(args.odometry, Some(PathBuf::from("odom.tum")));
+        let imu_from_body = args.imu_from_body.expect("extrinsics");
+        assert!((imu_from_body.translation - Vector3::new(0.1, 0.0, 0.3)).norm() < 1e-12);
+        assert!((imu_from_body.rotation.angle() - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(args.localize_every, 5);
+        assert!(with(&["--imu-from-body", "0,0,0,0,0,0,1"]).is_err());
+        assert!(with(&["--odometry", "o.tum", "--imu-from-body", "1,2,3"]).is_err());
+        assert!(with(&["--odometry", "o.tum", "--stride", "2"]).is_err());
+        let vio = ["--vio", "--calibration", "c.json", "--config", "k.json"];
+        assert!(with(&[&vio[..], &["--odometry", "o.tum"]].concat()).is_err());
+    }
+
+    #[test]
+    fn odometry_is_read_exactly_and_interpolated() {
+        let path = std::env::temp_dir().join(format!("visloc_odometry_{}.tum", std::process::id()));
+        fs::write(
+            &path,
+            "# timestamp tx ty tz qx qy qz qw\n\
+             1560000110.95848536 1 0 0 0 0 0 1\n\
+             1560000111.00848532 2 0 0 0 0 0.7071067811865476 0.7071067811865476\n",
+        )
+        .expect("write");
+        let poses = read_tum_ns(&path).expect("reads");
+        fs::remove_file(&path).expect("cleanup");
+        assert_eq!(poses[0].0, 1_560_000_110_958_485_360);
+        assert_eq!(poses[1].0, 1_560_000_111_008_485_320);
+        let middle = (poses[0].0 + poses[1].0) / 2;
+        let pose = interpolate_pose(&poses, middle).expect("inside");
+        assert!((pose.translation.x - 1.5).abs() < 1e-6);
+        assert!((pose.rotation.angle() - std::f64::consts::FRAC_PI_4).abs() < 1e-6);
+        assert!(interpolate_pose(&poses, poses[0].0 - 1).is_none());
+        assert!(interpolate_pose(&poses, poses[1].0 + 1).is_none());
+        assert_eq!(
+            interpolate_pose(&poses, poses[1].0)
+                .expect("end")
+                .translation
+                .x,
+            2.0
+        );
     }
 
     fn descriptor(seed: usize) -> [u8; 32] {
