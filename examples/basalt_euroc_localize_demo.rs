@@ -839,6 +839,8 @@ impl CorrectedRun {
         self.first_ns.get_or_insert(timestamp_ns);
         self.odometry_tum
             .push_str(&tum_line(timestamp_ns, odom_from_imu));
+        self.correction
+            .observe_odometry(timestamp_ns, odom_from_imu);
         // The correction as it stands before this image's fix predicts its pose,
         // while its newest fix is recent: after a long gap, a drifted
         // prediction can steer the projection search to a wrong pose that

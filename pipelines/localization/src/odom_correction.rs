@@ -19,6 +19,10 @@
 //! - **accepts** a fix whose map pose lies within a gate of where the current
 //!   offset puts the odometry pose; the gate widens with the odometry
 //!   distance travelled since the last accepted fix, to absorb drift;
+//!   that distance is the odometry's path through the poses passed to
+//!   [`OdomCorrection::observe_odometry`], or, without them, the straight
+//!   lines between the odometry positions of consecutive fixes, which
+//!   undercount a path that turns or doubles back;
 //! - **rejects** any other fix, and **resets** the offset when `reset_after`
 //!   consecutive rejected fixes agree with each other (the odometry itself
 //!   jumped, or the earlier offset was wrong).
@@ -35,6 +39,11 @@
 //! while following slow odometry drift.
 
 use std::collections::VecDeque;
+
+/// How far back [`OdomCorrection::observe_odometry`] keeps the odometry's
+/// path. A fix older than that, relative to the newest odometry pose, falls
+/// back to the straight-line distance.
+const PATH_HISTORY_NS: i64 = 30_000_000_000;
 
 use nalgebra::{UnitQuaternion, Vector3};
 use visloc_core::geometry::SE3;
@@ -172,6 +181,13 @@ pub struct OdomCorrection {
     /// (sampled at fixes) since the last accepted one.
     previous_odom_position: Option<Vector3<f64>>,
     travel_since_accept_m: f64,
+    /// Observed odometry, oldest first: stamp and path length from the first
+    /// observed pose. Covers at most `PATH_HISTORY_NS`.
+    path: VecDeque<(i64, f64)>,
+    /// Position of the newest observed odometry pose.
+    path_end: Option<Vector3<f64>>,
+    /// Path length at the last accepted fix, when the path covered it.
+    path_at_accept_m: Option<f64>,
 }
 
 impl OdomCorrection {
@@ -183,6 +199,9 @@ impl OdomCorrection {
             candidates: Vec::new(),
             previous_odom_position: None,
             travel_since_accept_m: 0.0,
+            path: VecDeque::new(),
+            path_end: None,
+            path_at_accept_m: None,
         }
     }
 
@@ -214,6 +233,54 @@ impl OdomCorrection {
     pub fn map_from_body(&self, odom_from_body: &SE3) -> Option<SE3> {
         self.map_from_odom()
             .map(|map_from_odom| map_from_odom.compose(odom_from_body))
+    }
+
+    /// Adds an odometry pose, so the gate measures the odometry's travel
+    /// along its path rather than between fixes. Poses must arrive in time
+    /// order (older or repeated stamps are ignored), but may run ahead of the
+    /// fixes: a fix's travel is read off the path at its own stamp.
+    pub fn observe_odometry(&mut self, timestamp_ns: i64, odom_from_body: &SE3) {
+        if self
+            .path
+            .back()
+            .is_some_and(|(last_ns, _)| timestamp_ns <= *last_ns)
+        {
+            return;
+        }
+        let position = odom_from_body.translation;
+        let length = match (self.path.back(), self.path_end) {
+            (Some((_, length)), Some(end)) => length + (position - end).norm(),
+            _ => 0.0,
+        };
+        self.path.push_back((timestamp_ns, length));
+        self.path_end = Some(position);
+        while self
+            .path
+            .front()
+            .is_some_and(|(first_ns, _)| timestamp_ns - first_ns > PATH_HISTORY_NS)
+        {
+            self.path.pop_front();
+        }
+    }
+
+    /// Path length of the observed odometry at `timestamp_ns`, interpolated
+    /// between the poses around it; `None` outside the observed path.
+    fn path_length_at(&self, timestamp_ns: i64) -> Option<f64> {
+        let (first_ns, _) = self.path.front()?;
+        let (last_ns, _) = self.path.back()?;
+        if timestamp_ns < *first_ns || timestamp_ns > *last_ns {
+            return None;
+        }
+        let index = self
+            .path
+            .partition_point(|(stamp, _)| *stamp < timestamp_ns);
+        let (after_ns, after) = self.path[index];
+        if after_ns == timestamp_ns || index == 0 {
+            return Some(after);
+        }
+        let (before_ns, before) = self.path[index - 1];
+        let alpha = (timestamp_ns - before_ns) as f64 / (after_ns - before_ns) as f64;
+        Some(before + alpha * (after - before))
     }
 
     /// Adds a map fix: the body's map pose from localization, and its
@@ -258,12 +325,13 @@ impl OdomCorrection {
             self.travel_since_accept_m += (fix.odom_position - previous).norm();
         }
         self.previous_odom_position = Some(fix.odom_position);
+        let path_m = self.path_length_at(timestamp_ns);
 
         let Some(offset) = self.offset else {
             return if self.push_initial(fix) {
                 Self::adopt(&mut self.window, &mut self.candidates);
                 self.refit();
-                self.travel_since_accept_m = 0.0;
+                self.restart_travel(path_m);
                 FixOutcome::Initialized
             } else {
                 FixOutcome::Pending
@@ -274,24 +342,33 @@ impl OdomCorrection {
             return FixOutcome::Unused;
         }
         let (position_residual, yaw_residual) = residuals(&offset, &fix);
-        let travel = self.travel_since_accept_m;
+        let travel = match (path_m, self.path_at_accept_m) {
+            (Some(now), Some(then)) => self.travel_since_accept_m.max(now - then),
+            _ => self.travel_since_accept_m,
+        };
         let accepted = position_residual <= self.config.gate_m + self.config.gate_per_m * travel
             && yaw_residual <= self.config.gate_yaw_deg + self.config.gate_yaw_per_m_deg * travel;
         if accepted {
             self.candidates.clear();
             self.window.push_back(fix);
             self.refit();
-            self.travel_since_accept_m = 0.0;
+            self.restart_travel(path_m);
             return FixOutcome::Accepted;
         }
         if self.push_candidate(fix, self.config.reset_after) {
             Self::adopt(&mut self.window, &mut self.candidates);
             self.refit();
-            self.travel_since_accept_m = 0.0;
+            self.restart_travel(path_m);
             FixOutcome::Reset
         } else {
             FixOutcome::Rejected
         }
+    }
+
+    /// Measures travel from a fix just accepted, at path length `path_m`.
+    fn restart_travel(&mut self, path_m: Option<f64>) {
+        self.travel_since_accept_m = 0.0;
+        self.path_at_accept_m = path_m;
     }
 
     /// Appends to the candidate run, keeping only its last `needed` fixes,
@@ -611,6 +688,39 @@ mod tests {
             FixOutcome::Rejected
         );
         assert_eq!(fix_at(&mut far, 40, &truth(), drift), FixOutcome::Accepted);
+    }
+
+    #[test]
+    fn observed_odometry_measures_travel_along_the_path() {
+        let config = OdomCorrectionConfig::default();
+        let mut sampled = OdomCorrection::new(config.clone());
+        let mut observed = OdomCorrection::new(config);
+        // The odometry runs ahead of the fixes, as a localization finishes
+        // after later odometry has arrived.
+        for index in 0..=40 {
+            observed.observe_odometry(index as i64 * SECOND / 10, &odom(index));
+        }
+        for index in 0..3 {
+            fix_at(&mut sampled, index, &truth(), Vector3::zeros());
+            fix_at(&mut observed, index, &truth(), Vector3::zeros());
+        }
+        // Almost a full circle (11.6 m of path) ends 1.1 m from the last
+        // fix: 0.3 m off is outside the gate that straight line gives, and
+        // inside the one the path gives.
+        let drift = Vector3::new(0.0, 0.0, 0.3);
+        assert_eq!(
+            fix_at(&mut sampled, 31, &truth(), drift),
+            FixOutcome::Rejected
+        );
+        assert_eq!(
+            fix_at(&mut observed, 31, &truth(), drift),
+            FixOutcome::Accepted
+        );
+        // Travel restarts at the accepted fix.
+        assert_eq!(
+            fix_at(&mut observed, 32, &truth(), drift * 2.0),
+            FixOutcome::Rejected
+        );
     }
 
     #[test]

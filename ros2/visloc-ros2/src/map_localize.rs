@@ -698,6 +698,7 @@ impl OdomCorrector {
         odom_from_body: SE3,
     ) -> (Vec<FixEvent>, Option<MapPose>) {
         self.odom.push(stamp_ns, odom_from_body.clone());
+        self.correction.observe_odometry(stamp_ns, &odom_from_body);
         if self
             .latest_odom
             .as_ref()
@@ -1019,6 +1020,34 @@ mod tests {
             [FixOutcome::Unused]
         );
         assert_eq!(MapLocalizeOptions::default().weak_min_inliers, 15);
+    }
+
+    #[test]
+    fn the_gate_widens_with_the_odometry_path_since_the_last_fix() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        let stamp = |i: usize| i as i64 * 50 * MS;
+        // 5 m out along x and back: 10.8 m of path.
+        let odom = |i: usize| pose(if i <= 50 { i } else { 100 - i } as f64 * 0.1, 0.0);
+        for i in 0..2 {
+            core.add_odom(stamp(i), odom(i));
+            core.add_fix(stamp(i), offset().compose(&odom(i)));
+        }
+        assert!(core.is_set());
+        for i in 2..100 {
+            core.add_odom(stamp(i), odom(i));
+        }
+        // Frame 97 is 0.2 m from the last fix but 10.6 m along the path:
+        // 0.3 m off is within the gate, though its localization arrives
+        // after later odometry.
+        let mut map_from_body = offset().compose(&odom(97));
+        map_from_body.translation.z += 0.3;
+        assert_eq!(
+            core.add_fix(stamp(97), map_from_body),
+            [FixEvent::Applied {
+                stamp_ns: stamp(97),
+                outcome: FixOutcome::Accepted
+            }]
+        );
     }
 
     #[test]
