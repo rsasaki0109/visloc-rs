@@ -1,8 +1,13 @@
 # Metric-scale objects from monocular VI-SLAM (plan)
 
-**Status:** Phase 0 is done (go). Phase 1 (2D detection and tracking) is in
-`pipelines/objects` (`visloc-objects`); see
-[`object_tracking.md`](object_tracking.md). Nothing from Phase 2 on is
+**Status:**
+- Phase 0 is done (go).
+- Phase 1 (2D detection and tracking) is in `pipelines/objects`
+  (`visloc-objects`).
+- Phase 2's moving-object filter is in `visloc-basalt`, checked on synthetic
+  data so far.
+
+See [`object_tracking.md`](object_tracking.md). Phase 3 onward is not
 implemented yet.
 
 ## Goal
@@ -105,6 +110,22 @@ scale, so this number is the ceiling.
   bit-identical (`trajectory.tum` sha256, as `scripts/bench/basalt_vio_parity.sh`
   checks).
 - Evaluate on LaMAria Moving (Score up?) and EuRoC (no regression).
+- **Done: the filter.** It is in `visloc_basalt::dynamic_objects` and runs
+  inside the estimator, right after the IMU prediction, so it covers the
+  serial, pipelined and stage-split paths alike.
+  - It is opt-in by supplying boxes (`set_object_boxes`,
+    `basalt_euroc_vio_demo --object-boxes`) rather than by a config key.
+    Without boxes the code path is skipped, so the output is unchanged.
+  - The test compares a box's median error with the background's, against
+    the IMU prediction. Tracks without a landmark use their oldest
+    observation in the window, because an object moving along with the
+    camera shows almost no frame-to-frame epipolar error.
+  - Moving objects stay out for 0.5 s after their last moving decision.
+  - The synthetic test has a person-sized object walking with the camera.
+    It raises the RMS position error from 7.8 mm to 0.58 m, and the filter
+    brings it back to 12 mm. A box over static points ("a parked car")
+    leaves the result bit-identical. See `docs/object_tracking.md`.
+- Next: evaluation on real sequences with moving people or cars.
 
 ### Phase 3: metric 3D objects (the core)
 

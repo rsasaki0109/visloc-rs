@@ -20,9 +20,18 @@ LENS1_FROM_LENS0 = Rot.from_euler("y", 180, degrees=True)
 
 
 def _position(t):
-    w1, w2, w3 = 2 * np.pi * 0.85, 2 * np.pi * 1.7, 2 * np.pi / 40
-    p = np.c_[1.2 * t + 0.04 * np.sin(w1 * t), 0.03 * np.sin(w2 * t), 8 * np.sin(w3 * t)]
-    acc = np.c_[-0.04 * w1**2 * np.sin(w1 * t), -0.03 * w2**2 * np.sin(w2 * t), -8 * w3**2 * np.sin(w3 * t)]
+    # Two incommensurate turn periods, so no time shift maps the path onto itself.
+    w1, w2, w3, w4 = 2 * np.pi * 0.85, 2 * np.pi * 1.7, 2 * np.pi / 40, 2 * np.pi / 33
+    p = np.c_[
+        1.2 * t + 0.04 * np.sin(w1 * t),
+        0.03 * np.sin(w2 * t),
+        8 * np.sin(w3 * t) + 3 * np.sin(w4 * t),
+    ]
+    acc = np.c_[
+        -0.04 * w1**2 * np.sin(w1 * t),
+        -0.03 * w2**2 * np.sin(w2 * t),
+        -8 * w3**2 * np.sin(w3 * t) - 3 * w4**2 * np.sin(w4 * t),
+    ]
     return p, acc
 
 
@@ -45,8 +54,24 @@ def _write_images_bin(path, images):
             f.write(struct.pack("<Q", 0))
 
 
-def _scene(directory, s_true=1.05, period=1 / 3, offset=0.4, seconds=75.0):
-    """An OverMaps360_50-like scene: model in units of s_true metres, raw-count IMU."""
+def _write_gps_log(path, seconds, tau=2.0, lat0=55.87, lon0=26.52):
+    """1 Hz fixes of the true positions, the first at IMU time tau; the model's
+    (X, Z) maps to (east, -north), a reflection."""
+    tg = np.arange(0, seconds - tau - 1)
+    p, _ = _position(tg + tau)
+    phi = np.radians(lat0)
+    w = 1 - imu_scale.WGS84_E2 * np.sin(phi) ** 2
+    north_radius = imu_scale.WGS84_A * (1 - imu_scale.WGS84_E2) / w**1.5
+    east_radius = imu_scale.WGS84_A / np.sqrt(w) * np.cos(phi)
+    lat = lat0 + np.degrees(-p[:, 2] / north_radius)
+    lon = lon0 + np.degrees(p[:, 0] / east_radius)
+    np.savetxt(path, np.c_[1.78e9 + tg, lat, lon, np.full(len(tg), 1.5)], delimiter=",", fmt="%.10f")
+
+
+def _scene(directory, s_true=1.05, period=1 / 3, offset=0.4, seconds=75.0, rs_c=None):
+    """An OverMaps360_50-like scene: model in units of s_true metres, raw-count IMU.
+    rs_c (metres times seconds, camera frame) adds the rolling-shutter-like
+    error R_wc (rs_c x w_c) to the camera centres."""
     t = np.arange(0, seconds, 1e-3)
     h = 1e-4
     gyro = (_body_rotation(t - h).inv() * _body_rotation(t + h)).as_rotvec() / (2 * h)
@@ -65,6 +90,10 @@ def _scene(directory, s_true=1.05, period=1 / 3, offset=0.4, seconds=75.0):
     tf = period * idx + offset
     p, _ = _position(tf)
     r_wc0 = _body_rotation(tf) * R_CB.inv()
+    if rs_c is not None:
+        w_b = (_body_rotation(tf - h).inv() * _body_rotation(tf + h)).as_rotvec() / (2 * h)
+        w_c = R_CB.apply(w_b)
+        p = p + r_wc0.apply(np.cross(rs_c, w_c))
     images = []
     for k, i in enumerate(idx):
         for lens, r_wc in ((0, r_wc0[k]), (1, r_wc0[k] * LENS1_FROM_LENS0)):
@@ -83,6 +112,7 @@ def _scene(directory, s_true=1.05, period=1 / 3, offset=0.4, seconds=75.0):
         rows.append(f"{name},{y[0]},{y[1]},{y[2]}")
     (Path(directory) / "smartphone_poses_405.csv").write_text("\n".join(rows) + "\n")
     _write_images_bin(Path(directory) / "images.bin", images)
+    _write_gps_log(Path(directory) / "backgroundlocationData.txt", seconds)
 
 
 class Insta360ImuScaleTest(unittest.TestCase):
@@ -102,8 +132,15 @@ class Insta360ImuScaleTest(unittest.TestCase):
             self.assertEqual(r[lens]["runs_kept"], 2)
             self.assertAlmostEqual(r[lens]["s_per_run"] / r["s_ref"], 1, delta=3e-3)
             self.assertAlmostEqual(r[lens]["g_median"], 9.80665, delta=0.15)
+        self.assertAlmostEqual(r["gps"]["s_gps"], 1.05, delta=2e-3)
+        self.assertAlmostEqual(r["gps"]["tau"], 2.0, delta=0.1)
+        self.assertTrue(r["gps"]["reflect"])
+        self.assertLess(abs(imu_scale.gps_errors(r)["rs"]), 0.5)
         e = imu_scale.scene_errors(r)
         self.assertLess(abs(e["s_per_run"]), 0.3)
+        for name in imu_scale.VARIANTS:
+            self.assertLess(abs(e[name]), 0.5, name)
+        np.testing.assert_allclose(r["lens0"]["variants"]["rs"]["c_median"], 0, atol=1e-3)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "r.json"
@@ -112,6 +149,16 @@ class Insta360ImuScaleTest(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 imu_scale.summary([str(path)])
         self.assertIn("per-run         1 scenes", out.getvalue())
+        self.assertIn("ARKit vs GPS", out.getvalue())
+
+    def test_angular_velocity_term_recovers_the_centre_error(self):
+        c = np.array([0.0, -0.015, 0.0])
+        with tempfile.TemporaryDirectory() as tmp:
+            _scene(tmp, rs_c=c)
+            r = imu_scale.analyse_scene(tmp, log=lambda m: None)
+        rs = r["lens0"]["variants"]["rs"]
+        self.assertAlmostEqual(rs["s_per_run"] / r["s_ref"], 1, delta=3e-3)
+        np.testing.assert_allclose(rs["c_median"], c, atol=1.5e-3)
 
     def test_rotation_fit_ignores_outliers(self):
         rng = np.random.default_rng(1)
