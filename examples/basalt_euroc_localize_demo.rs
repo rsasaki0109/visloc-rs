@@ -29,7 +29,11 @@
 //! localized. Accepted fixes anchor the VIO to the map
 //! (`visloc_localization::MapAnchor`: a gravity-aligned yaw + translation
 //! offset, gated against outliers), so every frame gets a map-frame pose once
-//! the anchor is set, including the frames the map does not localize.
+//! the anchor is set, including the frames the map does not localize. With
+//! `--projection-radius-px PX`, once the anchor is set, the anchor and the
+//! VIO predict each image's pose and every landmark is first matched only
+//! against the keypoints within `PX` pixels of its predicted projection, as
+//! `visloc_map_localize_node` does; the map-wide search remains the fallback.
 //!
 //! ```text
 //! cargo run --release --example basalt_euroc_localize_demo -- \
@@ -72,7 +76,9 @@ use visloc_basalt::pyramid::RawU16Image;
 use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationResult, QueryImage};
-use visloc_rs::localization::{FixOutcome, MapAnchor, MapAnchorConfig};
+use visloc_rs::localization::{
+    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, MapAnchor, MapAnchorConfig,
+};
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_rs::{
@@ -97,12 +103,17 @@ struct Args {
     reprojection_px: f64,
     ransac_iterations: usize,
     prior_radius_m: Option<f64>,
+    /// Map landmarks closer than this count as one point in the ratio test.
+    duplicate_radius_m: Option<f64>,
     /// Run the Basalt VIO alongside and anchor it to the map.
     vio: bool,
     calibration: Option<PathBuf>,
     config: Option<PathBuf>,
     /// With `--vio`, localize every N-th frame.
     localize_every: usize,
+    /// With `--vio`, match by projection from the anchored VIO's prediction
+    /// first, within this radius.
+    projection_radius_px: Option<f64>,
     /// Write each accepted localization's inliers here.
     dump_inliers: Option<PathBuf>,
 }
@@ -112,8 +123,9 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
-         [--prior-radius-m M] \
-         [--vio --calibration FILE --config FILE [--localize-every N]] [--dump-inliers FILE]"
+         [--prior-radius-m M] [--duplicate-radius-m M] \
+         [--vio --calibration FILE --config FILE [--localize-every N] \
+         [--projection-radius-px PX]] [--dump-inliers FILE]"
             .into()
     }
 
@@ -139,10 +151,12 @@ impl Args {
             reprojection_px: 3.0,
             ransac_iterations: 1000,
             prior_radius_m: None,
+            duplicate_radius_m: None,
             vio: false,
             calibration: None,
             config: None,
             localize_every: 1,
+            projection_radius_px: None,
             dump_inliers: None,
         };
         let mut arguments = arguments.into_iter();
@@ -179,10 +193,16 @@ impl Args {
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
+                "--duplicate-radius-m" => {
+                    args.duplicate_radius_m = Some(number(&option, value()?)?);
+                }
                 "--vio" => args.vio = true,
                 "--calibration" => args.calibration = Some(PathBuf::from(value()?)),
                 "--config" => args.config = Some(PathBuf::from(value()?)),
                 "--localize-every" => args.localize_every = number(&option, value()?)?,
+                "--projection-radius-px" => {
+                    args.projection_radius_px = Some(number(&option, value()?)?);
+                }
                 "--dump-inliers" => args.dump_inliers = Some(PathBuf::from(value()?)),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
@@ -203,8 +223,15 @@ impl Args {
             if args.localize_every == 0 {
                 return Err("--localize-every must be positive".into());
             }
-        } else if args.localize_every != 1 || args.calibration.is_some() || args.config.is_some() {
-            return Err("--localize-every, --calibration and --config need --vio".into());
+        } else if args.localize_every != 1
+            || args.calibration.is_some()
+            || args.config.is_some()
+            || args.projection_radius_px.is_some()
+        {
+            return Err(
+                "--localize-every, --calibration, --config and --projection-radius-px need --vio"
+                    .into(),
+            );
         }
         Ok(args)
     }
@@ -290,7 +317,12 @@ struct Localizer {
     camera_from_imu: SE3,
     max_points: usize,
     pipeline: Pipeline,
+    /// The map's descriptors packed for the map-wide search, which gives
+    /// the pipeline's correspondences (tested in `visloc-localization`).
+    index: BinaryLandmarkIndex,
+    gates: BinaryMatchGates,
     prior_radius_m: Option<f64>,
+    projection_radius_px: Option<f64>,
     previous: Option<Pose>,
 }
 
@@ -314,40 +346,75 @@ impl Localizer {
             map.map.landmarks.len(),
             map.descriptors.len()
         );
+        let index = BinaryLandmarkIndex::new(&map.map, &map.descriptors)
+            .with_duplicate_radius(args.duplicate_radius_m.unwrap_or(0.0));
         Ok(Self {
             max_points: args.max_points.unwrap_or(map.max_points),
             map,
             camera,
             camera_from_imu: imu_from_camera.inverse(),
             pipeline: pipeline(args),
+            index,
+            gates: BinaryMatchGates {
+                max_distance: args.max_hamming,
+                ratio: args.ratio,
+            },
             prior_radius_m: args.prior_radius_m,
+            projection_radius_px: args.projection_radius_px,
             previous: None,
         })
     }
 
-    fn localize(&mut self, image: &RawU16Image) -> Result<Attempt, Box<dyn std::error::Error>> {
+    /// Localizes one image. `predicted`, the map-frame IMU pose the anchored
+    /// VIO predicts for it, enables the projection search.
+    fn localize(
+        &mut self,
+        image: &RawU16Image,
+        predicted: Option<&SE3>,
+    ) -> Result<Attempt, Box<dyn std::error::Error>> {
         let started = Instant::now();
         let query = query_image(image, &self.camera, self.max_points)?;
-        let prior_result = self
-            .previous
-            .as_ref()
-            .zip(self.prior_radius_m)
-            .map(|(pose, radius)| {
-                self.pipeline
-                    .localize_with_candidate_selector_and_descriptor_store(
-                        &query,
-                        &self.map.map,
-                        &self.map.descriptors,
-                        RadiusLandmarkSelector::new(pose.camera_center_world(), radius),
-                    )
-            });
+        let packed = self.index.pack_query(&query.descriptors);
+        let projected = predicted
+            .zip(self.projection_radius_px)
+            .map(|(map_from_imu, radius)| {
+                let prior = Pose {
+                    world_to_camera: self.camera_from_imu.compose(&map_from_imu.inverse()),
+                };
+                self.pipeline.localize_correspondences(
+                    &self.camera,
+                    self.index.match_projected(
+                        &self.camera,
+                        &prior,
+                        &query.keypoints,
+                        &packed,
+                        radius,
+                        self.gates,
+                    ),
+                )
+            })
+            .filter(accepted);
+        let prior_result = projected.or_else(|| {
+            self.previous
+                .as_ref()
+                .zip(self.prior_radius_m)
+                .map(|(pose, radius)| {
+                    self.pipeline
+                        .localize_with_candidate_selector_and_descriptor_store(
+                            &query,
+                            &self.map.map,
+                            &self.map.descriptors,
+                            RadiusLandmarkSelector::new(pose.camera_center_world(), radius),
+                        )
+                })
+        });
         let used_prior = prior_result.as_ref().is_some_and(accepted);
         let result = match prior_result {
             Some(result) if used_prior => result,
-            _ => self.pipeline.localize_with_descriptor_store(
-                &query,
-                &self.map.map,
-                &self.map.descriptors,
+            _ => self.pipeline.localize_correspondences(
+                &self.camera,
+                self.index
+                    .match_all(&query.keypoints, &packed, self.gates, 1),
             ),
         };
         let latency_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -434,7 +501,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut latencies = Vec::with_capacity(images.len());
     let mut localized = 0_usize;
     for entry in &images {
-        let attempt = localizer.localize(&read_camera_image(&entry.path)?)?;
+        let attempt = localizer.localize(&read_camera_image(&entry.path)?, None)?;
         latencies.push(attempt.latency_ms);
         if let Some(world_from_imu) = &attempt.world_from_imu {
             tum.push_str(&tum_line(entry.timestamp_ns, world_from_imu));
@@ -488,13 +555,13 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
-        let attempt = if index % args.localize_every == 0 {
+        let image = if index % args.localize_every == 0 {
             let image = match args.camera {
                 0 => Some(&frame.cam0),
                 _ => frame.cam1.as_ref(),
             }
             .ok_or("this frame has no image for --camera")?;
-            Some(localizer.localize(image)?)
+            Some(image.clone())
         } else {
             None
         };
@@ -504,6 +571,11 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
             .state
             .imu_to_world;
         vio_tum.push_str(&tum_line(timestamp_ns, &odom_from_imu));
+        // The anchor as it stands before this image's fix predicts its pose.
+        let predicted = anchor.map_from_body(&odom_from_imu);
+        let attempt = image
+            .map(|image| localizer.localize(&image, predicted.as_ref()))
+            .transpose()?;
 
         if let Some(attempt) = attempt {
             attempts += 1;
@@ -631,6 +703,7 @@ mod tests {
         assert!(with(&["--vio", "--calibration", "c.json"]).is_err());
         assert!(with(&["--localize-every", "5"]).is_err());
         assert!(with(&["--calibration", "c.json"]).is_err());
+        assert!(with(&["--projection-radius-px", "20"]).is_err());
         let vio = ["--vio", "--calibration", "c.json", "--config", "k.json"];
         assert!(with(&[&vio[..], &["--stride", "2"]].concat()).is_err());
         assert!(with(&[&vio[..], &["--localize-every", "0"]].concat()).is_err());
@@ -638,6 +711,9 @@ mod tests {
         assert!(args.vio);
         assert_eq!(args.localize_every, 5);
         assert_eq!(args.config, Some(PathBuf::from("k.json")));
+        assert_eq!(args.projection_radius_px, None);
+        let args = with(&[&vio[..], &["--projection-radius-px", "20"]].concat()).expect("parses");
+        assert_eq!(args.projection_radius_px, Some(20.0));
         assert_eq!(with(&[]).expect("parses").localize_every, 1);
     }
 

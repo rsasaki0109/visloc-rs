@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero_map_localization.gif" alt="Map-based localization on EuRoC: the 3D landmarks of a map saved by the stereo-inertial SLAM from the MH_01 flight, with the MH_02 flight localized in it image by image. Inset: the current camera image with the keypoints that matched the map in green. In the map: the current camera in red with green rays to the landmarks it matched, and the localized camera positions so far in orange, tracing the flight's loops through the machine hall." width="720"><br>
-  <sub>Map-based localization: EuRoC MH_02 localized image by image in a map that the stereo-inertial SLAM saved from MH_01, a different flight. Green: the keypoints that matched the map, and rays to those landmarks. Orange: the localized camera positions. <b>81% of the 3,040 images localize, at 1.8 cm RMSE</b> against ground truth; with the VIO anchored to the map, every frame gets a pose (99.8%, 2.0 cm), also in real time as ROS 2 nodes. <a href="docs/basalt_map_localization.md">Details and the other EuRoC queries</a>.</sub>
+  <img src="docs/assets/hero_map_localization.gif" alt="Map-based localization on EuRoC: the 3D landmarks of a map saved by the stereo-inertial SLAM from the MH_01 flight, with the MH_02 flight's visual-inertial odometry anchored to it. Inset: the current camera image with the keypoints that matched the map in green. In the map: the current camera in red with green rays to the landmarks it matched, and its map-frame trajectory so far in orange, unbroken, tracing the flight's loops through the machine hall." width="720"><br>
+  <sub>Map-based localization: EuRoC MH_02 in a map that the stereo-inertial SLAM saved from MH_01, a different flight. The VIO is anchored to the map, so every frame gets a map pose (orange): <b>3,039 of the 3,040 frames, at 1.9 cm RMSE</b> against ground truth. Green: the keypoints that matched the map, searched around where the anchored VIO predicts each landmark (98% of the images match; 81% when each image is matched alone), and rays to those landmarks. The same runs in real time as ROS 2 nodes. <a href="docs/basalt_map_localization.md">Details and the other EuRoC queries</a>.</sub>
 </p>
 
 <p align="center">
@@ -406,7 +406,9 @@ queries no accepted pose is more than 25 cm off; how many images localize
 depends on how much of the flight the map covers. Add `--vio --calibration
 FILE --config FILE` to run the stereo-inertial VIO alongside and anchor it to
 the map: every frame then gets a map pose (MH_02: 99.8% at 2.0 cm RMSE,
-localizing every 5th image). Maps of several flights of a place merge into
+localizing every 5th image). With `--projection-radius-px 20` as well, each
+image is matched around where the anchored VIO predicts the landmarks, and
+98% of MH_02's images match the map instead of 81%. Maps of several flights of a place merge into
 one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
 with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
 the [EuRoC map-localization results](docs/basalt_map_localization.md).

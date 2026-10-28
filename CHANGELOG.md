@@ -36,12 +36,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
-- **README: map-based localization animation.** EuRoC MH_02 localized in
-  the MH_01 map, with the matched keypoints and the rays to their map
+- **README: map-based localization animation.** EuRoC MH_02 with the VIO
+  anchored to the MH_01 map: the map-frame trajectory (a pose for every
+  frame), the keypoints that matched the map and the rays to their
   landmarks (`docs/assets/hero_map_localization.gif`). It is rendered by
-  `scripts/render_map_localization_gif.py` from
-  `basalt_euroc_localize_demo --dump-inliers FILE`, which writes each
-  accepted localization's PnP inliers (keypoint pixel and map landmark).
+  `scripts/render_map_localization_gif.py` (`--trajectory` for a `--vio`
+  run) from `basalt_euroc_localize_demo --dump-inliers FILE`, which writes
+  each accepted localization's PnP inliers (keypoint pixel and map
+  landmark).
+
+- **`basalt_euroc_localize_demo --vio --projection-radius-px PX`.** Once
+  the VIO is anchored to the map, each image is first matched around the
+  landmarks' projections from the pose the anchored VIO predicts, as
+  `visloc_map_localize_node` does, with the map-wide search as the
+  fallback. At 20 px, localizing every image, 98.2% of MH_02's images
+  localize in the MH_01 map instead of 81.2%, the longest stretch without
+  one falls from 7.3 s to 1.2 s, and the VIO + map poses reach 1.94 cm RMSE
+  (2.03 before); on V2_02, 60.4% instead of 20.3%, at 3.33 cm instead of
+  4.13. Off by default.
 
 - **Live monocular-inertial VIO in a phone browser** (`bindings/wasm`). The
   Basalt port's VIO runs as WebAssembly on the phone's camera and motion
@@ -127,6 +139,17 @@ All notable changes to `visloc-rs` will be documented here.
   - **Speed:** about 14–17 ms a frame natively on one thread at 360 x 640.
     The page reports whether the phone offers WebGPU and the main
     thread's time to read a frame back.
+
+- **Duplicate-tolerant ratio test.**
+  `BinaryLandmarkIndex::with_duplicate_radius` makes the map-wide search
+  compare the best landmark with the best one farther than a radius from
+  it. Landmarks of one physical point (broken SLAM tracks, sessions of a
+  merged map) then no longer reject each other's matches. Off by default.
+  Enable it with `basalt_euroc_localize_demo --duplicate-radius-m` or
+  `visloc_map_localize_node -p duplicate_radius:=...`. At 10 cm, MH_02
+  against MH_01 localizes 83.1% of its images (81.2%), with the worst pose
+  7.6 cm off instead of 16.8 cm. V2_02 against V2_01 merged with V2_03 goes
+  from 18.4% to 19.3%.
 
 - **Merging maps of several flights.** `basalt_map_merge --base A --add B
   --out AB` registers saved SLAM maps of the same place to the first one
@@ -280,6 +303,10 @@ All notable changes to `visloc-rs` will be documented here.
     ADVIO at 60 fps from 2.65 m to 7.0 m. With it, 4.3 m and 2 resets
     instead of 13; at 30 Hz neutral. A test checks the covariance no
     longer depends on where an interval's samples fall.
+
+- `basalt_euroc_localize_demo` matches map-wide through
+  `BinaryLandmarkIndex`: the same matches as before (byte-identical
+  output on MH_02), at a median 67 ms per image instead of 86 ms.
 
 - **Basalt KLT frontend about 38% faster, bit-identical.** The five bilinear
   samples of an interpolated gradient now share one neighbourhood read. FAST
