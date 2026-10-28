@@ -9,7 +9,11 @@ paper's "Production B" set). Code:
 [`scripts/insta360_imu_scale.py`](../scripts/insta360_imu_scale.py) (one
 scene, about 1.5 minutes on a CPU) and
 [`scripts/overmaps360_imu_scale.sh`](../scripts/overmaps360_imu_scale.sh)
-(all scenes). Nothing in the Rust crates uses this yet.
+(all scenes). The Rust port, `visloc_slam::estimate_imu_scale` (with the
+centre term on by default), matches it to four decimals and runs in
+seconds; `gsplat_photos --imu` uses it to output metric models
+([photos_to_splat.md](photos_to_splat.md#metric-scale-from-the-cameras-imu)),
+and `visloc_io::insv` reads the IMU from an `.insv` itself.
 
 ## Results (50 scenes, 2026-10-28)
 
@@ -126,6 +130,13 @@ values are the sensor's raw counts:
   scene: 16.27 to 16.63 counts per deg/s, median 16.35.
 - **Accelerometer**: 1024 counts per g (a ±32 g range). Taken as mg, it
   reads 2.4% high, and the IMU scale comes out 2.4% high with it.
+
+The `.insv` trailer also carries a timestamp for every video frame on the
+IMU's clock (record 4, with the exposure time; 29.96883 fps, within 46 µs
+of a line on 0313afa5), and the OverMaps360 files, re-encoded with every
+10th frame (3840x3840 per lens, 1,665 frames), keep the original frames'
+timestamps in record 6 (frames 8, 18, 28, ...). The frame timing fitted from
+the gyro agrees with them within 0.4 ms.
 
 On scene 0313afa5 the trailer at the end of the `.insv` (the last 24 MB)
 confirms it: the camera writes 553,216 IMU samples as a 64-bit microsecond

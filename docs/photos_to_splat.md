@@ -92,6 +92,40 @@ that looks like panoramas gets a warning: 2:1 images whose left and right
 edges meet and whose top and bottom rows are poles, or whose metadata says
 equirectangular. The pinhole model gives no usable result on them.
 
+## Metric scale from the camera's IMU
+
+SfM leaves the model in arbitrary units. When the photos are frames of a
+video and the camera logged its IMU, `--imu FILE` scales the model to
+metres right after SfM: sparse/0, the splats and the mesh all come out in
+metres (`<out>/port` keeps the mapper's units). It is the per-run
+visual-inertial alignment of arXiv 2610.35554 with a rolling-shutter
+term, validated on the 50 OverMaps360 walks
+([insta360_imu_scale.md](insta360_imu_scale.md); Rust:
+`visloc_slam::estimate_imu_scale`).
+
+- **The IMU**: an Insta360 `.insv` (the IMU and frame timestamps in its
+  trailer; only the file's end is read), or a CSV file
+  `time, gx, gy, gz, ax, ay, az` in seconds, rad/s and m/s² (EuRoC's
+  `imu0/data.csv` and OverMaps360's `insta360_imu.csv` are recognised by
+  their headers).
+- **The frames**: each photo's file name must end in its frame number
+  (the last run of digits, e.g. ffmpeg's `%06d.jpg`). The frame period and
+  the offset to the IMU clock are searched from the gyro against the
+  model's rotations; `--imu-frame-period S` gives the search a starting
+  period when the frames cover only part of the IMU log. With `--equirect`
+  the panoramas are the frames.
+- **The output**: the log prints the timing, the rotation residual and the
+  scale; `<out>/imu_scale.txt` lists every run. A rotation residual of more
+  than a few tenths of a degree means the frames and the IMU do not match
+  (wrong numbering, stabilised video).
+
+On 136 frames (67 s) of the OverMaps360 walk 0313afa5, view 0 of lens 0 at
+1600 px, gsplat_photos registered all frames, found the dataset's frame
+timing (0.333683 s per frame) and scaled its model by 6.58. Aligned to
+the dataset's own model, it implies 1.0402 m per dataset unit, against
+1.0401 from the dataset's model over the whole walk (1.1 cm median
+residual).
+
 To train on panoramas that another tool already solved (such as COLMAP
 4.1), point `gsplat_train --data <colmap_root>` at the model: for
 an `EQUIRECTANGULAR` camera it cuts the same cube faces (`--max-face-size`,

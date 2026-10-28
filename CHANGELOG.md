@@ -4,6 +4,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **`gsplat_photos --imu`: metric models from the camera's IMU.** For
+  photos that are frames of a video (file names ending in the frame
+  number), the model is scaled to metres right after SfM, so sparse/0, the
+  splats and the mesh come out in metres. `visloc_slam::estimate_imu_scale`
+  is the Rust port of the per-run visual-inertial alignment validated on the
+  50 OverMaps360 walks (docs/insta360_imu_scale.md): it searches the frame
+  timing from the gyro and fits scale, gravity, accelerometer bias and a
+  rolling-shutter term per run. It matches the Python reference to four
+  decimals in seconds. The IMU comes from an Insta360 `.insv`
+  (`visloc_io::insv` reads its trailer: IMU and video frame timestamps) or a
+  CSV file (`visloc_io::imu_csv`: SI units, EuRoC, OverMaps360). On 136
+  frames of an OverMaps360 walk the metric model agrees with the dataset's
+  IMU scale within 0.01%. The `imu_metric_scale` example runs the estimator
+  on any COLMAP model.
+
 ### Fixed
 
 - **Saving a map from a lens wider than the Double Sphere model failed.**
