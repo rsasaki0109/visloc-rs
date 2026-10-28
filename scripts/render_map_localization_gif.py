@@ -259,8 +259,8 @@ def main() -> int:
         if matches:
             label, colour = f"{len(matches)} keypoints matched to the map", "white"
         elif camera_centre is not None and args.trajectory:
-            label = ("no map match: VIO holds the pose" if since_fix is None
-                     else f"no map match: VIO holds the pose ({since_fix:.1f} s)")
+            label = ("VIO only, no map match yet" if since_fix is None
+                     else f"VIO only, {since_fix:.1f} s since a map match")
             colour = ORANGE
         else:
             label, colour = "not localized", RED
