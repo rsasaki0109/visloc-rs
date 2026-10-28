@@ -17,6 +17,14 @@ All notable changes to `visloc-rs` will be documented here.
   configuration, as upstream does. The pinned EuRoC file has the same
   values, so its results are unchanged.
 
+- **`basalt_map_merge` wrote merged maps without point tracks.** The
+  COLMAP text reader fills only the keyframes' observations, so the
+  merged `sparse/points3D.txt` had an empty `TRACK[]` for every point.
+  Localization never reads the tracks, but COLMAP and other readers do.
+  The saved-map loader of the Basalt examples now rebuilds each
+  landmark's track from the keyframes, and the save/load round trip test
+  checks the tracks. Maps merged before this fix should be merged again.
+
 - **ROS 2 nodes: relative topics were invisible to ROS 2.** `ros2-client`
   0.11 resolves a relative topic name in the root namespace to the DDS
   topic `rt//odom` instead of `rt/odom`. Only other `ros2-client` nodes

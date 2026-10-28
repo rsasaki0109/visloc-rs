@@ -237,6 +237,30 @@ removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
 
+**The anchor is not what limits these numbers.** The recorded VIO
+trajectories and fixes (every 5th image) were replayed through other ways
+of combining them. A Python port of `MapAnchor` reproduces every RMSE above
+to 0.01 cm. A Kalman filter on the four offset parameters lets the offset
+drift by a random walk per metre of VIO travel (tried at 1-5 cm and
+0.2-1° per metre). It changes the RMSE by -0.6 to +0.8 cm. Averaging fixes
+over 2 or 10 s instead of 5 s changes it by -0.4 to +0.7 cm. Feeding the
+same ground-truth fix positions (with the real fixes' rotations, the same
+timing and the same averaging) into the anchor bounds what any such
+combination of these fixes can reach:
+
+| | MH_02 | MH_03 | MH_04 | MH_05 | V1_02 | V1_03 | V2_02 |
+|---|---|---|---|---|---|---|---|
+| `MapAnchor` | 2.05 | 4.97 | 23.0 | 14.4 | 3.47 | 6.66 | 4.24 |
+| with ground-truth fix positions | 1.30 | 4.80 | 23.7 | 15.4 | 2.76 | 6.36 | 3.85 |
+
+(RMSE, cm.) Even perfect fixes take off at most 1.4 cm, except on MH_02,
+where the fixes' own noise (1.9 cm) is most of its error. The rest is the
+VIO drifting where no image localizes. Neither a better filter nor feeding
+the fixes into the VIO estimator would remove that drift. More map
+coverage would ([merged maps](#merging-maps-of-several-flights)), and so
+would more fixes where the map does cover the flight
+([below](#matching-around-the-predicted-projections)).
+
 ### Matching around the predicted projections
 
 Once the anchor is set, it and the VIO predict each image's pose. With
@@ -367,8 +391,9 @@ What a merge buys depends on the added map:
   map covers the flight (MH_01's localizes none of those images), the
   fixes are 25 cm off. The anchor followed them after a stretch the VIO
   had carried alone, and two later fixes were rejected before it
-  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo an added map's own
-  distortion; a joint optimization of the merged sessions (not done) would.
+  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo
+  an added map's own distortion, and deforming it did not help either (see
+  below).
 - **Coverage is not the limit for the fast Vicon flights.** V1_02 and V2_02
   gain 20-24 points of coverage from V1_03 and V2_03, but no images: the
   difficult flights' maps barely localize them (V1_02 against the V1_03
@@ -383,6 +408,33 @@ What a merge buys depends on the added map:
   lost 2 more, and `--duplicate-radius-m 0.1` recovers 20
   ([above](#duplicate-landmarks-and-the-ratio-test)).
   Merge flights that cover new ground with a good map.
+
+**Deforming the added map was tried and dropped.** The added parts' own
+error was measured directly: their keyframes' positions in the merged map,
+put in the ground-truth frame with the base map's alignment, against the
+added flight's ground truth. With the rigid merge, MH_04's part is 15.2 cm
+RMSE (33.3 cm worst) and MH_05's 9.3 cm; the Vicon rooms' parts are
+1.9-5.1 cm. To deform them:
+
+1. With the registration as the prior, every keyframe of the added map was
+   localized in the base map by projection-guided matching. That localized
+   2-9 times as many keyframes as the map-wide search (MH_04: 90 instead of
+   28; V1_03: 278 instead of 74).
+2. A pose graph (`visloc_slam::PoseGraph`) held the keyframes to their
+   relative poses in the added map, between keyframes sharing at least 20
+   landmarks and between consecutive ones, and pulled the localized ones
+   toward those localizations under a Huber kernel. The landmarks moved
+   with their keyframes.
+
+It changed the added parts' error by -1.1 to +0.6 cm (MH_05 9.3 to 8.2;
+MH_04 15.2 to 15.8). Making the graph more flexible (fewer or looser
+relative edges) made MH_04 worse, 20-23 cm. The reason is in the
+localizations themselves. Each comes from only the keyframe's landmark
+keypoints, at least 15 inliers, so it is less accurate than the rigid
+placement at the same keyframes: 3.7-9.2 cm RMSE with outliers up to 30 cm,
+against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
+better than the constraints a deformation would use. Where they do not
+(MH_04's far end), there is nothing to fit.
 
 ## Reproduce
 
