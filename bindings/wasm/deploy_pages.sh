@@ -11,6 +11,10 @@
 # web/coi-sw.js adds them in the browser. Telemetry and uploads, which need
 # serve.py, are off there.
 set -euo pipefail
+# --dir is relative to the caller's directory, not this one
+if [[ "${1:-}" == --dir && -n "${2:-}" ]]; then
+  set -- --dir "$(realpath -m "$2")"
+fi
 cd "$(dirname "$0")"
 
 usage="usage: deploy_pages.sh <git remote or URL> [branch] | --dir <directory>"
