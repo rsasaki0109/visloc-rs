@@ -52,6 +52,12 @@ worker (`web/coi-sw.js`) adds them in the browser, after one reload on the
 first visit. Telemetry and uploads need `serve.py` and are off elsewhere:
 the page looks for the `X-Visloc-Server` header that `serve.py` sends.
 
+The repository's GitHub Pages site carries it at
+<https://rsasaki0109.github.io/visloc-rs/slam/>: `.github/workflows/pages.yml`
+builds it on every push to `main` and publishes it next to `docs/`
+(`./deploy_pages.sh --dir <directory>` writes the site without pushing). The
+ADVIO demo is not in git, so "Watch a demo" does not play there.
+
 The sensor-free demo (`web/demo/`, not in git) is built from an ADVIO
 sequence (CC BY-NC 4.0):
 
