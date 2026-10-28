@@ -22,30 +22,33 @@
 //! objects triangulate: a moving object's rays do not meet.
 //!
 //! Objects of a class that moves (people, vehicles, animals) are also placed
-//! on the ground frame by frame (`visloc_objects::ground`): the ground's
-//! height comes from all the triangulated feature tracks seen within 10 s of
-//! the object, then from those right under its foot (stairs and kerbs), and
-//! the middle of its box's bottom edge from the gravity direction, so a
-//! sideways camera works. That gives each one a metric
-//! height, width, distance and speed, moving or not. Boxes cut by the image
-//! border or scored below 0.5 are skipped. The trajectory is
+//! on the ground frame by frame (`visloc_objects::ground`). The ground
+//! follows the camera's path through the triangulated feature tracks seen
+//! within 10 s of the object (`PathGround`, so slopes stay sharp), then the
+//! points right under its foot (stairs and kerbs). The middle of its box's
+//! bottom edge comes from the gravity direction, so a sideways camera works.
+//! That gives each one a metric height, width, distance and speed, moving or
+//! not. Boxes cut by the image border or scored below 0.5 are skipped. The
+//! trajectory is
 //! the IMU pose (`T_w_i`), as `basalt_euroc_vio_demo` writes it; for
 //! `--mono-vo` runs, whose trajectory is the camera pose, pass
-//! `--trajectory-is-camera`. Writes `objects.csv` (static) and
-//! `ground_objects.csv` (on the ground) next to the boxes unless `--out`
-//! names the first.
+//! `--trajectory-is-camera`. Writes `objects.csv` (static),
+//! `ground_objects.csv` (on the ground) and `ground_tracks.csv` (their feet,
+//! frame by frame) next to the boxes unless `--out` names the first.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use nalgebra::{Isometry3, Point2, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
+use nalgebra::{
+    Isometry3, Point2, Point3, Quaternion, Translation3, UnitQuaternion, Vector2, Vector3,
+};
 use visloc_rs::objects::{
-    estimate_ground_height, estimate_static_object, place_on_local_ground, plausible_height,
-    plausible_size, summarize_ground_track, triangulate, BBox, BearingObservation, BoxFitParams,
-    BoxRays, GroundParams, GroundView, ObjectEstimate, TriangulationParams, COCO_CLASSES,
-    MOVABLE_COCO_CLASSES,
+    estimate_static_object, place_on_local_ground, plausible_height, plausible_size,
+    summarize_ground_track, triangulate, BBox, BearingObservation, BoxFitParams, BoxRays,
+    GroundParams, GroundTrackParams, GroundView, ObjectEstimate, PathGround, TriangulationParams,
+    COCO_CLASSES, MOVABLE_COCO_CLASSES,
 };
 
 struct Args {
@@ -303,9 +306,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let out = out.with_file_name("ground_objects.csv");
-    let csv = ground_objects(&boxes, &scene, &poses, &calibration, &camera_pose)?;
+    let (csv, frames) = ground_objects(&boxes, &scene, &poses, &calibration, &camera_pose)?;
     fs::write(&out, csv)?;
     println!("objects on the ground: {}", out.display());
+    let out = out.with_file_name("ground_tracks.csv");
+    fs::write(&out, frames)?;
+    println!("their feet, frame by frame: {}", out.display());
     Ok(())
 }
 
@@ -317,7 +323,7 @@ fn ground_objects(
     poses: &[(i64, Isometry3<f64>)],
     calibration: &visloc_basalt::BasaltCalibration,
     camera_pose: &dyn Fn(i64, u16) -> Option<Isometry3<f64>>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(String, String), Box<dyn std::error::Error>> {
     let camera = calibration.camera(0).ok_or("no camera 0")?;
     let (width, height) = calibration.resolutions[0];
     let (width, height) = (f64::from(width), f64::from(height));
@@ -339,7 +345,10 @@ fn ground_objects(
         }
     }
     let mut csv = String::from(
-        "object_id,class_id,class,frames,seconds,camera_height,ground_shift,x,y,z,height,width,distance,speed,scale_source,plausible\n",
+        "object_id,class_id,class,frames,seconds,camera_height,ground_shift,x,y,z,height,width,distance,speed,speed_sigma,moving,scale_source,plausible\n",
+    );
+    let mut frames_csv = String::from(
+        "object_id,class_id,timestamp_ns,x,y,z,camera_x,camera_y,camera_z,height,width,distance\n",
     );
     println!(
         "\n{:>6} {:<12} {:>6} {:>7}  {:>8}  {:>6}  {:>13}  {:>8}  {:>7}  plausible",
@@ -362,14 +371,15 @@ fn ground_objects(
             .filter(|(t, _)| window.contains(t))
             .map(|(_, p)| *p)
             .collect();
-        let lowest_camera = poses
+        let path: Vec<Point3<f64>> = poses
             .iter()
-            .filter(|(t, _)| (t0..=t1).contains(t))
+            .filter(|(t, _)| window.contains(t))
+            .step_by(5)
             .filter_map(|(t, _)| camera_pose(*t, 0))
-            .map(|pose| pose.translation.vector.z)
-            .fold(f64::INFINITY, f64::min);
+            .map(|pose| Point3::from(pose.translation.vector))
+            .collect();
         let params = GroundParams::default();
-        let Some(scene_ground) = estimate_ground_height(&points, lowest_camera, &params) else {
+        let Some(path_ground) = PathGround::estimate(&path, &points, &params) else {
             continue;
         };
         let views: Vec<GroundView> = frames
@@ -386,16 +396,56 @@ fn ground_objects(
                 })
             })
             .collect();
-        let Some((ground, placed)) = place_on_local_ground(&views, &points, scene_ground, &params)
-        else {
+        // The ground under the camera first, then under the object's foot.
+        let Some(middle) = views.get(views.len() / 2) else {
             continue;
         };
+        let xy = |p: &Point3<f64>| Vector2::new(p.x, p.y);
+        let Some((mut ground, mut placed)) = place_on_local_ground(
+            &views,
+            &points,
+            path_ground.height_at(&xy(&middle.camera_center)),
+            &params,
+        ) else {
+            continue;
+        };
+        let mut feet: Vec<Vector2<f64>> = placed.iter().map(|o| xy(&o.contact)).collect();
+        feet.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let path_at_foot = path_ground.height_at(&feet[feet.len() / 2]);
+        if (path_at_foot - ground).abs() > 0.05 {
+            if let Some(again) = place_on_local_ground(&views, &points, path_at_foot, &params) {
+                (ground, placed) = again;
+            }
+        }
         let mut camera_heights: Vec<f64> =
             views.iter().map(|v| v.camera_center.z - ground).collect();
-        let Some(track) = summarize_ground_track(object_id, class_id, &placed, MIN_GROUND_SECONDS)
-        else {
+        let Some(track) = summarize_ground_track(
+            object_id,
+            class_id,
+            &placed,
+            &GroundTrackParams {
+                min_seconds: MIN_GROUND_SECONDS,
+                ..GroundTrackParams::default()
+            },
+        ) else {
             continue;
         };
+        for o in &placed {
+            writeln!(
+                frames_csv,
+                "{object_id},{class_id},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2}",
+                o.timestamp_ns,
+                o.contact.x,
+                o.contact.y,
+                o.contact.z,
+                o.camera.x,
+                o.camera.y,
+                o.camera.z,
+                o.height,
+                o.width,
+                o.distance
+            )?;
+        }
         // Where it stands: the median of its contact points.
         let median = |axis: usize| {
             let mut v: Vec<f64> = track.path.iter().map(|(_, p)| p[axis]).collect();
@@ -406,7 +456,7 @@ fn ground_objects(
         camera_heights.sort_by(f64::total_cmp);
         let camera_height = camera_heights[camera_heights.len() / 2];
         let seconds = (t1 - t0) as f64 * 1e-9;
-        let shift = ground - scene_ground;
+        let shift = ground - path_at_foot;
         let plausible = match plausible_height(class_id) {
             Some((low, high)) if (low..=high).contains(&track.height) => "yes",
             Some(_) => "NO",
@@ -423,7 +473,7 @@ fn ground_objects(
         );
         writeln!(
             csv,
-            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{shift:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3},ground_contact,{plausible}",
+            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{shift:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3},{:.3},{},ground_contact,{plausible}",
             placed.len(),
             position.x,
             position.y,
@@ -431,10 +481,12 @@ fn ground_objects(
             track.height,
             track.width,
             track.distance,
-            track.speed
+            track.speed,
+            track.speed_sigma,
+            track.moving
         )?;
     }
-    Ok(csv)
+    Ok((csv, frames_csv))
 }
 
 /// The pose nearest to `timestamp_ns`, if one is within 1 ms. The demo

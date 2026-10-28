@@ -33,7 +33,10 @@
 //! VIO also runs on the sequence, and every `--localize-every`-th image is
 //! localized; until the correction is set, every `--initial-localize-every`-th
 //! (1: every image), as two agreeing fixes are needed before any frame gets
-//! a map pose. Accepted fixes correct the VIO into the map frame
+//! a map pose. That holds within `--initial-window-s` (30) seconds of the
+//! start or of the latest localization; after a longer stretch without one
+//! the map likely does not cover the place, and every `--localize-every`-th
+//! image is tried until one localizes again. Accepted fixes correct the VIO into the map frame
 //! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
 //! translation offset, gated against outliers), so every frame gets a
 //! map-frame pose once the correction is set, including the frames the map
@@ -143,8 +146,11 @@ struct Args {
     imu_from_body: Option<SE3>,
     /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
-    /// ... and every N-th until the odometry has a map pose.
+    /// ... and every N-th until the odometry has a map pose,
     initial_localize_every: usize,
+    /// ... within this many seconds of the start or of the latest
+    /// localization.
+    initial_window_s: f64,
     /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
@@ -166,7 +172,7 @@ impl Args {
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
-         [--initial-localize-every N] \
+         [--initial-localize-every N] [--initial-window-s S] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
          [--dump-inliers FILE]"
             .into()
@@ -179,6 +185,7 @@ impl Args {
         let mut map = None;
         let mut euroc_dir = None;
         let mut projection_radius_px = None::<f64>;
+        let mut initial_window_s = None::<f64>;
         let mut args = Self {
             map: PathBuf::new(),
             euroc_dir: PathBuf::new(),
@@ -205,6 +212,7 @@ impl Args {
             imu_from_body: None,
             localize_every: 1,
             initial_localize_every: 1,
+            initial_window_s: 30.0,
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
@@ -273,6 +281,7 @@ impl Args {
                 "--initial-localize-every" => {
                     args.initial_localize_every = number(&option, value()?)?;
                 }
+                "--initial-window-s" => initial_window_s = Some(number(&option, value()?)?),
                 "--projection-radius-px" => {
                     projection_radius_px = Some(number(&option, value()?)?);
                 }
@@ -314,13 +323,20 @@ impl Args {
                     "--localize-every and --initial-localize-every must be positive".into(),
                 );
             }
+            if let Some(window) = initial_window_s {
+                if !(window >= 0.0 && window.is_finite()) {
+                    return Err("--initial-window-s must be a non-negative number".into());
+                }
+                args.initial_window_s = window;
+            }
         } else if args.localize_every != 1
             || args.initial_localize_every != 1
+            || initial_window_s.is_some()
             || projection_radius_px.is_some()
         {
             return Err(
-                "--localize-every, --initial-localize-every and --projection-radius-px need \
-                 --vio or --odometry"
+                "--localize-every, --initial-localize-every, --initial-window-s and \
+                 --projection-radius-px need --vio or --odometry"
                     .into(),
             );
         }
@@ -691,9 +707,13 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 struct CorrectedRun {
     correction: OdomCorrection,
     /// Localize every `localize_every`-th frame once the odometry has a map
-    /// pose, every `initial_every`-th before.
+    /// pose, every `initial_every`-th before, within `initial_window_ns` of
+    /// the first frame or of the latest localization.
     localize_every: usize,
     initial_every: usize,
+    initial_window_ns: i64,
+    first_ns: Option<i64>,
+    last_localized_ns: Option<i64>,
     /// How long / far after the correction's newest fix its prediction is
     /// used.
     fresh_s: f64,
@@ -720,6 +740,9 @@ impl CorrectedRun {
             correction: OdomCorrection::new(OdomCorrectionConfig::default()),
             localize_every: args.localize_every,
             initial_every: args.initial_localize_every,
+            initial_window_ns: (args.initial_window_s * 1e9) as i64,
+            first_ns: None,
+            last_localized_ns: None,
             fresh_s: args.projection_fresh_s,
             fresh_m: args.projection_fresh_m,
             fixes_tum: header.to_owned(),
@@ -740,12 +763,19 @@ impl CorrectedRun {
         }
     }
 
-    /// Whether to localize the `index`-th frame: until the correction is set,
-    /// its first fixes are what gives the odometry a map pose at all, so
-    /// every `initial_every`-th frame is tried; after that every
-    /// `localize_every`-th.
-    fn localizes(&self, index: usize) -> bool {
-        let every = if self.correction.is_set() {
+    /// Whether to localize the `index`-th frame, stamped `timestamp_ns`.
+    /// Until the correction is set, its first fixes are what gives the
+    /// odometry a map pose at all, so every `initial_every`-th frame is
+    /// tried. After `initial_window_ns` without a localization (from the
+    /// first frame, or the latest localization), the map likely does not
+    /// cover the place, and every `localize_every`-th is tried until one
+    /// localizes; once the correction is set, every `localize_every`-th.
+    fn localizes(&self, index: usize, timestamp_ns: i64) -> bool {
+        let since = self
+            .last_localized_ns
+            .or(self.first_ns)
+            .map_or(0, |start_ns| timestamp_ns - start_ns);
+        let every = if self.correction.is_set() || since > self.initial_window_ns {
             self.localize_every
         } else {
             self.initial_every
@@ -763,6 +793,7 @@ impl CorrectedRun {
         image: Option<&RawU16Image>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.frames += 1;
+        self.first_ns.get_or_insert(timestamp_ns);
         self.odometry_tum
             .push_str(&tum_line(timestamp_ns, odom_from_imu));
         // The correction as it stands before this image's fix predicts its pose,
@@ -784,6 +815,7 @@ impl CorrectedRun {
             let outcome = match &attempt.world_from_imu {
                 Some(map_from_imu) => {
                     self.localized += 1;
+                    self.last_localized_ns = Some(timestamp_ns);
                     self.fixes_tum
                         .push_str(&tum_line(timestamp_ns, map_from_imu));
                     match self
@@ -876,7 +908,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
-        let image = if run.localizes(index) {
+        let image = if run.localizes(index, timestamp_ns) {
             let image = match args.camera {
                 0 => Some(&frame.cam0),
                 _ => frame.cam1.as_ref(),
@@ -927,7 +959,7 @@ fn run_odometry(
         };
         let odom_from_imu = odom_from_body.compose(&body_from_imu);
         let image = run
-            .localizes(index)
+            .localizes(index, entry.timestamp_ns)
             .then(|| read_camera_image(&entry.path))
             .transpose()?;
         run.frame(
@@ -1061,12 +1093,18 @@ mod tests {
         assert!(with(&["--initial-localize-every", "1"]).is_ok());
         assert!(with(&["--initial-localize-every", "5"]).is_err());
         assert!(with(&[&vio[..], &["--initial-localize-every", "0"]].concat()).is_err());
+        assert!(with(&["--initial-window-s", "30"]).is_err());
+        assert!(with(&[&vio[..], &["--initial-window-s", "-1"]].concat()).is_err());
+        assert!(with(&[&vio[..], &["--initial-window-s", "inf"]].concat()).is_err());
         let args = with(&[&vio[..], &["--localize-every", "5"]].concat()).expect("parses");
         assert!(args.vio);
         assert_eq!(args.localize_every, 5);
         assert_eq!(args.initial_localize_every, 1);
         let args = with(&[&vio[..], &["--initial-localize-every", "5"]].concat()).expect("parses");
         assert_eq!(args.initial_localize_every, 5);
+        assert_eq!(args.initial_window_s, 30.0);
+        let args = with(&[&vio[..], &["--initial-window-s", "0"]].concat()).expect("parses");
+        assert_eq!(args.initial_window_s, 0.0);
         assert_eq!(args.config, Some(PathBuf::from("k.json")));
         assert_eq!(args.projection_radius_px, Some(20.0));
         let args = with(&[&vio[..], &["--projection-radius-px", "12"]].concat()).expect("parses");
@@ -1118,7 +1156,21 @@ mod tests {
         ])
         .expect("parses");
         let mut run = CorrectedRun::new(&args);
-        assert!((0..7).all(|index| run.localizes(index)));
+        let s = |seconds: f64| (seconds * 1e9) as i64;
+        assert!((0..7).all(|index| run.localizes(index, 0)));
+        // Within 30 s of the first frame every image; after that every 5th
+        // until an image localizes, then every image for 30 s again.
+        run.first_ns = Some(s(10.0));
+        assert!((0..7).all(|index| run.localizes(index, s(40.0))));
+        assert_eq!(
+            (0..12)
+                .filter(|&index| run.localizes(index, s(40.1)))
+                .collect::<Vec<_>>(),
+            [0, 5, 10]
+        );
+        run.last_localized_ns = Some(s(55.0));
+        assert!((0..7).all(|index| run.localizes(index, s(85.0))));
+        assert!(!run.localizes(1, s(85.1)));
         // Two agreeing fixes set the correction.
         for (x, timestamp_ns) in [(0.0, 0), (0.1, 100_000_000)] {
             let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(x, 0.0, 0.0));
@@ -1126,7 +1178,7 @@ mod tests {
         }
         assert!(run.correction.is_set());
         let localized = (0..12)
-            .filter(|&index| run.localizes(index))
+            .filter(|&index| run.localizes(index, s(56.0)))
             .collect::<Vec<_>>();
         assert_eq!(localized, [0, 5, 10]);
     }

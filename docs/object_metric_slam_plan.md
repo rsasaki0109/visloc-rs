@@ -10,9 +10,13 @@
   `visloc_objects::metric`) and objects on the ground, moving or not
   (ground contact, `visloc_objects::ground`). The `objects_metric_offline`
   example runs both on a VIO run.
+- Phase 4 has KITTI raw: object heights and distances against the
+  tracklets, for mono + IMU, stereo + IMU and the OXTS poses
+  (`scripts/run_kitti_objects_eval.sh`).
 
-See [`object_tracking.md`](object_tracking.md). The world-frame EKF and the
-per-frame output of Phase 3, and the later phases, are not implemented yet.
+See [`object_tracking.md`](object_tracking.md). Speeds come from a weighted
+straight-line fit with a still test; a world-frame filter for turning and
+accelerating objects, and the later phases, are not implemented yet.
 
 ## Goal
 
@@ -172,13 +176,14 @@ scale, so this number is the ceiling.
     kerbs), and fits the speed to the foot's path. The scale source is
     `ground_contact`.
   - On LaMAria R_08_hard with mono + IMU, 24 people come out at a median
-    1.70 m (IQR 1.59–1.82) walking at 1.23 m/s, 34 cars at 1.46 m tall,
-    with moving ones at 6.6 m/s, and 15 parked bicycles at 1.09 m. Stereo +
-    IMU agrees to 7 % (people), 3 % (cars) and 2 % (bicycles) in height.
-    3 people are flagged (5 with stereo), most at the foot of stairs or a
-    ramp.
-  - Next: the world-frame EKF (the speed is a line fit for now), and
-    per-frame output.
+    1.79 m (IQR 1.60–1.89), the 15 moving ones walking at 1.16 m/s; 34 cars
+    at 1.48 m tall, the 14 moving ones at 6.2 m/s; and 15 parked bicycles at
+    1.06 m. Stereo + IMU agrees to 2.4 % (people), 2.7 % (cars) and 3.6 %
+    (bicycles) in height. 4 people are flagged: two at the foot of stairs or
+    a ramp, two 8–10 m away.
+  - Next: a world-frame filter for turning and accelerating objects (the
+    speed is a weighted line fit with a still test, and per-frame feet are
+    in `ground_tracks.csv`).
 
 ### Phase 4: metric accuracy evaluation
 
@@ -192,6 +197,20 @@ scale, so this number is the ceiling.
   within tolerance. These run in CI.
 - **Comparison table:** monocular only (scale unknown), mono + IMU and
   stereo + IMU, each with size, position and velocity error.
+
+- **Done: KITTI raw** (`object_tracking.md`, "Metric accuracy on KITTI
+  raw").
+  - 7 drives with tracklets. The VIO starts at rest: 6 drives start at rest
+    or are cut at a stop.
+  - Heights of cars (110 on 5 drives): 11 % (0.16 m) median error with
+    mono + IMU, 6 % with stereo + IMU, 7 % with the OXTS poses. Pedestrians
+    (18): 4 % with stereo + IMU.
+  - The path ground came out of this: a flat ground put cars 33 % off on a
+    falling road.
+  - Speed: a fit weighted by each foot's noise, with a still test, brings
+    the median error over all cars to 0.19–0.30 m/s (still cars 0.15 m/s);
+    moving cars are still 2–3 m/s off. Mono + IMU fails from a moving start.
+  - Next: own tape-measured captures, the comparison table with mono only.
 
 ### Phase 5: demo
 
@@ -221,8 +240,8 @@ VDO-SLAM and DynaSLAM II. Only if Phase 3 shows a clear benefit.
 ## Risks
 
 - **Mono-inertial scale.** Measured on TUM-VI room1–6 (Phase 0): at most
-  3.4 % off. Indoor, hand-held; outdoors and in a car (KITTI) it is not
-  measured yet.
+  3.4 % off, indoor and hand-held. In a car (KITTI raw, Phase 4): 2–9 % off
+  from a start at rest, and four times too small from a start at 7 m/s.
 - **Scale at start-up.** Mono-inertial needs motion to observe scale. Object
   estimates made before convergence are marked as such.
 - **Ground contact** fails for objects not on the ground (things carried,

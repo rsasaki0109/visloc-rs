@@ -138,8 +138,9 @@ What this shows:
   5`), office1-6's first map pose comes 2.0 s in and office1-7's (at 15
   inliers) 7.8 s in; with every image, 0.5 s and 1.9 s. Frames with a map
   pose rise from 94.4% to 98.5% and from 79.4% to 94.9%. Against map B,
-  which none of office1-7's images match, it only multiplies the attempts
-  by five (1,140 instead of 228).
+  which none of office1-7's images match, it only adds attempts: every
+  image for 30 s, then every 5th (`--initial-window-s`), 948 instead of
+  228.
 - **The wheel odometry is the weaker partner on this robot.** Its heading
   agrees with the ground truth within 0.5°. In office1-3's final 150°
   in-place turn, though, it reports `base_link` moving along a different

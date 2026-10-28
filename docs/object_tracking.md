@@ -235,10 +235,21 @@ A moving object cannot be triangulated: while the camera moves, so does the
 object, and its rays do not meet. `visloc_objects::ground` places such an
 object on the ground instead.
 
-- **The ground:** `estimate_ground_height` takes the triangulated scene
-  points (static, so metric) and returns the mean height of the densest
-  5 cm layer at least 0.3 m below the lowest camera position. The world is
-  gravity-aligned, so the ground is the plane `z = ground`.
+- **The ground:** `PathGround` uses the triangulated scene points (static,
+  so metric) in the gravity-aligned world.
+  - The camera moves over the ground, so each point's height is measured
+    from the camera where it passed nearest. On a road that climbs or falls,
+    the ground then stays one sharp layer below the path, at the camera's
+    height above it.
+  - That height is the densest 15 cm band at least 0.3 m down, taken for
+    each 20 m stretch of path either way. A camera whose height changes (a
+    hand lowering it) is followed too.
+  - The ground under a spot is that height below the nearest point of the
+    path.
+  - `estimate_ground_height`, one flat plane from the densest 5 cm layer
+    below the camera, is the simpler version. On KITTI 0084 (4.5 m down in
+    40 s) it smeared the road over many layers and put cars 33 % off in
+    height (below).
 - **The foot:** `BoxRays::from_box` unprojects the middles of the 2D box's
   edges and its corners into world rays. The edge-middle ray that points
   lowest is the bottom of the box, so this works for a camera mounted
@@ -256,7 +267,19 @@ object on the ground instead.
   rather than all within a radius, so that over steps the ground walks down
   one step at a time.
 - **Over a track:** `summarize_ground_track` gives the median height, width
-  and distance, and the speed of a straight line fitted to the foot's path.
+  and distance, and the velocity of a straight line fitted to the foot's
+  path.
+  - **Weights:** each foot is weighted by how far it can be off. Across the
+    ray that is the angular noise (0.004 rad) times the distance. Along the
+    ray it is that times `(h² + d²) / h`, metres far away. Both get half the
+    object's width (at least 0.2 m) on top, for not knowing which point of
+    the object the bottom edge falls on.
+  - **Outliers:** feet more than a chi-square of 9.21 off the line are
+    dropped and the line fitted again, which handles a 2D track that jumps
+    to a neighbour.
+  - **Still or moving:** if the velocity does not stand out of the noise
+    (chi-square 9.21, 1 %), the object is still and its speed is 0.
+    `speed_sigma` is the speed's standard deviation.
 - **Scale source:** `ScaleSource::GroundContact`. The scale is the camera's
   metric height above the ground, so it is as good as the VIO's.
 - **Class priors:** `plausible_height` holds rough heights of the classes
@@ -275,16 +298,24 @@ object on the ground instead.
     and fast, which the prior flags;
   - a person at the bottom of a flight of steps 1 m down, or at the top of
     one 0.5 m up, comes out on the right level and at the right size;
-  - the floor is found under a table top and walls.
+  - the floor is found under a table top and walls;
+  - a parked car whose box is 1.5 px loose, driven past from 40 m to 10 m,
+    is still, although a plain line fit sees it approach; a car crossing at
+    5 m/s moves at 5 ± 1 m/s;
+  - a standing person whose 2D track jumps to a neighbour for 6 frames
+    stays still.
 
 `objects_metric_offline` also places the boxes of the movable COCO classes
 (people, vehicles, animals) and writes `ground_objects.csv`: per 2D track,
 the frames used, the camera's height above the ground, how far the ground
 under the object lies from the camera's (`ground_shift`), the median foot
-position, height, width, distance and speed, and the height flag.
+position, height, width, distance, speed, `speed_sigma` and `moving`, and
+the height flag. `ground_tracks.csv` has every frame's foot and camera.
 - Boxes scored below 0.5, or within 2 px of the image border (the foot may
   be cut off), are skipped. A track needs 1 s.
-- The ground uses the scene points seen within 10 s of the track.
+- The ground uses the scene points seen and the path driven within 10 s of
+  the track. The object goes on the path ground under the camera first,
+  then under its foot, then on the local ground.
 
 ### LaMAria R_08_hard
 
@@ -295,15 +326,20 @@ config (`euroc_config_big_window_multicam.json` for stereo,
 
 | VIO | Trajectory ATE | People: height, median (IQR) | Cars: height | Bicycles: height | Walking speed | Moving cars |
 | --- | --- | --- | --- | --- | --- | --- |
-| Stereo + IMU | 0.92 m (scale 0.9994) | 1.67 m (1.58–1.78), n = 24 | 1.44 m (1.31–1.57), n = 34 | 1.08 m (0.99–1.12), n = 15 | 1.19 m/s (18 people) | 6.6 m/s (20 cars) |
-| Mono + IMU | 3.74 m (scale 0.982) | 1.70 m (1.59–1.82) | 1.46 m (1.35–1.60) | 1.09 m (1.03–1.20) | 1.23 m/s | 6.6 m/s |
+| Stereo + IMU | 0.92 m (scale 0.9994) | 1.77 m (1.59–1.90), n = 24 | 1.49 m (1.35–1.63), n = 34 | 1.06 m (1.02–1.13), n = 15 | 1.17 m/s (17 people moving) | 6.1 m/s (15 cars) |
+| Mono + IMU | 3.74 m (scale 0.982) | 1.79 m (1.60–1.89) | 1.48 m (1.34–1.63) | 1.06 m (1.03–1.21) | 1.16 m/s (15 people) | 6.2 m/s (14 cars) |
 
-- **Plausible:** the people's median is a typical adult height, cars come
-  out at a typical 1.4–1.6 m, and the parked bicycles at 1.0–1.1 m. People
-  walk at 1.2 m/s, and cars drive at about 24 km/h in town.
+- **Plausible:** the people's median is a tall adult height, cars come out
+  at a typical 1.4–1.6 m, and the parked bicycles at about 1.1 m. People
+  walk at 1.2 m/s, and cars drive at about 22 km/h in town. There is no
+  ground truth on LaMAria: KITTI (below) has it.
 - **Mono + IMU against stereo + IMU** (the same 2D tracks): the heights
-  agree to a median of 7 % for people (2.3 % bias), 3 % for cars and 2 %
-  for bicycles; the speeds to 0.07 m/s.
+  agree to a median of 2.4 % for people, 2.7 % for cars and 3.6 % for
+  bicycles, with no bias. They call the same objects moving or still in 75
+  of 78 cases.
+- **The flat ground of #385** gave people 5 % shorter (1.67 and 1.70 m) and
+  mono and stereo 7 % apart. The path ground replaced it because it is
+  better against KITTI's ground truth.
 - **Without the IMU** there is nothing to compare. The visual-only VO
   (`--mono-vo`) stopped 526 s into the walk (a non-finite window solve at
   frame 10,519). It also has no gravity: its world is the first camera's
@@ -316,18 +352,94 @@ config (`euroc_config_big_window_multicam.json` for stereo,
   1.1–1.2 m up would. In stretches of 10–40 s the camera drops another 0.55 m (the world
   height of the camera falls while the ground's stays), and the ground
   estimate follows.
-- **The ground under the object** moved 7 people by 0.1–0.6 m, all down
-  (steps and kerbs below the camera's ground). Without it they would come
-  out at 0.8–1.6 m; with it they are 1.5–1.9 m.
-- **Flagged:** 5 of the 24 people with stereo + IMU (3 with mono + IMU,
-  all at stairs or the ramp).
-  - Three at the foot of stairs or a ramp (0.6–0.8 m). The points under
-    them do lie lower, but spread over the steps or the slope, so no layer
-    stands out. Taking their median instead fixes one of the three and
-    breaks five others.
-  - One 1.7 m from the camera (2.2 m), one 8.4 m away (2.3 m).
-- **Still objects** show a residual speed of 0.1–0.5 m/s: as the camera
-  passes, the box's bottom edge slides along a car. Below about 0.6 m/s,
-  moving and still cannot be told apart.
-- **Tuning:** the local-ground settings were chosen on this sequence. No
-  other sequence with people has been run yet.
+- **The ground under the object** moved 7–9 people by 0.1–0.55 m, mostly
+  down (steps and kerbs below the camera's ground).
+- **Flagged:** 4 of the 24 people.
+  - Two at the foot of stairs or a ramp (0.7 m). The points under them do
+    lie lower, but spread over the steps or the slope, so no layer stands
+    out. Taking their median instead fixes one such case and breaks five
+    others.
+  - Two 8–10 m away (2.2 m).
+- **Still objects:** 14 of the 15 parked bicycles come out still (speed 0);
+  the last one creeps at 0.2–0.3 m/s. Before the weighted fit, still
+  objects showed up to 0.6 m/s, as the box's bottom edge slid along a car
+  while the camera passed.
+- **Tuning:** the local-ground settings were chosen on this sequence; KITTI
+  (below) is the held-out check.
+
+## Metric accuracy on KITTI raw (Phase 4)
+
+KITTI raw has what LaMAria lacks: 3D boxes of the cars, vans, pedestrians
+and cyclists (the tracklets), and a 100 Hz OXTS IMU. The evaluation scores
+`ground_objects.csv` against them.
+
+- **Data:** `scripts/fetch_kitti_raw_drive.py` takes only image_00/01 and
+  the OXTS from a drive's zips (HTTP range requests), plus the calibration
+  and tracklets. `scripts/kitti_raw_to_euroc.py` writes an EuRoC sequence:
+  - the 100 Hz OXTS of the `_extract` zip as the IMU;
+  - a Basalt calibration (pinhole from `P_rect`, `T_imu_cam` from the
+    calibration chain, the stereo baseline);
+  - the OXTS poses as `gt_imu.tum`.
+- **Ground truth:** `scripts/kitti_tracklets_to_csv.py` puts every tracklet
+  box in that world and in camera 0's image, each frame.
+- **Scoring:** `scripts/evaluate_kitti_objects.py` matches each YOLOX track
+  to the tracklet its box overlaps most (IoU ≥ 0.3, compatible class, half
+  its frames). It then compares:
+  - the height with the tracklet's `h`;
+  - the distance with the distance to the tracklet footprint's near edge
+    (what ground contact sees);
+  - the speed with a line fitted to the tracklet's path;
+  - with `--static`, the triangulated objects' box sizes.
+- **Runs:** `scripts/run_kitti_objects_eval.sh WORK DRIVE START` runs the
+  pipeline, for mono + IMU, stereo + IMU, and the OXTS poses (the method's
+  own error, without VIO error). The pipeline is: fetch, convert, YOLOX,
+  VIO (`configs/basalt/kitti/kitti_config.json`: four pyramid levels for
+  10 Hz frames), objects, score.
+- **Start at rest:** the mono-inertial VIO must start at rest. It sets the
+  first velocity to zero, and a car moving at constant speed shows no
+  acceleration to correct it. On 0091, which starts at 7 m/s, its scale
+  stays four times too small. The drives used start at rest, or are cut to
+  start at a stop.
+
+| Drive | Start frame | Frames | Path | Mono + IMU ATE (Sim3 scale) | Stereo + IMU ATE (scale) | Objects scored |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0084 | 0 | 383 | 239 m | 3.6 m (0.96) | 0.99 m (0.99) | 36 cars |
+| 0022 | 0 | 800 | 515 m | 11.1 m (0.91) | 1.9 m (0.98) | 55 cars, vans and trucks |
+| 0059 | 245 | 128 | 63 m | 0.9 m (1.02) | 0.42 m (0.98) | 17 cars |
+| 0018 | 170 | 100 | 51 m | 0.5 m (0.97) | 0.16 m (0.99) | 3 |
+| 0029 | 255 | 175 | 130 m | 3.0 m (0.91) | 0.65 m (0.98) | 1 |
+| 0070 | 0 | 420 | 645 m | 6.8 m (0.97) | 1.8 m (0.99) | 2–3 |
+| 0091 | 0 (moving) | 340 | 198 m | 39.8 m (3.93) | 0.69 m (0.99) | 18 pedestrians (stereo) |
+
+Objects on the ground, all drives (cars and vans; pedestrians only in 0091,
+so stereo):
+
+| Poses | Cars: height error, median \|.\| (bias) | Cars: distance error | Pedestrians: height error | Pedestrians: distance error |
+| --- | --- | --- | --- | --- |
+| Mono + IMU (n = 110, 5 drives) | 0.16 m, 11 % (+1 %) | 19 % (+12 %) | – (moving start) | – |
+| Stereo + IMU (n = 111) | 0.09 m, 6 % (−3 %) | 12 % (+6 %) | 0.07 m, 4 % (−4 %), n = 18 | 5 % (+3 %) |
+| OXTS poses (n = 111) | 0.11 m, 7 % (−6 %) | 10 % (+3 %) | 0.10 m, 6 % (−6 %) | 4 % (−2 %) |
+
+- **The height is metric to a few centimetres:** 7–11 cm for pedestrians
+  and cars with stereo + IMU or the OXTS, 16 cm with mono + IMU, where the
+  trajectory's scale is 2–9 % off.
+- **The OXTS poses are no better than stereo + IMU.** What is left (6–7 %
+  in height, a few percent low) is the method's own error. A 2D box is a
+  coarse outline of a 3D box, and its top edge is the roof's far edge,
+  seen at the near edge's distance.
+- **The flat ground** of `estimate_ground_height` gave cars 31–33 % off in
+  height and 34–41 % in distance on 0084, a road falling 4.5 m.
+- **Speed is the weakest part.** Far away, a car's foot comes out a few
+  percent near (−6 % at 25–40 m, −14 % beyond 40 m), and close by a little
+  far. A still car the ego car drives towards therefore seems to approach,
+  at 0.5–4 m/s with a plain line fit.
+  - **Fix:** the weighted fit with the still test (above) brings still cars
+    to a median 0.15–0.17 m/s, and calls 64–77 % of them still.
+  - **All cars:** the median error falls from 0.53–0.85 m/s to 0.19–0.30
+    m/s.
+  - **Moving cars (20):** 2.1–3.1 m/s (22–35 %) off, and 2–3 are called
+    still.
+  - **Pedestrians:** on crowded 0091 they stay 0.6–1.1 m/s off (17 of them).
+- **Triangulated (static) cars** come out 10–25 % off in length and width,
+  and 16–23 % short in height, because only the faces the camera sees are
+  tracked. For cars, ground contact is the better size.
