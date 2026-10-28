@@ -51,6 +51,9 @@ jobs:
         run: |
           cp -r docs _site
           bindings/wasm/deploy_pages.sh --dir _site/slam
+          test -f _site/slam/index.html
+          test -f _site/slam/pkg/visloc_wasm_bg.wasm
+          test -f _site/slam/pkg-mt/visloc_wasm_bg.wasm
 
       - name: Upload
         uses: actions/upload-pages-artifact@v4
