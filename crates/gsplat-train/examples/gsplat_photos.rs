@@ -70,6 +70,10 @@ SfM:
   --equirect               cut each panorama into six cube faces (one rig)
   --equirect-independent-faces  solve each face as its own camera
   --equirect-native        SfM on the panoramas as equirectangular cameras
+metric scale (video frames named by frame number):
+  --imu FILE               IMU log of the camera (CSV: SI, EuRoC or OverMaps360 counts);
+                           scales the model to metres (<out>/imu_scale.txt)
+  --imu-frame-period S     seconds per frame number to start the timing search from
 devices:
   --cpu                    extract SIFT and match on the CPU
   --cpu-sift               extract SIFT on the CPU
@@ -140,6 +144,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--equirect-independent-faces" => sfm.equirect_rig = false,
             // SfM on the panoramas as equirectangular cameras.
             "--equirect-native" => sfm.equirect_native = true,
+            // Scale the model to metres from the camera's IMU log.
+            "--imu" => sfm.imu = Some(PathBuf::from(next()?)),
+            "--imu-frame-period" => sfm.imu_frame_period = Some(next()?.parse()?),
             "--no-mesh" => mesh = false,
             "--normal-weight" => normal_weight = next()?.parse()?,
             // Per-photo colour correction (varying exposure / white balance).
@@ -164,6 +171,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.focal_source,
         report.points
     );
+    if let Some(scale) = report.metric_scale {
+        println!("model in metres: {scale:.4} m per SfM unit (<out>/imu_scale.txt)");
+    }
     if steps == 0 {
         return Ok(());
     }

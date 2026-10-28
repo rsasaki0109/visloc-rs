@@ -128,6 +128,28 @@ pub fn read_imu_csv(path: &Path) -> Result<(ImuCsv, ImuCsvLayout), ImuCsvError> 
     Ok((out, layout))
 }
 
+/// IMU samples from a file: an Insta360 `.insv` (its trailer, times from
+/// the first video frame; [`crate::insv`]) or a CSV file (the layouts above).
+/// Returns the samples and a description of the source for logs.
+pub fn read_imu_file(path: &Path) -> Result<(ImuCsv, String), Box<dyn std::error::Error>> {
+    let insv = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("insv"));
+    if insv {
+        let t = crate::insv::read_insv_telemetry(path)?;
+        let what = format!(
+            "{} trailer, {} video frames",
+            t.camera.as_deref().unwrap_or("Insta360"),
+            t.frame_times.len()
+        );
+        Ok((t.imu, what))
+    } else {
+        let (csv, layout) = read_imu_csv(path)?;
+        Ok((csv, format!("{layout:?} CSV")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

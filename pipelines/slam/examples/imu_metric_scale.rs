@@ -11,15 +11,16 @@
 //! digits in the name); with `--divisor N`, only numbers `n` with
 //! `n % N == R`, as frame number `(n - R) / N`. On OverMaps360_50's
 //! perspective model, `--frames '{n}_perspective_00000000.jpg' --divisor 2`
-//! takes view 0 of lens 0 (`--remainder 1`: lens 1). The IMU CSV is read by
-//! `visloc_io::imu_csv` (SI, EuRoC, or OverMaps360's raw counts). Without
-//! `--period`, the frame timing is searched.
+//! takes view 0 of lens 0 (`--remainder 1`: lens 1). The IMU is an Insta360
+//! `.insv` (its trailer) or a CSV file (SI, EuRoC, or OverMaps360's raw
+//! counts; `visloc_io::imu_csv::read_imu_file`). Without `--period`, the
+//! frame timing is searched.
 
 use std::path::Path;
 
 use nalgebra::Matrix3;
 use visloc_io::colmap::{parse_images_bin, parse_images_bin_names, parse_images_txt};
-use visloc_io::imu_csv::read_imu_csv;
+use visloc_io::imu_csv::read_imu_file;
 use visloc_slam::{estimate_imu_scale, FrameTiming, ImuSamples, ImuScaleConfig, ScaleFrame};
 
 /// The frame number in `name` per `template` (`{n}` = digits), if it matches.
@@ -113,9 +114,9 @@ fn main() {
             })
         })
         .collect();
-    let (csv, layout) = read_imu_csv(Path::new(&args[2])).expect("read IMU CSV");
+    let (csv, source) = read_imu_file(Path::new(&args[2])).expect("read IMU");
     println!(
-        "{} posed images, {} frames match; {} IMU samples ({layout:?}, {:.1} s); read in {:.1}s",
+        "{} posed images, {} frames match; {} IMU samples ({source}, {:.1} s); read in {:.1}s",
         poses.len(),
         frames.len(),
         csv.time.len(),

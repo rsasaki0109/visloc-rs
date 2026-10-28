@@ -26,12 +26,15 @@
 
 use std::path::{Path, PathBuf};
 
-use nalgebra::{Point2, Vector3};
+use nalgebra::{Point2, Point3, Vector3};
 use rayon::prelude::*;
 use visloc_core::types::Camera;
 use visloc_gsplat_core::colmap_scene::camera_view_from;
 use visloc_gsplat_core::gaussian::Scene;
-use visloc_slam::{IncrementalSfmConfig, PairwiseMatches};
+use visloc_slam::{
+    estimate_imu_scale, FrameTiming, ImuSamples, ImuScaleConfig, IncrementalSfmConfig,
+    PairwiseMatches, ScaleFrame,
+};
 use visloc_vision::features::sift::{extract_sift, GrayImage, SiftConfig};
 use visloc_vision::features::FeatureSet;
 use visloc_vision::matching::DescriptorMatch;
@@ -124,6 +127,21 @@ pub struct PhotoSfmConfig {
     /// training sees. The panoramas SfM sees are at most `2 max_size` wide.
     /// Overrides `equirect_rig`.
     pub equirect_native: bool,
+    /// An IMU log of the camera the photos were taken with, on the video's
+    /// clock: an Insta360 `.insv` (its trailer) or a CSV file (SI units,
+    /// EuRoC, or OverMaps360's raw counts; `visloc_io::imu_csv::read_imu_file`):
+    /// scale the model to metres with
+    /// `visloc_slam::estimate_imu_scale` (docs/insta360_imu_scale.md). The
+    /// photos must be frames of one video whose file names end in their frame
+    /// number (the last run of digits, e.g. ffmpeg's `%06d.jpg`); the frame
+    /// period and the offset to the IMU clock are searched from the gyro.
+    /// The scale applies to everything after SfM (sparse/0, splats, mesh);
+    /// `<out>/port` keeps the mapper's units. Details go to
+    /// `<out>/imu_scale.txt`.
+    pub imu: Option<PathBuf>,
+    /// With `imu`: the frame period (seconds per frame number) the search
+    /// starts from (default: the IMU span over the largest frame number).
+    pub imu_frame_period: Option<f64>,
 }
 
 impl Default for PhotoSfmConfig {
@@ -154,6 +172,8 @@ impl Default for PhotoSfmConfig {
             equirect: false,
             equirect_rig: true,
             equirect_native: false,
+            imu: None,
+            imu_frame_period: None,
         }
     }
 }
@@ -173,6 +193,8 @@ pub struct PhotoSfmReport {
     pub registered: usize,
     pub points: usize,
     pub mean_reprojection_px: f64,
+    /// Metres per SfM unit applied to the model, with `PhotoSfmConfig::imu`.
+    pub metric_scale: Option<f64>,
 }
 
 /// Candidate pairs and their descriptor matches, awaiting verification.
@@ -450,6 +472,130 @@ fn resize_triangle(img: &image::RgbImage, width: u32, height: u32) -> image::Rgb
         }
     }
     out
+}
+
+/// The frame number in a file name: its last run of digits.
+fn frame_number(path: &Path) -> Option<i64> {
+    let stem = path.file_stem()?.to_str()?;
+    let digits: String = stem
+        .chars()
+        .rev()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+/// Metres per SfM unit from `imu` ([`PhotoSfmConfig::imu`]). Image `i` comes
+/// from `sources[i / per_source]`; with cube faces (`per_source` 6) each
+/// panorama's first registered face, turned back by its face rotation, is
+/// the panorama's camera.
+fn imu_metric_scale(
+    imu: &Path,
+    sources: &[PathBuf],
+    poses: &[Option<visloc_core::geometry::Pose>],
+    per_source: usize,
+    cfg: &PhotoSfmConfig,
+    out_dir: &Path,
+    log: &mut dyn FnMut(&str),
+) -> Result<f64, EurocError> {
+    let (csv, source) =
+        visloc_io::imu_csv::read_imu_file(imu).map_err(|e| EurocError::Sfm(format!("imu: {e}")))?;
+    let rotations = equirect::cube_face_rotations();
+    let mut frames = Vec::new();
+    let mut unnumbered = 0;
+    for (s, source) in sources.iter().enumerate() {
+        let Some((k, pose)) =
+            (0..per_source).find_map(|k| poses.get(s * per_source + k)?.as_ref().map(|p| (k, p)))
+        else {
+            continue;
+        };
+        let Some(number) = frame_number(source) else {
+            unnumbered += 1;
+            continue;
+        };
+        let face_cw = *pose.world_to_camera.rotation.to_rotation_matrix().matrix();
+        // A face's world-to-camera rotation is its rotation's transpose times
+        // the panorama's (`equirect::face_pose`).
+        let r_cw = if per_source == 6 {
+            rotations[k].1 * face_cw
+        } else {
+            face_cw
+        };
+        frames.push(ScaleFrame {
+            number,
+            rotation: r_cw.transpose(),
+            centre: pose.camera_center_world().coords,
+        });
+    }
+    if unnumbered > 0 {
+        log(&format!(
+            "imu: {unnumbered} registered photos have no frame number in their file name; left out"
+        ));
+    }
+    let samples = ImuSamples {
+        time: csv.time,
+        gyro: csv.gyro,
+        accel: csv.accel,
+    };
+    let span =
+        samples.time.last().copied().unwrap_or(0.0) - samples.time.first().copied().unwrap_or(0.0);
+    let est_cfg = ImuScaleConfig {
+        timing: FrameTiming::Search {
+            nominal_period: cfg.imu_frame_period,
+        },
+        ..Default::default()
+    };
+    let t = std::time::Instant::now();
+    let e = estimate_imu_scale(&samples, &frames, &est_cfg)
+        .map_err(|e| EurocError::Sfm(format!("imu: {e}")))?;
+    log(&format!(
+        "imu: {} samples over {span:.1} s ({source}), {} frames; frames every {:.6} s from \
+         {:+.4} s (drift {:+.1} / {:+.1} ms), rotation residual {:.3} deg",
+        samples.time.len(),
+        frames.len(),
+        e.period,
+        e.offset,
+        e.drift_ms[0],
+        e.drift_ms[1],
+        e.rotation_residual_deg
+    ));
+    log(&format!(
+        "imu: scale {:.4} m per SfM unit (SD {:.4} over {}/{} runs, |g| {:.3} m/s2, {:.1} s)",
+        e.scale,
+        e.scale_std,
+        e.runs_kept(),
+        e.runs.len(),
+        e.gravity_median,
+        t.elapsed().as_secs_f64()
+    ));
+    let mut text = format!(
+        "# Metric scale from {} (docs/insta360_imu_scale.md), applied to the model\n\
+         scale {:.6}\nscale_sd {:.6}\nruns {} {}\ngravity {:.4}\nframe_period {:.9}\n\
+         frame_offset {:.6}\nrotation_residual_deg {:.4}\ndrift_ms {:.2} {:.2}\nspeed_jumps {}\n\
+         # run: start_s end_s intervals scale gravity kept\n",
+        imu.display(),
+        e.scale,
+        e.scale_std,
+        e.runs_kept(),
+        e.runs.len(),
+        e.gravity_median,
+        e.period,
+        e.offset,
+        e.rotation_residual_deg,
+        e.drift_ms[0],
+        e.drift_ms[1],
+        e.speed_jumps
+    );
+    for r in &e.runs {
+        text += &format!(
+            "run {:.3} {:.3} {} {:.6} {:.4} {}\n",
+            r.start, r.end, r.intervals, r.scale, r.gravity, r.kept as u8
+        );
+    }
+    let path = out_dir.join("imu_scale.txt");
+    std::fs::write(&path, text).map_err(|source| EurocError::Io { path, source })?;
+    Ok(e.scale)
 }
 
 /// Run the pipeline on the images in `images_dir`, writing the working
@@ -1178,6 +1324,19 @@ pub fn build_photo_dataset(
     if cfg.equirect && faces.is_none() {
         log(&face_centre_spread(&poses, per_source));
     }
+    // Metric scale from an IMU log, applied before anything is built from
+    // the model (points, cube-face poses, training views, sparse/0).
+    let mut metric_scale = None;
+    if let Some(imu) = &cfg.imu {
+        let scale = imu_metric_scale(imu, &files, &poses, per_source, cfg, out_dir, log)?;
+        for pose in poses.iter_mut().flatten() {
+            pose.world_to_camera.translation *= scale;
+        }
+        for track in &mut tracks {
+            track.position = Point3::from(track.position.coords * scale);
+        }
+        metric_scale = Some(scale);
+    }
 
     let points: Vec<ColoredPoint> = tracks
         .iter()
@@ -1392,6 +1551,7 @@ pub fn build_photo_dataset(
         registered,
         points: points.len(),
         mean_reprojection_px: reproj,
+        metric_scale,
     };
     Ok((
         Dataset {
