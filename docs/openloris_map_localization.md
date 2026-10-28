@@ -75,13 +75,13 @@ Each map is the stereo-inertial SLAM of one sequence
 (`basalt_euroc_online_slam_demo --save-map`, EuRoC configuration), at about
 0.5× real time on 4 cores (848×800 images).
 
-| Map | From | SLAM ATE | Scale vs ground truth | Keyframe images / landmarks |
+| Map | From | SLAM ATE | Scale, SLAM / ground truth | Keyframe images / landmarks |
 |---|---|---|---|---|
-| A | office1-1 | 2.75 cm | 0.983 | 332 / 4,027 |
-| B | office1-2 | 1.58 cm | 0.991 | 356 / 3,969 |
-| — | office1-3 | 0.94 cm | 0.965 | 170 / 1,298 |
+| A | office1-1 | 2.75 cm | 1.017 | 332 / 4,027 |
+| B | office1-2 | 1.58 cm | 1.009 | 356 / 3,969 |
+| — | office1-3 | 0.94 cm | 1.036 | 170 / 1,298 |
 
-The SLAM comes out 1–3.5% short in scale on every sequence. This points to
+The SLAM comes out 1–3.5% long in scale on every sequence. This points to
 the T265 calibration shipped with the dataset (`trans_matrix.yaml`).
 Because of it, a fix is 3–4 cm off on average however well it matches.
 
@@ -218,8 +218,8 @@ calibration in every run:
 - **The calibration carries over between sessions.** It is fitted on
   office1-3 and holds on office1-6 and office1-7, recorded 2.8 days later.
   The rigid-fit error of the wheel odometry alone falls by a factor of
-  1.8–4.4, except on office1-3 (0.97 to 1.52 cm). That short run is mostly one in-place
-  turn, which a rigid fit can partly rotate into place.
+  1.8–4.4, except on office1-3 (0.97 to 1.52 cm). That short run is mostly
+  one in-place turn, which a rigid fit can partly rotate into place.
 - **The fit uses the VIO only as a reference path.** The VIO's error over
   the run (0.83 cm on office1-3) sets how well the offset is found.
   Ground-truth fits on the five sessions spread by about 3 cm, so some of
@@ -359,7 +359,7 @@ dataset is CC BY-ND 4.0: keep the converted images out of the repository.
 - **ORB only.** Across the day/night change no raw image localizes.
   Equalizing the local contrast gets one of the two daylight sessions a
   map pose, through weak fixes; the dawn session still has none.
-- **The T265's shipped calibration.** It leaves the maps 1–3.5% short in
+- **The T265's shipped calibration.** It leaves the maps 1–3.5% long in
   scale, so every map pose carries a few cm of error. Recalibrating would
   likely remove most of it.
 - **The wheel odometry is planar and its frame is assumed level.** The

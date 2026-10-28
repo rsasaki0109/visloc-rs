@@ -421,9 +421,17 @@ All notable changes to `visloc-rs` will be documented here.
   a map pose for 99.4% of its frames by default (6.86 cm RMSE). The
   daylight office1-4 gets one against an equalized night map (33.4%,
   2.62 cm), where before it needed `--min-inliers 15`. On EuRoC, MH_02 and
-  V2_02 are unchanged, and V2_03 improves from 29.6 to 23.7 cm: its weak
-  localizations sample the odometry's path, which widens the gate enough
-  for a correct fix after a 65 s gap.
+  V2_02 are unchanged, and V2_03 improves from 29.6 to 23.7 cm.
+- **`OdomCorrection` measures travel along the odometry's path.** The gate
+  widens with the odometry's travel since the last accepted fix, which was
+  measured only between the odometry positions of consecutive fixes. After
+  a long gap that is one straight line, and a correct fix on EuRoC V2_03, 65
+  s after the previous one, was rejected. `OdomCorrection::observe_odometry`
+  now takes every odometry pose and keeps the path length by stamp, so it
+  also works when the odometry runs ahead of the localizations. The demo
+  and `visloc_map_localize_node` feed it every pose. Replayed on EuRoC
+  without weak fixes, it takes V2_03 from 29.1 to 24.6 cm and leaves the
+  other seven queries unchanged.
 
 - **Map localization tries every image until the odometry has a map
   pose.** No frame has one before two fixes agree, and with every 5th

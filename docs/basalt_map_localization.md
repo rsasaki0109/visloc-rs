@@ -457,13 +457,20 @@ the others unchanged. Rerun with the demo (VIO + map, defaults):
 | V2_03 → V2_01 | 4, none used | 77.8% → 77.7% | 29.6 / 70.4 → **23.7** / 70.4 cm |
 | OpenLORIS office1-7 → map B | 21, 3 used | none → **99.4%** | — → 6.86 / 13.7 cm |
 
-V2_03 improves through a side effect. The gate widens with the odometry's
-path since the last accepted fix, measured between the odometry positions
-of consecutive fixes. After 65 s without a fix, V2_03's path was measured as
-the straight line between two points, and a correct fix at 88 s (7.5 cm off)
-fell outside the gate. The weak localizations in between sample the path, as
-rejected fixes do. The gate is then wide enough, and with three more fixes
-the error falls to 23.7 cm.
+V2_03 improves for another reason: its weak localizations show how far
+the odometry went. The gate widens with the odometry's travel since the last
+accepted fix. That travel used to be measured only between the odometry
+positions of consecutive fixes. After 65 s without a fix, V2_03's travel was
+one straight line, and a correct fix at 88 s (7.5 cm off) fell outside the
+gate. The weak localizations in between sample the path, as rejected fixes
+do, so the gate is wide enough. With three more fixes the error falls to
+23.7 cm.
+
+Now `OdomCorrection::observe_odometry` takes every odometry pose, and the
+gate uses the path through them. The demo and `visloc_map_localize_node`
+feed it every pose. Replayed without weak fixes, that alone takes V2_03 from
+29.1 to 24.6 cm and leaves the other seven queries unchanged. Rerun with weak
+fixes too, every query above is unchanged (V2_03: 23.7 cm).
 
 ### On a robot (ROS 2)
 

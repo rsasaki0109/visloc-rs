@@ -202,7 +202,8 @@ which keeps the odometry-to-map transform:
 - it starts once two consecutive fixes agree, or three when one of them is
   a weak fix (`weak_min_inliers`); weak fixes are not used after that;
 - it accepts a fix within 15 cm / 3 deg of where it puts the odometry pose,
-  widened by 5 cm / 1 deg per metre travelled since the last accepted fix;
+  widened by 5 cm / 1 deg per metre travelled since the last accepted fix,
+  along the path of every odometry message;
   three agreeing rejected fixes in a row replace it (a VIO jump).
 
 Between fixes the VIO carries the pose, so its error grows with the distance
