@@ -28,6 +28,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **README: map-based localization animation.** EuRoC MH_02 localized in
+  the MH_01 map, with the matched keypoints and the rays to their map
+  landmarks (`docs/assets/hero_map_localization.gif`). It is rendered by
+  `scripts/render_map_localization_gif.py` from
+  `basalt_euroc_localize_demo --dump-inliers FILE`, which writes each
+  accepted localization's PnP inliers (keypoint pixel and map landmark).
+
 - **Live monocular-inertial VIO in a phone browser** (`bindings/wasm`). The
   Basalt port's VIO runs as WebAssembly on the phone's camera and motion
   sensors, on iPhone Safari and Android Chrome.

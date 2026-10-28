@@ -370,6 +370,21 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   --queries 3040
 ```
 
+The README's animation, from the localization run above with its inliers
+dumped (needs matplotlib and Pillow):
+
+```bash
+target/release/examples/basalt_euroc_localize_demo \
+  --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_on_mh01 \
+  --dump-inliers runs/mh02_inliers.csv
+python3 scripts/render_map_localization_gif.py --map runs/mh01_map \
+  --images $D/MH_02_easy --localization runs/mh02_on_mh01/localization.tum \
+  --inliers runs/mh02_inliers.csv --out docs/assets/hero_map_localization.gif \
+  --frames 140 --fps 10 --duration 150 --elev 60 --azim -80 --zoom 1.15 \
+  --width 760 --inset 270 --title "MH_02 localized in a map saved from MH_01" \
+  --subtitle "a different flight: 81% of its images localized, 1.8 cm RMSE vs ground truth"
+```
+
 A merged map (`cargo build ... --example basalt_map_merge`), queried with
 the flight left out of it and scored with the base map's alignment:
 

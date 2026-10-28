@@ -17,6 +17,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/hero_map_localization.gif" alt="Map-based localization on EuRoC: the 3D landmarks of a map saved by the stereo-inertial SLAM from the MH_01 flight, with the MH_02 flight localized in it image by image. Inset: the current camera image with the keypoints that matched the map in green. In the map: the current camera in red with green rays to the landmarks it matched, and the localized camera positions so far in orange, tracing the flight's loops through the machine hall." width="720"><br>
+  <sub>Map-based localization: EuRoC MH_02 localized image by image in a map that the stereo-inertial SLAM saved from MH_01, a different flight. Green: the keypoints that matched the map, and rays to those landmarks. Orange: the localized camera positions. <b>81% of the 3,040 images localize, at 1.8 cm RMSE</b> against ground truth; with the VIO anchored to the map, every frame gets a pose (99.8%, 2.0 cm), also in real time as ROS 2 nodes. <a href="docs/basalt_map_localization.md">Details and the other EuRoC queries</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling a whole city block (Hierarchical 3DGS SmallCity) from high above the rooftops, a viewpoint no input photo has: the sparse SfM point cloud of the surrounding streets and the 5,583 recovered camera frustums tracing the bicycle's path around the block pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, streets and parked cars included, then dissolve into the extracted mesh." width="640"><br>
   <sub>5,822 photos of a city block &rarr; 5,583 camera poses &rarr; 4.7M-gaussian splat &rarr; 5.9M-triangle mesh in 2.5 h, one <code>gsplat_photos</code> command, no COLMAP or Python, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
