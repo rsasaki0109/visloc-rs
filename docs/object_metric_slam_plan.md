@@ -1,6 +1,8 @@
 # Metric-scale objects from monocular VI-SLAM (plan)
 
-**Status: plan, not started.** Nothing below is implemented yet.
+**Status:** Phase 0 is done (go). Phase 1's tracker is in `pipelines/objects`
+(`visloc-objects`); the detector is next. Nothing from Phase 2 on is
+implemented yet.
 
 ## Goal
 
@@ -63,6 +65,27 @@ scale, so this number is the ceiling.
 - New crate `pipelines/objects`. The existing `pipelines/tracking` crate is
   camera tracking against a map, so a separate name avoids confusion.
 - Tests on synthetic box sequences: ID switches, occlusion, re-entry.
+- **Done: the tracker.** `visloc_objects::ByteTracker` follows the reference
+  `byte_tracker.py`. It uses the same box Kalman filter, IoU costs fused
+  with the score, and lapjv-style assignment with a cost limit (here
+  Hungarian on the extended matrix). It also has the three associations, the
+  one-second lost buffer and duplicate removal. Two additions: class-aware
+  association (on by default), and IDs given at confirmation, so they have
+  no gaps. `MotAccumulator` computes CLEAR MOT.
+- The tests in `pipelines/objects/tests/byte_track_synthetic.rs` cover:
+  - steady motion with no ID switches;
+  - a crossing where the hidden object's score drops to 0.3: tracked
+    throughout, and missed for exactly the occluded frames without the
+    low-score pass;
+  - a 15-frame occlusion that keeps the ID, and a 40-frame absence that gets
+    a new one;
+  - one-off false positives that are never reported;
+  - class gating.
+- On a 12-object crowd with 3 % box noise, 5 % missed detections, 10 %
+  low-score detections and a false positive per frame, it scores MOTA 0.94
+  with no ID switches.
+- Next: the detector behind a trait (ONNX, RT-DETR or YOLOX), with a replay
+  detector for tests, and a `*_dummy` example.
 
 ### Phase 2: dynamic-object rejection in the VIO
 
