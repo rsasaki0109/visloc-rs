@@ -422,6 +422,7 @@ All notable changes to `visloc-rs` will be documented here.
   daylight office1-4 gets one against an equalized night map (33.4%,
   2.62 cm), where before it needed `--min-inliers 15`. On EuRoC, MH_02 and
   V2_02 are unchanged, and V2_03 improves from 29.6 to 23.7 cm.
+
 - **`OdomCorrection` measures travel along the odometry's path.** The gate
   widens with the odometry's travel since the last accepted fix, which was
   measured only between the odometry positions of consecutive fixes. After
