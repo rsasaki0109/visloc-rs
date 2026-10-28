@@ -13,6 +13,11 @@
 //! post-processing). [`MotAccumulator`] scores tracks against ground truth
 //! with the CLEAR MOT metrics.
 //!
+//! With metric camera poses from the VIO, the tracks become metric objects
+//! (Phase 3): [`metric`] triangulates static objects and fits upright boxes,
+//! and [`ground`] puts objects that stand on the ground, moving or not, on
+//! it for their height, position and speed.
+//!
 //! ```
 //! use visloc_objects::{BBox, ByteTracker, Detection};
 //!
@@ -43,8 +48,8 @@ pub use bbox::{BBox, Detection};
 pub use byte_track::{ByteTrackConfig, ByteTracker, TrackId, TrackedObject};
 pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
 pub use ground::{
-    estimate_ground_height, place_on_ground, summarize_ground_track, BoxRays, GroundObservation,
-    GroundParams, GroundTrack,
+    estimate_ground_height, place_on_ground, place_on_local_ground, plausible_height,
+    summarize_ground_track, BoxRays, GroundObservation, GroundParams, GroundTrack, GroundView,
 };
 pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};

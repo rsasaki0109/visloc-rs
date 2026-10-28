@@ -23,9 +23,10 @@
 //!
 //! Objects of a class that moves (people, vehicles, animals) are also placed
 //! on the ground frame by frame (`visloc_objects::ground`): the ground's
-//! height comes from all the triangulated feature tracks seen within 5 s of
-//! the object, and the middle of its box's bottom edge from the gravity
-//! direction, so a sideways camera works. That gives each one a metric
+//! height comes from all the triangulated feature tracks seen within 10 s of
+//! the object, then from those right under its foot (stairs and kerbs), and
+//! the middle of its box's bottom edge from the gravity direction, so a
+//! sideways camera works. That gives each one a metric
 //! height, width, distance and speed, moving or not. Boxes cut by the image
 //! border or scored below 0.5 are skipped. The trajectory is
 //! the IMU pose (`T_w_i`), as `basalt_euroc_vio_demo` writes it; for
@@ -41,9 +42,10 @@ use std::path::PathBuf;
 
 use nalgebra::{Isometry3, Point2, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 use visloc_rs::objects::{
-    estimate_ground_height, estimate_static_object, place_on_ground, plausible_size,
-    summarize_ground_track, triangulate, BBox, BearingObservation, BoxFitParams, BoxRays,
-    GroundParams, ObjectEstimate, TriangulationParams, COCO_CLASSES, MOVABLE_COCO_CLASSES,
+    estimate_ground_height, estimate_static_object, place_on_local_ground, plausible_height,
+    plausible_size, summarize_ground_track, triangulate, BBox, BearingObservation, BoxFitParams,
+    BoxRays, GroundParams, GroundView, ObjectEstimate, TriangulationParams, COCO_CLASSES,
+    MOVABLE_COCO_CLASSES,
 };
 
 struct Args {
@@ -78,8 +80,8 @@ const MERGE_DISTANCE: f64 = 0.5;
 const MIN_POINTS: usize = 12;
 
 /// Feature points seen within this long of an object on the ground count
-/// for its ground height.
-const GROUND_WINDOW_NS: i64 = 5_000_000_000;
+/// for its ground height and the ground under it.
+const GROUND_WINDOW_NS: i64 = 10_000_000_000;
 
 /// Boxes placed on the ground: at least this score, at least this far from
 /// the image border (a cut box has no foot), over at least this long.
@@ -337,11 +339,19 @@ fn ground_objects(
         }
     }
     let mut csv = String::from(
-        "object_id,class_id,class,frames,seconds,camera_height,height,width,distance,speed,scale_source,plausible\n",
+        "object_id,class_id,class,frames,seconds,camera_height,ground_shift,x,y,z,height,width,distance,speed,scale_source,plausible\n",
     );
     println!(
-        "\n{:>6} {:<12} {:>6} {:>7}  {:>8}  {:>13}  {:>8}  {:>7}  plausible",
-        "object", "class", "frames", "seconds", "camera h", "size h x w (m)", "distance", "speed"
+        "\n{:>6} {:<12} {:>6} {:>7}  {:>8}  {:>6}  {:>13}  {:>8}  {:>7}  plausible",
+        "object",
+        "class",
+        "frames",
+        "seconds",
+        "camera h",
+        "shift",
+        "size h x w (m)",
+        "distance",
+        "speed"
     );
     for (object_id, (class_id, mut frames)) in per_object {
         frames.sort_by_key(|(t, _)| *t);
@@ -358,39 +368,53 @@ fn ground_objects(
             .filter_map(|(t, _)| camera_pose(*t, 0))
             .map(|pose| pose.translation.vector.z)
             .fold(f64::INFINITY, f64::min);
-        let Some(ground) = estimate_ground_height(&points, lowest_camera, &GroundParams::default())
-        else {
+        let params = GroundParams::default();
+        let Some(scene_ground) = estimate_ground_height(&points, lowest_camera, &params) else {
             continue;
         };
-        let mut camera_heights = Vec::new();
-        let placed: Vec<_> = frames
+        let views: Vec<GroundView> = frames
             .iter()
             .filter_map(|(t, bbox)| {
                 let pose = camera_pose(*t, 0)?;
                 let rays = BoxRays::from_box(bbox, &pose.rotation, |x, y| {
                     camera.unproject(&Point2::new(x, y))
                 })?;
-                let center = Point3::from(pose.translation.vector);
-                camera_heights.push(center.z - ground);
-                place_on_ground(&center, &rays, ground, *t)
+                Some(GroundView {
+                    timestamp_ns: *t,
+                    camera_center: Point3::from(pose.translation.vector),
+                    rays,
+                })
             })
             .collect();
+        let Some((ground, placed)) = place_on_local_ground(&views, &points, scene_ground, &params)
+        else {
+            continue;
+        };
+        let mut camera_heights: Vec<f64> =
+            views.iter().map(|v| v.camera_center.z - ground).collect();
         let Some(track) = summarize_ground_track(object_id, class_id, &placed, MIN_GROUND_SECONDS)
         else {
             continue;
         };
+        // Where it stands: the median of its contact points.
+        let median = |axis: usize| {
+            let mut v: Vec<f64> = track.path.iter().map(|(_, p)| p[axis]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let position = Point3::new(median(0), median(1), median(2));
         camera_heights.sort_by(f64::total_cmp);
         let camera_height = camera_heights[camera_heights.len() / 2];
         let seconds = (t1 - t0) as f64 * 1e-9;
-        let largest = track.height.max(track.width);
-        let plausible = match plausible_size(class_id) {
-            Some((low, high)) if (low..=high).contains(&largest) => "yes",
+        let shift = ground - scene_ground;
+        let plausible = match plausible_height(class_id) {
+            Some((low, high)) if (low..=high).contains(&track.height) => "yes",
             Some(_) => "NO",
             None => "-",
         };
         let class = COCO_CLASSES.get(class_id as usize).copied().unwrap_or("?");
         println!(
-            "{object_id:>6} {class:<12} {:>6} {seconds:>7.1}  {camera_height:>8.2}  {:>5.2} x {:>5.2}  {:>8.1}  {:>7.2}  {plausible}",
+            "{object_id:>6} {class:<12} {:>6} {seconds:>7.1}  {camera_height:>8.2}  {shift:>+6.2}  {:>5.2} x {:>5.2}  {:>8.1}  {:>7.2}  {plausible}",
             placed.len(),
             track.height,
             track.width,
@@ -399,8 +423,11 @@ fn ground_objects(
         );
         writeln!(
             csv,
-            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{:.3},{:.3},{:.2},{:.3},ground_contact,{plausible}",
+            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{shift:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3},ground_contact,{plausible}",
             placed.len(),
+            position.x,
+            position.y,
+            position.z,
             track.height,
             track.width,
             track.distance,

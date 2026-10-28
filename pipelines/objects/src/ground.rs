@@ -11,6 +11,11 @@
 //!   its distance, and the box's rays cut at that distance give its height
 //!   and width. "Bottom" is the edge lowest in the world, so a camera
 //!   mounted sideways works as well as an upright one.
+//! - **The ground under the object** ([`place_on_local_ground`]): stairs, a
+//!   ramp or a kerb can put an object on another level than the camera's
+//!   ground, which makes it look small and near (a lower level) or large and
+//!   far (a higher one). The ground moves to the layer of scene points under
+//!   the object's placed foot until it settles.
 //! - **Over a track** ([`summarize_ground_track`]): the median size, the path
 //!   of the foot, and the speed of a line fitted to it.
 //!
@@ -22,7 +27,7 @@ use nalgebra::{Point3, UnitQuaternion, Vector2, Vector3};
 
 use crate::BBox;
 
-/// Settings of [`estimate_ground_height`].
+/// Settings of [`estimate_ground_height`] and [`place_on_local_ground`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundParams {
     /// Height bin of the histogram (0.05 m).
@@ -31,6 +36,15 @@ pub struct GroundParams {
     pub min_below_camera: f64,
     /// Points the densest bin needs (20).
     pub min_points: usize,
+    /// The ground under an object: the points horizontally nearest to its
+    /// foot (12)...
+    pub local_neighbours: usize,
+    /// ...within this distance (1.5 m)...
+    pub local_radius: f64,
+    /// ...of which its densest bin needs this many (3)...
+    pub local_min_points: usize,
+    /// ...and is taken if it is this much higher or lower (0.1 m).
+    pub local_min_shift: f64,
 }
 
 impl Default for GroundParams {
@@ -39,6 +53,10 @@ impl Default for GroundParams {
             bin: 0.05,
             min_below_camera: 0.3,
             min_points: 20,
+            local_neighbours: 12,
+            local_radius: 1.5,
+            local_min_points: 3,
+            local_min_shift: 0.1,
         }
     }
 }
@@ -50,21 +68,29 @@ pub fn estimate_ground_height(
     lowest_camera_z: f64,
     params: &GroundParams,
 ) -> Option<f64> {
-    let ceiling = lowest_camera_z - params.min_below_camera;
-    let below: Vec<f64> = points
-        .iter()
-        .map(|p| p.z)
-        .filter(|z| z.is_finite() && *z < ceiling)
-        .collect();
+    densest_layer(
+        points.iter().map(|p| p.z),
+        lowest_camera_z - params.min_below_camera,
+        params.bin,
+        params.min_points,
+    )
+}
+
+/// The mean of the densest `bin`-high layer of the heights below `ceiling`,
+/// if it has `min_points`; ties go to the lower layer.
+fn densest_layer(
+    heights: impl Iterator<Item = f64>,
+    ceiling: f64,
+    bin: f64,
+    min_points: usize,
+) -> Option<f64> {
     let mut bins: std::collections::HashMap<i64, Vec<f64>> = std::collections::HashMap::new();
-    for z in below {
-        bins.entry((z / params.bin).floor() as i64)
-            .or_default()
-            .push(z);
+    for z in heights.filter(|z| z.is_finite() && *z < ceiling) {
+        bins.entry((z / bin).floor() as i64).or_default().push(z);
     }
     let (_, layer) = bins
         .into_iter()
-        .filter(|(_, zs)| zs.len() >= params.min_points)
+        .filter(|(_, zs)| zs.len() >= min_points)
         .max_by_key(|(bin, zs)| (zs.len(), std::cmp::Reverse(*bin)))?;
     Some(layer.iter().sum::<f64>() / layer.len() as f64)
 }
@@ -170,6 +196,92 @@ pub fn place_on_ground(
         width,
         distance,
     })
+}
+
+/// Rough height ranges of COCO classes that stand on the ground, in metres.
+/// The height is what ground contact measures best (the width depends on
+/// the side the object is seen from). Only for flagging implausible
+/// estimates, never to set a scale.
+pub fn plausible_height(class_id: u32) -> Option<(f64, f64)> {
+    Some(match class_id {
+        0 => (1.0, 2.1),  // person, children included
+        1 => (0.8, 1.4),  // bicycle
+        2 => (1.2, 2.1),  // car, vans included
+        3 => (0.9, 1.6),  // motorcycle
+        5 => (2.7, 4.5),  // bus
+        6 => (2.8, 4.8),  // train or tram
+        7 => (2.0, 4.2),  // truck
+        16 => (0.2, 1.0), // dog
+        17 => (1.2, 2.0), // horse
+        _ => return None,
+    })
+}
+
+/// One view of an object: where the camera was and the rays of its box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundView {
+    pub timestamp_ns: i64,
+    pub camera_center: Point3<f64>,
+    pub rays: BoxRays,
+}
+
+/// Place an object's views on the ground under it. Starting from `ground_z`,
+/// the views are placed ([`place_on_ground`]), and the ground moves to the
+/// densest layer of the `local_neighbours` scene `points` horizontally
+/// nearest to the median foot (within `local_radius`, below the lowest
+/// camera), while that layer lies more than `local_min_shift` away (a few
+/// rounds at most). Nearest points rather than all within a radius, so that
+/// over steps the ground walks down (or up) one step at a time. Returns the ground used and
+/// the placed views; `None` if no view could be placed.
+pub fn place_on_local_ground(
+    views: &[GroundView],
+    points: &[Point3<f64>],
+    ground_z: f64,
+    params: &GroundParams,
+) -> Option<(f64, Vec<GroundObservation>)> {
+    const ROUNDS: usize = 5;
+    let ceiling = views
+        .iter()
+        .map(|v| v.camera_center.z)
+        .fold(f64::INFINITY, f64::min)
+        - params.min_below_camera;
+    let mut ground = ground_z;
+    for round in 0.. {
+        let placed: Vec<GroundObservation> = views
+            .iter()
+            .filter_map(|v| place_on_ground(&v.camera_center, &v.rays, ground, v.timestamp_ns))
+            .collect();
+        if placed.is_empty() {
+            return None;
+        }
+        let median = |f: fn(&Point3<f64>) -> f64| {
+            let mut v: Vec<f64> = placed.iter().map(|o| f(&o.contact)).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let foot = Vector2::new(median(|p| p.x), median(|p| p.y));
+        let mut near: Vec<(f64, f64)> = points
+            .iter()
+            .filter(|p| p.z < ceiling)
+            .map(|p| ((Vector2::new(p.x, p.y) - foot).norm(), p.z))
+            .filter(|(d, _)| *d < params.local_radius)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(params.local_neighbours);
+        let local = densest_layer(
+            near.iter().map(|(_, z)| *z),
+            ceiling,
+            params.bin,
+            params.local_min_points,
+        );
+        match local {
+            Some(z) if (z - ground).abs() > params.local_min_shift && round + 1 < ROUNDS => {
+                ground = z
+            }
+            _ => return Some((ground, placed)),
+        }
+    }
+    unreachable!()
 }
 
 /// An object's track on the ground.
@@ -290,12 +402,13 @@ mod tests {
         .unwrap()
     }
 
-    /// A person 1.75 m tall (0.5 m wide, 0.3 m deep) walks diagonally at
-    /// (1.2, 0.8) m/s, about 5 m from a camera 1.5 m above the ground that
-    /// itself walks forward. Returns the summarized track, with every camera position
-    /// and the ground scaled by `scale` (a wrongly scaled trajectory).
     const SPEED: f64 = 1.442_220_510_185_596; // |(1.2, 0.8)|
 
+    /// A person 1.75 m tall (0.5 m wide, 0.3 m deep) walks diagonally at
+    /// (1.2, 0.8) m/s, about 5 m from a camera 1.5 m above the ground that
+    /// itself walks forward. Returns the summarized track, with every camera
+    /// position and the ground scaled by `scale` (a wrongly scaled
+    /// trajectory).
     fn walk(roll: f64, scale: f64) -> GroundTrack {
         let observations: Vec<GroundObservation> = (0..30)
             .map(|k| {
@@ -342,6 +455,8 @@ mod tests {
         let track = walk(0.0, 2.0);
         assert!((track.height / 1.75 - 2.0).abs() < 0.1, "{track:?}");
         assert!((track.speed / SPEED - 2.0).abs() < 0.1, "{track:?}");
+        let (low, high) = plausible_height(0).unwrap();
+        assert!((low..=high).contains(&1.75) && !(low..=high).contains(&track.height));
     }
 
     #[test]
@@ -353,6 +468,87 @@ mod tests {
         assert!(place_on_ground(&Point3::new(0.0, 0.0, 1.5), &rays(0.1), 0.0, 0).is_none());
         assert!(place_on_ground(&Point3::new(0.0, 0.0, -0.5), &rays(-0.3), 0.0, 0).is_none());
         assert!(place_on_ground(&Point3::new(0.0, 0.0, 1.5), &rays(-0.3), 0.0, 0).is_some());
+    }
+
+    /// Views of a person 1.75 m tall walking across on a level `level` m
+    /// below the camera's ground (above it if negative), 6 m ahead of a
+    /// camera 1.5 m above that ground; and scene points: the camera's ground
+    /// up to 3 m ahead, a flight of steps to the other level and the other
+    /// level beyond, up to 8.5 m ahead.
+    fn below_the_steps(level: f64) -> (Vec<GroundView>, Vec<Point3<f64>>) {
+        let views = (0..20)
+            .map(|k| {
+                let t = k as f64 / 10.0;
+                let position = Vector3::new(0.0, 0.0, 1.5);
+                let pose = camera(position, Vector3::new(0.0, 1.0, -0.2), 0.0);
+                let foot = Point3::new(-1.0 + t, 6.0, -level);
+                GroundView {
+                    timestamp_ns: (t * 1e9) as i64,
+                    camera_center: Point3::from(position),
+                    rays: outline(&pose, foot, (0.5, 0.3, 1.75)),
+                }
+            })
+            .collect();
+        let mut points = Vec::new();
+        for i in 0..40 {
+            for j in 0..30 {
+                let (x, y) = (-2.0 + i as f64 * 0.1, j as f64 * 0.1);
+                points.push(Point3::new(x, y, 0.0));
+            }
+            for step in 0..5 {
+                let y = 3.0 + step as f64 * 0.2;
+                points.push(Point3::new(
+                    -2.0 + i as f64 * 0.1,
+                    y,
+                    -level * (step as f64 + 1.0) / 5.0,
+                ));
+            }
+            for j in 0..30 {
+                let (x, y) = (-2.0 + i as f64 * 0.1, 4.0 + j as f64 * 0.15);
+                points.push(Point3::new(x, y, -level));
+            }
+        }
+        (views, points)
+    }
+
+    #[test]
+    fn a_person_below_the_steps_stands_on_the_lower_level() {
+        let (views, points) = below_the_steps(1.0);
+        let params = GroundParams::default();
+        // On the camera's ground, the person comes out small and near.
+        let flat: Vec<GroundObservation> = views
+            .iter()
+            .filter_map(|v| place_on_ground(&v.camera_center, &v.rays, 0.0, v.timestamp_ns))
+            .collect();
+        let flat = summarize_ground_track(1, 0, &flat, 1.0).unwrap();
+        assert!(flat.height < 1.2, "{flat:?}");
+        // On the ground under it, it stands 1 m lower and comes out right.
+        let (ground, placed) = place_on_local_ground(&views, &points, 0.0, &params).unwrap();
+        assert!((ground + 1.0).abs() < 0.05, "{ground}");
+        let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
+        assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
+        assert!((track.distance - 6.0).abs() < 0.3, "{track:?}");
+    }
+
+    #[test]
+    fn a_person_up_the_steps_stands_on_the_upper_level() {
+        let (views, points) = below_the_steps(-0.5);
+        let (ground, placed) =
+            place_on_local_ground(&views, &points, 0.0, &GroundParams::default()).unwrap();
+        assert!((ground - 0.5).abs() < 0.05, "{ground}");
+        let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
+        assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
+        assert!((track.distance - 6.0).abs() < 0.3, "{track:?}");
+    }
+
+    #[test]
+    fn a_person_on_the_camera_ground_stays_there() {
+        let (views, points) = below_the_steps(0.0);
+        let (ground, placed) =
+            place_on_local_ground(&views, &points, 0.0, &GroundParams::default()).unwrap();
+        assert_eq!(ground, 0.0);
+        let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
+        assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
     }
 
     #[test]
