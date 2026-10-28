@@ -21,6 +21,11 @@ by those localizations.
   ([below](#where-the-wheel-odometry-is-measured)). The dataset's
   `base_link` sits 5–8 cm from that point, which made in-place turns look
   like up to 17 cm of drift (7–12 cm RMSE).
+- **Scale:** the T265 calibration shipped with the dataset makes the maps
+  1–3.5% long. With its stereo baseline corrected by a factor the wheel
+  odometry gives (0.986), and close weak fixes used too
+  (`--weak-gate-cm 5`), the VIO + map error falls to 1.1–2.4 cm
+  ([below](#correcting-the-scale)).
 - **Daylight:** the two sessions recorded in daylight with the ceiling
   lights off never localize in maps built at night from the raw images:
   ORB features do not survive that change. With the map's and the
@@ -84,6 +89,8 @@ Each map is the stereo-inertial SLAM of one sequence
 The SLAM comes out 1–3.5% long in scale on every sequence. This points to
 the T265 calibration shipped with the dataset (`trans_matrix.yaml`).
 Because of it, a fix is 3–4 cm off on average however well it matches.
+Correcting the calibration's stereo baseline from the wheel odometry
+removes most of this ([below](#correcting-the-scale)).
 
 A and B were driven in opposite directions, and `basalt_map_merge` cannot
 register them: none of B's keyframes localizes in A. office1-3 turns in
@@ -171,7 +178,10 @@ What this shows:
   projections: 5 and 13 fixes over the 38 s. So the VIO carries the pose
   for most of the run, at 6.9–7.6 cm. At `--min-inliers 15` every
   15-inlier localization is a fix, and none is more than 10.3 cm off,
-  which gives 4.06 cm.
+  which gives 4.06 cm. `--weak-gate-cm 5` keeps the default threshold and
+  uses only the weak fixes within 5 cm of the corrected VIO: 3.35 cm
+  against B and 3.80 cm against the merged map
+  ([more](#correcting-the-scale)).
 - **Lighting is the hard limit.** office1-4 and office1-5 are recorded
   in daylight with the ceiling lights off. Their best images reach at
   most 12 inliers against maps recorded at night. No map, threshold or
@@ -228,6 +238,72 @@ calibration in every run:
   the wheel odometry's point in the URDF. `visloc_map_localize_node`'s
   `extrinsics tf` then reads the corrected camera position from
   `/tf_static`.
+- **Combining the two odometries did not help once corrected into the
+  map.** Taking the VIO's attitude and the wheels' travel (each step's
+  displacement in the wheel odometry's frame, turned by the VIO's heading)
+  gives the best odometry alone on four of the five sessions: 0.39, 1.63,
+  1.39 and 1.98 cm (rigid fit) on office1-3, -6, -7 and -4. Corrected
+  into the map, though, it does no better than the better of the two: 3.37,
+  5.03 and 5.42 cm on office1-3 → A, office1-6 → A and office1-7 → B. The
+  point the robot turns about varies by about 3 cm between sessions, so
+  the wheels' travel in a turn is off by that much, which a rigid fit over
+  the whole run hides.
+
+## Correcting the scale
+
+A stereo VIO takes its metric scale mostly from the distance between its
+two cameras. The calibration's baseline is 63.98 mm. Shrinking it changes
+the SLAM's scale almost one to one:
+
+| Baseline factor | office1-1: scale, ATE | office1-2: scale, ATE |
+|---|---|---|
+| 1 (as shipped) | 1.017, 2.75 cm | 1.010, 1.58 cm |
+| 0.99 | 1.007, 1.22 cm | **0.999, 0.55 cm** |
+| 0.98 | **0.997, 0.78 cm** | 0.989, 1.75 cm |
+| 0.97 | 0.987, 2.14 cm | 0.979, 3.30 cm |
+
+(Scale of the SLAM trajectory against the ground truth; ATE after a rigid
+fit. With a scale fit too, the ATE is 0.5–0.6 cm at every factor.)
+
+The ground truth is not needed to pick the factor. The wheel odometry's
+scale is set by its wheels, and against the ground truth it is within 2%
+on every session but office1-3, which mostly turns in place.
+`scripts/calibrate_wheel_offset.py` fits the SLAM trajectory to it and
+prints the scale: 1.013 on office1-1 and 1.015 on office1-2 (1.017 and
+1.010 against the ground truth). Their mean gives a factor of 0.986, which
+`scripts/scale_stereo_baseline.py` applies to the calibration, for the
+maps and the queries alike. Maps A and B rebuilt with it are 1.003 and
+0.995 of the ground truth's scale, at 0.76 and 0.91 cm ATE (2.75 and
+1.58 cm before).
+
+VIO + map, the same queries (frames with a map pose, RMSE / max):
+
+| Query → map | As shipped | Baseline × 0.986 | ... and `--weak-gate-cm 5` |
+|---|---|---|---|
+| office1-3 → A | 99.7%, 2.83 / 3.7 cm | 99.7%, 1.19 / 1.5 cm | 99.7%, **1.08 / 1.5 cm** |
+| office1-6 → A | 99.8%, 3.08 / 4.3 cm | 99.8%, 1.87 / 2.8 cm | 99.8%, **1.27 / 2.0 cm** |
+| office1-7 → B | 99.4%, 6.86 / 13.7 cm | 98.6%, 5.36 / 10.6 cm | 98.6%, **2.36 / 4.7 cm** |
+
+- **The fixes get more accurate.** With the scale right, the fixes are 1.1
+  to 1.7 cm off (RMSE) instead of 3.5–3.9 cm, and the VIO alone drifts
+  less: 1.15 instead of 3.24 cm on office1-6, 3.00 instead of 5.29 cm on
+  office1-7 (rigid fit).
+- **Weak fixes close to the corrected VIO help most where full fixes are
+  rare.** With `--weak-gate-cm 5`, once the VIO has a map pose, a
+  localization with 15–29 inliers (map-wide or by projection) within 5 cm
+  and 2° of where the correction puts the VIO is used as well. office1-7
+  gets 116 of them next to 22 full fixes. Keeping the correction close
+  keeps the predicted projections close, so more images reach 30 inliers
+  too (office1-6: 120 full fixes instead of 84). On EuRoC it does not
+  help (changes of -0.6 to +0.6 cm), so it stays off by default
+  ([numbers](basalt_map_localization.md#weak-fixes-too-few-inliers-but-three-agree)).
+- **The wheel odometry no longer gains on the VIO.** On the corrected maps
+  it gives 4.91, 8.16 and 3.45 cm (4.24, 2.99 and 2.88 cm with the weak
+  gate) on the same three queries: its turns are off by the variation in
+  the turning point ([above](#where-the-wheel-odometry-is-measured)).
+- **One factor does not fit every session exactly.** With it, the VIO of
+  the three queries is 1.006–1.018 of the ground truth's scale. The best
+  factor per session ranges from 0.97 to 0.99.
 
 ## Across lighting: local contrast equalization
 
@@ -340,6 +416,17 @@ target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
   --imu-from-body -0.0314,-0.8923,-0.2587,-0.5030,-0.4927,-0.5074,0.4968 \
   --localize-every 5
 
+# The scale: the SLAM trajectory of each mapping session against its wheel
+# odometry ("VIO scale vs wheel odometry": 1.013 and 1.015), then the
+# baseline divided by their mean, for every sequence's calibration
+python3 scripts/calibrate_wheel_offset.py --vio runs/o11_slam/trajectory_online.tum \
+  --odometry data/office1-1/odom.tum \
+  --imu-from-body=-0.0314,-0.8923,-0.2587,-0.5030,-0.4927,-0.5074,0.4968
+python3 scripts/scale_stereo_baseline.py --calibration data/office1-1/calibration.json \
+  --scale 0.986 --out data/office1-1/calibration_scaled.json
+# ... then the map and the queries as above, with calibration_scaled.json
+# (and --weak-gate-cm 5 for the last column)
+
 # Score against the ground truth, through the map's own alignment
 python3 scripts/evaluate_map_localization.py --mode fixed \
   --estimate runs/o16_wheel/trajectory_map.tum \
@@ -360,7 +447,8 @@ dataset is CC BY-ND 4.0: keep the converted images out of the repository.
   Equalizing the local contrast gets one of the two daylight sessions a
   map pose, through weak fixes; the dawn session still has none.
 - **The T265's shipped calibration.** It leaves the maps 1–3.5% long in
-  scale, so every map pose carries a few cm of error. Recalibrating would
-  likely remove most of it.
+  scale, so every map pose carries a few cm of error. The baseline
+  correction above removes most of it; the scale still varies by up to
+  2% between sessions, which only a proper calibration would remove.
 - **The wheel odometry is planar and its frame is assumed level.** The
   office floor is level, which this needs.

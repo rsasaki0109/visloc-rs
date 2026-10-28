@@ -200,7 +200,8 @@ which keeps the odometry-to-map transform:
 - the transform is a yaw and a translation (both frames are gravity-aligned),
   averaged over the fixes of the last 5 s;
 - it starts once two consecutive fixes agree, or three when one of them is
-  a weak fix (`weak_min_inliers`); weak fixes are not used after that;
+  a weak fix (`weak_min_inliers`); weak fixes are not used after that,
+  unless `weak_gate_m` is set;
 - it accepts a fix within 15 cm / 3 deg of where it puts the odometry pose,
   widened by 5 cm / 1 deg per metre travelled since the last accepted fix,
   along the path of every odometry message;
@@ -237,6 +238,7 @@ measurements behind the defaults.
 | `initial_window_s` | `30` | ... only within this many seconds of the first image or of the latest localization; after that every `localize_every`-th until an image localizes |
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `weak_min_inliers` | `15` | a map-wide localization with at least this many inliers, but fewer than `min_inliers`, is a *weak fix*: it counts only toward the first map pose, which then needs three agreeing fixes instead of two (`>= min_inliers`: off) |
+| `weak_gate_m` | `0` (off) | once the odometry has a map pose, a weak localization (also one matched by projection) within this many metres and 2 deg of the corrected odometry is used as a fix too; helps where images rarely reach `min_inliers` (OpenLORIS-Scene office1-7: 6.9 to 3.4 cm), costs a little where they often do (EuRoC: up to +0.6 cm) |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
 | `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |

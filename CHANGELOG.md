@@ -79,6 +79,27 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`scripts/scale_stereo_baseline.py`: the stereo VIO's scale from the
+  wheel odometry.** A stereo VIO takes its scale mostly from its camera
+  baseline. On OpenLORIS-Scene the T265 calibration shipped with the
+  dataset makes the SLAM 1–3.5% long, which is most of the maps' error.
+  `calibrate_wheel_offset.py` prints the SLAM's scale against the wheel
+  odometry (1.013 and 1.015 on the two mapping sessions; 1.017 and 1.010
+  against the ground truth), and the script scales the calibration's
+  baseline by the inverse of their mean (0.986). Maps rebuilt with it are
+  0.76 and 0.91 cm from the ground truth instead of 2.75 and 1.58 cm, and
+  VIO + map falls from 2.8–6.9 cm to 1.2–5.4 cm RMSE on three queries.
+  With `--weak-gate-cm 5` too, it is 1.1–2.4 cm.
+- **Close weak fixes after the first map pose, as an option.**
+  `OdomCorrectionConfig::weak_gate_m` (`basalt_euroc_localize_demo
+  --weak-gate-cm`, `visloc_map_localize_node` `weak_gate_m`; off by
+  default): once the correction is set, a weak fix within that distance
+  (and 2°) of the corrected odometry is used as a fix. Localizations
+  matched around the predicted projections can then be weak too. On
+  OpenLORIS-Scene office1-7, whose images rarely reach 30 inliers against
+  another session's map, VIO + map falls from 6.86 to 3.35 cm (map B) and
+  from 7.62 to 3.80 cm (merged map). On EuRoC, where full fixes are
+  frequent, it changes the error by -0.6 to +0.6 cm, so it stays off.
 - **`scripts/calibrate_wheel_offset.py`: where the wheel odometry is
   measured.** `--odometry` and the node's `extrinsics tf` place the camera
   relative to the odometry's body. If that body is not the point the wheel

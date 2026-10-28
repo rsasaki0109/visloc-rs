@@ -472,6 +472,31 @@ feed it every pose. Replayed without weak fixes, that alone takes V2_03 from
 29.1 to 24.6 cm and leaves the other seven queries unchanged. Rerun with weak
 fixes too, every query above is unchanged (V2_03: 23.7 cm).
 
+**Close weak fixes after the first map pose (`--weak-gate-cm`, off by
+default).** With `--weak-gate-cm 5` (`weak_gate_m` on the node), a weak fix
+is also used after the first map pose if it lies within 5 cm and 2° of
+where the correction puts the odometry. Localizations matched around the
+predicted projections can then be weak too. The gate does not widen with
+travel, and weak fixes never replace the correction.
+
+| Query → map | Default | `--weak-gate-cm 5` |
+|---|---|---|
+| MH_02 → MH_01 | 2.00 / 5.6 cm | 2.00 / 5.6 cm |
+| V2_02 → V2_01 | 3.50 / 12.0 cm | 3.61 / 12.1 cm |
+| V2_03 → V2_01 | 23.7 / 70.4 cm | 24.1 / 70.8 cm |
+| OpenLORIS office1-7 → map B | 6.86 / 13.7 cm | **3.35 / 6.8 cm** |
+| OpenLORIS office1-7 → merged map | 7.62 / 15.0 cm | **3.80 / 7.5 cm** |
+| OpenLORIS office1-6 → map A | 3.08 / 4.3 cm | 3.13 / 4.3 cm |
+
+(VIO + map, RMSE / max; frames with a map pose unchanged.) Where full
+fixes come often, as on EuRoC, the weak ones add noise to them; replayed
+on all eight queries (map-wide weak fixes only), the error changes by -0.6
+to +0.6 cm. Where full fixes are rare, as on office1-7 against another
+session's map, they keep the VIO in the map frame between them and halve
+the error. Using weak fixes only while no full fix is in the averaging
+window lost that gain (6.80 and 7.77 cm), so the gate stays an option for
+robots whose images rarely reach `--min-inliers`.
+
 ### On a robot (ROS 2)
 
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
