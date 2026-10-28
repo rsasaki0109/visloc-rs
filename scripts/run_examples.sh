@@ -24,6 +24,7 @@ pgo_g2o_benchmark
 bundle_adjustment_demo
 read_two_view_matches_dummy
 two_view_match_vo_prior_dummy
+track_objects_dummy
 track_sequence_dummy
 track_sequence_with_extractor_dummy
 track_sequence_with_gnss_prior
