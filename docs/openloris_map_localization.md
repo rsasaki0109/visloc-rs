@@ -17,10 +17,11 @@ by those localizations.
   images reaches the 30 inliers a fix needs, gets its map pose from
   [weak fixes](basalt_map_localization.md#weak-fixes-too-few-inliers-but-three-agree).
 - **Wheel odometry:** correcting the robot's wheel odometry instead gives
-  4.4–6.2 cm, once the point the wheel odometry reports is calibrated
+  3.5–5.1 cm, once the point the wheel odometry reports and the level of
+  its frame are calibrated from the VIO
   ([below](#where-the-wheel-odometry-is-measured)). The dataset's
-  `base_link` sits 5–8 cm from that point, which made in-place turns look
-  like up to 17 cm of drift (7–12 cm RMSE).
+  `base_link` sits 5–8 cm from that point and leans 1.9°, which made
+  in-place turns look like up to 17 cm of drift (7–12 cm RMSE).
 - **Scale:** the T265 calibration shipped with the dataset makes the maps
   1–3.5% long. With its stereo baseline corrected by a factor the wheel
   odometry gives (0.986), and close weak fixes used too
@@ -120,19 +121,19 @@ these settings:
 
 "Alone" is each odometry's own error after a rigid fit to the ground truth.
 It is in the odometry's own frame, not the map's. The wheel odometry's
-reference point is calibrated from office1-3's VIO
+reference point and level are calibrated from office1-3's VIO
 ([below](#where-the-wheel-odometry-is-measured)).
 
 | Query → map | Images that localize alone | VIO + map: frames, RMSE / max | Wheel odometry + map: frames, RMSE / max | VIO alone | Wheel alone |
 |---|---|---|---|---|---|
-| office1-3 → A (minutes later) | 36.7% | 99.7%, 2.83 / 3.7 cm | 99.2%, 6.23 / 9.7 cm | 0.83 cm | 1.52 cm |
-| office1-6 → A (2.8 days, moved furniture) | 6.7% | 99.8%, 3.08 / 4.3 cm | 99.7%, 5.88 / 11.6 cm | 3.24 cm | 1.08 cm |
-| office1-6 → merged | 2.9% | 99.8%, 3.30 / 4.7 cm | 99.7%, 5.84 / 11.6 cm | | |
-| office1-7 → B | 0% | 99.4%, 6.86 / 13.7 cm | 99.3%, 5.00 / 11.4 cm | 5.29 cm | 2.67 cm |
-| office1-7 → merged | 0% | 93.9%, 7.62 / 15.0 cm | 93.8%, 4.42 / 9.2 cm | | |
-| office1-7 → merged, `--min-inliers 15` | | 94.9%, 4.06 / 8.2 cm | 94.8%, 2.27 / 4.6 cm | | |
-| office1-4 → A, B or merged (daylight) | 0% | no map pose | no map pose | | 4.63 cm |
-| office1-5 → merged (dawn) | 0% | no map pose, also at 15 inliers | no map pose | 5.20 cm | 3.98 cm |
+| office1-3 → A (minutes later) | 36.7% | 99.7%, 2.83 / 3.7 cm | 99.2%, 3.45 / 4.0 cm | 0.83 cm | 0.50 cm |
+| office1-6 → A (2.8 days, moved furniture) | 6.7% | 99.8%, 3.08 / 4.3 cm | 99.7%, 4.87 / 8.3 cm | 3.24 cm | 1.31 cm |
+| office1-6 → merged | 2.9% | 99.8%, 3.30 / 4.7 cm | 99.7%, 5.08 / 8.6 cm | | |
+| office1-7 → B | 0% | 99.4%, 6.86 / 13.7 cm | 99.3%, 5.08 / 10.8 cm | 5.29 cm | 1.45 cm |
+| office1-7 → merged | 0% | 93.9%, 7.62 / 15.0 cm | 93.8%, 4.13 / 9.2 cm | | |
+| office1-7 → merged, `--min-inliers 15` | | 94.9%, 4.06 / 8.2 cm | 94.8%, 2.05 / 3.6 cm | | |
+| office1-4 → A, B or merged (daylight) | 0% | no map pose | no map pose | | 4.26 cm |
+| office1-5 → merged (dawn) | 0% | no map pose, also at 15 inliers | no map pose | 5.20 cm | 2.59 cm |
 
 What this shows:
 
@@ -155,12 +156,12 @@ What this shows:
   1.9 s. Frames with a map pose rose from 94.4% to 98.5% and from 79.4% to
   94.9%. Where the map matches none of the images, it only adds attempts:
   every image for 30 s, then every 5th (`--initial-window-s`).
-- **The wheel odometry follows the VIO once its reference point is
-  right.** Where fixes keep coming (office1-3, office1-6), the corrected
-  VIO stays ahead: 2.8–3.3 cm against 5.8–6.2 cm. Where they are few
-  (office1-7), the calibrated wheel odometry is the better partner: 4.4–5.0
-  cm against 6.9–7.6 cm by default, and 2.27 cm against 4.06 cm at 15
-  inliers. Before calibration it was 7–12 cm everywhere
+- **The wheel odometry follows the VIO once its frame is calibrated.**
+  Where fixes keep coming (office1-3, office1-6), the corrected VIO stays
+  ahead: 2.8–3.3 cm against 3.5–5.1 cm. Where they are few (office1-7), the
+  calibrated wheel odometry is the better partner: 4.1–5.1 cm against
+  6.9–7.6 cm by default, and 2.05 cm against 4.06 cm at 15 inliers. Before
+  calibration it was 7–12 cm everywhere
   ([below](#where-the-wheel-odometry-is-measured)).
 - **Merging both directions costs some matches.** office1-6 localizes
   alone in 2.9% of its images against the merged map, against 6.7% in A.
@@ -207,29 +208,41 @@ and -7, 5–8 cm away.
 from a run with both the VIO and the wheel odometry. It fits the VIO's body
 path to the wheel odometry's, with the offset in the body frame, a
 rotation, a translation and a scale (the VIO's scale differs by a few
-percent). Turns in place are what reveal the offset. It prints the
-corrected `--imu-from-body`, with the body moved to the wheel odometry's
-point. From office1-3's VIO run it finds (1.3, 6.2) cm, within that spread,
-and leaves 0.40 cm RMS (1.88 cm without the offset). With that one
-calibration in every run:
+percent). Turns in place are what reveal the offset. From office1-3's VIO
+run it finds (1.3, 6.2) cm, within that spread, and leaves 0.40 cm RMS
+(1.88 cm without the offset).
 
-| Wheel odometry + map | `base_link` as given | Calibrated from office1-3's VIO |
-|---|---|---|
-| office1-3 → A | 11.6 / 19.6 cm | **6.23 / 9.7 cm** |
-| office1-6 → A | 7.17 / 15.7 cm | **5.88 / 11.6 cm** |
-| office1-6 → merged | 7.17 / 15.8 cm | **5.84 / 11.6 cm** |
-| office1-7 → B | 11.9 / 23.3 cm | **5.00 / 11.4 cm** |
-| office1-7 → merged | 11.6 / 21.4 cm | **4.42 / 9.2 cm** |
-| office1-7 → merged, `--min-inliers 15` | 6.89 / 16.0 cm | **2.27 / 4.6 cm** |
-| Wheel alone, rigid fit: office1-6, -7, -4, -5 | 4.80, 7.89, 8.34, 9.39 cm | 1.08, 2.67, 4.63, 3.98 cm |
+The extrinsic's tilt matters as much. The T265 sits 0.89 m above
+`base_link`, and the wheel odometry keeps its body level, so a tilt of the
+body frame in the extrinsic moves the computed IMU sideways: 1.6 cm per
+degree. Against the VIO's gravity, the dataset's `base_link` leans by
+1.9° (1.94, 1.86 and 1.97° on office1-3, -6 and -7), about 3 cm at the
+IMU. Assuming a level floor, the script also levels the body frame: it
+turns it by the smallest rotation that makes the VIO's mean up its z axis
+(`--keep-tilt` skips this). It prints the corrected `--imu-from-body`, with
+the body moved to the wheel odometry's point and levelled. With that one
+calibration from office1-3 in every run:
+
+| Wheel odometry + map | `base_link` as given | Point calibrated | ... and levelled |
+|---|---|---|---|
+| office1-3 → A | 11.6 / 19.6 cm | 6.23 / 9.7 cm | **3.45 / 4.0 cm** |
+| office1-6 → A | 7.17 / 15.7 cm | 5.88 / 11.6 cm | **4.87 / 8.3 cm** |
+| office1-6 → merged | 7.17 / 15.8 cm | 5.84 / 11.6 cm | **5.08 / 8.6 cm** |
+| office1-7 → B | 11.9 / 23.3 cm | **5.00 / 11.4 cm** | 5.08 / 10.8 cm |
+| office1-7 → merged | 11.6 / 21.4 cm | 4.42 / 9.2 cm | **4.13 / 9.2 cm** |
+| office1-7 → merged, `--min-inliers 15` | 6.89 / 16.0 cm | 2.27 / 4.6 cm | **2.05 / 3.6 cm** |
+| Wheel alone, rigid fit: office1-3, -6, -7, -4, -5 | 0.97, 4.80, 7.89, 8.34, 9.39 cm | 1.52, 1.08, 2.67, 4.63, 3.98 cm | 0.50, 1.31, 1.45, 4.26, 2.59 cm |
 
 (RMSE / max. The frames with a map pose do not change.)
 
 - **The calibration carries over between sessions.** It is fitted on
   office1-3 and holds on office1-6 and office1-7, recorded 2.8 days later.
-  The rigid-fit error of the wheel odometry alone falls by a factor of
-  1.8–4.4, except on office1-3 (0.97 to 1.52 cm). That short run is mostly
-  one in-place turn, which a rigid fit can partly rotate into place.
+  Calibrated and levelled, the rigid-fit error of the wheel odometry alone
+  falls by a factor of 1.9–5.4 from the dataset's extrinsic on all five
+  sessions, and wheel odometry + map by 1.4–3.4 times.
+- **Levelling helps on most runs, not all.** Alone it helps on four of the
+  five sessions (office1-6: 1.08 to 1.31 cm), and with the map on five of
+  the six runs (office1-7 → B: 5.00 to 5.08 cm).
 - **The fit uses the VIO only as a reference path.** The VIO's error over
   the run (0.83 cm on office1-3) sets how well the offset is found.
   Ground-truth fits on the five sessions spread by about 3 cm, so some of
@@ -242,7 +255,8 @@ calibration in every run:
   map.** Taking the VIO's attitude and the wheels' travel (each step's
   displacement in the wheel odometry's frame, turned by the VIO's heading)
   gives the best odometry alone on four of the five sessions: 0.39, 1.63,
-  1.39 and 1.98 cm (rigid fit) on office1-3, -6, -7 and -4. Corrected
+  1.39 and 1.98 cm (rigid fit) on office1-3, -6, -7 and -4 (with the point
+  calibrated, before levelling). Corrected
   into the map, though, it does no better than the better of the two: 3.37,
   5.03 and 5.42 cm on office1-3 → A, office1-6 → A and office1-7 → B. The
   point the robot turns about varies by about 3 cm between sessions, so
@@ -298,7 +312,7 @@ VIO + map, the same queries (frames with a map pose, RMSE / max):
   help (changes of -0.6 to +0.6 cm), so it stays off by default
   ([numbers](basalt_map_localization.md#weak-fixes-too-few-inliers-but-three-agree)).
 - **The wheel odometry no longer gains on the VIO.** On the corrected maps
-  it gives 4.91, 8.16 and 3.45 cm (4.24, 2.99 and 2.88 cm with the weak
+  it gives 1.96, 5.30 and 4.89 cm (1.70, 2.38 and 3.66 cm with the weak
   gate) on the same three queries: its turns are off by the variation in
   the turning point ([above](#where-the-wheel-odometry-is-measured)).
 - **One factor does not fit every session exactly.** With it, the VIO of
@@ -368,6 +382,39 @@ were measured before weak fixes:
   `basalt_map_merge` refuses to merge an equalized map with a raw one,
   whose descriptors would not match.
 
+## On ROS 2
+
+The same runs, through the nodes instead of the demo: each session as a
+rosbag2 (`tools/euroc_to_rosbag2.py --odometry`, with the stereo images, the
+IMU and the wheel odometry on `/wheel/odom`), played at real time with `ros2
+bag play`, on 4 cores. Two `static_transform_publisher`s give `base_link ->
+imu0` (the calibrated and levelled extrinsic above) and `imu0 -> cam0`.
+`visloc_map_localize_node` runs with `extrinsics:=tf` and `weak_gate_m:=0.05`
+against the scale-corrected maps ([above](#correcting-the-scale)), and its
+odometry is either `visloc_vio_node` (`base_frame:=base_link`) or the
+bag's wheel odometry. `map_pose` (of `base_link`, moved to the IMU) is
+scored like the demo's:
+
+| Query → map | VIO node: first map pose, RMSE / max | Demo | Wheel odometry: first map pose, RMSE / max | Demo |
+|---|---|---|---|---|
+| office1-6 → A | 0.2 s, 1.51 / 2.7 cm | 1.27 / 2.0 cm | 0.2 s, 2.47 / 4.4 cm | 2.38 / 4.3 cm |
+| office1-7 → B | 0.9 s, 2.22 / 5.0 cm | 2.36 / 4.7 cm | 0.7 s, 3.25 / 8.8 cm | 3.66 / 9.5 cm |
+
+- **The nodes reproduce the demo** within 0.4 cm, at real time, with the
+  wheel odometry at its own 20 Hz and the camera's position from
+  `/tf_static`. `map_pose` comes for every odometry message from the first
+  map pose on.
+- **The extrinsic's level shows most here.** The node corrects
+  `base_link`'s pose, 0.9 m below the camera, so a lean in `base_link ->
+  imu0` moves every fix against the level wheel odometry. With it only
+  moved to the wheel odometry's point, not levelled, office1-7's wheel
+  odometry was 4.67 cm instead of 3.25 cm.
+- **One run of six lost `/tf_static`.** In one office1-7 run,
+  `visloc_vio_node` never received the transient-local `base_link -> imu0`
+  and published no odometry. Rerun unchanged, it received it. The cause
+  (between the RustDDS reader and Fast DDS's transient-local writer) is not
+  found.
+
 ## Reproduce
 
 ```bash
@@ -404,7 +451,7 @@ target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
 # Where the wheel odometry is measured, from that VIO run. --imu-from-body
 # is base_link in the T265 IMU frame, the inverse of T_base_imu in
 # data/office1-3/extrinsics.json. Prints the corrected --imu-from-body
-# (here -0.0314,-0.8923,-0.2587,-0.5030,-0.4927,-0.5074,0.4968).
+# (here -0.0314,-0.8938,-0.2587,-0.5059,-0.5042,-0.4958,0.4940).
 python3 scripts/calibrate_wheel_offset.py --vio runs/o13_vio/trajectory_vio.tum \
   --odometry data/office1-3/odom.tum \
   --imu-from-body=0.0306,-0.8937,-0.2452,-0.5030,-0.4927,-0.5074,0.4967
@@ -413,7 +460,7 @@ python3 scripts/calibrate_wheel_offset.py --vio runs/o13_vio/trajectory_vio.tum 
 target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
   --euroc-dir data/office1-6 --out-dir runs/o16_wheel \
   --odometry data/office1-6/odom.tum \
-  --imu-from-body -0.0314,-0.8923,-0.2587,-0.5030,-0.4927,-0.5074,0.4968 \
+  --imu-from-body -0.0314,-0.8938,-0.2587,-0.5059,-0.5042,-0.4958,0.4940 \
   --localize-every 5
 
 # The scale: the SLAM trajectory of each mapping session against its wheel
@@ -421,11 +468,24 @@ target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
 # baseline divided by their mean, for every sequence's calibration
 python3 scripts/calibrate_wheel_offset.py --vio runs/o11_slam/trajectory_online.tum \
   --odometry data/office1-1/odom.tum \
-  --imu-from-body=-0.0314,-0.8923,-0.2587,-0.5030,-0.4927,-0.5074,0.4968
+  --imu-from-body=-0.0314,-0.8938,-0.2587,-0.5059,-0.5042,-0.4958,0.4940
 python3 scripts/scale_stereo_baseline.py --calibration data/office1-1/calibration.json \
   --scale 0.986 --out data/office1-1/calibration_scaled.json
 # ... then the map and the queries as above, with calibration_scaled.json
 # (and --weak-gate-cm 5 for the last column)
+
+# On ROS 2: a bag with the wheel odometry, then the nodes (source ROS 2 Jazzy)
+python3 ros2/visloc-ros2/tools/euroc_to_rosbag2.py data/office1-7 o17_bag \
+  --odometry data/office1-7/odom.tum
+ros2 run tf2_ros static_transform_publisher --x 0.276788 --y 0.028308 --z 0.888469 \
+  --qx 0.505898 --qy 0.504198 --qz 0.495798 --qw 0.493998 \
+  --frame-id base_link --child-frame-id imu0 &   # the inverse of the --imu-from-body above
+ros2 run tf2_ros static_transform_publisher --x 0.010699 --y -0.000053 --z -0.000119 \
+  --qx 0.005548 --qy 0.001361 --qz 0.999981 --qw 0.002460 \
+  --frame-id imu0 --child-frame-id cam0 &        # T_imu_cam0 of calibration.json
+visloc_map_localize_node --map runs/o12_map_scaled --ros-args -p extrinsics:=tf \
+  -p weak_gate_m:=0.05 -r image:=/cam0/image_raw -r odom:=/wheel/odom &
+ros2 bag play o17_bag --delay 3
 
 # Score against the ground truth, through the map's own alignment
 python3 scripts/evaluate_map_localization.py --mode fixed \
