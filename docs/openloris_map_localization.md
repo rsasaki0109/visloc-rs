@@ -5,15 +5,16 @@ come from a drone in a static room, flown minutes apart. This page runs
 the same pipeline on a wheeled robot over four days in an office whose
 furniture and lighting changed between sessions. It uses the stereo-inertial
 SLAM for the maps, `basalt_euroc_localize_demo` to localize against them,
-and the VIO or the robot's own wheel odometry anchored to the map.
+and the VIO or the robot's own wheel odometry, corrected into the map frame
+by those localizations.
 
 **Summary.**
 
 - **Same lighting:** within the same evening, and 2.8 days later with the
-  office rearranged, the VIO anchored to the map gives a map pose for 79–99%
+  office rearranged, the VIO corrected into the map frame gives a map pose for 79–99%
   of the frames at 2.9–3.5 cm RMSE. This holds although only 3–37% of the
   images localize on their own.
-- **Wheel odometry:** anchoring the robot's wheel odometry instead gives
+- **Wheel odometry:** correcting the robot's wheel odometry instead gives
   7–12 cm. It drifts by up to 17 cm in an in-place turn, which a few map
   fixes cannot correct.
 - **Daylight:** the two sessions recorded in daylight with the ceiling
@@ -108,46 +109,46 @@ It is in the odometry's own frame, not the map's.
 | office1-3 → A (minutes later) | 36.7% | 98.6%, 2.85 / 3.9 cm | 96.9%, 11.7 / 19.6 cm | 0.83 cm | 0.97 cm |
 | office1-6 → A (2.8 days, moved furniture) | 6.7% | 98.6%, 3.21 / 4.3 cm | 98.6%, 7.19 / 15.7 cm | 3.24 cm | 4.80 cm |
 | office1-6 → merged | 2.9% | 94.4%, 3.30 / 4.7 cm | 94.4%, 7.30 / 15.8 cm | | |
-| office1-7 → B or merged | 0% | never anchored | never anchored | 5.29 cm | 7.90 cm |
+| office1-7 → B or merged | 0% | no map pose | no map pose | 5.29 cm | 7.90 cm |
 | office1-7 → merged, `--min-inliers 15` | | 79.4%, 3.50 / 6.0 cm | | | |
-| office1-4 → A, B or merged (daylight) | 0% | never anchored | never anchored | | 8.34 cm |
-| office1-5 → merged (dawn) | 0% | never anchored, also at 15 inliers | never anchored | 5.20 cm | 9.40 cm |
+| office1-4 → A, B or merged (daylight) | 0% | no map pose | no map pose | | 8.34 cm |
+| office1-5 → merged (dawn) | 0% | no map pose, also at 15 inliers | no map pose | 5.20 cm | 9.40 cm |
 
 What this shows:
 
-- **Anchoring keeps the robot in the map frame although few images
+- **The correction keeps the robot in the map frame although few images
   localize.** The robot needs map-frame poses across sessions, which VIO
   alone does not give: it has its own frame each time. On office1-6, 2.8
   days later with the furniture moved, fewer than 7% of the images
-  localize alone. The anchored VIO still gets a map pose for 98.6% of the
+  localize alone. The corrected VIO still gets a map pose for 98.6% of the
   frames, about as accurate as the VIO's own rigid-fit error. On these
   6 m paths the VIO barely drifts, so the map's own few-cm error (its
   scale above) is what bounds the result.
-- **Projection matching.** Matching around the anchored VIO's prediction
+- **Projection matching.** Matching around the corrected VIO's prediction
   raises office1-6's fixes from 16 to 137 of its 216 attempts. The
-  anchored RMSE falls from 3.93 to 3.21 cm.
+  VIO + map RMSE falls from 3.93 to 3.21 cm.
 - **The wheel odometry is the weaker partner on this robot.** Its heading
   agrees with the ground truth within 0.5°. In office1-3's final 150°
   in-place turn, though, it reports `base_link` moving along a different
   path than the mocap does: 16.7 cm apart after 7.7 s. The camera turns
   away from the mapped view in the same turn, so no fix corrects it.
   Rigid-fit numbers (0.97 cm) hide this, because the fit rotates the turn
-  into place. Where fixes keep coming, anchored wheel odometry stays
+  into place. Where fixes keep coming, the corrected wheel odometry stays
   within a few cm of the VIO's result.
 - **Merging both directions costs some matches.** office1-6 localizes
   alone in 2.9% of its images against the merged map, against 6.7% in A.
   The many near-identical landmarks make the ratio test reject more
-  matches (`--duplicate-radius-m 0.1` did not change this run). Once
-  anchored, projection matching makes up for it.
-- **office1-7 anchors only below the default inlier threshold.** Its best
+  matches (`--duplicate-radius-m 0.1` did not change this run). Once the
+  VIO has a map pose, projection matching makes up for it.
+- **office1-7 gets map poses only below the default inlier threshold.** Its best
   map-wide match has 21 inliers against B and 17 against the merged map. At `--min-inliers 15` the first fixes come
   through, and no accepted fix is more than 10 cm off. On EuRoC, though,
   20 inliers already admits poses metres off, so 15 is not a safe default.
-  The anchor's two-fix agreement check is what keeps this run clean.
+  The correction's two-fix agreement check is what keeps this run clean.
 - **Lighting is the hard limit.** office1-4 and office1-5 are recorded
   in daylight with the ceiling lights off. Their best images reach at
   most 12 inliers against maps recorded at night. No map, threshold or odometry
-  gets them anchored: ORB features on these images do not match across
+  gives them map poses: ORB features on these images do not match across
   that change.
 
 ## Reproduce
@@ -165,14 +166,14 @@ target/release/examples/basalt_euroc_online_slam_demo --euroc-dir data/office1-1
   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
   --out-dir runs/o11_slam --save-map runs/o11_map
 
-# Query: VIO anchored to the map
+# Query: VIO corrected into the map frame
 target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
   --euroc-dir data/office1-6 --out-dir runs/o16_vio --vio \
   --calibration data/office1-6/calibration.json \
   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
   --localize-every 5 --projection-radius-px 20
 
-# Query: the wheel odometry anchored to the map. --imu-from-body is
+# Query: the wheel odometry corrected into the map frame. --imu-from-body is
 # base_link in the T265 IMU frame, the inverse of T_base_imu in
 # data/office1-6/extrinsics.json.
 target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \

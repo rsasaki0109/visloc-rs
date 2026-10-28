@@ -1,24 +1,25 @@
-//! Anchoring gravity-aligned odometry to a map with intermittent map fixes.
+//! Correcting gravity-aligned odometry into a map's frame with intermittent
+//! map fixes.
 //!
 //! Map-based localization gives an absolute pose only for some images (those
 //! that match the map well enough), while odometry such as VIO gives a pose for
-//! every frame but drifts. [`MapAnchor`] keeps the transform from the
-//! odometry frame to the map frame, updated from each map fix, so every
-//! odometry pose can be reported in the map frame.
+//! every frame but drifts. [`OdomCorrection`] keeps the transform from the
+//! odometry frame to the map frame (`map -> odom` in REP-105), updated from
+//! each map fix, so every odometry pose can be reported in the map frame.
 //!
 //! Both frames are assumed gravity-aligned (z up), as a VIO world and a map
 //! built by VIO are. The offset is then four degrees of freedom: a yaw about
 //! the vertical and a translation. Roll and pitch come from the odometry,
 //! which observes gravity directly.
 //!
-//! The anchor is causal: it only uses fixes already added. Per fix it
+//! The correction is causal: it only uses fixes already added. Per fix it
 //!
 //! - **initializes** once `init_fixes` consecutive fixes agree on one offset,
 //!   so a single wrong fix cannot place the trajectory;
 //! - **accepts** a fix whose map pose lies within a gate of where the current
 //!   offset puts the odometry pose; the gate widens with the odometry
 //!   distance travelled since the last accepted fix, to absorb drift;
-//! - **rejects** any other fix, and **re-anchors** when `reanchor_after`
+//! - **rejects** any other fix, and **resets** the offset when `reset_after`
 //!   consecutive rejected fixes agree with each other (the odometry itself
 //!   jumped, or the earlier offset was wrong).
 //!
@@ -32,13 +33,13 @@ use nalgebra::{UnitQuaternion, Vector3};
 use visloc_core::geometry::SE3;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MapAnchorConfig {
+pub struct OdomCorrectionConfig {
     /// Consecutive mutually consistent fixes needed before the first offset.
     pub init_fixes: usize,
     /// Consecutive mutually consistent rejected fixes that replace the offset.
-    pub reanchor_after: usize,
+    pub reset_after: usize,
     /// Position tolerance, in metres, for fixes to count as agreeing with
-    /// each other (initialization, re-anchoring).
+    /// each other (initialization, reset).
     pub agreement_m: f64,
     /// Position gate, in metres, for accepting a fix right after another.
     pub gate_m: f64,
@@ -55,11 +56,11 @@ pub struct MapAnchorConfig {
     pub window_s: f64,
 }
 
-impl Default for MapAnchorConfig {
+impl Default for OdomCorrectionConfig {
     fn default() -> Self {
         Self {
             init_fixes: 2,
-            reanchor_after: 3,
+            reset_after: 3,
             agreement_m: 0.10,
             gate_m: 0.15,
             gate_per_m: 0.05,
@@ -70,10 +71,10 @@ impl Default for MapAnchorConfig {
     }
 }
 
-/// What [`MapAnchor::add_fix`] did with a fix.
+/// What [`OdomCorrection::add_fix`] did with a fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixOutcome {
-    /// Not anchored yet; the fix waits for agreeing ones.
+    /// No offset yet; the fix waits for agreeing ones.
     Pending,
     /// This fix completed initialization.
     Initialized,
@@ -83,7 +84,7 @@ pub enum FixOutcome {
     Rejected,
     /// This fix completed a run of agreeing rejected fixes, which replaced
     /// the offset.
-    Reanchored,
+    Reset,
 }
 
 /// Four-degree-of-freedom transform: `p_map = Rz(yaw) * p_odom + translation`.
@@ -147,8 +148,8 @@ fn residuals(offset: &Offset, fix: &Fix) -> (f64, f64) {
 }
 
 #[derive(Debug, Clone)]
-pub struct MapAnchor {
-    config: MapAnchorConfig,
+pub struct OdomCorrection {
+    config: OdomCorrectionConfig,
     offset: Option<Offset>,
     /// Accepted fixes inside the averaging window, oldest first.
     window: VecDeque<Fix>,
@@ -160,8 +161,8 @@ pub struct MapAnchor {
     travel_since_accept_m: f64,
 }
 
-impl MapAnchor {
-    pub fn new(config: MapAnchorConfig) -> Self {
+impl OdomCorrection {
+    pub fn new(config: OdomCorrectionConfig) -> Self {
         Self {
             config,
             offset: None,
@@ -172,15 +173,16 @@ impl MapAnchor {
         }
     }
 
-    pub const fn config(&self) -> &MapAnchorConfig {
+    pub const fn config(&self) -> &OdomCorrectionConfig {
         &self.config
     }
 
-    pub const fn is_anchored(&self) -> bool {
+    /// Whether the offset is set, i.e. odometry poses have a map pose.
+    pub const fn is_set(&self) -> bool {
         self.offset.is_some()
     }
 
-    /// The current odometry-to-map transform, once anchored.
+    /// The current odometry-to-map transform, once set.
     pub fn map_from_odom(&self) -> Option<SE3> {
         self.offset.as_ref().map(Offset::se3)
     }
@@ -195,7 +197,7 @@ impl MapAnchor {
             .map(|fix| (fix.timestamp_ns, fix.odom_position))
     }
 
-    /// An odometry pose expressed in the map frame, once anchored.
+    /// An odometry pose expressed in the map frame, once set.
     pub fn map_from_body(&self, odom_from_body: &SE3) -> Option<SE3> {
         self.map_from_odom()
             .map(|map_from_odom| map_from_odom.compose(odom_from_body))
@@ -242,11 +244,11 @@ impl MapAnchor {
             self.travel_since_accept_m = 0.0;
             return FixOutcome::Accepted;
         }
-        if self.push_candidate(fix, self.config.reanchor_after) {
+        if self.push_candidate(fix, self.config.reset_after) {
             Self::adopt(&mut self.window, &mut self.candidates);
             self.refit();
             self.travel_since_accept_m = 0.0;
-            FixOutcome::Reanchored
+            FixOutcome::Reset
         } else {
             FixOutcome::Rejected
         }
@@ -318,7 +320,7 @@ mod tests {
     }
 
     fn fix_at(
-        anchor: &mut MapAnchor,
+        correction: &mut OdomCorrection,
         index: usize,
         map_from_odom: &SE3,
         shift: Vector3<f64>,
@@ -326,7 +328,7 @@ mod tests {
         let odom_from_body = odom(index);
         let mut map_from_body = map_from_odom.compose(&odom_from_body);
         map_from_body.translation += shift;
-        anchor.add_fix(index as i64 * SECOND / 10, &map_from_body, &odom_from_body)
+        correction.add_fix(index as i64 * SECOND / 10, &map_from_body, &odom_from_body)
     }
 
     fn assert_pose_close(lhs: &SE3, rhs: &SE3, tolerance: f64) {
@@ -342,69 +344,72 @@ mod tests {
 
     #[test]
     fn exact_fixes_recover_the_offset_after_initialization() {
-        let mut anchor = MapAnchor::new(MapAnchorConfig::default());
-        assert_eq!(anchor.map_from_body(&odom(0)), None);
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
+        assert_eq!(correction.map_from_body(&odom(0)), None);
         assert_eq!(
-            fix_at(&mut anchor, 0, &truth(), Vector3::zeros()),
+            fix_at(&mut correction, 0, &truth(), Vector3::zeros()),
             FixOutcome::Pending
         );
-        assert_eq!(anchor.last_fix(), None);
+        assert_eq!(correction.last_fix(), None);
         assert_eq!(
-            fix_at(&mut anchor, 1, &truth(), Vector3::zeros()),
+            fix_at(&mut correction, 1, &truth(), Vector3::zeros()),
             FixOutcome::Initialized
         );
         assert_eq!(
-            fix_at(&mut anchor, 2, &truth(), Vector3::zeros()),
+            fix_at(&mut correction, 2, &truth(), Vector3::zeros()),
             FixOutcome::Accepted
         );
         assert_eq!(
-            anchor.last_fix(),
+            correction.last_fix(),
             Some((2 * SECOND / 10, odom(2).translation))
         );
         for index in [3, 10, 40] {
-            let pose = anchor.map_from_body(&odom(index)).expect("anchored");
+            let pose = correction.map_from_body(&odom(index)).expect("set");
             assert_pose_close(&pose, &truth().compose(&odom(index)), 1e-9);
         }
     }
 
     #[test]
     fn a_wrong_first_fix_does_not_place_the_trajectory() {
-        let mut anchor = MapAnchor::new(MapAnchorConfig::default());
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
         let off = Vector3::new(1.5, 0.0, 0.0);
-        assert_eq!(fix_at(&mut anchor, 0, &truth(), off), FixOutcome::Pending);
         assert_eq!(
-            fix_at(&mut anchor, 1, &truth(), Vector3::zeros()),
+            fix_at(&mut correction, 0, &truth(), off),
             FixOutcome::Pending
         );
         assert_eq!(
-            fix_at(&mut anchor, 2, &truth(), Vector3::zeros()),
+            fix_at(&mut correction, 1, &truth(), Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            fix_at(&mut correction, 2, &truth(), Vector3::zeros()),
             FixOutcome::Initialized
         );
-        assert_pose_close(&anchor.map_from_odom().unwrap(), &truth(), 1e-9);
+        assert_pose_close(&correction.map_from_odom().unwrap(), &truth(), 1e-9);
     }
 
     #[test]
     fn an_outlier_is_rejected_and_leaves_the_offset_alone() {
-        let mut anchor = MapAnchor::new(MapAnchorConfig::default());
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
         for index in 0..4 {
-            fix_at(&mut anchor, index, &truth(), Vector3::zeros());
+            fix_at(&mut correction, index, &truth(), Vector3::zeros());
         }
         assert_eq!(
-            fix_at(&mut anchor, 4, &truth(), Vector3::new(0.0, 2.0, 0.0)),
+            fix_at(&mut correction, 4, &truth(), Vector3::new(0.0, 2.0, 0.0)),
             FixOutcome::Rejected
         );
-        assert_pose_close(&anchor.map_from_odom().unwrap(), &truth(), 1e-9);
+        assert_pose_close(&correction.map_from_odom().unwrap(), &truth(), 1e-9);
         assert_eq!(
-            fix_at(&mut anchor, 5, &truth(), Vector3::zeros()),
+            fix_at(&mut correction, 5, &truth(), Vector3::zeros()),
             FixOutcome::Accepted
         );
     }
 
     #[test]
-    fn agreeing_rejected_fixes_reanchor_after_an_odometry_jump() {
-        let mut anchor = MapAnchor::new(MapAnchorConfig::default());
+    fn agreeing_rejected_fixes_reset_the_offset_after_an_odometry_jump() {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
         for index in 0..4 {
-            fix_at(&mut anchor, index, &truth(), Vector3::zeros());
+            fix_at(&mut correction, index, &truth(), Vector3::zeros());
         }
         // The odometry jumped: from now on the true offset is a different one.
         let jumped = SE3::new(
@@ -412,25 +417,25 @@ mod tests {
             Vector3::new(2.0, -1.0, 0.5),
         );
         assert_eq!(
-            fix_at(&mut anchor, 4, &jumped, Vector3::zeros()),
+            fix_at(&mut correction, 4, &jumped, Vector3::zeros()),
             FixOutcome::Rejected
         );
         assert_eq!(
-            fix_at(&mut anchor, 5, &jumped, Vector3::zeros()),
+            fix_at(&mut correction, 5, &jumped, Vector3::zeros()),
             FixOutcome::Rejected
         );
         assert_eq!(
-            fix_at(&mut anchor, 6, &jumped, Vector3::zeros()),
-            FixOutcome::Reanchored
+            fix_at(&mut correction, 6, &jumped, Vector3::zeros()),
+            FixOutcome::Reset
         );
-        assert_pose_close(&anchor.map_from_odom().unwrap(), &jumped, 1e-9);
+        assert_pose_close(&correction.map_from_odom().unwrap(), &jumped, 1e-9);
     }
 
     #[test]
     fn the_gate_widens_with_travel_since_the_last_accepted_fix() {
-        let config = MapAnchorConfig::default();
-        let mut near = MapAnchor::new(config.clone());
-        let mut far = MapAnchor::new(config);
+        let config = OdomCorrectionConfig::default();
+        let mut near = OdomCorrection::new(config.clone());
+        let mut far = OdomCorrection::new(config);
         for index in 0..3 {
             fix_at(&mut near, index, &truth(), Vector3::zeros());
             fix_at(&mut far, index, &truth(), Vector3::zeros());
@@ -448,33 +453,33 @@ mod tests {
 
     #[test]
     fn noisy_fixes_average_within_the_window() {
-        let mut anchor = MapAnchor::new(MapAnchorConfig::default());
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
         // Alternating +-2 cm noise along x averages out.
         for index in 0..20 {
             let sign = if index % 2 == 0 { 1.0 } else { -1.0 };
             fix_at(
-                &mut anchor,
+                &mut correction,
                 index,
                 &truth(),
                 Vector3::new(0.02 * sign, 0.0, 0.0),
             );
         }
-        let estimate = anchor.map_from_odom().unwrap();
+        let estimate = correction.map_from_odom().unwrap();
         assert!((estimate.translation - truth().translation).norm() < 0.005);
         // A 5 s window at 10 fixes per second keeps all 20 fixes.
-        assert_eq!(anchor.window.len(), 20);
+        assert_eq!(correction.window.len(), 20);
     }
 
     #[test]
     fn old_fixes_leave_the_window() {
-        let mut anchor = MapAnchor::new(MapAnchorConfig {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
             window_s: 1.0,
-            ..MapAnchorConfig::default()
+            ..OdomCorrectionConfig::default()
         });
         for index in 0..30 {
-            fix_at(&mut anchor, index, &truth(), Vector3::zeros());
+            fix_at(&mut correction, index, &truth(), Vector3::zeros());
         }
         // 0.1 s apart: the newest fix and the ten before it are within 1 s.
-        assert_eq!(anchor.window.len(), 11);
+        assert_eq!(correction.window.len(), 11);
     }
 }

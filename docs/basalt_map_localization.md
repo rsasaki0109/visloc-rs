@@ -16,17 +16,17 @@ localize is set mostly by how much of the query flight the map covers: from
 never saw. MH_01 against its own map localizes 98.4% and agrees with the SLAM
 trajectory to 2.4 mm (median).
 
-**With VIO** (`--vio`, [below](#anchoring-the-vio-to-the-map)), every
+**With VIO** (`--vio`, [below](#correcting-the-vio-into-the-map-frame)), every
 frame gets a map pose once two fixes agree: MH_02 99.8% of frames at 2.0 cm
 RMSE (5.7 cm worst) localizing only every 5th image, at 0.83× real time on 4
 cores. Between rare fixes the VIO drifts; each pose comes with the time and
 distance since its last fix, and the poses within 2 m and 5 s of one are never
 more than 13 cm off on any sequence. By default the demo then matches each
-image around the landmarks' projections from the anchored VIO's prediction
+image around the landmarks' projections from the corrected VIO's prediction
 ([below](#matching-around-the-predicted-projections)), as the ROS 2 node
 does. That makes the fixes far more frequent: 98% of MH_02's images match
 the map instead of 81%. Localization runs in half the time, and the VIO +
-map error falls on 6 of the 7 anchored queries.
+map error falls on 6 of the 7 queries that get map poses.
 
 ## Setup
 
@@ -217,13 +217,14 @@ What these show:
   map-wide search there by 40% ([below](#lifelong-use-appending-each-session)).
   It stays off by default.
 
-## Anchoring the VIO to the map
+## Correcting the VIO into the map frame
 
 Image localization gives a pose only for the images that match the map. With
 `--vio --calibration FILE --config FILE`, the Basalt stereo-inertial VIO runs
 on every frame of the query sequence and every `--localize-every`-th image is
-localized. `visloc_localization::MapAnchor` turns the accepted localizations
-(fixes) into the transform from the VIO frame to the map frame:
+localized. `visloc_localization::OdomCorrection` turns the accepted
+localizations (fixes) into the correction of the VIO: the transform from the
+VIO frame to the map frame (`map -> odom` in ROS terms):
 
 - Both frames are gravity-aligned, so the transform is a yaw and a
   translation, averaged over the fixes of the last 5 s.
@@ -255,19 +256,19 @@ now also matches around the predicted projections, compared
 | V1_02 → V1_01 | 28.5% | 93.9% | 3.5 / 6.4 cm | 59.3% | 3.1 / 6.4 cm | 1.03× |
 | V1_03 → V1_01 | 10.9% | 99.8% | 6.7 / 13.5 cm | 32.1% | 2.9 / 6.9 cm | 1.21× |
 | V2_02 → V2_01 | 20.3% | 99.8% | 4.2 / 12.6 cm | 49.0% | 3.6 / 12.6 cm | 1.20× |
-| V2_03 → V2_01 | 0.4% | never anchored | — | — | — | 1.41× |
+| V2_03 → V2_01 | 0.4% | none | — | — | — | 1.41× |
 
 "Localization alone" localizes every image (previous section); the VIO runs
 localize every 5th. Localizing every image instead gives the same accuracy
-(MH_02: 2.0 / 5.9 cm) at half the speed; it does anchor V2_03 (77.7% of
+(MH_02: 2.0 / 5.9 cm) at half the speed; it does give V2_03 map poses (77.7% of
 frames, 24.2 / 68.6 cm, its 4 fixes too few to hold the VIO, which alone
 drifts 24 cm), where every 5th image yields too few fixes for two to agree.
 Speed is the whole pipeline (image decoding, VIO, ORB extraction,
 localization) on the 4-core machine; matching against the larger MH_01 map
 is the slower part.
 
-**Error grows with the distance since the last fix.** Pooled over all seven
-anchored queries:
+**Error grows with the distance since the last fix.** Pooled over the seven
+queries that get map poses:
 
 | VIO travel since the last fix | Share of poses | RMSE | 95th percentile | > 25 cm off |
 |---|---|---|---|---|
@@ -285,20 +286,20 @@ removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
 
-**The anchor is not what limits these numbers.** The recorded VIO
+**The correction is not what limits these numbers.** The recorded VIO
 trajectories and fixes (every 5th image) were replayed through other ways
-of combining them. A Python port of `MapAnchor` reproduces every RMSE above
+of combining them. A Python port of `OdomCorrection` reproduces every RMSE above
 to 0.01 cm. A Kalman filter on the four offset parameters lets the offset
 drift by a random walk per metre of VIO travel (tried at 1-5 cm and
 0.2-1° per metre). It changes the RMSE by -0.6 to +0.8 cm. Averaging fixes
 over 2 or 10 s instead of 5 s changes it by -0.4 to +0.7 cm. Feeding the
 same ground-truth fix positions (with the real fixes' rotations, the same
-timing and the same averaging) into the anchor bounds what any such
+timing and the same averaging) into the correction bounds what any such
 combination of these fixes can reach:
 
 | | MH_02 | MH_03 | MH_04 | MH_05 | V1_02 | V1_03 | V2_02 |
 |---|---|---|---|---|---|---|---|
-| `MapAnchor` | 2.05 | 4.97 | 23.0 | 14.4 | 3.47 | 6.66 | 4.24 |
+| `OdomCorrection` | 2.05 | 4.97 | 23.0 | 14.4 | 3.47 | 6.66 | 4.24 |
 | with ground-truth fix positions | 1.30 | 4.80 | 23.7 | 15.4 | 2.76 | 6.36 | 3.85 |
 
 (RMSE, cm.) Even perfect fixes take off at most 1.4 cm, except on MH_02,
@@ -311,7 +312,7 @@ would more fixes where the map does cover the flight
 
 ### Matching around the predicted projections
 
-Once the anchor is set, it and the VIO predict each image's pose. Every
+Once the correction is set, the corrected VIO predicts each image's pose. Every
 landmark the predicted camera sees is then matched only against the
 keypoints within `--projection-radius-px` (20) pixels of its predicted
 projection (`BinaryLandmarkIndex::match_projected`), with the map-wide
@@ -333,7 +334,7 @@ All eight queries, localizing every 5th image, map-wide only
 | V1_02 → V1_01 | 28.9% → **54.4%** | 3.47 / 6.4 → 3.33 / 5.9 cm | 65 → 32 ms |
 | V1_03 → V1_01 | 10.5% → 24.2% | 6.66 / 13.5 → **4.60 / 9.6 cm** | 63 → 36 ms |
 | V2_02 → V2_01 | 21.1% → **56.4%** | 4.24 / 12.6 → **3.51 / 12.0 cm** | 47 → 32 ms |
-| V2_03 → V2_01 | 0.3% → 0.3% | never anchored, either way | |
+| V2_03 → V2_01 | 0.3% → 0.3% | no map pose, either way | |
 
 "Images that localize" is the share of the images tried. The share of frames
 with a map pose does not change. Per-image times are medians of ORB
@@ -341,24 +342,24 @@ extraction, matching and PnP, from runs three at a time on 4 cores.
 
 What these show:
 
-- **Six of the seven anchored queries improve.** On MH_05 the error rises by
+- **Six of the seven queries with map poses improve.** On MH_05 the error rises by
   1.5 cm although its fixes are accurate (none more than 10 cm off). The map
   covers only part of that flight, and the extra fixes in the covered part
-  move the anchor shortly before the VIO leaves it.
+  move the correction shortly before the VIO leaves it.
 - **Some extra fixes are 10–32 cm off, mostly on V2_02 (5 of 265).** The
-  anchor averages the fixes of the last 5 s and gates each one, so the
+  correction averages the fixes of the last 5 s and gates each one, so the
   VIO + map poses still improve and their worst error does not grow.
-  Replaying the recorded runs through `MapAnchor` with stricter rules for
+  Replaying the recorded runs through `OdomCorrection` with stricter rules for
   projection fixes (an inlier ratio of at least 0.6, at least 50 inliers,
   or a 6–8 cm gate) moves the VIO + map RMSE by 0.1 cm or less.
-- **A stale prediction is not trusted.** After a long gap the anchored VIO
+- **A stale prediction is not trusted.** After a long gap the corrected VIO
   has drifted, and the projection search can lock onto a wrong pose that
   agrees with the drifted prediction. MH_03, localizing every image, gave
   three fixes 16–42 cm off right after a 27 s gap; the gate accepted the
   16 cm one, and the worst VIO + map pose was 16.4 cm off. So the
   prediction is used only within `--projection-fresh-s` (5) seconds and
-  `--projection-fresh-m` (2) metres of odometry travel after the anchor's
-  newest fix, the "fresh" limits above. Otherwise the image is matched
+  `--projection-fresh-m` (2) metres of odometry travel after the
+  correction's newest fix, the "fresh" limits above. Otherwise the image is matched
   map-wide. With that limit MH_03's worst pose is 10.2 cm (9.7 map-wide
   only). V2_03, localizing every image, goes from 28.3 to 23.9 cm (24.2
   map-wide only). The ROS 2 node applies the same limits
@@ -367,10 +368,10 @@ What these show:
 ### On a robot (ROS 2)
 
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
-and `MapAnchor` next to `visloc_vio_node` and publishes `/tf` `map -> odom`
+and `OdomCorrection` next to `visloc_vio_node` and publishes `/tf` `map -> odom`
 (REP-105) and `map_pose`, with a position covariance of 3 cm + 2.5 cm per
-metre travelled since the last fix (the growth measured above). Once
-anchored, it matches each landmark only against the keypoints near the
+metre travelled since the last fix (the growth measured above). Once the
+odometry has a map pose, it matches each landmark only against the keypoints near the
 landmark's projection from the predicted pose, so localization costs about 4
 ms per image after ORB extraction. MH_02 was replayed over DDS against the
 MH_01 map, localizing every 5th image, with all processes on 4 cores. At
@@ -381,7 +382,7 @@ Played from a rosbag2 at real time, all eight queries above come within 1.2
 points of the offline `--vio --localize-every 5` share of frames with a map
 pose. On a ground robot, the VIO can publish `base_link` and the map node
 can take the camera's position from `/tf_static`, so wheel odometry can be
-anchored too; [OpenLORIS-Scene](openloris_map_localization.md) measures that
+corrected into the map frame too; [OpenLORIS-Scene](openloris_map_localization.md) measures that
 with a real robot's wheel odometry, and the VIO, over four days in an office.
 `ros2/visloc-ros2/launch/map_localization.launch.py` starts
 both nodes, `robot_state_publisher` with the rig's URDF, and RViz, where the
@@ -436,8 +437,8 @@ poses within 0.5 m of a map flight's pose looking the same way:
 | V1_03 → V1_01 + V1_02 | 67.1% | 13.1% | 99.8% | 6.3 / 4.4 / 12.2 cm | 0 |
 | V2_02 → V2_01 | 35.5% | 20.3% | 99.8% | 4.2 / 2.2 / 12.6 cm | 0 |
 | V2_02 → V2_01 + V2_03 | 59.3% | 18.4% | 99.8% | 4.3 / 2.3 / 12.6 cm | 0 |
-| V2_03 → V2_01 | 29.7% | 0.4% | never anchored | — | — |
-| V2_03 → V2_01 + V2_02 | 49.4% | 0.3% | never anchored | — | — |
+| V2_03 → V2_01 | 29.7% | 0.4% | none | — | — |
+| V2_03 → V2_01 + V2_02 | 49.4% | 0.3% | none | — | — |
 | MH_02 → MH_01 | 65.8% | 81.2% | 99.8% | 2.05 / 1.56 / 5.7 cm | 0 |
 | MH_02 → MH_01 + MH_04 | 65.8% | 80.1% | 99.8% | 2.09 / 1.67 / 5.7 cm | 0 |
 
@@ -460,7 +461,7 @@ What a merge buys depends on the added map:
 - **Where the map lacked coverage and the added flight is good, merging
   works.** MH_04 and MH_05 fly through parts of the hall MH_01 never saw.
   With the other difficult flight merged in, 6 to 12 times as many images
-  localize. The VIO anchors within 0.25 s instead of after 26-27 s, so
+  localize. The first map pose comes within 0.25 s instead of after 26-27 s, so
   99.7-99.8% of frames get a map pose. MH_04's error falls from 23.0 to
   9.5 cm RMSE, with no pose 25 cm off (418 before).
 - **An added map is only as accurate as itself and its registration.**
@@ -469,9 +470,9 @@ What a merge buys depends on the added map:
   away from there it sits up to 25 cm off. MH_05's median error halved
   (12.0 to 6.7 cm). But from 70 to 80 s, where only MH_04's part of the
   map covers the flight (MH_01's localizes none of those images), the
-  fixes are 25 cm off. The anchor followed them after a stretch the VIO
-  had carried alone, and two later fixes were rejected before it
-  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo
+  fixes are 25 cm off. The correction followed them after a stretch the VIO
+  had carried alone, and two later fixes were rejected before it was
+  reset; the worst pose is 49.6 cm off. A rigid transform cannot undo
   an added map's own distortion, and deforming it did not help either (see
   below).
 - **Coverage is not the limit for the fast Vicon flights.** V1_02 and V2_02
@@ -545,7 +546,7 @@ What these show:
 
 - **A session helps only where it went.** MH_02 and MH_03 fly where MH_01
   already did, and add little for MH_04 and MH_05. MH_04 explores the part
-  of the hall MH_05 needs: with it, MH_05 is anchored for the whole flight.
+  of the hall MH_05 needs: with it, MH_05 has a map pose for the whole flight.
 - **The map grows with every session.** Landmark fusion merges 2-12% of an
   added session's landmarks into existing ones, so the map still grows by
   6,000-12,000 landmarks a session. The map-wide search slows with it:
@@ -589,7 +590,7 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
 `--mode direct --reference runs/mh01_slam/trajectory_online.tum` compares a
 localization with the SLAM trajectory in the map frame, without alignment.
 
-VIO anchored to the map, scored the same way (drop `--projection-radius-px 0`
+VIO corrected into the map frame, scored the same way (drop `--projection-radius-px 0`
 for the default, matching around the predicted projections):
 
 ```bash
@@ -623,7 +624,7 @@ python3 scripts/render_map_localization_gif.py --map runs/mh01_map \
   --inliers runs/mh02_vio_inliers.csv --out docs/assets/hero_map_localization.gif \
   --start 0.5 --frames 140 --fps 10 --duration 150 --elev 60 --azim -80 --zoom 1.15 \
   --width 760 --inset 270 --title "MH_02 localized in a map saved from MH_01" \
-  --subtitle "VIO anchored to the map: a pose for every frame, 1.9 cm RMSE vs ground truth"
+  --subtitle "VIO in the map frame: a pose for every frame, 1.9 cm RMSE vs ground truth"
 ```
 
 Without `--trajectory`, the script draws the localizations alone (the run
@@ -655,7 +656,7 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   maps are registered rigidly, so an added flight's own map error stays in
   the merged map.
 - cam0 only. Without `--vio` each image is localized independently; with it
-  the anchor is a yaw + translation offset averaged over 5 s, not a joint
+  the correction is a yaw + translation offset averaged over 5 s, not a joint
   optimization of VIO and map, so its error grows between fixes as measured
   above.
 - The online mapper's background optimization depends on thread timing, so

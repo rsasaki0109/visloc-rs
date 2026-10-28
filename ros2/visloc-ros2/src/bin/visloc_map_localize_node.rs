@@ -1,5 +1,5 @@
 //! `visloc_map_localize_node`: robot-style localization against a saved
-//! Basalt map, anchored to odometry.
+//! Basalt map, with the odometry corrected into the map frame.
 //!
 //! Loads a map saved by `basalt_euroc_online_slam_demo --save-map`,
 //! subscribes `image` (the camera the map's localization uses, raw) and
@@ -22,7 +22,7 @@ use visloc_ros2::dds::{
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
     fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_pose_msg, map_to_odom_tf,
-    se3_from_ros, AnchorCore, Fix, FixEvent, MapLocalizeOptions, MapLocalizer, Matching,
+    se3_from_ros, Fix, FixEvent, MapLocalizeOptions, MapLocalizer, Matching, OdomCorrector,
     OdomLookup,
 };
 use visloc_ros2::msgs::{
@@ -34,7 +34,7 @@ use visloc_ros2::queue::DropOldestQueue;
 use visloc_ros2::tf_tree::StaticTransforms;
 
 const USAGE: &str = "\
-visloc_map_localize_node -- localization against a saved Basalt map, anchored to odometry
+visloc_map_localize_node -- localization against a saved Basalt map, correcting odometry into it
 
 USAGE:
   visloc_map_localize_node --map <dir from basalt_euroc_online_slam_demo --save-map> [options]
@@ -56,7 +56,7 @@ PARAMETERS (--name value  or  -p name:=value):
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
   reprojection_threshold PnP inlier threshold in pixels                               [3.0]
-  projection_radius      once anchored, match each landmark only with keypoints this
+  projection_radius      with a map pose, match each landmark only with keypoints this
                          close (px) to its projection from the predicted pose; on
                          failure, and with <= 0 always, match map-wide             [20]
   projection_fresh_s     ... only within this many seconds of the newest fix          [5]
@@ -79,7 +79,7 @@ TOPICS (remap with --remap from=to or -r from:=to):
        its header.frame_id and child_frame_id name the odometry and body frames),
        /tf_static (tf2_msgs/TFMessage, with extrinsics tf)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
-       body pose in map_frame, once anchored), /diagnostics (diagnostic_msgs/DiagnosticArray),
+       body pose in map_frame, after two agreeing fixes), /diagnostics (diagnostic_msgs/DiagnosticArray),
        map_cloud (sensor_msgs/PointCloud2, the map's landmarks in map_frame, transient-local)
 ";
 
@@ -169,7 +169,7 @@ fn run() -> Result<(), String> {
         )
     });
     let localizer = MapLocalizer::new(map, camera, &options)?;
-    let core = Arc::new(Mutex::new(AnchorCore::new(&options)));
+    let core = Arc::new(Mutex::new(OdomCorrector::new(&options)));
     // Notified on every odometry message, for images waiting for theirs.
     let odom_arrived = Arc::new(Condvar::new());
 
@@ -221,21 +221,21 @@ fn run() -> Result<(), String> {
                 }
             }
             let stamp_ns = msg.header.stamp.to_nanos();
-            let (events, anchored) = core
+            let (events, map_pose) = core
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .add_odom(stamp_ns, se3_from_ros(&msg.pose.pose));
             odom_arrived.notify_all();
             log_events(&events);
-            if let Some(anchored) = anchored {
+            if let Some(map_pose) = map_pose {
                 if publish_tf {
                     publish_logged(
                         &tf_pub,
-                        map_to_odom_tf(&anchored, &map_frame, &msg.header.frame_id),
+                        map_to_odom_tf(&map_pose, &map_frame, &msg.header.frame_id),
                         "tf",
                     );
                 }
-                let mut pose = map_pose_msg(&anchored, &map_frame, &options);
+                let mut pose = map_pose_msg(&map_pose, &map_frame, &options);
                 pose.header.stamp = msg.header.stamp;
                 publish_logged(&pose_pub, pose, "map_pose");
             }
@@ -308,25 +308,25 @@ fn run() -> Result<(), String> {
         if fix.matching == Some(Matching::Projection) {
             projected += 1;
         }
-        let (anchored, pending) = {
+        let (map_pose, pending) = {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map_from_body) = &fix.map_from_body {
                 localized += 1;
                 let events = core.add_fix(stamp.to_nanos(), map_from_body.clone());
                 log_events(&events);
             }
-            (core.latest_anchored(), core.pending_fixes())
+            (core.latest_map_pose(), core.pending_fixes())
         };
         publish_logged(
             &diagnostics_pub,
-            map_diagnostics_msg(&fix, stamp, anchored.as_ref(), pending, &node_name),
+            map_diagnostics_msg(&fix, stamp, map_pose.as_ref(), pending, &node_name),
             "diagnostics",
         );
         if attempts <= 3 || attempts.is_multiple_of(50) {
             eprintln!(
                 "visloc_map_localize_node: attempt {attempts}: localized={} inliers={} \
                  matches={} keypoints={} matching={} {:.1} ms (localized {localized}/{attempts}, \
-                 {projected} by projection, dropped images {}, odom messages {}, anchored {}){}",
+                 {projected} by projection, dropped images {}, odom messages {}, map pose {}){}",
                 fix.map_from_body.is_some(),
                 fix.inliers,
                 fix.matches,
@@ -335,7 +335,7 @@ fn run() -> Result<(), String> {
                 fix.elapsed_ms,
                 queue.dropped(),
                 odom_messages.load(Ordering::Relaxed),
-                anchored.is_some(),
+                map_pose.is_some(),
                 fix.failure
                     .as_ref()
                     .map(|reason| format!(" reason={reason}"))
@@ -345,11 +345,12 @@ fn run() -> Result<(), String> {
     }
 }
 
-/// The anchor's prediction of the body pose at `stamp_ns`, waiting up to
-/// `timeout` for the odometry of that stamp. `None` before anchoring, or
+/// The corrected odometry's prediction of the body pose at `stamp_ns`,
+/// waiting up to `timeout` for the odometry of that stamp. `None` before the
+/// correction is set, or
 /// when the odometry does not arrive in time.
 fn wait_for_prior(
-    core: &Mutex<AnchorCore>,
+    core: &Mutex<OdomCorrector>,
     odom_arrived: &Condvar,
     stamp_ns: i64,
     timeout: Duration,
@@ -374,7 +375,7 @@ fn wait_for_prior(
     }
 }
 
-/// Logs anchor state changes (initialization, rejections, re-anchoring and
+/// Logs changes of the correction (initialization, rejections, resets and
 /// fixes with no odometry); accepted fixes are the quiet normal case.
 fn log_events(events: &[FixEvent]) {
     for event in events {

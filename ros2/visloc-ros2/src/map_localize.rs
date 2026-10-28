@@ -1,23 +1,25 @@
 //! Transport-agnostic core of `visloc_map_localize_node`: robot-style map
 //! localization against a map saved by
-//! `basalt_euroc_online_slam_demo --save-map`, anchored to VIO odometry.
+//! `basalt_euroc_online_slam_demo --save-map`, correcting VIO odometry into
+//! the map frame.
 //!
 //! Same path as `basalt_euroc_localize_demo --vio`
 //! (`docs/basalt_map_localization.md`): each localized image goes through the
 //! Basalt mapper's own ORB frontend, is matched to the map's landmark
-//! descriptors by Hamming distance and solved with P3P RANSAC. Once anchored,
-//! the anchor and odometry predict the pose, and matching only compares each
+//! descriptors by Hamming distance and solved with P3P RANSAC. Once the
+//! odometry has a map pose, the correction and the odometry predict the
+//! pose, and matching only compares each
 //! landmark with the keypoints near its predicted projection (falling back
 //! to the map-wide search when that fails), which keeps localization cheap
 //! enough to run next to the VIO in real time; an accepted
 //! pose (a *fix*) is paired with the odometry pose at the same stamp and fed
-//! to [`MapAnchor`], which keeps the `map -> odom` transform (REP-105). Every
-//! odometry pose is then reported in the map frame, with the time and
-//! distance since the anchor's newest fix.
+//! to [`OdomCorrection`], which keeps the `map -> odom` transform (REP-105).
+//! Every odometry pose is then reported in the map frame, with the time and
+//! distance since the correction's newest fix.
 //!
 //! Fixes and odometry arrive on different threads and in either order (the
 //! VIO may publish a frame's odometry before or after that frame is
-//! localized), so [`AnchorCore`] keeps a short odometry history and holds a
+//! localized), so [`OdomCorrector`] keeps a short odometry history and holds a
 //! fix until the odometry for its stamp has arrived.
 
 use std::collections::VecDeque;
@@ -31,13 +33,13 @@ use visloc_basalt::mapper::{
     orb_descriptor_to_f32,
 };
 use visloc_basalt::RawU16Image;
-use visloc_core::geometry::{Pose as MapPose, SE3};
+use visloc_core::geometry::{Pose as CameraPose, SE3};
 use visloc_core::types::{Camera, LandmarkDescriptorStore, VisualMap};
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::read_landmark_descriptors_txt;
 use visloc_localization::{
     AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, LocalizationConfig,
-    LocalizationPipeline, MapAnchor, MapAnchorConfig, PackedDescriptors,
+    LocalizationPipeline, OdomCorrection, OdomCorrectionConfig, PackedDescriptors,
 };
 use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
@@ -64,11 +66,11 @@ pub struct MapLocalizeOptions {
     pub min_inliers: usize,
     pub ransac_iterations: usize,
     pub reprojection_px: f64,
-    /// Once anchored: search radius around each landmark's predicted
+    /// Once the odometry has a map pose: search radius around each landmark's predicted
     /// projection; `None` always matches map-wide.
     pub projection_radius_px: Option<f64>,
     /// The prediction is a prior only this long and this far (odometry
-    /// travel) after the anchor's newest fix: after a long gap, a drifted
+    /// travel) after the correction's newest fix: after a long gap, a drifted
     /// prediction can steer the projection search to a wrong pose that
     /// agrees with it.
     pub projection_fresh_s: f64,
@@ -80,7 +82,7 @@ pub struct MapLocalizeOptions {
     /// (`BinaryLandmarkIndex::with_duplicate_radius`); `None` is the plain
     /// ratio test.
     pub duplicate_radius_m: Option<f64>,
-    pub anchor: MapAnchorConfig,
+    pub correction: OdomCorrectionConfig,
     /// Odometry poses kept for pairing with fixes.
     pub odom_history_s: f64,
     /// Largest gap between two odometry poses a fix may be interpolated in.
@@ -107,7 +109,7 @@ impl Default for MapLocalizeOptions {
             projection_fresh_m: 2.0,
             match_threads: 1,
             duplicate_radius_m: None,
-            anchor: MapAnchorConfig::default(),
+            correction: OdomCorrectionConfig::default(),
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,
             position_stddev_m: 0.03,
@@ -193,7 +195,7 @@ pub enum Matching {
     /// Every keypoint against every map landmark.
     Global,
     /// Each landmark against the keypoints near its projection from the
-    /// pose predicted by the anchor and odometry.
+    /// pose predicted by the correction and the odometry.
     Projection,
 }
 
@@ -326,7 +328,7 @@ impl MapLocalizer {
     }
 
     /// Localizes one raw image; `prior` is the body pose in the map
-    /// predicted for it (see [`AnchorCore::prior`]).
+    /// predicted for it (see [`OdomCorrector::prior`]).
     pub fn localize(&self, image: &RawU16Image, prior: Option<&SE3>) -> Fix {
         let started = Instant::now();
         let mut fix = match self.extract(image) {
@@ -404,7 +406,7 @@ impl MapLocalizer {
     ) -> Fix {
         let started = Instant::now();
         let projection = prior.zip(self.projection_radius_px).map(|(prior, radius)| {
-            let pose = MapPose {
+            let pose = CameraPose {
                 world_to_camera: camera_from_body.compose(&prior.inverse()),
             };
             self.solve(
@@ -553,7 +555,7 @@ impl OdomBuffer {
 
 /// An odometry pose expressed in the map frame.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AnchoredPose {
+pub struct MapPose {
     pub stamp_ns: i64,
     pub map_from_odom: SE3,
     pub map_from_body: SE3,
@@ -561,7 +563,7 @@ pub struct AnchoredPose {
     pub metres_since_fix: f64,
 }
 
-/// What happened to one fix in [`AnchorCore`].
+/// What happened to one fix in [`OdomCorrector`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FixEvent {
     Applied {
@@ -574,10 +576,10 @@ pub enum FixEvent {
     },
 }
 
-/// Pairs fixes with odometry by stamp and keeps the [`MapAnchor`].
+/// Pairs fixes with odometry by stamp and keeps the [`OdomCorrection`].
 #[derive(Clone, Debug)]
-pub struct AnchorCore {
-    anchor: MapAnchor,
+pub struct OdomCorrector {
+    correction: OdomCorrection,
     odom: OdomBuffer,
     pending: VecDeque<(i64, SE3)>,
     max_gap_ns: i64,
@@ -586,10 +588,10 @@ pub struct AnchorCore {
     fresh_m: f64,
 }
 
-impl AnchorCore {
+impl OdomCorrector {
     pub fn new(options: &MapLocalizeOptions) -> Self {
         Self {
-            anchor: MapAnchor::new(options.anchor.clone()),
+            correction: OdomCorrection::new(options.correction.clone()),
             odom: OdomBuffer::new(options.odom_history_s),
             pending: VecDeque::new(),
             max_gap_ns: (options.max_odom_gap_s * 1e9) as i64,
@@ -599,8 +601,9 @@ impl AnchorCore {
         }
     }
 
-    pub const fn is_anchored(&self) -> bool {
-        self.anchor.is_anchored()
+    /// Whether odometry poses have a map pose.
+    pub const fn is_set(&self) -> bool {
+        self.correction.is_set()
     }
 
     pub fn pending_fixes(&self) -> usize {
@@ -615,12 +618,12 @@ impl AnchorCore {
     }
 
     /// Adds an odometry pose, applies the fixes it unblocks, and returns the
-    /// pose in the map frame once anchored.
+    /// pose in the map frame once the correction is set.
     pub fn add_odom(
         &mut self,
         stamp_ns: i64,
         odom_from_body: SE3,
-    ) -> (Vec<FixEvent>, Option<AnchoredPose>) {
+    ) -> (Vec<FixEvent>, Option<MapPose>) {
         self.odom.push(stamp_ns, odom_from_body.clone());
         if self
             .latest_odom
@@ -630,16 +633,16 @@ impl AnchorCore {
             self.latest_odom = Some((stamp_ns, odom_from_body));
         }
         let events = self.flush();
-        (events, self.latest_anchored())
+        (events, self.latest_map_pose())
     }
 
-    /// The body pose in the map at `stamp_ns` that the anchor and odometry
-    /// predict, as a localization prior; [`OdomLookup::Unavailable`] before
-    /// anchoring, and once the anchor's newest fix is more than
+    /// The body pose in the map at `stamp_ns` that the correction and the
+    /// odometry predict, as a localization prior; [`OdomLookup::Unavailable`]
+    /// before the correction is set, and once its newest fix is more than
     /// `projection_fresh_s` / `projection_fresh_m` behind.
     pub fn prior(&self, stamp_ns: i64) -> OdomLookup {
         let (Some(map_from_odom), Some((fix_ns, fix_position))) =
-            (self.anchor.map_from_odom(), self.anchor.last_fix())
+            (self.correction.map_from_odom(), self.correction.last_fix())
         else {
             return OdomLookup::Unavailable;
         };
@@ -659,12 +662,12 @@ impl AnchorCore {
         }
     }
 
-    /// The newest odometry pose in the map frame, once anchored.
-    pub fn latest_anchored(&self) -> Option<AnchoredPose> {
+    /// The newest odometry pose in the map frame, once the correction is set.
+    pub fn latest_map_pose(&self) -> Option<MapPose> {
         let (stamp_ns, odom_from_body) = self.latest_odom.as_ref()?;
-        let map_from_odom = self.anchor.map_from_odom()?;
-        let (fix_ns, fix_position) = self.anchor.last_fix()?;
-        Some(AnchoredPose {
+        let map_from_odom = self.correction.map_from_odom()?;
+        let (fix_ns, fix_position) = self.correction.last_fix()?;
+        Some(MapPose {
             stamp_ns: *stamp_ns,
             map_from_body: map_from_odom.compose(odom_from_body),
             map_from_odom,
@@ -685,9 +688,9 @@ impl AnchorCore {
                 }
                 OdomLookup::Pose(odom_from_body) => {
                     let (_, map_from_body) = self.pending.pop_front().expect("front exists");
-                    let outcome = self
-                        .anchor
-                        .add_fix(stamp_ns, &map_from_body, &odom_from_body);
+                    let outcome =
+                        self.correction
+                            .add_fix(stamp_ns, &map_from_body, &odom_from_body);
                     events.push(FixEvent::Applied { stamp_ns, outcome });
                 }
             }
@@ -696,8 +699,8 @@ impl AnchorCore {
     }
 }
 
-/// `/tf` with `map_frame -> odom_frame` from an anchored pose.
-pub fn map_to_odom_tf(pose: &AnchoredPose, map_frame: &str, odom_frame: &str) -> TfMessage {
+/// `/tf` with `map_frame -> odom_frame` from a map pose.
+pub fn map_to_odom_tf(pose: &MapPose, map_frame: &str, odom_frame: &str) -> TfMessage {
     let ros = ros_pose(&pose.map_from_odom);
     TfMessage {
         transforms: vec![TransformStamped {
@@ -718,7 +721,7 @@ pub fn map_to_odom_tf(pose: &AnchoredPose, map_frame: &str, odom_frame: &str) ->
 /// The body pose in the map frame, with a position covariance that grows
 /// with the VIO travel since the last fix.
 pub fn map_pose_msg(
-    pose: &AnchoredPose,
+    pose: &MapPose,
     map_frame: &str,
     options: &MapLocalizeOptions,
 ) -> PoseWithCovarianceStamped {
@@ -742,7 +745,7 @@ pub fn fix_outcome_name(outcome: FixOutcome) -> &'static str {
         FixOutcome::Initialized => "initialized",
         FixOutcome::Accepted => "accepted",
         FixOutcome::Rejected => "rejected",
-        FixOutcome::Reanchored => "reanchored",
+        FixOutcome::Reset => "reset",
     }
 }
 
@@ -750,7 +753,7 @@ pub fn fix_outcome_name(outcome: FixOutcome) -> &'static str {
 pub fn map_diagnostics_msg(
     fix: &Fix,
     stamp: Time,
-    anchored: Option<&AnchoredPose>,
+    map_pose: Option<&MapPose>,
     pending_fixes: usize,
     node_name: &str,
 ) -> DiagnosticArray {
@@ -758,18 +761,18 @@ pub fn map_diagnostics_msg(
         key: key.into(),
         value,
     };
-    let (level, message) = match (anchored, &fix.map_from_body) {
+    let (level, message) = match (map_pose, &fix.map_from_body) {
         (Some(_), Some(_)) => (
             DiagnosticStatus::OK,
             format!("localized with {} inliers", fix.inliers),
         ),
         (Some(_), None) => (
             DiagnosticStatus::OK,
-            "anchored; this image did not localize".to_owned(),
+            "map pose from the odometry; this image did not localize".to_owned(),
         ),
         (None, _) => (
             DiagnosticStatus::WARN,
-            "not anchored yet: waiting for two agreeing fixes".to_owned(),
+            "no map pose yet: waiting for two agreeing fixes".to_owned(),
         ),
     };
     DiagnosticArray {
@@ -790,14 +793,14 @@ pub fn map_diagnostics_msg(
                 ),
                 value("processing_ms", format!("{:.2}", fix.elapsed_ms)),
                 value("failure", fix.failure.clone().unwrap_or_default()),
-                value("anchored", anchored.is_some().to_string()),
+                value("map_pose", map_pose.is_some().to_string()),
                 value(
                     "seconds_since_fix",
-                    anchored.map_or_else(String::new, |p| format!("{:.3}", p.seconds_since_fix)),
+                    map_pose.map_or_else(String::new, |p| format!("{:.3}", p.seconds_since_fix)),
                 ),
                 value(
                     "metres_since_fix",
-                    anchored.map_or_else(String::new, |p| format!("{:.3}", p.metres_since_fix)),
+                    map_pose.map_or_else(String::new, |p| format!("{:.3}", p.metres_since_fix)),
                 ),
                 value("pending_fixes", pending_fixes.to_string()),
             ],
@@ -853,15 +856,15 @@ mod tests {
     }
 
     #[test]
-    fn fixes_wait_for_their_odometry_and_anchor_the_trajectory() {
+    fn fixes_wait_for_their_odometry_and_correct_the_trajectory() {
         let options = MapLocalizeOptions::default();
-        let mut core = AnchorCore::new(&options);
+        let mut core = OdomCorrector::new(&options);
         let stamps = (0..6).map(|i| i64::from(i) * 50 * MS).collect::<Vec<_>>();
         let odom = |i: usize| pose(i as f64 * 0.1, i as f64 * 0.05);
 
         // Odometry for frame 0 first, then a fix for frame 0: applied at once.
-        let (events, anchored) = core.add_odom(stamps[0], odom(0));
-        assert!(events.is_empty() && anchored.is_none());
+        let (events, map_pose) = core.add_odom(stamps[0], odom(0));
+        assert!(events.is_empty() && map_pose.is_none());
         let events = core.add_fix(stamps[0], offset().compose(&odom(0)));
         assert_eq!(
             events,
@@ -876,7 +879,7 @@ mod tests {
             .add_fix(stamps[1], offset().compose(&odom(1)))
             .is_empty());
         assert_eq!(core.pending_fixes(), 1);
-        let (events, anchored) = core.add_odom(stamps[1], odom(1));
+        let (events, map_pose) = core.add_odom(stamps[1], odom(1));
         assert_eq!(
             events,
             vec![FixEvent::Applied {
@@ -884,33 +887,33 @@ mod tests {
                 outcome: FixOutcome::Initialized
             }]
         );
-        let anchored = anchored.expect("anchored after two agreeing fixes");
-        assert!((anchored.map_from_odom.translation - offset().translation).norm() < 1e-9);
-        assert_eq!(anchored.seconds_since_fix, 0.0);
+        let map_pose = map_pose.expect("a map pose after two agreeing fixes");
+        assert!((map_pose.map_from_odom.translation - offset().translation).norm() < 1e-9);
+        assert_eq!(map_pose.seconds_since_fix, 0.0);
 
         // Later odometry without fixes is reported in the map frame.
         for (i, stamp) in stamps.iter().enumerate().skip(2) {
-            let (_, anchored) = core.add_odom(*stamp, odom(i));
-            let anchored = anchored.expect("still anchored");
+            let (_, map_pose) = core.add_odom(*stamp, odom(i));
+            let map_pose = map_pose.expect("still a map pose");
             let expected = offset().compose(&odom(i));
-            assert!((anchored.map_from_body.translation - expected.translation).norm() < 1e-9);
-            assert!((anchored.seconds_since_fix - (i - 1) as f64 * 0.05).abs() < 1e-9);
-            assert!(anchored.metres_since_fix > 0.0);
+            assert!((map_pose.map_from_body.translation - expected.translation).norm() < 1e-9);
+            assert!((map_pose.seconds_since_fix - (i - 1) as f64 * 0.05).abs() < 1e-9);
+            assert!(map_pose.metres_since_fix > 0.0);
         }
 
         // The prediction is a prior while the newest fix is recent and near.
-        let prior = |core: &AnchorCore, stamp: i64| match core.prior(stamp) {
+        let prior = |core: &OdomCorrector, stamp: i64| match core.prior(stamp) {
             OdomLookup::Pose(pose) => Some(pose),
             _ => None,
         };
         let expected = offset().compose(&odom(5));
         let near = prior(&core, stamps[5]).expect("fresh prior");
         assert!((near.translation - expected.translation).norm() < 1e-9);
-        let mut late = AnchorCore::new(&MapLocalizeOptions {
+        let mut late = OdomCorrector::new(&MapLocalizeOptions {
             projection_fresh_s: 0.1,
             ..MapLocalizeOptions::default()
         });
-        let mut far = AnchorCore::new(&MapLocalizeOptions {
+        let mut far = OdomCorrector::new(&MapLocalizeOptions {
             projection_fresh_m: 0.3,
             ..MapLocalizeOptions::default()
         });
@@ -920,7 +923,7 @@ mod tests {
             }
             core.add_fix(stamps[0], offset().compose(&odom(0)));
             core.add_fix(stamps[1], offset().compose(&odom(1)));
-            assert!(core.is_anchored());
+            assert!(core.is_set());
             assert!(prior(core, stamps[2]).is_some());
         }
         // 0.15 s after the newest fix; 0.22 m and 0.45 m of travel from it.
@@ -929,7 +932,7 @@ mod tests {
         assert!(prior(&far, stamps[5]).is_none());
 
         // A fix older than the odometry history is dropped, not applied.
-        let mut stale = AnchorCore::new(&MapLocalizeOptions {
+        let mut stale = OdomCorrector::new(&MapLocalizeOptions {
             odom_history_s: 0.1,
             ..MapLocalizeOptions::default()
         });
@@ -947,7 +950,7 @@ mod tests {
     /// A saved map in the `--save-map` layout: one fisheye camera, a grid of
     /// landmarks seen by one keyframe, each with its own descriptor.
     fn write_saved_map(dir: &Path, imu_from_camera: &SE3) -> (Camera, Vec<nalgebra::Point3<f64>>) {
-        use visloc_core::geometry::Pose as MapPose;
+        use visloc_core::geometry::Pose as CameraPose;
         use visloc_core::types::{CameraModel, Frame, Keyframe, Landmark, Observation};
         let camera = Camera {
             id: 1,
@@ -968,7 +971,7 @@ mod tests {
         let mut map = VisualMap::new();
         map.cameras.insert(1, camera.clone());
         let mut frame = Frame::new(1, 1);
-        frame.pose = Some(MapPose {
+        frame.pose = Some(CameraPose {
             world_to_camera: SE3::identity(),
         });
         let mut keyframe = Keyframe {
@@ -1116,7 +1119,7 @@ mod tests {
     #[test]
     fn published_covariance_grows_with_travel_since_the_fix() {
         let options = MapLocalizeOptions::default();
-        let mut pose = AnchoredPose {
+        let mut pose = MapPose {
             stamp_ns: 5 * MS,
             map_from_odom: offset(),
             map_from_body: offset(),

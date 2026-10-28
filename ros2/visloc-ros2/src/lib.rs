@@ -8,8 +8,8 @@
 //!   frame queue for the VIO node;
 //! * [`vio`] -- Basalt VIO estimator wrapper and output message builders;
 //! * [`localize`] -- COLMAP-map localization core and output builders;
-//! * [`map_localize`] -- localization against a saved Basalt map, anchored
-//!   to VIO odometry (`map -> odom`);
+//! * [`map_localize`] -- localization against a saved Basalt map, correcting
+//!   VIO odometry into it (`map -> odom`);
 //! * [`params`] -- ROS-style command-line parameters and remapping;
 //! * [`queue`] -- bounded drop-oldest hand-off queue;
 //! * [`dds`] -- the `ros2-client` shell (node, QoS, pub/sub threads).
