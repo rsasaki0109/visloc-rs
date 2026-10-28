@@ -27,6 +27,7 @@ pub mod camera;
 pub mod config;
 pub mod euroc;
 pub mod fast;
+mod fma;
 pub mod imu;
 pub mod initialization;
 pub mod mapper;

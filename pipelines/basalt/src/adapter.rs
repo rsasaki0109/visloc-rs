@@ -131,6 +131,47 @@ impl BasaltVioEstimatorAdapter {
         self.process_impl(frame, false, false)
     }
 
+    /// Runs only the estimator, on tracks a different frontend produced for
+    /// the frame (the browser build tracks on the GPU), with the lean
+    /// outputs of [`Self::process_without_marg_data_no_trace`]. This
+    /// adapter's own frontend is not used, so its tracks go stale: keep to
+    /// one of the two frontends for an adapter's lifetime.
+    pub fn process_tracks_no_trace(
+        &mut self,
+        mut tracks: TrackFrameOutput,
+        imu: &[ImuSample],
+        initialization_imu: Option<ImuSample>,
+    ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
+        let started = self.timing.start();
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(imu, &mut tracks.observations);
+        }
+        let estimator_started = self.timing.start();
+        let estimator = self
+            .estimator
+            .process_adapter_frame(
+                tracks.frame.frame_id,
+                tracks.frame.timestamp_ns,
+                &tracks.observations,
+                imu,
+                initialization_imu,
+                None,
+                false,
+                false,
+            )
+            .map_err(BasaltAdapterError::Estimator);
+        self.timing
+            .finish(TimingBucket::AdapterEstimator, estimator_started);
+        let estimator = estimator?;
+        self.last_gyro_bias = estimator.state.gyro_bias_rad_s;
+        self.timing.finish(TimingBucket::AdapterTotal, started);
+        Ok(BasaltAdapterOutput {
+            tracks,
+            estimator,
+            imu_count: imu.len(),
+        })
+    }
+
     fn process_impl(
         &mut self,
         frame: EurocSensorFrame,
@@ -519,14 +560,19 @@ fn vio_estimator_from_parts(
                 // public f64 noise model; otherwise an f64 product cast
                 // down by preintegration is one ulp below Eigen's
                 // discrete covariance (e.g. 3d51b717 vs 3d51b718).
-                gyro_density: sample_density_f32(
-                    calibration.gyro_noise_std,
-                    calibration.imu_update_rate_hz,
-                ),
-                accel_density: sample_density_f32(
-                    calibration.accel_noise_std,
-                    calibration.imu_update_rate_hz,
-                ),
+                //
+                // With `imu_noise_per_step` the densities stay continuous;
+                // the preintegration discretizes them by each step's length.
+                gyro_density: if estimator_config.imu_noise_per_step {
+                    rms_density(calibration.gyro_noise_std)
+                } else {
+                    sample_density_f32(calibration.gyro_noise_std, calibration.imu_update_rate_hz)
+                },
+                accel_density: if estimator_config.imu_noise_per_step {
+                    rms_density(calibration.accel_noise_std)
+                } else {
+                    sample_density_f32(calibration.accel_noise_std, calibration.imu_update_rate_hz)
+                },
             },
             BiasRandomWalkNoise {
                 // Basalt stores the *inverse* calibration standard
