@@ -11,6 +11,12 @@
 //! `yolox_nano` and `yolox_tiny`. The tracks go to `tracks.txt` in the
 //! MOTChallenge text format (`frame,id,x,y,w,h,score,class,-1,-1`, frames from
 //! 1). With `--draw`, each frame is also written with its track boxes and IDs.
+//!
+//! `--boxes-csv FILE` also writes the tracks of movable classes (people,
+//! vehicles, animals) in the format `basalt_euroc_vio_demo --object-boxes`
+//! reads: `timestamp_ns,object_id,class_id,score,x_min,y_min,x_max,y_max`.
+//! The timestamp is the frame's file name, as in the EuRoC layout
+//! (`mav0/cam0/data/<timestamp_ns>.png`).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,7 +26,7 @@ use std::time::Instant;
 
 use visloc_rs::objects::{
     ByteTracker, ObjectDetector, RgbImage, TrackedObject, YoloxConfig, YoloxOnnxDetector,
-    COCO_CLASSES,
+    COCO_CLASSES, MOVABLE_COCO_CLASSES,
 };
 
 struct Args {
@@ -30,6 +36,7 @@ struct Args {
     input_size: usize,
     max_frames: Option<usize>,
     draw: bool,
+    boxes_csv: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut mot = String::new();
+    let mut boxes_csv =
+        String::from("timestamp_ns,object_id,class_id,score,x_min,y_min,x_max,y_max\n");
     let mut detect_seconds = 0.0;
     let mut track_seconds = 0.0;
     let mut track_classes = BTreeMap::new();
@@ -93,6 +102,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             track_classes.insert(t.id.0, t.class_id);
         }
+        if args.boxes_csv.is_some() {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let timestamp_ns: i64 = stem.parse().map_err(|_| {
+                format!(
+                    "--boxes-csv needs frames named <timestamp_ns>.png, got {}",
+                    path.display()
+                )
+            })?;
+            for t in tracks
+                .iter()
+                .filter(|t| MOVABLE_COCO_CLASSES.contains(&t.class_id))
+            {
+                let b = t.bbox;
+                writeln!(
+                    boxes_csv,
+                    "{timestamp_ns},{},{},{:.3},{:.2},{:.2},{:.2},{:.2}",
+                    t.id.0, t.class_id, t.score, b.x_min, b.y_min, b.x_max, b.y_max
+                )?;
+            }
+        }
         if args.draw {
             let mut canvas = image::RgbImage::from_raw(width, height, image.data().to_vec())
                 .ok_or("image buffer")?;
@@ -102,6 +134,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     fs::write(args.out_dir.join("tracks.txt"), mot)?;
+    if let Some(path) = &args.boxes_csv {
+        fs::write(path, boxes_csv)?;
+        println!("object boxes: {}", path.display());
+    }
 
     let n = frames.len() as f64;
     println!(
@@ -123,13 +159,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_args() -> Result<Args, String> {
     let usage = "usage: yolox_track_demo --model <onnx> --images <dir> [--out-dir <dir>] \
-                 [--input-size 640] [--max-frames N] [--draw]";
+                 [--input-size 640] [--max-frames N] [--draw] [--boxes-csv FILE]";
     let mut model = None;
     let mut images = None;
     let mut out_dir = PathBuf::from("target/yolox_track");
     let mut input_size = 640;
     let mut max_frames = None;
     let mut draw = false;
+    let mut boxes_csv = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -143,6 +180,7 @@ fn parse_args() -> Result<Args, String> {
             "--input-size" => input_size = value()?.parse().map_err(|_| usage.to_string())?,
             "--max-frames" => max_frames = Some(value()?.parse().map_err(|_| usage.to_string())?),
             "--draw" => draw = true,
+            "--boxes-csv" => boxes_csv = Some(PathBuf::from(value()?)),
             _ => return Err(format!("unknown argument {arg}\n{usage}")),
         }
     }
@@ -153,6 +191,7 @@ fn parse_args() -> Result<Args, String> {
         input_size,
         max_frames,
         draw,
+        boxes_csv,
     })
 }
 

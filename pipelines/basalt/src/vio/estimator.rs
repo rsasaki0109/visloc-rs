@@ -23,6 +23,9 @@ use super::window::{
     NAV_STATE_DOF, POSE_DOF,
 };
 use crate::camera::DoubleSphereCamera;
+use crate::dynamic_objects::{
+    DynamicObjectFilter, DynamicObjectParams, DynamicObjectStats, ObjectBox, ScoredObservation,
+};
 use crate::fma::FusedMulAdd;
 use crate::imu::{
     integrate_between_with, BiasRandomWalkNoise, ImuDStateUpdateTrace, ImuNoiseModel,
@@ -570,6 +573,9 @@ pub struct BasaltVioEstimator {
     native_host_keys: BTreeMap<(u64, u16), u64>,
     track_history: BTreeMap<TrackId, Vec<TrackHistory>>,
     landmark_world: BTreeMap<TrackId, Point3<f64>>,
+    /// Moving-object filter; `None` until boxes are supplied
+    /// ([`Self::set_object_boxes`]).
+    dynamic_objects: Option<DynamicObjectFilter>,
     imu_links: Vec<(u64, u64, ImuPreintegratedDelta)>,
     prior: Option<WindowPrior>,
     anchor_point: Option<DVector<f64>>,
@@ -696,6 +702,7 @@ impl BasaltVioEstimator {
             native_host_keys: BTreeMap::new(),
             track_history: BTreeMap::new(),
             landmark_world: BTreeMap::new(),
+            dynamic_objects: None,
             imu_links: Vec::new(),
             prior: None,
             anchor_point: None,
@@ -847,6 +854,22 @@ impl BasaltVioEstimator {
         counts
     }
 
+    /// Supply camera-0 boxes of possibly moving objects, keyed by frame
+    /// timestamp, and turn on the moving-object filter
+    /// ([`crate::dynamic_objects`]). Frames without boxes are unaffected.
+    pub fn set_object_boxes(
+        &mut self,
+        boxes: BTreeMap<i64, Vec<ObjectBox>>,
+        params: DynamicObjectParams,
+    ) {
+        self.dynamic_objects = Some(DynamicObjectFilter::new(boxes, params));
+    }
+
+    /// Counts of the moving-object filter, if boxes were supplied.
+    pub fn dynamic_object_stats(&self) -> Option<DynamicObjectStats> {
+        self.dynamic_objects.as_ref().map(|filter| filter.stats)
+    }
+
     /// Diagnostic: world position of every landmark that is not removed and
     /// whose host keyframe is still in the window (the host's IMU pose
     /// composed with its camera's `T_imu_cam`, applied to the landmark's
@@ -893,6 +916,85 @@ impl BasaltVioEstimator {
 
     fn camera_pose(&self, imu_pose: &SE3, camera_id: u16) -> Option<SE3> {
         Some(imu_pose.compose(self.camera_to_imu(camera_id)?))
+    }
+
+    /// The observations without the tracks of moving objects, or `None` when
+    /// the filter is off, the frame has no boxes, or nothing is moving.
+    fn drop_moving_object_observations(
+        &mut self,
+        timestamp_ns: i64,
+        predicted_nav: &BasaltNavState,
+        observations: &[TrackObservation],
+    ) -> Option<Vec<TrackObservation>> {
+        let boxes = self
+            .dynamic_objects
+            .as_ref()?
+            .boxes_at(timestamp_ns)?
+            .to_vec();
+        let scored = observations
+            .iter()
+            .filter(|observation| observation.camera_id == 0)
+            .map(|observation| ScoredObservation {
+                track_id: observation.track_id,
+                pixel: observation.pixel,
+                residual_px: self.moving_object_residual_px(observation, predicted_nav),
+            })
+            .collect::<Vec<_>>();
+        let filter = self.dynamic_objects.as_mut()?;
+        let moving = filter.moving_tracks(timestamp_ns, &boxes, &scored);
+        if moving.is_empty() {
+            return None;
+        }
+        let kept = observations
+            .iter()
+            .filter(|observation| !moving.contains(&observation.track_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        filter.stats.dropped_observations += (observations.len() - kept.len()) as u64;
+        Some(kept)
+    }
+
+    /// How far a camera-0 observation is from where the predicted pose puts
+    /// it, in pixels: the reprojection error of the track's landmark, or, for
+    /// a track without one, the angle between its bearing and the epipolar
+    /// plane of its previous observation (the angle between the two bearings
+    /// when the camera has not moved) times the focal length.
+    fn moving_object_residual_px(
+        &self,
+        observation: &TrackObservation,
+        predicted_nav: &BasaltNavState,
+    ) -> Option<f64> {
+        let camera = self.camera_model(0)?;
+        let camera_to_world = self.camera_pose(&predicted_nav.imu_to_world, 0)?;
+        let has_landmark = self
+            .landmarks
+            .landmarks
+            .get(&observation.track_id)
+            .is_some_and(|record| record.status != LandmarkStatus::Removed);
+        if has_landmark {
+            if let Some(point) = self.landmark_world.get(&observation.track_id) {
+                let projected =
+                    camera.project(&camera_to_world.inverse().transform_point(point))?;
+                return Some((projected - observation.pixel).norm());
+            }
+        }
+        // The oldest observation still in the window: the longest baseline,
+        // so an object that moves along with the camera shows up sooner.
+        let previous = self
+            .track_history
+            .get(&observation.track_id)?
+            .iter()
+            .find(|entry| entry.camera_id == 0)?;
+        let before = previous.pose.rotation * previous.raw_bearing.try_normalize(1e-12)?;
+        let now = camera_to_world.rotation * camera.unproject(&observation.pixel)?;
+        let baseline = camera_to_world.translation - previous.pose.translation;
+        let angle = if baseline.norm() < 1e-3 {
+            before.angle(&now)
+        } else {
+            let normal = baseline.cross(&before).try_normalize(1e-12)?;
+            normal.dot(&now).clamp(-1.0, 1.0).asin().abs()
+        };
+        Some(angle * camera.fx)
     }
 
     fn bearing_from_pixel(&self, camera_id: u16, pixel: &Point2<f64>) -> Option<Vector3<f64>> {
@@ -1189,6 +1291,11 @@ impl BasaltVioEstimator {
                 self.config.scalar_mode,
             ));
         }
+        // Moving objects: only with boxes for this frame; otherwise the
+        // observations are the caller's, untouched.
+        let without_moving_objects =
+            self.drop_moving_object_observations(timestamp_ns, &predicted_nav, observations);
+        let observations = without_moving_objects.as_deref().unwrap_or(observations);
         // Upstream computes connectivity before triangulating the unconnected
         // tracks of a newly selected keyframe.  Preserve that ordering here:
         // otherwise a track created by this frame would count as already

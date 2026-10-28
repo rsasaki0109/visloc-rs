@@ -33,8 +33,16 @@ perspective model's `images.bin` (COLMAP 3.12+ binary,
    scale is the mean over runs. Added to the paper: runs also break where
    the model's speed exceeds three times its median (a misregistered frame).
    The joint variant fits one s, g and b_a to all runs.
+   Also reported, not in the paper: the same per-run fit with an extra
+   camera-centre error e = R_wc (c x w_c) proportional to the camera's
+   angular velocity w_c (three unknowns c per run; rolling shutter), and both
+   fits on every third frame. Without the term the scale grows with the
+   frame spacing (docs/insta360_imu_scale.md).
 5. Reference: the ARKit scale of the model, a Sim(3) from the model's phone
-   images to the ARKit poses (and per quarter of the phone path).
+   images to the ARKit poses (and per quarter of the phone path). When the
+   scene has the phone's GPS log taken during the walk
+   (`backgroundlocationData.txt`), also a GPS scale: a time offset and a 2-D
+   similarity from the model's horizontal camera centres to GPS east/north.
 """
 
 from __future__ import annotations
@@ -56,6 +64,9 @@ STANDARD_G = 9.80665
 MAX_GAP_S = 1.2
 MIN_INTERVALS = 8
 G_RANGE = (9.3, 10.3)
+VARIANTS = ("rs", "step3", "rs_step3")
+WGS84_A, WGS84_E2 = 6378137.0, 6.69437999014e-3
+GPS_MAX_RESIDUAL_M = 5.0
 
 
 def rotation(q: np.ndarray) -> np.ndarray:
@@ -293,21 +304,27 @@ def preintegrate(t, acc, g, r_wb0, t0, t1):
     )
 
 
-def solve(runs, pre, centres, reject=True):
-    """Least squares for one s, g, b_a over the given runs; returns (s, |g|)."""
+def solve(runs, pre, centres, reject=True, e_mat=None):
+    """Least squares for one s, g, b_a over the given runs; returns (s, |g|, c).
+
+    With e_mat (per frame, 3x3), the camera centres carry an error e_mat[k] c
+    (c in metres; the unknown is s c, since s scales the centres)."""
+    ne = 0 if e_mat is None else 3
     nv = sum(len(r) for r in runs)
-    rows, rhs, vo = [], [], 7
+    rows, rhs, vo = [], [], 7 + ne
     for r in runs:
         for j, i in enumerate(r[:-1]):
             dp, dv, jm, km, dt = pre[i]
-            a = np.zeros((3, 7 + 3 * nv))
+            a = np.zeros((3, 7 + ne + 3 * nv))
             a[:, 0] = centres[i + 1] - centres[i]
             a[:, 1:4] = -0.5 * dt * dt * np.eye(3)
             a[:, 4:7] = jm
+            if ne:
+                a[:, 7:10] = -(e_mat[i + 1] - e_mat[i])
             a[:, vo + 3 * j : vo + 3 * j + 3] = -dt * np.eye(3)
             rows.append(a)
             rhs.append(dp)
-            a = np.zeros((3, 7 + 3 * nv))
+            a = np.zeros((3, 7 + ne + 3 * nv))
             a[:, 1:4] = -dt * np.eye(3)
             a[:, 4:7] = km
             a[:, vo + 3 * j : vo + 3 * j + 3] = -np.eye(3)
@@ -321,20 +338,38 @@ def solve(runs, pre, centres, reject=True):
         e = np.linalg.norm((a @ x - y).reshape(-1, 6), axis=1)
         keep = np.repeat(e <= 5 * np.median(e), 6)
         x = np.linalg.lstsq(a[keep], y[keep], rcond=None)[0]
-    return float(x[0]), float(np.linalg.norm(x[1:4]))
+    c = x[7:10] / x[0] if ne else None
+    return float(x[0]), float(np.linalg.norm(x[1:4])), c
 
 
-def align(t, acc, g, a, b, frames):
-    """Per-run and joint scale for one lens (R_CB fitted for that lens)."""
+def skew(w: np.ndarray) -> np.ndarray:
+    """[w]x for an array of vectors, shape (n, 3, 3)."""
+    z = np.zeros(len(w))
+    return np.stack(
+        [
+            np.stack([z, -w[:, 2], w[:, 1]], -1),
+            np.stack([w[:, 2], z, -w[:, 0]], -1),
+            np.stack([-w[:, 1], w[:, 0], z], -1),
+        ],
+        1,
+    )
+
+
+def align(t, acc, g, a, b, frames, step=1, rs=False):
+    """Per-run and joint scale for one lens (R_CB fitted for that lens), on
+    every step-th frame; rs adds the angular-velocity term to the centres."""
     idx, r_wc, centres = frames
+    if step > 1:
+        keep = idx % step == 0
+        idx, r_wc, centres = idx[keep], r_wc[keep], centres[keep]
     tk = a * idx + b
-    p = np.flatnonzero(np.diff(idx) <= 3)
+    p = np.flatnonzero(np.diff(idx) <= 3 * step)
     d_rc = Rot.from_matrix(np.einsum("nji,njk->nik", r_wc[p], r_wc[p + 1]))
     r_cb = rotation_fit(g.rel(tk[p], tk[p + 1]).as_rotvec(), d_rc)[0]
     r_wb = r_wc @ r_cb
     speed = np.linalg.norm(np.diff(centres, axis=0), axis=1) / np.diff(tk)
     jump = speed > 3 * np.median(speed)
-    ok = (np.diff(tk) <= MAX_GAP_S) & (tk[:-1] >= t[0]) & (tk[1:] <= t[-1]) & ~jump
+    ok = (np.diff(tk) <= MAX_GAP_S * step) & (tk[:-1] >= t[0]) & (tk[1:] <= t[-1]) & ~jump
     runs, cur = [], [0]
     for i, step_ok in enumerate(ok):
         if step_ok:
@@ -345,13 +380,21 @@ def align(t, acc, g, a, b, frames):
     runs.append(cur)
     runs = [r for r in runs if len(r) - 1 >= MIN_INTERVALS]
     pre = {i: preintegrate(t, acc, g, r_wb[i], tk[i], tk[i + 1]) for r in runs for i in r[:-1]}
+    e_mat = None
+    if rs:
+        h = 0.01
+        w_c = (g.rel(tk - h, tk + h).as_rotvec() / (2 * h)) @ r_cb.T
+        e_mat = r_wc @ skew(w_c).transpose(0, 2, 1)  # R_wc (c x w) = R_wc [w]x^T c
     detail = []
     for r in runs:
-        s, gn = solve([r], pre, centres)
-        detail.append(dict(t0=float(tk[r[0]]), t1=float(tk[r[-1]]), intervals=len(r) - 1, s=s, g=gn))
+        s, gn, c = solve([r], pre, centres, e_mat=e_mat)
+        d = dict(t0=float(tk[r[0]]), t1=float(tk[r[-1]]), intervals=len(r) - 1, s=s, g=gn)
+        if c is not None:
+            d["c"] = c.tolist()
+        detail.append(d)
     kept = [d for d in detail if G_RANGE[0] <= d["g"] <= G_RANGE[1]]
     s_runs = np.array([d["s"] for d in kept])
-    s_joint, g_joint = solve(runs, pre, centres, reject=False) if runs else (np.nan, np.nan)
+    s_joint, g_joint, _ = solve(runs, pre, centres, reject=False, e_mat=e_mat) if runs else (np.nan, np.nan, None)
     return dict(
         speed_jumps=int(jump.sum()),
         runs=len(runs),
@@ -364,6 +407,57 @@ def align(t, acc, g, a, b, frames):
         g_joint=g_joint,
         detail=detail,
     )
+
+
+def _sim2(x: np.ndarray, y: np.ndarray, reflect: bool) -> tuple[float, np.ndarray]:
+    """Scale of the 2-D similarity (rotation, or reflection if reflect) taking
+    x onto y, and the residuals."""
+    if reflect:
+        x = x * np.array([1, -1])
+    xc, yc = x - x.mean(0), y - y.mean(0)
+    u, s, vt = np.linalg.svd(yc.T @ xc / len(x))
+    d = np.diag([1, np.sign(np.linalg.det(u @ vt))])
+    sc = float(np.trace(np.diag(s) @ d) / (xc**2).sum(1).mean())
+    return sc, np.linalg.norm(sc * xc @ (u @ d @ vt).T - yc, axis=1)
+
+
+def gps_scale(path: str, tk: np.ndarray, centres: np.ndarray) -> dict:
+    """Metres per model unit from a GPS log (lines `unix time, lat, lon, accuracy`)
+    taken during the walk. The log's first fix is at IMU time tau; the fit
+    searches tau over +-30 s, and the model's horizontal centres (X, Z; gravity
+    is +Y) map to east/north by a rotation or a reflection. Fixes inside frame
+    gaps over 2 s are skipped, and the similarity is refitted without fixes
+    beyond three times the median residual."""
+    g = np.loadtxt(path, delimiter=",", ndmin=2)
+    tg, lat, lon = g[:, 0] - g[0, 0], g[:, 1], g[:, 2]
+    lat0 = np.radians(lat.mean())
+    w = 1 - WGS84_E2 * np.sin(lat0) ** 2
+    north_radius = WGS84_A * (1 - WGS84_E2) / w**1.5
+    east_radius = WGS84_A / np.sqrt(w) * np.cos(lat0)
+    en = np.c_[np.radians(lon - lon.mean()) * east_radius, np.radians(lat - lat.mean()) * north_radius]
+    xz = centres[:, [0, 2]]
+
+    def fit(tau, reflect):
+        tq = tg + tau
+        ok = (tq >= tk[0]) & (tq <= tk[-1])
+        k = np.clip(np.searchsorted(tk, tq[ok]), 1, len(tk) - 1)
+        gap = tk[k] - tk[k - 1]
+        f = ((tq[ok] - tk[k - 1]) / gap)[:, None]
+        x = xz[k - 1] * (1 - f) + xz[k] * f
+        keep = gap < 2.0
+        x, y = x[keep], en[ok][keep]
+        _, res = _sim2(x, y, reflect)
+        sel = res <= 3 * np.median(res)
+        sc, res = _sim2(x[sel], y[sel], reflect)
+        return sc, float(np.median(res)), int(sel.sum()), len(sel)
+
+    best = min(
+        ((tau, reflect) for reflect in (False, True) for tau in np.arange(-30, 30, 0.5)),
+        key=lambda p: fit(*p)[1],
+    )
+    tau = min(np.arange(best[0] - 1, best[0] + 1, 0.05), key=lambda t: fit(t, best[1])[1])
+    sc, res, used, total = fit(tau, best[1])
+    return dict(s_gps=sc, tau=float(tau), reflect=bool(best[1]), residual_m=res, fixes_used=used, fixes=total)
 
 
 def analyse_scene(scene: str, log=print) -> dict:
@@ -394,8 +488,23 @@ def analyse_scene(scene: str, log=print) -> dict:
         rotation_residual_deg=residual,
         drift_ms=drift,
     )
+    gps_log = os.path.join(scene, "backgroundlocationData.txt")
+    if os.path.exists(gps_log):
+        out["gps"] = gps_scale(gps_log, a * lenses[0][0] + b, lenses[0][2])
+        log(
+            f"GPS scale {out['gps']['s_gps']:.4f} (ARKit {100 * (s_ref / out['gps']['s_gps'] - 1):+.2f}%), "
+            f"median residual {out['gps']['residual_m']:.2f} m, {out['gps']['fixes_used']}/{out['gps']['fixes']} fixes"
+        )
     for lens, frames in lenses.items():
         r = align(t, acc, g, a, b, frames)
+        r["variants"] = {}
+        for name, kw in (("rs", dict(rs=True)), ("step3", dict(step=3)), ("rs_step3", dict(step=3, rs=True))):
+            v = align(t, acc, g, a, b, frames, **kw)
+            r["variants"][name] = {k: v[k] for k in ("runs", "runs_kept", "s_per_run", "s_per_run_std", "g_median", "s_joint")}
+            if kw.get("rs") and v["runs_kept"]:
+                r["variants"][name]["c_median"] = np.median(
+                    [d["c"] for d in v["detail"] if G_RANGE[0] <= d["g"] <= G_RANGE[1]], axis=0
+                ).tolist()
         out[f"lens{lens}"] = r
         if r["s_per_run"] is None:
             log(f"lens {lens}: no run passed the gravity check")
@@ -404,6 +513,13 @@ def analyse_scene(scene: str, log=print) -> dict:
             f"lens {lens}: {r['runs_kept']}/{r['runs']} runs ({r['speed_jumps']} speed jumps), "
             f"per-run scale {r['s_per_run']:.4f} ({100 * (r['s_per_run'] / s_ref - 1):+.2f}% vs ARKit), "
             f"|g| {r['g_median']:.3f}; joint {r['s_joint']:.4f} ({100 * (r['s_joint'] / s_ref - 1):+.2f}%)"
+        )
+        log(
+            f"lens {lens} variants (per-run vs ARKit): "
+            + ", ".join(
+                f"{name} {100 * (v['s_per_run'] / s_ref - 1):+.2f}%" if v["s_per_run"] else f"{name} -"
+                for name, v in r["variants"].items()
+            )
         )
     return out
 
@@ -414,14 +530,35 @@ def scene_errors(result: dict) -> dict[str, float] | None:
     if not lenses:
         return None
     s_ref = result["s_ref"]
-    return {
+    out = {
         key: float(np.mean([100 * (r[key] / s_ref - 1) for r in lenses]))
         for key in ("s_per_run", "s_per_run_median", "s_joint")
     }
+    for name in VARIANTS:
+        v = [r["variants"][name]["s_per_run"] for r in lenses if r.get("variants", {}).get(name, {}).get("s_per_run")]
+        if len(v) == len(lenses):
+            out[name] = float(np.mean([100 * (x / s_ref - 1) for x in v]))
+    return out
+
+
+def gps_errors(result: dict) -> dict[str, float] | None:
+    """Scale errors (%) of ARKit and of the IMU estimates against the GPS scale,
+    when the GPS fit's median residual is at most GPS_MAX_RESIDUAL_M."""
+    g = result.get("gps")
+    lenses = [result[k] for k in ("lens0", "lens1") if k in result and result[k]["s_per_run"] is not None]
+    if not g or g["residual_m"] > GPS_MAX_RESIDUAL_M or not lenses:
+        return None
+    out = {"arkit": 100 * (result["s_ref"] / g["s_gps"] - 1)}
+    out["s_per_run"] = float(np.mean([100 * (r["s_per_run"] / g["s_gps"] - 1) for r in lenses]))
+    rs = [r["variants"]["rs"]["s_per_run"] for r in lenses if r.get("variants", {}).get("rs", {}).get("s_per_run")]
+    if len(rs) == len(lenses):
+        out["rs"] = float(np.mean([100 * (x / g["s_gps"] - 1) for x in rs]))
+    return out
 
 
 def summary(paths: list[str]) -> None:
     rows = []
+    gps_rows = []
     for path in sorted(paths):
         with open(path) as f:
             r = json.load(f)
@@ -430,20 +567,35 @@ def summary(paths: list[str]) -> None:
             print(f"{r['scene'][:8]}  no usable run")
             continue
         rows.append(e)
+        ge = gps_errors(r)
+        if ge:
+            gps_rows.append(ge)
         q = r["s_ref_quarters"]
+        variants = "".join(f"{name} {e[name]:+6.2f}%  " for name in VARIANTS if name in e)
         print(
             f"{r['scene'][:8]}  phone {r['phone_images']:3d}  ARKit quarters {min(q):.3f}-{max(q):.3f}  "
-            f"per-run {e['s_per_run']:+6.2f}%  joint {e['s_joint']:+6.2f}%  "
+            f"per-run {e['s_per_run']:+6.2f}%  joint {e['s_joint']:+6.2f}%  {variants}"
             f"|g| {r['lens0']['g_median'] or float('nan'):.3f}  gyro fit {r['gyro_counts_per_dps_fit']:.2f}  "
             f"1 g {r['accel_one_g_counts']:.0f}  rot {r['rotation_residual_deg']:.3f} deg  "
             f"drift {max(map(abs, r['drift_ms'])):.1f} ms"
         )
-    for key, label in (("s_per_run", "per-run"), ("s_per_run_median", "median of runs"), ("s_joint", "joint")):
-        v = np.array([e[key] for e in rows])
+    labels = [("s_per_run", "per-run"), ("s_per_run_median", "median of runs"), ("s_joint", "joint")]
+    labels += [(name, name) for name in VARIANTS]
+    for key, label in labels:
+        v = np.array([e[key] for e in rows if key in e])
+        if not len(v):
+            continue
         print(
             f"{label:15s} {len(v)} scenes: mean {v.mean():+.2f}%  MAE {np.abs(v).mean():.2f}%  "
             f"SD {v.std(ddof=1) if len(v) > 1 else 0:.2f}%  ratio mean {1 + v.mean() / 100:.4f}"
         )
+    for key, label in (("arkit", "ARKit"), ("s_per_run", "per-run"), ("rs", "rs")):
+        v = np.array([e[key] for e in gps_rows if key in e])
+        if len(v):
+            print(
+                f"{label + ' vs GPS':15s} {len(v)} scenes (GPS residual <= {GPS_MAX_RESIDUAL_M:g} m): "
+                f"mean {v.mean():+.2f}%  MAE {np.abs(v).mean():.2f}%  SD {v.std(ddof=1) if len(v) > 1 else 0:.2f}%"
+            )
 
 
 def main() -> None:
