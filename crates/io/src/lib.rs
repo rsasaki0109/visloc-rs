@@ -11,6 +11,7 @@ pub mod descriptors;
 pub mod euroc;
 pub mod external_deep;
 pub mod images;
+pub mod imu_csv;
 #[cfg(feature = "image-io")]
 pub mod kitti;
 pub mod kitti_imu;
