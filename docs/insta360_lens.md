@@ -69,6 +69,28 @@ spans the 200° image circle edge to edge:
    and are clearly worse at 1.40 or 1.36. The lenses are 3.2 cm apart, so
    nearby ground points shift this estimate upwards.
 
+An SfM control does not separate the two scales by reprojection error.
+`gsplat_photos --insv` ran on 200 frames of walk 0313afa5 (see
+[photos_to_splat.md](photos_to_splat.md#metric-scale-from-the-cameras-imu)).
+The control ran on the same frames, each lens image magnified by
+1.4 / 1.3784 first, which emulates s = 1.4.
+
+| | s = 1.3784 | s = 1.4 (control) |
+| --- | ---: | ---: |
+| Mean reprojection error | 0.584 px | 0.582 px |
+| Back lens behind the front one (refined) | 3.22 cm | 14.4 cm |
+| Back lens past the half turn | 1.17° | 1.23° |
+| m per dataset unit (dataset: 1.0401) | 1.0504 (+1.0%) | 1.0368 (−0.3%) |
+| Median distance to the dataset's track | 15 cm | 9.6 cm |
+
+- **Reprojection error.** Every face's pose on the rig is refined, so the
+  faces turn and absorb most of the scale error.
+- **The back lens.** It does not absorb the error: it settles where the
+  factory calibration puts it (3.23 cm) only at s = 1.3784.
+- **The dataset's track.** Over these 133 s both runs drift from the
+  dataset's track by more than the two differ, so it does not decide
+  between them.
+
 ## The lenses on the camera
 
 The three angles per lens describe how the lens sits on the camera, but
