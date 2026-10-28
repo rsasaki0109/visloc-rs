@@ -1804,6 +1804,23 @@ R sequences' device too. Nothing else measured sets the R sequences apart:
 Only their images are a little darker: a mean grey level of 68–69, against
 75–82.
 
+What the pass with ALIKED changes is mostly the scale: on all six sequences it
+shortens the trajectory, by 0.25–0.82 % (the scale of one similarity to the
+pseudo-GT):
+
+| Sequence | SIFT | SIFT online, ALIKED pass |
+|---|---:|---:|
+| R_11_5cp | 0.46 % too long | 0.31 % too short |
+| R_12_10cp | 1.09 % too long | 0.37 % too long |
+| sequence_1_19 | 0.05 % too long | 0.20 % too short |
+| sequence_1_20 | 0.14 % too long | 0.14 % too short |
+| sequence_2_11 | 0.02 % too long | 0.80 % too short |
+| sequence_3_18 | 0.42 % too long | 0.34 % too short |
+
+It helps where SIFT's chain comes out too long, as on the two R sequences,
+and makes the right scale of sequence_2_11 wrong. sequence_3_18 still loses,
+although its scale error gets a little smaller.
+
 ### Revisits for place recognition
 
 `loops` looks for revisits near the trajectory that guides it (the VIO, and
