@@ -178,16 +178,18 @@ visloc_map_localize_node --map runs/mh01_map --remap image=/cam0/image_raw
 ```
 
 Every `localize_every`-th image goes through the SLAM mapper's own ORB
-frontend, is matched to the map's landmarks by Hamming distance and solved
-with P3P RANSAC; a pose with at least `min_inliers` inliers is a *fix*.
-Until the odometry has a map pose, every keypoint is compared with every
-landmark. After that, the correction and the odometry at the image's stamp
-predict the pose (the node waits up to `prior_wait_ms` for that odometry). Each landmark
-is projected with the predicted pose and compared only with the keypoints
-within `projection_radius` pixels. If that does not localize, the node
-falls back to the map-wide search. On EuRoC this cuts matching and PnP from
-about 50 ms to 4 ms per image, and doubles the inliers (169 vs 81 on
-MH_02 against the MH_01 map). Both searches pack the map's descriptors once
+frontend (every `initial_localize_every`-th, by default every image, until
+the odometry has a map pose, which needs two agreeing fixes), is matched to
+the map's landmarks by Hamming distance and solved with P3P RANSAC; a pose
+with at least `min_inliers` inliers is a *fix*. Until the odometry has a
+map pose, every keypoint is compared with every landmark. After that, the
+correction and the odometry at the image's stamp predict the pose (the node
+waits up to `prior_wait_ms` for that odometry). Each landmark is projected
+with the predicted pose and compared only with the keypoints within
+`projection_radius` pixels. If that does not localize, the node falls back
+to the map-wide search. On EuRoC this cuts matching and PnP from about 50 ms
+to 4 ms per image, and doubles the inliers (169 vs 81 on MH_02 against the
+MH_01 map). Both searches pack the map's descriptors once
 (`visloc_localization::BinaryLandmarkIndex`).
 Each fix is paired with the odometry pose of the same stamp (the VIO node
 stamps its odometry with the left image's stamp; a fix that arrives before
@@ -229,6 +231,7 @@ measurements behind the defaults.
 | `publish_tf` | `true` | |
 | `publish_map_cloud` | `true` | publish `map_cloud` |
 | `localize_every` | `5` | localize every N-th received image |
+| `initial_localize_every` | `1` | ... and every N-th until the first map pose; while localizing is slower than the camera, the node takes the newest image whenever it is free |
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
@@ -423,8 +426,12 @@ its room's map, next to the offline
 | V2_02 → V2_01 | 27 | 98.6% (99.8%) | 3.5 / 14.1 cm (4.2 / 12.6) | 0.3 s |
 | V2_03 → V2_01 | 0 | none (same offline) | — | — |
 
-No run reset the VIO, and none dropped more than 1.2% of its frames. The
-node's results follow the offline ones, also where those are poor:
+No run reset the VIO, and none dropped more than 1.2% of its frames. These
+runs tried every 5th image from the start; the node now tries every image
+until the first map pose (`initial_localize_every`), which offline gives
+V2_03 map poses for 77.8% of its frames
+([details](../../docs/basalt_map_localization.md#every-image-until-the-first-map-pose)).
+The node's results follow the offline ones, also where those are poor:
 
 - MH_04 and MH_05 fly through parts of the hall the MH_01 map never saw.
   The first map pose comes only after 26-27 s, and the VIO carries the pose

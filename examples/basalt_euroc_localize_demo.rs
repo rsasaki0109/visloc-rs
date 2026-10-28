@@ -31,7 +31,9 @@
 //!
 //! With `--vio --calibration FILE --config FILE`, the stereo-inertial Basalt
 //! VIO also runs on the sequence, and every `--localize-every`-th image is
-//! localized. Accepted fixes correct the VIO into the map frame
+//! localized; until the correction is set, every `--initial-localize-every`-th
+//! (1: every image), as two agreeing fixes are needed before any frame gets
+//! a map pose. Accepted fixes correct the VIO into the map frame
 //! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
 //! translation offset, gated against outliers), so every frame gets a
 //! map-frame pose once the correction is set, including the frames the map
@@ -140,6 +142,8 @@ struct Args {
     imu_from_body: Option<SE3>,
     /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
+    /// ... and every N-th until the odometry has a map pose.
+    initial_localize_every: usize,
     /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
@@ -161,6 +165,7 @@ impl Args {
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
+         [--initial-localize-every N] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
          [--dump-inliers FILE]"
             .into()
@@ -198,6 +203,7 @@ impl Args {
             odometry: None,
             imu_from_body: None,
             localize_every: 1,
+            initial_localize_every: 1,
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
@@ -263,6 +269,9 @@ impl Args {
                     ));
                 }
                 "--localize-every" => args.localize_every = number(&option, value()?)?,
+                "--initial-localize-every" => {
+                    args.initial_localize_every = number(&option, value()?)?;
+                }
                 "--projection-radius-px" => {
                     projection_radius_px = Some(number(&option, value()?)?);
                 }
@@ -299,12 +308,19 @@ impl Args {
                         .into(),
                 );
             }
-            if args.localize_every == 0 {
-                return Err("--localize-every must be positive".into());
+            if args.localize_every == 0 || args.initial_localize_every == 0 {
+                return Err(
+                    "--localize-every and --initial-localize-every must be positive".into(),
+                );
             }
-        } else if args.localize_every != 1 || projection_radius_px.is_some() {
+        } else if args.localize_every != 1
+            || args.initial_localize_every != 1
+            || projection_radius_px.is_some()
+        {
             return Err(
-                "--localize-every and --projection-radius-px need --vio or --odometry".into(),
+                "--localize-every, --initial-localize-every and --projection-radius-px need \
+                 --vio or --odometry"
+                    .into(),
             );
         }
         args.projection_radius_px = match projection_radius_px {
@@ -658,6 +674,10 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 /// correction and every output file of `--vio` / `--odometry`.
 struct CorrectedRun {
     correction: OdomCorrection,
+    /// Localize every `localize_every`-th frame once the odometry has a map
+    /// pose, every `initial_every`-th before.
+    localize_every: usize,
+    initial_every: usize,
     /// How long / far after the correction's newest fix its prediction is
     /// used.
     fresh_s: f64,
@@ -682,6 +702,8 @@ impl CorrectedRun {
         let header = "# timestamp tx ty tz qx qy qz qw\n";
         Self {
             correction: OdomCorrection::new(OdomCorrectionConfig::default()),
+            localize_every: args.localize_every,
+            initial_every: args.initial_localize_every,
             fresh_s: args.projection_fresh_s,
             fresh_m: args.projection_fresh_m,
             fixes_tum: header.to_owned(),
@@ -700,6 +722,19 @@ impl CorrectedRun {
             outcomes: std::collections::BTreeMap::new(),
             started: Instant::now(),
         }
+    }
+
+    /// Whether to localize the `index`-th frame: until the correction is set,
+    /// its first fixes are what gives the odometry a map pose at all, so
+    /// every `initial_every`-th frame is tried; after that every
+    /// `localize_every`-th.
+    fn localizes(&self, index: usize) -> bool {
+        let every = if self.correction.is_set() {
+            self.localize_every
+        } else {
+            self.initial_every
+        };
+        index.is_multiple_of(every)
     }
 
     /// One frame: the odometry's IMU pose and, on a frame to localize, its
@@ -807,7 +842,8 @@ impl CorrectedRun {
 }
 
 /// Runs the Basalt VIO on every frame and corrects it into the map frame with
-/// the fixes from every `--localize-every`-th frame.
+/// the fixes from every `--localize-every`-th frame (every
+/// `--initial-localize-every`-th until the odometry has a map pose).
 fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::error::Error>> {
     let calibration = args.calibration.as_ref().expect("checked by Args::parse");
     let config = args.config.as_ref().expect("checked by Args::parse");
@@ -824,7 +860,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
-        let image = if index % args.localize_every == 0 {
+        let image = if run.localizes(index) {
             let image = match args.camera {
                 0 => Some(&frame.cam0),
                 _ => frame.cam1.as_ref(),
@@ -847,7 +883,8 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
 /// Corrects an external odometry (`--odometry`, e.g. a robot's wheel
 /// odometry) into the map frame instead of the VIO: each camera image takes the
 /// odometry pose interpolated at its stamp, and every `--localize-every`-th
-/// image is localized.
+/// image is localized (every `--initial-localize-every`-th until the odometry
+/// has a map pose).
 fn run_odometry(
     args: &Args,
     localizer: &mut Localizer,
@@ -873,7 +910,8 @@ fn run_odometry(
             continue;
         };
         let odom_from_imu = odom_from_body.compose(&body_from_imu);
-        let image = (index % args.localize_every == 0)
+        let image = run
+            .localizes(index)
             .then(|| read_camera_image(&entry.path))
             .transpose()?;
         run.frame(
@@ -1004,9 +1042,15 @@ mod tests {
         let vio = ["--vio", "--calibration", "c.json", "--config", "k.json"];
         assert!(with(&[&vio[..], &["--stride", "2"]].concat()).is_err());
         assert!(with(&[&vio[..], &["--localize-every", "0"]].concat()).is_err());
+        assert!(with(&["--initial-localize-every", "1"]).is_ok());
+        assert!(with(&["--initial-localize-every", "5"]).is_err());
+        assert!(with(&[&vio[..], &["--initial-localize-every", "0"]].concat()).is_err());
         let args = with(&[&vio[..], &["--localize-every", "5"]].concat()).expect("parses");
         assert!(args.vio);
         assert_eq!(args.localize_every, 5);
+        assert_eq!(args.initial_localize_every, 1);
+        let args = with(&[&vio[..], &["--initial-localize-every", "5"]].concat()).expect("parses");
+        assert_eq!(args.initial_localize_every, 5);
         assert_eq!(args.config, Some(PathBuf::from("k.json")));
         assert_eq!(args.projection_radius_px, Some(20.0));
         let args = with(&[&vio[..], &["--projection-radius-px", "12"]].concat()).expect("parses");
@@ -1042,6 +1086,33 @@ mod tests {
         assert!(with(&["--odometry", "o.tum", "--stride", "2"]).is_err());
         let vio = ["--vio", "--calibration", "c.json", "--config", "k.json"];
         assert!(with(&[&vio[..], &["--odometry", "o.tum"]].concat()).is_err());
+    }
+
+    #[test]
+    fn every_image_is_localized_until_the_first_map_pose() {
+        let args = parse(&[
+            "--map",
+            "m",
+            "--euroc-dir",
+            "d",
+            "--odometry",
+            "o.tum",
+            "--localize-every",
+            "5",
+        ])
+        .expect("parses");
+        let mut run = CorrectedRun::new(&args);
+        assert!((0..7).all(|index| run.localizes(index)));
+        // Two agreeing fixes set the correction.
+        for (x, timestamp_ns) in [(0.0, 0), (0.1, 100_000_000)] {
+            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(x, 0.0, 0.0));
+            run.correction.add_fix(timestamp_ns, &pose, &pose);
+        }
+        assert!(run.correction.is_set());
+        let localized = (0..12)
+            .filter(|&index| run.localizes(index))
+            .collect::<Vec<_>>();
+        assert_eq!(localized, [0, 5, 10]);
     }
 
     #[test]

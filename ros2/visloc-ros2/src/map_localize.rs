@@ -699,6 +699,39 @@ impl OdomCorrector {
     }
 }
 
+/// Which received images to localize: every `every`-th once the odometry
+/// has a map pose, every `initial_every`-th before. No frame has a map pose
+/// until two agreeing fixes set the correction, so the first fixes are
+/// worth every image.
+#[derive(Clone, Debug)]
+pub struct ImageCadence {
+    every: u64,
+    initial_every: u64,
+    received: u64,
+}
+
+impl ImageCadence {
+    pub fn new(every: u64, initial_every: u64) -> Self {
+        Self {
+            every: every.max(1),
+            initial_every: initial_every.max(1),
+            received: 0,
+        }
+    }
+
+    /// Counts a received image; whether to localize it.
+    pub fn take(&mut self, has_map_pose: bool) -> bool {
+        let every = if has_map_pose {
+            self.every
+        } else {
+            self.initial_every
+        };
+        let take = self.received.is_multiple_of(every);
+        self.received += 1;
+        take
+    }
+}
+
 /// `/tf` with `map_frame -> odom_frame` from a map pose.
 pub fn map_to_odom_tf(pose: &MapPose, map_frame: &str, odom_frame: &str) -> TfMessage {
     let ros = ros_pose(&pose.map_from_odom);
@@ -945,6 +978,19 @@ mod tests {
                 stamp_ns: stamps[0]
             }]
         );
+    }
+
+    #[test]
+    fn every_image_is_localized_until_the_first_map_pose() {
+        let taken = |cadence: &mut ImageCadence, has_map_pose: bool, images: usize| {
+            (0..images).filter(|_| cadence.take(has_map_pose)).count()
+        };
+        let mut cadence = ImageCadence::new(5, 1);
+        assert_eq!(taken(&mut cadence, false, 7), 7);
+        // A map pose from the 8th image on: the 11th and 16th of 8..=20.
+        assert_eq!(taken(&mut cadence, true, 13), 2);
+        assert_eq!(taken(&mut ImageCadence::new(5, 5), false, 10), 2);
+        assert_eq!(taken(&mut ImageCadence::new(0, 0), true, 3), 3);
     }
 
     /// A saved map in the `--save-map` layout: one fisheye camera, a grid of

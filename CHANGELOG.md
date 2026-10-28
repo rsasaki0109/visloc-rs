@@ -70,7 +70,7 @@ All notable changes to `visloc-rs` will be documented here.
   `docs/openloris_map_localization.md` reports the office scene, seven
   sessions over four days:
   - Sessions with the same lighting, up to 2.8 days later with furniture
-    moved, get a map pose for 79–99% of frames at 2.9–3.5 cm with the VIO.
+    moved, get a map pose for 95–99.7% of frames at 2.8–4.1 cm with the VIO.
     With the wheel odometry they get 7–12 cm, because it drifts in in-place
     turns.
   - No session localizes across the day/night lighting change.
@@ -341,6 +341,19 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **Map localization tries every image until the odometry has a map
+  pose.** No frame has one before two fixes agree, and with every 5th
+  image tried, EuRoC V2_03 never got two. `basalt_euroc_localize_demo`
+  (`--vio`, `--odometry`) and `visloc_map_localize_node` now try every image
+  until the first map pose, then every `--localize-every`-th /
+  `localize_every`-th. V2_03 gets a map pose for 77.8% of its frames, from
+  21 s on (29.6 cm RMSE; 5.8 cm within 5 s and 2 m of a fix). On the other
+  seven queries the first map pose comes up to 1.2 s sooner and the
+  accuracy is unchanged; MH_04 and MH_05, whose starts the map does not
+  cover, try about twice as many images. `--initial-localize-every` /
+  `initial_localize_every` (default 1) sets the start-up cadence; 5 is the
+  previous behaviour.
 
 - **`visloc_map_localize_node`: the projection prior expires.** The node
   matches around the predicted projections only within `projection_fresh_s`

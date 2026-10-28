@@ -22,8 +22,8 @@ use visloc_ros2::dds::{
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
     fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_pose_msg, map_to_odom_tf,
-    se3_from_ros, Fix, FixEvent, MapLocalizeOptions, MapLocalizer, Matching, OdomCorrector,
-    OdomLookup,
+    se3_from_ros, Fix, FixEvent, ImageCadence, MapLocalizeOptions, MapLocalizer, Matching,
+    OdomCorrector, OdomLookup,
 };
 use visloc_ros2::msgs::{
     DiagnosticArray, Header, Image, Odometry, PointCloud2, PoseWithCovarianceStamped, TfMessage,
@@ -51,6 +51,8 @@ PARAMETERS (--name value  or  -p name:=value):
   publish_tf             publish /tf map_frame -> odometry frame                      [true]
   publish_map_cloud      publish the map's landmarks once on map_cloud (latched)     [true]
   localize_every         localize every N-th received image                           [5]
+  initial_localize_every ... and every N-th until the first map pose (which needs two
+                         agreeing fixes)                                              [1]
   min_inliers            minimum PnP inliers to accept a fix                          [30]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
@@ -108,6 +110,7 @@ fn run() -> Result<(), String> {
     let publish_tf = args.flag("publish_tf", true)?;
     let publish_map_cloud = args.flag("publish_map_cloud", true)?;
     let localize_every = args.parsed_or("localize_every", 5u64)?.max(1);
+    let initial_localize_every = args.parsed_or("initial_localize_every", 1u64)?.max(1);
     let mut options = MapLocalizeOptions::default();
     options.min_inliers = args.parsed_or("min_inliers", options.min_inliers)?;
     options.max_hamming = args.parsed_or("max_hamming", options.max_hamming)?;
@@ -242,21 +245,24 @@ fn run() -> Result<(), String> {
         })?;
     }
 
-    // Images: keep every N-th, localize the latest one when free.
+    // Images: keep every N-th (every M-th until the first map pose), localize the
+    // latest one when free.
     let queue = Arc::new(DropOldestQueue::<Image>::new(image_queue));
     {
         let queue = Arc::clone(&queue);
-        let mut received = 0u64;
+        let core = Arc::clone(&core);
+        let mut cadence = ImageCadence::new(localize_every, initial_localize_every);
         spawn_receiver("image-rx", image_sub, move |msg: Image| {
-            if received.is_multiple_of(localize_every) {
+            let has_map_pose = core.lock().unwrap_or_else(|e| e.into_inner()).is_set();
+            if cadence.take(has_map_pose) {
                 queue.push(msg);
             }
-            received += 1;
         })?;
     }
     eprintln!(
         "visloc_map_localize_node: domain {domain_id}, node {}; in: {image_topic} {odom_topic}; \
-         out: {}{pose_topic} {diagnostics_topic}; localizing every {localize_every} image(s)",
+         out: {}{pose_topic} {diagnostics_topic}; localizing every {localize_every} image(s), \
+         every {initial_localize_every} until the first map pose",
         visloc_ros2::dds::qualified_name(&namespace, &node_name),
         if publish_tf {
             format!("{tf_topic} ")
