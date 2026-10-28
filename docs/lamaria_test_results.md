@@ -101,8 +101,9 @@ the VIO built from `3d6f7530`, the same VIO code as submission 4's.
   other device. The serials were read from the recordings' headers:
   sequence_1_1, 1_3, 1_4, 1_13 and 1_18.
 - **Change.** Against submission 4's estimates (one Sim(3) fit each, no ground
-  truth), the five trajectories come out 0.35–0.97 % shorter, as on the
-  training sequences, and move by 0.43–1.14 m (RMS).
+  truth), the five trajectories move by 0.43–1.14 m (RMS) after the fit. They
+  also come out 0.35–0.97 % shorter, as on the training sequences, but the
+  evaluation's own similarity fit takes that scale out.
 - **Result.** The five average 61.5 instead of 57.2: Short goes from 68.9 to
   70.1 and the mean from 54.2 to 54.4. sequence_1_13 goes from 64.5 to 61.8,
   so the four others gain about 24 points together. Their scores are now 55.2
@@ -162,11 +163,7 @@ from 61.09 to 64.30; on these test sequences it moved the scores by −0.4 …
   sequences) and 54.8 on 1WM093701G1276 (22) in submission 4. The difference
   is mostly Short: 73.4 against 57.2 (61.5 in submission 5). The two
   `sequence_1_*` training sequences were recorded with 1WM09370081264, and the
-  two R sequences with 1WM093701G1276. Against the pseudo-GT, the chain with
-  SIFT comes out too long on three of the four sequences of that device
-  measured (R_12_10cp 1.09 %, R_11_5cp 0.46 %, sequence_3_18 0.42 %;
-  sequence_2_11 0.02 %), and nearly right on the other device's two (0.05 %
-  and 0.14 %).
+  two R sequences with 1WM093701G1276.
 - **The end of sequence_5_12** (21–50 % too long between its last CPs) is
   walking, not a ride. Its CP errors grow from both ends of the recording (55 m
   at the start, 35 m at the end, 5–10 m in the middle), and one CP (8474) sits

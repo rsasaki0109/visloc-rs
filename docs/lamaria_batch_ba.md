@@ -1804,22 +1804,25 @@ R sequences' device too. Nothing else measured sets the R sequences apart:
 Only their images are a little darker: a mean grey level of 68–69, against
 75–82.
 
-What the pass with ALIKED changes is mostly the scale: on all six sequences it
-shortens the trajectory, by 0.25–0.82 % (the scale of one similarity to the
-pseudo-GT):
+The pass with ALIKED shortens every trajectory, by 0.25–0.82 % (the scale of
+one similarity to the pseudo-GT). The evaluation fits a similarity to the
+control points as well, so that scale costs nothing either way. What the
+scores follow is the shape left after the fit: the mean error after one
+similarity, and the spread of the heading over 60 s windows fitted after it.
 
-| Sequence | SIFT | SIFT online, ALIKED pass |
-|---|---:|---:|
-| R_11_5cp | 0.46 % too long | 0.31 % too short |
-| R_12_10cp | 1.09 % too long | 0.37 % too long |
-| sequence_1_19 | 0.05 % too long | 0.20 % too short |
-| sequence_1_20 | 0.14 % too long | 0.14 % too short |
-| sequence_2_11 | 0.02 % too long | 0.80 % too short |
-| sequence_3_18 | 0.42 % too long | 0.34 % too short |
+| Sequence | Mean error, SIFT | SIFT online, ALIKED pass | Heading spread, SIFT | SIFT online, ALIKED pass |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 0.58 m | **0.24 m** | 0.88° | **0.25°** |
+| R_12_10cp | 0.89 m | **0.60 m** | 0.58° | **0.49°** |
+| sequence_1_19 | **0.44 m** | 0.46 m | **0.19°** | 0.29° |
+| sequence_1_20 | **0.28 m** | 0.38 m | 0.21° | 0.21° |
+| sequence_2_11 | **0.30 m** | 0.59 m | **0.19°** | 0.45° |
+| sequence_3_18 | **1.46 m** | 1.71 m | 1.07° | 1.07° |
 
-It helps where SIFT's chain comes out too long, as on the two R sequences,
-and makes the right scale of sequence_2_11 wrong. sequence_3_18 still loses,
-although its scale error gets a little smaller.
+(Heading spread: the standard deviation over the 60 s windows.) ALIKED
+steadies the heading where SIFT's wanders, as on the two R sequences. Where
+SIFT's heading already holds within 0.2°, ALIKED unsettles it, as on
+sequence_2_11.
 
 ### Revisits for place recognition
 
