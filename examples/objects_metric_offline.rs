@@ -16,7 +16,9 @@
 //! A feature track belongs to the object whose camera-0 boxes contain it
 //! most often, if they do at least 3 times. Each object's tracks are
 //! triangulated with the trajectory's poses, and an upright box is fitted
-//! (`visloc_objects::metric`). Only static objects come out right: a moving
+//! (`visloc_objects::metric`). Objects of the same class whose boxes lie
+//! within 0.5 m of each other are merged and fitted again: the 2D tracker
+//! gives an object a new ID each time it comes back into view. Only static objects come out right: a moving
 //! object's rays do not meet, and its tracks are rejected. The trajectory is
 //! the IMU pose (`T_w_i`), as `basalt_euroc_vio_demo` writes it; for
 //! `--mono-vo` runs, whose trajectory is the camera pose, pass
@@ -30,8 +32,8 @@ use std::path::PathBuf;
 
 use nalgebra::{Isometry3, Point2, Quaternion, Translation3, UnitQuaternion, Vector3};
 use visloc_rs::objects::{
-    estimate_static_object, plausible_size, BearingObservation, BoxFitParams, TriangulationParams,
-    COCO_CLASSES,
+    estimate_static_object, plausible_size, BearingObservation, BoxFitParams, ObjectEstimate,
+    TriangulationParams, COCO_CLASSES,
 };
 
 struct Args {
@@ -55,6 +57,14 @@ struct ObjectBox {
 /// Minimum camera-0 observations inside an object's boxes for a track to
 /// belong to it.
 const MIN_VOTES: usize = 3;
+
+/// Objects of the same class closer than this (centre to centre, metres)
+/// are the same object seen under several 2D track IDs.
+const MERGE_DISTANCE: f64 = 0.5;
+
+/// Triangulated points a merged object needs to be reported; with fewer the
+/// box is mostly noise. Fragments only need the library default to be merged.
+const MIN_POINTS: usize = 12;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args()?;
@@ -118,7 +128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(&object_id) = owner.get(&track_id) else {
             continue;
         };
-        let (Some(pose), Some(camera)) = (poses.get(&timestamp_ns), calibration.camera(camera_id))
+        let (Some(pose), Some(camera)) =
+            (pose_at(&poses, timestamp_ns), calibration.camera(camera_id))
         else {
             continue;
         };
@@ -144,23 +155,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
     }
 
-    let mut csv = String::from(
-        "object_id,class_id,class,tracks,points,center_x,center_y,center_z,length,width,height,yaw,scale_source,plausible\n",
-    );
-    println!(
-        "{:>6} {:<14} {:>6} {:>6}  {:>22}  {:>24}  plausible",
-        "object", "class", "tracks", "points", "size l x w x h (m)", "centre (m)"
-    );
-    for (object_id, tracks) in &per_object {
-        let class_id = classes[object_id];
+    // First estimate each 2D track's object, then merge objects of the same
+    // class whose centres are within MERGE_DISTANCE: the 2D tracker loses an
+    // object when it leaves the view and gives it a new ID when it comes back.
+    let estimate = |tracks: &BTreeMap<u64, Vec<BearingObservation>>, object_id: u64, min_points| {
         let tracks: Vec<Vec<BearingObservation>> = tracks.values().cloned().collect();
-        let Some(estimate) = estimate_static_object(
-            *object_id,
-            class_id,
+        estimate_static_object(
+            object_id,
+            classes[&object_id],
             &tracks,
             &TriangulationParams::default(),
-            &BoxFitParams::default(),
-        ) else {
+            &BoxFitParams {
+                min_points,
+                ..BoxFitParams::default()
+            },
+        )
+    };
+    let first: Vec<(u64, ObjectEstimate)> = per_object
+        .iter()
+        .filter_map(|(id, tracks)| {
+            Some((
+                *id,
+                estimate(tracks, *id, BoxFitParams::default().min_points)?,
+            ))
+        })
+        .collect();
+    let mut group: Vec<usize> = (0..first.len()).collect();
+    fn root(group: &mut [usize], i: usize) -> usize {
+        if group[i] != i {
+            group[i] = root(group, group[i]);
+        }
+        group[i]
+    }
+    for i in 0..first.len() {
+        for j in i + 1..first.len() {
+            let (a, b) = (&first[i].1, &first[j].1);
+            if a.class_id == b.class_id
+                && (a.upright_box.center - b.upright_box.center).norm() < MERGE_DISTANCE
+            {
+                let (ri, rj) = (root(&mut group, i), root(&mut group, j));
+                group[ri.max(rj)] = ri.min(rj);
+            }
+        }
+    }
+    let mut merged: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+    for (i, (object_id, _)) in first.iter().enumerate() {
+        let r = root(&mut group, i);
+        merged.entry(r).or_default().push(*object_id);
+    }
+
+    let mut csv = String::from(
+        "object_id,merged_ids,class_id,class,tracks,points,center_x,center_y,center_z,length,width,height,yaw,scale_source,plausible\n",
+    );
+    println!(
+        "{:>6} {:<14} {:>6} {:>6} {:>6}  {:>22}  {:>24}  plausible",
+        "object", "class", "merged", "tracks", "points", "size l x w x h (m)", "centre (m)"
+    );
+    for ids in merged.values() {
+        let object_id = ids[0];
+        let class_id = classes[&object_id];
+        let mut tracks = BTreeMap::new();
+        for id in ids {
+            tracks.extend(per_object[id].iter().map(|(t, o)| (*t, o.clone())));
+        }
+        let Some(estimate) = estimate(&tracks, object_id, MIN_POINTS) else {
             continue;
         };
         let b = estimate.upright_box;
@@ -172,7 +230,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let class = COCO_CLASSES.get(class_id as usize).copied().unwrap_or("?");
         println!(
-            "{object_id:>6} {class:<14} {:>6} {:>6}  {:>6.2} x {:>5.2} x {:>5.2}  ({:>6.2}, {:>6.2}, {:>6.2})  {plausible}",
+            "{object_id:>6} {class:<14} {:>6} {:>6} {:>6}  {:>6.2} x {:>5.2} x {:>5.2}  ({:>6.2}, {:>6.2}, {:>6.2})  {plausible}",
+            ids.len(),
             tracks.len(),
             estimate.points,
             b.length,
@@ -182,9 +241,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             b.center.y,
             b.center.z
         );
+        let merged_ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(" ");
         writeln!(
             csv,
-            "{object_id},{class_id},{class},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},triangulated,{plausible}",
+            "{object_id},{merged_ids},{class_id},{class},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},triangulated,{plausible}",
             tracks.len(),
             estimate.points,
             b.center.x,
@@ -204,11 +264,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The pose nearest to `timestamp_ns`, if one is within 1 ms. The demo
+/// writes the TUM time in seconds through an f64, which is off by a few
+/// nanoseconds at epoch scale, so an exact match would miss.
+fn pose_at(poses: &[(i64, Isometry3<f64>)], timestamp_ns: i64) -> Option<&Isometry3<f64>> {
+    let i = poses.partition_point(|(t, _)| *t < timestamp_ns);
+    [i.checked_sub(1), Some(i)]
+        .into_iter()
+        .flatten()
+        .filter_map(|j| poses.get(j))
+        .min_by_key(|(t, _)| (t - timestamp_ns).abs())
+        .filter(|(t, _)| (t - timestamp_ns).abs() <= 1_000_000)
+        .map(|(_, pose)| pose)
+}
+
 /// TUM lines `t tx ty tz qx qy qz qw`, `t` in seconds with up to nine
-/// decimals, keyed by the exact nanosecond timestamp.
-fn read_trajectory(path: &PathBuf) -> Result<HashMap<i64, Isometry3<f64>>, String> {
+/// decimals, sorted by time.
+fn read_trajectory(path: &PathBuf) -> Result<Vec<(i64, Isometry3<f64>)>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut poses = HashMap::new();
+    let mut poses = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
@@ -218,7 +292,6 @@ fn read_trajectory(path: &PathBuf) -> Result<HashMap<i64, Isometry3<f64>>, Strin
         if f.len() != 8 {
             return Err(bad());
         }
-        // f64 seconds cannot hold nanoseconds at epoch scale: parse the digits.
         let (seconds, fraction) = f[0].split_once('.').unwrap_or((f[0], ""));
         let digits = format!("{fraction:0<9}");
         let timestamp_ns = seconds.parse::<i64>().map_err(|_| bad())? * 1_000_000_000
@@ -229,11 +302,12 @@ fn read_trajectory(path: &PathBuf) -> Result<HashMap<i64, Isometry3<f64>>, Strin
             .collect::<Result<_, _>>()
             .map_err(|_| bad())?;
         let rotation = UnitQuaternion::from_quaternion(Quaternion::new(v[6], v[3], v[4], v[5]));
-        poses.insert(
+        poses.push((
             timestamp_ns,
             Isometry3::from_parts(Translation3::from(Vector3::new(v[0], v[1], v[2])), rotation),
-        );
+        ));
     }
+    poses.sort_by_key(|(t, _)| *t);
     Ok(poses)
 }
 

@@ -166,3 +166,65 @@ the multi-camera big-window config, `--pipeline`, and the binary from
   - Telling whether its 289 moving decisions were right would need a look
     at those frames. A false positive on a static object only costs
     features, but the result does not show a gain to pay for that.
+
+## Metric objects (static)
+
+`visloc_objects::metric` turns object tracks and metric camera poses into
+metric 3D objects. This is the start of Phase 3 of the plan: the headline
+that the IMU makes object sizes metric.
+
+- **Triangulation:** `triangulate` intersects a feature's observation rays
+  (camera pose plus unit bearing) by least squares. It rejects tracks with
+  less than 2° of parallax, a point behind a camera, or a ray more than 0.3°
+  off the point.
+- **Box fit:** `fit_upright_box` fits a gravity-aligned box (world z up, as
+  in Basalt). It drops points more than 3 MADs from the median point. The
+  heading is the one whose 2–98 % quantile rectangle has the smallest area,
+  because the main axis of the scatter is unstable for near-square
+  footprints.
+- **Scale source:** each `ObjectEstimate` records it
+  (`ScaleSource::Triangulated`).
+- **Class priors:** `plausible_size` holds rough COCO size ranges. They
+  only flag an estimate and never set a scale.
+- **Tests:**
+  - a chair-sized box walked past at 3 m with 0.5 px noise comes out within
+    5 cm;
+  - the same walk with its trajectory doubled gives a box twice as large,
+    which the prior flags.
+
+`objects_metric_offline` runs this on a VIO run. Its inputs are the dumped
+feature tracks (`basalt_euroc_vio_demo --dump-tracks`), the trajectory, the
+calibration and the 2D object boxes (`yolox_track_demo --boxes-csv FILE
+--all-classes`).
+- A track belongs to the object whose camera-0 boxes contain it at least 3
+  times.
+- Objects of the same class whose boxes lie within 0.5 m are merged and
+  fitted again, because the 2D tracker gives an object a new ID each time it
+  comes back into view.
+- Objects with fewer than 12 points are not reported.
+
+### TUM-VI room1
+
+All runs use the same YOLOX boxes and the same dumped feature tracks, and
+`--trajectory-is-camera` for the visual-only one. YOLOX's largest steady
+object in the room is a wall-mounted whiteboard, which it calls "tv". The 2D
+tracker split it into 10 IDs, and the merge puts them back together.
+
+| VIO | Whiteboard, length × depth × height | Centre (m) |
+| --- | --- | --- |
+| Mono + IMU | 2.30 × 0.30 × 1.77 m | (1.93, 0.24, 0.01) |
+| Stereo + IMU (an independent metric scale) | 2.21 × 0.25 × 1.76 m | (1.96, 0.27, 0.00) |
+| Mono, no IMU (`--mono-vo`) | 0.60 × 0.37 × 0.80 (no scale) | (−0.65, −0.03, −0.15) in its own frame |
+
+- **Mono + IMU against stereo + IMU:** they agree to 4 % in length, 0.6 % in
+  height and 4 cm in position. On room1 the mono-inertial trajectory's scale
+  is 0.4 % off the motion capture (see `mono_inertial_vio.md`).
+- **Without the IMU:** the same board comes out at about a third of its
+  size, at whatever scale the visual-only bootstrap picked.
+- **Depth:** the box is 0.25–0.30 m deep where a flat board has none. Some
+  wall points beside the board pass as inliers.
+- **Class prior:** the "tv" range of `plausible_size` is 0.3–2.0 m, so the
+  2.3 m board is flagged. That is right for a TV, and the board is not one.
+  The flag does not change the estimate.
+- **Not reported:** the only other objects with enough boxes, two chairs
+  half hidden under a desk, have 6 points each.
