@@ -89,6 +89,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use nalgebra::{Point2, Quaternion, UnitQuaternion, Vector3};
+use visloc_basalt::contrast::LocalContrast;
 use visloc_basalt::euroc::{read_camera_image, read_camera_manifest};
 use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
@@ -356,12 +357,16 @@ fn pipeline(args: &Args) -> Pipeline {
     LocalizationPipeline::with_pose_estimator(matcher, AllLandmarksSelector, ransac, config)
 }
 
-/// The mapper keyframe frontend, with descriptors unpacked like the map's.
+/// The mapper keyframe frontend, with descriptors unpacked like the map's,
+/// on the image equalized like the map's keyframes if they were.
 fn query_image(
     image: &RawU16Image,
     camera: &Camera,
     max_points: usize,
+    local_contrast: Option<&LocalContrast>,
 ) -> Result<QueryImage, Box<dyn std::error::Error>> {
+    let equalized = local_contrast.map(|local_contrast| local_contrast.apply(image));
+    let image = equalized.as_ref().unwrap_or(image);
     let corners = detect_keypoints_mapping(image, max_points);
     let angles = compute_angles(image, &corners, true);
     let descriptors = compute_descriptors(image, &corners, &angles)?;
@@ -440,10 +445,16 @@ impl Localizer {
             .cloned()
             .ok_or_else(|| format!("map.json has no extrinsics for camera {}", args.camera))?;
         eprintln!(
-            "map: images={} landmarks={} descriptors={}",
+            "map: images={} landmarks={} descriptors={}{}",
             map.map.keyframes.len(),
             map.map.landmarks.len(),
-            map.descriptors.len()
+            map.descriptors.len(),
+            map.local_contrast
+                .map(|c| format!(
+                    ", local contrast equalized ({} tiles, clip {})",
+                    c.tiles, c.clip_limit
+                ))
+                .unwrap_or_default()
         );
         let index = BinaryLandmarkIndex::new(&map.map, &map.descriptors)
             .with_duplicate_radius(args.duplicate_radius_m.unwrap_or(0.0));
@@ -479,7 +490,12 @@ impl Localizer {
         predicted: Option<&SE3>,
     ) -> Result<Attempt, Box<dyn std::error::Error>> {
         let started = Instant::now();
-        let query = query_image(image, &self.camera, self.max_points)?;
+        let query = query_image(
+            image,
+            &self.camera,
+            self.max_points,
+            self.map.local_contrast.as_ref(),
+        )?;
         let packed = self.index.pack_query(&query.descriptors);
         let projected = predicted
             .zip(self.projection_radius_px)
@@ -1286,8 +1302,18 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&map_dir);
-        map_files::save(&map_dir, &export, &calibration, 800).expect("save");
+        map_files::save(&map_dir, &export, &calibration, 800, None).expect("save");
         let saved = map_files::load(&map_dir).expect("load");
+        assert_eq!(saved.local_contrast, None);
+        let equalized = LocalContrast {
+            tiles: 6,
+            clip_limit: 3.0,
+        };
+        map_files::save(&map_dir, &export, &calibration, 800, Some(&equalized)).expect("save");
+        assert_eq!(
+            map_files::load(&map_dir).expect("load").local_contrast,
+            Some(equalized)
+        );
         fs::remove_dir_all(&map_dir).expect("cleanup");
         assert_eq!(saved.map.landmarks.len(), points.len());
         // Each landmark's track is read back, so a map written again (as

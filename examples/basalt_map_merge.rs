@@ -145,6 +145,17 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
+        // Descriptors from equalized and raw images do not match each other.
+        if other.local_contrast != merged.local_contrast {
+            return Err(format!(
+                "{}: built with {:?} local contrast equalization, the base map with {:?}; \
+                 build both the same way",
+                dir.display(),
+                other.local_contrast,
+                merged.local_contrast
+            )
+            .into());
+        }
         let started = Instant::now();
         let registration = register_map(
             &merged.map,

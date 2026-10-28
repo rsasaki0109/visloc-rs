@@ -28,6 +28,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use nalgebra::{Quaternion as NaQuaternion, UnitQuaternion, Vector3};
+use visloc_basalt::contrast::LocalContrast;
 use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
     orb_descriptor_to_f32,
@@ -127,6 +128,10 @@ pub struct SavedBasaltMap {
     pub imu_from_camera: Vec<SE3>,
     /// Detector budget the map's keyframes were built with.
     pub max_points: usize,
+    /// Local contrast equalization the map's keyframes were built with
+    /// (`map.json`'s `feature_local_contrast`), applied to every image
+    /// before extraction.
+    pub local_contrast: Option<LocalContrast>,
 }
 
 fn se3_from_json(value: &serde_json::Value) -> Option<SE3> {
@@ -173,6 +178,25 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
         .get("feature_max_points")
         .and_then(serde_json::Value::as_u64)
         .ok_or("map.json: missing feature_max_points")? as usize;
+    let local_contrast = match summary
+        .get("feature_local_contrast")
+        .filter(|value| !value.is_null())
+    {
+        None => None,
+        Some(value) => {
+            let tiles = value.get("tiles").and_then(serde_json::Value::as_u64);
+            let clip_limit = value.get("clip_limit").and_then(serde_json::Value::as_f64);
+            match (tiles, clip_limit) {
+                (Some(tiles), Some(clip_limit)) if tiles > 0 && clip_limit > 0.0 => {
+                    Some(LocalContrast {
+                        tiles: tiles as usize,
+                        clip_limit,
+                    })
+                }
+                _ => return Err(format!("map.json: bad feature_local_contrast {value}")),
+            }
+        }
+    };
     let sparse = map_dir.join("sparse");
     let map = read_colmap_text_model(&sparse)
         .map_err(|error| format!("{}: {error}", sparse.display()))?;
@@ -184,6 +208,7 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
         descriptors,
         imu_from_camera,
         max_points,
+        local_contrast,
     })
 }
 
@@ -354,6 +379,11 @@ impl MapLocalizer {
                 self.camera.height
             ));
         }
+        let equalized = self
+            .map
+            .local_contrast
+            .map(|local_contrast| local_contrast.apply(image));
+        let image = equalized.as_ref().unwrap_or(image);
         let corners = detect_keypoints_mapping(image, self.max_points);
         let angles = compute_angles(image, &corners, true);
         let descriptors = compute_descriptors(image, &corners, &angles)
@@ -1082,7 +1112,24 @@ mod tests {
         fs::create_dir_all(&dir).expect("dir");
         let (camera, points) = write_saved_map(&dir, &imu_from_camera);
         let map = load_basalt_map(&dir).expect("loads");
+        // A map built from equalized images says so; a bad entry is refused.
+        let summary_path = dir.join("map.json");
+        let raw_summary = fs::read_to_string(&summary_path).expect("map.json");
+        let mut summary: serde_json::Value = serde_json::from_str(&raw_summary).expect("json");
+        summary["feature_local_contrast"] = serde_json::json!({"tiles": 6, "clip_limit": 3.0});
+        fs::write(&summary_path, summary.to_string()).expect("map.json");
+        assert_eq!(
+            load_basalt_map(&dir).expect("loads").local_contrast,
+            Some(LocalContrast {
+                tiles: 6,
+                clip_limit: 3.0
+            })
+        );
+        summary["feature_local_contrast"] = serde_json::json!({"tiles": 0, "clip_limit": 3.0});
+        fs::write(&summary_path, summary.to_string()).expect("map.json");
+        assert!(load_basalt_map(&dir).is_err());
         fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(map.local_contrast, None);
         assert_eq!(map.max_points, 800);
         assert_eq!(map.map.landmarks.len(), points.len());
         assert!(load_basalt_map(Path::new("/nonexistent/map")).is_err());
@@ -1159,6 +1206,7 @@ mod tests {
             descriptors: LandmarkDescriptorStore::new(),
             imu_from_camera: vec![SE3::identity()],
             max_points: 800,
+            local_contrast: None,
         }
     }
 
