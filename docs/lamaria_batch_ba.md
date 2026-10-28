@@ -1752,6 +1752,95 @@ sequence_3_18 and gains 4.9 on R_12_10cp, where DISK loses 1.3 and SuperPoint
 gains 1.2. As the tracks are no longer than SIFT's, the eight day sequences were
 not run.
 
+ALIKED's gain on R_12_10cp is spread over the whole sequence. Against the
+pseudo-GT (one similarity for the whole trajectory), its first solve is 0.77 m
+off on average, against 0.98 m for SIFT's. The scale and heading of each 60 s
+window, fitted to the pseudo-GT after that alignment, wander a little less:
+scale 0.986–1.036 against 0.977–1.038 (standard deviation 0.012 against
+0.015), heading standard deviation 0.57° against 0.64°. With the error that
+close to the evaluation's 1 m, the small gain moves the pose recall at 1 m from
+51 % to 84 %. On sequence_3_18 it goes the other way (1.73 m against 1.47 m).
+
+R_11_5cp, the other Short training sequence that is not a `sequence_1_*`,
+gains the same way: the first solve is 0.38 m off on average against 0.57 m,
+its 60 s windows' heading has a standard deviation of 0.31° against 0.74°, and
+it scores 85.23 against 81.32 (the chain with SIFT ends at 85.81).
+
+The whole chain was then run two ways, both against the chain with SIFT on
+this machine:
+
+- with ALIKED throughout (`lamaria_ba_chain.py --features aliked`), the online
+  windows included;
+- with SIFT online and ALIKED in the pass after it (`--pass-features aliked`).
+  The pass reads ALIKED's keypoints, matches and revisits, all guided by the VIO
+  like the online windows' own, and the rematch goes there too.
+
+| Sequence | Device | SIFT | ALIKED | SIFT online, ALIKED pass |
+|---|---|---:|---:|---:|
+| R_11_5cp | 1WM093701G1276 | 85.81 | 92.12 | **92.20** |
+| R_12_10cp | 1WM093701G1276 | 64.61 | 72.03 | **73.96** |
+| sequence_1_19 | 1WM09370081264 | **82.25** | 73.34 | 81.00 |
+| sequence_1_20 | 1WM09370081264 | **88.65** | 63.13 | 86.95 |
+| sequence_2_11 | 1WM093701G1276 | **89.25** | | 76.56 |
+| sequence_3_18 | 1WM093701G1276 | **54.27** | | 49.23 |
+
+With ALIKED in the online windows, sequence_1_20's heading turns by 2° over its
+17 minutes (+0.9° … −1.2° per 60 s window against the pseudo-GT). Its online
+result is 1.36 m off on average, against 0.38 m with SIFT. With SIFT online,
+the pass gains 6.4 and 9.3 on the two R sequences and loses 1.2–12.7 on the
+four others. Neither variant goes into the chain's defaults, and the remaining
+day sequences were not run.
+
+The device does not explain the split: sequence_2_11 and 3_18 come from the
+R sequences' device too. Nothing else measured sets the R sequences apart:
+
+- SIFT finds as many keypoints there (1,358–1,370 per image, against
+  1,221–1,432 on the four others).
+- ALIKED and LightGlue find as many matches per image pair (128–130, against
+  112–128).
+- The first solve's cost per observation is that of sequence_2_11 and 3_18
+  (0.13 with SIFT, 0.29–0.32 with ALIKED).
+
+Only their images are a little darker: a mean grey level of 68–69, against
+75–82.
+
+### Revisits for place recognition
+
+`loops` looks for revisits near the trajectory that guides it (the VIO, and
+the pass's `ba2` when matching again): keyframes more than 64 apart, within
+15 m and with camera axes within 60° ([Revisits](#revisits)). A global image
+descriptor (NetVLAD, MixVPR, SALAD) would find a revisit however far the
+trajectory has drifted, but only the revisits outside that gate need one. In
+the pseudo-GT, at the keyframes' 2 Hz, a keyframe is on a revisit when it lies
+within 15 m and 60° of heading of another after at least 50 m walked in
+between (so standing at a crossing does not count):
+
+| Sequence | Minutes | Walked | Keyframes on a revisit | Longest time between the visits |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 7.9 | 459 m | 23.2 % | 136 s |
+| R_12_10cp | 16.9 | 984 m | 0 % | |
+| sequence_1_19 | 15.3 | 975 m | 0.2 % | 54 s |
+| sequence_1_20 | 16.9 | 1,117 m | 15.0 % | 131 s |
+| sequence_2_11 | 19.8 | 1,261 m | 13.2 % | 221 s |
+| sequence_2_12 | 27.9 | 2,033 m | 15.9 % | 211 s |
+| sequence_3_17 | 29.8 | 1,946 m | 4.4 % | 66 s |
+| sequence_3_18 | 28.2 | 1,651 m | 3.7 % | 70 s |
+| sequence_4_10 | 23.6 | 1,410 m | 10.5 % | 76 s |
+| sequence_4_11 | 18.8 | 1,062 m | 2.0 % | 74 s |
+
+Every revisit comes within four minutes of the first visit, too soon for the
+VIO to drift out of the gate. On sequence_1_20 and 3_18 (the chain's first
+`loops`, guided by the VIO), each revisit of the pseudo-GT (at least 10
+keyframe pairs) has 71–100 % of its keyframe pairs within 15 m in the VIO as
+well. `loops` verifies pairs on 7 of sequence_1_20's 9 revisits (93 % of their
+keyframe pairs) and on 2 of sequence_3_18's 3 (96 %). The ones it misses are
+13–14 m apart in the VIO at the median, inside the gate: their images fail the
+essential-matrix check, so a global descriptor would propose them again to no
+effect. The sequences furthest
+behind, R_12_10cp and 3_18, barely revisit at all, and sequence_2_12's
+revisits come after its first ten minutes, too late for the heading that goes
+wrong at its start. Place recognition was not tried.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
@@ -1849,8 +1938,10 @@ python scripts/lamaria_batch_ba.py solve --work work/$S --vio out/$S.lc.tum --ca
   then match with LightGlue (`--lg-batch` pairs per call, `--lg-threshold`,
   `--no-lg-mp` for single precision; `--matcher ratio` for the ratio test, whose
   `--max-desc` is then unlimited). `lamaria_ba_chain.py --features` passes the
-  extractor to the features step. They do not find the landmarks again more
-  often (see [Learned features](#learned-features)).
+  extractor to the features step (1,024 keypoints at detection threshold 0 by
+  default), and `--pass-features` gives the pass by day an extractor of its own
+  in `work/<extractor>`. They do not find the landmarks again more often (see
+  [Learned features](#learned-features)).
 - **Track statistics.** `scripts/lamaria_track_stats.py --states
   ba1_states.npz --calib CALIB --work WORK` prints how often a solve's landmarks
   are observed where they are visible, and the track lengths.
