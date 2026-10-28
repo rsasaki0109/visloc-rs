@@ -56,6 +56,12 @@ PARAMETERS (--name value  or  -p name:=value):
   initial_window_s       ... within this many seconds of the first image or the
                          latest localization; then every localize_every-th            [30]
   min_inliers            minimum PnP inliers to accept a fix                          [30]
+  weak_min_inliers       a map-wide localization with this many inliers (but fewer than
+                         min_inliers) only helps set the first map pose, with three
+                         agreeing fixes; >= min_inliers turns it off                 [15]
+  weak_gate_m            once the odometry has a map pose, a weak localization (also by
+                         projection) this close (m) to the corrected odometry is used
+                         too; for robots whose images rarely reach min_inliers     [0: off]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
   ransac_iterations      P3P RANSAC iterations                                        [1000]
@@ -119,6 +125,12 @@ fn run() -> Result<(), String> {
     }
     let mut options = MapLocalizeOptions::default();
     options.min_inliers = args.parsed_or("min_inliers", options.min_inliers)?;
+    options.weak_min_inliers = args.parsed_or("weak_min_inliers", options.weak_min_inliers)?;
+    options.correction.weak_gate_m =
+        args.parsed_or("weak_gate_m", options.correction.weak_gate_m)?;
+    if !(options.correction.weak_gate_m >= 0.0 && options.correction.weak_gate_m.is_finite()) {
+        return Err("weak_gate_m must be a non-negative number".into());
+    }
     options.max_hamming = args.parsed_or("max_hamming", options.max_hamming)?;
     let ratio = args.parsed_or("ratio", options.ratio.unwrap_or(0.0))?;
     options.ratio = (ratio > 0.0).then_some(ratio);
@@ -331,6 +343,9 @@ fn run() -> Result<(), String> {
                 localized += 1;
                 let events = core.add_fix(stamp.to_nanos(), map_from_body.clone());
                 log_events(&events);
+            } else if let Some(map_from_body) = &fix.weak_map_from_body {
+                let events = core.add_weak_fix(stamp.to_nanos(), map_from_body.clone());
+                log_events(&events);
             }
             (core.latest_map_pose(), core.pending_fixes())
         };
@@ -399,7 +414,7 @@ fn log_events(events: &[FixEvent]) {
         match event {
             FixEvent::Applied { stamp_ns, outcome } => {
                 let name = fix_outcome_name(*outcome);
-                if name != "accepted" && name != "pending" {
+                if !matches!(name, "accepted" | "pending" | "unused") {
                     eprintln!("visloc_map_localize_node: fix at {stamp_ns} ns {name}");
                 }
             }

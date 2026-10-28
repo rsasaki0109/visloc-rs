@@ -35,7 +35,7 @@ use visloc_basalt::mapper::{
 };
 use visloc_basalt::RawU16Image;
 use visloc_core::geometry::{Pose as CameraPose, SE3};
-use visloc_core::types::{Camera, LandmarkDescriptorStore, VisualMap};
+use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureReason, VisualMap};
 use visloc_io::colmap::read_colmap_text_model;
 use visloc_io::descriptors::read_landmark_descriptors_txt;
 use visloc_localization::{
@@ -65,6 +65,11 @@ pub struct MapLocalizeOptions {
     pub ratio: Option<f32>,
     /// Below 30 inliers wrong poses appear on EuRoC.
     pub min_inliers: usize,
+    /// A map-wide localization with this many inliers, but fewer than
+    /// `min_inliers`, is a weak fix (`OdomCorrection::add_weak_fix`): it
+    /// helps only to set the first correction, which then takes three
+    /// agreeing fixes. At or above `min_inliers`: off.
+    pub weak_min_inliers: usize,
     pub ransac_iterations: usize,
     pub reprojection_px: f64,
     /// Once the odometry has a map pose: search radius around each landmark's predicted
@@ -103,6 +108,7 @@ impl Default for MapLocalizeOptions {
             max_hamming: 70,
             ratio: Some(0.8),
             min_inliers: 30,
+            weak_min_inliers: 15,
             ransac_iterations: 1000,
             reprojection_px: 3.0,
             projection_radius_px: Some(20.0),
@@ -238,6 +244,10 @@ impl Matching {
 pub struct Fix {
     /// The body (IMU) pose in the map frame, when accepted.
     pub map_from_body: Option<SE3>,
+    /// The body pose of a weak localization: map-wide (or, with a weak gate
+    /// set, by projection), with `weak_min_inliers` inliers or more but too
+    /// few to be accepted.
+    pub weak_map_from_body: Option<SE3>,
     /// The search of the final attempt; `None` when matching did not run.
     pub matching: Option<Matching>,
     pub keypoints: usize,
@@ -252,6 +262,7 @@ impl Fix {
     pub const fn failed(failure: String) -> Self {
         Self {
             map_from_body: None,
+            weak_map_from_body: None,
             matching: None,
             keypoints: 0,
             matches: 0,
@@ -278,6 +289,10 @@ pub struct MapLocalizer {
     max_points: usize,
     gates: BinaryMatchGates,
     projection_radius_px: Option<f64>,
+    weak_min_inliers: Option<usize>,
+    /// Whether a projection-matched localization can be weak: only when the
+    /// correction uses weak fixes after it is set (`weak_gate_m`).
+    weak_projected: bool,
     match_threads: usize,
     pipeline: Pipeline,
 }
@@ -334,6 +349,9 @@ impl MapLocalizer {
                 ratio: options.ratio,
             },
             projection_radius_px: options.projection_radius_px,
+            weak_min_inliers: Some(options.weak_min_inliers)
+                .filter(|&weak| weak < options.min_inliers),
+            weak_projected: options.correction.weak_gate_m > 0.0,
             match_threads: options.match_threads.max(1),
             pipeline: LocalizationPipeline::with_pose_estimator(
                 matcher,
@@ -455,17 +473,26 @@ impl MapLocalizer {
         });
         let mut fix = match projection {
             Some(fix) if fix.map_from_body.is_some() => fix,
-            _ => self.solve(
-                Matching::Global,
-                self.index.match_all(
-                    &features.keypoints,
-                    &features.descriptors,
-                    self.gates,
-                    self.match_threads,
-                ),
-                features,
-                camera_from_body,
-            ),
+            projection => {
+                let mut fix = self.solve(
+                    Matching::Global,
+                    self.index.match_all(
+                        &features.keypoints,
+                        &features.descriptors,
+                        self.gates,
+                        self.match_threads,
+                    ),
+                    features,
+                    camera_from_body,
+                );
+                // A weak localization by projection counts first.
+                if fix.map_from_body.is_none() {
+                    if let Some(weak) = projection.and_then(|p| p.weak_map_from_body) {
+                        fix.weak_map_from_body = Some(weak);
+                    }
+                }
+                fix
+            }
         };
         fix.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         fix
@@ -485,7 +512,18 @@ impl MapLocalizer {
             .then_some(result.pose.as_ref())
             .flatten()
             .map(|pose| pose.camera_to_world().compose(camera_from_body));
+        // Turned down only for too few inliers: a weak localization.
+        let weak_map_from_body = ((matching == Matching::Global || self.weak_projected)
+            && !result.success
+            && result.failure_reason == Some(LocalizationFailureReason::QualityGateFailed)
+            && self
+                .weak_min_inliers
+                .is_some_and(|weak| result.inlier_count >= weak))
+        .then_some(result.pose.as_ref())
+        .flatten()
+        .map(|pose| pose.camera_to_world().compose(camera_from_body));
         Fix {
+            weak_map_from_body,
             failure: map_from_body.is_none().then(|| {
                 result.failure_reason.as_ref().map_or_else(
                     || format!("{} inliers", result.inlier_count),
@@ -611,7 +649,8 @@ pub enum FixEvent {
 pub struct OdomCorrector {
     correction: OdomCorrection,
     odom: OdomBuffer,
-    pending: VecDeque<(i64, SE3)>,
+    /// Fixes waiting for their odometry: stamp, map pose, weak.
+    pending: VecDeque<(i64, SE3, bool)>,
     max_gap_ns: i64,
     latest_odom: Option<(i64, SE3)>,
     latest_fix_ns: Option<i64>,
@@ -650,8 +689,18 @@ impl OdomCorrector {
     /// Queues an accepted localization and applies every queued fix whose
     /// odometry is known.
     pub fn add_fix(&mut self, stamp_ns: i64, map_from_body: SE3) -> Vec<FixEvent> {
+        self.queue_fix(stamp_ns, map_from_body, false)
+    }
+
+    /// Queues a weak localization (`OdomCorrection::add_weak_fix`) like
+    /// [`Self::add_fix`].
+    pub fn add_weak_fix(&mut self, stamp_ns: i64, map_from_body: SE3) -> Vec<FixEvent> {
+        self.queue_fix(stamp_ns, map_from_body, true)
+    }
+
+    fn queue_fix(&mut self, stamp_ns: i64, map_from_body: SE3, weak: bool) -> Vec<FixEvent> {
         self.latest_fix_ns = Some(self.latest_fix_ns.map_or(stamp_ns, |t| t.max(stamp_ns)));
-        self.pending.push_back((stamp_ns, map_from_body));
+        self.pending.push_back((stamp_ns, map_from_body, weak));
         self.flush()
     }
 
@@ -663,6 +712,7 @@ impl OdomCorrector {
         odom_from_body: SE3,
     ) -> (Vec<FixEvent>, Option<MapPose>) {
         self.odom.push(stamp_ns, odom_from_body.clone());
+        self.correction.observe_odometry(stamp_ns, &odom_from_body);
         if self
             .latest_odom
             .as_ref()
@@ -716,7 +766,7 @@ impl OdomCorrector {
 
     fn flush(&mut self) -> Vec<FixEvent> {
         let mut events = Vec::new();
-        while let Some((stamp_ns, _)) = self.pending.front() {
+        while let Some((stamp_ns, _, _)) = self.pending.front() {
             let stamp_ns = *stamp_ns;
             match self.odom.lookup(stamp_ns, self.max_gap_ns) {
                 OdomLookup::NotYet => break,
@@ -725,10 +775,14 @@ impl OdomCorrector {
                     events.push(FixEvent::Dropped { stamp_ns });
                 }
                 OdomLookup::Pose(odom_from_body) => {
-                    let (_, map_from_body) = self.pending.pop_front().expect("front exists");
-                    let outcome =
+                    let (_, map_from_body, weak) = self.pending.pop_front().expect("front exists");
+                    let outcome = if weak {
                         self.correction
-                            .add_fix(stamp_ns, &map_from_body, &odom_from_body);
+                            .add_weak_fix(stamp_ns, &map_from_body, &odom_from_body)
+                    } else {
+                        self.correction
+                            .add_fix(stamp_ns, &map_from_body, &odom_from_body)
+                    };
                     events.push(FixEvent::Applied { stamp_ns, outcome });
                 }
             }
@@ -828,6 +882,7 @@ pub fn fix_outcome_name(outcome: FixOutcome) -> &'static str {
         FixOutcome::Accepted => "accepted",
         FixOutcome::Rejected => "rejected",
         FixOutcome::Reset => "reset",
+        FixOutcome::Unused => "unused",
     }
 }
 
@@ -854,7 +909,7 @@ pub fn map_diagnostics_msg(
         ),
         (None, _) => (
             DiagnosticStatus::WARN,
-            "no map pose yet: waiting for two agreeing fixes".to_owned(),
+            "no map pose yet: waiting for agreeing fixes".to_owned(),
         ),
     };
     DiagnosticArray {
@@ -866,6 +921,7 @@ pub fn map_diagnostics_msg(
             hardware_id: String::new(),
             values: vec![
                 value("localized", fix.map_from_body.is_some().to_string()),
+                value("weak", fix.weak_map_from_body.is_some().to_string()),
                 value("inliers", fix.inliers.to_string()),
                 value("matches", fix.matches.to_string()),
                 value("keypoints", fix.keypoints.to_string()),
@@ -935,6 +991,77 @@ mod tests {
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.7),
             Vector3::new(2.0, -1.0, 0.3),
         )
+    }
+
+    #[test]
+    fn weak_fixes_need_three_agreeing_and_wait_for_their_odometry_too() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        let stamps = (0..5).map(|i| i64::from(i) * 50 * MS).collect::<Vec<_>>();
+        let odom = |i: usize| pose(i as f64 * 0.1, i as f64 * 0.05);
+        let outcomes = |events: Vec<FixEvent>| {
+            events
+                .into_iter()
+                .map(|event| match event {
+                    FixEvent::Applied { outcome, .. } => outcome,
+                    FixEvent::Dropped { .. } => panic!("dropped"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // Weak fixes queued before their odometry, applied as it comes.
+        for (i, stamp) in stamps.iter().enumerate().take(3) {
+            assert!(core
+                .add_weak_fix(*stamp, offset().compose(&odom(i)))
+                .is_empty());
+        }
+        assert_eq!(core.latest_fix_ns(), Some(stamps[2]));
+        let mut seen = Vec::new();
+        for (i, stamp) in stamps.iter().enumerate().take(3) {
+            seen.extend(outcomes(core.add_odom(*stamp, odom(i)).0));
+        }
+        assert_eq!(
+            seen,
+            [
+                FixOutcome::Pending,
+                FixOutcome::Pending,
+                FixOutcome::Initialized
+            ]
+        );
+        assert!(core.is_set());
+        // Once set, a weak fix is not used.
+        core.add_odom(stamps[3], odom(3));
+        assert_eq!(
+            outcomes(core.add_weak_fix(stamps[3], odom(3))),
+            [FixOutcome::Unused]
+        );
+        assert_eq!(MapLocalizeOptions::default().weak_min_inliers, 15);
+    }
+
+    #[test]
+    fn the_gate_widens_with_the_odometry_path_since_the_last_fix() {
+        let mut core = OdomCorrector::new(&MapLocalizeOptions::default());
+        let stamp = |i: usize| i as i64 * 50 * MS;
+        // 5 m out along x and back: 10.8 m of path.
+        let odom = |i: usize| pose(if i <= 50 { i } else { 100 - i } as f64 * 0.1, 0.0);
+        for i in 0..2 {
+            core.add_odom(stamp(i), odom(i));
+            core.add_fix(stamp(i), offset().compose(&odom(i)));
+        }
+        assert!(core.is_set());
+        for i in 2..100 {
+            core.add_odom(stamp(i), odom(i));
+        }
+        // Frame 97 is 0.2 m from the last fix but 10.6 m along the path:
+        // 0.3 m off is within the gate, though its localization arrives
+        // after later odometry.
+        let mut map_from_body = offset().compose(&odom(97));
+        map_from_body.translation.z += 0.3;
+        assert_eq!(
+            core.add_fix(stamp(97), map_from_body),
+            [FixEvent::Applied {
+                stamp_ns: stamp(97),
+                outcome: FixOutcome::Accepted
+            }]
+        );
     }
 
     #[test]
@@ -1153,6 +1280,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("dir");
         let (camera, points) = write_saved_map(&dir, &imu_from_camera);
         let map = load_basalt_map(&dir).expect("loads");
+        let same_map = load_basalt_map(&dir).expect("loads");
         // A map built from equalized images says so; a bad entry is refused.
         let summary_path = dir.join("map.json");
         let raw_summary = fs::read_to_string(&summary_path).expect("map.json");
@@ -1232,6 +1360,20 @@ mod tests {
         let fix = localizer.localize_features(&features, Some(&wrong));
         assert_eq!(fix.matching, Some(Matching::Global));
         assert!(fix.map_from_body.is_some(), "{fix:?}");
+
+        // Above every image's inliers, a localization is only weak, by
+        // projection too when a weak gate is set.
+        let mut options = MapLocalizeOptions {
+            min_inliers: 1000,
+            ..MapLocalizeOptions::default()
+        };
+        options.correction.weak_gate_m = 0.05;
+        let strict = MapLocalizer::new(same_map, 0, &options).expect("camera 0");
+        assert!(strict.weak_projected && !localizer.weak_projected);
+        let fix = strict.localize_features(&features, Some(&prior));
+        assert!(fix.map_from_body.is_none(), "{fix:?}");
+        let weak = fix.weak_map_from_body.expect("weak");
+        assert!((weak.translation - map_from_body.translation).norm() < 1e-3);
 
         // A wrong-sized image is reported, not localized.
         let image = RawU16Image::new(64, 48, vec![0; 64 * 48]).expect("image");

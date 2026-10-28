@@ -423,6 +423,80 @@ first map pose (projection matching on, as by default):
   ([results](openloris_map_localization.md#results)), tries 948 images
   instead of 1,140 over its 38 s, and every 5th from 30 s on.
 
+### Weak fixes: too few inliers, but three agree
+
+A localization needs 30 inliers: below that, wrong poses appear on EuRoC
+([above](#choosing-the-inlier-threshold)). So a flight whose best images
+reach 15-29 inliers never gets a map pose, even when those poses are right.
+OpenLORIS-Scene's office1-7 is one: none of its images reaches 30 against
+maps from another session, yet at `--min-inliers 15` none of its fixes is
+more than 10.3 cm off ([OpenLORIS results](openloris_map_localization.md#results)).
+
+So with `--vio` or `--odometry`, a map-wide localization turned down only
+for having too few inliers, but at least `--weak-min-inliers` (15), is a
+*weak fix*:
+
+- **Before the first map pose,** it counts toward setting the correction,
+  which then needs the last three fixes to agree (within 10 cm and 3°)
+  instead of two. A wrong pose would have to agree with two others.
+- **After that it is not used.** It neither moves the correction nor counts
+  toward replacing it. Projection-matched localizations still need 30
+  inliers.
+
+`visloc_map_localize_node` does the same (`weak_min_inliers`). The
+recorded localizations of all eight queries (every image, map-wide, down to
+12 inliers) were replayed through this rule. It never uses a fix more than
+25 cm off. It brings the first map pose forward on MH_04 (26.8 to 24.3 s,
+73.6% to 76.1% of the frames), MH_05 and V1_02 (0.4 and 0.2 s), and leaves
+the others unchanged. Rerun with the demo (VIO + map, defaults):
+
+| Query → map | Weak fixes | Frames with a map pose | RMSE / max |
+|---|---|---|---|
+| MH_02 → MH_01 | 0 | 99.97% → 99.97% | 2.00 / 5.6 → 2.00 / 5.6 cm |
+| V2_02 → V2_01 | 7, none used | 99.96% → 99.96% | 3.50 / 12.0 → 3.50 / 12.0 cm |
+| V2_03 → V2_01 | 4, none used | 77.8% → 77.7% | 29.6 / 70.4 → **23.7** / 70.4 cm |
+| OpenLORIS office1-7 → map B | 21, 3 used | none → **99.4%** | — → 6.86 / 13.7 cm |
+
+V2_03 improves for another reason: its weak localizations show how far
+the odometry went. The gate widens with the odometry's travel since the last
+accepted fix. That travel used to be measured only between the odometry
+positions of consecutive fixes. After 65 s without a fix, V2_03's travel was
+one straight line, and a correct fix at 88 s (7.5 cm off) fell outside the
+gate. The weak localizations in between sample the path, as rejected fixes
+do, so the gate is wide enough. With three more fixes the error falls to
+23.7 cm.
+
+Now `OdomCorrection::observe_odometry` takes every odometry pose, and the
+gate uses the path through them. The demo and `visloc_map_localize_node`
+feed it every pose. Replayed without weak fixes, that alone takes V2_03 from
+29.1 to 24.6 cm and leaves the other seven queries unchanged. Rerun with weak
+fixes too, every query above is unchanged (V2_03: 23.7 cm).
+
+**Close weak fixes after the first map pose (`--weak-gate-cm`, off by
+default).** With `--weak-gate-cm 5` (`weak_gate_m` on the node), a weak fix
+is also used after the first map pose if it lies within 5 cm and 2° of
+where the correction puts the odometry. Localizations matched around the
+predicted projections can then be weak too. The gate does not widen with
+travel, and weak fixes never replace the correction.
+
+| Query → map | Default | `--weak-gate-cm 5` |
+|---|---|---|
+| MH_02 → MH_01 | 2.00 / 5.6 cm | 2.00 / 5.6 cm |
+| V2_02 → V2_01 | 3.50 / 12.0 cm | 3.61 / 12.1 cm |
+| V2_03 → V2_01 | 23.7 / 70.4 cm | 24.1 / 70.8 cm |
+| OpenLORIS office1-7 → map B | 6.86 / 13.7 cm | **3.35 / 6.8 cm** |
+| OpenLORIS office1-7 → merged map | 7.62 / 15.0 cm | **3.80 / 7.5 cm** |
+| OpenLORIS office1-6 → map A | 3.08 / 4.3 cm | 3.13 / 4.3 cm |
+
+(VIO + map, RMSE / max; frames with a map pose unchanged.) Where full
+fixes come often, as on EuRoC, the weak ones add noise to them; replayed
+on all eight queries (map-wide weak fixes only), the error changes by -0.6
+to +0.6 cm. Where full fixes are rare, as on office1-7 against another
+session's map, they keep the VIO in the map frame between them and halve
+the error. Using weak fixes only while no full fix is in the averaging
+window lost that gain (6.80 and 7.77 cm), so the gate stays an option for
+robots whose images rarely reach `--min-inliers`.
+
 ### On a robot (ROS 2)
 
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization

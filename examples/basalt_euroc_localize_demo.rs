@@ -36,7 +36,14 @@
 //! a map pose. That holds within `--initial-window-s` (30) seconds of the
 //! start or of the latest localization; after a longer stretch without one
 //! the map likely does not cover the place, and every `--localize-every`-th
-//! image is tried until one localizes again. Accepted fixes correct the VIO into the map frame
+//! image is tried until one localizes again. A map-wide localization with
+//! `--weak-min-inliers` (15) or more inliers but fewer than `--min-inliers`
+//! is a weak fix (`OdomCorrection::add_weak_fix`): it helps only to set the
+//! first correction, which then takes three agreeing fixes. With
+//! `--weak-gate-cm N`, a weak fix (also one matched by projection) within N
+//! cm of where the correction puts the odometry pose is used afterwards too,
+//! for robots whose images rarely reach `--min-inliers` against the map.
+//! Accepted fixes correct the VIO into the map frame
 //! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
 //! translation offset, gated against outliers), so every frame gets a
 //! map-frame pose once the correction is set, including the frames the map
@@ -101,7 +108,7 @@ use visloc_basalt::mapper::{
 use visloc_basalt::pyramid::RawU16Image;
 use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
-use visloc_core::types::{Camera, LocalizationResult, QueryImage};
+use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
     BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, OdomCorrection,
     OdomCorrectionConfig,
@@ -151,6 +158,13 @@ struct Args {
     /// ... within this many seconds of the start or of the latest
     /// localization.
     initial_window_s: f64,
+    /// With `--vio` or `--odometry`, a map-wide localization with this many
+    /// inliers, but fewer than `--min-inliers`, is a weak fix: it helps only
+    /// to set the first correction, which then takes three agreeing fixes.
+    weak_min_inliers: usize,
+    /// Once the correction is set, a weak fix (map-wide or by projection)
+    /// this close to the corrected odometry is used too (0: never).
+    weak_gate_m: f64,
     /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
@@ -172,7 +186,8 @@ impl Args {
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
-         [--initial-localize-every N] [--initial-window-s S] \
+         [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
+         [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
          [--dump-inliers FILE]"
             .into()
@@ -186,6 +201,8 @@ impl Args {
         let mut euroc_dir = None;
         let mut projection_radius_px = None::<f64>;
         let mut initial_window_s = None::<f64>;
+        let mut weak_min_inliers = None::<usize>;
+        let mut weak_gate_cm = None::<f64>;
         let mut args = Self {
             map: PathBuf::new(),
             euroc_dir: PathBuf::new(),
@@ -213,6 +230,8 @@ impl Args {
             localize_every: 1,
             initial_localize_every: 1,
             initial_window_s: 30.0,
+            weak_min_inliers: 15,
+            weak_gate_m: 0.0,
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
@@ -282,6 +301,8 @@ impl Args {
                     args.initial_localize_every = number(&option, value()?)?;
                 }
                 "--initial-window-s" => initial_window_s = Some(number(&option, value()?)?),
+                "--weak-min-inliers" => weak_min_inliers = Some(number(&option, value()?)?),
+                "--weak-gate-cm" => weak_gate_cm = Some(number::<f64>(&option, value()?)?),
                 "--projection-radius-px" => {
                     projection_radius_px = Some(number(&option, value()?)?);
                 }
@@ -329,14 +350,26 @@ impl Args {
                 }
                 args.initial_window_s = window;
             }
+            if let Some(weak) = weak_min_inliers {
+                args.weak_min_inliers = weak;
+            }
+            if let Some(gate) = weak_gate_cm {
+                if !(gate >= 0.0 && gate.is_finite()) {
+                    return Err("--weak-gate-cm must be a non-negative number".into());
+                }
+                args.weak_gate_m = gate / 100.0;
+            }
         } else if args.localize_every != 1
             || args.initial_localize_every != 1
             || initial_window_s.is_some()
+            || weak_min_inliers.is_some()
+            || weak_gate_cm.is_some()
             || projection_radius_px.is_some()
         {
             return Err(
-                "--localize-every, --initial-localize-every, --initial-window-s and \
-                 --projection-radius-px need --vio or --odometry"
+                "--localize-every, --initial-localize-every, --initial-window-s, \
+                 --weak-min-inliers, --weak-gate-cm and --projection-radius-px need --vio \
+                 or --odometry"
                     .into(),
             );
         }
@@ -397,6 +430,17 @@ fn accepted(result: &LocalizationResult) -> bool {
     result.success && result.pose.is_some()
 }
 
+fn outcome_name(outcome: FixOutcome) -> &'static str {
+    match outcome {
+        FixOutcome::Pending => "pending",
+        FixOutcome::Initialized => "initialized",
+        FixOutcome::Accepted => "accepted",
+        FixOutcome::Rejected => "rejected",
+        FixOutcome::Reset => "reset",
+        FixOutcome::Unused => "unused",
+    }
+}
+
 fn tum_line(timestamp_ns: i64, world_from_imu: &SE3) -> String {
     let t = world_from_imu.translation;
     let q = world_from_imu.rotation.quaternion();
@@ -424,6 +468,10 @@ struct Attempt {
     latency_ms: f64,
     /// The localized IMU pose in the map frame, when accepted.
     world_from_imu: Option<SE3>,
+    /// The pose of a weak localization: map-wide (or, with `--weak-gate-cm`,
+    /// by projection), with `weak_min_inliers` inliers or more but too few to
+    /// be accepted.
+    weak_world_from_imu: Option<SE3>,
     /// When accepted: each inlier's query keypoint and map landmark.
     inliers: Vec<(Point2<f64>, u64)>,
 }
@@ -443,6 +491,11 @@ struct Localizer {
     projection_radius_px: Option<f64>,
     /// Keyframe retrieval, and how many keyframes' landmarks to match among.
     retrieval: Option<(KeyframeRetrieval, usize)>,
+    /// With `--vio` or `--odometry`: the inliers of a weak localization.
+    weak_min_inliers: Option<usize>,
+    /// With `--weak-gate-cm`: a projection-matched localization can be weak
+    /// too.
+    weak_projected: bool,
     previous: Option<Pose>,
 }
 
@@ -493,6 +546,10 @@ impl Localizer {
             },
             prior_radius_m: args.prior_radius_m,
             projection_radius_px: args.projection_radius_px,
+            weak_projected: args.weak_gate_m > 0.0,
+            weak_min_inliers: (args.vio || args.odometry.is_some())
+                .then_some(args.weak_min_inliers)
+                .filter(|&weak| weak < args.min_inliers),
             retrieval,
             previous: None,
         })
@@ -513,25 +570,26 @@ impl Localizer {
             self.map.local_contrast.as_ref(),
         )?;
         let packed = self.index.pack_query(&query.descriptors);
-        let projected = predicted
-            .zip(self.projection_radius_px)
-            .map(|(map_from_imu, radius)| {
-                let prior = Pose {
-                    world_to_camera: self.camera_from_imu.compose(&map_from_imu.inverse()),
-                };
-                self.pipeline.localize_correspondences(
-                    &self.camera,
-                    self.index.match_projected(
+        let projected_raw =
+            predicted
+                .zip(self.projection_radius_px)
+                .map(|(map_from_imu, radius)| {
+                    let prior = Pose {
+                        world_to_camera: self.camera_from_imu.compose(&map_from_imu.inverse()),
+                    };
+                    self.pipeline.localize_correspondences(
                         &self.camera,
-                        &prior,
-                        &query.keypoints,
-                        &packed,
-                        radius,
-                        self.gates,
-                    ),
-                )
-            })
-            .filter(accepted);
+                        self.index.match_projected(
+                            &self.camera,
+                            &prior,
+                            &query.keypoints,
+                            &packed,
+                            radius,
+                            self.gates,
+                        ),
+                    )
+                });
+        let projected = projected_raw.clone().filter(accepted);
         let prior_result = projected.or_else(|| {
             self.previous
                 .as_ref()
@@ -594,6 +652,27 @@ impl Localizer {
             .previous
             .as_ref()
             .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
+        // Turned down only for too few inliers: a weak localization. With
+        // --weak-gate-cm, the projection search's counts first.
+        let is_weak = |result: &&LocalizationResult| {
+            result.failure_reason == Some(LocalizationFailureReason::QualityGateFailed)
+                && self
+                    .weak_min_inliers
+                    .is_some_and(|weak| result.inlier_count >= weak)
+        };
+        let weak_result = if success {
+            None
+        } else if self.weak_projected {
+            projected_raw
+                .as_ref()
+                .filter(is_weak)
+                .or(Some(&result).filter(is_weak))
+        } else {
+            Some(&result).filter(is_weak)
+        };
+        let weak_world_from_imu = weak_result
+            .and_then(|result| result.pose.as_ref())
+            .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
         let inliers = if world_from_imu.is_some() {
             result
                 .inlier_query_indices
@@ -612,6 +691,7 @@ impl Localizer {
             matching,
             latency_ms,
             world_from_imu,
+            weak_world_from_imu,
         })
     }
 }
@@ -737,7 +817,10 @@ impl CorrectedRun {
     fn new(args: &Args) -> Self {
         let header = "# timestamp tx ty tz qx qy qz qw\n";
         Self {
-            correction: OdomCorrection::new(OdomCorrectionConfig::default()),
+            correction: OdomCorrection::new(OdomCorrectionConfig {
+                weak_gate_m: args.weak_gate_m,
+                ..OdomCorrectionConfig::default()
+            }),
             localize_every: args.localize_every,
             initial_every: args.initial_localize_every,
             initial_window_ns: (args.initial_window_s * 1e9) as i64,
@@ -796,6 +879,8 @@ impl CorrectedRun {
         self.first_ns.get_or_insert(timestamp_ns);
         self.odometry_tum
             .push_str(&tum_line(timestamp_ns, odom_from_imu));
+        self.correction
+            .observe_odometry(timestamp_ns, odom_from_imu);
         // The correction as it stands before this image's fix predicts its pose,
         // while its newest fix is recent: after a long gap, a drifted
         // prediction can steer the projection search to a wrong pose that
@@ -812,24 +897,30 @@ impl CorrectedRun {
             let attempt = localizer.localize(image, predicted.as_ref())?;
             self.attempts += 1;
             self.latencies.push(attempt.latency_ms);
-            let outcome = match &attempt.world_from_imu {
-                Some(map_from_imu) => {
+            let outcome = match (&attempt.world_from_imu, &attempt.weak_world_from_imu) {
+                (Some(map_from_imu), _) => {
                     self.localized += 1;
                     self.last_localized_ns = Some(timestamp_ns);
                     self.fixes_tum
                         .push_str(&tum_line(timestamp_ns, map_from_imu));
+                    outcome_name(
+                        self.correction
+                            .add_fix(timestamp_ns, map_from_imu, odom_from_imu),
+                    )
+                }
+                (None, Some(map_from_imu)) => {
+                    self.last_localized_ns = Some(timestamp_ns);
                     match self
                         .correction
-                        .add_fix(timestamp_ns, map_from_imu, odom_from_imu)
+                        .add_weak_fix(timestamp_ns, map_from_imu, odom_from_imu)
                     {
-                        FixOutcome::Pending => "pending",
-                        FixOutcome::Initialized => "initialized",
-                        FixOutcome::Accepted => "accepted",
-                        FixOutcome::Rejected => "rejected",
-                        FixOutcome::Reset => "reset",
+                        FixOutcome::Pending => "weak-pending",
+                        FixOutcome::Initialized => "weak-initialized",
+                        FixOutcome::Accepted => "weak-accepted",
+                        _ => "weak-unused",
                     }
                 }
-                None => "-",
+                (None, None) => "-",
             };
             *self.outcomes.entry(outcome).or_default() += 1;
             csv_row(&mut self.csv, timestamp_ns, &attempt, outcome);
@@ -1094,6 +1185,21 @@ mod tests {
         assert!(with(&["--initial-localize-every", "5"]).is_err());
         assert!(with(&[&vio[..], &["--initial-localize-every", "0"]].concat()).is_err());
         assert!(with(&["--initial-window-s", "30"]).is_err());
+        assert!(with(&["--weak-min-inliers", "15"]).is_err());
+        assert!(with(&["--weak-gate-cm", "5"]).is_err());
+        assert!(with(&[&vio[..], &["--weak-gate-cm", "-1"]].concat()).is_err());
+        assert_eq!(
+            with(&[&vio[..], &["--weak-gate-cm", "5"]].concat())
+                .expect("parses")
+                .weak_gate_m,
+            0.05
+        );
+        assert_eq!(
+            with(&[&vio[..], &["--weak-min-inliers", "20"]].concat())
+                .expect("parses")
+                .weak_min_inliers,
+            20
+        );
         assert!(with(&[&vio[..], &["--initial-window-s", "-1"]].concat()).is_err());
         assert!(with(&[&vio[..], &["--initial-window-s", "inf"]].concat()).is_err());
         let args = with(&[&vio[..], &["--localize-every", "5"]].concat()).expect("parses");
@@ -1103,6 +1209,8 @@ mod tests {
         let args = with(&[&vio[..], &["--initial-localize-every", "5"]].concat()).expect("parses");
         assert_eq!(args.initial_localize_every, 5);
         assert_eq!(args.initial_window_s, 30.0);
+        assert_eq!(args.weak_min_inliers, 15);
+        assert_eq!(args.weak_gate_m, 0.0);
         let args = with(&[&vio[..], &["--initial-window-s", "0"]].concat()).expect("parses");
         assert_eq!(args.initial_window_s, 0.0);
         assert_eq!(args.config, Some(PathBuf::from("k.json")));
