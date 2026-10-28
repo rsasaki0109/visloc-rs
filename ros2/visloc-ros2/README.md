@@ -408,6 +408,8 @@ images to discovery. To reproduce:
 ```sh
 source /opt/ros/jazzy/setup.bash
 python3 tools/euroc_to_rosbag2.py /data/MH_02_easy mh02_bag     # needs Pillow
+# a robot's wheel odometry too (TUM, seconds) on /wheel/odom, odom -> base_link:
+#   python3 tools/euroc_to_rosbag2.py data/office1-7 o17_bag --odometry data/office1-7/odom.tum
 visloc_vio_node --calibration .../euroc_ds_calib.json --config .../euroc_config.json \
   --ros-args -r left/image_raw:=/cam0/image_raw -r right/image_raw:=/cam1/image_raw -r imu:=/imu0 &
 visloc_map_localize_node --map runs/mh01_map --ros-args -r image:=/cam0/image_raw &
@@ -506,12 +508,25 @@ publishers. In the VIO run, `tf2_echo map imu0` resolved
 (`base_link`'s ground-truth path with a 2% scale error and a yaw error
 growing by 0.5° per metre), because no wheeled-robot data with a
 stereo-inertial map was at hand. Real wheel odometry on an uneven floor
-also tilts, which this does not model. Offline, `basalt_euroc_localize_demo
---odometry` has since corrected a real robot's wheel odometry
-([OpenLORIS-Scene](../../docs/openloris_map_localization.md)): 4.4–6.2 cm,
-once `base_link` is placed at the point the wheel odometry reports
-(`scripts/calibrate_wheel_offset.py` fits it from a VIO run). Placed 5–8 cm
-away, as in the dataset, every turn in place looked like drift: 7–12 cm.
+also tilts, which this does not model.
+
+**A real robot: OpenLORIS-Scene.** Its sessions were played from rosbag2s
+with the robot's own wheel odometry (`tools/euroc_to_rosbag2.py --odometry`)
+into the nodes at real time, against maps of other sessions
+([details](../../docs/openloris_map_localization.md#on-ros-2)):
+
+| odometry | office1-6 → map A | office1-7 → map B |
+|---|---|---|
+| `visloc_vio_node`, `base_frame:=base_link` | 1.51 / 2.7 cm | 2.22 / 5.0 cm |
+| wheel odometry on `/wheel/odom`, 20 Hz | 2.47 / 4.4 cm | 3.25 / 8.8 cm |
+
+(RMSE / max of `map_pose`, `extrinsics:=tf`, `weak_gate_m:=0.05`.) Both
+reproduce the offline demo within 0.4 cm. The wheel odometry needs
+`base_link` where it reports it: `scripts/calibrate_wheel_offset.py` fits
+that point and the level of the frame from a VIO run. As shipped, the
+dataset's `base_link` is 5–8 cm from that point and leans 1.9°, with the
+camera 0.9 m above it; office1-7's wheel odometry was 4.67 cm with the
+point corrected but not the lean.
 
 ## Tests
 
@@ -570,8 +585,11 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
 * `visloc_map_localize_node` needs gravity-aligned odometry (z up), as a
   VIO provides. Planar wheel odometry qualifies on level floors only; on a
   ramp its missing pitch and height change are errors the correction can
-  only remove at fixes. It has been tested with simulated, not real, wheel
-  odometry ([above](#on-a-ground-robot)). Camera extrinsics come from the
+  only remove at fixes. It has been tested with simulated wheel odometry and
+  with a real robot's on a level office floor ([above](#on-a-ground-robot)).
+  In one of six such runs, `visloc_vio_node` never received a
+  transient-local `/tf_static` transform from an rclcpp publisher and
+  published nothing; a restart received it. Camera extrinsics come from the
   map or from `/tf_static`, which is read as static: a camera that moves
   on the robot (pan-tilt) is not supported. Its map is the stereo-inertial SLAM's (ORB),
   not a COLMAP/SIFT model. The correction is a filtered yaw + translation

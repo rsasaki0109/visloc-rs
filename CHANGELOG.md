@@ -84,6 +84,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **The ROS 2 nodes on a real robot's wheel odometry.**
+  `tools/euroc_to_rosbag2.py --odometry FILE.tum` adds a robot's wheel
+  odometry to the bag (`nav_msgs/Odometry` on `/wheel/odom`, `odom ->
+  base_link`). On OpenLORIS-Scene, played at real time into
+  `visloc_map_localize_node` (`extrinsics:=tf`, `weak_gate_m:=0.05`)
+  against the scale-corrected maps of other sessions, it gives 2.47 and 3.25
+  cm RMSE with the wheel odometry and 1.51 and 2.22 cm with
+  `visloc_vio_node`, within 0.4 cm of the offline demo. In one of six runs
+  the VIO node never received the transient-local `/tf_static` from an
+  rclcpp publisher; a restart received it.
+- **`calibrate_wheel_offset.py` levels the body frame.** Planar wheel
+  odometry keeps its body level, so a tilt in the extrinsic moves the IMU
+  sideways, by 1.6 cm per degree with OpenLORIS-Scene's camera 0.9 m above
+  `base_link`. The script now turns the body frame by the smallest rotation
+  that makes the VIO's mean up its z axis (`--keep-tilt` skips it): 1.9° on
+  OpenLORIS-Scene. Wheel odometry + map falls from 4.4–6.2 to 3.5–5.1 cm
+  RMSE on the maps as shipped (five of six runs better), and the wheel
+  odometry alone to 0.5–4.3 cm. It also normalizes the quaternion it reads.
 - **`scripts/scale_stereo_baseline.py`: the stereo VIO's scale from the
   wheel odometry.** A stereo VIO takes its scale mostly from its camera
   baseline. On OpenLORIS-Scene the T265 calibration shipped with the

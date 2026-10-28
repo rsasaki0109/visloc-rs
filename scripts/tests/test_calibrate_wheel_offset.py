@@ -78,6 +78,21 @@ class CalibrateWheelOffsetTests(unittest.TestCase):
         np.testing.assert_allclose(r_ib.T @ (t_ib - corrected[1]), [*offset, 0.0], atol=1e-4)
         np.testing.assert_allclose(again["offset_m"], [0.0, 0.0], atol=1e-4)
 
+    def test_levels_a_tilted_body_frame(self):
+        r_true, t_ib = parse_pose(IMU_FROM_BODY)
+        c, s = np.cos(np.radians(2.0)), np.sin(np.radians(2.0))
+        tilt = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+        with tempfile.TemporaryDirectory() as tmp:
+            vio, odometry = write_run(Path(tmp), offset=np.zeros(2))
+            result = calibrate(vio, odometry, (r_true @ tilt, t_ib))
+            kept = calibrate(vio, odometry, (r_true @ tilt, t_ib), level=False)
+        self.assertAlmostEqual(result["tilt_deg"], 2.0, places=6)
+        corrected = result["imu_from_body"][0]
+        # The body's z axis is gravity's again, without a turn about it.
+        np.testing.assert_allclose(corrected @ [0, 0, 1], r_true @ [0, 0, 1], atol=1e-9)
+        np.testing.assert_allclose(corrected, r_true, atol=1e-9)
+        np.testing.assert_allclose(kept["imu_from_body"][0], r_true @ tilt)
+
     def test_main_prints_the_corrected_extrinsic(self):
         with tempfile.TemporaryDirectory() as tmp:
             vio, odometry = write_run(Path(tmp), offset=np.array([0.013, 0.062]))
