@@ -309,7 +309,7 @@ VIO + map, the same queries (frames with a map pose, RMSE / max):
   gets 116 of them next to 22 full fixes. Keeping the correction close
   keeps the predicted projections close, so more images reach 30 inliers
   too (office1-6: 120 full fixes instead of 84). On EuRoC it does not
-  help (changes of -0.6 to +0.6 cm), so it stays off by default
+  help (changes of -0.6 to +0.5 cm), so it stays off by default
   ([numbers](basalt_map_localization.md#weak-fixes-too-few-inliers-but-three-agree)).
 - **The wheel odometry no longer gains on the VIO.** On the corrected maps
   it gives 1.96, 5.30 and 4.89 cm (1.70, 2.38 and 3.66 cm with the weak

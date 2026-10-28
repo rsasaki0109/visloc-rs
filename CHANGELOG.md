@@ -121,8 +121,9 @@ All notable changes to `visloc-rs` will be documented here.
   matched around the predicted projections can then be weak too. On
   OpenLORIS-Scene office1-7, whose images rarely reach 30 inliers against
   another session's map, VIO + map falls from 6.86 to 3.35 cm (map B) and
-  from 7.62 to 3.80 cm (merged map). On EuRoC, where full fixes are
-  frequent, it changes the error by -0.6 to +0.6 cm, so it stays off.
+  from 7.62 to 3.80 cm (merged map). On the eight EuRoC queries, where
+  full fixes are frequent, it changes the error by -0.6 to +0.5 cm, so it
+  stays off.
 - **`scripts/calibrate_wheel_offset.py`: where the wheel odometry is
   measured.** `--odometry` and the node's `extrinsics tf` place the camera
   relative to the odometry's body. If that body is not the point the wheel
@@ -464,8 +465,10 @@ All notable changes to `visloc-rs` will be documented here.
   whose images never reach 30 inliers against another session's map, gets
   a map pose for 99.4% of its frames by default (6.86 cm RMSE). The
   daylight office1-4 gets one against an equalized night map (33.4%,
-  2.62 cm), where before it needed `--min-inliers 15`. On EuRoC, MH_02 and
-  V2_02 are unchanged, and V2_03 improves from 29.6 to 23.7 cm.
+  2.62 cm), where before it needed `--min-inliers 15`. Rerun on all eight
+  EuRoC queries, MH_04 gets its first map pose 2.6 s sooner (76.1% of the
+  frames instead of 73.6%), V2_03 improves from 29.6 to 23.7 cm, and the
+  other six change by at most 0.1 cm.
 
 - **`OdomCorrection` measures travel along the odometry's path.** The gate
   widens with the odometry's travel since the last accepted fix, which was
