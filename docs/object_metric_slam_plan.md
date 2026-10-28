@@ -6,11 +6,13 @@
   (`visloc-objects`).
 - Phase 2's moving-object filter is in `visloc-basalt`. It works on synthetic
   data and showed no gain on a LaMAria walk.
-- Phase 3 has static objects: triangulation and upright boxes in
-  `visloc_objects::metric`, and the `objects_metric_offline` example.
+- Phase 3 has static objects (triangulation and upright boxes,
+  `visloc_objects::metric`) and objects on the ground, moving or not
+  (ground contact, `visloc_objects::ground`). The `objects_metric_offline`
+  example runs both on a VIO run.
 
-See [`object_tracking.md`](object_tracking.md). Moving objects (ground
-contact) and the later phases are not implemented yet.
+See [`object_tracking.md`](object_tracking.md). The world-frame EKF and the
+per-frame output of Phase 3, and the later phases, are not implemented yet.
 
 ## Goal
 
@@ -163,7 +165,20 @@ scale, so this number is the ceiling.
   - On TUM-VI room1, a whiteboard comes out at 2.30 × 1.77 m with mono +
     IMU, 2.21 × 1.76 m with stereo + IMU (an independent scale), and
     0.60 × 0.80 without the IMU (no scale).
-  - Next: moving objects (ground contact), and per-frame output.
+- **Done: objects on the ground (moving or not).**
+  - `visloc_objects::ground` finds the ground from the scene points, puts
+    the bottom edge of each box on it (lowest in the world, so sideways
+    cameras work), moves the ground to the level under the object (steps,
+    kerbs), and fits the speed to the foot's path. The scale source is
+    `ground_contact`.
+  - On LaMAria R_08_hard with mono + IMU, 24 people come out at a median
+    1.70 m (IQR 1.59–1.82) walking at 1.23 m/s, 34 cars at 1.46 m tall,
+    with moving ones at 6.6 m/s, and 15 parked bicycles at 1.09 m. Stereo +
+    IMU agrees to 7 % (people), 3 % (cars) and 2 % (bicycles) in height.
+    3 people are flagged (5 with stereo), most at the foot of stairs or a
+    ramp.
+  - Next: the world-frame EKF (the speed is a line fit for now), and
+    per-frame output.
 
 ### Phase 4: metric accuracy evaluation
 

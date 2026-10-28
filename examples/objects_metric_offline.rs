@@ -18,22 +18,34 @@
 //! triangulated with the trajectory's poses, and an upright box is fitted
 //! (`visloc_objects::metric`). Objects of the same class whose boxes lie
 //! within 0.5 m of each other are merged and fitted again: the 2D tracker
-//! gives an object a new ID each time it comes back into view. Only static objects come out right: a moving
-//! object's rays do not meet, and its tracks are rejected. The trajectory is
+//! gives an object a new ID each time it comes back into view. Only static
+//! objects triangulate: a moving object's rays do not meet.
+//!
+//! Objects of a class that moves (people, vehicles, animals) are also placed
+//! on the ground frame by frame (`visloc_objects::ground`): the ground's
+//! height comes from all the triangulated feature tracks seen within 10 s of
+//! the object, then from those right under its foot (stairs and kerbs), and
+//! the middle of its box's bottom edge from the gravity direction, so a
+//! sideways camera works. That gives each one a metric
+//! height, width, distance and speed, moving or not. Boxes cut by the image
+//! border or scored below 0.5 are skipped. The trajectory is
 //! the IMU pose (`T_w_i`), as `basalt_euroc_vio_demo` writes it; for
 //! `--mono-vo` runs, whose trajectory is the camera pose, pass
-//! `--trajectory-is-camera`. Writes `objects.csv` next to the boxes unless
-//! `--out` says otherwise.
+//! `--trajectory-is-camera`. Writes `objects.csv` (static) and
+//! `ground_objects.csv` (on the ground) next to the boxes unless `--out`
+//! names the first.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use nalgebra::{Isometry3, Point2, Quaternion, Translation3, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Point2, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 use visloc_rs::objects::{
-    estimate_static_object, plausible_size, BearingObservation, BoxFitParams, ObjectEstimate,
-    TriangulationParams, COCO_CLASSES,
+    estimate_ground_height, estimate_static_object, place_on_local_ground, plausible_height,
+    plausible_size, summarize_ground_track, triangulate, BBox, BearingObservation, BoxFitParams,
+    BoxRays, GroundParams, GroundView, ObjectEstimate, TriangulationParams, COCO_CLASSES,
+    MOVABLE_COCO_CLASSES,
 };
 
 struct Args {
@@ -48,6 +60,7 @@ struct Args {
 struct ObjectBox {
     object_id: u64,
     class_id: u32,
+    score: f64,
     x_min: f64,
     y_min: f64,
     x_max: f64,
@@ -65,6 +78,16 @@ const MERGE_DISTANCE: f64 = 0.5;
 /// Triangulated points a merged object needs to be reported; with fewer the
 /// box is mostly noise. Fragments only need the library default to be merged.
 const MIN_POINTS: usize = 12;
+
+/// Feature points seen within this long of an object on the ground count
+/// for its ground height and the ground under it.
+const GROUND_WINDOW_NS: i64 = 10_000_000_000;
+
+/// Boxes placed on the ground: at least this score, at least this far from
+/// the image border (a cut box has no foot), over at least this long.
+const MIN_GROUND_SCORE: f64 = 0.5;
+const BORDER_PX: f64 = 2.0;
+const MIN_GROUND_SECONDS: f64 = 1.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args()?;
@@ -122,37 +145,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // Bearing observations per object and track, from every camera.
-    let mut per_object: BTreeMap<u64, BTreeMap<u64, Vec<BearingObservation>>> = BTreeMap::new();
+    let camera_pose = |timestamp_ns: i64, camera_id: u16| -> Option<Isometry3<f64>> {
+        let pose = pose_at(&poses, timestamp_ns)?;
+        if args.trajectory_is_camera {
+            return Some(*pose);
+        }
+        let t_i_c = calibration.camera_to_imu(camera_id)?;
+        Some(pose * Isometry3::from_parts(Translation3::from(t_i_c.translation), t_i_c.rotation))
+    };
+
+    // Bearing observations per track, from every camera, and the time each
+    // track was seen.
+    let mut per_track: BTreeMap<u64, (Vec<BearingObservation>, Vec<i64>)> = BTreeMap::new();
     for &(timestamp_ns, camera_id, track_id, pixel) in &observations {
-        let Some(&object_id) = owner.get(&track_id) else {
+        let (Some(camera_to_world), Some(camera)) = (
+            camera_pose(timestamp_ns, camera_id),
+            calibration.camera(camera_id),
+        ) else {
             continue;
-        };
-        let (Some(pose), Some(camera)) =
-            (pose_at(&poses, timestamp_ns), calibration.camera(camera_id))
-        else {
-            continue;
-        };
-        let camera_to_world = if args.trajectory_is_camera {
-            *pose
-        } else {
-            let t_i_c = calibration
-                .camera_to_imu(camera_id)
-                .ok_or("camera without T_i_c")?;
-            pose * Isometry3::from_parts(Translation3::from(t_i_c.translation), t_i_c.rotation)
         };
         let Some(bearing) = camera.unproject(&pixel) else {
             continue;
         };
-        per_object
-            .entry(object_id)
-            .or_default()
-            .entry(track_id)
-            .or_default()
-            .push(BearingObservation {
-                camera_to_world,
-                bearing,
-            });
+        let (bearings, times) = per_track.entry(track_id).or_default();
+        bearings.push(BearingObservation {
+            camera_to_world,
+            bearing,
+        });
+        times.push(timestamp_ns);
+    }
+    let mut per_object: BTreeMap<u64, BTreeMap<u64, Vec<BearingObservation>>> = BTreeMap::new();
+    for (track_id, (bearings, _)) in &per_track {
+        if let Some(&object_id) = owner.get(track_id) {
+            per_object
+                .entry(object_id)
+                .or_default()
+                .insert(*track_id, bearings.clone());
+        }
     }
 
     // First estimate each 2D track's object, then merge objects of the same
@@ -258,10 +287,154 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let out = args
         .out
+        .clone()
         .unwrap_or_else(|| args.boxes.with_file_name("objects.csv"));
     fs::write(&out, csv)?;
     println!("objects: {}", out.display());
+
+    // The scene: every track that triangulates, at the median time it was seen.
+    let scene: Vec<(i64, Point3<f64>)> = per_track
+        .values()
+        .filter_map(|(bearings, times)| {
+            let point = triangulate(bearings, &TriangulationParams::default())?;
+            let mut times = times.clone();
+            times.sort_unstable();
+            Some((times[times.len() / 2], point))
+        })
+        .collect();
+    let out = out.with_file_name("ground_objects.csv");
+    let csv = ground_objects(&boxes, &scene, &poses, &calibration, &camera_pose)?;
+    fs::write(&out, csv)?;
+    println!("objects on the ground: {}", out.display());
     Ok(())
+}
+
+/// Place each movable object's camera-0 boxes on the ground and summarize
+/// them; returns the CSV.
+fn ground_objects(
+    boxes: &HashMap<i64, Vec<ObjectBox>>,
+    scene: &[(i64, Point3<f64>)],
+    poses: &[(i64, Isometry3<f64>)],
+    calibration: &visloc_basalt::BasaltCalibration,
+    camera_pose: &dyn Fn(i64, u16) -> Option<Isometry3<f64>>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let camera = calibration.camera(0).ok_or("no camera 0")?;
+    let (width, height) = calibration.resolutions[0];
+    let (width, height) = (f64::from(width), f64::from(height));
+    let mut per_object: BTreeMap<u64, (u32, Vec<(i64, BBox)>)> = BTreeMap::new();
+    for (&timestamp_ns, frame) in boxes {
+        for b in frame {
+            let inside = b.x_min > BORDER_PX
+                && b.y_min > BORDER_PX
+                && b.x_max < width - BORDER_PX
+                && b.y_max < height - BORDER_PX;
+            if MOVABLE_COCO_CLASSES.contains(&b.class_id) && b.score >= MIN_GROUND_SCORE && inside {
+                let entry = per_object
+                    .entry(b.object_id)
+                    .or_insert((b.class_id, Vec::new()));
+                entry
+                    .1
+                    .push((timestamp_ns, BBox::new(b.x_min, b.y_min, b.x_max, b.y_max)));
+            }
+        }
+    }
+    let mut csv = String::from(
+        "object_id,class_id,class,frames,seconds,camera_height,ground_shift,x,y,z,height,width,distance,speed,scale_source,plausible\n",
+    );
+    println!(
+        "\n{:>6} {:<12} {:>6} {:>7}  {:>8}  {:>6}  {:>13}  {:>8}  {:>7}  plausible",
+        "object",
+        "class",
+        "frames",
+        "seconds",
+        "camera h",
+        "shift",
+        "size h x w (m)",
+        "distance",
+        "speed"
+    );
+    for (object_id, (class_id, mut frames)) in per_object {
+        frames.sort_by_key(|(t, _)| *t);
+        let (t0, t1) = (frames[0].0, frames[frames.len() - 1].0);
+        let window = (t0 - GROUND_WINDOW_NS)..=(t1 + GROUND_WINDOW_NS);
+        let points: Vec<Point3<f64>> = scene
+            .iter()
+            .filter(|(t, _)| window.contains(t))
+            .map(|(_, p)| *p)
+            .collect();
+        let lowest_camera = poses
+            .iter()
+            .filter(|(t, _)| (t0..=t1).contains(t))
+            .filter_map(|(t, _)| camera_pose(*t, 0))
+            .map(|pose| pose.translation.vector.z)
+            .fold(f64::INFINITY, f64::min);
+        let params = GroundParams::default();
+        let Some(scene_ground) = estimate_ground_height(&points, lowest_camera, &params) else {
+            continue;
+        };
+        let views: Vec<GroundView> = frames
+            .iter()
+            .filter_map(|(t, bbox)| {
+                let pose = camera_pose(*t, 0)?;
+                let rays = BoxRays::from_box(bbox, &pose.rotation, |x, y| {
+                    camera.unproject(&Point2::new(x, y))
+                })?;
+                Some(GroundView {
+                    timestamp_ns: *t,
+                    camera_center: Point3::from(pose.translation.vector),
+                    rays,
+                })
+            })
+            .collect();
+        let Some((ground, placed)) = place_on_local_ground(&views, &points, scene_ground, &params)
+        else {
+            continue;
+        };
+        let mut camera_heights: Vec<f64> =
+            views.iter().map(|v| v.camera_center.z - ground).collect();
+        let Some(track) = summarize_ground_track(object_id, class_id, &placed, MIN_GROUND_SECONDS)
+        else {
+            continue;
+        };
+        // Where it stands: the median of its contact points.
+        let median = |axis: usize| {
+            let mut v: Vec<f64> = track.path.iter().map(|(_, p)| p[axis]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let position = Point3::new(median(0), median(1), median(2));
+        camera_heights.sort_by(f64::total_cmp);
+        let camera_height = camera_heights[camera_heights.len() / 2];
+        let seconds = (t1 - t0) as f64 * 1e-9;
+        let shift = ground - scene_ground;
+        let plausible = match plausible_height(class_id) {
+            Some((low, high)) if (low..=high).contains(&track.height) => "yes",
+            Some(_) => "NO",
+            None => "-",
+        };
+        let class = COCO_CLASSES.get(class_id as usize).copied().unwrap_or("?");
+        println!(
+            "{object_id:>6} {class:<12} {:>6} {seconds:>7.1}  {camera_height:>8.2}  {shift:>+6.2}  {:>5.2} x {:>5.2}  {:>8.1}  {:>7.2}  {plausible}",
+            placed.len(),
+            track.height,
+            track.width,
+            track.distance,
+            track.speed
+        );
+        writeln!(
+            csv,
+            "{object_id},{class_id},{class},{},{seconds:.2},{camera_height:.3},{shift:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3},ground_contact,{plausible}",
+            placed.len(),
+            position.x,
+            position.y,
+            position.z,
+            track.height,
+            track.width,
+            track.distance,
+            track.speed
+        )?;
+    }
+    Ok(csv)
 }
 
 /// The pose nearest to `timestamp_ns`, if one is within 1 ms. The demo
@@ -331,6 +504,7 @@ fn read_boxes(path: &PathBuf) -> Result<HashMap<i64, Vec<ObjectBox>>, String> {
             .push(ObjectBox {
                 object_id: f[1].parse().map_err(|_| bad())?,
                 class_id: f[2].parse().map_err(|_| bad())?,
+                score: n(3)?,
                 x_min: n(4)?,
                 y_min: n(5)?,
                 x_max: n(6)?,
