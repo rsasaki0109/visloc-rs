@@ -212,7 +212,10 @@ What these show:
   2.9% without. The same images localize in 6.7% against the one session
   that saw them.
 - **It does not reach images whose views the map lacks.** MH_04's first
-  fix still comes 27 s in. The option stays off by default.
+  fix still comes 27 s in.
+- **It is most useful on a map grown over many sessions.** It cuts the
+  map-wide search there by 40% ([below](#lifelong-use-appending-each-session)).
+  It stays off by default.
 
 ## Anchoring the VIO to the map
 
@@ -512,6 +515,47 @@ placement at the same keyframes: 3.7-9.2 cm RMSE with outliers up to 30 cm,
 against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
 better than the constraints a deformation would use. Where they do not
 (MH_04's far end), there is nothing to fit.
+
+### Lifelong use: appending each session
+
+A robot that maps each session (the SLAM's `--save-map`) and merges it into
+its map grows the map one session at a time. The merged map stays in the
+first session's frame, so poses from earlier sessions stay valid. On the
+Machine Hall, in flight order:
+
+| Map | Registration of the added session | Keyframe images / landmarks |
+|---|---|---|
+| MH_01 | — | 1,132 / 15,483 |
+| + MH_02 | 860 of 974 keyframes localize, 2.9 cm residual | 2,106 / 27,646 |
+| + MH_03 | 441 of 874, 3.3 cm | 2,980 / 35,037 |
+| + MH_04 | 67 of 706, 6.7 cm | 3,686 / 41,157 |
+
+Each later flight, localized against the map as it stood (VIO + map,
+every 5th image, the defaults):
+
+| Query → map | Images that localize alone | VIO + map: frames, RMSE / max |
+|---|---|---|
+| MH_04 → MH_01 | 4.6% | 73.2%, 22.5 / 44.1 cm |
+| MH_04 → MH_01..03 | 7.7% | 73.2%, 22.2 / 45.1 cm |
+| MH_05 → MH_01 | 7.8% | 77.1%, 15.9 / 27.7 cm |
+| MH_05 → MH_01..03 | 10.7% | 77.6%, 16.0 / 28.0 cm |
+| MH_05 → MH_01..04 | **43.2%** | **99.8%, 11.5 / 28.4 cm** |
+
+What these show:
+
+- **A session helps only where it went.** MH_02 and MH_03 fly where MH_01
+  already did, and add little for MH_04 and MH_05. MH_04 explores the part
+  of the hall MH_05 needs: with it, MH_05 is anchored for the whole flight.
+- **The map grows with every session.** Landmark fusion merges 2-12% of an
+  added session's landmarks into existing ones, so the map still grows by
+  6,000-12,000 landmarks a session. The map-wide search slows with it:
+  MH_05's median time per image goes from 61 ms against MH_01 to 125 ms
+  against the four-session map (every 5th image, one run at a time).
+- **Keyframe retrieval pays for itself on the larger map**
+  ([above](#keyframe-retrieval-before-the-map-wide-search)). With
+  `--retrieval-keyframes 10 --retrieval-bits 16` the median falls to
+  74 ms, while 43.7% of the images localize instead of 43.3%. Against
+  MH_01 alone, where most images match neither way, it costs about 6 ms.
 
 ## Reproduce
 

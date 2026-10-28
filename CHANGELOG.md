@@ -51,7 +51,10 @@ All notable changes to `visloc-rs` will be documented here.
   ones. `basalt_euroc_localize_demo --retrieval-keyframes N` tries that
   before the whole map. On the EuRoC queries it localizes 0.1–0.9 points
   more images. On a merged OpenLORIS map it localizes 4.6% of office1-6's
-  images instead of 2.9%. Off by default.
+  images instead of 2.9%. On a Machine Hall map grown session by session
+  to 41,000 landmarks (`docs/basalt_map_localization.md`, "Lifelong use"),
+  it cuts MH_05's median time per image from 125 to 74 ms. Off by
+  default.
 
 - **Map-based localization on a real wheeled robot (OpenLORIS-Scene).**
   `scripts/openloris_to_euroc.py` converts an OpenLORIS-Scene sequence's
