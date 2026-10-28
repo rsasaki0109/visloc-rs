@@ -193,6 +193,17 @@ run's, on its own model, against the one on the dataset's model.
   more runs to average.
 - **Indoors.** The mall is off by 12%. Its fitted gravity, 9.57 m/s², marks
   a weak fit.
+- **Face size.** These runs used 640 px faces to fit a 4-core CPU, and in
+  the mall that is what fails. Its first 100 frames at the full 0.33 s
+  spacing compare as follows:
+
+  | Faces | IMU fit | Rotation residual | Scale vs the dataset's |
+  | --- | --- | ---: | ---: |
+  | 640 px | fails its gravity check | – | – |
+  | 1024 px | passes | 0.023° (the dataset's model: 0.023°) | +5.5% over those 33 s |
+
+  Keep `--max-size` at its default, 1600, or at least 1024, for metric
+  output.
 - **Warning signs.** Distrust the scale when |g| is more than about
   0.2 m/s² from 9.81, or the rotation residual is more than a few tenths of
   a degree (the park, where 13 faces did not register).
