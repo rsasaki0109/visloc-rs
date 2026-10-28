@@ -119,6 +119,7 @@ Feature support is defined in [feature_matrix.md](feature_matrix.md).
 - `visloc-mapping`: local mapping skeleton and staged map updates.
 - `visloc-slam`: minimal online orchestration over tracking and local mapping.
 - `visloc-fusion`: loose-coupling sensor priors that can guide localization/tracking without forcing a GNSS/INS backend.
+- `visloc-objects`: image-space multi-object tracking (ByteTrack) and CLEAR MOT scoring, the first stage of metric object estimation.
 
 Pipeline crates should compose lower-level crates. They should not move algorithmic primitives out of `visloc-vision` or map semantics out of `visloc-core`.
 
