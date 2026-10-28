@@ -79,6 +79,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Local contrast equalization for maps that must localize under other
+  lighting.** `visloc_basalt::contrast::LocalContrast` equalizes an
+  image's local contrast (contrast-limited adaptive histogram equalization
+  over 8 × 8 tiles; black pixels stay black).
+  `basalt_euroc_online_slam_demo --equalize-local-contrast` applies it to
+  each keyframe image before ORB extraction (the VIO tracks the raw
+  images), `map.json` records it as `feature_local_contrast`, and
+  `basalt_euroc_localize_demo` and `visloc_map_localize_node` apply it to
+  every query image of such a map; `basalt_map_merge` refuses to merge an
+  equalized map with a raw one. On OpenLORIS-Scene the daylight session
+  office1-4, which no night map localized before, gets a map pose for
+  33.6% of its frames at 2.46 cm RMSE (at `--min-inliers 15`; its best
+  image has 23 inliers); the dawn session still gets none. On EuRoC it
+  changes little (MH_02 and V2_02 within 0.1 cm) except V2_03 (29.6 to
+  39.8 cm), so it stays off by default. Results in
+  `docs/openloris_map_localization.md`.
+
 - **Keyframe retrieval for the map-wide search.**
   `visloc_localization::KeyframeRetrieval` ranks a map's keyframes by
   hashed visual words of their landmarks' binary descriptors (Basalt's

@@ -52,6 +52,7 @@ use visloc_core::geometry::SE3;
 
 use crate::{
     calibration::BasaltCalibration,
+    contrast::LocalContrast,
     pyramid::{ImageError, RawU16Image},
     vio::margdata::{MargData, OfImageData},
     ImuSample,
@@ -298,6 +299,11 @@ pub struct OnlineMapperConfig {
     pub local_ba_window: usize,
     /// LM iteration budget for the local windowed BA.
     pub local_ba_iterations: usize,
+    /// Equalize each keyframe image's local contrast before ORB detection
+    /// and description (`crate::contrast`), for maps that must localize
+    /// images taken under other lighting. `None` (the default) extracts from
+    /// the raw image. The VIO always tracks the raw images.
+    pub local_contrast: Option<LocalContrast>,
 }
 
 impl Default for OnlineMapperConfig {
@@ -325,6 +331,7 @@ impl Default for OnlineMapperConfig {
             loop_closure_max_metric_residual_deg: 5.0,
             local_ba_window: 0,
             local_ba_iterations: 4,
+            local_contrast: None,
         }
     }
 }
@@ -750,8 +757,13 @@ impl OnlineNfrMapper {
             jobs.par_iter()
                 .map(|&(key, timestamp_index, image_index)| {
                     let image = &eligible_timestamps[timestamp_index].images[image_index];
-                    extract_one_image_features(image, &calibration, self.mapper.feature_config)
-                        .map(|features| (key, timestamp_index, features))
+                    extract_one_image_features(
+                        image,
+                        &calibration,
+                        self.mapper.feature_config,
+                        self.config.local_contrast,
+                    )
+                    .map(|features| (key, timestamp_index, features))
                 })
                 .collect();
         mapper_trace!("ingest_packet: parallel detect done");
@@ -2203,6 +2215,7 @@ fn extract_one_image_features(
     image: &OfImageData,
     calibration: &BasaltCalibration,
     feature_config: OfflineMapperConfig,
+    local_contrast: Option<LocalContrast>,
 ) -> Result<MapperImageFeatures, OnlineMapperError> {
     let timestamp_ns = image.timestamp_ns;
     let camera_id = image.camera_id;
@@ -2229,6 +2242,10 @@ fn extract_one_image_features(
             source,
         }
     })?;
+    let raw = match local_contrast {
+        Some(local_contrast) => local_contrast.apply(&raw),
+        None => raw,
+    };
     extract_mapper_features(&raw, camera, feature_config).map_err(|source| {
         OnlineMapperError::Extraction {
             timestamp_ns,
