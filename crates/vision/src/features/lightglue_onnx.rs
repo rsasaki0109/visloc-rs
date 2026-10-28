@@ -157,15 +157,8 @@ impl LightGlueOnnxMatcher {
         path: P,
         backend: OnnxBackend,
     ) -> Result<Self, LightGlueOnnxError> {
-        use ort::ep::{CPU, CUDA};
-
-        let providers = match backend {
-            OnnxBackend::CudaThenCpu => vec![CUDA::default().build(), CPU::default().build()],
-            OnnxBackend::Cuda => {
-                vec![CUDA::default().build().error_on_failure()]
-            }
-            OnnxBackend::Cpu => vec![CPU::default().build()],
-        };
+        let providers = super::superpoint_onnx::execution_providers(backend)
+            .map_err(LightGlueOnnxError::from_ort)?;
 
         let session = ort::session::Session::builder()
             .map_err(LightGlueOnnxError::from_ort)?
