@@ -1672,7 +1672,9 @@ dependencies = [
 name = "visloc-objects"
 version = "0.3.1"
 dependencies = [
+ "image",
  "nalgebra",
+ "ort",
  "rand",
 ]
 
