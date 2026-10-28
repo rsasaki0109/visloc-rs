@@ -33,6 +33,9 @@ All notable changes to `visloc-rs` will be documented here.
     the back lens's pose refined by the mapper. The video's IMU scales the
     result to metres.
   - The IMU frame search starts from the `.insv`'s own frame period.
+  - Without `--images`, `gsplat_photos --insv VID.insv --out run` cuts the
+    frames itself with ffmpeg (`--frame-step`, default 10;
+    `dual_fisheye::extract_dual_fisheye_frames`).
   - On 200 frames of an OverMaps360 walk (CPU, 23 min), all 2,000 faces
     registered at 0.58 px.
     - The refined back lens sits 3.22 cm behind the front one; the

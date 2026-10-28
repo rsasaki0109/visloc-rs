@@ -138,16 +138,21 @@ term, validated on the 50 OverMaps360 walks
 
 **From an Insta360 video.** The `.insv` holds the frames, the lens
 calibration and the IMU, so it goes in directly (decoded for the X5;
-[insta360_lens.md](insta360_lens.md)):
+[insta360_lens.md](insta360_lens.md)). With ffmpeg on `PATH`, one command:
 
-1. Cut every 10th frame of both lens streams, side by side, named by their
-   number in the video:
-   `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`
-2. `gsplat_photos --images frames --out run --insv VID.insv`
+```text
+gsplat_photos --insv VID.insv --out run
+```
 
-The frame timing search starts from the video's frame period (from its
-trailer). Frames 10 apart are 0.33 s apart, well inside the alignment's
-1.2 s gap limit.
+- **Frames.** It cuts every `--frame-step`-th frame (default 10, 0.33 s at
+  29.97 fps) into `run/frames`, both lenses side by side and named by their
+  number in the video. The frames are scaled to the faces' resolution, and a
+  later run reuses them.
+- **Timing.** The frame timing search starts from the video's frame period,
+  from its trailer. Frames 10 apart are well inside the alignment's 1.2 s
+  gap limit.
+- **Manual cut.** To cut the frames yourself, pass them with `--images`:
+  `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`.
 
 The test run used OverMaps360's walk 0313afa5:
 
