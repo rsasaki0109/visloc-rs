@@ -93,6 +93,47 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # Browser VIO (WebAssembly). Like the ROS 2 nodes, the crate is excluded
+  # from the root workspace and has its own lockfile, so it is checked here.
+  # Native tests need no GPU. The wasm32 clippy pass covers the
+  # single-threaded page build; the threaded one needs nightly (build.sh).
+  wasm-bindings:
+    name: Browser VIO (bindings/wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: bindings/wasm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-bindings
+          workspaces: bindings/wasm -> target
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy (wasm32)
+        run: cargo clippy --locked --lib --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
   rust:
     runs-on: ubuntu-latest
     steps:
