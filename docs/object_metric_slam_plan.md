@@ -38,6 +38,9 @@ scale, so this number is the ceiling.
   - the time to scale convergence after start-up;
   - ATE.
 - Run stereo-inertial on the same sequences as the upper bound.
+- How: the **EuRoC mono scale** workflow
+  (`.github/workflows/euroc_mono_scale.yml`) runs both modes on every
+  sequence and tabulates them; see `docs/mono_inertial_vio.md`.
 - **Go** if the scale error is a few percent after convergence. Otherwise,
   fix mono-inertial first: that becomes the project.
 - Detector: an ONNX model through the existing `ort` support in
