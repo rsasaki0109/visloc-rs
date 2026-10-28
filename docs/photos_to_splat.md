@@ -119,6 +119,20 @@ term, validated on the 50 OverMaps360 walks
   than a few tenths of a degree means the frames and the IMU do not match
   (wrong numbering, stabilised video).
 
+**From an Insta360 video** (not tried here: it needs Insta360 Studio, the
+maker's desktop application). The `.insv` keeps the IMU; the export does
+not, so pass the original:
+
+1. In Insta360 Studio, export the clip as a 360° (equirectangular) video
+   with FlowState stabilisation, direction lock and horizon levelling off.
+   Stabilised frames turn independently of the camera, and the gyro no
+   longer matches them.
+2. Cut every 10th frame (3 fps at 29.97 fps), numbered in order:
+   `ffmpeg -i export.mp4 -vf "select=not(mod(n\,10))" -fps_mode vfr frames/%06d.jpg`.
+   Frame `k` is then video frame `10 (k - 1)`; any numbering linear in time
+   works, since the period and offset are searched.
+3. `gsplat_photos --images frames --out run --equirect --imu original.insv`.
+
 On 136 frames (67 s) of the OverMaps360 walk 0313afa5, view 0 of lens 0 at
 1600 px, gsplat_photos registered all frames, found the dataset's frame
 timing (0.333683 s per frame) and scaled its model by 6.58. Aligned to
