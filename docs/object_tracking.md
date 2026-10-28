@@ -134,3 +134,35 @@ The first version scored against the previous frame only. It caught the
 object much later, at an RMS error of 0.13 m. Under pure translation, a
 point moving with the camera looks like a point at infinity, so only the
 accumulated rotation reveals it.
+
+### On real data: LaMAria R_08_hard
+
+LaMAria's training sequence R_08_hard is a 746 m walk through Zurich's
+streets, with its pseudo-dense ground truth. Both runs used the driver's
+default setup: `scripts/run_lamaria_test_submission.py --split training`,
+the multi-camera big-window config, `--pipeline`, and the binary from
+`e9b5ea3`.
+
+- **Detection:** Aria's SLAM cameras are mounted sideways, so YOLOX needs
+  `--rotate 90`. Without it, it finds people in 1 of 24 sampled frames; with
+  it, in 9. On the whole sequence, `yolox_s` gives boxes of movable classes
+  in 3895 of 12328 frames. That is 5843 boxes, mostly cars (201 tracks),
+  people (189) and bicycles (30).
+- **Result:**
+
+| Run | SE3 ATE | Sim3 ATE | Median error |
+| --- | ---: | ---: | ---: |
+| Without boxes | 0.922 m | 0.918 m | 0.561 m |
+| With the boxes | 0.938 m | 0.935 m | 0.586 m |
+
+- **The filter changed little, and slightly for the worse.**
+  - Of the 5843 boxes it judged 289 moving and left 4267 undecided, too
+    small for 5 scored points. It dropped 3101 observations.
+  - The trajectories are identical up to pose 2996 and differ by at most
+    0.27 m after.
+  - On this walk, moving objects are a small share of the features, and
+    Basalt's robust losses already cope with them. The filter pays off when
+    they dominate the view, as in the synthetic test.
+  - Telling whether its 289 moving decisions were right would need a look
+    at those frames. A false positive on a static object only costs
+    features, but the result does not show a gain to pay for that.

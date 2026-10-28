@@ -125,7 +125,14 @@ scale, so this number is the ceiling.
     It raises the RMS position error from 7.8 mm to 0.58 m, and the filter
     brings it back to 12 mm. A box over static points ("a parked car")
     leaves the result bit-identical. See `docs/object_tracking.md`.
-- Next: evaluation on real sequences with moving people or cars.
+- **Real data, LaMAria R_08_hard (746 m through streets, about 400
+  tracked people and cars): no gain.** SE3 ATE goes from 0.922 m to 0.938 m.
+  Only 289 of 5843 boxes were judged moving, and 3101 observations were
+  dropped. Moving objects are too small a share of the view on a walk for
+  the filter to matter. Details in `docs/object_tracking.md`. The filter
+  stays opt-in.
+- LaMAria's "Moving" track is a moving *platform* (the wearer rides a
+  vehicle), which `config.vio_platform_filter` handles, not moving objects.
 
 ### Phase 3: metric 3D objects (the core)
 
