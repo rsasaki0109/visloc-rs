@@ -43,5 +43,5 @@ pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
 pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};
 pub use mot_eval::{MotAccumulator, MotSummary};
-pub use yolox::{YoloxConfig, COCO_CLASSES};
+pub use yolox::{YoloxConfig, COCO_CLASSES, MOVABLE_COCO_CLASSES};
 pub use yolox_onnx::{YoloxOnnxDetector, YoloxOnnxError};

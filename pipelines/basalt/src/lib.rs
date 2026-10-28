@@ -25,6 +25,7 @@ pub mod adapter;
 pub mod calibration;
 pub mod camera;
 pub mod config;
+pub mod dynamic_objects;
 pub mod euroc;
 pub mod fast;
 mod fma;
