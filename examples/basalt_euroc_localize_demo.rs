@@ -787,6 +787,16 @@ mod tests {
         let saved = map_files::load(&map_dir).expect("load");
         fs::remove_dir_all(&map_dir).expect("cleanup");
         assert_eq!(saved.map.landmarks.len(), points.len());
+        // Each landmark's track is read back, so a map written again (as
+        // basalt_map_merge does) keeps it.
+        let track_length = |map: &visloc_core::types::VisualMap| {
+            map.landmarks
+                .values()
+                .map(|landmark| landmark.observations.len())
+                .sum::<usize>()
+        };
+        assert!(track_length(&export.map) > 0);
+        assert_eq!(track_length(&saved.map), track_length(&export.map));
         assert_eq!(saved.max_points, 800);
         assert!(
             (saved.imu_from_camera[0].translation - imu_from_camera.translation).norm() < 1e-12

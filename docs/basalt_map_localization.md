@@ -306,8 +306,9 @@ What a merge buys depends on the added map:
   map covers the flight (MH_01's localizes none of those images), the
   fixes are 25 cm off. The anchor followed them after a stretch the VIO
   had carried alone, and two later fixes were rejected before it
-  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo an added map's own
-  distortion; a joint optimization of the merged sessions (not done) would.
+  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo
+  an added map's own distortion, and deforming it did not help either (see
+  below).
 - **Coverage is not the limit for the fast Vicon flights.** V1_02 and V2_02
   gain 20-24 points of coverage from V1_03 and V2_03, but no images: the
   difficult flights' maps barely localize them (V1_02 against the V1_03
@@ -320,6 +321,33 @@ What a merge buys depends on the added map:
   2,468 to 2,435; V2_02 with V2_03: 477 to 433). Fusing more aggressively
   (30 cm, 70 bits) recovered 9 of those 44 images on V2_02, and not fusing
   lost 2 more. Merge flights that cover new ground with a good map.
+
+**Deforming the added map was tried and dropped.** The added parts' own
+error was measured directly: their keyframes' positions in the merged map,
+put in the ground-truth frame with the base map's alignment, against the
+added flight's ground truth. With the rigid merge, MH_04's part is 15.2 cm
+RMSE (33.3 cm worst) and MH_05's 9.3 cm; the Vicon rooms' parts are
+1.9-5.1 cm. To deform them:
+
+1. With the registration as the prior, every keyframe of the added map was
+   localized in the base map by projection-guided matching. That localized
+   2-9 times as many keyframes as the map-wide search (MH_04: 90 instead of
+   28; V1_03: 278 instead of 74).
+2. A pose graph (`visloc_slam::PoseGraph`) held the keyframes to their
+   relative poses in the added map, between keyframes sharing at least 20
+   landmarks and between consecutive ones, and pulled the localized ones
+   toward those localizations under a Huber kernel. The landmarks moved
+   with their keyframes.
+
+It changed the added parts' error by -1.1 to +0.6 cm (MH_05 9.3 to 8.2;
+MH_04 15.2 to 15.8). Making the graph more flexible (fewer or looser
+relative edges) made MH_04 worse, 20-23 cm. The reason is in the
+localizations themselves. Each comes from only the keyframe's landmark
+keypoints, at least 15 inliers, so it is less accurate than the rigid
+placement at the same keyframes: 3.7-9.2 cm RMSE with outliers up to 30 cm,
+against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
+better than the constraints a deformation would use. Where they do not
+(MH_04's far end), there is nothing to fit.
 
 ## Reproduce
 

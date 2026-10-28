@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use visloc_basalt::mapper::{localization_camera_id, LocalizationMapExport};
 use visloc_basalt::BasaltCalibration;
 use visloc_core::geometry::SE3;
-use visloc_core::types::{LandmarkDescriptorStore, VisualMap};
+use visloc_core::types::{LandmarkDescriptorStore, Observation, VisualMap};
 use visloc_rs::io::colmap::{write_colmap_text_model, ColmapMapProvider};
 use visloc_rs::io::descriptors::write_landmark_descriptors_txt;
 use visloc_rs::{DescriptorProvider, MapProvider};
@@ -250,8 +250,27 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         .landmark_descriptor_store()
         .cloned()
         .ok_or("map has no descriptor store")?;
+    // The COLMAP text reader fills only the keyframes' observations; rebuild
+    // each landmark's (its TRACK[]) from them, so a map written back keeps
+    // its tracks.
+    let mut map = provider.visual_map().clone();
+    let mut tracks = std::collections::HashMap::<u64, Vec<Observation>>::new();
+    for keyframe in map.keyframes.values() {
+        for observation in &keyframe.observations {
+            tracks
+                .entry(observation.landmark_id)
+                .or_default()
+                .push(observation.clone());
+        }
+    }
+    for (id, landmark) in &mut map.landmarks {
+        if let (true, Some(mut track)) = (landmark.observations.is_empty(), tracks.remove(id)) {
+            track.sort_by_key(|observation| (observation.frame_id, observation.keypoint_index));
+            landmark.observations = track;
+        }
+    }
     Ok(SavedMap {
-        map: provider.visual_map().clone(),
+        map,
         descriptors,
         imu_from_camera,
         max_points,
