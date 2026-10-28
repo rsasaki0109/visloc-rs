@@ -64,9 +64,38 @@ class StepsTest(unittest.TestCase):
                                                 features="aliked", num_features=2048)}
         self.assertEqual(value(p["features"], "--extractor"), "aliked")
         self.assertEqual(value(p["features"], "--num-features"), "2048")
+        self.assertEqual(value(p["features"], "--detection-threshold"), "0")
         for name, cmd in p.items():  # match, loops and the rematch read the extractor from features.npz
             if name != "features":
                 self.assertNotIn("--extractor", cmd)
+
+    def test_the_pass_reads_its_own_learned_keypoints(self):
+        p = {name: [str(c) for c in cmd]
+             for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True,
+                                                pass_features="aliked")}
+        self.assertEqual(list(p), ["features", "match", "loops", "online", "pass features", "pass match",
+                                   "pass loops", "pass solve", "loop-correct", "pass solve with the revisits",
+                                   "rematch", "rematch loops", "solve with the new matches"])
+        self.assertNotIn("--extractor", p["features"])
+        self.assertEqual(value(p["online"], "--work"), "w")
+        own = p["pass features"]
+        self.assertEqual(value(own, "--extractor"), "aliked")
+        self.assertEqual(value(own, "--num-features"), "1024")
+        self.assertEqual(value(own, "--detection-threshold"), "0")
+        for name in ("pass features", "pass match", "pass loops"):  # guided by the VIO, as the online windows'
+            self.assertEqual(value(p[name], "--work"), str(Path("w/aliked")))
+            self.assertEqual(value(p[name], "--vio"), "vio.tum")
+        self.assertEqual(value(p["pass match"], "--tau-slope"), "0.3")
+        for name in ("pass solve", "loop-correct", "pass solve with the revisits"):
+            self.assertEqual(value(p[name], "--work"), str(Path("w/aliked")))
+        self.assertEqual(value(p["pass solve"], "--vio"), str(Path("w/online.tum")))
+        self.assertEqual(value(p["pass solve"], "--out"), str(Path("w/ba1.tum")))
+        self.assertEqual(value(p["loop-correct"], "--states"), str(Path("w/ba1_states.npz")))
+        self.assertEqual(value(p["rematch"], "--work"), str(Path("w/aliked/rematch")))
+        self.assertEqual(value(p["solve with the new matches"], "--out"), str(Path("w/ba3.tum")))
+        low = [name for name, *_ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 4, "w", 4,
+                                                pass_features="aliked")]
+        self.assertEqual(low, ["features", "match", "loops", "online"])
 
     def test_the_rematch_follows_the_pass_by_day_only(self):
         p = {name: [str(c) for c in cmd]
@@ -128,6 +157,25 @@ class ResumeTest(unittest.TestCase):
                                                   log=lambda m: None, rematch=True))
             self.assertEqual((work / "ba3.tum").read_text(), "solve")
             self.assertFalse((work / "rematch" / "matches.npz").exists())
+
+    def test_the_pass_with_its_own_keypoints_resumes_and_ends_the_chain(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "fake_ba.py"
+            fake.write_text(FAKE_BA)
+            work, out = Path(d) / "work", Path(d) / "out.tum"
+            for _ in range(2):
+                chain.run_chain("mav0", "vio.tum", "imu.csv", "calib.json", 1, work, out, ba=fake, log=lambda m: None,
+                                rematch=True, pass_features="aliked")
+            own = work / "aliked"
+            self.assertEqual((work / "calls.txt").read_text().split(), ["features", "match", "loops", "online"])
+            self.assertEqual((own / "calls.txt").read_text().split(),
+                             ["features", "match", "loops", "solve", "loop-correct", "solve"])
+            self.assertEqual((own / "rematch" / "calls.txt").read_text().split(), ["match", "loops", "solve"])
+            self.assertEqual((own / "rematch" / "features.npz").read_text(), "features")
+            self.assertFalse(any(m.exists() for m in (work / "matches.npz", own / "matches.npz",
+                                                      own / "rematch" / "matches.npz")))
+            self.assertEqual(out.read_text(), "solve")
+            self.assertTrue((work / "ba3.tum").exists())
 
 
 if __name__ == "__main__":
