@@ -436,9 +436,9 @@ MH_01 map, localizing every 5th image, with all processes on 4 cores. At
 real time, 99.6% of frames got a map pose, at 2.05 / 5.2 cm (RMSE / max)
 and a median latency of 49 ms; the VIO dropped the rest in its busiest
 stretch. At half speed, 99.8% of frames got a pose, at 2.06 / 5.2 cm.
-Played from a rosbag2 at real time, all eight queries above come within 1.2
+Played from a rosbag2 at real time, all eight queries above come within 0.5
 points of the offline `--vio --localize-every 5` share of frames with a map
-pose. On a ground robot, the VIO can publish `base_link` and the map node
+pose, V2_03's 77.5% included. On a ground robot, the VIO can publish `base_link` and the map node
 can take the camera's position from `/tf_static`, so wheel odometry can be
 corrected into the map frame too; [OpenLORIS-Scene](openloris_map_localization.md) measures that
 with a real robot's wheel odometry, and the VIO, over four days in an office.

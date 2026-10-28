@@ -248,10 +248,10 @@ All notable changes to `visloc-rs` will be documented here.
     at 3.45 cm.
 
 - **The real-time ROS 2 map localization is validated on all eight EuRoC
-  query sequences** (rosbag2 at 1.0x, Fast DDS): within 1.2 points of the
+  query sequences** (rosbag2 at 1.0x, Fast DDS): within 0.5 points of the
   offline `basalt_euroc_localize_demo --vio` on the share of frames with a
-  map pose (V2_03 never gets one, as offline), with no VIO reset and at most
-  27 dropped frames per sequence; table in `ros2/visloc-ros2/README.md`.
+  map pose (V2_03: 77.5%, from 21 s on), with no VIO reset and at most 15
+  dropped frames per sequence; table in `ros2/visloc-ros2/README.md`.
 
 - **The ROS 2 nodes are tested against ROS 2 Jazzy** with both
   `rmw_fastrtps_cpp` and `rmw_cyclonedds_cpp`, on one host:
