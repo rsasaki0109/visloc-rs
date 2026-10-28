@@ -162,7 +162,9 @@ The test run used OverMaps360's walk 0313afa5:
 - **Settings.** `--imu-frame-period 0.333683`, because the trailer times the
   full-rate recording; `--max-size 640 --window 2 --cpu`.
 - **SfM.** All 2,000 faces registered, with 288,261 points at 0.58 px mean
-  reprojection error. It took 23 min on 4 CPU cores and peaked at 9.1 GB.
+  reprojection error. It took 23 min on 4 CPU cores and peaked at 9.1 GB,
+  with every frame and face in memory as they were then (now the faces go
+  to disk as they are cut).
 - **IMU.** It found the frame timing (offset 0.266 s, rotation residual
   0.07°) and gave 1.5927 m per SfM unit.
 - **Back lens.** The refined pose puts it 3.22 cm behind the front one; the
@@ -192,18 +194,27 @@ run's, on its own model, against the one on the dataset's model.
   ([insta360_imu_scale.md](insta360_imu_scale.md)); longer clips give
   more runs to average.
 - **Indoors.** The mall is off by 12%. Its fitted gravity, 9.57 m/s², marks
-  a weak fit.
+  a weak fit. With 1024 px faces it is off by about 5% (below).
 - **Face size.** These runs used 640 px faces to fit a 4-core CPU, and in
-  the mall that is what fails. Its first 100 frames at the full 0.33 s
-  spacing compare as follows:
+  the mall that is what fails. Its first frames at the full 0.33 s spacing
+  compare as follows:
 
-  | Faces | IMU fit | Rotation residual | Scale vs the dataset's |
-  | --- | --- | ---: | ---: |
-  | 640 px | fails its gravity check | – | – |
-  | 1024 px | passes | 0.023° (the dataset's model: 0.023°) | +5.5% over those 33 s |
+  | Faces | Frames | IMU fit | Rotation residual, \|g\| | Scale vs the dataset's |
+  | --- | ---: | --- | --- | ---: |
+  | 640 px | 100 (33 s) | fails its gravity check | – | – |
+  | 1024 px | 100 (33 s) | passes | 0.023°, 9.73 m/s² (the dataset's model: 0.023°) | +5.5% |
+  | 1024 px | 200 (66 s) | passes | 0.026°, 9.61 m/s² | +5.3% |
 
   Keep `--max-size` at its default, 1600, or at least 1024, for metric
-  output.
+  output. The 200-frame fit's |g| is at the edge of the warning signs
+  below, so indoors the scale stays the weaker one.
+- **Memory.** The lens faces are written to disk as each frame is cut, and
+  SIFT reads them back, so memory no longer grows with every frame's
+  image. On 4 CPU cores, the 100 frames with 1024 px faces peak at 4.5 GB
+  (7.9 GB with the faces in memory, same output), and the 200 frames at
+  8.6 GB in 46 min; with the faces in memory those were killed at 14 GB
+  on a 15 GB machine. The SIFT descriptors (5.7 GB for these 2,000 faces)
+  are most of what is left.
 - **Warning signs.** Distrust the scale when |g| is more than about
   0.2 m/s² from 9.81, or the rotation residual is more than a few tenths of
   a degree (the park, where 13 faces did not register).
