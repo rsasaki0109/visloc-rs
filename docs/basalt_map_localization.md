@@ -608,6 +608,29 @@ What these show:
   74 ms, while 43.7% of the images localize instead of 43.3%. Against
   MH_01 alone, where most images match neither way, it costs about 6 ms.
 
+### Local contrast equalization
+
+`basalt_euroc_online_slam_demo --equalize-local-contrast` equalizes each
+keyframe image's local contrast before ORB extraction, and localization
+then does the same to every query image (`map.json` records it). It is
+for maps that must localize images taken under other lighting: on
+OpenLORIS-Scene it gets a daylight session a map pose in a night map
+([across lighting](openloris_map_localization.md#across-lighting-local-contrast-equalization)).
+On EuRoC, with the MH_01 and V2_01 maps rebuilt with it (14,387 and 8,929
+landmarks instead of 15,483 and 8,242) and the defaults otherwise:
+
+| Query → map | Raw map: localized alone; VIO + map | Equalized map |
+|---|---|---|
+| MH_02 → MH_01 | 81.2%; 99.97%, 2.00 / 5.6 cm | 80.2%; 99.97%, 2.00 / 5.4 cm |
+| V2_02 → V2_01 | 20.3%; 99.96%, 3.50 / 12.0 cm | 22.0%; 99.96%, 3.61 / 11.8 cm |
+| V2_03 → V2_01 | 0.4%; 77.8%, 29.6 / 70.4 cm | 0.9%; 77.4%, 39.8 / 89.1 cm |
+
+Under EuRoC's constant lighting it changes little: MH_02 and V2_02 stay
+within 0.1 cm. V2_03 localizes twice as many images on their own (18
+instead of 8), but its VIO + map error grows: with six fixes over the
+flight, which ones arrive decides how far the VIO carries the pose. It
+stays off by default.
+
 ## Reproduce
 
 ```bash
