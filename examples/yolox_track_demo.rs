@@ -15,6 +15,7 @@
 //! `--boxes-csv FILE` also writes the tracks of movable classes (people,
 //! vehicles, animals) in the format `basalt_euroc_vio_demo --object-boxes`
 //! reads: `timestamp_ns,object_id,class_id,score,x_min,y_min,x_max,y_max`.
+//! With `--all-classes` it writes every class, for `objects_metric_offline`.
 //! The timestamp is the frame's file name, as in the EuRoC layout
 //! (`mav0/cam0/data/<timestamp_ns>.png`).
 //!
@@ -44,6 +45,7 @@ struct Args {
     max_frames: Option<usize>,
     draw: bool,
     boxes_csv: Option<PathBuf>,
+    all_classes: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -138,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
             for t in tracks
                 .iter()
-                .filter(|t| MOVABLE_COCO_CLASSES.contains(&t.class_id))
+                .filter(|t| args.all_classes || MOVABLE_COCO_CLASSES.contains(&t.class_id))
             {
                 let b = t.bbox;
                 writeln!(
@@ -182,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_args() -> Result<Args, String> {
     let usage = "usage: yolox_track_demo --model <onnx> --images <dir> [--out-dir <dir>] \
                  [--input-size 640] [--rotate 0|90|180|270] [--max-frames N] [--draw] \
-                 [--boxes-csv FILE]";
+                 [--boxes-csv FILE] [--all-classes]";
     let mut model = None;
     let mut images = None;
     let mut out_dir = PathBuf::from("target/yolox_track");
@@ -191,6 +193,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_frames = None;
     let mut draw = false;
     let mut boxes_csv = None;
+    let mut all_classes = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -211,6 +214,7 @@ fn parse_args() -> Result<Args, String> {
             "--max-frames" => max_frames = Some(value()?.parse().map_err(|_| usage.to_string())?),
             "--draw" => draw = true,
             "--boxes-csv" => boxes_csv = Some(PathBuf::from(value()?)),
+            "--all-classes" => all_classes = true,
             _ => return Err(format!("unknown argument {arg}\n{usage}")),
         }
     }
@@ -223,6 +227,7 @@ fn parse_args() -> Result<Args, String> {
         max_frames,
         draw,
         boxes_csv,
+        all_classes,
     })
 }
 

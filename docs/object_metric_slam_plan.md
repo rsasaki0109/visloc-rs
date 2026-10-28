@@ -4,11 +4,13 @@
 - Phase 0 is done (go).
 - Phase 1 (2D detection and tracking) is in `pipelines/objects`
   (`visloc-objects`).
-- Phase 2's moving-object filter is in `visloc-basalt`, checked on synthetic
-  data so far.
+- Phase 2's moving-object filter is in `visloc-basalt`. It works on synthetic
+  data and showed no gain on a LaMAria walk.
+- Phase 3 has static objects: triangulation and upright boxes in
+  `visloc_objects::metric`, and the `objects_metric_offline` example.
 
-See [`object_tracking.md`](object_tracking.md). Phase 3 onward is not
-implemented yet.
+See [`object_tracking.md`](object_tracking.md). Moving objects (ground
+contact) and the later phases are not implemented yet.
 
 ## Goal
 
@@ -155,6 +157,13 @@ scale, so this number is the ceiling.
   - An estimate far from its class prior is flagged.
 - Output: per-object tracks (ID, class, timestamp, centre, size, yaw,
   velocity, scale source) in a TUM-like text format.
+- **Done: static objects.**
+  - `visloc_objects::metric` triangulates the tracks and fits the box, and
+    `objects_metric_offline` runs it on a VIO run's dumped tracks.
+  - On TUM-VI room1, a whiteboard comes out at 2.30 × 1.77 m with mono +
+    IMU, 2.21 × 1.76 m with stereo + IMU (an independent scale), and
+    0.60 × 0.80 without the IMU (no scale).
+  - Next: moving objects (ground contact), and per-frame output.
 
 ### Phase 4: metric accuracy evaluation
 

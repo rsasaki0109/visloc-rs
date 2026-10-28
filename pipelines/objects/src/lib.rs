@@ -32,6 +32,7 @@ pub mod byte_track;
 pub mod detector;
 pub mod image;
 pub mod kalman;
+pub mod metric;
 pub mod mot_eval;
 pub mod yolox;
 pub mod yolox_onnx;
@@ -42,6 +43,10 @@ pub use byte_track::{ByteTrackConfig, ByteTracker, TrackId, TrackedObject};
 pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
 pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};
+pub use metric::{
+    estimate_static_object, fit_upright_box, plausible_size, triangulate, BearingObservation,
+    BoxFitParams, ObjectEstimate, ScaleSource, TriangulationParams, UprightBox,
+};
 pub use mot_eval::{MotAccumulator, MotSummary};
 pub use yolox::{YoloxConfig, COCO_CLASSES, MOVABLE_COCO_CLASSES};
 pub use yolox_onnx::{YoloxOnnxDetector, YoloxOnnxError};
