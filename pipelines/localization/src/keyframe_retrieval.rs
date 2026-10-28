@@ -300,7 +300,7 @@ mod tests {
     fn words_take_the_permuted_bits() {
         let mut descriptor = [0_u64; 4];
         descriptor[170 / 64] |= 1 << (170 % 64); // first permuted bit
-        descriptor[38 / 64] |= 1 << (38 % 64); // fourth
+        descriptor[0] |= 1 << 38; // fourth
         assert_eq!(word(&descriptor, 16), 0b1001);
         assert_eq!(word(&descriptor, 1), 0b1);
         assert_eq!(word(&descriptor, 0), 0);

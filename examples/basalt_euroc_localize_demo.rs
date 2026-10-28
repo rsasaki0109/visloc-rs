@@ -34,11 +34,12 @@
 //! localized. Accepted fixes anchor the VIO to the map
 //! (`visloc_localization::MapAnchor`: a gravity-aligned yaw + translation
 //! offset, gated against outliers), so every frame gets a map-frame pose once
-//! the anchor is set, including the frames the map does not localize. With
-//! `--projection-radius-px PX`, once the anchor is set, the anchor and the
-//! VIO predict each image's pose and every landmark is first matched only
-//! against the keypoints within `PX` pixels of its predicted projection, as
-//! `visloc_map_localize_node` does; the map-wide search remains the fallback.
+//! the anchor is set, including the frames the map does not localize. Once
+//! the anchor is set, the anchor and the VIO predict each image's pose and
+//! every landmark is first matched only against the keypoints within
+//! `--projection-radius-px` (20) pixels of its predicted projection, as
+//! `visloc_map_localize_node` does; the map-wide search remains the fallback
+//! (`--projection-radius-px 0` matches map-wide only).
 //! The prediction is used only within `--projection-fresh-s` (5) seconds
 //! and `--projection-fresh-m` (2) metres of odometry travel after the
 //! anchor's newest fix: a drifted prediction can steer the projection search
@@ -139,7 +140,8 @@ struct Args {
     /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
     /// With `--vio` or `--odometry`, match by projection from the anchored
-    /// odometry's prediction first, within this radius.
+    /// odometry's prediction first, within this radius (20 px unless set;
+    /// `0` turns it off).
     projection_radius_px: Option<f64>,
     /// Trust the prediction only this long and this far after the anchor's
     /// newest fix.
@@ -169,6 +171,7 @@ impl Args {
     {
         let mut map = None;
         let mut euroc_dir = None;
+        let mut projection_radius_px = None::<f64>;
         let mut args = Self {
             map: PathBuf::new(),
             euroc_dir: PathBuf::new(),
@@ -260,7 +263,7 @@ impl Args {
                 }
                 "--localize-every" => args.localize_every = number(&option, value()?)?,
                 "--projection-radius-px" => {
-                    args.projection_radius_px = Some(number(&option, value()?)?);
+                    projection_radius_px = Some(number(&option, value()?)?);
                 }
                 "--projection-fresh-s" => args.projection_fresh_s = number(&option, value()?)?,
                 "--projection-fresh-m" => args.projection_fresh_m = number(&option, value()?)?,
@@ -297,11 +300,15 @@ impl Args {
             if args.localize_every == 0 {
                 return Err("--localize-every must be positive".into());
             }
-        } else if args.localize_every != 1 || args.projection_radius_px.is_some() {
+        } else if args.localize_every != 1 || projection_radius_px.is_some() {
             return Err(
                 "--localize-every and --projection-radius-px need --vio or --odometry".into(),
             );
         }
+        args.projection_radius_px = match projection_radius_px {
+            Some(radius) => (radius > 0.0).then_some(radius),
+            None => (args.vio || args.odometry.is_some()).then_some(20.0),
+        };
         Ok(args)
     }
 }
@@ -998,9 +1005,12 @@ mod tests {
         assert!(args.vio);
         assert_eq!(args.localize_every, 5);
         assert_eq!(args.config, Some(PathBuf::from("k.json")));
-        assert_eq!(args.projection_radius_px, None);
-        let args = with(&[&vio[..], &["--projection-radius-px", "20"]].concat()).expect("parses");
         assert_eq!(args.projection_radius_px, Some(20.0));
+        let args = with(&[&vio[..], &["--projection-radius-px", "12"]].concat()).expect("parses");
+        assert_eq!(args.projection_radius_px, Some(12.0));
+        let args = with(&[&vio[..], &["--projection-radius-px", "0"]].concat()).expect("parses");
+        assert_eq!(args.projection_radius_px, None);
+        assert_eq!(with(&[]).expect("parses").projection_radius_px, None);
         assert_eq!(with(&[]).expect("parses").localize_every, 1);
     }
 

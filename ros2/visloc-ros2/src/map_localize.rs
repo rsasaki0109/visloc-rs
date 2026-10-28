@@ -67,6 +67,12 @@ pub struct MapLocalizeOptions {
     /// Once anchored: search radius around each landmark's predicted
     /// projection; `None` always matches map-wide.
     pub projection_radius_px: Option<f64>,
+    /// The prediction is a prior only this long and this far (odometry
+    /// travel) after the anchor's newest fix: after a long gap, a drifted
+    /// prediction can steer the projection search to a wrong pose that
+    /// agrees with it.
+    pub projection_fresh_s: f64,
+    pub projection_fresh_m: f64,
     /// Threads of the map-wide search.
     pub match_threads: usize,
     /// Map-wide search: landmarks closer than this to the best one count as
@@ -97,6 +103,8 @@ impl Default for MapLocalizeOptions {
             ransac_iterations: 1000,
             reprojection_px: 3.0,
             projection_radius_px: Some(20.0),
+            projection_fresh_s: 5.0,
+            projection_fresh_m: 2.0,
             match_threads: 1,
             duplicate_radius_m: None,
             anchor: MapAnchorConfig::default(),
@@ -574,6 +582,8 @@ pub struct AnchorCore {
     pending: VecDeque<(i64, SE3)>,
     max_gap_ns: i64,
     latest_odom: Option<(i64, SE3)>,
+    fresh_ns: i64,
+    fresh_m: f64,
 }
 
 impl AnchorCore {
@@ -584,6 +594,8 @@ impl AnchorCore {
             pending: VecDeque::new(),
             max_gap_ns: (options.max_odom_gap_s * 1e9) as i64,
             latest_odom: None,
+            fresh_ns: (options.projection_fresh_s * 1e9) as i64,
+            fresh_m: options.projection_fresh_m,
         }
     }
 
@@ -623,12 +635,23 @@ impl AnchorCore {
 
     /// The body pose in the map at `stamp_ns` that the anchor and odometry
     /// predict, as a localization prior; [`OdomLookup::Unavailable`] before
-    /// anchoring.
+    /// anchoring, and once the anchor's newest fix is more than
+    /// `projection_fresh_s` / `projection_fresh_m` behind.
     pub fn prior(&self, stamp_ns: i64) -> OdomLookup {
-        let Some(map_from_odom) = self.anchor.map_from_odom() else {
+        let (Some(map_from_odom), Some((fix_ns, fix_position))) =
+            (self.anchor.map_from_odom(), self.anchor.last_fix())
+        else {
             return OdomLookup::Unavailable;
         };
+        if stamp_ns - fix_ns > self.fresh_ns {
+            return OdomLookup::Unavailable;
+        }
         match self.odom.lookup(stamp_ns, self.max_gap_ns) {
+            OdomLookup::Pose(odom_from_body)
+                if (odom_from_body.translation - fix_position).norm() > self.fresh_m =>
+            {
+                OdomLookup::Unavailable
+            }
             OdomLookup::Pose(odom_from_body) => {
                 OdomLookup::Pose(map_from_odom.compose(&odom_from_body))
             }
@@ -874,6 +897,36 @@ mod tests {
             assert!((anchored.seconds_since_fix - (i - 1) as f64 * 0.05).abs() < 1e-9);
             assert!(anchored.metres_since_fix > 0.0);
         }
+
+        // The prediction is a prior while the newest fix is recent and near.
+        let prior = |core: &AnchorCore, stamp: i64| match core.prior(stamp) {
+            OdomLookup::Pose(pose) => Some(pose),
+            _ => None,
+        };
+        let expected = offset().compose(&odom(5));
+        let near = prior(&core, stamps[5]).expect("fresh prior");
+        assert!((near.translation - expected.translation).norm() < 1e-9);
+        let mut late = AnchorCore::new(&MapLocalizeOptions {
+            projection_fresh_s: 0.1,
+            ..MapLocalizeOptions::default()
+        });
+        let mut far = AnchorCore::new(&MapLocalizeOptions {
+            projection_fresh_m: 0.3,
+            ..MapLocalizeOptions::default()
+        });
+        for core in [&mut late, &mut far] {
+            for (i, stamp) in stamps.iter().enumerate() {
+                core.add_odom(*stamp, odom(i));
+            }
+            core.add_fix(stamps[0], offset().compose(&odom(0)));
+            core.add_fix(stamps[1], offset().compose(&odom(1)));
+            assert!(core.is_anchored());
+            assert!(prior(core, stamps[2]).is_some());
+        }
+        // 0.15 s after the newest fix; 0.22 m and 0.45 m of travel from it.
+        assert!(prior(&late, stamps[4]).is_none());
+        assert!(prior(&far, stamps[3]).is_some());
+        assert!(prior(&far, stamps[5]).is_none());
 
         // A fix older than the odometry history is dropped, not applied.
         let mut stale = AnchorCore::new(&MapLocalizeOptions {

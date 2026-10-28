@@ -43,6 +43,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Keyframe retrieval for the map-wide search.**
+  `visloc_localization::KeyframeRetrieval` ranks a map's keyframes by
+  hashed visual words of their landmarks' binary descriptors (Basalt's
+  `HashBow` scheme, histogram intersection through an inverted index).
+  `BinaryLandmarkIndex::match_among` matches among the landmarks of the best
+  ones. `basalt_euroc_localize_demo --retrieval-keyframes N` tries that
+  before the whole map. On the EuRoC queries it localizes 0.1–0.9 points
+  more images. On a merged OpenLORIS map it localizes 4.6% of office1-6's
+  images instead of 2.9%. Off by default.
+
 - **Map-based localization on a real wheeled robot (OpenLORIS-Scene).**
   `scripts/openloris_to_euroc.py` converts an OpenLORIS-Scene sequence's
   T265 data to the EuRoC layout with a Basalt calibration:
@@ -73,15 +83,21 @@ All notable changes to `visloc-rs` will be documented here.
   each accepted localization's PnP inliers (keypoint pixel and map
   landmark).
 
-- **`basalt_euroc_localize_demo --vio --projection-radius-px PX`.** Once
-  the VIO is anchored to the map, each image is first matched around the
-  landmarks' projections from the pose the anchored VIO predicts, as
-  `visloc_map_localize_node` does, with the map-wide search as the
-  fallback. At 20 px, localizing every image, 98.2% of MH_02's images
-  localize in the MH_01 map instead of 81.2%, the longest stretch without
-  one falls from 7.3 s to 1.2 s, and the VIO + map poses reach 1.94 cm RMSE
-  (2.03 before); on V2_02, 60.4% instead of 20.3%, at 3.33 cm instead of
-  4.13. Off by default.
+- **`basalt_euroc_localize_demo`: matching around the predicted projections
+  with `--vio` (and `--odometry`), by default.** Once the VIO is anchored to
+  the map, each image is first matched around the landmarks' projections
+  from the pose the anchored VIO predicts, as `visloc_map_localize_node`
+  does, with the map-wide search as the fallback (`--projection-radius-px`,
+  20; `0` turns it off).
+  - Over the eight EuRoC queries, localizing every 5th image, more images
+    localize (MH_02 98.4% instead of 81.6%, V2_02 56.4% instead of 21.1%)
+    in about half the time.
+  - The VIO + map error falls on 6 of the 7 anchored queries (V1_03 4.60 cm
+    instead of 6.66). On MH_05 it rises from 14.4 to 15.9 cm.
+  - The prediction is used only within 5 s and 2 m of odometry travel after
+    the anchor's newest fix (`--projection-fresh-s`, `--projection-fresh-m`).
+    After a 27 s gap on MH_03, a drifted prediction had produced fixes
+    16–42 cm off.
 
 - **Live monocular-inertial VIO in a phone browser** (`bindings/wasm`). The
   Basalt port's VIO runs as WebAssembly on the phone's camera and motion
@@ -322,6 +338,13 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **`visloc_map_localize_node`: the projection prior expires.** The node
+  matches around the predicted projections only within `projection_fresh_s`
+  (5) seconds and `projection_fresh_m` (2) metres of odometry travel after
+  the anchor's newest fix. After a longer gap it matches map-wide, since a
+  drifted prediction can steer the projection search to a wrong pose that
+  agrees with it.
 
 - **visloc-basalt builds and runs on wasm32-unknown-unknown.** Natively
   everything is identical, and the crate's tests pass unchanged.
