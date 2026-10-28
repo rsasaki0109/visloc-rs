@@ -107,6 +107,16 @@ pub const COCO_CLASSES: [&str; 80] = [
     "toothbrush",
 ];
 
+/// COCO classes that can move on their own: people, vehicles and animals.
+/// These are the candidates for the VIO's moving-object filter
+/// (`visloc_basalt::dynamic_objects`); everything else is static structure.
+pub const MOVABLE_COCO_CLASSES: [u32; 18] = [
+    0, 1, 2, 3, 4, 5, 6, 7,
+    8, // person, bicycle, car, motorcycle, airplane, bus, train, truck, boat
+    14, 15, 16, 17, 18, 19, 20, 21,
+    22, // bird, cat, dog, horse, sheep, cow, elephant, bear, zebra
+];
+
 /// Input size and thresholds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct YoloxConfig {
