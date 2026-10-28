@@ -3,9 +3,11 @@
 //!
 //! An object that moves while the camera moves cannot be triangulated: its
 //! rays do not meet. Ground contact places it anyway:
-//! - **The ground plane** is horizontal in the gravity-aligned world (z up)
-//!   and lies at a metric height, found from the VIO's static scene points
-//!   ([`estimate_ground_height`]).
+//! - **The ground** is found from the VIO's static scene points in the
+//!   gravity-aligned world (z up). [`PathGround`] follows the camera's path:
+//!   the camera moves over the ground, so a point's height is measured from
+//!   the camera where it passed nearest, which keeps roads that climb or fall
+//!   sharp. [`estimate_ground_height`] is the flat-ground version.
 //! - **Each frame** ([`place_on_ground`]): the ray through the middle of the
 //!   2D box's bottom edge meets the ground at the object's foot. That fixes
 //!   its distance, and the box's rays cut at that distance give its height
@@ -27,7 +29,8 @@ use nalgebra::{Point3, UnitQuaternion, Vector2, Vector3};
 
 use crate::BBox;
 
-/// Settings of [`estimate_ground_height`] and [`place_on_local_ground`].
+/// Settings of [`estimate_ground_height`], [`PathGround`] and
+/// [`place_on_local_ground`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundParams {
     /// Height bin of the histogram (0.05 m).
@@ -45,6 +48,9 @@ pub struct GroundParams {
     pub local_min_points: usize,
     /// ...and is taken if it is this much higher or lower (0.1 m).
     pub local_min_shift: f64,
+    /// [`PathGround`]: the stretch of path, either way, whose points give the
+    /// camera's height above the ground (20 m).
+    pub path_stretch: f64,
 }
 
 impl Default for GroundParams {
@@ -57,6 +63,7 @@ impl Default for GroundParams {
             local_radius: 1.5,
             local_min_points: 3,
             local_min_shift: 0.1,
+            path_stretch: 20.0,
         }
     }
 }
@@ -84,15 +91,128 @@ fn densest_layer(
     bin: f64,
     min_points: usize,
 ) -> Option<f64> {
+    densest_band(heights, ceiling, bin, 0, min_points)
+}
+
+/// [`densest_layer`] over bands of `2 * spread + 1` neighbouring bins, for
+/// noisier heights.
+fn densest_band(
+    heights: impl Iterator<Item = f64>,
+    ceiling: f64,
+    bin: f64,
+    spread: i64,
+    min_points: usize,
+) -> Option<f64> {
     let mut bins: std::collections::HashMap<i64, Vec<f64>> = std::collections::HashMap::new();
     for z in heights.filter(|z| z.is_finite() && *z < ceiling) {
         bins.entry((z / bin).floor() as i64).or_default().push(z);
     }
-    let (_, layer) = bins
-        .into_iter()
-        .filter(|(_, zs)| zs.len() >= min_points)
-        .max_by_key(|(bin, zs)| (zs.len(), std::cmp::Reverse(*bin)))?;
-    Some(layer.iter().sum::<f64>() / layer.len() as f64)
+    let band = |k: i64| {
+        (k - spread..=k + spread)
+            .filter_map(|j| bins.get(&j))
+            .flatten()
+    };
+    let (best, count) = bins
+        .keys()
+        .map(|&k| (k, band(k).count()))
+        .filter(|(_, n)| *n >= min_points)
+        .max_by_key(|(k, n)| (*n, std::cmp::Reverse(*k)))?;
+    Some(band(best).sum::<f64>() / count as f64)
+}
+
+/// The ground along the camera's path. The camera moves over the ground, so
+/// a scene point's height is measured from the camera where it passed
+/// nearest: on a road that climbs or falls, the ground then lies at one
+/// depth below the path, the camera's height above it. That height is found
+/// for each stretch of the path (`path_stretch` metres either way), so a
+/// camera whose height changes (a hand lowering it) is followed too. The
+/// ground under any spot is the camera's height below the nearest point of
+/// the path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathGround {
+    /// Camera centres along the path, in order.
+    pub path: Vec<Point3<f64>>,
+    /// The camera's height above the ground at each of them.
+    pub camera_heights: Vec<f64>,
+}
+
+impl PathGround {
+    /// For each point of the path, the densest band of three `bin`-high
+    /// layers of the heights of the scene `points` whose nearest path point
+    /// lies within `path_stretch` along the path, each measured from that
+    /// nearest point, at least `min_below_camera` down, with `min_points`. A stretch without
+    /// such a layer takes the nearest stretch's. `None` if none has one.
+    pub fn estimate(
+        path: &[Point3<f64>],
+        points: &[Point3<f64>],
+        params: &GroundParams,
+    ) -> Option<Self> {
+        path.first()?;
+        let mut along = vec![0.0];
+        for pair in path.windows(2) {
+            let step =
+                (Vector2::new(pair[1].x, pair[1].y) - Vector2::new(pair[0].x, pair[0].y)).norm();
+            along.push(along.last()? + step);
+        }
+        let ground = Self {
+            path: path.to_vec(),
+            camera_heights: Vec::new(),
+        };
+        let below: Vec<(usize, f64)> = points
+            .iter()
+            .map(|p| {
+                let i = ground.nearest(&Vector2::new(p.x, p.y));
+                (i, p.z - path[i].z)
+            })
+            .collect();
+        let found: Vec<Option<f64>> = along
+            .iter()
+            .map(|s| {
+                let heights = below
+                    .iter()
+                    .filter(|(i, _)| (along[*i] - s).abs() <= params.path_stretch)
+                    .map(|(_, z)| *z);
+                densest_band(
+                    heights,
+                    -params.min_below_camera,
+                    params.bin,
+                    1,
+                    params.min_points,
+                )
+                .map(|layer| -layer)
+            })
+            .collect();
+        let camera_heights = (0..found.len())
+            .map(|i| {
+                (0..found.len())
+                    .filter_map(|j| found[j].map(|h| ((along[i] - along[j]).abs(), h)))
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, h)| h)
+            })
+            .collect::<Option<Vec<f64>>>()?;
+        Some(Self {
+            camera_heights,
+            ..ground
+        })
+    }
+
+    /// The ground's height under `xy`.
+    pub fn height_at(&self, xy: &Vector2<f64>) -> f64 {
+        let i = self.nearest(xy);
+        self.path[i].z - self.camera_heights[i]
+    }
+
+    /// The camera's height above the ground where it passed nearest to `xy`.
+    pub fn camera_height_at(&self, xy: &Vector2<f64>) -> f64 {
+        self.camera_heights[self.nearest(xy)]
+    }
+
+    fn nearest(&self, xy: &Vector2<f64>) -> usize {
+        let d = |i: &usize| (Vector2::new(self.path[*i].x, self.path[*i].y) - xy).norm_squared();
+        (0..self.path.len())
+            .min_by(|a, b| d(a).total_cmp(&d(b)))
+            .expect("a path")
+    }
 }
 
 /// An object placed on the ground in one frame.
@@ -549,6 +669,38 @@ mod tests {
         assert_eq!(ground, 0.0);
         let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
         assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
+    }
+
+    #[test]
+    fn the_path_ground_follows_a_falling_road() {
+        // A camera 1.6 m above a road that falls 5 % along x; the road's
+        // points 0-30 m ahead and 2 m to the sides, and car bodies 0.8 m up.
+        let road = |x: f64| -0.05 * x;
+        let path: Vec<Point3<f64>> = (0..100)
+            .map(|i| Point3::new(i as f64, 0.0, road(i as f64) + 1.6))
+            .collect();
+        let mut points = Vec::new();
+        for i in 0..400 {
+            let x = i as f64 * 0.25;
+            points.push(Point3::new(x, -2.0 + (i % 5) as f64, road(x)));
+            if i % 3 == 0 {
+                points.push(Point3::new(
+                    x,
+                    3.0,
+                    road(x) + 0.8 + 0.1 * ((i / 3) % 4) as f64,
+                ));
+            }
+        }
+        let ground = PathGround::estimate(&path, &points, &GroundParams::default()).unwrap();
+        let height = ground.camera_height_at(&Vector2::new(50.0, 0.0));
+        assert!((height - 1.6).abs() < 0.05, "{height}");
+        assert!((ground.height_at(&Vector2::new(60.0, 2.5)) - road(60.0)).abs() < 0.1);
+        // A flat ground smears the 5 m drop over many layers.
+        let flat = estimate_ground_height(&points, path[0].z, &GroundParams::default());
+        assert!(
+            flat.is_none_or(|z| (z - road(60.0)).abs() > 0.5),
+            "{flat:?}"
+        );
     }
 
     #[test]

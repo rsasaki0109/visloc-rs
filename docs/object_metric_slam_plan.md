@@ -10,6 +10,9 @@
   `visloc_objects::metric`) and objects on the ground, moving or not
   (ground contact, `visloc_objects::ground`). The `objects_metric_offline`
   example runs both on a VIO run.
+- Phase 4 has KITTI raw: object heights and distances against the
+  tracklets, for mono + IMU, stereo + IMU and the OXTS poses
+  (`scripts/run_kitti_objects_eval.sh`).
 
 See [`object_tracking.md`](object_tracking.md). The world-frame EKF and the
 per-frame output of Phase 3, and the later phases, are not implemented yet.
@@ -193,6 +196,19 @@ scale, so this number is the ceiling.
 - **Comparison table:** monocular only (scale unknown), mono + IMU and
   stereo + IMU, each with size, position and velocity error.
 
+- **Done: KITTI raw** (`object_tracking.md`, "Metric accuracy on KITTI
+  raw").
+  - 7 drives with tracklets. The VIO starts at rest: 6 drives start at rest
+    or are cut at a stop.
+  - Heights of cars (110 on 5 drives): 11 % (0.16 m) median error with
+    mono + IMU, 6 % with stereo + IMU, 7 % with the OXTS poses. Pedestrians
+    (18): 4 % with stereo + IMU.
+  - The path ground came out of this: a flat ground put cars 33 % off on a
+    falling road.
+  - Speed is not good enough yet (0.5–2.7 m/s), and mono + IMU fails from a
+    moving start.
+  - Next: own tape-measured captures, the comparison table with mono only.
+
 ### Phase 5: demo
 
 1. **Offline GIF for the README hero.** Left: the image with boxes, IDs and
@@ -221,8 +237,8 @@ VDO-SLAM and DynaSLAM II. Only if Phase 3 shows a clear benefit.
 ## Risks
 
 - **Mono-inertial scale.** Measured on TUM-VI room1–6 (Phase 0): at most
-  3.4 % off. Indoor, hand-held; outdoors and in a car (KITTI) it is not
-  measured yet.
+  3.4 % off, indoor and hand-held. In a car (KITTI raw, Phase 4): 2–9 % off
+  from a start at rest, and four times too small from a start at 7 m/s.
 - **Scale at start-up.** Mono-inertial needs motion to observe scale. Object
   estimates made before convergence are marked as such.
 - **Ground contact** fails for objects not on the ground (things carried,

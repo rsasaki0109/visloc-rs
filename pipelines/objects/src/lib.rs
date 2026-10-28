@@ -50,6 +50,7 @@ pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
 pub use ground::{
     estimate_ground_height, place_on_ground, place_on_local_ground, plausible_height,
     summarize_ground_track, BoxRays, GroundObservation, GroundParams, GroundTrack, GroundView,
+    PathGround,
 };
 pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};
