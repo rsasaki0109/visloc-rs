@@ -205,6 +205,28 @@ removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
 
+**The anchor is not what limits these numbers.** The recorded VIO
+trajectories and fixes (every 5th image) were replayed through other ways
+of combining them. A Python port of `MapAnchor` reproduces every RMSE above
+to 0.01 cm. A Kalman filter on the four offset parameters lets the offset
+drift by a random walk per metre of VIO travel (tried at 1-5 cm and
+0.2-1° per metre). It changes the RMSE by -0.6 to +0.8 cm. Averaging fixes
+over 2 or 10 s instead of 5 s changes it by -0.4 to +0.7 cm. Feeding the
+same ground-truth fix positions (with the real fixes' rotations, the same
+timing and the same averaging) into the anchor bounds what any such
+combination of these fixes can reach:
+
+| | MH_02 | MH_03 | MH_04 | MH_05 | V1_02 | V1_03 | V2_02 |
+|---|---|---|---|---|---|---|---|
+| `MapAnchor` | 2.05 | 4.97 | 23.0 | 14.4 | 3.47 | 6.66 | 4.24 |
+| with ground-truth fix positions | 1.30 | 4.80 | 23.7 | 15.4 | 2.76 | 6.36 | 3.85 |
+
+(RMSE, cm.) Even perfect fixes take off at most 1.4 cm, except on MH_02,
+where the fixes' own noise (1.9 cm) is most of its error. The rest is the
+VIO drifting where no image localizes. Neither a better filter nor feeding
+the fixes into the VIO estimator would remove that drift. More map
+coverage would ([merged maps](#merging-maps-of-several-flights)).
+
 ### On a robot (ROS 2)
 
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
