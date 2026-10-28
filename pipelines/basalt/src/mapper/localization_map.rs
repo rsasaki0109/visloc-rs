@@ -114,8 +114,8 @@ fn double_sphere_radius(camera: &DoubleSphereCamera, theta: f64) -> Option<f64> 
 }
 
 /// Fits COLMAP's `OPENCV_FISHEYE` model to a Double Sphere camera; see the
-/// module documentation. Returns `None` when the image corners do not
-/// unproject or the fit is degenerate.
+/// module documentation. Returns `None` when no point between an image
+/// corner and the principal point unprojects, or the fit is degenerate.
 pub fn fit_opencv_fisheye(camera: &DoubleSphereCamera) -> Option<FisheyeFit> {
     let (width, height) = (f64::from(camera.width), f64::from(camera.height));
     let mut max_angle = 0.0_f64;
@@ -129,7 +129,16 @@ pub fn fit_opencv_fisheye(camera: &DoubleSphereCamera) -> Option<FisheyeFit> {
         (0.0, height / 2.0),
         (width, height / 2.0),
     ] {
-        let ray = camera.unproject(&Point2::new(x, y))?;
+        // A corner outside the model's domain (a lens wider than the Double
+        // Sphere model reaches) is moved toward the principal point until it
+        // unprojects, so the fit covers the domain's edge.
+        let ray = (0..64).find_map(|step| {
+            let scale = 1.0 - f64::from(step) / 64.0;
+            camera.unproject(&Point2::new(
+                camera.cx + (x - camera.cx) * scale,
+                camera.cy + (y - camera.cy) * scale,
+            ))
+        })?;
         max_angle = max_angle.max(ray.z.clamp(-1.0, 1.0).acos());
     }
     if !max_angle.is_finite() || max_angle <= 0.0 {
@@ -360,6 +369,35 @@ mod tests {
             let projected = fisheye.project(&Point3::from(ray)).expect("projects");
             assert!(
                 (projected - Point2::new(x, y)).norm() < 0.05,
+                "({x}, {y}) -> {projected}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencv_fisheye_fit_covers_a_lens_wider_than_the_model() {
+        // A RealSense T265 fisheye (OpenLORIS-Scene) as Double Sphere: its
+        // image corners lie outside the model's domain.
+        let camera = DoubleSphereCamera::new(
+            284.7777, 285.9001, 425.2448, 398.4679, 0.0, 0.6485, 848, 800,
+        )
+        .expect("camera");
+        assert!(camera.unproject(&Point2::new(0.0, 0.0)).is_none());
+        let fit = fit_opencv_fisheye(&camera).expect("fit");
+        assert!(fit.max_angle > 1.8, "max angle {}", fit.max_angle);
+        assert!(fit.max_error_px < 0.5, "fit error {}", fit.max_error_px);
+        let fisheye = Camera {
+            id: 1,
+            model: CameraModel::OpenCvFisheye,
+            width: camera.width,
+            height: camera.height,
+            params: fit.params.to_vec(),
+        };
+        for (x, y) in [(424.0, 400.0), (40.0, 400.0), (424.0, 20.0), (120.0, 120.0)] {
+            let ray = camera.unproject(&Point2::new(x, y)).expect("ray");
+            let projected = fisheye.project(&Point3::from(ray)).expect("projects");
+            assert!(
+                (projected - Point2::new(x, y)).norm() < 0.5,
                 "({x}, {y}) -> {projected}"
             );
         }
