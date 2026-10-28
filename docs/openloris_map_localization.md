@@ -18,8 +18,12 @@ by those localizations.
   7–12 cm. It drifts by up to 17 cm in an in-place turn, which a few map
   fixes cannot correct.
 - **Daylight:** the two sessions recorded in daylight with the ceiling
-  lights off never localize, in any map. ORB features do not survive that
-  change.
+  lights off never localize in maps built at night from the raw images:
+  ORB features do not survive that change. With the map's and the
+  queries' local contrast equalized
+  ([below](#across-lighting-local-contrast-equalization)) and a 15-inlier
+  threshold, the daylight session office1-4 gets a map pose for 34% of
+  its frames at 2.5 cm. The dawn session office1-5 still gets none.
 
 ## Data
 
@@ -158,9 +162,62 @@ What this shows:
   The correction's two-fix agreement check is what keeps this run clean.
 - **Lighting is the hard limit.** office1-4 and office1-5 are recorded
   in daylight with the ceiling lights off. Their best images reach at
-  most 12 inliers against maps recorded at night. No map, threshold or odometry
-  gives them map poses: ORB features on these images do not match across
-  that change.
+  most 12 inliers against maps recorded at night. No map, threshold or
+  odometry gives them map poses: ORB features on these raw images do not
+  match across that change. Equalizing the local contrast changes this
+  for office1-4 (next section).
+
+## Across lighting: local contrast equalization
+
+ORB compares the brightness of nearby pixels. A whole image getting
+brighter or darker does not affect it, but a change of lighting across the
+scene does: by day the ceiling lights are off and the windows light the
+room, so the shading moves and the darker parts lose contrast.
+`basalt_euroc_online_slam_demo --equalize-local-contrast` evens out the
+local contrast of each keyframe image before ORB extraction
+(`visloc_basalt::contrast::LocalContrast`: contrast-limited adaptive
+histogram equalization over 8 × 8 tiles, clip limit 2). `map.json` records
+it, and `basalt_euroc_localize_demo` and `visloc_map_localize_node` then
+equalize every query image the same way. The VIO tracks the raw images.
+
+Maps A (office1-1) and B (office1-2) rebuilt this way, against the maps
+from the raw images. Same settings as above; "15 inliers" is
+`--min-inliers 15`:
+
+| Query → map | Raw map | Equalized map |
+|---|---|---|
+| office1-4 → B (daylight), 15 inliers | no map pose (no image above 12 inliers) | **33.6%, 2.46 / 4.3 cm** |
+| office1-5 → A (dawn), 15 inliers | no map pose | no map pose (no image above 11 inliers) |
+| office1-7 → B, 15 inliers | 99.6%, 3.36 / 6.9 cm | 99.7%, 2.30 / 4.4 cm |
+| office1-6 → A | 99.7%, 3.15 / 4.3 cm | 99.9%, 3.24 / 4.7 cm |
+| office1-3 → A | 99.7%, 2.83 / 3.7 cm | 99.7%, 2.92 / 3.7 cm |
+
+(VIO + map: frames with a map pose, RMSE / max.)
+
+- **It lets a daylight session localize in a night map.** Against the
+  equalized B, 24 of office1-4's 870 images localize on their own at 15
+  inliers, all within 3.8 cm of the ground truth (none against the raw
+  B). The VIO then has a map pose from the first two agreeing fixes, 17 s
+  in, to the end. The other direction of its drive, which only A covers,
+  stays without fixes.
+- **It needs the lower threshold.** Its best daylight image has 23
+  inliers, so the default 30 admits none. 15 is not a safe default (on
+  EuRoC, 20 inliers already admits poses metres off); here the two-fix
+  agreement check kept every accepted fix within 4 cm.
+- **The dawn session stays out of reach.** office1-5 is darker still; its
+  best image reaches 11 inliers against the equalized A as against the
+  raw one. Equalizing the images the VIO tracks too, not just the ORB
+  frontend's, gave it 7 fixes and a map pose for 18.9% of its frames in
+  one trial, but that was the only run that did.
+- **Within the same lighting it does little.** More images localize on
+  their own (office1-6: 174 fixes over the flight instead of 131), and the
+  maps have more landmarks (A 5,358 instead of 4,027), but the VIO + map
+  error moves by at most 0.1 cm, except office1-7 at 15 inliers (3.36 to
+  2.30 cm).
+- **It stays off by default.** On EuRoC it changes little, and V2_03 gets
+  worse ([numbers](basalt_map_localization.md#local-contrast-equalization)).
+  `basalt_map_merge` refuses to merge an equalized map with a raw one,
+  whose descriptors would not match.
 
 ## Reproduce
 
@@ -176,6 +233,17 @@ target/release/examples/basalt_euroc_online_slam_demo --euroc-dir data/office1-1
   --calibration data/office1-1/calibration.json \
   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
   --out-dir runs/o11_slam --save-map runs/o11_map
+
+# Map with local contrast equalization (for office1-4 against office1-2's map)
+target/release/examples/basalt_euroc_online_slam_demo --euroc-dir data/office1-2 \
+  --calibration data/office1-2/calibration.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --out-dir runs/o12_slam_eq --save-map runs/o12_map_eq --equalize-local-contrast
+target/release/examples/basalt_euroc_localize_demo --map runs/o12_map_eq \
+  --euroc-dir data/office1-4 --out-dir runs/o14_vio_eq --vio \
+  --calibration data/office1-4/calibration.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --localize-every 5 --min-inliers 15
 
 # Query: VIO corrected into the map frame
 target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
@@ -209,8 +277,10 @@ dataset is CC BY-ND 4.0: keep the converted images out of the repository.
 
 - **One scene, short paths.** Seven sequences, all in one office, each at
   most 11 m. They test change over days, not large areas.
-- **ORB only.** Across the day/night change no image localizes. Learned
-  features would be the next thing to try.
+- **ORB only.** Across the day/night change no raw image localizes.
+  Equalizing the local contrast gets one of the two daylight sessions a
+  map pose, at a lowered inlier threshold; the dawn session still has
+  none.
 - **The T265's shipped calibration.** It leaves the maps 1–3.5% short in
   scale, so every map pose carries a few cm of error. Recalibrating would
   likely remove most of it.

@@ -33,6 +33,12 @@
 //! `--save-map DIR` also saves the final map (keyframe poses, ORB landmarks
 //! and descriptors, as a COLMAP text model plus descriptor store) for
 //! `basalt_euroc_localize_demo`; see `examples/basalt_map/map_files.rs`.
+//! With `--equalize-local-contrast`, the mapper equalizes each keyframe
+//! image's local contrast before ORB extraction
+//! (`visloc_basalt::contrast::LocalContrast`, for maps that must localize
+//! images taken under other lighting); `map.json` records it, and
+//! localization applies the same to its images. The VIO tracks the raw
+//! images either way.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -50,6 +56,7 @@ use std::{
 
 use serde_json::json;
 use visloc_basalt::{
+    contrast::LocalContrast,
     mapper_online::{
         run_mapper_thread, OnlineIngestReport, OnlineMapperConfig, OnlineNfrMapper, SentImageFilter,
     },
@@ -77,6 +84,8 @@ struct Args {
     frontend_stats_csv: Option<PathBuf>,
     /// Save the final map for localization (`map_files` layout).
     save_map: Option<PathBuf>,
+    /// Equalize the keyframes' local contrast before ORB extraction.
+    equalize_local_contrast: bool,
     max_frames: Option<usize>,
     optimize_every_k: usize,
     periodic_iterations: usize,
@@ -365,6 +374,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             loop_closure_max_rotation_error_deg: args.loop_closure_max_rotation_error_deg,
             local_ba_window: args.local_ba_window,
             local_ba_iterations: args.local_ba_iterations,
+            local_contrast: args.equalize_local_contrast.then(LocalContrast::default),
             ..OnlineMapperConfig::default()
         },
     );
@@ -821,6 +831,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &export,
             calibration,
             mapper.feature_config.max_points,
+            args.equalize_local_contrast
+                .then(LocalContrast::default)
+                .as_ref(),
         )?;
         eprintln!(
             "saved map: images={} landmarks={} observations={} -> {}",
@@ -1101,6 +1114,7 @@ impl Args {
         let mut out_dir = PathBuf::from("target/basalt_euroc_online_slam_demo");
         let mut frontend_stats_csv = None;
         let mut save_map = None;
+        let mut equalize_local_contrast = false;
         let mut max_frames = None;
         let mut optimize_every_k = OnlineMapperConfig::default().optimize_every_k;
         let mut periodic_iterations = OnlineMapperConfig::default().periodic_iterations;
@@ -1157,6 +1171,7 @@ impl Args {
                     frontend_stats_csv = Some(PathBuf::from(next(&mut arguments, &option)?))
                 }
                 "--save-map" => save_map = Some(PathBuf::from(next(&mut arguments, &option)?)),
+                "--equalize-local-contrast" => equalize_local_contrast = true,
                 "--max-frames" => {
                     max_frames = Some(
                         next(&mut arguments, &option)?
@@ -1358,6 +1373,7 @@ impl Args {
             out_dir,
             frontend_stats_csv,
             save_map,
+            equalize_local_contrast,
             max_frames,
             optimize_every_k,
             periodic_iterations,
@@ -1401,6 +1417,7 @@ impl Args {
          [--pipeline | --no-pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] \
          [--mapper-queue-capacity N] [--retained-marg-diagnostics] [--num-opt-iter N] \
          [--match-top-k N] [--frontend-stats-csv <path>] [--save-map DIR] \
+         [--equalize-local-contrast] \
          [--projection-rematch] [--local-mapping] [--imu-seed-klt] \
          [--projection-host-window N] [--projection-radius PX] \
          [--loop-match-max-rot-error DEG] \
@@ -1582,6 +1599,19 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(args.save_map, Some(PathBuf::from("maps/mh01")));
+        assert!(!args.equalize_local_contrast);
+        let args = Args::parse(
+            [
+                "--euroc-dir",
+                "d",
+                "--calibration",
+                "c.json",
+                "--equalize-local-contrast",
+            ]
+            .map(Into::into),
+        )
+        .expect("parses");
+        assert!(args.equalize_local_contrast);
     }
 
     #[test]

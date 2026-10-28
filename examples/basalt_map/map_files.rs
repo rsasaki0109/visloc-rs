@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use serde_json::{json, Value};
+use visloc_basalt::contrast::LocalContrast;
 use visloc_basalt::mapper::{localization_camera_id, LocalizationMapExport};
 use visloc_basalt::BasaltCalibration;
 use visloc_core::geometry::SE3;
@@ -54,6 +55,9 @@ pub struct SavedMap {
     pub imu_from_camera: Vec<SE3>,
     /// Detector budget the map's keyframes were built with.
     pub max_points: usize,
+    /// Local contrast equalization the map's keyframes were built with,
+    /// which localization must apply to its images too.
+    pub local_contrast: Option<LocalContrast>,
     /// `map.json` as read.
     pub summary: Value,
     /// `images.csv`, empty when the file is missing.
@@ -94,13 +98,42 @@ pub fn se3_from_json(value: &Value) -> Option<SE3> {
     ))
 }
 
+/// `map.json`'s `feature_local_contrast` entry.
+pub fn local_contrast_json(local_contrast: &LocalContrast) -> Value {
+    json!({"tiles": local_contrast.tiles, "clip_limit": local_contrast.clip_limit})
+}
+
+/// The map's `feature_local_contrast`: `None` when absent (a map built from
+/// the raw images).
+pub fn local_contrast_from_json(summary: &Value) -> Result<Option<LocalContrast>, String> {
+    let Some(value) = summary
+        .get("feature_local_contrast")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let tiles = value.get("tiles").and_then(Value::as_u64);
+    let clip_limit = value.get("clip_limit").and_then(Value::as_f64);
+    match (tiles, clip_limit) {
+        (Some(tiles), Some(clip_limit)) if tiles > 0 && clip_limit > 0.0 => {
+            Ok(Some(LocalContrast {
+                tiles: tiles as usize,
+                clip_limit,
+            }))
+        }
+        _ => Err(format!("map.json: bad feature_local_contrast {value}")),
+    }
+}
+
 /// Writes `export` under `map_dir` as a one-session map; returns the
-/// `map.json` summary.
+/// `map.json` summary. `local_contrast` is the equalization the keyframes'
+/// features were extracted with, if any.
 pub fn save(
     map_dir: &Path,
     export: &LocalizationMapExport,
     calibration: &BasaltCalibration,
     max_points: usize,
+    local_contrast: Option<&LocalContrast>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let images = export
         .images
@@ -129,12 +162,15 @@ pub fn save(
             })
         })
         .collect::<Vec<_>>();
-    let summary = json!({
+    let mut summary = json!({
         "schema": MAP_SCHEMA,
         "world_frame": "Basalt mapper world (gravity-aligned VIO world of the mapped sequence)",
         "feature_max_points": max_points,
         "cameras": cameras,
     });
+    if let Some(local_contrast) = local_contrast {
+        summary["feature_local_contrast"] = local_contrast_json(local_contrast);
+    }
     write(map_dir, &export.map, &export.descriptors, &images, summary)
 }
 
@@ -235,6 +271,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         .get("feature_max_points")
         .and_then(Value::as_u64)
         .ok_or("map.json: missing feature_max_points")? as usize;
+    let local_contrast = local_contrast_from_json(&summary)?;
     let images_path = map_dir.join("images.csv");
     let images = if images_path.exists() {
         read_images(&images_path)?
@@ -274,6 +311,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         descriptors,
         imu_from_camera,
         max_points,
+        local_contrast,
         summary,
         images,
     })

@@ -223,7 +223,7 @@ measurements behind the defaults.
 
 | parameter | default | |
 |---|---|---|
-| `map` | required | directory written by `--save-map` (`map.json`, `sparse/`, `landmark_descriptors.txt`), or a map merged from several flights by `basalt_map_merge` (see `docs/basalt_map_localization.md`) |
+| `map` | required | directory written by `--save-map` (`map.json`, `sparse/`, `landmark_descriptors.txt`), or a map merged from several flights by `basalt_map_merge` (see `docs/basalt_map_localization.md`); a map built with `--equalize-local-contrast` makes the node equalize every image the same way before extraction |
 | `camera` | `0` | Basalt camera index of `image` |
 | `map_frame` | `map` | |
 | `extrinsics` | `map` | where the camera sits relative to the odometry's body: `map` takes the map's IMU-from-camera (`map.json`; the body is the map's IMU, as with `visloc_vio_node`'s default output); `tf` looks up the `/tf_static` transform from the camera's frame to the odometry's `child_frame_id`, e.g. `base_link` (see [on a ground robot](#on-a-ground-robot)) |
