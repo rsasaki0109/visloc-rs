@@ -21,7 +21,12 @@ frame gets a map pose once two fixes agree: MH_02 99.8% of frames at 2.0 cm
 RMSE (5.7 cm worst) localizing only every 5th image, at 0.83× real time on 4
 cores. Between rare fixes the VIO drifts; each pose comes with the time and
 distance since its last fix, and the poses within 2 m and 5 s of one are never
-more than 13 cm off on any sequence.
+more than 13 cm off on any sequence. Matching each image around the
+landmarks' projections from the anchored VIO's prediction
+(`--projection-radius-px 20`, [below](#matching-around-the-predicted-projections))
+makes the fixes far more frequent: 98% of MH_02's images match the map
+instead of 81%, and the longest stretch without a match falls from 7.3 s to
+1.2 s.
 
 ## Setup
 
@@ -231,6 +236,35 @@ reach decimetres. Keeping only fresh poses (within 2 m and 5 s of a fix)
 removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
+
+### Matching around the predicted projections
+
+Once the anchor is set, it and the VIO predict each image's pose. With
+`--projection-radius-px PX`, every landmark the predicted camera sees is
+matched only against the keypoints within `PX` pixels of its predicted
+projection (`BinaryLandmarkIndex::match_projected`), with the map-wide
+search as the fallback. `visloc_map_localize_node` has always done this
+(`projection_radius`, 20 px). The ratio test then compares a landmark with
+the few keypoints near its projection instead of the whole image, so many
+more correct matches pass it. With 20 px:
+
+| Query → map, localizing | Images that localize | Longest stretch without one | Median inliers | VIO + map RMSE / max | Fixes > 10 cm off | Localization per image |
+|---|---|---|---|---|---|---|
+| MH_02 → MH_01, every image | 81.2% → **98.2%** | 7.3 s → **1.2 s** | 78 → 148 | 2.03 / 5.9 → **1.94 / 5.0 cm** | 1 → 2 | 77 → 31 ms |
+| MH_02 → MH_01, every 5th | 81.6% → 98.4% | 7.5 s → 1.8 s | 77 → 150 | 2.05 / 5.7 → 2.00 / 5.6 cm | 1 → 0 | 81 → 31 ms |
+| V2_02 → V2_01, every image | 20.3% → **60.4%** | 14.5 s → 9.4 s | 47 → 57 | 4.13 / 12.2 → **3.33 / 12.3 cm** | 0 → 22 | 45 → 30 ms |
+| V2_02 → V2_01, every 5th | 21.1% → 60.6% | 14.8 s → 11.3 s | 47 → 56 | 4.24 / 12.6 → 3.44 / 12.0 cm | 0 → 5 | 47 → 30 ms |
+
+"Images that localize" is the share of the images tried; the share of
+frames with a map pose does not change (99.8–99.97%). Per-image times are
+medians (ORB extraction, matching, PnP).
+
+On V2_02 the extra fixes are less accurate than the map-wide ones: 22 of
+1,419 are 10–19 cm off (none of 477 without projection), mostly fixes with
+40–60 inliers. The anchor averages the fixes of the last 5 s, so the VIO +
+map poses still improve and their worst error does not grow. The other six
+queries were not rerun with projection matching, so the option stays off by
+default.
 
 ### On a robot (ROS 2)
 

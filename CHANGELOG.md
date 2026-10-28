@@ -28,12 +28,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
-- **README: map-based localization animation.** EuRoC MH_02 localized in
-  the MH_01 map, with the matched keypoints and the rays to their map
+- **README: map-based localization animation.** EuRoC MH_02 with the VIO
+  anchored to the MH_01 map: the map-frame trajectory (a pose for every
+  frame), the keypoints that matched the map and the rays to their
   landmarks (`docs/assets/hero_map_localization.gif`). It is rendered by
-  `scripts/render_map_localization_gif.py` from
-  `basalt_euroc_localize_demo --dump-inliers FILE`, which writes each
-  accepted localization's PnP inliers (keypoint pixel and map landmark).
+  `scripts/render_map_localization_gif.py` (`--trajectory` for a `--vio`
+  run) from `basalt_euroc_localize_demo --dump-inliers FILE`, which writes
+  each accepted localization's PnP inliers (keypoint pixel and map
+  landmark).
+
+- **`basalt_euroc_localize_demo --vio --projection-radius-px PX`.** Once
+  the VIO is anchored to the map, each image is first matched around the
+  landmarks' projections from the pose the anchored VIO predicts, as
+  `visloc_map_localize_node` does, with the map-wide search as the
+  fallback. At 20 px, localizing every image, 98.2% of MH_02's images
+  localize in the MH_01 map instead of 81.2%, the longest stretch without
+  one falls from 7.3 s to 1.2 s, and the VIO + map poses reach 1.94 cm RMSE
+  (2.03 before); on V2_02, 60.4% instead of 20.3%, at 3.33 cm instead of
+  4.13. Off by default.
 
 - **Live monocular-inertial VIO in a phone browser** (`bindings/wasm`). The
   Basalt port's VIO runs as WebAssembly on the phone's camera and motion

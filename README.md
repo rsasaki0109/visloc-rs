@@ -406,7 +406,9 @@ queries no accepted pose is more than 25 cm off; how many images localize
 depends on how much of the flight the map covers. Add `--vio --calibration
 FILE --config FILE` to run the stereo-inertial VIO alongside and anchor it to
 the map: every frame then gets a map pose (MH_02: 99.8% at 2.0 cm RMSE,
-localizing every 5th image). Maps of several flights of a place merge into
+localizing every 5th image). With `--projection-radius-px 20` as well, each
+image is matched around where the anchored VIO predicts the landmarks, and
+98% of MH_02's images match the map instead of 81%. Maps of several flights of a place merge into
 one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
 with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
 the [EuRoC map-localization results](docs/basalt_map_localization.md).
