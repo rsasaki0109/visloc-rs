@@ -248,10 +248,10 @@ All notable changes to `visloc-rs` will be documented here.
     at 3.45 cm.
 
 - **The real-time ROS 2 map localization is validated on all eight EuRoC
-  query sequences** (rosbag2 at 1.0x, Fast DDS): within 1.2 points of the
+  query sequences** (rosbag2 at 1.0x, Fast DDS): within 0.5 points of the
   offline `basalt_euroc_localize_demo --vio` on the share of frames with a
-  map pose (V2_03 never gets one, as offline), with no VIO reset and at most
-  27 dropped frames per sequence; table in `ros2/visloc-ros2/README.md`.
+  map pose (V2_03: 77.5%, from 21 s on), with no VIO reset and at most 15
+  dropped frames per sequence; table in `ros2/visloc-ros2/README.md`.
 
 - **The ROS 2 nodes are tested against ROS 2 Jazzy** with both
   `rmw_fastrtps_cpp` and `rmw_cyclonedds_cpp`, on one host:
@@ -351,9 +351,12 @@ All notable changes to `visloc-rs` will be documented here.
   21 s on (29.6 cm RMSE; 5.8 cm within 5 s and 2 m of a fix). On the other
   seven queries the first map pose comes up to 1.2 s sooner and the
   accuracy is unchanged; MH_04 and MH_05, whose starts the map does not
-  cover, try about twice as many images. `--initial-localize-every` /
-  `initial_localize_every` (default 1) sets the start-up cadence; 5 is the
-  previous behaviour.
+  cover, try about twice as many images. After 30 s without any
+  localization (`--initial-window-s` / `initial_window_s`), where the map
+  likely does not cover the place, they back off to every
+  `localize_every`-th image until one localizes. `--initial-localize-every`
+  / `initial_localize_every` (default 1) sets the start-up cadence; 5 is
+  the previous behaviour.
 
 - **`visloc_map_localize_node`: the projection prior expires.** The node
   matches around the predicted projections only within `projection_fresh_s`

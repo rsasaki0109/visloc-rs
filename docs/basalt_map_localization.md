@@ -410,10 +410,18 @@ first map pose (projection matching on, as by default):
 - **It costs most where the flight starts outside the map.** MH_04 and
   MH_05 start in parts of the hall the MH_01 map does not cover, so every
   image is tried for their first 25-27 s: about twice the images over the
-  flight. Where the map never matches (OpenLORIS office1-7 against map B,
-  [results](openloris_map_localization.md#results)), every image is tried
-  throughout, five times the work for nothing. The node tries the newest
-  image whenever it is free, so this costs CPU, not VIO frames.
+  flight. The node tries the newest image whenever it is free, so this
+  costs CPU, not VIO frames.
+- **After 30 s without a localization it backs off.** Where the map never
+  matches, trying every image would be five times the work for nothing.
+  So every image is tried only within `--initial-window-s` (30) seconds of
+  the start or of the latest localization; after that every
+  `--localize-every`-th, until one localizes and the next 30 s try every
+  image again. The longest wait for a first localization above is MH_04's
+  26.4 s, so none of these runs changes. OpenLORIS office1-7 against map B,
+  which none of its images match
+  ([results](openloris_map_localization.md#results)), tries 948 images
+  instead of 1,140 over its 38 s, and every 5th from 30 s on.
 
 ### On a robot (ROS 2)
 
@@ -428,9 +436,9 @@ MH_01 map, localizing every 5th image, with all processes on 4 cores. At
 real time, 99.6% of frames got a map pose, at 2.05 / 5.2 cm (RMSE / max)
 and a median latency of 49 ms; the VIO dropped the rest in its busiest
 stretch. At half speed, 99.8% of frames got a pose, at 2.06 / 5.2 cm.
-Played from a rosbag2 at real time, all eight queries above come within 1.2
+Played from a rosbag2 at real time, all eight queries above come within 0.5
 points of the offline `--vio --localize-every 5` share of frames with a map
-pose. On a ground robot, the VIO can publish `base_link` and the map node
+pose, V2_03's 77.5% included. On a ground robot, the VIO can publish `base_link` and the map node
 can take the camera's position from `/tf_static`, so wheel odometry can be
 corrected into the map frame too; [OpenLORIS-Scene](openloris_map_localization.md) measures that
 with a real robot's wheel odometry, and the VIO, over four days in an office.

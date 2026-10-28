@@ -53,6 +53,8 @@ PARAMETERS (--name value  or  -p name:=value):
   localize_every         localize every N-th received image                           [5]
   initial_localize_every ... and every N-th until the first map pose (which needs two
                          agreeing fixes)                                              [1]
+  initial_window_s       ... within this many seconds of the first image or the
+                         latest localization; then every localize_every-th            [30]
   min_inliers            minimum PnP inliers to accept a fix                          [30]
   max_hamming            largest ORB Hamming distance of a match                      [70]
   ratio                  nearest / second-nearest ratio (<= 0 disables)               [0.8]
@@ -111,6 +113,10 @@ fn run() -> Result<(), String> {
     let publish_map_cloud = args.flag("publish_map_cloud", true)?;
     let localize_every = args.parsed_or("localize_every", 5u64)?.max(1);
     let initial_localize_every = args.parsed_or("initial_localize_every", 1u64)?.max(1);
+    let initial_window_s = args.parsed_or("initial_window_s", 30.0f64)?;
+    if !(initial_window_s >= 0.0 && initial_window_s.is_finite()) {
+        return Err("initial_window_s must be a non-negative number".into());
+    }
     let mut options = MapLocalizeOptions::default();
     options.min_inliers = args.parsed_or("min_inliers", options.min_inliers)?;
     options.max_hamming = args.parsed_or("max_hamming", options.max_hamming)?;
@@ -245,16 +251,20 @@ fn run() -> Result<(), String> {
         })?;
     }
 
-    // Images: keep every N-th (every M-th until the first map pose), localize the
-    // latest one when free.
+    // Images: keep every N-th (every M-th until the first map pose, while
+    // images localize), localize the latest one when free.
     let queue = Arc::new(DropOldestQueue::<Image>::new(image_queue));
     {
         let queue = Arc::clone(&queue);
         let core = Arc::clone(&core);
-        let mut cadence = ImageCadence::new(localize_every, initial_localize_every);
+        let mut cadence =
+            ImageCadence::new(localize_every, initial_localize_every, initial_window_s);
         spawn_receiver("image-rx", image_sub, move |msg: Image| {
-            let has_map_pose = core.lock().unwrap_or_else(|e| e.into_inner()).is_set();
-            if cadence.take(has_map_pose) {
+            let (has_map_pose, latest_fix_ns) = {
+                let core = core.lock().unwrap_or_else(|e| e.into_inner());
+                (core.is_set(), core.latest_fix_ns())
+            };
+            if cadence.take(msg.header.stamp.to_nanos(), has_map_pose, latest_fix_ns) {
                 queue.push(msg);
             }
         })?;
@@ -262,7 +272,8 @@ fn run() -> Result<(), String> {
     eprintln!(
         "visloc_map_localize_node: domain {domain_id}, node {}; in: {image_topic} {odom_topic}; \
          out: {}{pose_topic} {diagnostics_topic}; localizing every {localize_every} image(s), \
-         every {initial_localize_every} until the first map pose",
+         every {initial_localize_every} until the first map pose \
+         (within {initial_window_s} s of a localization)",
         visloc_ros2::dds::qualified_name(&namespace, &node_name),
         if publish_tf {
             format!("{tf_topic} ")
