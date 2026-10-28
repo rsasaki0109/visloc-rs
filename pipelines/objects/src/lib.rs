@@ -49,8 +49,8 @@ pub use byte_track::{ByteTrackConfig, ByteTracker, TrackId, TrackedObject};
 pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
 pub use ground::{
     estimate_ground_height, place_on_ground, place_on_local_ground, plausible_height,
-    summarize_ground_track, BoxRays, GroundObservation, GroundParams, GroundTrack, GroundView,
-    PathGround,
+    summarize_ground_track, BoxRays, GroundObservation, GroundParams, GroundTrack,
+    GroundTrackParams, GroundView, PathGround,
 };
 pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};

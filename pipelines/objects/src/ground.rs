@@ -19,13 +19,14 @@
 //!   far (a higher one). The ground moves to the layer of scene points under
 //!   the object's placed foot until it settles.
 //! - **Over a track** ([`summarize_ground_track`]): the median size, the path
-//!   of the foot, and the speed of a line fitted to it.
+//!   of the foot, and the velocity of a line fitted to it, weighted by how
+//!   far each foot can be off; a velocity within that noise is still.
 //!
 //! The scale comes from the camera's metric height above the ground, so it
 //! is as good as the VIO's. The object must touch the ground where the box
 //! ends: anything carried, stacked or seen over an edge breaks it.
 
-use nalgebra::{Point3, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{Matrix2, Matrix2x4, Matrix4, Point3, UnitQuaternion, Vector2, Vector3, Vector4};
 
 use crate::BBox;
 
@@ -221,6 +222,8 @@ pub struct GroundObservation {
     pub timestamp_ns: i64,
     /// Where the object touches the ground.
     pub contact: Point3<f64>,
+    /// The camera it was seen from.
+    pub camera: Point3<f64>,
     pub height: f64,
     pub width: f64,
     /// Horizontal distance from the camera.
@@ -312,6 +315,7 @@ pub fn place_on_ground(
     Some(GroundObservation {
         timestamp_ns,
         contact,
+        camera: *camera_center,
         height: top - ground_z,
         width,
         distance,
@@ -404,6 +408,43 @@ pub fn place_on_local_ground(
     unreachable!()
 }
 
+/// Settings of [`summarize_ground_track`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundTrackParams {
+    /// A track needs three frames over this long (1 s).
+    pub min_seconds: f64,
+    /// How far a box's bottom edge is off, as an angle (0.004 rad, about
+    /// 3 px at a focal length of 720 px): along the ray, the foot is off by
+    /// this times `(h² + d²) / h` for a camera `h` above the ground and `d`
+    /// from the foot, across it by this times `d`.
+    pub angular_noise: f64,
+    /// And by this share of the object's width more either way, for not
+    /// knowing which point of the object the box's bottom edge falls on
+    /// (0.5)...
+    pub extent_noise: f64,
+    /// ...but at least this much (0.2 m).
+    pub min_extent_noise: f64,
+    /// A fitted velocity this unlikely under the noise (chi-square, two
+    /// degrees of freedom) or more counts as moving (9.21: 1 %).
+    pub still_chi2: f64,
+    /// A foot this far off the fitted line (the same chi-square) is dropped
+    /// (9.21).
+    pub outlier_chi2: f64,
+}
+
+impl Default for GroundTrackParams {
+    fn default() -> Self {
+        Self {
+            min_seconds: 1.0,
+            angular_noise: 0.004,
+            extent_noise: 0.5,
+            min_extent_noise: 0.2,
+            still_chi2: 9.21,
+            outlier_chi2: 9.21,
+        }
+    }
+}
+
 /// An object's track on the ground.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroundTrack {
@@ -415,17 +456,31 @@ pub struct GroundTrack {
     pub distance: f64,
     /// The contact point per frame.
     pub path: Vec<(i64, Point3<f64>)>,
-    /// Horizontal speed of a straight line fitted to the path (m/s).
+    /// Horizontal velocity of a straight line fitted to the path (m/s).
+    pub velocity: Vector2<f64>,
+    /// Its standard deviation along its direction (m/s).
+    pub speed_sigma: f64,
+    /// Whether the velocity stands out of the noise.
+    pub moving: bool,
+    /// The speed: `velocity`'s, or 0 if not `moving` (m/s).
     pub speed: f64,
 }
 
-/// Median size and the speed of the path, from at least three frames
+/// Median size, and the velocity of the path, from at least three frames
 /// spanning `min_seconds`.
+///
+/// The velocity is a straight line fitted by weighted least squares. Each
+/// foot is weighted by how far it can be off: little across the ray, a lot
+/// along it far away, where a pixel moves the foot by metres
+/// ([`GroundTrackParams`]). A camera driving towards a still car that is
+/// placed a few percent near at range would otherwise see it approach. Feet
+/// far off the line (a 2D track that jumped to a neighbour) are dropped. If
+/// the velocity does not stand out of the noise, the object is still.
 pub fn summarize_ground_track(
     object_id: u64,
     class_id: u32,
     observations: &[GroundObservation],
-    min_seconds: f64,
+    params: &GroundTrackParams,
 ) -> Option<GroundTrack> {
     if observations.len() < 3 {
         return None;
@@ -435,22 +490,78 @@ pub fn summarize_ground_track(
         .iter()
         .map(|o| (o.timestamp_ns - t0) as f64 * 1e-9)
         .collect();
-    let mean_t = times.iter().sum::<f64>() / times.len() as f64;
-    let spread: f64 = times.iter().map(|t| (t - mean_t).powi(2)).sum();
-    if times.iter().copied().fold(0.0, f64::max) < min_seconds || spread <= 0.0 {
+    if times.iter().copied().fold(0.0, f64::max) < params.min_seconds {
         return None;
     }
-    let mean_xy = observations
+    let mut widths: Vec<f64> = observations.iter().map(|o| o.width).collect();
+    widths.sort_by(f64::total_cmp);
+    let extent = (params.extent_noise * widths[widths.len() / 2]).max(params.min_extent_noise);
+    // Each foot's position and 2x2 information.
+    let feet: Vec<(Vector2<f64>, Matrix2<f64>)> = observations
         .iter()
-        .map(|o| Vector2::new(o.contact.x, o.contact.y))
-        .sum::<Vector2<f64>>()
-        / observations.len() as f64;
-    let velocity = observations
-        .iter()
-        .zip(&times)
-        .map(|(o, t)| (Vector2::new(o.contact.x, o.contact.y) - mean_xy) * (t - mean_t))
-        .sum::<Vector2<f64>>()
-        / spread;
+        .map(|o| {
+            let foot = Vector2::new(o.contact.x, o.contact.y);
+            let ray = foot - Vector2::new(o.camera.x, o.camera.y);
+            let d = ray.norm();
+            let along = ray.try_normalize(1e-9).unwrap_or_else(Vector2::x);
+            let across = Vector2::new(-along.y, along.x);
+            let h = (o.camera.z - o.contact.z).max(0.3);
+            let sigma_along = params.angular_noise * (h * h + d * d) / h + extent;
+            let sigma_across = params.angular_noise * d + extent;
+            let information = along * along.transpose() / (sigma_along * sigma_along)
+                + across * across.transpose() / (sigma_across * sigma_across);
+            (foot, information)
+        })
+        .collect();
+    // p_i = p0 + v (t_i - mean_t) by weighted least squares; feet beyond
+    // `outlier_chi2` of the line (a 2D track that jumped to a neighbour) are
+    // dropped and the line fitted again, a few times.
+    let mut keep = vec![true; feet.len()];
+    let mut fit = None;
+    for _ in 0..4 {
+        let kept: Vec<usize> = (0..feet.len()).filter(|&i| keep[i]).collect();
+        let mean_t = kept.iter().map(|&i| times[i]).sum::<f64>() / kept.len() as f64;
+        let mut normal = Matrix4::<f64>::zeros();
+        let mut rhs = Vector4::<f64>::zeros();
+        for &i in &kept {
+            let (foot, information) = &feet[i];
+            let mut jacobian = Matrix2x4::<f64>::zeros();
+            jacobian
+                .fixed_view_mut::<2, 2>(0, 0)
+                .copy_from(&Matrix2::identity());
+            jacobian
+                .fixed_view_mut::<2, 2>(0, 2)
+                .copy_from(&(Matrix2::identity() * (times[i] - mean_t)));
+            normal += jacobian.transpose() * information * jacobian;
+            rhs += jacobian.transpose() * information * foot;
+        }
+        let covariance = normal.try_inverse()?;
+        let solution = covariance * rhs;
+        let inliers: Vec<bool> = (0..feet.len())
+            .map(|i| {
+                let (foot, information) = &feet[i];
+                let r = foot
+                    - Vector2::new(solution[0], solution[1])
+                    - Vector2::new(solution[2], solution[3]) * (times[i] - mean_t);
+                r.dot(&(information * r)) < params.outlier_chi2
+            })
+            .collect();
+        fit = Some((covariance, solution));
+        if inliers == keep || inliers.iter().filter(|&&k| k).count() < 3 {
+            break;
+        }
+        keep = inliers;
+    }
+    let (covariance, solution) = fit?;
+    let velocity = Vector2::new(solution[2], solution[3]);
+    let velocity_covariance: Matrix2<f64> = covariance.fixed_view::<2, 2>(2, 2).into();
+    let chi2 = velocity.dot(&(velocity_covariance.try_inverse()? * velocity));
+    let direction = velocity.try_normalize(1e-12).unwrap_or_else(Vector2::x);
+    let speed_sigma = direction
+        .dot(&(velocity_covariance * direction))
+        .max(0.0)
+        .sqrt();
+    let moving = chi2 > params.still_chi2;
     let median = |f: fn(&GroundObservation) -> f64| {
         let mut v: Vec<f64> = observations.iter().map(f).collect();
         v.sort_by(f64::total_cmp);
@@ -466,7 +577,10 @@ pub fn summarize_ground_track(
             .iter()
             .map(|o| (o.timestamp_ns, o.contact))
             .collect(),
-        speed: velocity.norm(),
+        velocity,
+        speed_sigma,
+        moving,
+        speed: if moving { velocity.norm() } else { 0.0 },
     })
 }
 
@@ -500,6 +614,17 @@ mod tests {
     /// The rays of the 2D box of an upright `width × depth × height` cuboid
     /// standing at `foot`.
     fn outline(pose: &Isometry3<f64>, foot: Point3<f64>, size: (f64, f64, f64)) -> BoxRays {
+        padded_outline(pose, foot, size, 0.0)
+    }
+
+    /// [`outline`] with the box's bottom edge `pad` pixels low, as a loose
+    /// detector box has it (upright camera).
+    fn padded_outline(
+        pose: &Isometry3<f64>,
+        foot: Point3<f64>,
+        size: (f64, f64, f64),
+        pad: f64,
+    ) -> BoxRays {
         let (w, d, h) = size;
         let corners: Vec<Point2<f64>> = [-0.5, 0.5]
             .iter()
@@ -516,7 +641,7 @@ mod tests {
         let (y0, y1) = corners.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| {
             (lo.min(p.y), hi.max(p.y))
         });
-        BoxRays::from_box(&BBox::new(x0, y0, x1, y1), &pose.rotation, |x, y| {
+        BoxRays::from_box(&BBox::new(x0, y0, x1, y1 + pad), &pose.rotation, |x, y| {
             Some(Vector3::new((x - C.0) / F, (y - C.1) / F, 1.0))
         })
         .unwrap()
@@ -546,7 +671,7 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        summarize_ground_track(1, 0, &observations, 1.0).unwrap()
+        summarize_ground_track(1, 0, &observations, &GroundTrackParams::default()).unwrap()
     }
 
     #[test]
@@ -568,6 +693,66 @@ mod tests {
                 "{end}"
             );
         }
+    }
+
+    /// A car 4.5 x 1.8 x 1.5 m, its box 1.5 px low (the angular noise at this
+    /// focal length), seen for 3 s from a camera
+    /// 1.6 m up driving at 10 m/s, from 40 m to 10 m, 3 m to the side; the
+    /// car drives at `velocity` (m/s, along x, across the camera's path).
+    fn drive_past(velocity: f64) -> GroundTrack {
+        let observations: Vec<GroundObservation> = (0..30)
+            .map(|k| {
+                let t = k as f64 / 10.0;
+                let position = Vector3::new(0.0, 10.0 * t, 1.6);
+                let pose = camera(position, Vector3::new(0.0, 1.0, 0.0), 0.0);
+                let foot = Point3::new(3.0 + velocity * t, 40.0, 0.0);
+                let rays = padded_outline(&pose, foot, (1.8, 4.5, 1.5), 1.5);
+                place_on_ground(&Point3::from(position), &rays, 0.0, (t * 1e9) as i64).unwrap()
+            })
+            .collect();
+        summarize_ground_track(1, 2, &observations, &GroundTrackParams::default()).unwrap()
+    }
+
+    #[test]
+    fn a_parked_car_driven_past_stands_still() {
+        let track = drive_past(0.0);
+        // The loose box puts it near at range: a plain line fit would see it
+        // approach.
+        assert!(track.velocity.norm() > 0.5, "{track:?}");
+        assert!(!track.moving, "{track:?}");
+        assert_eq!(track.speed, 0.0);
+    }
+
+    #[test]
+    fn a_car_crossing_ahead_moves() {
+        let track = drive_past(5.0);
+        assert!(track.moving, "{track:?}");
+        assert!((track.speed - 5.0).abs() < 1.0, "{track:?}");
+        assert!(track.speed_sigma < 1.0, "{track:?}");
+    }
+
+    #[test]
+    fn a_track_that_jumps_to_a_neighbour_stays_still() {
+        // A person stands 8 m ahead for 3 s; for 6 frames the 2D track takes
+        // the person next to them, 2 m to the side.
+        let position = Vector3::new(0.0, 0.0, 1.5);
+        let pose = camera(position, Vector3::new(0.0, 1.0, 0.0), 0.0);
+        let observations: Vec<GroundObservation> = (0..30)
+            .map(|k| {
+                let x = if (12..18).contains(&k) { 2.5 } else { 0.5 };
+                let rays = outline(&pose, Point3::new(x, 8.0, 0.0), (0.5, 0.3, 1.75));
+                place_on_ground(&Point3::from(position), &rays, 0.0, k * 100_000_000).unwrap()
+            })
+            .collect();
+        let track =
+            summarize_ground_track(1, 0, &observations, &GroundTrackParams::default()).unwrap();
+        assert!(!track.moving, "{track:?}");
+        let plain = GroundTrackParams {
+            outlier_chi2: f64::INFINITY,
+            ..GroundTrackParams::default()
+        };
+        let jumped = summarize_ground_track(1, 0, &observations, &plain).unwrap();
+        assert!(jumped.velocity.norm() > track.velocity.norm(), "{jumped:?}");
     }
 
     #[test]
@@ -640,12 +825,12 @@ mod tests {
             .iter()
             .filter_map(|v| place_on_ground(&v.camera_center, &v.rays, 0.0, v.timestamp_ns))
             .collect();
-        let flat = summarize_ground_track(1, 0, &flat, 1.0).unwrap();
+        let flat = summarize_ground_track(1, 0, &flat, &GroundTrackParams::default()).unwrap();
         assert!(flat.height < 1.2, "{flat:?}");
         // On the ground under it, it stands 1 m lower and comes out right.
         let (ground, placed) = place_on_local_ground(&views, &points, 0.0, &params).unwrap();
         assert!((ground + 1.0).abs() < 0.05, "{ground}");
-        let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
+        let track = summarize_ground_track(1, 0, &placed, &GroundTrackParams::default()).unwrap();
         assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
         assert!((track.distance - 6.0).abs() < 0.3, "{track:?}");
     }
@@ -656,7 +841,7 @@ mod tests {
         let (ground, placed) =
             place_on_local_ground(&views, &points, 0.0, &GroundParams::default()).unwrap();
         assert!((ground - 0.5).abs() < 0.05, "{ground}");
-        let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
+        let track = summarize_ground_track(1, 0, &placed, &GroundTrackParams::default()).unwrap();
         assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
         assert!((track.distance - 6.0).abs() < 0.3, "{track:?}");
     }
@@ -667,7 +852,7 @@ mod tests {
         let (ground, placed) =
             place_on_local_ground(&views, &points, 0.0, &GroundParams::default()).unwrap();
         assert_eq!(ground, 0.0);
-        let track = summarize_ground_track(1, 0, &placed, 1.0).unwrap();
+        let track = summarize_ground_track(1, 0, &placed, &GroundTrackParams::default()).unwrap();
         assert!((track.height - 1.75).abs() < 0.1, "{track:?}");
     }
 
