@@ -222,8 +222,12 @@ Played from a rosbag2 at real time, all eight queries above come within 1.2
 points of the offline `--vio --localize-every 5` share of frames with a map
 pose. On a ground robot, the VIO can publish `base_link` and the map node
 can take the camera's position from `/tf_static`, so wheel odometry can be
-anchored too. Details in
+anchored too. `ros2/visloc-ros2/launch/map_localization.launch.py` starts
+both nodes, `robot_state_publisher` with the rig's URDF, and RViz, where the
+map node's latched `map_cloud` shows the map's landmarks. Details in
 [the node's README](../ros2/visloc-ros2/README.md#visloc_map_localize_node).
+
+![RViz during MH_02 in the MH_01 map: the map's landmarks, the VIO path and the map pose](assets/ros2_map_localization_rviz.png)
 
 ## Merging maps of several flights
 
