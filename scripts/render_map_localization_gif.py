@@ -7,7 +7,7 @@ matched (green). Inset: the query camera image with those matched keypoints
 (PnP inliers, green).
 
 With `--trajectory`, the map-frame trajectory of a `--vio` run (the VIO
-anchored to the map), the orange path and the red camera are that
+corrected into the map frame), the orange path and the red camera are that
 trajectory, which has a pose for every frame; rays and keypoints are drawn
 for the images that also matched the map, and the inset says how long the
 VIO has carried the pose since the last match on the others.
@@ -29,7 +29,7 @@ Example:
       --images MH_02_easy --localization runs/mh02_on_mh01/localization.tum \\
       --inliers runs/mh02_inliers.csv --out docs/assets/hero_map_localization.gif
 
-  # The VIO anchored to the map: a pose for every frame.
+  # The VIO corrected into the map frame: a pose for every frame.
   basalt_euroc_localize_demo --map runs/mh01_map --euroc-dir MH_02_easy \\
       --out-dir runs/mh02_vio --vio --calibration CALIB --config CONFIG \\
       --projection-radius-px 20 --dump-inliers runs/mh02_vio_inliers.csv

@@ -64,8 +64,8 @@ All notable changes to `visloc-rs` will be documented here.
   - the ground truth (`base_link`) is moved to the IMU.
 
   `basalt_euroc_localize_demo --odometry FILE [--imu-from-body ...]`
-  anchors an external odometry, such as the robot's wheel odometry, to the
-  map instead of the VIO.
+  corrects an external odometry, such as the robot's wheel odometry, into
+  the map frame instead of the VIO.
 
   `docs/openloris_map_localization.md` reports the office scene, seven
   sessions over four days:
@@ -78,7 +78,7 @@ All notable changes to `visloc-rs` will be documented here.
     in place.
 
 - **README: map-based localization animation.** EuRoC MH_02 with the VIO
-  anchored to the MH_01 map: the map-frame trajectory (a pose for every
+  corrected into the MH_01 map's frame: the map-frame trajectory (a pose for every
   frame), the keypoints that matched the map and the rays to their
   landmarks (`docs/assets/hero_map_localization.gif`). It is rendered by
   `scripts/render_map_localization_gif.py` (`--trajectory` for a `--vio`
@@ -87,18 +87,18 @@ All notable changes to `visloc-rs` will be documented here.
   landmark).
 
 - **`basalt_euroc_localize_demo`: matching around the predicted projections
-  with `--vio` (and `--odometry`), by default.** Once the VIO is anchored to
-  the map, each image is first matched around the landmarks' projections
-  from the pose the anchored VIO predicts, as `visloc_map_localize_node`
+  with `--vio` (and `--odometry`), by default.** Once the VIO has a map
+  pose, each image is first matched around the landmarks' projections
+  from the pose the corrected VIO predicts, as `visloc_map_localize_node`
   does, with the map-wide search as the fallback (`--projection-radius-px`,
   20; `0` turns it off).
   - Over the eight EuRoC queries, localizing every 5th image, more images
     localize (MH_02 98.4% instead of 81.6%, V2_02 56.4% instead of 21.1%)
     in about half the time.
-  - The VIO + map error falls on 6 of the 7 anchored queries (V1_03 4.60 cm
+  - The VIO + map error falls on 6 of the 7 queries with map poses (V1_03 4.60 cm
     instead of 6.66). On MH_05 it rises from 14.4 to 15.9 cm.
   - The prediction is used only within 5 s and 2 m of odometry travel after
-    the anchor's newest fix (`--projection-fresh-s`, `--projection-fresh-m`).
+    the correction's newest fix (`--projection-fresh-s`, `--projection-fresh-m`).
     After a 27 s gap on MH_03, a drifted prediction had produced fixes
     16–42 cm off.
 
@@ -221,7 +221,7 @@ All notable changes to `visloc-rs` will be documented here.
   `visloc_map_localize_node`); `map.json` lists the sessions and
   `images.csv` gains a `session` column. On EuRoC, MH_04 against MH_01
   merged with MH_05 localizes 55.8% of its images (4.6% against MH_01) and
-  the anchored VIO gives 99.7% of frames a pose at 9.5 cm RMSE (73.1% at
+  the corrected VIO gives 99.7% of frames a pose at 9.5 cm RMSE (73.1% at
   23.0 cm). An added map keeps its own error: MH_05 against MH_01 + MH_04
   gets 99.8% of frames (77.1%) and half the median error, but a worse tail
   where MH_04's part of the map is 25 cm off. Results and limits in
@@ -236,8 +236,8 @@ All notable changes to `visloc-rs` will be documented here.
   - `visloc_map_localize_node -p extrinsics:=tf` takes the camera's
     position on the robot from `/tf_static` (image `frame_id` to the
     odometry's `child_frame_id`) instead of the map's IMU-from-camera, so
-    any gravity-aligned odometry can be anchored, e.g. wheel odometry on a
-    level floor. New parameter `camera_frame`.
+    any gravity-aligned odometry can be corrected into the map frame, e.g.
+    wheel odometry on a level floor. New parameter `camera_frame`.
   - `visloc_ros2::tf_tree::StaticTransforms` composes static transform
     chains like tf2; the nodes subscribe to `/tf_static` transient-local,
     as `tf2_ros` does.
@@ -250,7 +250,7 @@ All notable changes to `visloc-rs` will be documented here.
 - **The real-time ROS 2 map localization is validated on all eight EuRoC
   query sequences** (rosbag2 at 1.0x, Fast DDS): within 1.2 points of the
   offline `basalt_euroc_localize_demo --vio` on the share of frames with a
-  map pose (V2_03 never anchors, as offline), with no VIO reset and at most
+  map pose (V2_03 never gets one, as offline), with no VIO reset and at most
   27 dropped frames per sequence; table in `ros2/visloc-ros2/README.md`.
 
 - **The ROS 2 nodes are tested against ROS 2 Jazzy** with both
@@ -277,8 +277,8 @@ All notable changes to `visloc-rs` will be documented here.
     `VioCore::into_stages` into `VioFrontend` / `VioBackend`. The split
     gives the same estimates as the serial path (tested). New parameter
     `frontend_threads` (default 2).
-  - Once anchored, `visloc_map_localize_node` predicts each image's pose
-    from the anchor and the odometry. It then matches each map landmark only
+  - Once the odometry has a map pose, `visloc_map_localize_node` predicts
+    each image's pose from the corrected odometry. It then matches each map landmark only
     against the keypoints within `projection_radius` (20 px) of its
     predicted projection, and falls back to the map-wide search if that
     fails. Matching and PnP drop from about 50 ms to 4 ms per image, with
@@ -330,14 +330,14 @@ All notable changes to `visloc-rs` will be documented here.
     `scripts/evaluate_map_localization.py` (`--per-frame --min-inliers`
     scores any threshold from one run).
   - `--vio --calibration FILE --config FILE` runs the Basalt
-    stereo-inertial VIO on the query sequence and anchors it to the map
-    with the fixes of every `--localize-every`-th image
-    (`visloc_localization::MapAnchor`: a gated, gravity-aligned yaw +
+    stereo-inertial VIO on the query sequence and corrects it into the map
+    frame with the fixes of every `--localize-every`-th image
+    (`visloc_localization::OdomCorrection`: a gated, gravity-aligned yaw +
     translation offset). Every frame gets a map pose in
     `trajectory_map.tum`; `trajectory_map.csv` adds the time and distance
     since the last fix. MH_02: 99.8% of frames at 2.0 cm RMSE localizing
-    every 5th image, at 0.83× real time on 4 cores; on all seven anchored
-    queries no pose within 2 m and 5 s of a fix is more than 12.6 cm off,
+    every 5th image, at 0.83× real time on 4 cores; on all seven queries
+    with map poses no pose within 2 m and 5 s of a fix is more than 12.6 cm off,
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
@@ -345,7 +345,7 @@ All notable changes to `visloc-rs` will be documented here.
 - **`visloc_map_localize_node`: the projection prior expires.** The node
   matches around the predicted projections only within `projection_fresh_s`
   (5) seconds and `projection_fresh_m` (2) metres of odometry travel after
-  the anchor's newest fix. After a longer gap it matches map-wide, since a
+  the correction's newest fix. After a longer gap it matches map-wide, since a
   drifted prediction can steer the projection search to a wrong pose that
   agrees with it.
 

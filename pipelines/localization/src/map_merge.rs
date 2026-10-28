@@ -47,7 +47,7 @@ use visloc_vision::matching::HammingMatcher;
 use visloc_vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_vision::ransac::PnPRansac;
 
-use crate::map_anchor::{wrap_angle, yaw_of, Offset};
+use crate::odom_correction::{wrap_angle, yaw_of, Offset};
 use crate::{
     AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, LocalizationConfig,
     LocalizationPipeline,

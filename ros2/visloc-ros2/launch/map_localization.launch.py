@@ -37,7 +37,7 @@ ARGUMENTS = [
     ("left_topic", "/cam0/image_raw", "left camera (the map's camera)"),
     ("right_topic", "/cam1/image_raw", "right camera"),
     ("imu_topic", "/imu0", "IMU"),
-    ("odom_topic", "/odom", "odometry the map localization anchors"),
+    ("odom_topic", "/odom", "odometry the map localization corrects into the map"),
     ("imu_frame", "imu0", "the IMU's link in the URDF"),
     ("base_frame", "base_link", "the robot's base link"),
     ("use_vio", "true", "run visloc_vio_node (false: another node publishes odom_topic)"),

@@ -10,7 +10,7 @@ needed to build or run them**, and they still join an ordinary ROS 2 graph.
 |---|---|
 | `visloc_vio_node` | Stereo-inertial VIO: the repository's faithful Basalt port (`pipelines/basalt`) fed from two `sensor_msgs/Image` streams and `sensor_msgs/Imu`. Publishes odometry, pose, path and TF. |
 | `visloc_localize_node` | Map-based localization: loads a COLMAP model plus a landmark descriptor store at start, extracts SIFT on each incoming image, matches against the map and solves PnP-RANSAC. Publishes the camera pose, inlier count and diagnostics. |
-| `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and anchors the VIO odometry to it. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
+| `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and corrects the VIO odometry into the map frame. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
 
 This crate is **not** a member of the root Cargo workspace (it is listed in
 the root `[workspace] exclude` and declares its own `[workspace]`), has its
@@ -180,9 +180,9 @@ visloc_map_localize_node --map runs/mh01_map --remap image=/cam0/image_raw
 Every `localize_every`-th image goes through the SLAM mapper's own ORB
 frontend, is matched to the map's landmarks by Hamming distance and solved
 with P3P RANSAC; a pose with at least `min_inliers` inliers is a *fix*.
-Until the anchor exists, every keypoint is compared with every landmark.
-After that, the anchor and the odometry at the image's stamp predict the
-pose (the node waits up to `prior_wait_ms` for that odometry). Each landmark
+Until the odometry has a map pose, every keypoint is compared with every
+landmark. After that, the correction and the odometry at the image's stamp
+predict the pose (the node waits up to `prior_wait_ms` for that odometry). Each landmark
 is projected with the predicted pose and compared only with the keypoints
 within `projection_radius` pixels. If that does not localize, the node
 falls back to the map-wide search. On EuRoC this cuts matching and PnP from
@@ -192,7 +192,8 @@ MH_02 against the MH_01 map). Both searches pack the map's descriptors once
 Each fix is paired with the odometry pose of the same stamp (the VIO node
 stamps its odometry with the left image's stamp; a fix that arrives before
 its odometry waits for it, and a stamp between two odometry poses at most
-0.2 s apart is interpolated) and fed to `visloc_localization::MapAnchor`:
+0.2 s apart is interpolated) and fed to `visloc_localization::OdomCorrection`,
+which keeps the odometry-to-map transform:
 
 - the transform is a yaw and a translation (both frames are gravity-aligned),
   averaged over the fixes of the last 5 s;
@@ -213,9 +214,9 @@ measurements behind the defaults.
 | `image` | `sensor_msgs/Image` | in | raw images of the map's `camera` (cam0 by default), the same stream the VIO uses |
 | `odom` | `nav_msgs/Odometry` | in | gravity-aligned odometry of a body frame, e.g. `visloc_vio_node`'s or a ground robot's wheel odometry; its `header.frame_id` names the odometry frame and its `child_frame_id` the body |
 | `/tf_static` | `tf2_msgs/TFMessage` | in | only with `extrinsics tf`: where the camera sits relative to the body |
-| `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once anchored |
-| `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once anchored (not `pose`, which `visloc_vio_node` publishes) |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, anchored, seconds/metres since the last fix, pending fixes |
+| `/tf` | `tf2_msgs/TFMessage` | out | `map_frame -> <odometry frame>`, stamped with each odometry message once the correction is set |
+| `map_pose` | `geometry_msgs/PoseWithCovarianceStamped` | out | body pose in `map_frame` for each odometry message once the correction is set (not `pose`, which `visloc_vio_node` publishes) |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | out | per localization attempt: localized, inliers, matches, matching (`projection` / `global`), time, `map_pose` (whether the odometry has one yet), seconds/metres since the last fix, pending fixes |
 | `map_cloud` | `sensor_msgs/PointCloud2` | out | the map's landmarks in `map_frame`, published once at start, transient-local (a late subscriber such as RViz still gets it) |
 
 | parameter | default | |
@@ -231,8 +232,8 @@ measurements behind the defaults.
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
-| `projection_radius` | `20` px | once anchored, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
-| `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the anchor's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
+| `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
+| `projection_fresh_s`, `projection_fresh_m` | `5` s, `2` m | the prediction is used only this long and this far (odometry travel) after the correction's newest fix; after a longer gap the image is matched map-wide, since a drifted prediction can steer the projection search to a wrong pose that agrees with it |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
@@ -269,7 +270,7 @@ Three runs at 1.0x dropped 1, 5 and 14 frames. The offline
   (`max_iterations`). On the eight EuRoC sequences in
   `docs/basalt_map_localization.md`, the VIO's ATE changed by at most
   0.13 cm. The estimator got 15-30% faster.
-- Localization uses the projection search once anchored.
+- Localization uses the projection search once the odometry has a map pose.
 
 The remaining drops are in MH_02's busiest stretch, where the estimator
 still takes up to about 100 ms on a frame while sharing the cores with the
@@ -306,7 +307,7 @@ ros2 bag play mh02_bag --delay 3      # or the robot's drivers
 | `left_topic`, `right_topic`, `imu_topic` | `/cam0/image_raw`, `/cam1/image_raw`, `/imu0` | sensor topics; the left camera is the map's |
 | `imu_frame`, `base_frame` | `imu0`, `base_link` | the IMU's and the base's links in the URDF |
 | `use_vio` | `true` | `false`: another node (e.g. wheel odometry) publishes `odom_topic` |
-| `odom_topic` | `/odom` | the odometry the map localization anchors |
+| `odom_topic` | `/odom` | the odometry the map localization corrects into the map frame |
 | `bin_dir` | `ros2/visloc-ros2/target/release` | where the node binaries are |
 | `rviz`, `rviz_config` | `false`, `launch/rviz/map_localization.rviz` | |
 
@@ -420,20 +421,20 @@ its room's map, next to the offline
 | V1_02 → V1_01 | 5 | 93.5% (93.9%) | 3.4 / 5.8 cm (3.5 / 6.4) | 5.3 s |
 | V1_03 → V1_01 | 12 | 99.1% (99.8%) | 4.3 / 11.7 cm (6.7 / 13.5) | 0.3 s |
 | V2_02 → V2_01 | 27 | 98.6% (99.8%) | 3.5 / 14.1 cm (4.2 / 12.6) | 0.3 s |
-| V2_03 → V2_01 | 0 | never anchored (same offline) | — | — |
+| V2_03 → V2_01 | 0 | none (same offline) | — | — |
 
 No run reset the VIO, and none dropped more than 1.2% of its frames. The
 node's results follow the offline ones, also where those are poor:
 
 - MH_04 and MH_05 fly through parts of the hall the MH_01 map never saw.
-  The anchor starts only after 26-27 s, and the VIO carries the pose
+  The first map pose comes only after 26-27 s, and the VIO carries the pose
   through long stretches without a fix.
-- V2_03 localized 1 of 350 images and never anchored. Offline, 0.4% of its
+- V2_03 localized 1 of 350 images and never got a map pose. Offline, 0.4% of its
   images localize.
 - MH_03's worst pose, 23 cm off, comes after 35 s without a fix where the
   flight leaves the map. There the node's VIO (3 LM iterations, see above)
   drifted further than the offline run's (5). The first two fixes after
-  the gap were rejected and the third re-anchored; offline, none were
+  the gap were rejected and the third reset the correction; offline, none were
   rejected.
 
 Read the bag once before playing it (`cat bag/*.mcap > /dev/null`), as
@@ -465,7 +466,7 @@ Both nodes fit into that tree:
   `child_frame_id`) instead of the map's IMU-from-camera calibration. The
   odometry's body can then be any frame. Wheel odometry works as well as
   the VIO: on a level floor its `odom` frame is gravity-aligned (z up),
-  and the anchor only estimates a yaw and a translation.
+  and the correction only estimates a yaw and a translation.
 
 The map is still built by the stereo-inertial SLAM, and the localized camera
 must be the map's camera.
@@ -489,7 +490,7 @@ publishers. In the VIO run, `tf2_echo map imu0` resolved
 growing by 0.5° per metre), because no wheeled-robot data with a
 stereo-inertial map was at hand. Real wheel odometry on an uneven floor
 also tilts, which this does not model. Offline, `basalt_euroc_localize_demo
---odometry` has since anchored a real robot's wheel odometry
+--odometry` has since corrected a real robot's wheel odometry
 ([OpenLORIS-Scene](../../docs/openloris_map_localization.md)): 7–12 cm,
 against 3 cm for the VIO, because it drifts in in-place turns that the
 map does not see.
@@ -550,11 +551,11 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   (`cam_time_offset_ns`) and not estimated online.
 * `visloc_map_localize_node` needs gravity-aligned odometry (z up), as a
   VIO provides. Planar wheel odometry qualifies on level floors only; on a
-  ramp its missing pitch and height change are errors the anchor can only
-  correct at fixes. It has been tested with simulated, not real, wheel
+  ramp its missing pitch and height change are errors the correction can
+  only remove at fixes. It has been tested with simulated, not real, wheel
   odometry ([above](#on-a-ground-robot)). Camera extrinsics come from the
   map or from `/tf_static`, which is read as static: a camera that moves
   on the robot (pan-tilt) is not supported. Its map is the stereo-inertial SLAM's (ORB),
-  not a COLMAP/SIFT model. The anchor is a filtered yaw + translation
+  not a COLMAP/SIFT model. The correction is a filtered yaw + translation
   offset, not a joint optimization with the VIO, so the pose error grows
   between fixes where the map does not cover the route.

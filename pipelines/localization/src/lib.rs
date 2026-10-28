@@ -13,8 +13,8 @@
 mod binary_index;
 mod correspondence;
 mod keyframe_retrieval;
-mod map_anchor;
 mod map_merge;
+mod odom_correction;
 
 use std::collections::HashSet;
 
@@ -36,10 +36,10 @@ pub use correspondence::{
     ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
 pub use keyframe_retrieval::KeyframeRetrieval;
-pub use map_anchor::{FixOutcome, MapAnchor, MapAnchorConfig};
 pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
 };
+pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {

@@ -31,18 +31,18 @@
 //!
 //! With `--vio --calibration FILE --config FILE`, the stereo-inertial Basalt
 //! VIO also runs on the sequence, and every `--localize-every`-th image is
-//! localized. Accepted fixes anchor the VIO to the map
-//! (`visloc_localization::MapAnchor`: a gravity-aligned yaw + translation
-//! offset, gated against outliers), so every frame gets a map-frame pose once
-//! the anchor is set, including the frames the map does not localize. Once
-//! the anchor is set, the anchor and the VIO predict each image's pose and
-//! every landmark is first matched only against the keypoints within
+//! localized. Accepted fixes correct the VIO into the map frame
+//! (`visloc_localization::OdomCorrection`: a gravity-aligned yaw +
+//! translation offset, gated against outliers), so every frame gets a
+//! map-frame pose once the correction is set, including the frames the map
+//! does not localize. From then on the corrected VIO predicts each image's
+//! pose and every landmark is first matched only against the keypoints within
 //! `--projection-radius-px` (20) pixels of its predicted projection, as
 //! `visloc_map_localize_node` does; the map-wide search remains the fallback
 //! (`--projection-radius-px 0` matches map-wide only).
 //! The prediction is used only within `--projection-fresh-s` (5) seconds
 //! and `--projection-fresh-m` (2) metres of odometry travel after the
-//! anchor's newest fix: a drifted prediction can steer the projection search
+//! correction's newest fix: a drifted prediction can steer the projection search
 //! to a wrong pose that agrees with it.
 //!
 //! ```text
@@ -58,12 +58,13 @@
 //!   frame, `timestamp tx ty tz qx qy qz qw` with the image timestamp, the
 //!   convention of the SLAM demo's `trajectory_*.tum`.
 //! - `per_frame.csv`: per localization attempt, success, matches, inliers,
-//!   latency, with `--vio` what the anchor did with the fix, and which
+//!   latency, with `--vio` what the correction did with the fix, and which
 //!   search gave the result (`projection`, `radius`, `retrieval` or
 //!   `global`).
-//! - With `--vio`: `trajectory_map.tum`, every anchored frame's IMU pose in
-//!   the map frame; `trajectory_map.csv`, the same poses with the time and
-//!   VIO distance since the anchor's newest fix (the fused error grows with
+//! - With `--vio`: `trajectory_map.tum`, the IMU pose in the map frame of
+//!   every frame from the correction's start; `trajectory_map.csv`, the same
+//!   poses with the time and VIO distance since the correction's newest fix
+//!   (the fused error grows with
 //!   them, so use them to judge a pose); `trajectory_vio.tum`, the raw VIO in
 //!   its own frame.
 //! - With `--odometry FILE` instead of `--vio`: `trajectory_map.tum` and
@@ -96,8 +97,8 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, MapAnchor,
-    MapAnchorConfig,
+    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, OdomCorrection,
+    OdomCorrectionConfig,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
@@ -129,22 +130,22 @@ struct Args {
     retrieval_keyframes: Option<usize>,
     /// Bits of a retrieval visual word.
     retrieval_bits: u8,
-    /// Run the Basalt VIO alongside and anchor it to the map.
+    /// Run the Basalt VIO alongside and correct it into the map frame.
     vio: bool,
     calibration: Option<PathBuf>,
     config: Option<PathBuf>,
-    /// Anchor this odometry (TUM, a body's poses) instead of the VIO.
+    /// Correct this odometry (TUM, a body's poses) instead of the VIO.
     odometry: Option<PathBuf>,
     /// With `--odometry`: the body's pose in the IMU frame, `T_imu_body`.
     imu_from_body: Option<SE3>,
     /// With `--vio` or `--odometry`, localize every N-th frame.
     localize_every: usize,
-    /// With `--vio` or `--odometry`, match by projection from the anchored
+    /// With `--vio` or `--odometry`, match by projection from the corrected
     /// odometry's prediction first, within this radius (20 px unless set;
     /// `0` turns it off).
     projection_radius_px: Option<f64>,
-    /// Trust the prediction only this long and this far after the anchor's
-    /// newest fix.
+    /// Trust the prediction only this long and this far after the
+    /// correction's newest fix.
     projection_fresh_s: f64,
     projection_fresh_m: f64,
     /// Write each accepted localization's inliers here.
@@ -294,7 +295,8 @@ impl Args {
         if args.vio || args.odometry.is_some() {
             if args.stride != 1 {
                 return Err(
-                    "an anchored run sees every frame; use --localize-every, not --stride".into(),
+                    "a --vio or --odometry run sees every frame; use --localize-every, not --stride"
+                        .into(),
                 );
             }
             if args.localize_every == 0 {
@@ -453,7 +455,7 @@ impl Localizer {
         })
     }
 
-    /// Localizes one image. `predicted`, the map-frame IMU pose the anchored
+    /// Localizes one image. `predicted`, the map-frame IMU pose the corrected
     /// VIO predicts for it, enables the projection search.
     fn localize(
         &mut self,
@@ -567,13 +569,13 @@ impl Localizer {
 }
 
 const CSV_HEADER: &str =
-    "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms,anchor,\
+    "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms,correction,\
      matching\n";
 
-fn csv_row(csv: &mut String, timestamp_ns: i64, attempt: &Attempt, anchor: &str) {
+fn csv_row(csv: &mut String, timestamp_ns: i64, attempt: &Attempt, correction: &str) {
     let _ = writeln!(
         csv,
-        "{},{},{},{},{},{},{:.4},{:.2},{anchor},{}",
+        "{},{},{},{},{},{},{:.4},{:.2},{correction},{}",
         timestamp_ns,
         attempt.world_from_imu.is_some(),
         attempt.used_prior,
@@ -652,11 +654,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Odometry anchored to the map, frame by frame: the fixes, the anchor and
-/// every output file of `--vio` / `--odometry`.
-struct AnchoredRun {
-    anchor: MapAnchor,
-    /// How long / far after the anchor's newest fix its prediction is used.
+/// Odometry corrected into the map frame, frame by frame: the fixes, the
+/// correction and every output file of `--vio` / `--odometry`.
+struct CorrectedRun {
+    correction: OdomCorrection,
+    /// How long / far after the correction's newest fix its prediction is
+    /// used.
     fresh_s: f64,
     fresh_m: f64,
     fixes_tum: String,
@@ -668,17 +671,17 @@ struct AnchoredRun {
     latencies: Vec<f64>,
     attempts: usize,
     localized: usize,
-    anchored: usize,
+    map_poses: usize,
     frames: usize,
     outcomes: std::collections::BTreeMap<&'static str, usize>,
     started: Instant,
 }
 
-impl AnchoredRun {
+impl CorrectedRun {
     fn new(args: &Args) -> Self {
         let header = "# timestamp tx ty tz qx qy qz qw\n";
         Self {
-            anchor: MapAnchor::new(MapAnchorConfig::default()),
+            correction: OdomCorrection::new(OdomCorrectionConfig::default()),
             fresh_s: args.projection_fresh_s,
             fresh_m: args.projection_fresh_m,
             fixes_tum: header.to_owned(),
@@ -692,7 +695,7 @@ impl AnchoredRun {
             latencies: Vec::new(),
             attempts: 0,
             localized: 0,
-            anchored: 0,
+            map_poses: 0,
             frames: 0,
             outcomes: std::collections::BTreeMap::new(),
             started: Instant::now(),
@@ -711,18 +714,18 @@ impl AnchoredRun {
         self.frames += 1;
         self.odometry_tum
             .push_str(&tum_line(timestamp_ns, odom_from_imu));
-        // The anchor as it stands before this image's fix predicts its pose,
+        // The correction as it stands before this image's fix predicts its pose,
         // while its newest fix is recent: after a long gap, a drifted
         // prediction can steer the projection search to a wrong pose that
         // agrees with it.
         let predicted = self
-            .anchor
+            .correction
             .last_fix()
             .filter(|(fix_ns, fix_position)| {
                 (timestamp_ns - fix_ns) as f64 * 1e-9 <= self.fresh_s
                     && (odom_from_imu.translation - fix_position).norm() <= self.fresh_m
             })
-            .and_then(|_| self.anchor.map_from_body(odom_from_imu));
+            .and_then(|_| self.correction.map_from_body(odom_from_imu));
         if let Some(image) = image {
             let attempt = localizer.localize(image, predicted.as_ref())?;
             self.attempts += 1;
@@ -733,14 +736,14 @@ impl AnchoredRun {
                     self.fixes_tum
                         .push_str(&tum_line(timestamp_ns, map_from_imu));
                     match self
-                        .anchor
+                        .correction
                         .add_fix(timestamp_ns, map_from_imu, odom_from_imu)
                     {
                         FixOutcome::Pending => "pending",
                         FixOutcome::Initialized => "initialized",
                         FixOutcome::Accepted => "accepted",
                         FixOutcome::Rejected => "rejected",
-                        FixOutcome::Reanchored => "reanchored",
+                        FixOutcome::Reset => "reset",
                     }
                 }
                 None => "-",
@@ -750,8 +753,8 @@ impl AnchoredRun {
             inlier_rows(&mut self.inliers, timestamp_ns, &attempt);
         }
         if let (Some(map_from_imu), Some((fix_ns, fix_position))) = (
-            self.anchor.map_from_body(odom_from_imu),
-            self.anchor.last_fix(),
+            self.correction.map_from_body(odom_from_imu),
+            self.correction.last_fix(),
         ) {
             self.map_tum
                 .push_str(&tum_line(timestamp_ns, &map_from_imu));
@@ -769,7 +772,7 @@ impl AnchoredRun {
                 (timestamp_ns - fix_ns) as f64 * 1e-9,
                 (odom_from_imu.translation - fix_position).norm(),
             )?;
-            self.anchored += 1;
+            self.map_poses += 1;
         }
         Ok(())
     }
@@ -788,13 +791,13 @@ impl AnchoredRun {
             fs::write(path, self.inliers)?;
         }
         println!(
-            "frames {}, localized {}/{} attempts (median {:.1} ms), anchored {}/{} frames, \
+            "frames {}, localized {}/{} attempts (median {:.1} ms), map poses {}/{} frames, \
              fixes {:?}, {wall_s:.1} s -> {}",
             self.frames,
             self.localized,
             self.attempts,
             median(self.latencies),
-            self.anchored,
+            self.map_poses,
             self.frames,
             self.outcomes,
             args.out_dir.display()
@@ -803,8 +806,8 @@ impl AnchoredRun {
     }
 }
 
-/// Runs the Basalt VIO on every frame and anchors it to the map with the
-/// fixes from every `--localize-every`-th frame.
+/// Runs the Basalt VIO on every frame and corrects it into the map frame with
+/// the fixes from every `--localize-every`-th frame.
 fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::error::Error>> {
     let calibration = args.calibration.as_ref().expect("checked by Args::parse");
     let config = args.config.as_ref().expect("checked by Args::parse");
@@ -817,7 +820,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
         .unwrap_or(usize::MAX)
         .min(dataset.frame_count());
 
-    let mut run = AnchoredRun::new(args);
+    let mut run = CorrectedRun::new(args);
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
@@ -841,8 +844,8 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     run.finish(args, "trajectory_vio.tum")
 }
 
-/// Anchors an external odometry (`--odometry`, e.g. a robot's wheel
-/// odometry) to the map instead of the VIO: each camera image takes the
+/// Corrects an external odometry (`--odometry`, e.g. a robot's wheel
+/// odometry) into the map frame instead of the VIO: each camera image takes the
 /// odometry pose interpolated at its stamp, and every `--localize-every`-th
 /// image is localized.
 fn run_odometry(
@@ -864,7 +867,7 @@ fn run_odometry(
         .take(args.max_frames.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
 
-    let mut run = AnchoredRun::new(args);
+    let mut run = CorrectedRun::new(args);
     for (index, entry) in images.iter().enumerate() {
         let Some(odom_from_body) = interpolate_pose(&odometry, entry.timestamp_ns) else {
             continue;
