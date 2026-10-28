@@ -1,0 +1,67 @@
+name: pages
+
+# The GitHub Pages site: docs/ as is, plus the browser VIO demo
+# (bindings/wasm, both builds from its build.sh) under slam/. Needs
+# Settings > Pages > Source set to "GitHub Actions".
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchains
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustup toolchain install nightly-2026-04-10 --profile minimal \
+            --component rust-src --target wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            bindings/wasm -> target
+            bindings/wasm -> target/mt
+
+      - name: Install wasm-bindgen-cli
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' bindings/wasm/Cargo.lock)
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Build the browser VIO
+        run: bindings/wasm/build.sh
+
+      - name: Assemble the site
+        run: |
+          cp -r docs _site
+          bindings/wasm/deploy_pages.sh --dir _site/slam
+
+      - name: Upload
+        uses: actions/upload-pages-artifact@v4
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

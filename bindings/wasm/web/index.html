@@ -236,7 +236,7 @@
     <li><b>IMU only</b> ignores the camera: the map freezes and moves by the motion sensors alone. Points that stay on their features while you turn the phone mean the camera and IMU agree.</li>
   </ul>
   <button class="big" id="b-start">Start camera &amp; motion sensors</button>
-  <button class="ghost" id="b-demo">Watch a demo (recorded iPhone walk, no sensors needed)</button>
+  <button class="ghost" id="b-demo" hidden>Watch a demo (recorded iPhone walk, no sensors needed)</button>
   <div class="err" id="start-err"></div>
   <p class="note">Calibration is loaded for your phone model where known (focal length from the manufacturer's 35&nbsp;mm-equivalent figure). Tune it under ⚙ if tracking drifts. Uses wasm threads when the page is cross-origin isolated. Served by <code>serve.py</code>, the page sends it diagnostics (timings, counters, errors and phone model; no images); <code>?telemetry=0</code> turns that off.</p>
 </section>

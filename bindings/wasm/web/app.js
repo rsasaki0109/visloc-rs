@@ -1731,6 +1731,11 @@ $("live").addEventListener("click", () => {
 
 $("b-start").onclick = start;
 $("b-demo").onclick = startDemo;
+// The demo is not in git (tools/make_advio_demo.py builds it): offer it only
+// where the host has it.
+fetch(`demo/${new URLSearchParams(location.search).get("demo") || "advio-02"}.json`, { method: "HEAD" })
+  .then((r) => ($("b-demo").hidden = !r.ok))
+  .catch(() => {});
 $("b-stop").onclick = () => stop("button");
 $("b-imu").onclick = () => (imuOnly ? stopImuOnly("button") : startImuOnly());
 $("b-reset").onclick = () => {
