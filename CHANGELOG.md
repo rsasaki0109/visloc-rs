@@ -42,7 +42,8 @@ All notable changes to `visloc-rs` will be documented here.
       over the same frames.
     - Indoors (a mall), it is off by 12%, with a weak fit (|g| 9.57).
       These runs used 640 px faces. At 1024 px the mall's fit passes and
-      lands +5.5% over 33 s, so keep `--max-size` at 1024 or more.
+      lands +5.5% over 33 s and +5.3% over 66 s (|g| 9.61, still a weak
+      fit), so keep `--max-size` at 1024 or more.
     - The `.insv` image-circle string is read after `p2_` or `n2_`.
 
 ### Fixed
@@ -59,6 +60,16 @@ All notable changes to `visloc-rs` will be documented here.
   missing (`dds::StaticTfListener`): 5 s after the first subscription,
   then with doubling waits, at most six times. With that, 300 of 300
   probes had both transforms.
+- **`gsplat_photos --equirect-native` crashed writing its model.** Since
+  0.3.0 the sparse model lists each image's observations. With
+  `--equirect-native` the tracks observe the panoramas while the model
+  holds their cube faces, so the panorama observations were indexed as
+  faces, and every run panicked at the end. Each observation now goes to
+  the face nearest its ray, at the pixel where the ray crosses it. On the
+  synthetic room the faces' observations reproject at a median 0.09 px, as
+  with `--equirect`. The two end-to-end tests that cover this (run with
+  `--ignored`) misread the observation lines and failed too; they now also
+  check the observations' reprojection.
 - **Saving a map from a lens wider than the Double Sphere model failed.**
   The map export fits COLMAP's `OPENCV_FISHEYE` to each Double Sphere
   camera. It gave up when an image corner did not unproject, which happens
@@ -475,6 +486,20 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **`gsplat_photos` frees the working images after SIFT, and `--insv`
+  writes its lens faces to disk as it cuts them.**
+  - Each SfM point takes its colour from its first keypoint, as before. The
+    colours under the keypoints are now kept at SIFT time, so the decoded
+    photos, cube faces or lens faces are freed after feature extraction
+    instead of being held through SfM.
+  - With `--insv` each frame is cut into its ten faces and written as it
+    is read, and SIFT reads the faces back (PNG, so the same pixels).
+  - The output is byte-identical for photos, `--mask-black`, `--equirect`,
+    `--equirect-native` and `--insv` (100 frames).
+  - On 4 cores and 15 GB, 100 frames with 1024 px lens faces peak at
+    4.5 GB instead of 7.9 GB. 200 frames, killed at 14 GB before, finish
+    at 8.6 GB.
 
 - **Weak fixes: localizations with 15–29 inliers can set the first map
   pose.** With `--vio` or `--odometry`, `basalt_euroc_localize_demo` passes
