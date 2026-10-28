@@ -120,6 +120,18 @@ All notable changes to `visloc-rs` will be documented here.
     The page reports whether the phone offers WebGPU and the main
     thread's time to read a frame back.
 
+- **Launch file, URDF and RViz config for the ROS 2 nodes.**
+  `ros2/visloc-ros2/launch/map_localization.launch.py` starts
+  `robot_state_publisher`, the VIO (`odom -> base_link`), the map
+  localization (extrinsics from `/tf_static`) and optionally RViz with
+  `launch/rviz/map_localization.rviz`. `tools/calib_to_urdf.py` writes a
+  URDF from a Basalt calibration (`launch/euroc_rig.urdf` for EuRoC).
+  `visloc_map_localize_node` publishes the map's landmarks once on
+  `map_cloud` (`sensor_msgs/PointCloud2`, transient-local;
+  `publish_map_cloud`). Tested with ROS 2 Jazzy: MH_02 through the launch
+  file gives 99.6% of frames a map pose at 2.06 cm RMSE, and RViz shows
+  the map, path, pose and TF tree.
+
 - **Merging maps of several flights.** `basalt_map_merge --base A --add B
   --out AB` registers saved SLAM maps of the same place to the first one
   and writes one map in its frame. `visloc_localization::register_map`

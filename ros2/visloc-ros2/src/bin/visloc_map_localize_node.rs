@@ -17,7 +17,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use visloc_ros2::dds::{
-    output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
+    latched_qos, output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
 };
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
@@ -25,7 +25,10 @@ use visloc_ros2::map_localize::{
     se3_from_ros, AnchorCore, Fix, FixEvent, MapLocalizeOptions, MapLocalizer, Matching,
     OdomLookup,
 };
-use visloc_ros2::msgs::{DiagnosticArray, Image, Odometry, PoseWithCovarianceStamped, TfMessage};
+use visloc_ros2::msgs::{
+    DiagnosticArray, Header, Image, Odometry, PointCloud2, PoseWithCovarianceStamped, TfMessage,
+    Time,
+};
 use visloc_ros2::params::NodeArgs;
 use visloc_ros2::queue::DropOldestQueue;
 use visloc_ros2::tf_tree::StaticTransforms;
@@ -46,6 +49,7 @@ PARAMETERS (--name value  or  -p name:=value):
                          frame to the body frame (e.g. base_link)                   [map]
   camera_frame           with extrinsics tf: the camera's frame       [the image's frame_id]
   publish_tf             publish /tf map_frame -> odometry frame                      [true]
+  publish_map_cloud      publish the map's landmarks once on map_cloud (latched)     [true]
   localize_every         localize every N-th received image                           [5]
   min_inliers            minimum PnP inliers to accept a fix                          [30]
   max_hamming            largest ORB Hamming distance of a match                      [70]
@@ -71,7 +75,8 @@ TOPICS (remap with --remap from=to or -r from:=to):
        its header.frame_id and child_frame_id name the odometry and body frames),
        /tf_static (tf2_msgs/TFMessage, with extrinsics tf)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
-       body pose in map_frame, once anchored), /diagnostics (diagnostic_msgs/DiagnosticArray)
+       body pose in map_frame, once anchored), /diagnostics (diagnostic_msgs/DiagnosticArray),
+       map_cloud (sensor_msgs/PointCloud2, the map's landmarks in map_frame, transient-local)
 ";
 
 fn main() {
@@ -97,6 +102,7 @@ fn run() -> Result<(), String> {
     };
     let camera_frame = args.string("camera_frame");
     let publish_tf = args.flag("publish_tf", true)?;
+    let publish_map_cloud = args.flag("publish_map_cloud", true)?;
     let localize_every = args.parsed_or("localize_every", 5u64)?.max(1);
     let mut options = MapLocalizeOptions::default();
     options.min_inliers = args.parsed_or("min_inliers", options.min_inliers)?;
@@ -131,6 +137,7 @@ fn run() -> Result<(), String> {
     let tf_static_topic = args.topic("/tf_static");
     let pose_topic = args.topic("map_pose");
     let diagnostics_topic = args.topic("/diagnostics");
+    let map_cloud_topic = args.topic("map_cloud");
     args.finish()?;
 
     let map = load_basalt_map(&map_dir)?;
@@ -141,6 +148,16 @@ fn run() -> Result<(), String> {
         map.map.landmarks.len(),
         map.descriptors.len(),
     );
+    // The map's landmarks, for RViz; published once below.
+    let map_cloud = publish_map_cloud.then(|| {
+        PointCloud2::xyz(
+            Header::new(Time::from_nanos(0), map_frame.clone()),
+            map.map.landmarks.values().map(|landmark| {
+                let p = landmark.position;
+                [p.x as f32, p.y as f32, p.z as f32]
+            }),
+        )
+    });
     let localizer = MapLocalizer::new(map, camera, &options)?;
     let core = Arc::new(Mutex::new(AnchorCore::new(&options)));
     // Notified on every odometry message, for images waiting for theirs.
@@ -152,6 +169,15 @@ fn run() -> Result<(), String> {
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
     let diagnostics_pub = ros.publisher::<DiagnosticArray>(&diagnostics_topic, output_qos(10))?;
+    // Kept by the transient-local writer for subscribers that join later.
+    let _map_cloud_pub = match map_cloud {
+        Some(cloud) => {
+            let publisher = ros.publisher::<PointCloud2>(&map_cloud_topic, latched_qos(1))?;
+            publish_logged(&publisher, cloud, "map_cloud");
+            Some(publisher)
+        }
+        None => None,
+    };
     // With extrinsics from tf: the static transforms, and the odometry's
     // body frame.
     let transforms = Arc::new(Mutex::new(StaticTransforms::new()));
