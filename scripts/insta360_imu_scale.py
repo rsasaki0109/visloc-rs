@@ -12,15 +12,17 @@ perspective model's `images.bin` (COLMAP 3.12+ binary,
 
 1. Frames: images `<2 * i + lens>_perspective_<view>.jpg`, view 0 of each
    fisheye lens; i is the frame's index in time.
-2. IMU units: the dataset CSV holds raw sensor counts. The gyro is taken as
-   16.4 counts per deg/s (refined below), the accelerometer as the nominal
-   sensitivity (1000, 1024, 2048 or 4096 counts per g) closest to the mean
-   specific force over 20 s windows.
+2. IMU units: the dataset CSV holds the X5's raw sensor counts, 16.4 counts
+   per deg/s (+-2000 dps) and 1024 counts per g (+-32 g). The CSV may also
+   be in deg/s already; the timing search tries both. Reported as checks:
+   the gyro sensitivity fitted to the model's rotations and 1 g in counts
+   (the specific force averaged over 20 s windows; it reads low when the
+   camera turns within the window, so it does not pick the sensitivity).
 3. Timing t_i = a i + b and the camera-from-IMU rotation R_CB: a coarse grid
    on the frame-to-frame rotation angles, a finer grid within +-0.4% of a,
    then Nelder-Mead on the median residual of the Kabsch fit
-   r_C = R_CB r_B. The gyro scale is refined from the same fit. Drift check:
-   b re-estimated on the first and last quarters.
+   r_C = R_CB r_B. Drift check: b re-estimated on the first and last
+   quarters.
 4. Scale: per run of frames at most 1.2 s apart (at least 8 intervals),
    unknowns s, g, b_a and one velocity per frame, with IMU preintegration
    using R_WB from the model propagated by the gyro:
@@ -49,7 +51,7 @@ from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as Rot
 
 GYRO_COUNTS_PER_DPS = 16.4
-ACCEL_COUNTS_PER_G = (1000, 1024, 2048, 4096)
+ACCEL_COUNTS_PER_G = 1024
 STANDARD_G = 9.80665
 MAX_GAP_S = 1.2
 MIN_INTERVALS = 8
@@ -135,11 +137,10 @@ def arkit_scale(images, poses_csv: str) -> tuple[int, float, list[float]]:
     return len(common), umeyama(x, y), quarters
 
 
-def accel_counts_per_g(acc: np.ndarray, window: int = 20000) -> tuple[int, float]:
-    """The nominal sensitivity closest to the mean specific force over 20 s."""
+def one_g_counts(acc: np.ndarray, window: int = 20000) -> float:
+    """Median magnitude of the specific force averaged over 20 s windows."""
     m = len(acc) // window
-    one_g = float(np.median(np.linalg.norm(acc[: m * window].reshape(m, window, 3).mean(1), axis=1)))
-    return min(ACCEL_COUNTS_PER_G, key=lambda v: abs(np.log(one_g / v))), one_g
+    return float(np.median(np.linalg.norm(acc[: m * window].reshape(m, window, 3).mean(1), axis=1)))
 
 
 def _qmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -185,9 +186,23 @@ def kabsch(rb: np.ndarray, rc: np.ndarray) -> np.ndarray:
     return vt.T @ np.diag([1, 1, np.sign(np.linalg.det(vt.T @ u.T))]) @ u.T
 
 
+def rotation_fit(rb: np.ndarray, d_rc: Rot) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """R_CB from the Kabsch fit, refitted without residuals above three times
+    the median; returns R_CB, the residuals (rad) and the inlier mask."""
+    rc = d_rc.as_rotvec()
+    r = kabsch(rb, rc)
+    for _ in range(2):
+        pred = Rot.from_matrix(r) * Rot.from_rotvec(rb) * Rot.from_matrix(r.T)
+        resid = (d_rc.inv() * pred).magnitude()
+        inliers = resid <= 3 * np.median(resid)
+        r = kabsch(rb[inliers], rc[inliers])
+    return r, resid, inliers
+
+
 def estimate_timing(t, gyro_counts, idx, r_wc):
-    """Gyro scale k (rad/s per count), frame timing (a, b), the gyro integral,
-    the median rotation residual (deg) and the drift check (ms)."""
+    """Frame timing (a, b), the gyro integral, the gyro sensitivity fitted to
+    the model's rotations (counts per deg/s), the median rotation residual
+    (deg) and the drift check (ms)."""
     pair = np.flatnonzero(np.diff(idx) <= 3)
     i0, i1 = idx[pair], idx[pair + 1]
     d_rc = Rot.from_matrix(np.einsum("nji,njk->nik", r_wc[pair], r_wc[pair + 1]))
@@ -214,12 +229,11 @@ def estimate_timing(t, gyro_counts, idx, r_wc):
     def fit(g, a, b, sel=slice(None)):
         ti, tj = a * i0[sel] + b, a * i1[sel] + b
         if ti.min() < t[0] or tj.max() > t[-1]:
-            return np.inf, None, 1.0
+            return np.inf
         rb = g.rel(ti, tj).as_rotvec()
         r = kabsch(rb, rc[sel])
         pred = Rot.from_matrix(r) * Rot.from_rotvec(rb) * Rot.from_matrix(r.T)
-        resid = (d_rc[sel].inv() * pred).magnitude()
-        return float(np.median(resid)), r, float((rc[sel] * (rb @ r.T)).sum() / (rb**2).sum())
+        return float(np.median((d_rc[sel].inv() * pred).magnitude()))
 
     a0 = (t[-1] - t[0]) / idx[-1]
     a_grid = np.arange(a0 * 0.9, a0 * 1.1, a0 * 0.0012)
@@ -230,34 +244,33 @@ def estimate_timing(t, gyro_counts, idx, r_wc):
         candidates.append((*coarse(g, a_grid, b_grid), k, g))
     _, a, b, k, g = min(candidates, key=lambda c: c[0])
     _, a, b = coarse(g, np.linspace(a * 0.996, a * 1.004, 81), np.arange(b - 0.3, b + 0.3, 0.005))
-    for _ in range(3):
-        a, b = minimize(
-            lambda x: fit(g, x[0], x[1])[0],
-            [a, b],
-            method="Nelder-Mead",
-            options=dict(
-                xatol=1e-7,
-                fatol=1e-8,
-                maxiter=300,
-                initial_simplex=[[a, b], [a * 1.0005, b], [a, b + 0.02]],
-            ),
-        ).x
-        residual, _, rotvec_scale = fit(g, a, b)
-        if abs(rotvec_scale - 1) < 1e-3:
-            break
-        k *= rotvec_scale
-        g = GyroIntegral(t, gyro_counts * k)
+    a, b = minimize(
+        lambda x: fit(g, x[0], x[1]),
+        [a, b],
+        method="Nelder-Mead",
+        options=dict(
+            xatol=1e-7,
+            fatol=1e-8,
+            maxiter=300,
+            initial_simplex=[[a, b], [a * 1.0005, b], [a, b + 0.02]],
+        ),
+    ).x
+    # Check: the gyro scale that best matches the model's rotations (inliers).
+    rb = g.rel(a * i0 + b, a * i1 + b).as_rotvec()
+    r, resid, inliers = rotation_fit(rb, d_rc)
+    rotvec_scale = (rc[inliers] * (rb[inliers] @ r.T)).sum() / (rb[inliers] ** 2).sum()
+    gyro_fit = float(1 / np.degrees(k * rotvec_scale))
     drift = []
     q = len(pair) // 4
     for sel in (slice(0, q), slice(3 * q, None)):
         bq = minimize(
-            lambda x: fit(g, a, x[0], sel)[0],
+            lambda x: fit(g, a, x[0], sel),
             [b],
             method="Nelder-Mead",
             options=dict(xatol=1e-5, initial_simplex=[[b], [b + 0.01]]),
         ).x[0]
         drift.append(float((bq - b) * 1e3))
-    return k, float(a), float(b), g, float(np.degrees(residual)), drift
+    return float(a), float(b), g, gyro_fit, float(np.degrees(np.median(resid))), drift
 
 
 def preintegrate(t, acc, g, r_wb0, t0, t1):
@@ -316,8 +329,8 @@ def align(t, acc, g, a, b, frames):
     idx, r_wc, centres = frames
     tk = a * idx + b
     p = np.flatnonzero(np.diff(idx) <= 3)
-    rc = Rot.from_matrix(np.einsum("nji,njk->nik", r_wc[p], r_wc[p + 1])).as_rotvec()
-    r_cb = kabsch(g.rel(tk[p], tk[p + 1]).as_rotvec(), rc)
+    d_rc = Rot.from_matrix(np.einsum("nji,njk->nik", r_wc[p], r_wc[p + 1]))
+    r_cb = rotation_fit(g.rel(tk[p], tk[p + 1]).as_rotvec(), d_rc)[0]
     r_wb = r_wc @ r_cb
     speed = np.linalg.norm(np.diff(centres, axis=0), axis=1) / np.diff(tk)
     jump = speed > 3 * np.median(speed)
@@ -360,11 +373,11 @@ def analyse_scene(scene: str, log=print) -> dict:
     log(f"{len(images)} images, lenses interleaved: {interleaved}; ARKit scale {s_ref:.4f} from {n_phone} phone images")
     d = np.loadtxt(os.path.join(scene, "insta360_imu.csv"), delimiter=",", skiprows=1)
     t, gyro_counts, acc_counts = d[:, 0], d[:, 1:4], d[:, 4:7]
-    counts_per_g, one_g = accel_counts_per_g(acc_counts)
-    acc = acc_counts / counts_per_g * STANDARD_G
-    k, a, b, g, residual, drift = estimate_timing(t, gyro_counts, *lenses[0][:2])
+    one_g = one_g_counts(acc_counts)
+    acc = acc_counts / ACCEL_COUNTS_PER_G * STANDARD_G
+    a, b, g, gyro_fit, residual, drift = estimate_timing(t, gyro_counts, *lenses[0][:2])
     log(
-        f"IMU {t[-1] - t[0]:.1f} s; gyro {np.radians(1) / k:.3f} counts per deg/s, accel {counts_per_g} counts per g; "
+        f"IMU {t[-1] - t[0]:.1f} s; checks: gyro fit {gyro_fit:.3f} counts per deg/s, 1 g = {one_g:.1f} counts; "
         f"frames every {a:.6f} s from {b:+.4f} s, rotation residual {residual:.3f} deg, drift {drift[0]:+.1f} / {drift[1]:+.1f} ms"
     )
     out = dict(
@@ -375,8 +388,7 @@ def analyse_scene(scene: str, log=print) -> dict:
         s_ref_quarters=quarters,
         imu_seconds=float(t[-1] - t[0]),
         accel_one_g_counts=one_g,
-        accel_counts_per_g=counts_per_g,
-        gyro_counts_per_dps=float(np.radians(1) / k),
+        gyro_counts_per_dps_fit=gyro_fit,
         frame_period=a,
         frame_offset=b,
         rotation_residual_deg=residual,
@@ -422,8 +434,8 @@ def summary(paths: list[str]) -> None:
         print(
             f"{r['scene'][:8]}  phone {r['phone_images']:3d}  ARKit quarters {min(q):.3f}-{max(q):.3f}  "
             f"per-run {e['s_per_run']:+6.2f}%  joint {e['s_joint']:+6.2f}%  "
-            f"|g| {r['lens0']['g_median'] or float('nan'):.3f}  gyro {r['gyro_counts_per_dps']:.2f}  "
-            f"accel {r['accel_counts_per_g']}  rot {r['rotation_residual_deg']:.3f} deg  "
+            f"|g| {r['lens0']['g_median'] or float('nan'):.3f}  gyro fit {r['gyro_counts_per_dps_fit']:.2f}  "
+            f"1 g {r['accel_one_g_counts']:.0f}  rot {r['rotation_residual_deg']:.3f} deg  "
             f"drift {max(map(abs, r['drift_ms'])):.1f} ms"
         )
     for key, label in (("s_per_run", "per-run"), ("s_per_run_median", "median of runs"), ("s_joint", "joint")):

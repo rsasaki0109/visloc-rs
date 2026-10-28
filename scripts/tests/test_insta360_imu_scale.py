@@ -93,8 +93,8 @@ class Insta360ImuScaleTest(unittest.TestCase):
         self.assertTrue(r["lens_interleaved"])
         self.assertEqual(r["phone_images"], 40)
         self.assertAlmostEqual(r["s_ref"], 1.05, places=6)
-        self.assertEqual(r["accel_counts_per_g"], 1024)
-        self.assertAlmostEqual(r["gyro_counts_per_dps"], 16.4, delta=0.05)
+        self.assertAlmostEqual(r["accel_one_g_counts"], 1024, delta=15)
+        self.assertAlmostEqual(r["gyro_counts_per_dps_fit"], 16.4, delta=0.05)
         self.assertAlmostEqual(r["frame_period"], 1 / 3, delta=1e-5)
         self.assertAlmostEqual(r["frame_offset"], 0.4, delta=2e-3)
         self.assertLess(r["rotation_residual_deg"], 0.01)
@@ -113,11 +113,18 @@ class Insta360ImuScaleTest(unittest.TestCase):
                 imu_scale.summary([str(path)])
         self.assertIn("per-run         1 scenes", out.getvalue())
 
-    def test_accelerometer_sensitivity(self):
-        g = np.tile([0.0, -1.0, 0.0], (40000, 1))
-        self.assertEqual(imu_scale.accel_counts_per_g(g * 1000)[0], 1000)
-        self.assertEqual(imu_scale.accel_counts_per_g(g * 1023)[0], 1024)
-        self.assertEqual(imu_scale.accel_counts_per_g(g * 2050)[0], 2048)
+    def test_rotation_fit_ignores_outliers(self):
+        rng = np.random.default_rng(1)
+        r_cb = Rot.from_euler("xyz", [5, -80, 20], degrees=True)
+        rb = rng.normal(scale=0.05, size=(200, 3))
+        noise = Rot.from_rotvec(rng.normal(scale=1e-4, size=(200, 3)))
+        d_rc = noise * r_cb * Rot.from_rotvec(rb) * r_cb.inv()
+        bad = Rot.from_rotvec(rng.normal(scale=0.5, size=(20, 3)))
+        d_rc = Rot.concatenate([d_rc[:180], bad])
+        r, resid, inliers = imu_scale.rotation_fit(rb, d_rc)
+        self.assertLess((Rot.from_matrix(r) * r_cb.inv()).magnitude(), 1e-3)
+        self.assertGreater(inliers[:180].sum(), 170)
+        self.assertEqual(inliers[180:].sum(), 0)
 
 
 if __name__ == "__main__":
