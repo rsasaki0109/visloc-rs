@@ -7,8 +7,11 @@
 //! the ByteTrack way: a box Kalman filter ([`BoxKalmanFilter`]), IoU costs,
 //! an optimal assignment ([`assign_with_cost_limit`]), and a second pass over
 //! the low-score detections that keeps partly occluded objects. It takes
-//! [`Detection`]s from any detector. [`MotAccumulator`] scores tracks against
-//! ground truth with the CLEAR MOT metrics.
+//! [`Detection`]s from any [`ObjectDetector`]: [`ReplayDetector`] replays
+//! stored boxes, and [`YoloxOnnxDetector`] runs a YOLOX model with ONNX
+//! Runtime (the `onnx-inference` feature; [`yolox`] has its pre- and
+//! post-processing). [`MotAccumulator`] scores tracks against ground truth
+//! with the CLEAR MOT metrics.
 //!
 //! ```
 //! use visloc_objects::{BBox, ByteTracker, Detection};
@@ -26,11 +29,19 @@
 pub mod assignment;
 pub mod bbox;
 pub mod byte_track;
+pub mod detector;
+pub mod image;
 pub mod kalman;
 pub mod mot_eval;
+pub mod yolox;
+pub mod yolox_onnx;
 
 pub use assignment::{assign_with_cost_limit, Assignment};
 pub use bbox::{BBox, Detection};
 pub use byte_track::{ByteTrackConfig, ByteTracker, TrackId, TrackedObject};
+pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
+pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};
 pub use mot_eval::{MotAccumulator, MotSummary};
+pub use yolox::{YoloxConfig, COCO_CLASSES};
+pub use yolox_onnx::{YoloxOnnxDetector, YoloxOnnxError};
