@@ -50,6 +50,9 @@
 //!   VIO distance since the anchor's newest fix (the fused error grows with
 //!   them, so use them to judge a pose); `trajectory_vio.tum`, the raw VIO in
 //!   its own frame.
+//! - With `--dump-inliers FILE`: per accepted localization, one CSV row per
+//!   PnP inlier, `timestamp_ns,x,y,landmark_id` (the query keypoint in
+//!   pixels and the map landmark it matched), e.g. for drawing the matches.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -59,6 +62,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use nalgebra::Point2;
 use visloc_basalt::euroc::{read_camera_image, read_camera_manifest};
 use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
@@ -99,6 +103,8 @@ struct Args {
     config: Option<PathBuf>,
     /// With `--vio`, localize every N-th frame.
     localize_every: usize,
+    /// Write each accepted localization's inliers here.
+    dump_inliers: Option<PathBuf>,
 }
 
 impl Args {
@@ -107,7 +113,7 @@ impl Args {
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
          [--prior-radius-m M] \
-         [--vio --calibration FILE --config FILE [--localize-every N]]"
+         [--vio --calibration FILE --config FILE [--localize-every N]] [--dump-inliers FILE]"
             .into()
     }
 
@@ -137,6 +143,7 @@ impl Args {
             calibration: None,
             config: None,
             localize_every: 1,
+            dump_inliers: None,
         };
         let mut arguments = arguments.into_iter();
         while let Some(option) = arguments.next() {
@@ -176,6 +183,7 @@ impl Args {
                 "--calibration" => args.calibration = Some(PathBuf::from(value()?)),
                 "--config" => args.config = Some(PathBuf::from(value()?)),
                 "--localize-every" => args.localize_every = number(&option, value()?)?,
+                "--dump-inliers" => args.dump_inliers = Some(PathBuf::from(value()?)),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
         }
@@ -271,6 +279,8 @@ struct Attempt {
     latency_ms: f64,
     /// The localized IMU pose in the map frame, when accepted.
     world_from_imu: Option<SE3>,
+    /// When accepted: each inlier's query keypoint and map landmark.
+    inliers: Vec<(Point2<f64>, u64)>,
 }
 
 /// The saved map plus everything needed to localize one image against it.
@@ -347,7 +357,18 @@ impl Localizer {
             .previous
             .as_ref()
             .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
+        let inliers = if world_from_imu.is_some() {
+            result
+                .inlier_query_indices
+                .iter()
+                .zip(&result.inlier_landmark_ids)
+                .filter_map(|(&index, &landmark)| Some((*query.keypoints.get(index)?, landmark)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Attempt {
+            inliers,
             keypoints: query.keypoints.len(),
             result,
             used_prior,
@@ -375,6 +396,18 @@ fn csv_row(csv: &mut String, timestamp_ns: i64, attempt: &Attempt, anchor: &str)
     );
 }
 
+const INLIERS_HEADER: &str = "timestamp_ns,x,y,landmark_id\n";
+
+fn inlier_rows(rows: &mut String, timestamp_ns: i64, attempt: &Attempt) {
+    for (pixel, landmark) in &attempt.inliers {
+        let _ = writeln!(
+            rows,
+            "{timestamp_ns},{:.2},{:.2},{landmark}",
+            pixel.x, pixel.y
+        );
+    }
+}
+
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     values.get(values.len() / 2).copied().unwrap_or(0.0)
@@ -397,6 +430,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tum = String::from("# timestamp tx ty tz qx qy qz qw\n");
     let mut csv = String::from(CSV_HEADER);
+    let mut inliers = String::from(INLIERS_HEADER);
     let mut latencies = Vec::with_capacity(images.len());
     let mut localized = 0_usize;
     for entry in &images {
@@ -407,11 +441,15 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             localized += 1;
         }
         csv_row(&mut csv, entry.timestamp_ns, &attempt, "-");
+        inlier_rows(&mut inliers, entry.timestamp_ns, &attempt);
     }
 
     fs::create_dir_all(&args.out_dir)?;
     fs::write(args.out_dir.join("localization.tum"), tum)?;
     fs::write(args.out_dir.join("per_frame.csv"), csv)?;
+    if let Some(path) = &args.dump_inliers {
+        fs::write(path, inliers)?;
+    }
     println!(
         "localized {localized}/{} images (median {:.1} ms/image) -> {}",
         images.len(),
@@ -440,6 +478,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     let (mut fixes_tum, mut map_tum, mut vio_tum) =
         (header.to_owned(), header.to_owned(), header.to_owned());
     let mut csv = String::from(CSV_HEADER);
+    let mut inliers = String::from(INLIERS_HEADER);
     let mut map_csv =
         String::from("timestamp_ns,tx,ty,tz,qx,qy,qz,qw,seconds_since_fix,metres_since_fix\n");
     let mut latencies = Vec::new();
@@ -485,6 +524,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
             };
             *outcomes.entry(outcome).or_default() += 1;
             csv_row(&mut csv, timestamp_ns, &attempt, outcome);
+            inlier_rows(&mut inliers, timestamp_ns, &attempt);
         }
         if let (Some(map_from_imu), Some((fix_ns, fix_position))) =
             (anchor.map_from_body(&odom_from_imu), anchor.last_fix())
@@ -515,6 +555,9 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
     fs::write(args.out_dir.join("trajectory_map.csv"), map_csv)?;
     fs::write(args.out_dir.join("trajectory_vio.tum"), vio_tum)?;
     fs::write(args.out_dir.join("per_frame.csv"), csv)?;
+    if let Some(path) = &args.dump_inliers {
+        fs::write(path, inliers)?;
+    }
     println!(
         "frames {frames}, localized {localized}/{attempts} attempts (median {:.1} ms), \
          anchored {anchored}/{frames} frames, fixes {outcomes:?}, {wall_s:.1} s -> {}",

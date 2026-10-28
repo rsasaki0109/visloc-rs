@@ -12,6 +12,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/hero_map_localization.gif" alt="Map-based localization on EuRoC: the 3D landmarks of a map saved by the stereo-inertial SLAM from the MH_01 flight, with the MH_02 flight localized in it image by image. Inset: the current camera image with the keypoints that matched the map in green. In the map: the current camera in red with green rays to the landmarks it matched, and the localized camera positions so far in orange, tracing the flight's loops through the machine hall." width="720"><br>
+  <sub>Map-based localization: EuRoC MH_02 localized image by image in a map that the stereo-inertial SLAM saved from MH_01, a different flight. Green: the keypoints that matched the map, and rays to those landmarks. Orange: the localized camera positions. <b>81% of the 3,040 images localize, at 1.8 cm RMSE</b> against ground truth; with the VIO anchored to the map, every frame gets a pose (99.8%, 2.0 cm), also in real time as ROS 2 nodes. <a href="docs/basalt_map_localization.md">Details and the other EuRoC queries</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_vislam_lamaria.gif" alt="Visual-inertial SLAM on LaMAria sequence_1_19 (Project Aria glasses, 1.0 km city walk). Left: both Aria SLAM cameras with the points the VIO is tracking. Right: top-down trajectories growing in time against the pseudo ground truth: visloc-rs (blue) and OpenVINS (orange) stay on the route, Basalt with its upstream configuration (red) drifts away." width="720"><br>
   <sub>Visual-inertial odometry on <a href="https://lamaria.ethz.ch">LaMAria</a> sequence_1_19: Project Aria glasses, 1.0 km city walk, 15 min, both SLAM cameras + IMU, no loop closure. LaMAria Score (official evaluator, higher is better): <b>visloc-rs 50.0</b>, OpenVINS 49.9 (estimate shipped with the LaMAria demo), Basalt with its upstream configuration 7.7 (run through this repository's parity-verified Basalt port). Trajectories are Sim(3)-aligned to the pseudo ground truth as the evaluator does. <a href="docs/lamaria_multicam.md">Details and the other training sequences</a>.</sub>
 </p>
