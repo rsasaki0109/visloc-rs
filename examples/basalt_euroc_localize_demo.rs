@@ -617,7 +617,7 @@ impl Localizer {
             && self
                 .weak_min_inliers
                 .is_some_and(|weak| result.inlier_count >= weak))
-        .then(|| result.pose.as_ref())
+        .then_some(result.pose.as_ref())
         .flatten()
         .map(|pose| pose.camera_to_world().compose(&self.camera_from_imu));
         let inliers = if world_from_imu.is_some() {
