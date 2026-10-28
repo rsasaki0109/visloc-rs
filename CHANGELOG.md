@@ -351,9 +351,12 @@ All notable changes to `visloc-rs` will be documented here.
   21 s on (29.6 cm RMSE; 5.8 cm within 5 s and 2 m of a fix). On the other
   seven queries the first map pose comes up to 1.2 s sooner and the
   accuracy is unchanged; MH_04 and MH_05, whose starts the map does not
-  cover, try about twice as many images. `--initial-localize-every` /
-  `initial_localize_every` (default 1) sets the start-up cadence; 5 is the
-  previous behaviour.
+  cover, try about twice as many images. After 30 s without any
+  localization (`--initial-window-s` / `initial_window_s`), where the map
+  likely does not cover the place, they back off to every
+  `localize_every`-th image until one localizes. `--initial-localize-every`
+  / `initial_localize_every` (default 1) sets the start-up cadence; 5 is
+  the previous behaviour.
 
 - **`visloc_map_localize_node`: the projection prior expires.** The node
   matches around the predicted projections only within `projection_fresh_s`

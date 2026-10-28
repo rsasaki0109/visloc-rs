@@ -232,6 +232,7 @@ measurements behind the defaults.
 | `publish_map_cloud` | `true` | publish `map_cloud` |
 | `localize_every` | `5` | localize every N-th received image |
 | `initial_localize_every` | `1` | ... and every N-th until the first map pose; while localizing is slower than the camera, the node takes the newest image whenever it is free |
+| `initial_window_s` | `30` | ... only within this many seconds of the first image or of the latest localization; after that every `localize_every`-th until an image localizes |
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
