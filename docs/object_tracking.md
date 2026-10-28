@@ -228,3 +228,106 @@ tracker split it into 10 IDs, and the merge puts them back together.
   The flag does not change the estimate.
 - **Not reported:** the only other objects with enough boxes, two chairs
   half hidden under a desk, have 6 points each.
+
+## Metric objects on the ground (moving)
+
+A moving object cannot be triangulated: while the camera moves, so does the
+object, and its rays do not meet. `visloc_objects::ground` places such an
+object on the ground instead.
+
+- **The ground:** `estimate_ground_height` takes the triangulated scene
+  points (static, so metric) and returns the mean height of the densest
+  5 cm layer at least 0.3 m below the lowest camera position. The world is
+  gravity-aligned, so the ground is the plane `z = ground`.
+- **The foot:** `BoxRays::from_box` unprojects the middles of the 2D box's
+  edges and its corners into world rays. The edge-middle ray that points
+  lowest is the bottom of the box, so this works for a camera mounted
+  sideways (Aria) as well. Where it meets the ground is the object's foot
+  (`place_on_ground`).
+- **The size:** the box's rays cut the vertical plane through the foot,
+  facing the camera. Their top gives the height above the ground and their
+  sideways extent the width.
+- **The ground under the object:** steps, a ramp or a kerb can put the
+  object on another level than the camera's ground. A lower level makes it
+  look small and near, a higher one large and far. `place_on_local_ground`
+  takes the 12 scene points horizontally nearest to the median foot (within
+  1.5 m) and, if their densest layer lies more than 0.1 m away, moves the
+  ground there and places the object again, up to 5 times. Nearest points
+  rather than all within a radius, so that over steps the ground walks down
+  one step at a time.
+- **Over a track:** `summarize_ground_track` gives the median height, width
+  and distance, and the speed of a straight line fitted to the foot's path.
+- **Scale source:** `ScaleSource::GroundContact`. The scale is the camera's
+  metric height above the ground, so it is as good as the VIO's.
+- **Class priors:** `plausible_height` holds rough heights of the classes
+  that stand on the ground (people 1.0–2.1 m, cars 1.2–2.1 m, bicycles
+  0.8–1.4 m...). The height is what ground contact measures best; the width
+  depends on the side the object is seen from. They only flag.
+- **Error:** the distance is `h / tan(depression)` for a camera `h` above
+  the ground. A pitch error `δ` changes it by about `δ · d / h`: 0.5° at
+  10 m with the camera 1.1 m up is 8 %, at 5 m 4 %. A ground `δh` off
+  changes every length by `δh / h`.
+- **Tests:**
+  - a person 1.75 m tall walking at 1.44 m/s about 5 m from a walking
+    camera comes out at 1.75 ± 0.1 m and 1.44 ± 0.05 m/s, with the camera
+    upright or rolled 90°;
+  - the same walk with the trajectory doubled gives a person twice as tall
+    and fast, which the prior flags;
+  - a person at the bottom of a flight of steps 1 m down, or at the top of
+    one 0.5 m up, comes out on the right level and at the right size;
+  - the floor is found under a table top and walls.
+
+`objects_metric_offline` also places the boxes of the movable COCO classes
+(people, vehicles, animals) and writes `ground_objects.csv`: per 2D track,
+the frames used, the camera's height above the ground, how far the ground
+under the object lies from the camera's (`ground_shift`), the median foot
+position, height, width, distance and speed, and the height flag.
+- Boxes scored below 0.5, or within 2 px of the image border (the foot may
+  be cut off), are skipped. A track needs 1 s.
+- The ground uses the scene points seen within 10 s of the track.
+
+### LaMAria R_08_hard
+
+The same 746 m walk through Zurich as above (Phase 2), with its YOLOX boxes
+(`--rotate 90`). Feature tracks are dumped from the VIO with the LaMAria
+config (`euroc_config_big_window_multicam.json` for stereo,
+`euroc_config_big_window.json` with `--mono`).
+
+| VIO | Trajectory ATE | People: height, median (IQR) | Cars: height | Bicycles: height | Walking speed | Moving cars |
+| --- | --- | --- | --- | --- | --- | --- |
+| Stereo + IMU | 0.92 m (scale 0.9994) | 1.67 m (1.58–1.78), n = 24 | 1.44 m (1.31–1.57), n = 34 | 1.08 m (0.99–1.12), n = 15 | 1.19 m/s (18 people) | 6.6 m/s (20 cars) |
+| Mono + IMU | 3.74 m (scale 0.982) | 1.70 m (1.59–1.82) | 1.46 m (1.35–1.60) | 1.09 m (1.03–1.20) | 1.23 m/s | 6.6 m/s |
+
+- **Plausible:** the people's median is a typical adult height, cars come
+  out at a typical 1.4–1.6 m, and the parked bicycles at 1.0–1.1 m. People
+  walk at 1.2 m/s, and cars drive at about 24 km/h in town.
+- **Mono + IMU against stereo + IMU** (the same 2D tracks): the heights
+  agree to a median of 7 % for people (2.3 % bias), 3 % for cars and 2 %
+  for bicycles; the speeds to 0.07 m/s.
+- **Without the IMU** there is nothing to compare. The visual-only VO
+  (`--mono-vo`) stopped 526 s into the walk (a non-finite window solve at
+  frame 10,519). It also has no gravity: its world is the first camera's
+  frame, so its z is not up, and neither the ground nor the bottom of a box
+  is defined. The IMU gives ground contact both its scale and its "down".
+- **The camera is low:** about 1.1–1.2 m above the ground. Two checks that
+  do not depend on the ground estimate: the camera-height line from the
+  VIO's gravity runs through the road's vanishing point, and it crosses the
+  people walking ahead at about two thirds of their height, as a camera
+  1.1–1.2 m up would. In stretches of 10–40 s the camera drops another 0.55 m (the world
+  height of the camera falls while the ground's stays), and the ground
+  estimate follows.
+- **The ground under the object** moved 7 people by 0.1–0.6 m, all down
+  (steps and kerbs below the camera's ground). Without it they would come
+  out at 0.8–1.6 m; with it they are 1.5–1.9 m.
+- **Flagged:** 5 of the 24 people with stereo + IMU (3 with mono + IMU,
+  all at stairs or the ramp).
+  - Three at the foot of stairs or a ramp (0.6–0.8 m). The points under
+    them do lie lower, but spread over the steps or the slope, so no layer
+    stands out. Taking their median instead fixes one of the three and
+    breaks five others.
+  - One 1.7 m from the camera (2.2 m), one 8.4 m away (2.3 m).
+- **Still objects** show a residual speed of 0.1–0.5 m/s: as the camera
+  passes, the box's bottom edge slides along a car. Below about 0.6 m/s,
+  moving and still cannot be told apart.
+- **Tuning:** the local-ground settings were chosen on this sequence. No
+  other sequence with people has been run yet.

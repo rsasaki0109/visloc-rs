@@ -205,6 +205,9 @@ pub fn fit_upright_box(points: &[Point3<f64>], params: &BoxFitParams) -> Option<
 pub enum ScaleSource {
     /// Feature tracks triangulated with the metric VIO poses (static objects).
     Triangulated,
+    /// The camera's metric height above the ground, through the object's
+    /// ground contact (objects that move; [`crate::ground`]).
+    GroundContact,
 }
 
 /// A metric object estimate.
