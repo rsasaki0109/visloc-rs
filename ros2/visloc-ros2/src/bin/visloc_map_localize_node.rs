@@ -17,7 +17,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use visloc_ros2::dds::{
-    latched_qos, output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
+    latched_qos, output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
 };
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
@@ -211,18 +211,14 @@ fn run() -> Result<(), String> {
     };
     // With extrinsics from tf: the static transforms, and the odometry's
     // body frame.
-    let transforms = Arc::new(Mutex::new(StaticTransforms::new()));
+    let mut tf_static = extrinsics_from_tf
+        .then(|| StaticTfListener::new(&mut ros, &tf_static_topic))
+        .transpose()?;
+    let transforms = tf_static.as_ref().map_or_else(
+        || Arc::new(Mutex::new(StaticTransforms::new())),
+        |listener| Arc::clone(listener.transforms()),
+    );
     let body_frame = Arc::new(Mutex::new(None::<String>));
-    if extrinsics_from_tf {
-        let transforms = Arc::clone(&transforms);
-        let tf_static_sub = ros.subscription::<TfMessage>(&tf_static_topic, static_tf_qos())?;
-        spawn_receiver("tf-static-rx", tf_static_sub, move |msg: TfMessage| {
-            transforms
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(&msg);
-        })?;
-    }
 
     // Odometry: pair with fixes, then publish map -> odom and the map pose.
     let odom_messages = Arc::new(AtomicU64::new(0));
@@ -302,20 +298,33 @@ fn run() -> Result<(), String> {
         attempts += 1;
         let stamp = msg.header.stamp;
         let started = Instant::now();
+        let mut tf_missing = false;
         let camera_from_body = if extrinsics_from_tf {
             let camera = camera_frame.as_deref().unwrap_or(&msg.header.frame_id);
             let body = body_frame.lock().unwrap_or_else(|e| e.into_inner()).clone();
             body.ok_or_else(|| "no odometry yet to name the body frame".to_owned())
                 .and_then(|body| {
-                    transforms
+                    let found = transforms
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .lookup(camera, &body)
-                        .ok_or_else(|| format!("no /tf_static transform {camera} <- {body}"))
+                        .lookup(camera, &body);
+                    tf_missing = found.is_none();
+                    found.ok_or_else(|| format!("no /tf_static transform {camera} <- {body}"))
                 })
         } else {
             Ok(localizer.camera_from_imu().clone())
         };
+        if tf_missing {
+            if let Some(listener) = tf_static.as_mut() {
+                match listener.missing(&mut ros) {
+                    Ok(true) => {
+                        eprintln!("visloc_map_localize_node: subscribed to /tf_static again")
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("visloc_map_localize_node: {error}"),
+                }
+            }
+        }
         let features = camera_from_body.and_then(|camera_from_body| {
             decode_luma(&msg)
                 .and_then(|luma| luma.to_basalt())

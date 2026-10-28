@@ -587,9 +587,12 @@ cargo test --test dds_nodes       # node binaries over real RTPS/DDS
   ramp its missing pitch and height change are errors the correction can
   only remove at fixes. It has been tested with simulated wheel odometry and
   with a real robot's on a level office floor ([above](#on-a-ground-robot)).
-  In one of six such runs, `visloc_vio_node` never received a
-  transient-local `/tf_static` transform from an rclcpp publisher and
-  published nothing; a restart received it. Camera extrinsics come from the
+  A RustDDS reader sometimes never receives a transient-local
+  `/tf_static` writer's transforms (about 2% of readers started alongside
+  freshly started publishers, in a test); both nodes then subscribe again,
+  5 s after the first subscription and with doubling waits, up to six
+  times, while a transform they need is missing
+  (`examples/tf_static_probe.rs` reproduces it). Camera extrinsics come from the
   map or from `/tf_static`, which is read as static: a camera that moves
   on the robot (pan-tilt) is not supported. Its map is the stereo-inertial SLAM's (ORB),
   not a COLMAP/SIFT model. The correction is a filtered yaw + translation
