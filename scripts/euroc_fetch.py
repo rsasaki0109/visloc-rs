@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Fetch one EuRoC MAV sequence from the ETH Research Collection, without its family zip.
 
-    python scripts/euroc_fetch.py MH_01_easy DEST_DIR [--workers 4]
+    python scripts/euroc_fetch.py MH_01_easy DEST_DIR [--workers 2]
 
 The official archives bundle a family (machine_hall 12.7 GB, vicon_room1 and
 vicon_room2 6 GB each; ids in benchmarks/basalt/euroc_dataset_manifest.py) with
-one zip per sequence inside. The family zip is read over HTTP range requests
-(scripts/http_zip.py). If the sequence's zip is stored uncompressed in it, its
-members are read by range too; otherwise it is streamed to DEST_DIR, extracted
-and deleted. A family zip that holds the sequence's files directly also works.
+one zip per sequence inside. Where the server takes range requests, the family
+zip is read over them (scripts/http_zip.py): if the sequence's zip is stored
+uncompressed in it, its members are read by range too; otherwise it is streamed
+to DEST_DIR, extracted and deleted. Where it does not, the family zip is
+downloaded to DEST_DIR/_family first. A family zip that holds the sequence's
+files directly also works. The Research Collection rate-limits (HTTP 429), so
+requests are retried for longer than http_zip.py's default, after Retry-After.
 
 Only what basalt_euroc_vio_demo and the evaluators read is kept: cam0, cam1,
 imu0, state_groundtruth_estimate0 and the yamls, as DEST_DIR/<sequence>/mav0.
 A member already on disk with the right size is skipped, so a rerun resumes.
 """
 import argparse
+import http.client
 import importlib.util
 import io
 import os
@@ -22,13 +26,14 @@ import shutil
 import struct
 import sys
 import time
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from http_zip import HttpFile  # noqa: E402
+from http_zip import HttpFile, probe, retry_delay  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location(
     "euroc_dataset_manifest", ROOT / "benchmarks" / "basalt" / "euroc_dataset_manifest.py"
@@ -39,6 +44,11 @@ _spec.loader.exec_module(_manifest)
 BITSTREAM_URL = "https://www.research-collection.ethz.ch/server/api/core/bitstreams/{id}/content"
 FAMILIES = {"MH_": "machine_hall", "V1_": "vicon_room1", "V2_": "vicon_room2"}
 KEEP = ("cam0/", "cam1/", "imu0/", "state_groundtruth_estimate0/")
+ATTEMPTS = 14  # with retry_delay's 120 s cap: about 17 minutes of 429s per request
+
+
+class PatientHttpFile(HttpFile):
+    ATTEMPTS = ATTEMPTS
 
 
 def family_url(sequence):
@@ -91,9 +101,31 @@ class Window(io.RawIOBase):
         return got
 
 
-def open_family(url):
-    raw = HttpFile(url)
+def open_family(opener):
+    raw = opener()
     return raw, zipfile.ZipFile(io.BufferedReader(raw, buffer_size=1 << 20))
+
+
+def download(url, path, size, log):
+    """The whole of `url` to `path`, restarted from scratch on failure (no ranges)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size == size:
+        return
+    for attempt in range(ATTEMPTS):
+        try:
+            t0 = time.time()
+            with urllib.request.urlopen(url, timeout=120) as r, open(path, "wb") as out:
+                shutil.copyfileobj(r, out, 8 << 20)
+            if size is None or path.stat().st_size == size:
+                log(f"downloaded {path.stat().st_size / 1e9:.2f} GB in {time.time() - t0:.0f} s")
+                return
+            error = f"{path.stat().st_size} of {size} bytes"
+            delay = retry_delay(attempt)
+        except (OSError, http.client.HTTPException) as e:
+            error, delay = repr(e), retry_delay(attempt, e)
+        log(f"retry {attempt} download {url}: {error}, waiting {delay} s")
+        time.sleep(delay)
+    raise IOError(f"download of {url} failed")
 
 
 def stored_member_window(raw, info):
@@ -147,11 +179,23 @@ def extract(open_archive, dest, workers, log):
     log(f"extracted {len(infos)} members, {total / 1e9:.2f} GB in {time.time() - t0:.0f} s")
 
 
-def fetch(sequence, dest_root, workers=4, log=print):
+def fetch(sequence, dest_root, workers=2, log=print):
     url = family_url(sequence)
     dest = Path(dest_root) / sequence
     dest.mkdir(parents=True, exist_ok=True)
-    _, family = open_family(url)
+    size, ranges = probe(url, ATTEMPTS)
+    log(f"{url}: {'?' if size is None else f'{size / 1e9:.2f} GB'}, "
+        f"{'range requests' if ranges else 'no range requests: downloading it whole'}")
+    if ranges:
+        def opener():
+            return PatientHttpFile(url, size=size)
+    else:
+        family_zip = Path(dest_root) / "_family" / url.split("/")[-2]
+        download(url, family_zip, size, log)
+
+        def opener():
+            return open(family_zip, "rb", buffering=0)
+    _, family = open_family(opener)
     names = family.namelist()
     nested = [n for n in names if n.rsplit("/", 1)[-1] == f"{sequence}.zip"]
     if not nested:  # the family zip holds the sequence's files directly
@@ -159,7 +203,7 @@ def fetch(sequence, dest_root, workers=4, log=print):
             raise SystemExit(f"{sequence} is not in {url}")
 
         def open_direct():
-            archive = open_family(url)[1]
+            archive = open_family(opener)[1]
             # keep only this sequence's members visible to extract()
             archive.filelist = [i for i in archive.filelist if f"{sequence}/mav0/" in i.filename]
             return archive
@@ -172,8 +216,8 @@ def fetch(sequence, dest_root, workers=4, log=print):
     if inner.compress_type == zipfile.ZIP_STORED:
 
         def open_inner():
-            raw, family = open_family(url)
-            window = stored_member_window(raw, family.getinfo(inner.filename))
+            # a raw file of its own: the family ZipFile would close the one it reads
+            window = stored_member_window(opener(), inner)
             return zipfile.ZipFile(io.BufferedReader(window, buffer_size=1 << 20))
 
         extract(open_inner, dest, workers, log)
@@ -192,7 +236,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("sequence", help="e.g. MH_01_easy")
     p.add_argument("dest", type=Path, help="the sequence lands in DEST/<sequence>/mav0")
-    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--workers", type=int, default=2, help="parallel connections (the server rate-limits)")
     args = p.parse_args()
     out = fetch(args.sequence, args.dest, args.workers, lambda m: print(m, flush=True))
     print(out)
