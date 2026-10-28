@@ -100,9 +100,9 @@ left, as ffmpeg's `hstack` of the video's two streams produces.
   square: one along its axis and four tilted 45° from it. All of them stay
   within 90° of the axis. The cut uses the lens calibration in the video's
   metadata ([insta360_lens.md](insta360_lens.md)).
-- **Rigs.** The faces of a lens are solved as one rig. The two lenses are
-  separate cameras, so nothing is stitched, and `--window` counts lenses
-  (two per frame).
+- **Rig.** A frame's ten faces are solved as one rig. The back lens's pose
+  on it starts from a half turn and is refined by the mapper, so nothing is
+  stitched. `--window` counts frames.
 - **Scale.** The video's IMU scales the model to metres (next section).
 - **Cameras.** The calibration is decoded for the X5; videos from other
   cameras stop with an error.

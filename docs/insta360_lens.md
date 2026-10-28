@@ -57,33 +57,41 @@ spans the 200° image circle edge to edge:
    (2646.5 and 2647.8 px) lies at 99.95° off the axis: the 200° circle.
 3. **The scale, fitted.** OverMaps360 ships perspective views cut from the
    same frames (1600 px, f = 800, five per lens image). Fitting the model
-   with a free scale to SIFT matches between a frame and its views gives
-   s = 1.377–1.385 (eight fits, all four 90° orientations of the sensor
-   axes). The rotations fitted for two views of one lens agree with the
-   dataset's rig to 0.10°.
+   with a free scale and centre to SIFT matches between a frame and a view
+   near the back lens's axis (14–42° off it) gives s = 1.37874 against the
+   predicted 1.37906, centre (1919.8, 1918.0), 0.29 px median residual: the
+   factory model at the predicted scale fits to SIFT noise. Views further
+   out (to 79°) give s = 1.3765–1.3815 at about 1 px, where the dataset's
+   views follow a slightly different model. The rotations fitted for two
+   views of one lens agree with the dataset's rig to 0.10°.
 4. **The two lenses meet.** Rays through the lenses' overlap (90–100° off
    each axis, 1,753 matches in six frames) agree best near s = 1.38–1.39,
    and are clearly worse at 1.40 or 1.36. The lenses are 3.2 cm apart, so
    nearby ground points shift this estimate upwards.
 
-The dataset's own views follow a slightly different model: fitting one
-freely gives `fx` and `fy` 0.25% apart, and the factory model with the best
-scale stays about 1 px off. So they show the scale, but they are not a
-pixel-exact reference.
+## The lenses on the camera
 
-## What is not decoded
+The three angles per lens describe how the lens sits on the camera, but
+their convention was not found. Three estimates from the data agree on the
+back lens's rotation: a half turn about the vertical axis, then about 1° more.
 
-**The lens-to-lens rotation.** The three angles per lens describe how the
-lens sits on the camera, but their convention was not found. Fitted from
-the overlap, the back lens's rotation is a 180° turn about y, then
-1.1–1.6° more depending on which matches are used. No reading of the angles
-as Euler angles comes closer than 0.57° to that.
+| Estimate | Beyond the half turn |
+| --- | ---: |
+| OverMaps360's rig (its perspective views, through the per-view fits above) | 1.01° |
+| SfM of the two lenses as separate cameras, mean over 200 frames of walk 0313afa5 | 1.01° (0.16° from the rig's) |
+| SfM with one rig per frame, the back lens refined (same frames) | 1.13° |
 
-Ground 2 m below the camera shifts a point by up to 0.9° between the lenses
-(they are 3.2 cm apart). Along the overlap, that shift cannot be told apart
-from a tilt. A stitched panorama needs this rotation to about 0.1°.
+No reading of the angles as Euler angles comes closer than 0.30° to the
+dataset's rig. A fit from the lenses' overlap alone is biased: ground 2 m
+below the camera shifts a point by up to 0.9° between the lenses (they are
+3.2 cm apart), and along the overlap that cannot be told apart from a tilt.
 
-So `gsplat_photos --insv` does not stitch. Each lens is cut into five 90°
-faces that stay within 90° of its axis, and the faces of a lens are solved
-as one rig. The two lenses are separate cameras, tied together only by the
-points they share.
+So `gsplat_photos --insv` does not stitch, and does not rely on the angles.
+
+- **Faces.** Each lens is cut into five 90° faces within 90° of its axis.
+- **Rig.** A frame's ten faces are one rig in the front lens's frame. The
+  back lens's pose on it starts from the half turn with no offset.
+- **Refinement.** The mapper's bundle adjustments refine that pose (COLMAP's
+  `ba_refine_sensor_from_rig`). On those 200 frames it settles 1.13° from
+  the half turn and 3.6 cm behind the front lens; the calibration says 3.2 cm.
+  The front lens's faces, refined too, move by at most 0.034° and 5 mm.

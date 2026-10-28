@@ -95,6 +95,31 @@ pub fn lens_face_rotations() -> [(&'static str, Matrix3<f64>); 5] {
     ]
 }
 
+/// The back lens's nominal rotation on the camera, taking a direction in
+/// its frame to the front lens's: half a turn about the vertical (y) axis.
+/// The X5's actual one is about 1° off (docs/insta360_lens.md); the
+/// mapper refines it.
+pub fn back_lens_rotation() -> Matrix3<f64> {
+    Matrix3::from_diagonal(&Vector3::new(-1.0, 1.0, -1.0))
+}
+
+/// The ten faces of a frame as one rig whose frame is the front lens's: the
+/// rotation taking a direction in each face's frame to the front lens's,
+/// the front lens's [`lens_face_rotations`] then the back lens's (behind
+/// [`back_lens_rotation`]).
+pub fn rig_face_rotations() -> [Matrix3<f64>; 10] {
+    let faces = lens_face_rotations();
+    let back = back_lens_rotation();
+    std::array::from_fn(|k| {
+        let face = faces[k % 5].1;
+        if k < 5 {
+            face
+        } else {
+            back * face
+        }
+    })
+}
+
 /// The `size x size`, 90° pinhole view of the lens image `img` (`lens`'s
 /// pixels) through a face rotated by `rotation` (face frame to lens frame,
 /// as in [`lens_face_rotations`]): bilinear samples, black off the image.
@@ -197,6 +222,12 @@ mod tests {
         // Up tilts towards -y (the image's top), right towards +x.
         let faces = lens_face_rotations();
         assert!(faces[3].1.column(2).y < 0.0 && faces[1].1.column(2).x > 0.0);
+        // The back lens's front face looks the other way, its up face still up.
+        let rig = rig_face_rotations();
+        assert_eq!(rig[0], Matrix3::identity());
+        assert!((rig[5].column(2) + Vector3::z()).norm() < 1e-12);
+        assert!(rig[8].column(2).y < 0.0);
+        assert!(rig.iter().all(|r| (r.determinant() - 1.0).abs() < 1e-12));
     }
 
     #[test]

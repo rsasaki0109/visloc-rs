@@ -25,7 +25,7 @@
 //! from them. Either way training sees the faces that see SfM points.
 //! [`PhotoSfmConfig::insv`] takes an Insta360's dual-fisheye frames instead:
 //! each lens is cut into five 90° faces with the calibration in the video's
-//! metadata ([`crate::dual_fisheye`]), the faces of a lens solved as one rig.
+//! metadata ([`crate::dual_fisheye`]), a frame's ten faces solved as one rig.
 
 use std::path::{Path, PathBuf};
 
@@ -144,18 +144,20 @@ pub struct PhotoSfmConfig {
     /// `<out>/imu_scale.txt`.
     pub imu: Option<PathBuf>,
     /// With `imu`: the frame period (seconds per frame number) the search
-    /// starts from (default: the IMU span over the largest frame number).
+    /// starts from (default: an `.insv`'s video frame period, else the IMU
+    /// span over the largest frame number).
     pub imu_frame_period: Option<f64>,
     /// The images are dual-fisheye frames of this Insta360 video: its two
     /// lenses side by side, front lens (first video stream) on the left
     /// (ffmpeg's `hstack` of the streams; docs/photos_to_splat.md). Each
     /// lens is cut into five 90° faces (at most `max_size` square) with the
     /// lens calibration in the video's metadata
-    /// ([`crate::dual_fisheye`]); the faces of a lens are solved as one rig,
-    /// the two lenses as separate cameras, with the exact focal length held
-    /// fixed (no `focal_px`, no intrinsics refinement). The video's IMU
-    /// gives the model metric scale unless `imu` names another log; only
-    /// the front lens's poses go into it. Not with `equirect`.
+    /// ([`crate::dual_fisheye`]). A frame's ten faces are solved as one rig
+    /// in the front lens's frame, with the exact focal length held fixed (no
+    /// `focal_px`, no intrinsics refinement); the back lens's pose on the
+    /// rig starts from a half turn and is refined. `window` counts frames.
+    /// The video's IMU gives the model metric scale unless `imu` names
+    /// another log. Not with `equirect`.
     pub insv: Option<PathBuf>,
 }
 
@@ -502,15 +504,30 @@ fn frame_number(path: &Path) -> Option<i64> {
     digits.chars().rev().collect::<String>().parse().ok()
 }
 
+/// The median spacing of an `.insv`'s video frames (its trailer), seconds;
+/// `None` for other files.
+fn insv_frame_period(path: &Path) -> Option<f64> {
+    let insv = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("insv"));
+    if !insv {
+        return None;
+    }
+    let times = visloc_io::insv::read_insv_telemetry(path).ok()?.frame_times;
+    let mut steps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    steps.sort_by(f64::total_cmp);
+    steps.get(steps.len() / 2).copied()
+}
+
 /// Metres per SfM unit from `imu` ([`PhotoSfmConfig::imu`]). Image `i` comes
-/// from source `i / per_source`, `per_source` being the number of
+/// from `sources[i / per_source]`, `per_source` being the number of
 /// `face_rotations` (face frame to source frame; none: one image per
 /// source); each source's first registered face, turned back by its face
-/// rotation, is the source's camera. Sources that are `None` (a
-/// dual-fisheye frame's back lens) are left out.
+/// rotation, is the source's camera.
 fn imu_metric_scale(
     imu: &Path,
-    sources: &[Option<&Path>],
+    sources: &[PathBuf],
     poses: &[Option<visloc_core::geometry::Pose>],
     face_rotations: &[Matrix3<f64>],
     cfg: &PhotoSfmConfig,
@@ -523,9 +540,6 @@ fn imu_metric_scale(
     let mut frames = Vec::new();
     let mut unnumbered = 0;
     for (s, source) in sources.iter().enumerate() {
-        let Some(source) = source else {
-            continue;
-        };
         let Some((k, pose)) =
             (0..per_source).find_map(|k| poses.get(s * per_source + k)?.as_ref().map(|p| (k, p)))
         else {
@@ -557,10 +571,12 @@ fn imu_metric_scale(
     };
     let span =
         samples.time.last().copied().unwrap_or(0.0) - samples.time.first().copied().unwrap_or(0.0);
+    // An `.insv` times its video frames in the trailer: unless given, the
+    // search starts from their period, for frames named by their number in
+    // the video (ffmpeg's `-frame_pts 1`).
+    let nominal_period = cfg.imu_frame_period.or_else(|| insv_frame_period(imu));
     let est_cfg = ImuScaleConfig {
-        timing: FrameTiming::Search {
-            nominal_period: cfg.imu_frame_period,
-        },
+        timing: FrameTiming::Search { nominal_period },
         ..Default::default()
     };
     let t = std::time::Instant::now();
@@ -791,12 +807,12 @@ pub fn build_photo_dataset(
         t_load.elapsed().as_secs_f64()
     ));
     // Each panorama -> its six cube faces, consecutive, in panorama order:
-    // image `i` comes from source `i / per_source`. A dual-fisheye frame is
-    // two sources, its front lens's five faces then its back lens's.
+    // image `i` comes from source image `i / per_source`. A dual-fisheye
+    // frame gives its front lens's five faces, then its back lens's.
     let per_source = if cfg.equirect {
         6
     } else if lenses.is_some() {
-        5
+        10
     } else {
         1
     };
@@ -1357,13 +1373,21 @@ pub fn build_photo_dataset(
     // the incremental loop's capped BAs. On ETH3D electro it takes three
     // such images from 0.17-0.27° to 0.02-0.05°.
     port_overrides.push("ba_global_final_converge_min_frames=0".into());
-    // Face `k`'s `sensor_from_rig`: the panorama's or lens's (rig) frame to
-    // the face's.
+    // A dual-fisheye frame's ten faces are one rig in the front lens's
+    // frame. The back lens's pose on it starts from a half turn with no
+    // offset and is refined, its faces' with it: on an X5 it settles about
+    // 1.1° from the half turn, 3.6 cm behind, while the front lens's faces
+    // move by hundredths of a degree (docs/insta360_lens.md).
+    if lenses.is_some() {
+        port_overrides.push("ba_refine_sensor_from_rig=1".into());
+    }
+    // Face `k`'s `sensor_from_rig`: the panorama's or front lens's (rig)
+    // frame to the face's.
     let rig: Option<Vec<nalgebra::Matrix3<f64>>> = if lenses.is_some() {
         Some(
-            dual_fisheye::lens_face_rotations()
+            dual_fisheye::rig_face_rotations()
                 .iter()
-                .map(|(_, r)| r.transpose())
+                .map(|r| r.transpose())
                 .collect(),
         )
     } else {
@@ -1461,32 +1485,16 @@ pub fn build_photo_dataset(
     // the model (points, cube-face poses, training views, sparse/0).
     let mut metric_scale = None;
     if let Some(imu) = cfg.imu.as_ref().or(cfg.insv.as_ref()) {
-        // Sources and their faces' rotations (face frame to source frame);
-        // a dual-fisheye frame's back lens is left out.
-        let (sources, face_rotations): (Vec<Option<&Path>>, Vec<Matrix3<f64>>) = match per_source {
-            5 => (
-                files
-                    .iter()
-                    .flat_map(|f| [Some(f.as_path()), None])
-                    .collect(),
-                dual_fisheye::lens_face_rotations()
-                    .iter()
-                    .map(|(_, r)| *r)
-                    .collect(),
-            ),
-            6 => (
-                files.iter().map(|f| Some(f.as_path())).collect(),
-                equirect::cube_face_rotations()
-                    .iter()
-                    .map(|(_, r)| *r)
-                    .collect(),
-            ),
-            _ => (
-                files.iter().map(|f| Some(f.as_path())).collect(),
-                Vec::new(),
-            ),
+        // The faces' rotations (face frame to source frame).
+        let face_rotations: Vec<Matrix3<f64>> = match per_source {
+            10 => dual_fisheye::rig_face_rotations().to_vec(),
+            6 => equirect::cube_face_rotations()
+                .iter()
+                .map(|(_, r)| *r)
+                .collect(),
+            _ => Vec::new(),
         };
-        let scale = imu_metric_scale(imu, &sources, &poses, &face_rotations, cfg, out_dir, log)?;
+        let scale = imu_metric_scale(imu, &files, &poses, &face_rotations, cfg, out_dir, log)?;
         for pose in poses.iter_mut().flatten() {
             pose.world_to_camera.translation *= scale;
         }

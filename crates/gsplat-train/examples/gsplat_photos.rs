@@ -27,7 +27,7 @@
 //! `--insv` takes an Insta360's dual-fisheye frames instead (both lenses
 //! side by side, e.g. ffmpeg's `hstack` of the video's two streams): each
 //! lens is cut into five 90° faces with the lens calibration in the video's
-//! metadata, the faces of a lens solved as one rig, and the video's IMU
+//! metadata, a frame's ten faces solved as one rig, and the video's IMU
 //! scales the model to metres (docs/photos_to_splat.md).
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, SIFT, GPU matching,
