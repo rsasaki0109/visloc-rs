@@ -15,8 +15,17 @@ categories.workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+default = []
+# YOLOX inference with ONNX Runtime (`YoloxOnnxDetector`). Off by default, as
+# in visloc-vision: `ort` loads the ONNX Runtime library at run time.
+onnx-inference = ["dep:ort"]
+
 [dependencies]
 nalgebra = { workspace = true }
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "api-22", "std", "tls-rustls"] }
 
 [dev-dependencies]
+# Decodes the test image of the YOLOX check; pinned like the other crates' image.
+image = { version = "=0.25.5", default-features = false, features = ["jpeg", "png"] }
 rand = { workspace = true }

@@ -1,7 +1,8 @@
 # Metric-scale objects from monocular VI-SLAM (plan)
 
-**Status:** Phase 0 is done (go). Phase 1's tracker is in `pipelines/objects`
-(`visloc-objects`); the detector is next. Nothing from Phase 2 on is
+**Status:** Phase 0 is done (go). Phase 1 (2D detection and tracking) is in
+`pipelines/objects` (`visloc-objects`); see
+[`object_tracking.md`](object_tracking.md). Nothing from Phase 2 on is
 implemented yet.
 
 ## Goal
@@ -84,8 +85,13 @@ scale, so this number is the ceiling.
 - On a 12-object crowd with 3 % box noise, 5 % missed detections, 10 %
   low-score detections and a false positive per frame, it scores MOTA 0.94
   with no ID switches.
-- Next: the detector behind a trait (ONNX, RT-DETR or YOLOX), with a replay
-  detector for tests, and a `*_dummy` example.
+- **Done: the detector.** `ObjectDetector` is the boundary.
+  - `ReplayDetector` replays stored boxes.
+  - `YoloxOnnxDetector` runs the official YOLOX ONNX models (Apache-2.0)
+    through the `onnx-inference` feature. YOLOX won over RT-DETR because its
+    models need no export step. Its pre- and post-processing are pure Rust and
+    match a Python reference to within 5e-4 px.
+  - Examples: `track_objects_dummy` and `yolox_track_demo`.
 
 ### Phase 2: dynamic-object rejection in the VIO
 
