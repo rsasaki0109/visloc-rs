@@ -109,6 +109,12 @@ By day the chain then matches once more after its pass, guided by the pass's
 trajectory, and solves again (lamaria_ba_chain.py --rematch; `--no-ba-rematch`
 skips it): +0.26 on the eight day training sequences, +3.21 on R_12_10cp,
 whose VIO heading drifts most.
+`--ba-pass-features aliked` gives that pass learned keypoints (LightGlue's, on
+the GPU; lamaria_ba_chain.py --pass-features) on `--ba-pass-features-tracks`
+(default Short) from the devices in `--ba-pass-features-serials` (default
+1WM093701G1276) only: the two Short training sequences of that device gain 6.4
+and 9.3, where sequence_1_19 and 1_20 (the other device), 2_11 and 3_18 lose
+1.2 to 12.7 (docs/lamaria_batch_ba.md#learned-features). Off by default.
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
 downloading it first (scripts/http_zip.py), so a sequence needs its images'
@@ -142,6 +148,9 @@ LOW_LIGHT_TRACK = 4
 # sequences average 74-88, the two low-light ones 26-29 (docs/lamaria_submission.md)
 DAYLIT_BRIGHTNESS = 70.0
 DEFAULT_PLATFORM_TRACKS = (5,)  # Moving platform: docs/lamaria_submission.md
+# Where --ba-pass-features applies by default: the Short training sequences of this device gain with it
+DEFAULT_PASS_FEATURES_TRACKS = (1,)
+DEFAULT_PASS_FEATURES_SERIALS = ("1WM093701G1276",)
 DEFAULT_CONFIG = Path("configs/basalt/variants/lamaria/euroc_config_big_window_multicam.json")
 DEFAULT_LOW_LIGHT_CONFIG = Path(
     "configs/basalt/variants/lamaria/euroc_config_big_window_multicam_lowlight.json")
@@ -228,6 +237,20 @@ def rectify_imu(seq: str, inner: Path, work: Path, calib_dir: Path,
 def sequence_track(seq: str) -> int:
     """The leaderboard track of `sequence_<track>_<n>`."""
     return int(seq.split("_")[1])
+
+
+def device_serial(calib_dir: Path, seq: str) -> str | None:
+    """The recording device's serial, from the factory calibration that the IMU rectification wrote."""
+    factory = calib_dir / f"{seq}_factory_calib.json"
+    return json.loads(factory.read_text()).get("Serial") if factory.is_file() else None
+
+
+def pass_features(args, track: int, serial: str | None) -> str | None:
+    """The chain pass's learned keypoints for this sequence (--ba-pass-features), or None for SIFT."""
+    if args.ba_pass_features and track in args.ba_pass_features_tracks \
+            and serial in args.ba_pass_features_serials:
+        return args.ba_pass_features
+    return None
 
 
 def estimator_command(args, inner: Path, calibration: Path, out_dir: Path,
@@ -450,6 +473,14 @@ def main() -> int:
                         help="--ba-chain: by day, match again guided by the pass and solve again (lamaria_ba_chain.py "
                              "--rematch; default on); with --log-dir the pass's estimate before it is kept as "
                              "<log-dir>/<sequence>/ba2_estimate.txt")
+    parser.add_argument("--ba-pass-features", choices=("aliked", "disk", "superpoint"), default=None,
+                        help="--ba-chain: learned keypoints for the pass after the online windows (GPU, LightGlue; "
+                             "lamaria_ba_chain.py --pass-features) on the tracks and devices below (default off)")
+    parser.add_argument("--ba-pass-features-tracks", type=int, nargs="*",
+                        default=list(DEFAULT_PASS_FEATURES_TRACKS), choices=sorted(TRACK_COUNTS),
+                        help="--ba-pass-features: the tracks it applies to (default 1)")
+    parser.add_argument("--ba-pass-features-serials", nargs="*", default=list(DEFAULT_PASS_FEATURES_SERIALS),
+                        help="--ba-pass-features: the device serials it applies to (default 1WM093701G1276)")
     parser.add_argument("--ba-jobs", type=int, default=4, help="--ba-chain: processes for features, match, loops")
     parser.add_argument("--ba-threads", type=int, default=2, help="--ba-chain: threads for its solves")
     parser.add_argument("--gyro-bias-std", type=float, default=1e-7,
@@ -596,12 +627,13 @@ def main() -> int:
                     log(f"{seq}: WARN the VIO diverged at every start; submitting {trajectory.name} "
                         f"({failure:.0f} s run away)")
             if args.ba_chain:
-                log(f"{seq}: BA chain (track {track})")
+                learned = pass_features(args, track, device_serial(calib_dir, seq))
+                log(f"{seq}: BA chain (track {track}" + (f", {learned} in the pass)" if learned else ")"))
                 try:
                     trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
                                            args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
-                                           low_light=low_light, rematch=args.ba_rematch)
+                                           low_light=low_light, rematch=args.ba_rematch, pass_features=learned)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
                 before = work / "ba" / "ba2.tum"
