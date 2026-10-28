@@ -85,8 +85,11 @@ The control ran on the same frames, each lens image magnified by
 
 - **Reprojection error.** Every face's pose on the rig is refined, so the
   faces turn and absorb most of the scale error.
-- **The back lens.** It does not absorb the error: it settles where the
-  factory calibration puts it (3.23 cm) only at s = 1.3784.
+- **The back lens.** On this walk it settles where the factory calibration
+  puts it (3.23 cm) at s = 1.3784, and far off at s = 1.4. On four other
+  walks it lands 2.1–6.8 cm behind at s = 1.3784, though, so the offset is
+  only weakly determined. It is a hint, not a proof; the image fits above
+  are the evidence.
 - **The dataset's track.** Over these 133 s both runs drift from the
   dataset's track by more than the two differ, so it does not decide
   between them.
@@ -114,6 +117,8 @@ So `gsplat_photos --insv` does not stitch, and does not rely on the angles.
 - **Rig.** A frame's ten faces are one rig in the front lens's frame. The
   back lens's pose on it starts from the half turn with no offset.
 - **Refinement.** The mapper's bundle adjustments refine that pose (COLMAP's
-  `ba_refine_sensor_from_rig`). On those 200 frames it settles 1.13° from
-  the half turn and 3.6 cm behind the front lens; the calibration says 3.2 cm.
-  The front lens's faces, refined too, move by at most 0.034° and 5 mm.
+  `ba_refine_sensor_from_rig`).
+  - On five OverMaps360 walks it settles 1.2–1.7° past the half turn.
+  - It sits 2.1–6.8 cm behind the front lens (the calibration says 3.2 cm),
+    so the offset is only weakly determined.
+  - The front lens's faces, refined too, move by at most 0.034° and 5 mm.

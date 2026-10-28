@@ -36,12 +36,12 @@ All notable changes to `visloc-rs` will be documented here.
   - Without `--images`, `gsplat_photos --insv VID.insv --out run` cuts the
     frames itself with ffmpeg (`--frame-step`, default 10;
     `dual_fisheye::extract_dual_fisheye_frames`).
-  - On 200 frames of an OverMaps360 walk (CPU, 23 min), all 2,000 faces
-    registered at 0.58 px.
-    - The refined back lens sits 3.22 cm behind the front one; the
-      calibration says 3.23 cm.
-    - The metric model is within 1.0% of the dataset's IMU scale, with a
-      15 cm median residual over 165 m.
+  - On 200 frames each of five OverMaps360 walks (CPU, 13–30 min), SfM
+    registered 99.4–100% of the faces.
+    - Outdoors, the metric scale is within 4% of the dataset's IMU scale
+      over the same frames.
+    - Indoors (a mall), it is off by 12%, with a weak fit (|g| 9.57).
+    - The `.insv` image-circle string is read after `p2_` or `n2_`.
 
 ### Fixed
 

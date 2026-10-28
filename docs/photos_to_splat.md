@@ -166,11 +166,36 @@ The test run used OverMaps360's walk 0313afa5:
 - **IMU.** It found the frame timing (offset 0.266 s, rotation residual
   0.07°) and gave 1.5927 m per SfM unit.
 - **Back lens.** The refined pose puts it 3.22 cm behind the front one; the
-  calibration says 3.23 cm.
+  calibration says 3.23 cm. On the other walks below it lands 2.1–6.8 cm
+  behind, so the offset is only weakly determined.
 - **Against the dataset.** Aligned to the dataset's own model over the 143
   frames both have, the run implies 1.0504 m per dataset unit. The dataset's
-  model gives 1.0401 over the whole walk (+1.0%). The median residual is
-  15 cm.
+  model gives 1.0401, over the same frames and over the whole walk (+1.0%).
+  The median residual is 15 cm.
+
+Four more walks, each run the same way on its first 400 frames:
+
+| Walk | Scene | Faces registered | IMU rotation residual, \|g\| | Scale vs the dataset's (same frames) |
+| --- | --- | ---: | --- | ---: |
+| 0313afa5 | city street | 2000/2000 | 0.07°, 9.94 m/s² | +1.0% |
+| 0c05c38a | temple courtyard | 2000/2000 | 0.09°, 9.81 m/s² | −2.5% |
+| 3b81dbc3 | residential street | 1998/2000 | 0.14°, 9.77 m/s² | −3.8% |
+| 9d2fe9b1 | tropical park | 1987/2000 | 1.18°, 9.82 m/s² | +2.4% |
+| 5bb3848a | shopping mall, indoors | 2000/2000 | 0.07°, 9.57 m/s² | +12.2% |
+
+The last column compares two IMU estimates over the same frames: this
+run's, on its own model, against the one on the dataset's model.
+
+- **SfM.** Every walk reconstructs.
+- **Outdoors.** One 133 s run of the IMU alignment lands within 4%. The
+  50-walk study found about 2.5% error at 1 s frame spacing
+  ([insta360_imu_scale.md](insta360_imu_scale.md)); longer clips give
+  more runs to average.
+- **Indoors.** The mall is off by 12%. Its fitted gravity, 9.57 m/s², marks
+  a weak fit.
+- **Warning signs.** Distrust the scale when |g| is more than about
+  0.2 m/s² from 9.81, or the rotation residual is more than a few tenths of
+  a degree (the park, where 13 faces did not register).
 
 **Through Insta360 Studio** (not tried here; Studio is the maker's desktop
 application). Studio's export drops the IMU, so pass the original `.insv`:
