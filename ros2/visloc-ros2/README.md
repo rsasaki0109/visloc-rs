@@ -199,7 +199,8 @@ which keeps the odometry-to-map transform:
 
 - the transform is a yaw and a translation (both frames are gravity-aligned),
   averaged over the fixes of the last 5 s;
-- it starts once two consecutive fixes agree;
+- it starts once two consecutive fixes agree, or three when one of them is
+  a weak fix (`weak_min_inliers`); weak fixes are not used after that;
 - it accepts a fix within 15 cm / 3 deg of where it puts the odometry pose,
   widened by 5 cm / 1 deg per metre travelled since the last accepted fix;
   three agreeing rejected fixes in a row replace it (a VIO jump).
@@ -234,6 +235,7 @@ measurements behind the defaults.
 | `initial_localize_every` | `1` | ... and every N-th until the first map pose; while localizing is slower than the camera, the node takes the newest image whenever it is free |
 | `initial_window_s` | `30` | ... only within this many seconds of the first image or of the latest localization; after that every `localize_every`-th until an image localizes |
 | `min_inliers` | `30` | below 30, wrong poses appear on EuRoC |
+| `weak_min_inliers` | `15` | a map-wide localization with at least this many inliers, but fewer than `min_inliers`, is a *weak fix*: it counts only toward the first map pose, which then needs three agreeing fixes instead of two (`>= min_inliers`: off) |
 | `max_hamming`, `ratio` | `70`, `0.8` | ORB match gates (`ratio <= 0` disables) |
 | `ransac_iterations`, `reprojection_threshold` | `1000`, `3.0` | P3P RANSAC |
 | `projection_radius` | `20` px | once the odometry has a map pose, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
@@ -503,9 +505,10 @@ growing by 0.5° per metre), because no wheeled-robot data with a
 stereo-inertial map was at hand. Real wheel odometry on an uneven floor
 also tilts, which this does not model. Offline, `basalt_euroc_localize_demo
 --odometry` has since corrected a real robot's wheel odometry
-([OpenLORIS-Scene](../../docs/openloris_map_localization.md)): 7–12 cm,
-against 3 cm for the VIO, because it drifts in in-place turns that the
-map does not see.
+([OpenLORIS-Scene](../../docs/openloris_map_localization.md)): 4.4–6.2 cm,
+once `base_link` is placed at the point the wheel odometry reports
+(`scripts/calibrate_wheel_offset.py` fits it from a VIO run). Placed 5–8 cm
+away, as in the dataset, every turn in place looked like drift: 7–12 cm.
 
 ## Tests
 

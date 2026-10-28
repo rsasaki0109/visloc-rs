@@ -79,6 +79,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`scripts/calibrate_wheel_offset.py`: where the wheel odometry is
+  measured.** `--odometry` and the node's `extrinsics tf` place the camera
+  relative to the odometry's body. If that body is not the point the wheel
+  odometry reports (the turning centre), every turn moves the computed
+  camera pose, which looks like drift. The script fits that planar offset
+  from a run with both the VIO and the wheel odometry, with no ground truth,
+  and prints the corrected `--imu-from-body`. On OpenLORIS-Scene the
+  dataset's `base_link` sits 5–8 cm from it. Calibrated from one
+  session's VIO, the wheel odometry + map error falls from 7.2–11.9 cm to
+  4.4–6.2 cm RMSE over five queries. On office1-7 at 15 inliers it reaches
+  2.27 cm, ahead of the VIO's 4.06 cm. Details in
+  `docs/openloris_map_localization.md`.
+
 - **Local contrast equalization for maps that must localize under other
   lighting.** `visloc_basalt::contrast::LocalContrast` equalizes an
   image's local contrast (contrast-limited adaptive histogram equalization
@@ -394,6 +407,23 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **Weak fixes: localizations with 15–29 inliers can set the first map
+  pose.** With `--vio` or `--odometry`, `basalt_euroc_localize_demo` passes
+  a map-wide localization turned down only for too few inliers, but with at
+  least `--weak-min-inliers` (15), to `OdomCorrection::add_weak_fix`.
+  `visloc_map_localize_node` does the same (`weak_min_inliers`). Weak fixes
+  count only toward setting the first offset, which then needs three
+  agreeing fixes instead of two. Once it is set they are
+  `FixOutcome::Unused`. Replaying all eight EuRoC queries through the rule,
+  it never uses a fix more than 25 cm off. On OpenLORIS-Scene, office1-7,
+  whose images never reach 30 inliers against another session's map, gets
+  a map pose for 99.4% of its frames by default (6.86 cm RMSE). The
+  daylight office1-4 gets one against an equalized night map (33.4%,
+  2.62 cm), where before it needed `--min-inliers 15`. On EuRoC, MH_02 and
+  V2_02 are unchanged, and V2_03 improves from 29.6 to 23.7 cm: its weak
+  localizations sample the odometry's path, which widens the gate enough
+  for a correct fix after a 65 s gap.
 
 - **Map localization tries every image until the odometry has a map
   pose.** No frame has one before two fixes agree, and with every 5th

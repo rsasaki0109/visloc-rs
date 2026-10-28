@@ -894,7 +894,7 @@ pub fn map_diagnostics_msg(
         ),
         (None, _) => (
             DiagnosticStatus::WARN,
-            "no map pose yet: waiting for two agreeing fixes".to_owned(),
+            "no map pose yet: waiting for agreeing fixes".to_owned(),
         ),
     };
     DiagnosticArray {
