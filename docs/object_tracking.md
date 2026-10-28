@@ -443,3 +443,33 @@ so stereo):
 - **Triangulated (static) cars** come out 10–25 % off in length and width,
   and 16–23 % short in height, because only the faces the camera sees are
   tracked. For cars, ground contact is the better size.
+
+### The demo GIF
+
+`scripts/render_objects_gif.py` draws the README's GIF from one drive's run
+(0084, mono + IMU):
+
+- **Top:** cam0 with the YOLOX boxes. Each placed object is labelled with
+  its track's height, its distance in that frame, and its speed (marked
+  "avg": the track's line fit) or "parked". A height outside its class's
+  range is grey with a question mark.
+- **Bottom left:** a top view that follows the camera, heading up.
+- **Bottom right:** the whole drive.
+  - Mono + IMU is aligned to the OXTS by a rotation and a translation.
+  - The visual-only VO (`basalt_euroc_vio_demo --mono-vo`, the same config)
+    starts at 10.7 s, once the car moves. Its numbers are drawn as metres,
+    rotated and moved onto the OXTS but not scaled. The 219 m from there
+    come out 5.7 m: its Sim(3) scale is 38.6, and after that scale its ATE
+    is 0.50 m.
+  - Beside it, the camera's own speed from each.
+
+```bash
+python3 scripts/render_objects_gif.py --euroc WORK/0084/euroc \
+    --boxes WORK/0084/yolox/boxes.csv \
+    --objects WORK/0084/objects_mono/ground_objects.csv \
+    --feet WORK/0084/objects_mono/ground_tracks.csv \
+    --trajectory WORK/0084/run_mono/trajectory.tum \
+    --visual-only WORK/0084/run_monovo/trajectory.tum \
+    --matches WORK/0084/objects_mono/matches.csv \
+    --out docs/assets/hero_metric_objects_kitti.gif
+```

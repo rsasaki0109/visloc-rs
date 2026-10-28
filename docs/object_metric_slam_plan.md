@@ -13,10 +13,12 @@
 - Phase 4 has KITTI raw: object heights and distances against the
   tracklets, for mono + IMU, stereo + IMU and the OXTS poses
   (`scripts/run_kitti_objects_eval.sh`).
+- Phase 5's offline GIF is in the README (`scripts/render_objects_gif.py`,
+  KITTI raw 0084).
 
 See [`object_tracking.md`](object_tracking.md). Speeds come from a weighted
-straight-line fit with a still test; a world-frame filter for turning and
-accelerating objects, and the later phases, are not implemented yet.
+straight-line fit with a still test. A world-frame filter for turning and
+accelerating objects, the live demo and Phase 6 are not implemented yet.
 
 ## Goal
 
@@ -220,10 +222,23 @@ scale, so this number is the ceiling.
    side-by-side with the IMU off. Made the same way as the existing hero GIFs.
 2. **Live on a phone,** on top of the browser VIO of #311 (phone camera and
    IMU, mono + IMU exactly). Metric labels as an AR overlay. The detector in
-   the browser (WebGPU) is the heavy part, so this comes second, and it
-   depends on #311 landing.
+   the browser (WebGPU) is the heavy part, so this comes second. The
+   browser VIO is now published at `/slam/` (#388).
 3. **ROS 2 (optional):** a node publishing the objects with their sizes as a
    `MarkerArray`, in `visloc-ros2`.
+
+- **Done: the offline GIF** (`scripts/render_objects_gif.py`;
+  `object_tracking.md`, "The demo GIF"). It shows KITTI raw 0084 with
+  mono + IMU:
+  - **Top:** the camera image, each car labelled with its height, distance
+    and speed or "parked". There are no IDs or features, which keeps the GIF
+    under 8 MB.
+  - **Bottom left:** a top view that follows the camera, with a ring every
+    10 m.
+  - **Bottom right, the IMU off:** with no scale and no gravity, ground
+    contact cannot place anything. The visual-only trajectory is drawn as
+    metres instead: the 219 m drive comes out 5.7 m, and the camera's own
+    speed under 1 km/h.
 
 ### Phase 6 (stretch): joint optimization
 
