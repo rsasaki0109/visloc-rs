@@ -1,0 +1,173 @@
+# Metric scale of monocular-inertial VIO on EuRoC, with stereo-inertial as the reference.
+#
+# Phase 0 of docs/object_metric_slam_plan.md: object sizes from mono + IMU can be no more
+# accurate than the trajectory's scale. Each job fetches one sequence from the ETH Research
+# Collection (scripts/euroc_fetch.py, HTTP range requests, no family zip stored), runs
+# basalt_euroc_vio_demo stereo and --mono, and scores both with scripts/euroc_scale_report.py:
+# SE3 / Sim3 ATE, the scale error, and when the scale settles within ±5 %. The last job puts
+# the table in the run summary. Run it by hand (Actions > EuRoC mono scale > Run workflow).
+name: EuRoC mono scale
+
+on:
+  workflow_dispatch:
+    inputs:
+      sequences:
+        description: Sequence names, space-separated (empty = all 11)
+        type: string
+        default: ""
+      max_parallel:
+        description: Sequences at a time (spares the ETH server)
+        type: number
+        default: 3
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      sequences: ${{ steps.plan.outputs.sequences }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - id: plan
+        name: Sequences
+        env:
+          SEQUENCES: ${{ inputs.sequences }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import importlib.util, json, os, sys
+          spec = importlib.util.spec_from_file_location("m", "benchmarks/basalt/euroc_dataset_manifest.py")
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          seqs = os.environ["SEQUENCES"].split() or list(m.SEQUENCES)
+          if any(s not in m.SEQUENCES for s in seqs):
+              sys.exit(f"bad sequences: {seqs}")
+          print("sequences=" + json.dumps(seqs))
+          EOF
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: euroc-release
+
+      - name: Build the VIO
+        run: cargo build --locked --release --example basalt_euroc_vio_demo
+
+      - name: Upload the VIO
+        uses: actions/upload-artifact@v7
+        with:
+          name: basalt-euroc-vio-demo
+          path: target/release/examples/basalt_euroc_vio_demo
+          if-no-files-found: error
+          retention-days: 7
+
+  sequence:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '3') }}  # a number, also when dispatched as text
+      matrix:
+        sequence: ${{ fromJSON(needs.plan.outputs.sequences) }}
+    env:
+      SEQ: ${{ matrix.sequence }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install numpy
+        run: python -m pip install --quiet --disable-pip-version-check numpy==2.5.3
+
+      - name: Download the VIO
+        uses: actions/download-artifact@v8
+        with:
+          name: basalt-euroc-vio-demo
+          path: bin
+
+      - name: Fetch ${{ matrix.sequence }}
+        run: python scripts/euroc_fetch.py "$SEQ" "$RUNNER_TEMP/euroc"
+
+      - name: Run stereo and mono
+        run: |
+          chmod +x bin/basalt_euroc_vio_demo
+          for mode in stereo mono; do
+            flag=""; [ "$mode" = mono ] && flag=--mono
+            mkdir -p "out/$mode/$SEQ"
+            # a failed run still gets its row (the report marks the missing trajectory)
+            bin/basalt_euroc_vio_demo --euroc-dir "$RUNNER_TEMP/euroc/$SEQ" \
+              --calibration benchmarks/basalt/release_inputs/euroc_ds_calib.json \
+              --config configs/basalt/euroc_config.json --out-dir "out/$mode/$SEQ" $flag --no-trace \
+              > "out/$mode/$SEQ.log" 2>&1 || echo "::warning::$mode $SEQ exited with $?"
+          done
+
+      - name: Score
+        run: |
+          mkdir -p results
+          for mode in stereo mono; do
+            python scripts/euroc_scale_report.py run --sequence "$SEQ" --mode "$mode" \
+              --ground-truth-csv "$RUNNER_TEMP/euroc/$SEQ/mav0/state_groundtruth_estimate0/data.csv" \
+              --trajectory "out/$mode/$SEQ/trajectory.tum" --out "results/${mode}_$SEQ.json"
+          done
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: results-${{ matrix.sequence }}
+          path: |
+            results
+            out/*/*.log
+            out/*/*/trajectory.tum
+            out/*/*/summary.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  summary:
+    needs: sequence
+    if: always() && needs.sequence.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install numpy
+        run: python -m pip install --quiet --disable-pip-version-check numpy==2.5.3
+
+      - name: Download the results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: results-*
+          path: all
+
+      - name: Table
+        run: |
+          python scripts/euroc_scale_report.py summarize all/*/results/*.json > scale.md
+          cat scale.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the table
+        uses: actions/upload-artifact@v7
+        with:
+          name: euroc-mono-scale
+          path: scale.md
+          if-no-files-found: error
+          retention-days: 30
