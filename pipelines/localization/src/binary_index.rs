@@ -12,6 +12,14 @@
 //! windows, which only compares each projected landmark with the keypoints
 //! near it.
 //!
+//! A map can hold several landmarks for one physical point: a SLAM map whose
+//! tracks broke and restarted, and more so a map merged from several
+//! sessions. Their descriptors are nearly equal, so the nearest /
+//! second-nearest ratio test rejects keypoints of that point.
+//! [`BinaryLandmarkIndex::with_duplicate_radius`] makes
+//! [`BinaryLandmarkIndex::match_all`] compare the best landmark with the
+//! best one farther than a radius from it instead.
+//!
 //! [`Matcher`]: visloc_vision::matching::Matcher
 //! [`HammingMatcher`]: visloc_vision::matching::HammingMatcher
 
@@ -154,6 +162,60 @@ impl Nearest {
     }
 }
 
+/// Candidates [`NearestDistinct`] keeps.
+const DISTINCT_CANDIDATES: usize = 8;
+
+/// The best distances of one search, for a ratio test whose second-best
+/// candidate must lie farther than a radius from the best one.
+#[derive(Clone, Copy)]
+struct NearestDistinct {
+    /// `(distance, index)`, ascending; ties keep the earlier candidate first.
+    candidates: [(u32, usize); DISTINCT_CANDIDATES],
+    len: usize,
+}
+
+impl NearestDistinct {
+    const fn new() -> Self {
+        Self {
+            candidates: [(u32::MAX, 0); DISTINCT_CANDIDATES],
+            len: 0,
+        }
+    }
+
+    fn offer(&mut self, distance: u32, index: usize) {
+        if self.len == DISTINCT_CANDIDATES && distance >= self.candidates[self.len - 1].0 {
+            return;
+        }
+        let at = self.candidates[..self.len].partition_point(|(kept, _)| *kept <= distance);
+        let end = self.len.min(DISTINCT_CANDIDATES - 1);
+        self.candidates.copy_within(at..end, at + 1);
+        self.candidates[at] = (distance, index);
+        self.len = (self.len + 1).min(DISTINCT_CANDIDATES);
+    }
+
+    /// The best candidate and, as the second-best distance, the nearest
+    /// candidate farther than `radius` from it. When every kept candidate is
+    /// within the radius, the last kept distance is a lower bound of that
+    /// second-best distance and stands in for it.
+    fn collapse(self, positions: &[Point3<f64>], radius: f64) -> Nearest {
+        if self.len == 0 {
+            return Nearest::new();
+        }
+        let (distance, index) = self.candidates[0];
+        let best = positions[index];
+        let second = self.candidates[1..self.len]
+            .iter()
+            .find(|(_, other)| (positions[*other] - best).norm() > radius)
+            .map(|(distance, _)| *distance)
+            .or_else(|| (self.len == DISTINCT_CANDIDATES).then(|| self.candidates[self.len - 1].0))
+            .unwrap_or(u32::MAX);
+        Nearest {
+            best: (distance, index),
+            second,
+        }
+    }
+}
+
 fn descriptor_match(
     query_index: usize,
     train_index: usize,
@@ -176,6 +238,7 @@ pub struct BinaryLandmarkIndex {
     landmark_ids: Vec<LandmarkId>,
     positions: Vec<Point3<f64>>,
     descriptors: PackedDescriptors,
+    duplicate_radius_m: Option<f64>,
 }
 
 impl BinaryLandmarkIndex {
@@ -196,7 +259,18 @@ impl BinaryLandmarkIndex {
                 .map(|(landmark, _)| landmark.position)
                 .collect(),
             descriptors: PackedDescriptors::pack(&descriptors, dimension),
+            duplicate_radius_m: None,
         }
+    }
+
+    /// Makes the ratio test of [`Self::match_all`] treat landmarks within
+    /// `radius_m` of the best one as the same point: the second-best
+    /// distance is that of the best landmark farther away. See the module
+    /// documentation. `radius_m <= 0` turns it off.
+    #[must_use]
+    pub fn with_duplicate_radius(mut self, radius_m: f64) -> Self {
+        self.duplicate_radius_m = (radius_m > 0.0).then_some(radius_m);
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -219,8 +293,8 @@ impl BinaryLandmarkIndex {
     }
 
     /// Appearance-only matching: every query descriptor against every
-    /// landmark, split over up to `threads` threads. The same
-    /// correspondences, in the same order, as
+    /// landmark, split over up to `threads` threads. Without a duplicate
+    /// radius, the same correspondences, in the same order, as
     /// [`CorrespondenceBuilder`](crate::CorrespondenceBuilder) with a
     /// [`HammingMatcher`](visloc_vision::matching::HammingMatcher) of the
     /// same gates: one per accepted keypoint, several keypoints may share a
@@ -237,10 +311,22 @@ impl BinaryLandmarkIndex {
             range
                 .filter_map(|query_index| {
                     let bits = query.get(query_index)?;
-                    let mut nearest = Nearest::new();
-                    for (landmark, train) in self.descriptors.iter() {
-                        nearest.offer(hamming(bits, train), landmark);
-                    }
+                    let nearest = match self.duplicate_radius_m {
+                        None => {
+                            let mut nearest = Nearest::new();
+                            for (landmark, train) in self.descriptors.iter() {
+                                nearest.offer(hamming(bits, train), landmark);
+                            }
+                            nearest
+                        }
+                        Some(radius) => {
+                            let mut nearest = NearestDistinct::new();
+                            for (landmark, train) in self.descriptors.iter() {
+                                nearest.offer(hamming(bits, train), landmark);
+                            }
+                            nearest.collapse(&self.positions, radius)
+                        }
+                    };
                     let (distance, landmark, second) = nearest.accept(gates)?;
                     Some(descriptor_match(query_index, landmark, distance, second))
                 })
@@ -648,5 +734,82 @@ mod tests {
         assert!(all.query_indices.iter().all(|&q| q != 0));
         let empty = index.match_all(&[], &index.pack_query::<Vec<f32>>(&[]), GATES, 4);
         assert_eq!(empty.match_count, 0);
+    }
+
+    #[test]
+    fn a_radius_below_the_landmark_spacing_changes_nothing() {
+        let scene = scene();
+        let index = BinaryLandmarkIndex::new(&scene.map, &scene.store);
+        let packed = index.pack_query(&scene.descriptors);
+        let plain = index.match_all(&scene.keypoints, &packed, GATES, 1);
+        let index = index.with_duplicate_radius(1e-9);
+        for threads in [1, 3] {
+            assert_eq!(
+                index.match_all(&scene.keypoints, &packed, GATES, threads),
+                plain
+            );
+        }
+    }
+
+    /// Landmark 0 has `copies` duplicates (within 2 cm, the same
+    /// descriptor); landmark 1, far away, has the same descriptor as landmark
+    /// 2. One keypoint observes each of 0, 1 and 3, its descriptor 8 bits
+    /// off.
+    fn duplicates(copies: usize) -> (BinaryLandmarkIndex, Vec<Point2<f64>>, PackedDescriptors) {
+        let mut rng = Rng(7);
+        let mut map = VisualMap::new();
+        let mut store = LandmarkDescriptorStore::new();
+        let point = |x: f64| Point3::new(x, 0.0, 3.0);
+        let original = rng.bits();
+        let twin = rng.bits();
+        let lone = rng.bits();
+        let mut add = |id: u64, position: Point3<f64>, descriptor: Vec<f32>| {
+            map.landmarks.insert(id, Landmark::new(id, position));
+            store.insert(id, descriptor);
+        };
+        add(0, point(0.0), original.clone());
+        add(1, point(5.0), twin.clone());
+        add(2, point(-5.0), twin.clone());
+        add(3, point(2.0), lone.clone());
+        for copy in 0..copies {
+            let jitter = 0.002 * copy as f64;
+            add(100 + copy as u64, point(jitter), original.clone());
+        }
+        let index = BinaryLandmarkIndex::new(&map, &store);
+        let query = [original, twin, lone]
+            .iter()
+            .map(|descriptor| flip(descriptor, 8, &mut rng))
+            .collect::<Vec<_>>();
+        let packed = index.pack_query(&query);
+        let keypoints = vec![Point2::new(10.0, 10.0); 3];
+        (index, keypoints, packed)
+    }
+
+    fn matched_queries(set: &CorrespondenceSet) -> Vec<usize> {
+        set.query_indices.clone()
+    }
+
+    #[test]
+    fn duplicates_of_a_point_pass_the_ratio_test_within_the_radius() {
+        let (index, keypoints, packed) = duplicates(1);
+        // The duplicate defeats the ratio test; the twin descriptors of two
+        // distinct points do too.
+        let plain = index.match_all(&keypoints, &packed, GATES, 1);
+        assert_eq!(matched_queries(&plain), [2]);
+        let index = index.with_duplicate_radius(0.05);
+        let tolerant = index.match_all(&keypoints, &packed, GATES, 1);
+        assert_eq!(matched_queries(&tolerant), [0, 2]);
+        assert_eq!(tolerant.landmark_ids, [0, 3]);
+    }
+
+    #[test]
+    fn a_crowd_of_duplicates_falls_back_to_a_lower_bound() {
+        // More duplicates than candidates kept: no distinct second-best is
+        // seen. The last kept distance, equal to the best, bounds it from
+        // below, and the ratio test rejects rather than guess.
+        let (index, keypoints, packed) = duplicates(DISTINCT_CANDIDATES + 2);
+        let index = index.with_duplicate_radius(0.05);
+        let tolerant = index.match_all(&keypoints, &packed, GATES, 1);
+        assert_eq!(matched_queries(&tolerant), [2]);
     }
 }

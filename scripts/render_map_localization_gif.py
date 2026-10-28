@@ -6,6 +6,12 @@ The saved map's landmarks in 3D, the localized camera positions so far
 matched (green). Inset: the query camera image with those matched keypoints
 (PnP inliers, green).
 
+With `--trajectory`, the map-frame trajectory of a `--vio` run (the VIO
+anchored to the map), the orange path and the red camera are that
+trajectory, which has a pose for every frame; rays and keypoints are drawn
+for the images that also matched the map, and the inset says how long the
+VIO has carried the pose since the last match on the others.
+
 Inputs are files produced elsewhere in this repo:
 
   --map DIR            map from `basalt_euroc_online_slam_demo --save-map`
@@ -13,6 +19,7 @@ Inputs are files produced elsewhere in this repo:
   --localization FILE  `basalt_euroc_localize_demo` localization.tum (IMU
                        poses in the map frame, seconds)
   --inliers FILE       `basalt_euroc_localize_demo --dump-inliers` CSV
+  --trajectory FILE    optional: trajectory_map.tum of a `--vio` run
 
 Example:
 
@@ -21,6 +28,15 @@ Example:
   python scripts/render_map_localization_gif.py --map runs/mh01_map \\
       --images MH_02_easy --localization runs/mh02_on_mh01/localization.tum \\
       --inliers runs/mh02_inliers.csv --out docs/assets/hero_map_localization.gif
+
+  # The VIO anchored to the map: a pose for every frame.
+  basalt_euroc_localize_demo --map runs/mh01_map --euroc-dir MH_02_easy \\
+      --out-dir runs/mh02_vio --vio --calibration CALIB --config CONFIG \\
+      --projection-radius-px 20 --dump-inliers runs/mh02_vio_inliers.csv
+  python scripts/render_map_localization_gif.py --map runs/mh01_map \\
+      --images MH_02_easy --localization runs/mh02_vio/localization.tum \\
+      --trajectory runs/mh02_vio/trajectory_map.tum \\
+      --inliers runs/mh02_vio_inliers.csv --out hero.gif
 """
 
 from __future__ import annotations
@@ -110,6 +126,8 @@ def main() -> int:
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--localization", type=Path, required=True)
     parser.add_argument("--inliers", type=Path, required=True)
+    parser.add_argument("--trajectory", type=Path,
+                        help="trajectory_map.tum of a --vio run: a pose for every frame")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--start", type=float, default=0.0, help="seconds into the sequence")
     parser.add_argument("--duration", type=float, default=60.0, help="seconds of the sequence")
@@ -131,6 +149,9 @@ def main() -> int:
     r_ic, t_ic = camera_from_imu(args.map)
     poses = load_localization(args.localization)
     pose_keys = np.array(sorted(poses))
+    # The poses drawn: the trajectory's when given, else the localizations'.
+    track = load_localization(args.trajectory) if args.trajectory else poses
+    track_keys = np.array(sorted(track))
     inliers = load_inliers(args.inliers)
     cam_ts, cam_files = read_image_index(args.images / "mav0" / "cam0")
 
@@ -172,20 +193,24 @@ def main() -> int:
     palette = Image.new("P", (1, 1))
     palette.putpalette(flat + flat[-3:] * (256 - len(entries)))
 
-    # Camera centres of every localization, for the trail.
-    centres = np.array([poses[k][0] + poses[k][1] @ t_ic for k in pose_keys])
+    # Camera centres of every drawn pose, for the trail.
+    centres = np.array([track[k][0] + track[k][1] @ t_ic for k in track_keys])
     localized = 0
     frames = []
     for gi, pick in enumerate(picks):
         stamp = int(cam_ts[pick])
-        # The localization nearest this image, if it was localized.
+        # The localization nearest this image, if it was localized, and the
+        # drawn pose of this image.
         key = nearest(pose_keys, stamp)
         matches = inliers.get(key, []) if key is not None else []
+        track_key = nearest(track_keys, stamp)
         camera_centre = None
-        if key is not None:
-            p_imu, r_imu = poses[key]
+        if track_key is not None:
+            p_imu, r_imu = track[track_key]
             camera_centre = p_imu + r_imu @ t_ic
             localized += 1
+        earlier = pose_keys[pose_keys <= stamp]
+        since_fix = (stamp - earlier[-1]) / 1e9 if len(earlier) else None
 
         # The map, the trail, the camera and its rays.
         fig = plt.figure(figsize=(args.width / 100, height / 100), dpi=100,
@@ -194,7 +219,7 @@ def main() -> int:
         ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.8, c=shown[:, 2],
                    cmap="Blues", vmin=lo[2] - 2.0, vmax=hi[2], depthshade=False,
                    linewidths=0)
-        path = centres[pose_keys <= stamp]
+        path = centres[track_keys <= stamp]
         if len(path) > 1:
             ax.plot(path[:, 0], path[:, 1], path[:, 2], color=ORANGE, lw=1.6)
         if camera_centre is not None:
@@ -213,7 +238,8 @@ def main() -> int:
         fig.text(0.40, 0.885, args.subtitle, fontsize=8.5, color="#dddddd")
         fig.text(0.40, 0.845, f"t = {elapsed:3.0f} s", fontsize=8, color="#999999")
         fig.text(0.02, 0.03, "map landmarks", fontsize=8, color=MAP_BLUE)
-        fig.text(0.16, 0.03, "localized trajectory", fontsize=8, color=ORANGE)
+        fig.text(0.16, 0.03, "map-frame trajectory" if args.trajectory
+                 else "localized trajectory", fontsize=8, color=ORANGE)
         fig.text(0.33, 0.03, "camera", fontsize=8, color=RED)
         fig.text(0.41, 0.03, "rays to the landmarks its image matched", fontsize=8,
                  color=GREEN)
@@ -230,11 +256,17 @@ def main() -> int:
         for x, y, _ in matches:
             x, y = x * sx, y * sy
             draw.ellipse((x - 2.5, y - 2.5, x + 2.5, y + 2.5), outline=GREEN, width=2)
-        label = (f"{len(matches)} keypoints matched to the map" if matches
-                 else "not localized")
+        if matches:
+            label, colour = f"{len(matches)} keypoints matched to the map", "white"
+        elif camera_centre is not None and args.trajectory:
+            label = ("VIO only, no map match yet" if since_fix is None
+                     else f"VIO only, {since_fix:.1f} s since a map match")
+            colour = ORANGE
+        else:
+            label, colour = "not localized", RED
         box = draw.textbbox((6, 4), label, font=font)
         draw.rectangle((box[0] - 3, box[1] - 2, box[2] + 3, box[3] + 2), fill=(0, 0, 0))
-        draw.text((6, 4), label, fill="white" if matches else RED, font=font)
+        draw.text((6, 4), label, fill=colour, font=font)
         frame.paste((255, 255, 255), (8, 8, 12 + inset_w, 12 + inset_h))
         frame.paste(image, (10, 10))
         frames.append(frame.quantize(palette=palette, dither=Image.Dither.NONE))

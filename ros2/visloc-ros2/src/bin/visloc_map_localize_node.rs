@@ -62,6 +62,8 @@ PARAMETERS (--name value  or  -p name:=value):
   prior_wait_ms          longest wait for the odometry of an image's stamp before
                          matching map-wide instead                                    [300]
   match_threads          threads of the map-wide search                               [1]
+  duplicate_radius       map-wide search: landmarks within this many metres of the best
+                         one count as the same point in the ratio test (0: off)      [0]
   max_points             ORB keypoints per image                                      [the map's]
   position_stddev        published 1-sigma position at a fix (m)                      [0.03]
   position_stddev_per_m  ... plus this per metre of VIO travel since the fix          [0.025]
@@ -118,6 +120,8 @@ fn run() -> Result<(), String> {
     options.projection_radius_px = (radius > 0.0).then_some(radius);
     let prior_wait = Duration::from_millis(args.parsed_or("prior_wait_ms", 300u64)?);
     options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
+    let duplicate_radius = args.parsed_or("duplicate_radius", 0.0f64)?;
+    options.duplicate_radius_m = (duplicate_radius > 0.0).then_some(duplicate_radius);
     options.max_points = args.parsed::<usize>("max_points")?;
     options.position_stddev_m = args.parsed_or("position_stddev", options.position_stddev_m)?;
     options.position_stddev_per_m =

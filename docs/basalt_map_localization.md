@@ -21,7 +21,12 @@ frame gets a map pose once two fixes agree: MH_02 99.8% of frames at 2.0 cm
 RMSE (5.7 cm worst) localizing only every 5th image, at 0.83× real time on 4
 cores. Between rare fixes the VIO drifts; each pose comes with the time and
 distance since its last fix, and the poses within 2 m and 5 s of one are never
-more than 13 cm off on any sequence.
+more than 13 cm off on any sequence. Matching each image around the
+landmarks' projections from the anchored VIO's prediction
+(`--projection-radius-px 20`, [below](#matching-around-the-predicted-projections))
+makes the fixes far more frequent: 98% of MH_02's images match the map
+instead of 81%, and the longest stretch without a match falls from 7.3 s to
+1.2 s.
 
 ## Setup
 
@@ -140,6 +145,33 @@ It barely raises the localized rate. Combined with a low inlier threshold it
 accepts wrong poses, since with fewer candidates the nearest /
 second-nearest ratio test also passes wrong matches.
 
+### Duplicate landmarks and the ratio test
+
+The ratio test rejects a keypoint whose two nearest landmark descriptors are
+about equally close. A map can hold several landmarks for one physical
+point: the SLAM's tracks break and restart, and a map
+[merged from several flights](#merging-maps-of-several-flights) holds each
+session's landmarks. Those duplicates have nearly the same descriptor, so
+the ratio test rejects keypoints of exactly the points the map knows twice.
+With `--duplicate-radius-m R` (`duplicate_radius` in
+`visloc_map_localize_node`), landmarks within R of the best one count as
+the same point. The ratio test then compares the best landmark with the
+best one farther away (`BinaryLandmarkIndex::with_duplicate_radius`):
+
+| Query → map | off | 5 cm | 10 cm | 20 cm |
+|---|---|---|---|---|
+| MH_02 → MH_01 | 81.2% (max 16.8 cm) | 82.3% (8.1 cm) | 83.1% (7.6 cm) | 83.7% (8.7 cm) |
+| V2_02 → V2_01 | 20.3% | | 21.0% | |
+| V2_02 → V2_01 + V2_03 (merged) | 18.4% | 19.0% | 19.3% | 19.6% |
+
+The RMSE stays within 0.1 cm (1.75-1.83 cm on MH_02, 2.1-2.2 cm on V2_02),
+and no pose is more than 10 cm off. The gain is small and it is off by
+default, which keeps the tables on this page reproducible; 10 cm matches the
+fusion radius of `basalt_map_merge`. The demo now matches map-wide through
+`BinaryLandmarkIndex`, which gives the same matches as before (MH_02's
+`localization.tum` is byte-identical) at a median 67 ms per image instead
+of 86 ms.
+
 ## Anchoring the VIO to the map
 
 Image localization gives a pose only for the images that match the map. With
@@ -204,6 +236,59 @@ reach decimetres. Keeping only fresh poses (within 2 m and 5 s of a fix)
 removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
+
+**The anchor is not what limits these numbers.** The recorded VIO
+trajectories and fixes (every 5th image) were replayed through other ways
+of combining them. A Python port of `MapAnchor` reproduces every RMSE above
+to 0.01 cm. A Kalman filter on the four offset parameters lets the offset
+drift by a random walk per metre of VIO travel (tried at 1-5 cm and
+0.2-1° per metre). It changes the RMSE by -0.6 to +0.8 cm. Averaging fixes
+over 2 or 10 s instead of 5 s changes it by -0.4 to +0.7 cm. Feeding the
+same ground-truth fix positions (with the real fixes' rotations, the same
+timing and the same averaging) into the anchor bounds what any such
+combination of these fixes can reach:
+
+| | MH_02 | MH_03 | MH_04 | MH_05 | V1_02 | V1_03 | V2_02 |
+|---|---|---|---|---|---|---|---|
+| `MapAnchor` | 2.05 | 4.97 | 23.0 | 14.4 | 3.47 | 6.66 | 4.24 |
+| with ground-truth fix positions | 1.30 | 4.80 | 23.7 | 15.4 | 2.76 | 6.36 | 3.85 |
+
+(RMSE, cm.) Even perfect fixes take off at most 1.4 cm, except on MH_02,
+where the fixes' own noise (1.9 cm) is most of its error. The rest is the
+VIO drifting where no image localizes. Neither a better filter nor feeding
+the fixes into the VIO estimator would remove that drift. More map
+coverage would ([merged maps](#merging-maps-of-several-flights)), and so
+would more fixes where the map does cover the flight
+([below](#matching-around-the-predicted-projections)).
+
+### Matching around the predicted projections
+
+Once the anchor is set, it and the VIO predict each image's pose. With
+`--projection-radius-px PX`, every landmark the predicted camera sees is
+matched only against the keypoints within `PX` pixels of its predicted
+projection (`BinaryLandmarkIndex::match_projected`), with the map-wide
+search as the fallback. `visloc_map_localize_node` has always done this
+(`projection_radius`, 20 px). The ratio test then compares a landmark with
+the few keypoints near its projection instead of the whole image, so many
+more correct matches pass it. With 20 px:
+
+| Query → map, localizing | Images that localize | Longest stretch without one | Median inliers | VIO + map RMSE / max | Fixes > 10 cm off | Localization per image |
+|---|---|---|---|---|---|---|
+| MH_02 → MH_01, every image | 81.2% → **98.2%** | 7.3 s → **1.2 s** | 78 → 148 | 2.03 / 5.9 → **1.94 / 5.0 cm** | 1 → 2 | 77 → 31 ms |
+| MH_02 → MH_01, every 5th | 81.6% → 98.4% | 7.5 s → 1.8 s | 77 → 150 | 2.05 / 5.7 → 2.00 / 5.6 cm | 1 → 0 | 81 → 31 ms |
+| V2_02 → V2_01, every image | 20.3% → **60.4%** | 14.5 s → 9.4 s | 47 → 57 | 4.13 / 12.2 → **3.33 / 12.3 cm** | 0 → 22 | 45 → 30 ms |
+| V2_02 → V2_01, every 5th | 21.1% → 60.6% | 14.8 s → 11.3 s | 47 → 56 | 4.24 / 12.6 → 3.44 / 12.0 cm | 0 → 5 | 47 → 30 ms |
+
+"Images that localize" is the share of the images tried; the share of
+frames with a map pose does not change (99.8–99.97%). Per-image times are
+medians (ORB extraction, matching, PnP).
+
+On V2_02 the extra fixes are less accurate than the map-wide ones: 22 of
+1,419 are 10–19 cm off (none of 477 without projection), mostly fixes with
+40–60 inliers. The anchor averages the fixes of the last 5 s, so the VIO +
+map poses still improve and their worst error does not grow. The other six
+queries were not rerun with projection matching, so the option stays off by
+default.
 
 ### On a robot (ROS 2)
 
@@ -310,8 +395,9 @@ What a merge buys depends on the added map:
   map covers the flight (MH_01's localizes none of those images), the
   fixes are 25 cm off. The anchor followed them after a stretch the VIO
   had carried alone, and two later fixes were rejected before it
-  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo an added map's own
-  distortion; a joint optimization of the merged sessions (not done) would.
+  re-anchored; the worst pose is 49.6 cm off. A rigid transform cannot undo
+  an added map's own distortion, and deforming it did not help either (see
+  below).
 - **Coverage is not the limit for the fast Vicon flights.** V1_02 and V2_02
   gain 20-24 points of coverage from V1_03 and V2_03, but no images: the
   difficult flights' maps barely localize them (V1_02 against the V1_03
@@ -322,8 +408,37 @@ What a merge buys depends on the added map:
   landmarks. Where an added map brings little, 1-9% of the images that
   localized against the base map stop doing so (MH_02 with MH_04:
   2,468 to 2,435; V2_02 with V2_03: 477 to 433). Fusing more aggressively
-  (30 cm, 70 bits) recovered 9 of those 44 images on V2_02, and not fusing
-  lost 2 more. Merge flights that cover new ground with a good map.
+  (30 cm, 70 bits) recovered 9 of those 44 images on V2_02, not fusing
+  lost 2 more, and `--duplicate-radius-m 0.1` recovers 20
+  ([above](#duplicate-landmarks-and-the-ratio-test)).
+  Merge flights that cover new ground with a good map.
+
+**Deforming the added map was tried and dropped.** The added parts' own
+error was measured directly: their keyframes' positions in the merged map,
+put in the ground-truth frame with the base map's alignment, against the
+added flight's ground truth. With the rigid merge, MH_04's part is 15.2 cm
+RMSE (33.3 cm worst) and MH_05's 9.3 cm; the Vicon rooms' parts are
+1.9-5.1 cm. To deform them:
+
+1. With the registration as the prior, every keyframe of the added map was
+   localized in the base map by projection-guided matching. That localized
+   2-9 times as many keyframes as the map-wide search (MH_04: 90 instead of
+   28; V1_03: 278 instead of 74).
+2. A pose graph (`visloc_slam::PoseGraph`) held the keyframes to their
+   relative poses in the added map, between keyframes sharing at least 20
+   landmarks and between consecutive ones, and pulled the localized ones
+   toward those localizations under a Huber kernel. The landmarks moved
+   with their keyframes.
+
+It changed the added parts' error by -1.1 to +0.6 cm (MH_05 9.3 to 8.2;
+MH_04 15.2 to 15.8). Making the graph more flexible (fewer or looser
+relative edges) made MH_04 worse, 20-23 cm. The reason is in the
+localizations themselves. Each comes from only the keyframe's landmark
+keypoints, at least 15 inliers, so it is less accurate than the rigid
+placement at the same keyframes: 3.7-9.2 cm RMSE with outliers up to 30 cm,
+against 1.9-4.2 cm. Where the maps overlap, the rigid placement is already
+better than the constraints a deformation would use. Where they do not
+(MH_04's far end), there is nothing to fit.
 
 ## Reproduce
 
@@ -374,20 +489,28 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   --queries 3040
 ```
 
-The README's animation, from the localization run above with its inliers
-dumped (needs matplotlib and Pillow):
+The README's animation, from the VIO run with every image localized,
+matching by projection, and its inliers dumped (needs matplotlib and
+Pillow):
 
 ```bash
 target/release/examples/basalt_euroc_localize_demo \
-  --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_on_mh01 \
-  --dump-inliers runs/mh02_inliers.csv
+  --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_vio_projection \
+  --vio --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --localize-every 1 --projection-radius-px 20 --dump-inliers runs/mh02_vio_inliers.csv
 python3 scripts/render_map_localization_gif.py --map runs/mh01_map \
-  --images $D/MH_02_easy --localization runs/mh02_on_mh01/localization.tum \
-  --inliers runs/mh02_inliers.csv --out docs/assets/hero_map_localization.gif \
-  --frames 140 --fps 10 --duration 150 --elev 60 --azim -80 --zoom 1.15 \
+  --images $D/MH_02_easy --localization runs/mh02_vio_projection/localization.tum \
+  --trajectory runs/mh02_vio_projection/trajectory_map.tum \
+  --inliers runs/mh02_vio_inliers.csv --out docs/assets/hero_map_localization.gif \
+  --start 0.5 --frames 140 --fps 10 --duration 150 --elev 60 --azim -80 --zoom 1.15 \
   --width 760 --inset 270 --title "MH_02 localized in a map saved from MH_01" \
-  --subtitle "a different flight: 81% of its images localized, 1.8 cm RMSE vs ground truth"
+  --subtitle "VIO anchored to the map: a pose for every frame, 1.9 cm RMSE vs ground truth"
 ```
+
+Without `--trajectory`, the script draws the localizations alone (the run
+without `--vio` above), and the camera disappears from the frames whose
+image did not localize.
 
 A merged map (`cargo build ... --example basalt_map_merge`), queried with
 the flight left out of it and scored with the base map's alignment:

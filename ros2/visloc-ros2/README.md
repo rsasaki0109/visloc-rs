@@ -234,6 +234,7 @@ measurements behind the defaults.
 | `projection_radius` | `20` px | once anchored, search radius around each landmark's predicted projection (`<= 0`: always map-wide) |
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
 | `match_threads` | `1` | threads of the map-wide search |
+| `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
 | `max_points` | the map's | ORB keypoints per image |
 | `position_stddev`, `position_stddev_per_m` | `0.03` m, `0.025` m/m | published position 1-sigma |
 | `orientation_stddev` | `0.02` rad | |
