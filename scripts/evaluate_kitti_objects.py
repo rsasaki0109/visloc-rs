@@ -17,6 +17,10 @@ tracklets.
 - **Speed:** a line fitted to the tracklet's bottom centre over the matched
   frames, against the track's speed.
 
+`--static objects.csv` also scores the triangulated (static) objects: their
+upright box's height, length and width against the tracklet's (length is
+the longer side), matched through the object's first 2D track.
+
 `--gt` is `kitti_tracklets_to_csv.py`'s output; `--boxes` is
 `yolox_track_demo --boxes-csv`'s.
 """
@@ -68,6 +72,7 @@ def main() -> int:
     parser.add_argument("--boxes", required=True, type=Path)
     parser.add_argument("--ground", required=True, type=Path)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--static", type=Path, help="objects_metric_offline's objects.csv")
     args = parser.parse_args()
 
     gt_by_time = defaultdict(list)
@@ -144,6 +149,26 @@ def main() -> int:
         dtext = f"{100 * statistics.median(map(abs, dist)):.0f} %, {100 * statistics.median(dist):+.0f} %" if dist else "-"
         stext = f"{statistics.median(map(abs, speed)):.2f}, {statistics.median(speed):+.2f}" if speed else "-"
         print(f"{cls:<10} {len(rows):>3}  {height:>32}  {dtext:>22}  {stext:>18}")
+
+    if args.static:
+        static = []
+        for r in csv.DictReader(open(args.static)):
+            if r["object_id"] not in matched:
+                continue
+            gt_id, _ = matched[r["object_id"]]
+            g = next(iter(gt_rows[gt_id].values()))
+            static.append((r["class"], [float(r[k]) for k in ("height", "length", "width")],
+                           [float(g["h"]), max(float(g["l"]), float(g["w"])), min(float(g["l"]), float(g["w"]))]))
+        print(f"\nstatic (triangulated): {len(static)} matched")
+        for cls in sorted({c for c, _, _ in static}):
+            rows = [(e, g) for c, e, g in static if c == cls]
+            errs = ["/".join(f"{100 * statistics.median(abs(e[i] / g[i] - 1) for e, g in rows):.0f}" for i in range(3))]
+            print(f"{cls:<10} {len(rows):>3}  height/length/width median |err| {errs[0]} %")
+    if args.out and args.static:
+        with open(args.out.with_name("static_matches.csv"), "w") as f:
+            f.write("class,height,length,width,gt_height,gt_length,gt_width\n")
+            for c, e, g in static:
+                f.write(f"{c},{e[0]:.3f},{e[1]:.3f},{e[2]:.3f},{g[0]:.3f},{g[1]:.3f},{g[2]:.3f}\n")
     return 0
 
 

@@ -22,13 +22,14 @@
 //! objects triangulate: a moving object's rays do not meet.
 //!
 //! Objects of a class that moves (people, vehicles, animals) are also placed
-//! on the ground frame by frame (`visloc_objects::ground`): the ground's
-//! height comes from all the triangulated feature tracks seen within 10 s of
-//! the object, then from those right under its foot (stairs and kerbs), and
-//! the middle of its box's bottom edge from the gravity direction, so a
-//! sideways camera works. That gives each one a metric
-//! height, width, distance and speed, moving or not. Boxes cut by the image
-//! border or scored below 0.5 are skipped. The trajectory is
+//! on the ground frame by frame (`visloc_objects::ground`). The ground
+//! follows the camera's path through the triangulated feature tracks seen
+//! within 10 s of the object (`PathGround`, so slopes stay sharp), then the
+//! points right under its foot (stairs and kerbs). The middle of its box's
+//! bottom edge comes from the gravity direction, so a sideways camera works.
+//! That gives each one a metric height, width, distance and speed, moving or
+//! not. Boxes cut by the image border or scored below 0.5 are skipped. The
+//! trajectory is
 //! the IMU pose (`T_w_i`), as `basalt_euroc_vio_demo` writes it; for
 //! `--mono-vo` runs, whose trajectory is the camera pose, pass
 //! `--trajectory-is-camera`. Writes `objects.csv` (static) and

@@ -49,7 +49,7 @@ pub struct GroundParams {
     /// ...and is taken if it is this much higher or lower (0.1 m).
     pub local_min_shift: f64,
     /// [`PathGround`]: the stretch of path, either way, whose points give the
-    /// camera's height above the ground (10 m).
+    /// camera's height above the ground (20 m).
     pub path_stretch: f64,
 }
 
@@ -63,7 +63,7 @@ impl Default for GroundParams {
             local_radius: 1.5,
             local_min_points: 3,
             local_min_shift: 0.1,
-            path_stretch: 10.0,
+            path_stretch: 20.0,
         }
     }
 }
@@ -91,15 +91,33 @@ fn densest_layer(
     bin: f64,
     min_points: usize,
 ) -> Option<f64> {
+    densest_band(heights, ceiling, bin, 0, min_points)
+}
+
+/// [`densest_layer`] over bands of `2 * spread + 1` neighbouring bins, for
+/// noisier heights.
+fn densest_band(
+    heights: impl Iterator<Item = f64>,
+    ceiling: f64,
+    bin: f64,
+    spread: i64,
+    min_points: usize,
+) -> Option<f64> {
     let mut bins: std::collections::HashMap<i64, Vec<f64>> = std::collections::HashMap::new();
     for z in heights.filter(|z| z.is_finite() && *z < ceiling) {
         bins.entry((z / bin).floor() as i64).or_default().push(z);
     }
-    let (_, layer) = bins
-        .into_iter()
-        .filter(|(_, zs)| zs.len() >= min_points)
-        .max_by_key(|(bin, zs)| (zs.len(), std::cmp::Reverse(*bin)))?;
-    Some(layer.iter().sum::<f64>() / layer.len() as f64)
+    let band = |k: i64| {
+        (k - spread..=k + spread)
+            .filter_map(|j| bins.get(&j))
+            .flatten()
+    };
+    let (best, count) = bins
+        .keys()
+        .map(|&k| (k, band(k).count()))
+        .filter(|(_, n)| *n >= min_points)
+        .max_by_key(|(k, n)| (*n, std::cmp::Reverse(*k)))?;
+    Some(band(best).sum::<f64>() / count as f64)
 }
 
 /// The ground along the camera's path. The camera moves over the ground, so
@@ -119,10 +137,10 @@ pub struct PathGround {
 }
 
 impl PathGround {
-    /// For each point of the path, the densest `bin`-high layer of the
-    /// heights of the scene `points` whose nearest path point lies within
-    /// `path_stretch` along the path, each measured from that nearest point,
-    /// at least `min_below_camera` down, with `min_points`. A stretch without
+    /// For each point of the path, the densest band of three `bin`-high
+    /// layers of the heights of the scene `points` whose nearest path point
+    /// lies within `path_stretch` along the path, each measured from that
+    /// nearest point, at least `min_below_camera` down, with `min_points`. A stretch without
     /// such a layer takes the nearest stretch's. `None` if none has one.
     pub fn estimate(
         path: &[Point3<f64>],
@@ -154,10 +172,11 @@ impl PathGround {
                     .iter()
                     .filter(|(i, _)| (along[*i] - s).abs() <= params.path_stretch)
                     .map(|(_, z)| *z);
-                densest_layer(
+                densest_band(
                     heights,
                     -params.min_below_camera,
                     params.bin,
+                    1,
                     params.min_points,
                 )
                 .map(|layer| -layer)
