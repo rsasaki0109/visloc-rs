@@ -138,16 +138,21 @@ term, validated on the 50 OverMaps360 walks
 
 **From an Insta360 video.** The `.insv` holds the frames, the lens
 calibration and the IMU, so it goes in directly (decoded for the X5;
-[insta360_lens.md](insta360_lens.md)):
+[insta360_lens.md](insta360_lens.md)). With ffmpeg on `PATH`, one command:
 
-1. Cut every 10th frame of both lens streams, side by side, named by their
-   number in the video:
-   `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`
-2. `gsplat_photos --images frames --out run --insv VID.insv`
+```text
+gsplat_photos --insv VID.insv --out run
+```
 
-The frame timing search starts from the video's frame period (from its
-trailer). Frames 10 apart are 0.33 s apart, well inside the alignment's
-1.2 s gap limit.
+- **Frames.** It cuts every `--frame-step`-th frame (default 10, 0.33 s at
+  29.97 fps) into `run/frames`, both lenses side by side and named by their
+  number in the video. The frames are scaled to the faces' resolution, and a
+  later run reuses them.
+- **Timing.** The frame timing search starts from the video's frame period,
+  from its trailer. Frames 10 apart are well inside the alignment's 1.2 s
+  gap limit.
+- **Manual cut.** To cut the frames yourself, pass them with `--images`:
+  `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`.
 
 The test run used OverMaps360's walk 0313afa5:
 
@@ -161,11 +166,47 @@ The test run used OverMaps360's walk 0313afa5:
 - **IMU.** It found the frame timing (offset 0.266 s, rotation residual
   0.07°) and gave 1.5927 m per SfM unit.
 - **Back lens.** The refined pose puts it 3.22 cm behind the front one; the
-  calibration says 3.23 cm.
+  calibration says 3.23 cm. On the other walks below it lands 2.1–6.8 cm
+  behind, so the offset is only weakly determined.
 - **Against the dataset.** Aligned to the dataset's own model over the 143
   frames both have, the run implies 1.0504 m per dataset unit. The dataset's
-  model gives 1.0401 over the whole walk (+1.0%). The median residual is
-  15 cm.
+  model gives 1.0401, over the same frames and over the whole walk (+1.0%).
+  The median residual is 15 cm.
+
+Four more walks, each run the same way on its first 400 frames:
+
+| Walk | Scene | Faces registered | IMU rotation residual, \|g\| | Scale vs the dataset's (same frames) |
+| --- | --- | ---: | --- | ---: |
+| 0313afa5 | city street | 2000/2000 | 0.07°, 9.94 m/s² | +1.0% |
+| 0c05c38a | temple courtyard | 2000/2000 | 0.09°, 9.81 m/s² | −2.5% |
+| 3b81dbc3 | residential street | 1998/2000 | 0.14°, 9.77 m/s² | −3.8% |
+| 9d2fe9b1 | tropical park | 1987/2000 | 1.18°, 9.82 m/s² | +2.4% |
+| 5bb3848a | shopping mall, indoors | 2000/2000 | 0.07°, 9.57 m/s² | +12.2% |
+
+The last column compares two IMU estimates over the same frames: this
+run's, on its own model, against the one on the dataset's model.
+
+- **SfM.** Every walk reconstructs.
+- **Outdoors.** One 133 s run of the IMU alignment lands within 4%. The
+  50-walk study found about 2.5% error at 1 s frame spacing
+  ([insta360_imu_scale.md](insta360_imu_scale.md)); longer clips give
+  more runs to average.
+- **Indoors.** The mall is off by 12%. Its fitted gravity, 9.57 m/s², marks
+  a weak fit.
+- **Face size.** These runs used 640 px faces to fit a 4-core CPU, and in
+  the mall that is what fails. Its first 100 frames at the full 0.33 s
+  spacing compare as follows:
+
+  | Faces | IMU fit | Rotation residual | Scale vs the dataset's |
+  | --- | --- | ---: | ---: |
+  | 640 px | fails its gravity check | – | – |
+  | 1024 px | passes | 0.023° (the dataset's model: 0.023°) | +5.5% over those 33 s |
+
+  Keep `--max-size` at its default, 1600, or at least 1024, for metric
+  output.
+- **Warning signs.** Distrust the scale when |g| is more than about
+  0.2 m/s² from 9.81, or the rotation residual is more than a few tenths of
+  a degree (the park, where 13 faces did not register).
 
 **Through Insta360 Studio** (not tried here; Studio is the maker's desktop
 application). Studio's export drops the IMU, so pass the original `.insv`:
