@@ -94,8 +94,12 @@ impl PackedDescriptors {
         self.valid.is_empty()
     }
 
-    fn get(&self, index: usize) -> Option<&[u64]> {
-        self.valid[index].then(|| &self.bits[index * self.words..(index + 1) * self.words])
+    pub(crate) fn get(&self, index: usize) -> Option<&[u64]> {
+        self.valid
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+            .then(|| &self.bits[index * self.words..(index + 1) * self.words])
     }
 
     /// `(index, words)` of every valid descriptor.
@@ -311,22 +315,7 @@ impl BinaryLandmarkIndex {
             range
                 .filter_map(|query_index| {
                     let bits = query.get(query_index)?;
-                    let nearest = match self.duplicate_radius_m {
-                        None => {
-                            let mut nearest = Nearest::new();
-                            for (landmark, train) in self.descriptors.iter() {
-                                nearest.offer(hamming(bits, train), landmark);
-                            }
-                            nearest
-                        }
-                        Some(radius) => {
-                            let mut nearest = NearestDistinct::new();
-                            for (landmark, train) in self.descriptors.iter() {
-                                nearest.offer(hamming(bits, train), landmark);
-                            }
-                            nearest.collapse(&self.positions, radius)
-                        }
-                    };
+                    let nearest = self.search(bits, self.descriptors.iter());
                     let (distance, landmark, second) = nearest.accept(gates)?;
                     Some(descriptor_match(query_index, landmark, distance, second))
                 })
@@ -352,6 +341,68 @@ impl BinaryLandmarkIndex {
             })
         };
         self.correspondence_set(keypoints, matches, self.len())
+    }
+
+    /// [`Self::match_all`] restricted to the landmarks at `landmarks`
+    /// (indices into this index, e.g. from
+    /// [`KeyframeRetrieval`](crate::KeyframeRetrieval)): each keypoint's
+    /// ratio test then weighs only those landmarks against each other.
+    pub fn match_among(
+        &self,
+        keypoints: &[Point2<f64>],
+        query: &PackedDescriptors,
+        gates: BinaryMatchGates,
+        landmarks: &[usize],
+    ) -> CorrespondenceSet {
+        let count = keypoints.len().min(query.len());
+        let matches = (0..count)
+            .filter_map(|query_index| {
+                let bits = query.get(query_index)?;
+                let candidates = landmarks.iter().filter_map(|&landmark| {
+                    self.descriptors
+                        .get(landmark)
+                        .map(|train| (landmark, train))
+                });
+                let (distance, landmark, second) = self.search(bits, candidates).accept(gates)?;
+                Some(descriptor_match(query_index, landmark, distance, second))
+            })
+            .collect();
+        self.correspondence_set(keypoints, matches, landmarks.len())
+    }
+
+    /// The nearest of `candidates` (landmark indices with their packed
+    /// descriptors) to `bits`, with the duplicate radius applied.
+    fn search<'a>(
+        &self,
+        bits: &[u64],
+        candidates: impl Iterator<Item = (usize, &'a [u64])>,
+    ) -> Nearest {
+        match self.duplicate_radius_m {
+            None => {
+                let mut nearest = Nearest::new();
+                for (landmark, train) in candidates {
+                    nearest.offer(hamming(bits, train), landmark);
+                }
+                nearest
+            }
+            Some(radius) => {
+                let mut nearest = NearestDistinct::new();
+                for (landmark, train) in candidates {
+                    nearest.offer(hamming(bits, train), landmark);
+                }
+                nearest.collapse(&self.positions, radius)
+            }
+        }
+    }
+
+    /// Index of landmark `id` in this index, if it has a descriptor.
+    pub fn landmark_index(&self, id: LandmarkId) -> Option<usize> {
+        self.landmark_ids.binary_search(&id).ok()
+    }
+
+    /// The packed descriptor of the landmark at `index`.
+    pub(crate) fn landmark_descriptor(&self, index: usize) -> Option<&[u64]> {
+        self.descriptors.get(index)
     }
 
     /// Projection-guided matching: each landmark is projected with

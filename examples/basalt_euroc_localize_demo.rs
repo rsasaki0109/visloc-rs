@@ -9,7 +9,12 @@
 //! P3P RANSAC with Gauss-Newton refinement estimates the camera pose. When
 //! `--prior-radius-m` is set and the previous image localized, only the
 //! landmarks within that radius of its camera centre are tried first, with
-//! the whole map as the fallback.
+//! the whole map as the fallback. With `--retrieval-keyframes N`, the
+//! map-wide search first matches only among the landmarks of the `N` map
+//! keyframes that look most like the image
+//! (`visloc_localization::KeyframeRetrieval`, `--retrieval-bits`-bit hashed
+//! words, 16 by default), and falls back to the whole map when that does
+//! not localize.
 //!
 //! ```text
 //! # 1. Map a sequence and save the map.
@@ -48,7 +53,9 @@
 //!   frame, `timestamp tx ty tz qx qy qz qw` with the image timestamp, the
 //!   convention of the SLAM demo's `trajectory_*.tum`.
 //! - `per_frame.csv`: per localization attempt, success, matches, inliers,
-//!   latency and, with `--vio`, what the anchor did with the fix.
+//!   latency, with `--vio` what the anchor did with the fix, and which
+//!   search gave the result (`projection`, `radius`, `retrieval` or
+//!   `global`).
 //! - With `--vio`: `trajectory_map.tum`, every anchored frame's IMU pose in
 //!   the map frame; `trajectory_map.csv`, the same poses with the time and
 //!   VIO distance since the anchor's newest fix (the fused error grows with
@@ -84,7 +91,8 @@ use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationResult, QueryImage};
 use visloc_rs::localization::{
-    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, MapAnchor, MapAnchorConfig,
+    BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, KeyframeRetrieval, MapAnchor,
+    MapAnchorConfig,
 };
 use visloc_rs::vision::matching::HammingMatcher;
 use visloc_rs::vision::pnp::{GaussNewtonPoseRefiner, P3PGrunert};
@@ -112,6 +120,10 @@ struct Args {
     prior_radius_m: Option<f64>,
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
+    /// Match map-wide among the landmarks of the N retrieved keyframes first.
+    retrieval_keyframes: Option<usize>,
+    /// Bits of a retrieval visual word.
+    retrieval_bits: u8,
     /// Run the Basalt VIO alongside and anchor it to the map.
     vio: bool,
     calibration: Option<PathBuf>,
@@ -135,6 +147,7 @@ impl Args {
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
          [--prior-radius-m M] [--duplicate-radius-m M] \
+         [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
          [--projection-radius-px PX] [--dump-inliers FILE]"
@@ -164,6 +177,8 @@ impl Args {
             ransac_iterations: 1000,
             prior_radius_m: None,
             duplicate_radius_m: None,
+            retrieval_keyframes: None,
+            retrieval_bits: 16,
             vio: false,
             calibration: None,
             config: None,
@@ -210,6 +225,10 @@ impl Args {
                 "--duplicate-radius-m" => {
                     args.duplicate_radius_m = Some(number(&option, value()?)?);
                 }
+                "--retrieval-keyframes" => {
+                    args.retrieval_keyframes = Some(number(&option, value()?)?);
+                }
+                "--retrieval-bits" => args.retrieval_bits = number(&option, value()?)?,
                 "--vio" => args.vio = true,
                 "--calibration" => args.calibration = Some(PathBuf::from(value()?)),
                 "--config" => args.config = Some(PathBuf::from(value()?)),
@@ -241,6 +260,9 @@ impl Args {
             euroc_dir.ok_or_else(|| format!("--euroc-dir is required\n\n{}", Self::usage()))?;
         if args.stride == 0 {
             return Err("--stride must be positive".into());
+        }
+        if args.retrieval_keyframes == Some(0) || !(1..=32).contains(&args.retrieval_bits) {
+            return Err("--retrieval-keyframes must be positive, --retrieval-bits 1..=32".into());
         }
         if args.vio && args.odometry.is_some() {
             return Err("--vio and --odometry are alternatives".into());
@@ -336,6 +358,9 @@ fn tum_line(timestamp_ns: i64, world_from_imu: &SE3) -> String {
 struct Attempt {
     result: LocalizationResult,
     used_prior: bool,
+    /// The search that gave `result`: `projection`, `radius`, `retrieval`
+    /// or `global`.
+    matching: &'static str,
     keypoints: usize,
     latency_ms: f64,
     /// The localized IMU pose in the map frame, when accepted.
@@ -357,6 +382,8 @@ struct Localizer {
     gates: BinaryMatchGates,
     prior_radius_m: Option<f64>,
     projection_radius_px: Option<f64>,
+    /// Keyframe retrieval, and how many keyframes' landmarks to match among.
+    retrieval: Option<(KeyframeRetrieval, usize)>,
     previous: Option<Pose>,
 }
 
@@ -382,6 +409,12 @@ impl Localizer {
         );
         let index = BinaryLandmarkIndex::new(&map.map, &map.descriptors)
             .with_duplicate_radius(args.duplicate_radius_m.unwrap_or(0.0));
+        let retrieval = args.retrieval_keyframes.map(|top_k| {
+            (
+                KeyframeRetrieval::new(&map.map, &index, args.retrieval_bits),
+                top_k,
+            )
+        });
         Ok(Self {
             max_points: args.max_points.unwrap_or(map.max_points),
             map,
@@ -395,6 +428,7 @@ impl Localizer {
             },
             prior_radius_m: args.prior_radius_m,
             projection_radius_px: args.projection_radius_px,
+            retrieval,
             previous: None,
         })
     }
@@ -443,13 +477,45 @@ impl Localizer {
                 })
         });
         let used_prior = prior_result.as_ref().is_some_and(accepted);
+        let mut matching = if !used_prior {
+            "global"
+        } else if predicted.is_some() && self.projection_radius_px.is_some() {
+            "projection"
+        } else {
+            "radius"
+        };
         let result = match prior_result {
             Some(result) if used_prior => result,
-            _ => self.pipeline.localize_correspondences(
-                &self.camera,
-                self.index
-                    .match_all(&query.keypoints, &packed, self.gates, 1),
-            ),
+            _ => {
+                // The retrieved keyframes' landmarks first, then the whole map.
+                let retrieved = self
+                    .retrieval
+                    .as_ref()
+                    .map(|(retrieval, top_k)| {
+                        let landmarks = retrieval.candidate_landmarks(&packed, *top_k);
+                        self.pipeline.localize_correspondences(
+                            &self.camera,
+                            self.index.match_among(
+                                &query.keypoints,
+                                &packed,
+                                self.gates,
+                                &landmarks,
+                            ),
+                        )
+                    })
+                    .filter(accepted);
+                match retrieved {
+                    Some(result) => {
+                        matching = "retrieval";
+                        result
+                    }
+                    None => self.pipeline.localize_correspondences(
+                        &self.camera,
+                        self.index
+                            .match_all(&query.keypoints, &packed, self.gates, 1),
+                    ),
+                }
+            }
         };
         let latency_ms = started.elapsed().as_secs_f64() * 1e3;
         let success = accepted(&result);
@@ -473,6 +539,7 @@ impl Localizer {
             keypoints: query.keypoints.len(),
             result,
             used_prior,
+            matching,
             latency_ms,
             world_from_imu,
         })
@@ -480,12 +547,13 @@ impl Localizer {
 }
 
 const CSV_HEADER: &str =
-    "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms,anchor\n";
+    "timestamp_ns,success,used_prior,keypoints,matches,inliers,inlier_ratio,latency_ms,anchor,\
+     matching\n";
 
 fn csv_row(csv: &mut String, timestamp_ns: i64, attempt: &Attempt, anchor: &str) {
     let _ = writeln!(
         csv,
-        "{},{},{},{},{},{},{:.4},{:.2},{anchor}",
+        "{},{},{},{},{},{},{:.4},{:.2},{anchor},{}",
         timestamp_ns,
         attempt.world_from_imu.is_some(),
         attempt.used_prior,
@@ -493,7 +561,8 @@ fn csv_row(csv: &mut String, timestamp_ns: i64, attempt: &Attempt, anchor: &str)
         attempt.result.match_count,
         attempt.result.inlier_count,
         attempt.result.inlier_ratio,
-        attempt.latency_ms
+        attempt.latency_ms,
+        attempt.matching
     );
 }
 
