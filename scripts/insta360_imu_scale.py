@@ -39,7 +39,10 @@ perspective model's `images.bin` (COLMAP 3.12+ binary,
    fits on every third frame. Without the term the scale grows with the
    frame spacing (docs/insta360_imu_scale.md).
 5. Reference: the ARKit scale of the model, a Sim(3) from the model's phone
-   images to the ARKit poses (and per quarter of the phone path).
+   images to the ARKit poses (and per quarter of the phone path). When the
+   scene has the phone's GPS log taken during the walk
+   (`backgroundlocationData.txt`), also a GPS scale: a time offset and a 2-D
+   similarity from the model's horizontal camera centres to GPS east/north.
 """
 
 from __future__ import annotations
@@ -62,6 +65,8 @@ MAX_GAP_S = 1.2
 MIN_INTERVALS = 8
 G_RANGE = (9.3, 10.3)
 VARIANTS = ("rs", "step3", "rs_step3")
+WGS84_A, WGS84_E2 = 6378137.0, 6.69437999014e-3
+GPS_MAX_RESIDUAL_M = 5.0
 
 
 def rotation(q: np.ndarray) -> np.ndarray:
@@ -404,6 +409,57 @@ def align(t, acc, g, a, b, frames, step=1, rs=False):
     )
 
 
+def _sim2(x: np.ndarray, y: np.ndarray, reflect: bool) -> tuple[float, np.ndarray]:
+    """Scale of the 2-D similarity (rotation, or reflection if reflect) taking
+    x onto y, and the residuals."""
+    if reflect:
+        x = x * np.array([1, -1])
+    xc, yc = x - x.mean(0), y - y.mean(0)
+    u, s, vt = np.linalg.svd(yc.T @ xc / len(x))
+    d = np.diag([1, np.sign(np.linalg.det(u @ vt))])
+    sc = float(np.trace(np.diag(s) @ d) / (xc**2).sum(1).mean())
+    return sc, np.linalg.norm(sc * xc @ (u @ d @ vt).T - yc, axis=1)
+
+
+def gps_scale(path: str, tk: np.ndarray, centres: np.ndarray) -> dict:
+    """Metres per model unit from a GPS log (lines `unix time, lat, lon, accuracy`)
+    taken during the walk. The log's first fix is at IMU time tau; the fit
+    searches tau over +-30 s, and the model's horizontal centres (X, Z; gravity
+    is +Y) map to east/north by a rotation or a reflection. Fixes inside frame
+    gaps over 2 s are skipped, and the similarity is refitted without fixes
+    beyond three times the median residual."""
+    g = np.loadtxt(path, delimiter=",", ndmin=2)
+    tg, lat, lon = g[:, 0] - g[0, 0], g[:, 1], g[:, 2]
+    lat0 = np.radians(lat.mean())
+    w = 1 - WGS84_E2 * np.sin(lat0) ** 2
+    north_radius = WGS84_A * (1 - WGS84_E2) / w**1.5
+    east_radius = WGS84_A / np.sqrt(w) * np.cos(lat0)
+    en = np.c_[np.radians(lon - lon.mean()) * east_radius, np.radians(lat - lat.mean()) * north_radius]
+    xz = centres[:, [0, 2]]
+
+    def fit(tau, reflect):
+        tq = tg + tau
+        ok = (tq >= tk[0]) & (tq <= tk[-1])
+        k = np.clip(np.searchsorted(tk, tq[ok]), 1, len(tk) - 1)
+        gap = tk[k] - tk[k - 1]
+        f = ((tq[ok] - tk[k - 1]) / gap)[:, None]
+        x = xz[k - 1] * (1 - f) + xz[k] * f
+        keep = gap < 2.0
+        x, y = x[keep], en[ok][keep]
+        _, res = _sim2(x, y, reflect)
+        sel = res <= 3 * np.median(res)
+        sc, res = _sim2(x[sel], y[sel], reflect)
+        return sc, float(np.median(res)), int(sel.sum()), len(sel)
+
+    best = min(
+        ((tau, reflect) for reflect in (False, True) for tau in np.arange(-30, 30, 0.5)),
+        key=lambda p: fit(*p)[1],
+    )
+    tau = min(np.arange(best[0] - 1, best[0] + 1, 0.05), key=lambda t: fit(t, best[1])[1])
+    sc, res, used, total = fit(tau, best[1])
+    return dict(s_gps=sc, tau=float(tau), reflect=bool(best[1]), residual_m=res, fixes_used=used, fixes=total)
+
+
 def analyse_scene(scene: str, log=print) -> dict:
     images = read_images_bin(os.path.join(scene, "images.bin"))
     interleaved, lenses = lens_frames(images)
@@ -432,6 +488,13 @@ def analyse_scene(scene: str, log=print) -> dict:
         rotation_residual_deg=residual,
         drift_ms=drift,
     )
+    gps_log = os.path.join(scene, "backgroundlocationData.txt")
+    if os.path.exists(gps_log):
+        out["gps"] = gps_scale(gps_log, a * lenses[0][0] + b, lenses[0][2])
+        log(
+            f"GPS scale {out['gps']['s_gps']:.4f} (ARKit {100 * (s_ref / out['gps']['s_gps'] - 1):+.2f}%), "
+            f"median residual {out['gps']['residual_m']:.2f} m, {out['gps']['fixes_used']}/{out['gps']['fixes']} fixes"
+        )
     for lens, frames in lenses.items():
         r = align(t, acc, g, a, b, frames)
         r["variants"] = {}
@@ -478,8 +541,24 @@ def scene_errors(result: dict) -> dict[str, float] | None:
     return out
 
 
+def gps_errors(result: dict) -> dict[str, float] | None:
+    """Scale errors (%) of ARKit and of the IMU estimates against the GPS scale,
+    when the GPS fit's median residual is at most GPS_MAX_RESIDUAL_M."""
+    g = result.get("gps")
+    lenses = [result[k] for k in ("lens0", "lens1") if k in result and result[k]["s_per_run"] is not None]
+    if not g or g["residual_m"] > GPS_MAX_RESIDUAL_M or not lenses:
+        return None
+    out = {"arkit": 100 * (result["s_ref"] / g["s_gps"] - 1)}
+    out["s_per_run"] = float(np.mean([100 * (r["s_per_run"] / g["s_gps"] - 1) for r in lenses]))
+    rs = [r["variants"]["rs"]["s_per_run"] for r in lenses if r.get("variants", {}).get("rs", {}).get("s_per_run")]
+    if len(rs) == len(lenses):
+        out["rs"] = float(np.mean([100 * (x / g["s_gps"] - 1) for x in rs]))
+    return out
+
+
 def summary(paths: list[str]) -> None:
     rows = []
+    gps_rows = []
     for path in sorted(paths):
         with open(path) as f:
             r = json.load(f)
@@ -488,6 +567,9 @@ def summary(paths: list[str]) -> None:
             print(f"{r['scene'][:8]}  no usable run")
             continue
         rows.append(e)
+        ge = gps_errors(r)
+        if ge:
+            gps_rows.append(ge)
         q = r["s_ref_quarters"]
         variants = "".join(f"{name} {e[name]:+6.2f}%  " for name in VARIANTS if name in e)
         print(
@@ -507,6 +589,13 @@ def summary(paths: list[str]) -> None:
             f"{label:15s} {len(v)} scenes: mean {v.mean():+.2f}%  MAE {np.abs(v).mean():.2f}%  "
             f"SD {v.std(ddof=1) if len(v) > 1 else 0:.2f}%  ratio mean {1 + v.mean() / 100:.4f}"
         )
+    for key, label in (("arkit", "ARKit"), ("s_per_run", "per-run"), ("rs", "rs")):
+        v = np.array([e[key] for e in gps_rows if key in e])
+        if len(v):
+            print(
+                f"{label + ' vs GPS':15s} {len(v)} scenes (GPS residual <= {GPS_MAX_RESIDUAL_M:g} m): "
+                f"mean {v.mean():+.2f}%  MAE {np.abs(v).mean():.2f}%  SD {v.std(ddof=1) if len(v) > 1 else 0:.2f}%"
+            )
 
 
 def main() -> None:
