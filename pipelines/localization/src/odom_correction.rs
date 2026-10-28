@@ -23,6 +23,13 @@
 //!   consecutive rejected fixes agree with each other (the odometry itself
 //!   jumped, or the earlier offset was wrong).
 //!
+//! A *weak* fix ([`OdomCorrection::add_weak_fix`]) is a localization with
+//! fewer inliers than a fix needs, which is more often wrong. Weak fixes only
+//! help to set the first offset, and then `init_fixes_weak` (more than
+//! `init_fixes`) consecutive fixes must agree; once the offset is set they
+//! are not used. Under lighting the map was not built in, the first images
+//! that localize at all often have too few inliers for a fix.
+//!
 //! The offset is the mean over the accepted fixes of the last `window_s`
 //! seconds (circular mean for the yaw), which averages out localization noise
 //! while following slow odometry drift.
@@ -36,6 +43,8 @@ use visloc_core::geometry::SE3;
 pub struct OdomCorrectionConfig {
     /// Consecutive mutually consistent fixes needed before the first offset.
     pub init_fixes: usize,
+    /// ... when any of them is weak ([`OdomCorrection::add_weak_fix`]).
+    pub init_fixes_weak: usize,
     /// Consecutive mutually consistent rejected fixes that replace the offset.
     pub reset_after: usize,
     /// Position tolerance, in metres, for fixes to count as agreeing with
@@ -60,6 +69,7 @@ impl Default for OdomCorrectionConfig {
     fn default() -> Self {
         Self {
             init_fixes: 2,
+            init_fixes_weak: 3,
             reset_after: 3,
             agreement_m: 0.10,
             gate_m: 0.15,
@@ -85,6 +95,8 @@ pub enum FixOutcome {
     /// This fix completed a run of agreeing rejected fixes, which replaced
     /// the offset.
     Reset,
+    /// A weak fix after the offset was set: not used.
+    Unused,
 }
 
 /// Four-degree-of-freedom transform: `p_map = Rz(yaw) * p_odom + translation`.
@@ -112,6 +124,7 @@ struct Fix {
     /// Yaw of `map_from_body * odom_from_body^-1`, the offset this fix alone
     /// implies.
     yaw: f64,
+    weak: bool,
 }
 
 pub(crate) fn yaw_of(rotation: &UnitQuaternion<f64>) -> f64 {
@@ -211,11 +224,35 @@ impl OdomCorrection {
         map_from_body: &SE3,
         odom_from_body: &SE3,
     ) -> FixOutcome {
+        self.add(timestamp_ns, map_from_body, odom_from_body, false)
+    }
+
+    /// Adds a weak fix: a localization with fewer inliers than a fix needs.
+    /// It counts toward setting the first offset, which then takes
+    /// `init_fixes_weak` agreeing fixes, and is [`FixOutcome::Unused`] once
+    /// the offset is set.
+    pub fn add_weak_fix(
+        &mut self,
+        timestamp_ns: i64,
+        map_from_body: &SE3,
+        odom_from_body: &SE3,
+    ) -> FixOutcome {
+        self.add(timestamp_ns, map_from_body, odom_from_body, true)
+    }
+
+    fn add(
+        &mut self,
+        timestamp_ns: i64,
+        map_from_body: &SE3,
+        odom_from_body: &SE3,
+        weak: bool,
+    ) -> FixOutcome {
         let fix = Fix {
             timestamp_ns,
             map_position: map_from_body.translation,
             odom_position: odom_from_body.translation,
             yaw: yaw_of(&(map_from_body.rotation * odom_from_body.rotation.inverse())),
+            weak,
         };
         if let Some(previous) = self.previous_odom_position {
             self.travel_since_accept_m += (fix.odom_position - previous).norm();
@@ -223,7 +260,7 @@ impl OdomCorrection {
         self.previous_odom_position = Some(fix.odom_position);
 
         let Some(offset) = self.offset else {
-            return if self.push_candidate(fix, self.config.init_fixes) {
+            return if self.push_initial(fix) {
                 Self::adopt(&mut self.window, &mut self.candidates);
                 self.refit();
                 self.travel_since_accept_m = 0.0;
@@ -233,6 +270,9 @@ impl OdomCorrection {
             };
         };
 
+        if weak {
+            return FixOutcome::Unused;
+        }
         let (position_residual, yaw_residual) = residuals(&offset, &fix);
         let travel = self.travel_since_accept_m;
         let accepted = position_residual <= self.config.gate_m + self.config.gate_per_m * travel
@@ -262,12 +302,43 @@ impl OdomCorrection {
         if self.candidates.len() > needed {
             self.candidates.drain(..self.candidates.len() - needed);
         }
-        if self.candidates.len() < needed {
-            return false;
+        self.candidates.len() == needed && self.agree(&self.candidates)
+    }
+
+    /// Appends to the candidate run before the first offset and reports
+    /// whether its newest fixes now set it: `init_fixes` of them agreeing, or
+    /// `init_fixes_weak` when any of those is weak. On success the run keeps
+    /// only those.
+    fn push_initial(&mut self, fix: Fix) -> bool {
+        let strong = self.config.init_fixes.max(1);
+        let weak = self.config.init_fixes_weak.max(strong);
+        self.candidates.push(fix);
+        if self.candidates.len() > weak {
+            self.candidates.drain(..self.candidates.len() - weak);
         }
-        let candidates = self.candidates.iter().collect::<Vec<_>>();
-        let offset = fit(&candidates);
-        candidates.iter().all(|fix| {
+        for needed in [strong, weak] {
+            let Some(start) = self.candidates.len().checked_sub(needed) else {
+                continue;
+            };
+            let newest = &self.candidates[start..];
+            let required = if newest.iter().any(|fix| fix.weak) {
+                weak
+            } else {
+                strong
+            };
+            if needed == required && self.agree(newest) {
+                self.candidates.drain(..start);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether `fixes` agree on one offset.
+    fn agree(&self, fixes: &[Fix]) -> bool {
+        let fixes = fixes.iter().collect::<Vec<_>>();
+        let offset = fit(&fixes);
+        fixes.iter().all(|fix| {
             let (position, yaw) = residuals(&offset, fix);
             position <= self.config.agreement_m && yaw <= self.config.gate_yaw_deg
         })
@@ -399,6 +470,97 @@ mod tests {
             FixOutcome::Rejected
         );
         assert_pose_close(&correction.map_from_odom().unwrap(), &truth(), 1e-9);
+        assert_eq!(
+            fix_at(&mut correction, 5, &truth(), Vector3::zeros()),
+            FixOutcome::Accepted
+        );
+    }
+
+    fn weak_fix_at(
+        correction: &mut OdomCorrection,
+        index: usize,
+        shift: Vector3<f64>,
+    ) -> FixOutcome {
+        let odom_from_body = odom(index);
+        let mut map_from_body = truth().compose(&odom_from_body);
+        map_from_body.translation += shift;
+        correction.add_weak_fix(index as i64 * SECOND / 10, &map_from_body, &odom_from_body)
+    }
+
+    #[test]
+    fn weak_fixes_need_three_agreeing_and_only_set_the_first_offset() {
+        // Two weak fixes do not set the offset; a third agreeing one does.
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig::default());
+        assert_eq!(
+            weak_fix_at(&mut correction, 0, Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            weak_fix_at(&mut correction, 1, Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            weak_fix_at(&mut correction, 2, Vector3::zeros()),
+            FixOutcome::Initialized
+        );
+        assert_pose_close(&correction.map_from_odom().unwrap(), &truth(), 1e-9);
+
+        // A strong fix after a weak one: still three, since one is weak.
+        let mut mixed = OdomCorrection::new(OdomCorrectionConfig::default());
+        assert_eq!(
+            weak_fix_at(&mut mixed, 0, Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            fix_at(&mut mixed, 1, &truth(), Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            fix_at(&mut mixed, 2, &truth(), Vector3::zeros()),
+            FixOutcome::Initialized
+        );
+        // Two strong fixes alone, as before.
+        let mut strong = OdomCorrection::new(OdomCorrectionConfig::default());
+        assert_eq!(
+            fix_at(&mut strong, 0, &truth(), Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            fix_at(&mut strong, 1, &truth(), Vector3::zeros()),
+            FixOutcome::Initialized
+        );
+
+        // A wrong weak fix breaks the run; three agreeing ones after it set
+        // the offset to theirs.
+        let mut broken = OdomCorrection::new(OdomCorrectionConfig::default());
+        let off = Vector3::new(1.5, 0.0, 0.0);
+        assert_eq!(
+            weak_fix_at(&mut broken, 0, Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(weak_fix_at(&mut broken, 1, off), FixOutcome::Pending);
+        assert_eq!(
+            weak_fix_at(&mut broken, 2, Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            weak_fix_at(&mut broken, 3, Vector3::zeros()),
+            FixOutcome::Pending
+        );
+        assert_eq!(
+            weak_fix_at(&mut broken, 4, Vector3::zeros()),
+            FixOutcome::Initialized
+        );
+        assert_pose_close(&broken.map_from_odom().unwrap(), &truth(), 1e-9);
+
+        // Once set, weak fixes are not used, however far off.
+        let before = correction.map_from_odom().unwrap();
+        assert_eq!(weak_fix_at(&mut correction, 3, off), FixOutcome::Unused);
+        assert_eq!(
+            weak_fix_at(&mut correction, 4, Vector3::zeros()),
+            FixOutcome::Unused
+        );
+        assert_pose_close(&correction.map_from_odom().unwrap(), &before, 1e-12);
         assert_eq!(
             fix_at(&mut correction, 5, &truth(), Vector3::zeros()),
             FixOutcome::Accepted
