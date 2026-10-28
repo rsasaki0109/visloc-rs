@@ -418,6 +418,40 @@ scored like the demo's:
   now subscribe again while a transform they need is missing; with that,
   300 of 300 probes had both transforms.
 
+### Calibrating the wheel odometry online
+
+`visloc_wheel_calibration_node` fits the wheel odometry's point, the lean of
+`base_link` and the VIO's scale while the robot drives, from the VIO node's
+odometry and the wheel odometry, and publishes the wheel odometry as
+`base_link`'s pose ([node README](../ros2/visloc-ros2/README.md#visloc_wheel_calibration_node)).
+Here `/tf_static` carries the dataset's own `base_link -> imu0`, the maps are
+as shipped, and the map node runs with its defaults. Each of office1-6 and
+office1-7 was calibrated online, and its saved calibration applied to the
+other from its first message:
+
+| Wheel odometry into the map node | office1-7 → B | office1-6 → A |
+|---|---|---|
+| As is | 12.10 / 22.8 cm | 8.01 / 14.0 cm |
+| Calibrated online on the other session | 8.13 / 16.4 cm | 5.68 / 10.7 cm |
+| ... without its scale (`apply_scale:=false`) | 9.59 / 18.9 cm | 5.22 / 8.9 cm |
+| office1-3's offline calibration through the node, without scale | 4.66 / 10.4 cm | 4.92 / 8.3 cm |
+
+(RMSE / max of `map_pose`, moved to the IMU.)
+
+- **Online it finds what the script finds offline.** On office1-6 the fit
+  came after 180° of turning, 33.8 s into the 35.9 s session: (4.3, 3.1) cm,
+  a 1.67° lean and a VIO scale of 1.012 (the script on the whole run:
+  (3.4, 4.4) cm, 1.86°, 1.015). On office1-7: (1.0, 6.3) cm, 1.90°, 1.036.
+  The output is continuous where the fit takes over: there, a step of
+  1.03 cm where the wheels moved 1.05 cm.
+- **The turning point moves between sessions.** office1-7's calibration is
+  close to office1-3's and works on office1-6; office1-6's is 3 cm away
+  from both and helps office1-7 less. Fits against the ground truth spread
+  by 3 cm as well ([above](#where-the-wheel-odometry-is-measured)).
+- **The VIO's scale varies too.** It stands for the maps' scale, but
+  differs by 2.4% between these two sessions, so carrying it over helped
+  office1-7 and cost office1-6 a little.
+
 ## Reproduce
 
 ```bash

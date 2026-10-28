@@ -11,6 +11,7 @@ needed to build or run them**, and they still join an ordinary ROS 2 graph.
 | `visloc_vio_node` | Stereo-inertial VIO: the repository's faithful Basalt port (`pipelines/basalt`) fed from two `sensor_msgs/Image` streams and `sensor_msgs/Imu`. Publishes odometry, pose, path and TF. |
 | `visloc_localize_node` | Map-based localization: loads a COLMAP model plus a landmark descriptor store at start, extracts SIFT on each incoming image, matches against the map and solves PnP-RANSAC. Publishes the camera pose, inlier count and diagnostics. |
 | `visloc_map_localize_node` | Robot-style map localization: loads a map saved by the stereo-inertial SLAM (`basalt_euroc_online_slam_demo --save-map`), localizes camera images against it and corrects the VIO odometry into the map frame. Publishes `/tf` `map -> odom` (REP-105), the body pose in the map and diagnostics. |
+| `visloc_wheel_calibration_node` | A robot's wheel odometry calibrated against `visloc_vio_node` while driving: where the wheel odometry is measured relative to `base_link`, the lean of `base_link`, and the VIO's scale. Publishes the wheel odometry as `base_link`'s pose, for `visloc_map_localize_node`. |
 
 This crate is **not** a member of the root Cargo workspace (it is listed in
 the root `[workspace] exclude` and declares its own `[workspace]`), has its
@@ -527,6 +528,72 @@ that point and the level of the frame from a VIO run. As shipped, the
 dataset's `base_link` is 5–8 cm from that point and leans 1.9°, with the
 camera 0.9 m above it; office1-7's wheel odometry was 4.67 cm with the
 point corrected but not the lean.
+
+## `visloc_wheel_calibration_node`
+
+Wheel odometry reports the point the robot turns about, in a level frame, at
+the wheels' scale. A robot's description may put `base_link` centimetres from
+that point and a degree or two off level; with the camera high above the
+wheels, either moves the camera pose the wheel odometry implies by
+centimetres in every turn. The VIO the maps are built from may also be a few
+percent off the wheels' scale.
+
+The node pairs the wheel odometry with `visloc_vio_node`'s odometry (within
+20 ms) and fits, in the plane, `base_link`'s path from the VIO (through the
+`/tf_static` transform between the VIO's frame and `base_link`) against the
+wheel odometry's, with the offset in the body frame, a rotation, a
+translation and a scale (`visloc_localization::WheelCalibration`). The
+VIO's mean gravity gives `base_link`'s lean. It fits once the wheel
+odometry has turned `min_turn_deg` (180) and travelled `min_travel_m` (1 m):
+turns in place show the offset, and travel tells it from the scale. From
+then on it publishes each wheel odometry message as `base_link`'s pose at
+the VIO's scale, levelled, with a yaw and a translation that keep the output
+continuous where the calibration takes over. Before that it passes the
+wheel odometry through. With `calibration_file`, a saved calibration
+applies from the first message, and a new one is written there.
+`scripts/calibrate_wheel_offset.py` fits the same offline.
+
+```sh
+visloc_vio_node ... -p body_frame:=imu0 -p publish_tf:=false -r odom:=/vio/odom
+visloc_wheel_calibration_node -p calibration_file:=wheel.json \
+  -r wheel_odom:=/wheel/odom -r vio_odom:=/vio/odom -r odom:=/wheel/odom_calibrated
+visloc_map_localize_node --map ... -p extrinsics:=tf -r odom:=/wheel/odom_calibrated
+```
+
+| topic | type | dir | notes |
+|---|---|---|---|
+| `wheel_odom` | `nav_msgs/Odometry` | in | the wheel odometry; its `child_frame_id` is the body (`base_link`) |
+| `vio_odom` | `nav_msgs/Odometry` | in | `visloc_vio_node`'s odometry (or `base_link`'s, with `base_frame`) |
+| `/tf_static` | `tf2_msgs/TFMessage` | in | the VIO's frame relative to the body, unless both are the same |
+| `odom` | `nav_msgs/Odometry` | out | `base_link`'s pose, in the wheel odometry's frame and the VIO's scale; twist and covariances as received |
+
+| parameter | default | |
+|---|---|---|
+| `calibration_file` | none | JSON calibration: applied from the start if it exists, written when a new one is fitted |
+| `min_turn_deg`, `min_travel_m`, `min_pairs` | `180`, `1.0`, `200` | fit once the wheel odometry has turned and travelled this much over this many pairs |
+| `level` | `true` | level `base_link` against the VIO's gravity (assumes a level floor) |
+| `apply_scale` | `true` | publish at the VIO's scale (the maps'); the VIO's scale varies by a few percent between sessions |
+| `publish_uncalibrated` | `true` | pass the wheel odometry through until calibrated |
+
+On OpenLORIS-Scene, each session calibrated online and saved, then applied
+to the other from its first message (both rosbag2s at real time, maps as
+shipped, the dataset's own `base_link -> imu0`;
+[details](../../docs/openloris_map_localization.md#calibrating-the-wheel-odometry-online)):
+
+| wheel odometry into `visloc_map_localize_node` | office1-7 → map B | office1-6 → map A |
+|---|---|---|
+| as is | 12.10 / 22.8 cm | 8.01 / 14.0 cm |
+| calibrated online on the other session | 8.13 / 16.4 cm | 5.68 / 10.7 cm |
+| ... `apply_scale:=false` | 9.59 / 18.9 cm | 5.22 / 8.9 cm |
+| office1-3's offline calibration through the node, without scale | 4.66 / 10.4 cm | 4.92 / 8.3 cm |
+
+The node's arithmetic matches the offline route (office1-3's calibration
+gives 4.66 cm through it, 5.08 cm in the demo). What it estimates varies
+between sessions: office1-6 put the turning point (4.3, 3.1) cm from
+`base_link`, office1-7 (1.0, 6.3) cm, and fits against the ground truth
+spread by about 3 cm too. A drive with turns in place and straight runs,
+calibrated once and saved, removes most of the error; the session-to-session
+variation of the turning point stays.
 
 ## Tests
 
