@@ -1733,6 +1733,9 @@ pub fn build_photo_dataset(
     } else {
         None
     };
+    // With `equirect_native` the tracks observe the panoramas, while the
+    // model written below has their cube faces, this many pixels square.
+    let face_size = faces.as_ref().map(|(_, size, _)| *size as f64);
     // Each registered panorama -> its six cube faces, posed by the face's
     // fixed rotation behind the panorama's pose (face `k` of panorama `i`
     // is image `6 i + k`, as written above).
@@ -1811,8 +1814,8 @@ pub fn build_photo_dataset(
     // point id) and each point its track (image id, observation index), as
     // COLMAP writes them, so tools that read the observations (visloc-mvs's
     // source views and depth ranges) can use the model.
-    let mut image_ids = vec![0usize; n];
-    let mut observations: Vec<Vec<(f64, f64, usize)>> = vec![Vec::new(); n];
+    let mut image_ids = vec![0usize; poses.len()];
+    let mut observations: Vec<Vec<(f64, f64, usize)>> = vec![Vec::new(); poses.len()];
     for (id, (i, _)) in poses
         .iter()
         .enumerate()
@@ -1821,14 +1824,35 @@ pub fn build_photo_dataset(
     {
         image_ids[i] = id + 1;
     }
+    // An observation of a panorama (`equirect_native`) goes to the face
+    // nearest its ray, at the pixel where the ray crosses the face.
+    let face_axes = equirect::face_axes();
+    let face_rotations = equirect::cube_face_rotations();
+    let model_observation = |img: usize, px: &Point2<f64>| -> Option<(usize, f64, f64)> {
+        let Some(size) = face_size else {
+            return Some((img, px.x, px.y));
+        };
+        let ray = camera.unit_ray_from_pixel(px)?;
+        let k = equirect::nearest_face(&face_axes, &ray);
+        let d = face_rotations[k].1.transpose() * ray;
+        let half = size / 2.0;
+        Some((
+            6 * img + k,
+            half * d.x / d.z + half,
+            half * d.y / d.z + half,
+        ))
+    };
     let mut point_tracks: Vec<Vec<(usize, usize)>> = vec![Vec::new(); tracks.len()];
     for (k, t) in tracks.iter().enumerate() {
         for &(img, _, px) in &t.observations {
+            let Some((img, x, y)) = model_observation(img, &px) else {
+                continue;
+            };
             if image_ids[img] == 0 {
                 continue;
             }
             point_tracks[k].push((image_ids[img], observations[img].len()));
-            observations[img].push((px.x, px.y, k + 1));
+            observations[img].push((x, y, k + 1));
         }
     }
     let mut images_txt = String::from("# Image list\n");
@@ -2294,13 +2318,11 @@ mod tests {
             nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw).matrix()
                 * faces[i % 6].1
         };
-        // Recovered world-to-camera rotations and centres, by image index.
+        // Recovered world-to-camera rotations and centres, by image index
+        // (each image's line; its observations' line follows).
         let text = std::fs::read_to_string(out.join("sparse/0/images.txt")).unwrap();
         let mut est: Vec<(usize, nalgebra::Matrix3<f64>, nalgebra::Vector3<f64>)> = Vec::new();
-        for line in text
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.is_empty())
-        {
+        for line in text.lines().filter(|l| !l.starts_with('#')).step_by(2) {
             let t: Vec<&str> = line.split_whitespace().collect();
             let v: Vec<f64> = t[1..8].iter().map(|x| x.parse().unwrap()).collect();
             let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
@@ -2355,6 +2377,46 @@ mod tests {
         (est.len(), worst_deg, worst_m)
     }
 
+    /// The observations of the model in `sparse/0` under `out` (a PINHOLE
+    /// camera): how many there are, and their median reprojection error
+    /// (pixels) through the written poses and points.
+    fn model_reprojection(out: &Path) -> (usize, f64) {
+        let read = |name: &str| std::fs::read_to_string(out.join("sparse/0").join(name)).unwrap();
+        let numbers = |line: &str| -> Vec<f64> {
+            line.split_whitespace()
+                .filter_map(|x| x.parse().ok())
+                .collect()
+        };
+        let cameras = read("cameras.txt");
+        let camera = cameras.lines().find(|l| !l.starts_with('#')).unwrap();
+        let c = numbers(camera);
+        let (fx, fy, cx, cy) = (c[3], c[4], c[5], c[6]);
+        let points: std::collections::HashMap<usize, nalgebra::Point3<f64>> = read("points3D.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| {
+                let v = numbers(l);
+                (v[0] as usize, nalgebra::Point3::new(v[1], v[2], v[3]))
+            })
+            .collect();
+        let images = read("images.txt");
+        let lines: Vec<&str> = images.lines().filter(|l| !l.starts_with('#')).collect();
+        let mut errors = Vec::new();
+        for pair in lines.chunks(2) {
+            let v = numbers(pair[0]);
+            let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+                v[1], v[2], v[3], v[4],
+            ));
+            let t = nalgebra::Vector3::new(v[5], v[6], v[7]);
+            for o in numbers(pair[1]).chunks(3) {
+                let p = q * points[&(o[2] as usize)].coords + t;
+                errors.push((fx * p.x / p.z + cx - o[0]).hypot(fy * p.y / p.z + cy - o[1]));
+            }
+        }
+        errors.sort_by(f64::total_cmp);
+        (errors.len(), errors[errors.len() / 2])
+    }
+
     /// Panoramas of a synthetic room through the whole CPU pipeline: the
     /// pinhole path warns, the cube-face path registers the faces as one
     /// rig per panorama.
@@ -2406,6 +2468,10 @@ mod tests {
         assert_eq!(dataset.eval.len() + dataset.train.len(), report.registered);
 
         let (faces, worst_deg, worst_m) = face_pose_errors(&root.join("faces"), &truth);
+        let (observations, median_px) = model_reprojection(&root.join("faces"));
+        println!("{observations} observations, median reprojection error {median_px:.3} px");
+        assert!(observations > 10_000, "{observations} observations");
+        assert!(median_px < 0.25, "{median_px} px");
         assert_eq!(faces, report.registered);
         assert!(worst_deg < 0.05, "{worst_deg} deg");
         assert!(worst_m < 0.005, "{worst_m} m");
@@ -2446,6 +2512,10 @@ mod tests {
         assert_eq!(dataset.train.len(), 30);
         assert!(points.len() > 1000, "{} points", points.len());
         let (faces, worst_deg, worst_m) = face_pose_errors(&root.join("native"), &truth);
+        let (observations, median_px) = model_reprojection(&root.join("native"));
+        println!("{observations} observations, median reprojection error {median_px:.3} px");
+        assert!(observations > 10_000, "{observations} observations");
+        assert!(median_px < 0.25, "{median_px} px");
         assert_eq!(faces, 30);
         assert!(worst_deg < 0.05, "{worst_deg} deg");
         assert!(worst_m < 0.005, "{worst_m} m");

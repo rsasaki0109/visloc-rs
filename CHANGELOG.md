@@ -47,6 +47,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **`gsplat_photos --equirect-native` crashed writing its model.** Since
+  0.3.0 the sparse model lists each image's observations. With
+  `--equirect-native` the tracks observe the panoramas while the model
+  holds their cube faces, so the panorama observations were indexed as
+  faces, and every run panicked at the end. Each observation now goes to
+  the face nearest its ray, at the pixel where the ray crosses it. On the
+  synthetic room the faces' observations reproject at a median 0.09 px, as
+  with `--equirect`. The two end-to-end tests that cover this (run with
+  `--ignored`) misread the observation lines and failed too; they now also
+  check the observations' reprojection.
+
 - **Saving a map from a lens wider than the Double Sphere model failed.**
   The map export fits COLMAP's `OPENCV_FISHEYE` to each Double Sphere
   camera. It gave up when an image corner did not unproject, which happens
