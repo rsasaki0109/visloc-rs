@@ -56,7 +56,7 @@ The repository's GitHub Pages site carries it at
 <https://rsasaki0109.github.io/visloc-rs/slam/>: `.github/workflows/pages.yml`
 builds it on every push to `main` and publishes it next to `docs/`
 (`./deploy_pages.sh --dir <directory>` writes the site without pushing). The
-ADVIO demo is not in git, so "Watch a demo" does not play there.
+ADVIO demo is not in git, so the page hides "Watch a demo" there.
 
 The sensor-free demo (`web/demo/`, not in git) is built from an ADVIO
 sequence (CC BY-NC 4.0):
