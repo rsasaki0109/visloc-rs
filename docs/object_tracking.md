@@ -304,6 +304,11 @@ config (`euroc_config_big_window_multicam.json` for stereo,
 - **Mono + IMU against stereo + IMU** (the same 2D tracks): the heights
   agree to a median of 7 % for people (2.3 % bias), 3 % for cars and 2 %
   for bicycles; the speeds to 0.07 m/s.
+- **Without the IMU** there is nothing to compare. The visual-only VO
+  (`--mono-vo`) stopped 526 s into the walk (a non-finite window solve at
+  frame 10,519). It also has no gravity: its world is the first camera's
+  frame, so its z is not up, and neither the ground nor the bottom of a box
+  is defined. The IMU gives ground contact both its scale and its "down".
 - **The camera is low:** about 1.1–1.2 m above the ground. Two checks that
   do not depend on the ground estimate: the camera-height line from the
   VIO's gravity runs through the road's vanishing point, and it crosses the
