@@ -30,6 +30,7 @@ pub mod assignment;
 pub mod bbox;
 pub mod byte_track;
 pub mod detector;
+pub mod ground;
 pub mod image;
 pub mod kalman;
 pub mod metric;
@@ -41,6 +42,10 @@ pub use assignment::{assign_with_cost_limit, Assignment};
 pub use bbox::{BBox, Detection};
 pub use byte_track::{ByteTrackConfig, ByteTracker, TrackId, TrackedObject};
 pub use detector::{ObjectDetector, ReplayDetector, ReplayExhausted};
+pub use ground::{
+    estimate_ground_height, place_on_ground, summarize_ground_track, BoxRays, GroundObservation,
+    GroundParams, GroundTrack,
+};
 pub use image::{ImageSizeError, RgbImage};
 pub use kalman::{BoxKalmanFilter, BoxKalmanState};
 pub use metric::{
