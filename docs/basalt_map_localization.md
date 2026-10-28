@@ -21,7 +21,12 @@ frame gets a map pose once two fixes agree: MH_02 99.8% of frames at 2.0 cm
 RMSE (5.7 cm worst) localizing only every 5th image, at 0.83× real time on 4
 cores. Between rare fixes the VIO drifts; each pose comes with the time and
 distance since its last fix, and the poses within 2 m and 5 s of one are never
-more than 13 cm off on any sequence.
+more than 13 cm off on any sequence. Matching each image around the
+landmarks' projections from the anchored VIO's prediction
+(`--projection-radius-px 20`, [below](#matching-around-the-predicted-projections))
+makes the fixes far more frequent: 98% of MH_02's images match the map
+instead of 81%, and the longest stretch without a match falls from 7.3 s to
+1.2 s.
 
 ## Setup
 
@@ -232,6 +237,35 @@ removes them: no fresh pose is more than 12.6 cm off on any sequence, at
 either cadence. The time limit matters for V2_03, whose VIO drifts quickly
 even over short distances.
 
+### Matching around the predicted projections
+
+Once the anchor is set, it and the VIO predict each image's pose. With
+`--projection-radius-px PX`, every landmark the predicted camera sees is
+matched only against the keypoints within `PX` pixels of its predicted
+projection (`BinaryLandmarkIndex::match_projected`), with the map-wide
+search as the fallback. `visloc_map_localize_node` has always done this
+(`projection_radius`, 20 px). The ratio test then compares a landmark with
+the few keypoints near its projection instead of the whole image, so many
+more correct matches pass it. With 20 px:
+
+| Query → map, localizing | Images that localize | Longest stretch without one | Median inliers | VIO + map RMSE / max | Fixes > 10 cm off | Localization per image |
+|---|---|---|---|---|---|---|
+| MH_02 → MH_01, every image | 81.2% → **98.2%** | 7.3 s → **1.2 s** | 78 → 148 | 2.03 / 5.9 → **1.94 / 5.0 cm** | 1 → 2 | 77 → 31 ms |
+| MH_02 → MH_01, every 5th | 81.6% → 98.4% | 7.5 s → 1.8 s | 77 → 150 | 2.05 / 5.7 → 2.00 / 5.6 cm | 1 → 0 | 81 → 31 ms |
+| V2_02 → V2_01, every image | 20.3% → **60.4%** | 14.5 s → 9.4 s | 47 → 57 | 4.13 / 12.2 → **3.33 / 12.3 cm** | 0 → 22 | 45 → 30 ms |
+| V2_02 → V2_01, every 5th | 21.1% → 60.6% | 14.8 s → 11.3 s | 47 → 56 | 4.24 / 12.6 → 3.44 / 12.0 cm | 0 → 5 | 47 → 30 ms |
+
+"Images that localize" is the share of the images tried; the share of
+frames with a map pose does not change (99.8–99.97%). Per-image times are
+medians (ORB extraction, matching, PnP).
+
+On V2_02 the extra fixes are less accurate than the map-wide ones: 22 of
+1,419 are 10–19 cm off (none of 477 without projection), mostly fixes with
+40–60 inliers. The anchor averages the fixes of the last 5 s, so the VIO +
+map poses still improve and their worst error does not grow. The other six
+queries were not rerun with projection matching, so the option stays off by
+default.
+
 ### On a robot (ROS 2)
 
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
@@ -399,20 +433,28 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
   --queries 3040
 ```
 
-The README's animation, from the localization run above with its inliers
-dumped (needs matplotlib and Pillow):
+The README's animation, from the VIO run with every image localized,
+matching by projection, and its inliers dumped (needs matplotlib and
+Pillow):
 
 ```bash
 target/release/examples/basalt_euroc_localize_demo \
-  --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_on_mh01 \
-  --dump-inliers runs/mh02_inliers.csv
+  --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_vio_projection \
+  --vio --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
+  --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
+  --localize-every 1 --projection-radius-px 20 --dump-inliers runs/mh02_vio_inliers.csv
 python3 scripts/render_map_localization_gif.py --map runs/mh01_map \
-  --images $D/MH_02_easy --localization runs/mh02_on_mh01/localization.tum \
-  --inliers runs/mh02_inliers.csv --out docs/assets/hero_map_localization.gif \
-  --frames 140 --fps 10 --duration 150 --elev 60 --azim -80 --zoom 1.15 \
+  --images $D/MH_02_easy --localization runs/mh02_vio_projection/localization.tum \
+  --trajectory runs/mh02_vio_projection/trajectory_map.tum \
+  --inliers runs/mh02_vio_inliers.csv --out docs/assets/hero_map_localization.gif \
+  --start 0.5 --frames 140 --fps 10 --duration 150 --elev 60 --azim -80 --zoom 1.15 \
   --width 760 --inset 270 --title "MH_02 localized in a map saved from MH_01" \
-  --subtitle "a different flight: 81% of its images localized, 1.8 cm RMSE vs ground truth"
+  --subtitle "VIO anchored to the map: a pose for every frame, 1.9 cm RMSE vs ground truth"
 ```
+
+Without `--trajectory`, the script draws the localizations alone (the run
+without `--vio` above), and the camera disappears from the frames whose
+image did not localize.
 
 A merged map (`cargo build ... --example basalt_map_merge`), queried with
 the flight left out of it and scored with the base map's alignment:
