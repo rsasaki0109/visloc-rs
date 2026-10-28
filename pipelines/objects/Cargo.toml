@@ -1,0 +1,22 @@
+[package]
+name = "visloc-objects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "2D multi-object tracking (ByteTrack-style) for metric object estimation in visloc-rs."
+readme.workspace = true
+documentation = "https://docs.rs/visloc-objects"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+nalgebra = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

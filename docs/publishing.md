@@ -5,7 +5,7 @@
 ## Publish Order
 
 `visloc-rs` depends on every crate below (the GPU crates as optional
-dependencies, which crates.io still requires to exist), so all sixteen
+dependencies, which crates.io still requires to exist), so all seventeen
 workspace crates must be published. With cargo 1.90 or newer the simplest
 route is to let cargo order them:
 
@@ -25,13 +25,14 @@ To publish crate by crate instead, use this order:
 8. `visloc-mapping`
 9. `visloc-slam`
 10. `visloc-basalt`
-11. `visloc-gsplat-core`
-12. `visloc-gsplat-render`
-13. `visloc-sift-gpu`
-14. `visloc-ba-gpu`
-15. `visloc-mvs`
-16. `visloc-gsplat-train`
-17. `visloc-rs`
+11. `visloc-objects`
+12. `visloc-gsplat-core`
+13. `visloc-gsplat-render`
+14. `visloc-sift-gpu`
+15. `visloc-ba-gpu`
+16. `visloc-mvs`
+17. `visloc-gsplat-train`
+18. `visloc-rs`
 
 The order follows internal dependencies (optional ones marked `?`):
 
@@ -43,6 +44,7 @@ The order follows internal dependencies (optional ones marked `?`):
 - `visloc-mapping` depends on `visloc-core`, `visloc-vision`, and `visloc-tracking`.
 - `visloc-slam` depends on `visloc-core`, `visloc-vision`, `visloc-io`, `visloc-fusion`, `visloc-localization`, `visloc-tracking`, and `visloc-mapping`.
 - `visloc-basalt` depends on `visloc-core`.
+- `visloc-objects` has no internal dependencies.
 - `visloc-gsplat-core` depends on `visloc-core` and `visloc-io?`.
 - `visloc-gsplat-render` depends on `visloc-gsplat-core`.
 - `visloc-sift-gpu` depends on `visloc-vision` and `visloc-gsplat-render`.
