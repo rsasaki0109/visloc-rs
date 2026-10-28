@@ -43,6 +43,12 @@ scale, so this number is the ceiling.
   sequence and tabulates them; see `docs/mono_inertial_vio.md`.
 - **Go** if the scale error is a few percent after convergence. Otherwise,
   fix mono-inertial first: that becomes the project.
+- **Result: go.** The ETH Research Collection answers GitHub's runners with
+  HTTP 429 only, so the workflow ran on TUM-VI room1–6 instead (motion-capture
+  ground truth over each whole sequence). Mono-inertial scale error: median
+  1.3 %, at most 3.4 %; every 10 s window within ±5 % from the start; ATE
+  at most 0.014 m above stereo-inertial's. Table in `docs/mono_inertial_vio.md`.
+  EuRoC stays a cross-check for when its server lets the runners in.
 - Detector: an ONNX model through the existing `ort` support in
   `crates/vision`, the way SuperPoint and DPVO are loaded. The model must be
   Apache-2.0 or similar: RT-DETR or YOLOX. Avoid Ultralytics YOLOv8/11
@@ -133,7 +139,9 @@ VDO-SLAM and DynaSLAM II. Only if Phase 3 shows a clear benefit.
 
 ## Risks
 
-- **Mono-inertial scale.** Not yet measured on real data (Phase 0).
+- **Mono-inertial scale.** Measured on TUM-VI room1–6 (Phase 0): at most
+  3.4 % off. Indoor, hand-held; outdoors and in a car (KITTI) it is not
+  measured yet.
 - **Scale at start-up.** Mono-inertial needs motion to observe scale. Object
   estimates made before convergence are marked as such.
 - **Ground contact** fails for objects not on the ground (things carried,
