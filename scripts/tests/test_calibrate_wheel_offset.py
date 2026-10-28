@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from calibrate_wheel_offset import calibrate, format_pose, main, parse_pose, quat_matrix, rotation_quat
+from calibrate_wheel_offset import calibrate, format_pose, main, parse_pose, quat_matrix, read_tum, rotation_quat
 
 # OpenLORIS-Scene's base_link in the T265 IMU frame.
 IMU_FROM_BODY = "0.0306,-0.8937,-0.2452,-0.5030,-0.4927,-0.5074,0.4967"
@@ -85,8 +85,13 @@ class CalibrateWheelOffsetTests(unittest.TestCase):
             with redirect_stdout(out):
                 main(["--vio", str(vio), "--odometry", str(odometry), "--imu-from-body", IMU_FROM_BODY])
         last = out.getvalue().strip().splitlines()[-1]
-        self.assertTrue(last.startswith("--imu-from-body "))
-        rotation, translation = parse_pose(last.split()[1])
+        self.assertTrue(last.startswith("--imu-from-body="))
+        rotation, translation = parse_pose(last.split("=", 1)[1])
+        # The printed form is accepted back, though it starts with a minus sign.
+        with tempfile.TemporaryDirectory() as tmp:
+            vio, odometry = write_run(Path(tmp), offset=np.array([0.013, 0.062]))
+            with redirect_stdout(io.StringIO()):
+                main(["--vio", str(vio), "--odometry", str(odometry), last])
         expected_r, expected_t = parse_pose(IMU_FROM_BODY)
         np.testing.assert_allclose(rotation, expected_r, atol=2e-4)
         np.testing.assert_allclose(translation, expected_t - expected_r @ [0.013, 0.062, 0.0], atol=1e-3)
@@ -96,6 +101,16 @@ class CalibrateWheelOffsetTests(unittest.TestCase):
         rotation = quat_matrix(*q / np.linalg.norm(q))
         np.testing.assert_allclose(quat_matrix(*rotation_quat(rotation)), rotation, atol=1e-9)
         self.assertEqual(format_pose(np.eye(3), np.array([0.1, 0.0, -0.2])), "0.1000,0.0000,-0.2000,0.0000,0.0000,0.0000,1.0000")
+
+    def test_reads_stamps_in_exponent_notation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "slam.tum"
+            path.write_text("# timestamp tx ty tz qx qy qz qw\n"
+                            "1.560000083949067116e9 0 0 0 0 0 0 1\n"
+                            "1560000084.000000001 1 0 0 0 0 0 1\n")
+            stamps, positions, _ = read_tum(path)
+        self.assertEqual(stamps.tolist(), [1560000083949067116, 1560000084000000001])
+        self.assertEqual(positions[1].tolist(), [1.0, 0.0, 0.0])
 
     def test_too_few_pairs_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:

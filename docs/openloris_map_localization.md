@@ -331,7 +331,7 @@ target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \
 # (here -0.0314,-0.8923,-0.2587,-0.5030,-0.4927,-0.5074,0.4968).
 python3 scripts/calibrate_wheel_offset.py --vio runs/o13_vio/trajectory_vio.tum \
   --odometry data/office1-3/odom.tum \
-  --imu-from-body 0.0306,-0.8937,-0.2452,-0.5030,-0.4927,-0.5074,0.4967
+  --imu-from-body=0.0306,-0.8937,-0.2452,-0.5030,-0.4927,-0.5074,0.4967
 
 # Query: the wheel odometry corrected into the map frame
 target/release/examples/basalt_euroc_localize_demo --map runs/o11_map \

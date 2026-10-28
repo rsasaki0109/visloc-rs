@@ -27,13 +27,17 @@ the wheel odometry's point: `T_imu_body' = T_imu_body * (I, -r)`.
 
     python3 scripts/calibrate_wheel_offset.py --vio runs/o13_vio/trajectory_vio.tum \\
         --odometry data/office1-3/odom.tum \\
-        --imu-from-body 0.0306,-0.8937,-0.2452,-0.5030,-0.4927,-0.5074,0.4967
+        --imu-from-body=0.0306,-0.8937,-0.2452,-0.5030,-0.4927,-0.5074,0.4967
+
+(Write `--imu-from-body=VALUE`: a value starting with a minus sign would
+otherwise read as an option.)
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -57,8 +61,8 @@ def read_tum(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not line or line.startswith("#"):
             continue
         fields = line.split()
-        seconds, _, fraction = fields[0].partition(".")
-        stamps.append(int(seconds) * 1_000_000_000 + int((fraction + "000000000")[:9]))
+        # Decimal: exact for "123.456789012" and for "1.23456789012e9" alike.
+        stamps.append(int(Decimal(fields[0]) * 1_000_000_000))
         values = [float(v) for v in fields[1:8]]
         positions.append(values[:3])
         rotations.append(quat_matrix(*values[3:7]))
@@ -166,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
           f"({result['offset_m'][0] * 100:.1f}, {result['offset_m'][1] * 100:.1f}) cm in the body frame")
     print(f"VIO scale vs wheel odometry: {result['scale']:.4f}")
     print(f"residual: {result['rms_m'] * 100:.2f} cm RMS (without the offset: {result['rms_without_offset_m'] * 100:.2f} cm)")
-    print(f"--imu-from-body {format_pose(*result['imu_from_body'])}")
+    # With "=": the value may start with a minus sign.
+    print(f"--imu-from-body={format_pose(*result['imu_from_body'])}")
     return 0
 
 
