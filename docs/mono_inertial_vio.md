@@ -89,10 +89,14 @@ This writes `trajectory.tum` and `trajectory.csv` as in the stereo replay.
 Evaluate them with the usual tooling. Monocular VIO is metric, so use SE(3)
 alignment. Sim(3) alignment would hide a scale error.
 
-To measure the scale on EuRoC without a local copy, run the **EuRoC mono
+To measure the scale without a local copy of the data, run the **EuRoC mono
 scale** workflow (`.github/workflows/euroc_mono_scale.yml`, by hand from the
-Actions tab). Each job fetches one sequence from the ETH Research Collection
-(`scripts/euroc_fetch.py`) and runs stereo and `--mono`. It then scores both
+Actions tab). With `dataset: tumvi` (the default) each job streams one TUM-VI
+room sequence from the TUM server (`scripts/tumvi_fetch.py`; motion-capture
+ground truth over the whole sequence, upstream Basalt's calibration and config
+in `configs/basalt/tumvi`). With `dataset: euroc` it fetches from the ETH
+Research Collection (`scripts/euroc_fetch.py`), which has so far answered
+GitHub's runners with nothing but HTTP 429. Each job runs stereo and `--mono`. It then scores both
 with `scripts/euroc_scale_report.py`: SE(3) and Sim(3) ATE, the scale error,
 and the time until the scale stays within ±5 % (Sim(3) on 10 s windows). The
 run summary holds the table. The demo writes `trajectory.tum` timestamps in

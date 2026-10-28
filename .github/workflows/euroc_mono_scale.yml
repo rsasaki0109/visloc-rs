@@ -1,25 +1,37 @@
-# Metric scale of monocular-inertial VIO on EuRoC, with stereo-inertial as the reference.
+# Metric scale of monocular-inertial VIO, with stereo-inertial as the reference, on TUM-VI
+# (room1-6, motion-capture ground truth) or EuRoC.
 #
 # Phase 0 of docs/object_metric_slam_plan.md: object sizes from mono + IMU can be no more
-# accurate than the trajectory's scale. Each job fetches one sequence from the ETH Research
-# Collection (scripts/euroc_fetch.py: by HTTP range requests where the server takes them,
-# else the family zip downloaded whole; the server rate-limits, so it retries), runs
+# accurate than the trajectory's scale. Each job fetches one sequence, runs
 # basalt_euroc_vio_demo stereo and --mono, and scores both with scripts/euroc_scale_report.py:
 # SE3 / Sim3 ATE, the scale error, and when the scale settles within ±5 %. The last job puts
 # the table in the run summary. Run it by hand (Actions > EuRoC mono scale > Run workflow).
+#
+# - TUM-VI: scripts/tumvi_fetch.py streams the sequence's tar from the TUM server; the
+#   calibration and config are upstream Basalt's (configs/basalt/tumvi).
+# - EuRoC: scripts/euroc_fetch.py reads the ETH Research Collection, which has answered
+#   GitHub's runners with nothing but 429 so far (docs/mono_inertial_vio.md).
 name: EuRoC mono scale
 
 on:
   workflow_dispatch:
     inputs:
+      dataset:
+        description: Dataset
+        type: choice
+        options: [tumvi, euroc]
+        default: tumvi
       sequences:
-        description: Sequence names, space-separated (empty = all 11)
+        description: Sequence names, space-separated (empty = all; TUM-VI room1-6, EuRoC all 11)
         type: string
         default: ""
       max_parallel:
         description: Sequences at a time (the ETH server rate-limits)
         type: number
         default: 2
+
+env:
+  DATASET: ${{ inputs.dataset || 'tumvi' }}
 
 jobs:
   plan:
@@ -37,7 +49,8 @@ jobs:
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import importlib.util, json, os, sys
-          spec = importlib.util.spec_from_file_location("m", "benchmarks/basalt/euroc_dataset_manifest.py")
+          path = {"euroc": "benchmarks/basalt/euroc_dataset_manifest.py", "tumvi": "scripts/tumvi_fetch.py"}
+          spec = importlib.util.spec_from_file_location("m", path[os.environ["DATASET"]])
           m = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(m)
           seqs = os.environ["SEQUENCES"].split() or list(m.SEQUENCES)
@@ -112,8 +125,22 @@ jobs:
           name: basalt-euroc-vio-demo
           path: bin
 
+      - name: Dataset settings
+        run: |
+          if [ "$DATASET" = tumvi ]; then
+            { echo "FETCH=scripts/tumvi_fetch.py"
+              echo "CALIB=configs/basalt/tumvi/tumvi_512_ds_calib.json"
+              echo "CONFIG=configs/basalt/tumvi/tumvi_512_config.json"
+              echo "GT=mav0/mocap0/data.csv"; } >> "$GITHUB_ENV"
+          else
+            { echo "FETCH=scripts/euroc_fetch.py"
+              echo "CALIB=benchmarks/basalt/release_inputs/euroc_ds_calib.json"
+              echo "CONFIG=configs/basalt/euroc_config.json"
+              echo "GT=mav0/state_groundtruth_estimate0/data.csv"; } >> "$GITHUB_ENV"
+          fi
+
       - name: Fetch ${{ matrix.sequence }}
-        run: python scripts/euroc_fetch.py "$SEQ" "$WORK"
+        run: python "$FETCH" "$SEQ" "$WORK"
 
       - name: Run stereo and mono
         run: |
@@ -121,10 +148,10 @@ jobs:
           for mode in stereo mono; do
             flag=""; [ "$mode" = mono ] && flag=--mono
             mkdir -p "out/$mode/$SEQ"
-            # a failed run still gets its row (the report marks the missing trajectory)
-            bin/basalt_euroc_vio_demo --euroc-dir "$WORK/$SEQ" \
-              --calibration benchmarks/basalt/release_inputs/euroc_ds_calib.json \
-              --config configs/basalt/euroc_config.json --out-dir "out/$mode/$SEQ" $flag --no-trace \
+            # a failed run still gets its row (the report marks the missing trajectory);
+            # without marginalization dumps (GBs per sequence) the trajectory is the same
+            bin/basalt_euroc_vio_demo --euroc-dir "$WORK/$SEQ" --calibration "$CALIB" \
+              --config "$CONFIG" --out-dir "out/$mode/$SEQ" $flag --no-trace --no-marg-data \
               > "out/$mode/$SEQ.log" 2>&1 || echo "::warning::$mode $SEQ exited with $?"
           done
 
@@ -133,7 +160,7 @@ jobs:
           mkdir -p results
           for mode in stereo mono; do
             python scripts/euroc_scale_report.py run --sequence "$SEQ" --mode "$mode" \
-              --ground-truth-csv "$WORK/$SEQ/mav0/state_groundtruth_estimate0/data.csv" \
+              --ground-truth-csv "$WORK/$SEQ/$GT" \
               --trajectory "out/$mode/$SEQ/trajectory.tum" --out "results/${mode}_$SEQ.json"
           done
 
@@ -174,7 +201,8 @@ jobs:
 
       - name: Table
         run: |
-          python scripts/euroc_scale_report.py summarize all/*/results/*.json > scale.md
+          { echo "## Mono-inertial scale on $DATASET"; echo
+            python scripts/euroc_scale_report.py summarize all/*/results/*.json; } > scale.md
           cat scale.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the table
