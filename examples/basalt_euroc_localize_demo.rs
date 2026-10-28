@@ -39,6 +39,10 @@
 //! VIO predict each image's pose and every landmark is first matched only
 //! against the keypoints within `PX` pixels of its predicted projection, as
 //! `visloc_map_localize_node` does; the map-wide search remains the fallback.
+//! The prediction is used only within `--projection-fresh-s` (5) seconds
+//! and `--projection-fresh-m` (2) metres of odometry travel after the
+//! anchor's newest fix: a drifted prediction can steer the projection search
+//! to a wrong pose that agrees with it.
 //!
 //! ```text
 //! cargo run --release --example basalt_euroc_localize_demo -- \
@@ -137,6 +141,10 @@ struct Args {
     /// With `--vio` or `--odometry`, match by projection from the anchored
     /// odometry's prediction first, within this radius.
     projection_radius_px: Option<f64>,
+    /// Trust the prediction only this long and this far after the anchor's
+    /// newest fix.
+    projection_fresh_s: f64,
+    projection_fresh_m: f64,
     /// Write each accepted localization's inliers here.
     dump_inliers: Option<PathBuf>,
 }
@@ -150,7 +158,8 @@ impl Args {
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
-         [--projection-radius-px PX] [--dump-inliers FILE]"
+         [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
+         [--dump-inliers FILE]"
             .into()
     }
 
@@ -186,6 +195,8 @@ impl Args {
             imu_from_body: None,
             localize_every: 1,
             projection_radius_px: None,
+            projection_fresh_s: 5.0,
+            projection_fresh_m: 2.0,
             dump_inliers: None,
         };
         let mut arguments = arguments.into_iter();
@@ -251,6 +262,8 @@ impl Args {
                 "--projection-radius-px" => {
                     args.projection_radius_px = Some(number(&option, value()?)?);
                 }
+                "--projection-fresh-s" => args.projection_fresh_s = number(&option, value()?)?,
+                "--projection-fresh-m" => args.projection_fresh_m = number(&option, value()?)?,
                 "--dump-inliers" => args.dump_inliers = Some(PathBuf::from(value()?)),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
@@ -636,6 +649,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 /// every output file of `--vio` / `--odometry`.
 struct AnchoredRun {
     anchor: MapAnchor,
+    /// How long / far after the anchor's newest fix its prediction is used.
+    fresh_s: f64,
+    fresh_m: f64,
     fixes_tum: String,
     map_tum: String,
     odometry_tum: String,
@@ -652,10 +668,12 @@ struct AnchoredRun {
 }
 
 impl AnchoredRun {
-    fn new() -> Self {
+    fn new(args: &Args) -> Self {
         let header = "# timestamp tx ty tz qx qy qz qw\n";
         Self {
             anchor: MapAnchor::new(MapAnchorConfig::default()),
+            fresh_s: args.projection_fresh_s,
+            fresh_m: args.projection_fresh_m,
             fixes_tum: header.to_owned(),
             map_tum: header.to_owned(),
             odometry_tum: header.to_owned(),
@@ -686,8 +704,18 @@ impl AnchoredRun {
         self.frames += 1;
         self.odometry_tum
             .push_str(&tum_line(timestamp_ns, odom_from_imu));
-        // The anchor as it stands before this image's fix predicts its pose.
-        let predicted = self.anchor.map_from_body(odom_from_imu);
+        // The anchor as it stands before this image's fix predicts its pose,
+        // while its newest fix is recent: after a long gap, a drifted
+        // prediction can steer the projection search to a wrong pose that
+        // agrees with it.
+        let predicted = self
+            .anchor
+            .last_fix()
+            .filter(|(fix_ns, fix_position)| {
+                (timestamp_ns - fix_ns) as f64 * 1e-9 <= self.fresh_s
+                    && (odom_from_imu.translation - fix_position).norm() <= self.fresh_m
+            })
+            .and_then(|_| self.anchor.map_from_body(odom_from_imu));
         if let Some(image) = image {
             let attempt = localizer.localize(image, predicted.as_ref())?;
             self.attempts += 1;
@@ -782,7 +810,7 @@ fn run_vio(args: &Args, localizer: &mut Localizer) -> Result<(), Box<dyn std::er
         .unwrap_or(usize::MAX)
         .min(dataset.frame_count());
 
-    let mut run = AnchoredRun::new();
+    let mut run = AnchoredRun::new(args);
     for index in 0..frames {
         let frame = dataset.frame(index)?;
         let timestamp_ns = frame.timestamp_ns;
@@ -829,7 +857,7 @@ fn run_odometry(
         .take(args.max_frames.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
 
-    let mut run = AnchoredRun::new();
+    let mut run = AnchoredRun::new(args);
     for (index, entry) in images.iter().enumerate() {
         let Some(odom_from_body) = interpolate_pose(&odometry, entry.timestamp_ns) else {
             continue;
