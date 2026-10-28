@@ -413,37 +413,41 @@ python3 tools/bag_to_tum.py out /map_pose map_pose.tum
 
 **All eight EuRoC queries.** The same setup (Fast DDS, 1.0x, `--delay 3`)
 on every query sequence of `docs/basalt_map_localization.md`, each against
-its room's map, next to the offline
-`basalt_euroc_localize_demo --vio --localize-every 5 --projection-radius-px 0`:
+its room's map, next to the offline `basalt_euroc_localize_demo --vio
+--localize-every 5` with its defaults (projection matching, every image
+until the first map pose):
 
-| query → map | VIO frames dropped | `map_pose` published (offline) | RMSE / max (offline) | first fix |
+| query → map | VIO frames dropped | `map_pose` published (offline) | RMSE / max (offline) | first map pose |
 |---|---|---|---|---|
-| MH_02 → MH_01 | 2 | 99.7% (99.8%) | 2.0 / 5.2 cm (2.0 / 5.7) | 0.4 s |
-| MH_03 → MH_01 | 19 | 99.0% (99.8%) | 4.3 / 23.0 cm (5.0 / 10.9) | 0.3 s |
-| MH_04 → MH_01 | 2 | 73.4% (73.1%) | 19.5 / 38.2 cm (23.0 / 47.1) | 27.0 s |
-| MH_05 → MH_01 | 0 | 77.0% (77.1%) | 17.6 / 30.3 cm (14.4 / 27.6) | 26.1 s |
-| V1_02 → V1_01 | 5 | 93.5% (93.9%) | 3.4 / 5.8 cm (3.5 / 6.4) | 5.3 s |
-| V1_03 → V1_01 | 12 | 99.1% (99.8%) | 4.3 / 11.7 cm (6.7 / 13.5) | 0.3 s |
-| V2_02 → V2_01 | 27 | 98.6% (99.8%) | 3.5 / 14.1 cm (4.2 / 12.6) | 0.3 s |
-| V2_03 → V2_01 | 0 | none (same offline) | — | — |
+| MH_02 → MH_01 | 0 | 99.8% (99.97%) | 2.1 / 5.2 cm (2.0 / 5.6) | 0.3 s |
+| MH_03 → MH_01 | 10 | 99.5% (99.96%) | 4.3 / 13.2 cm (4.5 / 10.6) | 0.2 s |
+| MH_04 → MH_01 | 1 | 73.3% (73.6%) | 21.5 / 40.0 cm (22.7 / 44.6) | 27.0 s |
+| MH_05 → MH_01 | 0 | 78.1% (78.2%) | 17.9 / 30.2 cm (15.7 / 27.9) | 24.9 s |
+| V1_02 → V1_01 | 15 | 94.2% (94.3%) | 3.3 / 5.9 cm (3.4 / 5.9) | 5.0 s |
+| V1_03 → V1_01 | 7 | 99.6% (99.95%) | 4.7 / 11.0 cm (4.6 / 9.6) | 0.1 s |
+| V2_02 → V2_01 | 0 | 99.9% (99.96%) | 3.6 / 14.1 cm (3.5 / 12.0) | 0.1 s |
+| V2_03 → V2_01 | 4 | 77.5% (77.8%) | 27.1 / 43.1 cm (29.6 / 70.4) | 21.4 s |
 
-No run reset the VIO, and none dropped more than 1.2% of its frames. These
-runs tried every 5th image from the start; the node now tries every image
-until the first map pose (`initial_localize_every`), which offline gives
-V2_03 map poses for 77.8% of its frames
-([details](../../docs/basalt_map_localization.md#every-image-until-the-first-map-pose)).
-The node's results follow the offline ones, also where those are poor:
+No run reset the VIO, and none dropped more than 0.9% of its frames, also
+while the node tried every image before the first map pose (MH_04 and
+MH_05 for 25-27 s). The node's results follow the offline ones, also where
+those are poor:
 
 - MH_04 and MH_05 fly through parts of the hall the MH_01 map never saw.
-  The first map pose comes only after 26-27 s, and the VIO carries the pose
-  through long stretches without a fix.
-- V2_03 localized 1 of 350 images and never got a map pose. Offline, 0.4% of its
-  images localize.
-- MH_03's worst pose, 23 cm off, comes after 35 s without a fix where the
-  flight leaves the map. There the node's VIO (3 LM iterations, see above)
-  drifted further than the offline run's (5). The first two fixes after
-  the gap were rejected and the third reset the correction; offline, none were
-  rejected.
+  The first map pose comes only after 25-27 s, and the VIO carries the pose
+  through long stretches without a fix. On MH_05 two fixes after such a
+  stretch were rejected and the third reset the correction.
+- V2_03 localized 8 of the 700 images the node tried. That is enough for a
+  map pose from 21 s on (with every 5th image from the start, it never got
+  one), but the VIO carries the pose most of the time: 27 cm RMSE.
+- MH_03 has no 23 cm pose any more. In an earlier replay, before the node
+  stopped trusting its prediction 5 s or 2 m after the newest fix
+  (`projection_fresh_s`, `projection_fresh_m`), the first fix after a
+  27 s gap was matched around the 27 s old prediction, with 30 inliers,
+  and accepted. The next two, with 85 and 110 inliers, were rejected and
+  the third reset the correction; the worst pose was 23 cm off. Now that
+  image is matched map-wide, no fix is rejected and the worst pose is
+  13.2 cm off.
 
 Read the bag once before playing it (`cat bag/*.mcap > /dev/null`), as
 every run above did. Played straight after a reboot, MH_02 lost 1,106 of
