@@ -11,9 +11,9 @@ by those localizations.
 **Summary.**
 
 - **Same lighting:** within the same evening, and 2.8 days later with the
-  office rearranged, the VIO corrected into the map frame gives a map pose for 79–99%
-  of the frames at 2.9–3.5 cm RMSE. This holds although only 3–37% of the
-  images localize on their own.
+  office rearranged, the VIO corrected into the map frame gives a map pose
+  for 95–99.7% of the frames at 2.8–4.1 cm RMSE. This holds although only
+  3–37% of the images localize on their own.
 - **Wheel odometry:** correcting the robot's wheel odometry instead gives
   7–12 cm. It drifts by up to 17 cm in an in-place turn, which a few map
   fixes cannot correct.
@@ -95,9 +95,11 @@ ground truth.
 Each query is localized against a map built from another session, with
 these settings:
 
-- Localization every 5th image. The VIO runs on every frame; the wheel
-  odometry is interpolated at every image.
-- Projection matching (`--projection-radius-px 20`).
+- Localization of every image until the first map pose, then every 5th
+  (the defaults with `--localize-every 5`). The VIO runs on every frame;
+  the wheel odometry is interpolated at every image.
+- Projection matching (`--projection-radius-px 20`, the default), with the
+  prediction used only within 5 s and 2 m of the newest fix.
 - Scoring with the map's fixed alignment to the mocap frame: the
   "fixed" mode of `scripts/evaluate_map_localization.py`.
 
@@ -106,11 +108,11 @@ It is in the odometry's own frame, not the map's.
 
 | Query → map | Images that localize alone | VIO + map: frames, RMSE / max | Wheel odometry + map: frames, RMSE / max | VIO alone | Wheel alone |
 |---|---|---|---|---|---|
-| office1-3 → A (minutes later) | 36.7% | 98.6%, 2.85 / 3.9 cm | 96.9%, 11.7 / 19.6 cm | 0.83 cm | 0.97 cm |
-| office1-6 → A (2.8 days, moved furniture) | 6.7% | 98.6%, 3.21 / 4.3 cm | 98.6%, 7.19 / 15.7 cm | 3.24 cm | 4.80 cm |
-| office1-6 → merged | 2.9% | 94.4%, 3.30 / 4.7 cm | 94.4%, 7.30 / 15.8 cm | | |
+| office1-3 → A (minutes later) | 36.7% | 99.7%, 2.83 / 3.7 cm | 99.2%, 11.6 / 19.7 cm | 0.83 cm | 0.97 cm |
+| office1-6 → A (2.8 days, moved furniture) | 6.7% | 99.7%, 3.15 / 4.3 cm | 99.7%, 7.17 / 15.7 cm | 3.24 cm | 4.80 cm |
+| office1-6 → merged | 2.9% | 98.5%, 3.33 / 4.7 cm | 98.5%, 7.18 / 15.8 cm | | |
 | office1-7 → B or merged | 0% | no map pose | no map pose | 5.29 cm | 7.90 cm |
-| office1-7 → merged, `--min-inliers 15` | | 79.4%, 3.50 / 6.0 cm | | | |
+| office1-7 → merged, `--min-inliers 15` | | 94.9%, 4.06 / 8.2 cm | 94.8%, 6.89 / 16.0 cm | | |
 | office1-4 → A, B or merged (daylight) | 0% | no map pose | no map pose | | 8.34 cm |
 | office1-5 → merged (dawn) | 0% | no map pose, also at 15 inliers | no map pose | 5.20 cm | 9.40 cm |
 
@@ -120,13 +122,20 @@ What this shows:
   localize.** The robot needs map-frame poses across sessions, which VIO
   alone does not give: it has its own frame each time. On office1-6, 2.8
   days later with the furniture moved, fewer than 7% of the images
-  localize alone. The corrected VIO still gets a map pose for 98.6% of the
+  localize alone. The corrected VIO still gets a map pose for 99.7% of the
   frames, about as accurate as the VIO's own rigid-fit error. On these
   6 m paths the VIO barely drifts, so the map's own few-cm error (its
   scale above) is what bounds the result.
 - **Projection matching.** Matching around the corrected VIO's prediction
-  raises office1-6's fixes from 16 to 137 of its 216 attempts. The
-  VIO + map RMSE falls from 3.93 to 3.21 cm.
+  raises office1-6's fixes from 16 to 128 of its 216 attempts (every 5th
+  image from the start). The VIO + map RMSE falls from 3.93 to 3.15 cm.
+- **Trying every image until the first map pose matters on the merged
+  map.** With every 5th image from the start (`--initial-localize-every
+  5`), office1-6's first map pose comes 2.0 s in and office1-7's (at 15
+  inliers) 7.8 s in; with every image, 0.5 s and 1.9 s. Frames with a map
+  pose rise from 94.4% to 98.5% and from 79.4% to 94.9%. Against map B,
+  which none of office1-7's images match, it only multiplies the attempts
+  by five (1,140 instead of 228).
 - **The wheel odometry is the weaker partner on this robot.** Its heading
   agrees with the ground truth within 0.5°. In office1-3's final 150°
   in-place turn, though, it reports `base_link` moving along a different
@@ -140,9 +149,10 @@ What this shows:
   The many near-identical landmarks make the ratio test reject more
   matches (`--duplicate-radius-m 0.1` did not change this run). Once the
   VIO has a map pose, projection matching makes up for it.
-- **office1-7 gets map poses only below the default inlier threshold.** Its best
-  map-wide match has 21 inliers against B and 17 against the merged map. At `--min-inliers 15` the first fixes come
-  through, and no accepted fix is more than 10 cm off. On EuRoC, though,
+- **office1-7 gets map poses only below the default inlier threshold.**
+  Its best map-wide match has 21 inliers against B and 17 against the
+  merged map. At `--min-inliers 15` the first fixes come through, and no
+  fix is more than 10.3 cm off. On EuRoC, though,
   20 inliers already admits poses metres off, so 15 is not a safe default.
   The correction's two-fix agreement check is what keeps this run clean.
 - **Lighting is the hard limit.** office1-4 and office1-5 are recorded

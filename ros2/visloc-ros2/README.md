@@ -426,8 +426,12 @@ its room's map, next to the offline
 | V2_02 → V2_01 | 27 | 98.6% (99.8%) | 3.5 / 14.1 cm (4.2 / 12.6) | 0.3 s |
 | V2_03 → V2_01 | 0 | none (same offline) | — | — |
 
-No run reset the VIO, and none dropped more than 1.2% of its frames. The
-node's results follow the offline ones, also where those are poor:
+No run reset the VIO, and none dropped more than 1.2% of its frames. These
+runs tried every 5th image from the start; the node now tries every image
+until the first map pose (`initial_localize_every`), which offline gives
+V2_03 map poses for 77.8% of its frames
+([details](../../docs/basalt_map_localization.md#every-image-until-the-first-map-pose)).
+The node's results follow the offline ones, also where those are poor:
 
 - MH_04 and MH_05 fly through parts of the hall the MH_01 map never saw.
   The first map pose comes only after 26-27 s, and the VIO carries the pose

@@ -90,8 +90,16 @@ way (camera axes within 30°). MH_04 and MH_05 fly through parts of the hall
 MH_01 never saw (median 7 m from any MH_01 viewpoint), and their few
 localized images are the ones near it. Coverage does not explain the
 "difficult" Vicon flights: V1_03 and V2_03 come near map viewpoints for
-30–39% of the flight but localize 11% and 0.4%; their fast motion and blur
-are the likely cause (not isolated here).
+30–39% of the flight but localize 11% and 0.4%. For V2_03 the motion does
+not explain it either. Its covered images that rotate slower than
+0.5 rad/s still give a median of 4 inliers, against 36 for V2_02's. Paired
+by place, 37 V2_03 images within 12 cm of a V2_02 image that localizes
+with 40 or more inliers, looking the same way, give a median of 8 inliers
+against V2_02's 44. Those V2_03 images are no blurrier by a gradient
+measure but carry about 45% more pixel noise. Over the whole flight the
+frontend finds fewer corners (median 228 per image against 375) and fewer
+matches pass the descriptor gates (median 5 against 19). V1_03 was not
+examined this way.
 
 ## Choosing the inlier threshold
 
@@ -245,7 +253,10 @@ Same maps, queries and scoring as above (fixed map→ground-truth alignment).
 "Fresh" poses are those within 2 m and 5 s of their last fix. These runs
 match every image map-wide (`--projection-radius-px 0`); the demo's default
 now also matches around the predicted projections, compared
-[below](#matching-around-the-predicted-projections).
+[below](#matching-around-the-predicted-projections). They also try every
+5th image from the start (`--initial-localize-every 5`); by default the demo
+now tries every image until the first map pose
+([below](#every-image-until-the-first-map-pose)).
 
 | Query → map | Localization alone | VIO + map: frames with a pose | RMSE / max | Fresh poses: frames | RMSE / max | Speed |
 |---|---|---|---|---|---|---|
@@ -263,6 +274,7 @@ localize every 5th. Localizing every image instead gives the same accuracy
 (MH_02: 2.0 / 5.9 cm) at half the speed; it does give V2_03 map poses (77.7% of
 frames, 24.2 / 68.6 cm, its 4 fixes too few to hold the VIO, which alone
 drifts 24 cm), where every 5th image yields too few fixes for two to agree.
+Until the first map pose, that is now the default.
 Speed is the whole pipeline (image decoding, VIO, ORB extraction,
 localization) on the 4-core machine; matching against the larger MH_01 map
 is the slower part.
@@ -322,7 +334,7 @@ search as the fallback. This is the demo's default with `--vio` or
 the few keypoints near its projection instead of the whole image, so many
 more correct matches pass it.
 
-All eight queries, localizing every 5th image, map-wide only
+All eight queries, localizing every 5th image from the start, map-wide only
 (`--projection-radius-px 0`) → around the projections:
 
 | Query → map | Images that localize | VIO + map RMSE / max | Localization per image |
@@ -364,6 +376,44 @@ What these show:
   only). V2_03, localizing every image, goes from 28.3 to 23.9 cm (24.2
   map-wide only). The ROS 2 node applies the same limits
   (`projection_fresh_s`, `projection_fresh_m`).
+
+### Every image until the first map pose
+
+No frame has a map pose until two fixes agree. With every 5th image tried,
+a flight whose images rarely localize may never get two: V2_03 above. So
+until the first map pose the demo tries every image
+(`--initial-localize-every`, 1), and every `--localize-every`-th after
+that; `visloc_map_localize_node` does the same (`initial_localize_every`).
+All eight queries, every 5th image from the start → every image until the
+first map pose (projection matching on, as by default):
+
+| Query → map | First map pose | Frames with a map pose | VIO + map RMSE / max | Images tried |
+|---|---|---|---|---|
+| MH_02 → MH_01 | 0.3 → 0.1 s | 99.8% → 99.97% | 2.00 / 5.6 → 2.00 / 5.6 cm | 608 → 609 |
+| MH_03 → MH_01 | 0.3 → 0.0 s | 99.8% → 99.96% | 4.49 / 10.6 → 4.49 / 10.6 cm | 540 → 541 |
+| MH_04 → MH_01 | 27.3 → 26.8 s | 73.2% → 73.6% | 22.5 / 44.1 → 22.7 / 44.6 cm | 407 → 836 |
+| MH_05 → MH_01 | 26.0 → 24.8 s | 77.1% → 78.2% | 15.9 / 27.7 → 15.7 / 27.9 cm | 455 → 851 |
+| V1_02 → V1_01 | 5.2 → 4.9 s | 93.9% → 94.3% | 3.33 / 5.9 → 3.35 / 5.9 cm | 342 → 421 |
+| V1_03 → V1_01 | 0.2 → 0.0 s | 99.8% → 99.95% | 4.60 / 9.6 → 4.60 / 9.6 cm | 430 → 431 |
+| V2_02 → V2_01 | 0.2 → 0.0 s | 99.8% → 99.96% | 3.51 / 12.0 → 3.50 / 12.0 cm | 470 → 471 |
+| V2_03 → V2_01 | none → 21.3 s | 0 → **77.8%** | — → 29.6 / 70.4 cm | 385 → 727 |
+
+- **V2_03 gets map poses, but coarse ones.** Its first two agreeing fixes
+  come 21 s in. After that every 5th image is tried again, and only four
+  more localize (one rejected), so the VIO carries the pose for most of
+  the remaining 75 s: 29.6 cm RMSE. The poses within 5 s and 2 m of a fix,
+  6.2% of the frames, are 5.8 / 10.0 cm; `trajectory_map.csv` and the
+  node's covariance tell them apart. Localizing every image throughout
+  gives 23.9 cm ([above](#matching-around-the-predicted-projections)).
+- **Elsewhere the first map pose comes up to 1.2 s sooner,** and the error
+  changes by 0.2 cm or less.
+- **It costs most where the flight starts outside the map.** MH_04 and
+  MH_05 start in parts of the hall the MH_01 map does not cover, so every
+  image is tried for their first 25-27 s: about twice the images over the
+  flight. Where the map never matches (OpenLORIS office1-7 against map B,
+  [results](openloris_map_localization.md#results)), every image is tried
+  throughout, five times the work for nothing. The node tries the newest
+  image whenever it is free, so this costs CPU, not VIO frames.
 
 ### On a robot (ROS 2)
 
@@ -590,15 +640,17 @@ python3 scripts/evaluate_map_localization.py --mode fixed \
 `--mode direct --reference runs/mh01_slam/trajectory_online.tum` compares a
 localization with the SLAM trajectory in the map frame, without alignment.
 
-VIO corrected into the map frame, scored the same way (drop `--projection-radius-px 0`
-for the default, matching around the predicted projections):
+VIO corrected into the map frame, scored the same way (drop
+`--initial-localize-every 5` and `--projection-radius-px 0` for the
+defaults: every image until the first map pose, and matching around the
+predicted projections):
 
 ```bash
 target/release/examples/basalt_euroc_localize_demo \
   --map runs/mh01_map --euroc-dir $D/MH_02_easy --out-dir runs/mh02_vio \
   --vio --calibration configs/basalt/variants/official_euroc_ds/euroc_ds_calib.json \
   --config configs/basalt/variants/official_euroc_ds/euroc_config.json \
-  --localize-every 5 --projection-radius-px 0
+  --localize-every 5 --initial-localize-every 5 --projection-radius-px 0
 
 python3 scripts/evaluate_map_localization.py --mode fixed \
   --estimate runs/mh02_vio/trajectory_map.tum \
