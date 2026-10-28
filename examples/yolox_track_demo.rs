@@ -17,6 +17,11 @@
 //! reads: `timestamp_ns,object_id,class_id,score,x_min,y_min,x_max,y_max`.
 //! The timestamp is the frame's file name, as in the EuRoC layout
 //! (`mav0/cam0/data/<timestamp_ns>.png`).
+//!
+//! `--rotate 90|180|270` turns each frame clockwise before detection, for
+//! cameras mounted sideways (the SLAM cameras of Project Aria glasses, as in
+//! LaMAria, need `--rotate 90`). Every output is in the original frame's
+//! pixels.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -34,6 +39,8 @@ struct Args {
     images: PathBuf,
     out_dir: PathBuf,
     input_size: usize,
+    /// Clockwise rotation before detection: 0, 90, 180 or 270 degrees.
+    rotate: u32,
     max_frames: Option<usize>,
     draw: bool,
     boxes_csv: Option<PathBuf>,
@@ -79,13 +86,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in &frames {
         let decoded = image::open(path)?.to_rgb8();
         let (width, height) = (decoded.width(), decoded.height());
-        let image = RgbImage::new(width as usize, height as usize, decoded.into_raw())?;
+        let upright = match args.rotate {
+            90 => image::imageops::rotate90(&decoded),
+            180 => image::imageops::rotate180(&decoded),
+            270 => image::imageops::rotate270(&decoded),
+            _ => decoded.clone(),
+        };
+        let (upright_width, upright_height) = (upright.width(), upright.height());
+        let image = RgbImage::new(
+            upright_width as usize,
+            upright_height as usize,
+            upright.into_raw(),
+        )?;
         let started = Instant::now();
         let detections = detector.detect(&image)?;
         detect_seconds += started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let tracks = tracker.update(&detections);
+        let mut tracks = tracker.update(&detections);
         track_seconds += started.elapsed().as_secs_f64();
+        for t in &mut tracks {
+            t.bbox = t
+                .bbox
+                .unrotated(args.rotate, f64::from(width), f64::from(height));
+        }
         for t in &tracks {
             let b = t.bbox;
             writeln!(
@@ -126,8 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if args.draw {
-            let mut canvas = image::RgbImage::from_raw(width, height, image.data().to_vec())
-                .ok_or("image buffer")?;
+            let mut canvas = decoded;
             draw_tracks(&mut canvas, &tracks);
             let name = Path::new(path.file_name().ok_or("file name")?).with_extension("png");
             canvas.save(drawn_dir.join(name))?;
@@ -159,11 +181,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_args() -> Result<Args, String> {
     let usage = "usage: yolox_track_demo --model <onnx> --images <dir> [--out-dir <dir>] \
-                 [--input-size 640] [--max-frames N] [--draw] [--boxes-csv FILE]";
+                 [--input-size 640] [--rotate 0|90|180|270] [--max-frames N] [--draw] \
+                 [--boxes-csv FILE]";
     let mut model = None;
     let mut images = None;
     let mut out_dir = PathBuf::from("target/yolox_track");
     let mut input_size = 640;
+    let mut rotate = 0;
     let mut max_frames = None;
     let mut draw = false;
     let mut boxes_csv = None;
@@ -178,6 +202,12 @@ fn parse_args() -> Result<Args, String> {
             "--images" => images = Some(PathBuf::from(value()?)),
             "--out-dir" => out_dir = PathBuf::from(value()?),
             "--input-size" => input_size = value()?.parse().map_err(|_| usage.to_string())?,
+            "--rotate" => {
+                rotate = value()?.parse().map_err(|_| usage.to_string())?;
+                if ![0, 90, 180, 270].contains(&rotate) {
+                    return Err(format!("--rotate takes 0, 90, 180 or 270\n{usage}"));
+                }
+            }
             "--max-frames" => max_frames = Some(value()?.parse().map_err(|_| usage.to_string())?),
             "--draw" => draw = true,
             "--boxes-csv" => boxes_csv = Some(PathBuf::from(value()?)),
@@ -189,6 +219,7 @@ fn parse_args() -> Result<Args, String> {
         images: images.ok_or(usage)?,
         out_dir,
         input_size,
+        rotate,
         max_frames,
         draw,
         boxes_csv,

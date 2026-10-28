@@ -62,6 +62,27 @@ impl BBox {
             && self.y_max > self.y_min
     }
 
+    /// This box, found in an image turned `degrees` clockwise (0, 90, 180 or
+    /// 270; other values leave it as it is), in the pixels of the original
+    /// `width` × `height` image. For cameras mounted sideways, whose frames
+    /// are turned upright before detection.
+    pub fn unrotated(&self, degrees: u32, width: f64, height: f64) -> BBox {
+        let b = self;
+        match degrees {
+            // Turned clockwise by 90: original (x, y) is at (height - y, x).
+            90 => BBox::new(b.y_min, height - b.x_max, b.y_max, height - b.x_min),
+            180 => BBox::new(
+                width - b.x_max,
+                height - b.y_max,
+                width - b.x_min,
+                height - b.y_min,
+            ),
+            // Turned clockwise by 270: original (x, y) is at (y, width - x).
+            270 => BBox::new(width - b.y_max, b.x_min, width - b.y_min, b.x_max),
+            _ => *b,
+        }
+    }
+
     /// Intersection over union, 0 when the boxes do not overlap or are empty.
     pub fn iou(&self, other: &BBox) -> f64 {
         let width = (self.x_max.min(other.x_max) - self.x_min.max(other.x_min)).max(0.0);
@@ -109,6 +130,32 @@ mod tests {
         let b = BBox::from_xywh(5.0, 0.0, 10.0, 10.0);
         assert!((a.iou(&b) - 50.0 / 150.0).abs() < 1e-12);
         assert_eq!(a.iou(&b), b.iou(&a));
+    }
+
+    #[test]
+    fn unrotated_undoes_image_rotation() {
+        // One lit pixel at (5, 2) in a 7 × 4 image; find it in each rotated
+        // image and map its pixel square back.
+        let mut original = image::GrayImage::new(7, 4);
+        original.put_pixel(5, 2, image::Luma([255]));
+        for degrees in [0, 90, 180, 270] {
+            let rotated = match degrees {
+                90 => image::imageops::rotate90(&original),
+                180 => image::imageops::rotate180(&original),
+                270 => image::imageops::rotate270(&original),
+                _ => original.clone(),
+            };
+            let (u, v, _) = rotated
+                .enumerate_pixels()
+                .find(|(_, _, p)| p[0] == 255)
+                .unwrap();
+            let found = BBox::from_xywh(f64::from(u), f64::from(v), 1.0, 1.0);
+            assert_eq!(
+                found.unrotated(degrees, 7.0, 4.0),
+                BBox::from_xywh(5.0, 2.0, 1.0, 1.0),
+                "{degrees} degrees"
+            );
+        }
     }
 
     #[test]
