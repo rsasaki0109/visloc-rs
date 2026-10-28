@@ -29,8 +29,16 @@ All notable changes to `visloc-rs` will be documented here.
     the 200° image circle around the calibrated centre
     (docs/insta360_lens.md).
   - `visloc_gsplat_train::dual_fisheye` cuts each lens into five 90° faces
-    within 90° of its axis. The faces of a lens are solved as one rig, and
-    the video's IMU scales the result to metres.
+    within 90° of its axis. A frame's ten faces are solved as one rig, with
+    the back lens's pose refined by the mapper. The video's IMU scales the
+    result to metres.
+  - The IMU frame search starts from the `.insv`'s own frame period.
+  - On 200 frames of an OverMaps360 walk (CPU, 23 min), all 2,000 faces
+    registered at 0.58 px.
+    - The refined back lens sits 3.22 cm behind the front one; the
+      calibration says 3.23 cm.
+    - The metric model is within 1.0% of the dataset's IMU scale, with a
+      15 cm median residual over 165 m.
 
 ### Fixed
 
