@@ -28,11 +28,15 @@
 //!   jumped, or the earlier offset was wrong).
 //!
 //! A *weak* fix ([`OdomCorrection::add_weak_fix`]) is a localization with
-//! fewer inliers than a fix needs, which is more often wrong. Weak fixes only
-//! help to set the first offset, and then `init_fixes_weak` (more than
-//! `init_fixes`) consecutive fixes must agree; once the offset is set they
-//! are not used. Under lighting the map was not built in, the first images
-//! that localize at all often have too few inliers for a fix.
+//! fewer inliers than a fix needs, which is more often wrong. Weak fixes help
+//! to set the first offset, and then `init_fixes_weak` (more than
+//! `init_fixes`) consecutive fixes must agree. Under lighting the map was not
+//! built in, the first images that localize at all often have too few
+//! inliers for a fix. Once the offset is set, weak fixes are not used by
+//! default; with `weak_gate_m` set, one that lies that close to where the
+//! offset puts the odometry pose is accepted, which keeps the offset
+//! following the odometry's drift where full fixes are rare. It never
+//! counts toward a reset.
 //!
 //! The offset is the mean over the accepted fixes of the last `window_s`
 //! seconds (circular mean for the yaw), which averages out localization noise
@@ -72,6 +76,13 @@ pub struct OdomCorrectionConfig {
     /// Accepted fixes older than this (relative to the newest) leave the
     /// averaging window.
     pub window_s: f64,
+    /// Once the offset is set, a weak fix within this distance of where the
+    /// offset puts the odometry pose (and within `weak_gate_yaw_deg`) is
+    /// accepted like a fix; 0, the default, leaves weak fixes unused then.
+    /// Unlike a fix's gate, it does not widen with travel.
+    pub weak_gate_m: f64,
+    /// Yaw gate, in degrees, for accepting a weak fix (`weak_gate_m`).
+    pub weak_gate_yaw_deg: f64,
 }
 
 impl Default for OdomCorrectionConfig {
@@ -86,6 +97,8 @@ impl Default for OdomCorrectionConfig {
             gate_yaw_deg: 3.0,
             gate_yaw_per_m_deg: 1.0,
             window_s: 5.0,
+            weak_gate_m: 0.0,
+            weak_gate_yaw_deg: 2.0,
         }
     }
 }
@@ -338,10 +351,20 @@ impl OdomCorrection {
             };
         };
 
+        let (position_residual, yaw_residual) = residuals(&offset, &fix);
         if weak {
+            if self.config.weak_gate_m > 0.0
+                && position_residual <= self.config.weak_gate_m
+                && yaw_residual <= self.config.weak_gate_yaw_deg
+            {
+                self.candidates.clear();
+                self.window.push_back(fix);
+                self.refit();
+                self.restart_travel(path_m);
+                return FixOutcome::Accepted;
+            }
             return FixOutcome::Unused;
         }
-        let (position_residual, yaw_residual) = residuals(&offset, &fix);
         let travel = match (path_m, self.path_at_accept_m) {
             (Some(now), Some(then)) => self.travel_since_accept_m.max(now - then),
             _ => self.travel_since_accept_m,
@@ -641,6 +664,28 @@ mod tests {
         assert_eq!(
             fix_at(&mut correction, 5, &truth(), Vector3::zeros()),
             FixOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn a_weak_gate_accepts_close_weak_fixes_after_the_first_offset() {
+        let mut correction = OdomCorrection::new(OdomCorrectionConfig {
+            weak_gate_m: 0.05,
+            ..OdomCorrectionConfig::default()
+        });
+        for index in 0..2 {
+            fix_at(&mut correction, index, &truth(), Vector3::zeros());
+        }
+        assert!(correction.is_set());
+        // 3 cm off: inside the weak gate, and it moves the offset.
+        let close = Vector3::new(0.03, 0.0, 0.0);
+        assert_eq!(weak_fix_at(&mut correction, 2, close), FixOutcome::Accepted);
+        let moved = correction.map_from_odom().unwrap().translation - truth().translation;
+        assert!((moved - close / 3.0).norm() < 1e-9, "{moved:?}");
+        // 8 cm off: inside a fix's gate, outside the weak one.
+        assert_eq!(
+            weak_fix_at(&mut correction, 3, Vector3::new(0.08, 0.0, 0.0)),
+            FixOutcome::Unused
         );
     }
 

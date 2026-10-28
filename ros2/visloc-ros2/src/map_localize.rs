@@ -244,8 +244,9 @@ impl Matching {
 pub struct Fix {
     /// The body (IMU) pose in the map frame, when accepted.
     pub map_from_body: Option<SE3>,
-    /// The body pose of a weak localization: map-wide, with
-    /// `weak_min_inliers` inliers or more but too few to be accepted.
+    /// The body pose of a weak localization: map-wide (or, with a weak gate
+    /// set, by projection), with `weak_min_inliers` inliers or more but too
+    /// few to be accepted.
     pub weak_map_from_body: Option<SE3>,
     /// The search of the final attempt; `None` when matching did not run.
     pub matching: Option<Matching>,
@@ -289,6 +290,9 @@ pub struct MapLocalizer {
     gates: BinaryMatchGates,
     projection_radius_px: Option<f64>,
     weak_min_inliers: Option<usize>,
+    /// Whether a projection-matched localization can be weak: only when the
+    /// correction uses weak fixes after it is set (`weak_gate_m`).
+    weak_projected: bool,
     match_threads: usize,
     pipeline: Pipeline,
 }
@@ -347,6 +351,7 @@ impl MapLocalizer {
             projection_radius_px: options.projection_radius_px,
             weak_min_inliers: Some(options.weak_min_inliers)
                 .filter(|&weak| weak < options.min_inliers),
+            weak_projected: options.correction.weak_gate_m > 0.0,
             match_threads: options.match_threads.max(1),
             pipeline: LocalizationPipeline::with_pose_estimator(
                 matcher,
@@ -468,17 +473,26 @@ impl MapLocalizer {
         });
         let mut fix = match projection {
             Some(fix) if fix.map_from_body.is_some() => fix,
-            _ => self.solve(
-                Matching::Global,
-                self.index.match_all(
-                    &features.keypoints,
-                    &features.descriptors,
-                    self.gates,
-                    self.match_threads,
-                ),
-                features,
-                camera_from_body,
-            ),
+            projection => {
+                let mut fix = self.solve(
+                    Matching::Global,
+                    self.index.match_all(
+                        &features.keypoints,
+                        &features.descriptors,
+                        self.gates,
+                        self.match_threads,
+                    ),
+                    features,
+                    camera_from_body,
+                );
+                // A weak localization by projection counts first.
+                if fix.map_from_body.is_none() {
+                    if let Some(weak) = projection.and_then(|p| p.weak_map_from_body) {
+                        fix.weak_map_from_body = Some(weak);
+                    }
+                }
+                fix
+            }
         };
         fix.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         fix
@@ -499,7 +513,7 @@ impl MapLocalizer {
             .flatten()
             .map(|pose| pose.camera_to_world().compose(camera_from_body));
         // Turned down only for too few inliers: a weak localization.
-        let weak_map_from_body = (matching == Matching::Global
+        let weak_map_from_body = ((matching == Matching::Global || self.weak_projected)
             && !result.success
             && result.failure_reason == Some(LocalizationFailureReason::QualityGateFailed)
             && self
@@ -1266,6 +1280,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("dir");
         let (camera, points) = write_saved_map(&dir, &imu_from_camera);
         let map = load_basalt_map(&dir).expect("loads");
+        let same_map = load_basalt_map(&dir).expect("loads");
         // A map built from equalized images says so; a bad entry is refused.
         let summary_path = dir.join("map.json");
         let raw_summary = fs::read_to_string(&summary_path).expect("map.json");
@@ -1345,6 +1360,20 @@ mod tests {
         let fix = localizer.localize_features(&features, Some(&wrong));
         assert_eq!(fix.matching, Some(Matching::Global));
         assert!(fix.map_from_body.is_some(), "{fix:?}");
+
+        // Above every image's inliers, a localization is only weak, by
+        // projection too when a weak gate is set.
+        let mut options = MapLocalizeOptions {
+            min_inliers: 1000,
+            ..MapLocalizeOptions::default()
+        };
+        options.correction.weak_gate_m = 0.05;
+        let strict = MapLocalizer::new(same_map, 0, &options).expect("camera 0");
+        assert!(strict.weak_projected && !localizer.weak_projected);
+        let fix = strict.localize_features(&features, Some(&prior));
+        assert!(fix.map_from_body.is_none(), "{fix:?}");
+        let weak = fix.weak_map_from_body.expect("weak");
+        assert!((weak.translation - map_from_body.translation).norm() < 1e-3);
 
         // A wrong-sized image is reported, not localized.
         let image = RawU16Image::new(64, 48, vec![0; 64 * 48]).expect("image");
