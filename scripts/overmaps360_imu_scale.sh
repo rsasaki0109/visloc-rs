@@ -7,8 +7,9 @@
 # The dataset (huggingface.co/datasets/OverTheReality/OverMaps360_50,
 # CC BY-NC 4.0) is gated: accept its terms on Hugging Face, then pass a read
 # token in HF_TOKEN. Per scene: download the perspective model's images.bin
-# (0.2-0.3 GB), insta360_imu.csv (about 70 MB) and the smartphone poses,
-# write WORK_DIR/res/<id>.json and WORK_DIR/log/<id>.txt, then delete the
+# (0.2-0.3 GB), insta360_imu.csv (about 70 MB), the smartphone poses and
+# the phone's GPS log (for a GPS reference scale), write
+# WORK_DIR/res/<id>.json and WORK_DIR/log/<id>.txt, then delete the
 # downloads. Scenes that already have a result are skipped. Without ids,
 # every scene in the dataset manifest. Ends with the summary over
 # WORK_DIR/res/*.json. Needs curl and python3 with numpy and scipy.
@@ -28,15 +29,17 @@ ids=("$@")
 for id in "${ids[@]}"; do
   [ -s "$W/res/$id.json" ] && continue
   row=$(grep "^$id," "$W/manifest.csv") || { echo "$id: not in the manifest"; continue; }
-  # Manifest columns: imu_path (3), perspective_sparse_path (9),
-  # smartphone_poses_path (12).
+  # Manifest columns: imu_path (3), location_path (4, the phone's GPS log),
+  # perspective_sparse_path (9), smartphone_poses_path (12).
   imu=$(cut -d, -f3 <<<"$row")
+  gps=$(cut -d, -f4 <<<"$row")
   sparse=$(cut -d, -f9 <<<"$row")
   poses=$(cut -d, -f12 <<<"$row")
   D=$W/data/$id
   mkdir -p "$D"
   if fetch "$sparse/0/images.bin" "$D/images.bin" && fetch "$imu" "$D/insta360_imu.csv" &&
     fetch "$poses" "$D/$(basename "$poses")"; then
+    [ -n "$gps" ] && { fetch "$gps" "$D/backgroundlocationData.txt" || rm -f "$D/backgroundlocationData.txt"; }
     python3 -I "$ROOT/scripts/insta360_imu_scale.py" scene "$D" "$W/res/$id.json" \
       >"$W/log/$id.txt" 2>&1 || echo "$id: failed, see $W/log/$id.txt"
     tail -2 "$W/log/$id.txt" | sed "s/^/${id:0:8} /"
