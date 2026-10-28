@@ -584,6 +584,7 @@ pub struct OdomCorrector {
     pending: VecDeque<(i64, SE3)>,
     max_gap_ns: i64,
     latest_odom: Option<(i64, SE3)>,
+    latest_fix_ns: Option<i64>,
     fresh_ns: i64,
     fresh_m: f64,
 }
@@ -596,6 +597,7 @@ impl OdomCorrector {
             pending: VecDeque::new(),
             max_gap_ns: (options.max_odom_gap_s * 1e9) as i64,
             latest_odom: None,
+            latest_fix_ns: None,
             fresh_ns: (options.projection_fresh_s * 1e9) as i64,
             fresh_m: options.projection_fresh_m,
         }
@@ -610,9 +612,15 @@ impl OdomCorrector {
         self.pending.len()
     }
 
+    /// Stamp of the newest localization added, applied or not.
+    pub const fn latest_fix_ns(&self) -> Option<i64> {
+        self.latest_fix_ns
+    }
+
     /// Queues an accepted localization and applies every queued fix whose
     /// odometry is known.
     pub fn add_fix(&mut self, stamp_ns: i64, map_from_body: SE3) -> Vec<FixEvent> {
+        self.latest_fix_ns = Some(self.latest_fix_ns.map_or(stamp_ns, |t| t.max(stamp_ns)));
         self.pending.push_back((stamp_ns, map_from_body));
         self.flush()
     }
@@ -702,26 +710,37 @@ impl OdomCorrector {
 /// Which received images to localize: every `every`-th once the odometry
 /// has a map pose, every `initial_every`-th before. No frame has a map pose
 /// until two agreeing fixes set the correction, so the first fixes are
-/// worth every image.
+/// worth every image. That holds within `initial_window_s` of the first
+/// image or of the latest localization; after a longer stretch without one
+/// the map likely does not cover the place, and every `every`-th image is
+/// tried until one localizes again.
 #[derive(Clone, Debug)]
 pub struct ImageCadence {
     every: u64,
     initial_every: u64,
+    initial_window_ns: i64,
+    first_ns: Option<i64>,
     received: u64,
 }
 
 impl ImageCadence {
-    pub fn new(every: u64, initial_every: u64) -> Self {
+    pub fn new(every: u64, initial_every: u64, initial_window_s: f64) -> Self {
         Self {
             every: every.max(1),
             initial_every: initial_every.max(1),
+            initial_window_ns: (initial_window_s.max(0.0) * 1e9) as i64,
+            first_ns: None,
             received: 0,
         }
     }
 
-    /// Counts a received image; whether to localize it.
-    pub fn take(&mut self, has_map_pose: bool) -> bool {
-        let every = if has_map_pose {
+    /// Counts a received image stamped `stamp_ns`; whether to localize it,
+    /// given whether the odometry has a map pose and the stamp of the
+    /// latest localization ([`OdomCorrector::latest_fix_ns`]).
+    pub fn take(&mut self, stamp_ns: i64, has_map_pose: bool, latest_fix_ns: Option<i64>) -> bool {
+        let first_ns = *self.first_ns.get_or_insert(stamp_ns);
+        let since = stamp_ns - latest_fix_ns.unwrap_or(first_ns);
+        let every = if has_map_pose || since > self.initial_window_ns {
             self.every
         } else {
             self.initial_every
@@ -982,15 +1001,37 @@ mod tests {
 
     #[test]
     fn every_image_is_localized_until_the_first_map_pose() {
-        let taken = |cadence: &mut ImageCadence, has_map_pose: bool, images: usize| {
-            (0..images).filter(|_| cadence.take(has_map_pose)).count()
+        const S: i64 = 1_000_000_000;
+        // Images at 10 Hz from `start_s`; how many of them are taken.
+        let taken = |cadence: &mut ImageCadence,
+                     start_s: f64,
+                     images: usize,
+                     has_map_pose: bool,
+                     latest_fix_ns: Option<i64>| {
+            (0..images)
+                .filter(|&i| {
+                    let stamp_ns = ((start_s + i as f64 * 0.1) * S as f64) as i64;
+                    cadence.take(stamp_ns, has_map_pose, latest_fix_ns)
+                })
+                .count()
         };
-        let mut cadence = ImageCadence::new(5, 1);
-        assert_eq!(taken(&mut cadence, false, 7), 7);
+        let mut cadence = ImageCadence::new(5, 1, 30.0);
+        assert_eq!(taken(&mut cadence, 0.0, 7, false, None), 7);
         // A map pose from the 8th image on: the 11th and 16th of 8..=20.
-        assert_eq!(taken(&mut cadence, true, 13), 2);
-        assert_eq!(taken(&mut ImageCadence::new(5, 5), false, 10), 2);
-        assert_eq!(taken(&mut ImageCadence::new(0, 0), true, 3), 3);
+        assert_eq!(taken(&mut cadence, 0.7, 13, true, None), 2);
+        // 30 s without a localization: every 5th; after one, every image.
+        let mut cadence = ImageCadence::new(5, 1, 30.0);
+        assert_eq!(taken(&mut cadence, 10.0, 301, false, None), 301);
+        assert_eq!(taken(&mut cadence, 40.1, 10, false, None), 2);
+        assert_eq!(taken(&mut cadence, 41.1, 10, false, Some(41 * S)), 10);
+        assert_eq!(
+            taken(&mut ImageCadence::new(5, 5, 30.0), 0.0, 10, false, None),
+            2
+        );
+        assert_eq!(
+            taken(&mut ImageCadence::new(0, 0, 30.0), 0.0, 3, true, None),
+            3
+        );
     }
 
     /// A saved map in the `--save-map` layout: one fisheye camera, a grid of
