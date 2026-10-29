@@ -1824,6 +1824,20 @@ steadies the heading where SIFT's wanders, as on the two R sequences. Where
 SIFT's heading already holds within 0.2°, ALIKED unsettles it, as on
 sequence_2_11.
 
+In low light the chain ends with its online windows, so ALIKED goes there too
+(`--features aliked`, after the same CLAHE and non-local means as SIFT;
+learned matching had not been tried in low light, see [Low light: features
+after denoising](#low-light-features-after-denoising)). It loses on both
+low-light training sequences, both chains on this machine from the same VIO:
+
+| Sequence | SIFT | ALIKED | Mean error, SIFT | ALIKED | Heading spread, SIFT | ALIKED |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_4_10 | **59.80** | 49.25 | **1.33 m** | 1.90 m | **1.10°** | 1.96° |
+| sequence_4_11 | **71.07** | 48.26 | **0.77 m** | 3.15 m | **1.11°** | 2.38° |
+
+As on sequence_1_20 by day, the online windows with ALIKED let the heading
+wander: per 60 s window it reaches +6.5° on sequence_4_10 and +4.4° on 4_11.
+
 ### Learned matches without the VIO's band
 
 The VIO's epipolar band lets a drifting VIO pick the matches ([Matching guided

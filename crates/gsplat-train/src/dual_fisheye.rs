@@ -7,9 +7,12 @@
 //! the lens's 200° image circle (ffmpeg's `hstack` of an X5 video's two
 //! streams; docs/insta360_lens.md). Directions are in the camera convention
 //! the rest of the crate uses: x right, y down, z forward (along the lens's
-//! axis).
+//! axis). [`extract_dual_fisheye_frames`] cuts such frames from the video
+//! with ffmpeg.
 
 use std::f64::consts::FRAC_1_SQRT_2;
+use std::path::Path;
+use std::process::Command;
 
 use nalgebra::{Matrix3, Vector3};
 use visloc_io::insv::InsvLens;
@@ -120,6 +123,99 @@ pub fn rig_face_rotations() -> [Matrix3<f64>; 10] {
     })
 }
 
+/// Cuts every `step`-th frame of a dual-fisheye video into `dir` with ffmpeg
+/// and ffprobe (on `PATH`): both lenses side by side, front lens on the
+/// left, as `NNNNNN.jpg` named by the frame's number in the video (the
+/// numbering `PhotoSfmConfig::imu` times from an `.insv`). The video has
+/// the two lenses as two streams (an X5's `.insv`) or side by side in one.
+/// The frames are scaled so that faces of `face_size` pixels see the
+/// lenses' resolution on their axes ([`natural_face_size`]; never
+/// enlarged). Returns how many frames `dir` then holds.
+pub fn extract_dual_fisheye_frames(
+    video: &Path,
+    dir: &Path,
+    step: u32,
+    lenses: &[InsvLens],
+    face_size: u32,
+) -> Result<usize, String> {
+    let run = |cmd: &mut Command| {
+        let name = cmd.get_program().to_string_lossy().into_owned();
+        cmd.output().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("{name} is not on PATH: install ffmpeg, or cut the frames yourself")
+            } else {
+                format!("{name}: {e}")
+            }
+        })
+    };
+    let probe = run(Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v"])
+        .args(["-show_entries", "stream=width,height", "-of", "csv=p=0"])
+        .arg(video))?;
+    if !probe.status.success() {
+        return Err(format!(
+            "ffprobe {}: {}",
+            video.display(),
+            String::from_utf8_lossy(&probe.stderr).trim()
+        ));
+    }
+    let streams: Vec<(u32, u32)> = String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (w, h) = l.trim().split_once(',')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .collect();
+    let (lens_size, stack) = match streams.as_slice() {
+        [(w0, h0), (w1, h1), ..] if w0 == h0 && (w0, h0) == (w1, h1) => (*h0, true),
+        [(w, h)] if *w == 2 * *h => (*h, false),
+        _ => {
+            return Err(format!(
+                "{}: video streams {streams:?}; expected two square lens streams or one with \
+                 the lenses side by side",
+                video.display()
+            ))
+        }
+    };
+    let natural = lenses
+        .iter()
+        .map(|l| natural_face_size(&FisheyeLens::from_insv(l, lens_size)))
+        .max()
+        .unwrap_or(lens_size)
+        .max(1);
+    let height = (face_size as u64 * lens_size as u64)
+        .div_ceil(natural as u64)
+        .min(lens_size as u64) as u32
+        & !1;
+    let select = format!("select='not(mod(n\\,{}))'", step.max(1));
+    let scale = format!("scale={}:{height}", 2 * height);
+    let filter = if stack {
+        format!("[0:v:0][0:v:1]hstack=inputs=2,{select},{scale}")
+    } else {
+        format!("[0:v:0]{select},{scale}")
+    };
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let out = run(Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(video)
+        .args(["-filter_complex", &filter])
+        .args(["-fps_mode", "passthrough", "-frame_pts", "1", "-q:v", "2"])
+        .arg(dir.join("%06d.jpg")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ffmpeg {}: {}",
+            video.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let frames = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+        .count();
+    Ok(frames)
+}
+
 /// The `size x size`, 90° pinhole view of the lens image `img` (`lens`'s
 /// pixels) through a face rotated by `rotation` (face frame to lens frame,
 /// as in [`lens_face_rotations`]): bilinear samples, black off the image.
@@ -207,6 +303,45 @@ mod tests {
         assert_eq!(lens.project(&Vector3::z()), Some((c, c)));
         // About 2,065 px faces match the axis's resolution at 3840 px.
         assert!((natural_face_size(&lens) as i64 - 2065).abs() < 5);
+    }
+
+    #[test]
+    fn extracts_side_by_side_frames_named_by_frame_number() {
+        // Needs ffmpeg; skipped without it.
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("dual_fisheye_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("two_lenses.mp4");
+        let made = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=30:duration=1"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=30:duration=1",
+            ])
+            .args(["-map", "0:v", "-map", "1:v"])
+            .arg(&video)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let frames = dir.join("frames");
+        let lenses = [x5_like(), x5_like()];
+        let n = extract_dual_fisheye_frames(&video, &frames, 10, &lenses, 4000).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&frames)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let first = image::open(frames.join("000000.jpg")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(names, ["000000.jpg", "000010.jpg", "000020.jpg"]);
+        // Two 64 px lenses side by side, not enlarged for the large faces.
+        assert_eq!((first.width(), first.height()), (128, 64));
     }
 
     #[test]

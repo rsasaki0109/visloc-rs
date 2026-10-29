@@ -33,15 +33,44 @@ All notable changes to `visloc-rs` will be documented here.
     the back lens's pose refined by the mapper. The video's IMU scales the
     result to metres.
   - The IMU frame search starts from the `.insv`'s own frame period.
-  - On 200 frames of an OverMaps360 walk (CPU, 23 min), all 2,000 faces
-    registered at 0.58 px.
-    - The refined back lens sits 3.22 cm behind the front one; the
-      calibration says 3.23 cm.
-    - The metric model is within 1.0% of the dataset's IMU scale, with a
-      15 cm median residual over 165 m.
+  - Without `--images`, `gsplat_photos --insv VID.insv --out run` cuts the
+    frames itself with ffmpeg (`--frame-step`, default 10;
+    `dual_fisheye::extract_dual_fisheye_frames`).
+  - On 200 frames each of five OverMaps360 walks (CPU, 13–30 min), SfM
+    registered 99.4–100% of the faces.
+    - Outdoors, the metric scale is within 4% of the dataset's IMU scale
+      over the same frames.
+    - Indoors (a mall), it is off by 12%, with a weak fit (|g| 9.57).
+    - These runs used 640 px faces. With 1024 px faces the mall's fit is
+      sound (|g| 9.80) and lands +1.4% over the same frames, while the
+      outdoor walks move by at most 0.7 points. Keep `--max-size` at 1024
+      or more.
+    - The `.insv` image-circle string is read after `p2_` or `n2_`.
 
 ### Fixed
 
+- **ROS 2 nodes: a missed `/tf_static` stalled them for good.** A RustDDS
+  reader sometimes never receives a transient-local writer's samples: a
+  probe with the nodes' `/tf_static` reader
+  (`ros2/visloc-ros2/examples/tf_static_probe.rs`), started 200 times next
+  to freshly started `static_transform_publisher`s, had nothing after 30 s
+  in 4 cases, and in one OpenLORIS-Scene replay `visloc_vio_node`
+  published no odometry. A second reader in the same node receives them.
+  `visloc_vio_node` (`base_frame`) and `visloc_map_localize_node`
+  (`extrinsics tf`) now subscribe again while a transform they need is
+  missing (`dds::StaticTfListener`): 5 s after the first subscription,
+  then with doubling waits, at most six times. With that, 300 of 300
+  probes had both transforms.
+- **`gsplat_photos --equirect-native` crashed writing its model.** Since
+  0.3.0 the sparse model lists each image's observations. With
+  `--equirect-native` the tracks observe the panoramas while the model
+  holds their cube faces, so the panorama observations were indexed as
+  faces, and every run panicked at the end. Each observation now goes to
+  the face nearest its ray, at the pixel where the ray crosses it. On the
+  synthetic room the faces' observations reproject at a median 0.09 px, as
+  with `--equirect`. The two end-to-end tests that cover this (run with
+  `--ignored`) misread the observation lines and failed too; they now also
+  check the observations' reprojection.
 - **Saving a map from a lens wider than the Double Sphere model failed.**
   The map export fits COLMAP's `OPENCV_FISHEYE` to each Double Sphere
   camera. It gave up when an image corner did not unproject, which happens
@@ -78,6 +107,79 @@ All notable changes to `visloc-rs` will be documented here.
   `/odom`, `/robot1/odom` with `-r __ns:=/robot1`).
 
 ### Added
+
+- **`visloc_wheel_calibration_node`: wheel odometry calibrated while
+  driving.** It fits where a robot's wheel odometry is measured relative to
+  `base_link`, `base_link`'s lean and the map's scale
+  (`visloc_localization::WheelCalibration`, the Rust port of
+  `scripts/calibrate_wheel_offset.py`), and publishes the wheel odometry as
+  `base_link`'s pose and `odom -> base_link`. The offset comes from
+  `visloc_vio_node`'s odometry once the robot has turned 180° and travelled
+  1 m; the lean and the scale from `visloc_map_localize_node`'s
+  localizations (the new `map_fix` topic), which carry the map's own gravity
+  and scale, and without a VIO the offset too, held near the saved one
+  where their turns do not show it. A VIO session's scale is reported but
+  not used: on OpenLORIS-Scene it was up to 3.6% off the map's. The node
+  refits every 5 s over the last 120 s, continuous wherever a new estimate
+  takes over, and a saved `calibration_file` applies from the start. On
+  OpenLORIS-Scene through ROS 2, the map's localizations alone take
+  office1-6's wheel odometry + map from 8.01 to 5.49 cm; office1-3's
+  offline calibration, saved, gives 4.92 cm and office1-7 4.66 cm (12.10 as
+  is), where its 24 localizations show only the lean. In the demo, the
+  map's lean and scale with office1-3's offset take office1-7 from 5.07 to
+  3.64 cm. `launch/map_localization.launch.py` starts it with
+  `wheel_odom_topic` (and `wheel_calibration_file` to keep the calibration
+  between launches).
+- **The ROS 2 nodes on a real robot's wheel odometry.**
+  `tools/euroc_to_rosbag2.py --odometry FILE.tum` adds a robot's wheel
+  odometry to the bag (`nav_msgs/Odometry` on `/wheel/odom`, `odom ->
+  base_link`). On OpenLORIS-Scene, played at real time into
+  `visloc_map_localize_node` (`extrinsics:=tf`, `weak_gate_m:=0.05`)
+  against the scale-corrected maps of other sessions, it gives 2.47 and 3.25
+  cm RMSE with the wheel odometry and 1.51 and 2.22 cm with
+  `visloc_vio_node`, within 0.4 cm of the offline demo.
+- **`calibrate_wheel_offset.py` levels the body frame.** Planar wheel
+  odometry keeps its body level, so a tilt in the extrinsic moves the IMU
+  sideways, by 1.6 cm per degree with OpenLORIS-Scene's camera 0.9 m above
+  `base_link`. The script now turns the body frame by the smallest rotation
+  that makes the VIO's mean up its z axis (`--keep-tilt` skips it): 1.9° on
+  OpenLORIS-Scene. Wheel odometry + map falls from 4.4–6.2 to 3.5–5.1 cm
+  RMSE on the maps as shipped (five of six runs better), and the wheel
+  odometry alone to 0.5–4.3 cm. It also normalizes the quaternion it reads.
+- **`scripts/scale_stereo_baseline.py`: the stereo VIO's scale from the
+  wheel odometry.** A stereo VIO takes its scale mostly from its camera
+  baseline. On OpenLORIS-Scene the T265 calibration shipped with the
+  dataset makes the SLAM 1–3.5% long, which is most of the maps' error.
+  `calibrate_wheel_offset.py` prints the SLAM's scale against the wheel
+  odometry (1.013 and 1.015 on the two mapping sessions; 1.017 and 1.010
+  against the ground truth), and the script scales the calibration's
+  baseline by the inverse of their mean (0.986). Maps rebuilt with it are
+  0.76 and 0.91 cm from the ground truth instead of 2.75 and 1.58 cm, and
+  VIO + map falls from 2.8–6.9 cm to 1.2–5.4 cm RMSE on three queries.
+  With `--weak-gate-cm 5` too, it is 1.1–2.4 cm.
+- **Close weak fixes after the first map pose, as an option.**
+  `OdomCorrectionConfig::weak_gate_m` (`basalt_euroc_localize_demo
+  --weak-gate-cm`, `visloc_map_localize_node` `weak_gate_m`; off by
+  default): once the correction is set, a weak fix within that distance
+  (and 2°) of the corrected odometry is used as a fix. Localizations
+  matched around the predicted projections can then be weak too. On
+  OpenLORIS-Scene office1-7, whose images rarely reach 30 inliers against
+  another session's map, VIO + map falls from 6.86 to 3.35 cm (map B) and
+  from 7.62 to 3.80 cm (merged map). On the eight EuRoC queries, where
+  full fixes are frequent, it changes the error by -0.6 to +0.5 cm, so it
+  stays off.
+- **`scripts/calibrate_wheel_offset.py`: where the wheel odometry is
+  measured.** `--odometry` and the node's `extrinsics tf` place the camera
+  relative to the odometry's body. If that body is not the point the wheel
+  odometry reports (the turning centre), every turn moves the computed
+  camera pose, which looks like drift. The script fits that planar offset
+  from a run with both the VIO and the wheel odometry, with no ground truth,
+  and prints the corrected `--imu-from-body`. On OpenLORIS-Scene the
+  dataset's `base_link` sits 5–8 cm from it. Calibrated from one
+  session's VIO, the wheel odometry + map error falls from 7.2–11.9 cm to
+  4.4–6.2 cm RMSE over five queries. On office1-7 at 15 inliers it reaches
+  2.27 cm, ahead of the VIO's 4.06 cm. Details in
+  `docs/openloris_map_localization.md`.
 
 - **Local contrast equalization for maps that must localize under other
   lighting.** `visloc_basalt::contrast::LocalContrast` equalizes an
@@ -394,6 +496,48 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **`gsplat_photos` frees the working images after SIFT, and `--insv`
+  writes its lens faces to disk as it cuts them.**
+  - Each SfM point takes its colour from its first keypoint, as before. The
+    colours under the keypoints are now kept at SIFT time, so the decoded
+    photos, cube faces or lens faces are freed after feature extraction
+    instead of being held through SfM.
+  - With `--insv` each frame is cut into its ten faces and written as it
+    is read, and SIFT reads the faces back (PNG, so the same pixels).
+  - The output is byte-identical for photos, `--mask-black`, `--equirect`,
+    `--equirect-native` and `--insv` (100 frames).
+  - On 4 cores and 15 GB, 100 frames with 1024 px lens faces peak at
+    4.5 GB instead of 7.9 GB. 200 frames, killed at 14 GB before, finish
+    at 8.6 GB.
+
+- **Weak fixes: localizations with 15–29 inliers can set the first map
+  pose.** With `--vio` or `--odometry`, `basalt_euroc_localize_demo` passes
+  a map-wide localization turned down only for too few inliers, but with at
+  least `--weak-min-inliers` (15), to `OdomCorrection::add_weak_fix`.
+  `visloc_map_localize_node` does the same (`weak_min_inliers`). Weak fixes
+  count only toward setting the first offset, which then needs three
+  agreeing fixes instead of two. Once it is set they are
+  `FixOutcome::Unused`. Replaying all eight EuRoC queries through the rule,
+  it never uses a fix more than 25 cm off. On OpenLORIS-Scene, office1-7,
+  whose images never reach 30 inliers against another session's map, gets
+  a map pose for 99.4% of its frames by default (6.86 cm RMSE). The
+  daylight office1-4 gets one against an equalized night map (33.4%,
+  2.62 cm), where before it needed `--min-inliers 15`. Rerun on all eight
+  EuRoC queries, MH_04 gets its first map pose 2.6 s sooner (76.1% of the
+  frames instead of 73.6%), V2_03 improves from 29.6 to 23.7 cm, and the
+  other six change by at most 0.1 cm.
+
+- **`OdomCorrection` measures travel along the odometry's path.** The gate
+  widens with the odometry's travel since the last accepted fix, which was
+  measured only between the odometry positions of consecutive fixes. After
+  a long gap that is one straight line, and a correct fix on EuRoC V2_03, 65
+  s after the previous one, was rejected. `OdomCorrection::observe_odometry`
+  now takes every odometry pose and keeps the path length by stamp, so it
+  also works when the odometry runs ahead of the localizations. The demo
+  and `visloc_map_localize_node` feed it every pose. Replayed on EuRoC
+  without weak fixes, it takes V2_03 from 29.1 to 24.6 cm and leaves the
+  other seven queries unchanged.
 
 - **Map localization tries every image until the odometry has a map
   pose.** No frame has one before two fixes agree, and with every 5th

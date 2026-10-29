@@ -138,16 +138,21 @@ term, validated on the 50 OverMaps360 walks
 
 **From an Insta360 video.** The `.insv` holds the frames, the lens
 calibration and the IMU, so it goes in directly (decoded for the X5;
-[insta360_lens.md](insta360_lens.md)):
+[insta360_lens.md](insta360_lens.md)). With ffmpeg on `PATH`, one command:
 
-1. Cut every 10th frame of both lens streams, side by side, named by their
-   number in the video:
-   `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`
-2. `gsplat_photos --images frames --out run --insv VID.insv`
+```text
+gsplat_photos --insv VID.insv --out run
+```
 
-The frame timing search starts from the video's frame period (from its
-trailer). Frames 10 apart are 0.33 s apart, well inside the alignment's
-1.2 s gap limit.
+- **Frames.** It cuts every `--frame-step`-th frame (default 10, 0.33 s at
+  29.97 fps) into `run/frames`, both lenses side by side and named by their
+  number in the video. The frames are scaled to the faces' resolution, and a
+  later run reuses them.
+- **Timing.** The frame timing search starts from the video's frame period,
+  from its trailer. Frames 10 apart are well inside the alignment's 1.2 s
+  gap limit.
+- **Manual cut.** To cut the frames yourself, pass them with `--images`:
+  `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`.
 
 The test run used OverMaps360's walk 0313afa5:
 
@@ -157,15 +162,68 @@ The test run used OverMaps360's walk 0313afa5:
 - **Settings.** `--imu-frame-period 0.333683`, because the trailer times the
   full-rate recording; `--max-size 640 --window 2 --cpu`.
 - **SfM.** All 2,000 faces registered, with 288,261 points at 0.58 px mean
-  reprojection error. It took 23 min on 4 CPU cores and peaked at 9.1 GB.
+  reprojection error. It took 23 min on 4 CPU cores and peaked at 9.1 GB,
+  with every frame and face in memory as they were then (now the faces go
+  to disk as they are cut).
 - **IMU.** It found the frame timing (offset 0.266 s, rotation residual
   0.07°) and gave 1.5927 m per SfM unit.
 - **Back lens.** The refined pose puts it 3.22 cm behind the front one; the
-  calibration says 3.23 cm.
+  calibration says 3.23 cm. On the other walks below it lands 2.1–6.8 cm
+  behind, so the offset is only weakly determined.
 - **Against the dataset.** Aligned to the dataset's own model over the 143
   frames both have, the run implies 1.0504 m per dataset unit. The dataset's
-  model gives 1.0401 over the whole walk (+1.0%). The median residual is
-  15 cm.
+  model gives 1.0401, over the same frames and over the whole walk (+1.0%).
+  The median residual is 15 cm.
+
+Four more walks, each run the same way on its first 400 frames, once
+with 640 px lens faces and once with 1024 px (`--max-size`):
+
+| Walk | Scene | Faces registered, 640 / 1024 px | \|g\|, 640 / 1024 px | Rotation residual | Scale vs the dataset's, 640 px | 1024 px |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| 0313afa5 | city street | 2000 / 2000 | 9.94 / 9.93 m/s² | 0.07° | +1.0% | +1.1% |
+| 0c05c38a | temple courtyard | 2000 / 2000 | 9.81 / 9.79 m/s² | 0.09° | −2.5% | −1.8% |
+| 3b81dbc3 | residential street | 1998 / 1998 | 9.77 / 9.77 m/s² | 0.14° | −3.8% | −3.7% |
+| 9d2fe9b1 | tropical park | 1987 / 1986 | 9.82 / 9.80 m/s² | 1.18° | +2.4% | +2.5% |
+| 5bb3848a | shopping mall, indoors | 2000 / 2000 | 9.57 / 9.80 m/s² | 0.07° | +12.2% | +1.4% |
+
+The scale columns compare two IMU estimates over the same frames: this
+run's, on its own model, against the one on the dataset's model. The
+rotation residual is the same at both face sizes.
+
+- **SfM.** Every walk reconstructs at both sizes.
+- **Outdoors.** One 133 s run of the IMU alignment lands within 4%. 1024 px
+  faces move each walk by at most 0.7 points, so outdoors the error is the
+  alignment's, not the faces'. The 50-walk study found about 2.5% error at
+  1 s frame spacing ([insta360_imu_scale.md](insta360_imu_scale.md));
+  longer clips give more runs to average.
+- **Indoors.** With 640 px faces the mall is off by 12%, and its fitted
+  gravity, 9.57 m/s², marks a weak fit. With 1024 px faces gravity is
+  9.80 m/s² and the scale is +1.4%.
+- **The park.** Its rotation residual (1.18°) and frame-timing drift (18.5
+  and 11 ms) are the same at both sizes, so the faces are not what limits
+  it.
+- **Face size.** In the mall, the first frames at the full 0.33 s spacing
+  compare as follows:
+
+  | Faces | Frames | IMU fit | Rotation residual, \|g\| | Scale vs the dataset's |
+  | --- | ---: | --- | --- | ---: |
+  | 640 px | 100 (33 s) | fails its gravity check | – | – |
+  | 1024 px | 100 (33 s) | passes | 0.023°, 9.73 m/s² (the dataset's model: 0.023°) | +5.5% |
+  | 1024 px | 200 (66 s) | passes | 0.026°, 9.61 m/s² | +5.3% |
+
+  Keep `--max-size` at its default, 1600, or at least 1024, for metric
+  output.
+- **Memory.** The lens faces are written to disk as each frame is cut, and
+  SIFT reads them back, so memory no longer grows with every frame's
+  image. On 4 CPU cores, the 100 frames with 1024 px faces peak at 4.5 GB
+  (7.9 GB with the faces in memory, same output), and the 200 frames at
+  8.6 GB in 46 min; with the faces in memory those were killed at 14 GB
+  on a 15 GB machine. The five 1024 px walks above peaked at 7.8–9.3 GB
+  in 35–47 min. The SIFT descriptors (5.7 GB for 2,000 faces) are most of
+  what is left.
+- **Warning signs.** Distrust the scale when |g| is more than about
+  0.2 m/s² from 9.81, or the rotation residual is more than a few tenths of
+  a degree (the park, where 13 faces did not register).
 
 **Through Insta360 Studio** (not tried here; Studio is the maker's desktop
 application). Studio's export drops the IMU, so pass the original `.insv`:

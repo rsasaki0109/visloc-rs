@@ -17,7 +17,7 @@ use nalgebra::Vector3;
 
 use visloc_basalt::RawU16Image;
 use visloc_ros2::dds::{
-    output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
+    output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
 };
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::msgs::{Image, Imu, Odometry, Path, PoseStamped, TfMessage};
@@ -268,17 +268,14 @@ fn run() -> Result<(), String> {
         None
     };
 
-    let transforms = Arc::new(Mutex::new(StaticTransforms::new()));
-    if base_frame.is_some() {
-        let transforms = Arc::clone(&transforms);
-        let tf_static_sub = ros.subscription::<TfMessage>(&tf_static_topic, static_tf_qos())?;
-        spawn_receiver("tf-static-rx", tf_static_sub, move |msg: TfMessage| {
-            transforms
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(&msg);
-        })?;
-    }
+    let mut tf_static = base_frame
+        .is_some()
+        .then(|| StaticTfListener::new(&mut ros, &tf_static_topic))
+        .transpose()?;
+    let transforms = tf_static.as_ref().map_or_else(
+        || Arc::new(Mutex::new(StaticTransforms::new())),
+        |listener| Arc::clone(listener.transforms()),
+    );
 
     for (side, subscription) in [(0usize, left_sub), (1usize, right_sub)] {
         let shared = Arc::clone(&shared);
@@ -431,6 +428,15 @@ fn run() -> Result<(), String> {
                                     frames.body_frame
                                 )
                             });
+                            if let Some(listener) = tf_static.as_mut() {
+                                match listener.missing(&mut ros) {
+                                    Ok(true) => {
+                                        eprintln!("visloc_vio_node: subscribed to /tf_static again")
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => eprintln!("visloc_vio_node: {error}"),
+                                }
+                            }
                             continue;
                         };
                         rebase(&estimate, &imu_from_base)

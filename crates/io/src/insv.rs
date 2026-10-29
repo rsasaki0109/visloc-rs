@@ -208,7 +208,8 @@ pub fn parse_trailer(trailer: &[u8], path: &Path) -> Result<InsvTelemetry, InsvE
 /// `2_` then per lens `xi_fx_fy_cx_cy_` three angles, three translations,
 /// `k1_k2_k3_p1_p2_` and the calibration image's width, height and a code
 /// (19 fields; then one more field), and the image circles' radii from the
-/// `p2_` string (per lens `radius_cx_cy_` three angles), matched by centre.
+/// string after a letter and `2_` (`p2_` or `n2_` on X5s, per lens
+/// `radius_cx_cy_` three angles), matched by centre.
 fn parse_lenses(text: &str) -> Vec<InsvLens> {
     const PER_LENS: usize = 19;
     let runs = || {
@@ -216,12 +217,20 @@ fn parse_lenses(text: &str) -> Vec<InsvLens> {
             .filter(|r| r.len() > 20)
     };
     let numbers = |s: &str| -> Option<Vec<f64>> { s.split('_').map(|t| t.parse().ok()).collect() };
+    // Every `<letter>2_` string's per-lens `radius cx cy`, in order; a lens
+    // takes the first whose centre is its own.
     let circles: Vec<[f64; 3]> = runs()
-        .find_map(|r| {
-            let v = numbers(&r[r.find("p2_")? + 3..])?;
-            (v.len() >= 12).then(|| [[v[0], v[1], v[2]], [v[6], v[7], v[8]]].to_vec())
+        .flat_map(|r| {
+            r.match_indices("2_").filter_map(move |(i, _)| {
+                if !r[..i].ends_with(|c: char| c.is_ascii_alphabetic()) {
+                    return None;
+                }
+                let v = numbers(&r[i + 2..])?;
+                (v.len() >= 12).then(|| [[v[0], v[1], v[2]], [v[6], v[7], v[8]]])
+            })
         })
-        .unwrap_or_default();
+        .flatten()
+        .collect();
     // The string may follow a printable length byte of the record's framing.
     let Some(v) = runs().find_map(|r| {
         r.match_indices("2_").find_map(|(i, _)| {
@@ -383,8 +392,10 @@ mod tests {
         assert_eq!(back.circle_radius, 2651.0);
         assert_eq!(back.translation, [-0.001, 0.0004, -0.032]);
         assert_eq!(back.angles, [-0.4, -0.2, 91.1]);
+        // Some files write `n2_` instead of `p2_`.
+        assert_eq!(parse_lenses(&text.replace("p2_", "n2_")), lenses);
         // Without the circles' string there is no lens image to map to.
-        let no_circles = text.replace("p2_", "q2_");
+        let no_circles = text.replace("p2_", "*2_");
         assert!(parse_lenses(&no_circles).is_empty());
     }
 
