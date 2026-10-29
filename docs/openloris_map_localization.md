@@ -34,6 +34,9 @@ by those localizations.
   ([below](#across-lighting-local-contrast-equalization)), the daylight
   session office1-4 gets a map pose for 33% of its frames at 2.6 cm. The
   dawn session office1-5 still gets none.
+- **Grainy images:** blurring before ORB (`--smooth-features 1.5`)
+  localizes up to ten times as many images across sessions at about the
+  same error ([below](#grainy-images-blur-before-orb)).
 - **A long run:** over the corridor's 284 s and 232 m, the wheels'
   heading drifts 38° in two minutes. Once each few seconds of the wheel
   calibration's fit get their own heading, its offset stays at
@@ -388,6 +391,54 @@ were measured before weak fixes:
   `basalt_map_merge` refuses to merge an equalized map with a raw one,
   whose descriptors would not match.
 
+## Grainy images: blur before ORB
+
+On the corridor ([below](#over-a-long-run-corridor)) few images localize
+across sessions, and not because of the lighting. Within 1 m of
+corridor1-5's path and facing within 30° of it, 6.3% of corridor1-1's 898
+tries localize; corridor1-5's own images, against its map, 33.5%. Two
+near-identical views from the two sessions (6–9 cm and under 5° apart,
+equally bright) share 22 geometrically consistent ORB matches per pair.
+The T265's images are grainy, and ORB's descriptor compares single
+pixels: noise flips enough of those comparisons that the same corner's
+descriptors fall too far apart. OpenCV's ORB blurs before its descriptor
+for this reason; the Basalt frontend this repository ports does not.
+
+`basalt_euroc_online_slam_demo --smooth-features SIGMA` blurs each keyframe
+image (after any equalization) before ORB detection and description.
+`map.json` records it, and `basalt_euroc_localize_demo` and
+`visloc_map_localize_node` blur their images the same way. At sigma 1.5
+the pairs share 38 consistent matches:
+
+| corridor1-1 → corridor1-5 | Raw map | Blurred map (1.5) |
+|---|---|---|
+| Map landmarks | 7,036 | 9,620 |
+| corridor1-5's own images that localize (every 5th) | 33.5% | 52.1% |
+| corridor1-1, VIO + map: localizations; RMSE against the map around it | 57; 1.26 m | 75; 1.02 m |
+| ... wheel odometry with the gyro's heading + map | 58; 0.70 m | 76; 0.67 m |
+| Time per image (median, ORB included) | 43.5 ms | 54.1 ms |
+
+- **The localizations still come at the same two places**, more of them.
+  Elsewhere the corridor yields too few matches either way (a median of
+  14 with the blur).
+- **No other session fills the quarter of the path the map misses.**
+  corridor1-3 covers most of it, but none of its images (every 5th, 421)
+  localizes in corridor1-5's map, so `basalt_map_merge` cannot register it.
+- **Local contrast equalization does not help here:** 5,138 landmarks,
+  32% of corridor1-5's own images, 57 localizations of corridor1-1.
+
+In the office it localizes more images at about the same error (VIO +
+map, `--localize-every 5`, the maps as shipped and rebuilt with the blur):
+
+| Query → map | Raw map: RMSE / max, localizations | Blurred map |
+|---|---|---|
+| office1-3 → A | 2.83 / 3.7 cm, 34 | 2.97 / 3.8 cm, 43 |
+| office1-6 → A | 3.08 / 4.3 cm, 130 | 3.26 / 4.5 cm, 180 |
+| office1-7 → B | 6.86 / 13.7 cm, 5 | 6.61 / 13.2 cm, 52 |
+
+On EuRoC: [basalt_map_localization.md](basalt_map_localization.md#blurring-before-orb).
+It stays off by default.
+
 ## On ROS 2
 
 The same runs, through the nodes instead of the demo: each session as a
@@ -510,12 +561,12 @@ truth jumps by up to 0.7 m in places.
 
 - **Few images localize across these sessions.** 57 of the 2,426 images
   corridor1-1 tries localize, at two places (66–68 s and 206–214 s). Each
-  is 3.0 cm RMSE from the map around it. Half of corridor1-1's path lies
-  outside corridor1-5's, up to 22 m from it. Between those two places the
-  VIO + map drifts up to 2.8 m (49 cm at the median). The wheel odometry
-  gets 12 localizations and drifts 3 m. This run therefore does not
-  measure the wheel odometry + map. It measures whether the calibration
-  keeps up.
+  is 3.0 cm RMSE from the map around it. A quarter of corridor1-1's path
+  lies more than 1 m from corridor1-5's, up to 22 m. Between those two
+  places the VIO + map drifts up to 2.8 m (49 cm at the median). The wheel
+  odometry gets 12 localizations and drifts 3 m. This run therefore does
+  not measure the wheel odometry + map. It measures whether the
+  calibration keeps up.
 - **The wheels slip in turns.** Their heading drifts 15° off the VIO's in
   one 350° turn in place, and 38° after 120 s. The VIO stays within 1.3–5°
   of the ground truth.
@@ -547,6 +598,52 @@ estimate every 5 s:
   replay, office1-6's and office1-7's wheel odometry + map in the demo
   stays at 5.11 cm and goes from 11.70 to 11.69 cm, with the VIO and the
   localizations.
+
+### The wheels' heading from a gyro
+
+The wheels' travel holds up over the corridor run: it is 1.1% short of the
+ground truth. Their heading does not. The wheels slip in turns in place,
+and their heading drifts 44.5° from the ground truth over corridor1-1's
+272 s, 15° of it in its first 350° turn. Between two localizations a
+robot's pose rests on that odometry, and on the corridor localizations are
+minutes apart.
+
+`visloc_localization::GyroWheelOdometry` keeps the wheels' travel and turns
+it by the heading a gyro integrates about the vertical. The accelerometer
+gives the vertical, so the IMU may sit anywhere on the robot in any
+orientation; here it is the T265's. Where the wheels stand still, the
+heading holds, and the gyro's rate about the vertical is taken as its bias
+(corridor1-1: −2.7°/min, from its first second).
+`visloc_wheel_calibration_node` uses it with an `imu` topic, and
+`wheel_calibration_replay` with `--imu`.
+
+Odometry alone on corridor1-1, from every second of the run: how far off
+its end point is after 10, 30 and 60 s, with the heading aligned at the
+start. The ground truth's own heading is 2.3° off its direction of travel,
+and is corrected for that.
+
+| After | Wheels: median / p90 / max | Wheels with the gyro's heading |
+|---|---|---|
+| 10 s | 0.22 / 0.41 / 0.71 m | 0.15 / 0.29 / 0.52 m |
+| 30 s | 0.82 / 3.1 / 4.7 m | 0.37 / 0.53 / 0.76 m |
+| 60 s | 2.7 / 6.8 / 15.9 m | 0.81 / 1.06 / 1.37 m |
+| Heading over the whole run | −44.5° … 3.2° | −5.6° … 2.7° |
+
+- **The map finds the robot again.** In the demo, wheel odometry + map on
+  corridor1-1 (calibrated from the localizations alone, through the
+  replay) gets 58 localizations instead of 12: with the heading held, the
+  prediction still points the projection search at the right landmarks
+  140 s after the last localization. Scored against the map around each
+  pose, its RMSE falls from 3.1 m (median 2.9 m, max 8.5 m) to 0.70 m
+  (median 0.59 m, max 2.1 m). The VIO + map gets 1.27 m: its own drift
+  over the last 70 s, with no localization, reaches 2.7 m.
+- **What remains is mostly the wheels' scale.** 60 s of driving is about
+  50 m, and 1.1% of it is 0.55 m.
+- **The short office sessions gain too.** Through the replay (VIO and
+  localizations into the calibration, then the demo), office1-6's wheel
+  odometry + map goes from 5.11 to 4.79 cm and office1-7's from 11.69 to
+  10.60 cm; with the localizations alone, from 5.11 to 4.79 cm and from
+  11.96 to 10.78 cm.
 
 ## Reproduce
 
@@ -620,10 +717,13 @@ visloc_map_localize_node --map runs/o12_map_scaled --ros-args -p extrinsics:=tf 
   -p weak_gate_m:=0.05 -r image:=/cam0/image_raw -r odom:=/wheel/odom &
 ros2 bag play o17_bag --delay 3
 
-# The corridor: corridor1-5's map, corridor1-1 the query (whole .7z files,
-# 6.9 and 13.9 GB), each converted and run as above
+# The corridor: corridor1-5's map, corridor1-1 the query. corridor1-1.7z
+# (13.9 GB) is a file of its own; corridor1-5.7z (6.9 GB) is a member of
+# corridor1-2_5-package.tar, bytes 12802381312 .. +6892693271
 curl -L -o corridor1-1.7z $U/corridor1-1.7z
+curl -L -r 12802381312-19695074582 -o corridor1-5.7z $U/corridor1-2_5-package.tar
 python3 scripts/openloris_to_euroc.py --sequence corridor1-1.7z --out data/corridor1-1
+python3 scripts/openloris_to_euroc.py --sequence corridor1-5.7z --out data/corridor1-5
 # ... runs/c15_slam and runs/c15_map from corridor1-5, runs/c11_vio as the
 # VIO query above. Then the calibration node's fit, replayed (--imu-from-body:
 # the inverse of T_base_imu in data/corridor1-1/extrinsics.json):

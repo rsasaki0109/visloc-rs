@@ -156,6 +156,16 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
+        if other.feature_smoothing != merged.feature_smoothing {
+            return Err(format!(
+                "{}: built with {:?} blur before ORB, the base map with {:?}; \
+                 build both the same way",
+                dir.display(),
+                other.feature_smoothing,
+                merged.feature_smoothing
+            )
+            .into());
+        }
         let started = Instant::now();
         let registration = register_map(
             &merged.map,

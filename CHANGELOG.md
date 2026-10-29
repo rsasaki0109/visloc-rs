@@ -6,6 +6,37 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Blur before ORB (opt-in).** ORB's descriptor compares single pixels,
+  and on OpenLORIS-Scene's grainy T265 images noise flips its bits: two
+  near-identical views from two corridor sessions shared 22 consistent
+  matches. `basalt_euroc_online_slam_demo --smooth-features SIGMA` blurs
+  each keyframe image before ORB extraction
+  (`visloc_basalt::smoothing::GaussianSmoothing`), `map.json` records it
+  (`feature_smoothing_sigma`), and `basalt_euroc_localize_demo` and
+  `visloc_map_localize_node` blur their images the same way;
+  `basalt_map_merge` refuses maps built differently. At sigma 1.5 the pairs
+  share 38 matches, corridor1-5's own images localize 52% of the time
+  instead of 33.5%, and corridor1-1 localizes 75 times in its map instead
+  of 57 (VIO + map 1.26 → 1.02 m against the map around it). Elsewhere more
+  images localize at about the same error: office1-7 52 instead of 5 (6.86
+  → 6.61 cm), V2_03 36 instead of 5 (29.3 → 28.8 cm), MH_02 1.97 → 2.03 cm.
+  About 10 ms more per image. Off by default.
+
+- **Wheel odometry with its heading from a gyro.** Wheels slip in turns in
+  place: on OpenLORIS-Scene's corridor (corridor1-1, 272 s) the wheel
+  odometry's heading drifts 44.5° from the ground truth.
+  `visloc_localization::GyroWheelOdometry` keeps the wheels' travel and
+  turns it by the heading a gyro integrates about the vertical, which the
+  accelerometer gives (any IMU, mounted any way); at a standstill the
+  heading holds and the gyro's rate is its bias. The heading then stays
+  within 5.6°, and 60 s after a known pose the odometry is at most 1.4 m
+  off instead of 15.9 m. Wheel odometry + map on corridor1-1 localizes 58
+  times instead of 12 and its RMSE falls from 3.1 to 0.70 m; office1-6
+  and office1-7 go from 5.11 to 4.79 cm and from 11.69 to 10.60 cm.
+  `visloc_wheel_calibration_node` uses it with an `imu` topic
+  (`gyro_heading`, on by default), `launch/map_localization.launch.py`
+  passes `imu_topic` to it, and `wheel_calibration_replay` takes `--imu`.
+
 - **Extra descriptors per landmark (opt-in).**
   `basalt_euroc_online_slam_demo --extra-descriptors` keeps, besides each
   landmark's medoid descriptor, up to three of its views' descriptors,

@@ -112,6 +112,7 @@ use visloc_basalt::mapper::{
     orb_descriptor_to_f32,
 };
 use visloc_basalt::pyramid::RawU16Image;
+use visloc_basalt::smoothing::GaussianSmoothing;
 use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
@@ -432,15 +433,18 @@ fn pipeline(args: &Args) -> Pipeline {
 }
 
 /// The mapper keyframe frontend, with descriptors unpacked like the map's,
-/// on the image equalized like the map's keyframes if they were.
+/// on the image equalized and blurred like the map's keyframes if they were.
 fn query_image(
     image: &RawU16Image,
     camera: &Camera,
     max_points: usize,
     local_contrast: Option<&LocalContrast>,
+    feature_smoothing: Option<&GaussianSmoothing>,
 ) -> Result<QueryImage, Box<dyn std::error::Error>> {
     let equalized = local_contrast.map(|local_contrast| local_contrast.apply(image));
     let image = equalized.as_ref().unwrap_or(image);
+    let smoothed = feature_smoothing.map(|feature_smoothing| feature_smoothing.apply(image));
+    let image = smoothed.as_ref().unwrap_or(image);
     let corners = detect_keypoints_mapping(image, max_points);
     let angles = compute_angles(image, &corners, true);
     let descriptors = compute_descriptors(image, &corners, &angles)?;
@@ -557,6 +561,10 @@ impl Localizer {
                     c.tiles, c.clip_limit
                 ))
                 .unwrap_or_default()
+                + &map
+                    .feature_smoothing
+                    .map(|s| format!(", blurred (sigma {})", s.sigma))
+                    .unwrap_or_default()
         );
         let retrieval = args.retrieval_keyframes.map(|top_k| {
             (
@@ -602,6 +610,7 @@ impl Localizer {
             &self.camera,
             self.max_points,
             self.map.local_contrast.as_ref(),
+            self.map.feature_smoothing.as_ref(),
         )?;
         let packed = self.index.pack_query(&query.descriptors);
         let projected_raw =
@@ -1511,9 +1520,10 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&map_dir);
-        map_files::save(&map_dir, &export, &calibration, 800, None, true).expect("save");
+        map_files::save(&map_dir, &export, &calibration, 800, None, None, true).expect("save");
         let saved = map_files::load(&map_dir).expect("load");
         assert_eq!(saved.local_contrast, None);
+        assert_eq!(saved.feature_smoothing, None);
         // The extra descriptors round-trip; a map saved without them has none.
         assert_eq!(saved.extra_descriptors, export.extra_descriptors);
         let equalized = LocalContrast {
@@ -1526,11 +1536,16 @@ mod tests {
             &calibration,
             800,
             Some(&equalized),
+            Some(&GaussianSmoothing { sigma: 1.5 }),
             false,
         )
         .expect("save");
         let resaved = map_files::load(&map_dir).expect("load");
         assert_eq!(resaved.local_contrast, Some(equalized));
+        assert_eq!(
+            resaved.feature_smoothing,
+            Some(GaussianSmoothing { sigma: 1.5 })
+        );
         assert!(resaved.extra_descriptors.is_empty());
         fs::remove_dir_all(&map_dir).expect("cleanup");
         assert_eq!(saved.map.landmarks.len(), points.len());

@@ -822,6 +822,27 @@ instead of 8), but its VIO + map error grows: with six fixes over the
 flight, which ones arrive decides how far the VIO carries the pose. It
 stays off by default.
 
+### Blurring before ORB
+
+`basalt_euroc_online_slam_demo --smooth-features SIGMA` blurs each keyframe
+image before ORB extraction, and localization does the same to every query
+image (`map.json` records it). ORB's descriptor compares single pixels, so
+on grainy images noise flips its bits; it was made for OpenLORIS-Scene's
+T265 images
+([grainy images](openloris_map_localization.md#grainy-images-blur-before-orb)).
+On EuRoC, with the MH_01 and V2_01 maps rebuilt with it (sigma 1.5; 17,760
+and 8,649 landmarks instead of 15,495 and 8,251), VIO + map,
+`--localize-every 5`:
+
+| Query → map | Raw map: RMSE / max, fixes, ms per image | Blurred map |
+|---|---|---|
+| MH_02 → MH_01 | 1.97 / 5.3 cm, 599, 30 ms | 2.03 / 5.8 cm, 607, 35 ms |
+| V2_02 → V2_01 | 3.52 / 12.1 cm, 268, 28 ms | 3.07 / 10.5 cm, 353, 37 ms |
+| V2_03 → V2_01 | 29.3 / 69.9 cm, 5, 25 ms | 28.8 / 89.9 cm, 36, 35 ms |
+
+More images localize, most in V2_03 (36 instead of 5), at about the same
+error, for 5–9 ms more per image. It stays off by default.
+
 ## Reproduce
 
 ```bash

@@ -16,6 +16,7 @@ mod keyframe_retrieval;
 mod map_merge;
 mod odom_correction;
 mod wheel_calibration;
+mod wheel_gyro;
 
 use std::collections::HashSet;
 
@@ -44,6 +45,7 @@ pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
 pub use wheel_calibration::{
     CalibrationSource, WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate,
 };
+pub use wheel_gyro::{GyroWheelConfig, GyroWheelOdometry};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {
