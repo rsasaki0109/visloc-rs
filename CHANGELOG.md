@@ -23,9 +23,19 @@ All notable changes to `visloc-rs` will be documented here.
   - `CudaTrainer` (example `gsplat_train_cuda`) runs the wgpu trainer's
     brush-strategy loop.
   - On south-building (1024x768, 112 train / 16 eval views) it trains 30k
-    steps in 978 s on an 8 GB laptop GPU, ending at 1.35M gaussians and
-    22.99 dB held-out PSNR (23.30 dB at 15k). The README's wgpu run reached
-    22.77 dB with a different SfM and the depth-normal loss.
+    steps in 691 s on an 8 GB laptop GPU, ending at 1.41M gaussians and
+    23.22 dB held-out PSNR. The README's wgpu run reached 22.77 dB with a
+    different SfM and the depth-normal loss.
+  - Rasterizer optimizations cut a training step from 30.9 to 21 GPU ms;
+    before them the run took 978 s.
+    - Sub-tile masks: 8x4 sub-tiles per warp, 8 bits in the sorted value.
+    - `project_bwd` skips gaussians that blended into nothing.
+    - Gradients go to global memory with native float reductions; on this
+      GPU the shared-memory float atomic was a CAS loop.
+    - Three dense runs spread over 22.71–23.22 dB.
+  - `--sparse-sh-adam` (opt-in) updates SH only for blended gaussians,
+    halving the optimizer (18 ms per step). In training it saved 5% at
+    22.87 dB.
   - See [docs/gsplat_cuda.md](docs/gsplat_cuda.md).
 - **`visloc_gsplat_train::config`.** `TrainConfig` moved here from the
   wgpu-only `trainer` module, together with the image packing, brush's

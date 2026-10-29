@@ -6,7 +6,8 @@
 //! VISLOC_GSPLAT_CUDA_LIB=/tmp/gsplat_cuda/libvisloc_gsplat_cuda.so \
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
-//!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile]
+//!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
+//!   [--sparse-sh-adam]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every 8th view (the brush
@@ -33,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = TrainConfig::brush_preset();
     let mut eval_every = 5000usize;
     let mut profile = false;
+    let mut sparse_sh_adam = false;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -50,6 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // A fixed population: no refine.
             "--no-densify" => cfg.brush_refine = None,
             "--profile" => profile = true,
+            // SH Adam only on the gaussians each step blends.
+            "--sparse-sh-adam" => sparse_sh_adam = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -78,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )??;
     let t0 = Instant::now();
     let mut trainer = CudaTrainer::new(gs, &dataset, &init, cfg.clone())?;
+    trainer.set_sparse_sh_adam(sparse_sh_adam);
     println!(
         "setup {:.1}s, scene extent {:.3}",
         t0.elapsed().as_secs_f64(),

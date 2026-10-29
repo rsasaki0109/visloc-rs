@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 2).
+  version (currently 3).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -28,7 +28,7 @@ The packaging follows the DPVO CUDA kernels:
 |---|---|
 | Rasterizer forward (projection, SH colour, tile binning, sort, compositing) | Done |
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
-| Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise | Done |
+| Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
 | Inria densification rule, per-image appearance, depth-normal loss | Not supported (the trainer refuses these configurations) |
 | Geometry channels (normal, depth) for the normal loss and the mesh | Not started |
@@ -101,7 +101,7 @@ magnitude. The tolerances are 2e-3 (image, screen gradients) and 3e-3
 | Loss gradient against the CPU L1 and `metrics::ssim_with_grad` (weight 0.2) | 4.5e-5 of its largest value; L1 alone 2.0e-8 |
 | Masked pixels (ground-truth alpha below 128) | Exactly zero gradient |
 | Refine scatter (prune, keep, clone, brush split) | Row order, split means symmetric about the parent, scales / sqrt 2, opacity 1 - sqrt(1 - a), statistics reset |
-| 300 steps on a scene rendered from known gaussians, colours and opacities perturbed | Mean L1 0.0175 → 0.0009 |
+| 300 steps on a scene rendered from known gaussians, colours and opacities perturbed, dense and sparse SH Adam | Mean L1 0.0175 → 0.0009 in both; a gaussian behind every camera keeps its SH bit for bit |
 
 ## Training on south-building
 
@@ -114,7 +114,7 @@ The dataset is south-building's 128 raw JPGs through `gsplat_photos
 
 Then `gsplat_train_cuda --steps 30000 --eval-every 5000 --max-gaussians
 2500000`, with brush's preset, every 8th view held out (112 train / 16
-eval), 1024x768:
+eval), 1024x768. The first run, on the unoptimized rasterizer:
 
 | Step | Eval PSNR | Eval SSIM | Gaussians | Training time (evaluations left out) |
 |---|---|---|---|---|
@@ -126,85 +126,143 @@ eval), 1024x768:
 | 30,000 | 22.99 | 0.815 | 1.35M | **978 s** |
 
 - **Peak and overfitting.** Eval PSNR peaks when growth stops (15k) and
-  then drifts down 0.3 dB while the training L1 keeps falling
-  (0.033 → 0.026), so the model overfits the 112 views.
+  then drifts down while the training L1 keeps falling (0.033 → 0.026), so
+  the model overfits the 112 views.
 - **Against the wgpu run.** The README's wgpu run of the same photos
   reached 22.77 dB at 30k. That run used GPU SIFT for the SfM and
   `--normal-weight 0.005`, which the photos page puts at about -0.2 dB, so
   the two runs agree within their differences.
-- **Speed.** 978 s is 32.6 ms per step on average. The breakdown for steps
-  29,001 to 30,000, with 1.35M gaussians, in GPU ms per step:
+- **Where the time went.** At 1.35M gaussians a step took 28.9 GPU ms. The
+  largest stages were raster_bwd (9.6 ms), the optimizer (8.7 ms) and
+  raster (3.8 ms), which the next section works on.
+
+## Optimizations
+
+Each change was checked against the oracle and training tests and timed
+with `gsplat_cuda_bench --data`. That bench runs training steps with zero
+learning rates on the first run's trained scene (1.35M gaussians), from all
+128 cameras of the dataset. These are the kernels and gradients of
+training, and back-to-back runs agree to a few percent. The figures are GPU
+ms per step, the median over 128 steps, then the range over 3 or 4 bench
+runs:
+
+| Change | raster | raster_bwd | project_bwd | optimizer | Total |
+|---|---|---|---|---|---|
+| Baseline (rasterizer of the first run) | 4.3–4.9 | 11.0–11.8 | 2.8–2.9 | 8.1 | 30.3–31.6 |
+| Sub-tile masks, `project_bwd` gating | 2.6–2.8 | 7.9–8.7 | 1.1–1.2 | 6.7 | 22.7–23.7 |
+| Gradients added to global memory directly | 2.4–2.7 | 6.5–7.3 | 1.05–1.07 | 6.7 | 20.7–21.3 |
+| `--sparse-sh-adam` (opt-in) | 2.5–2.7 | 6.8–7.2 | 1.09–1.16 | 3.4–3.5 | 17.8–18.5 |
+
+- **Sub-tile masks.** The duplicate pass records, for each (tile, splat)
+  entry, which 8x4 sub-tiles of the 16x16 tile the footprint reaches: 8
+  bits in the top byte of the sorted value, so the sort carries them.
+  - **Threads.** Each warp of a tile block covers one 8x4 sub-tile,
+    instead of two 16-pixel rows. Forward and backward skip the splats
+    whose bit for their warp is clear, without evaluating them.
+  - **Cost.** The bits come from the footprint's columns over 4-row bands.
+    Each tile row's bands are computed once, which keeps duplicate at
+    0.8 ms. Computed per tile, it took 4.8 ms.
+  - **Limit.** Gaussian ids are limited to 24 bits (16.7M). `set_scene` and
+    refine refuse more.
+  - **Rejected first try.** A forward pass that voted per warp for the
+    contributor mask made raster 37% slower and was dropped.
+- **project_bwd gating.** Gaussians that blended into no pixel this frame
+  (all screen gradients zero) are skipped. Their outputs are zero anyway.
+- **Gradients added directly.** A float `atomicAdd` on shared memory
+  compiles to a compare-and-swap loop on this GPU (`ATOMS.CAST.SPIN` in the
+  SASS). The global one is a native reduction (`REDG.E.ADD.F32`). Each warp
+  now adds its butterfly-reduced sums straight to the gaussian's record,
+  with no shared accumulator and no flush.
+- **Sparse SH Adam (opt-in, `--sparse-sh-adam`).** The SH group, 48 of the
+  59 floats per gaussian, is updated only for the gaussians blended this
+  step. Their SH gradient rows need no zeroing either.
+  - **What stays dense.** The transform and opacity groups stay dense, so
+    brush's aux losses still fade the gaussians no view sees.
+  - **First try.** Using "projected" instead of "blended" as the criterion
+    saved only 1.6 ms of the optimizer and cost 0.8 ms in `project_bwd`.
+
+The forward image is bit-identical through all of these. The gradients
+change only in summation order.
+
+South-building trained again with the optimized kernels:
+
+| Run | Adam | PSNR at 15k | PSNR at 30k | Gaussians | Training time |
+|---|---|---|---|---|---|
+| First run (baseline kernels) | dense | 23.30 | 22.99 | 1.35M | 978 s |
+| Sub-tile masks, shared-memory accumulation | dense | 23.04 | 22.71 | 1.33M | 674 s |
+| Final kernels | dense | **23.32** | **23.22** | 1.41M | **691 s** |
+| Final kernels | sparse SH | 23.18 | 22.87 | 1.41M | 659 s |
+
+- **Run-to-run spread.** Float atomics make every run diverge, and the
+  three dense runs end 0.5 dB apart (22.71–23.22 dB). The final kernels
+  train 29% faster than the first run without losing quality.
+- **Sparse SH Adam.** It falls inside that spread at 0.13–0.35 dB below the
+  dense run of the same kernels. In wall-clock time it saved only 5%
+  (659 s against 691 s), against 18% in the bench, because GPU clocks vary
+  between runs on this laptop. It stays opt-in.
+- **Final breakdown.** At steps 29,001 to 30,000 of the final dense run
+  (1.41M gaussians), a step takes 23.0 GPU ms:
 
 | Stage | ms/step |
 |---|---|
-| project | 1.03 |
-| scan | 0.21 |
-| duplicate | 0.61 |
-| sort | 1.53 |
-| ranges | 0.11 |
-| raster | 3.77 |
-| loss (L1 + D-SSIM) | 0.83 |
-| raster_bwd | 9.64 |
-| project_bwd | 2.45 |
-| optimizer (statistics, Adam on every group, mean noise) | 8.69 |
-| **total** | **28.9** |
+| project | 1.05 |
+| scan | 0.26 |
+| duplicate | 0.79 |
+| sort | 1.47 |
+| ranges | 0.07 |
+| raster | 2.59 |
+| loss | 0.73 |
+| raster_bwd | 6.85 |
+| project_bwd | 1.13 |
+| optimizer | 8.02 |
 
-The two largest stages are the next targets:
+## Rasterizer timing on synthetic views
 
-- **raster_bwd.** The write-up's steps 4 to 6 address it.
-- **The optimizer.** It is a dense Adam over all 1.35M x 59 parameters, as
-  in the wgpu trainer and Inria's code. It is bandwidth-bound, and the 45
-  SH-rest coefficients per gaussian dominate it. A sparse Adam that skips
-  gaussians no view saw (as in Taming 3DGS) would cut most of it, but it
-  changes the training, so it needs its own PSNR check.
+Without `--data`, `gsplat_cuda_bench` renders and runs the backward pass
+from 6 views that stand at the median of the means and turn about the y
+axis. It reads the image and every gradient back each iteration, so the GPU
+idles between iterations. The repository's EuRoC splats are degree 0,
+rendered at 752x480 over 30 iterations, with an 8 GB laptop GPU under
+WSL2, CUDA 13.3:
 
-## Rasterizer timing
-
-`gsplat_cuda_bench` runs a render and a backward pass for each iteration,
-cycling through 6 views. The scene has no cameras, so the views stand at the
-median of the means and turn about the y axis. The figures are median GPU
-times of each stage (a CUDA event pair around it, so host gaps between
-stages and host copies are left out). Hardware: an 8 GB laptop GPU under
-WSL2, CUDA 13.3.
-
-The repository's EuRoC splats are degree 0, rendered at 752x480 over 30
-iterations:
-
-| Stage | V1_01 (423k gaussians, 2.10M intersections) | MH_01 (346k, 0.18M) |
+| Stage | V1_01 (423k gaussians, 2.10M intersections), before / after | MH_01 (346k, 0.18M), before / after |
 |---|---|---|
-| project | 0.236 ms | 0.171 ms |
-| scan (includes the intersection-count readback) | 0.124 ms | 0.122 ms |
-| duplicate | 0.237 ms | 0.105 ms |
-| sort | 0.745 ms | 0.426 ms |
-| ranges | 0.035 ms | 0.033 ms |
-| raster | 0.253 ms | 0.171 ms |
-| raster_bwd | 0.844 ms | 0.497 ms |
-| project_bwd | 0.114 ms | 0.090 ms |
-| **forward / backward** | **1.63 / 0.96 ms** | **1.03 / 0.59 ms** |
+| project | 0.236 / 0.235 ms | 0.171 / 0.186 ms |
+| scan (includes the intersection-count readback) | 0.124 / 0.144 ms | 0.122 / 0.139 ms |
+| duplicate | 0.237 / 0.659 ms | 0.105 / 0.198 ms |
+| sort | 0.745 / 0.753 ms | 0.426 / 0.167 ms |
+| ranges | 0.035 / 0.038 ms | 0.033 / 0.035 ms |
+| raster | 0.253 / 0.296 ms | 0.171 / 0.164 ms |
+| raster_bwd | 0.844 / 0.872 ms | 0.497 / 0.451 ms |
+| project_bwd | 0.114 / 0.040 ms | 0.090 / 0.088 ms |
+| **forward / backward** | **1.63 / 0.96 → 2.12 / 0.91 ms** | **1.03 / 0.59 → 0.89 / 0.54 ms** |
 
+- **The masks do not help here.** The views stand inside the scene, where
+  large nearby splats cover whole tiles, so the masks are nearly all ones.
+  Their cost in duplicate shows on V1_01.
+- **Which numbers count.** Training views are what the optimizations
+  target, and they are measured in the previous section.
 - **Earlier figures.** ABI 1 timed the gaps between consecutive events, and
   so counted host gaps between stages. It reported 2.44 / 0.95 ms and 1.80 /
-  0.58 ms for the same kernels.
-- **What these are not.** These are not training numbers: the views are
-  synthetic, there is no SH, and the loss gradient is a fixed pattern.
+  0.58 ms for the baseline kernels.
 
 ## Against the write-up's optimizations
 
 | Write-up step | Here |
 |---|---|
 | Exact conic-tile intersection | In (`tile_row_span`, as in the wgpu renderer) |
-| Two-stage sort (visible by depth, then a narrow tile sort) | Not yet: one 64-bit sort |
-| Warp butterfly reduce-scatter of the gradients (step 2) | In: a transposed butterfly (8+4+2+1+1 shuffles for 10 sums), skipped when no lane blended the splat |
-| Sub-tile bitmasks to skip splats before evaluating them | Not yet |
+| Two-stage sort (visible by depth, then a narrow tile sort) | Not yet: one 64-bit sort (1.5 ms of a training step) |
+| Warp butterfly reduce-scatter of the gradients (step 2) | In: a transposed butterfly (8+4+2+1+1 shuffles for 10 sums), skipped when no lane blended the splat; the sums go to global memory directly |
+| Sub-tile bitmasks to skip splats before evaluating them | In: 8x4 sub-tiles, 8 bits in the sorted value |
 | SH register streaming, cooperative zeroing (step 3) | Not yet |
-| Contributor compaction and pruning the backward pass (step 4) | Not yet (the backward pass starts at each tile's last blended entry) |
+| Contributor compaction and pruning the backward pass (step 4) | `splat_touched` gating in (`project_bwd`); compaction not yet (the backward pass starts at each tile's last blended entry) |
 | Branchless predication (step 5) | Not yet |
 | Two pixels per thread, per-warp staging without block barriers (step 6) | Not yet |
 
 ## Next
 
-1. **Speed.** Work on raster_bwd (the write-up's steps 4 to 6) and on a
-   sparse Adam. Check each change against the oracle tests and the
-   south-building PSNR.
+1. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;
+   sparse SH Adam halves it), raster_bwd (6.9 ms: the write-up's steps 5
+   and 6), raster (2.6 ms) and the sort (1.5 ms: the two-stage sort).
 2. **Geometry.** Add the geometry channels, then score `gsplat_mesh`'s mesh
    on ETH3D.

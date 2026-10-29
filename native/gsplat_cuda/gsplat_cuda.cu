@@ -57,7 +57,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 2;
+constexpr uint32_t kAbiVersion = 3;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -194,16 +194,18 @@ __device__ Projected compute_projected(const GscCamera& c, const float* tr, floa
     return p;
 }
 
-// Tiles of row `ty` holding a pixel the rasterizer could blend, as an
-// inclusive column range (empty when x > y). See tile_row_span in
-// common.wgsl for the derivation.
-__device__ int2 tile_row_span(const Projected& p, int ty, uint32_t img_w, uint32_t img_h) {
-    const int2 empty = make_int2(1, 0);
+// Pixel columns [x, y] (empty when x > y) holding a pixel the rasterizer
+// could blend among the pixel rows py0..=py1. See tile_row_span in
+// common.wgsl for the derivation: the footprint is convex, so over a band of
+// rows its x-extent is analytic, and the small slack on k only ever keeps a
+// borderline pixel.
+__device__ float2 footprint_columns(const Projected& p, int py0, int py1) {
+    const float2 empty = make_float2(1.f, 0.f);
     const float det = p.c00 * p.c11 - p.c01 * p.c01;
     if (!(det > 0.f) || !(p.c00 > 0.f) || !(p.c11 > 0.f)) return empty;
     const float k = p.extent_k * 1.001f + 1e-3f;
-    const float y0 = float(ty * kTile) + 0.5f - p.v;
-    const float y1 = float(min(ty * kTile + kTile - 1, int(img_h) - 1)) + 0.5f - p.v;
+    const float y0 = float(py0) + 0.5f - p.v;
+    const float y1 = float(py1) + 0.5f - p.v;
     const float x_max = sqrtf(k * p.c11 / det);
     const float yr = clampf(-p.c01 * x_max / p.c11, y0, y1);
     const float yl = clampf(p.c01 * x_max / p.c11, y0, y1);
@@ -212,11 +214,50 @@ __device__ int2 tile_row_span(const Projected& p, int ty, uint32_t img_w, uint32
     const float dl = fmaxf(k * p.c00 - yl * yl * det, 0.f);
     const float xr = (-p.c01 * yr + sqrtf(dr)) / p.c00;
     const float xl = (-p.c01 * yl - sqrtf(dl)) / p.c00;
-    const float px_lo = fmaxf(ceilf(p.u + xl - 0.5f), float(p.tx0 * kTile));
-    const float px_hi = fminf(floorf(p.u + xr - 0.5f), float(min(p.tx1 * kTile + kTile - 1, int(img_w) - 1)));
-    if (px_hi < px_lo) return empty;
+    return make_float2(ceilf(p.u + xl - 0.5f), floorf(p.u + xr - 0.5f));
+}
+
+// Tiles of row `ty` holding a pixel the rasterizer could blend, as an
+// inclusive column range (empty when x > y).
+__device__ int2 tile_row_span(const Projected& p, int ty, uint32_t img_w, uint32_t img_h) {
+    const float2 cols = footprint_columns(p, ty * kTile, min(ty * kTile + kTile - 1, int(img_h) - 1));
+    const float px_lo = fmaxf(cols.x, float(p.tx0 * kTile));
+    const float px_hi = fminf(cols.y, float(min(p.tx1 * kTile + kTile - 1, int(img_w) - 1)));
+    if (px_hi < px_lo) return make_int2(1, 0);
     return make_int2(int(px_lo) / kTile, int(px_hi) / kTile);
 }
+
+// The footprint's columns in each 4-row band of tile row `ty` (empty past
+// the image), shared by every tile of the row.
+__device__ void band_columns(const Projected& p, int ty, uint32_t img_h, float2 bands[kTile / 4]) {
+#pragma unroll
+    for (int band = 0; band < kTile / 4; ++band) {
+        const int py0 = ty * kTile + band * 4;
+        bands[band] = py0 < int(img_h) ? footprint_columns(p, py0, min(py0 + 3, int(img_h) - 1)) : make_float2(1.f, 0.f);
+    }
+}
+
+// Bit w set: the footprint reaches the 8x4 sub-tile of warp w (see
+// tile_pixel) in tile column `tx` of the row whose bands are given. A
+// superset of the warps that can blend the splat, so the rasterizer kernels
+// skip the others without evaluating them.
+__device__ uint32_t subtile_mask(const float2 bands[kTile / 4], int tx) {
+    uint32_t mask = 0;
+    const float x0 = float(tx * kTile);
+#pragma unroll
+    for (int band = 0; band < kTile / 4; ++band) {
+        const float2 c = bands[band];
+        if (c.x <= x0 + 7.f && c.y >= x0) mask |= 1u << (2 * band);
+        if (c.x <= x0 + 15.f && c.y >= x0 + 8.f) mask |= 1u << (2 * band + 1);
+    }
+    return mask;
+}
+
+// Rasterizer list entries pack the gaussian id with its sub-tile mask in the
+// top byte, so the sort carries the mask along.
+constexpr uint32_t kIdBits = 24;
+constexpr uint32_t kIdMask = (1u << kIdBits) - 1;
+constexpr int kMaxGaussians = 1 << kIdBits;
 
 // Real SH basis b1..b15 (b0 = kC0) for unit direction d, Inria / brush
 // normalisation.
@@ -326,10 +367,13 @@ __global__ void duplicate_kernel(int n, GscCamera cam, uint32_t tile_bw, const f
     const uint32_t end = offsets[i];
     for (int ty = p.ty0; ty <= p.ty1; ++ty) {
         const int2 span = tile_row_span(p, ty, cam.width, cam.height);
+        if (span.y < span.x) continue;
+        float2 bands[kTile / 4];
+        band_columns(p, ty, cam.height, bands);
         for (int tx = span.x; tx <= span.y && out < end; ++tx) {
             const unsigned long long tile = uint32_t(ty) * tile_bw + uint32_t(tx);
             keys[out] = (tile << 32) | dbits;
-            vals[out] = uint32_t(i);
+            vals[out] = uint32_t(i) | (subtile_mask(bands, tx) << kIdBits);
             ++out;
         }
     }
@@ -343,8 +387,18 @@ __global__ void ranges_kernel(uint32_t m, const unsigned long long* __restrict__
     if (i + 1 == m || uint32_t(keys[i + 1] >> 32) != tile) ranges[tile].y = i + 1;
 }
 
+// Pixel of thread `tid` within its 16x16 tile: warp w covers the 8x4
+// sub-tile (w % 2, w / 2), compact so that a splat touches few warps.
+__device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
+    const int warp = tid >> 5, lane = tid & 31;
+    lx = uint32_t((warp & 1) * 8 + (lane & 7));
+    ly = uint32_t((warp >> 1) * 4 + (lane >> 3));
+}
+
 // One block per 16x16 tile, one thread per pixel, splats staged in shared
-// memory 256 at a time; the block stops once every pixel is saturated.
+// memory 256 at a time; the block stops once every pixel is saturated. A
+// warp skips the splats whose footprint misses its 8x4 sub-tile (the mask in
+// the list entry's top byte).
 __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
@@ -352,10 +406,14 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     __shared__ float2 s_xy[kBlock];
     __shared__ float4 s_co[kBlock];
     __shared__ float3 s_col[kBlock];
+    __shared__ uint32_t s_mask[kBlock];
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
-    const uint32_t px = blockIdx.x * kTile + tid % kTile;
-    const uint32_t py = blockIdx.y * kTile + tid / kTile;
+    const uint32_t warp_bit = 1u << (tid >> 5);
+    uint32_t lx, ly;
+    tile_pixel(tid, lx, ly);
+    const uint32_t px = blockIdx.x * kTile + lx;
+    const uint32_t py = blockIdx.y * kTile + ly;
     const bool in_image = px < img_w && py < img_h;
     const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
     const uint2 range = ranges[tile];
@@ -369,16 +427,19 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
         if (__syncthreads_count(done) == kBlock) break;
         const uint32_t cnt = min(uint32_t(kBlock), range.y - start);
         if (uint32_t(tid) < cnt) {
-            const uint32_t g = vals[start + tid];
+            const uint32_t v = vals[start + tid];
+            const uint32_t g = v & kIdMask;
             s_xy[tid] = xy[g];
             s_co[tid] = conic_op[g];
             const float4 c = color[g];
             s_col[tid] = make_float3(c.x, c.y, c.z);
+            s_mask[tid] = v >> kIdBits;
         }
         __syncthreads();
         if (!done) {
             for (uint32_t s = 0; s < cnt; ++s) {
                 if (trans <= 1e-4f) break;
+                if (!(s_mask[s] & warp_bit)) continue;
                 const float dx = sx - s_xy[s].x;
                 const float dy = sy - s_xy[s].y;
                 const float4 co = s_co[s];
@@ -421,8 +482,11 @@ __device__ inline float xstep(float lo, float hi, bool h, int m) {
 // from T after it (T_before = T_after / (1 - alpha)) and keeps the colour
 // composited behind it. A splat's 256 per-pixel contributions are summed per
 // warp with a transposed xor butterfly (lanes 2c end up holding component c),
-// then in shared memory across warps, then added to the gaussian's record in
-// screen_grads with one global float atomic per component.
+// which then add them to the gaussian's record in screen_grads with one
+// global float reduction per component (fire-and-forget REDs; a shared-memory
+// float atomicAdd would be a CAS loop, and the warps that hit a splat are few).
+// A warp skips the splats whose footprint misses its sub-tile (the list
+// entry's mask).
 __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
@@ -432,13 +496,15 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     __shared__ float4 s_co[kBwdBatch];
     __shared__ float3 s_col[kBwdBatch];
     __shared__ uint32_t s_gid[kBwdBatch];
-    __shared__ float s_gacc[kBwdBatch * kNumGrad];
+    __shared__ uint32_t s_cm[kBwdBatch];
     __shared__ uint32_t s_last;
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
-    const int lane = tid & 31;
-    const uint32_t px = blockIdx.x * kTile + tid % kTile;
-    const uint32_t py = blockIdx.y * kTile + tid / kTile;
+    const int warp = tid >> 5, lane = tid & 31;
+    uint32_t lx, ly;
+    tile_pixel(tid, lx, ly);
+    const uint32_t px = blockIdx.x * kTile + lx;
+    const uint32_t py = blockIdx.y * kTile + ly;
     const bool in_image = px < img_w && py < img_h;
     const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
     const uint2 range = ranges[tile];
@@ -463,20 +529,23 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     for (uint32_t bend = stop; bend > range.x;) {
         const uint32_t bstart = bend - range.x > uint32_t(kBwdBatch) ? bend - kBwdBatch : range.x;
         const uint32_t cnt = bend - bstart;
-        // The previous batch's flush must finish before its slots are reused.
+        // Every warp must be done with the previous batch before its slots are reused.
         __syncthreads();
         if (uint32_t(tid) < cnt) {
-            const uint32_t gi = vals[bstart + tid];
+            const uint32_t v = vals[bstart + tid];
+            const uint32_t gi = v & kIdMask;
             s_xy[tid] = xy[gi];
             s_co[tid] = conic_op[gi];
             const float4 c = color[gi];
             s_col[tid] = make_float3(c.x, c.y, c.z);
             s_gid[tid] = gi;
+            s_cm[tid] = v >> kIdBits;
         }
-        for (uint32_t i = tid; i < cnt * kNumGrad; i += kBlock) s_gacc[i] = 0.f;
         __syncthreads();
 
         for (int s = int(cnt) - 1; s >= 0; --s) {
+            // Warp-uniform: the footprint misses this warp's sub-tile.
+            if (!((s_cm[s] >> warp) & 1u)) continue;
             const uint32_t j = bstart + uint32_t(s);
             float g_u = 0.f, g_v = 0.f, g_a = 0.f, g_b = 0.f, g_c = 0.f, g_o = 0.f, g_r = 0.f;
             float3 g_col = make_float3(0.f, 0.f, 0.f);
@@ -540,13 +609,9 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 float z = xstep(y0, y1, (lane & 2) != 0, 2);
                 z += __shfl_xor_sync(0xffffffffu, z, 1);
                 const int comp = lane >> 1;
-                if ((lane & 1) == 0 && comp < kNumGrad && z != 0.f) atomicAdd(&s_gacc[s * kNumGrad + comp], z);
+                if ((lane & 1) == 0 && comp < kNumGrad && z != 0.f)
+                    atomicAdd(&screen_grads[size_t(s_gid[s]) * kNumGrad + comp], z);
             }
-        }
-        __syncthreads();
-        for (uint32_t i = tid; i < cnt * kNumGrad; i += kBlock) {
-            const float v = s_gacc[i];
-            if (v != 0.f) atomicAdd(&screen_grads[size_t(s_gid[i / kNumGrad]) * kNumGrad + i % kNumGrad], v);
         }
         bend = bstart;
     }
@@ -584,10 +649,21 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
                                    const float* __restrict__ opacity, const float* __restrict__ sh,
                                    const uint32_t* __restrict__ tiles, const float* __restrict__ screen_grads,
                                    float* __restrict__ g_transforms, float* __restrict__ g_opacity,
-                                   float* __restrict__ g_sh) {
+                                   float* __restrict__ g_sh, int sh_zeroed, uint8_t* __restrict__ touched) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n || tiles[i] == 0) return;
+    if (i >= n) return;
     const float* sg = screen_grads + size_t(i) * kNumGrad;
+    // Not blended into any pixel (or only where the loss gradient is 0):
+    // every output gradient is 0, which the caller wrote, except the SH ones
+    // when `sh_zeroed` is 0: then the sparse SH Adam skips this gaussian
+    // (touched = 0) and never reads its stale row.
+    bool any = false;
+    if (tiles[i] != 0) {
+#pragma unroll
+        for (int k = 0; k < kNumGrad; ++k) any |= sg[k] != 0.f;
+    }
+    touched[i] = any;
+    if (!any) return;
     const float g_u = sg[0], g_v = sg[1], g_ca = sg[2], g_cb = sg[3], g_cc = sg[4], g_op = sg[5];
     const float g_col[3] = {sg[6], sg[7], sg[8]};
     const float* tr = transforms + size_t(i) * 10;
@@ -785,7 +861,10 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
         float* grest = grow + 3 + ch * rest_pc;
 #pragma unroll
         for (int k = 1; k < 16; ++k)
-            if (k <= act) grest[k - 1] = gc * b[k];
+            if (k <= act)
+                grest[k - 1] = gc * b[k];
+            else if (!sh_zeroed && k <= rest_pc)
+                grest[k - 1] = 0.f;
         gdir[0] += gc * dd[0];
         gdir[1] += gc * dd[1];
         gdir[2] += gc * dd[2];
@@ -1025,14 +1104,18 @@ __global__ void stats_kernel(int n, const uint32_t* __restrict__ tiles, const fl
 // brush's auxiliary losses ride along: aux_kind 1 adds
 // aux_coef * v * exp(p) to the log-scale elements (k >= 7), aux_kind 2 adds
 // aux_coef * v to every element (an opacity logit), with
-// v = 1e-3 + (1 if the gaussian was projected this frame).
+// v = 1e-3 + (1 if the gaussian was projected this frame). With
+// `sparse_touched`, gaussians whose flag is 0 are left as they are.
 __global__ void adam_kernel(size_t n_elem, uint32_t stride, uint32_t split_a, uint32_t split_b, float lr_a,
                             float lr_b, float lr_c, float beta1, float beta2, float eps, float bc1, float bc2,
-                            int aux_kind, float aux_coef, const uint32_t* __restrict__ tiles,
+                            int aux_kind, float aux_coef, const uint8_t* __restrict__ sparse_touched,
+                            const uint32_t* __restrict__ tiles,
                             float* __restrict__ params, const float* __restrict__ grads, float* __restrict__ m1,
                             float* __restrict__ m2) {
     const size_t e = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (e >= n_elem) return;
+    // Sparse: gaussians the frame did not blend keep their values and moments.
+    if (sparse_touched && !sparse_touched[e / stride]) return;
     const uint32_t k = uint32_t(e % stride);
     const float lr = k < split_a ? lr_a : (k < split_b ? lr_b : lr_c);
     const float p = params[e];
@@ -1215,7 +1298,7 @@ struct Ctx {
     // Per tile / pixel.
     Buf ranges, image, final_t, last_idx;
     // Backward.
-    Buf d_image, screen_grads, grads[3];
+    Buf d_image, screen_grads, grads[3], touched;
     // Training: ground truth (packed RGBA8 per pixel, image-major), SSIM
     // partials, loss sums (L1, SSIM), refine statistics, refine scratch.
     Buf gt, abc, loss_acc, weight_max, seen, actions, counts, cum;
@@ -1400,8 +1483,10 @@ int run_forward(Ctx* ctx) {
 }
 
 // Backward of the last forward for the d_image already on the device, into
-// screen_grads and the per-group gradient buffers (zeroed first).
-int run_backward(Ctx* ctx) {
+// screen_grads and the per-group gradient buffers (zeroed first; with
+// `zero_sh` false the SH gradients are written for every projected gaussian
+// instead, and left stale for the others).
+int run_backward(Ctx* ctx, bool zero_sh) {
     if (!ctx->have_forward) {
         ctx->error = "backward called before render";
         return -1;
@@ -1410,7 +1495,13 @@ int run_backward(Ctx* ctx) {
     float* screen_grads;
     GSC_TRY(ensure_zero(ctx, ctx->screen_grads, size_t(n) * kNumGrad, &screen_grads));
     float* g[3];
-    for (int k = 0; k < 3; ++k) GSC_TRY(ensure_zero(ctx, ctx->grads[k], size_t(n) * ctx->stride(k), &g[k]));
+    for (int k = 0; k < 2; ++k) GSC_TRY(ensure_zero(ctx, ctx->grads[k], size_t(n) * ctx->stride(k), &g[k]));
+    uint8_t* touched;
+    GSC_TRY(ensure(ctx, ctx->touched, n, &touched));
+    if (zero_sh)
+        GSC_TRY(ensure_zero(ctx, ctx->grads[2], size_t(n) * ctx->stride(2), &g[2]));
+    else
+        GSC_TRY(ensure(ctx, ctx->grads[2], size_t(n) * ctx->stride(2), &g[2]));
 
     GSC_TRY(stage_begin(ctx, kRasterBwd));
     raster_bwd_kernel<<<dim3(ctx->tile_bw, ctx->tile_bh), kBlock>>>(
@@ -1425,7 +1516,7 @@ int run_backward(Ctx* ctx) {
     if (n > 0) {
         project_bwd_kernel<<<blocks_for(n), 256>>>(n, ctx->cam, ctx->rest_pc(), ctx->act, ctx->p(0), ctx->p(1),
                                                    ctx->p(2), static_cast<const uint32_t*>(ctx->tiles.ptr),
-                                                   screen_grads, g[0], g[1], g[2]);
+                                                   screen_grads, g[0], g[1], g[2], zero_sh ? 1 : 0, touched);
         GSC_CHECK(ctx, cudaGetLastError());
     }
     GSC_TRY(stage_end(ctx, kProjectBwd));
@@ -1506,6 +1597,7 @@ struct GscStepParams {
     uint32_t noise_seed;
     float noise_scale;  // lr_mean * mean noise weight (0 = off)
     float noise_max;
+    uint32_t sparse_sh_adam;   // SH Adam only on the gaussians blended this frame
 };
 
 #if defined(_WIN32)
@@ -1540,7 +1632,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
     Buf* bufs[] = {&ctx->xy,          &ctx->conic_op,  &ctx->color,    &ctx->depth,      &ctx->rect,
                    &ctx->extk,        &ctx->tiles,     &ctx->offsets,  &ctx->keys,       &ctx->vals,
                    &ctx->keys_sorted, &ctx->vals_sorted, &ctx->sort_temp, &ctx->scan_temp, &ctx->ranges,
-                   &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->d_image,    &ctx->screen_grads,
+                   &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->d_image,    &ctx->screen_grads, &ctx->touched,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum};
     for (Buf* b : bufs) free_buf(*b);
@@ -1564,8 +1656,8 @@ GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, 
                                             const float* opacity, const float* sh) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
-    if (n < 0 || sh_degree < 0 || sh_degree > 3) {
-        ctx->error = "set_scene: n must be >= 0 and the SH degree in 0..=3";
+    if (n < 0 || n > kMaxGaussians || sh_degree < 0 || sh_degree > 3) {
+        ctx->error = "set_scene: n must be in 0..=2^24 and the SH degree in 0..=3";
         return -1;
     }
     ctx->n = n;
@@ -1641,7 +1733,7 @@ GSC_EXPORT int visloc_gsplat_cuda_backward(void* handle, const float* d_image, f
         ctx->ran[s] = false;
         ctx->ms[s] = 0.f;
     }
-    GSC_TRY(run_backward(ctx));
+    GSC_TRY(run_backward(ctx, true));
     GSC_TRY(collect_stages(ctx));
     float* dst[3] = {g_transforms, g_opacity, g_sh};
     for (int k = 0; k < 3; ++k) {
@@ -1691,7 +1783,7 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     clear_stages(ctx);
     GSC_TRY(run_forward(ctx));
     GSC_TRY(run_loss(ctx, p->image, p->ssim_weight));
-    GSC_TRY(run_backward(ctx));
+    GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0));
 
     const int n = ctx->n;
     const uint32_t* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
@@ -1711,17 +1803,18 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
             float lr_a, lr_b, lr_c;
             int aux_kind;
             float aux_coef;
+            int sparse;
         } groups[3] = {
-            {10, 3, 7, p->lr[0], p->lr[1], p->lr[2], p->scale_aux_coef > 0.f ? 1 : 0, p->scale_aux_coef},
-            {1, 1, 1, p->lr[3], p->lr[3], p->lr[3], p->opacity_aux_coef > 0.f ? 2 : 0, p->opacity_aux_coef},
-            {rl, 3, 3, p->lr[4], p->lr[5], p->lr[5], 0, 0.f},
+            {10, 3, 7, p->lr[0], p->lr[1], p->lr[2], p->scale_aux_coef > 0.f ? 1 : 0, p->scale_aux_coef, 0},
+            {1, 1, 1, p->lr[3], p->lr[3], p->lr[3], p->opacity_aux_coef > 0.f ? 2 : 0, p->opacity_aux_coef, 0},
+            {rl, 3, 3, p->lr[4], p->lr[5], p->lr[5], 0, 0.f, p->sparse_sh_adam ? 1 : 0},
         };
         for (int k = 0; k < 3; ++k) {
             const size_t n_elem = size_t(n) * groups[k].stride;
             adam_kernel<<<blocks_for(n_elem), 256>>>(
                 n_elem, groups[k].stride, groups[k].split_a, groups[k].split_b, groups[k].lr_a, groups[k].lr_b,
                 groups[k].lr_c, p->beta1, p->beta2, p->eps, p->bc1, p->bc2, groups[k].aux_kind, groups[k].aux_coef,
-                tiles, ctx->p(k), static_cast<const float*>(ctx->grads[k].ptr), static_cast<float*>(ctx->m1[k].ptr),
+                groups[k].sparse ? static_cast<const uint8_t*>(ctx->touched.ptr) : nullptr, tiles, ctx->p(k), static_cast<const float*>(ctx->grads[k].ptr), static_cast<float*>(ctx->m1[k].ptr),
                 static_cast<float*>(ctx->m2[k].ptr));
             GSC_CHECK(ctx, cudaGetLastError());
         }
@@ -1809,6 +1902,10 @@ GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* ac
         GSC_TRY(ensure(ctx, ctx->scan_temp, temp_bytes, &temp));
         GSC_CHECK(ctx, cub::DeviceScan::InclusiveSum(temp, temp_bytes, counts, cum, n));
         GSC_CHECK(ctx, cudaMemcpy(&total, cum + (n - 1), sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        if (total > uint32_t(kMaxGaussians)) {
+            ctx->error = "apply_actions: more than 2^24 gaussians";
+            return -1;
+        }
         for (int k = 0; k < 3; ++k) {
             const size_t stride = ctx->stride(k);
             Buf dp, dm1, dm2;

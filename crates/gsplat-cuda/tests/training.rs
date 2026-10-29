@@ -208,9 +208,10 @@ fn refine_actions_scatter_rows() {
     assert_eq!(stats.seen, vec![0.0; 6]);
 }
 
-#[test]
-fn training_steps_fit_a_rendered_target() {
-    let Some(mut gs) = gsplat() else { return };
+/// Fit perturbed colours and opacities back to targets rendered from known
+/// gaussians; returns the mean L1 every 50 steps. One extra gaussian sits
+/// behind every camera: it is never projected, so its SH must not move.
+fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
     let (w, h) = (96u32, 80u32);
     let truth = random_scene(60, 21, 1);
     let views: Vec<CameraView> = (0..4)
@@ -233,8 +234,13 @@ fn training_steps_fit_a_rendered_target() {
         g.sh_dc = [(f * 0.7).sin(), (f * 1.3).cos(), (f * 0.4).sin()];
         g.opacity_logit = 0.0;
     }
-    gs.set_scene(&PackedScene::from_scene(&init))
-        .expect("upload");
+    let mut hidden = init.gaussians[0].clone();
+    hidden.mean = Vector3::new(0.0, 0.0, -5.0);
+    init.gaussians.push(hidden);
+    let packed = PackedScene::from_scene(&init);
+    let row = 3 * packed.sh_coeffs_per_channel;
+    let hidden_sh = packed.sh[(init.len() - 1) * row..].to_vec();
+    gs.set_scene(&packed).expect("upload");
     let mut mean_loss = Vec::new();
     for step in 0..300u32 {
         let t = (step + 1) as f32;
@@ -256,6 +262,7 @@ fn training_steps_fit_a_rendered_target() {
             noise_seed: step,
             noise_scale: 0.0,
             noise_max: 0.0,
+            sparse_sh_adam: sparse_sh_adam as u32,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -263,13 +270,28 @@ fn training_steps_fit_a_rendered_target() {
             mean_loss.push(s.l1 / s.steps as f64);
         }
     }
-    eprintln!("mean L1 every 50 steps: {mean_loss:.4?}");
-    assert!(
-        mean_loss.last().unwrap() < &(0.25 * mean_loss[0]),
-        "L1 fell from {:.4} to only {:.4}",
-        mean_loss[0],
-        mean_loss.last().unwrap()
+    let out = gs.scene().expect("download");
+    assert_eq!(
+        out.sh[(init.len() - 1) * row..],
+        hidden_sh[..],
+        "hidden SH moved"
     );
     let stats = gs.refine_stats().expect("stats");
     assert!(stats.seen.iter().any(|&s| s > 0.0), "no refine statistics");
+    mean_loss
+}
+
+#[test]
+fn training_steps_fit_a_rendered_target() {
+    let Some(mut gs) = gsplat() else { return };
+    for sparse in [false, true] {
+        let mean_loss = fit(&mut gs, sparse);
+        eprintln!("sparse SH Adam {sparse}: mean L1 every 50 steps {mean_loss:.4?}");
+        assert!(
+            mean_loss.last().unwrap() < &(0.25 * mean_loss[0]),
+            "L1 fell from {:.4} to only {:.4}",
+            mean_loss[0],
+            mean_loss.last().unwrap()
+        );
+    }
 }

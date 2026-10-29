@@ -75,6 +75,7 @@ pub struct CudaTrainer {
     extent: f32,
     bound_size: f32,
     last_refine: Option<DensifyReport>,
+    sparse_sh_adam: bool,
 }
 
 impl fmt::Debug for CudaTrainer {
@@ -158,7 +159,15 @@ impl CudaTrainer {
             extent,
             bound_size,
             last_refine: None,
+            sparse_sh_adam: false,
         })
+    }
+
+    /// Run the SH Adam only on the gaussians each step blends (off by
+    /// default: the wgpu trainer's dense Adam). The other groups stay dense,
+    /// so brush's aux losses still fade the gaussians no view sees.
+    pub fn set_sparse_sh_adam(&mut self, on: bool) {
+        self.sparse_sh_adam = on;
     }
 
     pub fn steps_done(&self) -> usize {
@@ -252,6 +261,7 @@ impl CudaTrainer {
             noise_seed: (self.cfg.seed as u32) ^ (self.step as u32).wrapping_mul(0x85EB_CA6B),
             noise_scale,
             noise_max,
+            sparse_sh_adam: self.sparse_sh_adam as u32,
         };
         self.gs.train_step(&params)?;
         self.step += 1;

@@ -110,6 +110,9 @@ pub struct StepParams {
     /// `lr_mean * mean_noise_weight` (0 = no mean noise).
     pub noise_scale: f32,
     pub noise_max: f32,
+    /// Run the SH Adam only on the gaussians blended this frame (the
+    /// others keep their SH and its moments; 0 = dense, as the wgpu trainer).
+    pub sparse_sh_adam: u32,
 }
 
 type AbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -281,7 +284,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 2;
+    pub const ABI_VERSION: u32 = 3;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {

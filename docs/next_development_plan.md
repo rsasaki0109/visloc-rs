@@ -19,10 +19,12 @@ The planned order:
 1. CUDA 3DGS rasterizer: forward and backward, checked against the CPU
    oracle. Done.
 2. CUDA trainer on top of it. Measure south-building PSNR and time against
-   the wgpu trainer's recorded numbers. Done: 30k steps in 978 s, held-out
-   PSNR 22.99 dB (the README's wgpu run reached 22.77 dB with a different
-   SfM and the depth-normal loss). The next speed targets are raster_bwd
-   and the dense Adam.
+   the wgpu trainer's recorded numbers. Done: 30k steps in 691 s, held-out
+   PSNR 23.22 dB. The README's wgpu run reached 22.77 dB with a different
+   SfM and the depth-normal loss. The first version took 978 s; sub-tile
+   masks and direct global gradient adds cut a step from 30.9 to 21 GPU ms.
+   The remaining large stages are the dense Adam (opt-in sparse SH Adam
+   halves it), raster_bwd and the sort.
 3. Score `gsplat_mesh`'s mesh on ETH3D, which gives 3DGS geometry a
    baseline (visloc-mvs's mesh: F1 79.3% at 2 cm). Then move TSDF
    integration to CUDA: it is 28 of the 34 mesh minutes on SmallCity.
