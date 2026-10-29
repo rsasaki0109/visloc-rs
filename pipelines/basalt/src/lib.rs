@@ -45,6 +45,7 @@ pub mod platform;
 pub mod provenance;
 pub mod pyramid;
 pub mod rt_priority;
+pub mod smoothing;
 pub mod stream;
 pub mod streaming;
 pub mod time;

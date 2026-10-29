@@ -32,6 +32,7 @@ use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use serde_json::{json, Value};
 use visloc_basalt::contrast::LocalContrast;
 use visloc_basalt::mapper::{localization_camera_id, LocalizationMapExport};
+use visloc_basalt::smoothing::GaussianSmoothing;
 use visloc_basalt::BasaltCalibration;
 use visloc_core::geometry::SE3;
 use visloc_core::types::{LandmarkDescriptorStore, Observation, VisualMap};
@@ -68,6 +69,9 @@ pub struct SavedMap {
     /// Local contrast equalization the map's keyframes were built with,
     /// which localization must apply to its images too.
     pub local_contrast: Option<LocalContrast>,
+    /// The blur the map's keyframes were built with (after the
+    /// equalization), which localization must apply to its images too.
+    pub feature_smoothing: Option<GaussianSmoothing>,
     /// `map.json` as read.
     pub summary: Value,
     /// `images.csv`, empty when the file is missing.
@@ -135,16 +139,31 @@ pub fn local_contrast_from_json(summary: &Value) -> Result<Option<LocalContrast>
     }
 }
 
+/// The map's `feature_smoothing_sigma`: `None` when absent (no blur).
+pub fn feature_smoothing_from_json(summary: &Value) -> Result<Option<GaussianSmoothing>, String> {
+    match summary.get("feature_smoothing_sigma") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => match value.as_f64() {
+            Some(sigma) if sigma.is_finite() && sigma > 0.0 => {
+                Ok(Some(GaussianSmoothing { sigma }))
+            }
+            _ => Err(format!("map.json: bad feature_smoothing_sigma {value}")),
+        },
+    }
+}
+
 /// Writes `export` under `map_dir` as a one-session map; returns the
-/// `map.json` summary. `local_contrast` is the equalization the keyframes'
-/// features were extracted with, if any; with `extra_descriptors`, the
-/// export's extra descriptors go to `landmark_descriptors_extra.txt`.
+/// `map.json` summary. `local_contrast` and `feature_smoothing` are the
+/// equalization and the blur the keyframes' features were extracted with,
+/// if any; with `extra_descriptors`, the export's extra descriptors go to
+/// `landmark_descriptors_extra.txt`.
 pub fn save(
     map_dir: &Path,
     export: &LocalizationMapExport,
     calibration: &BasaltCalibration,
     max_points: usize,
     local_contrast: Option<&LocalContrast>,
+    feature_smoothing: Option<&GaussianSmoothing>,
     extra_descriptors: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let images = export
@@ -182,6 +201,9 @@ pub fn save(
     });
     if let Some(local_contrast) = local_contrast {
         summary["feature_local_contrast"] = local_contrast_json(local_contrast);
+    }
+    if let Some(feature_smoothing) = feature_smoothing {
+        summary["feature_smoothing_sigma"] = json!(feature_smoothing.sigma);
     }
     let extra_path = extra_descriptors_path(map_dir);
     if extra_descriptors {
@@ -292,6 +314,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         .and_then(Value::as_u64)
         .ok_or("map.json: missing feature_max_points")? as usize;
     let local_contrast = local_contrast_from_json(&summary)?;
+    let feature_smoothing = feature_smoothing_from_json(&summary)?;
     let images_path = map_dir.join("images.csv");
     let images = if images_path.exists() {
         read_images(&images_path)?
@@ -340,6 +363,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         imu_from_camera,
         max_points,
         local_contrast,
+        feature_smoothing,
         summary,
         images,
     })

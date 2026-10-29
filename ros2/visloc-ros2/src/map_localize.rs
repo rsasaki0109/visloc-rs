@@ -33,6 +33,7 @@ use visloc_basalt::mapper::{
     compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
     orb_descriptor_to_f32,
 };
+use visloc_basalt::smoothing::GaussianSmoothing;
 use visloc_basalt::RawU16Image;
 use visloc_core::geometry::{Pose as CameraPose, SE3};
 use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureReason, VisualMap};
@@ -147,6 +148,9 @@ pub struct SavedBasaltMap {
     /// (`map.json`'s `feature_local_contrast`), applied to every image
     /// before extraction.
     pub local_contrast: Option<LocalContrast>,
+    /// The blur the map's keyframes were built with (`map.json`'s
+    /// `feature_smoothing_sigma`), applied after the equalization.
+    pub feature_smoothing: Option<GaussianSmoothing>,
 }
 
 fn se3_from_json(value: &serde_json::Value) -> Option<SE3> {
@@ -212,6 +216,16 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
             }
         }
     };
+    let feature_smoothing = match summary
+        .get("feature_smoothing_sigma")
+        .filter(|value| !value.is_null())
+    {
+        None => None,
+        Some(value) => match value.as_f64() {
+            Some(sigma) if sigma.is_finite() && sigma > 0.0 => Some(GaussianSmoothing { sigma }),
+            _ => return Err(format!("map.json: bad feature_smoothing_sigma {value}")),
+        },
+    };
     let sparse = map_dir.join("sparse");
     let map = read_colmap_text_model(&sparse)
         .map_err(|error| format!("{}: {error}", sparse.display()))?;
@@ -232,6 +246,7 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
         imu_from_camera,
         max_points,
         local_contrast,
+        feature_smoothing,
     })
 }
 
@@ -425,6 +440,11 @@ impl MapLocalizer {
             .local_contrast
             .map(|local_contrast| local_contrast.apply(image));
         let image = equalized.as_ref().unwrap_or(image);
+        let smoothed = self
+            .map
+            .feature_smoothing
+            .map(|feature_smoothing| feature_smoothing.apply(image));
+        let image = smoothed.as_ref().unwrap_or(image);
         let corners = detect_keypoints_mapping(image, self.max_points);
         let angles = compute_angles(image, &corners, true);
         let descriptors = compute_descriptors(image, &corners, &angles)
@@ -1340,8 +1360,20 @@ mod tests {
         summary["feature_local_contrast"] = serde_json::json!({"tiles": 0, "clip_limit": 3.0});
         fs::write(&summary_path, summary.to_string()).expect("map.json");
         assert!(load_basalt_map(&dir).is_err());
+        // So does one built from blurred images.
+        summary["feature_local_contrast"] = serde_json::Value::Null;
+        summary["feature_smoothing_sigma"] = serde_json::json!(1.5);
+        fs::write(&summary_path, summary.to_string()).expect("map.json");
+        assert_eq!(
+            load_basalt_map(&dir).expect("loads").feature_smoothing,
+            Some(GaussianSmoothing { sigma: 1.5 })
+        );
+        summary["feature_smoothing_sigma"] = serde_json::json!(-1.0);
+        fs::write(&summary_path, summary.to_string()).expect("map.json");
+        assert!(load_basalt_map(&dir).is_err());
         fs::remove_dir_all(&dir).expect("cleanup");
         assert_eq!(map.local_contrast, None);
+        assert_eq!(map.feature_smoothing, None);
         assert_eq!(map.max_points, 800);
         assert_eq!(map.map.landmarks.len(), points.len());
         assert!(load_basalt_map(Path::new("/nonexistent/map")).is_err());
@@ -1434,6 +1466,7 @@ mod tests {
             imu_from_camera: vec![SE3::identity()],
             max_points: 800,
             local_contrast: None,
+            feature_smoothing: None,
         }
     }
 
