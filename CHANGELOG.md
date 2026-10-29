@@ -6,6 +6,22 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **CUDA 3DGS rasterizer (`visloc-gsplat-cuda`, experimental, opt-in).**
+  This is a CUDA backend for the forward and backward passes of the 3DGS
+  rasterizer, for machines where wgpu cannot reach the GPU (WSL2 exposes
+  CUDA but no NVIDIA Vulkan driver). It also serves as a reference for
+  CUDA-level optimizations.
+  - The packaging follows the DPVO kernels: `native/gsplat_cuda/gsplat_cuda.cu`
+    is built by `scripts/build_gsplat_cuda.sh` and loaded at runtime. Cargo
+    never compiles CUDA, and the crate is `publish = false`.
+  - The maths is the wgpu renderer's. Against the CPU f64 oracle, every
+    parameter gradient is within 4.2e-6 of its largest value; the tests use
+    the wgpu tests' tolerances, 3e-3.
+  - On an 8 GB laptop GPU, the forward and backward passes take 2.44 ms and
+    0.95 ms on the EuRoC V1_01 splat at 752x480 (423k gaussians, 2.1M
+    intersections).
+  - There is no trainer yet. See [docs/gsplat_cuda.md](docs/gsplat_cuda.md).
+
 - **`visloc_map_localize_node` (ROS 2): robot-style localization in a saved
   SLAM map.** Run next to `visloc_vio_node`, it localizes every 5th camera
   image against a map from `basalt_euroc_online_slam_demo --save-map`,

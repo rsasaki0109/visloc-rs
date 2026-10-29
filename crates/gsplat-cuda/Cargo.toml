@@ -1,0 +1,27 @@
+[package]
+name = "visloc-gsplat-cuda"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Runtime-loaded native CUDA 3D Gaussian Splatting rasterizer for visloc-gsplat (opt-in)."
+readme.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
+# Experimental: not published until the CUDA trainer lands.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+libloading = "0.9"
+visloc-gsplat-core = { path = "../gsplat-core", version = "0.3.1" }
+visloc-gsplat-render = { path = "../gsplat-render", version = "0.3.1" }
+
+[dev-dependencies]
+nalgebra = { workspace = true }
+
+[lib]
+doctest = false
