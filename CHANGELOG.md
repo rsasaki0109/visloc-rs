@@ -36,6 +36,27 @@ All notable changes to `visloc-rs` will be documented here.
   - `--sparse-sh-adam` (opt-in) updates SH only for blended gaussians,
     halving the optimizer (18 ms per step). In training it saved 5% at
     22.87 dB.
+  - Meshes from CUDA:
+    - The median depth comes from the splat centre, or with
+      `--planar-depth` from where the ray meets the splat's plane.
+    - `gsplat_mesh_cuda` meshes a trained splat; `gsplat_train_cuda --mesh`
+      meshes after training.
+    - The TSDF fusion is shared with wgpu
+      (`visloc_gsplat_train::mesh::fuse_views`, behind the new `mesh`
+      feature).
+  - **ETH3D geometry.** Three high-res training scenes, on their
+    ground-truth poses at 1600x1067, score a mean F1 of 33.1% at 2 cm
+    (terrains 34.1%, playground 43.9%, office 21.4%). visloc-mvs's clouds
+    score 80.0% on the same scenes. The mesh options needed are 1 cm
+    voxels, no support filter, depths up to 20 m, min weight 1 and planar
+    depth; `gsplat_photos`' defaults score 20.8%. See
+    `scripts/eth3d_3dgs_mesh.sh`.
+- **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
+  model of pinhole images and the images themselves to a maximum or an
+  exact size (`--size` makes cameras of slightly different sizes, as in some
+  ETH3D scenes, share one).
+- **`scripts/build_eth3d_evaluator.sh`** builds the official ETH3D
+  multi-view evaluator on current toolchains (CMake 4, Boost 1.90, PCL 1.15).
   - See [docs/gsplat_cuda.md](docs/gsplat_cuda.md).
 - **`visloc_gsplat_train::config`.** `TrainConfig` moved here from the
   wgpu-only `trainer` module, together with the image packing, brush's

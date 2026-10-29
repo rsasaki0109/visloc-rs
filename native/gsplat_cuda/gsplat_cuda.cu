@@ -57,7 +57,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 3;
+constexpr uint32_t kAbiVersion = 4;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -398,15 +398,24 @@ __device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
 // One block per 16x16 tile, one thread per pixel, splats staged in shared
 // memory 256 at a time; the block stops once every pixel is saturated. A
 // warp skips the splats whose footprint misses its 8x4 sub-tile (the mask in
-// the list entry's top byte).
+// the list entry's top byte). With kDepth, out_depth also receives per pixel
+// the median depth (camera z of the splat at which the transmittance first
+// drops to 0.5 or below; 0 when it never does) and the opacity 1 - T, as
+// rasterize_depth.wgsl. With `plane` (plane_kernel) the median depth is where
+// the pixel's ray meets that splat's plane instead of the splat centre's z
+// (falling back to it at grazing angles); `intr` is (fx, fy, cx, cy).
+template <bool kDepth>
 __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
-    float* __restrict__ out_img, float* __restrict__ final_t, uint32_t* __restrict__ last_idx) {
+    const float* __restrict__ depth, const float4* __restrict__ plane, float4 intr, float* __restrict__ out_img,
+    float* __restrict__ final_t, uint32_t* __restrict__ last_idx, float* __restrict__ out_depth) {
     __shared__ float2 s_xy[kBlock];
     __shared__ float4 s_co[kBlock];
     __shared__ float3 s_col[kBlock];
     __shared__ uint32_t s_mask[kBlock];
+    __shared__ float s_depth[kDepth ? kBlock : 1];
+    __shared__ float4 s_plane[kDepth ? kBlock : 1];
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
     const uint32_t warp_bit = 1u << (tid >> 5);
@@ -421,6 +430,7 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     float3 acc = make_float3(0.f, 0.f, 0.f);
     float trans = 1.f;
     uint32_t last = 0;
+    float median = 0.f;
     bool done = !in_image;
     for (uint32_t start = range.x; start < range.y; start += kBlock) {
         // Also the barrier that protects the staged batch before it is reloaded.
@@ -434,6 +444,10 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
             const float4 c = color[g];
             s_col[tid] = make_float3(c.x, c.y, c.z);
             s_mask[tid] = v >> kIdBits;
+            if (kDepth) {
+                s_depth[tid] = depth[g];
+                if (plane) s_plane[tid] = plane[g];
+            }
         }
         __syncthreads();
         if (!done) {
@@ -452,8 +466,19 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                         acc.x += w * fmaxf(c.x, 0.f);
                         acc.y += w * fmaxf(c.y, 0.f);
                         acc.z += w * fmaxf(c.z, 0.f);
+                        const float before = trans;
                         trans *= 1.f - a;
                         last = start + s + 1;
+                        if (kDepth && before > 0.5f && trans <= 0.5f) {
+                            median = s_depth[s];
+                            if (plane) {
+                                const float4 pl = s_plane[s];
+                                const float nr = pl.x * (sx - intr.z) / intr.x + pl.y * (sy - intr.w) / intr.y + pl.z;
+                                const float z = nr != 0.f ? pl.w / nr : 0.f;
+                                // Grazing planes put the hit far along the ray.
+                                if (z > 0.f && z < 2.f * median) median = z;
+                            }
+                        }
                     }
                 }
             }
@@ -467,6 +492,10 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
         out_img[pix * 3 + 2] = acc.z + trans * bg.z;
         final_t[pix] = trans;
         last_idx[pix] = last;
+        if (kDepth) {
+            out_depth[pix * 2] = median;
+            out_depth[pix * 2 + 1] = 1.f - trans;
+        }
     }
 }
 
@@ -887,6 +916,37 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
 }
 
 
+// Per projected gaussian, its plane in camera space for the planar median
+// depth: the normal is the axis of its smallest scale, turned to face the
+// camera (as project_geo.wgsl), and w = n . p_cam. A ray (x, y, 1) meets
+// the plane at depth w / (n . (x, y, 1)).
+__global__ void plane_kernel(int n, GscCamera cam, const float* __restrict__ transforms,
+                             const uint32_t* __restrict__ tiles, float4* __restrict__ plane) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || tiles[i] == 0) return;
+    const float* tr = transforms + size_t(i) * 10;
+    const float* W = cam.rot;
+    float p[3];
+    mat_vec(W, tr, p);
+    p[0] += cam.t[0];
+    p[1] += cam.t[1];
+    p[2] += cam.t[2];
+    float R[9];
+    quat_to_rot(tr[3], tr[4], tr[5], tr[6], R);
+    int k = 0;
+    if (tr[8] < tr[7 + k]) k = 1;
+    if (tr[9] < tr[7 + k]) k = 2;
+    const float axis[3] = {R[k], R[3 + k], R[6 + k]};
+    float nc[3];
+    mat_vec(W, axis, nc);
+    if (dot3(nc, p) > 0.f) {
+        nc[0] = -nc[0];
+        nc[1] = -nc[1];
+        nc[2] = -nc[2];
+    }
+    plane[i] = make_float4(nc[0], nc[1], nc[2], dot3(nc, p));
+}
+
 // ---------------------------------------------------------------------------
 // Training kernels: the wgpu trainer's loss_l1, ssim, densify_stats, adam,
 // mean_noise and densify_scatter shaders (crates/gsplat-train/src/shaders).
@@ -1296,7 +1356,7 @@ struct Ctx {
     // Intersections.
     Buf keys, vals, keys_sorted, vals_sorted, sort_temp, scan_temp;
     // Per tile / pixel.
-    Buf ranges, image, final_t, last_idx;
+    Buf ranges, image, final_t, last_idx, depth_out, plane;
     // Backward.
     Buf d_image, screen_grads, grads[3], touched;
     // Training: ground truth (packed RGBA8 per pixel, image-major), SSIM
@@ -1390,7 +1450,10 @@ int collect_stages(Ctx* ctx) {
     return 0;
 }
 
-int run_forward(Ctx* ctx) {
+// Render the uploaded scene from ctx->cam; with `out_depth` (device, 2 floats
+// per pixel) also the median depth and opacity, at the splat planes when
+// `planar`.
+int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false) {
     const int n = ctx->n;
     const GscCamera cam = ctx->cam;
     ctx->tile_bw = (cam.width + kTile - 1) / kTile;
@@ -1473,9 +1536,20 @@ int run_forward(Ctx* ctx) {
     }
     GSC_TRY(stage_end(ctx, kRanges));
     GSC_TRY(stage_begin(ctx, kRaster));
-    raster_fwd_kernel<<<dim3(ctx->tile_bw, ctx->tile_bh), kBlock>>>(cam.width, cam.height, ctx->bg, ranges,
-                                                                    vals_sorted, xy, conic_op, color, image, final_t,
-                                                                    last_idx);
+    const dim3 grid(ctx->tile_bw, ctx->tile_bh);
+    const float4 intr = make_float4(cam.fx, cam.fy, cam.cx, cam.cy);
+    float4* plane = nullptr;
+    if (out_depth && planar && n > 0) {
+        GSC_TRY(ensure(ctx, ctx->plane, n, &plane));
+        plane_kernel<<<blocks_for(n), 256>>>(n, cam, ctx->p(0), tiles, plane);
+        GSC_CHECK(ctx, cudaGetLastError());
+    }
+    if (out_depth)
+        raster_fwd_kernel<true><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
+                                                  color, depth, plane, intr, image, final_t, last_idx, out_depth);
+    else
+        raster_fwd_kernel<false><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
+                                                   color, depth, nullptr, intr, image, final_t, last_idx, nullptr);
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRaster));
     ctx->have_forward = true;
@@ -1632,7 +1706,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
     Buf* bufs[] = {&ctx->xy,          &ctx->conic_op,  &ctx->color,    &ctx->depth,      &ctx->rect,
                    &ctx->extk,        &ctx->tiles,     &ctx->offsets,  &ctx->keys,       &ctx->vals,
                    &ctx->keys_sorted, &ctx->vals_sorted, &ctx->sort_temp, &ctx->scan_temp, &ctx->ranges,
-                   &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->d_image,    &ctx->screen_grads, &ctx->touched,
+                   &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->depth_out, &ctx->plane, &ctx->d_image,    &ctx->screen_grads, &ctx->touched,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum};
     for (Buf* b : bufs) free_buf(*b);
@@ -1710,6 +1784,27 @@ GSC_EXPORT int visloc_gsplat_cuda_render(void* handle, const GscCamera* cam, con
     if (out_rgb)
         GSC_CHECK(ctx, cudaMemcpy(out_rgb, ctx->image.ptr, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
     if (num_intersections) *num_intersections = ctx->num_isect;
+    return 0;
+}
+
+// visloc_gsplat_cuda_render, plus per pixel the median depth (camera z of the
+// splat at which the transmittance first drops to 0.5 or below; 0 when it
+// never does) and the opacity 1 - T: `out_depth` (nullable) receives
+// width * height * 2 floats. With `planar` the depth is where the pixel's ray
+// meets that splat's plane (normal: its smallest axis) instead of its centre.
+GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* cam, const float* bg,
+                                               int sh_active_degree, int planar, float* out_rgb, float* out_depth) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    GSC_TRY(set_camera(ctx, cam, bg, sh_active_degree));
+    float* d;
+    GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &d));
+    clear_stages(ctx);
+    GSC_TRY(run_forward(ctx, d, planar != 0));
+    GSC_TRY(collect_stages(ctx));
+    if (out_rgb)
+        GSC_CHECK(ctx, cudaMemcpy(out_rgb, ctx->image.ptr, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    if (out_depth) GSC_CHECK(ctx, cudaMemcpy(out_depth, d, ctx->pixels() * 2 * sizeof(float), cudaMemcpyDeviceToHost));
     return 0;
 }
 

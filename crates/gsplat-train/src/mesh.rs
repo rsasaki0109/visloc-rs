@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use visloc_gsplat_core::camera::CameraView;
 pub use visloc_gsplat_core::mesh::{rig_scale, DepthFrame, Mesh, Tsdf};
 
-/// Settings for [`extract_from_splat`]; lengths in voxels unless noted.
+/// Settings for [`fuse_views`]; lengths in voxels unless noted.
 #[derive(Debug, Clone)]
 pub struct MeshOptions {
     /// Voxel edge (world units); `None`: [`scene_scale`] / 256.
@@ -76,44 +76,34 @@ pub fn scene_scale(views: &[&CameraView], support: &[[f32; 3]]) -> f32 {
     rig.max(0.5 * *p90)
 }
 
-/// Render `scene`'s median depth from every view, fuse, extract, filter by
-/// `support` (e.g. SfM points) and drop small components. Returns the mesh
-/// and a one-line summary.
-pub fn extract_from_splat(
-    ctx: visloc_gsplat_render::GpuContext,
-    scene: &visloc_gsplat_core::gaussian::Scene,
+/// Fuse the median depth of every view into a TSDF, extract the mesh, filter
+/// it by `support` (e.g. SfM points) and drop small components. `render`
+/// gives a view's row-major RGB and median depth (camera z, 0 = no surface),
+/// from whichever renderer holds the splat. Returns the mesh and a one-line
+/// summary.
+pub fn fuse_views<E>(
     views: &[&CameraView],
     support: &[[f32; 3]],
     opts: &MeshOptions,
-) -> Result<(Mesh, String, visloc_gsplat_render::GpuContext), visloc_gsplat_render::GpuError> {
+    mut render: impl FnMut(&CameraView) -> Result<(Vec<[f32; 3]>, Vec<f32>), E>,
+) -> Result<(Mesh, String), E> {
     let scale = scene_scale(views, support);
     let voxel = opts.voxel.unwrap_or(scale / 256.0);
     let max_depth = opts.max_depth.unwrap_or(2.0 * scale);
     let mut tsdf = Tsdf::new(voxel, voxel * opts.trunc_voxels, max_depth);
     tsdf.carve = opts.carve;
     tsdf.min_weight = opts.min_weight;
-    let mut ctx = Some(ctx);
-    let mut renderer: Option<(u32, u32, visloc_gsplat_render::Renderer)> = None;
     let t0 = std::time::Instant::now();
     let (mut render_s, mut integrate_s) = (0.0f64, 0.0f64);
     for view in views {
-        let (w, h) = (view.camera.width, view.camera.height);
-        if renderer.as_ref().map(|r| (r.0, r.1)) != Some((w, h)) {
-            let c = match renderer.take() {
-                Some((_, _, r)) => r.into_context(),
-                None => ctx.take().expect("context"),
-            };
-            renderer = Some((w, h, visloc_gsplat_render::Renderer::new(c, scene, w, h)?));
-        }
-        let (_, _, r) = renderer.as_mut().expect("renderer set above");
         let t = std::time::Instant::now();
-        let (image, depth, _) = r.render_depth(view, [0.0, 0.0, 0.0]);
+        let (rgb, depth) = render(view)?;
         render_s += t.elapsed().as_secs_f64();
         let t = std::time::Instant::now();
         tsdf.integrate(&DepthFrame {
             view,
             depth: &depth,
-            rgb: &image.rgb,
+            rgb: &rgb,
         });
         integrate_s += t.elapsed().as_secs_f64();
     }
@@ -130,6 +120,40 @@ pub fn extract_from_splat(
         tsdf.num_blocks(),
         mesh.triangles.len()
     );
+    Ok((mesh, summary))
+}
+
+/// [`fuse_views`] with the wgpu renderer: render `scene`'s median depth from
+/// every view. Returns the mesh, a one-line summary and the context.
+#[cfg(feature = "gpu")]
+pub fn extract_from_splat(
+    ctx: visloc_gsplat_render::GpuContext,
+    scene: &visloc_gsplat_core::gaussian::Scene,
+    views: &[&CameraView],
+    support: &[[f32; 3]],
+    opts: &MeshOptions,
+) -> Result<(Mesh, String, visloc_gsplat_render::GpuContext), visloc_gsplat_render::GpuError> {
+    let mut ctx = Some(ctx);
+    let mut renderer: Option<(u32, u32, visloc_gsplat_render::Renderer)> = None;
+    let fused = fuse_views(
+        views,
+        support,
+        opts,
+        |view| -> Result<_, visloc_gsplat_render::GpuError> {
+            let (w, h) = (view.camera.width, view.camera.height);
+            if renderer.as_ref().map(|r| (r.0, r.1)) != Some((w, h)) {
+                let c = match renderer.take() {
+                    Some((_, _, r)) => r.into_context(),
+                    None => ctx.take().expect("context"),
+                };
+                renderer = Some((w, h, visloc_gsplat_render::Renderer::new(c, scene, w, h)?));
+            }
+            let (_, _, r) = renderer.as_mut().expect("renderer set above");
+            let (image, depth, _) = r.render_depth(view, [0.0, 0.0, 0.0]);
+            Ok((image.rgb, depth))
+        },
+    );
+    let (mesh, summary) = fused?;
     let ctx = match renderer {
         Some((_, _, r)) => r.into_context(),
         None => ctx.take().expect("context"),

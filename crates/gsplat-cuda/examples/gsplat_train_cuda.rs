@@ -7,12 +7,14 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
-//!   [--sparse-sh-adam]
+//!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]]
 //! ```
 //!
-//! Initialises from `sparse/0/points3D`, holds out every 8th view (the brush
-//! / Inria split) and reports eval PSNR and SSIM of the CUDA renders with
-//! `visloc_gsplat_train::metrics`. Training time leaves the evaluations out.
+//! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
+//! (8: the brush / Inria split; 0 trains on every view) and reports eval
+//! PSNR and SSIM of the CUDA renders with `visloc_gsplat_train::metrics`.
+//! Training time leaves the evaluations out. `--mesh` also extracts a mesh
+//! from every view after training, as `gsplat_mesh_cuda` with its defaults.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -25,6 +27,7 @@ use visloc_gsplat_train::dataset::{
     find_model_dir, load_colmap_dataset_with, load_view_rgb, EquirectOptions,
 };
 use visloc_gsplat_train::init::{read_points3d, seed_scene};
+use visloc_gsplat_train::mesh::MeshOptions;
 use visloc_gsplat_train::metrics::{psnr, ssim};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut eval_every = 5000usize;
     let mut profile = false;
     let mut sparse_sh_adam = false;
+    let mut holdout = 8usize;
+    let mut mesh_out: Option<PathBuf> = None;
+    let mut planar = false;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -54,15 +60,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--profile" => profile = true,
             // SH Adam only on the gaussians each step blends.
             "--sparse-sh-adam" => sparse_sh_adam = true,
+            "--holdout" => holdout = next()?.parse()?,
+            "--mesh" => mesh_out = Some(PathBuf::from(next()?)),
+            "--planar-depth" => planar = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
     let data = data.ok_or("--data <colmap root> is required")?;
 
-    let dataset =
-        load_colmap_dataset_with(&data, Some(8), &EquirectOptions::default(), &mut |m| {
-            println!("{m}")
-        })?;
+    let dataset = load_colmap_dataset_with(
+        &data,
+        (holdout > 0).then_some(holdout),
+        &EquirectOptions::default(),
+        &mut |m| println!("{m}"),
+    )?;
     let points = read_points3d(find_model_dir(&data)?)?;
     let init = seed_scene(&points, 3);
     println!(
@@ -137,9 +148,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if step % eval_every == 0 || step == cfg.steps {
                 train_s += since.elapsed().as_secs_f64();
-                let (p, s) = eval(&mut trainer)?;
+                let quality = if dataset.eval.is_empty() {
+                    String::new()
+                } else {
+                    let (p, s) = eval(&mut trainer)?;
+                    format!("  eval psnr {p:.3}  ssim {s:.4}")
+                };
                 println!(
-                    "step {step:6}  l1 {loss:.4}  eval psnr {p:.3}  ssim {s:.4}  gaussians {}  ({train_s:.0}s)",
+                    "step {step:6}  l1 {loss:.4}{quality}  gaussians {}  ({train_s:.0}s)",
                     trainer.num_gaussians()
                 );
                 since = Instant::now();
@@ -157,5 +173,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     save_ply(&trainer.scene()?, &out)?;
     println!("wrote {}", out.display());
+    if let Some(path) = mesh_out {
+        let views: Vec<_> = dataset
+            .train
+            .iter()
+            .chain(&dataset.eval)
+            .map(|v| &v.camera)
+            .collect();
+        let support: Vec<[f32; 3]> = points
+            .iter()
+            .map(|p| [p.position.x, p.position.y, p.position.z])
+            .collect();
+        let (mesh, summary) =
+            trainer.extract_mesh(planar, &views, &support, &MeshOptions::default())?;
+        println!("{summary}");
+        mesh.write_ply(&path)?;
+        println!("wrote {}", path.display());
+    }
     Ok(())
 }

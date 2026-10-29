@@ -26,7 +26,7 @@ pub mod euroc;
 pub mod init;
 #[cfg(feature = "gpu")]
 pub mod loss;
-#[cfg(feature = "gpu")]
+#[cfg(feature = "mesh")]
 pub mod mesh;
 pub mod metrics;
 #[cfg(feature = "euroc")]

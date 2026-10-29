@@ -283,3 +283,94 @@ fn param_grads_respect_active_sh_degree() {
 fn param_grads_match_cpu_dense_tiles() {
     check_param_grads(&random_scene(2500, 3, 1, -3.0), 64, 48, None);
 }
+
+/// A flat, round gaussian facing the camera at depth `z` with opacity `a`.
+fn disc(z: f32, a: f32, colour: [f32; 3]) -> Gaussian {
+    let sh0 = visloc_gsplat_core::sh::SH_C0;
+    Gaussian {
+        mean: Vector3::new(0.0, 0.0, z),
+        scale_log: Vector3::new(0.5f32.ln(), 0.5f32.ln(), 0.01f32.ln()),
+        rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+        opacity_logit: (a / (1.0 - a)).ln(),
+        sh_dc: colour.map(|c| (c - 0.5) / sh0),
+        sh_rest: Vec::new(),
+        sh_degree: 0,
+    }
+}
+
+#[test]
+fn median_depth_is_where_transmittance_halves() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (64u32, 48u32);
+    let view = CameraView::new(
+        nalgebra::Matrix3::identity(),
+        Vector3::zeros(),
+        // The discs project onto the centre of pixel (31, 23).
+        PinholeCamera::new(w, h, 60.0, 60.0, 31.5, 23.5),
+    );
+    let centre = (23 * w + 31) as usize;
+    // Only a faint front disc: T = 0.6 > 0.5 at the centre, so no median.
+    let front = Scene::new(vec![disc(3.0, 0.4, [0.9, 0.1, 0.1])], 0);
+    cuda.set_scene(&PackedScene::from_scene(&front))
+        .expect("upload");
+    let f = cuda.render_depth(&view, BG, 0, false).expect("render");
+    assert_eq!(f.depth[centre], 0.0);
+    assert!(
+        (f.opacity[centre] - 0.4).abs() < 1e-3,
+        "{}",
+        f.opacity[centre]
+    );
+    // An opaque disc behind it takes T below 0.5: the median is its depth.
+    let both = Scene::new(
+        vec![
+            disc(3.0, 0.4, [0.9, 0.1, 0.1]),
+            disc(5.0, 0.9, [0.1, 0.9, 0.1]),
+        ],
+        0,
+    );
+    cuda.set_scene(&PackedScene::from_scene(&both))
+        .expect("upload");
+    let f = cuda.render_depth(&view, BG, 0, false).expect("render");
+    assert!((f.depth[centre] - 5.0).abs() < 1e-4, "{}", f.depth[centre]);
+    assert!((f.opacity[centre] - (1.0 - 0.6 * 0.1)).abs() < 1e-3);
+    // Corners see neither disc.
+    assert_eq!(f.depth[0], 0.0);
+    // The colour is the plain render's.
+    let plain = cuda.render(&view, BG, 0).expect("render");
+    assert_eq!(f.rgb, plain.rgb);
+}
+
+#[test]
+fn planar_depth_meets_the_splat_plane() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (64u32, 48u32);
+    let view = CameraView::new(
+        nalgebra::Matrix3::identity(),
+        Vector3::zeros(),
+        PinholeCamera::new(w, h, 60.0, 60.0, 31.5, 23.5),
+    );
+    // An opaque disc at depth 5, turned 30 degrees about y.
+    let half = 15f32.to_radians();
+    let mut tilted = disc(5.0, 0.9, [0.5, 0.5, 0.5]);
+    tilted.rotation = Quaternion::new(half.cos(), 0.0, half.sin(), 0.0);
+    cuda.set_scene(&PackedScene::from_scene(&Scene::new(vec![tilted], 0)))
+        .expect("upload");
+    let centre_depth = cuda.render_depth(&view, BG, 0, false).expect("render");
+    let planar = cuda.render_depth(&view, BG, 0, true).expect("render");
+    // Pixel (36, 23): its ray is (5 / 60, 0, 1). The disc's plane has normal
+    // (sin 30, 0, cos 30) through (0, 0, 5).
+    let pix = (23 * w + 36) as usize;
+    let x = 5.0f32 / 60.0;
+    let (s, c) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
+    let want = 5.0 * c / (x * s + c);
+    assert!((centre_depth.depth[pix] - 5.0).abs() < 1e-4);
+    assert!(
+        (planar.depth[pix] - want).abs() < 1e-3,
+        "planar {} want {want}",
+        planar.depth[pix]
+    );
+    // At the centre pixel both agree.
+    let centre = (23 * w + 31) as usize;
+    assert!((planar.depth[centre] - 5.0).abs() < 1e-4);
+    assert_eq!(planar.rgb, centre_depth.rgb);
+}

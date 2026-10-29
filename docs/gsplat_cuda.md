@@ -31,7 +31,8 @@ The packaging follows the DPVO CUDA kernels:
 | Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
 | Inria densification rule, per-image appearance, depth-normal loss | Not supported (the trainer refuses these configurations) |
-| Geometry channels (normal, depth) for the normal loss and the mesh | Not started |
+| Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
+| Geometry channels (normal, depth) for the depth-normal loss | Not started |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -93,6 +94,13 @@ magnitude. The tolerances are 2e-3 (image, screen gradients) and 3e-3
 | 64 gaussians, 96x80 | 4.9e-7 (absolute) | 3.2e-6 | 1.5e-6 |
 | 2,500 faint gaussians, 64x48 (about 500 per tile: several batches) | 4.5e-7 (absolute) | 6.7e-6 | 1.1e-6 |
 | Active SH degree 1 and 0 of a degree-3 scene | | | 1.8e-6; bands above the active degree get exactly 0 |
+
+Two more tests check the depth output against analytic cases:
+
+- **Median depth.** A faint disc gives no median, with opacity 0.4. An
+  opaque disc behind it gives its depth, with opacity 1 - 0.6 x 0.1.
+- **Planar depth.** For a disc turned 30 degrees, the depth matches the
+  ray-plane intersection to 1e-3.
 
 `tests/training.rs` checks the training step:
 
@@ -259,10 +267,84 @@ WSL2, CUDA 13.3:
 | Branchless predication (step 5) | Not yet |
 | Two pixels per thread, per-warp staging without block barriers (step 6) | Not yet |
 
+## Geometry on ETH3D
+
+How good is the geometry of a trained splat? Three ETH3D high-res training
+scenes were trained on their ground-truth poses and the meshes scored with
+the official evaluator against the laser scans
+(`scripts/eth3d_3dgs_mesh.sh`, evaluator built by
+`scripts/build_eth3d_evaluator.sh`). The setup:
+
+- **Images.** `colmap_resize --size 1600x1067` scales the undistorted DSLR
+  images and their cameras. terrains has two cameras of slightly different
+  sizes, so `--size` gives every camera the same size and scales each
+  camera's intrinsics per axis.
+- **Training.** 30k steps with brush's preset on every view (`--holdout 0`),
+  up to 2.5M gaussians.
+- **Mesh.** Median depth from every view, fused into a TSDF
+  (`visloc_gsplat_train::mesh::fuse_views`, shared with wgpu's
+  `extract_from_splat`). The evaluator scores the mesh vertices.
+
+F1 at 2 cm, with accuracy / completeness in parentheses:
+
+| Scene | Images | Gaussians | Training | Default mesh | ETH3D-oriented mesh | visloc-mvs cloud |
+|---|---|---|---|---|---|---|
+| terrains | 42 | 616k | 628 s | 18.6% (72.7 / 10.7) | 34.1% (46.5 / 27.0) | 91.2% |
+| playground | 38 | 1.93M | 1231 s | 34.6% (57.2 / 24.8) | 43.9% (50.3 / 39.0) | 69.8% |
+| office | 26 | 201k | 460 s | 9.2% (84.2 / 4.9) | 21.4% (39.1 / 14.8) | 79.0% |
+| **mean** | | | | **20.8%** | **33.1%** | 80.0% |
+
+- **Default mesh.** `gsplat_photos`' options, built for photos-to-mesh:
+  - Voxel scene scale / 256: 1.0 cm on terrains, 2.7 cm on playground.
+  - Depths up to 2 x the scene scale.
+  - Triangles within 10 voxels of an SfM point. ETH3D's points are sparse,
+    18,553 on terrains.
+  - Voxels seen by at least 3 views.
+  - Accuracy is fair, but most of the scan goes missing.
+- **ETH3D-oriented mesh** (the script's default):
+  - 1 cm voxels.
+  - No support filter.
+  - Depths up to 20 m.
+  - Voxels seen once are kept.
+  - Planar median depth.
+  - Exception: playground uses 1.5 cm voxels and depths up to 14 m. At
+    1 cm the CPU TSDF ran out of WSL2's 11 GB, and even this setting peaks
+    at 9.7 GB.
+- **visloc-mvs cloud.** From `docs/mvs.md` (3200 px, all 13 scenes on an
+  L4). For meshes from MVS depth maps, the 13-scene mean is 79.3%.
+
+Each option on terrains, at 2 cm:
+
+| Mesh options | Accuracy | Completeness | F1 |
+|---|---|---|---|
+| Default | 72.7% | 10.7% | 18.6% |
+| No support filter | 54.9% | 15.0% | 23.6% |
+| No support filter, depths up to 20 m | 42.3% | 17.6% | 24.9% |
+| … and planar depth | 52.7% | 19.0% | 27.9% |
+| No support filter, depths up to 20 m, min weight 1 | 36.6% | 22.4% | 27.8% |
+| … and planar depth | 46.2% | 27.0% | 34.1% |
+
+- **Planar depth** (`--planar-depth`). The median depth is the camera z of
+  the splat that takes the transmittance to 0.5. Splats lie along the
+  surface, so on surfaces seen at an angle their centre is off the pixel's
+  ray. Planar depth takes the depth where the ray meets that splat's plane
+  instead: the normal is the axis of its smallest scale, as in PGSR's
+  unbiased depth. If that point is more than twice the centre's depth, the
+  centre's depth is kept. On terrains it adds 3–6 points of F1 at 2 cm.
+- **Where 3DGS stands.** A plain 3DGS (no geometric regularization) reaches
+  about 2/5 of MVS's F1 at 2 cm. The gap is at cm scale: on terrains,
+  completeness reaches 92% at 50 cm. office, with 26 views and weak
+  texture, is the worst; the splat fits its appearance without its
+  geometry.
+
 ## Next
 
-1. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;
+1. **Geometry.** Two levers, measured on these three scenes:
+   - The depth-normal loss needs the geometry channels in CUDA (wgpu has
+     them). On wgpu it smoothed meshes noticeably.
+   - Supervision from visloc-mvs depth maps.
+2. **TSDF on the GPU.** At 1 cm the CPU TSDF dominates meshing and runs out
+   of memory on large scenes.
+3. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;
    sparse SH Adam halves it), raster_bwd (6.9 ms: the write-up's steps 5
    and 6), raster (2.6 ms) and the sort (1.5 ms: the two-stage sort).
-2. **Geometry.** Add the geometry channels, then score `gsplat_mesh`'s mesh
-   on ETH3D.

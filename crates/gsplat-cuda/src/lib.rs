@@ -19,6 +19,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
+pub mod mesh;
 pub mod trainer;
 
 use libloading::Library;
@@ -139,6 +140,15 @@ type RenderFn = unsafe extern "C" fn(
     *mut c_float,
     *mut u32,
 ) -> c_int;
+type RenderDepthFn = unsafe extern "C" fn(
+    *mut c_void,
+    *const GscCamera,
+    *const c_float,
+    c_int,
+    c_int,
+    *mut c_float,
+    *mut c_float,
+) -> c_int;
 type BackwardFn = unsafe extern "C" fn(
     *mut c_void,
     *const c_float,
@@ -194,6 +204,18 @@ pub struct Frame {
     pub num_intersections: u32,
 }
 
+/// A rendered frame with its depth (see [`CudaGsplat::render_depth`]).
+#[derive(Debug, Clone)]
+pub struct DepthFrame {
+    /// Row-major RGB, `width * height * 3` floats (background included).
+    pub rgb: Vec<f32>,
+    /// Per pixel, the median depth: camera z of the splat at which the
+    /// transmittance first drops to 0.5 or below (0 when it never does).
+    pub depth: Vec<f32>,
+    /// Per pixel, the opacity `1 - T`.
+    pub opacity: Vec<f32>,
+}
+
 /// Gradients of `L = sum_px dot(d_image[px], C[px])` for the last frame, in
 /// the [`PackedScene`] layouts. Gaussians that were not visible get zeros.
 #[derive(Debug, Clone)]
@@ -232,6 +254,7 @@ struct Api {
     num_gaussians: NumGaussiansFn,
     get_scene: GetSceneFn,
     render: RenderFn,
+    render_depth: RenderDepthFn,
     backward: BackwardFn,
     set_images: SetImagesFn,
     train_step: TrainStepFn,
@@ -284,7 +307,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 3;
+    pub const ABI_VERSION: u32 = 4;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -322,6 +345,7 @@ impl CudaGsplat {
                 num_gaussians: symbol(&library, "visloc_gsplat_cuda_num_gaussians", path)?,
                 get_scene: symbol(&library, "visloc_gsplat_cuda_get_scene", path)?,
                 render: symbol(&library, "visloc_gsplat_cuda_render", path)?,
+                render_depth: symbol(&library, "visloc_gsplat_cuda_render_depth", path)?,
                 backward: symbol(&library, "visloc_gsplat_cuda_backward", path)?,
                 set_images: symbol(&library, "visloc_gsplat_cuda_set_images", path)?,
                 train_step: symbol(&library, "visloc_gsplat_cuda_train_step", path)?,
@@ -474,6 +498,45 @@ impl CudaGsplat {
         Ok(Frame {
             rgb,
             num_intersections,
+        })
+    }
+
+    /// [`render`](Self::render) plus the median depth and opacity per pixel
+    /// (the wgpu renderer's `render_depth`), e.g. for mesh extraction. With
+    /// `planar` the depth is where the pixel's ray meets the plane of the splat
+    /// that takes the transmittance to 0.5 (normal: its smallest axis)
+    /// instead of that splat's centre depth.
+    pub fn render_depth(
+        &mut self,
+        view: &CameraView,
+        bg: [f32; 3],
+        sh_active_degree: u32,
+        planar: bool,
+    ) -> Result<DepthFrame, GsplatCudaError> {
+        let cam = GscCamera::from_view(view);
+        let pixels = cam.width as usize * cam.height as usize;
+        let mut rgb = vec![0.0f32; pixels * 3];
+        let mut depth_opacity = vec![0.0f32; pixels * 2];
+        // SAFETY: `rgb` holds width * height * 3 floats and `depth_opacity`
+        // width * height * 2, the sizes the native side writes.
+        let code = unsafe {
+            (self.api.render_depth)(
+                self.ctx(),
+                &cam,
+                bg.as_ptr(),
+                sh_active_degree as c_int,
+                planar as c_int,
+                rgb.as_mut_ptr(),
+                depth_opacity.as_mut_ptr(),
+            )
+        };
+        self.check(code)?;
+        self.pixels = pixels;
+        let (depth, opacity) = depth_opacity.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
+        Ok(DepthFrame {
+            rgb,
+            depth,
+            opacity,
         })
     }
 

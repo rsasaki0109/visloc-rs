@@ -397,6 +397,25 @@ impl CudaTrainer {
             .collect())
     }
 
+    /// Extract a mesh from the current scene (see [`crate::mesh`]), with the
+    /// current SH degree; `planar` takes the median depth at the splat planes.
+    pub fn extract_mesh(
+        &mut self,
+        planar: bool,
+        views: &[&CameraView],
+        support: &[[f32; 3]],
+        opts: &visloc_gsplat_train::mesh::MeshOptions,
+    ) -> Result<(visloc_gsplat_train::mesh::Mesh, String), CudaTrainError> {
+        Ok(crate::mesh::extract_mesh(
+            &mut self.gs,
+            self.active_sh,
+            planar,
+            views,
+            support,
+            opts,
+        )?)
+    }
+
     /// Download the current gaussians as a [`Scene`].
     pub fn scene(&self) -> Result<Scene, CudaTrainError> {
         let packed = self.gs.scene()?;
