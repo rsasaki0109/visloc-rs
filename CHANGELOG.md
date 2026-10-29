@@ -80,6 +80,21 @@ All notable changes to `visloc-rs` will be documented here.
     against 35.0% for the prior alone. 0.05 is far too strong (terrains
     22.9%).
   - CUDA ABI 6.
+- **TSDF on the GPU for CUDA meshes (`gsplat_mesh_cuda --gpu-tsdf`).**
+  - `mesh::extract_mesh_gpu` (`CudaGsplat::tsdf_surface`) fuses the median
+    depth and extracts surface nets on the device, with `Tsdf`'s maths,
+    options and filters.
+  - Every block is allocated before any view is fused. The blocks are then
+    fused in slabs along x, so memory stays bounded at any voxel size.
+  - On ETH3D at 1 cm it matches the CPU's F1 to 0.2 points in 4–5x less time
+    and 1/6 of the memory (terrains: 5.4 s and 1.6 GB against 24.0 s and
+    10.3 GB). playground, which ran out of memory on the CPU, meshes in
+    12.0 s and 4.2 GB.
+  - One view gives the CPU's mesh, and any number of slabs gives the same
+    surface bit for bit.
+  - `Mesh::remove_small_components` counts triangles per component in a
+    vector instead of a hash map.
+  - CUDA ABI 7.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
   exact size (`--size` makes cameras of slightly different sizes, as in some

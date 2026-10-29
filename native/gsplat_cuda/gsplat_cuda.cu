@@ -35,10 +35,12 @@
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_scan.cuh>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <new>
 #include <string>
+#include <vector>
 
 extern "C" {
 
@@ -57,7 +59,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 6;
+constexpr uint32_t kAbiVersion = 7;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -1582,6 +1584,14 @@ struct Ctx {
     // the loss's per-pixel scratch, and per gaussian the normal gradient.
     Buf acc_normal, d_normal, gab, g_normal;
     bool have_normal = false;  // the last render has the depth and normal channels
+    // GPU TSDF (tsdf.cuh): the block table, the current slab's blocks and
+    // voxels, the extraction output, and on the host the surface of the last
+    // fusion until visloc_gsplat_cuda_tsdf_take.
+    Buf tsdf_table, tsdf_keys, tsdf_slab_table, tsdf_slab_keys, tsdf_sdf, tsdf_w, tsdf_col, tsdf_counts,
+        tsdf_out_cells, tsdf_out_pos, tsdf_out_col, tsdf_out_edges, tsdf_cache_depth, tsdf_cache_rgb;
+    std::vector<int32_t> tsdf_cells, tsdf_edges;
+    std::vector<float> tsdf_pos;
+    std::vector<uint8_t> tsdf_col_host;
     int num_priors = 0;
     int num_images = 0;
     uint32_t gt_w = 0, gt_h = 0;
@@ -2008,6 +2018,9 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->keys_sorted, &ctx->vals_sorted, &ctx->sort_temp, &ctx->scan_temp, &ctx->ranges,
                    &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->depth_out, &ctx->plane, &ctx->d_image,    &ctx->screen_grads, &ctx->touched, &ctx->depth_prior, &ctx->acc_depth, &ctx->d_depth, &ctx->g_depth,
                    &ctx->acc_normal,  &ctx->d_normal,  &ctx->gab,      &ctx->g_normal,
+                   &ctx->tsdf_table,  &ctx->tsdf_keys, &ctx->tsdf_slab_table, &ctx->tsdf_slab_keys,
+                   &ctx->tsdf_sdf,    &ctx->tsdf_w,    &ctx->tsdf_col, &ctx->tsdf_counts,
+                   &ctx->tsdf_out_cells, &ctx->tsdf_out_pos, &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum};
     for (Buf* b : bufs) free_buf(*b);
@@ -2441,3 +2454,6 @@ GSC_EXPORT int visloc_gsplat_cuda_stage_times(void* handle, float* ms, int cap) 
 }
 
 }  // extern "C"
+
+// GPU TSDF fusion and surface-nets extraction (visloc_gsplat_cuda_tsdf_*).
+#include "tsdf.cuh"
