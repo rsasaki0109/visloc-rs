@@ -3,7 +3,7 @@
 //!
 //! cargo run --release -p visloc-slam --example imu_metric_scale -- \
 //!     <model dir> <imu.csv> [--frames TEMPLATE] [--divisor N] [--remainder R] \
-//!     [--period S [--offset S]] [--no-centre-term] [--runs]
+//!     [--period S [--offset S]] [--no-centre-term] [--no-gyro-bias] [--runs]
 //!
 //! The model is `images.bin` or `images.txt` (only the poses are read). The
 //! frames used are the images whose names match `TEMPLATE`, where `{n}` stands
@@ -130,6 +130,7 @@ fn main() {
     };
     let mut cfg = ImuScaleConfig {
         rolling_shutter_term: !flag("--no-centre-term"),
+        gyro_bias: !flag("--no-gyro-bias"),
         ..Default::default()
     };
     if let Some(period) = opt("--period") {
@@ -147,9 +148,10 @@ fn main() {
     let t = std::time::Instant::now();
     match estimate_imu_scale(&imu, &frames, &cfg) {
         Ok(e) => {
+            let b = e.gyro_bias.map(f64::to_degrees);
             println!(
-                "timing: every {:.7} s from {:+.4} s, drift {:+.1} / {:+.1} ms; rotation residual {:.3} deg; {} speed jumps",
-                e.period, e.offset, e.drift_ms[0], e.drift_ms[1], e.rotation_residual_deg, e.speed_jumps
+                "timing: every {:.7} s from {:+.4} s, drift {:+.1} / {:+.1} ms; rotation residual {:.3} deg; gyro bias ({:.3}, {:.3}, {:.3}) deg/s; {} speed jumps",
+                e.period, e.offset, e.drift_ms[0], e.drift_ms[1], e.rotation_residual_deg, b.x, b.y, b.z, e.speed_jumps
             );
             if flag("--runs") {
                 for r in &e.runs {
