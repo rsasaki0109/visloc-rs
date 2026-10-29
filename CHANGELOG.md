@@ -107,20 +107,28 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
-- **`visloc_wheel_calibration_node`: wheel odometry calibrated against the
-  VIO while driving.** It pairs a robot's wheel odometry with
-  `visloc_vio_node`'s and fits where the wheel odometry is measured relative
-  to `base_link`, `base_link`'s lean against the VIO's gravity and the
-  VIO's scale (`visloc_localization::WheelCalibration`, the Rust port of
-  `scripts/calibrate_wheel_offset.py`), once the robot has turned 180° and
-  travelled 1 m. From then on it publishes the wheel odometry as
-  `base_link`'s pose, continuous where the calibration takes over; a saved
-  `calibration_file` applies from the start. On OpenLORIS-Scene, with the
-  dataset's own `base_link` and the maps as shipped, a calibration from the
-  other session takes the wheel odometry + map from 12.10 to 8.13 cm
-  (office1-7) and from 8.01 to 5.68 cm (office1-6); office1-3's offline
-  calibration through the node gives 4.66 and 4.92 cm. The turning point
-  and the VIO's scale vary between sessions.
+- **`visloc_wheel_calibration_node`: wheel odometry calibrated while
+  driving.** It fits where a robot's wheel odometry is measured relative to
+  `base_link`, `base_link`'s lean and the map's scale
+  (`visloc_localization::WheelCalibration`, the Rust port of
+  `scripts/calibrate_wheel_offset.py`), and publishes the wheel odometry as
+  `base_link`'s pose and `odom -> base_link`. The offset comes from
+  `visloc_vio_node`'s odometry once the robot has turned 180° and travelled
+  1 m; the lean and the scale from `visloc_map_localize_node`'s
+  localizations (the new `map_fix` topic), which carry the map's own gravity
+  and scale, and without a VIO the offset too, held near the saved one
+  where their turns do not show it. A VIO session's scale is reported but
+  not used: on OpenLORIS-Scene it was up to 3.6% off the map's. The node
+  refits every 5 s over the last 120 s, continuous wherever a new estimate
+  takes over, and a saved `calibration_file` applies from the start. On
+  OpenLORIS-Scene through ROS 2, the map's localizations alone take
+  office1-6's wheel odometry + map from 8.01 to 5.49 cm; office1-3's
+  offline calibration, saved, gives 4.92 cm and office1-7 4.66 cm (12.10 as
+  is), where its 24 localizations show only the lean. In the demo, the
+  map's lean and scale with office1-3's offset take office1-7 from 5.07 to
+  3.64 cm. `launch/map_localization.launch.py` starts it with
+  `wheel_odom_topic` (and `wheel_calibration_file` to keep the calibration
+  between launches).
 - **The ROS 2 nodes on a real robot's wheel odometry.**
   `tools/euroc_to_rosbag2.py --odometry FILE.tum` adds a robot's wheel
   odometry to the bag (`nav_msgs/Odometry` on `/wheel/odom`, `odom ->
