@@ -14,7 +14,10 @@
 //!    rotation angles (gyro against model), a finer grid within ±0.4% of the
 //!    period, then Nelder-Mead on the median residual of the Kabsch fit
 //!    `r_C = R_CB r_B`. Drift check: the offset refitted on the first and
-//!    last quarters of the frames.
+//!    last quarters of the frames. A constant gyro bias `b_g` bends every
+//!    frame-to-frame rotation by `b_g dt`, and the timing search with it:
+//!    it is fitted at that timing (`R_CBᵀ r_C = r_B - b_g dt`, alternating
+//!    with `R_CB`), taken off the gyro, and the timing searched again.
 //! 2. **Runs**: frames at most 1.2 s apart, broken where the model's speed
 //!    exceeds three times its median (a misregistered frame), with at least
 //!    8 intervals.
@@ -82,6 +85,9 @@ pub struct ImuScaleConfig {
     pub outlier_factor: f64,
     /// Fit the camera-centre error proportional to the angular velocity.
     pub rolling_shutter_term: bool,
+    /// Fit a constant gyro bias and take it off the gyro (module docs,
+    /// step 1).
+    pub gyro_bias: bool,
 }
 
 impl Default for ImuScaleConfig {
@@ -96,6 +102,7 @@ impl Default for ImuScaleConfig {
             speed_jump_factor: 3.0,
             outlier_factor: 5.0,
             rolling_shutter_term: true,
+            gyro_bias: true,
         }
     }
 }
@@ -132,6 +139,9 @@ pub struct ImuScaleEstimate {
     pub offset: f64,
     /// Camera-from-IMU rotation.
     pub camera_from_imu: Matrix3<f64>,
+    /// The gyro bias taken off the gyro, rad/s in the IMU's frame (zero
+    /// without [`ImuScaleConfig::gyro_bias`]).
+    pub gyro_bias: Vector3<f64>,
     /// Median angle between the model's and the gyro's frame-to-frame
     /// rotations after the fit, degrees.
     pub rotation_residual_deg: f64,
@@ -189,17 +199,31 @@ pub fn estimate_imu_scale(
     if frames.len() < cfg.min_intervals + 1 {
         return Err(ImuScaleError::TooFewFrames(frames.len()));
     }
-    let gyro = GyroIntegral::new(&imu.time, &imu.gyro);
-    let (period, offset, drift_ms) = match cfg.timing {
-        FrameTiming::Known { period, offset } => (period, offset, [0.0; 2]),
+    let timing = |gyro: &GyroIntegral| match cfg.timing {
+        FrameTiming::Known { period, offset } => Ok((period, offset, [0.0; 2])),
         FrameTiming::Search { nominal_period } => {
-            estimate_timing(&imu.time, &gyro, &frames, nominal_period)?
+            estimate_timing(&imu.time, gyro, &frames, nominal_period)
         }
     };
-    let times: Vec<f64> = frames
-        .iter()
-        .map(|f| period * f.number as f64 + offset)
-        .collect();
+    let frame_times = |period: f64, offset: f64| -> Vec<f64> {
+        frames
+            .iter()
+            .map(|f| period * f.number as f64 + offset)
+            .collect()
+    };
+    let without_bias =
+        |b: &Vector3<f64>| -> Vec<Vector3<f64>> { imu.gyro.iter().map(|w| w - b).collect() };
+    let (mut period, mut offset, mut drift_ms) = timing(&GyroIntegral::new(&imu.time, &imu.gyro))?;
+    let gyro_bias = if cfg.gyro_bias {
+        let b = estimate_gyro_bias(imu, &frames, &frame_times(period, offset));
+        (period, offset, drift_ms) = timing(&GyroIntegral::new(&imu.time, &without_bias(&b)))?;
+        estimate_gyro_bias(imu, &frames, &frame_times(period, offset))
+    } else {
+        Vector3::zeros()
+    };
+    let gyro_samples = without_bias(&gyro_bias);
+    let gyro = GyroIntegral::new(&imu.time, &gyro_samples);
+    let times = frame_times(period, offset);
 
     // Camera-from-IMU rotation from consecutive frames (outlier-robust).
     let pairs = rotation_pairs(&frames, &times, &gyro, 3);
@@ -295,6 +319,7 @@ pub fn estimate_imu_scale(
         period,
         offset,
         camera_from_imu,
+        gyro_bias,
         rotation_residual_deg,
         drift_ms,
         speed_jumps: jump.iter().filter(|&&j| j).count(),
@@ -349,6 +374,8 @@ impl<'a> GyroIntegral<'a> {
 struct RotationPairs {
     rb: Vec<Vector3<f64>>,
     d_rc: Vec<Rotation3<f64>>,
+    /// Seconds between the two frames.
+    dt: Vec<f64>,
 }
 
 fn rotation_pairs(
@@ -361,6 +388,7 @@ fn rotation_pairs(
     let mut out = RotationPairs {
         rb: Vec::new(),
         d_rc: Vec::new(),
+        dt: Vec::new(),
     };
     for k in 0..frames.len() - 1 {
         if frames[k + 1].number - frames[k].number > max_number_gap
@@ -373,8 +401,37 @@ fn rotation_pairs(
         out.d_rc.push(Rotation3::from_matrix_unchecked(
             frames[k].rotation.transpose() * frames[k + 1].rotation,
         ));
+        out.dt.push(times[k + 1] - times[k]);
     }
     out
+}
+
+/// A constant gyro bias (rad/s, IMU frame) from the frame-to-frame rotations
+/// at the frame times `times`: [`rotation_fit`] and the least-squares bias of
+/// `R_CBᵀ r_C = r_B - b dt` over its pairs within three times the median
+/// residual, in turn, the gyro integrated again without the bias each time.
+fn estimate_gyro_bias(imu: &ImuSamples, frames: &[ScaleFrame], times: &[f64]) -> Vector3<f64> {
+    let mut bias = Vector3::zeros();
+    for _ in 0..4 {
+        let w: Vec<Vector3<f64>> = imu.gyro.iter().map(|w| w - bias).collect();
+        let pairs = rotation_pairs(frames, times, &GyroIntegral::new(&imu.time, &w), 3);
+        if pairs.rb.len() < 8 {
+            break;
+        }
+        let (r, resid) = rotation_fit(&pairs.rb, &pairs.d_rc);
+        let cut = 3.0 * median(&resid);
+        let (mut num, mut den) = (Vector3::zeros(), 0.0);
+        for (((rb, rc), &dt), &e) in pairs.rb.iter().zip(&pairs.d_rc).zip(&pairs.dt).zip(&resid) {
+            if e <= cut {
+                num += (rb - r.transpose() * rc.scaled_axis()) * dt;
+                den += dt * dt;
+            }
+        }
+        if den > 0.0 {
+            bias += num / den;
+        }
+    }
+    bias
 }
 
 /// `R` minimising `Σ |rc - R rb|²`.
@@ -836,6 +893,41 @@ mod tests {
                 run.centre_term.unwrap()
             );
         }
+    }
+
+    #[test]
+    fn fits_and_removes_a_gyro_bias() {
+        // 1.8 deg/s, as on one OverMaps360 walk's camera.
+        let b = Vector3::new(0.027, -0.0158, -0.0003);
+        let (mut imu, frames, camera_from_imu) = scene(1.05, 1.0 / 3.0, 0.4, None);
+        for w in &mut imu.gyro {
+            *w += b;
+        }
+        let plain = ImuScaleConfig {
+            gyro_bias: false,
+            ..Default::default()
+        };
+        let est = estimate_imu_scale(&imu, &frames, &plain).unwrap();
+        assert!(
+            est.rotation_residual_deg > 0.5,
+            "{}",
+            est.rotation_residual_deg
+        );
+        let est = estimate_imu_scale(&imu, &frames, &ImuScaleConfig::default()).unwrap();
+        assert!((est.gyro_bias - b).norm() < 2e-4, "bias {}", est.gyro_bias);
+        assert!(
+            est.rotation_residual_deg < 0.01,
+            "{}",
+            est.rotation_residual_deg
+        );
+        assert!(
+            (est.period - 1.0 / 3.0).abs() < 1e-5,
+            "period {}",
+            est.period
+        );
+        assert!((est.offset - 0.4).abs() < 2e-3, "offset {}", est.offset);
+        assert!((est.camera_from_imu - camera_from_imu).norm() < 1e-3);
+        assert!((est.scale / 1.05 - 1.0).abs() < 3e-3, "scale {}", est.scale);
     }
 
     #[test]

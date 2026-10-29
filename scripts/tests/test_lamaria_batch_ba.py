@@ -1,5 +1,6 @@
 """Unit tests for scripts/lamaria_batch_ba.py (numpy parts, the loop edge's PnP if opencv is there and the IMU
 graph's warm start if gtsam is)."""
+import argparse
 import importlib.util
 import pathlib
 import unittest
@@ -420,6 +421,20 @@ class ModeVectorTest(unittest.TestCase):
         np.testing.assert_allclose((p2 - pts) / k_, vl[1], atol=1e-4)
 
 
+class TrackTest(unittest.TestCase):
+    def test_a_track_with_two_features_in_one_image_is_dropped(self):
+        offsets = np.arange(0, 19, 3)  # three keyframes, two cameras, three features per image
+        # images 0, 2 and 4 are camera 0 of keyframes 0-2; a wrong match also joins feature 1 of image 4 to the
+        # track of feature 0, a second track runs through feature 1 of images 0 and 2
+        pairs = np.array([[0, 0, 1, 0], [1, 0, 2, 0], [1, 0, 2, 0], [0, 0, 1, 0]])
+        matches = np.array([[0, 0], [0, 0], [0, 1], [1, 1]])
+        g = lambda img, f: int(offsets[img] + f)  # noqa: E731
+        tracks, image_of, conflicts = lb.build_tracks(offsets, pairs, matches, 4)
+        self.assertEqual(conflicts, 1)
+        self.assertEqual([sorted(t.tolist()) for t in tracks], [[g(0, 1), g(2, 1)]])
+        np.testing.assert_array_equal(image_of[[g(4, 0), g(4, 1)]], [4, 4])
+
+
 class MatchingTest(unittest.TestCase):
     def test_best_two(self):
         keys = np.array([0, 0, 1, 0, 1])
@@ -522,6 +537,44 @@ class MatchingTest(unittest.TestCase):
         normal = line[:, :2] / np.hypot(line[:, 0], line[:, 1])[:, None]
         d = lb._band_dist(0, 0, 1, 0, xy0, xy1 + 5 * normal)
         np.testing.assert_allclose(d * k[0, 0], 5.0, rtol=0.02)
+
+    @unittest.skipUnless(HAVE_CV2, "needs opencv-python")
+    def test_essential_verification_keeps_true_matches_the_drifted_band_drops(self):
+        rng = np.random.default_rng(13)
+        cams = two_cameras()
+        k = cams[0]["K"]
+        kf_r = np.array([np.eye(3), lb.so3_exp(np.array([0.0, 0.05, 0.0]))])
+        lb._G.update(cams=[cams[0], cams[0]], kf_p=np.array([[0.0, 0.0, 0.0], [0.8, 0.1, 0.0]]), kf_r=kf_r)
+        r_wc0, c0 = lb._cam_pose(0, 0)
+        r_wc1, c1 = lb._cam_pose(1, 0)
+        n, wrong = 150, 40
+        xy0 = rng.uniform([50, 50], [730, 530], size=(n, 2))
+        rays = np.c_[xy0, np.ones(n)] @ np.linalg.inv(k).T
+        world = c0 + (rays * rng.uniform(3, 20, size=n)[:, None]) @ r_wc0.T
+        cam1 = (world - c1) @ r_wc1
+        xy1 = (cam1 @ k.T)[:, :2] / cam1[:, 2:3]
+        true = np.c_[np.arange(n), np.arange(n)]
+        bad = np.c_[rng.integers(0, n, wrong), rng.integers(0, n, wrong)]
+        bad = bad[bad[:, 0] != bad[:, 1]]
+        m = np.concatenate([true, bad]).astype(np.int32)
+        # the VIO has drifted: right rotation, translation 0.6 m off
+        lb._G.update(kf_p=np.array([[0.0, 0.0, 0.0], [0.8, 0.6, 0.3]]), offsets=np.array([0, n, n, 2 * n, 2 * n]),
+                     xy=np.concatenate([xy0, xy1]).astype(np.float32), desc=np.zeros((2 * n, 8), np.float32),
+                     min_inliers=20, max_rot=10.0)
+        pair = (0, 0, 1, 0, 6.0)
+        in_band = lb._band_dist(0, 0, 1, 0, xy0, xy1) < pair[4] / k[0, 0]
+        self.assertLess(in_band.mean(), 0.5)
+        saved = lb._lightglue_pairs
+        try:
+            lb._lightglue_pairs = lambda pairs, a: iter([(pairs[0], m)])
+            count = [0, 0]
+            (_, kept), = lb._lightglue_essential([pair], argparse.Namespace(jobs=2), count)
+        finally:
+            lb._lightglue_pairs = saved
+        kept = {tuple(x) for x in kept}
+        self.assertGreater(len(kept & {tuple(x) for x in true}), 0.95 * n)
+        self.assertLessEqual(len(kept - {tuple(x) for x in true}), 3)
+        self.assertEqual(count, [len(m), len(kept)])
 
     def test_learned_features_default_to_lightglue_without_a_descriptor_limit(self):
         self.assertEqual(lb._matcher("auto", "sift"), "ratio")

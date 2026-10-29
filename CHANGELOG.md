@@ -72,9 +72,10 @@ All notable changes to `visloc-rs` will be documented here.
     - Outdoors, the metric scale is within 4% of the dataset's IMU scale
       over the same frames.
     - Indoors (a mall), it is off by 12%, with a weak fit (|g| 9.57).
-      These runs used 640 px faces. At 1024 px the mall's fit passes and
-      lands +5.5% over 33 s and +5.3% over 66 s (|g| 9.61, still a weak
-      fit), so keep `--max-size` at 1024 or more.
+    - These runs used 640 px faces. With 1024 px faces the mall's fit is
+      sound (|g| 9.80) and lands +1.2% over the same frames, while the
+      outdoor walks move by at most 0.8 points. Keep `--max-size` at 1024
+      or more.
     - The `.insv` image-circle string is read after `p2_` or `n2_`.
 
 ### Fixed
@@ -545,6 +546,24 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **The IMU scale fits the gyro's bias.** A constant gyro bias bends every
+  frame-to-frame rotation, and with it the camera-from-IMU fit and the
+  frame-timing search.
+  - `visloc_slam::estimate_imu_scale` now fits the bias after the first
+    timing search, takes it off the gyro, and searches the timing again.
+    This is `ImuScaleConfig::gyro_bias`, on by default; turn it off with
+    `imu_metric_scale --no-gyro-bias`. The fitted bias is reported in
+    `ImuScaleEstimate::gyro_bias`, the `gsplat_photos` log and
+    `imu_scale.txt`.
+  - On OverMaps360's 9d2fe9b1 the camera's gyro reads 1.8°/s off, which
+    left a 1.18° rotation residual. The fit takes it to 0.05° and puts the
+    frame timing back (drift 18.5 → 2.7 ms).
+  - Over all 50 walks the bias is 0.07–1.69°/s, and the rotation residual
+    falls from 0.03–0.60° to 0.01–0.05° on all walks but one. The scale
+    moves by 0.06% in the median and 1.1% at most.
+  - Against ARKit and GPS the agreement is unchanged (MAE 1.85% and 1.38%,
+    from 1.86% and 1.34%; docs/insta360_imu_scale.md, "Gyro bias").
 
 - **`gsplat_photos` frees the working images after SIFT, and `--insv`
   writes its lens faces to disk as it cuts them.**

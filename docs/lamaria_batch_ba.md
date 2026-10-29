@@ -1824,6 +1824,73 @@ steadies the heading where SIFT's wanders, as on the two R sequences. Where
 SIFT's heading already holds within 0.2°, ALIKED unsettles it, as on
 sequence_2_11.
 
+In low light the chain ends with its online windows, so ALIKED goes there too
+(`--features aliked`, after the same CLAHE and non-local means as SIFT;
+learned matching had not been tried in low light, see [Low light: features
+after denoising](#low-light-features-after-denoising)). It loses on both
+low-light training sequences, both chains on this machine from the same VIO:
+
+| Sequence | SIFT | ALIKED | Mean error, SIFT | ALIKED | Heading spread, SIFT | ALIKED |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_4_10 | **59.80** | 49.25 | **1.33 m** | 1.90 m | **1.10°** | 1.96° |
+| sequence_4_11 | **71.07** | 48.26 | **0.77 m** | 3.15 m | **1.11°** | 2.38° |
+
+As on sequence_1_20 by day, the online windows with ALIKED let the heading
+wander: per 60 s window it reaches +6.5° on sequence_4_10 and +4.4° on 4_11.
+
+### Learned matches without the VIO's band
+
+The VIO's epipolar band lets a drifting VIO pick the matches ([Matching guided
+by a drifting VIO](#matching-guided-by-a-drifting-vio)). LightGlue matches
+without any guidance, so the pass with ALIKED can keep its matches by other
+means:
+
+- `match --verify essential` keeps those an essential matrix explains,
+  checked as a revisit is (RANSAC at 1 px, at least 20 inliers, the rotation
+  within 10° of the VIO's), whatever the VIO's translation.
+- `match --vio online.tum` keeps those within the online result's band instead
+  of the VIO's (`lamaria_ba_chain.py --pass-match online`).
+
+Each runs with SIFT online, ALIKED's revisits (searched near the VIO) and the
+rematch guided by the pass, on this machine:
+
+| Sequence | SIFT | The VIO's band | Essential matrix | The online result's band |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 85.81 | 92.20 | 96.98 | **97.02** |
+| R_12_10cp | 64.61 | 73.96 | 75.43 | **79.31** |
+| sequence_1_19 | **82.25** | 81.00 | 68.16 | 70.16 |
+| sequence_1_20 | **88.65** | 86.95 | 86.15 | 80.78 |
+| sequence_2_11 | **89.25** | 76.56 | 83.14 | 82.43 |
+| sequence_3_18 | 54.27 | 49.23 | **62.12** | 53.92 |
+| **Mean** | 77.47 | 76.65 | **78.66** | 77.27 |
+| The two R sequences | 75.21 | 83.08 | 86.21 | **88.17** |
+| The four others | **78.61** | 73.44 | 74.89 | 71.82 |
+
+None of the variants beats SIFT outside the R sequences, and none of them
+keeps its place across all six sequences. sequence_3_18 gains 7.8 with the
+essential matrix, and sequence_1_19 loses 14.1 with it.
+
+- **The essential matrix and the far pairs.** It keeps few pairs far apart. On
+  sequence_1_19, at 128–256 keyframes apart, it keeps 3–142 image pairs per
+  offset, against about 2,000 in the band. The few matches of such a pair rarely
+  reach 20 inliers. Without them the heading of sequence_1_19's first solve
+  spreads 0.67° over the 60 s windows, against 0.27° in the VIO's band. The
+  online result's band keeps the far pairs and spreads 0.65° all the same.
+- **The revisits.** On sequence_2_11 the first solve with the essential matrix
+  scores 88.41, against 77.04 for SIFT's. The solve with the revisits then
+  loses 5.4, where SIFT's gains 12.0. With ALIKED, 40,553 tracks are dropped for
+  two features in one image (SIFT 7,669), and the revisits leave 7,857
+  keyframe blocks outside the band (SIFT 36,461).
+  - Dropping only the conflicting images' features of such a track helps
+    R_12_10cp (77.16) and loses on sequence_2_11 (78.51) and 3_18 (57.53).
+  - A pass without the revisits (the rematch guided by its first solve, no
+    `--loops`) loses on all three tried. With the online result's band,
+    sequence_1_19 scores 68.31, 2_11 71.24 and R_12_10cp 73.57.
+
+The online result's band does best on the two R sequences, and it replaces
+the VIO's for the Short sequences of device 1WM093701G1276 in submission 6
+([lamaria_test_results.md](lamaria_test_results.md)).
+
 ### Revisits for place recognition
 
 `loops` looks for revisits near the trajectory that guides it (the VIO, and
@@ -1962,6 +2029,13 @@ python scripts/lamaria_batch_ba.py solve --work work/$S --vio out/$S.lc.tum --ca
   default), and `--pass-features` gives the pass by day an extractor of its own
   in `work/<extractor>`. They do not find the landmarks again more often (see
   [Learned features](#learned-features)).
+- **Learned matches without the VIO's band.** `match --verify essential`
+  keeps LightGlue's matches that an essential matrix explains (`--min-inliers`
+  20, `--max-rot` 10°, fitted on `--jobs` threads) instead of those within the
+  band. `lamaria_ba_chain.py --pass-match online|essential` picks the pass's
+  matching: the online result's band, or the essential matrix (default `vio`,
+  the VIO's band). See [Learned matches without the VIO's
+  band](#learned-matches-without-the-vios-band).
 - **Track statistics.** `scripts/lamaria_track_stats.py --states
   ba1_states.npz --calib CALIB --work WORK` prints how often a solve's landmarks
   are observed where they are visible, and the track lengths.

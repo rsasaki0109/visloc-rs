@@ -584,14 +584,15 @@ fn imu_metric_scale(
         .map_err(|e| EurocError::Sfm(format!("imu: {e}")))?;
     log(&format!(
         "imu: {} samples over {span:.1} s ({source}), {} frames; frames every {:.6} s from \
-         {:+.4} s (drift {:+.1} / {:+.1} ms), rotation residual {:.3} deg",
+         {:+.4} s (drift {:+.1} / {:+.1} ms), rotation residual {:.3} deg, gyro bias {:.2} deg/s",
         samples.time.len(),
         frames.len(),
         e.period,
         e.offset,
         e.drift_ms[0],
         e.drift_ms[1],
-        e.rotation_residual_deg
+        e.rotation_residual_deg,
+        e.gyro_bias.norm().to_degrees()
     ));
     log(&format!(
         "imu: scale {:.4} m per SfM unit (SD {:.4} over {}/{} runs, |g| {:.3} m/s2, {:.1} s)",
@@ -605,8 +606,8 @@ fn imu_metric_scale(
     let mut text = format!(
         "# Metric scale from {} (docs/insta360_imu_scale.md), applied to the model\n\
          scale {:.6}\nscale_sd {:.6}\nruns {} {}\ngravity {:.4}\nframe_period {:.9}\n\
-         frame_offset {:.6}\nrotation_residual_deg {:.4}\ndrift_ms {:.2} {:.2}\nspeed_jumps {}\n\
-         # run: start_s end_s intervals scale gravity kept\n",
+         frame_offset {:.6}\nrotation_residual_deg {:.4}\ngyro_bias_dps {:.4} {:.4} {:.4}\n\
+         drift_ms {:.2} {:.2}\nspeed_jumps {}\n# run: start_s end_s intervals scale gravity kept\n",
         imu.display(),
         e.scale,
         e.scale_std,
@@ -616,6 +617,9 @@ fn imu_metric_scale(
         e.period,
         e.offset,
         e.rotation_residual_deg,
+        e.gyro_bias.x.to_degrees(),
+        e.gyro_bias.y.to_degrees(),
+        e.gyro_bias.z.to_degrees(),
         e.drift_ms[0],
         e.drift_ms[1],
         e.speed_jumps
