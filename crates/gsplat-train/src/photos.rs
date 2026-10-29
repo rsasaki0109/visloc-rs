@@ -224,21 +224,34 @@ const IMAGE_EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "JPG"];
 /// images more than `skip_within` positions away, by the cosine similarity
 /// of VLAD descriptors over a 64-word vocabulary built from a subsample of
 /// all descriptors.
-fn retrieval_pairs(features: &[FeatureSet], k: usize, skip_within: usize) -> Vec<(usize, usize)> {
+fn retrieval_pairs<'a>(
+    features: &[FeatureSet],
+    descriptors: &(dyn Fn(usize) -> std::borrow::Cow<'a, [Vec<f32>]> + Sync),
+    k: usize,
+    skip_within: usize,
+) -> Vec<(usize, usize)> {
     use visloc_vision::place_recognition::{vlad, Vocabulary};
-    // About 100k descriptors for the vocabulary, evenly from every image.
-    let total: usize = features.iter().map(|f| f.descriptors.len()).sum();
+    // About 100k descriptors for the vocabulary, evenly from every image
+    // (one descriptor per keypoint).
+    let total: usize = features.iter().map(|f| f.keypoints.len()).sum();
     let step = (total / 100_000).max(1);
-    let sample: Vec<&[f32]> = features
-        .iter()
-        .flat_map(|f| f.descriptors.iter().step_by(step).map(Vec::as_slice))
+    let sample: Vec<Vec<f32>> = (0..features.len())
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            descriptors(i)
+                .iter()
+                .step_by(step)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
         .collect();
+    let sample: Vec<&[f32]> = sample.iter().map(Vec::as_slice).collect();
     let Some(vocab) = Vocabulary::build(&sample, 64, 10, 7) else {
         return Vec::new();
     };
-    let global: Vec<Vec<f32>> = features
-        .par_iter()
-        .map(|f| vlad(&f.descriptors, &vocab))
+    let global: Vec<Vec<f32>> = (0..features.len())
+        .into_par_iter()
+        .map(|i| vlad(&descriptors(i), &vocab))
         .collect();
     top_k_similar_pairs(&global, k, skip_within)
 }
@@ -1176,14 +1189,28 @@ pub fn build_photo_dataset(
             .map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0)
             .collect()
     };
+    // VLFeat-compatible descriptors are kept as their bytes
+    // (`unit_scale_descriptors`), the others as f32 in the features.
     let byte_scale = sift_cfg.vlfeat_compatible_descriptor;
-    let to_features = |kps: Vec<visloc_vision::features::sift::SiftKeypoint>, desc| FeatureSet {
-        keypoints: kps.iter().map(|k| Point2::new(k.x, k.y)).collect(),
-        descriptors: if byte_scale {
-            unit_scale_descriptors(desc)
+    let to_features = |kps: Vec<visloc_vision::features::sift::SiftKeypoint>,
+                       desc: Vec<Vec<f32>>|
+     -> (FeatureSet, Vec<u8>) {
+        let keypoints = kps.iter().map(|k| Point2::new(k.x, k.y)).collect();
+        if byte_scale {
+            debug_assert!(desc.iter().all(|d| d.len() == SIFT_DIM));
+            let bytes = desc.iter().flatten().map(|&v| v as u8).collect();
+            let features = FeatureSet {
+                keypoints,
+                descriptors: Vec::new(),
+            };
+            (features, bytes)
         } else {
-            desc
-        },
+            let features = FeatureSet {
+                keypoints,
+                descriptors: desc,
+            };
+            (features, Vec::new())
+        }
     };
     #[cfg(not(feature = "gpu"))]
     if cfg.gpu_ba {
@@ -1222,7 +1249,8 @@ pub fn build_photo_dataset(
     #[cfg(not(feature = "gpu"))]
     let vlfeat_gpu = false;
     // With each image's keypoints, the colour at each (`keypoint_colours`).
-    let (features, keypoint_rgb): (Vec<FeatureSet>, Vec<Vec<[u8; 3]>>) = if vlfeat_gpu {
+    #[allow(clippy::type_complexity)]
+    let (sift, keypoint_rgb): (Vec<(FeatureSet, Vec<u8>)>, Vec<Vec<[u8; 3]>>) = if vlfeat_gpu {
         #[allow(unused_mut)]
         let mut features = Vec::with_capacity(n);
         #[allow(unused_mut)]
@@ -1272,7 +1300,7 @@ pub fn build_photo_dataset(
                     chunk
                         .iter()
                         .zip(&features[start..])
-                        .map(|(img, f)| keypoint_colours(img, &f.keypoints)),
+                        .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
                 );
             }
             if cfg.gpu {
@@ -1306,7 +1334,7 @@ pub fn build_photo_dataset(
                 chunk
                     .iter()
                     .zip(&features[start..])
-                    .map(|(img, f)| keypoint_colours(img, &f.keypoints)),
+                    .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
             );
         }
         (features, colours)
@@ -1321,7 +1349,7 @@ pub fn build_photo_dataset(
                 let (kps, desc) =
                     extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
                 let f = to_features(kps, desc);
-                let colours = keypoint_colours(&img, &f.keypoints);
+                let colours = keypoint_colours(&img, &f.0.keypoints);
                 Ok((f, colours))
             })
             .collect::<Result<Vec<_>, EurocError>>()?
@@ -1329,6 +1357,15 @@ pub fn build_photo_dataset(
             .unzip()
     };
     drop(work);
+    let (features, desc_bytes): (Vec<FeatureSet>, Vec<Vec<u8>>) = sift.into_iter().unzip();
+    // Image `i`'s descriptors as the matchers take them.
+    let descriptors = |i: usize| -> std::borrow::Cow<'_, [Vec<f32>]> {
+        if byte_scale {
+            std::borrow::Cow::Owned(unit_scale_descriptors(&desc_bytes[i]))
+        } else {
+            std::borrow::Cow::Borrowed(&features[i].descriptors)
+        }
+    };
     log(&format!(
         "sift: mean {} keypoints ({:.1} s)",
         features.iter().map(|f| f.keypoints.len()).sum::<usize>() / n.max(1),
@@ -1352,9 +1389,14 @@ pub fn build_photo_dataset(
             .collect();
         if cfg.retrieval_k > 0 {
             let t = std::time::Instant::now();
-            let extra = retrieval_pairs(&features, cfg.retrieval_k, cfg.window * per_source)
-                .into_iter()
-                .filter(|&(i, j)| source(i) != source(j));
+            let extra = retrieval_pairs(
+                &features,
+                &descriptors,
+                cfg.retrieval_k,
+                cfg.window * per_source,
+            )
+            .into_iter()
+            .filter(|&(i, j)| source(i) != source(j));
             let before = pairs.len();
             pairs.extend(extra);
             log(&format!(
@@ -1380,13 +1422,8 @@ pub fn build_photo_dataset(
             .map(|g| g.context().limits.max_storage_buffer_binding_size)
             .unwrap_or(u64::MAX);
         let per_value = if cfg.match_u8 { 1 } else { 4 };
-        let bytes = |i: usize| -> u64 {
-            features[i]
-                .descriptors
-                .iter()
-                .map(|d| d.len() as u64 * per_value)
-                .sum()
-        };
+        let bytes =
+            |i: usize| -> u64 { (features[i].keypoints.len() * SIFT_DIM) as u64 * per_value };
         let total: u64 = (0..n).map(bytes).sum();
         if total <= limit {
             vec![(0..n).collect()]
@@ -1472,10 +1509,9 @@ pub fn build_photo_dataset(
         #[cfg(feature = "gpu")]
         let gpu_match = gpu_sift.as_ref().and_then(|g| {
             let ctx = g.context();
-            let sets: Vec<&[Vec<f32>]> = imgs
-                .iter()
-                .map(|&i| features[i].descriptors.as_slice())
-                .collect();
+            let owned: Vec<std::borrow::Cow<'_, [Vec<f32>]>> =
+                imgs.par_iter().map(|&i| descriptors(i)).collect();
+            let sets: Vec<&[Vec<f32>]> = owned.iter().map(|d| d.as_ref()).collect();
             let bank = if cfg.match_u8 {
                 visloc_sift_gpu::FeatureBank::upload_u8(ctx, &sets)
             } else {
@@ -1491,9 +1527,15 @@ pub fn build_photo_dataset(
                     pairs.iter().map(|&(i, j)| (local[i], local[j])).collect();
                 return m.match_pairs(ctx, bank, &lp, Some(0.8), true);
             }
+            // The descriptors of the chunk's images, as f32 for this chunk.
+            let mut used: Vec<usize> = pairs.iter().flat_map(|&(i, j)| [i, j]).collect();
+            used.sort_unstable();
+            used.dedup();
+            let sets: std::collections::HashMap<usize, std::borrow::Cow<'_, [Vec<f32>]>> =
+                used.par_iter().map(|&i| (i, descriptors(i))).collect();
             pairs
                 .par_iter()
-                .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
+                .map(|&(i, j)| cpu_matches(&sets[&i], &sets[&j]))
                 .collect()
         };
         // Verify the previous chunk on the CPU while the next one matches.
@@ -1537,14 +1579,20 @@ pub fn build_photo_dataset(
     // A cube or lens face's intrinsics are exact.
     let refine_intrinsics = cfg.refine_intrinsics && !cfg.equirect && lenses.is_none();
     // Past matching only the intrinsics refinement reads the descriptors
-    // (13 GB for SmallCity at 4,000 SIFT); without it, free them before the
-    // mapper.
+    // (13 GB of f32 for SmallCity at 4,000 SIFT); without it, free them
+    // before the mapper, with it give the features their f32 descriptors.
     let mut features = features;
     if !refine_intrinsics {
         for f in &mut features {
             f.descriptors = Vec::new();
         }
+    } else if byte_scale {
+        features
+            .par_iter_mut()
+            .zip(&desc_bytes)
+            .for_each(|(f, b)| f.descriptors = unit_scale_descriptors(b));
     }
+    drop(desc_bytes);
 
     // Mapper, then a global BA that also refines the intrinsics. The mapper
     // self-calibrates the focal length and principal point in its own
@@ -1997,20 +2045,22 @@ fn face_centre_spread(
     )
 }
 
+/// SIFT descriptor length.
+const SIFT_DIM: usize = 128;
+
 /// VLFeat-compatible SIFT descriptors come back already quantised like
-/// COLMAP's bytes (`round(512 x)`, norm about 512). Matching expects the
-/// unit-norm scale: the GPU u8 bank quantises with `round(512 x)` again,
-/// which saturated every non-zero value at 255 and left near-binary
-/// descriptors (SmallCity lost 70% of its 3D points). Dividing by 512 is
-/// exact in f32, so the bank recovers the same bytes, and the CPU matcher's
-/// comparisons are unchanged.
-fn unit_scale_descriptors(mut desc: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    for d in &mut desc {
-        for v in d.iter_mut() {
-            *v /= 512.0;
-        }
-    }
-    desc
+/// COLMAP's bytes (`round(512 x)`, norm about 512), so they are kept as
+/// bytes, a quarter of the memory of f32. Matching expects the unit-norm
+/// scale: the GPU u8 bank quantises with `round(512 x)` again, which
+/// saturated every non-zero value at 255 and left near-binary descriptors
+/// (SmallCity lost 70% of its 3D points). `byte / 512` is exact in f32, so
+/// the bank recovers the same bytes, and the CPU matcher's comparisons are
+/// unchanged. `bytes` holds the descriptors one after another.
+fn unit_scale_descriptors(bytes: &[u8]) -> Vec<Vec<f32>> {
+    bytes
+        .chunks_exact(SIFT_DIM)
+        .map(|d| d.iter().map(|&b| b as f32 / 512.0).collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -2057,10 +2107,12 @@ mod tests {
 
     #[test]
     fn vlfeat_bytes_round_trip_through_the_u8_scale() {
-        let bytes: Vec<f32> = (0..128).map(|i| ((i * 37) % 256) as f32).collect();
-        let unit = unit_scale_descriptors(vec![bytes.clone()]);
-        for (b, u) in bytes.iter().zip(&unit[0]) {
-            assert_eq!((u * 512.0).round().clamp(0.0, 255.0), *b);
+        let bytes: Vec<u8> = (0..256).map(|i| ((i * 37) % 256) as u8).collect();
+        let unit = unit_scale_descriptors(&bytes);
+        assert_eq!(unit.len(), 2);
+        for (b, u) in bytes.iter().zip(unit.iter().flatten()) {
+            assert_eq!(*u, *b as f32 / 512.0);
+            assert_eq!((u * 512.0).round().clamp(0.0, 255.0), *b as f32);
         }
     }
 

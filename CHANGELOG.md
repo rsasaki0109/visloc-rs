@@ -579,6 +579,23 @@ All notable changes to `visloc-rs` will be documented here.
     4.5 GB instead of 7.9 GB. 200 frames, killed at 14 GB before, finish
     at 8.6 GB.
 
+- **`gsplat_photos` keeps VLFeat-compatible SIFT descriptors as bytes.**
+  - They come out of SIFT as COLMAP's bytes, but were held as f32 vectors
+    until matching ended, about 550 bytes a keypoint. They are now kept as
+    bytes, 128 a keypoint.
+  - They are turned into the same f32 values (`byte / 512` is exact) only
+    where they are read: per chunk of pairs for the CPU matcher, per block
+    for the GPU bank, per image for the retrieval, and before the
+    intrinsics refinement.
+  - The output is byte-identical for photos (with and without retrieval
+    pairs), `--equirect` and `--insv`.
+  - The mall walk's 200 frames with 1024 px lens faces peak at 4.5 GB
+    instead of 7.8 GB.
+  - At the defaults (1600 px faces, 8,192 keypoints; `--window 2`) the same
+    frames peak at 9.5 GB, in 2 h 23 min on 4 CPU cores, most of it
+    matching. On a CPU, `--max-size 1024 --max-keypoints 4096` is the
+    practical setting (docs/photos_to_splat.md).
+
 - **Weak fixes: localizations with 15–29 inliers can set the first map
   pose.** With `--vio` or `--odometry`, `basalt_euroc_localize_demo` passes
   a map-wide localization turned down only for too few inliers, but with at
