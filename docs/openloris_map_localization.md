@@ -522,12 +522,20 @@ defaults), RMSE / max of `map_pose`, moved to the IMU:
 | As is | 8.01 / 14.0 cm | 12.10 / 22.8 cm |
 | Calibrated in the run from the map's localizations alone | **5.49 / 9.5 cm** | 10.89 / 21.6 cm |
 | ... from the VIO and the localizations | 5.46 / 9.4 cm | 10.88 / 21.5 cm |
+| ... with the gyro's heading (`imu`), from the localizations alone | 5.34 / 9.4 cm | 10.00 / 17.2 cm |
+| ... from the VIO and the localizations | 5.26 / 7.3 cm | 10.01 / 17.2 cm |
 | ... without the scale (`apply_scale:=false`) | 5.40 / 9.0 cm | — |
 | From office1-3's offline calibration, saved | 4.92 / 8.3 cm | 4.66 / 10.4 cm |
 | ... refined in the run from the localizations | 5.01 / 9.3 cm | 4.66 / 10.5 cm |
 | ... refined from the VIO and the localizations | 5.16 / 9.7 cm | 4.89 / 10.9 cm |
 | From the other session's VIO calibration, refined | 5.07 / 9.2 cm | 9.79 / 19.5 cm |
 
+- **The gyro's heading helps through ROS 2 too**
+  ([below](#the-wheels-heading-from-a-gyro)). With `-r imu:=/imu0`, the
+  node takes the bag's T265 IMU (bias 5.4 and −9.3°/min); run again without
+  it, the rows above come out within 0.08 cm. On 4 cores the VIO node
+  drops a different share of frames from run to run (123–410 of about
+  1,100), which moves the VIO rows by a few millimetres either way.
 - **Without a VIO or a saved calibration, the map calibrates the wheels.**
   office1-6's 131 localizations give (0.7, 4.8) cm, a 1.87° lean and a
   scale of 1.018 within the run, and the error falls from 8.01 to 5.49 cm.
