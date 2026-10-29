@@ -34,6 +34,12 @@ by those localizations.
   ([below](#across-lighting-local-contrast-equalization)), the daylight
   session office1-4 gets a map pose for 33% of its frames at 2.6 cm. The
   dawn session office1-5 still gets none.
+- **A long run:** over the corridor's 284 s and 232 m, the wheels'
+  heading drifts 38° in two minutes. Once each few seconds of the wheel
+  calibration's fit get their own heading, its offset stays at
+  (−4…3, 7…12) cm, near the office's (1–3, 6–8) cm; before, it wandered
+  by a metre. Across those sessions only 2% of the images localize, so
+  the run cannot score the map poses ([below](#over-a-long-run-corridor)).
 
 ## Data
 
@@ -482,10 +488,65 @@ defaults), RMSE / max of `map_pose`, moved to the IMU:
 - **A saved calibration stays the best start.** In sessions this short,
   refining office1-3's calibration does not improve on it, and the VIO's
   offset from office1-7's last seconds costs 0.2 cm. On a long run the
-  refits keep following the robot (over the last 120 s of pairs).
+  refits keep following the robot (over the last 120 s of pairs;
+  [below](#over-a-long-run-corridor)).
 - **The output stays continuous.** Each refit continues the published pose
   with a yaw and a translation, as at the first estimate (a step of 1.03 cm
   where the wheels moved 1.05 cm).
+
+### Over a long run: corridor
+
+The office sessions last 12–53 s. OpenLORIS-Scene's corridor sessions are
+longer: corridor1-1 drives 232 m in 284 s along a loop of corridors, turning
+2,026° in all by its wheel odometry. Their ground truth comes from a 2D laser
+SLAM, not motion capture. The map is corridor1-5's (146 s, 126 m; 1,836
+keyframe images, 7,036 landmarks), built as above. Its SLAM closes no loop:
+it is 1.33 m RMSE and up to 3.9 m off the ground truth, and 3% long. So the
+localizations are scored against the map around them: each is put in the
+ground truth's frame through the stretch of the map's own trajectory within
+5 m of it (`evaluate_map_localization.py --mode local`). Scored that way,
+the map's own SLAM poses are 3.5 cm off at the median; the laser ground
+truth jumps by up to 0.7 m in places.
+
+- **Few images localize across these sessions.** 57 of the 2,426 images
+  corridor1-1 tries localize, at two places (66–68 s and 206–214 s). Each
+  is 3.0 cm RMSE from the map around it. Half of corridor1-1's path lies
+  outside corridor1-5's, up to 22 m from it. Between those two places the
+  VIO + map drifts up to 2.8 m (49 cm at the median). The wheel odometry
+  gets 12 localizations and drifts 3 m. This run therefore does not
+  measure the wheel odometry + map. It measures whether the calibration
+  keeps up.
+- **The wheels slip in turns.** Their heading drifts 15° off the VIO's in
+  one 350° turn in place, and 38° after 120 s. The VIO stays within 1.3–5°
+  of the ground truth.
+
+With one heading and position between the wheel odometry and the
+reference over the whole 120 s window, the offset took up that drift and
+wandered by a metre. The fit now gives each 5 s of VIO pairs (`segment_s`),
+and each 30 s of map localizations (`fix_segment_s`), a heading and a
+position of their own, and shares the offset and the scale. Replaying
+corridor1-1's wheel odometry, VIO and localizations through it
+(`wheel_calibration_replay`, the node's calibration without ROS), with an
+estimate every 5 s:
+
+| corridor1-1 | One heading per 120 s window | Each 5 s / 30 s its own |
+|---|---|---|
+| Offset from the VIO, forward / left, over the run | −117 … 29 / −64 … 71 cm | −4.0 … 2.8 / 6.7 … 12.1 cm |
+| Fit residual at the end (RMS) | 62 cm | 2.3 cm |
+| Map's scale from all 57 localizations (`window_s:=0`) | 0.485 | 1.0315 |
+
+- **The offset is the office's.** Over the whole run it is (0.7, 8.2) cm.
+  The office VIO runs give (1–3, 6–8) cm, and the office's motion capture
+  (2.7–4.7, 6.8–7.4) cm. The corridor's laser ground truth puts it at
+  (15, 0) cm, so its `base_link` is a different point and it cannot check
+  the offset.
+- **The scale is the map's.** 1.0315 is the 3% the map is long. With one
+  heading for all localizations, the 8 at 66 s and the 49 at 206 s, 140 s
+  and 40° of wheel drift apart, gave 0.485.
+- **The short office sessions stay where they were.** Through the same
+  replay, office1-6's and office1-7's wheel odometry + map in the demo
+  stays at 5.11 cm and goes from 11.70 to 11.69 cm, with the VIO and the
+  localizations.
 
 ## Reproduce
 
@@ -559,6 +620,25 @@ visloc_map_localize_node --map runs/o12_map_scaled --ros-args -p extrinsics:=tf 
   -p weak_gate_m:=0.05 -r image:=/cam0/image_raw -r odom:=/wheel/odom &
 ros2 bag play o17_bag --delay 3
 
+# The corridor: corridor1-5's map, corridor1-1 the query (whole .7z files,
+# 6.9 and 13.9 GB), each converted and run as above
+curl -L -o corridor1-1.7z $U/corridor1-1.7z
+python3 scripts/openloris_to_euroc.py --sequence corridor1-1.7z --out data/corridor1-1
+# ... runs/c15_slam and runs/c15_map from corridor1-5, runs/c11_vio as the
+# VIO query above. Then the calibration node's fit, replayed (--imu-from-body:
+# the inverse of T_base_imu in data/corridor1-1/extrinsics.json):
+cargo run --release --manifest-path ros2/visloc-ros2/Cargo.toml \
+  --example wheel_calibration_replay -- --wheel data/corridor1-1/odom.tum \
+  --imu-from-body 0.030639,-0.893715,-0.245211,-0.503044,-0.492681,-0.507444,0.496703 \
+  --vio runs/c11_vio/trajectory_vio.tum --fixes runs/c11_vio/localization.tum \
+  --out runs/c11_wheel.tum --estimate runs/c11_wheel.json
+# ... and scored against the map around each pose
+python3 scripts/evaluate_map_localization.py --mode local \
+  --estimate runs/c11_vio/localization.tum \
+  --reference data/corridor1-1/mav0/state_groundtruth_estimate0/data.csv \
+  --align-estimate runs/c15_slam/trajectory_online.tum \
+  --align-ground-truth data/corridor1-5/mav0/state_groundtruth_estimate0/data.csv
+
 # Score against the ground truth, through the map's own alignment
 python3 scripts/evaluate_map_localization.py --mode fixed \
   --estimate runs/o16_wheel/trajectory_map.tum \
@@ -574,7 +654,9 @@ dataset is CC BY-ND 4.0: keep the converted images out of the repository.
 ## Limits
 
 - **One scene, short paths.** Seven sequences, all in one office, each at
-  most 11 m. They test change over days, not large areas.
+  most 11 m. They test change over days, not large areas. On the one long
+  run, in the corridor, few images localize across sessions
+  ([above](#over-a-long-run-corridor)).
 - **ORB only.** Across the day/night change no raw image localizes.
   Equalizing the local contrast gets one of the two daylight sessions a
   map pose, through weak fixes; the dawn session still has none.

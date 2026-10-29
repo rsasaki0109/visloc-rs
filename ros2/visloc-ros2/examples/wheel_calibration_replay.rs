@@ -4,7 +4,8 @@
 //! ```text
 //! wheel_calibration_replay --wheel odom.tum --imu-from-body tx,ty,tz,qx,qy,qz,qw \
 //!   [--vio trajectory_vio.tum] [--fixes localization.tum] [--prior calibration.json] \
-//!   [--refine-s 5] [--window-s 120] [--fix-delay-s 0.2] [--no-scale] \
+//!   [--refine-s 5] [--window-s 120] [--segment-s 5] [--fix-segment-s 30] \
+//!   [--fix-delay-s 0.2] [--no-scale] \
 //!   --out calibrated.tum [--estimate final.json]
 //! ```
 //!
@@ -34,6 +35,8 @@ struct Args {
     imu_from_body: SE3,
     refine_s: f64,
     window_s: f64,
+    segment_s: f64,
+    fix_segment_s: f64,
     fix_delay_s: f64,
     apply_scale: bool,
     out: String,
@@ -64,6 +67,8 @@ fn parse_args() -> Result<Args, String> {
         imu_from_body: SE3::identity(),
         refine_s: 5.0,
         window_s: 120.0,
+        segment_s: WheelCalibrationConfig::default().segment_s,
+        fix_segment_s: WheelCalibrationConfig::default().fix_segment_s,
         fix_delay_s: 0.2,
         apply_scale: true,
         out: String::new(),
@@ -84,6 +89,8 @@ fn parse_args() -> Result<Args, String> {
             "--imu-from-body" => args.imu_from_body = parse_pose(&value()?)?,
             "--refine-s" => args.refine_s = number(value()?)?,
             "--window-s" => args.window_s = number(value()?)?,
+            "--segment-s" => args.segment_s = number(value()?)?,
+            "--fix-segment-s" => args.fix_segment_s = number(value()?)?,
             "--fix-delay-s" => args.fix_delay_s = number(value()?)?,
             "--no-scale" => args.apply_scale = false,
             "--out" => args.out = value()?,
@@ -151,6 +158,8 @@ fn run() -> Result<(), String> {
     let fixes = args.fixes.as_deref().map(read_tum).transpose()?;
     let config = WheelCalibrationConfig {
         window_s: args.window_s,
+        segment_s: args.segment_s,
+        fix_segment_s: args.fix_segment_s,
         ..WheelCalibrationConfig::default()
     };
     let mut calibrator = WheelOdomCalibrator::new(config)

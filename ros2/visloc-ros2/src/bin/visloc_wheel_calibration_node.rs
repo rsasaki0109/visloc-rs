@@ -51,6 +51,9 @@ PARAMETERS (--name value  or  -p name:=value):
   refine_s             refit this often (s); 0 keeps the first estimate (or the
                        saved one)                                                     [5]
   window_s             fit over the last this many seconds; 0 keeps every pair     [120]
+  segment_s            each stretch of this many seconds of VIO pairs gets its own
+                       heading against the VIO (the wheels' drift); 0: one for all   [5]
+  fix_segment_s        ... of map localizations                                     [30]
   level                level the body frame against gravity (level floor)          [true]
   apply_scale          scale the output to the map's (from its localizations)      [true]
   publish_uncalibrated pass the wheel odometry through until calibrated             [true]
@@ -101,12 +104,22 @@ fn run() -> Result<(), String> {
         min_pairs: args.parsed_or("min_pairs", defaults.min_pairs)?,
         min_fixes: args.parsed_or("min_fixes", defaults.min_fixes)?,
         window_s: args.parsed_or("window_s", 120.0)?,
+        segment_s: args.parsed_or("segment_s", defaults.segment_s)?,
+        fix_segment_s: args.parsed_or("fix_segment_s", defaults.fix_segment_s)?,
         level: args.flag("level", defaults.level)?,
         ..defaults
     };
     let refine_s = args.parsed_or("refine_s", 5.0f64)?;
-    if !(refine_s >= 0.0 && refine_s.is_finite() && config.window_s >= 0.0) {
-        return Err("refine_s and window_s must be non-negative numbers".into());
+    if !(refine_s >= 0.0
+        && refine_s.is_finite()
+        && config.window_s >= 0.0
+        && [config.segment_s, config.fix_segment_s]
+            .iter()
+            .all(|value| *value >= 0.0 && value.is_finite()))
+    {
+        return Err(
+            "refine_s, window_s, segment_s and fix_segment_s must be non-negative numbers".into(),
+        );
     }
     let apply_scale = args.flag("apply_scale", true)?;
     let publish_uncalibrated = args.flag("publish_uncalibrated", true)?;
