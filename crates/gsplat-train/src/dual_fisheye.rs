@@ -299,15 +299,20 @@ pub fn lens_face(
 /// `S x S` half), in [`crate::equirect`]'s convention with the front lens's
 /// axis at the centre column. `back` is the back lens's rotation on the
 /// camera (a direction in its frame to the front lens's, as
-/// [`back_lens_rotation`]). Each direction takes the lens whose axis is
-/// nearer; within `blend` radians of where both are as far, the two are
-/// mixed, linearly across the band. Bilinear samples, no filtering: make
-/// `width` about the lenses' resolution (`2π` times
-/// [`FisheyeLens::axial_resolution`]) or downscale the frame first.
+/// [`back_lens_rotation`]). The panorama is stitched on a sphere around
+/// the front lens: `parallax` is the back lens's centre in the front
+/// lens's frame divided by the sphere's radius (zero for a sphere at
+/// infinity), and the back lens samples where it sees that sphere. Each
+/// direction takes the lens whose axis is nearer; within `blend` radians of
+/// where both are as far, the two are mixed, linearly across the band.
+/// Bilinear samples, no filtering: make `width` about the lenses'
+/// resolution (`2π` times [`FisheyeLens::axial_resolution`]) or downscale
+/// the frame first.
 pub fn stitch_equirect(
     frame: &image::RgbImage,
     lenses: &[FisheyeLens; 2],
     back: &Matrix3<f64>,
+    parallax: &Vector3<f64>,
     width: u32,
     blend: f64,
 ) -> image::RgbImage {
@@ -336,7 +341,7 @@ pub fn stitch_equirect(
                         let lon = (x as f64 + 0.5) / w as f64 * 2.0 * PI - PI;
                         let ray =
                             Vector3::new(lat.cos() * lon.sin(), -lat.sin(), lat.cos() * lon.cos());
-                        let ray_back = to_back * ray;
+                        let ray_back = (to_back * (ray - parallax)).normalize();
                         let off_front = ray.z.clamp(-1.0, 1.0).acos();
                         let off_back = ray_back.z.clamp(-1.0, 1.0).acos();
                         let w_front = if blend > 0.0 {
@@ -461,19 +466,34 @@ pub fn seam_pairs(
         .collect()
 }
 
+/// The back lens on the camera as [`fit_back_lens_rotation`] finds it along
+/// the seam.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeamFit {
+    /// The back lens's rotation (as [`back_lens_rotation`]).
+    pub rotation: Matrix3<f64>,
+    /// The shift towards the lenses' axes the pairs share (radians): the
+    /// baseline over the scene's typical distance along the seam.
+    pub parallax: f64,
+    /// The pairs' median offset across the parallax after the fit
+    /// (radians).
+    pub across: f64,
+    /// How many pairs the fit kept.
+    pub pairs: usize,
+}
+
 /// The back lens's rotation (as [`back_lens_rotation`]) that best aligns
 /// `pairs` ([`seam_pairs`]), refined from `initial`. The lenses sit apart
 /// along `baseline` (the back lens's centre in the front lens's frame), so a
 /// point at a finite distance shows the back lens a direction shifted towards
 /// the front lens's axis: the fit takes each pair's offset across that
 /// shift exactly (parallax cannot cause it) and along it up to one offset
-/// shared by all pairs (the scene's typical parallax), robustly. Returns
-/// the rotation and the median offset across, in radians.
+/// shared by all pairs (the scene's typical parallax), robustly.
 pub fn fit_back_lens_rotation(
     pairs: &[SeamPair],
     initial: &Matrix3<f64>,
     baseline: &Vector3<f64>,
-) -> (Matrix3<f64>, f64) {
+) -> SeamFit {
     let e = if baseline.norm() > 0.0 {
         -baseline.normalize()
     } else {
@@ -542,8 +562,12 @@ pub fn fit_back_lens_rotation(
         .filter_map(|(((_, b), f), &k)| Some((rot * b).dot(&f.filter(|_| k)?.0).abs()))
         .collect();
     across.sort_by(f64::total_cmp);
-    let median = across.get(across.len() / 2).copied().unwrap_or(f64::NAN);
-    (rot, median)
+    SeamFit {
+        rotation: rot,
+        parallax: along_offset,
+        across: across.get(across.len() / 2).copied().unwrap_or(f64::NAN),
+        pairs: across.len(),
+    }
 }
 
 /// The bilinear sample at `(px, py)` of the `size x size` half of `frame`
@@ -597,7 +621,16 @@ mod tests {
         let size = 3840;
         let s = X5_CALIBRATION_PX_PER_VIDEO_PX;
         let mid = size as f64 / 2.0 - 0.5;
-        for (lens, middle_x) in [(x5_like(), 2687.5), (InsvLens { cx: 8080.0, ..x5_like() }, 8063.5)] {
+        for (lens, middle_x) in [
+            (x5_like(), 2687.5),
+            (
+                InsvLens {
+                    cx: 8080.0,
+                    ..x5_like()
+                },
+                8063.5,
+            ),
+        ] {
             let model = FisheyeLens::from_insv(&lens, size);
             for ray in [
                 Vector3::new(0.0, 0.0, 1.0),
@@ -617,7 +650,10 @@ mod tests {
                 let (cu, cv) = (lens.fx * xd + lens.cx, lens.fy * yd + lens.cy);
                 let want = (mid + (cu - middle_x) / s, mid - (cv - 2687.5) / s);
                 let got = model.project(&ray).unwrap();
-                assert!((got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9, "{got:?} {want:?}");
+                assert!(
+                    (got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9,
+                    "{got:?} {want:?}"
+                );
             }
         }
         // The axis lands (cx, cy) from the middle, upside down.
@@ -754,7 +790,8 @@ mod tests {
             }
             sum / n
         };
-        let pano = stitch_equirect(&frame, &lenses, &back, 1024, 2f64.to_radians());
+        let none = Vector3::zeros();
+        let pano = stitch_equirect(&frame, &lenses, &back, &none, 1024, 2f64.to_radians());
         assert_eq!((pano.width(), pano.height()), (1024, 512));
         let mean = error(&pano);
         // About a level of interpolation error, nothing like a misplaced seam.
@@ -764,10 +801,98 @@ mod tests {
             &frame,
             &lenses,
             &back_lens_rotation(),
+            &none,
             1024,
             0.0,
         ));
         assert!(plain > 3.0 * mean, "{plain} vs {mean}");
+    }
+
+    #[test]
+    fn stitching_at_a_distance_takes_the_lenses_offset_into_account() {
+        // The world painted on a sphere 1.5 m around the front lens, the
+        // back lens 3.2 cm behind it: stitched on that sphere, the seam
+        // matches; stitched at infinity, the back lens's view is up to 1.2°
+        // off.
+        use std::f64::consts::PI;
+        let size = 512u32;
+        let lens = FisheyeLens::from_insv(&x5_like(), size);
+        let back = back_lens_rotation();
+        let centre = Vector3::new(0.0, 0.0, -0.032);
+        let radius = 1.5;
+        let world = |d: &Vector3<f64>| {
+            let d = d.normalize();
+            [
+                (127.5 + 120.0 * (9.0 * d.x).sin()) as u8,
+                (127.5 + 120.0 * (7.0 * d.y + 3.0 * d.z).cos()) as u8,
+                (127.5 + 120.0 * (8.0 * d.z).sin()) as u8,
+            ]
+        };
+        let mut frame = image::RgbImage::new(2 * size, size);
+        let n = 1400;
+        for i in 0..n {
+            for j in 0..n {
+                let th = (i as f64 + 0.5) / n as f64 * 100f64.to_radians();
+                let ph = (j as f64 + 0.5) / n as f64 * 2.0 * PI;
+                let d = Vector3::new(th.sin() * ph.cos(), th.sin() * ph.sin(), th.cos());
+                let Some((x, y)) = lens.project(&d) else {
+                    continue;
+                };
+                let (x, y) = (x.round(), y.round());
+                if x < 0.0 || y < 0.0 || x >= size as f64 || y >= size as f64 {
+                    continue;
+                }
+                frame.put_pixel(x as u32, y as u32, image::Rgb(world(&d)));
+                // The back lens sees, along `back d`, the sphere's point
+                // from its own centre.
+                let dir = back * d;
+                let b = centre.dot(&dir);
+                let along = -b + (b * b - centre.norm_squared() + radius * radius).sqrt();
+                let point = centre + along * dir;
+                frame.put_pixel(x as u32 + size, y as u32, image::Rgb(world(&point)));
+            }
+        }
+        let lenses = [lens.clone(), lens];
+        // The seam's band, 80-100° off the front lens's axis.
+        let seam_error = |pano: &image::RgbImage| {
+            let (w, h) = (pano.width(), pano.height());
+            let (mut sum, mut count) = (0.0, 0.0);
+            for y in (h / 8..7 * h / 8).step_by(3) {
+                for x in 0..w {
+                    let lon = (x as f64 + 0.5) / w as f64 * 2.0 * PI - PI;
+                    let lat = PI / 2.0 - (y as f64 + 0.5) / h as f64 * PI;
+                    let d = Vector3::new(lat.cos() * lon.sin(), -lat.sin(), lat.cos() * lon.cos());
+                    if d.z.abs() > 10f64.to_radians().sin() {
+                        continue;
+                    }
+                    let (want, got) = (world(&d), pano.get_pixel(x, y).0);
+                    for c in 0..3 {
+                        sum += (want[c] as f64 - got[c] as f64).abs();
+                        count += 1.0;
+                    }
+                }
+            }
+            sum / count
+        };
+        let blend = 2f64.to_radians();
+        let near = seam_error(&stitch_equirect(
+            &frame,
+            &lenses,
+            &back,
+            &(centre / radius),
+            1024,
+            blend,
+        ));
+        let far = seam_error(&stitch_equirect(
+            &frame,
+            &lenses,
+            &back,
+            &Vector3::zeros(),
+            1024,
+            blend,
+        ));
+        assert!(near < 2.0, "{near}");
+        assert!(far > 3.0 * near, "{far} vs {near}");
     }
 
     #[test]
