@@ -253,6 +253,28 @@ South-building trained again with the optimized kernels:
 | project_bwd | 1.13 |
 | optimizer | 8.02 |
 
+### Tried and not adopted
+
+Three more changes were timed with `gsplat_cuda_bench --data`, three rounds
+each, alternating with the current kernels. The bench now also reports the
+host wall time of a step, which counts the gradient memsets and launches
+between the timed stages. The current kernels took 21.0–21.3 ms of wall
+time per step (stages 19.7–20.0 ms).
+
+| Change | Effect per step | Why |
+|---|---|---|
+| Adam on 4 elements per thread (16-byte loads and stores, no 64-bit index division) | optimizer 6.66 → 6.69 ms | The kernel was already bound by memory: 28 bytes per element. |
+| No gradient memset: `project_bwd` writes zeros for the gaussians that blended into nothing | project_bwd 1.0 → 2.5 ms; wall unchanged or worse | Each thread writes its own 59-float rows, which do not coalesce; one memset is faster. |
+| Two-stage sort (gaussians by depth, then a stable 32-bit sort by tile alone) | sort 1.35 → 0.29 ms, but scan +0.27 ms (the depth sort) and duplicate +0.35 ms; wall −0.1 ms (under 1%) | Duplicating in depth order reads the gaussians out of order. |
+
+- **Order.** The two-stage sort keeps the order of the one 64-bit sort
+  (equal depths in gaussian order), and all three passed the oracle and
+  training tests.
+- **Where the time is.** A step stays at about 21 ms. The optimizer
+  (6.7 ms) moves 28 bytes per element; only fewer bytes would help, such as
+  moments in bf16 or the opt-in sparse SH Adam, and both change the
+  numerics. raster_bwd (6.1 ms) is the write-up's steps 5 and 6.
+
 ## Rasterizer timing on synthetic views
 
 Without `--data`, `gsplat_cuda_bench` renders and runs the backward pass
@@ -288,7 +310,7 @@ WSL2, CUDA 13.3:
 | Write-up step | Here |
 |---|---|
 | Exact conic-tile intersection | In (`tile_row_span`, as in the wgpu renderer) |
-| Two-stage sort (visible by depth, then a narrow tile sort) | Not yet: one 64-bit sort (1.5 ms of a training step) |
+| Two-stage sort (visible by depth, then a narrow tile sort) | Tried, under 1% per step ([above](#tried-and-not-adopted)); one 64-bit sort (1.4 ms of a training step) |
 | Warp butterfly reduce-scatter of the gradients (step 2) | In: a transposed butterfly (8+4+2+1+1 shuffles for 10 sums), skipped when no lane blended the splat; the sums go to global memory directly |
 | Sub-tile bitmasks to skip splats before evaluating them | In: 8x4 sub-tiles, 8 bits in the sorted value |
 | SH register streaming, cooperative zeroing (step 3) | Not yet |
@@ -497,6 +519,9 @@ shared the GPU:
 1. **Geometry.** Neither the depth prior nor the depth-normal loss raised
    completeness, where most of the gap to MVS is. Untried: losses on the
    median depth the mesh is built from, and multi-view consistency.
-2. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;
-   sparse SH Adam halves it), raster_bwd (6.9 ms: the write-up's steps 5
-   and 6), raster (2.6 ms) and the sort (1.5 ms: the two-stage sort).
+2. **Speed.** A step takes about 21 ms. The dense optimizer (6.7 ms) is
+   bound by memory, so it only gets faster with fewer bytes per element,
+   such as bf16 moments or the opt-in sparse SH Adam. raster_bwd (6.1 ms)
+   needs the write-up's steps 5 and 6. The two-stage sort, a vectorized Adam
+   and dropping the gradient memset each gained under 1%
+   ([tried](#tried-and-not-adopted)).
