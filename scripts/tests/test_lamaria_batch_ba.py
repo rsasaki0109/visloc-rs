@@ -421,6 +421,20 @@ class ModeVectorTest(unittest.TestCase):
         np.testing.assert_allclose((p2 - pts) / k_, vl[1], atol=1e-4)
 
 
+class TrackTest(unittest.TestCase):
+    def test_a_track_with_two_features_in_one_image_is_dropped(self):
+        offsets = np.arange(0, 19, 3)  # three keyframes, two cameras, three features per image
+        # images 0, 2 and 4 are camera 0 of keyframes 0-2; a wrong match also joins feature 1 of image 4 to the
+        # track of feature 0, a second track runs through feature 1 of images 0 and 2
+        pairs = np.array([[0, 0, 1, 0], [1, 0, 2, 0], [1, 0, 2, 0], [0, 0, 1, 0]])
+        matches = np.array([[0, 0], [0, 0], [0, 1], [1, 1]])
+        g = lambda img, f: int(offsets[img] + f)  # noqa: E731
+        tracks, image_of, conflicts = lb.build_tracks(offsets, pairs, matches, 4)
+        self.assertEqual(conflicts, 1)
+        self.assertEqual([sorted(t.tolist()) for t in tracks], [[g(0, 1), g(2, 1)]])
+        np.testing.assert_array_equal(image_of[[g(4, 0), g(4, 1)]], [4, 4])
+
+
 class MatchingTest(unittest.TestCase):
     def test_best_two(self):
         keys = np.array([0, 0, 1, 0, 1])
