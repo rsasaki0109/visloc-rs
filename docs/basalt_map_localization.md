@@ -510,6 +510,51 @@ the error. Using weak fixes only while no full fix is in the averaging
 window lost that gain (6.80 and 7.77 cm), so the gate stays an option for
 robots whose images rarely reach `--min-inliers`.
 
+### Where MH_04 and MH_05 lose
+
+MH_04 and MH_05 are the worst queries against MH_01 (22.1 and 15.6 cm
+with weak fixes). Ground truth shows where their error comes from:
+
+| Odometry path since the last fix | MH_04: share of poses, RMSE | MH_05: share of poses, RMSE |
+|---|---|---|
+| 0–0.5 m | 16%, 4.3 cm | 17%, 5.0 cm |
+| 0.5–5 m | 14%, 15.0 cm | 15%, 14.8 cm |
+| 5–20 m | 59%, 21.9 cm | 56%, 16.0 cm |
+| over 20 m | 11%, 40.0 cm | 12%, 23.1 cm |
+
+- **Most of the error is far from any fix.** Poses more than 10 m from
+  their last fix carry 83% of MH_04's squared error and 58% of MH_05's.
+  All of MH_04's 48 fixes come before 36 s; it then flies 75 m without one.
+- **The correction is not the limit.** In hindsight, the best fixed yaw for
+  each stretch between fixes gives 13.2–14.6 cm on MH_04 and 13.7–15.2 cm
+  on MH_05, but it absorbs the VIO's drift over the stretch, which no
+  causal estimate knows. Replayed from the runs' VIO and fixes, fitting the
+  yaw to the fixes' positions as well as their orientations, over windows
+  of 5 to 60 s, gave 23.6–28.6 cm on MH_04: the fixes' own orientations
+  are the better yaw.
+- **The map lacks those views.** MH_01's landmarks projected into MH_04's
+  true poses (occlusion ignored): from 46 to 73 s, fewer than 30 of them
+  are within 30° and twice the distance of a view the map has. From 73 to
+  87 s, tens to thousands are, the most (5,300) at 83 s, where MH_04 passes
+  MH_01's path.
+- **A perfect prediction finds little more.** With the true trajectory as
+  the odometry (`--odometry`, the fresh limits lifted), 11 more of MH_04's
+  images localize, all at 80–86 s, around that crossing. The stale VIO
+  prediction, with the fresh limits lifted, finds the same 11, 5–13 cm
+  off: MH_04 goes from 22.1 to 21.2 cm, and MH_05 from 15.6 to 15.2 cm
+  with 7 more fixes. The fresh limits stay, since a stale prediction gave
+  MH_03 fixes 16–42 cm off
+  ([above](#matching-around-the-predicted-projections)).
+- **From 74 to 79 s the views are close but do not match.** 100 to 300
+  landmarks are within 30° of a map view there, yet none of the 20 images
+  tried localizes, even around the true pose's projections. The map keeps
+  one descriptor per landmark (the medoid of its observations); keeping one
+  per viewpoint is the remaining lead on the map's side.
+
+So the remaining error is mostly the map's coverage, which another flight's
+map supplies: MH_05 against MH_01 to MH_04 gets a map pose for 99.8% of
+frames at 11.5 cm ([below](#lifelong-use-appending-each-session)).
+
 ### On a robot (ROS 2)
 
 `ros2/visloc-ros2`'s `visloc_map_localize_node` runs the same localization
