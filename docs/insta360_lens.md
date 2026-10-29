@@ -151,7 +151,7 @@ stitches images of the two lenses side by side instead.
   column (the convention `gsplat_photos --equirect` reads), 6,464 x 3,232
   by default: the lenses' resolution on their axes.
 - **The back lens.** Before stitching, `insv_stitch` cuts eight views
-  across the seam from both lenses in 24 frames spread over the video,
+  across the seam from both lenses in 16 frames spread over the video,
   matches them with SIFT, and fits the back lens's rotation to the
   matches: across the parallax exactly, along it up to one shift all
   matches share, robustly (`dual_fisheye::fit_back_lens_rotation`).
