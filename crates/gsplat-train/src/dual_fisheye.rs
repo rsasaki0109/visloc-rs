@@ -27,22 +27,39 @@ pub struct FisheyeLens {
     fy: f64,
     radial: [f64; 3],
     tangential: [f64; 2],
-    centre: f64,
+    centre: [f64; 2],
 }
 
+/// Calibration pixels per pixel of an X5 video's 3840 px lens image: the
+/// video's square spans about 5,322 of the calibration's 5,376 px
+/// (docs/insta360_lens.md).
+pub const X5_CALIBRATION_PX_PER_VIDEO_PX: f64 = 1.386;
+
 impl FisheyeLens {
-    /// `lens` in an `size x size` lens image: the calibration's pixels
-    /// scaled by `size / (2 circle_radius)`, the optical centre in the
-    /// middle.
+    /// `lens` in a `size x size` lens image of the video. The video holds
+    /// each lens upside down relative to its calibration: the square around
+    /// the middle of the lens's calibration square (not around `(cx, cy)`)
+    /// that spans [`X5_CALIBRATION_PX_PER_VIDEO_PX`] x 3840 calibration
+    /// pixels, scaled to `size` (docs/insta360_lens.md).
     pub fn from_insv(lens: &InsvLens, size: u32) -> Self {
-        let s = size as f64 / (2.0 * lens.circle_radius);
+        let s = size as f64 / (3840.0 * X5_CALIBRATION_PX_PER_VIDEO_PX);
+        let mid = size as f64 / 2.0 - 0.5;
+        // The middle of the lens's own square in the side-by-side
+        // calibration image (pixel centres at integers).
+        let side = lens.calibration_size[0] / 2.0;
+        let middle_x = (lens.cx / side).floor() * side + side / 2.0 - 0.5;
+        let middle_y = lens.calibration_size[1] / 2.0 - 0.5;
         Self {
             xi: lens.xi,
             fx: lens.fx * s,
             fy: lens.fy * s,
             radial: lens.radial,
-            tangential: lens.tangential,
-            centre: size as f64 / 2.0 - 0.5,
+            // Upside down, the model's y and with it p1 change sign.
+            tangential: [-lens.tangential[0], lens.tangential[1]],
+            centre: [
+                mid + (lens.cx - middle_x) * s,
+                mid - (lens.cy - middle_y) * s,
+            ],
         }
     }
 
@@ -61,7 +78,7 @@ impl FisheyeLens {
         let radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
         let xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
         let yd = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
-        Some((self.fx * xd + self.centre, self.fy * yd + self.centre))
+        Some((self.fx * xd + self.centre[0], self.fy * yd + self.centre[1]))
     }
 
     /// Pixels per radian along the optical axis.
@@ -104,6 +121,16 @@ pub fn lens_face_rotations() -> [(&'static str, Matrix3<f64>); 5] {
 /// mapper refines it.
 pub fn back_lens_rotation() -> Matrix3<f64> {
     Matrix3::from_diagonal(&Vector3::new(-1.0, 1.0, -1.0))
+}
+
+/// The back lens's rotation on the camera (as [`back_lens_rotation`]) from
+/// the lenses' recorded angles: the half turn, then the turn about the
+/// optical axis that the third angles hold beyond 90° each
+/// (docs/insta360_lens.md).
+pub fn factory_back_lens_rotation(front: &InsvLens, back: &InsvLens) -> Matrix3<f64> {
+    let roll = (front.angles[2] - 90.0 + back.angles[2] - 90.0).to_radians();
+    nalgebra::Rotation3::from_axis_angle(&Vector3::z_axis(), -roll).into_inner()
+        * back_lens_rotation()
 }
 
 /// The ten faces of a frame as one rig whose frame is the front lens's: the
@@ -267,6 +294,280 @@ pub fn lens_face(
     face
 }
 
+/// The `width x width / 2` equirectangular panorama of a dual-fisheye frame
+/// (`2S x S`, the front lens on the left; `lenses` in the pixels of an
+/// `S x S` half), in [`crate::equirect`]'s convention with the front lens's
+/// axis at the centre column. `back` is the back lens's rotation on the
+/// camera (a direction in its frame to the front lens's, as
+/// [`back_lens_rotation`]). Each direction takes the lens whose axis is
+/// nearer; within `blend` radians of where both are as far, the two are
+/// mixed, linearly across the band. Bilinear samples, no filtering: make
+/// `width` about the lenses' resolution (`2π` times
+/// [`FisheyeLens::axial_resolution`]) or downscale the frame first.
+pub fn stitch_equirect(
+    frame: &image::RgbImage,
+    lenses: &[FisheyeLens; 2],
+    back: &Matrix3<f64>,
+    width: u32,
+    blend: f64,
+) -> image::RgbImage {
+    use std::f64::consts::PI;
+    let (w, h) = (width.max(2) & !1, width.max(2) / 2);
+    let size = frame.height();
+    let mut pano = image::RgbImage::new(w, h);
+    if frame.width() != 2 * size || size == 0 {
+        return pano;
+    }
+    let to_back = back.transpose();
+    let row_bytes = 3 * w as usize;
+    let rows_per = (h as usize).div_ceil(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    );
+    std::thread::scope(|scope| {
+        for (chunk, rows) in pano.chunks_mut(rows_per * row_bytes).enumerate() {
+            let to_back = &to_back;
+            scope.spawn(move || {
+                for (r, row) in rows.chunks_mut(row_bytes).enumerate() {
+                    let y = chunk * rows_per + r;
+                    let lat = PI / 2.0 - (y as f64 + 0.5) / h as f64 * PI;
+                    for (x, out) in row.chunks_mut(3).enumerate() {
+                        let lon = (x as f64 + 0.5) / w as f64 * 2.0 * PI - PI;
+                        let ray =
+                            Vector3::new(lat.cos() * lon.sin(), -lat.sin(), lat.cos() * lon.cos());
+                        let ray_back = to_back * ray;
+                        let off_front = ray.z.clamp(-1.0, 1.0).acos();
+                        let off_back = ray_back.z.clamp(-1.0, 1.0).acos();
+                        let w_front = if blend > 0.0 {
+                            ((off_back - off_front) / (2.0 * blend) + 0.5).clamp(0.0, 1.0)
+                        } else if off_front <= off_back {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        let mut rgb = [0.0; 3];
+                        for (lens, weight, dir, x0) in [
+                            (&lenses[0], w_front, &ray, 0),
+                            (&lenses[1], 1.0 - w_front, &ray_back, size),
+                        ] {
+                            if weight <= 0.0 {
+                                continue;
+                            }
+                            if let Some(c) = lens
+                                .project(dir)
+                                .and_then(|(px, py)| sample_half(frame, x0, size, px, py))
+                            {
+                                for k in 0..3 {
+                                    rgb[k] += weight * c[k];
+                                }
+                            }
+                        }
+                        for k in 0..3 {
+                            out[k] = rgb[k].round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    pano
+}
+
+/// A direction seen by both lenses: its ray in the front lens's frame and
+/// in the back lens's.
+pub type SeamPair = (Vector3<f64>, Vector3<f64>);
+
+/// The pairs of rays SIFT matches between the two lenses along their seam in
+/// a dual-fisheye frame (as [`stitch_equirect`] takes it). The seam is cut
+/// into eight pinhole views straddling it, 50° along it and 24° across,
+/// each rendered from both lenses (the back lens's placed by `back`, as in
+/// [`back_lens_rotation`]); a match's rays are exact whatever `back` is,
+/// which only aims the views.
+#[cfg(feature = "euroc")]
+pub fn seam_pairs(
+    frame: &image::RgbImage,
+    lenses: &[FisheyeLens; 2],
+    back: &Matrix3<f64>,
+) -> Vec<SeamPair> {
+    use visloc_vision::features::sift::{extract_sift, GrayImage, SiftConfig};
+    let size = frame.height();
+    if frame.width() != 2 * size || size == 0 {
+        return Vec::new();
+    }
+    // About the lenses' resolution along the seam (half their axial one).
+    let px_per_rad = 0.5
+        * 2.0
+        * lenses[0]
+            .axial_resolution()
+            .max(lenses[1].axial_resolution());
+    let (along, across) = (50f64.to_radians(), 24f64.to_radians());
+    let f = px_per_rad.max(50.0);
+    let w = (2.0 * f * (along / 2.0).tan()).round() as usize;
+    let h = (2.0 * f * (across / 2.0).tan()).round() as usize;
+    let to_back = back.transpose();
+    let sift = SiftConfig::default();
+    use rayon::prelude::*;
+    (0..8)
+        .into_par_iter()
+        .flat_map_iter(|k| {
+            let mut pairs = Vec::new();
+            let phi = k as f64 * std::f64::consts::FRAC_PI_4;
+            let (s, c) = phi.sin_cos();
+            // View frame to front frame: x along the seam, y towards the front
+            // lens's axis, z out through the seam.
+            let view = Matrix3::new(-s, 0.0, c, c, 0.0, s, 0.0, 1.0, 0.0);
+            let ray = |u: f64, v: f64| {
+                view * Vector3::new((u - w as f64 / 2.0) / f, (v - h as f64 / 2.0) / f, 1.0)
+            };
+            let render = |lens: &FisheyeLens, x0: u32, to_lens: &Matrix3<f64>| -> Vec<f32> {
+                let mut out = vec![0f32; w * h];
+                for v in 0..h {
+                    for u in 0..w {
+                        let d = to_lens * ray(u as f64 + 0.5, v as f64 + 0.5);
+                        if let Some(c) = lens
+                            .project(&d)
+                            .and_then(|(px, py)| sample_half(frame, x0, size, px, py))
+                        {
+                            out[v * w + u] =
+                                ((0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255.0) as f32;
+                        }
+                    }
+                }
+                out
+            };
+            let g0 = render(&lenses[0], 0, &Matrix3::identity());
+            let g1 = render(&lenses[1], size, &to_back);
+            let (Ok(i0), Ok(i1)) = (GrayImage::new(w, h, &g0), GrayImage::new(w, h, &g1)) else {
+                return pairs;
+            };
+            let (Ok((k0, d0)), Ok((k1, d1))) = (extract_sift(&i0, &sift), extract_sift(&i1, &sift))
+            else {
+                return pairs;
+            };
+            // Within 95° of each lens's axis: clear of the black beyond the
+            // image circle (about 98°), whose edge SIFT also finds.
+            let max_off = 95f64.to_radians().cos();
+            for m in crate::euroc::cpu_matches(&d0, &d1) {
+                let (a, b) = (&k0[m.query_index], &k1[m.train_index]);
+                let ra = ray(a.x + 0.5, a.y + 0.5).normalize();
+                let rb = to_back * ray(b.x + 0.5, b.y + 0.5).normalize();
+                if ra.z > max_off && rb.z > max_off {
+                    pairs.push((ra, rb));
+                }
+            }
+            pairs
+        })
+        .collect()
+}
+
+/// The back lens's rotation (as [`back_lens_rotation`]) that best aligns
+/// `pairs` ([`seam_pairs`]), refined from `initial`. The lenses sit apart
+/// along `baseline` (the back lens's centre in the front lens's frame), so a
+/// point at a finite distance shows the back lens a direction shifted towards
+/// the front lens's axis: the fit takes each pair's offset across that
+/// shift exactly (parallax cannot cause it) and along it up to one offset
+/// shared by all pairs (the scene's typical parallax), robustly. Returns
+/// the rotation and the median offset across, in radians.
+pub fn fit_back_lens_rotation(
+    pairs: &[SeamPair],
+    initial: &Matrix3<f64>,
+    baseline: &Vector3<f64>,
+) -> (Matrix3<f64>, f64) {
+    let e = if baseline.norm() > 0.0 {
+        -baseline.normalize()
+    } else {
+        -Vector3::z()
+    };
+    // Each pair's directions across and along its parallax (none on the
+    // baseline itself, far from any seam).
+    let frames: Vec<Option<(Vector3<f64>, Vector3<f64>)>> = pairs
+        .iter()
+        .map(|(a, _)| {
+            let n = a.cross(&e);
+            (n.norm() > 1e-6).then(|| {
+                let n = n.normalize();
+                (n, n.cross(a))
+            })
+        })
+        .collect();
+    let mut rot = *initial;
+    let mut along_offset = 0.0;
+    // Pairs more than 2° off the initial rotation are mismatches.
+    let gate = |rot: &Matrix3<f64>| -> Vec<bool> {
+        pairs
+            .iter()
+            .zip(&frames)
+            .map(|((a, b), f)| f.is_some() && a.dot(&(rot * b)) > 2f64.to_radians().cos())
+            .collect()
+    };
+    let mut keep = gate(initial);
+    let scale = 0.1f64.to_radians();
+    for _ in 0..15 {
+        let mut jtj = nalgebra::Matrix4::<f64>::zeros();
+        let mut jtr = nalgebra::Vector4::<f64>::zeros();
+        for (((_, b), f), &k) in pairs.iter().zip(&frames).zip(&keep) {
+            let (Some((n, ep)), true) = (f, k) else {
+                continue;
+            };
+            let q = rot * b;
+            for (dir, c, dc) in [(n, 0.0, 0.0), (ep, along_offset, -1.0)] {
+                let r = q.dot(dir) - c;
+                // Soft-L1 weight for iteratively reweighted least squares.
+                let w = 1.0 / (1.0 + (r / scale).powi(2)).sqrt();
+                let g = q.cross(dir);
+                let j = nalgebra::Vector4::new(g.x, g.y, g.z, dc);
+                jtj += w * j * j.transpose();
+                jtr += w * j * r;
+            }
+        }
+        let Some(step) = (jtj + nalgebra::Matrix4::identity() * 1e-9)
+            .lu()
+            .solve(&(-jtr))
+        else {
+            break;
+        };
+        let omega = Vector3::new(step[0], step[1], step[2]);
+        rot = nalgebra::Rotation3::new(omega).into_inner() * rot;
+        along_offset += step[3];
+        if omega.norm() < 1e-9 {
+            break;
+        }
+        keep = gate(&rot);
+    }
+    let mut across: Vec<f64> = pairs
+        .iter()
+        .zip(&frames)
+        .zip(&keep)
+        .filter_map(|(((_, b), f), &k)| Some((rot * b).dot(&f.filter(|_| k)?.0).abs()))
+        .collect();
+    across.sort_by(f64::total_cmp);
+    let median = across.get(across.len() / 2).copied().unwrap_or(f64::NAN);
+    (rot, median)
+}
+
+/// The bilinear sample at `(px, py)` of the `size x size` half of `frame`
+/// starting at column `x0`; `None` outside it.
+fn sample_half(frame: &image::RgbImage, x0: u32, size: u32, px: f64, py: f64) -> Option<[f64; 3]> {
+    let max = size as f64 - 1.0;
+    if !(0.0..=max).contains(&px) || !(0.0..=max).contains(&py) {
+        return None;
+    }
+    let (xa, ya) = (
+        px.floor().min(max - 1.0).max(0.0),
+        py.floor().min(max - 1.0).max(0.0),
+    );
+    let (fx, fy) = (px - xa, py - ya);
+    let (xa, ya) = (xa as u32 + x0, ya as u32);
+    let p = |x: u32, y: u32| frame.get_pixel(x, y).0;
+    let (p00, p10, p01, p11) = (p(xa, ya), p(xa + 1, ya), p(xa, ya + 1), p(xa + 1, ya + 1));
+    Some(std::array::from_fn(|c| {
+        let top = p00[c] as f64 * (1.0 - fx) + p10[c] as f64 * fx;
+        let bottom = p01[c] as f64 * (1.0 - fx) + p11[c] as f64 * fx;
+        top * (1.0 - fy) + bottom * fy
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,25 +585,55 @@ mod tests {
             circle_radius: 2646.5,
             angles: [0.4, -0.2, 89.8],
             translation: [0.0; 3],
+            calibration_size: [10752.0, 5376.0],
         }
     }
 
     #[test]
-    fn the_image_circle_spans_the_lens_image() {
-        // The calibration's 200° circle reaches the square's edges.
+    fn the_video_holds_the_calibration_upside_down_around_its_middle() {
+        // A ray lands where the calibration puts its mirror image (y
+        // flipped), mapped from the middle of the lens's calibration square
+        // upside down and scaled; for the back lens, the right half's.
         let size = 3840;
-        let lens = FisheyeLens::from_insv(&x5_like(), size);
-        let c = size as f64 / 2.0 - 0.5;
-        for phi in [0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0] {
-            let t = 100f64.to_radians();
-            let ray = Vector3::new(t.sin() * phi.cos(), t.sin() * phi.sin(), t.cos());
-            let (x, y) = lens.project(&ray).unwrap();
-            let r = (x - c).hypot(y - c);
-            assert!((r - size as f64 / 2.0).abs() < 0.01 * size as f64, "{r}");
+        let s = X5_CALIBRATION_PX_PER_VIDEO_PX;
+        let mid = size as f64 / 2.0 - 0.5;
+        for (lens, middle_x) in [(x5_like(), 2687.5), (InsvLens { cx: 8080.0, ..x5_like() }, 8063.5)] {
+            let model = FisheyeLens::from_insv(&lens, size);
+            for ray in [
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.3, -0.2, 0.9),
+                Vector3::new(-0.8, 0.5, 0.1),
+            ] {
+                // The calibration's model of the mirrored ray, in its pixels.
+                let m = Vector3::new(ray.x, -ray.y, ray.z);
+                let zs = m.z + lens.xi * m.norm();
+                let (x, y) = (m.x / zs, m.y / zs);
+                let r2 = x * x + y * y;
+                let [k1, k2, k3] = lens.radial;
+                let [p1, p2] = lens.tangential;
+                let rad = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+                let xd = x * rad + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+                let yd = y * rad + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
+                let (cu, cv) = (lens.fx * xd + lens.cx, lens.fy * yd + lens.cy);
+                let want = (mid + (cu - middle_x) / s, mid - (cv - 2687.5) / s);
+                let got = model.project(&ray).unwrap();
+                assert!((got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9, "{got:?} {want:?}");
+            }
         }
-        assert_eq!(lens.project(&Vector3::z()), Some((c, c)));
-        // About 2,065 px faces match the axis's resolution at 3840 px.
-        assert!((natural_face_size(&lens) as i64 - 2065).abs() < 5);
+        // The axis lands (cx, cy) from the middle, upside down.
+        let lens = FisheyeLens::from_insv(&x5_like(), size);
+        let (x, y) = lens.project(&Vector3::z()).unwrap();
+        assert!((x - (mid + 12.5 / s)).abs() < 1e-9 && (y - (mid + 7.5 / s)).abs() < 1e-9);
+        // The 200° circle nearly spans the square: 2646.5 / 1.386 = 1909 px.
+        let t = 100f64.to_radians();
+        for phi in [0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            let ray = Vector3::new(t.sin() * phi.cos(), t.sin() * phi.sin(), t.cos());
+            let (u, v) = lens.project(&ray).unwrap();
+            let r = (u - x).hypot(v - y);
+            assert!((r - 2646.5 / s).abs() < 0.01 * r, "{r}");
+        }
+        // About 2,066 px faces match the axis's resolution at 3840 px.
+        assert!((natural_face_size(&lens) as i64 - 2054).abs() < 5);
     }
 
     #[test]
@@ -363,6 +694,80 @@ mod tests {
         assert!((rig[5].column(2) + Vector3::z()).norm() < 1e-12);
         assert!(rig[8].column(2).y < 0.0);
         assert!(rig.iter().all(|r| (r.determinant() - 1.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn stitching_puts_each_direction_where_both_lenses_saw_it() {
+        // A dual-fisheye frame of a world whose colour depends only on the
+        // direction, the back lens 2° past the half turn; stitched with that
+        // rotation, the panorama shows the same world, seams included.
+        use std::f64::consts::PI;
+        let size = 512u32;
+        let lens = FisheyeLens::from_insv(&x5_like(), size);
+        let back = nalgebra::Rotation3::from_euler_angles(0.01, 0.02, -0.03).into_inner()
+            * back_lens_rotation();
+        let world = |d: &Vector3<f64>| {
+            let d = d.normalize();
+            [
+                (127.5 + 120.0 * (9.0 * d.x).sin()) as u8,
+                (127.5 + 120.0 * (7.0 * d.y + 3.0 * d.z).cos()) as u8,
+                (127.5 + 120.0 * (8.0 * d.z).sin()) as u8,
+            ]
+        };
+        // Each lens image: a dense grid of directions within 100° of the
+        // axis, splatted to their pixels.
+        let mut frame = image::RgbImage::new(2 * size, size);
+        let n = 1400;
+        for i in 0..n {
+            for j in 0..n {
+                // Directions within 100° of the axis, densely.
+                let th = (i as f64 + 0.5) / n as f64 * 100f64.to_radians();
+                let ph = (j as f64 + 0.5) / n as f64 * 2.0 * PI;
+                let d = Vector3::new(th.sin() * ph.cos(), th.sin() * ph.sin(), th.cos());
+                for (k, rot) in [Matrix3::identity(), back].iter().enumerate() {
+                    if let Some((x, y)) = lens.project(&d) {
+                        let (x, y) = (x.round(), y.round());
+                        if x >= 0.0 && y >= 0.0 && x < size as f64 && y < size as f64 {
+                            let c = world(&(rot * d));
+                            frame.put_pixel(x as u32 + k as u32 * size, y as u32, image::Rgb(c));
+                        }
+                    }
+                }
+            }
+        }
+        let lenses = [lens.clone(), lens];
+        // Mean colour error over the panorama (poles aside).
+        let error = |pano: &image::RgbImage| {
+            let (w, h) = (pano.width(), pano.height());
+            let (mut sum, mut n) = (0.0, 0.0);
+            for y in (h / 8..7 * h / 8).step_by(5) {
+                for x in (0..w).step_by(5) {
+                    let lon = (x as f64 + 0.5) / w as f64 * 2.0 * PI - PI;
+                    let lat = PI / 2.0 - (y as f64 + 0.5) / h as f64 * PI;
+                    let d = Vector3::new(lat.cos() * lon.sin(), -lat.sin(), lat.cos() * lon.cos());
+                    let (want, got) = (world(&d), pano.get_pixel(x, y).0);
+                    for c in 0..3 {
+                        sum += (want[c] as f64 - got[c] as f64).abs();
+                        n += 1.0;
+                    }
+                }
+            }
+            sum / n
+        };
+        let pano = stitch_equirect(&frame, &lenses, &back, 1024, 2f64.to_radians());
+        assert_eq!((pano.width(), pano.height()), (1024, 512));
+        let mean = error(&pano);
+        // About a level of interpolation error, nothing like a misplaced seam.
+        assert!(mean < 1.5, "{mean}");
+        // With the plain half turn, the back lens's half is 2° off.
+        let plain = error(&stitch_equirect(
+            &frame,
+            &lenses,
+            &back_lens_rotation(),
+            1024,
+            0.0,
+        ));
+        assert!(plain > 3.0 * mean, "{plain} vs {mean}");
     }
 
     #[test]

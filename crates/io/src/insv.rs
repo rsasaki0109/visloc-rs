@@ -57,11 +57,11 @@ pub struct InsvTelemetry {
 /// The unified (Mei) model: a ray `(x, y, z)` in the lens frame (x right,
 /// y down, z along the optical axis) goes to `(x, y) / (z + xi |ray|)`,
 /// then radial distortion `1 + k1 r² + k2 r⁴ + k3 r⁶` and tangential
-/// `p1, p2` (OpenCV's), then `fx, fy, cx, cy`. The video's lens image is
-/// the square around `(cx, cy)` that spans the 200° image circle
-/// (`circle_radius`) edge to edge, scaled to the video's size: checked on
-/// an X5 against the image circle's black edge, perspective views made
-/// from the frames, and the two lenses' overlap (docs/insta360_lens.md).
+/// `p1, p2` (OpenCV's), then `fx, fy, cx, cy`. On an X5 the video holds
+/// each lens's image upside down relative to the calibration, centred on
+/// the middle of the lens's calibration square rather than on `(cx, cy)`
+/// (`visloc_gsplat_train::dual_fisheye::FisheyeLens::from_insv`; measured
+/// from where the two lenses see the same things, docs/insta360_lens.md).
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsvLens {
     pub xi: f64,
@@ -79,6 +79,10 @@ pub struct InsvLens {
     /// The lens's position on the camera as recorded (metres; the back lens
     /// sits about 3 cm behind the front one).
     pub translation: [f64; 3],
+    /// The calibration image's width and height: both lenses side by side
+    /// (10752 x 5376 on an X5), so the lens's own square is the half that
+    /// holds `(cx, cy)`.
+    pub calibration_size: [f64; 2],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -261,6 +265,7 @@ fn parse_lenses(text: &str) -> Vec<InsvLens> {
                 radial: [b[11], b[12], b[13]],
                 tangential: [b[14], b[15]],
                 circle_radius: circle[0],
+                calibration_size: [b[16], b[17]],
             })
         })
         .collect();
@@ -392,6 +397,7 @@ mod tests {
         assert_eq!(back.circle_radius, 2651.0);
         assert_eq!(back.translation, [-0.001, 0.0004, -0.032]);
         assert_eq!(back.angles, [-0.4, -0.2, 91.1]);
+        assert_eq!(back.calibration_size, [10752.0, 5376.0]);
         // Some files write `n2_` instead of `p2_`.
         assert_eq!(parse_lenses(&text.replace("p2_", "n2_")), lenses);
         // Without the circles' string there is no lens image to map to.
