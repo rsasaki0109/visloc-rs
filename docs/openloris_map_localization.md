@@ -548,6 +548,44 @@ estimate every 5 s:
   stays at 5.11 cm and goes from 11.70 to 11.69 cm, with the VIO and the
   localizations.
 
+### The wheels' heading from a gyro
+
+The wheels' travel holds up over the corridor run: it is 1.1% short of the
+ground truth. Their heading does not. The wheels slip in turns in place,
+and their heading drifts 44.5° from the ground truth over corridor1-1's
+272 s, 15° of it in its first 350° turn. Between two localizations a
+robot's pose rests on that odometry, and on the corridor localizations are
+minutes apart.
+
+`visloc_localization::GyroWheelOdometry` keeps the wheels' travel and turns
+it by the heading a gyro integrates about the vertical. The accelerometer
+gives the vertical, so the IMU may sit anywhere on the robot in any
+orientation; here it is the T265's. Where the wheels stand still, the
+heading holds, and the gyro's rate about the vertical is taken as its bias
+(corridor1-1: −2.7°/min, from its first second).
+`visloc_wheel_calibration_node` uses it with an `imu` topic, and
+`wheel_calibration_replay` with `--imu`.
+
+Odometry alone on corridor1-1, from every second of the run: how far off
+its end point is after 10, 30 and 60 s, with the heading aligned at the
+start. The ground truth's own heading is 2.3° off its direction of travel,
+and is corrected for that.
+
+| After | Wheels: median / p90 / max | Wheels with the gyro's heading |
+|---|---|---|
+| 10 s | 0.22 / 0.41 / 0.71 m | 0.15 / 0.29 / 0.52 m |
+| 30 s | 0.82 / 3.1 / 4.7 m | 0.37 / 0.53 / 0.76 m |
+| 60 s | 2.7 / 6.8 / 15.9 m | 0.81 / 1.06 / 1.37 m |
+| Heading over the whole run | −44.5° … 3.2° | −5.6° … 2.7° |
+
+- **What remains is mostly the wheels' scale.** 60 s of driving is about
+  50 m, and 1.1% of it is 0.55 m.
+- **The short office sessions gain too.** Through the replay (VIO and
+  localizations into the calibration, then the demo), office1-6's wheel
+  odometry + map goes from 5.11 to 4.79 cm and office1-7's from 11.69 to
+  10.60 cm; with the localizations alone, from 5.11 to 4.79 cm and from
+  11.96 to 10.78 cm.
+
 ## Reproduce
 
 ```bash
@@ -620,10 +658,13 @@ visloc_map_localize_node --map runs/o12_map_scaled --ros-args -p extrinsics:=tf 
   -p weak_gate_m:=0.05 -r image:=/cam0/image_raw -r odom:=/wheel/odom &
 ros2 bag play o17_bag --delay 3
 
-# The corridor: corridor1-5's map, corridor1-1 the query (whole .7z files,
-# 6.9 and 13.9 GB), each converted and run as above
+# The corridor: corridor1-5's map, corridor1-1 the query. corridor1-1.7z
+# (13.9 GB) is a file of its own; corridor1-5.7z (6.9 GB) is a member of
+# corridor1-2_5-package.tar, bytes 12802381312 .. +6892693271
 curl -L -o corridor1-1.7z $U/corridor1-1.7z
+curl -L -r 12802381312-19695074582 -o corridor1-5.7z $U/corridor1-2_5-package.tar
 python3 scripts/openloris_to_euroc.py --sequence corridor1-1.7z --out data/corridor1-1
+python3 scripts/openloris_to_euroc.py --sequence corridor1-5.7z --out data/corridor1-5
 # ... runs/c15_slam and runs/c15_map from corridor1-5, runs/c11_vio as the
 # VIO query above. Then the calibration node's fit, replayed (--imu-from-body:
 # the inverse of T_base_imu in data/corridor1-1/extrinsics.json):

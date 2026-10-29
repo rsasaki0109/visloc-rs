@@ -610,7 +610,7 @@ recorded wheel odometry, VIO and map localizations (TUM files) without ROS.
 
 ```sh
 visloc_vio_node ... -p body_frame:=imu0 -p publish_tf:=false -r odom:=/vio/odom
-visloc_wheel_calibration_node -p calibration_file:=wheel.json \
+visloc_wheel_calibration_node -p calibration_file:=wheel.json -r imu:=/imu0 \
   -r wheel_odom:=/wheel/odom -r vio_odom:=/vio/odom -r odom:=/wheel/odom_calibrated
 visloc_map_localize_node --map ... -p extrinsics:=tf -r odom:=/wheel/odom_calibrated
 ```
@@ -619,9 +619,20 @@ Without a VIO, leave `visloc_vio_node` out: the map's localizations alone
 give the lean, the scale and the offset. The [launch file](#launch-file-urdf-and-rviz)
 starts all three with `wheel_odom_topic`.
 
+Wheels slip in turns in place, so the wheel odometry's heading drifts with
+every turn. Given an IMU on `imu` (any IMU on the robot, mounted any way;
+here the VIO's), the node keeps the wheels' travel but turns it by the
+heading the gyro integrates about the vertical, which the accelerometer
+gives, and takes the gyro's bias wherever the wheels stand still. On
+OpenLORIS-Scene's corridor (284 s, 232 m) the heading then stays within
+5.6° of the ground truth instead of 44°, and 60 s after a known pose the
+odometry is at most 1.4 m off instead of 16 m
+([details](../../docs/openloris_map_localization.md#the-wheels-heading-from-a-gyro)).
+
 | topic | type | dir | notes |
 |---|---|---|---|
 | `wheel_odom` | `nav_msgs/Odometry` | in | the wheel odometry; its `child_frame_id` is the body (`base_link`) |
+| `imu` | `sensor_msgs/Imu` | in | optional: any IMU on the robot, in any orientation; the wheel odometry's heading comes from its gyro (`gyro_heading`) |
 | `vio_odom` | `nav_msgs/Odometry` | in | optional: `visloc_vio_node`'s odometry (or `base_link`'s, with `base_frame`) |
 | `map_fix` | `geometry_msgs/PoseWithCovarianceStamped` | in | optional: `visloc_map_localize_node`'s localizations of `base_link` (`extrinsics:=tf`) |
 | `/tf_static` | `tf2_msgs/TFMessage` | in | the VIO's frame relative to the body, unless both are the same |
@@ -637,6 +648,7 @@ starts all three with `wheel_odom_topic`.
 | `window_s` | `120` | fit over this many seconds of pairs; `0` keeps them all |
 | `segment_s`, `fix_segment_s` | `5`, `30` | each stretch of this many seconds of VIO pairs, or of map localizations, gets its own heading against them, so the wheels' heading drift stays out of the fit; `0`: one for all |
 | `level` | `true` | level `base_link` against gravity (assumes a level floor) |
+| `gyro_heading` | `true` | with `imu`, turn the wheels' travel by the gyro's heading instead of the wheels' own |
 | `apply_scale` | `true` | publish at the map's scale |
 | `publish_uncalibrated` | `true` | pass the wheel odometry through until calibrated |
 | `publish_tf` | `true` | publish the output on `/tf` (turn the wheel driver's off) |

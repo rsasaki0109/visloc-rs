@@ -8,7 +8,7 @@
 //! which the accelerometer gives, so the IMU may sit anywhere on the robot
 //! in any orientation. Where the wheels stand still, the heading holds and
 //! the gyro's rate about the vertical is its bias. On that corridor run the
-//! heading stays within 8.4 deg of the ground truth.
+//! heading stays within 5.6 deg of the ground truth.
 
 use std::collections::VecDeque;
 
