@@ -445,17 +445,26 @@ for having too few inliers, but at least `--weak-min-inliers` (15), is a
 
 `visloc_map_localize_node` does the same (`weak_min_inliers`). The
 recorded localizations of all eight queries (every image, map-wide, down to
-12 inliers) were replayed through this rule. It never uses a fix more than
-25 cm off. It brings the first map pose forward on MH_04 (26.8 to 24.3 s,
-73.6% to 76.1% of the frames), MH_05 and V1_02 (0.4 and 0.2 s), and leaves
-the others unchanged. Rerun with the demo (VIO + map, defaults):
+12 inliers) were replayed through this rule first. It never used a fix
+more than 25 cm off. All eight queries rerun with the demo, against the
+previous rule (every image until the first map pose, above), with the
+gate's travel along the odometry's path (below) as well (VIO + map,
+defaults):
 
-| Query → map | Weak fixes | Frames with a map pose | RMSE / max |
-|---|---|---|---|
-| MH_02 → MH_01 | 0 | 99.97% → 99.97% | 2.00 / 5.6 → 2.00 / 5.6 cm |
-| V2_02 → V2_01 | 7, none used | 99.96% → 99.96% | 3.50 / 12.0 → 3.50 / 12.0 cm |
-| V2_03 → V2_01 | 4, none used | 77.8% → 77.7% | 29.6 / 70.4 → **23.7** / 70.4 cm |
-| OpenLORIS office1-7 → map B | 21, 3 used | none → **99.4%** | — → 6.86 / 13.7 cm |
+| Query → map | Weak fixes | First map pose | Frames with a map pose | RMSE / max |
+|---|---|---|---|---|
+| MH_02 → MH_01 | 0 | 0.1 s | 99.97% → 99.97% | 2.00 / 5.6 → 2.00 / 5.6 cm |
+| MH_03 → MH_01 | 5, none used | 0.0 s | 99.96% → 99.96% | 4.49 / 10.6 → 4.49 / 10.6 cm |
+| MH_04 → MH_01 | 10, 3 set it | 26.8 → **24.2 s** | 73.6% → **76.1%** | 22.7 / 44.6 → 22.1 / 44.1 cm |
+| MH_05 → MH_01 | 4, 3 set it | 24.8 → 24.3 s | 78.2% → 78.6% | 15.7 / 27.9 → 15.6 / 27.7 cm |
+| V1_02 → V1_01 | 20, 3 set it | 4.9 → 4.6 s | 94.3% → 94.4% | 3.35 / 5.9 → 3.42 / 6.7 cm |
+| V1_03 → V1_01 | 13, none used | 0.0 s | 99.95% → 99.95% | 4.60 / 9.6 → 4.60 / 9.6 cm |
+| V2_02 → V2_01 | 7, none used | 0.0 s | 99.96% → 99.96% | 3.50 / 12.0 → 3.50 / 12.0 cm |
+| V2_03 → V2_01 | 4, none used | 21.3 s | 77.8% → 77.7% | 29.6 / 70.4 → **23.7** / 70.4 cm |
+| OpenLORIS office1-7 → map B | 21, 3 set it | none → 0.2 s | none → **99.4%** | — → 6.86 / 13.7 cm |
+
+Where three weak fixes set the correction (MH_04, MH_05, V1_02), the map
+poses of the following second are 4.0–5.7 cm off on average.
 
 V2_03 improves for another reason: its weak localizations show how far
 the odometry went. The gate widens with the odometry's travel since the last
@@ -482,6 +491,11 @@ travel, and weak fixes never replace the correction.
 | Query → map | Default | `--weak-gate-cm 5` |
 |---|---|---|
 | MH_02 → MH_01 | 2.00 / 5.6 cm | 2.00 / 5.6 cm |
+| MH_03 → MH_01 | 4.49 / 10.6 cm | 4.51 / 10.6 cm |
+| MH_04 → MH_01 | 22.1 / 44.1 cm | 21.5 / 42.6 cm |
+| MH_05 → MH_01 | 15.6 / 27.7 cm | 16.1 / 27.8 cm |
+| V1_02 → V1_01 | 3.42 / 6.7 cm | 3.48 / 6.7 cm |
+| V1_03 → V1_01 | 4.60 / 9.6 cm | 4.40 / 10.4 cm |
 | V2_02 → V2_01 | 3.50 / 12.0 cm | 3.61 / 12.1 cm |
 | V2_03 → V2_01 | 23.7 / 70.4 cm | 24.1 / 70.8 cm |
 | OpenLORIS office1-7 → map B | 6.86 / 13.7 cm | **3.35 / 6.8 cm** |
@@ -489,13 +503,57 @@ travel, and weak fixes never replace the correction.
 | OpenLORIS office1-6 → map A | 3.08 / 4.3 cm | 3.13 / 4.3 cm |
 
 (VIO + map, RMSE / max; frames with a map pose unchanged.) Where full
-fixes come often, as on EuRoC, the weak ones add noise to them; replayed
-on all eight queries (map-wide weak fixes only), the error changes by -0.6
-to +0.6 cm. Where full fixes are rare, as on office1-7 against another
-session's map, they keep the VIO in the map frame between them and halve
+fixes come often, as on EuRoC, the weak ones add noise to them: the error
+changes by -0.6 to +0.5 cm. Where full fixes are rare, as on office1-7
+against another session's map, they keep the VIO in the map frame between them and halve
 the error. Using weak fixes only while no full fix is in the averaging
 window lost that gain (6.80 and 7.77 cm), so the gate stays an option for
 robots whose images rarely reach `--min-inliers`.
+
+### Where MH_04 and MH_05 lose
+
+MH_04 and MH_05 are the worst queries against MH_01 (22.1 and 15.6 cm
+with weak fixes). Ground truth shows where their error comes from:
+
+| Odometry path since the last fix | MH_04: share of poses, RMSE | MH_05: share of poses, RMSE |
+|---|---|---|
+| 0–0.5 m | 16%, 4.3 cm | 17%, 5.0 cm |
+| 0.5–5 m | 14%, 15.0 cm | 15%, 14.8 cm |
+| 5–20 m | 59%, 21.9 cm | 56%, 16.0 cm |
+| over 20 m | 11%, 40.0 cm | 12%, 23.1 cm |
+
+- **Most of the error is far from any fix.** Poses more than 10 m from
+  their last fix carry 83% of MH_04's squared error and 58% of MH_05's.
+  All of MH_04's 48 fixes come before 36 s; it then flies 75 m without one.
+- **The correction is not the limit.** In hindsight, the best fixed yaw for
+  each stretch between fixes gives 13.2–14.6 cm on MH_04 and 13.7–15.2 cm
+  on MH_05, but it absorbs the VIO's drift over the stretch, which no
+  causal estimate knows. Replayed from the runs' VIO and fixes, fitting the
+  yaw to the fixes' positions as well as their orientations, over windows
+  of 5 to 60 s, gave 23.6–28.6 cm on MH_04: the fixes' own orientations
+  are the better yaw.
+- **The map lacks those views.** MH_01's landmarks projected into MH_04's
+  true poses (occlusion ignored): from 46 to 73 s, fewer than 30 of them
+  are within 30° and twice the distance of a view the map has. From 73 to
+  87 s, tens to thousands are, the most (5,300) at 83 s, where MH_04 passes
+  MH_01's path.
+- **A perfect prediction finds little more.** With the true trajectory as
+  the odometry (`--odometry`, the fresh limits lifted), 11 more of MH_04's
+  images localize, all at 80–86 s, around that crossing. The stale VIO
+  prediction, with the fresh limits lifted, finds the same 11, 5–13 cm
+  off: MH_04 goes from 22.1 to 21.2 cm, and MH_05 from 15.6 to 15.2 cm
+  with 7 more fixes. The fresh limits stay, since a stale prediction gave
+  MH_03 fixes 16–42 cm off
+  ([above](#matching-around-the-predicted-projections)).
+- **From 74 to 79 s the views are close but do not match.** 100 to 300
+  landmarks are within 30° of a map view there, yet none of the 20 images
+  tried localizes, even around the true pose's projections. The map keeps
+  one descriptor per landmark (the medoid of its observations); keeping one
+  per viewpoint is the remaining lead on the map's side.
+
+So the remaining error is mostly the map's coverage, which another flight's
+map supplies: MH_05 against MH_01 to MH_04 gets a map pose for 99.8% of
+frames at 11.5 cm ([below](#lifelong-use-appending-each-session)).
 
 ### On a robot (ROS 2)
 

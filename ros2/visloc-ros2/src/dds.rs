@@ -4,7 +4,9 @@
 //! All algorithmic behavior lives in the transport-agnostic modules; this
 //! file only moves messages between DDS and those cores.
 
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use ros2_client::{
@@ -14,6 +16,7 @@ use ros2_client::{
 };
 
 use crate::msgs::{self, RosMessageType};
+use crate::tf_tree::StaticTransforms;
 
 macro_rules! impl_message {
     ($($ty:ty),* $(,)?) => {
@@ -226,9 +229,111 @@ where
     }
 }
 
+/// Receives `/tf_static` into shared [`StaticTransforms`], and subscribes
+/// again while a transform the node needs is missing.
+///
+/// A RustDDS reader sometimes never receives a transient-local writer's
+/// samples: in a test where `static_transform_publisher`s and readers all
+/// restarted every few seconds, 4 of 200 readers had nothing after 30 s,
+/// while the others had both transforms within 1.6 s. A new reader in the
+/// same node receives them; with one 5 s after the first, all 300 readers of
+/// a second test had both.
+pub struct StaticTfListener {
+    topic: String,
+    transforms: Arc<Mutex<StaticTransforms>>,
+    retries: RetrySchedule,
+}
+
+impl StaticTfListener {
+    pub fn new(ros: &mut RosNode, topic: &str) -> Result<Self, String> {
+        let listener = Self {
+            topic: topic.to_owned(),
+            transforms: Arc::new(Mutex::new(StaticTransforms::new())),
+            retries: RetrySchedule::new(Instant::now()),
+        };
+        listener.subscribe(ros)?;
+        Ok(listener)
+    }
+
+    /// The transforms received so far, shared with the receive threads.
+    pub fn transforms(&self) -> &Arc<Mutex<StaticTransforms>> {
+        &self.transforms
+    }
+
+    fn subscribe(&self, ros: &mut RosNode) -> Result<(), String> {
+        let transforms = Arc::clone(&self.transforms);
+        let subscription = ros.subscription::<msgs::TfMessage>(&self.topic, static_tf_qos())?;
+        spawn_receiver("tf-static-rx", subscription, move |msg: msgs::TfMessage| {
+            transforms
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(&msg);
+        })?;
+        Ok(())
+    }
+
+    /// Call when a transform the node needs is missing: subscribes again
+    /// when [`RetrySchedule`] says so, and returns whether it did. Each
+    /// subscription keeps its reader and thread, so the retries are few.
+    pub fn missing(&mut self, ros: &mut RosNode) -> Result<bool, String> {
+        if !self.retries.due(Instant::now()) {
+            return Ok(false);
+        }
+        self.subscribe(ros)?;
+        Ok(true)
+    }
+}
+
+/// When to subscribe again: 5 s after the first subscription, then after
+/// twice the previous wait, at most six times (5 s to 5 min after the start).
+#[derive(Clone, Debug)]
+pub struct RetrySchedule {
+    last: Instant,
+    wait: Duration,
+    left: u32,
+}
+
+impl RetrySchedule {
+    pub const FIRST_WAIT: Duration = Duration::from_secs(5);
+    pub const MAX_RETRIES: u32 = 6;
+
+    pub const fn new(subscribed: Instant) -> Self {
+        Self {
+            last: subscribed,
+            wait: Self::FIRST_WAIT,
+            left: Self::MAX_RETRIES,
+        }
+    }
+
+    /// Whether to subscribe again at `now`; if so, the next wait doubles.
+    pub fn due(&mut self, now: Instant) -> bool {
+        if self.left == 0 || now.saturating_duration_since(self.last) < self.wait {
+            return false;
+        }
+        self.left -= 1;
+        self.last = now;
+        self.wait *= 2;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retries_back_off_and_stop() {
+        let start = Instant::now();
+        let mut schedule = RetrySchedule::new(start);
+        let at = |s: u64| start + Duration::from_secs(s);
+        assert!(!schedule.due(at(4)));
+        assert!(schedule.due(at(5)));
+        assert!(!schedule.due(at(14)));
+        assert!(schedule.due(at(15)));
+        let fired: Vec<u64> = (16..400).filter(|&s| schedule.due(at(s))).collect();
+        assert_eq!(fired, [35, 75, 155, 315]);
+        assert!(!schedule.due(at(10_000)));
+    }
 
     #[test]
     fn relative_topics_resolve_under_the_namespace() {

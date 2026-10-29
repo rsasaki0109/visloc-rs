@@ -309,7 +309,7 @@ VIO + map, the same queries (frames with a map pose, RMSE / max):
   gets 116 of them next to 22 full fixes. Keeping the correction close
   keeps the predicted projections close, so more images reach 30 inliers
   too (office1-6: 120 full fixes instead of 84). On EuRoC it does not
-  help (changes of -0.6 to +0.6 cm), so it stays off by default
+  help (changes of -0.6 to +0.5 cm), so it stays off by default
   ([numbers](basalt_map_localization.md#weak-fixes-too-few-inliers-but-three-agree)).
 - **The wheel odometry no longer gains on the VIO.** On the corrected maps
   it gives 1.96, 5.30 and 4.89 cm (1.70, 2.38 and 3.66 cm with the weak
@@ -411,9 +411,81 @@ scored like the demo's:
   odometry was 4.67 cm instead of 3.25 cm.
 - **One run of six lost `/tf_static`.** In one office1-7 run,
   `visloc_vio_node` never received the transient-local `base_link -> imu0`
-  and published no odometry. Rerun unchanged, it received it. The cause
-  (between the RustDDS reader and Fast DDS's transient-local writer) is not
-  found.
+  and published no odometry. A probe with the nodes' reader
+  (`ros2/visloc-ros2/examples/tf_static_probe.rs`), started 200 times next
+  to freshly started `static_transform_publisher`s, had nothing after 30 s
+  in 4 cases. A second reader in the same node gets them, so both nodes
+  now subscribe again while a transform they need is missing; with that,
+  300 of 300 probes had both transforms.
+
+### Calibrating the wheel odometry online
+
+`visloc_wheel_calibration_node` fits the wheel odometry's point, the lean of
+`base_link` and the map's scale while the robot drives, and publishes the
+wheel odometry as `base_link`'s pose
+([node README](../ros2/visloc-ros2/README.md#visloc_wheel_calibration_node)).
+It takes the offset from the VIO, which follows every turn, and the lean and
+the scale from the map node's localizations (`map_fix`), which carry the
+map's own gravity and scale; without the VIO, the localizations give the
+offset too, held near the saved one (or zero) where their turns do not show
+it. It refits every 5 s.
+
+Which reference should give what was first measured offline, in the demo:
+each calibration applied to the whole wheel odometry from its first pose
+(RMSE of `basalt_euroc_localize_demo`'s map poses):
+
+| Calibration of the wheel odometry | office1-6 → A | office1-7 → B |
+|---|---|---|
+| None | 7.17 cm | 11.96 cm |
+| The session's own VIO fit: offset, lean and scale | 4.18 cm | 6.39 cm |
+| ... with the wheels' scale | 3.97 cm | 5.04 cm |
+| ... with the map's lean and scale (from its localizations) | 4.10 cm | **3.30 cm** |
+| office1-3's offline calibration (wheels' scale) | 4.89 cm | 5.07 cm |
+| ... with the map's lean and scale | 4.88 cm | 3.64 cm |
+| The map's localizations alone: offset, lean and scale | 5.05 cm | — |
+| ... lean and scale only | 6.09 cm | 8.23 cm |
+
+- **A VIO session's scale is not the map's.** office1-7's VIO is 3.6% long
+  against its wheels, map B 1.1%; applying the VIO's scale costs 1.3 cm
+  there. The localizations give the map's scale directly (1.011 against
+  the wheels, the same on both maps), so the node uses only theirs.
+- **The map's gravity is what the map node sees.** The lean measured by
+  the localizations (1.4° on map B) differs from the VIO's (1.9°), and on
+  office1-7 it is worth another 0.8 cm.
+- **The VIO is better at the offset.** The localizations come where the
+  camera sees the map, rarely through a turn in place: office1-6's span
+  118° of the wheels' turn, office1-7's none.
+
+Through ROS 2 (both rosbag2s at real time, the dataset's own
+`base_link -> imu0` on `/tf_static`, the maps as shipped, the map node's
+defaults), RMSE / max of `map_pose`, moved to the IMU:
+
+| Wheel odometry into the map node | office1-6 → A | office1-7 → B |
+|---|---|---|
+| As is | 8.01 / 14.0 cm | 12.10 / 22.8 cm |
+| Calibrated in the run from the map's localizations alone | **5.49 / 9.5 cm** | 10.89 / 21.6 cm |
+| ... from the VIO and the localizations | 5.46 / 9.4 cm | 10.88 / 21.5 cm |
+| ... without the scale (`apply_scale:=false`) | 5.40 / 9.0 cm | — |
+| From office1-3's offline calibration, saved | 4.92 / 8.3 cm | 4.66 / 10.4 cm |
+| ... refined in the run from the localizations | 5.01 / 9.3 cm | 4.66 / 10.5 cm |
+| ... refined from the VIO and the localizations | 5.16 / 9.7 cm | 4.89 / 10.9 cm |
+| From the other session's VIO calibration, refined | 5.07 / 9.2 cm | 9.79 / 19.5 cm |
+
+- **Without a VIO or a saved calibration, the map calibrates the wheels.**
+  office1-6's 131 localizations give (0.7, 4.8) cm, a 1.87° lean and a
+  scale of 1.018 within the run, and the error falls from 8.01 to 5.49 cm.
+  The scale changes it by 0.1 cm: with fixes this frequent, the correction
+  absorbs it.
+- **office1-7 is too short for it.** Its 24 localizations come in the first
+  11 s and span 0.5 m of the wheels' path, enough for the lean only; the
+  VIO turns 180° only at the end of the 38 s session.
+- **A saved calibration stays the best start.** In sessions this short,
+  refining office1-3's calibration does not improve on it, and the VIO's
+  offset from office1-7's last seconds costs 0.2 cm. On a long run the
+  refits keep following the robot (over the last 120 s of pairs).
+- **The output stays continuous.** Each refit continues the published pose
+  with a yaw and a translation, as at the first estimate (a step of 1.03 cm
+  where the wheels moved 1.05 cm).
 
 ## Reproduce
 

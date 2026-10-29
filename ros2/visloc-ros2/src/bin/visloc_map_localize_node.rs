@@ -8,7 +8,8 @@
 //! and publishes `/tf` (`map -> odom`, REP-105),
 //! `map_pose` (the body pose in the map,
 //! `geometry_msgs/PoseWithCovarianceStamped`; not `pose`, which
-//! `visloc_vio_node` already publishes) and `/diagnostics`. Run with `--help` for parameters.
+//! `visloc_vio_node` already publishes), `map_fix` (each localization) and
+//! `/diagnostics`. Run with `--help` for parameters.
 
 use std::path::PathBuf;
 use std::process;
@@ -17,13 +18,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use visloc_ros2::dds::{
-    latched_qos, output_qos, publish_logged, sensor_qos, spawn_receiver, static_tf_qos, RosNode,
+    latched_qos, output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
 };
 use visloc_ros2::image::decode_luma;
 use visloc_ros2::map_localize::{
-    fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_pose_msg, map_to_odom_tf,
-    se3_from_ros, Fix, FixEvent, ImageCadence, MapLocalizeOptions, MapLocalizer, Matching,
-    OdomCorrector, OdomLookup,
+    fix_outcome_name, load_basalt_map, map_diagnostics_msg, map_fix_msg, map_pose_msg,
+    map_to_odom_tf, se3_from_ros, Fix, FixEvent, ImageCadence, MapLocalizeOptions, MapLocalizer,
+    Matching, OdomCorrector, OdomLookup,
 };
 use visloc_ros2::msgs::{
     DiagnosticArray, Header, Image, Odometry, PointCloud2, PoseWithCovarianceStamped, TfMessage,
@@ -89,7 +90,9 @@ TOPICS (remap with --remap from=to or -r from:=to):
        its header.frame_id and child_frame_id name the odometry and body frames),
        /tf_static (tf2_msgs/TFMessage, with extrinsics tf)
   out: /tf (map_frame -> odometry frame), map_pose (geometry_msgs/PoseWithCovarianceStamped,
-       body pose in map_frame, after two agreeing fixes), /diagnostics (diagnostic_msgs/DiagnosticArray),
+       body pose in map_frame, after two agreeing fixes), map_fix (geometry_msgs/
+       PoseWithCovarianceStamped, the body pose of each image localized with min_inliers,
+       e.g. for visloc_wheel_calibration_node), /diagnostics (diagnostic_msgs/DiagnosticArray),
        map_cloud (sensor_msgs/PointCloud2, the map's landmarks in map_frame, transient-local)
 ";
 
@@ -167,6 +170,7 @@ fn run() -> Result<(), String> {
     let tf_topic = args.topic("/tf");
     let tf_static_topic = args.topic("/tf_static");
     let pose_topic = args.topic("map_pose");
+    let fix_topic = args.topic("map_fix");
     let diagnostics_topic = args.topic("/diagnostics");
     let map_cloud_topic = args.topic("map_cloud");
     args.finish()?;
@@ -199,6 +203,7 @@ fn run() -> Result<(), String> {
     let odom_sub = ros.subscription::<Odometry>(&odom_topic, sensor_qos(50))?;
     let tf_pub = ros.publisher::<TfMessage>(&tf_topic, output_qos(10))?;
     let pose_pub = ros.publisher::<PoseWithCovarianceStamped>(&pose_topic, output_qos(10))?;
+    let fix_pub = ros.publisher::<PoseWithCovarianceStamped>(&fix_topic, output_qos(10))?;
     let diagnostics_pub = ros.publisher::<DiagnosticArray>(&diagnostics_topic, output_qos(10))?;
     // Kept by the transient-local writer for subscribers that join later.
     let _map_cloud_pub = match map_cloud {
@@ -211,18 +216,14 @@ fn run() -> Result<(), String> {
     };
     // With extrinsics from tf: the static transforms, and the odometry's
     // body frame.
-    let transforms = Arc::new(Mutex::new(StaticTransforms::new()));
+    let mut tf_static = extrinsics_from_tf
+        .then(|| StaticTfListener::new(&mut ros, &tf_static_topic))
+        .transpose()?;
+    let transforms = tf_static.as_ref().map_or_else(
+        || Arc::new(Mutex::new(StaticTransforms::new())),
+        |listener| Arc::clone(listener.transforms()),
+    );
     let body_frame = Arc::new(Mutex::new(None::<String>));
-    if extrinsics_from_tf {
-        let transforms = Arc::clone(&transforms);
-        let tf_static_sub = ros.subscription::<TfMessage>(&tf_static_topic, static_tf_qos())?;
-        spawn_receiver("tf-static-rx", tf_static_sub, move |msg: TfMessage| {
-            transforms
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(&msg);
-        })?;
-    }
 
     // Odometry: pair with fixes, then publish map -> odom and the map pose.
     let odom_messages = Arc::new(AtomicU64::new(0));
@@ -283,7 +284,7 @@ fn run() -> Result<(), String> {
     }
     eprintln!(
         "visloc_map_localize_node: domain {domain_id}, node {}; in: {image_topic} {odom_topic}; \
-         out: {}{pose_topic} {diagnostics_topic}; localizing every {localize_every} image(s), \
+         out: {}{pose_topic} {fix_topic} {diagnostics_topic}; localizing every {localize_every} image(s), \
          every {initial_localize_every} until the first map pose \
          (within {initial_window_s} s of a localization)",
         visloc_ros2::dds::qualified_name(&namespace, &node_name),
@@ -302,20 +303,33 @@ fn run() -> Result<(), String> {
         attempts += 1;
         let stamp = msg.header.stamp;
         let started = Instant::now();
+        let mut tf_missing = false;
         let camera_from_body = if extrinsics_from_tf {
             let camera = camera_frame.as_deref().unwrap_or(&msg.header.frame_id);
             let body = body_frame.lock().unwrap_or_else(|e| e.into_inner()).clone();
             body.ok_or_else(|| "no odometry yet to name the body frame".to_owned())
                 .and_then(|body| {
-                    transforms
+                    let found = transforms
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .lookup(camera, &body)
-                        .ok_or_else(|| format!("no /tf_static transform {camera} <- {body}"))
+                        .lookup(camera, &body);
+                    tf_missing = found.is_none();
+                    found.ok_or_else(|| format!("no /tf_static transform {camera} <- {body}"))
                 })
         } else {
             Ok(localizer.camera_from_imu().clone())
         };
+        if tf_missing {
+            if let Some(listener) = tf_static.as_mut() {
+                match listener.missing(&mut ros) {
+                    Ok(true) => {
+                        eprintln!("visloc_map_localize_node: subscribed to /tf_static again")
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("visloc_map_localize_node: {error}"),
+                }
+            }
+        }
         let features = camera_from_body.and_then(|camera_from_body| {
             decode_luma(&msg)
                 .and_then(|luma| luma.to_basalt())
@@ -341,6 +355,11 @@ fn run() -> Result<(), String> {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map_from_body) = &fix.map_from_body {
                 localized += 1;
+                publish_logged(
+                    &fix_pub,
+                    map_fix_msg(stamp.to_nanos(), map_from_body, &map_frame, &options),
+                    "map_fix",
+                );
                 let events = core.add_fix(stamp.to_nanos(), map_from_body.clone());
                 log_events(&events);
             } else if let Some(map_from_body) = &fix.weak_map_from_body {

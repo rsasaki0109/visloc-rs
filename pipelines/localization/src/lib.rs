@@ -15,6 +15,7 @@ mod correspondence;
 mod keyframe_retrieval;
 mod map_merge;
 mod odom_correction;
+mod wheel_calibration;
 
 use std::collections::HashSet;
 
@@ -40,6 +41,9 @@ pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
 };
 pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
+pub use wheel_calibration::{
+    CalibrationSource, WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {
