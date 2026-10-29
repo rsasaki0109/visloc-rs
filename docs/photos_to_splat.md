@@ -153,6 +153,19 @@ gsplat_photos --insv VID.insv --out run
   gap limit.
 - **Manual cut.** To cut the frames yourself, pass them with `--images`:
   `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`.
+- **On a CPU.** The defaults suit a GPU: 1600 px faces (the X5's lenses
+  resolve about 2,066 px on their axes), up to 8,192 SIFT keypoints, and a
+  20-frame matching window. On a CPU, use `--max-size 1024
+  --max-keypoints 4096 --window 2`. On the mall walk below (200 frames,
+  4 CPU cores, both with `--window 2`):
+
+  | Settings | Peak memory | Time | Faces, points | IMU \|g\| | Scale vs the dataset's |
+  | --- | ---: | ---: | --- | --- | ---: |
+  | defaults (1600 px, 8,192 keypoints) | 9.5 GB | 2 h 23 min | 2000, 216,788 | 9.78 m/s² | +3.2% |
+  | `--max-size 1024 --max-keypoints 4096` | 4.5 GB | 37 min | 2000, 190,451 | 9.80 m/s² | +1.2% |
+
+  The defaults spend 1 h 47 min matching. The default window matches ten
+  times as many pairs.
 
 The test run used OverMaps360's walk 0313afa5:
 

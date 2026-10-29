@@ -541,6 +541,10 @@ All notable changes to `visloc-rs` will be documented here.
     pairs), `--equirect` and `--insv`.
   - The mall walk's 200 frames with 1024 px lens faces peak at 4.5 GB
     instead of 7.8 GB.
+  - At the defaults (1600 px faces, 8,192 keypoints; `--window 2`) the same
+    frames peak at 9.5 GB, in 2 h 23 min on 4 CPU cores, most of it
+    matching. On a CPU, `--max-size 1024 --max-keypoints 4096` is the
+    practical setting (docs/photos_to_splat.md).
 
 - **Weak fixes: localizations with 15–29 inliers can set the first map
   pose.** With `--vio` or `--odometry`, `basalt_euroc_localize_demo` passes
