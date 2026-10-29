@@ -41,9 +41,10 @@ All notable changes to `visloc-rs` will be documented here.
     - Outdoors, the metric scale is within 4% of the dataset's IMU scale
       over the same frames.
     - Indoors (a mall), it is off by 12%, with a weak fit (|g| 9.57).
-      These runs used 640 px faces. At 1024 px the mall's fit passes and
-      lands +5.5% over 33 s and +5.3% over 66 s (|g| 9.61, still a weak
-      fit), so keep `--max-size` at 1024 or more.
+    - These runs used 640 px faces. With 1024 px faces the mall's fit is
+      sound (|g| 9.80) and lands +1.4% over the same frames, while the
+      outdoor walks move by at most 0.7 points. Keep `--max-size` at 1024
+      or more.
     - The `.insv` image-circle string is read after `p2_` or `n2_`.
 
 ### Fixed
