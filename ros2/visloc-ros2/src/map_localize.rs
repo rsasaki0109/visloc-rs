@@ -875,6 +875,26 @@ pub fn map_pose_msg(
     }
 }
 
+/// One localization against the map (`map_fix`): the body pose of the
+/// image at `stamp_ns`, with the covariance of a fresh fix.
+pub fn map_fix_msg(
+    stamp_ns: i64,
+    map_from_body: &SE3,
+    map_frame: &str,
+    options: &MapLocalizeOptions,
+) -> PoseWithCovarianceStamped {
+    PoseWithCovarianceStamped {
+        header: Header::new(Time::from_nanos(stamp_ns), map_frame),
+        pose: PoseWithCovariance {
+            pose: ros_pose(map_from_body),
+            covariance: Covariance6::diagonal(
+                options.position_stddev_m.powi(2),
+                options.orientation_stddev_rad.powi(2),
+            ),
+        },
+    }
+}
+
 pub fn fix_outcome_name(outcome: FixOutcome) -> &'static str {
     match outcome {
         FixOutcome::Pending => "pending",

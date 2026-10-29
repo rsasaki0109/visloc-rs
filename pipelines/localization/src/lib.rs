@@ -41,7 +41,9 @@ pub use map_merge::{
     merge_maps, register_map, MapMergeConfig, MapMergeError, MapRegistration, MergedMap,
 };
 pub use odom_correction::{FixOutcome, OdomCorrection, OdomCorrectionConfig};
-pub use wheel_calibration::{WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate};
+pub use wheel_calibration::{
+    CalibrationSource, WheelCalibration, WheelCalibrationConfig, WheelCalibrationEstimate,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalizationConfig {
