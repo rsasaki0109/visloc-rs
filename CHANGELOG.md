@@ -75,6 +75,10 @@ All notable changes to `visloc-rs` will be documented here.
   - The normal channel's gradients match an exact colour-channel identity
     to 9.0e-7. The loss's gradients match central differences of an f64 CPU
     copy to 2.5e-6.
+  - It does not improve the ETH3D meshes. At weight 0.005 the mean F1 at
+    2 cm is 32.0% against 33.1%; with the depth prior 0.1 it is 34.0%
+    against 35.0% for the prior alone. 0.05 is far too strong (terrains
+    22.9%).
   - CUDA ABI 6.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an

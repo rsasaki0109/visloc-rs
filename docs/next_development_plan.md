@@ -33,9 +33,11 @@ The planned order:
    ([`gsplat_cuda.md`](gsplat_cuda.md#geometry-on-eth3d)). visloc-mvs
    depth supervision (`--depth-prior`, weight 0.1) raises it to 35.0%:
    accuracy rises, completeness does not
-   ([`gsplat_cuda.md`](gsplat_cuda.md#depth-prior-from-visloc-mvs)). Next
-   are the depth-normal loss and the TSDF on the GPU: at 1 cm, the CPU TSDF
-   peaks at 9.7 GB on playground.
+   ([`gsplat_cuda.md`](gsplat_cuda.md#depth-prior-from-visloc-mvs)). The
+   depth-normal loss (CUDA, weight 0.005) does not help: 32.0% alone, 34.0%
+   with the prior ([`gsplat_cuda.md`](gsplat_cuda.md#depth-normal-loss)).
+   Next is the TSDF on the GPU: at 1 cm, the CPU TSDF peaks at 9.7 GB on
+   playground.
 4. The rasterizer optimizations from Kopanas's
    [3DGS CUDA write-up](https://grgkopanas.github.io/3dgs_cuda_blog/), one at
    a time.

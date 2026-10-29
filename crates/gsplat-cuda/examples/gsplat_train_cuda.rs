@@ -8,7 +8,7 @@
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
 //!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
-//!   [--depth-prior <dir> [--depth-weight 0.1]] [--normal-weight 0.05 [--normal-start 7000]]
+//!   [--depth-prior <dir> [--depth-weight 0.1]] [--normal-weight 0.005 [--normal-start 7000]]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
