@@ -6,6 +6,27 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Extra descriptors per landmark (opt-in).**
+  `basalt_euroc_online_slam_demo --extra-descriptors` keeps, besides each
+  landmark's medoid descriptor, up to three of its views' descriptors,
+  farthest first and at least 24 bits apart
+  (`landmark_descriptors_extra.txt`).
+  `visloc_localization::BinaryLandmarkIndex::with_extra_descriptors`
+  matches a keypoint against the nearest of a landmark's descriptors, with
+  the ratio test against the nearest other landmark;
+  `basalt_euroc_localize_demo --extra-descriptors N` and
+  `visloc_map_localize_node`'s `extra_descriptors` use them. On the eight
+  EuRoC queries they find more fixes (MH_04 56 instead of 48) but less
+  accurate ones: six queries get 0.02–1.2 cm worse, V2_03 better (29.3 to
+  23.6 cm), and the map-wide search up to three times slower. Off by
+  default.
+- **`basalt_euroc_localize_demo --stale-projection-min-inliers N`.** A
+  prediction past the fresh limits is tried too, and its projection search
+  counts only with N inliers. With 60, its 14 fixes over the eight EuRoC
+  queries are at most 10.4 cm off; MH_04 goes from 22.0 to 21.2 cm and
+  V1_03 from 4.80 to 4.24 cm, but V2_03, with 5 fixes in all, from 29.3 to
+  39.1 cm. Off by default.
+
 - **`gsplat_photos --imu`: metric models from the camera's IMU.** For
   photos that are frames of a video (file names ending in the frame
   number), the model is scaled to metres right after SfM, so sparse/0, the

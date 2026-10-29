@@ -90,7 +90,8 @@ pub struct MapLocalizeOptions {
     pub duplicate_radius_m: Option<f64>,
     /// Extra descriptors per landmark matched at most (the map's
     /// `landmark_descriptors_extra.txt`, from the views that differ most
-    /// from the main descriptor); 0 matches the main one only.
+    /// from the main descriptor); 0, the default, matches the main one
+    /// only.
     pub extra_descriptors: usize,
     pub correction: OdomCorrectionConfig,
     /// Odometry poses kept for pairing with fixes.
@@ -120,7 +121,7 @@ impl Default for MapLocalizeOptions {
             projection_fresh_m: 2.0,
             match_threads: 1,
             duplicate_radius_m: None,
-            extra_descriptors: usize::MAX,
+            extra_descriptors: 0,
             correction: OdomCorrectionConfig::default(),
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,

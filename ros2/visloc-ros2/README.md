@@ -248,6 +248,7 @@ measurements behind the defaults.
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
+| `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |
 | `max_points` | the map's | ORB keypoints per image |
 | `position_stddev`, `position_stddev_per_m` | `0.03` m, `0.025` m/m | published position 1-sigma |
 | `orientation_stddev` | `0.02` rad | |

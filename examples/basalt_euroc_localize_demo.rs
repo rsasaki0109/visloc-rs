@@ -54,8 +54,8 @@
 //! (`--projection-radius-px 0` matches map-wide only).
 //! A map saved with `--extra-descriptors` holds up to three more
 //! descriptors per landmark, from its views that differ most from the main
-//! one; a keypoint matches a landmark at the nearest of them
-//! (`--extra-descriptors N` uses at most N per landmark, 0 none).
+//! one; with `--extra-descriptors N`, a keypoint matches a landmark at the
+//! nearest of its main one and up to N of those (default 0: the main one).
 //! The prediction is used only within `--projection-fresh-s` (5) seconds
 //! and `--projection-fresh-m` (2) metres of odometry travel after the
 //! correction's newest fix: a drifted prediction can steer the projection search
@@ -146,7 +146,7 @@ struct Args {
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
     /// Extra descriptors per landmark to match (the map's
-    /// `landmark_descriptors_extra.txt`), at most.
+    /// `landmark_descriptors_extra.txt`), at most; 0 by default.
     extra_descriptors: usize,
     /// Match map-wide among the landmarks of the N retrieved keyframes first.
     retrieval_keyframes: Option<usize>,
@@ -233,7 +233,7 @@ impl Args {
             ransac_iterations: 1000,
             prior_radius_m: None,
             duplicate_radius_m: None,
-            extra_descriptors: usize::MAX,
+            extra_descriptors: 0,
             retrieval_keyframes: None,
             retrieval_bits: 16,
             vio: false,
