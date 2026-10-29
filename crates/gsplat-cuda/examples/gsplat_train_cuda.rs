@@ -7,7 +7,7 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
-//!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]]
+//!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \n//!   [--depth-prior <dir> [--depth-weight 0.1]]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
@@ -15,6 +15,9 @@
 //! PSNR and SSIM of the CUDA renders with `visloc_gsplat_train::metrics`.
 //! Training time leaves the evaluations out. `--mesh` also extracts a mesh
 //! from every view after training, as `gsplat_mesh_cuda` with its defaults.
+//! `--depth-prior` adds a depth loss against `<dir>/<image name>.bin` (e.g.
+//! `visloc-mvs --save-fused-depth`'s `fused_depth`): `--depth-weight` x the
+//! mean relative error of the expected depth where the prior has one.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -41,6 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut holdout = 8usize;
     let mut mesh_out: Option<PathBuf> = None;
     let mut planar = false;
+    let mut depth_prior: Option<PathBuf> = None;
+    let mut depth_weight = 0.1f32;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -63,6 +68,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--holdout" => holdout = next()?.parse()?,
             "--mesh" => mesh_out = Some(PathBuf::from(next()?)),
             "--planar-depth" => planar = true,
+            "--depth-prior" => depth_prior = Some(PathBuf::from(next()?)),
+            "--depth-weight" => depth_weight = next()?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -94,6 +101,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
     let mut trainer = CudaTrainer::new(gs, &dataset, &init, cfg.clone())?;
     trainer.set_sparse_sh_adam(sparse_sh_adam);
+    if let Some(dir) = &depth_prior {
+        let found = trainer.load_depth_priors(dir, depth_weight)?;
+        println!(
+            "depth priors for {found} / {} training views (weight {depth_weight})",
+            dataset.train.len()
+        );
+    }
     println!(
         "setup {:.1}s, scene extent {:.3}",
         t0.elapsed().as_secs_f64(),
@@ -154,8 +168,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (p, s) = eval(&mut trainer)?;
                     format!("  eval psnr {p:.3}  ssim {s:.4}")
                 };
+                let depth = if depth_prior.is_some() {
+                    format!("  depth {:.4}", trainer.last_depth_loss())
+                } else {
+                    String::new()
+                };
                 println!(
-                    "step {step:6}  l1 {loss:.4}{quality}  gaussians {}  ({train_s:.0}s)",
+                    "step {step:6}  l1 {loss:.4}{depth}{quality}  gaussians {}  ({train_s:.0}s)",
                     trainer.num_gaussians()
                 );
                 since = Instant::now();

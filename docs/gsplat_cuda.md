@@ -32,7 +32,8 @@ The packaging follows the DPVO CUDA kernels:
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
 | Inria densification rule, per-image appearance, depth-normal loss | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
-| Geometry channels (normal, depth) for the depth-normal loss | Not started |
+| Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; effect on ETH3D being measured |
+| Geometry channels (normal) for the depth-normal loss | Not started |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -101,6 +102,13 @@ Two more tests check the depth output against analytic cases:
   opaque disc behind it gives its depth, with opacity 1 - 0.6 x 0.1.
 - **Planar depth.** For a disc turned 30 degrees, the depth matches the
   ray-plane intersection to 1e-3.
+- **Expected-depth channel** (the depth prior's path). Each splat's red is
+  set to its view depth / 10 on black, so red is exactly D / 10. A red
+  gradient and a depth gradient / 10 then give the same opacity, conic and
+  2D-mean gradients, and mean gradients that differ by exactly W^T e_z
+  times the red gradient / 10. Worst error 1.8e-7.
+  - Finite differences cannot check this: a pixel crossing the alpha gate
+    moves D by z / 255.
 
 `tests/training.rs` checks the training step:
 

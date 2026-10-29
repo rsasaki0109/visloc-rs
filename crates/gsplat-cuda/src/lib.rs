@@ -114,6 +114,10 @@ pub struct StepParams {
     /// Run the SH Adam only on the gaussians blended this frame (the
     /// others keep their SH and its moments; 0 = dense, as the wgpu trainer).
     pub sparse_sh_adam: u32,
+    /// Weight of the depth-prior loss, `mean |D - P| / P` over the pixels
+    /// with a prior P ([`CudaGsplat::set_depth_priors`]), D the expected
+    /// depth (0 = off).
+    pub depth_weight: f32,
 }
 
 type AbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -148,9 +152,11 @@ type RenderDepthFn = unsafe extern "C" fn(
     c_int,
     *mut c_float,
     *mut c_float,
+    *mut c_float,
 ) -> c_int;
 type BackwardFn = unsafe extern "C" fn(
     *mut c_void,
+    *const c_float,
     *const c_float,
     *mut c_float,
     *mut c_float,
@@ -160,8 +166,14 @@ type BackwardFn = unsafe extern "C" fn(
 type SetImagesFn = unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const u32) -> c_int;
 type TrainStepFn = unsafe extern "C" fn(*mut c_void, *const StepParams) -> c_int;
 type LossGradFn = unsafe extern "C" fn(*mut c_void, u32, c_float, *mut c_float) -> c_int;
-type TakeLossFn =
-    unsafe extern "C" fn(*mut c_void, *mut c_double, *mut c_double, *mut u32) -> c_int;
+type TakeLossFn = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_double,
+    *mut c_double,
+    *mut c_double,
+    *mut u32,
+) -> c_int;
+type SetDepthPriorsFn = unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const c_float) -> c_int;
 type RefineStatsFn = unsafe extern "C" fn(*mut c_void, *mut c_float, *mut c_float) -> c_int;
 type ApplyActionsFn = unsafe extern "C" fn(*mut c_void, *const u32, u32, *mut c_int) -> c_int;
 type StageTimesFn = unsafe extern "C" fn(*mut c_void, *mut c_float, c_int) -> c_int;
@@ -214,6 +226,9 @@ pub struct DepthFrame {
     pub depth: Vec<f32>,
     /// Per pixel, the opacity `1 - T`.
     pub opacity: Vec<f32>,
+    /// Per pixel, the expected depth `sum_i T_i a_i z_i` of the splat centres
+    /// (the channel [`StepParams::depth_weight`] trains).
+    pub expected: Vec<f32>,
 }
 
 /// Gradients of `L = sum_px dot(d_image[px], C[px])` for the last frame, in
@@ -235,6 +250,8 @@ pub struct LossSums {
     /// Sum over steps of the SSIM summed over pixels and channels (0 when
     /// the SSIM term is off).
     pub ssim: f64,
+    /// Sum over steps of the depth-prior loss `mean |D - P| / P` (0 when off).
+    pub depth: f64,
     pub steps: u32,
 }
 
@@ -260,6 +277,7 @@ struct Api {
     train_step: TrainStepFn,
     loss_grad: LossGradFn,
     take_loss: TakeLossFn,
+    set_depth_priors: SetDepthPriorsFn,
     refine_stats: RefineStatsFn,
     apply_actions: ApplyActionsFn,
     stage_times: StageTimesFn,
@@ -307,7 +325,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 4;
+    pub const ABI_VERSION: u32 = 5;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -351,6 +369,7 @@ impl CudaGsplat {
                 train_step: symbol(&library, "visloc_gsplat_cuda_train_step", path)?,
                 loss_grad: symbol(&library, "visloc_gsplat_cuda_loss_grad", path)?,
                 take_loss: symbol(&library, "visloc_gsplat_cuda_take_loss", path)?,
+                set_depth_priors: symbol(&library, "visloc_gsplat_cuda_set_depth_priors", path)?,
                 refine_stats: symbol(&library, "visloc_gsplat_cuda_get_refine_stats", path)?,
                 apply_actions: symbol(&library, "visloc_gsplat_cuda_apply_actions", path)?,
                 stage_times: symbol(&library, "visloc_gsplat_cuda_stage_times", path)?,
@@ -517,8 +536,10 @@ impl CudaGsplat {
         let pixels = cam.width as usize * cam.height as usize;
         let mut rgb = vec![0.0f32; pixels * 3];
         let mut depth_opacity = vec![0.0f32; pixels * 2];
-        // SAFETY: `rgb` holds width * height * 3 floats and `depth_opacity`
-        // width * height * 2, the sizes the native side writes.
+        let mut expected = vec![0.0f32; pixels];
+        // SAFETY: `rgb` holds width * height * 3 floats, `depth_opacity`
+        // width * height * 2 and `expected` width * height, the sizes the
+        // native side writes.
         let code = unsafe {
             (self.api.render_depth)(
                 self.ctx(),
@@ -528,6 +549,7 @@ impl CudaGsplat {
                 planar as c_int,
                 rgb.as_mut_ptr(),
                 depth_opacity.as_mut_ptr(),
+                expected.as_mut_ptr(),
             )
         };
         self.check(code)?;
@@ -537,18 +559,35 @@ impl CudaGsplat {
             rgb,
             depth,
             opacity,
+            expected,
         })
     }
 
     /// Gradients for the last [`render`](Self::render) given `d_image`
     /// (row-major RGB, `width * height * 3`).
     pub fn backward(&mut self, d_image: &[f32]) -> Result<Gradients, GsplatCudaError> {
+        self.backward_with_depth(d_image, None)
+    }
+
+    /// [`backward`](Self::backward) with a depth term: `L` also gets
+    /// `sum_px d_depth[px] * D[px]`, D the expected depth
+    /// ([`DepthFrame::expected`]; `d_depth` one float per pixel).
+    pub fn backward_with_depth(
+        &mut self,
+        d_image: &[f32],
+        d_depth: Option<&[f32]>,
+    ) -> Result<Gradients, GsplatCudaError> {
         if d_image.len() != self.pixels * 3 {
             return Err(GsplatCudaError::Input(format!(
                 "d_image has {} floats, the last frame needs {}",
                 d_image.len(),
                 self.pixels * 3
             )));
+        }
+        if d_depth.is_some_and(|d| d.len() != self.pixels) {
+            return Err(GsplatCudaError::Input(
+                "d_depth needs one float per pixel of the last frame".into(),
+            ));
         }
         let n = self.num_gaussians();
         let mut grads = Gradients {
@@ -558,11 +597,13 @@ impl CudaGsplat {
             screen: vec![0.0; n * SCREEN_GRAD_FLOATS],
         };
         // SAFETY: every output holds the size the native side writes for the
-        // current scene, and `d_image` the last frame's pixel count.
+        // current scene, and `d_image` / `d_depth` the last frame's pixel
+        // count (checked above).
         let code = unsafe {
             (self.api.backward)(
                 self.ctx(),
                 d_image.as_ptr(),
+                d_depth.map_or(std::ptr::null(), <[f32]>::as_ptr),
                 grads.transforms.as_mut_ptr(),
                 grads.opacity.as_mut_ptr(),
                 grads.sh.as_mut_ptr(),
@@ -596,6 +637,30 @@ impl CudaGsplat {
         self.check(code)
     }
 
+    /// Upload a depth prior per image of [`set_images`](Self::set_images)
+    /// (same order and size): camera-z depths, 0 where there is none,
+    /// image-major. Steps with [`StepParams::depth_weight`] > 0 use them.
+    pub fn set_depth_priors(
+        &mut self,
+        width: u32,
+        height: u32,
+        depths: &[f32],
+    ) -> Result<(), GsplatCudaError> {
+        let per = width as usize * height as usize;
+        if per == 0 || !depths.len().is_multiple_of(per) {
+            return Err(GsplatCudaError::Input(
+                "depth buffer is not a whole number of images".into(),
+            ));
+        }
+        let count = c_int::try_from(depths.len() / per)
+            .map_err(|_| GsplatCudaError::Input("too many depth priors".into()))?;
+        // SAFETY: `depths` holds `count` maps of width * height floats.
+        let code = unsafe {
+            (self.api.set_depth_priors)(self.ctx(), count, width, height, depths.as_ptr())
+        };
+        self.check(code)
+    }
+
     /// One optimisation step (see [`StepParams`]).
     pub fn train_step(&mut self, params: &StepParams) -> Result<(), GsplatCudaError> {
         // SAFETY: `params` is a live `repr(C)` struct of the declared layout.
@@ -622,11 +687,18 @@ impl CudaGsplat {
         let mut sums = LossSums {
             l1: 0.0,
             ssim: 0.0,
+            depth: 0.0,
             steps: 0,
         };
         // SAFETY: the outputs are live scalars.
         let code = unsafe {
-            (self.api.take_loss)(self.ctx(), &mut sums.l1, &mut sums.ssim, &mut sums.steps)
+            (self.api.take_loss)(
+                self.ctx(),
+                &mut sums.l1,
+                &mut sums.ssim,
+                &mut sums.depth,
+                &mut sums.steps,
+            )
         };
         self.check(code)?;
         Ok(sums)

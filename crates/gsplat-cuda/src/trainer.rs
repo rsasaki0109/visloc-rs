@@ -76,6 +76,8 @@ pub struct CudaTrainer {
     bound_size: f32,
     last_refine: Option<DensifyReport>,
     sparse_sh_adam: bool,
+    depth_weight: f32,
+    last_depth_loss: f32,
 }
 
 impl fmt::Debug for CudaTrainer {
@@ -160,6 +162,8 @@ impl CudaTrainer {
             bound_size,
             last_refine: None,
             sparse_sh_adam: false,
+            depth_weight: 0.0,
+            last_depth_loss: 0.0,
         })
     }
 
@@ -262,6 +266,7 @@ impl CudaTrainer {
             noise_scale,
             noise_max,
             sparse_sh_adam: self.sparse_sh_adam as u32,
+            depth_weight: self.depth_weight,
         };
         self.gs.train_step(&params)?;
         self.step += 1;
@@ -381,10 +386,67 @@ impl CudaTrainer {
         Ok(())
     }
 
-    /// Mean L1 loss over the steps since the last call.
+    /// Mean L1 loss over the steps since the last call (and the mean depth-prior
+    /// loss, kept for [`last_depth_loss`](Self::last_depth_loss)).
     pub fn take_mean_loss(&mut self) -> Result<f32, CudaTrainError> {
         let sums = self.gs.take_loss()?;
-        Ok((sums.l1 / sums.steps.max(1) as f64) as f32)
+        let steps = sums.steps.max(1) as f64;
+        self.last_depth_loss = (sums.depth / steps) as f32;
+        Ok((sums.l1 / steps) as f32)
+    }
+
+    /// Mean depth-prior loss `|D - P| / P` (averaged over all pixels) of the
+    /// steps before the last [`take_mean_loss`](Self::take_mean_loss).
+    pub fn last_depth_loss(&self) -> f32 {
+        self.last_depth_loss
+    }
+
+    /// Load a depth prior per training view from `dir/<image name>.bin` (as
+    /// written by `visloc-mvs --save-fused-depth`: width and height `u32`,
+    /// then camera-z `f32` depths, 0 where there is none), and train them
+    /// with `weight`. A map of another size (e.g. depth estimated at half the
+    /// resolution) is resampled to the view's by nearest neighbour; a view
+    /// without a readable file gets no prior. Returns the number of views with
+    /// one.
+    pub fn load_depth_priors(
+        &mut self,
+        dir: &std::path::Path,
+        weight: f32,
+    ) -> Result<usize, CudaTrainError> {
+        let first = &self.views[0].camera.camera;
+        let (w, h) = (first.width, first.height);
+        let per = (w * h) as usize;
+        let mut depths = vec![0.0f32; per * self.views.len()];
+        let mut found = 0;
+        for (k, view) in self.views.iter().enumerate() {
+            let Ok(bytes) = std::fs::read(dir.join(format!("{}.bin", view.name))) else {
+                continue;
+            };
+            if bytes.len() < 8 {
+                continue;
+            }
+            let pw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let ph = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            if pw == 0 || ph == 0 || bytes.len() != 8 + (pw * ph) as usize * 4 {
+                continue;
+            }
+            let at = |x: u32, y: u32| {
+                let o = 8 + ((y * pw + x) as usize) * 4;
+                f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+            };
+            let map = &mut depths[k * per..(k + 1) * per];
+            for y in 0..h {
+                let sy = ((y as u64 * ph as u64) / h as u64) as u32;
+                for x in 0..w {
+                    let sx = ((x as u64 * pw as u64) / w as u64) as u32;
+                    map[(y * w + x) as usize] = at(sx, sy);
+                }
+            }
+            found += 1;
+        }
+        self.gs.set_depth_priors(w, h, &depths)?;
+        self.depth_weight = weight;
+        Ok(found)
     }
 
     /// Render a view with the current SH degree (row-major RGB).

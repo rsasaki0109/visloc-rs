@@ -51,6 +51,15 @@ All notable changes to `visloc-rs` will be documented here.
     voxels, no support filter, depths up to 20 m, min weight 1 and planar
     depth; `gsplat_photos`' defaults score 20.8%. See
     `scripts/eth3d_3dgs_mesh.sh`.
+- **Depth priors for 3DGS (opt-in).**
+  - `visloc-mvs --save-fused-depth` writes each view's depths that fusion's
+    source views agree with.
+  - `gsplat_train_cuda --depth-prior <dir> [--depth-weight 0.1]` trains the
+    splat's expected depth against them, with a relative L1. A map of another
+    size is resampled by nearest neighbour.
+  - The expected-depth channel's gradients match an exact colour-channel
+    identity to 1.8e-7.
+  - CUDA ABI 5.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
   exact size (`--size` makes cameras of slightly different sizes, as in some

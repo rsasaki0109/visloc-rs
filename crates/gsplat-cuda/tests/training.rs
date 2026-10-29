@@ -263,6 +263,7 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
             noise_scale: 0.0,
             noise_max: 0.0,
             sparse_sh_adam: sparse_sh_adam as u32,
+            depth_weight: 0.0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {

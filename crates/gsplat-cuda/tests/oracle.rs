@@ -374,3 +374,78 @@ fn planar_depth_meets_the_splat_plane() {
     assert!((planar.depth[centre] - 5.0).abs() < 1e-4);
     assert_eq!(planar.rgb, centre_depth.rgb);
 }
+
+/// The expected-depth channel's gradients (the depth-prior loss's path).
+/// Finite differences are useless here: a pixel crossing the alpha gate
+/// moves D by z / 255, centimetres at a few metres. Instead each splat's red
+/// is set to its view depth / 10 on a black background, so the red channel
+/// is exactly D / 10: a red gradient g and a depth gradient g / 10 must give
+/// the same opacity, conic and 2D-mean gradients, and the mean gradients
+/// must differ by exactly W^T e_z times the red colour gradient / 10.
+#[test]
+fn depth_channel_gradients_match_the_colour_channel() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (64u32, 48u32);
+    let view = view(w, h);
+    let mut scene = random_scene(40, 5, 0, 0.0);
+    let s = 10.0f32;
+    let sh0 = visloc_gsplat_core::sh::SH_C0;
+    for g in scene.gaussians.iter_mut() {
+        let z = view.world_to_camera_point(g.mean).z;
+        g.sh_dc = [(z / s - 0.5) / sh0, (0.3 - 0.5) / sh0, (0.6 - 0.5) / sh0];
+    }
+    let npix = (w * h) as usize;
+    let g: Vec<f32> = (0..npix).map(|i| (i as f32 * 0.31).sin()).collect();
+    cuda.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let f = cuda
+        .render_depth(&view, [0.0; 3], 0, false)
+        .expect("render");
+    let red_err = f
+        .expected
+        .iter()
+        .zip(f.rgb.chunks_exact(3))
+        .map(|(d, c)| (d / s - c[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(red_err < 1e-5, "red is not D / s: {red_err}");
+    let mut d_red = vec![0.0f32; npix * 3];
+    for (k, v) in g.iter().enumerate() {
+        d_red[k * 3] = *v;
+    }
+    let by_red = cuda.backward(&d_red).expect("backward");
+    let d_depth: Vec<f32> = g.iter().map(|v| v / s).collect();
+    let by_depth = cuda
+        .backward_with_depth(&vec![0.0; npix * 3], Some(&d_depth))
+        .expect("backward");
+
+    let scale = |v: &[f32]| v.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-9);
+    // Screen gradients du dv dA dB dC dopacity.
+    let screen_scale = scale(&by_red.screen);
+    let mut worst = 0.0f32;
+    for i in 0..scene.len() {
+        for c in 0..6 {
+            let (a, b) = (by_red.screen[i * 10 + c], by_depth.screen[i * 10 + c]);
+            worst = worst.max((a - b).abs() / screen_scale);
+        }
+    }
+    // Mean: the depth path adds W^T e_z * (red colour gradient / s).
+    let wrow = view.rotation.row(2);
+    let mean_scale = scale(&by_depth.transforms);
+    for i in 0..scene.len() {
+        let extra = by_red.screen[i * 10 + 6] / s;
+        for k in 0..3 {
+            let want = by_red.transforms[i * 10 + k] + wrow[k] * extra;
+            worst = worst.max((by_depth.transforms[i * 10 + k] - want).abs() / mean_scale);
+        }
+        for k in 3..10 {
+            let (a, b) = (
+                by_red.transforms[i * 10 + k],
+                by_depth.transforms[i * 10 + k],
+            );
+            worst = worst.max((a - b).abs() / mean_scale);
+        }
+        worst = worst.max((by_red.opacity[i] - by_depth.opacity[i]).abs() / scale(&by_red.opacity));
+    }
+    eprintln!("depth channel against the red channel: worst error {worst:.2e}");
+    assert!(worst < 1e-4, "depth channel off by {worst:.2e}");
+}
