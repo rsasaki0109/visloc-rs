@@ -77,6 +77,8 @@ PARAMETERS (--name value  or  -p name:=value):
   match_threads          threads of the map-wide search                               [1]
   duplicate_radius       map-wide search: landmarks within this many metres of the best
                          one count as the same point in the ratio test (0: off)      [0]
+  extra_descriptors      extra descriptors per landmark to match, from the map's
+                         landmark_descriptors_extra.txt (0: the main one only)        [0]
   max_points             ORB keypoints per image                                      [the map's]
   position_stddev        published 1-sigma position at a fix (m)                      [0.03]
   position_stddev_per_m  ... plus this per metre of VIO travel since the fix          [0.025]
@@ -152,6 +154,7 @@ fn run() -> Result<(), String> {
     options.match_threads = args.parsed_or("match_threads", options.match_threads)?;
     let duplicate_radius = args.parsed_or("duplicate_radius", 0.0f64)?;
     options.duplicate_radius_m = (duplicate_radius > 0.0).then_some(duplicate_radius);
+    options.extra_descriptors = args.parsed_or("extra_descriptors", options.extra_descriptors)?;
     options.max_points = args.parsed::<usize>("max_points")?;
     options.position_stddev_m = args.parsed_or("position_stddev", options.position_stddev_m)?;
     options.position_stddev_per_m =
@@ -194,6 +197,12 @@ fn run() -> Result<(), String> {
         )
     });
     let localizer = MapLocalizer::new(map, camera, &options)?;
+    if localizer.extra_descriptor_count() > 0 {
+        eprintln!(
+            "visloc_map_localize_node: matching {} extra landmark descriptors",
+            localizer.extra_descriptor_count()
+        );
+    }
     let core = Arc::new(Mutex::new(OdomCorrector::new(&options)));
     // Notified on every odometry message, for images waiting for theirs.
     let odom_arrived = Arc::new(Condvar::new());

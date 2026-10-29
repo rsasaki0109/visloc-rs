@@ -278,9 +278,35 @@ def read_rows(path: Path):
             yield line.split()
 
 
+def read_input_when_needed() -> None:
+    """Have py7zr read compressed input only when its decoder needs it.
+
+    py7zr (1.1) hands the LZMA decoder another block on every call, even while
+    the decoder still holds input it could not decode within the output limit.
+    On the T265's PNGs, incompressible and in many small files, that input
+    piles up with the archive: 9 GB into corridor1-1's 13.9 GB.
+    """
+    from py7zr.compressor import SevenZipDecompressor
+
+    read_data = getattr(SevenZipDecompressor, "_read_data", None)
+    if read_data is None or getattr(read_data, "when_needed", False):
+        return
+
+    def when_needed(self, fp):
+        # LZMA1Decompressor wraps lzma's decoder; LZMA2's is lzma's own.
+        decoder = getattr(self.chain[0], "_decompressor", self.chain[0])
+        if not getattr(decoder, "needs_input", True):
+            return b""
+        return read_data(self, fp)
+
+    when_needed.when_needed = True
+    SevenZipDecompressor._read_data = when_needed
+
+
 def extract(archive: Path, destination: Path) -> Path:
     import py7zr  # optional dependency, only for .7z input
 
+    read_input_when_needed()
     with py7zr.SevenZipFile(archive) as z:
         targets = [name for name in z.getnames() if T265_FILES.search(name)]
     with py7zr.SevenZipFile(archive) as z:

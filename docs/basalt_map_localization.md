@@ -549,11 +549,62 @@ with weak fixes). Ground truth shows where their error comes from:
   landmarks are within 30° of a map view there, yet none of the 20 images
   tried localizes, even around the true pose's projections. The map keeps
   one descriptor per landmark (the medoid of its observations); keeping one
-  per viewpoint is the remaining lead on the map's side.
+  per viewpoint was the remaining lead on the map's side (tried
+  [below](#more-descriptors-per-landmark-and-stale-predictions)).
 
 So the remaining error is mostly the map's coverage, which another flight's
 map supplies: MH_05 against MH_01 to MH_04 gets a map pose for 99.8% of
 frames at 11.5 cm ([below](#lifelong-use-appending-each-session)).
+
+### More descriptors per landmark, and stale predictions
+
+Two options follow the leads above; both are measured on the eight
+queries against maps rebuilt with `--extra-descriptors` (MH_01: 15,495
+landmarks and 45,631 extra descriptors; V1_01 and V2_01 likewise), VIO +
+map, `--localize-every 5`:
+
+- **`--extra-descriptors N`** (map built with
+  `basalt_euroc_online_slam_demo --extra-descriptors`). The mapper keeps,
+  besides each landmark's medoid, up to three descriptors of its views,
+  farthest first and each at least 24 bits from those kept before
+  (`landmark_descriptors_extra.txt`). A keypoint then matches a landmark at
+  the nearest of them, and the ratio test compares that with the nearest
+  other landmark.
+- **`--stale-projection-min-inliers N`**. A prediction past the fresh
+  limits is tried too, and its projection search counts only with N
+  inliers or more (60 here, twice `--min-inliers`).
+
+| Query → map | Defaults: RMSE / max, fixes, ms per image | Extra descriptors (3) | Stale predictions (60 inliers): RMSE / max, stale fixes |
+|---|---|---|---|
+| MH_02 → MH_01 | 1.97 / 5.3 cm, 599, 28 ms | 1.95 / 5.3 cm, 603, 29 ms | 1.97 / 5.3 cm, 0 |
+| MH_03 → MH_01 | 4.53 / 10.3 cm, 300, 33 ms | 4.75 / 21.0 cm, 303, 40 ms | 4.54 / 10.3 cm, 2 |
+| MH_04 → MH_01 | 22.0 / 43.8 cm, 48, 60 ms | 23.2 / 48.1 cm, 56, 188 ms | **21.2** / 43.8 cm, 1 |
+| MH_05 → MH_01 | 15.5 / 28.2 cm, 59, 44 ms | 16.0 / 27.6 cm, 65, 127 ms | 15.5 / 28.2 cm, 1 |
+| V1_02 → V1_01 | 3.46 / 6.3 cm, 187, 34 ms | 3.48 / 6.8 cm, 221, 31 ms | 3.47 / 6.3 cm, 2 |
+| V1_03 → V1_01 | 4.80 / 10.4 cm, 105, 33 ms | 4.97 / 10.4 cm, 153, 60 ms | **4.24** / 10.4 cm, 4 |
+| V2_02 → V2_01 | 3.52 / 12.1 cm, 268, 30 ms | 3.66 / 12.2 cm, 312, 31 ms | 3.50 / 12.1 cm, 3 |
+| V2_03 → V2_01 | 29.3 / 69.9 cm, 5, 27 ms | **23.6** / 70.4 cm, 16, 50 ms | 39.1 / 87.8 cm, 1 |
+
+(ms: median time per localized image, ORB extraction included. The share
+of frames with a map pose is unchanged, except V1_02 with the extra
+descriptors: 95.9% instead of 94.4%, its first map pose at 3.5 instead of
+4.8 s.)
+
+- **The extra descriptors find more fixes, not better ones.** Every query
+  gets more (MH_04 56 instead of 48, V1_03 153 instead of 105), but more of
+  them are off: MH_03 gains a 19.8 cm map-wide fix, MH_05 three over 10 cm.
+  Six of the eight queries end up worse, by 0.02 to 1.2 cm; MH_02 is
+  unchanged and only V2_03, whose 5 fixes become 16, improves. The
+  map-wide search compares four times as many descriptors and is up to
+  three times slower where it runs. Matching the main descriptor alone
+  stays the default.
+- **A stale prediction with twice the inliers is safe but rarely needed.**
+  The 14 fixes taken from stale predictions over the eight queries are at
+  most 10.4 cm off; the wrong ones MH_03 got after a gap (above) do not
+  recur. It helps MH_04 (22.0 to 21.2 cm) and V1_03 (4.80 to 4.24 cm).
+  V2_03 gets one more fix, 1.0 cm off, and 9.7 cm more error: with this
+  few fixes, which ones arrive decides how far the VIO carries the pose.
+  It stays off by default.
 
 ### On a robot (ROS 2)
 

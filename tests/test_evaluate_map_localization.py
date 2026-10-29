@@ -91,6 +91,39 @@ class EvaluateMapLocalizationTests(unittest.TestCase):
         result = MODULE.evaluate("gt", moved, reference, 1_000)
         self.assertLess(result["translation_m"]["max"], 1e-9)
 
+    def test_local_mode_scores_against_the_map_around_each_pose(self) -> None:
+        # A map driven 40 m out along x and back 2 m to the side, whose heading
+        # drifted 0.05 deg per metre: the true path bends away from the map's.
+        positions = [np.asarray([0.25 * i, 0.0, 0.0]) for i in range(161)]
+        positions += [np.asarray([40.0 - 0.25 * i, 2.0, 0.0]) for i in range(161)]
+        map_poses, ground_truth = {}, {}
+        true_position, travelled = np.zeros(3), 0.0
+        for index, position in enumerate(positions):
+            if index:
+                step = position - positions[index - 1]
+                true_position = true_position + rotation_z(0.0005 * travelled) @ step
+                travelled += np.linalg.norm(step)
+            timestamp = 1_000_000_000 + index * 50_000_000
+            map_poses[timestamp] = (position, np.eye(3))
+            ground_truth[timestamp] = (true_position, rotation_z(0.0005 * travelled))
+        pairs = MODULE.associate(map_poses, ground_truth, 1_000)
+        sources = np.asarray([map_poses[a][0] for a, _ in pairs])
+        targets = np.asarray([ground_truth[b][0] for _, b in pairs])
+
+        # Localizations 2 cm above the outbound map poses in the middle 20 m.
+        query = {
+            timestamp: (position + np.asarray([0.0, 0.0, 0.02]), orientation)
+            for timestamp, (position, orientation) in map_poses.items()
+            if position[1] == 0.0 and 10.0 <= position[0] <= 30.0
+        }
+        local = MODULE.evaluate("local", query, ground_truth, 1_000, (sources, targets, 5.0))
+        self.assertEqual(local["scored"], len(query))
+        self.assertAlmostEqual(local["translation_m"]["rmse"], 0.02, delta=0.005)
+        self.assertLess(local["rotation_deg"]["max"], 0.2)
+        alignment = MODULE.fit_to_ground_truth(map_poses, ground_truth, 1_000)
+        fixed = MODULE.evaluate("fixed", query, ground_truth, 1_000, alignment)
+        self.assertGreater(fixed["translation_m"]["rmse"], 0.1)
+
     def test_inlier_filter_keeps_poses_accepted_at_the_threshold(self) -> None:
         estimate = MODULE.load_tum_seconds  # keep the parser's rounding in the loop
         with tempfile.TemporaryDirectory() as directory:

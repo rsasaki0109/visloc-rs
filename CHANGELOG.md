@@ -6,6 +6,37 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Extra descriptors per landmark (opt-in).**
+  `basalt_euroc_online_slam_demo --extra-descriptors` keeps, besides each
+  landmark's medoid descriptor, up to three of its views' descriptors,
+  farthest first and at least 24 bits apart
+  (`landmark_descriptors_extra.txt`).
+  `visloc_localization::BinaryLandmarkIndex::with_extra_descriptors`
+  matches a keypoint against the nearest of a landmark's descriptors, with
+  the ratio test against the nearest other landmark;
+  `basalt_euroc_localize_demo --extra-descriptors N` and
+  `visloc_map_localize_node`'s `extra_descriptors` use them. On the eight
+  EuRoC queries they find more fixes (MH_04 56 instead of 48) but less
+  accurate ones: six queries get 0.02–1.2 cm worse, V2_03 better (29.3 to
+  23.6 cm), and the map-wide search up to three times slower. Off by
+  default.
+- **`evaluate_map_localization.py --mode local`.** Like `fixed`, but the
+  map->ground truth transform is fitted for each scored pose on the stretch
+  of the map's own trajectory within `--align-radius-m` (5) of it, turning
+  about the vertical only. On a map whose SLAM drifted over a long loop
+  (corridor1-5: 1.33 m RMSE, no loop closed) it scores a localization
+  against the map around it.
+- **`wheel_calibration_replay`.** `ros2/visloc-ros2/examples` runs
+  `visloc_wheel_calibration_node`'s calibration on recorded wheel odometry,
+  VIO and map localizations (TUM files), without ROS, and writes the
+  calibrated wheel odometry for `basalt_euroc_localize_demo --odometry`.
+- **`basalt_euroc_localize_demo --stale-projection-min-inliers N`.** A
+  prediction past the fresh limits is tried too, and its projection search
+  counts only with N inliers. With 60, its 14 fixes over the eight EuRoC
+  queries are at most 10.4 cm off; MH_04 goes from 22.0 to 21.2 cm and
+  V1_03 from 4.80 to 4.24 cm, but V2_03, with 5 fixes in all, from 29.3 to
+  39.1 cm. Off by default.
+
 - **`gsplat_photos --imu`: metric models from the camera's IMU.** For
   photos that are frames of a video (file names ending in the frame
   number), the model is scaled to metres right after SfM, so sparse/0, the
@@ -49,6 +80,25 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **Wheel calibration: the offset wandered on long runs.** A robot's
+  wheels slip in turns in place, and on OpenLORIS-Scene's corridor
+  (corridor1-1: 284 s, 232 m) their heading drifted 38° off the VIO's in
+  two minutes. Fitted with one heading over the 120 s window, the offset
+  absorbed that drift and wandered over −117…29 cm forward and −64…71 cm
+  left, and the map's scale from localizations 140 s apart came out 0.485.
+  `visloc_localization::WheelCalibration` now gives each 5 s of VIO pairs
+  (`segment_s`) and each 30 s of map localizations (`fix_segment_s`) a
+  heading and a position of their own, sharing the offset and the scale:
+  the offset stays at −4.0…2.8 / 6.7…12.1 cm (the office sessions':
+  1–3 / 6–8 cm), the fit residual falls from 62 to 2.3 cm, and the scale
+  is the map's 1.0315. `visloc_wheel_calibration_node` takes both as
+  parameters. The short office sessions' wheel odometry + map stays within
+  0.01 cm.
+- **`openloris_to_euroc.py` on large .7z files.** py7zr fed its LZMA decoder
+  more input on every call while the decoder still held some, so on the
+  T265's incompressible PNGs its memory grew with the archive (to 9 GB, and
+  killed, on corridor1-1's 13.9 GB). The converter now feeds it only when
+  it needs input: 54 MB instead of 417 MB on a 547 MB test archive.
 - **ROS 2 nodes: a missed `/tf_static` stalled them for good.** A RustDDS
   reader sometimes never receives a transient-local writer's samples: a
   probe with the nodes' `/tf_static` reader

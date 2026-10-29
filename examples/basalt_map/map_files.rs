@@ -6,6 +6,8 @@
 //! <map_dir>/
 //!   sparse/{cameras,images,points3D}.txt  COLMAP text model, mapper world frame
 //!   landmark_descriptors.txt              LANDMARK_ID + 256 ORB bits as 0/1
+//!   landmark_descriptors_extra.txt        optional: more descriptors per landmark,
+//!                                         from its views that differ most (ids repeat)
 //!   images.csv                            IMAGE_ID -> mapper frame, camera, timestamp, session
 //!   map.json                              T_imu_cam per camera, fit errors, counts, sessions
 //! ```
@@ -34,7 +36,9 @@ use visloc_basalt::BasaltCalibration;
 use visloc_core::geometry::SE3;
 use visloc_core::types::{LandmarkDescriptorStore, Observation, VisualMap};
 use visloc_rs::io::colmap::{write_colmap_text_model, ColmapMapProvider};
-use visloc_rs::io::descriptors::write_landmark_descriptors_txt;
+use visloc_rs::io::descriptors::{
+    read_landmark_descriptor_rows, write_landmark_descriptor_rows, write_landmark_descriptors_txt,
+};
 use visloc_rs::{DescriptorProvider, MapProvider};
 
 pub const MAP_SCHEMA: &str = "visloc.basalt_localization_map.v1";
@@ -47,10 +51,16 @@ pub fn descriptors_path(map_dir: &Path) -> PathBuf {
     map_dir.join("landmark_descriptors.txt")
 }
 
+pub fn extra_descriptors_path(map_dir: &Path) -> PathBuf {
+    map_dir.join("landmark_descriptors_extra.txt")
+}
+
 /// A saved map loaded back for localization.
 pub struct SavedMap {
     pub map: VisualMap,
     pub descriptors: LandmarkDescriptorStore,
+    /// `landmark_descriptors_extra.txt`, empty when the file is missing.
+    pub extra_descriptors: Vec<(u64, Vec<f32>)>,
     /// `T_imu_cam` per Basalt camera index.
     pub imu_from_camera: Vec<SE3>,
     /// Detector budget the map's keyframes were built with.
@@ -127,13 +137,15 @@ pub fn local_contrast_from_json(summary: &Value) -> Result<Option<LocalContrast>
 
 /// Writes `export` under `map_dir` as a one-session map; returns the
 /// `map.json` summary. `local_contrast` is the equalization the keyframes'
-/// features were extracted with, if any.
+/// features were extracted with, if any; with `extra_descriptors`, the
+/// export's extra descriptors go to `landmark_descriptors_extra.txt`.
 pub fn save(
     map_dir: &Path,
     export: &LocalizationMapExport,
     calibration: &BasaltCalibration,
     max_points: usize,
     local_contrast: Option<&LocalContrast>,
+    extra_descriptors: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let images = export
         .images
@@ -170,6 +182,14 @@ pub fn save(
     });
     if let Some(local_contrast) = local_contrast {
         summary["feature_local_contrast"] = local_contrast_json(local_contrast);
+    }
+    let extra_path = extra_descriptors_path(map_dir);
+    if extra_descriptors {
+        fs::create_dir_all(map_dir)?;
+        write_landmark_descriptor_rows(&export.extra_descriptors, &extra_path)?;
+        summary["extra_descriptors"] = json!(export.extra_descriptors.len());
+    } else if extra_path.exists() {
+        fs::remove_file(&extra_path)?;
     }
     write(map_dir, &export.map, &export.descriptors, &images, summary)
 }
@@ -287,6 +307,13 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         .landmark_descriptor_store()
         .cloned()
         .ok_or("map has no descriptor store")?;
+    let extra_path = extra_descriptors_path(map_dir);
+    let extra_descriptors = if extra_path.exists() {
+        read_landmark_descriptor_rows(&extra_path)
+            .map_err(|error| format!("{}: {error}", extra_path.display()))?
+    } else {
+        Vec::new()
+    };
     // The COLMAP text reader fills only the keyframes' observations; rebuild
     // each landmark's (its TRACK[]) from them, so a map written back keeps
     // its tracks.
@@ -309,6 +336,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
     Ok(SavedMap {
         map,
         descriptors,
+        extra_descriptors,
         imu_from_camera,
         max_points,
         local_contrast,

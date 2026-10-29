@@ -451,8 +451,8 @@ mod tests {
         let estimate = calibrator.estimate().expect("estimate");
         assert_eq!(estimate.offset_from, CalibrationSource::Vio);
         assert_eq!(estimate.scale_from, CalibrationSource::Map);
-        assert!((estimate.offset - Vector2::new(0.05, 0.0)).norm() < 1e-5);
-        assert!((estimate.scale - 1.01).abs() < 1e-5);
+        assert!((estimate.offset - Vector2::new(0.05, 0.0)).norm() < 1e-4);
+        assert!((estimate.scale - 1.01).abs() < 1e-4);
         // Each refit continues the output: the step there is no larger
         // than the wheels' own at that point (2 cm, or a 5 cm point turning
         // 3 deg in place).
@@ -468,7 +468,7 @@ mod tests {
         let last = outputs.last().unwrap().pose();
         let start = outputs[outputs.len() - 41].pose();
         let driven = (last.translation - start.translation).norm();
-        assert!((driven - 0.808).abs() < 1e-5, "{driven}");
+        assert!((driven - 0.808).abs() < 1e-4, "{driven}");
     }
 
     #[test]

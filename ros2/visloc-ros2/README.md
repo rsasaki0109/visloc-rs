@@ -248,6 +248,7 @@ measurements behind the defaults.
 | `prior_wait_ms` | `300` | longest wait for the odometry of an image's stamp before searching map-wide |
 | `match_threads` | `1` | threads of the map-wide search |
 | `duplicate_radius` | `0` (off) | map-wide search: landmarks within this many metres of the best one count as the same point in the ratio test; helps merged maps (see `docs/basalt_map_localization.md`) |
+| `extra_descriptors` | `0` | with a map saved by `basalt_euroc_online_slam_demo --extra-descriptors`: match each landmark at the nearest of its main descriptor and up to this many of its other views' (finds more fixes, but less accurate ones on EuRoC; see `docs/basalt_map_localization.md`) |
 | `max_points` | the map's | ORB keypoints per image |
 | `position_stddev`, `position_stddev_per_m` | `0.03` m, `0.025` m/m | published position 1-sigma |
 | `orientation_stddev` | `0.02` rad | |
@@ -591,15 +592,21 @@ OpenLORIS-Scene sessions), so the node reports it but does not use it.
 Until a reference shows a value, it keeps the saved calibration's, or none.
 
 It refits every `refine_s` (5) seconds over the last `window_s` (120)
-seconds of pairs, and publishes each wheel odometry message as `base_link`'s
-pose, levelled and at the map's scale, with a yaw and a translation that
-keep the output continuous wherever a new estimate takes over. Before the
+seconds of pairs, giving each `segment_s` (5) seconds of VIO pairs, and
+each `fix_segment_s` (30) seconds of map localizations, their own heading
+against the reference: the wheels slip in turns, and their heading drifts
+by tens of degrees over minutes. It publishes each wheel odometry
+message as `base_link`'s pose, levelled and at the map's scale, with a yaw
+and a translation that keep the output continuous wherever a new estimate
+takes over. Before the
 first estimate it passes the wheel odometry through. With
 `calibration_file`, a saved calibration applies from the first message, and
 each new estimate is written there. It also publishes the same pose on
 `/tf`, so that `map -> odom -> base_link` agrees with `map_pose`: turn the
 wheel driver's own `odom -> base_link` off (as for `robot_localization`).
-`scripts/calibrate_wheel_offset.py` fits the VIO's part offline.
+`scripts/calibrate_wheel_offset.py` fits the VIO's part offline, and
+`examples/wheel_calibration_replay.rs` runs the node's calibration on
+recorded wheel odometry, VIO and map localizations (TUM files) without ROS.
 
 ```sh
 visloc_vio_node ... -p body_frame:=imu0 -p publish_tf:=false -r odom:=/vio/odom
@@ -628,6 +635,7 @@ starts all three with `wheel_odom_topic`.
 | `min_fixes` | `20` | map localizations for the lean (and the scale) |
 | `refine_s` | `5` | refit this often (s); `0` keeps the first estimate, or the saved one |
 | `window_s` | `120` | fit over this many seconds of pairs; `0` keeps them all |
+| `segment_s`, `fix_segment_s` | `5`, `30` | each stretch of this many seconds of VIO pairs, or of map localizations, gets its own heading against them, so the wheels' heading drift stays out of the fit; `0`: one for all |
 | `level` | `true` | level `base_link` against gravity (assumes a level floor) |
 | `apply_scale` | `true` | publish at the map's scale |
 | `publish_uncalibrated` | `true` | pass the wheel odometry through until calibrated |

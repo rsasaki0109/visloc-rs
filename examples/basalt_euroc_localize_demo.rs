@@ -52,10 +52,16 @@
 //! `--projection-radius-px` (20) pixels of its predicted projection, as
 //! `visloc_map_localize_node` does; the map-wide search remains the fallback
 //! (`--projection-radius-px 0` matches map-wide only).
+//! A map saved with `--extra-descriptors` holds up to three more
+//! descriptors per landmark, from its views that differ most from the main
+//! one; with `--extra-descriptors N`, a keypoint matches a landmark at the
+//! nearest of its main one and up to N of those (default 0: the main one).
 //! The prediction is used only within `--projection-fresh-s` (5) seconds
 //! and `--projection-fresh-m` (2) metres of odometry travel after the
 //! correction's newest fix: a drifted prediction can steer the projection search
-//! to a wrong pose that agrees with it.
+//! to a wrong pose that agrees with it. With `--stale-projection-min-inliers N`,
+//! an older prediction is tried too, and its projection search counts only
+//! with N inliers or more.
 //!
 //! ```text
 //! cargo run --release --example basalt_euroc_localize_demo -- \
@@ -139,6 +145,9 @@ struct Args {
     prior_radius_m: Option<f64>,
     /// Map landmarks closer than this count as one point in the ratio test.
     duplicate_radius_m: Option<f64>,
+    /// Extra descriptors per landmark to match (the map's
+    /// `landmark_descriptors_extra.txt`), at most; 0 by default.
+    extra_descriptors: usize,
     /// Match map-wide among the landmarks of the N retrieved keyframes first.
     retrieval_keyframes: Option<usize>,
     /// Bits of a retrieval visual word.
@@ -173,6 +182,9 @@ struct Args {
     /// correction's newest fix.
     projection_fresh_s: f64,
     projection_fresh_m: f64,
+    /// With N > 0, a prediction past the fresh limits is still tried, but
+    /// its projection search is accepted only with at least N inliers.
+    stale_projection_min_inliers: usize,
     /// Write each accepted localization's inliers here.
     dump_inliers: Option<PathBuf>,
 }
@@ -182,11 +194,12 @@ impl Args {
         "usage: basalt_euroc_localize_demo --map DIR --euroc-dir DIR [--out-dir DIR] \
          [--camera N] [--max-frames N] [--stride N] [--max-points N] [--max-hamming N] \
          [--ratio R|none] [--min-inliers N] [--reprojection-px PX] [--ransac-iterations N] \
-         [--prior-radius-m M] [--duplicate-radius-m M] \
+         [--prior-radius-m M] [--duplicate-radius-m M] [--extra-descriptors N] \
          [--retrieval-keyframes N [--retrieval-bits B]] \
          [--vio --calibration FILE --config FILE | --odometry FILE \
          [--imu-from-body tx,ty,tz,qx,qy,qz,qw]] [--localize-every N] \
          [--initial-localize-every N] [--initial-window-s S] [--weak-min-inliers N] \
+         [--stale-projection-min-inliers N] \
          [--weak-gate-cm CM] \
          [--projection-radius-px PX [--projection-fresh-s S] [--projection-fresh-m M]] \
          [--dump-inliers FILE]"
@@ -220,6 +233,7 @@ impl Args {
             ransac_iterations: 1000,
             prior_radius_m: None,
             duplicate_radius_m: None,
+            extra_descriptors: 0,
             retrieval_keyframes: None,
             retrieval_bits: 16,
             vio: false,
@@ -235,6 +249,7 @@ impl Args {
             projection_radius_px: None,
             projection_fresh_s: 5.0,
             projection_fresh_m: 2.0,
+            stale_projection_min_inliers: 0,
             dump_inliers: None,
         };
         let mut arguments = arguments.into_iter();
@@ -271,6 +286,11 @@ impl Args {
                 "--reprojection-px" => args.reprojection_px = number(&option, value()?)?,
                 "--ransac-iterations" => args.ransac_iterations = number(&option, value()?)?,
                 "--prior-radius-m" => args.prior_radius_m = Some(number(&option, value()?)?),
+                "--extra-descriptors" => {
+                    args.extra_descriptors = value()?
+                        .parse()
+                        .map_err(|_| format!("{option}: expected a count"))?;
+                }
                 "--duplicate-radius-m" => {
                     args.duplicate_radius_m = Some(number(&option, value()?)?);
                 }
@@ -308,6 +328,11 @@ impl Args {
                 }
                 "--projection-fresh-s" => args.projection_fresh_s = number(&option, value()?)?,
                 "--projection-fresh-m" => args.projection_fresh_m = number(&option, value()?)?,
+                "--stale-projection-min-inliers" => {
+                    args.stale_projection_min_inliers = value()?
+                        .parse()
+                        .map_err(|_| format!("{option}: expected a count"))?;
+                }
                 "--dump-inliers" => args.dump_inliers = Some(PathBuf::from(value()?)),
                 other => return Err(format!("unknown option {other}\n\n{}", Self::usage())),
             }
@@ -513,11 +538,19 @@ impl Localizer {
             .get(usize::from(args.camera))
             .cloned()
             .ok_or_else(|| format!("map.json has no extrinsics for camera {}", args.camera))?;
+        let index = BinaryLandmarkIndex::new(&map.map, &map.descriptors)
+            .with_extra_descriptors(&map.extra_descriptors, args.extra_descriptors)
+            .with_duplicate_radius(args.duplicate_radius_m.unwrap_or(0.0));
         eprintln!(
-            "map: images={} landmarks={} descriptors={}{}",
+            "map: images={} landmarks={} descriptors={}{}{}",
             map.map.keyframes.len(),
             map.map.landmarks.len(),
             map.descriptors.len(),
+            if index.extra_descriptor_count() > 0 {
+                format!(" (+{} extra)", index.extra_descriptor_count())
+            } else {
+                String::new()
+            },
             map.local_contrast
                 .map(|c| format!(
                     ", local contrast equalized ({} tiles, clip {})",
@@ -525,8 +558,6 @@ impl Localizer {
                 ))
                 .unwrap_or_default()
         );
-        let index = BinaryLandmarkIndex::new(&map.map, &map.descriptors)
-            .with_duplicate_radius(args.duplicate_radius_m.unwrap_or(0.0));
         let retrieval = args.retrieval_keyframes.map(|top_k| {
             (
                 KeyframeRetrieval::new(&map.map, &index, args.retrieval_bits),
@@ -556,11 +587,14 @@ impl Localizer {
     }
 
     /// Localizes one image. `predicted`, the map-frame IMU pose the corrected
-    /// VIO predicts for it, enables the projection search.
+    /// VIO predicts for it, enables the projection search; with
+    /// `stale_min_inliers` (a prediction past the fresh limits), its result
+    /// counts only with that many inliers.
     fn localize(
         &mut self,
         image: &RawU16Image,
         predicted: Option<&SE3>,
+        stale_min_inliers: Option<usize>,
     ) -> Result<Attempt, Box<dyn std::error::Error>> {
         let started = Instant::now();
         let query = query_image(
@@ -589,7 +623,9 @@ impl Localizer {
                         ),
                     )
                 });
-        let projected = projected_raw.clone().filter(accepted);
+        let projected = projected_raw.clone().filter(|result| {
+            accepted(result) && stale_min_inliers.is_none_or(|needed| result.inlier_count >= needed)
+        });
         let prior_result = projected.or_else(|| {
             self.previous
                 .as_ref()
@@ -608,7 +644,11 @@ impl Localizer {
         let mut matching = if !used_prior {
             "global"
         } else if predicted.is_some() && self.projection_radius_px.is_some() {
-            "projection"
+            if stale_min_inliers.is_some() {
+                "stale-projection"
+            } else {
+                "projection"
+            }
         } else {
             "radius"
         };
@@ -663,8 +703,10 @@ impl Localizer {
         let weak_result = if success {
             None
         } else if self.weak_projected {
+            // (Never a stale prediction's.)
             projected_raw
                 .as_ref()
+                .filter(|_| stale_min_inliers.is_none())
                 .filter(is_weak)
                 .or(Some(&result).filter(is_weak))
         } else {
@@ -757,7 +799,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut latencies = Vec::with_capacity(images.len());
     let mut localized = 0_usize;
     for entry in &images {
-        let attempt = localizer.localize(&read_camera_image(&entry.path)?, None)?;
+        let attempt = localizer.localize(&read_camera_image(&entry.path)?, None, None)?;
         latencies.push(attempt.latency_ms);
         if let Some(world_from_imu) = &attempt.world_from_imu {
             tum.push_str(&tum_line(entry.timestamp_ns, world_from_imu));
@@ -798,6 +840,7 @@ struct CorrectedRun {
     /// used.
     fresh_s: f64,
     fresh_m: f64,
+    stale_min_inliers: usize,
     fixes_tum: String,
     map_tum: String,
     odometry_tum: String,
@@ -828,6 +871,7 @@ impl CorrectedRun {
             last_localized_ns: None,
             fresh_s: args.projection_fresh_s,
             fresh_m: args.projection_fresh_m,
+            stale_min_inliers: args.stale_projection_min_inliers,
             fixes_tum: header.to_owned(),
             map_tum: header.to_owned(),
             odometry_tum: header.to_owned(),
@@ -884,17 +928,22 @@ impl CorrectedRun {
         // The correction as it stands before this image's fix predicts its pose,
         // while its newest fix is recent: after a long gap, a drifted
         // prediction can steer the projection search to a wrong pose that
-        // agrees with it.
-        let predicted = self
+        // agrees with it. With --stale-projection-min-inliers, an older one
+        // is tried too, and must give that many inliers.
+        let fresh = self
             .correction
             .last_fix()
-            .filter(|(fix_ns, fix_position)| {
+            .is_some_and(|(fix_ns, fix_position)| {
                 (timestamp_ns - fix_ns) as f64 * 1e-9 <= self.fresh_s
                     && (odom_from_imu.translation - fix_position).norm() <= self.fresh_m
-            })
-            .and_then(|_| self.correction.map_from_body(odom_from_imu));
+            });
+        let stale_min_inliers =
+            (!fresh && self.stale_min_inliers > 0).then_some(self.stale_min_inliers);
+        let predicted = (fresh || stale_min_inliers.is_some())
+            .then(|| self.correction.map_from_body(odom_from_imu))
+            .flatten();
         if let Some(image) = image {
-            let attempt = localizer.localize(image, predicted.as_ref())?;
+            let attempt = localizer.localize(image, predicted.as_ref(), stale_min_inliers)?;
             self.attempts += 1;
             self.latencies.push(attempt.latency_ms);
             let outcome = match (&attempt.world_from_imu, &attempt.weak_world_from_imu) {
@@ -1462,18 +1511,27 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&map_dir);
-        map_files::save(&map_dir, &export, &calibration, 800, None).expect("save");
+        map_files::save(&map_dir, &export, &calibration, 800, None, true).expect("save");
         let saved = map_files::load(&map_dir).expect("load");
         assert_eq!(saved.local_contrast, None);
+        // The extra descriptors round-trip; a map saved without them has none.
+        assert_eq!(saved.extra_descriptors, export.extra_descriptors);
         let equalized = LocalContrast {
             tiles: 6,
             clip_limit: 3.0,
         };
-        map_files::save(&map_dir, &export, &calibration, 800, Some(&equalized)).expect("save");
-        assert_eq!(
-            map_files::load(&map_dir).expect("load").local_contrast,
-            Some(equalized)
-        );
+        map_files::save(
+            &map_dir,
+            &export,
+            &calibration,
+            800,
+            Some(&equalized),
+            false,
+        )
+        .expect("save");
+        let resaved = map_files::load(&map_dir).expect("load");
+        assert_eq!(resaved.local_contrast, Some(equalized));
+        assert!(resaved.extra_descriptors.is_empty());
         fs::remove_dir_all(&map_dir).expect("cleanup");
         assert_eq!(saved.map.landmarks.len(), points.len());
         // Each landmark's track is read back, so a map written again (as
