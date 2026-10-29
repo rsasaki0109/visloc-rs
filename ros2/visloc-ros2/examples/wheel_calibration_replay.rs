@@ -3,13 +3,16 @@
 //!
 //! ```text
 //! wheel_calibration_replay --wheel odom.tum --imu-from-body tx,ty,tz,qx,qy,qz,qw \
-//!   [--vio trajectory_vio.tum] [--fixes localization.tum] [--prior calibration.json] \
+//!   [--imu imu0/data.csv] [--vio trajectory_vio.tum] [--fixes localization.tum] \
+//!   [--prior calibration.json] \
 //!   [--refine-s 5] [--window-s 120] [--segment-s 5] [--fix-segment-s 30] \
 //!   [--fix-delay-s 0.2] [--no-scale] \
 //!   --out calibrated.tum [--estimate final.json]
 //! ```
 //!
-//! `--wheel` holds the body's (e.g. `base_link`) wheel odometry poses; `--vio`
+//! `--wheel` holds the body's (e.g. `base_link`) wheel odometry poses. With
+//! `--imu` (EuRoC's `imu0/data.csv`: stamp, gyro, accelerometer), their
+//! heading comes from the gyro, as the node's with an `imu` topic. `--vio`
 //! the VIO's IMU poses and `--fixes` map localizations of the IMU
 //! (`basalt_euroc_localize_demo`'s `trajectory_vio.tum` and
 //! `localization.tum`), turned into body poses with `--imu-from-body`
@@ -24,11 +27,12 @@ use std::process;
 
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use visloc_core::geometry::SE3;
-use visloc_localization::WheelCalibrationConfig;
+use visloc_localization::{GyroWheelConfig, GyroWheelOdometry, WheelCalibrationConfig};
 use visloc_ros2::wheel_odom::{SavedCalibration, WheelOdomCalibrator, WheelOutput};
 
 struct Args {
     wheel: String,
+    imu: Option<String>,
     vio: Option<String>,
     fixes: Option<String>,
     prior: Option<String>,
@@ -61,6 +65,7 @@ fn parse_pose(text: &str) -> Result<SE3, String> {
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         wheel: String::new(),
+        imu: None,
         vio: None,
         fixes: None,
         prior: None,
@@ -83,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
         };
         match option.as_str() {
             "--wheel" => args.wheel = value()?,
+            "--imu" => args.imu = Some(value()?),
             "--vio" => args.vio = Some(value()?),
             "--fixes" => args.fixes = Some(value()?),
             "--prior" => args.prior = Some(value()?),
@@ -127,6 +133,35 @@ fn read_tum(path: &str) -> Result<Vec<(i64, SE3)>, String> {
     Ok(poses)
 }
 
+/// Stamp (ns), angular velocity (rad/s), specific force (m/s^2).
+type ImuRow = (i64, Vector3<f64>, Vector3<f64>);
+
+/// EuRoC IMU rows (`t [ns], gyro xyz, accelerometer xyz`).
+fn read_imu(path: &str) -> Result<Vec<ImuRow>, String> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+    let mut samples = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bad = || format!("{path}: bad line {line:?}");
+        let (stamp, rest) = line.split_once(',').ok_or_else(bad)?;
+        let values = rest
+            .split(',')
+            .map(|field| field.trim().parse::<f64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| bad())?;
+        let [wx, wy, wz, ax, ay, az]: [f64; 6] = values.try_into().map_err(|_| bad())?;
+        samples.push((
+            stamp.trim().parse::<i64>().map_err(|_| bad())?,
+            Vector3::new(wx, wy, wz),
+            Vector3::new(ax, ay, az),
+        ));
+    }
+    Ok(samples)
+}
+
 fn tum_line(stamp: i64, pose: &SE3) -> String {
     let q = pose.rotation.quaternion();
     let t = pose.translation;
@@ -154,6 +189,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = parse_args()?;
     let wheel = read_tum(&args.wheel)?;
+    let imu = args.imu.as_deref().map(read_imu).transpose()?;
     let vio = args.vio.as_deref().map(read_tum).transpose()?;
     let fixes = args.fixes.as_deref().map(read_tum).transpose()?;
     let config = WheelCalibrationConfig {
@@ -178,6 +214,9 @@ fn run() -> Result<(), String> {
         .into_iter()
         .map(|(stamp, map_from_imu)| (stamp, map_from_imu.compose(&args.imu_from_body)))
         .collect();
+    let mut imu: VecDeque<_> = imu.unwrap_or_default().into();
+    let mut gyro = GyroWheelOdometry::new(GyroWheelConfig::default());
+    let use_gyro = !imu.is_empty();
     let delay_ns = (args.fix_delay_s * 1e9) as i64;
     let mut out = String::from("# timestamp tx ty tz qx qy qz qw (calibrated body poses)\n");
     let mut last = None;
@@ -190,7 +229,16 @@ fn run() -> Result<(), String> {
             let (t, pose) = fixes.pop_front().expect("front");
             calibrator.add_fix(t, &pose);
         }
-        let output = calibrator.wheel(*stamp, odom_from_wheel);
+        while imu.front().is_some_and(|(t, _, _)| t <= stamp) {
+            let (t, angular_velocity, acceleration) = imu.pop_front().expect("front");
+            gyro.add_imu(t, &angular_velocity, &acceleration);
+        }
+        let odom_from_wheel = if use_gyro {
+            gyro.wheel(*stamp, odom_from_wheel)
+        } else {
+            odom_from_wheel.clone()
+        };
+        let output = calibrator.wheel(*stamp, &odom_from_wheel);
         if let WheelOutput::Updated(_, estimate) = &output {
             eprintln!(
                 "{:.1} s: offset ({:.1}, {:.1}) cm from {}, scale {:.4} from {}, tilt {:.2} deg from {} \
@@ -210,6 +258,12 @@ fn run() -> Result<(), String> {
         }
         out.push_str(&tum_line(*stamp, output.pose()));
         last = calibrator.estimate().cloned();
+    }
+    if let Some(bias) = gyro.bias() {
+        eprintln!(
+            "gyro bias about the vertical {:.3} deg/min",
+            bias.to_degrees() * 60.0
+        );
     }
     fs::write(&args.out, out).map_err(|error| format!("{}: {error}", args.out))?;
     if let (Some(path), Some(estimate)) = (&args.estimate, last) {

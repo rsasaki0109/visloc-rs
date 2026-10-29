@@ -8,8 +8,8 @@ Starts
 - with `wheel_odom_topic`, visloc_wheel_calibration_node: it calibrates the
   robot's wheel odometry against the VIO and the map's localizations and
   publishes it on `odom_topic` and as odom -> `base_frame` (turn the wheel
-  driver's own odom -> base_link TF off); the VIO then only feeds it,
-  on `vio_odom_topic`. With `wheel_calibration_file`, the calibration is
+  driver's own odom -> base_link TF off), with its heading from the gyro on
+  `imu_topic`; the VIO then only feeds it, on `vio_odom_topic`. With `wheel_calibration_file`, the calibration is
   saved there and applied from the start of the next launch,
 - visloc_map_localize_node with the camera extrinsics from /tf_static,
   publishing map -> odom, `map_pose` and `map_fix`,
@@ -109,6 +109,7 @@ def launch_setup(context):
                     "--ros-args",
                     *calibration_file,
                     "-r", f"wheel_odom:={arg['wheel_odom_topic']}",
+                    "-r", f"imu:={arg['imu_topic']}",
                     "-r", f"vio_odom:={arg['vio_odom_topic']}",
                     "-r", f"odom:={arg['odom_topic']}",
                 ],

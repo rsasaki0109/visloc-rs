@@ -16,21 +16,24 @@
 //! from the start, and each new estimate is saved there. It also publishes
 //! the calibrated odometry on `/tf`, so that `map -> odom -> base_link`
 //! agrees with `map_pose`: the wheel driver's own `odom -> base_link` must
-//! then be off.
+//! then be off. With an `imu` topic, the wheel odometry's heading comes from
+//! the gyro (`visloc_localization::GyroWheelOdometry`): wheels slip in turns.
 
 use std::process;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use visloc_core::geometry::SE3;
-use visloc_localization::{WheelCalibrationConfig, WheelCalibrationEstimate};
+use visloc_localization::{
+    GyroWheelConfig, GyroWheelOdometry, WheelCalibrationConfig, WheelCalibrationEstimate,
+};
 use visloc_ros2::dds::{
     output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode, StaticTfListener,
 };
 use visloc_ros2::map_localize::se3_from_ros;
-use visloc_ros2::msgs::{Odometry, PoseWithCovarianceStamped, TfMessage};
+use visloc_ros2::msgs::{Imu, Odometry, PoseWithCovarianceStamped, TfMessage};
 use visloc_ros2::params::NodeArgs;
-use visloc_ros2::vio::ros_pose;
+use visloc_ros2::vio::{imu_sample_from_msg, ros_pose};
 use visloc_ros2::wheel_odom::{odom_tf, SavedCalibration, WheelOdomCalibrator, WheelOutput};
 
 const USAGE: &str = "\
@@ -55,6 +58,7 @@ PARAMETERS (--name value  or  -p name:=value):
                        heading against the VIO (the wheels' drift); 0: one for all   [5]
   fix_segment_s        ... of map localizations                                     [30]
   level                level the body frame against gravity (level floor)          [true]
+  gyro_heading         with an imu topic, the wheel odometry's heading from the gyro [true]
   apply_scale          scale the output to the map's (from its localizations)      [true]
   publish_uncalibrated pass the wheel odometry through until calibrated             [true]
   publish_tf           publish the output's frame -> child frame on /tf (turn the wheel
@@ -64,8 +68,9 @@ PARAMETERS (--name value  or  -p name:=value):
 
 TOPICS (remap with --remap from=to or -r from:=to):
   in : wheel_odom (nav_msgs/Odometry, the wheel odometry: planar, child_frame_id = the
-       robot's body, e.g. base_link), vio_odom (nav_msgs/Odometry, visloc_vio_node's
-       odom; optional), map_fix (geometry_msgs/PoseWithCovarianceStamped,
+       robot's body, e.g. base_link), imu (sensor_msgs/Imu, any IMU on the robot, in any
+       orientation: the heading from its gyro; optional), vio_odom (nav_msgs/Odometry,
+       visloc_vio_node's odom; optional), map_fix (geometry_msgs/PoseWithCovarianceStamped,
        visloc_map_localize_node's localizations of the body, with extrinsics:=tf;
        optional), /tf_static (tf2_msgs/TFMessage: the VIO's child frame <- the body)
   out: odom (nav_msgs/Odometry, the body's pose at the map's scale, in the wheel
@@ -83,6 +88,10 @@ fn main() {
 /// What the receive threads share.
 struct State {
     calibrator: WheelOdomCalibrator,
+    /// The wheel odometry with its heading from the gyro (passed through
+    /// until IMU samples come).
+    gyro: Option<GyroWheelOdometry>,
+    gyro_logged: bool,
     /// Child frames of the wheel and VIO odometries, once seen.
     wheel_frame: Option<String>,
     vio_frame: Option<String>,
@@ -122,6 +131,7 @@ fn run() -> Result<(), String> {
         );
     }
     let apply_scale = args.flag("apply_scale", true)?;
+    let gyro_heading = args.flag("gyro_heading", true)?;
     let publish_uncalibrated = args.flag("publish_uncalibrated", true)?;
     let publish_tf = args.flag("publish_tf", true)?;
     let domain_id = args.domain_id()?;
@@ -131,6 +141,7 @@ fn run() -> Result<(), String> {
         .unwrap_or_else(|| args.string_or("node_name", "visloc_wheel_calibration"));
     let namespace = args.namespace.clone().unwrap_or_else(|| "/".into());
     let wheel_topic = args.topic("wheel_odom");
+    let imu_topic = args.topic("imu");
     let vio_topic = args.topic("vio_odom");
     let fix_topic = args.topic("map_fix");
     let out_topic = args.topic("odom");
@@ -160,6 +171,8 @@ fn run() -> Result<(), String> {
     }
     let state = Arc::new(Mutex::new(State {
         calibrator,
+        gyro: gyro_heading.then(|| GyroWheelOdometry::new(GyroWheelConfig::default())),
+        gyro_logged: false,
         wheel_frame: None,
         vio_frame: None,
         logged: None,
@@ -168,6 +181,9 @@ fn run() -> Result<(), String> {
     let mut ros = RosNode::new(domain_id, &namespace, &node_name)?;
     let wheel_sub = ros.subscription::<Odometry>(&wheel_topic, sensor_qos(50))?;
     let vio_sub = ros.subscription::<Odometry>(&vio_topic, sensor_qos(50))?;
+    let imu_sub = gyro_heading
+        .then(|| ros.subscription::<Imu>(&imu_topic, sensor_qos(400)))
+        .transpose()?;
     let fix_sub = ros.subscription::<PoseWithCovarianceStamped>(&fix_topic, sensor_qos(50))?;
     let odom_pub = ros.publisher::<Odometry>(&out_topic, output_qos(50))?;
     let tf_pub = publish_tf
@@ -188,6 +204,18 @@ fn run() -> Result<(), String> {
                 .add_vio(msg.header.stamp.to_nanos(), &se3_from_ros(&msg.pose.pose));
         })?;
     }
+    if let Some(imu_sub) = imu_sub {
+        let state = Arc::clone(&state);
+        spawn_receiver("imu-rx", imu_sub, move |msg: Imu| {
+            let Some(sample) = imu_sample_from_msg(&msg) else {
+                return;
+            };
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(gyro) = &mut state.gyro {
+                gyro.add_imu(sample.timestamp_ns, &sample.gyro_rad_s, &sample.accel_m_s2);
+            }
+        })?;
+    }
     {
         let state = Arc::clone(&state);
         spawn_receiver("fix-rx", fix_sub, move |msg: PoseWithCovarianceStamped| {
@@ -204,11 +232,23 @@ fn run() -> Result<(), String> {
             if state.wheel_frame.is_none() {
                 state.wheel_frame = Some(msg.child_frame_id.clone());
             }
-            let output = state
-                .calibrator
-                .wheel(msg.header.stamp.to_nanos(), &se3_from_ros(&msg.pose.pose));
+            let stamp = msg.header.stamp.to_nanos();
+            let mut odom_from_wheel = se3_from_ros(&msg.pose.pose);
+            let state = &mut *state;
+            if let Some(gyro) = &mut state.gyro {
+                odom_from_wheel = gyro.wheel(stamp, &odom_from_wheel);
+                if let (false, Some(bias)) = (state.gyro_logged, gyro.bias()) {
+                    eprintln!(
+                        "visloc_wheel_calibration_node: heading from the gyro; its bias about \
+                         the vertical {:.2} deg/min",
+                        bias.to_degrees() * 60.0
+                    );
+                    state.gyro_logged = true;
+                }
+            }
+            let output = state.calibrator.wheel(stamp, &odom_from_wheel);
             if let WheelOutput::Updated(_, estimate) = &output {
-                log_estimate(&mut state, estimate);
+                log_estimate(state, estimate);
                 if let Some(path) = &calibration_file {
                     if let Err(error) =
                         std::fs::write(path, SavedCalibration::from(estimate).to_json())
@@ -230,9 +270,14 @@ fn run() -> Result<(), String> {
     }
 
     eprintln!(
-        "visloc_wheel_calibration_node: domain {domain_id}, node {}; in: {wheel_topic} \
+        "visloc_wheel_calibration_node: domain {domain_id}, node {}; in: {wheel_topic}{} \
          {vio_topic} {fix_topic}; out: {out_topic}{}; refitting every {refine_s} s",
         visloc_ros2::dds::qualified_name(&namespace, &node_name),
+        if gyro_heading {
+            format!(" {imu_topic}")
+        } else {
+            String::new()
+        },
         if publish_tf {
             format!(" {tf_topic}")
         } else {
