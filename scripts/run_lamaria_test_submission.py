@@ -115,6 +115,9 @@ the GPU; lamaria_ba_chain.py --pass-features) on `--ba-pass-features-tracks`
 1WM093701G1276) only: the two Short training sequences of that device gain 6.4
 and 9.3, where sequence_1_19 and 1_20 (the other device), 2_11 and 3_18 lose
 1.2 to 12.7 (docs/lamaria_batch_ba.md#learned-features). Off by default.
+`--ba-pass-match online` matches those keypoints within the online result's
+epipolar band instead of the VIO's (lamaria_ba_chain.py --pass-match): the two
+R sequences then reach 97.02 and 79.31 instead of 92.20 and 73.96 (submission 6).
 
 `--stream` extracts the ASL zip over HTTP range requests instead of
 downloading it first (scripts/http_zip.py), so a sequence needs its images'
@@ -136,7 +139,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aria_factory_imu_rectify import VRS_HEAD_BYTES, extract_record, rectify_csv  # noqa: E402
 from aria_device_refinement import lookup as device_refinement, rotate_rig  # noqa: E402
-from lamaria_ba_chain import run_chain  # noqa: E402
+from lamaria_ba_chain import PASS_MATCH, run_chain  # noqa: E402
 import http_zip  # noqa: E402
 
 LOOP_MATCH_MAX_ROT_ERROR_DEG = 5
@@ -481,6 +484,9 @@ def main() -> int:
                         help="--ba-pass-features: the tracks it applies to (default 1)")
     parser.add_argument("--ba-pass-features-serials", nargs="*", default=list(DEFAULT_PASS_FEATURES_SERIALS),
                         help="--ba-pass-features: the device serials it applies to (default 1WM093701G1276)")
+    parser.add_argument("--ba-pass-match", choices=PASS_MATCH, default="vio",
+                        help="--ba-pass-features: keep the matches within the VIO's epipolar band (default), the online "
+                             "result's, or those an essential matrix explains (lamaria_ba_chain.py --pass-match)")
     parser.add_argument("--ba-jobs", type=int, default=4, help="--ba-chain: processes for features, match, loops")
     parser.add_argument("--ba-threads", type=int, default=2, help="--ba-chain: threads for its solves")
     parser.add_argument("--gyro-bias-std", type=float, default=1e-7,
@@ -633,7 +639,8 @@ def main() -> int:
                     trajectory = run_chain(inner / "mav0", trajectory, inner / "mav0" / "imu0" / "data.csv",
                                            ba_calib, track, work / "ba", work / "ba_chain.tum", args.ba_jobs,
                                            args.ba_threads, python, log=lambda m, seq=seq: log(f"{seq}: {m}"),
-                                           low_light=low_light, rematch=args.ba_rematch, pass_features=learned)
+                                           low_light=low_light, rematch=args.ba_rematch, pass_features=learned,
+                                           pass_match=args.ba_pass_match)
                 except subprocess.CalledProcessError as error:  # a VIO estimate scores, none does not
                     log(f"{seq}: WARN BA chain failed ({error.cmd[3]}); submitting the VIO trajectory")
                 before = work / "ba" / "ba2.tum"
