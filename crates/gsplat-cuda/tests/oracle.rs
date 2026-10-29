@@ -8,11 +8,11 @@ use nalgebra::{Quaternion, Vector3};
 use visloc_gsplat_core::backward::{render_backward, render_backward_screen, render_f64};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{sh_rest_coeffs_per_channel, Gaussian, Scene};
-use visloc_gsplat_cuda::{CudaRasterizer, SCREEN_GRAD_FLOATS};
+use visloc_gsplat_cuda::{CudaGsplat, SCREEN_GRAD_FLOATS};
 use visloc_gsplat_render::packing::PackedScene;
 
-fn rasterizer() -> Option<CudaRasterizer> {
-    match CudaRasterizer::from_env() {
+fn rasterizer() -> Option<CudaGsplat> {
+    match CudaGsplat::from_env() {
         None => {
             eprintln!("skipping: {} is not set", visloc_gsplat_cuda::LIBRARY_ENV);
             None

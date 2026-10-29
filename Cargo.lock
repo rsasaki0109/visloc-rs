@@ -1596,6 +1596,7 @@ dependencies = [
  "nalgebra",
  "visloc-gsplat-core",
  "visloc-gsplat-render",
+ "visloc-gsplat-train",
 ]
 
 [[package]]

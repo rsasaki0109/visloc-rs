@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use nalgebra::{Rotation3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::Scene;
-use visloc_gsplat_cuda::CudaRasterizer;
+use visloc_gsplat_cuda::CudaGsplat;
 use visloc_gsplat_render::packing::PackedScene;
 
 struct Args {
@@ -100,7 +100,7 @@ fn main() {
         args.height
     );
 
-    let mut cuda = CudaRasterizer::from_env()
+    let mut cuda = CudaGsplat::from_env()
         .expect("set VISLOC_GSPLAT_CUDA_LIB to the built library")
         .expect("load the CUDA rasterizer");
     cuda.set_scene(&PackedScene::from_scene(&scene))
@@ -158,6 +158,10 @@ fn main() {
     let mut forward = 0.0;
     let mut backward = 0.0;
     for (name, ms) in &mut stage_ms {
+        // The loss and optimizer stages only run in a training step.
+        if ms.iter().all(|&m| m == 0.0) {
+            continue;
+        }
         let m = median(ms);
         if name.ends_with("_bwd") {
             backward += m;

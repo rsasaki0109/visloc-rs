@@ -17,6 +17,7 @@
 //! Scoring every method's splat with the same renderer, split and metric keeps
 //! comparisons (e.g. against brush) apples to apples.
 
+pub mod config;
 pub mod dataset;
 pub mod densify;
 pub mod equirect;

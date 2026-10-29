@@ -23,6 +23,12 @@
 //   opacity[i]              = opacity logit
 //   sh[i * 3 * cpc2 + ..]   = 3 DC values, then channel-major rest
 // Gradients come back in the same layouts.
+//
+// Training (ABI 2) keeps the scene, its Adam moments and the ground-truth
+// images on the device; one train_step call runs the wgpu trainer's step
+// (loss_l1, ssim, densify_stats, adam, mean_noise shaders). brush's refine
+// is split as in the wgpu trainer: the host reads the statistics and picks
+// an action per gaussian, the device scatters (densify_scatter.wgsl).
 
 #include <cuda_runtime.h>
 
@@ -51,16 +57,13 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 1;
+constexpr uint32_t kAbiVersion = 2;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
 // du dv dA dB dC dopacity dr dg db, and the refine weight (brush / AbsGS:
 // sum over pixels of |dL/du| W + |dL/dv| H).
 constexpr int kNumGrad = 10;
-constexpr int kNumStages = 8;
-constexpr const char* kStageNames =
-    "project,scan,duplicate,sort,ranges,raster,raster_bwd,project_bwd";
 
 constexpr float kC0 = 0.2820948f;
 
@@ -804,11 +807,394 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
     gt[9] = gls[2];
 }
 
+
+// ---------------------------------------------------------------------------
+// Training kernels: the wgpu trainer's loss_l1, ssim, densify_stats, adam,
+// mean_noise and densify_scatter shaders (crates/gsplat-train/src/shaders).
+
+__device__ inline float gt_channel(uint32_t packed, int c) { return float((packed >> (8 * c)) & 0xFFu) / 255.f; }
+__device__ inline bool gt_valid(uint32_t packed) { return (packed >> 24) >= 128u; }
+__device__ inline float signf(float x) { return float(x > 0.f) - float(x < 0.f); }
+
+// Sum `v` over the block (256 threads) and add it to `*acc` once.
+__device__ inline void block_add(float v, double* acc) {
+    __shared__ float warp_sums[kBlock / 32];
+#pragma unroll
+    for (int m = 16; m > 0; m >>= 1) v += __shfl_xor_sync(0xffffffffu, v, m);
+    if ((threadIdx.x & 31) == 0) warp_sums[threadIdx.x >> 5] = v;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        float s = threadIdx.x < kBlock / 32 ? warp_sums[threadIdx.x] : 0.f;
+#pragma unroll
+        for (int m = 16; m > 0; m >>= 1) s += __shfl_xor_sync(0xffffffffu, s, m);
+        if (threadIdx.x == 0) atomicAdd(acc, double(s));
+    }
+}
+
+// d_image = weight * sign(render - gt) / (3 npix): the gradient of
+// weight * mean |render - gt|. Ground truth is packed RGBA8 (R in the low
+// byte); alpha below 128 masks the pixel out. acc += the unweighted mean L1.
+__global__ void __launch_bounds__(kBlock) loss_l1_kernel(uint32_t npix, const uint32_t* __restrict__ gt,
+                                                         const float* __restrict__ render, float weight,
+                                                         float* __restrict__ d_image, double* __restrict__ acc) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    float l = 0.f;
+    if (i < npix) {
+        const uint32_t packed = gt[i];
+        const float scale = (gt_valid(packed) ? 1.f : 0.f) / (3.f * float(npix));
+#pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            const float diff = render[i * 3 + c] - gt_channel(packed, c);
+            d_image[i * 3 + c] = signf(diff) * weight * scale;
+            l += fabsf(diff) * scale;
+        }
+    }
+    block_add(l, acc);
+}
+
+// D-SSIM: 11x11 gaussian window (sigma 1.5), zero padding, C1 = 0.01^2,
+// C2 = 0.03^2, per channel; see ssim.wgsl for the derivation. One block per
+// 16x16 tile with its 26x26 apron in shared memory.
+constexpr int kSsimR = 5;
+constexpr int kSsimA = kTile + 2 * kSsimR;  // 26
+__constant__ float kGauss[11] = {0.0010284f, 0.0075988f, 0.0360008f, 0.1093607f, 0.2130055f, 0.2660117f,
+                                 0.2130055f, 0.1093607f, 0.0360008f, 0.0075988f, 0.0010284f};
+
+__device__ inline int apron_pixel(int tx, int ty, int ax, int ay, uint32_t w, uint32_t h) {
+    const int gx = tx * kTile + ax - kSsimR;
+    const int gy = ty * kTile + ay - kSsimR;
+    if (gx < 0 || gy < 0 || gx >= int(w) || gy >= int(h)) return -1;
+    return gy * int(w) + gx;
+}
+
+// SSIM and, per pixel and channel, A = dS/dmx, B = dS/dSxx, C = dS/dSxy.
+__global__ void __launch_bounds__(kBlock) ssim_fwd_kernel(uint32_t w, uint32_t h, const float* __restrict__ render,
+                                                          const uint32_t* __restrict__ gt, float* __restrict__ abc,
+                                                          double* __restrict__ acc) {
+    __shared__ float in0[kSsimA * kSsimA];
+    __shared__ float in1[kSsimA * kSsimA];
+    __shared__ float hq[kSsimA * kTile * 5];
+    const int tx = blockIdx.x, ty = blockIdx.y;
+    const int t = threadIdx.x;
+    const int ox = t % kTile, oy = t / kTile;
+    const uint32_t px = tx * kTile + ox, py = ty * kTile + oy;
+    const bool inside = px < w && py < h;
+    const bool valid = inside && gt_valid(gt[py * w + px]);
+    const float C1 = 0.0001f, C2 = 0.0009f;
+    float s_sum = 0.f;
+    for (int c = 0; c < 3; ++c) {
+        for (int i = t; i < kSsimA * kSsimA; i += kBlock) {
+            const int p = apron_pixel(tx, ty, i % kSsimA, i / kSsimA, w, h);
+            in0[i] = p >= 0 ? render[p * 3 + c] : 0.f;
+            in1[i] = p >= 0 ? gt_channel(gt[p], c) : 0.f;
+        }
+        __syncthreads();
+        for (int i = t; i < kSsimA * kTile; i += kBlock) {
+            const int row = i / kTile, col = i % kTile;
+            float mx = 0.f, my = 0.f, sxx = 0.f, syy = 0.f, sxy = 0.f;
+#pragma unroll
+            for (int k = 0; k < 11; ++k) {
+                const float g = kGauss[k];
+                const int j = row * kSsimA + col + k;
+                const float xv = in0[j], yv = in1[j];
+                mx += g * xv;
+                my += g * yv;
+                sxx += g * xv * xv;
+                syy += g * yv * yv;
+                sxy += g * xv * yv;
+            }
+            hq[i * 5 + 0] = mx;
+            hq[i * 5 + 1] = my;
+            hq[i * 5 + 2] = sxx;
+            hq[i * 5 + 3] = syy;
+            hq[i * 5 + 4] = sxy;
+        }
+        __syncthreads();
+        float mx = 0.f, my = 0.f, sxx = 0.f, syy = 0.f, sxy = 0.f;
+#pragma unroll
+        for (int k = 0; k < 11; ++k) {
+            const float g = kGauss[k];
+            const int j = ((oy + k) * kTile + ox) * 5;
+            mx += g * hq[j];
+            my += g * hq[j + 1];
+            sxx += g * hq[j + 2];
+            syy += g * hq[j + 3];
+            sxy += g * hq[j + 4];
+        }
+        if (inside) {
+            const uint32_t i = py * w + px;
+            float ga = 0.f, gb = 0.f, gc = 0.f;
+            if (valid) {
+                const float vx = sxx - mx * mx;
+                const float vy = syy - my * my;
+                const float cxy = sxy - mx * my;
+                const float a = 2.f * mx * my + C1;
+                const float b = 2.f * cxy + C2;
+                const float cc = mx * mx + my * my + C1;
+                const float d = vx + vy + C2;
+                const float s = a * b / (cc * d);
+                s_sum += s;
+                ga = (2.f * my * b - 2.f * my * a) / (cc * d) - s * (2.f * mx / cc - 2.f * mx / d);
+                gb = -s / d;
+                gc = 2.f * a / (cc * d);
+            }
+            abc[i * 9 + c * 3 + 0] = ga;
+            abc[i * 9 + c * 3 + 1] = gb;
+            abc[i * 9 + c * 3 + 2] = gc;
+        }
+        // in0 / in1 / hq are reused by the next channel.
+        __syncthreads();
+    }
+    block_add(s_sum, acc);
+}
+
+// d_image -= scale * dS/dx with dS/dx = (G*A) + 2 x (G*B) + y (G*C).
+__global__ void __launch_bounds__(kBlock) ssim_bwd_kernel(uint32_t w, uint32_t h, float scale,
+                                                          const float* __restrict__ render,
+                                                          const uint32_t* __restrict__ gt,
+                                                          const float* __restrict__ abc,
+                                                          float* __restrict__ d_image) {
+    __shared__ float in0[kSsimA * kSsimA];
+    __shared__ float in1[kSsimA * kSsimA];
+    __shared__ float in2[kSsimA * kSsimA];
+    __shared__ float hq[kSsimA * kTile * 3];
+    const int tx = blockIdx.x, ty = blockIdx.y;
+    const int t = threadIdx.x;
+    const int ox = t % kTile, oy = t / kTile;
+    const uint32_t px = tx * kTile + ox, py = ty * kTile + oy;
+    const bool inside = px < w && py < h;
+    const bool valid = inside && gt_valid(gt[py * w + px]);
+    for (int c = 0; c < 3; ++c) {
+        for (int i = t; i < kSsimA * kSsimA; i += kBlock) {
+            const int p = apron_pixel(tx, ty, i % kSsimA, i / kSsimA, w, h);
+            in0[i] = p >= 0 ? abc[p * 9 + c * 3] : 0.f;
+            in1[i] = p >= 0 ? abc[p * 9 + c * 3 + 1] : 0.f;
+            in2[i] = p >= 0 ? abc[p * 9 + c * 3 + 2] : 0.f;
+        }
+        __syncthreads();
+        for (int i = t; i < kSsimA * kTile; i += kBlock) {
+            const int row = i / kTile, col = i % kTile;
+            float ga = 0.f, gb = 0.f, gc = 0.f;
+#pragma unroll
+            for (int k = 0; k < 11; ++k) {
+                const float g = kGauss[k];
+                const int j = row * kSsimA + col + k;
+                ga += g * in0[j];
+                gb += g * in1[j];
+                gc += g * in2[j];
+            }
+            hq[i * 3 + 0] = ga;
+            hq[i * 3 + 1] = gb;
+            hq[i * 3 + 2] = gc;
+        }
+        __syncthreads();
+        float ga = 0.f, gb = 0.f, gc = 0.f;
+#pragma unroll
+        for (int k = 0; k < 11; ++k) {
+            const float g = kGauss[k];
+            const int j = ((oy + k) * kTile + ox) * 3;
+            ga += g * hq[j];
+            gb += g * hq[j + 1];
+            gc += g * hq[j + 2];
+        }
+        if (valid) {
+            const uint32_t i = py * w + px;
+            const float xv = render[i * 3 + c];
+            const float yv = gt_channel(gt[i], c);
+            d_image[i * 3 + c] -= scale * (ga + 2.f * xv * gb + yv * gc);
+        }
+        __syncthreads();
+    }
+}
+
+// brush refine statistics: per gaussian blended into at least one pixel
+// this frame (a nonzero opacity or colour gradient), the max of its refine
+// weight and the number of such frames.
+__global__ void stats_kernel(int n, const uint32_t* __restrict__ tiles, const float* __restrict__ screen_grads,
+                             float* __restrict__ weight_max, float* __restrict__ seen) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || tiles[i] == 0) return;
+    const float* sg = screen_grads + size_t(i) * kNumGrad;
+    if (sg[5] == 0.f && sg[6] == 0.f && sg[7] == 0.f && sg[8] == 0.f) return;
+    weight_max[i] = fmaxf(weight_max[i], sg[9]);
+    seen[i] += 1.f;
+}
+
+// Adam over one parameter buffer of `stride`-float records: element
+// k = e % stride uses lr_a for k < split_a, lr_b for k < split_b, else lr_c.
+// brush's auxiliary losses ride along: aux_kind 1 adds
+// aux_coef * v * exp(p) to the log-scale elements (k >= 7), aux_kind 2 adds
+// aux_coef * v to every element (an opacity logit), with
+// v = 1e-3 + (1 if the gaussian was projected this frame).
+__global__ void adam_kernel(size_t n_elem, uint32_t stride, uint32_t split_a, uint32_t split_b, float lr_a,
+                            float lr_b, float lr_c, float beta1, float beta2, float eps, float bc1, float bc2,
+                            int aux_kind, float aux_coef, const uint32_t* __restrict__ tiles,
+                            float* __restrict__ params, const float* __restrict__ grads, float* __restrict__ m1,
+                            float* __restrict__ m2) {
+    const size_t e = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (e >= n_elem) return;
+    const uint32_t k = uint32_t(e % stride);
+    const float lr = k < split_a ? lr_a : (k < split_b ? lr_b : lr_c);
+    const float p = params[e];
+    float g = grads[e];
+    if (aux_kind != 0) {
+        const float v = 1e-3f + (tiles[e / stride] > 0 ? 1.f : 0.f);
+        if (aux_kind == 1) {
+            if (k >= 7) g += aux_coef * v * expf(p);
+        } else {
+            g += aux_coef * v;
+        }
+    }
+    const float m = beta1 * m1[e] + (1.f - beta1) * g;
+    const float vv = beta2 * m2[e] + (1.f - beta2) * g * g;
+    m1[e] = m;
+    m2[e] = vv;
+    params[e] = p - lr * (m / bc1) / (sqrtf(vv / bc2) + eps);
+}
+
+// PCG-style integer hash, uniform and normal samples (mean_noise.wgsl,
+// densify_scatter.wgsl).
+__device__ inline uint32_t hash_u32(uint32_t x) {
+    const uint32_t v = x * 747796405u + 2891336453u;
+    const uint32_t w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+__device__ inline float uniform01(uint32_t key) { return (float(hash_u32(key) >> 8u) + 0.5f) / 16777216.f; }
+__device__ inline float normal_sample(uint32_t key) {
+    const float u1 = uniform01(key * 2u + 1u);
+    const float u2 = uniform01(key * 2u + 2u);
+    return sqrtf(-2.f * logf(u1)) * cosf(6.2831853f * u2);
+}
+
+// Rotate v by the normalised quaternion (w, x, y, z).
+__device__ inline void quat_rotate(const float* q, const float* v, float* out) {
+    const float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    float w = 1.f, x = 0.f, y = 0.f, z = 0.f;
+    if (n > 1e-12f) {
+        w = q[0] / n;
+        x = q[1] / n;
+        y = q[2] / n;
+        z = q[3] / n;
+    }
+    // t = 2 u x v; out = v + w t + u x t
+    const float t0 = 2.f * (y * v[2] - z * v[1]);
+    const float t1 = 2.f * (z * v[0] - x * v[2]);
+    const float t2 = 2.f * (x * v[1] - y * v[0]);
+    out[0] = v[0] + w * t0 + (y * t2 - z * t1);
+    out[1] = v[1] + w * t1 + (z * t0 - x * t2);
+    out[2] = v[2] + w * t2 + (x * t1 - y * t0);
+}
+
+// brush mean noise: nearly transparent gaussians wander,
+// mean += clamp(R (N(0, 1) * s) * w, +-max_noise),
+// w = clamp((1 - opacity)^100, 0, 1) * scale.
+__global__ void noise_kernel(int n, uint32_t seed, float scale, float max_noise, float* __restrict__ transforms,
+                             const float* __restrict__ opacity) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float a = 1.f / (1.f + expf(-opacity[i]));
+    const float w = fminf(fmaxf(powf(1.f - a, 100.f), 0.f), 1.f) * scale;
+    if (w <= 0.f) return;
+    float* t = transforms + size_t(i) * 10;
+    const uint32_t key = (seed ^ (uint32_t(i) * 3u)) * 3u;
+    const float v[3] = {normal_sample(key) * expf(t[7]), normal_sample(key + 1u) * expf(t[8]),
+                        normal_sample(key + 2u) * expf(t[9])};
+    float d[3];
+    quat_rotate(t + 3, v, d);
+#pragma unroll
+    for (int k = 0; k < 3; ++k) t[k] += clampf(d[k] * w, -max_noise, max_noise);
+}
+
+__global__ void action_counts_kernel(int n, const uint32_t* __restrict__ actions, uint32_t* __restrict__ counts) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const uint32_t a = actions[i];
+    counts[i] = a == 0 ? 0u : (a >= 2 ? 2u : 1u);
+}
+
+// Copy one parameter group's rows and Adam moments to the new buffers per
+// action: 0 prune, 1 keep, 2 clone (keep + a fresh copy), 4 brush split
+// (the parent shifted by -o and a fresh copy shifted by +o, o = R (N(0, 0.5)
+// * s), both with scales / sqrt 2 and opacity 1 - sqrt(1 - a)). Row 0 keeps
+// the parent's moments, row 1 starts at zero. kind: 0 transforms,
+// 1 opacity, 2 SH.
+__global__ void scatter_kernel(int n, uint32_t stride, int kind, uint32_t seed, const uint32_t* __restrict__ actions,
+                               const uint32_t* __restrict__ cum, const float* __restrict__ src_p,
+                               const float* __restrict__ src_m1, const float* __restrict__ src_m2,
+                               float* __restrict__ dst_p, float* __restrict__ dst_m1, float* __restrict__ dst_m2) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const uint32_t action = actions[i];
+    if (action == 0) return;
+    const uint32_t count = action >= 2 ? 2u : 1u;
+    const size_t out0 = cum[i] - count;
+    const size_t src = size_t(i) * stride;
+
+    if (kind == 0 && action == 4) {
+        const float* p = src_p + src;
+        const uint32_t key = (seed ^ (uint32_t(i) * 6u)) * 3u;
+        const float v[3] = {normal_sample(key) * 0.5f * expf(p[7]), normal_sample(key + 1u) * 0.5f * expf(p[8]),
+                            normal_sample(key + 2u) * 0.5f * expf(p[9])};
+        float o[3];
+        quat_rotate(p + 3, v, o);
+        const float shrink = logf(sqrtf(2.f));
+        for (uint32_t c = 0; c < 2; ++c) {
+            const size_t d = (out0 + c) * stride;
+            const float sgn = c == 1 ? 1.f : -1.f;
+            for (int k = 0; k < 3; ++k) dst_p[d + k] = p[k] + sgn * o[k];
+            for (int k = 3; k < 7; ++k) dst_p[d + k] = p[k];
+            for (int k = 7; k < 10; ++k) dst_p[d + k] = p[k] - shrink;
+            for (int k = 0; k < 10; ++k) {
+                dst_m1[d + k] = c == 1 ? 0.f : src_m1[src + k];
+                dst_m2[d + k] = c == 1 ? 0.f : src_m2[src + k];
+            }
+        }
+        return;
+    }
+    if (kind == 1 && action == 4) {
+        const float a = 1.f / (1.f + expf(-src_p[src]));
+        const float na = clampf(1.f - sqrtf(fmaxf(1.f - a, 0.f)), 1e-7f, 1.f - 1e-7f);
+        const float logit = logf(na / (1.f - na));
+        for (uint32_t c = 0; c < 2; ++c) {
+            dst_p[out0 + c] = logit;
+            dst_m1[out0 + c] = c == 1 ? 0.f : src_m1[src];
+            dst_m2[out0 + c] = c == 1 ? 0.f : src_m2[src];
+        }
+        return;
+    }
+    for (uint32_t c = 0; c < count; ++c) {
+        const size_t d = (out0 + c) * stride;
+        for (uint32_t k = 0; k < stride; ++k) {
+            dst_p[d + k] = src_p[src + k];
+            dst_m1[d + k] = c == 1 ? 0.f : src_m1[src + k];
+            dst_m2[d + k] = c == 1 ? 0.f : src_m2[src + k];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host side.
+
 // Device buffer that only grows.
 struct Buf {
     void* ptr = nullptr;
     size_t cap = 0;
 };
+
+enum Stage {
+    kProject,
+    kScan,
+    kDuplicate,
+    kSort,
+    kRanges,
+    kRaster,
+    kLoss,
+    kRasterBwd,
+    kProjectBwd,
+    kOptimizer,
+    kNumStages,
+};
+constexpr const char* kStageNames = "project,scan,duplicate,sort,ranges,raster,loss,raster_bwd,project_bwd,optimizer";
 
 struct Ctx {
     std::string error;
@@ -820,8 +1206,8 @@ struct Ctx {
     uint32_t tile_bw = 0, tile_bh = 0;
     uint32_t num_isect = 0;
     bool have_forward = false;
-    // Scene.
-    Buf transforms, opacity, sh;
+    // Scene and its Adam moments, per group (transforms, opacity, SH).
+    Buf params[3], m1[3], m2[3];
     // Per gaussian, per frame.
     Buf xy, conic_op, color, depth, rect, extk, tiles, offsets;
     // Intersections.
@@ -829,22 +1215,36 @@ struct Ctx {
     // Per tile / pixel.
     Buf ranges, image, final_t, last_idx;
     // Backward.
-    Buf d_image, screen_grads, g_transforms, g_opacity, g_sh;
-    cudaEvent_t ev[kNumStages + 2] = {};
+    Buf d_image, screen_grads, grads[3];
+    // Training: ground truth (packed RGBA8 per pixel, image-major), SSIM
+    // partials, loss sums (L1, SSIM), refine statistics, refine scratch.
+    Buf gt, abc, loss_acc, weight_max, seen, actions, counts, cum;
+    int num_images = 0;
+    uint32_t gt_w = 0, gt_h = 0;
+    uint32_t loss_steps = 0;
+    cudaEvent_t ev_start[kNumStages] = {}, ev_end[kNumStages] = {};
+    bool ran[kNumStages] = {};
     float ms[kNumStages] = {};
 
     int rest_pc() const { return (sh_degree + 1) * (sh_degree + 1) - 1; }
     size_t row_len() const { return size_t(3) * (sh_degree + 1) * (sh_degree + 1); }
+    size_t stride(int group) const { return group == 0 ? 10 : (group == 1 ? 1 : row_len()); }
     size_t pixels() const { return size_t(cam.width) * cam.height; }
+    float* p(int group) const { return static_cast<float*>(params[group].ptr); }
 };
 
-#define GSC_CHECK(ctx, expr)                                                               \
-    do {                                                                                   \
-        cudaError_t err__ = (expr);                                                        \
-        if (err__ != cudaSuccess) {                                                        \
-            (ctx)->error = std::string(#expr) + ": " + cudaGetErrorString(err__);          \
-            return -1;                                                                     \
-        }                                                                                  \
+#define GSC_CHECK(ctx, expr)                                                      \
+    do {                                                                          \
+        cudaError_t err__ = (expr);                                               \
+        if (err__ != cudaSuccess) {                                               \
+            (ctx)->error = std::string(#expr) + ": " + cudaGetErrorString(err__); \
+            return -1;                                                            \
+        }                                                                         \
+    } while (0)
+
+#define GSC_TRY(expr)               \
+    do {                            \
+        if ((expr) != 0) return -1; \
     } while (0)
 
 template <class T>
@@ -863,14 +1263,51 @@ int ensure(Ctx* ctx, Buf& b, size_t count, T** out) {
     return 0;
 }
 
-#define GSC_TRY(expr)              \
-    do {                           \
-        if ((expr) != 0) return -1; \
-    } while (0)
+// A buffer of exactly `count` zeros (contents not preserved).
+template <class T>
+int ensure_zero(Ctx* ctx, Buf& b, size_t count, T** out) {
+    GSC_TRY(ensure(ctx, b, count, out));
+    if (count > 0) GSC_CHECK(ctx, cudaMemsetAsync(*out, 0, count * sizeof(T)));
+    return 0;
+}
+
+void free_buf(Buf& b) {
+    if (b.ptr) cudaFree(b.ptr);
+    b.ptr = nullptr;
+    b.cap = 0;
+}
 
 inline unsigned blocks_for(size_t n, unsigned per = 256) { return unsigned((n + per - 1) / per); }
 
-int run_forward(Ctx* ctx, float* out_rgb) {
+int stage_begin(Ctx* ctx, Stage s) {
+    GSC_CHECK(ctx, cudaEventRecord(ctx->ev_start[s]));
+    ctx->ran[s] = true;
+    return 0;
+}
+int stage_end(Ctx* ctx, Stage s) {
+    GSC_CHECK(ctx, cudaEventRecord(ctx->ev_end[s]));
+    return 0;
+}
+void clear_stages(Ctx* ctx) {
+    for (int s = 0; s < kNumStages; ++s) {
+        ctx->ran[s] = false;
+        ctx->ms[s] = 0.f;
+    }
+}
+// Wait for the last recorded stage and read every stage's time.
+int collect_stages(Ctx* ctx) {
+    for (int s = kNumStages - 1; s >= 0; --s) {
+        if (ctx->ran[s]) {
+            GSC_CHECK(ctx, cudaEventSynchronize(ctx->ev_end[s]));
+            break;
+        }
+    }
+    for (int s = 0; s < kNumStages; ++s)
+        if (ctx->ran[s]) GSC_CHECK(ctx, cudaEventElapsedTime(&ctx->ms[s], ctx->ev_start[s], ctx->ev_end[s]));
+    return 0;
+}
+
+int run_forward(Ctx* ctx) {
     const int n = ctx->n;
     const GscCamera cam = ctx->cam;
     ctx->tile_bw = (cam.width + kTile - 1) / kTile;
@@ -899,17 +1336,14 @@ int run_forward(Ctx* ctx, float* out_rgb) {
     GSC_TRY(ensure(ctx, ctx->final_t, pixels, &final_t));
     GSC_TRY(ensure(ctx, ctx->last_idx, pixels, &last_idx));
 
-    cudaEvent_t* ev = ctx->ev;
-    GSC_CHECK(ctx, cudaEventRecord(ev[0]));
+    GSC_TRY(stage_begin(ctx, kProject));
     if (n > 0) {
-        project_kernel<<<blocks_for(n), 256>>>(n, cam, ctx->rest_pc(), ctx->act,
-                                               static_cast<const float*>(ctx->transforms.ptr),
-                                               static_cast<const float*>(ctx->opacity.ptr),
-                                               static_cast<const float*>(ctx->sh.ptr), xy, conic_op, color, depth,
-                                               rect, extk, tiles);
+        project_kernel<<<blocks_for(n), 256>>>(n, cam, ctx->rest_pc(), ctx->act, ctx->p(0), ctx->p(1), ctx->p(2), xy,
+                                               conic_op, color, depth, rect, extk, tiles);
         GSC_CHECK(ctx, cudaGetLastError());
     }
-    GSC_CHECK(ctx, cudaEventRecord(ev[1]));
+    GSC_TRY(stage_end(ctx, kProject));
+    GSC_TRY(stage_begin(ctx, kScan));
     uint32_t num_isect = 0;
     if (n > 0) {
         size_t temp_bytes = 0;
@@ -920,7 +1354,7 @@ int run_forward(Ctx* ctx, float* out_rgb) {
         GSC_CHECK(ctx, cudaMemcpy(&num_isect, offsets + (n - 1), sizeof(uint32_t), cudaMemcpyDeviceToHost));
     }
     ctx->num_isect = num_isect;
-    GSC_CHECK(ctx, cudaEventRecord(ev[2]));
+    GSC_TRY(stage_end(ctx, kScan));
 
     unsigned long long *keys, *keys_sorted;
     uint32_t *vals, *vals_sorted;
@@ -928,12 +1362,14 @@ int run_forward(Ctx* ctx, float* out_rgb) {
     GSC_TRY(ensure(ctx, ctx->vals, num_isect, &vals));
     GSC_TRY(ensure(ctx, ctx->keys_sorted, num_isect, &keys_sorted));
     GSC_TRY(ensure(ctx, ctx->vals_sorted, num_isect, &vals_sorted));
+    GSC_TRY(stage_begin(ctx, kDuplicate));
     if (num_isect > 0) {
         duplicate_kernel<<<blocks_for(n), 256>>>(n, cam, ctx->tile_bw, xy, conic_op, depth, rect, extk, tiles,
                                                  offsets, keys, vals);
         GSC_CHECK(ctx, cudaGetLastError());
     }
-    GSC_CHECK(ctx, cudaEventRecord(ev[3]));
+    GSC_TRY(stage_end(ctx, kDuplicate));
+    GSC_TRY(stage_begin(ctx, kSort));
     if (num_isect > 0) {
         int tile_bits = 1;
         while ((1u << tile_bits) <= num_tiles) ++tile_bits;
@@ -945,83 +1381,132 @@ int run_forward(Ctx* ctx, float* out_rgb) {
         GSC_CHECK(ctx, cub::DeviceRadixSort::SortPairs(temp, temp_bytes, keys, keys_sorted, vals, vals_sorted,
                                                        int(num_isect), 0, 32 + tile_bits));
     }
-    GSC_CHECK(ctx, cudaEventRecord(ev[4]));
+    GSC_TRY(stage_end(ctx, kSort));
+    GSC_TRY(stage_begin(ctx, kRanges));
     GSC_CHECK(ctx, cudaMemsetAsync(ranges, 0, num_tiles * sizeof(uint2)));
     if (num_isect > 0) {
         ranges_kernel<<<blocks_for(num_isect), 256>>>(num_isect, keys_sorted, ranges);
         GSC_CHECK(ctx, cudaGetLastError());
     }
-    GSC_CHECK(ctx, cudaEventRecord(ev[5]));
+    GSC_TRY(stage_end(ctx, kRanges));
+    GSC_TRY(stage_begin(ctx, kRaster));
     raster_fwd_kernel<<<dim3(ctx->tile_bw, ctx->tile_bh), kBlock>>>(cam.width, cam.height, ctx->bg, ranges,
                                                                     vals_sorted, xy, conic_op, color, image, final_t,
                                                                     last_idx);
     GSC_CHECK(ctx, cudaGetLastError());
-    GSC_CHECK(ctx, cudaEventRecord(ev[6]));
-    GSC_CHECK(ctx, cudaEventSynchronize(ev[6]));
-    for (int s = 0; s < 6; ++s) GSC_CHECK(ctx, cudaEventElapsedTime(&ctx->ms[s], ev[s], ev[s + 1]));
-    if (out_rgb) GSC_CHECK(ctx, cudaMemcpy(out_rgb, image, pixels * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    GSC_TRY(stage_end(ctx, kRaster));
     ctx->have_forward = true;
     return 0;
 }
 
-int run_backward(Ctx* ctx, const float* d_image_host, float* g_transforms_host, float* g_opacity_host,
-                 float* g_sh_host, float* screen_grads_host) {
+// Backward of the last forward for the d_image already on the device, into
+// screen_grads and the per-group gradient buffers (zeroed first).
+int run_backward(Ctx* ctx) {
     if (!ctx->have_forward) {
         ctx->error = "backward called before render";
         return -1;
     }
     const int n = ctx->n;
-    const size_t pixels = ctx->pixels();
-    float *d_image, *screen_grads, *g_transforms, *g_opacity, *g_sh;
-    GSC_TRY(ensure(ctx, ctx->d_image, pixels * 3, &d_image));
-    GSC_TRY(ensure(ctx, ctx->screen_grads, size_t(n) * kNumGrad, &screen_grads));
-    GSC_TRY(ensure(ctx, ctx->g_transforms, size_t(n) * 10, &g_transforms));
-    GSC_TRY(ensure(ctx, ctx->g_opacity, n, &g_opacity));
-    GSC_TRY(ensure(ctx, ctx->g_sh, size_t(n) * ctx->row_len(), &g_sh));
-    GSC_CHECK(ctx, cudaMemcpy(d_image, d_image_host, pixels * 3 * sizeof(float), cudaMemcpyHostToDevice));
-    GSC_CHECK(ctx, cudaMemset(screen_grads, 0, size_t(n) * kNumGrad * sizeof(float)));
-    GSC_CHECK(ctx, cudaMemset(g_transforms, 0, size_t(n) * 10 * sizeof(float)));
-    GSC_CHECK(ctx, cudaMemset(g_opacity, 0, size_t(n) * sizeof(float)));
-    GSC_CHECK(ctx, cudaMemset(g_sh, 0, size_t(n) * ctx->row_len() * sizeof(float)));
+    float* screen_grads;
+    GSC_TRY(ensure_zero(ctx, ctx->screen_grads, size_t(n) * kNumGrad, &screen_grads));
+    float* g[3];
+    for (int k = 0; k < 3; ++k) GSC_TRY(ensure_zero(ctx, ctx->grads[k], size_t(n) * ctx->stride(k), &g[k]));
 
-    cudaEvent_t* ev = ctx->ev;
-    GSC_CHECK(ctx, cudaEventRecord(ev[6]));
+    GSC_TRY(stage_begin(ctx, kRasterBwd));
     raster_bwd_kernel<<<dim3(ctx->tile_bw, ctx->tile_bh), kBlock>>>(
         ctx->cam.width, ctx->cam.height, ctx->bg, static_cast<const uint2*>(ctx->ranges.ptr),
         static_cast<const uint32_t*>(ctx->vals_sorted.ptr), static_cast<const float2*>(ctx->xy.ptr),
         static_cast<const float4*>(ctx->conic_op.ptr), static_cast<const float4*>(ctx->color.ptr),
-        static_cast<const float*>(ctx->final_t.ptr), static_cast<const uint32_t*>(ctx->last_idx.ptr), d_image,
-        screen_grads);
+        static_cast<const float*>(ctx->final_t.ptr), static_cast<const uint32_t*>(ctx->last_idx.ptr),
+        static_cast<const float*>(ctx->d_image.ptr), screen_grads);
     GSC_CHECK(ctx, cudaGetLastError());
-    GSC_CHECK(ctx, cudaEventRecord(ev[7]));
+    GSC_TRY(stage_end(ctx, kRasterBwd));
+    GSC_TRY(stage_begin(ctx, kProjectBwd));
     if (n > 0) {
-        project_bwd_kernel<<<blocks_for(n), 256>>>(
-            n, ctx->cam, ctx->rest_pc(), ctx->act, static_cast<const float*>(ctx->transforms.ptr),
-            static_cast<const float*>(ctx->opacity.ptr), static_cast<const float*>(ctx->sh.ptr),
-            static_cast<const uint32_t*>(ctx->tiles.ptr), screen_grads, g_transforms, g_opacity, g_sh);
+        project_bwd_kernel<<<blocks_for(n), 256>>>(n, ctx->cam, ctx->rest_pc(), ctx->act, ctx->p(0), ctx->p(1),
+                                                   ctx->p(2), static_cast<const uint32_t*>(ctx->tiles.ptr),
+                                                   screen_grads, g[0], g[1], g[2]);
         GSC_CHECK(ctx, cudaGetLastError());
     }
-    GSC_CHECK(ctx, cudaEventRecord(ev[8]));
-    GSC_CHECK(ctx, cudaEventSynchronize(ev[8]));
-    GSC_CHECK(ctx, cudaEventElapsedTime(&ctx->ms[6], ev[6], ev[7]));
-    GSC_CHECK(ctx, cudaEventElapsedTime(&ctx->ms[7], ev[7], ev[8]));
-    if (g_transforms_host)
-        GSC_CHECK(ctx, cudaMemcpy(g_transforms_host, g_transforms, size_t(n) * 10 * sizeof(float),
-                                  cudaMemcpyDeviceToHost));
-    if (g_opacity_host)
-        GSC_CHECK(ctx, cudaMemcpy(g_opacity_host, g_opacity, size_t(n) * sizeof(float), cudaMemcpyDeviceToHost));
-    if (g_sh_host)
-        GSC_CHECK(ctx, cudaMemcpy(g_sh_host, g_sh, size_t(n) * ctx->row_len() * sizeof(float),
-                                  cudaMemcpyDeviceToHost));
-    if (screen_grads_host)
-        GSC_CHECK(ctx, cudaMemcpy(screen_grads_host, screen_grads, size_t(n) * kNumGrad * sizeof(float),
-                                  cudaMemcpyDeviceToHost));
+    GSC_TRY(stage_end(ctx, kProjectBwd));
+    return 0;
+}
+
+int set_camera(Ctx* ctx, const GscCamera* cam, const float* bg, int sh_active_degree) {
+    if (!cam || !bg || cam->width == 0 || cam->height == 0) {
+        ctx->error = "camera and background are required, image size must be positive";
+        return -1;
+    }
+    if (sh_active_degree < 0 || sh_active_degree > ctx->sh_degree) {
+        ctx->error = "active SH degree must be in 0..=scene degree";
+        return -1;
+    }
+    ctx->cam = *cam;
+    ctx->bg = make_float3(bg[0], bg[1], bg[2]);
+    ctx->act = (sh_active_degree + 1) * (sh_active_degree + 1) - 1;
+    return 0;
+}
+
+// (1 - w) L1 + w (1 - SSIM) of the last render against uploaded image
+// `image`: its gradient into d_image, and the unweighted mean L1 and the
+// SSIM sum added to loss_acc.
+int run_loss(Ctx* ctx, uint32_t image, float ssim_weight) {
+    if (!ctx->have_forward) {
+        ctx->error = "loss: no render to compare";
+        return -1;
+    }
+    if (image >= uint32_t(ctx->num_images) || ctx->cam.width != ctx->gt_w || ctx->cam.height != ctx->gt_h) {
+        ctx->error = "loss: image index or size does not match the uploaded images";
+        return -1;
+    }
+    const uint32_t npix = uint32_t(ctx->pixels());
+    const uint32_t* gt = static_cast<const uint32_t*>(ctx->gt.ptr) + size_t(image) * npix;
+    const float* render = static_cast<const float*>(ctx->image.ptr);
+    float* d_image;
+    double* acc;
+    GSC_TRY(ensure(ctx, ctx->d_image, size_t(npix) * 3, &d_image));
+    GSC_TRY(ensure(ctx, ctx->loss_acc, 2, &acc));
+    if (ctx->loss_steps == 0) GSC_CHECK(ctx, cudaMemsetAsync(acc, 0, 2 * sizeof(double)));
+    GSC_TRY(stage_begin(ctx, kLoss));
+    loss_l1_kernel<<<blocks_for(npix), kBlock>>>(npix, gt, render, 1.f - ssim_weight, d_image, acc);
+    GSC_CHECK(ctx, cudaGetLastError());
+    if (ssim_weight > 0.f) {
+        float* abc;
+        GSC_TRY(ensure(ctx, ctx->abc, size_t(npix) * 9, &abc));
+        const dim3 grid(ctx->tile_bw, ctx->tile_bh);
+        ssim_fwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, render, gt, abc, acc + 1);
+        GSC_CHECK(ctx, cudaGetLastError());
+        ssim_bwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ssim_weight / (3.f * float(npix)), render,
+                                          gt, abc, d_image);
+        GSC_CHECK(ctx, cudaGetLastError());
+    }
+    GSC_TRY(stage_end(ctx, kLoss));
+    ctx->loss_steps++;
     return 0;
 }
 
 }  // namespace
 
 extern "C" {
+
+// One optimisation step (see visloc_gsplat_cuda_train_step). Mirrored by
+// `GscStepParams` in crates/gsplat-cuda/src/lib.rs.
+struct GscStepParams {
+    GscCamera cam;
+    uint32_t image;  // index into the uploaded ground-truth images
+    int32_t sh_active_degree;
+    float bg[3];
+    float ssim_weight;  // loss = (1 - w) L1 + w (1 - SSIM)
+    float lr[6];        // mean, quaternion, log-scale, opacity logit, SH DC, SH rest
+    float beta1, beta2, eps;
+    float bc1, bc2;            // Adam bias corrections 1 - beta^t
+    float scale_aux_coef;      // brush aux loss on log-scales (0 = off)
+    float opacity_aux_coef;    // brush aux loss on opacity logits (0 = off)
+    uint32_t accumulate_stats; // brush refine statistics
+    uint32_t noise_seed;
+    float noise_scale;  // lr_mean * mean noise weight (0 = off)
+    float noise_max;
+};
 
 #if defined(_WIN32)
 #define GSC_EXPORT __declspec(dllexport)
@@ -1034,8 +1519,8 @@ GSC_EXPORT uint32_t visloc_gsplat_cuda_abi_version() { return kAbiVersion; }
 GSC_EXPORT void* visloc_gsplat_cuda_create() {
     Ctx* ctx = new (std::nothrow) Ctx();
     if (!ctx) return nullptr;
-    for (auto& e : ctx->ev) {
-        if (cudaEventCreate(&e) != cudaSuccess) {
+    for (int s = 0; s < kNumStages; ++s) {
+        if (cudaEventCreate(&ctx->ev_start[s]) != cudaSuccess || cudaEventCreate(&ctx->ev_end[s]) != cudaSuccess) {
             ctx->error = "cudaEventCreate failed (no CUDA device?)";
             break;
         }
@@ -1046,16 +1531,23 @@ GSC_EXPORT void* visloc_gsplat_cuda_create() {
 GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return;
-    Buf* bufs[] = {&ctx->transforms, &ctx->opacity,  &ctx->sh,         &ctx->xy,          &ctx->conic_op,
-                   &ctx->color,      &ctx->depth,    &ctx->rect,       &ctx->extk,        &ctx->tiles,
-                   &ctx->offsets,    &ctx->keys,     &ctx->vals,       &ctx->keys_sorted, &ctx->vals_sorted,
-                   &ctx->sort_temp,  &ctx->scan_temp, &ctx->ranges,    &ctx->image,       &ctx->final_t,
-                   &ctx->last_idx,   &ctx->d_image,  &ctx->screen_grads, &ctx->g_transforms, &ctx->g_opacity,
-                   &ctx->g_sh};
-    for (Buf* b : bufs)
-        if (b->ptr) cudaFree(b->ptr);
-    for (auto& e : ctx->ev)
-        if (e) cudaEventDestroy(e);
+    for (int k = 0; k < 3; ++k) {
+        free_buf(ctx->params[k]);
+        free_buf(ctx->m1[k]);
+        free_buf(ctx->m2[k]);
+        free_buf(ctx->grads[k]);
+    }
+    Buf* bufs[] = {&ctx->xy,          &ctx->conic_op,  &ctx->color,    &ctx->depth,      &ctx->rect,
+                   &ctx->extk,        &ctx->tiles,     &ctx->offsets,  &ctx->keys,       &ctx->vals,
+                   &ctx->keys_sorted, &ctx->vals_sorted, &ctx->sort_temp, &ctx->scan_temp, &ctx->ranges,
+                   &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->d_image,    &ctx->screen_grads,
+                   &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
+                   &ctx->actions,     &ctx->counts,    &ctx->cum};
+    for (Buf* b : bufs) free_buf(*b);
+    for (int s = 0; s < kNumStages; ++s) {
+        if (ctx->ev_start[s]) cudaEventDestroy(ctx->ev_start[s]);
+        if (ctx->ev_end[s]) cudaEventDestroy(ctx->ev_end[s]);
+    }
     delete ctx;
 }
 
@@ -1065,8 +1557,9 @@ GSC_EXPORT const char* visloc_gsplat_cuda_last_error(void* handle) {
 
 GSC_EXPORT const char* visloc_gsplat_cuda_stage_names() { return kStageNames; }
 
-// Upload a packed scene (host pointers). `sh` holds 3 * (degree + 1)^2 floats
-// per gaussian.
+// Upload a packed scene (host pointers), replacing the current one; the Adam
+// moments and refine statistics start at zero. `sh` holds
+// 3 * (degree + 1)^2 floats per gaussian.
 GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, const float* transforms,
                                             const float* opacity, const float* sh) {
     Ctx* ctx = static_cast<Ctx*>(handle);
@@ -1078,37 +1571,52 @@ GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, 
     ctx->n = n;
     ctx->sh_degree = sh_degree;
     ctx->have_forward = false;
-    float *t, *o, *s;
-    GSC_TRY(ensure(ctx, ctx->transforms, size_t(n) * 10, &t));
-    GSC_TRY(ensure(ctx, ctx->opacity, n, &o));
-    GSC_TRY(ensure(ctx, ctx->sh, size_t(n) * ctx->row_len(), &s));
-    if (n > 0) {
-        GSC_CHECK(ctx, cudaMemcpy(t, transforms, size_t(n) * 10 * sizeof(float), cudaMemcpyHostToDevice));
-        GSC_CHECK(ctx, cudaMemcpy(o, opacity, size_t(n) * sizeof(float), cudaMemcpyHostToDevice));
-        GSC_CHECK(ctx, cudaMemcpy(s, sh, size_t(n) * ctx->row_len() * sizeof(float), cudaMemcpyHostToDevice));
+    const float* src[3] = {transforms, opacity, sh};
+    for (int k = 0; k < 3; ++k) {
+        const size_t count = size_t(n) * ctx->stride(k);
+        float *p, *a, *b;
+        GSC_TRY(ensure(ctx, ctx->params[k], count, &p));
+        GSC_TRY(ensure_zero(ctx, ctx->m1[k], count, &a));
+        GSC_TRY(ensure_zero(ctx, ctx->m2[k], count, &b));
+        if (count > 0) GSC_CHECK(ctx, cudaMemcpy(p, src[k], count * sizeof(float), cudaMemcpyHostToDevice));
+    }
+    float *w, *s;
+    GSC_TRY(ensure_zero(ctx, ctx->weight_max, n, &w));
+    GSC_TRY(ensure_zero(ctx, ctx->seen, n, &s));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
+GSC_EXPORT int visloc_gsplat_cuda_num_gaussians(void* handle) {
+    return handle ? static_cast<Ctx*>(handle)->n : -1;
+}
+
+// Download the current scene (all outputs nullable), in the upload layouts.
+GSC_EXPORT int visloc_gsplat_cuda_get_scene(void* handle, float* transforms, float* opacity, float* sh) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    float* dst[3] = {transforms, opacity, sh};
+    for (int k = 0; k < 3; ++k) {
+        const size_t count = size_t(ctx->n) * ctx->stride(k);
+        if (dst[k] && count > 0)
+            GSC_CHECK(ctx, cudaMemcpy(dst[k], ctx->params[k].ptr, count * sizeof(float), cudaMemcpyDeviceToHost));
     }
     return 0;
 }
 
-// Render the uploaded scene. `out_rgb` (nullable) receives width * height * 3
+// Render the current scene. `out_rgb` (nullable) receives width * height * 3
 // floats, row-major RGB. `num_intersections` (nullable) receives the number
 // of (tile, gaussian) pairs.
 GSC_EXPORT int visloc_gsplat_cuda_render(void* handle, const GscCamera* cam, const float* bg, int sh_active_degree,
                                          float* out_rgb, uint32_t* num_intersections) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
-    if (!cam || !bg || cam->width == 0 || cam->height == 0) {
-        ctx->error = "render: camera and background are required, image size must be positive";
-        return -1;
-    }
-    if (sh_active_degree < 0 || sh_active_degree > ctx->sh_degree) {
-        ctx->error = "render: active SH degree must be in 0..=scene degree";
-        return -1;
-    }
-    ctx->cam = *cam;
-    ctx->bg = make_float3(bg[0], bg[1], bg[2]);
-    ctx->act = (sh_active_degree + 1) * (sh_active_degree + 1) - 1;
-    GSC_TRY(run_forward(ctx, out_rgb));
+    GSC_TRY(set_camera(ctx, cam, bg, sh_active_degree));
+    clear_stages(ctx);
+    GSC_TRY(run_forward(ctx));
+    GSC_TRY(collect_stages(ctx));
+    if (out_rgb)
+        GSC_CHECK(ctx, cudaMemcpy(out_rgb, ctx->image.ptr, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
     if (num_intersections) *num_intersections = ctx->num_isect;
     return 0;
 }
@@ -1125,12 +1633,215 @@ GSC_EXPORT int visloc_gsplat_cuda_backward(void* handle, const float* d_image, f
         ctx->error = "backward: d_image is required";
         return -1;
     }
-    return run_backward(ctx, d_image, g_transforms, g_opacity, g_sh, screen_grads);
+    const size_t pixels = ctx->pixels();
+    float* d;
+    GSC_TRY(ensure(ctx, ctx->d_image, pixels * 3, &d));
+    GSC_CHECK(ctx, cudaMemcpy(d, d_image, pixels * 3 * sizeof(float), cudaMemcpyHostToDevice));
+    for (int s = kLoss; s < kNumStages; ++s) {
+        ctx->ran[s] = false;
+        ctx->ms[s] = 0.f;
+    }
+    GSC_TRY(run_backward(ctx));
+    GSC_TRY(collect_stages(ctx));
+    float* dst[3] = {g_transforms, g_opacity, g_sh};
+    for (int k = 0; k < 3; ++k) {
+        const size_t count = size_t(ctx->n) * ctx->stride(k);
+        if (dst[k] && count > 0)
+            GSC_CHECK(ctx, cudaMemcpy(dst[k], ctx->grads[k].ptr, count * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+    if (screen_grads && ctx->n > 0)
+        GSC_CHECK(ctx, cudaMemcpy(screen_grads, ctx->screen_grads.ptr, size_t(ctx->n) * kNumGrad * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    return 0;
 }
 
-// Milliseconds of each stage of the last render / backward (GPU time between
-// CUDA events), in the order of visloc_gsplat_cuda_stage_names. Returns the
-// number of stages written.
+// Upload the training images: `count` images of width x height, one packed
+// RGBA8 u32 per pixel (R in the low byte; alpha below 128 leaves the pixel
+// out of the loss), image-major.
+GSC_EXPORT int visloc_gsplat_cuda_set_images(void* handle, int count, uint32_t width, uint32_t height,
+                                             const uint32_t* rgba) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (count < 0 || (count > 0 && (!rgba || width == 0 || height == 0))) {
+        ctx->error = "set_images: bad image set";
+        return -1;
+    }
+    const size_t total = size_t(count) * width * height;
+    uint32_t* gt;
+    GSC_TRY(ensure(ctx, ctx->gt, total, &gt));
+    if (total > 0) GSC_CHECK(ctx, cudaMemcpy(gt, rgba, total * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    ctx->num_images = count;
+    ctx->gt_w = width;
+    ctx->gt_h = height;
+    return 0;
+}
+
+// One optimisation step on uploaded image `p->image` (the wgpu trainer's
+// step): render, (1 - w) L1 + w D-SSIM and its image gradient, backward,
+// refine statistics, Adam on every group with brush's aux losses, and mean
+// noise.
+GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* p) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (!p) {
+        ctx->error = "train_step: params are required";
+        return -1;
+    }
+    GSC_TRY(set_camera(ctx, &p->cam, p->bg, p->sh_active_degree));
+    clear_stages(ctx);
+    GSC_TRY(run_forward(ctx));
+    GSC_TRY(run_loss(ctx, p->image, p->ssim_weight));
+    GSC_TRY(run_backward(ctx));
+
+    const int n = ctx->n;
+    const uint32_t* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
+    GSC_TRY(stage_begin(ctx, kOptimizer));
+    if (n > 0) {
+        if (p->accumulate_stats) {
+            float *w, *s;
+            GSC_TRY(ensure(ctx, ctx->weight_max, n, &w));
+            GSC_TRY(ensure(ctx, ctx->seen, n, &s));
+            stats_kernel<<<blocks_for(n), 256>>>(n, tiles, static_cast<const float*>(ctx->screen_grads.ptr), w, s);
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
+        // (stride, split_a, split_b, lr_a, lr_b, lr_c, aux kind, aux coef) per group.
+        const uint32_t rl = uint32_t(ctx->row_len());
+        const struct {
+            uint32_t stride, split_a, split_b;
+            float lr_a, lr_b, lr_c;
+            int aux_kind;
+            float aux_coef;
+        } groups[3] = {
+            {10, 3, 7, p->lr[0], p->lr[1], p->lr[2], p->scale_aux_coef > 0.f ? 1 : 0, p->scale_aux_coef},
+            {1, 1, 1, p->lr[3], p->lr[3], p->lr[3], p->opacity_aux_coef > 0.f ? 2 : 0, p->opacity_aux_coef},
+            {rl, 3, 3, p->lr[4], p->lr[5], p->lr[5], 0, 0.f},
+        };
+        for (int k = 0; k < 3; ++k) {
+            const size_t n_elem = size_t(n) * groups[k].stride;
+            adam_kernel<<<blocks_for(n_elem), 256>>>(
+                n_elem, groups[k].stride, groups[k].split_a, groups[k].split_b, groups[k].lr_a, groups[k].lr_b,
+                groups[k].lr_c, p->beta1, p->beta2, p->eps, p->bc1, p->bc2, groups[k].aux_kind, groups[k].aux_coef,
+                tiles, ctx->p(k), static_cast<const float*>(ctx->grads[k].ptr), static_cast<float*>(ctx->m1[k].ptr),
+                static_cast<float*>(ctx->m2[k].ptr));
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
+        if (p->noise_scale > 0.f) {
+            noise_kernel<<<blocks_for(n), 256>>>(n, p->noise_seed, p->noise_scale, p->noise_max, ctx->p(0),
+                                                 ctx->p(1));
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
+    }
+    GSC_TRY(stage_end(ctx, kOptimizer));
+    // The parameters moved: a backward needs a fresh render.
+    ctx->have_forward = false;
+    GSC_TRY(collect_stages(ctx));
+    return 0;
+}
+
+// The training loss of the last render against uploaded image `image`
+// (what train_step computes): `d_image` (nullable) receives its gradient,
+// width * height * 3 floats. The loss sums go to take_loss as a step's do.
+GSC_EXPORT int visloc_gsplat_cuda_loss_grad(void* handle, uint32_t image, float ssim_weight, float* d_image) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    GSC_TRY(run_loss(ctx, image, ssim_weight));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    if (d_image)
+        GSC_CHECK(ctx, cudaMemcpy(d_image, ctx->d_image.ptr, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// Sums of the mean L1 and of the SSIM (over pixels and channels) since the
+// last call, and the number of steps; resets them.
+GSC_EXPORT int visloc_gsplat_cuda_take_loss(void* handle, double* l1_sum, double* ssim_sum, uint32_t* steps) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    double acc[2] = {0.0, 0.0};
+    if (ctx->loss_steps > 0) GSC_CHECK(ctx, cudaMemcpy(acc, ctx->loss_acc.ptr, sizeof(acc), cudaMemcpyDeviceToHost));
+    if (l1_sum) *l1_sum = acc[0];
+    if (ssim_sum) *ssim_sum = acc[1];
+    if (steps) *steps = ctx->loss_steps;
+    ctx->loss_steps = 0;
+    return 0;
+}
+
+// brush refine statistics per gaussian since the last refine (nullable
+// outputs): the max refine weight and the number of frames it was blended.
+GSC_EXPORT int visloc_gsplat_cuda_get_refine_stats(void* handle, float* weight_max, float* seen) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    const size_t bytes = size_t(ctx->n) * sizeof(float);
+    if (weight_max && bytes > 0)
+        GSC_CHECK(ctx, cudaMemcpy(weight_max, ctx->weight_max.ptr, bytes, cudaMemcpyDeviceToHost));
+    if (seen && bytes > 0) GSC_CHECK(ctx, cudaMemcpy(seen, ctx->seen.ptr, bytes, cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// Apply one action per gaussian (0 prune, 1 keep, 2 clone, 4 brush split;
+// see scatter_kernel) to the scene and its Adam moments on the device, then
+// zero the refine statistics. `n_after` (nullable) receives the new count.
+GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* actions, uint32_t seed, int* n_after) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    const int n = ctx->n;
+    if (n > 0 && !actions) {
+        ctx->error = "apply_actions: actions are required";
+        return -1;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (actions[i] == 3 || actions[i] > 4) {
+            ctx->error = "apply_actions: only actions 0 (prune), 1 (keep), 2 (clone) and 4 (brush split) are supported";
+            return -1;
+        }
+    }
+    uint32_t total = 0;
+    if (n > 0) {
+        uint32_t *d_actions, *counts, *cum;
+        GSC_TRY(ensure(ctx, ctx->actions, n, &d_actions));
+        GSC_TRY(ensure(ctx, ctx->counts, n, &counts));
+        GSC_TRY(ensure(ctx, ctx->cum, n, &cum));
+        GSC_CHECK(ctx, cudaMemcpy(d_actions, actions, size_t(n) * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        action_counts_kernel<<<blocks_for(n), 256>>>(n, d_actions, counts);
+        GSC_CHECK(ctx, cudaGetLastError());
+        size_t temp_bytes = 0;
+        GSC_CHECK(ctx, cub::DeviceScan::InclusiveSum(nullptr, temp_bytes, counts, cum, n));
+        uint8_t* temp;
+        GSC_TRY(ensure(ctx, ctx->scan_temp, temp_bytes, &temp));
+        GSC_CHECK(ctx, cub::DeviceScan::InclusiveSum(temp, temp_bytes, counts, cum, n));
+        GSC_CHECK(ctx, cudaMemcpy(&total, cum + (n - 1), sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        for (int k = 0; k < 3; ++k) {
+            const size_t stride = ctx->stride(k);
+            Buf dp, dm1, dm2;
+            float *p, *a, *b;
+            GSC_TRY(ensure(ctx, dp, size_t(total) * stride, &p));
+            GSC_TRY(ensure(ctx, dm1, size_t(total) * stride, &a));
+            GSC_TRY(ensure(ctx, dm2, size_t(total) * stride, &b));
+            scatter_kernel<<<blocks_for(n), 256>>>(n, uint32_t(stride), k, seed, d_actions, cum, ctx->p(k),
+                                                   static_cast<const float*>(ctx->m1[k].ptr),
+                                                   static_cast<const float*>(ctx->m2[k].ptr), p, a, b);
+            GSC_CHECK(ctx, cudaGetLastError());
+            GSC_CHECK(ctx, cudaDeviceSynchronize());
+            free_buf(ctx->params[k]);
+            free_buf(ctx->m1[k]);
+            free_buf(ctx->m2[k]);
+            ctx->params[k] = dp;
+            ctx->m1[k] = dm1;
+            ctx->m2[k] = dm2;
+        }
+    }
+    ctx->n = int(total);
+    ctx->have_forward = false;
+    float *w, *s;
+    GSC_TRY(ensure_zero(ctx, ctx->weight_max, total, &w));
+    GSC_TRY(ensure_zero(ctx, ctx->seen, total, &s));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    if (n_after) *n_after = int(total);
+    return 0;
+}
+
+// Milliseconds of each stage of the last render / backward / train step (GPU
+// time between CUDA events; 0 for stages that did not run), in the order of
+// visloc_gsplat_cuda_stage_names. Returns the number of stages written.
 GSC_EXPORT int visloc_gsplat_cuda_stage_times(void* handle, float* ms, int cap) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx || !ms) return -1;
