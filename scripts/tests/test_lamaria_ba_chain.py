@@ -97,6 +97,25 @@ class StepsTest(unittest.TestCase):
                                                 pass_features="aliked")]
         self.assertEqual(low, ["features", "match", "loops", "online"])
 
+    def test_the_pass_matches_within_the_online_band_or_by_an_essential_matrix(self):
+        def plan_with(guide):
+            return {name: [str(c) for c in cmd]
+                    for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 1, "w", 4,
+                                                       rematch=True, pass_features="aliked", pass_match=guide)}
+        online, essential = plan_with("online"), plan_with("essential")
+        self.assertEqual(value(online["pass match"], "--vio"), str(Path("w/online.tum")))
+        self.assertNotIn("--verify", online["pass match"])
+        self.assertEqual(value(essential["pass match"], "--vio"), "vio.tum")
+        self.assertEqual(value(essential["pass match"], "--verify"), "essential")
+        for p in (online, essential):  # the revisits and the rematch stay as they are
+            self.assertEqual(value(p["pass loops"], "--vio"), "vio.tum")
+            self.assertEqual(value(p["rematch"], "--vio"), str(Path("w/ba2.tum")))
+            self.assertNotIn("--verify", p["rematch"])
+            self.assertEqual(p["pass match"].count("--vio"), 1)
+        vio = plan_with("vio")["pass match"]  # the default: the VIO's band
+        self.assertEqual(value(vio, "--vio"), "vio.tum")
+        self.assertNotIn("--verify", vio)
+
     def test_the_rematch_follows_the_pass_by_day_only(self):
         p = {name: [str(c) for c in cmd]
              for name, cmd, _, _ in chain.steps("mav0", "vio.tum", "imu.csv", "calib.json", 2, "w", 4, rematch=True)}

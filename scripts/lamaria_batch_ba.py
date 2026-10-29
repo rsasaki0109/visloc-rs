@@ -480,15 +480,38 @@ def _lightglue_guided(pairs, a, count):
         yield pair, m
 
 
+def _lightglue_essential(pairs, a, count, chunk=512):
+    """LightGlue's matches of each pair that an essential matrix explains, checked as a revisit is (_loop_worker:
+    RANSAC at 1 px, --min-inliers, its rotation within --max-rot of the VIO's): the VIO's translation, and so
+    its drift, no longer picks the matches. The essential matrices are fitted on --jobs threads (OpenCV
+    releases the GIL), chunk pairs at a time."""
+    from concurrent.futures import ThreadPoolExecutor
+    from itertools import islice
+
+    def verify(item):
+        return _loop_worker(item[0][:4], item[1])[1]
+
+    found = _lightglue_pairs(pairs, a)
+    with ThreadPoolExecutor(max(1, a.jobs)) as pool:
+        while batch := list(islice(found, chunk)):
+            for (pair, m), kept in zip(batch, pool.map(verify, batch)):
+                count[0] += len(m)
+                count[1] += len(kept)
+                yield pair, kept
+
+
 def cmd_match(a):
     from contextlib import nullcontext
     kf_ns, offsets, xy, desc = load_features(a.work)
     extractor, image_wh = feature_kind(a.work)
     matcher = _matcher(a.matcher, extractor)
+    if a.verify == "essential" and matcher != "lightglue":
+        sys.exit("match --verify essential takes LightGlue's matches (learned features)")
     cams, _ = load_calib(a.calib)
     kf_p, kf_r = keyframe_poses(kf_ns, a.vio)
     _G.update(offsets=offsets, xy=xy, desc=desc, cams=cams, kf_p=kf_p, kf_r=kf_r,
-              ratio=a.ratio, max_desc=_max_desc(a.max_desc, extractor), extractor=extractor, image_wh=image_wh)
+              ratio=a.ratio, max_desc=_max_desc(a.max_desc, extractor), extractor=extractor, image_wh=image_wh,
+              min_inliers=a.min_inliers, max_rot=a.max_rot)
     offs = [int(x) for x in a.offsets.split(",")]
     cos_max = np.cos(np.radians(a.max_axis_angle))
     pairs = []
@@ -508,8 +531,9 @@ def cmd_match(a):
     print(f"{n} keyframes, {len(pairs)} image pairs to match ({extractor}, {matcher})", flush=True)
     t0 = time.time()
     out_pairs, out_matches, count = [], [], [0, 0]
+    lightglue = _lightglue_essential if a.verify == "essential" else _lightglue_guided
     with mp.Pool(a.jobs) if matcher == "ratio" else nullcontext() as pool:
-        results = pool.imap(_match_worker, pairs, chunksize=16) if pool else _lightglue_guided(pairs, a, count)
+        results = pool.imap(_match_worker, pairs, chunksize=16) if pool else lightglue(pairs, a, count)
         for i, (pair, m) in enumerate(results):
             if len(m):
                 out_pairs.append(np.array(pair[:4], np.int32)[None].repeat(len(m), 0))
@@ -519,7 +543,8 @@ def cmd_match(a):
     np.savez(os.path.join(a.work, "matches.npz"), pairs=np.concatenate(out_pairs),
              matches=np.concatenate(out_matches))
     if matcher == "lightglue":
-        print(f"  LightGlue: {count[0]} matches, {count[1]} within the epipolar band", flush=True)
+        kept = "explained by an essential matrix" if a.verify == "essential" else "within the epipolar band"
+        print(f"  LightGlue: {count[0]} matches, {count[1]} {kept}", flush=True)
     print(f"matches: {sum(len(m) for m in out_matches)} over {len(out_pairs)} pairs, "
           f"{time.time() - t0:.0f} s", flush=True)
 
@@ -2045,6 +2070,12 @@ def main():
     m.add_argument("--ratio", type=float, default=0.8, help="descriptor ratio test within the band")
     m.add_argument("--max-desc", type=float, default=None,
                    help="maximum descriptor L2 distance of the ratio test (default: 300 for SIFT, none for learned)")
+    m.add_argument("--verify", choices=("band", "essential"), default="band",
+                   help="band: keep the matches within the VIO's epipolar band; essential (LightGlue): keep those "
+                        "an essential matrix explains, as loops does, whatever the VIO's translation")
+    m.add_argument("--min-inliers", type=int, default=20, help="--verify essential: inliers to keep a pair")
+    m.add_argument("--max-rot", type=float, default=10.0,
+                   help="--verify essential: largest disagreement with the VIO rotation (deg)")
     m.add_argument("--jobs", type=int, default=2)
     lightglue_args(m)
     lp = sub.add_parser("loops", help="verified matches between revisits of the same place")
