@@ -124,6 +124,22 @@ pub struct PhotoSfmConfig {
     /// training sees. The panoramas SfM sees are at most `2 max_size` wide.
     /// Overrides `equirect_rig`.
     pub equirect_native: bool,
+    /// Match the candidate pairs with this instead of the CPU (or wgpu)
+    /// matcher, e.g. `visloc-gsplat-cuda`'s CUDA matcher. If it fails, the
+    /// CPU matches.
+    pub matcher: Option<std::sync::Arc<dyn PairMatcher>>,
+}
+
+/// Descriptor matching for [`build_photo_dataset`]'s candidate pairs, in
+/// place of the CPU matcher: it must give what the CPU does, the ratio-tested
+/// (0.8) mutual nearest neighbours of
+/// `BruteForceMatcher::match_descriptors_cross_checked`.
+pub trait PairMatcher: Send + Sync + std::fmt::Debug {
+    /// Every image's descriptors, before any [`PairMatcher::match_pairs`].
+    fn set_features(&self, descriptors: &[&[Vec<f32>]]) -> Result<(), String>;
+    /// The matches of each pair `(i, j)` (`query_index` in image i,
+    /// `train_index` in image j).
+    fn match_pairs(&self, pairs: &[(usize, usize)]) -> Result<Vec<Vec<DescriptorMatch>>, String>;
 }
 
 impl Default for PhotoSfmConfig {
@@ -154,6 +170,7 @@ impl Default for PhotoSfmConfig {
             equirect: false,
             equirect_rig: true,
             equirect_native: false,
+            matcher: None,
         }
     }
 }
@@ -945,6 +962,20 @@ pub fn build_photo_dataset(
             .or_default()
             .push((i, j));
     }
+    // An external matcher takes every pair once it has the descriptors.
+    let external = cfg.matcher.as_ref().and_then(|m| {
+        let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
+        match m.set_features(&sets) {
+            Ok(()) => {
+                log(&format!("matching with {m:?}"));
+                Some(m.clone())
+            }
+            Err(e) => {
+                log(&format!("matcher failed ({e}); matching on the CPU"));
+                None
+            }
+        }
+    });
     let mut pairwise: Vec<PairwiseMatches> = Vec::new();
     let (mut match_s, mut verify_s) = (0.0f64, 0.0f64);
     // Verified matches of one matched chunk, and the CPU time spent.
@@ -1002,6 +1033,12 @@ pub fn build_photo_dataset(
                 .map(|bank| (ctx, bank, visloc_sift_gpu::GpuMatcher::new(ctx)))
         });
         let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
+            if let Some(m) = &external {
+                match m.match_pairs(pairs) {
+                    Ok(dms) => return dms,
+                    Err(e) => eprintln!("matcher failed ({e}); this chunk on the CPU"),
+                }
+            }
             #[cfg(feature = "gpu")]
             if let Some((ctx, bank, m)) = &gpu_match {
                 let lp: Vec<(usize, usize)> =

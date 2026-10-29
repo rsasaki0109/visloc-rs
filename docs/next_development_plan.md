@@ -46,6 +46,13 @@ The planned order:
    Adam is bound by memory, and raster_bwd needs steps 5 and 6
    ([`gsplat_cuda.md`](gsplat_cuda.md#tried-and-not-adopted)).
 5. Two-view verification on the GPU: 450 s of SmallCity's 600 s front end.
+   On the WSL2 laptop the CPU matcher was the bottleneck instead (no wgpu):
+   on south-building it took 780 s, and verification 578 s only because the
+   two shared the cores. Matching on CUDA (`gsplat_photos_cuda`, the CPU's
+   matches bit for bit) brings the front end to 18.4 s and the whole SfM
+   from 945 s to 148 s (the same model), with verification at 5.3 s on the
+   CPU, so verification stays there
+   ([`gsplat_cuda.md`](gsplat_cuda.md#matching-on-the-gpu)).
 
 ## Track 1: Correctness and release hygiene
 

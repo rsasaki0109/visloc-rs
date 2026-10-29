@@ -59,7 +59,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 7;
+constexpr uint32_t kAbiVersion = 8;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -1592,6 +1592,10 @@ struct Ctx {
     std::vector<int32_t> tsdf_cells, tsdf_edges;
     std::vector<float> tsdf_pos;
     std::vector<uint8_t> tsdf_col_host;
+    // Matching (match.cuh): the descriptors (128 bytes each) and their
+    // squared norms, each image's first row, and the top-2 outputs.
+    Buf match_words, match_norms, match_fwd, match_rev, match_partial;
+    std::vector<uint32_t> match_first;
     int num_priors = 0;
     int num_images = 0;
     uint32_t gt_w = 0, gt_h = 0;
@@ -2020,6 +2024,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->acc_normal,  &ctx->d_normal,  &ctx->gab,      &ctx->g_normal,
                    &ctx->tsdf_table,  &ctx->tsdf_keys, &ctx->tsdf_slab_table, &ctx->tsdf_slab_keys,
                    &ctx->tsdf_sdf,    &ctx->tsdf_w,    &ctx->tsdf_col, &ctx->tsdf_counts,
+                   &ctx->match_words, &ctx->match_norms, &ctx->match_fwd, &ctx->match_rev, &ctx->match_partial,
                    &ctx->tsdf_out_cells, &ctx->tsdf_out_pos, &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum};
@@ -2457,3 +2462,6 @@ GSC_EXPORT int visloc_gsplat_cuda_stage_times(void* handle, float* ms, int cap) 
 
 // GPU TSDF fusion and surface-nets extraction (visloc_gsplat_cuda_tsdf_*).
 #include "tsdf.cuh"
+
+// Exhaustive SIFT matching (visloc_gsplat_cuda_match_*).
+#include "match.cuh"

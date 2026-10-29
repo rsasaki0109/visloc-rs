@@ -98,6 +98,21 @@ All notable changes to `visloc-rs` will be documented here.
   - `Mesh::remove_small_components` counts triangles per component in a
     vector instead of a hash map.
   - CUDA ABI 7.
+- **Descriptor matching on the GPU for photos-to-dataset
+  (`gsplat_photos_cuda`, `visloc-gsplat-cuda` feature `photos`).**
+  - `PhotoSfmConfig::matcher` lets a `PairMatcher` take
+    `build_photo_dataset`'s candidate pairs. The CPU matches if it fails.
+  - `matching::CudaPairMatcher` computes each pair's top-2 scores in both
+    directions with exact 8-bit dot products (`CudaGsplat::match_top2`). It
+    then applies the CPU matcher's filter, so the matches are
+    `BruteForceMatcher::match_descriptors_cross_checked`'s, bit for bit.
+  - On south-building (128 images, 10.5k SIFT each), matching and
+    verification take 18.4 s against 780.7 s for the CPU matcher, with the
+    same 2461 verified pairs. The whole SfM takes 148.4 s against 945.0 s,
+    with the same model: 128/128 registered, 101,450 points, focal 850.2 px.
+  - Verification alone takes 5.3 s once the CPU matcher no longer holds
+    every core.
+  - `CudaGsplat` is `Send`. CUDA ABI 8.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
   exact size (`--size` makes cameras of slightly different sizes, as in some

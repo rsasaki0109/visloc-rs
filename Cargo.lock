@@ -1598,6 +1598,7 @@ dependencies = [
  "visloc-gsplat-core",
  "visloc-gsplat-render",
  "visloc-gsplat-train",
+ "visloc-vision",
 ]
 
 [[package]]

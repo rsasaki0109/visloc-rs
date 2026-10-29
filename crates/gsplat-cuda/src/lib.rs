@@ -19,6 +19,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
+#[cfg(feature = "photos")]
+pub mod matching;
 pub mod mesh;
 pub mod trainer;
 
@@ -245,6 +247,28 @@ type TsdfMeshFn = unsafe extern "C" fn(
 ) -> c_int;
 type TsdfTakeFn =
     unsafe extern "C" fn(*mut c_void, *mut i32, *mut c_float, *mut u8, *mut i32) -> c_int;
+type MatchSetFn = unsafe extern "C" fn(*mut c_void, c_int, *const u32, *const u8) -> c_int;
+type MatchTop2Fn =
+    unsafe extern "C" fn(*mut c_void, c_int, *const u32, *mut i32, *mut i32) -> c_int;
+
+/// A descriptor's best match among the other image's (see
+/// [`CudaGsplat::match_top2`]): scores `|other|^2 - 2 dot` in byte units
+/// (`|own|^2 + score` is the squared distance), [`NO_SCORE`] for none.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Top2 {
+    pub best: i32,
+    /// Index of the best row in the other image.
+    pub index: i32,
+    /// The lowest score among the other rows.
+    pub second: i32,
+}
+
+/// [`Top2`] score of no row.
+pub const NO_SCORE: i32 = i32::MAX;
+
+/// Bytes per descriptor [`CudaGsplat::set_match_descriptors`] takes.
+pub const MATCH_DESCRIPTOR_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub enum GsplatCudaError {
@@ -372,6 +396,8 @@ struct Api {
     stage_times: StageTimesFn,
     tsdf_mesh: TsdfMeshFn,
     tsdf_take: TsdfTakeFn,
+    match_set: MatchSetFn,
+    match_top2: MatchTop2Fn,
 }
 
 /// The native context: a scene, its Adam state and the training images on
@@ -382,6 +408,8 @@ pub struct CudaGsplat {
     stage_names: Vec<String>,
     sh_degree: u32,
     pixels: usize,
+    // Descriptors per image of the last set_match_descriptors.
+    match_counts: Vec<u32>,
     // Declared last: dropped after `context` is destroyed in Drop.
     _library: Library,
 }
@@ -416,7 +444,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 7;
+    pub const ABI_VERSION: u32 = 8;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -467,6 +495,8 @@ impl CudaGsplat {
                 stage_times: symbol(&library, "visloc_gsplat_cuda_stage_times", path)?,
                 tsdf_mesh: symbol(&library, "visloc_gsplat_cuda_tsdf_mesh", path)?,
                 tsdf_take: symbol(&library, "visloc_gsplat_cuda_tsdf_take", path)?,
+                match_set: symbol(&library, "visloc_gsplat_cuda_match_set", path)?,
+                match_top2: symbol(&library, "visloc_gsplat_cuda_match_top2", path)?,
             };
             (version, create, stage_names, api)
         };
@@ -486,6 +516,7 @@ impl CudaGsplat {
             stage_names,
             sh_degree: 0,
             pixels: 0,
+            match_counts: Vec::new(),
             _library: library,
         };
         // create() records a device failure (e.g. no CUDA device) in the
@@ -934,6 +965,75 @@ impl CudaGsplat {
         Ok(s)
     }
 
+    /// Upload descriptors for [`match_top2`](Self::match_top2):
+    /// `counts[i]` descriptors of [`MATCH_DESCRIPTOR_BYTES`] bytes for image
+    /// i, image after image in `bytes`. Replaces the previous set.
+    pub fn set_match_descriptors(
+        &mut self,
+        counts: &[u32],
+        bytes: &[u8],
+    ) -> Result<(), GsplatCudaError> {
+        let total: usize = counts.iter().map(|&c| c as usize).sum();
+        if bytes.len() != total * MATCH_DESCRIPTOR_BYTES {
+            return Err(GsplatCudaError::Input(format!(
+                "{} descriptor bytes for {total} descriptors",
+                bytes.len()
+            )));
+        }
+        let n = c_int::try_from(counts.len())
+            .map_err(|_| GsplatCudaError::Input("too many images".into()))?;
+        // SAFETY: `counts` has `n` entries and `bytes` their sum times 128.
+        let code = unsafe { (self.api.match_set)(self.ctx(), n, counts.as_ptr(), bytes.as_ptr()) };
+        self.check(code)?;
+        self.match_counts = counts.to_vec();
+        Ok(())
+    }
+
+    /// Exhaustive matching of image pairs `(query image, train image)` of
+    /// [`set_match_descriptors`](Self::set_match_descriptors): per pair, the
+    /// forward [`Top2`] of every query descriptor over the train image and
+    /// the reverse one of every train descriptor over the query image, the
+    /// state `BruteForceMatcher::match_descriptors_cross_checked` takes its
+    /// ratio-tested mutual nearest neighbours from (best: lowest score, ties
+    /// to the lower index). Returns both, pair after pair (a pair's share is
+    /// its query and train images' descriptor counts); a pair with an empty
+    /// side leaves its entries at their default.
+    pub fn match_top2(
+        &mut self,
+        pairs: &[(u32, u32)],
+    ) -> Result<(Vec<Top2>, Vec<Top2>), GsplatCudaError> {
+        let count = |i: u32| {
+            self.match_counts
+                .get(i as usize)
+                .map(|&c| c as usize)
+                .ok_or_else(|| GsplatCudaError::Input(format!("no image {i} to match")))
+        };
+        let (mut queries, mut trains) = (0usize, 0usize);
+        for &(i, j) in pairs {
+            queries += count(i)?;
+            trains += count(j)?;
+        }
+        let flat: Vec<u32> = pairs.iter().flat_map(|&(i, j)| [i, j]).collect();
+        let n = c_int::try_from(pairs.len())
+            .map_err(|_| GsplatCudaError::Input("too many pairs".into()))?;
+        let mut fwd = vec![Top2::default(); queries];
+        let mut rev = vec![Top2::default(); trains];
+        // SAFETY: `flat` holds two in-range indices per pair, and `fwd` /
+        // `rev` the pairs' query / train descriptor counts of `Top2`
+        // (`repr(C)`, 3 i32), what the native side writes.
+        let code = unsafe {
+            (self.api.match_top2)(
+                self.ctx(),
+                n,
+                flat.as_ptr(),
+                fwd.as_mut_ptr().cast(),
+                rev.as_mut_ptr().cast(),
+            )
+        };
+        self.check(code)?;
+        Ok((fwd, rev))
+    }
+
     /// brush's refine statistics since the last refine.
     pub fn refine_stats(&self) -> Result<RefineStats, GsplatCudaError> {
         let n = self.num_gaussians();
@@ -997,3 +1097,9 @@ impl Drop for CudaGsplat {
         unsafe { (self.api.destroy)(self.ctx()) };
     }
 }
+
+// SAFETY: the native context is host memory holding device pointers of the
+// process's primary CUDA context, which the CUDA runtime lets any thread use,
+// and it is only reached through this value. Moving it to another thread is
+// therefore sound; it stays `!Sync`, so calls into one context never overlap.
+unsafe impl Send for CudaGsplat {}
