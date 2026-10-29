@@ -565,10 +565,10 @@ cannot close one. corridor1-5 drives each corridor out and back, and every
 place it passes twice (921 pairs of its poses within 1 m and over 30 s
 apart) it passes facing the other way, so its forward cameras never see
 the same view twice. Fitting a scale too leaves 1.17 m: the error is
-mostly the VIO's heading drift. So the
-localizations are scored against the map around them: each is put in the
-ground truth's frame through the stretch of the map's own trajectory within
-5 m of it (`evaluate_map_localization.py --mode local`). Scored that way,
+mostly the VIO's heading drift. So the localizations are scored against
+the map around them: each is put in the ground truth's frame through the
+stretch of the map's own trajectory within 5 m of it
+(`evaluate_map_localization.py --mode local`). Scored that way,
 the map's own SLAM poses are 3.5 cm off at the median; the laser ground
 truth jumps by up to 0.7 m in places.
 
