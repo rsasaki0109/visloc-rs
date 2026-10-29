@@ -52,30 +52,56 @@ impl GaussianSmoothing {
             let i = i.rem_euclid(period);
             (if i < len { i } else { period - i }) as usize
         };
+        let r = radius as usize;
         let pixels = image.pixels();
+        // Along each row: taps read straight from the row inside it, and
+        // reflected within `radius` of its ends.
         let mut rows = vec![0.0_f32; width * height];
+        let mut line = vec![0.0_f32; width];
         for y in 0..height {
-            let row = &pixels[y * width..(y + 1) * width];
-            for x in 0..width {
-                rows[y * width + x] = kernel
-                    .iter()
-                    .zip(-radius..=radius)
-                    .map(|(weight, i)| weight * f32::from(row[reflect(x as isize + i, width)]))
-                    .sum();
+            for (value, &pixel) in line.iter_mut().zip(&pixels[y * width..(y + 1) * width]) {
+                *value = f32::from(pixel);
+            }
+            let out = &mut rows[y * width..(y + 1) * width];
+            for (x, out) in out.iter_mut().enumerate() {
+                *out = if x >= r && x + r < width {
+                    kernel
+                        .iter()
+                        .zip(&line[x - r..=x + r])
+                        .map(|(weight, value)| weight * value)
+                        .sum()
+                } else {
+                    kernel
+                        .iter()
+                        .zip(-radius..=radius)
+                        .map(|(weight, i)| weight * line[reflect(x as isize + i, width)])
+                        .sum()
+                };
             }
         }
+        // Down each column, a whole row at a time.
         let mut out = vec![0_u16; width * height];
+        let mut sum = vec![0.0_f32; width];
         for y in 0..height {
-            for x in 0..width {
-                if pixels[y * width + x] == 0 {
-                    continue;
+            sum.iter_mut().for_each(|value| *value = 0.0);
+            for (weight, i) in kernel.iter().zip(-radius..=radius) {
+                let source = reflect(y as isize + i, height);
+                for (value, &row) in sum
+                    .iter_mut()
+                    .zip(&rows[source * width..(source + 1) * width])
+                {
+                    *value += weight * row;
                 }
-                let value: f32 = kernel
-                    .iter()
-                    .zip(-radius..=radius)
-                    .map(|(weight, i)| weight * rows[reflect(y as isize + i, height) * width + x])
-                    .sum();
-                out[y * width + x] = value.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+            }
+            let target = &mut out[y * width..(y + 1) * width];
+            for ((out, &value), &pixel) in target
+                .iter_mut()
+                .zip(&sum)
+                .zip(&pixels[y * width..(y + 1) * width])
+            {
+                if pixel != 0 {
+                    *out = value.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+                }
             }
         }
         RawU16Image::new(width, height, out).expect("same dimensions as the input")
@@ -97,6 +123,45 @@ mod tests {
         }
         // Next to the black border the blur reaches into it.
         assert!(smoothed.pixel(3, 5).expect("pixel") < 100 << 8);
+    }
+
+    #[test]
+    fn matches_a_direct_two_dimensional_blur() {
+        let image = RawU16Image::from_fn(23, 17, |x, y| ((x * 7 + y * 13) % 31) as u16 * 1000 + 1)
+            .expect("image");
+        let smoothing = GaussianSmoothing { sigma: 1.2 };
+        let smoothed = smoothing.apply(&image);
+        let radius = (3.0 * smoothing.sigma).ceil() as isize;
+        let weight = |i: isize| (-((i * i) as f64) / (2.0 * 1.2 * 1.2)).exp();
+        let total: f64 = (-radius..=radius).map(weight).sum();
+        let reflect = |i: isize, len: isize| {
+            let period = 2 * (len - 1);
+            let i = i.rem_euclid(period);
+            if i < len {
+                i
+            } else {
+                period - i
+            }
+        };
+        for y in 0..17_isize {
+            for x in 0..23_isize {
+                let mut value = 0.0;
+                for dy in -radius..=radius {
+                    for dx in -radius..=radius {
+                        let pixel = image
+                            .pixel(reflect(x + dx, 23) as usize, reflect(y + dy, 17) as usize)
+                            .expect("pixel");
+                        value += weight(dx) * weight(dy) * f64::from(pixel);
+                    }
+                }
+                let expected = value / (total * total);
+                let got = f64::from(smoothed.pixel(x as usize, y as usize).expect("pixel"));
+                assert!(
+                    (got - expected).abs() <= 1.0,
+                    "{x} {y}: {got} vs {expected}"
+                );
+            }
+        }
     }
 
     #[test]
