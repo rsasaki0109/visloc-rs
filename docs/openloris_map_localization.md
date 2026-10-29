@@ -510,12 +510,12 @@ truth jumps by up to 0.7 m in places.
 
 - **Few images localize across these sessions.** 57 of the 2,426 images
   corridor1-1 tries localize, at two places (66–68 s and 206–214 s). Each
-  is 3.0 cm RMSE from the map around it. Half of corridor1-1's path lies
-  outside corridor1-5's, up to 22 m from it. Between those two places the
-  VIO + map drifts up to 2.8 m (49 cm at the median). The wheel odometry
-  gets 12 localizations and drifts 3 m. This run therefore does not
-  measure the wheel odometry + map. It measures whether the calibration
-  keeps up.
+  is 3.0 cm RMSE from the map around it. A quarter of corridor1-1's path
+  lies more than 1 m from corridor1-5's, up to 22 m. Between those two
+  places the VIO + map drifts up to 2.8 m (49 cm at the median). The wheel
+  odometry gets 12 localizations and drifts 3 m. This run therefore does
+  not measure the wheel odometry + map. It measures whether the
+  calibration keeps up.
 - **The wheels slip in turns.** Their heading drifts 15° off the VIO's in
   one 350° turn in place, and 38° after 120 s. The VIO stays within 1.3–5°
   of the ground truth.
