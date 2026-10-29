@@ -216,14 +216,16 @@ residual is what is left, at 1024 px (within 0.01° of 640 px).
 
   Keep `--max-size` at its default, 1600, or at least 1024, for metric
   output.
-- **Memory.** The lens faces are written to disk as each frame is cut, and
-  SIFT reads them back, so memory no longer grows with every frame's
-  image. On 4 CPU cores, the 100 frames with 1024 px faces peak at 4.5 GB
-  (7.9 GB with the faces in memory, same output), and the 200 frames at
-  8.6 GB in 46 min; with the faces in memory those were killed at 14 GB
-  on a 15 GB machine. The five 1024 px walks above peaked at 7.8–9.3 GB
-  in 35–47 min. The SIFT descriptors (5.7 GB for 2,000 faces) are most of
-  what is left.
+- **Memory.** The lens faces are written to disk as each frame is cut,
+  and SIFT reads them back. The SIFT descriptors are kept as COLMAP's
+  bytes, a quarter of their f32 size, and are turned into f32 only where
+  they are matched. On 4 CPU cores:
+  - The mall walk above (200 frames, 1024 px faces) peaks at 4.5 GB in
+    37 min, with the same output as with f32 descriptors (7.8 GB).
+  - With every frame and face in memory, 200 frames at 1024 px were killed
+    at 14 GB on a 15 GB machine.
+  - The other four walks, run with f32 descriptors, peaked at 8.7–9.3 GB in
+    42–47 min.
 - **Warning signs.** Distrust the scale when |g| is more than about
   0.2 m/s² from 9.81, or the rotation residual (after the gyro bias fit) is
   more than a few tenths of a degree.
