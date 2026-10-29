@@ -6,6 +6,21 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Wheel odometry with its heading from a gyro.** Wheels slip in turns in
+  place: on OpenLORIS-Scene's corridor (corridor1-1, 272 s) the wheel
+  odometry's heading drifts 44.5° from the ground truth.
+  `visloc_localization::GyroWheelOdometry` keeps the wheels' travel and
+  turns it by the heading a gyro integrates about the vertical, which the
+  accelerometer gives (any IMU, mounted any way); at a standstill the
+  heading holds and the gyro's rate is its bias. The heading then stays
+  within 5.6°, and 60 s after a known pose the odometry is at most 1.4 m
+  off instead of 15.9 m. Wheel odometry + map on corridor1-1 localizes 58
+  times instead of 12 and its RMSE falls from 3.1 to 0.70 m; office1-6
+  and office1-7 go from 5.11 to 4.79 cm and from 11.69 to 10.60 cm.
+  `visloc_wheel_calibration_node` uses it with an `imu` topic
+  (`gyro_heading`, on by default), `launch/map_localization.launch.py`
+  passes `imu_topic` to it, and `wheel_calibration_replay` takes `--imu`.
+
 - **Extra descriptors per landmark (opt-in).**
   `basalt_euroc_online_slam_demo --extra-descriptors` keeps, besides each
   landmark's medoid descriptor, up to three of its views' descriptors,

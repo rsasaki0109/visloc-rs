@@ -578,6 +578,14 @@ and is corrected for that.
 | 60 s | 2.7 / 6.8 / 15.9 m | 0.81 / 1.06 / 1.37 m |
 | Heading over the whole run | −44.5° … 3.2° | −5.6° … 2.7° |
 
+- **The map finds the robot again.** In the demo, wheel odometry + map on
+  corridor1-1 (calibrated from the localizations alone, through the
+  replay) gets 58 localizations instead of 12: with the heading held, the
+  prediction still points the projection search at the right landmarks
+  140 s after the last localization. Scored against the map around each
+  pose, its RMSE falls from 3.1 m (median 2.9 m, max 8.5 m) to 0.70 m
+  (median 0.59 m, max 2.1 m). The VIO + map gets 1.27 m: its own drift
+  over the last 70 s, with no localization, reaches 2.7 m.
 - **What remains is mostly the wheels' scale.** 60 s of driving is about
   50 m, and 1.1% of it is 0.55 m.
 - **The short office sessions gain too.** Through the replay (VIO and
