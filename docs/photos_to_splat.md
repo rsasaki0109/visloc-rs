@@ -178,30 +178,33 @@ The test run used OverMaps360's walk 0313afa5:
 Four more walks, each run the same way on its first 400 frames, once
 with 640 px lens faces and once with 1024 px (`--max-size`):
 
-| Walk | Scene | Faces registered, 640 / 1024 px | \|g\|, 640 / 1024 px | Rotation residual | Scale vs the dataset's, 640 px | 1024 px |
-| --- | --- | ---: | --- | ---: | ---: | ---: |
-| 0313afa5 | city street | 2000 / 2000 | 9.94 / 9.93 m/s² | 0.07° | +1.0% | +1.1% |
-| 0c05c38a | temple courtyard | 2000 / 2000 | 9.81 / 9.79 m/s² | 0.09° | −2.5% | −1.8% |
-| 3b81dbc3 | residential street | 1998 / 1998 | 9.77 / 9.77 m/s² | 0.14° | −3.8% | −3.7% |
-| 9d2fe9b1 | tropical park | 1987 / 1986 | 9.82 / 9.80 m/s² | 1.18° | +2.4% | +2.5% |
-| 5bb3848a | shopping mall, indoors | 2000 / 2000 | 9.57 / 9.80 m/s² | 0.07° | +12.2% | +1.4% |
+| Walk | Scene | Faces registered, 640 / 1024 px | \|g\|, 640 / 1024 px | Gyro bias, rotation residual | Scale vs the dataset's, 640 px | 1024 px |
+| --- | --- | ---: | --- | --- | ---: | ---: |
+| 0313afa5 | city street | 2000 / 2000 | 9.94 / 9.94 m/s² | 0.10°/s, 0.02° | +1.0% | +1.1% |
+| 0c05c38a | temple courtyard | 2000 / 2000 | 9.81 / 9.79 m/s² | 0.11°/s, 0.06° | −2.5% | −1.7% |
+| 3b81dbc3 | residential street | 1998 / 1998 | 9.77 / 9.77 m/s² | 0.17°/s, 0.09° | −3.7% | −3.6% |
+| 9d2fe9b1 | tropical park | 1987 / 1986 | 9.78 / 9.76 m/s² | 1.80°/s, 0.05° | +1.7% | +1.8% |
+| 5bb3848a | shopping mall, indoors | 2000 / 2000 | 9.57 / 9.80 m/s² | 0.08°/s, 0.04° | +12.0% | +1.2% |
 
 The scale columns compare two IMU estimates over the same frames: this
-run's, on its own model, against the one on the dataset's model. The
-rotation residual is the same at both face sizes.
+run's, on its own model, against the one on the dataset's model. Both fit
+the camera's gyro bias
+([insta360_imu_scale.md](insta360_imu_scale.md#gyro-bias)); the rotation
+residual is what is left, at 1024 px (within 0.01° of 640 px).
 
 - **SfM.** Every walk reconstructs at both sizes.
 - **Outdoors.** One 133 s run of the IMU alignment lands within 4%. 1024 px
-  faces move each walk by at most 0.7 points, so outdoors the error is the
+  faces move each walk by at most 0.8 points, so outdoors the error is the
   alignment's, not the faces'. The 50-walk study found about 2.5% error at
   1 s frame spacing ([insta360_imu_scale.md](insta360_imu_scale.md));
   longer clips give more runs to average.
 - **Indoors.** With 640 px faces the mall is off by 12%, and its fitted
   gravity, 9.57 m/s², marks a weak fit. With 1024 px faces gravity is
-  9.80 m/s² and the scale is +1.4%.
-- **The park.** Its rotation residual (1.18°) and frame-timing drift (18.5
-  and 11 ms) are the same at both sizes, so the faces are not what limits
-  it.
+  9.80 m/s² and the scale is +1.2%.
+- **The park.** Its camera's gyro reads 1.8°/s off. Before the estimator
+  fitted that bias, it left a 1.18° rotation residual at both face sizes,
+  pulled the frame timing 18 ms off over the clip, and gave a scale 3.3%
+  lower.
 - **Face size.** In the mall, the first frames at the full 0.33 s spacing
   compare as follows:
 
@@ -222,8 +225,8 @@ rotation residual is the same at both face sizes.
   in 35–47 min. The SIFT descriptors (5.7 GB for 2,000 faces) are most of
   what is left.
 - **Warning signs.** Distrust the scale when |g| is more than about
-  0.2 m/s² from 9.81, or the rotation residual is more than a few tenths of
-  a degree (the park, where 13 faces did not register).
+  0.2 m/s² from 9.81, or the rotation residual (after the gyro bias fit) is
+  more than a few tenths of a degree.
 
 **Through Insta360 Studio** (not tried here; Studio is the maker's desktop
 application). Studio's export drops the IMU, so pass the original `.insv`:

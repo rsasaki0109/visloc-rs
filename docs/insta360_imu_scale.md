@@ -10,8 +10,9 @@ paper's "Production B" set). Code:
 scene, about 1.5 minutes on a CPU) and
 [`scripts/overmaps360_imu_scale.sh`](../scripts/overmaps360_imu_scale.sh)
 (all scenes). The Rust port, `visloc_slam::estimate_imu_scale` (with the
-centre term on by default), matches it to four decimals and runs in
-seconds; `gsplat_photos --imu` uses it to output metric models
+centre term on by default), matches it to four decimals with its gyro bias
+fit turned off ([below](#gyro-bias)), and runs in seconds;
+`gsplat_photos --imu` uses it to output metric models
 ([photos_to_splat.md](photos_to_splat.md#metric-scale-from-the-cameras-imu)),
 and `visloc_io::insv` reads the IMU from an `.insv` itself.
 
@@ -297,6 +298,42 @@ against the GPS scale, 49 scenes:
   other (+0.05%) and both read about 1.2% below the GPS. Two independent
   sensors agreeing suggests the phone's GPS scale is about 1% high there
   (1 Hz smartphone fixes in streets; not investigated further).
+
+## Gyro bias
+
+Every camera in the dataset has a constant gyro bias. It bends each
+frame-to-frame rotation by `b_g dt`, so the Kabsch fit of the
+camera-from-IMU rotation leaves a residual that grows with the interval,
+and on a short clip the bias pulls the frame timing too. The Rust
+`estimate_imu_scale` fits it after the first timing search
+(`R_CBᵀ r_C = r_B − b_g dt` by least squares, alternating with `R_CB`),
+takes it off the gyro, and searches the timing again
+(`ImuScaleConfig::gyro_bias`, on by default; `imu_metric_scale
+--no-gyro-bias` turns it off). On the 50 walks (dataset models, whole
+walks):
+
+- **Size.** 0.07–0.43°/s on 48 walks (median 0.15°/s); 1.48°/s on e24912d9
+  and 1.69°/s on 9d2fe9b1. On five walks also run end to end from their raw
+  `.insv` ([photos_to_splat.md](photos_to_splat.md#metric-scale-from-the-cameras-imu)),
+  gsplat_photos' own model finds the same bias within 0.02°/s.
+- **Rotation residual.** It falls from 0.03–0.60° to 0.01–0.05°. The
+  exception is c8c675bc, which stays at 0.40° for some other reason.
+- **Scale.** It moves by 0.06% in the median and by 1.1% at most
+  (9d2fe9b1). Against ARKit and GPS the agreement does not change:
+
+  | Estimate | vs ARKit MAE | SD | vs GPS MAE | SD |
+  | --- | ---: | ---: | ---: | ---: |
+  | Per run with the term | 1.86% | 2.43% | 1.34% | 1.51% |
+  | With the gyro bias fitted | 1.85% | 2.42% | 1.38% | 1.51% |
+
+  On the two walks with a large bias the references point opposite ways:
+  9d2fe9b1 moves 1.1 points away from both, e24912d9 0.5 points closer.
+- **Timing.** On a synthetic walk with a 1.8°/s bias the fit recovers the
+  scale (1.0503 for 1.05); left in, the bias makes it read 1.8% low and puts
+  the frame offset 1.2 s off. On the first 133 s of 9d2fe9b1 with
+  gsplat_photos' own model, the bias shifted the fitted frame period by
+  0.03% and the offset by 23 ms (drift 18.5 ms between the clip's first and
+  last quarters); with it fitted, the timing matches the dataset model's.
 
 ## Reproduce
 
