@@ -37,7 +37,7 @@ use visloc_basalt::RawU16Image;
 use visloc_core::geometry::{Pose as CameraPose, SE3};
 use visloc_core::types::{Camera, LandmarkDescriptorStore, LocalizationFailureReason, VisualMap};
 use visloc_io::colmap::read_colmap_text_model;
-use visloc_io::descriptors::read_landmark_descriptors_txt;
+use visloc_io::descriptors::{read_landmark_descriptor_rows, read_landmark_descriptors_txt};
 use visloc_localization::{
     AllLandmarksSelector, BinaryLandmarkIndex, BinaryMatchGates, FixOutcome, LocalizationConfig,
     LocalizationPipeline, OdomCorrection, OdomCorrectionConfig, PackedDescriptors,
@@ -88,6 +88,10 @@ pub struct MapLocalizeOptions {
     /// (`BinaryLandmarkIndex::with_duplicate_radius`); `None` is the plain
     /// ratio test.
     pub duplicate_radius_m: Option<f64>,
+    /// Extra descriptors per landmark matched at most (the map's
+    /// `landmark_descriptors_extra.txt`, from the views that differ most
+    /// from the main descriptor); 0 matches the main one only.
+    pub extra_descriptors: usize,
     pub correction: OdomCorrectionConfig,
     /// Odometry poses kept for pairing with fixes.
     pub odom_history_s: f64,
@@ -116,6 +120,7 @@ impl Default for MapLocalizeOptions {
             projection_fresh_m: 2.0,
             match_threads: 1,
             duplicate_radius_m: None,
+            extra_descriptors: usize::MAX,
             correction: OdomCorrectionConfig::default(),
             odom_history_s: 10.0,
             max_odom_gap_s: 0.2,
@@ -130,6 +135,9 @@ impl Default for MapLocalizeOptions {
 pub struct SavedBasaltMap {
     pub map: VisualMap,
     pub descriptors: LandmarkDescriptorStore,
+    /// `landmark_descriptors_extra.txt`: more descriptors per landmark (ids
+    /// repeat), empty when the file is missing.
+    pub extra_descriptors: Vec<(u64, Vec<f32>)>,
     /// `T_imu_cam` per Basalt camera index.
     pub imu_from_camera: Vec<SE3>,
     /// Detector budget the map's keyframes were built with.
@@ -209,9 +217,17 @@ pub fn load_basalt_map(map_dir: &Path) -> Result<SavedBasaltMap, String> {
     let descriptors_path = map_dir.join("landmark_descriptors.txt");
     let descriptors = read_landmark_descriptors_txt(&descriptors_path)
         .map_err(|error| format!("{}: {error}", descriptors_path.display()))?;
+    let extra_path = map_dir.join("landmark_descriptors_extra.txt");
+    let extra_descriptors = if extra_path.exists() {
+        read_landmark_descriptor_rows(&extra_path)
+            .map_err(|error| format!("{}: {error}", extra_path.display()))?
+    } else {
+        Vec::new()
+    };
     Ok(SavedBasaltMap {
         map,
         descriptors,
+        extra_descriptors,
         imu_from_camera,
         max_points,
         local_contrast,
@@ -339,6 +355,7 @@ impl MapLocalizer {
         };
         Ok(Self {
             index: BinaryLandmarkIndex::new(&map.map, &map.descriptors)
+                .with_extra_descriptors(&map.extra_descriptors, options.extra_descriptors)
                 .with_duplicate_radius(options.duplicate_radius_m.unwrap_or(0.0)),
             max_points: options.max_points.unwrap_or(map.max_points),
             map,
@@ -372,6 +389,11 @@ impl MapLocalizer {
 
     /// Localizes one raw image; `prior` is the body pose in the map
     /// predicted for it (see [`OdomCorrector::prior`]).
+    /// Extra descriptors matched besides each landmark's main one.
+    pub fn extra_descriptor_count(&self) -> usize {
+        self.index.extra_descriptor_count()
+    }
+
     pub fn localize(&self, image: &RawU16Image, prior: Option<&SE3>) -> Fix {
         let started = Instant::now();
         let mut fix = match self.extract(image) {
@@ -1407,6 +1429,7 @@ mod tests {
         SavedBasaltMap {
             map: VisualMap::new(),
             descriptors: LandmarkDescriptorStore::new(),
+            extra_descriptors: Vec::new(),
             imu_from_camera: vec![SE3::identity()],
             max_points: 800,
             local_contrast: None,

@@ -38,7 +38,10 @@
 //! (`visloc_basalt::contrast::LocalContrast`, for maps that must localize
 //! images taken under other lighting); `map.json` records it, and
 //! localization applies the same to its images. The VIO tracks the raw
-//! images either way.
+//! images either way. With `--extra-descriptors`, each landmark also keeps
+//! the descriptors of up to three of its views that differ most from its
+//! main one (`landmark_descriptors_extra.txt`), which localization matches
+//! too.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -86,6 +89,7 @@ struct Args {
     save_map: Option<PathBuf>,
     /// Equalize the keyframes' local contrast before ORB extraction.
     equalize_local_contrast: bool,
+    extra_descriptors: bool,
     max_frames: Option<usize>,
     optimize_every_k: usize,
     periodic_iterations: usize,
@@ -834,6 +838,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.equalize_local_contrast
                 .then(LocalContrast::default)
                 .as_ref(),
+            args.extra_descriptors,
         )?;
         eprintln!(
             "saved map: images={} landmarks={} observations={} -> {}",
@@ -1115,6 +1120,7 @@ impl Args {
         let mut frontend_stats_csv = None;
         let mut save_map = None;
         let mut equalize_local_contrast = false;
+        let mut extra_descriptors = false;
         let mut max_frames = None;
         let mut optimize_every_k = OnlineMapperConfig::default().optimize_every_k;
         let mut periodic_iterations = OnlineMapperConfig::default().periodic_iterations;
@@ -1172,6 +1178,7 @@ impl Args {
                 }
                 "--save-map" => save_map = Some(PathBuf::from(next(&mut arguments, &option)?)),
                 "--equalize-local-contrast" => equalize_local_contrast = true,
+                "--extra-descriptors" => extra_descriptors = true,
                 "--max-frames" => {
                     max_frames = Some(
                         next(&mut arguments, &option)?
@@ -1374,6 +1381,7 @@ impl Args {
             frontend_stats_csv,
             save_map,
             equalize_local_contrast,
+            extra_descriptors,
             max_frames,
             optimize_every_k,
             periodic_iterations,
@@ -1417,7 +1425,7 @@ impl Args {
          [--pipeline | --no-pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] \
          [--mapper-queue-capacity N] [--retained-marg-diagnostics] [--num-opt-iter N] \
          [--match-top-k N] [--frontend-stats-csv <path>] [--save-map DIR] \
-         [--equalize-local-contrast] \
+         [--equalize-local-contrast] [--extra-descriptors] \
          [--projection-rematch] [--local-mapping] [--imu-seed-klt] \
          [--projection-host-window N] [--projection-radius PX] \
          [--loop-match-max-rot-error DEG] \
@@ -1600,6 +1608,7 @@ mod tests {
         .expect("parses");
         assert_eq!(args.save_map, Some(PathBuf::from("maps/mh01")));
         assert!(!args.equalize_local_contrast);
+        assert!(!args.extra_descriptors);
         let args = Args::parse(
             [
                 "--euroc-dir",
@@ -1607,11 +1616,13 @@ mod tests {
                 "--calibration",
                 "c.json",
                 "--equalize-local-contrast",
+                "--extra-descriptors",
             ]
             .map(Into::into),
         )
         .expect("parses");
         assert!(args.equalize_local_contrast);
+        assert!(args.extra_descriptors);
     }
 
     #[test]

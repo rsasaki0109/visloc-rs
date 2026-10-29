@@ -12,6 +12,12 @@
 //! windows, which only compares each projected landmark with the keypoints
 //! near it.
 //!
+//! A landmark can also carry extra descriptors, from the views of it whose
+//! descriptors differ most from its main one
+//! ([`BinaryLandmarkIndex::with_extra_descriptors`]): a keypoint matches the
+//! landmark at the nearest of them, and the ratio test compares it with the
+//! nearest other landmark.
+//!
 //! A map can hold several landmarks for one physical point: a SLAM map whose
 //! tracks broke and restarted, and more so a map merged from several
 //! sessions. Their descriptors are nearly equal, so the nearest /
@@ -141,11 +147,16 @@ impl Nearest {
         }
     }
 
+    /// Offers a candidate; an index offered again (a landmark's other
+    /// descriptor) competes with itself only for the best distance, never as
+    /// the second best.
     fn offer(&mut self, distance: u32, index: usize) {
         if distance < self.best.0 {
-            self.second = self.best.0;
+            if index != self.best.1 {
+                self.second = self.best.0;
+            }
             self.best = (distance, index);
-        } else if distance < self.second {
+        } else if distance < self.second && index != self.best.1 {
             self.second = distance;
         }
     }
@@ -242,6 +253,12 @@ pub struct BinaryLandmarkIndex {
     landmark_ids: Vec<LandmarkId>,
     positions: Vec<Point3<f64>>,
     descriptors: PackedDescriptors,
+    /// Extra descriptors, grouped by landmark: those of the landmark at
+    /// index `i` are rows `extra_offsets[i]..extra_offsets[i + 1]`.
+    extra: PackedDescriptors,
+    extra_offsets: Vec<usize>,
+    /// The landmark index of each extra row.
+    extra_owner: Vec<usize>,
     duplicate_radius_m: Option<f64>,
 }
 
@@ -263,8 +280,70 @@ impl BinaryLandmarkIndex {
                 .map(|(landmark, _)| landmark.position)
                 .collect(),
             descriptors: PackedDescriptors::pack(&descriptors, dimension),
+            extra: PackedDescriptors::pack::<&[f32]>(&[], dimension),
+            extra_offsets: vec![0; paired.len() + 1],
+            extra_owner: Vec::new(),
             duplicate_radius_m: None,
         }
+    }
+
+    /// Adds extra descriptors, `(landmark id, descriptor)` rows with ids
+    /// repeated freely, at most `max_per_landmark` per landmark in the order
+    /// given; rows of landmarks not indexed are skipped. Replaces any extra
+    /// descriptors added before.
+    #[must_use]
+    pub fn with_extra_descriptors<D: AsRef<[f32]>>(
+        mut self,
+        rows: &[(LandmarkId, D)],
+        max_per_landmark: usize,
+    ) -> Self {
+        let mut grouped: Vec<Vec<&[f32]>> = vec![Vec::new(); self.len()];
+        for (id, descriptor) in rows {
+            if let Some(index) = self.landmark_index(*id) {
+                if grouped[index].len() < max_per_landmark {
+                    grouped[index].push(descriptor.as_ref());
+                }
+            }
+        }
+        let mut offsets = Vec::with_capacity(self.len() + 1);
+        let mut owner = Vec::new();
+        let mut flat = Vec::new();
+        offsets.push(0);
+        for (index, descriptors) in grouped.into_iter().enumerate() {
+            owner.extend(std::iter::repeat_n(index, descriptors.len()));
+            flat.extend(descriptors);
+            offsets.push(flat.len());
+        }
+        self.extra = PackedDescriptors::pack(&flat, self.dimension());
+        self.extra_offsets = offsets;
+        self.extra_owner = owner;
+        self
+    }
+
+    /// Number of extra descriptors indexed.
+    pub fn extra_descriptor_count(&self) -> usize {
+        self.extra.len()
+    }
+
+    /// Every descriptor row with its landmark index: the main ones, then
+    /// the extra ones.
+    fn rows(&self) -> impl Iterator<Item = (usize, &[u64])> {
+        self.descriptors.iter().chain(
+            self.extra
+                .iter()
+                .map(|(row, bits)| (self.extra_owner[row], bits)),
+        )
+    }
+
+    /// The descriptors of the landmark at `index`: its main one (if valid),
+    /// then its extra ones.
+    fn landmark_rows(&self, index: usize) -> impl Iterator<Item = &[u64]> {
+        let range = self.extra_offsets.get(index).copied().unwrap_or(0)
+            ..self.extra_offsets.get(index + 1).copied().unwrap_or(0);
+        self.descriptors
+            .get(index)
+            .into_iter()
+            .chain(range.filter_map(|row| self.extra.get(row)))
     }
 
     /// Makes the ratio test of [`Self::match_all`] treat landmarks within
@@ -315,7 +394,7 @@ impl BinaryLandmarkIndex {
             range
                 .filter_map(|query_index| {
                     let bits = query.get(query_index)?;
-                    let nearest = self.search(bits, self.descriptors.iter());
+                    let nearest = self.search(bits, self.rows());
                     let (distance, landmark, second) = nearest.accept(gates)?;
                     Some(descriptor_match(query_index, landmark, distance, second))
                 })
@@ -358,10 +437,9 @@ impl BinaryLandmarkIndex {
         let matches = (0..count)
             .filter_map(|query_index| {
                 let bits = query.get(query_index)?;
-                let candidates = landmarks.iter().filter_map(|&landmark| {
-                    self.descriptors
-                        .get(landmark)
-                        .map(|train| (landmark, train))
+                let candidates = landmarks.iter().flat_map(|&landmark| {
+                    self.landmark_rows(landmark)
+                        .map(move |train| (landmark, train))
                 });
                 let (distance, landmark, second) = self.search(bits, candidates).accept(gates)?;
                 Some(descriptor_match(query_index, landmark, distance, second))
@@ -371,7 +449,8 @@ impl BinaryLandmarkIndex {
     }
 
     /// The nearest of `candidates` (landmark indices with their packed
-    /// descriptors) to `bits`, with the duplicate radius applied.
+    /// descriptors, a landmark possibly more than once) to `bits`, with the
+    /// duplicate radius applied.
     fn search<'a>(
         &self,
         bits: &[u64],
@@ -406,7 +485,8 @@ impl BinaryLandmarkIndex {
     }
 
     /// Projection-guided matching: each landmark is projected with
-    /// `pose_prior` and its descriptor compared only with the keypoints
+    /// `pose_prior` and its descriptors (the nearest of them) compared only
+    /// with the keypoints
     /// within `radius_px` of the projection (best and second best among
     /// them, gated by `gates`); overlapping windows are then resolved
     /// one-to-one, lowest distance first. The same correspondences as
@@ -430,9 +510,9 @@ impl BinaryLandmarkIndex {
         let mut candidate_count = 0;
         let mut proposals = Vec::new();
         for (landmark, position) in self.positions.iter().enumerate() {
-            let Some(train) = self.descriptors.get(landmark) else {
+            if self.landmark_rows(landmark).next().is_none() {
                 continue;
-            };
+            }
             let point_camera = pose_prior.transform_world_point(position);
             if point_camera.z <= 0.0 {
                 continue;
@@ -453,7 +533,12 @@ impl BinaryLandmarkIndex {
             let mut nearest = Nearest::new();
             for keypoint in grid.within(keypoints, projected, radius_squared) {
                 if let Some(bits) = query.get(keypoint) {
-                    nearest.offer(hamming(train, bits), keypoint);
+                    let distance = self
+                        .landmark_rows(landmark)
+                        .map(|train| hamming(train, bits))
+                        .min()
+                        .unwrap_or(u32::MAX);
+                    nearest.offer(distance, keypoint);
                 }
             }
             if let Some((distance, keypoint, second)) = nearest.accept(gates) {
@@ -862,5 +947,84 @@ mod tests {
         let index = index.with_duplicate_radius(0.05);
         let tolerant = index.match_all(&keypoints, &packed, GATES, 1);
         assert_eq!(matched_queries(&tolerant), [2]);
+    }
+
+    /// `descriptor` with exactly the first `count` bits flipped.
+    fn flip_first(descriptor: &[f32], count: usize) -> Vec<f32> {
+        let mut flipped = descriptor.to_vec();
+        for value in flipped.iter_mut().take(count) {
+            *value = 1.0 - *value;
+        }
+        flipped
+    }
+
+    #[test]
+    fn extra_descriptors_match_their_landmark_and_never_compete_with_it() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let camera = Camera::pinhole(1, 640, 480, 400.0, 400.0, 320.0, 240.0);
+        let mut map = VisualMap::new();
+        let mut store = LandmarkDescriptorStore::new();
+        // Landmark 1: main descriptor `a`, an extra `b` far from it (another
+        // view), and an extra 2 bits from `a`. Landmark 2: `c`.
+        let (a, b, c) = (rng.bits(), rng.bits(), rng.bits());
+        let near_a = flip_first(&a, 2);
+        for (id, position, descriptor) in [
+            (1_u64, Point3::new(0.0, 0.0, 4.0), &a),
+            (2, Point3::new(0.5, 0.0, 4.0), &c),
+        ] {
+            map.landmarks.insert(id, Landmark::new(id, position));
+            store.insert(id, descriptor.clone());
+        }
+        let extra = vec![(1_u64, b.clone()), (1, near_a), (9, rng.bits())];
+        let plain = BinaryLandmarkIndex::new(&map, &store);
+        let index = plain.clone().with_extra_descriptors(&extra, 4);
+        assert_eq!(index.extra_descriptor_count(), 2);
+        assert_eq!(
+            plain
+                .clone()
+                .with_extra_descriptors(&extra, 1)
+                .extra_descriptor_count(),
+            1
+        );
+
+        // A keypoint seen from `b`'s view matches landmark 1 only with the
+        // extras; one 1 bit from `a` is not rejected by `a`'s own neighbour.
+        let keypoints = vec![Point2::new(320.0, 240.0), Point2::new(370.0, 240.0)];
+        let descriptors = vec![flip_first(&b, 5), flip_first(&a, 1)];
+        let query = index.pack_query(&descriptors);
+        let ids = |set: &CorrespondenceSet| set.landmark_ids.clone();
+        assert_eq!(
+            ids(&plain.match_all(&keypoints[..1], &query, GATES, 1)),
+            Vec::<u64>::new()
+        );
+        let matched = index.match_all(&keypoints, &query, GATES, 1);
+        assert_eq!(ids(&matched), vec![1, 1]);
+        assert_eq!(matched.descriptor_matches[0].distance, 5.0);
+        assert_eq!(matched.descriptor_matches[1].distance, 1.0);
+        // The second best is landmark 2, not landmark 1's other descriptors.
+        let second = matched.descriptor_matches[1].second_best_distance.unwrap();
+        assert!(second > 70.0, "{second}");
+        assert_eq!(
+            ids(&index.match_among(&keypoints, &query, GATES, &[0, 1])),
+            vec![1, 1]
+        );
+
+        // Around the projections, the nearest of a landmark's descriptors
+        // counts: the first keypoint (at landmark 1) matches it through `b`.
+        let pose = Pose::identity();
+        let projected = index.match_projected(&camera, &pose, &keypoints, &query, 30.0, GATES);
+        assert_eq!(ids(&projected), vec![1]);
+        assert_eq!(projected.query_indices, vec![0]);
+        assert!(plain
+            .match_projected(
+                &camera,
+                &pose,
+                &keypoints,
+                &plain.pack_query(&descriptors),
+                30.0,
+                GATES
+            )
+            .landmark_ids
+            .is_empty());
     }
 }
