@@ -19,7 +19,7 @@
 //! from the video.
 //!
 //! The back lens's rotation on the camera is fitted to where the two lenses
-//! see the same things along the seam, in 24 frames spread over the video
+//! see the same things along the seam, in 16 frames spread over the video
 //! (`--back-lens auto`); `factory` takes it from the recorded angles alone,
 //! and a file from the `back_lens.txt` a `gsplat_photos --insv` run wrote
 //! (docs/insta360_lens.md). The lenses are 3.2 cm apart, so where they meet
@@ -48,7 +48,7 @@ An Insta360 video's dual-fisheye frames -> equirectangular (360°) frames.
   --step 1           stitch every N-th frame
   --width PX         panorama width (height = width / 2; default: the lenses' resolution)
   --blend 2          degrees over which the two lenses are mixed at the seam
-  --back-lens auto   the back lens's rotation: auto (fitted along the seam in 24 frames),
+  --back-lens auto   the back lens's rotation: auto (fitted along the seam in 16 frames),
                      factory (the recorded angles alone), or a gsplat_photos --insv run's
                      back_lens.txt
   --distance M       stitch the seam for things this far away (metres; inf: far away;
@@ -61,7 +61,7 @@ An Insta360 video's dual-fisheye frames -> equirectangular (360°) frames.
 ";
 
 /// Frames the automatic back-lens fit samples from a video.
-const FIT_FRAMES: u64 = 24;
+const FIT_FRAMES: u64 = 16;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);

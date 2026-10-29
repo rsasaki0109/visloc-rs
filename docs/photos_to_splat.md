@@ -102,10 +102,14 @@ left, as ffmpeg's `hstack` of the video's two streams produces.
   metadata ([insta360_lens.md](insta360_lens.md)).
 - **Rig.** A frame's ten faces are solved as one rig. The back lens's pose
   on it starts from a half turn and is refined by the mapper, so nothing is
-  stitched. `--window` counts frames.
+  stitched; `<out>/back_lens.txt` holds the refined pose. `--window`
+  counts frames.
 - **Scale.** The video's IMU scales the model to metres (next section).
 - **Cameras.** The calibration is decoded for the X5; videos from other
   cameras stop with an error.
+- **Panoramas instead.** The `insv_stitch` example stitches the two
+  lenses into equirectangular frames or video, for `--equirect` or any
+  360° viewer ([insta360_lens.md](insta360_lens.md#stitching)).
 
 ## Metric scale from the camera's IMU
 
