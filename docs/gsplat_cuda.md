@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 3).
+  version (currently 6).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -30,10 +30,10 @@ The packaging follows the DPVO CUDA kernels:
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
 | Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
-| Inria densification rule, per-image appearance, depth-normal loss | Not supported (the trainer refuses these configurations) |
+| Inria densification rule, per-image appearance | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
-| Geometry channels (normal) for the depth-normal loss | Not started |
+| Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; effect on ETH3D being measured |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -61,6 +61,13 @@ the same hashes for the random draws.
   aux-loss fade) and the refine decisions are copies of `Trainer`'s. The
   configuration, image packing and bounds come from
   `visloc_gsplat_train::config`, which needs no GPU feature.
+- **Depth losses**: with a depth prior or the depth-normal loss on, the
+  step also blends the expected depth, and for the depth-normal loss the
+  normal `sum_i T_i a_i n_i` (n_i the axis of the smallest scale, turned to
+  face the camera). `normal_loss.wgsl`'s two passes become two kernels.
+  The backward pass carries both channels in free slots of its butterfly:
+  through alpha to opacity, conic and 2D mean, the depth to the centre's z,
+  and the normal to the rotation.
 
 ## Build and test
 
@@ -96,7 +103,7 @@ magnitude. The tolerances are 2e-3 (image, screen gradients) and 3e-3
 | 2,500 faint gaussians, 64x48 (about 500 per tile: several batches) | 4.5e-7 (absolute) | 6.7e-6 | 1.1e-6 |
 | Active SH degree 1 and 0 of a degree-3 scene | | | 1.8e-6; bands above the active degree get exactly 0 |
 
-Two more tests check the depth output against analytic cases:
+More tests check the depth and normal outputs:
 
 - **Median depth.** A faint disc gives no median, with opacity 0.4. An
   opaque disc behind it gives its depth, with opacity 1 - 0.6 x 0.1.
@@ -109,6 +116,18 @@ Two more tests check the depth output against analytic cases:
   times the red gradient / 10. Worst error 1.8e-7.
   - Finite differences cannot check this: a pixel crossing the alpha gate
     moves D by z / 255.
+- **Normal channel** (the depth-normal loss's path), by the same trick.
+  Each splat's colour is set to its camera-space normal + 1 on black, so
+  the colour is N + A (A = 1 - T), and a colour-1 render gives A. A colour
+  gradient then gives the normal channel's opacity, conic, mean and scale
+  gradients as the difference of the two renders' gradients. Its
+  quaternion gradients differ by J_n^T g_n, the rotation of the normal,
+  which the test takes by central differences of the smooth n(q) on the
+  CPU. Worst error 9.0e-7.
+- **Depth-normal loss.** Its value and its gradients with respect to the
+  normal and expected-depth channels against central differences of an f64
+  CPU copy (opacity held constant, as in the kernel): 1.9e-6 and 2.5e-6 of
+  their largest values.
 
 `tests/training.rs` checks the training step:
 
@@ -118,6 +137,7 @@ Two more tests check the depth output against analytic cases:
 | Masked pixels (ground-truth alpha below 128) | Exactly zero gradient |
 | Refine scatter (prune, keep, clone, brush split) | Row order, split means symmetric about the parent, scales / sqrt 2, opacity 1 - sqrt(1 - a), statistics reset |
 | 300 steps on a scene rendered from known gaussians, colours and opacities perturbed, dense and sparse SH Adam | Mean L1 0.0175 → 0.0009 in both; a gaussian behind every camera keeps its SH bit for bit |
+| 300 steps of the depth-normal loss (weight 1) on a dense scene fitted to its own renders, only rotations learning | Depth-normal loss 0.286 → 0.099 |
 
 ## Training on south-building
 

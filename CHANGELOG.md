@@ -65,6 +65,17 @@ All notable changes to `visloc-rs` will be documented here.
     completeness does not, and the mesh stays far below the MVS cloud that
     supervised it (67.6%).
   - CUDA ABI 5.
+- **Depth-normal loss for the CUDA trainer (opt-in).**
+  - `gsplat_train_cuda --normal-weight w [--normal-start 7000]` runs the wgpu
+    trainer's 2DGS / PGSR-style loss, which `CudaTrainer` refused before.
+  - The step blends a normal channel next to the expected depth and
+    back-propagates it to the rotations.
+  - `CudaGsplat::render_geometry`, `normal_loss` and
+    `backward_with_geometry` expose the channels and their gradients.
+  - The normal channel's gradients match an exact colour-channel identity
+    to 9.0e-7. The loss's gradients match central differences of an f64 CPU
+    copy to 2.5e-6.
+  - CUDA ABI 6.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
   exact size (`--size` makes cameras of slightly different sizes, as in some

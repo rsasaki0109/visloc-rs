@@ -57,7 +57,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 5;
+constexpr uint32_t kAbiVersion = 6;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -401,19 +401,21 @@ __device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
 // the list entry's top byte). With kDepth, out_depth also receives per pixel
 // the median depth (camera z of the splat at which the transmittance first
 // drops to 0.5 or below; 0 when it never does) and the opacity 1 - T, as
-// rasterize_depth.wgsl. With `plane` (plane_kernel) the median depth is where
-// the pixel's ray meets that splat's plane instead of the splat centre's z
-// (falling back to it at grazing angles); `intr` is (fx, fy, cx, cy). With
-// kDepth, `acc_depth` (nullable) also receives the expected depth
+// rasterize_depth.wgsl. With `planar` the median depth is where the pixel's
+// ray meets that splat's plane (`plane`, plane_kernel) instead of the splat
+// centre's z (falling back to it at grazing angles); `intr` is (fx, fy, cx,
+// cy). With kDepth, `acc_depth` (nullable) also receives the expected depth
 // sum_i T_i a_i z_i of the splat centres, the depth channel the depth-prior
-// loss trains.
+// and depth-normal losses train, and `acc_normal` (nullable, 3 floats per
+// pixel; needs `plane`) the normal channel sum_i T_i a_i n_i of the splats'
+// plane normals, as rasterize.wgsl's geometry variant.
 template <bool kDepth>
 __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
-    const float* __restrict__ depth, const float4* __restrict__ plane, float4 intr, float* __restrict__ out_img,
-    float* __restrict__ final_t, uint32_t* __restrict__ last_idx, float* __restrict__ out_depth,
-    float* __restrict__ acc_depth) {
+    const float* __restrict__ depth, const float4* __restrict__ plane, int planar, float4 intr,
+    float* __restrict__ out_img, float* __restrict__ final_t, uint32_t* __restrict__ last_idx,
+    float* __restrict__ out_depth, float* __restrict__ acc_depth, float* __restrict__ acc_normal) {
     __shared__ float2 s_xy[kBlock];
     __shared__ float4 s_co[kBlock];
     __shared__ float3 s_col[kBlock];
@@ -436,6 +438,7 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     uint32_t last = 0;
     float median = 0.f;
     float zacc = 0.f;
+    float3 nacc = make_float3(0.f, 0.f, 0.f);
     bool done = !in_image;
     for (uint32_t start = range.x; start < range.y; start += kBlock) {
         // Also the barrier that protects the staged batch before it is reloaded.
@@ -468,7 +471,15 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                     if (a >= 1.f / 255.f) {
                         const float3 c = s_col[s];
                         const float w = trans * a;
-                        if (kDepth) zacc += w * s_depth[s];
+                        if (kDepth) {
+                            zacc += w * s_depth[s];
+                            if (acc_normal) {
+                                const float4 pl = s_plane[s];
+                                nacc.x += w * pl.x;
+                                nacc.y += w * pl.y;
+                                nacc.z += w * pl.z;
+                            }
+                        }
                         acc.x += w * fmaxf(c.x, 0.f);
                         acc.y += w * fmaxf(c.y, 0.f);
                         acc.z += w * fmaxf(c.z, 0.f);
@@ -477,7 +488,7 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                         last = start + s + 1;
                         if (kDepth && before > 0.5f && trans <= 0.5f) {
                             median = s_depth[s];
-                            if (plane) {
+                            if (planar) {
                                 const float4 pl = s_plane[s];
                                 const float nr = pl.x * (sx - intr.z) / intr.x + pl.y * (sy - intr.w) / intr.y + pl.z;
                                 const float z = nr != 0.f ? pl.w / nr : 0.f;
@@ -502,6 +513,11 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
             out_depth[pix * 2] = median;
             out_depth[pix * 2 + 1] = 1.f - trans;
             if (acc_depth) acc_depth[pix] = zacc;
+            if (acc_normal) {
+                acc_normal[pix * 3 + 0] = nacc.x;
+                acc_normal[pix * 3 + 1] = nacc.y;
+                acc_normal[pix * 3 + 2] = nacc.z;
+            }
         }
     }
 }
@@ -522,23 +538,29 @@ __device__ inline float xstep(float lo, float hi, bool h, int m) {
 // global float reduction per component (fire-and-forget REDs; a shared-memory
 // float atomicAdd would be a CAS loop, and the warps that hit a splat are few).
 // A warp skips the splats whose footprint misses its sub-tile (the list
-// entry's mask). With kZ the expected-depth channel (raster_fwd_kernel's
+// entry's mask). With kGeo >= 1 the expected-depth channel (raster_fwd_kernel's
 // acc_depth, background 0) is differentiated too, for `d_depth` per pixel:
 // its share reaches the opacity and conic through alpha, and the splat
-// centre's depth through `g_depth` (slot 10 of the butterfly).
-template <bool kZ>
+// centre's depth through `g_depth` (slot 10 of the butterfly). kGeo 2 adds
+// the normal channel (acc_normal; `d_normal` 3 floats per pixel) the same
+// way, the plane normals' share going to `g_normal` (slots 11-13).
+template <int kGeo>
 __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
     const float* __restrict__ final_t, const uint32_t* __restrict__ last_idx, const float* __restrict__ d_image,
     float* __restrict__ screen_grads, const float* __restrict__ depth, const float* __restrict__ d_depth,
-    float* __restrict__ g_depth) {
+    float* __restrict__ g_depth, const float4* __restrict__ plane, const float* __restrict__ d_normal,
+    float* __restrict__ g_normal) {
+    constexpr bool kZ = kGeo >= 1;
+    constexpr bool kN = kGeo >= 2;
     __shared__ float2 s_xy[kBwdBatch];
     __shared__ float4 s_co[kBwdBatch];
     __shared__ float3 s_col[kBwdBatch];
     __shared__ uint32_t s_gid[kBwdBatch];
     __shared__ uint32_t s_cm[kBwdBatch];
     __shared__ float s_z[kZ ? kBwdBatch : 1];
+    __shared__ float3 s_n[kN ? kBwdBatch : 1];
     __shared__ uint32_t s_last;
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
@@ -557,12 +579,14 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     float3 g = make_float3(0.f, 0.f, 0.f);
     float3 behind = bg;
     float gz = 0.f, behind_z = 0.f;
+    float3 gn = make_float3(0.f, 0.f, 0.f), behind_n = make_float3(0.f, 0.f, 0.f);
     if (in_image) {
         const uint32_t pix = py * img_w + px;
         t_cur = final_t[pix];
         last = last_idx[pix];
         g = make_float3(d_image[pix * 3], d_image[pix * 3 + 1], d_image[pix * 3 + 2]);
         if (kZ) gz = d_depth[pix];
+        if (kN) gn = make_float3(d_normal[pix * 3], d_normal[pix * 3 + 1], d_normal[pix * 3 + 2]);
     }
     if (tid == 0) s_last = 0;
     __syncthreads();
@@ -585,6 +609,10 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
             s_gid[tid] = gi;
             s_cm[tid] = v >> kIdBits;
             if (kZ) s_z[tid] = depth[gi];
+            if (kN) {
+                const float4 pl = plane[gi];
+                s_n[tid] = make_float3(pl.x, pl.y, pl.z);
+            }
         }
         __syncthreads();
 
@@ -595,6 +623,7 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
             float g_u = 0.f, g_v = 0.f, g_a = 0.f, g_b = 0.f, g_c = 0.f, g_o = 0.f, g_r = 0.f;
             float3 g_col = make_float3(0.f, 0.f, 0.f);
             float g_zs = 0.f;
+            float3 g_ns = make_float3(0.f, 0.f, 0.f);
             bool hit = false;
             if (in_image && j < last) {
                 const float4 co = s_co[s];
@@ -621,6 +650,15 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                             d_alpha += t_before * (z - behind_z) * gz;
                             behind_z = a * z + (1.f - a) * behind_z;
                         }
+                        if (kN) {
+                            const float3 nv = s_n[s];
+                            g_ns = make_float3(w * gn.x, w * gn.y, w * gn.z);
+                            d_alpha += t_before * ((nv.x - behind_n.x) * gn.x + (nv.y - behind_n.y) * gn.y +
+                                                   (nv.z - behind_n.z) * gn.z);
+                            behind_n.x = a * nv.x + (1.f - a) * behind_n.x;
+                            behind_n.y = a * nv.y + (1.f - a) * behind_n.y;
+                            behind_n.z = a * nv.z + (1.f - a) * behind_n.z;
+                        }
                         behind.x = a * col.x + (1.f - a) * behind.x;
                         behind.y = a * col.y + (1.f - a) * behind.y;
                         behind.z = a * col.z + (1.f - a) * behind.z;
@@ -645,9 +683,9 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 const float w0 = xstep(g_u, g_col.z, h4, 16);
                 const float w1 = xstep(g_v, g_r, h4, 16);
                 const float w2 = xstep(g_a, g_zs, h4, 16);
-                const float w3 = xstep(g_b, 0.f, h4, 16);
-                const float w4 = xstep(g_c, 0.f, h4, 16);
-                const float w5 = xstep(g_o, 0.f, h4, 16);
+                const float w3 = xstep(g_b, g_ns.x, h4, 16);
+                const float w4 = xstep(g_c, g_ns.y, h4, 16);
+                const float w5 = xstep(g_o, g_ns.z, h4, 16);
                 const float w6 = xstep(g_col.x, 0.f, h4, 16);
                 const float w7 = xstep(g_col.y, 0.f, h4, 16);
                 const bool h3 = (lane & 8) != 0;
@@ -664,6 +702,8 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 if ((lane & 1) == 0 && comp < kNumGrad && z != 0.f)
                     atomicAdd(&screen_grads[size_t(s_gid[s]) * kNumGrad + comp], z);
                 if (kZ && (lane & 1) == 0 && comp == kNumGrad && z != 0.f) atomicAdd(&g_depth[s_gid[s]], z);
+                if (kN && (lane & 1) == 0 && comp > kNumGrad && comp <= kNumGrad + 3 && z != 0.f)
+                    atomicAdd(&g_normal[size_t(s_gid[s]) * 3 + (comp - kNumGrad - 1)], z);
             }
         }
         bend = bstart;
@@ -703,7 +743,7 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
                                    const uint32_t* __restrict__ tiles, const float* __restrict__ screen_grads,
                                    float* __restrict__ g_transforms, float* __restrict__ g_opacity,
                                    float* __restrict__ g_sh, int sh_zeroed, uint8_t* __restrict__ touched,
-                                   const float* __restrict__ g_depth) {
+                                   const float* __restrict__ g_depth, const float* __restrict__ g_normal) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float* sg = screen_grads + size_t(i) * kNumGrad;
@@ -712,10 +752,18 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
     // when `sh_zeroed` is 0: then the sparse SH Adam skips this gaussian
     // (touched = 0) and never reads its stale row.
     bool any = false;
+    float gn[3] = {0.f, 0.f, 0.f};
     if (tiles[i] != 0) {
 #pragma unroll
         for (int k = 0; k < kNumGrad; ++k) any |= sg[k] != 0.f;
         if (g_depth) any |= g_depth[i] != 0.f;
+        if (g_normal) {
+#pragma unroll
+            for (int k = 0; k < 3; ++k) {
+                gn[k] = g_normal[size_t(i) * 3 + k];
+                any |= gn[k] != 0.f;
+            }
+        }
     }
     touched[i] = any;
     if (!any) return;
@@ -848,6 +896,20 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
         gls[k] = (gm3[k] * rg[k] + gm3[3 + k] * rg[3 + k] + gm3[6 + k] * rg[6 + k]) * s[k];
 #pragma unroll
         for (int r = 0; r < 3; ++r) gr[r * 3 + k] = gm3[r * 3 + k] * s[k];
+    }
+    // The normal channel: n = +-W Rg[:, k] for the smallest scale k, turned to
+    // face the camera (plane_kernel's choice and flip, both piecewise
+    // constant), so dL/dRg[:, k] = +-W^T gn.
+    if (g_normal) {
+        int k = 0;
+        if (tr[8] < tr[7 + k]) k = 1;
+        if (tr[9] < tr[7 + k]) k = 2;
+        const float axis[3] = {rg[k], rg[3 + k], rg[6 + k]};
+        float nc[3];
+        mat_vec(W, axis, nc);
+        const float sign = dot3(nc, p) > 0.f ? -1.f : 1.f;
+#pragma unroll
+        for (int r = 0; r < 3; ++r) gr[r * 3 + k] += sign * (W[r] * gn[0] + W[3 + r] * gn[1] + W[6 + r] * gn[2]);
     }
     // Rg(qn) -> normalised quaternion.
     const float qw = qn[0], qx = qn[1], qy = qn[2], qz = qn[3];
@@ -1040,6 +1102,106 @@ __global__ void __launch_bounds__(kBlock) depth_loss_kernel(uint32_t npix, const
         d_depth[i] = d;
     }
     block_add(l, acc);
+}
+
+// Depth-normal consistency (2DGS / PGSR style), normal_loss.wgsl's two passes.
+// Per pixel the render gives N = sum_i w_i n_i (acc_normal), D = sum_i w_i z_i
+// (acc_depth) and alpha = 1 - T. With P(q) = D_q / alpha_q r(q),
+// r(q) = ((qx + 0.5 - cx) / fx, (qy + 0.5 - cy) / fy, 1), the depth map's
+// normal is n_d = s c / |c|, c = (P(x+1) - P(x-1)) x (P(y+1) - P(y-1)), s = +-1
+// facing the camera, and L = weight / npix sum_p (1 - N_p . n_d(p)) over the
+// pixels whose own and 4-neighbour opacities exceed 0.5. The gradient reaches
+// N and D; alpha is held constant.
+struct NormalLossArgs {
+    uint32_t w, h;
+    float fx, fy, cx, cy;
+    float coef;  // weight / npix
+};
+
+__device__ inline float3 f3(float x, float y, float z) { return make_float3(x, y, z); }
+__device__ inline float3 operator+(float3 a, float3 b) { return f3(a.x + b.x, a.y + b.y, a.z + b.z); }
+__device__ inline float3 operator-(float3 a, float3 b) { return f3(a.x - b.x, a.y - b.y, a.z - b.z); }
+__device__ inline float3 operator*(float s, float3 a) { return f3(s * a.x, s * a.y, s * a.z); }
+__device__ inline float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+__device__ inline float3 cross(float3 a, float3 b) {
+    return f3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+__device__ inline float3 normal_ray(const NormalLossArgs& a, uint32_t x, uint32_t y) {
+    return f3((float(x) + 0.5f - a.cx) / a.fx, (float(y) + 0.5f - a.cy) / a.fy, 1.f);
+}
+
+// Pass 1: dL/dN into d_normal and, per pixel, dL/da and dL/db (a, b the two
+// central differences) into `gab` (6 floats per pixel). acc += the
+// unweighted mean of 1 - N . n_d.
+__global__ void __launch_bounds__(kBlock) normal_grad_kernel(NormalLossArgs a, const float* __restrict__ acc_normal,
+                                                             const float* __restrict__ acc_depth,
+                                                             const float* __restrict__ final_t,
+                                                             float* __restrict__ d_normal, float* __restrict__ gab,
+                                                             double* __restrict__ acc) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t npix = a.w * a.h;
+    float l = 0.f;
+    if (i < npix) {
+        const uint32_t x = i % a.w, y = i / a.w;
+        float3 gn = f3(0.f, 0.f, 0.f), ga = gn, gb = gn;
+        auto alpha = [&](uint32_t j) { return 1.f - final_t[j]; };
+        auto point = [&](uint32_t px, uint32_t py) {
+            const uint32_t j = py * a.w + px;
+            return (acc_depth[j] / fmaxf(alpha(j), 1e-6f)) * normal_ray(a, px, py);
+        };
+        if (x > 0 && y > 0 && x + 1 < a.w && y + 1 < a.h && alpha(i) > 0.5f && alpha(i - 1) > 0.5f &&
+            alpha(i + 1) > 0.5f && alpha(i - a.w) > 0.5f && alpha(i + a.w) > 0.5f) {
+            const float3 da = point(x + 1, y) - point(x - 1, y);
+            const float3 db = point(x, y + 1) - point(x, y - 1);
+            const float3 c = cross(da, db);
+            const float cl = sqrtf(dot(c, c));
+            if (cl > 1e-12f) {
+                const float3 nd = (1.f / cl) * c;
+                const float s = dot(nd, point(x, y)) > 0.f ? -1.f : 1.f;
+                const float3 big_n = f3(acc_normal[i * 3], acc_normal[i * 3 + 1], acc_normal[i * 3 + 2]);
+                l = (1.f - s * dot(big_n, nd)) / float(npix);
+                // L = coef (1 - N . s n_d)
+                gn = (-a.coef * s) * nd;
+                const float3 g_nd = (-a.coef * s) * big_n;
+                const float3 gc = (1.f / cl) * (g_nd - dot(nd, g_nd) * nd);
+                ga = cross(db, gc);
+                gb = cross(gc, da);
+            }
+        }
+        d_normal[i * 3 + 0] = gn.x;
+        d_normal[i * 3 + 1] = gn.y;
+        d_normal[i * 3 + 2] = gn.z;
+        float* o = gab + size_t(i) * 6;
+        o[0] = ga.x;
+        o[1] = ga.y;
+        o[2] = ga.z;
+        o[3] = gb.x;
+        o[4] = gb.y;
+        o[5] = gb.z;
+    }
+    block_add(l, acc);
+}
+
+// Pass 2: gather dL/dP(q) from the four pixels whose differences use q and
+// add dL/dD_q to d_depth.
+__global__ void __launch_bounds__(kBlock) normal_depth_grad_kernel(NormalLossArgs a, const float* __restrict__ final_t,
+                                                                   const float* __restrict__ gab,
+                                                                   float* __restrict__ d_depth) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= a.w * a.h) return;
+    const uint32_t x = i % a.w, y = i / a.w;
+    // a(p) = P(p + x) - P(p - x): q is the +x term of p = q - x and the -x
+    // term of p = q + x (likewise for b along y).
+    auto ga = [&](uint32_t j) { return f3(gab[size_t(j) * 6], gab[size_t(j) * 6 + 1], gab[size_t(j) * 6 + 2]); };
+    auto gb = [&](uint32_t j) { return f3(gab[size_t(j) * 6 + 3], gab[size_t(j) * 6 + 4], gab[size_t(j) * 6 + 5]); };
+    float3 gp = f3(0.f, 0.f, 0.f);
+    if (x > 0) gp = gp + ga(i - 1);
+    if (x + 1 < a.w) gp = gp - ga(i + 1);
+    if (y > 0) gp = gp + gb(i - a.w);
+    if (y + 1 < a.h) gp = gp - gb(i + a.w);
+    const float alpha = fmaxf(1.f - final_t[i], 1e-6f);
+    d_depth[i] += dot(gp, normal_ray(a, x, y)) / alpha;
 }
 
 // D-SSIM: 11x11 gaussian window (sigma 1.5), zero padding, C1 = 0.01^2,
@@ -1416,6 +1578,10 @@ struct Ctx {
     // Depth prior: per image and pixel (0 = none), the expected depth of the
     // last render, its gradient, and per gaussian the centre-depth gradient.
     Buf depth_prior, acc_depth, d_depth, g_depth;
+    // Depth-normal loss: the normal channel of the last render, its gradient,
+    // the loss's per-pixel scratch, and per gaussian the normal gradient.
+    Buf acc_normal, d_normal, gab, g_normal;
+    bool have_normal = false;  // the last render has the depth and normal channels
     int num_priors = 0;
     int num_images = 0;
     uint32_t gt_w = 0, gt_h = 0;
@@ -1507,8 +1673,9 @@ int collect_stages(Ctx* ctx) {
 
 // Render the uploaded scene from ctx->cam; with `out_depth` (device, 2 floats
 // per pixel) also the median depth and opacity, at the splat planes when
-// `planar`.
-int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float* acc_depth = nullptr) {
+// `planar`, and (nullable) the expected-depth and normal channels.
+int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float* acc_depth = nullptr,
+                float* acc_normal = nullptr) {
     const int n = ctx->n;
     const GscCamera cam = ctx->cam;
     ctx->tile_bw = (cam.width + kTile - 1) / kTile;
@@ -1594,32 +1761,39 @@ int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float
     const dim3 grid(ctx->tile_bw, ctx->tile_bh);
     const float4 intr = make_float4(cam.fx, cam.fy, cam.cx, cam.cy);
     float4* plane = nullptr;
-    if (out_depth && planar && n > 0) {
+    if (out_depth && (planar || acc_normal) && n > 0) {
         GSC_TRY(ensure(ctx, ctx->plane, n, &plane));
         plane_kernel<<<blocks_for(n), 256>>>(n, cam, ctx->p(0), tiles, plane);
         GSC_CHECK(ctx, cudaGetLastError());
     }
     if (out_depth)
         raster_fwd_kernel<true><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
-                                                  color, depth, plane, intr, image, final_t, last_idx, out_depth,
-                                                  acc_depth);
+                                                  color, depth, plane, planar && plane, intr, image, final_t,
+                                                  last_idx, out_depth, acc_depth, acc_normal);
     else
         raster_fwd_kernel<false><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
-                                                   color, depth, nullptr, intr, image, final_t, last_idx, nullptr,
-                                                   nullptr);
+                                                   color, depth, nullptr, 0, intr, image, final_t, last_idx, nullptr,
+                                                   nullptr, nullptr);
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRaster));
     ctx->have_forward = true;
+    ctx->have_normal = out_depth && acc_depth && acc_normal;
     return 0;
 }
 
 // Backward of the last forward for the d_image already on the device, into
 // screen_grads and the per-group gradient buffers (zeroed first; with
 // `zero_sh` false the SH gradients are written for every projected gaussian
-// instead, and left stale for the others).
-int run_backward(Ctx* ctx, bool zero_sh, bool depth_channel = false) {
+// instead, and left stale for the others). `geo`: 1 also differentiates the
+// expected-depth channel (d_depth), 2 the depth and normal channels (d_depth,
+// d_normal; the render must have them).
+int run_backward(Ctx* ctx, bool zero_sh, int geo = 0) {
     if (!ctx->have_forward) {
         ctx->error = "backward called before render";
+        return -1;
+    }
+    if (geo >= 2 && !ctx->have_normal) {
+        ctx->error = "backward: the last render has no normal channel";
         return -1;
     }
     const int n = ctx->n;
@@ -1635,7 +1809,9 @@ int run_backward(Ctx* ctx, bool zero_sh, bool depth_channel = false) {
         GSC_TRY(ensure(ctx, ctx->grads[2], size_t(n) * ctx->stride(2), &g[2]));
 
     float* g_depth = nullptr;
-    if (depth_channel) GSC_TRY(ensure_zero(ctx, ctx->g_depth, n, &g_depth));
+    if (geo >= 1) GSC_TRY(ensure_zero(ctx, ctx->g_depth, n, &g_depth));
+    float* g_normal = nullptr;
+    if (geo >= 2) GSC_TRY(ensure_zero(ctx, ctx->g_normal, size_t(n) * 3, &g_normal));
 
     GSC_TRY(stage_begin(ctx, kRasterBwd));
     const dim3 grid(ctx->tile_bw, ctx->tile_bh);
@@ -1647,22 +1823,29 @@ int run_backward(Ctx* ctx, bool zero_sh, bool depth_channel = false) {
     const auto* final_t = static_cast<const float*>(ctx->final_t.ptr);
     const auto* last_idx = static_cast<const uint32_t*>(ctx->last_idx.ptr);
     const auto* d_image = static_cast<const float*>(ctx->d_image.ptr);
-    if (depth_channel)
-        raster_bwd_kernel<true><<<grid, kBlock>>>(
-            ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op, color, final_t, last_idx, d_image,
-            screen_grads, static_cast<const float*>(ctx->depth.ptr), static_cast<const float*>(ctx->d_depth.ptr),
-            g_depth);
+    const auto* depth = static_cast<const float*>(ctx->depth.ptr);
+    const auto* d_depth = static_cast<const float*>(ctx->d_depth.ptr);
+    if (geo >= 2)
+        raster_bwd_kernel<2><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
+                                               color, final_t, last_idx, d_image, screen_grads, depth, d_depth,
+                                               g_depth, static_cast<const float4*>(ctx->plane.ptr),
+                                               static_cast<const float*>(ctx->d_normal.ptr), g_normal);
+    else if (geo == 1)
+        raster_bwd_kernel<1><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
+                                               color, final_t, last_idx, d_image, screen_grads, depth, d_depth,
+                                               g_depth, nullptr, nullptr, nullptr);
     else
-        raster_bwd_kernel<false><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy,
-                                                   conic_op, color, final_t, last_idx, d_image, screen_grads,
-                                                   nullptr, nullptr, nullptr);
+        raster_bwd_kernel<0><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
+                                               color, final_t, last_idx, d_image, screen_grads, nullptr, nullptr,
+                                               nullptr, nullptr, nullptr, nullptr);
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRasterBwd));
     GSC_TRY(stage_begin(ctx, kProjectBwd));
     if (n > 0) {
         project_bwd_kernel<<<blocks_for(n), 256>>>(n, ctx->cam, ctx->rest_pc(), ctx->act, ctx->p(0), ctx->p(1),
                                                    ctx->p(2), static_cast<const uint32_t*>(ctx->tiles.ptr),
-                                                   screen_grads, g[0], g[1], g[2], zero_sh ? 1 : 0, touched, g_depth);
+                                                   screen_grads, g[0], g[1], g[2], zero_sh ? 1 : 0, touched, g_depth,
+                                                   g_normal);
         GSC_CHECK(ctx, cudaGetLastError());
     }
     GSC_TRY(stage_end(ctx, kProjectBwd));
@@ -1684,10 +1867,34 @@ int set_camera(Ctx* ctx, const GscCamera* cam, const float* bg, int sh_active_de
     return 0;
 }
 
+constexpr int kNumLossSums = 4;  // L1, SSIM, depth prior, depth-normal
+
+// The depth-normal loss of the last render (which has the depth and normal
+// channels): its gradient into d_normal, added to d_depth (written by the
+// caller), and its unweighted mean added to `acc`.
+int run_normal_loss(Ctx* ctx, float weight, double* acc) {
+    const uint32_t npix = uint32_t(ctx->pixels());
+    float *d_normal, *gab;
+    GSC_TRY(ensure(ctx, ctx->d_normal, size_t(npix) * 3, &d_normal));
+    GSC_TRY(ensure(ctx, ctx->gab, size_t(npix) * 6, &gab));
+    const GscCamera& cam = ctx->cam;
+    const NormalLossArgs a = {cam.width, cam.height, cam.fx, cam.fy, cam.cx, cam.cy, weight / float(npix)};
+    const auto* final_t = static_cast<const float*>(ctx->final_t.ptr);
+    normal_grad_kernel<<<blocks_for(npix), kBlock>>>(a, static_cast<const float*>(ctx->acc_normal.ptr),
+                                                     static_cast<const float*>(ctx->acc_depth.ptr), final_t,
+                                                     d_normal, gab, acc);
+    GSC_CHECK(ctx, cudaGetLastError());
+    normal_depth_grad_kernel<<<blocks_for(npix), kBlock>>>(a, final_t, gab, static_cast<float*>(ctx->d_depth.ptr));
+    GSC_CHECK(ctx, cudaGetLastError());
+    return 0;
+}
+
 // (1 - w) L1 + w (1 - SSIM) of the last render against uploaded image
 // `image`: its gradient into d_image, and the unweighted mean L1 and the
-// SSIM sum added to loss_acc.
-int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0.f) {
+// SSIM sum added to loss_acc. With `depth_weight` the depth prior and with
+// `normal_weight` the depth-normal loss too (their gradients into d_depth and
+// d_normal; the render must have the channels).
+int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0.f, float normal_weight = 0.f) {
     if (!ctx->have_forward) {
         ctx->error = "loss: no render to compare";
         return -1;
@@ -1702,8 +1909,9 @@ int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0
     float* d_image;
     double* acc;
     GSC_TRY(ensure(ctx, ctx->d_image, size_t(npix) * 3, &d_image));
-    GSC_TRY(ensure(ctx, ctx->loss_acc, 3, &acc));
-    if (ctx->loss_steps == 0) GSC_CHECK(ctx, cudaMemsetAsync(acc, 0, 3 * sizeof(double)));
+    // One more slot for visloc_gsplat_cuda_normal_loss.
+    GSC_TRY(ensure(ctx, ctx->loss_acc, kNumLossSums + 1, &acc));
+    if (ctx->loss_steps == 0) GSC_CHECK(ctx, cudaMemsetAsync(acc, 0, kNumLossSums * sizeof(double)));
     GSC_TRY(stage_begin(ctx, kLoss));
     loss_l1_kernel<<<blocks_for(npix), kBlock>>>(npix, gt, render, 1.f - ssim_weight, d_image, acc);
     GSC_CHECK(ctx, cudaGetLastError());
@@ -1724,6 +1932,16 @@ int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0
         depth_loss_kernel<<<blocks_for(npix), kBlock>>>(npix, prior, static_cast<const float*>(ctx->acc_depth.ptr),
                                                         depth_weight, d_depth, acc + 2);
         GSC_CHECK(ctx, cudaGetLastError());
+    } else if (normal_weight > 0.f) {
+        float* d_depth;
+        GSC_TRY(ensure_zero(ctx, ctx->d_depth, npix, &d_depth));
+    }
+    if (normal_weight > 0.f) {
+        if (!ctx->have_normal) {
+            ctx->error = "loss: the depth-normal loss needs a render with the normal channel";
+            return -1;
+        }
+        GSC_TRY(run_normal_loss(ctx, normal_weight, acc + 3));
     }
     GSC_TRY(stage_end(ctx, kLoss));
     ctx->loss_steps++;
@@ -1753,6 +1971,7 @@ struct GscStepParams {
     float noise_max;
     uint32_t sparse_sh_adam;   // SH Adam only on the gaussians blended this frame
     float depth_weight;        // depth-prior loss (set_depth_priors; 0 = off)
+    float normal_weight;       // depth-normal loss (0 = off)
 };
 
 #if defined(_WIN32)
@@ -1788,6 +2007,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->extk,        &ctx->tiles,     &ctx->offsets,  &ctx->keys,       &ctx->vals,
                    &ctx->keys_sorted, &ctx->vals_sorted, &ctx->sort_temp, &ctx->scan_temp, &ctx->ranges,
                    &ctx->image,       &ctx->final_t,   &ctx->last_idx, &ctx->depth_out, &ctx->plane, &ctx->d_image,    &ctx->screen_grads, &ctx->touched, &ctx->depth_prior, &ctx->acc_depth, &ctx->d_depth, &ctx->g_depth,
+                   &ctx->acc_normal,  &ctx->d_normal,  &ctx->gab,      &ctx->g_normal,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum};
     for (Buf* b : bufs) free_buf(*b);
@@ -1874,10 +2094,13 @@ GSC_EXPORT int visloc_gsplat_cuda_render(void* handle, const GscCamera* cam, con
 // width * height * 2 floats. With `planar` the depth is where the pixel's ray
 // meets that splat's plane (normal: its smallest axis) instead of its centre.
 // `out_expected` (nullable) receives the expected depth sum_i T_i a_i z_i per
-// pixel, the channel the depth-prior loss trains.
+// pixel, the channel the depth-prior loss trains. With `out_normal`
+// (nullable) the render also has the normal channel sum_i T_i a_i n_i (3
+// floats per pixel; n_i the splat's plane normal, facing the camera), the
+// depth-normal loss's input.
 GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* cam, const float* bg,
                                                int sh_active_degree, int planar, float* out_rgb, float* out_depth,
-                                               float* out_expected) {
+                                               float* out_expected, float* out_normal) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
     GSC_TRY(set_camera(ctx, cam, bg, sh_active_degree));
@@ -1885,14 +2108,48 @@ GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* ca
     GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &d));
     float* expected;
     GSC_TRY(ensure(ctx, ctx->acc_depth, ctx->pixels(), &expected));
+    float* normal = nullptr;
+    if (out_normal) GSC_TRY(ensure(ctx, ctx->acc_normal, ctx->pixels() * 3, &normal));
     clear_stages(ctx);
-    GSC_TRY(run_forward(ctx, d, planar != 0, expected));
+    GSC_TRY(run_forward(ctx, d, planar != 0, expected, normal));
     GSC_TRY(collect_stages(ctx));
     if (out_rgb)
         GSC_CHECK(ctx, cudaMemcpy(out_rgb, ctx->image.ptr, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
     if (out_depth) GSC_CHECK(ctx, cudaMemcpy(out_depth, d, ctx->pixels() * 2 * sizeof(float), cudaMemcpyDeviceToHost));
     if (out_expected)
         GSC_CHECK(ctx, cudaMemcpy(out_expected, expected, ctx->pixels() * sizeof(float), cudaMemcpyDeviceToHost));
+    if (out_normal)
+        GSC_CHECK(ctx, cudaMemcpy(out_normal, normal, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// The depth-normal loss (weight * mean (1 - N . n_d), see normal_grad_kernel)
+// of the last render, which must have come from render_depth with the normal
+// channel. `loss` (nullable) receives its unweighted value, `d_depth` and
+// `d_normal` (nullable; 1 and 3 floats per pixel) its gradient with respect
+// to the expected-depth and normal channels.
+GSC_EXPORT int visloc_gsplat_cuda_normal_loss(void* handle, float weight, double* loss, float* d_depth,
+                                              float* d_normal) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (!ctx->have_forward || !ctx->have_normal) {
+        ctx->error = "normal_loss: render the normal channel first (render_depth with out_normal)";
+        return -1;
+    }
+    const size_t pixels = ctx->pixels();
+    float* dd;
+    GSC_TRY(ensure_zero(ctx, ctx->d_depth, pixels, &dd));
+    // The slot after the step's sums, so take_loss is undisturbed.
+    double* acc;
+    GSC_TRY(ensure(ctx, ctx->loss_acc, kNumLossSums + 1, &acc));
+    double* sum = acc + kNumLossSums;
+    GSC_CHECK(ctx, cudaMemsetAsync(sum, 0, sizeof(double)));
+    GSC_TRY(run_normal_loss(ctx, weight, sum));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    if (loss) GSC_CHECK(ctx, cudaMemcpy(loss, sum, sizeof(double), cudaMemcpyDeviceToHost));
+    if (d_depth) GSC_CHECK(ctx, cudaMemcpy(d_depth, dd, pixels * sizeof(float), cudaMemcpyDeviceToHost));
+    if (d_normal)
+        GSC_CHECK(ctx, cudaMemcpy(d_normal, ctx->d_normal.ptr, pixels * 3 * sizeof(float), cudaMemcpyDeviceToHost));
     return 0;
 }
 
@@ -1900,13 +2157,16 @@ GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* ca
 // the scene layouts (all outputs nullable). Gaussians that were not visible
 // get zeros. `screen_grads` receives 10 floats per gaussian: du dv dA dB dC
 // dopacity dr dg db and the refine weight. With `d_depth` (nullable, one
-// float per pixel) L also has sum_px d_depth[px] D[px], D the expected depth.
+// float per pixel) L also has sum_px d_depth[px] D[px], D the expected depth,
+// and with `d_normal` (nullable, 3 floats per pixel; needs `d_depth` and a
+// render with the normal channel) sum_px dot(d_normal[px], N[px]).
 GSC_EXPORT int visloc_gsplat_cuda_backward(void* handle, const float* d_image, const float* d_depth,
-                                           float* g_transforms, float* g_opacity, float* g_sh, float* screen_grads) {
+                                           const float* d_normal, float* g_transforms, float* g_opacity, float* g_sh,
+                                           float* screen_grads) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
-    if (!d_image) {
-        ctx->error = "backward: d_image is required";
+    if (!d_image || (d_normal && !d_depth)) {
+        ctx->error = "backward: d_image is required, and d_normal needs d_depth";
         return -1;
     }
     const size_t pixels = ctx->pixels();
@@ -1918,11 +2178,16 @@ GSC_EXPORT int visloc_gsplat_cuda_backward(void* handle, const float* d_image, c
         GSC_TRY(ensure(ctx, ctx->d_depth, pixels, &dd));
         GSC_CHECK(ctx, cudaMemcpy(dd, d_depth, pixels * sizeof(float), cudaMemcpyHostToDevice));
     }
+    if (d_normal) {
+        float* dn;
+        GSC_TRY(ensure(ctx, ctx->d_normal, pixels * 3, &dn));
+        GSC_CHECK(ctx, cudaMemcpy(dn, d_normal, pixels * 3 * sizeof(float), cudaMemcpyHostToDevice));
+    }
     for (int s = kLoss; s < kNumStages; ++s) {
         ctx->ran[s] = false;
         ctx->ms[s] = 0.f;
     }
-    GSC_TRY(run_backward(ctx, true, d_depth != nullptr));
+    GSC_TRY(run_backward(ctx, true, d_normal ? 2 : (d_depth ? 1 : 0)));
     GSC_TRY(collect_stages(ctx));
     float* dst[3] = {g_transforms, g_opacity, g_sh};
     for (int k = 0; k < 3; ++k) {
@@ -1990,21 +2255,24 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     }
     GSC_TRY(set_camera(ctx, &p->cam, p->bg, p->sh_active_degree));
     const bool depth_on = p->depth_weight > 0.f;
+    const bool normal_on = p->normal_weight > 0.f;
     if (depth_on && (ctx->num_priors != ctx->num_images || p->cam.width != ctx->gt_w || p->cam.height != ctx->gt_h)) {
         ctx->error = "train_step: a depth weight needs a depth prior per uploaded image";
         return -1;
     }
     clear_stages(ctx);
-    if (depth_on) {
-        float *depth_out, *acc_depth;
+    if (depth_on || normal_on) {
+        float *depth_out, *acc_depth, *acc_normal = nullptr;
         GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &depth_out));
         GSC_TRY(ensure(ctx, ctx->acc_depth, ctx->pixels(), &acc_depth));
-        GSC_TRY(run_forward(ctx, depth_out, false, acc_depth));
+        if (normal_on) GSC_TRY(ensure(ctx, ctx->acc_normal, ctx->pixels() * 3, &acc_normal));
+        GSC_TRY(run_forward(ctx, depth_out, false, acc_depth, acc_normal));
     } else {
         GSC_TRY(run_forward(ctx));
     }
-    GSC_TRY(run_loss(ctx, p->image, p->ssim_weight, depth_on ? p->depth_weight : 0.f));
-    GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0, depth_on));
+    GSC_TRY(run_loss(ctx, p->image, p->ssim_weight, depth_on ? p->depth_weight : 0.f,
+                     normal_on ? p->normal_weight : 0.f));
+    GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0, normal_on ? 2 : (depth_on ? 1 : 0)));
 
     const int n = ctx->n;
     const uint32_t* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
@@ -2065,17 +2333,19 @@ GSC_EXPORT int visloc_gsplat_cuda_loss_grad(void* handle, uint32_t image, float 
     return 0;
 }
 
-// Sums of the mean L1 and of the SSIM (over pixels and channels) since the
-// last call, and the number of steps; resets them.
+// Sums of the mean L1, of the SSIM (over pixels and channels), of the mean
+// depth-prior loss and of the mean depth-normal loss (both unweighted) since
+// the last call, and the number of steps; resets them.
 GSC_EXPORT int visloc_gsplat_cuda_take_loss(void* handle, double* l1_sum, double* ssim_sum, double* depth_sum,
-                                            uint32_t* steps) {
+                                            double* normal_sum, uint32_t* steps) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
-    double acc[3] = {0.0, 0.0, 0.0};
+    double acc[kNumLossSums] = {};
     if (ctx->loss_steps > 0) GSC_CHECK(ctx, cudaMemcpy(acc, ctx->loss_acc.ptr, sizeof(acc), cudaMemcpyDeviceToHost));
     if (l1_sum) *l1_sum = acc[0];
     if (ssim_sum) *ssim_sum = acc[1];
     if (depth_sum) *depth_sum = acc[2];
+    if (normal_sum) *normal_sum = acc[3];
     if (steps) *steps = ctx->loss_steps;
     ctx->loss_steps = 0;
     return 0;

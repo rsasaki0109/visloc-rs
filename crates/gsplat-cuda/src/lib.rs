@@ -118,6 +118,12 @@ pub struct StepParams {
     /// with a prior P ([`CudaGsplat::set_depth_priors`]), D the expected
     /// depth (0 = off).
     pub depth_weight: f32,
+    /// Weight of the depth-normal consistency loss (2DGS / PGSR style):
+    /// `mean (1 - N . n_d)` over the pixels whose own and 4-neighbour
+    /// opacities exceed 0.5, N the blended splat normals and n_d the normal
+    /// of the expected-depth map (0 = off; see
+    /// [`CudaGsplat::normal_loss`]).
+    pub normal_weight: f32,
 }
 
 type AbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -153,9 +159,13 @@ type RenderDepthFn = unsafe extern "C" fn(
     *mut c_float,
     *mut c_float,
     *mut c_float,
+    *mut c_float,
 ) -> c_int;
+type NormalLossFn =
+    unsafe extern "C" fn(*mut c_void, c_float, *mut c_double, *mut c_float, *mut c_float) -> c_int;
 type BackwardFn = unsafe extern "C" fn(
     *mut c_void,
+    *const c_float,
     *const c_float,
     *const c_float,
     *mut c_float,
@@ -168,6 +178,7 @@ type TrainStepFn = unsafe extern "C" fn(*mut c_void, *const StepParams) -> c_int
 type LossGradFn = unsafe extern "C" fn(*mut c_void, u32, c_float, *mut c_float) -> c_int;
 type TakeLossFn = unsafe extern "C" fn(
     *mut c_void,
+    *mut c_double,
     *mut c_double,
     *mut c_double,
     *mut c_double,
@@ -229,6 +240,23 @@ pub struct DepthFrame {
     /// Per pixel, the expected depth `sum_i T_i a_i z_i` of the splat centres
     /// (the channel [`StepParams::depth_weight`] trains).
     pub expected: Vec<f32>,
+    /// Per pixel, the normal channel `sum_i T_i a_i n_i` (3 floats; n_i the
+    /// splat's smallest axis in camera space, turned to face the camera).
+    /// Empty unless rendered by [`CudaGsplat::render_geometry`].
+    pub normal: Vec<f32>,
+}
+
+/// The depth-normal loss of the last render and its gradient (see
+/// [`CudaGsplat::normal_loss`]).
+#[derive(Debug, Clone)]
+pub struct NormalLoss {
+    /// The unweighted loss `mean (1 - N . n_d)`.
+    pub loss: f64,
+    /// Gradient of the weighted loss with respect to the expected depth, one
+    /// float per pixel.
+    pub d_depth: Vec<f32>,
+    /// ... and with respect to the normal channel, 3 floats per pixel.
+    pub d_normal: Vec<f32>,
 }
 
 /// Gradients of `L = sum_px dot(d_image[px], C[px])` for the last frame, in
@@ -252,6 +280,9 @@ pub struct LossSums {
     pub ssim: f64,
     /// Sum over steps of the depth-prior loss `mean |D - P| / P` (0 when off).
     pub depth: f64,
+    /// Sum over steps of the depth-normal loss `mean (1 - N . n_d)` (0 when
+    /// off).
+    pub normal: f64,
     pub steps: u32,
 }
 
@@ -272,6 +303,7 @@ struct Api {
     get_scene: GetSceneFn,
     render: RenderFn,
     render_depth: RenderDepthFn,
+    normal_loss: NormalLossFn,
     backward: BackwardFn,
     set_images: SetImagesFn,
     train_step: TrainStepFn,
@@ -325,7 +357,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 5;
+    pub const ABI_VERSION: u32 = 6;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -364,6 +396,7 @@ impl CudaGsplat {
                 get_scene: symbol(&library, "visloc_gsplat_cuda_get_scene", path)?,
                 render: symbol(&library, "visloc_gsplat_cuda_render", path)?,
                 render_depth: symbol(&library, "visloc_gsplat_cuda_render_depth", path)?,
+                normal_loss: symbol(&library, "visloc_gsplat_cuda_normal_loss", path)?,
                 backward: symbol(&library, "visloc_gsplat_cuda_backward", path)?,
                 set_images: symbol(&library, "visloc_gsplat_cuda_set_images", path)?,
                 train_step: symbol(&library, "visloc_gsplat_cuda_train_step", path)?,
@@ -532,14 +565,39 @@ impl CudaGsplat {
         sh_active_degree: u32,
         planar: bool,
     ) -> Result<DepthFrame, GsplatCudaError> {
+        self.render_depth_channels(view, bg, sh_active_degree, planar, false)
+    }
+
+    /// [`render_depth`](Self::render_depth) (centre median depth) plus the
+    /// normal channel ([`DepthFrame::normal`]): the inputs of the
+    /// depth-normal loss, which [`normal_loss`](Self::normal_loss) and
+    /// [`backward_with_geometry`](Self::backward_with_geometry) then take.
+    pub fn render_geometry(
+        &mut self,
+        view: &CameraView,
+        bg: [f32; 3],
+        sh_active_degree: u32,
+    ) -> Result<DepthFrame, GsplatCudaError> {
+        self.render_depth_channels(view, bg, sh_active_degree, false, true)
+    }
+
+    fn render_depth_channels(
+        &mut self,
+        view: &CameraView,
+        bg: [f32; 3],
+        sh_active_degree: u32,
+        planar: bool,
+        with_normal: bool,
+    ) -> Result<DepthFrame, GsplatCudaError> {
         let cam = GscCamera::from_view(view);
         let pixels = cam.width as usize * cam.height as usize;
         let mut rgb = vec![0.0f32; pixels * 3];
         let mut depth_opacity = vec![0.0f32; pixels * 2];
         let mut expected = vec![0.0f32; pixels];
+        let mut normal = vec![0.0f32; if with_normal { pixels * 3 } else { 0 }];
         // SAFETY: `rgb` holds width * height * 3 floats, `depth_opacity`
-        // width * height * 2 and `expected` width * height, the sizes the
-        // native side writes.
+        // width * height * 2, `expected` width * height and `normal` (when
+        // passed) width * height * 3, the sizes the native side writes.
         let code = unsafe {
             (self.api.render_depth)(
                 self.ctx(),
@@ -550,6 +608,11 @@ impl CudaGsplat {
                 rgb.as_mut_ptr(),
                 depth_opacity.as_mut_ptr(),
                 expected.as_mut_ptr(),
+                if with_normal {
+                    normal.as_mut_ptr()
+                } else {
+                    std::ptr::null_mut()
+                },
             )
         };
         self.check(code)?;
@@ -560,13 +623,40 @@ impl CudaGsplat {
             depth,
             opacity,
             expected,
+            normal,
         })
+    }
+
+    /// The depth-normal loss ([`StepParams::normal_weight`]) of the last
+    /// [`render_geometry`](Self::render_geometry), times `weight`, and its
+    /// gradient with respect to the expected-depth and normal channels (the
+    /// opacity is held constant, as in training).
+    pub fn normal_loss(&mut self, weight: f32) -> Result<NormalLoss, GsplatCudaError> {
+        let mut out = NormalLoss {
+            loss: 0.0,
+            d_depth: vec![0.0; self.pixels],
+            d_normal: vec![0.0; self.pixels * 3],
+        };
+        // SAFETY: the outputs hold the last frame's width * height and
+        // width * height * 3 floats; the native side checks that the last
+        // render has the normal channel.
+        let code = unsafe {
+            (self.api.normal_loss)(
+                self.ctx(),
+                weight,
+                &mut out.loss,
+                out.d_depth.as_mut_ptr(),
+                out.d_normal.as_mut_ptr(),
+            )
+        };
+        self.check(code)?;
+        Ok(out)
     }
 
     /// Gradients for the last [`render`](Self::render) given `d_image`
     /// (row-major RGB, `width * height * 3`).
     pub fn backward(&mut self, d_image: &[f32]) -> Result<Gradients, GsplatCudaError> {
-        self.backward_with_depth(d_image, None)
+        self.backward_with_geometry(d_image, None, None)
     }
 
     /// [`backward`](Self::backward) with a depth term: `L` also gets
@@ -576,6 +666,20 @@ impl CudaGsplat {
         &mut self,
         d_image: &[f32],
         d_depth: Option<&[f32]>,
+    ) -> Result<Gradients, GsplatCudaError> {
+        self.backward_with_geometry(d_image, d_depth, None)
+    }
+
+    /// [`backward_with_depth`](Self::backward_with_depth) with a normal term
+    /// too: `L` also gets `sum_px dot(d_normal[px], N[px])`, N the normal
+    /// channel ([`DepthFrame::normal`]; `d_normal` 3 floats per pixel). A
+    /// normal term needs a depth term (zeros will do) and a frame from
+    /// [`render_geometry`](Self::render_geometry).
+    pub fn backward_with_geometry(
+        &mut self,
+        d_image: &[f32],
+        d_depth: Option<&[f32]>,
+        d_normal: Option<&[f32]>,
     ) -> Result<Gradients, GsplatCudaError> {
         if d_image.len() != self.pixels * 3 {
             return Err(GsplatCudaError::Input(format!(
@@ -589,6 +693,13 @@ impl CudaGsplat {
                 "d_depth needs one float per pixel of the last frame".into(),
             ));
         }
+        if d_normal.is_some_and(|d| d.len() != self.pixels * 3)
+            || (d_normal.is_some() && d_depth.is_none())
+        {
+            return Err(GsplatCudaError::Input(
+                "d_normal needs 3 floats per pixel of the last frame, and d_depth".into(),
+            ));
+        }
         let n = self.num_gaussians();
         let mut grads = Gradients {
             transforms: vec![0.0; n * TRANSFORM_FLOATS],
@@ -597,13 +708,14 @@ impl CudaGsplat {
             screen: vec![0.0; n * SCREEN_GRAD_FLOATS],
         };
         // SAFETY: every output holds the size the native side writes for the
-        // current scene, and `d_image` / `d_depth` the last frame's pixel
-        // count (checked above).
+        // current scene, and `d_image` / `d_depth` / `d_normal` the last
+        // frame's pixel count (checked above).
         let code = unsafe {
             (self.api.backward)(
                 self.ctx(),
                 d_image.as_ptr(),
                 d_depth.map_or(std::ptr::null(), <[f32]>::as_ptr),
+                d_normal.map_or(std::ptr::null(), <[f32]>::as_ptr),
                 grads.transforms.as_mut_ptr(),
                 grads.opacity.as_mut_ptr(),
                 grads.sh.as_mut_ptr(),
@@ -688,6 +800,7 @@ impl CudaGsplat {
             l1: 0.0,
             ssim: 0.0,
             depth: 0.0,
+            normal: 0.0,
             steps: 0,
         };
         // SAFETY: the outputs are live scalars.
@@ -697,6 +810,7 @@ impl CudaGsplat {
                 &mut sums.l1,
                 &mut sums.ssim,
                 &mut sums.depth,
+                &mut sums.normal,
                 &mut sums.steps,
             )
         };
