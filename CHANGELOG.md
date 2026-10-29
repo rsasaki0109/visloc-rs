@@ -6,6 +6,22 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Blur before ORB (opt-in).** ORB's descriptor compares single pixels,
+  and on OpenLORIS-Scene's grainy T265 images noise flips its bits: two
+  near-identical views from two corridor sessions shared 22 consistent
+  matches. `basalt_euroc_online_slam_demo --smooth-features SIGMA` blurs
+  each keyframe image before ORB extraction
+  (`visloc_basalt::smoothing::GaussianSmoothing`), `map.json` records it
+  (`feature_smoothing_sigma`), and `basalt_euroc_localize_demo` and
+  `visloc_map_localize_node` blur their images the same way;
+  `basalt_map_merge` refuses maps built differently. At sigma 1.5 the pairs
+  share 38 matches, corridor1-5's own images localize 52% of the time
+  instead of 33.5%, and corridor1-1 localizes 75 times in its map instead
+  of 57 (VIO + map 1.26 → 1.02 m against the map around it). Elsewhere more
+  images localize at about the same error: office1-7 52 instead of 5 (6.86
+  → 6.61 cm), V2_03 36 instead of 5 (29.3 → 28.8 cm), MH_02 1.97 → 2.03 cm.
+  About 10 ms more per image. Off by default.
+
 - **Wheel odometry with its heading from a gyro.** Wheels slip in turns in
   place: on OpenLORIS-Scene's corridor (corridor1-1, 272 s) the wheel
   odometry's heading drifts 44.5° from the ground truth.

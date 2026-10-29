@@ -34,6 +34,9 @@ by those localizations.
   ([below](#across-lighting-local-contrast-equalization)), the daylight
   session office1-4 gets a map pose for 33% of its frames at 2.6 cm. The
   dawn session office1-5 still gets none.
+- **Grainy images:** blurring before ORB (`--smooth-features 1.5`)
+  localizes up to ten times as many images across sessions at about the
+  same error ([below](#grainy-images-blur-before-orb)).
 - **A long run:** over the corridor's 284 s and 232 m, the wheels'
   heading drifts 38° in two minutes. Once each few seconds of the wheel
   calibration's fit get their own heading, its offset stays at
@@ -387,6 +390,54 @@ were measured before weak fixes:
   worse ([numbers](basalt_map_localization.md#local-contrast-equalization)).
   `basalt_map_merge` refuses to merge an equalized map with a raw one,
   whose descriptors would not match.
+
+## Grainy images: blur before ORB
+
+On the corridor ([below](#over-a-long-run-corridor)) few images localize
+across sessions, and not because of the lighting. Within 1 m of
+corridor1-5's path and facing within 30° of it, 6.3% of corridor1-1's 898
+tries localize; corridor1-5's own images, against its map, 33.5%. Two
+near-identical views from the two sessions (6–9 cm and under 5° apart,
+equally bright) share 22 geometrically consistent ORB matches per pair.
+The T265's images are grainy, and ORB's descriptor compares single
+pixels: noise flips enough of those comparisons that the same corner's
+descriptors fall too far apart. OpenCV's ORB blurs before its descriptor
+for this reason; the Basalt frontend this repository ports does not.
+
+`basalt_euroc_online_slam_demo --smooth-features SIGMA` blurs each keyframe
+image (after any equalization) before ORB detection and description.
+`map.json` records it, and `basalt_euroc_localize_demo` and
+`visloc_map_localize_node` blur their images the same way. At sigma 1.5
+the pairs share 38 consistent matches:
+
+| corridor1-1 → corridor1-5 | Raw map | Blurred map (1.5) |
+|---|---|---|
+| Map landmarks | 7,036 | 9,620 |
+| corridor1-5's own images that localize (every 5th) | 33.5% | 52.1% |
+| corridor1-1, VIO + map: localizations; RMSE against the map around it | 57; 1.26 m | 75; 1.02 m |
+| ... wheel odometry with the gyro's heading + map | 58; 0.70 m | 76; 0.67 m |
+| Time per image (median, ORB included) | 43.5 ms | 54.1 ms |
+
+- **The localizations still come at the same two places**, more of them.
+  Elsewhere the corridor yields too few matches either way (a median of
+  14 with the blur).
+- **No other session fills the quarter of the path the map misses.**
+  corridor1-3 covers most of it, but none of its images (every 5th, 421)
+  localizes in corridor1-5's map, so `basalt_map_merge` cannot register it.
+- **Local contrast equalization does not help here:** 5,138 landmarks,
+  32% of corridor1-5's own images, 57 localizations of corridor1-1.
+
+In the office it localizes more images at about the same error (VIO +
+map, `--localize-every 5`, the maps as shipped and rebuilt with the blur):
+
+| Query → map | Raw map: RMSE / max, localizations | Blurred map |
+|---|---|---|
+| office1-3 → A | 2.83 / 3.7 cm, 34 | 2.97 / 3.8 cm, 43 |
+| office1-6 → A | 3.08 / 4.3 cm, 130 | 3.26 / 4.5 cm, 180 |
+| office1-7 → B | 6.86 / 13.7 cm, 5 | 6.61 / 13.2 cm, 52 |
+
+On EuRoC: [basalt_map_localization.md](basalt_map_localization.md#blurring-before-orb).
+It stays off by default.
 
 ## On ROS 2
 
