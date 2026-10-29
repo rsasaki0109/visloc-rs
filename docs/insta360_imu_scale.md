@@ -317,7 +317,17 @@ walks):
   `.insv` ([photos_to_splat.md](photos_to_splat.md#metric-scale-from-the-cameras-imu)),
   gsplat_photos' own model finds the same bias within 0.02°/s.
 - **Rotation residual.** It falls from 0.03–0.60° to 0.01–0.05°. The
-  exception is c8c675bc, which stays at 0.40° for some other reason.
+  exception is c8c675bc (0.40°), whose censored video is not every 10th
+  frame of the recording:
+  - Between consecutive frames of its model it steps 10 recording frames
+    624 times and 11 frames 9 times, so its frame period fits 0.33420 s
+    instead of 0.33368 s.
+  - `period · number + offset` then misses the frame times by up to 17 ms.
+  - Placing each frame at the nearest recording frame (the trailer times
+    every one) takes the residual to 0.14°.
+  - Its scale is still within 1.3% of ARKit's. Frames cut from a raw
+    `.insv`, as `gsplat_photos --insv` does, are every recording frame and
+    do not have this.
 - **Scale.** It moves by 0.06% in the median and by 1.1% at most
   (9d2fe9b1). Against ARKit and GPS the agreement does not change:
 
