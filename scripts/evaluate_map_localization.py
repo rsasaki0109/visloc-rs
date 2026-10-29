@@ -16,6 +16,10 @@ Modes:
           another trajectory (`--align-estimate` vs `--align-ground-truth`), the SLAM
           run that built the map. Nothing is fitted to the scored poses, so this
           is the honest cross-session number.
+  local   like fixed, but the map->GT transform is fitted per scored pose on the
+          stretch of --align-estimate within --align-radius-m of it (in the map
+          frame). On a map whose SLAM drifted over a long loop this scores the
+          localization against the map around it, not the map's own drift.
 
 Without `--prior-radius-m`, `basalt_euroc_localize_demo` localizes every image
 independently with a fixed RANSAC seed, so one run at a low `--min-inliers`
@@ -124,6 +128,19 @@ def umeyama_se3(source, target):
     return rotation, target_mean - rotation @ source_mean
 
 
+def fit_yaw(source, target):
+    """R (about z only), t minimizing sum |target - (R source + t)|^2."""
+    source_mean, target_mean = source.mean(0), target.mean(0)
+    a, b = source - source_mean, target - target_mean
+    yaw = np.arctan2(
+        np.sum(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]),
+        np.sum(a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1]),
+    )
+    c, s = np.cos(yaw), np.sin(yaw)
+    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return rotation, target_mean - rotation @ source_mean
+
+
 def fit_to_ground_truth(estimate, ground_truth, max_diff_ns):
     pairs = associate(estimate, ground_truth, max_diff_ns)
     if len(pairs) < 3:
@@ -161,6 +178,37 @@ def summary(values):
     }
 
 
+def local_errors(estimate, reference, pairs, sources, targets, radius_m):
+    """pose_errors with a map->GT fit on the map stretch around each pose.
+
+    sources and targets are the map and GT positions of --align-estimate and
+    --align-ground-truth, in time order. The stretch is the run of map positions
+    within radius_m of the pose through the nearest one, so a place the map
+    passed twice is fitted on one pass. The fit turns about the vertical only,
+    as both frames are level, which a straight stretch would not pin down
+    otherwise. Poses with fewer than three map positions around them are not
+    scored.
+    """
+    translation_errors, rotation_errors = [], []
+    for pair in pairs:
+        distances = np.linalg.norm(sources - estimate[pair[0]][0], axis=1)
+        near = distances <= radius_m
+        first = last = int(np.argmin(distances))
+        while first > 0 and near[first - 1]:
+            first -= 1
+        while last + 1 < len(near) and near[last + 1]:
+            last += 1
+        if last - first < 2:
+            continue
+        rotation, translation = fit_yaw(sources[first : last + 1], targets[first : last + 1])
+        translation_error, rotation_error = pose_errors(
+            estimate, reference, [pair], rotation, translation
+        )
+        translation_errors.append(translation_error[0])
+        rotation_errors.append(rotation_error[0])
+    return np.asarray(translation_errors), np.asarray(rotation_errors)
+
+
 def evaluate(mode, estimate, reference, max_diff_ns, alignment=None):
     rotation, translation = np.eye(3), np.zeros(3)
     if mode == "gt":
@@ -168,28 +216,37 @@ def evaluate(mode, estimate, reference, max_diff_ns, alignment=None):
     elif mode == "fixed":
         rotation, translation = alignment
     pairs = associate(estimate, reference, max_diff_ns)
-    translation_errors, rotation_errors = pose_errors(
-        estimate, reference, pairs, rotation, translation
-    )
+    if mode == "local":
+        translation_errors, rotation_errors = local_errors(estimate, reference, pairs, *alignment)
+    else:
+        translation_errors, rotation_errors = pose_errors(
+            estimate, reference, pairs, rotation, translation
+        )
     return {
         "mode": mode,
         "estimated_poses": len(estimate),
         "associated": len(pairs),
+        "scored": len(translation_errors),
         "translation_m": summary(translation_errors),
         "rotation_deg": summary(rotation_errors),
-        "within_5cm": float(np.mean(translation_errors < 0.05)) if len(pairs) else 0.0,
+        "within_5cm": float(np.mean(translation_errors < 0.05)) if len(translation_errors) else 0.0,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("direct", "gt", "fixed"), required=True)
+    parser.add_argument("--mode", choices=("direct", "gt", "fixed", "local"), required=True)
     parser.add_argument("--estimate", type=Path, required=True, help="TUM, seconds")
     parser.add_argument(
-        "--reference", type=Path, required=True, help="TUM (direct) or EuRoC GT csv (gt, fixed)"
+        "--reference", type=Path, required=True, help="TUM (direct) or EuRoC GT csv (gt, fixed, local)"
     )
-    parser.add_argument("--align-estimate", type=Path, help="fixed: TUM defining map->GT")
-    parser.add_argument("--align-ground-truth", type=Path, help="fixed: GT csv for --align-estimate")
+    parser.add_argument("--align-estimate", type=Path, help="fixed, local: TUM defining map->GT")
+    parser.add_argument(
+        "--align-ground-truth", type=Path, help="fixed, local: GT csv for --align-estimate"
+    )
+    parser.add_argument(
+        "--align-radius-m", type=float, default=5.0, help="local: map poses used per scored pose"
+    )
     parser.add_argument("--queries", type=int, help="query image count, adds localized_rate")
     parser.add_argument("--per-frame", type=Path, help="the run's per_frame.csv, for --min-inliers")
     parser.add_argument(
@@ -198,8 +255,8 @@ def main():
     parser.add_argument("--max-diff-ns", type=int, default=10_000_000)
     parser.add_argument("--out-json", type=Path)
     args = parser.parse_args()
-    if args.mode == "fixed" and not (args.align_estimate and args.align_ground_truth):
-        parser.error("--mode fixed needs --align-estimate and --align-ground-truth")
+    if args.mode in ("fixed", "local") and not (args.align_estimate and args.align_ground_truth):
+        parser.error(f"--mode {args.mode} needs --align-estimate and --align-ground-truth")
     if (args.min_inliers is None) != (args.per_frame is None):
         parser.error("--min-inliers and --per-frame go together")
 
@@ -216,6 +273,15 @@ def main():
             load_tum_seconds(args.align_estimate),
             load_euroc_ground_truth(args.align_ground_truth),
             args.max_diff_ns,
+        )
+    elif args.mode == "local":
+        map_poses = load_tum_seconds(args.align_estimate)
+        map_ground_truth = load_euroc_ground_truth(args.align_ground_truth)
+        map_pairs = associate(map_poses, map_ground_truth, args.max_diff_ns)
+        alignment = (
+            np.asarray([map_poses[a][0] for a, _ in map_pairs]),
+            np.asarray([map_ground_truth[b][0] for _, b in map_pairs]),
+            args.align_radius_m,
         )
     result = evaluate(args.mode, estimate, reference, args.max_diff_ns, alignment)
     if args.queries:
