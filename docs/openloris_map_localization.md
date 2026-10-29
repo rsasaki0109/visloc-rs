@@ -560,7 +560,12 @@ longer: corridor1-1 drives 232 m in 284 s along a loop of corridors, turning
 2,026° in all by its wheel odometry. Their ground truth comes from a 2D laser
 SLAM, not motion capture. The map is corridor1-5's (146 s, 126 m; 1,836
 keyframe images, 7,036 landmarks), built as above. Its SLAM closes no loop:
-it is 1.33 m RMSE and up to 3.9 m off the ground truth, and 3% long. So the
+it is 1.33 m RMSE and up to 3.9 m off the ground truth, and 3% long. It
+cannot close one. corridor1-5 drives each corridor out and back, and every
+place it passes twice (921 pairs of its poses within 1 m and over 30 s
+apart) it passes facing the other way, so its forward cameras never see
+the same view twice. Fitting a scale too leaves 1.17 m: the error is
+mostly the VIO's heading drift. So the
 localizations are scored against the map around them: each is put in the
 ground truth's frame through the stretch of the map's own trajectory within
 5 m of it (`evaluate_map_localization.py --mode local`). Scored that way,
