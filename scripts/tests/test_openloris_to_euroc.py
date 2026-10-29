@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import math
 import sys
@@ -106,6 +107,32 @@ class OpenLorisToEurocTests(unittest.TestCase):
         self.assertEqual(int(stamp), 1_005_000_000)
         self.assertAlmostEqual(float(values[0]), 0.1)
         self.assertAlmostEqual(float(values[3]), 0.5)  # 1.6 * 5 / 16
+
+    @unittest.skipUnless(importlib.util.find_spec("py7zr"), "needs py7zr")
+    def test_extract_takes_the_t265_files_of_an_lzma_bcj_archive(self):
+        # The official packages' coders: BCJ over LZMA1, solid, mostly
+        # incompressible PNGs.
+        import py7zr
+
+        rng = np.random.default_rng(3)
+        files = {f"corridor9/fisheye1/{i:04d}.png": rng.bytes(150_000) for i in range(40)}
+        files["corridor9/odom.txt"] = b"# t x y\n"
+        files["corridor9/color/0000.png"] = rng.bytes(150_000)
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            archive = directory / "corridor9.7z"
+            filters = [{"id": py7zr.FILTER_X86}, {"id": py7zr.FILTER_LZMA}]
+            with py7zr.SevenZipFile(archive, "w", filters=filters) as z:
+                for name, data in files.items():
+                    z.writestr(data, name)
+            sequence = conv.extract(archive, directory / "out")
+            self.assertEqual(sequence, directory / "out" / "corridor9")
+            for name, data in files.items():
+                path = directory / "out" / name
+                if "/color/" in name:
+                    self.assertFalse(path.exists())
+                else:
+                    self.assertEqual(path.read_bytes(), data, name)
 
     def test_rotations_round_trip_through_quaternions(self):
         rng = np.random.default_rng(1)

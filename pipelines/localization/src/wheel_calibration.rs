@@ -24,6 +24,14 @@
 //! gravity, which on a level floor is an error of `T_imu_body`.
 //! `scripts/calibrate_wheel_offset.py` fits the same offline.
 //!
+//! The wheel odometry's heading drifts: its wheels slip in turns in place,
+//! by 15 deg in one 350 deg turn on OpenLORIS-Scene's corridor. So `a` and
+//! `t0` hold only over a stretch of a few seconds of VIO pairs
+//! ([`WheelCalibrationConfig::segment_s`]), or a few tens of seconds of map
+//! localizations ([`WheelCalibrationConfig::fix_segment_s`]): each stretch
+//! gets its own, and `r` and `s` are shared. With one `a` over a 120 s
+//! window, `r` took up that drift and wandered by up to 1 m.
+//!
 //! Two references feed it. A VIO ([`WheelCalibration::add_vio`]) follows
 //! every turn, which shows the offset. Localizations against a map
 //! ([`WheelCalibration::add_fix`]) come only where the camera sees the map,
@@ -36,8 +44,9 @@
 //! prior ([`WheelCalibration::with_prior`]) until the pairs show it.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 
-use nalgebra::{Matrix2, Matrix2x4, Matrix4, UnitQuaternion, Vector2, Vector3, Vector4};
+use nalgebra::{Matrix2, UnitQuaternion, Vector2, Vector3};
 use visloc_core::geometry::SE3;
 
 /// Longest gap between the two wheel poses a map localization is
@@ -75,6 +84,14 @@ pub struct WheelCalibrationConfig {
     /// Only pairs from the last `window_s` seconds count (0: all), so that
     /// a long run's estimate follows the odometry's slow changes.
     pub window_s: f64,
+    /// VIO pairs within this many seconds of the first of their stretch
+    /// share a heading and a position against the VIO (0: all pairs one
+    /// stretch); the offset and the scale are shared by all. Short enough
+    /// that the wheel odometry's heading drift stays small within one.
+    pub segment_s: f64,
+    /// The same for map localizations, longer: they are sparser and noisier
+    /// than the VIO pairs, so a stretch needs more of them.
+    pub fix_segment_s: f64,
     /// How far (m) the offset may be from the prior's (or from zero) before
     /// the pairs show it: the fit holds the offset there where the turns
     /// seen so far do not show it, as map localizations rarely do.
@@ -93,6 +110,8 @@ impl Default for WheelCalibrationConfig {
             min_fixes: 20,
             max_fix_residual_m: 0.10,
             window_s: 0.0,
+            segment_s: 5.0,
+            fix_segment_s: 30.0,
             offset_stddev_m: 0.03,
             level: true,
         }
@@ -494,10 +513,13 @@ impl WheelCalibration {
                 0.0
             }
         };
+        let segment_ns = (self.config.segment_s.max(0.0) * 1e9) as i64;
+        let fix_segment_ns = (self.config.fix_segment_s.max(0.0) * 1e9) as i64;
         let pairs: Vec<Pair> = self.pairs.iter().copied().collect();
         let vio_fit = vio_ready.then(|| {
             fit(
                 &pairs,
+                segment_ns,
                 OffsetFit::Fitted(prior_offset, weight(VIO_STDDEV_M)),
                 30,
             )
@@ -505,7 +527,7 @@ impl WheelCalibration {
 
         let mut fixes: Vec<Pair> = self.fix_pairs.iter().copied().collect();
         let (offset, offset_from, rms_m, rms_without_offset_m) = if let Some(vio_fit) = &vio_fit {
-            let without = fit(&pairs, OffsetFit::Held(Vector2::zeros()), 0);
+            let without = fit(&pairs, segment_ns, OffsetFit::Held(Vector2::zeros()), 0);
             (
                 vio_fit.offset,
                 CalibrationSource::Vio,
@@ -515,11 +537,12 @@ impl WheelCalibration {
         } else if fixes_travelled {
             let fitted = robust_fit(
                 &mut fixes,
+                fix_segment_ns,
                 OffsetFit::Fitted(prior_offset, weight(FIX_STDDEV_M)),
                 self.config.max_fix_residual_m,
                 self.config.min_fixes,
             );
-            let without = fit(&fixes, OffsetFit::Held(Vector2::zeros()), 0);
+            let without = fit(&fixes, fix_segment_ns, OffsetFit::Held(Vector2::zeros()), 0);
             (
                 fitted.offset,
                 CalibrationSource::Map,
@@ -540,6 +563,7 @@ impl WheelCalibration {
         let map_fit = fixes_travelled.then(|| {
             robust_fit(
                 &mut fixes,
+                fix_segment_ns,
                 OffsetFit::Held(offset),
                 self.config.max_fix_residual_m,
                 self.config.min_fixes,
@@ -662,81 +686,106 @@ enum OffsetFit {
     Fitted(Vector2<f64>, f64),
 }
 
+/// The stretches of [`WheelCalibrationConfig::segment_s`] (or
+/// `fix_segment_s`): ranges of pairs (in time order) within `segment_ns` of
+/// the first of theirs, or one for all with 0.
+fn segments(pairs: &[Pair], segment_ns: i64) -> Vec<Range<usize>> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for index in 1..pairs.len() {
+        if segment_ns > 0 && pairs[index].timestamp_ns - pairs[start].timestamp_ns > segment_ns {
+            segments.push(start..index);
+            start = index;
+        }
+    }
+    if start < pairs.len() {
+        segments.push(start..pairs.len());
+    }
+    segments
+}
+
+fn mean(points: impl Iterator<Item = Vector2<f64>>) -> Vector2<f64> {
+    let (sum, count) = points.fold((Vector2::zeros(), 0usize), |(sum, count), point| {
+        (sum + point, count + 1)
+    });
+    sum / count.max(1) as f64
+}
+
 /// Offset `r`, scale and residuals of
-/// `body ~ s R(a) (wheel + R(yaw) r) + t0`, alternating the similarity and
-/// the (linear) offset with `t0` `iterations` times, from the held offset
-/// or the prior. A fitted offset is drawn to its prior by the weight, which
-/// decides it where the pairs' turns do not.
-fn fit(pairs: &[Pair], offset_fit: OffsetFit, iterations: usize) -> Fit {
-    let n = pairs.len() as f64;
+/// `body ~ s R(a_k) (wheel + R(yaw) r) + t_k`, with `a_k`, `t_k` for each
+/// stretch of `segment_ns` ([`segments`]) and `s`, `r` shared. Alternates
+/// those with the offset (linear, `t_k` centred out) `iterations` times,
+/// from the held offset or the prior. A fitted offset is drawn to its prior
+/// by the weight, which decides it where the pairs' turns do not.
+fn fit(pairs: &[Pair], segment_ns: i64, offset_fit: OffsetFit, iterations: usize) -> Fit {
+    let segments = segments(pairs, segment_ns);
     let (mut offset, prior) = match offset_fit {
         OffsetFit::Held(offset) => (offset, None),
         OffsetFit::Fitted(prior, weight) => (prior, Some((prior, weight))),
     };
+    // Each stretch's rotation and centroids, and the scale over all of them.
     let similarity = |offset: &Vector2<f64>| {
         let q: Vec<Vector2<f64>> = pairs
             .iter()
             .map(|pair| pair.wheel + rotation2(pair.wheel_yaw) * offset)
             .collect();
-        let mean_q = q.iter().sum::<Vector2<f64>>() / n;
-        let mean_g = pairs.iter().map(|pair| pair.body).sum::<Vector2<f64>>() / n;
-        let h = q
-            .iter()
-            .zip(pairs)
-            .map(|(q, pair)| (q - mean_q) * (pair.body - mean_g).transpose())
-            .sum::<Matrix2<f64>>();
-        let rotation = rotation2((h[(0, 1)] - h[(1, 0)]).atan2(h[(0, 0)] + h[(1, 1)]));
-        let spread: f64 = q.iter().map(|q| (q - mean_q).norm_squared()).sum();
-        let scale = if spread > 0.0 {
-            q.iter()
+        let (mut stretches, mut dot, mut spread) = (Vec::with_capacity(segments.len()), 0.0, 0.0);
+        for range in &segments {
+            let (q, pairs) = (&q[range.clone()], &pairs[range.clone()]);
+            let mean_q = mean(q.iter().copied());
+            let mean_g = mean(pairs.iter().map(|pair| pair.body));
+            let h = q
+                .iter()
                 .zip(pairs)
-                .map(|(q, pair)| (pair.body - mean_g).dot(&(rotation * (q - mean_q))))
-                .sum::<f64>()
-                / spread
-        } else {
-            1.0
-        };
-        let translation = mean_g - scale * rotation * mean_q;
-        (rotation, scale, translation, q)
+                .map(|(q, pair)| (q - mean_q) * (pair.body - mean_g).transpose())
+                .sum::<Matrix2<f64>>();
+            let rotation = rotation2((h[(0, 1)] - h[(1, 0)]).atan2(h[(0, 0)] + h[(1, 1)]));
+            for (q, pair) in q.iter().zip(pairs) {
+                dot += (pair.body - mean_g).dot(&(rotation * (q - mean_q)));
+                spread += (q - mean_q).norm_squared();
+            }
+            stretches.push((rotation, mean_q, mean_g));
+        }
+        let scale = if spread > 0.0 { dot / spread } else { 1.0 };
+        (stretches, scale, q)
     };
     if let Some((prior, weight)) = prior {
         for _ in 0..iterations {
-            let (rotation, scale, _, _) = similarity(&offset);
-            // body - s R wheel = s R R(yaw) r + t0, linear in (r, t0).
-            let (mut normal, mut rhs) = (Matrix4::zeros(), Vector4::zeros());
-            for pair in pairs {
-                let a = scale * rotation * rotation2(pair.wheel_yaw);
-                let m = Matrix2x4::new(
-                    a[(0, 0)],
-                    a[(0, 1)],
-                    1.0,
-                    0.0,
-                    a[(1, 0)],
-                    a[(1, 1)],
-                    0.0,
-                    1.0,
-                );
-                let b = pair.body - scale * rotation * pair.wheel;
-                normal += m.transpose() * m;
-                rhs += m.transpose() * b;
-            }
-            for axis in 0..2 {
-                normal[(axis, axis)] += weight;
-                rhs[axis] += weight * prior[axis];
+            let (stretches, scale, _) = similarity(&offset);
+            // Centred within a stretch, body - s R wheel = s R R(yaw) r + t
+            // leaves the offset alone, linear.
+            let (mut normal, mut rhs) = (Matrix2::identity() * weight, prior * weight);
+            for (range, (rotation, _, _)) in segments.iter().zip(&stretches) {
+                let pairs = &pairs[range.clone()];
+                let count = pairs.len() as f64;
+                let mean_turn = pairs
+                    .iter()
+                    .map(|pair| rotation2(pair.wheel_yaw))
+                    .sum::<Matrix2<f64>>()
+                    / count;
+                let mean_wheel = mean(pairs.iter().map(|pair| pair.wheel));
+                let mean_body = mean(pairs.iter().map(|pair| pair.body));
+                for pair in pairs {
+                    let m = scale * rotation * (rotation2(pair.wheel_yaw) - mean_turn);
+                    let b = pair.body - mean_body - scale * rotation * (pair.wheel - mean_wheel);
+                    normal += m.transpose() * m;
+                    rhs += m.transpose() * b;
+                }
             }
             match normal.try_inverse() {
-                Some(inverse) => offset = (inverse * rhs).fixed_rows::<2>(0).into_owned(),
+                Some(inverse) => offset = inverse * rhs,
                 None => break,
             }
         }
     }
-    let (rotation, scale, translation, q) = similarity(&offset);
-    let residuals: Vec<f64> = q
-        .iter()
-        .zip(pairs)
-        .map(|(q, pair)| (pair.body - (scale * rotation * q + translation)).norm())
-        .collect();
-    let rms = (residuals.iter().map(|r| r * r).sum::<f64>() / n).sqrt();
+    let (stretches, scale, q) = similarity(&offset);
+    let mut residuals = Vec::with_capacity(pairs.len());
+    for (range, (rotation, mean_q, mean_g)) in segments.iter().zip(&stretches) {
+        for (q, pair) in q[range.clone()].iter().zip(&pairs[range.clone()]) {
+            residuals.push((pair.body - mean_g - scale * rotation * (q - mean_q)).norm());
+        }
+    }
+    let rms = (residuals.iter().map(|r| r * r).sum::<f64>() / pairs.len().max(1) as f64).sqrt();
     Fit {
         offset,
         scale,
@@ -750,11 +799,12 @@ fn fit(pairs: &[Pair], offset_fit: OffsetFit, iterations: usize) -> Fit {
 /// `min_kept` remain. `pairs` keeps those used.
 fn robust_fit(
     pairs: &mut Vec<Pair>,
+    segment_ns: i64,
     offset_fit: OffsetFit,
     max_residual: f64,
     min_kept: usize,
 ) -> Fit {
-    let mut result = fit(pairs, offset_fit, 30);
+    let mut result = fit(pairs, segment_ns, offset_fit, 30);
     for _ in 0..2 {
         if max_residual <= 0.0 || result.residuals.iter().all(|r| *r <= max_residual) {
             break;
@@ -769,7 +819,7 @@ fn robust_fit(
             break;
         }
         *pairs = kept;
-        result = fit(pairs, offset_fit, 30);
+        result = fit(pairs, segment_ns, offset_fit, 30);
     }
     result
 }
@@ -784,23 +834,31 @@ mod tests {
         UnitQuaternion::from_axis_angle(&Vector3::z_axis(), angle)
     }
 
-    /// A drive: 2 m ahead, a half turn in place, 2 m back, a quarter turn.
-    fn drive() -> Vec<(f64, f64, f64)> {
+    /// A drive: 2 m ahead, a half turn in place, 2 m back, a quarter turn,
+    /// `laps` times; the turns as the wheels measure them `turn_gain` times
+    /// the true ones (1: the true drive).
+    fn drive_laps(laps: usize, turn_gain: f64) -> Vec<(f64, f64, f64)> {
         let (mut x, mut y, mut yaw, mut poses) = (0.0, 0.0, 0.0, Vec::new());
-        for (steps, speed, turn) in [
-            (100, 0.02, 0.0),
-            (90, 0.0, std::f64::consts::PI / 90.0),
-            (100, 0.02, 0.0),
-            (45, 0.0, std::f64::consts::PI / 90.0),
-        ] {
-            for _ in 0..steps {
-                x += speed * f64::cos(yaw);
-                y += speed * f64::sin(yaw);
-                yaw += turn;
-                poses.push((x, y, yaw));
+        for _ in 0..laps {
+            for (steps, speed, turn) in [
+                (100, 0.02, 0.0),
+                (90, 0.0, std::f64::consts::PI / 90.0),
+                (100, 0.02, 0.0),
+                (45, 0.0, std::f64::consts::PI / 90.0),
+            ] {
+                for _ in 0..steps {
+                    x += speed * f64::cos(yaw);
+                    y += speed * f64::sin(yaw);
+                    yaw += turn * turn_gain;
+                    poses.push((x, y, yaw));
+                }
             }
         }
         poses
+    }
+
+    fn drive() -> Vec<(f64, f64, f64)> {
+        drive_laps(1, 1.0)
     }
 
     /// The true `T_imu_body`: the IMU 0.9 m above the body, rotated.
@@ -901,8 +959,8 @@ mod tests {
         assert!(calibration.is_ready());
         assert!(!calibration.fixes_ready());
         let estimate = calibration.estimate().expect("estimate");
-        // (The prior, zero, draws the offset by a hundredth of a mm.)
-        assert!((estimate.offset - offset).norm() < 1e-5, "{estimate:?}");
+        // (The prior, zero, draws the offset by a few hundredths of a mm.)
+        assert!((estimate.offset - offset).norm() < 1e-4, "{estimate:?}");
         // The VIO's scale is reported, not used: no map localizations, so 1.
         assert!((estimate.vio_scale.expect("vio") - 1.03).abs() < 1e-5);
         assert_eq!(estimate.scale, 1.0);
@@ -942,7 +1000,7 @@ mod tests {
         let imu_from_wheel = estimate.imu_from_wheel(&given);
         assert!(imu_from_wheel.rotation.angle_to(&truth.rotation) < 1e-9);
         let expected = truth.translation - truth.rotation * Vector3::new(offset.x, offset.y, 0.0);
-        assert!((imu_from_wheel.translation - expected).norm() < 1e-5);
+        assert!((imu_from_wheel.translation - expected).norm() < 1e-4);
         // The body pose from a wheel pose puts the IMU where the given
         // extrinsic says, as the VIO saw it.
         let wheel = SE3::new(rz(0.7), Vector3::new(1.0, 2.0, 0.0));
@@ -991,8 +1049,9 @@ mod tests {
         assert_eq!(estimate.offset_from, CalibrationSource::Vio);
         assert_eq!(estimate.scale_from, CalibrationSource::Map);
         assert_eq!(estimate.level_from, CalibrationSource::Map);
-        assert!((estimate.offset - offset).norm() < 1e-5);
-        assert!((estimate.scale - 1.012).abs() < 1e-5, "{}", estimate.scale);
+        assert!((estimate.offset - offset).norm() < 1e-4);
+        // (The map's fit holds the VIO's offset, a few hundredths of a mm off.)
+        assert!((estimate.scale - 1.012).abs() < 1e-4, "{}", estimate.scale);
         assert!(
             (estimate.tilt_deg - 1.5).abs() < 1e-6,
             "{}",
@@ -1045,6 +1104,41 @@ mod tests {
         assert!(estimate.tilt_deg < 1e-6);
         // The localization 1 m off is left out.
         assert_eq!(estimate.fixes, fixes.len() - 1);
+    }
+
+    #[test]
+    fn stretches_keep_the_wheels_heading_drift_out_of_the_offset() {
+        // Four laps whose turns the wheels overcount by 5 %, as when they
+        // slip: their heading drifts 54 deg off the VIO's.
+        let offset = Vector2::new(0.041, 0.064);
+        let (truth, world) = (
+            imu_from_body(),
+            SE3::new(rz(0.4), Vector3::new(0.3, -1.2, 0.5)),
+        );
+        let offset_error = |segment_s: f64| {
+            let config = WheelCalibrationConfig {
+                segment_s,
+                ..WheelCalibrationConfig::default()
+            };
+            let mut calibration = WheelCalibration::new(config, truth.clone());
+            for (index, (body, wheel)) in drive_laps(4, 1.0)
+                .into_iter()
+                .zip(drive_laps(4, 1.05))
+                .enumerate()
+            {
+                let t = wheel_stamp(index);
+                let body = body_in(&world, &wheel_pose(body), offset, 1.0);
+                calibration.add_vio(t, &body.compose(&truth.inverse()));
+                calibration.add_wheel(t, &wheel_pose(wheel));
+            }
+            let estimate = calibration.estimate().expect("estimate");
+            (estimate.offset - offset).norm()
+        };
+        // 3.6 mm off in 5 s stretches (a turn's own slip stays in), 8 cm
+        // with one heading for the whole run.
+        let (stretches, one) = (offset_error(5.0), offset_error(0.0));
+        assert!(stretches < 0.005, "{stretches}");
+        assert!(one > 0.05, "{one}");
     }
 
     #[test]
