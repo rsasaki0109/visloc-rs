@@ -30,9 +30,12 @@ The planned order:
    integration to CUDA: it is 28 of the 34 mesh minutes on SmallCity.
    Baseline done: on terrains, playground and office the 3DGS mesh scores
    a mean F1 of 33.1% at 2 cm, against 80.0% for visloc-mvs's clouds
-   ([`gsplat_cuda.md`](gsplat_cuda.md#geometry-on-eth3d)). Next are the
-   depth-normal loss, visloc-mvs depth supervision, and the TSDF on the GPU:
-   at 1 cm, the CPU TSDF peaks at 9.7 GB on playground.
+   ([`gsplat_cuda.md`](gsplat_cuda.md#geometry-on-eth3d)). visloc-mvs
+   depth supervision (`--depth-prior`, weight 0.1) raises it to 35.0%:
+   accuracy rises, completeness does not
+   ([`gsplat_cuda.md`](gsplat_cuda.md#depth-prior-from-visloc-mvs)). Next
+   are the depth-normal loss and the TSDF on the GPU: at 1 cm, the CPU TSDF
+   peaks at 9.7 GB on playground.
 4. The rasterizer optimizations from Kopanas's
    [3DGS CUDA write-up](https://grgkopanas.github.io/3dgs_cuda_blog/), one at
    a time.

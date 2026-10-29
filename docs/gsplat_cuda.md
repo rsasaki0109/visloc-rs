@@ -32,7 +32,7 @@ The packaging follows the DPVO CUDA kernels:
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
 | Inria densification rule, per-image appearance, depth-normal loss | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
-| Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; effect on ETH3D being measured |
+| Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Geometry channels (normal) for the depth-normal loss | Not started |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
@@ -345,12 +345,48 @@ Each option on terrains, at 2 cm:
   texture, is the worst; the splat fits its appearance without its
   geometry.
 
+### Depth prior from visloc-mvs
+
+`gsplat_train_cuda --depth-prior <dir> --depth-weight w` adds
+`w * mean |D - P| / P` to the loss:
+
+- **P** is the prior. visloc-mvs (`--save-fused-depth`) writes, per view,
+  the depths that fusion's source views agree with. Pixels without one are
+  left out of the mean's sum but not its count.
+- **D** is the splat's expected depth `sum_i T_i a_i z_i`, a fourth blended
+  channel whose gradient reaches opacity, conic and mean as the colour's
+  does.
+
+visloc-mvs ran on the CPU on the same 1600x1067 images: at 1600 px on
+terrains (4483 s), and at 800 px on playground (804 s) and office (468 s),
+whose maps are resampled to 1600 px by nearest neighbour. Training and
+meshing are otherwise as above. F1 at 2 cm, with accuracy / completeness:
+
+| Scene | No prior | w = 0.1 | w = 0.5 | w = 1.0 | The prior's own cloud |
+|---|---|---|---|---|---|
+| terrains | 34.1% (46.5 / 27.0) | 34.6% (62.2 / 24.0) | 37.3% (74.5 / 24.8) | **38.6%** (78.8 / 25.5) | 84.7% |
+| playground | 43.9% (50.3 / 39.0) | **44.8%** (59.5 / 35.9) | 42.3% (64.5 / 31.4) | 42.7% (66.4 / 31.5) | 61.3% |
+| office | 21.4% (39.1 / 14.8) | **25.5%** (42.7 / 18.2) | 22.5% (40.3 / 15.6) | 24.7% (46.3 / 16.9) | 56.8% |
+| **mean** | 33.1% | 35.0% | 34.0% | **35.3%** | 67.6% |
+
+- **Accuracy rises, completeness does not.** The prior moves the surfaces
+  onto the MVS depths. On terrains and playground accuracy climbs with the
+  weight, by up to 32 and 16 points. Completeness falls there by 2 to 8
+  points, so F1 moves little.
+- **The weight matters little.** Every weight gains 1 to 2 points of mean
+  F1. Their order is not monotonic (0.5 is lowest), so the differences are
+  likely run-to-run variation, which float atomics cause and which was not
+  measured on these scenes.
+- **The mesh stays far below its prior.** Even with the prior, the 3DGS
+  mesh scores about half of the cloud that supervised it.
+- **Cost.** Training time is unchanged (608, 843 and 370 s at w = 0.1).
+  The prior stays opt-in.
+
 ## Next
 
-1. **Geometry.** Two levers, measured on these three scenes:
-   - The depth-normal loss needs the geometry channels in CUDA (wgpu has
-     them). On wgpu it smoothed meshes noticeably.
-   - Supervision from visloc-mvs depth maps.
+1. **Geometry.** The depth prior raised accuracy but not completeness. Next
+   is the depth-normal loss, which needs the geometry channels in CUDA (wgpu
+   has them); on wgpu it smoothed meshes noticeably.
 2. **TSDF on the GPU.** At 1 cm the CPU TSDF dominates meshing and runs out
    of memory on large scenes.
 3. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;

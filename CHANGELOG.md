@@ -59,6 +59,11 @@ All notable changes to `visloc-rs` will be documented here.
     size is resampled by nearest neighbour.
   - The expected-depth channel's gradients match an exact colour-channel
     identity to 1.8e-7.
+  - On the three ETH3D scenes, weight 0.1 raises the 3DGS mesh's mean F1
+    at 2 cm from 33.1% to 35.0% (office 21.4% → 25.5%); weights 0.5 and 1.0
+    give 34.0% and 35.3%. Accuracy rises by up to 32 points, but
+    completeness does not, and the mesh stays far below the MVS cloud that
+    supervised it (67.6%).
   - CUDA ABI 5.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
