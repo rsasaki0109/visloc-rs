@@ -305,6 +305,19 @@ __global__ void expected_depth_kernel(uint32_t npix, const float* __restrict__ a
     depth_out[i * 2] = a > 0.5f ? acc[i] / a : 0.f;
 }
 
+// A depth map's value where it has one (> 0); elsewhere the rendered depth,
+// or none (0) with `only`.
+__global__ void override_depth_kernel(uint32_t npix, const float* __restrict__ map, bool only,
+                                      float* __restrict__ depth_out) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= npix) return;
+    const float m = map[i];
+    if (m > 0.f)
+        depth_out[i * 2] = m;
+    else if (only)
+        depth_out[i * 2] = 0.f;
+}
+
 uint32_t next_pow2(uint64_t n) {
     uint64_t p = 1;
     while (p < n) p <<= 1;
@@ -342,20 +355,30 @@ struct GscTsdfParams {
     uint32_t slab_blocks;  // blocks fused at a time (0 = 65536)
     uint32_t cache_mb;     // keep the views' depth and colour on the device up to this (0 = never)
     uint32_t expected;     // fuse the expected depth D / (1 - T) where 1 - T > 0.5 instead (planar ignored)
+    uint32_t override_mode;  // with `maps`: 1 a map's depth where it has one, the splat's elsewhere; 2 the maps' alone
 };
 
 // Render the current scene's median depth from each of `num_views` cameras,
 // fuse it into a TSDF on the device and extract the surface (see tsdf.cuh).
-// The outputs are counts; visloc_gsplat_cuda_tsdf_take copies the surface.
+// `maps` (nullable; host, one per view at its size, view after view, > 0
+// where they have a depth) replace the rendered depth as `override_mode`
+// says. The outputs are counts; visloc_gsplat_cuda_tsdf_take copies the
+// surface.
 GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p, int num_views,
-                                            const GscCamera* cams, uint32_t* num_vertices, uint32_t* num_edges,
-                                            uint32_t* num_blocks, uint32_t* num_slabs) {
+                                            const GscCamera* cams, const float* maps, uint32_t* num_vertices,
+                                            uint32_t* num_edges, uint32_t* num_blocks, uint32_t* num_slabs) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
     if (!p || num_views <= 0 || !cams || !(p->voxel > 0.f) || !(p->trunc > 0.f)) {
         ctx->error = "tsdf_mesh: settings, views and a positive voxel and truncation are required";
         return -1;
     }
+    if (p->override_mode != 0 && !maps) {
+        ctx->error = "tsdf_mesh: override_mode needs depth maps";
+        return -1;
+    }
+    std::vector<size_t> view_px(num_views + 1, 0);
+    for (int v = 0; v < num_views; ++v) view_px[v + 1] = view_px[v] + size_t(cams[v].width) * cams[v].height;
     ctx->tsdf_cells.clear();
     ctx->tsdf_edges.clear();
     ctx->tsdf_pos.clear();
@@ -376,15 +399,21 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
         } else {
             GSC_TRY(run_forward(ctx, d, p->planar != 0));
         }
+        if (p->override_mode != 0) {
+            const size_t npx = view_px[v + 1] - view_px[v];
+            float* m;
+            GSC_TRY(ensure(ctx, ctx->tsdf_override, npx, &m));
+            GSC_CHECK(ctx, cudaMemcpy(m, maps + view_px[v], npx * sizeof(float), cudaMemcpyHostToDevice));
+            override_depth_kernel<<<blocks_for(npx), 256>>>(uint32_t(npx), m, p->override_mode == 2, d);
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
         return 0;
     };
     uint32_t* counts;
     GSC_TRY(ensure(ctx, ctx->tsdf_counts, 8, &counts));
     uint32_t host_counts[8] = {};
     // The views' depth and colour, kept from the allocation pass when they
-    // fit (offsets in pixels).
-    std::vector<size_t> view_px(num_views + 1, 0);
-    for (int v = 0; v < num_views; ++v) view_px[v + 1] = view_px[v] + size_t(cams[v].width) * cams[v].height;
+    // fit (offsets in pixels: view_px).
     const size_t cache_limit = size_t(p->cache_mb) << 20;
     const bool cache = view_px[num_views] * 16 <= cache_limit;
     float *cache_depth = nullptr, *cache_rgb = nullptr;
@@ -561,7 +590,7 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
     // The voxels are the large part; the next fusion allocates them again.
     for (Buf* b : {&ctx->tsdf_sdf, &ctx->tsdf_w, &ctx->tsdf_col, &ctx->tsdf_out_cells, &ctx->tsdf_out_pos,
                    &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_keys, &ctx->tsdf_slab_table,
-                   &ctx->tsdf_slab_keys, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb})
+                   &ctx->tsdf_slab_keys, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb, &ctx->tsdf_override})
         free_buf(*b);
     if (num_vertices) *num_vertices = uint32_t(ctx->tsdf_pos.size() / 3);
     if (num_edges) *num_edges = uint32_t(ctx->tsdf_edges.size() / 4);

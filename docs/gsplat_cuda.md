@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 9).
+  version (currently 10).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -35,6 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
+| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7% |
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 
@@ -539,6 +540,42 @@ report PSNR and SSIM on the held-out views at 30k, and mesh from all views.
 - **The choice.** Constant for the best mesh, a fade for a mesh and images
   together; the prior off for the best images.
 
+### MVS depth, the splat filling its holes
+
+A depth prior moves the splats, and the image pays for it. The MVS depth
+can go into the mesh instead.
+`gsplat_mesh_cuda --gpu-tsdf --depth-maps mvs/fused_depth` fuses
+visloc-mvs's depth (`--save-fused-depth`, resampled to each view)
+wherever it has one, and the splat's depth elsewhere.
+`--depth-maps-only` fuses the maps alone. The meshes are built from all
+views, on the GPU TSDF at 1 cm with depths up to 20 m. F1 at 2 cm, with
+accuracy / completeness:
+
+| Mesh | Splat | terrains | playground | office | mean | Splat's held-out PSNR |
+|---|---|---|---|---|---|---|
+| MVS depth only | | 74.4% (93.5 / 61.8) | 50.5% (84.3 / 36.1) | 38.9% (96.4 / 24.3) | 54.6% | |
+| MVS + splat (planar median) | plain, every view | 78.5% | **64.7%** (69.7 / 60.3) | 45.0% | 62.7% | not held out |
+| MVS + splat (planar median) | plain, every 8th view held out | 79.1% | 64.0% | 43.7% | 62.3% | as the plain splat |
+| MVS + splat (expected depth) | prior 30 → 1, held out | 79.5% | 62.9% | 50.6% | 64.3% | −0.79 dB |
+| MVS + splat (expected depth) | prior 30, every view | **79.7%** | 62.8% | **54.6%** (62.5 / 48.5) | **65.7%** | (−1.81 dB held out) |
+| splat alone (expected depth) | prior 30, every view | 78.1% | 60.4% | 52.3% | 63.6% | (−1.81 dB held out) |
+| splat alone (planar median) | plain, every view | 34.1% | 44.5% | 21.2% | 33.3% | |
+
+- **The image need not pay.** With a plain splat, which is trained for
+  images only, the hybrid mesh scores 62.7%: 29 points above the plain
+  splat's own mesh and 8 above the MVS depth alone. On playground its 64.7%
+  beats every mesh trained with a prior.
+- **What each side brings.** The MVS depth is accurate but full of holes:
+  office's mesh from it alone is 96.4% accurate and 24.3% complete. The splat
+  fills the holes, and completeness rises by 9 to 24 points.
+- **Where a prior still helps.** office's weak texture leaves MVS few
+  depths. There the splat does the most filling, and a splat trained with a
+  strong prior fills better (54.6% against 45.0%). Across the three scenes,
+  a prior adds 3 points to the hybrid at its price in held-out PSNR.
+- **The choice.** For geometry with images untouched, use the hybrid with a
+  plain splat. For the best geometry, use the hybrid with a prior-trained
+  splat.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
@@ -628,7 +665,9 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
 
 ## Next
 
-1. **Geometry.** Meshing the expected depth with a strong depth prior
+1. **Geometry.** Fusing the MVS depth and letting a plain splat fill its
+   holes reaches 62.7% with the image untouched (65.7% with a prior-trained
+   splat). Meshing the expected depth with a strong depth prior
    brings the mesh within a few points of its MVS prior, at 1.8 dB of
    held-out PSNR; fading the prior halves that cost and keeps most of the
    gain. Open: a prior that leaves the image alone (on separate geometry
