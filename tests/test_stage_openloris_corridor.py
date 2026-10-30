@@ -29,6 +29,13 @@ class OpenLorisStagingTests(unittest.TestCase):
         self.assertEqual(decompressor._read_data(source), b"")
         source.read.assert_not_called()
 
+        # The official packages chain LZMA1 (lzma's decoder, wrapped) and BCJ.
+        wrapped = type("Lzma1", (), {})()
+        wrapped._decompressor = type("Buffered", (), {"needs_input": False})()
+        decompressor.chain = [wrapped, object()]
+        self.assertEqual(decompressor._read_data(source), b"")
+        source.read.assert_not_called()
+
     def test_extract_callback_releases_completed_folder_decompressors(self) -> None:
         file_info = type("FileInfo", (), {"filename": "scene/frame.png"})()
         folder = type("Folder", (), {"files": [file_info], "decompressor": object()})()

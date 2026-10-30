@@ -99,6 +99,66 @@ pub struct Image {
 }
 ros_type!(Image, "sensor_msgs", "Image");
 
+/// `sensor_msgs/PointField`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointField {
+    pub name: String,
+    pub offset: u32,
+    pub datatype: u8,
+    pub count: u32,
+}
+
+impl PointField {
+    /// `sensor_msgs/PointField::FLOAT32`.
+    pub const FLOAT32: u8 = 7;
+}
+
+/// `sensor_msgs/PointCloud2`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PointCloud2 {
+    pub header: Header,
+    pub height: u32,
+    pub width: u32,
+    pub fields: Vec<PointField>,
+    pub is_bigendian: bool,
+    pub point_step: u32,
+    pub row_step: u32,
+    #[serde(with = "serde_bytes_vec")]
+    pub data: Vec<u8>,
+    pub is_dense: bool,
+}
+ros_type!(PointCloud2, "sensor_msgs", "PointCloud2");
+
+impl PointCloud2 {
+    /// An unordered cloud of `x`, `y`, `z` `float32` points, little-endian.
+    pub fn xyz(header: Header, points: impl IntoIterator<Item = [f32; 3]>) -> Self {
+        let mut data = Vec::new();
+        for point in points {
+            for value in point {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let width = (data.len() / 12) as u32;
+        let field = |name: &str, offset| PointField {
+            name: name.into(),
+            offset,
+            datatype: PointField::FLOAT32,
+            count: 1,
+        };
+        Self {
+            header,
+            height: 1,
+            width,
+            fields: vec![field("x", 0), field("y", 4), field("z", 8)],
+            is_bigendian: false,
+            point_step: 12,
+            row_step: 12 * width,
+            data,
+            is_dense: true,
+        }
+    }
+}
+
 /// `sensor_msgs/RegionOfInterest`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionOfInterest {
@@ -490,6 +550,40 @@ mod tests {
         expected.extend_from_slice(&3u32.to_le_bytes());
         expected.extend_from_slice(&3u32.to_le_bytes()); // data length
         expected.extend_from_slice(&[10, 20, 30]);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn point_cloud_matches_reference_cdr_layout() {
+        let cloud = PointCloud2::xyz(
+            Header::new(Time { sec: 1, nanosec: 2 }, "m"),
+            [[1.0, -2.0, 0.5]],
+        );
+        assert_eq!((cloud.width, cloud.row_step), (1, 12));
+        let bytes = roundtrip(&cloud);
+        let mut expected = vec![1, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, b'm', 0];
+        expected.extend_from_slice(&[0, 0]); // pad to 4 for height
+        expected.extend_from_slice(&1u32.to_le_bytes()); // height
+        expected.extend_from_slice(&1u32.to_le_bytes()); // width
+        expected.extend_from_slice(&3u32.to_le_bytes()); // fields length
+        for (name, offset) in [(b'x', 0u32), (b'y', 4), (b'z', 8)] {
+            expected.extend_from_slice(&2u32.to_le_bytes()); // name length
+            expected.extend_from_slice(&[name, 0]);
+            expected.extend_from_slice(&[0, 0]); // pad to 4 for offset
+            expected.extend_from_slice(&offset.to_le_bytes());
+            expected.push(PointField::FLOAT32);
+            expected.extend_from_slice(&[0, 0, 0]); // pad to 4 for count
+            expected.extend_from_slice(&1u32.to_le_bytes());
+        }
+        expected.push(0); // is_bigendian
+        expected.extend_from_slice(&[0, 0, 0]); // pad to 4 for point_step
+        expected.extend_from_slice(&12u32.to_le_bytes());
+        expected.extend_from_slice(&12u32.to_le_bytes()); // row_step
+        expected.extend_from_slice(&12u32.to_le_bytes()); // data length
+        for value in [1.0f32, -2.0, 0.5] {
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        expected.push(1); // is_dense
         assert_eq!(bytes, expected);
     }
 

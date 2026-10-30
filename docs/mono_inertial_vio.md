@@ -89,6 +89,48 @@ This writes `trajectory.tum` and `trajectory.csv` as in the stereo replay.
 Evaluate them with the usual tooling. Monocular VIO is metric, so use SE(3)
 alignment. Sim(3) alignment would hide a scale error.
 
+To measure the scale without a local copy of the data, run the **EuRoC mono
+scale** workflow (`.github/workflows/euroc_mono_scale.yml`, by hand from the
+Actions tab). With `dataset: tumvi` (the default) each job streams one TUM-VI
+room sequence from the TUM server (`scripts/tumvi_fetch.py`; motion-capture
+ground truth over the whole sequence, upstream Basalt's calibration and config
+in `configs/basalt/tumvi`). With `dataset: euroc` it fetches from the ETH
+Research Collection (`scripts/euroc_fetch.py`), which has so far answered
+GitHub's runners with nothing but HTTP 429. Each job runs stereo and `--mono`. It then scores both
+with `scripts/euroc_scale_report.py`: SE(3) and Sim(3) ATE, the scale error,
+and the time until the scale stays within ±5 % (Sim(3) on 10 s windows). The
+run summary holds the table. The demo writes `trajectory.tum` timestamps in
+seconds, so the report reads them as seconds.
+
+### Results on TUM-VI
+
+TUM-VI room1–6 (512 px), upstream Basalt's calibration and config, from
+[run 40632289750](https://github.com/rsasaki0109/visloc-rs/actions/runs/40632289750)
+of the workflow at `9cb4812`. ATE is RMS after SE(3) alignment. Scale error is
+that of the Sim(3) alignment over the whole sequence (+ means the estimate is too
+large). Windows are Sim(3) alignments of 10 s spans, every 2 s.
+
+| Sequence | Path | Mono ATE | Mono scale | Mono 10 s windows (median / max) | Stereo ATE | Stereo scale |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| room1 | 146 m | 0.094 m | −0.4 % | 0.7 % / 3.5 % | 0.098 m | +0.2 % |
+| room2 | 141 m | 0.084 m | −2.6 % | 3.0 % / 4.2 % | 0.076 m | −0.5 % |
+| room3 | 135 m | 0.128 m | −1.0 % | 1.1 % / 4.8 % | 0.131 m | +0.1 % |
+| room4 | 68 m | 0.046 m | −1.6 % | 1.2 % / 3.7 % | 0.048 m | −0.6 % |
+| room5 | 131 m | 0.185 m | +3.4 % | 1.0 % / 4.1 % | 0.171 m | +2.8 % |
+| room6 | 67 m | 0.021 m | −0.7 % | 0.5 % / 2.5 % | 0.022 m | −0.5 % |
+
+- Monocular-inertial: the median |scale error| is 1.3 % and the largest 3.4 %.
+  Every 10 s window of every sequence is within ±5 %, from the first window on.
+  ATE differs from stereo-inertial's by at most 0.014 m (room5).
+- Stereo-inertial: the median |scale error| is 0.5 % and the largest 2.8 %.
+  On room5 one window late in the sequence (126–136 s) is more than 5 % off,
+  so the report has it settling at 128 s.
+- room1 and room2 were also run on another machine, with the same numbers.
+  On room2 the trajectory is byte-identical with and without
+  `--no-marg-data`.
+- On a GitHub runner each sequence takes 283–376 s to fetch and about 90 s
+  for both runs.
+
 ## Verification
 
 Synthetic tests in `pipelines/basalt/tests/mono_inertial_synthetic.rs`:

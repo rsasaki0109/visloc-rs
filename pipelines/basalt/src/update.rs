@@ -5,6 +5,7 @@
 //! composition explicit and keep the float32 arithmetic used by the upstream
 //! optical-flow factory.
 
+use crate::fma::FusedMulAdd;
 use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 use thiserror::Error;
 
@@ -48,9 +49,9 @@ impl AffineCompact2f {
         // nalgebra's generic matrix product can choose a different scalar
         // association and move the warped sample by one f32 bit.
         let x = self.linear[(0, 0)] * point.x;
-        let x = self.linear[(0, 1)].mul_add(point.y, x) + self.translation.x;
+        let x = self.linear[(0, 1)].fused_mul_add(point.y, x) + self.translation.x;
         let y = self.linear[(1, 0)] * point.x;
-        let y = self.linear[(1, 1)].mul_add(point.y, y) + self.translation.y;
+        let y = self.linear[(1, 1)].fused_mul_add(point.y, y) + self.translation.y;
         Vector2::new(x, y)
     }
 
@@ -90,24 +91,24 @@ impl AffineCompact2f {
         let r11 = update.rotation[(1, 1)];
 
         let n00 = a01 * r10;
-        let n00 = old_translation.x.mul_add(0.0, n00);
-        let n00 = a00.mul_add(r00, n00);
+        let n00 = old_translation.x.fused_mul_add(0.0, n00);
+        let n00 = a00.fused_mul_add(r00, n00);
         let n10 = a11 * r10;
-        let n10 = old_translation.y.mul_add(0.0, n10);
-        let n10 = a10.mul_add(r00, n10);
+        let n10 = old_translation.y.fused_mul_add(0.0, n10);
+        let n10 = a10.fused_mul_add(r00, n10);
         let n01 = a01 * r11;
-        let n01 = old_translation.x.mul_add(0.0, n01);
-        let n01 = a00.mul_add(r01, n01);
+        let n01 = old_translation.x.fused_mul_add(0.0, n01);
+        let n01 = a00.fused_mul_add(r01, n01);
         let n11 = a11 * r11;
-        let n11 = old_translation.y.mul_add(0.0, n11);
-        let n11 = a10.mul_add(r01, n11);
+        let n11 = old_translation.y.fused_mul_add(0.0, n11);
+        let n11 = a10.fused_mul_add(r01, n11);
 
         let tx = a01 * update.translation.y;
-        let tx = old_translation.x.mul_add(1.0, tx);
-        let tx = a00.mul_add(update.translation.x, tx);
+        let tx = old_translation.x.fused_mul_add(1.0, tx);
+        let tx = a00.fused_mul_add(update.translation.x, tx);
         let ty = a11 * update.translation.y;
-        let ty = old_translation.y.mul_add(1.0, ty);
-        let ty = a10.mul_add(update.translation.x, ty);
+        let ty = old_translation.y.fused_mul_add(1.0, ty);
+        let ty = a10.fused_mul_add(update.translation.x, ty);
 
         self.linear = Matrix2::new(n00, n01, n10, n11);
         self.translation = Vector2::new(tx, ty);
@@ -178,8 +179,8 @@ impl Se2 {
             // the already-rounded ty product.  Keep the y numerator's fixed
             // FMA shape as well; both spellings are part of the pinned
             // Sophus/Eigen f32 operation order.
-            sin_over_theta.mul_add(tangent.x, -(one_minus_cos_over_theta * tangent.y)),
-            one_minus_cos_over_theta.mul_add(tangent.x, sin_over_theta * tangent.y),
+            sin_over_theta.fused_mul_add(tangent.x, -(one_minus_cos_over_theta * tangent.y)),
+            one_minus_cos_over_theta.fused_mul_add(tangent.x, sin_over_theta * tangent.y),
         );
         Self {
             rotation,

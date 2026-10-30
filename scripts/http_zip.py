@@ -19,23 +19,60 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 CHUNK = 32 << 20
+MAX_DELAY = 120
+
+
+def retry_delay(attempt, error=None):
+    """Seconds to wait before retrying: the server's Retry-After (429, 503) when it sends
+    one, else exponential, at most MAX_DELAY."""
+    headers = getattr(error, "headers", None)
+    after = headers.get("Retry-After", "") if headers else ""
+    return min(int(after) if after.isdigit() else 2 ** attempt, MAX_DELAY)
+
+
+def probe(url, attempts=8):
+    """(size, ranges supported) of `url`, from a one-byte range request. Servers that
+    answer HEAD without a Content-Length still give the total in Content-Range."""
+    request = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as r:
+                total = r.headers.get("Content-Range", "").rpartition("/")[2]
+                if r.status == 206 and total.isdigit():
+                    return int(total), True
+                length = r.headers.get("Content-Length")
+                return (int(length) if length else None), False
+        except (OSError, http.client.HTTPException) as e:
+            if attempt == attempts - 1:
+                raise
+            delay = retry_delay(attempt, e)
+            print(f"retry {attempt} probe {url}: {e!r}, waiting {delay} s", file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 class HttpFile(io.RawIOBase):
     """A read-only, seekable file over HTTP range requests, read CHUNK bytes at a time."""
 
-    def __init__(self, url):
+    ATTEMPTS = 8  # per request; a caller facing a rate-limited server can raise it
+
+    def __init__(self, url, size=None):
         self.url = url
-        for attempt in range(8):  # the server sometimes stalls for minutes (TLS handshake timeouts)
+        self.size = size
+        for attempt in range(self.ATTEMPTS if size is None else 0):
+            # the server sometimes stalls for minutes (TLS handshake timeouts)
             try:
                 with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
-                    self.size = int(r.headers["Content-Length"])
+                    length = r.headers.get("Content-Length")
+                self.size = int(length) if length else probe(url, self.ATTEMPTS)[0]
+                if self.size is None:
+                    raise IOError(f"{url} reports no size")
                 break
             except (OSError, http.client.HTTPException) as e:
-                if attempt == 7:
+                if attempt == self.ATTEMPTS - 1:
                     raise
-                print(f"retry {attempt} HEAD {url}: {e!r}", file=sys.stderr, flush=True)
-                time.sleep(2 ** attempt)
+                delay = retry_delay(attempt, e)
+                print(f"retry {attempt} HEAD {url}: {e!r}, waiting {delay} s", file=sys.stderr, flush=True)
+                time.sleep(delay)
         self.pos = 0
         self.buf_start = 0
         self.buf = b""
@@ -56,7 +93,8 @@ class HttpFile(io.RawIOBase):
     def _fetch(self, start, n):
         end = min(self.size, start + n) - 1
         request = urllib.request.Request(self.url, headers={"Range": f"bytes={start}-{end}"})
-        for attempt in range(8):
+        for attempt in range(self.ATTEMPTS):
+            delay = retry_delay(attempt)
             try:
                 with urllib.request.urlopen(request, timeout=120) as r:
                     data = r.read()
@@ -65,8 +103,9 @@ class HttpFile(io.RawIOBase):
                 error = f"status {r.status}, {len(data)} of {end - start + 1} bytes"
             except (OSError, http.client.HTTPException) as e:  # IncompleteRead: the connection dropped mid-body
                 error = repr(e)
-            print(f"retry {attempt} at {start}: {error}", file=sys.stderr, flush=True)
-            time.sleep(2 ** attempt)
+                delay = retry_delay(attempt, e)
+            print(f"retry {attempt} at {start}: {error}, waiting {delay} s", file=sys.stderr, flush=True)
+            time.sleep(delay)
         raise IOError(f"range {start}-{end} of {self.url} failed")
 
     def read(self, n=-1):

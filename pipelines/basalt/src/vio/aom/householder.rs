@@ -1,6 +1,7 @@
 //! Landmark packet arithmetic and the f32 Householder landmark workspace.
 
 use super::*;
+use crate::fma::FusedMulAdd;
 
 // Eigen's pinned x86 f32 path uses eight-lane AVX packets (and four-lane
 // half-packets).  Keeping this emulation local to ABS_QR makes the storage and
@@ -44,10 +45,10 @@ fn landmark_packet_fused_sub(
     scale: f32,
 ) -> LandmarkPacket4 {
     LandmarkPacket4([
-        (-scale).mul_add(workspace.0[0], destination.0[0]),
-        (-scale).mul_add(workspace.0[1], destination.0[1]),
-        (-scale).mul_add(workspace.0[2], destination.0[2]),
-        (-scale).mul_add(workspace.0[3], destination.0[3]),
+        (-scale).fused_mul_add(workspace.0[0], destination.0[0]),
+        (-scale).fused_mul_add(workspace.0[1], destination.0[1]),
+        (-scale).fused_mul_add(workspace.0[2], destination.0[2]),
+        (-scale).fused_mul_add(workspace.0[3], destination.0[3]),
     ])
 }
 
@@ -59,10 +60,10 @@ fn landmark_packet_mul_add(
 ) -> LandmarkPacket4 {
     // Eigen's SSE/AVX pmadd uses fused multiply-add when FMA is enabled.
     LandmarkPacket4([
-        lhs.0[0].mul_add(rhs.0[0], accumulator.0[0]),
-        lhs.0[1].mul_add(rhs.0[1], accumulator.0[1]),
-        lhs.0[2].mul_add(rhs.0[2], accumulator.0[2]),
-        lhs.0[3].mul_add(rhs.0[3], accumulator.0[3]),
+        lhs.0[0].fused_mul_add(rhs.0[0], accumulator.0[0]),
+        lhs.0[1].fused_mul_add(rhs.0[1], accumulator.0[1]),
+        lhs.0[2].fused_mul_add(rhs.0[2], accumulator.0[2]),
+        lhs.0[3].fused_mul_add(rhs.0[3], accumulator.0[3]),
     ])
 }
 
@@ -116,14 +117,14 @@ fn landmark_packet8_fused_sub(
     scale: f32,
 ) -> LandmarkPacket8 {
     LandmarkPacket8([
-        (-scale).mul_add(workspace.0[0], destination.0[0]),
-        (-scale).mul_add(workspace.0[1], destination.0[1]),
-        (-scale).mul_add(workspace.0[2], destination.0[2]),
-        (-scale).mul_add(workspace.0[3], destination.0[3]),
-        (-scale).mul_add(workspace.0[4], destination.0[4]),
-        (-scale).mul_add(workspace.0[5], destination.0[5]),
-        (-scale).mul_add(workspace.0[6], destination.0[6]),
-        (-scale).mul_add(workspace.0[7], destination.0[7]),
+        (-scale).fused_mul_add(workspace.0[0], destination.0[0]),
+        (-scale).fused_mul_add(workspace.0[1], destination.0[1]),
+        (-scale).fused_mul_add(workspace.0[2], destination.0[2]),
+        (-scale).fused_mul_add(workspace.0[3], destination.0[3]),
+        (-scale).fused_mul_add(workspace.0[4], destination.0[4]),
+        (-scale).fused_mul_add(workspace.0[5], destination.0[5]),
+        (-scale).fused_mul_add(workspace.0[6], destination.0[6]),
+        (-scale).fused_mul_add(workspace.0[7], destination.0[7]),
     ])
 }
 
@@ -134,14 +135,14 @@ fn landmark_packet8_mul_add(
     accumulator: LandmarkPacket8,
 ) -> LandmarkPacket8 {
     LandmarkPacket8([
-        lhs.0[0].mul_add(rhs.0[0], accumulator.0[0]),
-        lhs.0[1].mul_add(rhs.0[1], accumulator.0[1]),
-        lhs.0[2].mul_add(rhs.0[2], accumulator.0[2]),
-        lhs.0[3].mul_add(rhs.0[3], accumulator.0[3]),
-        lhs.0[4].mul_add(rhs.0[4], accumulator.0[4]),
-        lhs.0[5].mul_add(rhs.0[5], accumulator.0[5]),
-        lhs.0[6].mul_add(rhs.0[6], accumulator.0[6]),
-        lhs.0[7].mul_add(rhs.0[7], accumulator.0[7]),
+        lhs.0[0].fused_mul_add(rhs.0[0], accumulator.0[0]),
+        lhs.0[1].fused_mul_add(rhs.0[1], accumulator.0[1]),
+        lhs.0[2].fused_mul_add(rhs.0[2], accumulator.0[2]),
+        lhs.0[3].fused_mul_add(rhs.0[3], accumulator.0[3]),
+        lhs.0[4].fused_mul_add(rhs.0[4], accumulator.0[4]),
+        lhs.0[5].fused_mul_add(rhs.0[5], accumulator.0[5]),
+        lhs.0[6].fused_mul_add(rhs.0[6], accumulator.0[6]),
+        lhs.0[7].fused_mul_add(rhs.0[7], accumulator.0[7]),
     ])
 }
 
@@ -583,7 +584,7 @@ impl LandmarkHouseholderF32 {
                 // a fused scalar multiply-add for this tail path.  Keep this
                 // boundary explicit; the all61 fixture has a one-ULP beta
                 // witness at k=1 (track 63).
-                tail_sq_norm = value.mul_add(value, tail_sq_norm);
+                tail_sq_norm = value.fused_mul_add(value, tail_sq_norm);
             }
 
             let (tau, beta) = if tail_sq_norm <= f32::MIN_POSITIVE {
@@ -597,7 +598,7 @@ impl LandmarkHouseholderF32 {
                 // scalar fused multiply-add before sqrt (vfmadd231ss in the
                 // pinned clean build).  Keep this separate from the tail
                 // reduction so both rounding boundaries are explicit.
-                let beta_norm = c0.mul_add(c0, tail_sq_norm).sqrt();
+                let beta_norm = c0.fused_mul_add(c0, tail_sq_norm).sqrt();
                 let beta = if c0 >= 0.0 { -beta_norm } else { beta_norm };
                 let denominator = c0 - beta;
                 essential.clear();
@@ -658,7 +659,7 @@ impl LandmarkHouseholderF32 {
                 workspace[column] += self.storage[self.index(k, column)];
                 let row_index = self.index(k, column);
                 self.storage[row_index] =
-                    (-tau).mul_add(workspace[column], self.storage[row_index]);
+                    (-tau).fused_mul_add(workspace[column], self.storage[row_index]);
                 column += 1;
             }
             // For a row-major destination Eigen's outer-product evaluator
@@ -692,7 +693,8 @@ impl LandmarkHouseholderF32 {
                 }
                 while column < storage_cols {
                     let index = row_index + column;
-                    self.storage[index] = (-scale).mul_add(workspace[column], self.storage[index]);
+                    self.storage[index] =
+                        (-scale).fused_mul_add(workspace[column], self.storage[index]);
                     column += 1;
                 }
             }

@@ -51,6 +51,22 @@ pub fn integrate_between(
     bias_accel: Vector3<f64>,
     noise: Option<super::ImuNoiseModel>,
 ) -> Result<ImuPreintegratedDelta, SamplingError> {
+    integrate_between_with(
+        samples, start_ns, end_ns, bias_gyro, bias_accel, noise, false,
+    )
+}
+
+/// [`integrate_between`], with the noise discretized per step when
+/// `noise_per_step` (see `EstimatorConfig::imu_noise_per_step`).
+pub fn integrate_between_with(
+    samples: &[TimestampedImu],
+    start_ns: i64,
+    end_ns: i64,
+    bias_gyro: Vector3<f64>,
+    bias_accel: Vector3<f64>,
+    noise: Option<super::ImuNoiseModel>,
+    noise_per_step: bool,
+) -> Result<ImuPreintegratedDelta, SamplingError> {
     if end_ns <= start_ns {
         return Err(SamplingError::InvalidInterval);
     }
@@ -64,7 +80,7 @@ pub fn integrate_between(
         }
     }
     points.push(end);
-    let mut pre = ImuPreintegrator::new(bias_gyro, bias_accel);
+    let mut pre = ImuPreintegrator::new(bias_gyro, bias_accel).with_per_step_noise(noise_per_step);
     if let Some(n) = noise {
         pre = pre.with_noise(n).ok_or(SamplingError::InvalidInterval)?;
     }

@@ -1,6 +1,7 @@
 //! Landmark back-substitution and upstream trial projection helpers.
 
 use super::*;
+use crate::fma::FusedMulAdd;
 
 /// Recover a landmark increment from a compact Q1/R payload produced by one
 /// [`LandmarkHouseholderF32::factor`] call.  The arithmetic intentionally
@@ -87,9 +88,10 @@ fn back_substitute_compact_flat_f32(
             return None;
         }
         let x2 = rhs[2] / d2;
-        let row1 = (-storage[upper_r_offset + n + 2]).mul_add(x2, rhs[1]);
+        let row1 = (-storage[upper_r_offset + n + 2]).fused_mul_add(x2, rhs[1]);
         let x1 = row1 / d1;
-        let row0_dot = storage[upper_r_offset + 2].mul_add(x2, storage[upper_r_offset + 1] * x1);
+        let row0_dot =
+            storage[upper_r_offset + 2].fused_mul_add(x2, storage[upper_r_offset + 1] * x1);
         let row0_numerator = rhs[0] - row0_dot;
         let x0 = row0_numerator / d0;
         increment[0] = -x0;
@@ -146,7 +148,7 @@ fn eigen_compact_q1_state_gemv_f32(
         while column < full_end {
             for lane in 0..8 {
                 lanes[lane] = storage[row * state_cols + column + lane]
-                    .mul_add(state_step[column + lane] as f32, lanes[lane]);
+                    .fused_mul_add(state_step[column + lane] as f32, lanes[lane]);
             }
             column += 8;
         }
@@ -160,7 +162,7 @@ fn eigen_compact_q1_state_gemv_f32(
         while column < half_end {
             for lane in 0..4 {
                 half_lanes[lane] = storage[row * state_cols + column + lane]
-                    .mul_add(state_step[column + lane] as f32, half_lanes[lane]);
+                    .fused_mul_add(state_step[column + lane] as f32, half_lanes[lane]);
             }
             column += 4;
         }
@@ -239,9 +241,9 @@ pub(super) fn back_substitute_landmark_f32_with_track(
             return None;
         }
         let x2 = rhs[2] / d2;
-        let row1 = (-r[(1, 2)]).mul_add(x2, rhs[1]);
+        let row1 = (-r[(1, 2)]).fused_mul_add(x2, rhs[1]);
         let x1 = row1 / d1;
-        let row0_dot = r[(0, 2)].mul_add(x2, r[(0, 1)] * x1);
+        let row0_dot = r[(0, 2)].fused_mul_add(x2, r[(0, 1)] * x1);
         let row0_numerator = rhs[0] - row0_dot;
         let x0 = row0_numerator / d0;
         increment[0] = -x0;
@@ -354,7 +356,11 @@ pub fn back_substitute_landmark(
 // Trial computeError's DS visitor uses a different expression schedule from
 // the linearized factor objective. Keep this separate until trial wiring.
 pub(crate) fn upstream_trial_bearing_f32(direction: Vector2<f32>) -> Vector3<f32> {
-    let scale = 2.0_f32 / (direction.x.mul_add(direction.x, direction.y * direction.y) + 1.0_f32);
+    let scale = 2.0_f32
+        / (direction
+            .x
+            .fused_mul_add(direction.x, direction.y * direction.y)
+            + 1.0_f32);
     Vector3::new(direction.x * scale, direction.y * scale, scale - 1.0_f32)
 }
 
@@ -366,14 +372,14 @@ pub(crate) fn upstream_trial_projection_coordinates_f32(
     point: Vector3<f32>,
 ) -> Vector2<f32> {
     let r2 = point.x * point.x + point.y * point.y;
-    let d1 = point.z.mul_add(point.z, r2).sqrt();
-    let k = (camera.xi as f32).mul_add(d1, point.z);
-    let d2 = k.mul_add(k, r2).sqrt();
+    let d1 = point.z.fused_mul_add(point.z, r2).sqrt();
+    let k = (camera.xi as f32).fused_mul_add(d1, point.z);
+    let d2 = k.fused_mul_add(k, r2).sqrt();
     let alpha = camera.alpha as f32;
-    let denominator = alpha.mul_add(d2, (1.0_f32 - alpha) * k);
+    let denominator = alpha.fused_mul_add(d2, (1.0_f32 - alpha) * k);
     Vector2::new(
-        (camera.fx as f32).mul_add(point.x / denominator, camera.cx as f32),
-        (camera.fy as f32).mul_add(point.y / denominator, camera.cy as f32),
+        (camera.fx as f32).fused_mul_add(point.x / denominator, camera.cx as f32),
+        (camera.fy as f32).fused_mul_add(point.y / denominator, camera.cy as f32),
     )
 }
 
@@ -385,7 +391,7 @@ pub(crate) fn upstream_trial_project_f32(
 ) -> Option<Vector2<f32>> {
     let projected = upstream_trial_projection_coordinates_f32(camera, point);
     let r2 = point.x * point.x + point.y * point.y;
-    let d1 = point.z.mul_add(point.z, r2).sqrt();
+    let d1 = point.z.fused_mul_add(point.z, r2).sqrt();
     let alpha = camera.alpha as f32;
     let xi = camera.xi as f32;
     let w1 = if alpha > 0.5_f32 {
@@ -393,7 +399,7 @@ pub(crate) fn upstream_trial_project_f32(
     } else {
         alpha / (1.0_f32 - alpha)
     };
-    let w2 = (w1 + xi) / ((w1 + w1).mul_add(xi, xi * xi) + 1.0_f32).sqrt();
+    let w2 = (w1 + xi) / ((w1 + w1).fused_mul_add(xi, xi * xi) + 1.0_f32).sqrt();
     if projected.iter().all(|value| value.is_finite()) && point.z > (-w2) * d1 {
         Some(projected)
     } else {
@@ -402,10 +408,10 @@ pub(crate) fn upstream_trial_project_f32(
 }
 
 pub(crate) fn upstream_trial_visual_cost_f32(x: f32, y: f32, sigma: f32, huber: f32) -> f32 {
-    let norm = (y.mul_add(y, x * x) + 0.0_f32).sqrt();
+    let norm = (y.fused_mul_add(y, x * x) + 0.0_f32).sqrt();
     let weight = if norm < huber { 1.0_f32 } else { huber / norm };
     let coefficient = (weight / (sigma * sigma)) * (0.5_f32 * (2.0_f32 - weight));
-    (coefficient * y).mul_add(y, (coefficient * x) * x)
+    (coefficient * y).fused_mul_add(y, (coefficient * x) * x)
 }
 
 /// Trial computeError constructs one matrix per host/target TimeCamId pair.

@@ -1,0 +1,116 @@
+# RViz 2 config for map_localization.launch.py: the map's landmarks
+# (map_cloud), the robot's map pose with its covariance (map_pose), the VIO
+# odometry and path, the TF tree, and the left camera image.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Help Height: 0
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Map landmarks
+      Enabled: true
+      Topic:
+        Value: /map_cloud
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+      Use Fixed Frame: true
+      Alpha: 0.8
+    - Class: rviz_default_plugins/Path
+      Name: VIO path
+      Enabled: true
+      Topic:
+        Value: /path
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Color: 25; 255; 0
+      Line Width: 0.03
+      Line Style: Billboards
+    - Class: rviz_default_plugins/PoseWithCovariance
+      Name: Map pose
+      Enabled: true
+      Topic:
+        Value: /map_pose
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Shape: Arrow
+      Color: 255; 25; 0
+      Shaft Length: 0.6
+      Shaft Radius: 0.05
+      Head Length: 0.2
+      Head Radius: 0.1
+      Covariance:
+        Value: true
+        Position:
+          Value: true
+          Color: 204; 51; 204
+          Alpha: 0.3
+          Scale: 1
+        Orientation:
+          Value: false
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Marker Scale: 0.6
+      Update Interval: 0
+    - Class: rviz_default_plugins/Image
+      Name: Left camera
+      Enabled: true
+      Topic:
+        Value: /cam0/image_raw
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Normalize Range: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      # Follows the robot.
+      Target Frame: base_link
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Distance: 14
+      Pitch: 0.75
+      Yaw: 0.6
+Window Geometry:
+  Width: 1400
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: true
