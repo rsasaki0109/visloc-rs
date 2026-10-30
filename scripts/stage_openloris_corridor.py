@@ -279,11 +279,11 @@ def patch_py7zr_backpressure() -> None:
     original = SevenZipDecompressor._read_data
 
     def bounded_read_data(self, source):
-        if (
-            len(self.chain) == 1
-            and hasattr(self.chain[0], "needs_input")
-            and not self.chain[0].needs_input
-        ):
+        # The LZMA decoder comes first in the chain, alone or before BCJ (the
+        # official packages: LZMA1 + BCJ); py7zr's LZMA1Decompressor wraps
+        # lzma's own as `_decompressor`.
+        decoder = getattr(self.chain[0], "_decompressor", self.chain[0])
+        if not getattr(decoder, "needs_input", True):
             return b""
         return original(self, source)
 

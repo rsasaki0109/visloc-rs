@@ -86,6 +86,9 @@ const OPTIONAL_KEYS: &[&str] = &[
     // Latitude in degrees for Earth-rotation compensation of the gyro
     // (absent: off); see `EstimatorConfig::earth_rotation_up_rad_s`.
     "config.vio_earth_rotation_latitude_deg",
+    // IMU noise discretized by each preintegration step's length (default
+    // false); see `EstimatorConfig::imu_noise_per_step`.
+    "config.vio_imu_noise_per_step",
     // Moving-platform filter (default false): during a ride, only the
     // tracks that move with the street reach the estimator; see
     // `crate::platform`.
@@ -173,6 +176,9 @@ impl BasaltConfig {
             },
             min_frames_after_kf: self.value("config.vio_min_frames_after_kf")?,
             new_kf_keypoints_threshold: self.value("config.vio_new_kf_keypoints_thresh")?,
+            min_triangulation_distance: self.value("config.vio_min_triangulation_dist")?,
+            observation_stddev: self.value("config.vio_obs_std_dev")?,
+            observation_huber: self.value("config.vio_obs_huber_thresh")?,
             urgent_kf: self.urgent_kf_policy()?,
             solver: LmConfig {
                 lambda_initial: self.value("config.vio_lm_lambda_initial")?,
@@ -191,6 +197,7 @@ impl BasaltConfig {
                 .optional_bool("config.vio_kf_connectivity_all_cameras")?,
             outlier_filter: self.outlier_filter()?,
             earth_rotation_up_rad_s: self.earth_rotation_up_rad_s()?,
+            imu_noise_per_step: self.optional_bool("config.vio_imu_noise_per_step")?,
             visual_only: self.optional_bool("config.vio_visual_only")?,
         })
     }
@@ -344,6 +351,9 @@ mod tests {
         assert_eq!(e.window.min_feature_ratio, 0.1);
         assert_eq!(e.min_frames_after_kf, 5);
         assert_eq!(e.new_kf_keypoints_threshold, 0.7);
+        assert_eq!(e.min_triangulation_distance, 0.05);
+        assert_eq!(e.observation_stddev, 0.5);
+        assert_eq!(e.observation_huber, 1.0);
         assert_eq!(e.urgent_kf, None);
         assert_eq!(e.solver.max_iterations, 7);
         assert_eq!(e.initial_pose_weight, 1.0e8);

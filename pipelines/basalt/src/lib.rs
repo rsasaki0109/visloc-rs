@@ -25,8 +25,11 @@ pub mod adapter;
 pub mod calibration;
 pub mod camera;
 pub mod config;
+pub mod contrast;
+pub mod dynamic_objects;
 pub mod euroc;
 pub mod fast;
+mod fma;
 pub mod imu;
 pub mod initialization;
 pub mod mapper;
@@ -42,6 +45,7 @@ pub mod platform;
 pub mod provenance;
 pub mod pyramid;
 pub mod rt_priority;
+pub mod smoothing;
 pub mod stream;
 pub mod streaming;
 pub mod time;
@@ -52,7 +56,8 @@ pub mod vio;
 
 pub use adapter::{
     direct_klt_config, vio_estimator_from_calibration, BasaltAdapterError, BasaltAdapterOutput,
-    BasaltVioEstimatorAdapter,
+    BasaltFrontendPacket, BasaltVioEstimatorAdapter, BasaltVioEstimatorStage,
+    BasaltVioFrontendStage,
 };
 pub use calibration::{BasaltCalibration, CalibrationError};
 pub use camera::{CameraModelError, DoubleSphereCamera};

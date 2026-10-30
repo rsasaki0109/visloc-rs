@@ -2,11 +2,12 @@
 //!
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
-//!     --images <folder> --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
+//!     (--images <folder> | --insv VIDEO.insv) --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
 //!     [--principal-point CX,CY] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
+//!     [--frame-step 10] [--imu FILE [--imu-frame-period S]]
 //! ```
 //!
 //! SIFT runs on the GPU (`visloc_sift_gpu::VlfeatSiftGpu`, an f32 port of
@@ -23,6 +24,13 @@
 //! panoramas themselves as equirectangular cameras instead, and poses the
 //! faces for training from them. Without `--equirect`, a folder of
 //! panoramas gets a warning: the pinhole model cannot fit them.
+//! `--insv` takes an Insta360's dual-fisheye frames instead (both lenses
+//! side by side, e.g. ffmpeg's `hstack` of the video's two streams): each
+//! lens is cut into five 90° faces with the lens calibration in the video's
+//! metadata, a frame's ten faces solved as one rig, and the video's IMU
+//! scales the model to metres (docs/photos_to_splat.md). Without
+//! `--images`, every `--frame-step`-th frame is cut from the video with
+//! ffmpeg into `<out>/frames` (kept and reused by later runs).
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, SIFT, GPU matching,
 //! the COLMAP-port mapper, intrinsics refinement), brush-strategy training,
@@ -35,6 +43,7 @@ use std::time::Instant;
 use visloc_gsplat_core::ply::save_ply;
 use visloc_gsplat_render::GpuContext;
 use visloc_gsplat_train::dataset::load_view_rgb_mask;
+use visloc_gsplat_train::dual_fisheye::extract_dual_fisheye_frames;
 use visloc_gsplat_train::init::seed_scene;
 use visloc_gsplat_train::mesh::{extract_from_splat, MeshOptions};
 use visloc_gsplat_train::metrics::psnr_masked;
@@ -43,6 +52,7 @@ use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
 const USAGE: &str = "\
 usage: gsplat_photos --images <folder> --out <work dir> [options]
+       gsplat_photos --insv <VIDEO.insv> --out <work dir> [options]
 
 A folder of photos -> camera poses (COLMAP model in <out>/sparse/0),
 3D Gaussian splats (<out>/scene.ply) and a mesh (<out>/mesh.ply).
@@ -70,6 +80,16 @@ SfM:
   --equirect               cut each panorama into six cube faces (one rig)
   --equirect-independent-faces  solve each face as its own camera
   --equirect-native        SfM on the panoramas as equirectangular cameras
+  --insv VIDEO.insv        the photos are this Insta360 video's dual-fisheye frames (lenses
+                           side by side): five faces per lens from its lens calibration;
+                           its IMU scales the model to metres. Without --images, the frames
+                           are cut with ffmpeg into <out>/frames
+  --frame-step 10          with --insv and no --images: every N-th video frame
+metric scale (video frames named by frame number):
+  --imu FILE               IMU log of the camera (Insta360 .insv, or CSV: SI, EuRoC or
+                           OverMaps360 counts);
+                           scales the model to metres (<out>/imu_scale.txt)
+  --imu-frame-period S     seconds per frame number to start the timing search from
 devices:
   --cpu                    extract SIFT and match on the CPU
   --cpu-sift               extract SIFT on the CPU
@@ -86,6 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mesh = true;
     let mut normal_weight = 0.0f32;
     let mut appearance = false;
+    let mut frame_step = 10u32;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -140,6 +161,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--equirect-independent-faces" => sfm.equirect_rig = false,
             // SfM on the panoramas as equirectangular cameras.
             "--equirect-native" => sfm.equirect_native = true,
+            // Scale the model to metres from the camera's IMU log.
+            "--imu" => sfm.imu = Some(PathBuf::from(next()?)),
+            "--insv" => sfm.insv = Some(PathBuf::from(next()?)),
+            "--frame-step" => frame_step = next()?.parse()?,
+            "--imu-frame-period" => sfm.imu_frame_period = Some(next()?.parse()?),
             "--no-mesh" => mesh = false,
             "--normal-weight" => normal_weight = next()?.parse()?,
             // Per-photo colour correction (varying exposure / white balance).
@@ -147,9 +173,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             other => return Err(format!("unknown argument {other} (--help lists them)").into()),
         }
     }
-    let images = images.ok_or("--images <folder> is required (--help for usage)")?;
     let out = out.ok_or("--out <work dir> is required (--help for usage)")?;
     std::fs::create_dir_all(&out)?;
+    let images = match (images, &sfm.insv) {
+        (Some(images), _) => images,
+        // The video's frames, cut once into <out>/frames.
+        (None, Some(video)) => {
+            let frames = out.join("frames");
+            let have = std::fs::read_dir(&frames).map_or(0, |d| {
+                d.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+                    .count()
+            });
+            if have > 0 {
+                println!("insv: reusing the {have} frames in {}", frames.display());
+            } else {
+                let lenses = visloc_io::insv::read_insv_telemetry(video)?.lenses;
+                let t = Instant::now();
+                let n =
+                    extract_dual_fisheye_frames(video, &frames, frame_step, &lenses, sfm.max_size)?;
+                println!(
+                    "insv: cut {n} frames (every {frame_step}th) into {} with ffmpeg ({:.1} s)",
+                    frames.display(),
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            frames
+        }
+        (None, None) => return Err("--images <folder> is required (--help for usage)".into()),
+    };
     let t0 = Instant::now();
 
     let (dataset, points, report) =
@@ -164,6 +216,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.focal_source,
         report.points
     );
+    if let Some(scale) = report.metric_scale {
+        println!("model in metres: {scale:.4} m per SfM unit (<out>/imu_scale.txt)");
+    }
     if steps == 0 {
         return Ok(());
     }

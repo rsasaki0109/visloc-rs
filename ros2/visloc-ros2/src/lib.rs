@@ -8,10 +8,12 @@
 //!   frame queue for the VIO node;
 //! * [`vio`] -- Basalt VIO estimator wrapper and output message builders;
 //! * [`localize`] -- COLMAP-map localization core and output builders;
-//! * [`map_localize`] -- localization against a saved Basalt map, anchored
-//!   to VIO odometry (`map -> odom`);
+//! * [`map_localize`] -- localization against a saved Basalt map, correcting
+//!   VIO odometry into it (`map -> odom`);
 //! * [`params`] -- ROS-style command-line parameters and remapping;
 //! * [`queue`] -- bounded drop-oldest hand-off queue;
+//! * [`wheel_odom`] -- wheel odometry calibrated against the VIO while
+//!   driving;
 //! * [`dds`] -- the `ros2-client` shell (node, QoS, pub/sub threads).
 //!
 //! The binaries `visloc_vio_node` and `visloc_localize_node` wire these
@@ -26,4 +28,6 @@ pub mod msgs;
 pub mod params;
 pub mod queue;
 pub mod sync;
+pub mod tf_tree;
 pub mod vio;
+pub mod wheel_odom;

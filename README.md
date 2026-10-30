@@ -17,6 +17,16 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/hero_metric_objects_kitti.gif" alt="Objects in metres from one camera and an IMU on KITTI raw drive 0084. Top: the camera image with YOLOX boxes; each car is labelled with its height, its distance and its speed or 'parked'. Bottom left: a top view following the camera with a ring every 10 m, the cars' positions and the moving ones' paths. Bottom right: the whole drive from above; mono + IMU follows the ground truth, while the visual-only VO, drawn as metres, covers a few metres near the start; a readout gives the camera's own speed from each, tens of km/h from the ground truth and mono + IMU and under 1 km/h from the visual-only VO." width="800"><br>
+  <sub>Objects in metres from one camera and an IMU, offline, on KITTI raw drive 0084. Each car's foot is where the bottom of its box meets the ground: the VIO's metric scale puts the camera a measured height above the ground, and gravity gives down. That gives the height, the distance and, from the foot's path, the speed. Against KITTI's 3D boxes on five drives, car heights come out <b>11 % off</b> (median, 110 cars) with mono + IMU and <b>6 %</b> with stereo + IMU; pedestrians 7 cm (stereo + IMU). Speed is the weak part: still cars 0.15 m/s, moving cars 2–3 m/s off. With the IMU off (bottom right), the visual-only VO draws the 219 m drive as 5.7 m, 39× too small. <a href="docs/object_tracking.md#metric-accuracy-on-kitti-raw-phase-4">Details</a>. Images: <a href="https://www.cvlibs.net/datasets/kitti/raw_data.php">KITTI raw</a> (CC BY-NC-SA 3.0).</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/hero_map_localization.gif" alt="Map-based localization on EuRoC: the 3D landmarks of a map saved by the stereo-inertial SLAM from the MH_01 flight, with the MH_02 flight's visual-inertial odometry corrected into its frame. Inset: the current camera image with the keypoints that matched the map in green. In the map: the current camera in red with green rays to the landmarks it matched, and its map-frame trajectory so far in orange, unbroken, tracing the flight's loops through the machine hall." width="720"><br>
+  <sub>Map-based localization: EuRoC MH_02 in a map that the stereo-inertial SLAM saved from MH_01, a different flight. The map fixes correct the VIO into the map frame, so every frame gets a map pose (orange): <b>3,039 of the 3,040 frames, at 1.9 cm RMSE</b> against ground truth. Green: the keypoints that matched the map, searched around where the corrected VIO predicts each landmark (98% of the images match; 81% when each image is matched alone), and rays to those landmarks. The same runs in real time as ROS 2 nodes. <a href="docs/basalt_map_localization.md">Details and the other EuRoC queries</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/assets/hero_reconstruction.gif" alt="One continuous orbit camera circling a whole city block (Hierarchical 3DGS SmallCity) from high above the rooftops, a viewpoint no input photo has: the sparse SfM point cloud of the surrounding streets and the 5,583 recovered camera frustums tracing the bicycle's path around the block pop in, dissolve into the photoreal 3D Gaussian splat rendered with visloc-rs's own Rust + wgpu renderer, streets and parked cars included, then dissolve into the extracted mesh." width="640"><br>
   <sub>5,822 photos of a city block &rarr; 5,583 camera poses &rarr; 4.7M-gaussian splat &rarr; 5.9M-triangle mesh in 2.5 h, one <code>gsplat_photos</code> command, no COLMAP or Python, orbited from high above where no input photo was taken. <a href="#photos-to-splat-and-mesh-3d-gaussian-splatting">Details</a>.</sub>
 </p>
@@ -35,6 +45,7 @@ results plug into existing tools.
 | **GPU SfM** (video frames) | EuRoC: **faster on 8/8** sequences (1.4–7.5×), **more accurate on 4/8**, equal on 1; COLMAP breaks on MH_05 (194 cm vs 2.6 cm) | COLMAP 4.1 CUDA |
 | **Stereo-inertial VI-SLAM** (Basalt port + online mapper) | **Real time on 11/11** EuRoC sequences on the dev machine (1.06–1.68×, thin margin on the slowest); **beats ORB-SLAM3 on 9/11** | ORB-SLAM3, Basalt |
 | **Egocentric VI-SLAM** (Project Aria, both SLAM cameras + IMU) | LaMAria, all 5 tracks: mean Score **64.3**, above GroundedSLAM (62.3); ahead on Short, Medium and Long, level on Low light, behind on Moving; causal and real time on 4 CPU cores (training sequences; the leaderboard's are test) | GroundedSLAM, Aria's SLAM |
+| **Metric objects** (mono camera + IMU + a 2D detector) | KITTI raw, against the 3D boxes: car heights **11 %** off with mono + IMU (110 cars), **6 %** with stereo + IMU; pedestrians **7 cm** | KITTI tracklets |
 | **Photos → 3D Gaussian Splatting + mesh** | **Faster than brush on 5/5** benchmark scenes, PSNR within 0.05 dB on 4 | brush 0.3 |
 | **Localization against a prebuilt map** | OpenLORIS robot rig: **98.96%** of 1,250 held-out frames localized, median 2.9 mm; simulated house: 38 ms / frame | — |
 | **Stereo / RGB-D VO** | KITTI 00 **1.23 m** and 09 **2.07 m** (ORB-SLAM2: 1.3 m / 3.2 m); TUM fr1_xyz 1.4 cm | ORB-SLAM2 |
@@ -72,17 +83,21 @@ the docs record open gaps.
 | Monocular video | SfM | **Benchmarked** | EuRoC: faster than COLMAP 4.1 CUDA on 8/8 sequences, more accurate on 4/8 | `gsplat_euroc` |
 | Posed photos (a COLMAP sparse model) | Dense MVS | Experimental | ETH3D high-res training, 13 scenes at 3200 px on one L4: F1 83.7% at 2 cm in 74 min (ACMMP 83.42%), 4× faster than ACMMP's code on the same GPU; 81.5% end to end from the photos | `visloc-mvs` example `mvs` ([notes](docs/mvs.md)) |
 | Monocular video | VO (DPVO port) | Experimental | MH_01 prefix 0.16 m, about 2× DPVO's published error; CPU only | `euroc_dpvo_vo_demo` |
-| Monocular + IMU | VIO (Basalt port) | Experimental | Runs end to end; synthetic tests recover metric scale within 0.3% at 5–9 mm RMS over 5–7 m paths; no EuRoC result yet | `basalt_euroc_vio_demo --mono` ([notes](docs/mono_inertial_vio.md)) |
+| Monocular + IMU | VIO (Basalt port) | Experimental | TUM-VI room1–6: metric scale within 3.4% (median 1.3%), ATE 0.02–0.19 m, at most 0.014 m above stereo + IMU; no EuRoC result yet | `basalt_euroc_vio_demo --mono` ([notes](docs/mono_inertial_vio.md)) |
+| Monocular + IMU, plus a 2D detector | Object height, distance and speed in metres | Experimental | KITTI raw, 5 drives: car heights 11 % off (median, 110 cars), distances 19 %; moving cars' speeds 2–3 m/s off | `objects_metric_offline` ([notes](docs/object_tracking.md)) |
 | Stereo | VO / SLAM | **Benchmarked** | KITTI seq00 1.23 m and seq09 2.07 m, vs 1.3 m and 3.2 m for ORB-SLAM2 | `deep_stereo_slam`, `online_slam_stereo_vo_kitti_demo` |
 | Stereo + IMU | VIO + mapping (Basalt port) | **Benchmarked** | Beats ORB-SLAM3 on 9/11 EuRoC sequences; native-Basalt parity within 0.1%; real time (RTF 1.06–1.68) on all 11/11 EuRoC sequences on the dev machine, thin margin on the slowest | `basalt_euroc_online_slam_demo` |
 | RGB-D (as virtual stereo) | VO | **Benchmarked** | TUM fr1_xyz 0.014 m, fr1_desk 0.026 m (about 1.3–1.6× ORB-SLAM2 RGB-D) | [TUM RGB-D](docs/tum_rgbd_benchmark.md) |
 | Multi-camera rig | SfM | Experimental | OpenLORIS 10k: 9,998/10,000 registered; RMSE parity with COLMAP still open | `generalized_rig_sfm` |
 | Robot rig cameras vs. a prebuilt map | Relocalization | **Benchmarked** | OpenLORIS (robot-mounted rig): 98.96% of 1,250 held-out frames localized against a map built from other frames, median 2.9 mm | `localize_openloris_map` |
+| Wheeled robot: stereo + IMU (RealSense T265), wheel odometry | Localization in a saved SLAM map, odometry corrected into its frame | **Benchmarked** | OpenLORIS-Scene office, other sessions up to 2.8 days later with furniture moved: VIO + map gives 94–99.8% of frames a map pose at 2.8–7.6 cm, and 1.1–2.4 cm with the stereo baseline corrected from the wheel odometry; wheel odometry + map 3.5–5.1 cm with its reference point and level calibrated from the VIO, and the same through the ROS 2 nodes from a rosbag2; across the day/night lighting change only with local contrast equalization (daylight session: 33% of frames at 2.6 cm; dawn session: none) | `scripts/openloris_to_euroc.py`, `basalt_euroc_localize_demo --vio` or `--odometry` ([notes](docs/openloris_map_localization.md)) |
 | Robot camera sequence vs. a prebuilt map | Sequential map-matching localization | **Benchmarked** (simulation) | RNE house (drjohnson): 387/400 frames at 5.6 cm ATE, 38 ms per frame (median) with `--gpu --motion-model`. RNE checker corridor: 203/400 at 1.57 m, limited by repetitive texture | `localize_rne_map_sequence` |
 | Camera + GNSS prior | Tracking | Example only | Synthetic smoke test; no tight GNSS fusion | `track_sequence_with_gnss_prior` |
 | VO + GNSS positions | Joint pose-graph fusion | Experimental (synthetic) | ~1 km synthetic loop: ATE 5.25 m (VO only) → 0.90 m fused; multipath jumps rejected, 15 s dropout bridged. Loosely coupled (receiver ENU positions; no raw pseudoranges, no IMU) | `gnss_vo_fusion_demo` ([notes](docs/gnss_fusion.md)) |
 
-LiDAR and wheel odometry are not supported.
+LiDAR is not supported. Wheel odometry is supported only as the odometry
+that map fixes correct into a map's frame (above); it is not fused into the
+VIO.
 
 ## Try it
 
@@ -318,6 +333,28 @@ the solve halves: 7.4). Per sequence:
 [the real-time chain](docs/lamaria_batch_ba.md#the-first-minutes-online);
 the leaderboard and the steps that led here: [LaMAria plan](docs/lamaria_plan.md).</sub>
 
+### Objects in metres (mono + IMU)
+
+A 2D detector (YOLOX through ONNX Runtime) and a ByteTrack-style tracker
+give each object a track of boxes. The mono-inertial VIO gives metric camera
+poses and gravity. An object on the ground is placed where the bottom of its
+box meets the ground, found from the triangulated points under the camera's
+path. That gives its height, its distance and, from the foot's path, its
+speed. On KITTI raw, against the tracklets (median errors):
+
+| Poses | Cars: height | Cars: distance | Pedestrians: height |
+| --- | --- | --- | --- |
+| Mono + IMU (110 cars, 5 drives) | 0.16 m, 11 % | 19 % | – ¹ |
+| Stereo + IMU (111 cars, 18 pedestrians) | 0.09 m, 6 % | 12 % | 0.07 m, 4 % |
+
+<sub>¹ The pedestrians are on 0091, which starts moving; the mono-inertial VIO
+must start at rest.</sub>
+
+`scripts/run_kitti_objects_eval.sh` runs a drive end to end, and
+`scripts/render_objects_gif.py` draws the GIF at the top. The method,
+results on LaMAria and TUM-VI, and what still fails:
+[object tracking](docs/object_tracking.md).
+
 ### Run the VI-SLAM demo
 
 Replay a EuRoC sequence through the online VIO + mapper (the calibration and
@@ -399,10 +436,18 @@ Against an MH_01 map, MH_02 (a different flight) localizes 81.2% of its
 images at 1.8 cm RMSE against ground truth. Over eight cross-session EuRoC
 queries no accepted pose is more than 25 cm off; how many images localize
 depends on how much of the flight the map covers. Add `--vio --calibration
-FILE --config FILE` to run the stereo-inertial VIO alongside and anchor it to
-the map: every frame then gets a map pose (MH_02: 99.8% at 2.0 cm RMSE,
-localizing every 5th image). See the
-[EuRoC map-localization results](docs/basalt_map_localization.md).
+FILE --config FILE` to run the stereo-inertial VIO alongside and correct it
+into the map frame: every frame then gets a map pose (MH_02: 99.8% at 2.0 cm RMSE,
+localizing every 5th image). Each image is then matched around where the
+corrected VIO predicts the landmarks, so 98% of MH_02's images match the map
+instead of 81%, in half the time. On a real wheeled
+robot (OpenLORIS-Scene, a RealSense T265), sessions days apart in a
+rearranged office localize the same way, and `--odometry FILE` corrects the
+robot's wheel odometry instead of the VIO; see
+[the OpenLORIS results](docs/openloris_map_localization.md). Maps of several flights of a place merge into
+one with `basalt_map_merge --base A --add B --out AB`: against MH_01 merged
+with MH_05's map, MH_04 localizes 55.8% of its images instead of 4.6%. See
+the [EuRoC map-localization results](docs/basalt_map_localization.md).
 
 More runnable demos and the full index are in the
 [demo strategy](docs/demo_strategy.md) and the

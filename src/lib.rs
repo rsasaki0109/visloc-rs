@@ -42,6 +42,7 @@ pub use visloc_fusion as fusion;
 pub use visloc_io as io;
 pub use visloc_localization as localization;
 pub use visloc_mapping as mapping;
+pub use visloc_objects as objects;
 pub use visloc_slam as slam;
 pub use visloc_tracking as tracking;
 pub use visloc_vision as vision;
