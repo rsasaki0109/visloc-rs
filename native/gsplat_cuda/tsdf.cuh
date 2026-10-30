@@ -295,6 +295,16 @@ __global__ void tsdf_extract_kernel(TsdfSlab s, const unsigned long long* __rest
     }
 }
 
+// Replace each pixel's median depth (depth_out: median, opacity) by the
+// expected depth acc / opacity where the opacity exceeds 0.5, 0 elsewhere
+// (the median's "no surface").
+__global__ void expected_depth_kernel(uint32_t npix, const float* __restrict__ acc, float* __restrict__ depth_out) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= npix) return;
+    const float a = depth_out[i * 2 + 1];
+    depth_out[i * 2] = a > 0.5f ? acc[i] / a : 0.f;
+}
+
 uint32_t next_pow2(uint64_t n) {
     uint64_t p = 1;
     while (p < n) p <<= 1;
@@ -331,6 +341,7 @@ struct GscTsdfParams {
     int32_t sh_active_degree;
     uint32_t slab_blocks;  // blocks fused at a time (0 = 65536)
     uint32_t cache_mb;     // keep the views' depth and colour on the device up to this (0 = never)
+    uint32_t expected;     // fuse the expected depth D / (1 - T) where 1 - T > 0.5 instead (planar ignored)
 };
 
 // Render the current scene's median depth from each of `num_views` cameras,
@@ -356,7 +367,15 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
         GSC_TRY(set_camera(ctx, &cams[v], bg, p->sh_active_degree));
         float* d;
         GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &d));
-        GSC_TRY(run_forward(ctx, d, p->planar != 0));
+        if (p->expected) {
+            float* acc;
+            GSC_TRY(ensure(ctx, ctx->acc_depth, ctx->pixels(), &acc));
+            GSC_TRY(run_forward(ctx, d, false, acc));
+            expected_depth_kernel<<<blocks_for(ctx->pixels()), 256>>>(uint32_t(ctx->pixels()), acc, d);
+            GSC_CHECK(ctx, cudaGetLastError());
+        } else {
+            GSC_TRY(run_forward(ctx, d, p->planar != 0));
+        }
         return 0;
     };
     uint32_t* counts;

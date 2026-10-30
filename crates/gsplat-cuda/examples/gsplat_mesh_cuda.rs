@@ -8,7 +8,7 @@
 //!   --ply scene.ply --data <colmap_root> --out mesh.ply \
 //!   [--voxel V] [--trunc-voxels 4] [--max-depth D] [--min-component 500] \
 //!   [--min-weight 3] [--no-carve] [--support-voxels 10] [--planar-depth] \
-//!   [--gpu-tsdf [--slab-blocks 65536]]
+//!   [--expected-depth] [--gpu-tsdf [--slab-blocks 65536]]
 //! ```
 //!
 //! Renders the median depth of the splat from every dataset view, fuses the
@@ -16,14 +16,16 @@
 //! the same defaults and filters as `gsplat_mesh` (see
 //! `visloc_gsplat_train::mesh`). `--planar-depth` takes each pixel's median
 //! depth where its ray meets the plane of the splat that takes the
-//! transmittance to 0.5, instead of that splat's centre depth. `--gpu-tsdf`
+//! transmittance to 0.5, instead of that splat's centre depth;
+//! `--expected-depth` the expected depth where the opacity exceeds 0.5 (the
+//! channel the depth losses train). `--gpu-tsdf`
 //! fuses and extracts on the device instead (`extract_mesh_gpu`), at most
 //! `--slab-blocks` blocks of 8^3 voxels at a time.
 
 use std::path::PathBuf;
 
 use visloc_gsplat_core::ply::load_ply;
-use visloc_gsplat_cuda::mesh::{extract_mesh, extract_mesh_gpu};
+use visloc_gsplat_cuda::mesh::{extract_mesh, extract_mesh_gpu, MeshDepth};
 use visloc_gsplat_cuda::CudaGsplat;
 use visloc_gsplat_render::packing::PackedScene;
 use visloc_gsplat_train::dataset::load_colmap_dataset;
@@ -35,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data: Option<PathBuf> = None;
     let mut out = PathBuf::from("mesh.ply");
     let mut opts = MeshOptions::default();
-    let mut planar = false;
+    let mut depth = MeshDepth::Median;
     let mut gpu_tsdf = false;
     let mut slab_blocks = 0u32;
     while let Some(a) = args.next() {
@@ -51,7 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--min-weight" => opts.min_weight = next()?.parse()?,
             "--no-carve" => opts.carve = false,
             "--support-voxels" => opts.support_voxels = next()?.parse()?,
-            "--planar-depth" => planar = true,
+            "--planar-depth" => depth = MeshDepth::Planar,
+            "--expected-depth" => depth = MeshDepth::Expected,
             "--gpu-tsdf" => gpu_tsdf = true,
             "--slab-blocks" => slab_blocks = next()?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
@@ -90,14 +93,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         extract_mesh_gpu(
             &mut gs,
             scene.sh_degree,
-            planar,
+            depth,
             &views,
             &support,
             &opts,
             slab_blocks,
         )?
     } else {
-        extract_mesh(&mut gs, scene.sh_degree, planar, &views, &support, &opts)?
+        extract_mesh(&mut gs, scene.sh_degree, depth, &views, &support, &opts)?
     };
     println!("{summary}");
     mesh.write_ply(&out)?;

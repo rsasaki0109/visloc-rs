@@ -12,26 +12,60 @@ use visloc_gsplat_train::mesh::{fuse_views, scene_scale, Mesh, MeshOptions};
 
 use crate::{CudaGsplat, GsplatCudaError, TsdfParams, TsdfSurface};
 
-/// Render the current scene's median depth (SH up to `sh_degree`; at the
-/// splat planes when `planar`, see [`CudaGsplat::render_depth`]) from every
+/// The per-pixel depth a mesh is fused from (see
+/// [`CudaGsplat::render_depth`]); 0 is no surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeshDepth {
+    /// Camera z of the splat that takes the transmittance to 0.5.
+    #[default]
+    Median,
+    /// Where the pixel's ray meets that splat's plane.
+    Planar,
+    /// The expected depth `sum_i T_i a_i z_i / (1 - T)` where the opacity
+    /// `1 - T` exceeds 0.5: the channel the depth prior and the depth-normal
+    /// loss train.
+    Expected,
+}
+
+impl MeshDepth {
+    /// [`MeshDepth::Planar`] if `planar`, else [`MeshDepth::Median`].
+    pub fn median(planar: bool) -> Self {
+        if planar {
+            Self::Planar
+        } else {
+            Self::Median
+        }
+    }
+}
+
+/// Render the current scene's `depth` (SH up to `sh_degree`) from every
 /// view, fuse, extract, filter by `support` and drop small components.
 /// Returns the mesh and a one-line summary.
 pub fn extract_mesh(
     gs: &mut CudaGsplat,
     sh_degree: u32,
-    planar: bool,
+    depth: MeshDepth,
     views: &[&CameraView],
     support: &[[f32; 3]],
     opts: &MeshOptions,
 ) -> Result<(Mesh, String), GsplatCudaError> {
     fuse_views(views, support, opts, |view| {
-        let frame = gs.render_depth(view, [0.0; 3], sh_degree, planar)?;
+        let frame = gs.render_depth(view, [0.0; 3], sh_degree, depth == MeshDepth::Planar)?;
         let rgb = frame
             .rgb
             .chunks_exact(3)
             .map(|p| [p[0], p[1], p[2]])
             .collect();
-        Ok((rgb, frame.depth))
+        let d = match depth {
+            MeshDepth::Expected => frame
+                .expected
+                .iter()
+                .zip(&frame.opacity)
+                .map(|(&e, &a)| if a > 0.5 { e / a } else { 0.0 })
+                .collect(),
+            _ => frame.depth,
+        };
+        Ok((rgb, d))
     })
 }
 
@@ -43,7 +77,7 @@ pub fn extract_mesh(
 pub fn extract_mesh_gpu(
     gs: &mut CudaGsplat,
     sh_degree: u32,
-    planar: bool,
+    depth: MeshDepth,
     views: &[&CameraView],
     support: &[[f32; 3]],
     opts: &MeshOptions,
@@ -58,10 +92,11 @@ pub fn extract_mesh_gpu(
         min_weight: opts.min_weight,
         carve: opts.carve as u32,
         free_space: 1,
-        planar: planar as u32,
+        planar: (depth == MeshDepth::Planar) as u32,
         sh_active_degree: sh_degree as i32,
         slab_blocks,
         cache_mb: 2048,
+        expected: (depth == MeshDepth::Expected) as u32,
     };
     let t0 = Instant::now();
     let surface = gs.tsdf_surface(views, &params)?;

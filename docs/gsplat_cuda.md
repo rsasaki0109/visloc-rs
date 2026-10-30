@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 8).
+  version (currently 9).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -35,6 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
+| Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
@@ -463,6 +464,62 @@ completeness:
   not fall during training. The wgpu trainer saw the same on bonsai (-3.3 dB
   at 7k with 0.05) and uses 0.005.
 
+### Meshing the depth the losses train
+
+The depth prior and the depth-normal loss act on the expected depth
+`D / (1 - T)`, but the meshes above were fused from the planar median depth.
+`gsplat_mesh_cuda --expected-depth` (`mesh::MeshDepth::Expected`) fuses the
+expected depth where the opacity exceeds 0.5, and 0 elsewhere. The splats
+are the ones trained above, plus stronger priors. All meshes use the GPU TSDF ([below](#tsdf-on-the-gpu))
+at 1 cm and depths up to 20 m on every scene. F1 at 2 cm:
+
+| Trained with | Mesh depth | terrains | playground | office | mean |
+|---|---|---|---|---|---|
+| no loss | planar median | 34.1% | 44.5% | 21.2% | 33.3% |
+| no loss | expected | 4.8% | 8.9% | 5.4% | 6.4% |
+| depth prior 0.1 | planar median | 34.7% | 45.1% | 25.3% | 35.0% |
+| depth prior 0.1 | expected | 43.9% | 29.7% | 25.8% | 33.1% |
+| depth prior 1.0 | planar median | 38.6% | 43.3% | 24.6% | 35.5% |
+| depth prior 1.0 | expected | 56.8% (82.9 / 43.2) | 40.3% | 38.4% (59.1 / 28.4) | 45.2% |
+| depth prior 0.1, normal 0.005 | planar median | 35.6% | 43.4% | 23.2% | 34.1% |
+| depth prior 0.1, normal 0.005 | expected | 51.8% | 32.4% | 24.2% | 36.1% |
+| depth prior 1.0, normal 0.005 | planar median | 42.5% | 40.7% | 23.0% | 35.4% |
+| depth prior 1.0, normal 0.005 | expected | 60.5% | 41.0% | 36.2% | 45.9% |
+| depth prior 3.0 | planar median | 52.5% | 43.4% | 26.8% | 40.9% |
+| depth prior 3.0 | expected | 69.2% | 49.6% | 42.5% | 53.8% |
+| depth prior 10 | planar median | 64.8% | 46.3% | 30.7% | 47.3% |
+| depth prior 10 | expected | 76.0% | 54.2% | 45.7% | 58.6% |
+| depth prior 30 | planar median | 70.7% | 50.2% | 39.4% | 53.4% |
+| depth prior 30 | expected | **78.1%** (88.1 / 70.2) | **60.4%** (71.4 / 52.4) | **52.3%** (60.8 / 45.9) | **63.6%** |
+| *the prior's own cloud* | | *84.7%* | *61.3%* | *56.8%* | *67.6%* |
+
+- **Mesh the depth the losses train.** The expected-depth mesh beats the
+  median mesh at every prior of 1.0 or more, and the gap grows with the
+  weight. Completeness, which no loss raised in the median mesh, rises
+  with it: terrains 26.9% (no loss, median) to 70.2%, office 14.5% to
+  45.9%.
+- **The weight matters now.** The median meshes moved by a point or two
+  between weights 0.1 and 1.0 (see the depth-prior section). The
+  expected-depth meshes climb from 33.1% at 0.1 to 63.6% at 30. At 30 they
+  come within 5–7 points of the MVS cloud that supervised them on terrains
+  and office, and within 1 on playground.
+- **Not without a prior.** A plain splat's expected depth blends the splats
+  along each ray, and its mesh scores 6.4%. With the prior at 0.1,
+  playground still does better from the median.
+- **The depth-normal loss** helps the expected-depth mesh where the prior is
+  weak (terrains at 0.1: 43.9% → 51.8%). At 1.0 it changes the mean by under
+  a point (45.9% against 45.2%).
+- **The cost is the image.** A strong prior pulls the splats onto the MVS
+  depths against the photometric loss. At 30 the final training L1 is about
+  twice the plain splat's: terrains 0.0083 → 0.0174, playground 0.0200 →
+  0.0372, office 0.0085 → 0.0147. terrains also trains a third longer (850k
+  gaussians against 616k). Held-out image quality was not measured here
+  (`--holdout 0`).
+- **What this is.** At 30 the splat largely carries the MVS depth into a
+  coloured mesh. It does not see more than MVS does. For geometry, train with
+  a strong prior and mesh the expected depth; for novel views, keep the
+  prior low or off.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
@@ -552,9 +609,11 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
 
 ## Next
 
-1. **Geometry.** Neither the depth prior nor the depth-normal loss raised
-   completeness, where most of the gap to MVS is. Untried: losses on the
-   median depth the mesh is built from, and multi-view consistency.
+1. **Geometry.** Meshing the expected depth with a strong depth prior
+   brings the mesh within a few points of its MVS prior, at the price of
+   the image fit. Open: keeping held-out image quality while doing so (a
+   prior that fades out, or one on the geometry channels only), and why the
+   median depth lags.
 2. **Speed.** A step takes about 21 ms. The dense optimizer (6.7 ms) is
    bound by memory, so it only gets faster with fewer bytes per element,
    such as bf16 moments or the opt-in sparse SH Adam. raster_bwd (6.1 ms)

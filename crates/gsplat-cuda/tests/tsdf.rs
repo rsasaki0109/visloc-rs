@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use nalgebra::{Quaternion, Rotation3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{Gaussian, Scene};
-use visloc_gsplat_cuda::mesh::{extract_mesh, extract_mesh_gpu, surface_mesh};
+use visloc_gsplat_cuda::mesh::{extract_mesh, extract_mesh_gpu, surface_mesh, MeshDepth};
 use visloc_gsplat_cuda::{CudaGsplat, TsdfParams};
 use visloc_gsplat_render::packing::PackedScene;
 use visloc_gsplat_train::mesh::{Mesh, MeshOptions};
@@ -127,9 +127,16 @@ fn triangles_under(m: &Mesh, map: &[usize]) -> Vec<[usize; 3]> {
 
 /// With one view both fusions allocate every block before fusing, so the
 /// device's mesh is the CPU's: the same vertices (to float rounding of the
-/// projections), colours and triangles.
+/// projections), colours and triangles, from the planar median depth and
+/// from the expected depth.
 #[test]
 fn one_view_matches_the_cpu_tsdf() {
+    for depth in [MeshDepth::Planar, MeshDepth::Expected] {
+        one_view(depth);
+    }
+}
+
+fn one_view(depth: MeshDepth) {
     let Some(mut gs) = gsplat() else { return };
     let scene = wall();
     gs.set_scene(&PackedScene::from_scene(&scene))
@@ -138,11 +145,11 @@ fn one_view_matches_the_cpu_tsdf() {
     let views = [&v];
     let voxel = 0.04;
     let opts = options(voxel);
-    let (cpu, _) = extract_mesh(&mut gs, 0, true, &views, &[], &opts).expect("cpu mesh");
+    let (cpu, _) = extract_mesh(&mut gs, 0, depth, &views, &[], &opts).expect("cpu mesh");
     let (gpu, summary) =
-        extract_mesh_gpu(&mut gs, 0, true, &views, &[], &opts, 0).expect("gpu mesh");
+        extract_mesh_gpu(&mut gs, 0, depth, &views, &[], &opts, 0).expect("gpu mesh");
     eprintln!(
-        "{summary}; cpu {} vertices, {} triangles",
+        "{depth:?}: {summary}; cpu {} vertices, {} triangles",
         cpu.vertices.len(),
         cpu.triangles.len()
     );
@@ -204,6 +211,7 @@ fn slabs_do_not_change_the_surface() {
         sh_active_degree: 0,
         slab_blocks,
         cache_mb,
+        expected: 0,
     };
     let one = gs.tsdf_surface(&views, &params(0, 64)).expect("one slab");
     let many = gs.tsdf_surface(&views, &params(3, 64)).expect("many slabs");
@@ -246,7 +254,8 @@ fn slabs_do_not_change_the_surface() {
     );
 
     let gpu = surface_mesh(&one);
-    let (cpu, _) = extract_mesh(&mut gs, 0, false, &views, &[], &options(voxel)).expect("cpu mesh");
+    let (cpu, _) = extract_mesh(&mut gs, 0, MeshDepth::Median, &views, &[], &options(voxel))
+        .expect("cpu mesh");
     let grid = Grid::new(&cpu.vertices, voxel);
     let mut within = [0usize; 3];
     for &p in &gpu.vertices {

@@ -113,6 +113,19 @@ All notable changes to `visloc-rs` will be documented here.
   - Verification alone takes 5.3 s once the CPU matcher no longer holds
     every core.
   - `CudaGsplat` is `Send`. CUDA ABI 8.
+- **Meshes from the expected depth (`gsplat_mesh_cuda --expected-depth`,
+  `visloc_gsplat_cuda::mesh::MeshDepth`).**
+  - The depth prior and the depth-normal loss train the expected depth, but
+    meshes were fused from the median depth.
+  - Fusing the expected depth (where the opacity exceeds 0.5) from splats
+    trained with a strong prior lifts the ETH3D mesh F1 at 2 cm from 33.3%
+    to 63.6% at prior weight 30: terrains 78.1%, playground 60.4%, office
+    52.3%. The prior's own MVS clouds score 67.6%.
+  - Completeness rises with it, which no loss achieved in the median mesh
+    (terrains 26.9% → 70.2%).
+  - The cost is the image fit: the final training L1 about doubles at 30.
+  - `extract_mesh` / `extract_mesh_gpu` take a `MeshDepth` instead of
+    `planar: bool`. CUDA ABI 9.
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
   exact size (`--size` makes cameras of slightly different sizes, as in some

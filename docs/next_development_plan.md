@@ -36,6 +36,10 @@ The planned order:
    ([`gsplat_cuda.md`](gsplat_cuda.md#depth-prior-from-visloc-mvs)). The
    depth-normal loss (CUDA, weight 0.005) does not help: 32.0% alone, 34.0%
    with the prior ([`gsplat_cuda.md`](gsplat_cuda.md#depth-normal-loss)).
+   Meshing the expected depth instead, which those losses train, with the
+   prior at weight 30 reaches 63.6% (the prior's MVS clouds: 67.6%), at the
+   price of the image fit
+   ([`gsplat_cuda.md`](gsplat_cuda.md#meshing-the-depth-the-losses-train)).
    TSDF on the GPU done for the CUDA meshes: the same F1 in 4–5x less time
    and 1/6 of the memory, and playground at 1 cm in 4.2 GB, where the CPU
    TSDF ran out of 11 GB ([`gsplat_cuda.md`](gsplat_cuda.md#tsdf-on-the-gpu)).

@@ -154,6 +154,10 @@ pub struct TsdfParams {
     /// pixel) when they fit in this many MiB, instead of rendering every
     /// view again for each slab (0 = always render).
     pub cache_mb: u32,
+    /// Fuse the expected depth `sum_i T_i a_i z_i / (1 - T)` where the
+    /// opacity `1 - T` exceeds 0.5 (the channel the depth losses train)
+    /// instead of the median depth; `planar` is then ignored (0 = no).
+    pub expected: u32,
 }
 
 /// The surface of a TSDF fused on the device, before its quads are
@@ -444,7 +448,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 8;
+    pub const ABI_VERSION: u32 = 9;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
