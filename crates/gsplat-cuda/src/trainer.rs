@@ -486,7 +486,7 @@ impl CudaTrainer {
         Ok(crate::mesh::extract_mesh(
             &mut self.gs,
             self.active_sh,
-            planar,
+            crate::mesh::MeshDepth::median(planar),
             views,
             support,
             opts,
