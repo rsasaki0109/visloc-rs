@@ -479,7 +479,7 @@ pub struct SeamFit {
 }
 
 /// The back lens's rotation (as [`back_lens_rotation`]) and optical centre
-/// that best align `pairs` ([`seam_pairs`], whose back-lens rays `back`
+/// that best align `pairs` (`seam_pairs` (feature `euroc`), whose back-lens rays `back`
 /// gave), refined from `initial`. The lenses sit apart along `baseline` (the
 /// back lens's centre in the front lens's frame), so a point at a finite
 /// distance shows the back lens a direction shifted towards the front
