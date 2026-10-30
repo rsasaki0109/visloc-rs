@@ -61,7 +61,8 @@ An Insta360 video's dual-fisheye frames -> equirectangular (360°) frames.
 ";
 
 /// The back lens's rotation, its optical centre's offset (pixels) and the
-/// distance the seam is stitched at (none: far away).
+/// shift along the parallax the seam is stitched with (radians; none: as if
+/// far away).
 type BackLens = (Matrix3<f64>, [f64; 2], Option<f64>);
 
 /// Frames the automatic back-lens fit samples from a video.
@@ -112,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The back lens's centre in the front lens's frame, as recorded.
     let baseline = Vector3::from(back.translation);
     let blend = blend.max(0.0).to_radians();
-    // The back lens's rotation and optical centre, and the distance its
-    // seam is stitched at.
+    // The back lens's rotation and optical centre, and the shift along the
+    // parallax its seam is stitched with.
     let fit = |pairs: &[SeamPair], lens: &FisheyeLens| -> BackLens {
         let SeamFit {
             rotation,
@@ -122,9 +123,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             across,
             pairs: kept,
         } = fit_back_lens(pairs, lens, &factory, &baseline);
-        // The baseline over the shared shift; none for a shift too small to
-        // tell from far away (beyond 300 m).
-        let distance = (parallax > baseline.norm() / 300.0).then(|| baseline.norm() / parallax);
+        // A shift towards the axes is the scene's distance; one away from
+        // them, which no distance gives, is the lenses' models disagreeing
+        // on the scale at the seam, and the stitch takes it all the same.
+        let seam = if parallax > baseline.norm() / 300.0 {
+            format!(
+                "the scene along the seam about {:.1} m away",
+                baseline.norm() / parallax
+            )
+        } else {
+            "the models' scale, not a distance".to_string()
+        };
         // Past the half turn as a rotation vector in the front lens's frame.
         let past =
             nalgebra::Rotation3::from_matrix_unchecked(back_lens_rotation() * rotation.transpose())
@@ -133,8 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "back lens: {:.3}° past the half turn ({:+.3}, {:+.3}, {:+.3}), {:.3}° from the \
              recorded angles, optical centre ({:+.1}, {:+.1}) px; {kept} of {} matches along \
-             the seam, median {:.3}° across their parallax; the scene along the seam about {} \
-             away",
+             the seam, median {:.3}° across their parallax; shifted {:+.3}° along it ({seam})",
             angle_between(&rotation, &back_lens_rotation()),
             past.x,
             past.y,
@@ -144,14 +152,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             centre_offset[1],
             pairs.len(),
             across.to_degrees(),
-            distance.map_or("far".to_string(), |d| format!("{d:.1} m"))
+            parallax.to_degrees()
         );
-        (rotation, centre_offset, distance)
+        (rotation, centre_offset, Some(parallax))
     };
-    // The back lens's centre over the stitching distance (`stitch_equirect`).
+    // The back lens's centre over the stitching distance (`stitch_equirect`):
+    // `--distance`, else the fitted shift (the baseline's direction times the
+    // shift), else far away.
     let parallax = |fitted: Option<f64>| -> Vector3<f64> {
-        match distance.or(fitted) {
-            Some(d) if d.is_finite() && d > 0.0 => baseline / d,
+        match (distance, fitted) {
+            (Some(d), _) if d.is_finite() && d > 0.0 => baseline / d,
+            (None, Some(shift)) if baseline.norm() > 0.0 => baseline.normalize() * shift,
             _ => Vector3::zeros(),
         }
     };
