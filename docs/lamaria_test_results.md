@@ -129,8 +129,9 @@ reuses submission 5's online result, ALIKED keypoints, revisits, IMU and VIO.
   from 63.8 to 61.2, 1_4 from 55.4 to 51.7 and 1_13 from 61.8 to 59.3, while
   1_18 gains (71.4 → 73.0). The five average 60.0 instead of 61.5, Short goes
   from 70.1 to 69.7 and the mean from 54.4 to 54.3. The two training
-  sequences did not carry over to the five test sequences; the next
-  submission takes submission 5's estimates for them back.
+  sequences did not carry over to the five test sequences: two are too few
+  to choose between the bands. Going back to the VIO's band because of these
+  scores would choose on the test set, so the training set's choice stands.
 
 ## Against GroundedSLAM, sequence by sequence
 
