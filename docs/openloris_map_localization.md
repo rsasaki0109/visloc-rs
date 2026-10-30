@@ -481,6 +481,31 @@ office1-7, whose images never reached the 30 inliers a localization needs,
 now localizes 186 times and is 2.66 cm off. For the T265, build maps with
 `--smooth-features 1.5 --detector-quality 0.003`. Both stay off by default.
 
+### Two more scenes: cafe and home
+
+The same comparison in two other scenes, each session's map built from its
+first session and the second localized in it (VIO + map,
+`--localize-every 5`). Their ground truth comes from a 2D laser (z = 0,
+level). The maps themselves are 17–19 cm from it after a rigid fit, almost
+all of it horizontal: the VIO drifts that much over 30–40 m with no loop
+closed. So each localization is scored with the local fit used in the
+corridor, on the map poses within 3 m.
+
+| | Raw map | Blurred, quality 0.003 |
+|---|---|---|
+| cafe1-1's map: landmarks | 12,422 | 14,072 |
+| cafe1-2's localizations | 180 | 207 |
+| ... their error, local fit: RMSE / median (scored) | 5.8 / 4.3 cm (146) | 5.7 / 3.8 cm (167) |
+| home1-1's map: landmarks | 13,856 | 24,250 |
+| home1-2's localizations | 29 | **177** |
+| ... their error, local fit: RMSE / median (scored) | 9.5 cm (3) | 15.1 / 12.9 cm (26) |
+| Time per image (median), cafe / home | 40 / 22 ms | 56 / 58 ms |
+
+In the café the settings add 15% more localizations at the same error; in
+the home, six times as many. Home's ground truth has a pose every 0.1 s at
+best, so few of them get scored, and those few are less accurate than in
+the café. The market (41.5 GB to download) was not tried.
+
 ## On ROS 2
 
 The same runs, through the nodes instead of the demo: each session as a
