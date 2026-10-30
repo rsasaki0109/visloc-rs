@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 7).
+  version (currently 8).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -35,6 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
+| Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -513,6 +514,41 @@ shared the GPU:
   (`remove_small_components` now counts in a vector instead of a hash map).
 - **Without the cache.** Each of playground's 38 slabs rendered the 38 views
   again, and fusion took 31.6 s.
+
+## Matching on the GPU
+
+`gsplat_photos_cuda` (feature `photos`) runs `build_photo_dataset` on the
+CPU path of `gsplat_photos`: SIFT, two-view verification and mapping on the
+CPU, but the descriptor matching on the device. It plugs
+`matching::CudaPairMatcher` into the new `PhotoSfmConfig::matcher` hook.
+Without wgpu (WSL2) the CPU matched before.
+
+- **On the device.** Per image pair, every descriptor's best and second
+  score against the other image, in both directions
+  (`CudaGsplat::match_top2`). The dot products are 8-bit (`__dp4a`), over
+  tiles of 128 queries x 128 trains.
+- **Exact.** The descriptors are RootSIFT bytes / 512, so every score is an
+  exact integer. The host then repeats the CPU matcher's final filter (ratio
+  0.8 both ways, then mutual) on the same values, so the matches are
+  `BruteForceMatcher::match_descriptors_cross_checked`'s, bit for bit.
+- **Ties.** The best is the lowest score, ties to the lower index; the second
+  is the lowest of the others. That is the CPU's first-wins scan.
+- **Test.** `tests/matching.rs` covers 30 pairs, with noisy copies, duplicate
+  rows (ties), an empty image and a one-row image, at scales 512 and 1. The
+  matches are identical.
+
+south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
+
+| | CPU matching (`gsplat_photos --cpu --cpu-sift`) | `gsplat_photos_cuda` |
+|---|---|---|
+| Matching and verification | 780.7 s (overlapped: match 780.2 s, verify 578.2 s) | **18.4 s** (match 15.0 s, verify 5.3 s) |
+| Verified pairs | 2461 | 2461 |
+| SfM in all | 945.0 s | **148.4 s** |
+| Registered, points, refined focal | 128/128, 101,450, 850.2 px | the same |
+
+- **Verification stays on the CPU.** It took 578 s only because the CPU
+  matcher held every core. Alone it takes 5.3 s, so moving it to the GPU
+  (the plan's next step) is not needed here.
 
 ## Next
 

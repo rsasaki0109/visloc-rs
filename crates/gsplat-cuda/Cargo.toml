@@ -22,6 +22,18 @@ rayon = { workspace = true }
 visloc-gsplat-core = { path = "../gsplat-core", version = "0.3.1" }
 visloc-gsplat-render = { path = "../gsplat-render", version = "0.3.1" }
 visloc-gsplat-train = { path = "../gsplat-train", version = "0.3.1", default-features = false, features = ["mesh"] }
+visloc-vision = { path = "../vision", version = "0.3.1", optional = true }
+
+[features]
+default = []
+# Descriptor matching on the GPU for `build_photo_dataset`
+# (`matching::CudaPairMatcher`, example `gsplat_photos_cuda`).
+photos = ["dep:visloc-vision", "visloc-gsplat-train/euroc"]
 
 [lib]
 doctest = false
+
+[[example]]
+name = "gsplat_photos_cuda"
+path = "examples/gsplat_photos_cuda.rs"
+required-features = ["photos"]
