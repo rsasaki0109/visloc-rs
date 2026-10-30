@@ -138,8 +138,9 @@ cargo run --release -p visloc-mvs --features cuda --example mvs -- \
   path (`pass_setup::checks`); the CUDA ones run when
   `VISLOC_MVS_CUDA_LIB` is set.
 
-On three ETH3D scenes (our SfM, an 8 GB laptop GPU against the CPU of the
-same laptop), CUDA scores what the CPU path does, 16 to 21 times faster.
+On three ETH3D scenes (the ground-truth poses, the images resized to
+1600x1067; an 8 GB laptop GPU against the CPU of the same laptop), CUDA
+scores what the CPU path does, 16 to 21 times faster.
 F1 at 2 cm, with accuracy / completeness, and the whole `mvs` run:
 
 | Scene | Images | CPU | CUDA |
@@ -149,12 +150,20 @@ F1 at 2 cm, with accuracy / completeness, and the whole `mvs` run:
 | terrains, 1600 px | 42 | 84.73% (92.5 / 78.1), 4483 s | 85.05% (92.7 / 78.6), 209 s |
 | office, 1600 px | 26 | | 72.76% (88.6 / 61.7), 102 s |
 | playground, 1600 px | 38 | | 67.69% (84.1 / 56.6), 177 s |
+| pipes, 1600 px | 14 | | 79.24% (96.5 / 67.2), 53 s |
+| terrace, 1600 px | 23 | | 88.47% (96.9 / 81.4), 105 s |
+| kicker, 1600 px | 31 | | 83.57% (87.9 / 79.7), 138 s |
+| courtyard, 1600 px | 38 | | 84.28% (90.6 / 78.8), 182 s |
 
 - **Same results.** At the CPU runs' sizes the scores agree within 0.32
   points. The rounding differs, so the clouds are not identical.
 - **Resolution is now affordable.** The CPU runs took office and
   playground at 800 px for time. At 1600 px, in 2 to 3 minutes, office
   gains 16.0 points and playground 6.4.
+- **Against 3200 px.** At 1600 px six of the seven scenes score 2.1 to
+  6.2 points below the L4 runs at 3200 px
+  ([All 13 training scenes on a GPU](#all-13-training-scenes-on-a-gpu)),
+  except kicker, 1.3 points above.
 
 **Memory.** A view keeps its colours, 3 bytes a pixel; its grey levels
 are the colours' luma, computed when the view is matched. A depth map

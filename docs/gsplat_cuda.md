@@ -624,6 +624,37 @@ cell is from the splats trained on the 800 px maps, meshed the same way:
   held-out PSNR falls by 1.40 dB instead of 0.56. Over the three scenes the
   fade now costs 1.06 dB.
 
+#### Four more scenes
+
+pipes, terrace, kicker and courtyard (14, 23, 31 and 38 images), end to end
+the same way: the ground-truth poses and the images at 1600x1067, visloc-mvs
+on CUDA at 1600 px (53 to 182 s), a plain splat and one with the prior at 30
+(30k steps on every view, 6.5 to 17.5 minutes each), and the same meshes.
+F1 at 2 cm; the means also include terrains, playground and office:
+
+| Mesh | pipes | terrace | kicker | mean of three | mean of six |
+|---|---|---|---|---|---|
+| MVS cloud (`fused.ply`, not a mesh) | 79.2% | 88.5% | 83.6% | 83.8% | 79.5% |
+| plain splat alone (planar median) | 16.7% | 36.8% | 36.5% | 30.0% | 31.6% |
+| prior-30 splat alone (expected depth) | 69.2% | 84.0% | 75.8% | 76.3% | 72.0% |
+| MVS depth only | 68.9% (96.6 / 53.5) | 85.5% | 47.8% (97.0 / 31.7) | 67.4% | 61.3% |
+| MVS + plain splat | 67.8% (83.0 / 57.4) | **87.6%** | 72.5% | 76.0% | 70.1% |
+| MVS + prior-30 splat | **76.8%** (92.7 / 65.6) | 87.3% | **79.5%** (85.1 / 74.7) | **81.2%** | **75.8%** |
+
+- **The hybrid with the prior-30 splat is the best mesh** in four of the
+  six scenes, and within 0.4 points of the plain splat's hybrid on terrace
+  and playground.
+- **A plain splat can hurt.** On pipes (14 images) its own mesh scores
+  16.7%, and filling the MVS depth's holes with it costs more accuracy
+  (96.6% → 83.0%) than it adds completeness: 67.8% against 68.9% for the
+  MVS depth alone.
+- **The MVS depth's mesh keeps much less than its cloud.** On kicker the
+  cloud is 79.7% complete, the TSDF mesh of the same depth 31.7%
+  (playground: 56.6% and 33.9%). Not explained yet.
+- **courtyard:** the MVS cloud scores 84.3% (90.6 / 78.8, 182 s). Its 1 cm
+  meshes are 1.0 to 1.8 GB, and the evaluator ran out of memory on them in
+  this 11 GB WSL2 VM, so courtyard has no mesh scores.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
