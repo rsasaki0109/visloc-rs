@@ -7,7 +7,8 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
-//!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \n//!   [--depth-prior <dir> [--depth-weight 0.1]]
+//!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
+//!   [--depth-prior <dir> [--depth-weight 0.1]] [--normal-weight 0.005 [--normal-start 7000]]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
@@ -18,6 +19,8 @@
 //! `--depth-prior` adds a depth loss against `<dir>/<image name>.bin` (e.g.
 //! `visloc-mvs --save-fused-depth`'s `fused_depth`): `--depth-weight` x the
 //! mean relative error of the expected depth where the prior has one.
+//! `--normal-weight` adds the depth-normal consistency loss from
+//! `--normal-start` on (the wgpu trainer's `normal_weight` / `normal_start`).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -70,6 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--planar-depth" => planar = true,
             "--depth-prior" => depth_prior = Some(PathBuf::from(next()?)),
             "--depth-weight" => depth_weight = next()?.parse()?,
+            "--normal-weight" => cfg.normal_weight = next()?.parse()?,
+            "--normal-start" => cfg.normal_start = next()?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -173,8 +178,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     String::new()
                 };
+                let normal = if cfg.normal_weight > 0.0 {
+                    format!("  normal {:.4}", trainer.last_normal_loss())
+                } else {
+                    String::new()
+                };
                 println!(
-                    "step {step:6}  l1 {loss:.4}{depth}{quality}  gaussians {}  ({train_s:.0}s)",
+                    "step {step:6}  l1 {loss:.4}{depth}{normal}{quality}  gaussians {}  ({train_s:.0}s)",
                     trainer.num_gaussians()
                 );
                 since = Instant::now();

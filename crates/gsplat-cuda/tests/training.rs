@@ -264,6 +264,7 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
             noise_max: 0.0,
             sparse_sh_adam: sparse_sh_adam as u32,
             depth_weight: 0.0,
+            normal_weight: 0.0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -280,6 +281,76 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
     let stats = gs.refine_stats().expect("stats");
     assert!(stats.seen.iter().any(|&s| s > 0.0), "no refine statistics");
     mean_loss
+}
+
+/// The depth-normal loss trains: with only the rotations learning, the
+/// splats of a dense scene, fitted to their own renders, turn until their
+/// blended normals agree better with the depth map's. Returns the mean
+/// depth-normal loss every 50 steps.
+fn fit_normals(gs: &mut CudaGsplat) -> Vec<f64> {
+    let (w, h) = (96u32, 80u32);
+    let mut scene = random_scene(400, 33, 0);
+    for g in scene.gaussians.iter_mut() {
+        g.opacity_logit += 2.5;
+    }
+    let views: Vec<CameraView> = (0..4)
+        .map(|k| view(w, h, -0.12 + 0.08 * k as f32))
+        .collect();
+    gs.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let mut images = Vec::new();
+    for v in &views {
+        let f = gs.render(v, [0.0; 3], 0).expect("render");
+        let rgb: Vec<[f32; 3]> = f.rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        images.extend(pack_rgba8(&rgb, None));
+    }
+    gs.set_images(w, h, &images).expect("images");
+    let mut mean_loss = Vec::new();
+    for step in 0..300u32 {
+        let t = (step + 1) as f32;
+        let p = StepParams {
+            camera: GscCamera::from_view(&views[step as usize % views.len()]),
+            image: step % views.len() as u32,
+            sh_active_degree: 0,
+            background: [0.0; 3],
+            ssim_weight: 0.0,
+            lr: [0.0, 1e-2, 0.0, 0.0, 0.0, 0.0],
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-15,
+            bc1: 1.0 - 0.9f32.powf(t),
+            bc2: 1.0 - 0.999f32.powf(t),
+            scale_aux_coef: 0.0,
+            opacity_aux_coef: 0.0,
+            accumulate_stats: 0,
+            noise_seed: step,
+            noise_scale: 0.0,
+            noise_max: 0.0,
+            sparse_sh_adam: 0,
+            depth_weight: 0.0,
+            normal_weight: 1.0,
+        };
+        gs.train_step(&p).expect("step");
+        if (step + 1) % 50 == 0 {
+            let s = gs.take_loss().expect("loss");
+            mean_loss.push(s.normal / s.steps as f64);
+        }
+    }
+    mean_loss
+}
+
+#[test]
+fn depth_normal_loss_falls_in_training() {
+    let Some(mut gs) = gsplat() else { return };
+    let mean_loss = fit_normals(&mut gs);
+    eprintln!("depth-normal loss every 50 steps {mean_loss:.4?}");
+    assert!(mean_loss[0] > 0.0, "no pixel in the depth-normal loss");
+    assert!(
+        mean_loss.last().unwrap() < &(0.7 * mean_loss[0]),
+        "the depth-normal loss fell from {:.4} to only {:.4}",
+        mean_loss[0],
+        mean_loss.last().unwrap()
+    );
 }
 
 #[test]

@@ -7,9 +7,10 @@
 //! the splats' bound size), the scale's from `lr_scale` to `lr_scale_final`,
 //! the SH degree raised every `sh_degree_interval` steps, brush's aux losses
 //! fading out at `aux_loss_time`, and every `refine_every` steps a refine
-//! whose actions the host picks from the device's statistics. Not supported
-//! yet: the Inria densification rule, per-image appearance and the
-//! depth-normal loss.
+//! whose actions the host picks from the device's statistics. The
+//! depth-normal loss (`normal_weight`) runs from `normal_start` on, as in
+//! the wgpu trainer. Not supported yet: the Inria densification rule and
+//! per-image appearance.
 
 use std::fmt;
 
@@ -78,6 +79,7 @@ pub struct CudaTrainer {
     sparse_sh_adam: bool,
     depth_weight: f32,
     last_depth_loss: f32,
+    last_normal_loss: f32,
 }
 
 impl fmt::Debug for CudaTrainer {
@@ -104,9 +106,6 @@ impl CudaTrainer {
         }
         if cfg.appearance {
             return Err(CudaTrainError::Unsupported("per-image appearance"));
-        }
-        if cfg.normal_weight > 0.0 {
-            return Err(CudaTrainError::Unsupported("the depth-normal loss"));
         }
         let views = dataset.train.clone();
         let first = views.first().ok_or(CudaTrainError::NoViews)?;
@@ -164,6 +163,7 @@ impl CudaTrainer {
             sparse_sh_adam: false,
             depth_weight: 0.0,
             last_depth_loss: 0.0,
+            last_normal_loss: 0.0,
         })
     }
 
@@ -267,6 +267,11 @@ impl CudaTrainer {
             noise_max,
             sparse_sh_adam: self.sparse_sh_adam as u32,
             depth_weight: self.depth_weight,
+            normal_weight: if self.step >= self.cfg.normal_start {
+                self.cfg.normal_weight
+            } else {
+                0.0
+            },
         };
         self.gs.train_step(&params)?;
         self.step += 1;
@@ -386,12 +391,15 @@ impl CudaTrainer {
         Ok(())
     }
 
-    /// Mean L1 loss over the steps since the last call (and the mean depth-prior
-    /// loss, kept for [`last_depth_loss`](Self::last_depth_loss)).
+    /// Mean L1 loss over the steps since the last call (and the mean
+    /// depth-prior and depth-normal losses, kept for
+    /// [`last_depth_loss`](Self::last_depth_loss) and
+    /// [`last_normal_loss`](Self::last_normal_loss)).
     pub fn take_mean_loss(&mut self) -> Result<f32, CudaTrainError> {
         let sums = self.gs.take_loss()?;
         let steps = sums.steps.max(1) as f64;
         self.last_depth_loss = (sums.depth / steps) as f32;
+        self.last_normal_loss = (sums.normal / steps) as f32;
         Ok((sums.l1 / steps) as f32)
     }
 
@@ -399,6 +407,13 @@ impl CudaTrainer {
     /// steps before the last [`take_mean_loss`](Self::take_mean_loss).
     pub fn last_depth_loss(&self) -> f32 {
         self.last_depth_loss
+    }
+
+    /// Mean depth-normal loss `1 - N . n_d` (averaged over all pixels) of the
+    /// steps before the last [`take_mean_loss`](Self::take_mean_loss); steps
+    /// before `normal_start` count as 0.
+    pub fn last_normal_loss(&self) -> f32 {
+        self.last_normal_loss
     }
 
     /// Load a depth prior per training view from `dir/<image name>.bin` (as

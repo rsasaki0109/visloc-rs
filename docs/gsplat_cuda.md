@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 3).
+  version (currently 6).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -30,10 +30,10 @@ The packaging follows the DPVO CUDA kernels:
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
 | Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
-| Inria densification rule, per-image appearance, depth-normal loss | Not supported (the trainer refuses these configurations) |
+| Inria densification rule, per-image appearance | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
-| Geometry channels (normal) for the depth-normal loss | Not started |
+| Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -61,6 +61,13 @@ the same hashes for the random draws.
   aux-loss fade) and the refine decisions are copies of `Trainer`'s. The
   configuration, image packing and bounds come from
   `visloc_gsplat_train::config`, which needs no GPU feature.
+- **Depth losses**: with a depth prior or the depth-normal loss on, the
+  step also blends the expected depth, and for the depth-normal loss the
+  normal `sum_i T_i a_i n_i` (n_i the axis of the smallest scale, turned to
+  face the camera). `normal_loss.wgsl`'s two passes become two kernels.
+  The backward pass carries both channels in free slots of its butterfly:
+  through alpha to opacity, conic and 2D mean, the depth to the centre's z,
+  and the normal to the rotation.
 
 ## Build and test
 
@@ -96,7 +103,7 @@ magnitude. The tolerances are 2e-3 (image, screen gradients) and 3e-3
 | 2,500 faint gaussians, 64x48 (about 500 per tile: several batches) | 4.5e-7 (absolute) | 6.7e-6 | 1.1e-6 |
 | Active SH degree 1 and 0 of a degree-3 scene | | | 1.8e-6; bands above the active degree get exactly 0 |
 
-Two more tests check the depth output against analytic cases:
+More tests check the depth and normal outputs:
 
 - **Median depth.** A faint disc gives no median, with opacity 0.4. An
   opaque disc behind it gives its depth, with opacity 1 - 0.6 x 0.1.
@@ -109,6 +116,18 @@ Two more tests check the depth output against analytic cases:
   times the red gradient / 10. Worst error 1.8e-7.
   - Finite differences cannot check this: a pixel crossing the alpha gate
     moves D by z / 255.
+- **Normal channel** (the depth-normal loss's path), by the same trick.
+  Each splat's colour is set to its camera-space normal + 1 on black, so
+  the colour is N + A (A = 1 - T), and a colour-1 render gives A. A colour
+  gradient then gives the normal channel's opacity, conic, mean and scale
+  gradients as the difference of the two renders' gradients. Its
+  quaternion gradients differ by J_n^T g_n, the rotation of the normal,
+  which the test takes by central differences of the smooth n(q) on the
+  CPU. Worst error 9.0e-7.
+- **Depth-normal loss.** Its value and its gradients with respect to the
+  normal and expected-depth channels against central differences of an f64
+  CPU copy (opacity held constant, as in the kernel): 1.9e-6 and 2.5e-6 of
+  their largest values.
 
 `tests/training.rs` checks the training step:
 
@@ -118,6 +137,7 @@ Two more tests check the depth output against analytic cases:
 | Masked pixels (ground-truth alpha below 128) | Exactly zero gradient |
 | Refine scatter (prune, keep, clone, brush split) | Row order, split means symmetric about the parent, scales / sqrt 2, opacity 1 - sqrt(1 - a), statistics reset |
 | 300 steps on a scene rendered from known gaussians, colours and opacities perturbed, dense and sparse SH Adam | Mean L1 0.0175 → 0.0009 in both; a gaussian behind every camera keeps its SH bit for bit |
+| 300 steps of the depth-normal loss (weight 1) on a dense scene fitted to its own renders, only rotations learning | Depth-normal loss 0.286 → 0.099 |
 
 ## Training on south-building
 
@@ -382,11 +402,47 @@ meshing are otherwise as above. F1 at 2 cm, with accuracy / completeness:
 - **Cost.** Training time is unchanged (608, 843 and 370 s at w = 0.1).
   The prior stays opt-in.
 
+### Depth-normal loss
+
+`gsplat_train_cuda --normal-weight w` adds `w * mean (1 - N . n_d)` from
+step 7000 (`--normal-start`), the wgpu trainer's 2DGS / PGSR-style loss:
+
+- **N** is the blended normal channel.
+- **n_d** is the normal of the expected-depth map, from the cross product of
+  its central differences.
+- **Pixels.** Only those whose own and 4-neighbour opacities exceed 0.5
+  count.
+
+Training and meshing are as above. F1 at 2 cm, with accuracy /
+completeness:
+
+| Scene | No loss | w = 0.005 | w = 0.005 and depth prior 0.1 | Depth prior 0.1 alone |
+|---|---|---|---|---|
+| terrains | 34.1% (46.5 / 27.0) | 31.6% (45.8 / 24.1) | 35.6% (70.9 / 23.8) | 34.6% (62.2 / 24.0) |
+| playground | 43.9% (50.3 / 39.0) | 43.1% (48.7 / 38.6) | 43.0% (58.5 / 33.9) | 44.8% (59.5 / 35.9) |
+| office | 21.4% (39.1 / 14.8) | 21.5% (36.9 / 15.2) | 23.3% (41.0 / 16.3) | 25.5% (42.7 / 18.2) |
+| **mean** | 33.1% | 32.0% | 34.0% | 35.0% |
+
+- **No gain on these scenes.** Alone, w = 0.005 lowers the mean by 1.1
+  points: terrains loses 2.5, the other two move by under a point. With the
+  depth prior it scores a point below the prior alone. Both differences are
+  about the spread of the depth-prior weights above (34.0–35.3%), so the loss
+  helps no more than run-to-run variation.
+- **What it acts on.** The loss shapes the expected depth and the blended
+  normals, while the mesh is fused from the planar median depth. A loss on
+  the median depth itself, as PGSR's, was not tried.
+- **Cost.** Training time stays within the runs' spread (653, 915 and 427 s
+  alone). The loss stays opt-in.
+- **w = 0.05 is far too strong.** It took terrains to 22.9% (40.3 / 16.0).
+  The image L1 at 30k was 0.0152 against 0.0083, and the loss itself did
+  not fall during training. The wgpu trainer saw the same on bonsai (-3.3 dB
+  at 7k with 0.05) and uses 0.005.
+
 ## Next
 
-1. **Geometry.** The depth prior raised accuracy but not completeness. Next
-   is the depth-normal loss, which needs the geometry channels in CUDA (wgpu
-   has them); on wgpu it smoothed meshes noticeably.
+1. **Geometry.** Neither the depth prior nor the depth-normal loss raised
+   completeness, where most of the gap to MVS is. Untried: losses on the
+   median depth the mesh is built from, and multi-view consistency.
 2. **TSDF on the GPU.** At 1 cm the CPU TSDF dominates meshing and runs out
    of memory on large scenes.
 3. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;

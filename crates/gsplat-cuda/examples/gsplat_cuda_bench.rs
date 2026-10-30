@@ -193,6 +193,7 @@ fn main() {
                 noise_max: 0.0,
                 sparse_sh_adam: args.sparse_sh_adam as u32,
                 depth_weight: 0.0,
+                normal_weight: 0.0,
             };
             cuda.train_step(&step).expect("train step");
         } else {

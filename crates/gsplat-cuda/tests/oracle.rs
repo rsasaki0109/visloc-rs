@@ -449,3 +449,233 @@ fn depth_channel_gradients_match_the_colour_channel() {
     eprintln!("depth channel against the red channel: worst error {worst:.2e}");
     assert!(worst < 1e-4, "depth channel off by {worst:.2e}");
 }
+
+/// The camera-space normal the CUDA side blends for a splat of rotation `q`
+/// and log-scales `ls` at camera-space centre `p`: the axis of the smallest
+/// scale (ties to the lower axis), turned to face the camera when `flip` is
+/// `None`, else multiplied by the given sign. Returns the normal and its sign.
+fn splat_normal(
+    view: &CameraView,
+    q: Quaternion<f64>,
+    ls: Vector3<f32>,
+    p: Vector3<f32>,
+    flip: Option<f64>,
+) -> (Vector3<f64>, f64) {
+    let r = nalgebra::UnitQuaternion::from_quaternion(q).to_rotation_matrix();
+    let mut k = 0;
+    if ls.y < ls[k] {
+        k = 1;
+    }
+    if ls.z < ls[k] {
+        k = 2;
+    }
+    let n = view.rotation.cast::<f64>() * r.matrix().column(k).into_owned();
+    let sign = flip.unwrap_or(if n.dot(&p.cast::<f64>()) > 0.0 {
+        -1.0
+    } else {
+        1.0
+    });
+    (n * sign, sign)
+}
+
+/// The normal channel's gradients (the depth-normal loss's path), by the
+/// depth test's trick: each splat's colour is set to its normal + 1 on black,
+/// so the colour is N + A (A = 1 - T), and a colour-1 render gives A. A colour
+/// gradient g then gives, through alpha, the normal channel's opacity, conic,
+/// 2D-mean, mean and scale gradients plus the colour-1 render's. The
+/// quaternion gradients also differ by J_n^T g_n, the rotation of the normal
+/// (central differences of the smooth n(q) on the CPU), with g_n the colour
+/// gradient.
+#[test]
+fn normal_channel_gradients_match_the_colour_channel() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (64u32, 48u32);
+    let view = view(w, h);
+    let base = random_scene(40, 7, 0, 0.0);
+    let sh0 = visloc_gsplat_core::sh::SH_C0;
+    let quat = |g: &Gaussian| g.rotation.cast::<f64>();
+    let mut signs = Vec::new();
+    let mut coloured = base.clone();
+    for g in coloured.gaussians.iter_mut() {
+        let p = view.world_to_camera_point(g.mean);
+        let (n, sign) = splat_normal(&view, quat(g), g.scale_log, p, None);
+        signs.push(sign);
+        g.sh_dc = [0, 1, 2].map(|c| (n[c] as f32 + 1.0 - 0.5) / sh0);
+    }
+    let mut ones = base.clone();
+    for g in ones.gaussians.iter_mut() {
+        g.sh_dc = [(1.0 - 0.5) / sh0; 3];
+    }
+    let npix = (w * h) as usize;
+    let d: Vec<f32> = (0..npix * 3).map(|i| (i as f32 * 0.29).sin()).collect();
+
+    cuda.set_scene(&PackedScene::from_scene(&coloured))
+        .expect("upload");
+    let f = cuda.render_geometry(&view, [0.0; 3], 0).expect("render");
+    let fwd_err = (0..npix * 3)
+        .map(|i| (f.rgb[i] - (f.normal[i] + f.opacity[i / 3])).abs())
+        .fold(0.0f32, f32::max);
+    assert!(fwd_err < 1e-5, "colour is not N + A: {fwd_err}");
+    let by_colour = cuda.backward(&d).expect("backward");
+    let by_normal = cuda
+        .backward_with_geometry(&vec![0.0; npix * 3], Some(&vec![0.0; npix]), Some(&d))
+        .expect("backward");
+    cuda.set_scene(&PackedScene::from_scene(&ones))
+        .expect("upload");
+    cuda.render(&view, [0.0; 3], 0).expect("render");
+    let by_one = cuda.backward(&d).expect("backward");
+
+    let scale = |v: &[f32]| v.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-9);
+    let screen_scale = scale(&by_normal.screen);
+    let tr_scale = scale(&by_normal.transforms);
+    let op_scale = scale(&by_normal.opacity);
+    let mut worst = 0.0f32;
+    let mut rotation_part = 0.0f32;
+    for (i, g) in base.gaussians.iter().enumerate() {
+        for c in 0..6 {
+            let want = by_colour.screen[i * 10 + c] - by_one.screen[i * 10 + c];
+            worst = worst.max((by_normal.screen[i * 10 + c] - want).abs() / screen_scale);
+        }
+        let want = by_colour.opacity[i] - by_one.opacity[i];
+        worst = worst.max((by_normal.opacity[i] - want).abs() / op_scale);
+        // dL/dn per splat: the colour gradient of the n + 1 render.
+        let g_n = Vector3::from_fn(|c, _| f64::from(by_colour.screen[i * 10 + 6 + c]));
+        let p = view.world_to_camera_point(g.mean);
+        let q = quat(g);
+        let hq = 1e-6;
+        for k in 0..10 {
+            let mut want = by_colour.transforms[i * 10 + k] - by_one.transforms[i * 10 + k];
+            if (3..7).contains(&k) {
+                let mut dq = [0.0f64; 4];
+                dq[k - 3] = hq;
+                let step = Quaternion::new(dq[0], dq[1], dq[2], dq[3]);
+                let (np, _) = splat_normal(&view, q + step, g.scale_log, p, Some(signs[i]));
+                let (nm, _) = splat_normal(&view, q - step, g.scale_log, p, Some(signs[i]));
+                let extra = ((np - nm).dot(&g_n) / (2.0 * hq)) as f32;
+                rotation_part = rotation_part.max(extra.abs() / tr_scale);
+                want += extra;
+            }
+            worst = worst.max((by_normal.transforms[i * 10 + k] - want).abs() / tr_scale);
+        }
+    }
+    eprintln!(
+        "normal channel against the colour channel: worst error {worst:.2e} \
+         (rotation of the normal up to {rotation_part:.2e} of the largest gradient)"
+    );
+    assert!(
+        rotation_part > 1e-2,
+        "the test does not exercise the normal's rotation"
+    );
+    assert!(worst < 2e-4, "normal channel off by {worst:.2e}");
+}
+
+/// The depth-normal loss L(N, D) on the CPU in f64, alpha held fixed (see
+/// normal_grad_kernel): weight / npix * sum over the valid pixels of
+/// 1 - s N . n_d.
+fn normal_loss_cpu(cam: &PinholeCamera, weight: f64, n: &[f64], d: &[f64], alpha: &[f64]) -> f64 {
+    let (w, h) = (cam.width as usize, cam.height as usize);
+    let ray = |x: usize, y: usize| {
+        Vector3::new(
+            (x as f64 + 0.5 - f64::from(cam.cx)) / f64::from(cam.fx),
+            (y as f64 + 0.5 - f64::from(cam.cy)) / f64::from(cam.fy),
+            1.0,
+        )
+    };
+    let point = |x: usize, y: usize| {
+        let i = y * w + x;
+        ray(x, y) * (d[i] / alpha[i].max(1e-6))
+    };
+    let mut sum = 0.0;
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            if [i, i - 1, i + 1, i - w, i + w]
+                .iter()
+                .any(|&j| alpha[j] <= 0.5)
+            {
+                continue;
+            }
+            let c = (point(x + 1, y) - point(x - 1, y)).cross(&(point(x, y + 1) - point(x, y - 1)));
+            let cl = c.norm();
+            if cl <= 1e-12 {
+                continue;
+            }
+            let nd = c / cl;
+            let s = if nd.dot(&point(x, y)) > 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            let big_n = Vector3::new(n[i * 3], n[i * 3 + 1], n[i * 3 + 2]);
+            sum += 1.0 - s * big_n.dot(&nd);
+        }
+    }
+    weight * sum / (w * h) as f64
+}
+
+/// The depth-normal loss's value and its gradients with respect to the normal
+/// and expected-depth channels, against central differences of
+/// [`normal_loss_cpu`] on the rendered channels.
+#[test]
+fn depth_normal_loss_matches_cpu() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (40u32, 32u32);
+    let view = view(w, h);
+    let scene = random_scene(400, 11, 0, 3.0);
+    cuda.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let f = cuda.render_geometry(&view, BG, 0).expect("render");
+    let weight = 0.7f32;
+    let gpu = cuda.normal_loss(weight).expect("normal loss");
+    let npix = (w * h) as usize;
+    let n: Vec<f64> = f.normal.iter().map(|&v| f64::from(v)).collect();
+    let d: Vec<f64> = f.expected.iter().map(|&v| f64::from(v)).collect();
+    let alpha: Vec<f64> = f.opacity.iter().map(|&v| f64::from(v)).collect();
+    let weight = f64::from(weight);
+    let cpu = normal_loss_cpu(&view.camera, weight, &n, &d, &alpha);
+    assert!(
+        (gpu.loss * weight - cpu).abs() < 1e-5 * cpu.abs().max(1e-3),
+        "loss: gpu {} cpu {cpu}",
+        gpu.loss * weight
+    );
+    let valid = gpu
+        .d_normal
+        .chunks_exact(3)
+        .filter(|g| g.iter().any(|&v| v != 0.0))
+        .count();
+    assert!(
+        valid > npix / 4,
+        "only {valid} of {npix} pixels in the loss"
+    );
+
+    let fd = |v: &[f64], i: usize, eval: &dyn Fn(&[f64]) -> f64| {
+        let hh = 1e-6 * v[i].abs().max(1.0);
+        let mut plus = v.to_vec();
+        plus[i] += hh;
+        let mut minus = v.to_vec();
+        minus[i] -= hh;
+        (eval(&plus) - eval(&minus)) / (2.0 * hh)
+    };
+    let (mut worst_n, mut scale_n) = (0.0f64, 0.0f64);
+    for i in 0..npix * 3 {
+        let want = fd(&n, i, &|v| {
+            normal_loss_cpu(&view.camera, weight, v, &d, &alpha)
+        });
+        scale_n = scale_n.max(want.abs());
+        worst_n = worst_n.max((f64::from(gpu.d_normal[i]) - want).abs());
+    }
+    let (mut worst_d, mut scale_d) = (0.0f64, 0.0f64);
+    for i in 0..npix {
+        let want = fd(&d, i, &|v| {
+            normal_loss_cpu(&view.camera, weight, &n, v, &alpha)
+        });
+        scale_d = scale_d.max(want.abs());
+        worst_d = worst_d.max((f64::from(gpu.d_depth[i]) - want).abs());
+    }
+    let (rel_n, rel_d) = (worst_n / scale_n, worst_d / scale_d);
+    eprintln!(
+        "depth-normal loss: d_normal off by {rel_n:.2e}, d_depth by {rel_d:.2e} of their largest values"
+    );
+    assert!(rel_n < 1e-4, "d_normal off by {rel_n:.2e}");
+    assert!(rel_d < 1e-3, "d_depth off by {rel_d:.2e}");
+}
