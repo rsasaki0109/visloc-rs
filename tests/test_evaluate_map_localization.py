@@ -124,6 +124,47 @@ class EvaluateMapLocalizationTests(unittest.TestCase):
         fixed = MODULE.evaluate("fixed", query, ground_truth, 1_000, alignment)
         self.assertGreater(fixed["translation_m"]["rmse"], 0.1)
 
+    def test_local_mode_scores_on_the_pass_facing_the_same_way(self) -> None:
+        # Out 40 m along x and back 0.3 m to the side, facing back; the
+        # heading drifts 0.2 deg per metre, so the two passes' map->GT
+        # transforms differ by up to 0.3 m at the same place.
+        positions = [(np.asarray([0.25 * i, 0.0, 0.0]), 0.0) for i in range(161)]
+        positions += [(np.asarray([40.0 - 0.25 * i, 0.3, 0.0]), np.pi) for i in range(161)]
+        map_poses, ground_truth, drift = {}, {}, {}
+        true_position, travelled = np.zeros(3), 0.0
+        for index, (position, yaw) in enumerate(positions):
+            if index:
+                step = position - positions[index - 1][0]
+                true_position = true_position + rotation_z(0.0035 * travelled) @ step
+                travelled += np.linalg.norm(step)
+            timestamp = 1_000_000_000 + index * 50_000_000
+            map_poses[timestamp] = (position, rotation_z(yaw))
+            ground_truth[timestamp] = (true_position, rotation_z(0.0035 * travelled + yaw))
+            drift[timestamp] = rotation_z(0.0035 * travelled)
+        pairs = MODULE.associate(map_poses, ground_truth, 1_000)
+        alignment = (
+            np.asarray([map_poses[a][0] for a, _ in pairs]),
+            np.asarray([ground_truth[b][0] for _, b in pairs]),
+            5.0,
+            np.asarray([ground_truth[b][1] for _, b in pairs]),
+        )
+        # Localizations on the way back, 0.16 m towards the outbound pass:
+        # nearer to it than to their own.
+        shift = np.asarray([0.0, -0.16, 0.0])
+        query, reference = {}, {}
+        for timestamp, (position, orientation) in map_poses.items():
+            if position[1] == 0.3 and 10.0 <= position[0] <= 30.0:
+                query[timestamp] = (position + shift, orientation)
+                truth, truth_orientation = ground_truth[timestamp]
+                reference[timestamp] = (truth + drift[timestamp] @ shift, truth_orientation)
+        facing = MODULE.evaluate("local", query, reference, 1_000, alignment)
+        self.assertEqual(facing["scored"], len(query))
+        # (1.4 cm: the drift bends within the 10 m stretch.)
+        self.assertLess(facing["translation_m"]["max"], 0.02)
+        # Without the orientations the outbound pass is nearer and fits them.
+        anywhere = MODULE.evaluate("local", query, reference, 1_000, alignment[:3])
+        self.assertGreater(anywhere["translation_m"]["max"], 0.1)
+
     def test_inlier_filter_keeps_poses_accepted_at_the_threshold(self) -> None:
         estimate = MODULE.load_tum_seconds  # keep the parser's rounding in the loop
         with tempfile.TemporaryDirectory() as directory:

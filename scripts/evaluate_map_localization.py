@@ -18,8 +18,10 @@ Modes:
           is the honest cross-session number.
   local   like fixed, but the map->GT transform is fitted per scored pose on the
           stretch of --align-estimate within --align-radius-m of it (in the map
-          frame). On a map whose SLAM drifted over a long loop this scores the
-          localization against the map around it, not the map's own drift.
+          frame) and, by the ground truth, facing within 90 deg of it. On a map
+          whose SLAM drifted over a long loop this scores the localization
+          against the map around it, not the map's own drift; the facing keeps
+          a pass the other way, whose landmarks it did not see, out.
 
 Without `--prior-radius-m`, `basalt_euroc_localize_demo` localizes every image
 independently with a fixed RANSAC seed, so one run at a low `--min-inliers`
@@ -178,21 +180,30 @@ def summary(values):
     }
 
 
-def local_errors(estimate, reference, pairs, sources, targets, radius_m):
+def local_errors(estimate, reference, pairs, sources, targets, radius_m, rotations=None):
     """pose_errors with a map->GT fit on the map stretch around each pose.
 
     sources and targets are the map and GT positions of --align-estimate and
-    --align-ground-truth, in time order. The stretch is the run of map positions
-    within radius_m of the pose through the nearest one, so a place the map
-    passed twice is fitted on one pass. The fit turns about the vertical only,
-    as both frames are level, which a straight stretch would not pin down
-    otherwise. Poses with fewer than three map positions around them are not
-    scored.
+    --align-ground-truth, in time order, and rotations their GT orientations.
+    The stretch is the run of map positions within radius_m of the pose, and
+    facing within 90 deg of it by the ground truth, through the nearest one: a
+    place the map passed twice is fitted on the pass whose view the pose
+    shares, however far off the pose's own heading is. The fit
+    turns about the vertical only, as both frames are level, which a straight
+    stretch would not pin down otherwise. Poses with fewer than three map
+    positions around them are not scored.
     """
     translation_errors, rotation_errors = [], []
     for pair in pairs:
         distances = np.linalg.norm(sources - estimate[pair[0]][0], axis=1)
         near = distances <= radius_m
+        if rotations is not None:
+            # Less than 90 deg between the two true orientations:
+            # trace(R_map^T R) > 1.
+            near &= np.einsum("nij,ij->n", rotations, reference[pair[1]][1]) > 1.0
+        distances = np.where(near, distances, np.inf)
+        if not np.isfinite(distances).any():
+            continue
         first = last = int(np.argmin(distances))
         while first > 0 and near[first - 1]:
             first -= 1
@@ -282,6 +293,7 @@ def main():
             np.asarray([map_poses[a][0] for a, _ in map_pairs]),
             np.asarray([map_ground_truth[b][0] for _, b in map_pairs]),
             args.align_radius_m,
+            np.asarray([map_ground_truth[b][1] for _, b in map_pairs]),
         )
     result = evaluate(args.mode, estimate, reference, args.max_diff_ns, alignment)
     if args.queries:

@@ -414,8 +414,8 @@ the pairs share 38 consistent matches:
 |---|---|---|
 | Map landmarks | 7,036 | 9,620 |
 | corridor1-5's own images that localize (every 5th) | 33.5% | 52.1% |
-| corridor1-1, VIO + map: localizations; RMSE against the map around it | 57; 1.26 m | 75; 1.02 m |
-| ... wheel odometry with the gyro's heading + map | 58; 0.70 m | 76; 0.67 m |
+| corridor1-1, VIO + map: localizations; RMSE against the map around it | 57; 1.55 m | 75; 1.35 m |
+| ... wheel odometry with the gyro's heading + map | 58; 0.95 m | 76; 0.93 m |
 | Time per image (median, ORB included) | 43.5 ms | 54.1 ms |
 
 - **The localizations still come at the same two places**, more of them.
@@ -569,16 +569,16 @@ mostly the VIO's heading drift. So the localizations are scored against
 the map around them: each is put in the ground truth's frame through the
 stretch of the map's own trajectory within 5 m of it
 (`evaluate_map_localization.py --mode local`). Scored that way,
-the map's own SLAM poses are 3.5 cm off at the median; the laser ground
+the map's own SLAM poses are 3.2 cm off at the median; the laser ground
 truth jumps by up to 0.7 m in places.
 
 - **Few images localize across these sessions.** 57 of the 2,426 images
   corridor1-1 tries localize, at two places (66–68 s and 206–214 s). Each
-  is 3.0 cm RMSE from the map around it. A quarter of corridor1-1's path
+  is 3.1 cm RMSE from the map around it. A quarter of corridor1-1's path
   lies more than 1 m from corridor1-5's, up to 22 m. Between those two
-  places the VIO + map drifts up to 2.8 m (49 cm at the median). The wheel
-  odometry gets 12 localizations and drifts 3 m. This run therefore does
-  not measure the wheel odometry + map. It measures whether the
+  places the VIO + map drifts up to 3.8 m (71 cm at the median). The wheel
+  odometry gets 12 localizations and drifts by metres. This run therefore
+  does not measure the wheel odometry + map. It measures whether the
   calibration keeps up.
 - **The wheels slip in turns.** Their heading drifts 15° off the VIO's in
   one 350° turn in place, and 38° after 120 s. The VIO stays within 1.3–5°
@@ -647,9 +647,11 @@ and is corrected for that.
   replay) gets 58 localizations instead of 12: with the heading held, the
   prediction still points the projection search at the right landmarks
   140 s after the last localization. Scored against the map around each
-  pose, its RMSE falls from 3.1 m (median 2.9 m, max 8.5 m) to 0.70 m
-  (median 0.59 m, max 2.1 m). The VIO + map gets 1.27 m: its own drift
-  over the last 70 s, with no localization, reaches 2.7 m.
+  pose, its RMSE falls to 0.95 m (median 0.68 m, max 2.9 m). Without the
+  gyro it is 3.5 m (median 2.2 m, max 8.5 m) where it is scored at all:
+  more than half its poses drift over 5 m from the map. The VIO + map gets
+  1.55 m: with no localization over the last 70 s, its own drift reaches
+  3.8 m.
 - **What remains is mostly the wheels' scale.** 60 s of driving is about
   50 m, and 1.1% of it is 0.55 m.
 - **The short office sessions gain too.** Through the replay (VIO and
