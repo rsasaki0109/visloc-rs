@@ -1887,9 +1887,10 @@ essential matrix, and sequence_1_19 loses 14.1 with it.
     `--loops`) loses on all three tried. With the online result's band,
     sequence_1_19 scores 68.31, 2_11 71.24 and R_12_10cp 73.57.
 
-The online result's band does best on the two R sequences, and it replaces
-the VIO's for the Short sequences of device 1WM093701G1276 in submission 6
-([lamaria_test_results.md](lamaria_test_results.md)).
+The online result's band does best on the two R sequences. It replaced the
+VIO's for the five Short test sequences of device 1WM093701G1276 in
+submission 6, and four of them lost: 60.0 on average, against 61.5 with the
+VIO's band ([lamaria_test_results.md](lamaria_test_results.md)).
 
 ### Revisits for place recognition
 

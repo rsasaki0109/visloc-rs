@@ -1,9 +1,9 @@
 # LaMAria test-set results
 
-Five submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
+Six submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
 to the 63 test sequences, run on GitHub Actions
 ([`lamaria_submission.yml`](../.github/workflows/lamaria_submission.yml)); the
-fifth reran five Short sequences locally, on an 8 GB GPU. The
+fifth and the sixth reran five Short sequences locally, on an 8 GB GPU. The
 system uses the two grayscale SLAM cameras and the 1 kHz IMU only (no GPS or
 magnetometer) and runs one VIO per sequence. Scores are the leaderboard's means
 per challenge.
@@ -15,12 +15,15 @@ per challenge.
 | 3 (2026-10-25) | 67.7 | 54.8 | **54.2** | **60.9** | 26.9 | 52.9 |
 | 4 (2026-10-27) | 68.9 | **56.8** | 54.1 | 60.6 | **30.6** | 54.2 |
 | 5 (2026-10-28) | **70.1** | **56.8** | 54.1 | 60.6 | **30.6** | **54.4** |
-| GroundedSLAM | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 | 62.3 |
+| 6 (2026-10-31) | 69.7 | **56.8** | 54.1 | 60.6 | **30.6** | 54.3 |
+| GroundedSLAM (2026-10-29) | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
 | RedComet | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
+| FPV-SLAM, binocular (2026-10-28) | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
 
-visloc-rs ranks fourth, behind Aria's SLAM (reproduced by the LaMAria team),
-RedComet and GroundedSLAM, and ahead of the other binocular-inertial entries
-(FPV-SLAM 42.8). The same chain averages 64.35 per track on the ten training
+visloc-rs ranks fifth on 2026-10-31, behind Aria's SLAM (reproduced by the
+LaMAria team), GroundedSLAM, RedComet and the binocular FPV-SLAM. Their last
+uploads raised GroundedSLAM's mean from 62.3 to 72.4 and FPV-SLAM's from 42.8
+to 56.3. The same chain averages 64.35 per track on the ten training
 sequences. Each track's first training sequence is the one the method was
 developed on, and the test set behaves like the second ones
 ([Two sequences per track](lamaria_batch_ba.md#two-sequences-per-track)).
@@ -108,8 +111,30 @@ the VIO built from `3d6f7530`, the same VIO code as submission 4's.
   70.1 and the mean from 54.2 to 54.4. sequence_1_13 goes from 64.5 to 61.8,
   so the four others gain about 24 points together. Their scores are now 55.2
   (1_1), 63.8 (1_3), 55.4 (1_4) and 71.4 (1_18).
+- **A repeat.** Submission 5's archive, uploaded again by mistake on
+  2026-10-29, scored the same on all 63 sequences: the evaluation is
+  deterministic.
+
+**Submission 6.** The same five sequences again, with the pass's ALIKED
+keypoints matched within the online result's epipolar band instead of the
+VIO's ([Learned matches without the VIO's
+band](lamaria_batch_ba.md#learned-matches-without-the-vios-band)). The run
+reuses submission 5's online result, ALIKED keypoints, revisits, IMU and VIO.
+- **Selection.** On the device's two Short training sequences the online
+  result's band scored 88.17 on average, against 83.08 with the VIO's
+  (R_11_5cp 97.02, R_12_10cp 79.31).
+- **Change.** Against submission 5's estimates the five trajectories move by
+  0.08–0.49 m (RMS) after a Sim(3) fit.
+- **Result.** Four of the five lose: sequence_1_1 goes from 55.2 to 54.7, 1_3
+  from 63.8 to 61.2, 1_4 from 55.4 to 51.7 and 1_13 from 61.8 to 59.3, while
+  1_18 gains (71.4 → 73.0). The five average 60.0 instead of 61.5, Short goes
+  from 70.1 to 69.7 and the mean from 54.4 to 54.3. The two training
+  sequences did not carry over to the five test sequences; the next
+  submission takes submission 5's estimates for them back.
 
 ## Against GroundedSLAM, sequence by sequence
+
+GroundedSLAM's scores here are those before its upload of 2026-10-29.
 
 The leaderboard's per-sequence scores (2026-10-27, submission 4): visloc-rs
 beats GroundedSLAM on 21 of the 63 sequences, 8 of them Long. The 14
