@@ -126,6 +126,12 @@ All notable changes to `visloc-rs` will be documented here.
   - The cost is the image fit: the final training L1 about doubles at 30.
   - `extract_mesh` / `extract_mesh_gpu` take a `MeshDepth` instead of
     `planar: bool`. CUDA ABI 9.
+  - `gsplat_train_cuda --depth-weight-final W`
+    (`CudaTrainer::set_depth_weight_final`) moves the prior's weight
+    log-linearly to W over the run. With every 8th view held out, 30 → 1
+    costs 0.79 dB of held-out PSNR against the plain splat, where a
+    constant 30 costs 1.81 dB. Its expected-depth meshes score 54.6% against
+    63.2% (plain median mesh: 33.5%).
 - **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
   model of pinhole images and the images themselves to a maximum or an
   exact size (`--size` makes cameras of slightly different sizes, as in some
