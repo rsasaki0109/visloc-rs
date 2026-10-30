@@ -125,6 +125,10 @@ All notable changes to `visloc-rs` will be documented here.
     and 28 s instead of 804 s and 468 s.
   - At 1600 px office scores 72.8% and playground 67.7%, in 102 s and
     177 s.
+  - With those 1600 px maps, the hybrid meshes (`--depth-maps`) of the same
+    splats score 64.2% instead of 62.7% with a plain splat, and 68.1%
+    instead of 65.7% with a prior-trained one (mean ETH3D mesh F1 at 2 cm;
+    office +3.8 to +4.8 points).
   - The wgpu path's pass preparation moved to `pass_setup.rs`, shared by
     both backends, as are their tests (`pass_setup::checks`).
   - The crate's `unsafe_code` lint is `deny` instead of `forbid`; the
