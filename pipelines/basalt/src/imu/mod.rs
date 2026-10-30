@@ -24,4 +24,6 @@ pub(crate) use factors::{
 pub use preintegration::{
     ImuDStateUpdateTrace, ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrator,
 };
-pub use sampling::{integrate_between, interpolate_at, SamplingError, TimestampedImu};
+pub use sampling::{
+    integrate_between, integrate_between_with, interpolate_at, SamplingError, TimestampedImu,
+};

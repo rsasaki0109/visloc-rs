@@ -206,6 +206,34 @@ pub enum OnnxBackend {
     Cpu,
 }
 
+/// The execution providers for `backend`, in registration order.
+///
+/// ort 2.0.0-rc.13 compiles the CUDA provider only with its `cuda` feature,
+/// which this crate's `onnx-cuda` enables. Without it, `CudaThenCpu` is the
+/// CPU provider alone and `Cuda` is an error.
+#[cfg(feature = "onnx-inference")]
+pub(crate) fn execution_providers(
+    backend: OnnxBackend,
+) -> Result<Vec<ort::ep::ExecutionProviderDispatch>, String> {
+    use ort::ep::CPU;
+    match backend {
+        #[cfg(feature = "onnx-cuda")]
+        OnnxBackend::CudaThenCpu => Ok(vec![
+            ort::ep::CUDA::default().build(),
+            CPU::default().build(),
+        ]),
+        #[cfg(not(feature = "onnx-cuda"))]
+        OnnxBackend::CudaThenCpu => Ok(vec![CPU::default().build()]),
+        #[cfg(feature = "onnx-cuda")]
+        OnnxBackend::Cuda => Ok(vec![ort::ep::CUDA::default().build().error_on_failure()]),
+        #[cfg(not(feature = "onnx-cuda"))]
+        OnnxBackend::Cuda => {
+            Err("the CUDA execution provider needs the `onnx-cuda` feature".to_string())
+        }
+        OnnxBackend::Cpu => Ok(vec![CPU::default().build()]),
+    }
+}
+
 #[cfg(feature = "onnx-inference")]
 impl SuperPointOnnxExtractor {
     /// Load a SuperPoint ONNX model from disk and build a session
@@ -226,19 +254,11 @@ impl SuperPointOnnxExtractor {
         config: SuperPointOnnxConfig,
         backend: OnnxBackend,
     ) -> Result<Self, SuperPointOnnxError> {
-        use ort::ep::{CPU, CUDA};
-
-        let providers = match backend {
-            // CUDA first, CPU as the always-available fallback. ort registers
-            // providers in order and silently skips one that fails to load
-            // (e.g. CUDA binaries / cuDNN absent), so this degrades to CPU
-            // without erroring.
-            OnnxBackend::CudaThenCpu => vec![CUDA::default().build(), CPU::default().build()],
-            OnnxBackend::Cuda => {
-                vec![CUDA::default().build().error_on_failure()]
-            }
-            OnnxBackend::Cpu => vec![CPU::default().build()],
-        };
+        // CUDA first, CPU as the always-available fallback. ort registers
+        // providers in order and silently skips one that fails to load
+        // (e.g. CUDA binaries / cuDNN absent), so this degrades to CPU
+        // without erroring.
+        let providers = execution_providers(backend).map_err(SuperPointOnnxError::from_ort)?;
 
         let session = ort::session::Session::builder()
             .map_err(SuperPointOnnxError::from_ort)?

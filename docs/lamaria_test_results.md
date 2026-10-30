@@ -1,8 +1,9 @@
 # LaMAria test-set results
 
-Four submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
+Five submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
 to the 63 test sequences, run on GitHub Actions
-([`lamaria_submission.yml`](../.github/workflows/lamaria_submission.yml)). The
+([`lamaria_submission.yml`](../.github/workflows/lamaria_submission.yml)); the
+fifth reran five Short sequences locally, on an 8 GB GPU. The
 system uses the two grayscale SLAM cameras and the 1 kHz IMU only (no GPS or
 magnetometer) and runs one VIO per sequence. Scores are the leaderboard's means
 per challenge.
@@ -12,7 +13,8 @@ per challenge.
 | 1 (2026-10-23) | 67.7 | 54.8 | 54.1 | 53.6 | 27.5 | 51.5 |
 | 2 (2026-10-24) | 67.7 | 54.8 | 54.1 | 59.3 | 26.9 | 52.6 |
 | 3 (2026-10-25) | 67.7 | 54.8 | **54.2** | **60.9** | 26.9 | 52.9 |
-| 4 (2026-10-27) | **68.9** | **56.8** | 54.1 | 60.6 | **30.6** | **54.2** |
+| 4 (2026-10-27) | 68.9 | **56.8** | 54.1 | 60.6 | **30.6** | 54.2 |
+| 5 (2026-10-28) | **70.1** | **56.8** | 54.1 | 60.6 | **30.6** | **54.4** |
 | GroundedSLAM | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 | 62.3 |
 | RedComet | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
 
@@ -85,6 +87,28 @@ track's VIO tracks both cameras' features
   with cam1's detection, landmarks and keyframe links added: 115 m), but a
   ride in the first three minutes costs the score little.
 
+**Submission 5.** The five Short sequences recorded with device
+1WM093701G1276 ran again, with ALIKED keypoints matched by LightGlue in the
+chain's pass and SIFT online (`run_lamaria_test_submission.py
+--ba-pass-features aliked`;
+[Learned features](lamaria_batch_ba.md#learned-features)). The other 58
+sequences keep submission 4's estimates. They ran locally on an 8 GB GPU, with
+the VIO built from `3d6f7530`, the same VIO code as submission 4's.
+- **Selection.** On the training set the pass with ALIKED gains only on the
+  two Short sequences of that device, R_11_5cp (+6.4) and R_12_10cp (+9.3). It
+  loses 1.2–12.7 on sequence_1_19, 1_20, 2_11 and 3_18. On the test set that
+  device's Short sequences averaged 57.2 in submission 4, against 73.4 on the
+  other device. The serials were read from the recordings' headers:
+  sequence_1_1, 1_3, 1_4, 1_13 and 1_18.
+- **Change.** Against submission 4's estimates (one Sim(3) fit each, no ground
+  truth), the five trajectories move by 0.43–1.14 m (RMS) after the fit. They
+  also come out 0.35–0.97 % shorter, as on the training sequences, but the
+  evaluation's own similarity fit takes that scale out.
+- **Result.** The five average 61.5 instead of 57.2: Short goes from 68.9 to
+  70.1 and the mean from 54.2 to 54.4. sequence_1_13 goes from 64.5 to 61.8,
+  so the four others gain about 24 points together. Their scores are now 55.2
+  (1_1), 63.8 (1_3), 55.4 (1_4) and 71.4 (1_18).
+
 ## Against GroundedSLAM, sequence by sequence
 
 The leaderboard's per-sequence scores (2026-10-27, submission 4): visloc-rs
@@ -136,9 +160,10 @@ from 61.09 to 64.30; on these test sequences it moved the scores by −0.4 …
   detector finds is overcast sky, and the Aria SLAM cameras see the sun only
   when it is low.
 - **By device**, the walking tracks average 66.7 on 1WM09370081264 (22
-  sequences) and 54.8 on 1WM093701G1276 (22). The difference is mostly Short:
-  73.4 against 57.2. Both Short training sequences were recorded with
-  1WM09370081264.
+  sequences) and 54.8 on 1WM093701G1276 (22) in submission 4. The difference
+  is mostly Short: 73.4 against 57.2 (61.5 in submission 5). The two
+  `sequence_1_*` training sequences were recorded with 1WM09370081264, and the
+  two R sequences with 1WM093701G1276.
 - **The end of sequence_5_12** (21–50 % too long between its last CPs) is
   walking, not a ride. Its CP errors grow from both ends of the recording (55 m
   at the start, 35 m at the end, 5–10 m in the middle), and one CP (8474) sits

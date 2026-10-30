@@ -20,7 +20,9 @@
 //! - **Descriptors.** Each landmark keeps the medoid of its observations'
 //!   ORB descriptors (the one with the smallest summed Hamming distance to
 //!   the others), unpacked to 256 `0.0`/`1.0` values by
-//!   [`orb_descriptor_to_f32`]. Squared L2 distance between two unpacked
+//!   [`orb_descriptor_to_f32`]. The views whose descriptors differ most from
+//!   it give up to [`MAX_EXTRA_DESCRIPTORS`] extra descriptors, each at least
+//!   [`MIN_EXTRA_DISTANCE`] bits from the ones kept before. Squared L2 distance between two unpacked
 //!   descriptors equals their Hamming distance, so float matchers work, and
 //!   query images must be unpacked with the same function.
 
@@ -35,6 +37,12 @@ use visloc_core::types::{
 
 use super::{NfrMapper, TimeCamId};
 use crate::DoubleSphereCamera;
+
+/// Extra descriptors a landmark keeps at most, besides its medoid.
+pub const MAX_EXTRA_DESCRIPTORS: usize = 3;
+/// Hamming distance an extra descriptor keeps at least from the medoid and
+/// from the extra ones before it.
+pub const MIN_EXTRA_DISTANCE: u32 = 24;
 
 /// Number of field-of-view samples used by [`fit_opencv_fisheye`].
 const FIT_SAMPLES: usize = 512;
@@ -70,6 +78,9 @@ pub struct LocalizationMapExport {
     pub map: VisualMap,
     /// One unpacked ORB descriptor per landmark.
     pub descriptors: LandmarkDescriptorStore,
+    /// Extra unpacked descriptors, `(landmark id, descriptor)`, from the
+    /// views that differ most from the main one; ids repeat.
+    pub extra_descriptors: Vec<(u64, Vec<f32>)>,
     pub images: Vec<LocalizationMapImage>,
     /// Fitted camera per Basalt camera index.
     pub camera_fits: Vec<FisheyeFit>,
@@ -99,6 +110,33 @@ pub fn orb_descriptor_to_f32(descriptor: &[u8; 32]) -> Vec<f32> {
         .collect()
 }
 
+/// Up to [`MAX_EXTRA_DESCRIPTORS`] of `observed`, farthest first: each the
+/// one whose Hamming distance to the nearest kept descriptor (the medoid and
+/// the extra ones before it) is largest, while that distance is at least
+/// [`MIN_EXTRA_DISTANCE`].
+fn diverse_descriptors<'a>(observed: &[&'a [u8; 32]], medoid: &[u8; 32]) -> Vec<&'a [u8; 32]> {
+    let mut nearest_kept: Vec<u32> = observed.iter().map(|d| hamming(d, medoid)).collect();
+    let mut extra = Vec::new();
+    while extra.len() < MAX_EXTRA_DESCRIPTORS {
+        let Some((index, &distance)) = nearest_kept
+            .iter()
+            .enumerate()
+            .max_by_key(|(index, distance)| (**distance, std::cmp::Reverse(*index)))
+        else {
+            break;
+        };
+        if distance < MIN_EXTRA_DISTANCE {
+            break;
+        }
+        let chosen = observed[index];
+        extra.push(chosen);
+        for (kept, candidate) in nearest_kept.iter_mut().zip(observed) {
+            *kept = (*kept).min(hamming(candidate, chosen));
+        }
+    }
+    extra
+}
+
 fn hamming(lhs: &[u8; 32], rhs: &[u8; 32]) -> u32 {
     lhs.iter().zip(rhs).map(|(a, b)| (a ^ b).count_ones()).sum()
 }
@@ -114,8 +152,8 @@ fn double_sphere_radius(camera: &DoubleSphereCamera, theta: f64) -> Option<f64> 
 }
 
 /// Fits COLMAP's `OPENCV_FISHEYE` model to a Double Sphere camera; see the
-/// module documentation. Returns `None` when the image corners do not
-/// unproject or the fit is degenerate.
+/// module documentation. Returns `None` when no point between an image
+/// corner and the principal point unprojects, or the fit is degenerate.
 pub fn fit_opencv_fisheye(camera: &DoubleSphereCamera) -> Option<FisheyeFit> {
     let (width, height) = (f64::from(camera.width), f64::from(camera.height));
     let mut max_angle = 0.0_f64;
@@ -129,7 +167,16 @@ pub fn fit_opencv_fisheye(camera: &DoubleSphereCamera) -> Option<FisheyeFit> {
         (0.0, height / 2.0),
         (width, height / 2.0),
     ] {
-        let ray = camera.unproject(&Point2::new(x, y))?;
+        // A corner outside the model's domain (a lens wider than the Double
+        // Sphere model reaches) is moved toward the principal point until it
+        // unprojects, so the fit covers the domain's edge.
+        let ray = (0..64).find_map(|step| {
+            let scale = 1.0 - f64::from(step) / 64.0;
+            camera.unproject(&Point2::new(
+                camera.cx + (x - camera.cx) * scale,
+                camera.cy + (y - camera.cy) * scale,
+            ))
+        })?;
         max_angle = max_angle.max(ray.z.clamp(-1.0, 1.0).acos());
     }
     if !max_angle.is_finite() || max_angle <= 0.0 {
@@ -243,6 +290,7 @@ impl NfrMapper {
         }
 
         let mut descriptors = LandmarkDescriptorStore::new();
+        let mut extra_descriptors = Vec::new();
         for (&track_id, landmark) in &self.lmdb.landmarks {
             let (Some(position_in_host), Some(world_from_imu), Some(imu_from_camera)) = (
                 landmark.position_in_host(),
@@ -294,6 +342,9 @@ impl NfrMapper {
                 })
                 .expect("at least two observations");
             descriptors.insert(track_id, orb_descriptor_to_f32(medoid));
+            for extra in diverse_descriptors(&observed_descriptors, medoid) {
+                extra_descriptors.push((track_id, orb_descriptor_to_f32(extra)));
+            }
 
             for observation in &observations {
                 if let Some(keyframe) = map.keyframes.get_mut(&observation.frame_id) {
@@ -308,6 +359,7 @@ impl NfrMapper {
         Ok(LocalizationMapExport {
             map,
             descriptors,
+            extra_descriptors,
             images,
             camera_fits,
         })
@@ -363,6 +415,56 @@ mod tests {
                 "({x}, {y}) -> {projected}"
             );
         }
+    }
+
+    #[test]
+    fn opencv_fisheye_fit_covers_a_lens_wider_than_the_model() {
+        // A RealSense T265 fisheye (OpenLORIS-Scene) as Double Sphere: its
+        // image corners lie outside the model's domain.
+        let camera = DoubleSphereCamera::new(
+            284.7777, 285.9001, 425.2448, 398.4679, 0.0, 0.6485, 848, 800,
+        )
+        .expect("camera");
+        assert!(camera.unproject(&Point2::new(0.0, 0.0)).is_none());
+        let fit = fit_opencv_fisheye(&camera).expect("fit");
+        assert!(fit.max_angle > 1.8, "max angle {}", fit.max_angle);
+        assert!(fit.max_error_px < 0.5, "fit error {}", fit.max_error_px);
+        let fisheye = Camera {
+            id: 1,
+            model: CameraModel::OpenCvFisheye,
+            width: camera.width,
+            height: camera.height,
+            params: fit.params.to_vec(),
+        };
+        for (x, y) in [(424.0, 400.0), (40.0, 400.0), (424.0, 20.0), (120.0, 120.0)] {
+            let ray = camera.unproject(&Point2::new(x, y)).expect("ray");
+            let projected = fisheye.project(&Point3::from(ray)).expect("projects");
+            assert!(
+                (projected - Point2::new(x, y)).norm() < 0.5,
+                "({x}, {y}) -> {projected}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_descriptors_are_the_farthest_views_kept_apart() {
+        let with_bits = |bits: &[usize]| {
+            let mut descriptor = [0_u8; 32];
+            for &bit in bits {
+                descriptor[bit / 8] |= 1 << (bit % 8);
+            }
+            descriptor
+        };
+        let medoid = with_bits(&[]);
+        // 30 bits from the medoid; 28 bits from it but 2 from the first;
+        // 25 bits from both; 10 bits from the medoid.
+        let far = with_bits(&(0..30).collect::<Vec<_>>());
+        let near_far = with_bits(&(0..28).collect::<Vec<_>>());
+        let other = with_bits(&(100..125).collect::<Vec<_>>());
+        let close = with_bits(&(200..210).collect::<Vec<_>>());
+        let observed = [&medoid, &close, &near_far, &far, &other];
+        assert_eq!(diverse_descriptors(&observed, &medoid), vec![&far, &other]);
+        assert!(diverse_descriptors(&[&medoid, &close], &medoid).is_empty());
     }
 
     #[test]

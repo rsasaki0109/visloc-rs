@@ -1,6 +1,7 @@
 //! Anchored visual reprojection factors: the f64 path and the f32 Sophus / Eigen bit-parity chain.
 
 use super::*;
+use crate::fma::FusedMulAdd;
 
 pub type Matrix2x6 = SMatrix<f64, 2, 6>;
 
@@ -36,7 +37,7 @@ pub(crate) struct VisualChainF32 {
 /// without changing the f64 compatibility path or IMU factors.
 #[inline]
 pub(super) fn eigen_vector2_squared_norm_f32(x: f32, y: f32) -> f32 {
-    y.mul_add(y, x * x)
+    y.fused_mul_add(y, x * x)
 }
 
 /// Literal visual row before it is scattered into the global AOM columns.
@@ -419,8 +420,8 @@ pub(super) fn sophus_quat_product_current_packet_f32(
     let b_vec = [bx, by, bz, bw];
     let mut negative = [0.0_f32; 4];
     for lane in 0..4 {
-        negative[lane] = b_vec[lane].mul_add(a_ff[lane], -product[lane]);
-        product[lane] = b_vec[lane].mul_add(a_ff[lane], product[lane]);
+        negative[lane] = b_vec[lane].fused_mul_add(a_ff[lane], -product[lane]);
+        product[lane] = b_vec[lane].fused_mul_add(a_ff[lane], product[lane]);
     }
     product[3] = negative[3];
 
@@ -430,8 +431,8 @@ pub(super) fn sophus_quat_product_current_packet_f32(
     let mut second_negative = [0.0_f32; 4];
     let mut second_positive = [0.0_f32; 4];
     for lane in 0..4 {
-        second_negative[lane] = (-b52[lane]).mul_add(a49[lane], product[lane]);
-        second_positive[lane] = a49[lane].mul_add(b52[lane], product[lane]);
+        second_negative[lane] = (-b52[lane]).fused_mul_add(a49[lane], product[lane]);
+        second_positive[lane] = a49[lane].fused_mul_add(b52[lane], product[lane]);
     }
     product = second_positive;
     product[3] = second_negative[3];
@@ -440,7 +441,7 @@ pub(super) fn sophus_quat_product_current_packet_f32(
     let b89 = [by, bz, bx, bz];
     let a92 = [az, ax, ay, az];
     for lane in 0..4 {
-        product[lane] = (-a92[lane]).mul_add(b89[lane], product[lane]);
+        product[lane] = (-a92[lane]).fused_mul_add(b89[lane], product[lane]);
     }
 
     // 0x3055bd..0x3055e4: vmulps followed by the Packet4f pair reduction,
@@ -518,8 +519,8 @@ fn sophus_quat_product_relpose_out_of_line_f32(
     let mut first_negative = [0.0_f32; 4];
     let mut first_positive = [0.0_f32; 4];
     for lane in 0..4 {
-        first_negative[lane] = (-b3f[lane]).mul_add(a24[lane], b_times_aw[lane]);
-        first_positive[lane] = b3f[lane].mul_add(a24[lane], b_times_aw[lane]);
+        first_negative[lane] = (-b3f[lane]).fused_mul_add(a24[lane], b_times_aw[lane]);
+        first_positive[lane] = b3f[lane].fused_mul_add(a24[lane], b_times_aw[lane]);
     }
     first_positive[3] = first_negative[3];
 
@@ -527,15 +528,15 @@ fn sophus_quat_product_relpose_out_of_line_f32(
     let mut second_negative = [0.0_f32; 4];
     let mut second_positive = [0.0_f32; 4];
     for lane in 0..4 {
-        second_negative[lane] = (-b52[lane]).mul_add(a49[lane], first_positive[lane]);
-        second_positive[lane] = b52[lane].mul_add(a49[lane], first_positive[lane]);
+        second_negative[lane] = (-b52[lane]).fused_mul_add(a49[lane], first_positive[lane]);
+        second_positive[lane] = b52[lane].fused_mul_add(a49[lane], first_positive[lane]);
     }
     second_positive[3] = second_negative[3];
 
     // 2bcc1e: final signed partial using the saved 0x89 permutation.
     let mut product = [0.0_f32; 4];
     for lane in 0..4 {
-        product[lane] = (-a92[lane]).mul_add(b89[lane], second_positive[lane]);
+        product[lane] = (-a92[lane]).fused_mul_add(b89[lane], second_positive[lane]);
     }
 
     let x2 = product[0] * product[0];
@@ -572,25 +573,25 @@ pub(super) fn sophus_rotate_relpose_out_of_line_f32(
     let mut x3 = vx * q.j;
 
     // First cross product, doubled (2bcb34..2bcb77).
-    x5 = q.j.mul_add(vz, -x5);
-    x4 = qz.mul_add(vx, -x4);
-    x3 = vy.mul_add(q.i, -x3);
+    x5 = q.j.fused_mul_add(vz, -x5);
+    x4 = qz.fused_mul_add(vx, -x4);
+    x3 = vy.fused_mul_add(q.i, -x3);
     x5 += x5;
     x4 += x4;
     x3 += x3;
 
     // q.vec().cross(2 * uv), using the same scalar temporaries and FMA order.
     let mut x11 = x5 * q.j;
-    x11 = x4.mul_add(q.i, -x11);
+    x11 = x4.fused_mul_add(q.i, -x11);
     let mut x2 = x3 * q.i;
-    x2 = qz.mul_add(x5, -x2);
+    x2 = qz.fused_mul_add(x5, -x2);
     let qz_x4 = qz * x4;
-    let x1 = x3.mul_add(q.j, -qz_x4);
+    let x1 = x3.fused_mul_add(q.j, -qz_x4);
 
     // Add p + q.w() * (2 * uv), then contract the cross terms.
-    x4 = x4.mul_add(q.w, vy);
-    x5 = x5.mul_add(q.w, vx);
-    x3 = x3.mul_add(q.w, vz);
+    x4 = x4.fused_mul_add(q.w, vy);
+    x5 = x5.fused_mul_add(q.w, vx);
+    x3 = x3.fused_mul_add(q.w, vz);
     let y = x2 + x4;
     let x = x1 + x5;
     let z = x3 + x11;
@@ -616,12 +617,12 @@ pub(crate) fn sophus_rotate_step_packet_f32(
     // 0x2f0094..0x2f00b9: three packed partial products.  The duplicated
     // lanes below correspond to different source packets and therefore use
     // different FMA accumulators in the native body.
-    let uv_x_a = (-q.k).mul_add(py, q.j * pz);
-    let uv_y_a = (-q.i).mul_add(pz, q.k * px);
-    let uv_y_b = q.k.mul_add(px, -(q.i * pz));
-    let uv_z_b = q.i.mul_add(py, -(q.j * px));
-    let uv_z_c = q.i.mul_add(py, -(px * q.j));
-    let uv_x_c = q.j.mul_add(pz, -(py * q.k));
+    let uv_x_a = (-q.k).fused_mul_add(py, q.j * pz);
+    let uv_y_a = (-q.i).fused_mul_add(pz, q.k * px);
+    let uv_y_b = q.k.fused_mul_add(px, -(q.i * pz));
+    let uv_z_b = q.i.fused_mul_add(py, -(q.j * px));
+    let uv_z_c = q.i.fused_mul_add(py, -(px * q.j));
+    let uv_x_c = q.j.fused_mul_add(pz, -(py * q.k));
 
     let uv2_x_a = uv_x_a + uv_x_a;
     let uv2_y_a = uv_y_a + uv_y_a;
@@ -631,15 +632,15 @@ pub(crate) fn sophus_rotate_step_packet_f32(
     let uv2_x_c = uv_x_c + uv_x_c;
 
     // 0x2f00ca..0x2f00e8: packed x/y cross and scalar z cross.
-    let cross_x = q.j.mul_add(uv2_z_c, -(q.k * uv2_y_b));
-    let cross_y = q.k.mul_add(uv2_x_c, -(q.i * uv2_z_b));
-    let cross_z = q.i.mul_add(uv2_y_b, -(q.j * uv2_x_c));
+    let cross_x = q.j.fused_mul_add(uv2_z_c, -(q.k * uv2_y_b));
+    let cross_y = q.k.fused_mul_add(uv2_x_c, -(q.i * uv2_z_b));
+    let cross_z = q.i.fused_mul_add(uv2_y_b, -(q.j * uv2_x_c));
 
     // 0x2f00fa..0x2f0108: packet q.w action plus the second cross.
     Vector3::new(
-        q.w.mul_add(uv2_x_a, px) + cross_x,
-        q.w.mul_add(uv2_y_a, py) + cross_y,
-        q.w.mul_add(uv2_z_c, pz) + cross_z,
+        q.w.fused_mul_add(uv2_x_a, px) + cross_x,
+        q.w.fused_mul_add(uv2_y_a, py) + cross_y,
+        q.w.fused_mul_add(uv2_z_c, pz) + cross_z,
     )
 }
 
@@ -692,22 +693,22 @@ pub(super) fn sophus_quat_product_camera_prefix_f32(
     let mut x5 = [0.0_f32; 4];
     let mut x8 = [aw * bx, aw * by, aw * bz, aw * bw];
     for lane in 0..4 {
-        x5[lane] = (-p3f[lane]).mul_add(c24[lane], x8[lane]);
-        x8[lane] = p3f[lane].mul_add(c24[lane], x8[lane]);
+        x5[lane] = (-p3f[lane]).fused_mul_add(c24[lane], x8[lane]);
+        x8[lane] = p3f[lane].fused_mul_add(c24[lane], x8[lane]);
     }
     x8[3] = x5[3];
     let p52 = [bz, bx, by, by];
     let c49 = [ay, az, ax, ay];
     let mut x2 = [0.0_f32; 4];
     for lane in 0..4 {
-        x2[lane] = (-p52[lane]).mul_add(c49[lane], x8[lane]);
-        x8[lane] = p52[lane].mul_add(c49[lane], x8[lane]);
+        x2[lane] = (-p52[lane]).fused_mul_add(c49[lane], x8[lane]);
+        x8[lane] = p52[lane].fused_mul_add(c49[lane], x8[lane]);
     }
     x8[3] = x2[3];
     let p89 = [by, bz, bx, bz];
     let c92 = [az, ax, ay, az];
     for lane in 0..4 {
-        x8[lane] = (-p89[lane]).mul_add(c92[lane], x8[lane]);
+        x8[lane] = (-p89[lane]).fused_mul_add(c92[lane], x8[lane]);
     }
     let pair0 = x8[0] * x8[0] + x8[2] * x8[2];
     let pair1 = x8[1] * x8[1] + x8[3] * x8[3];
@@ -752,23 +753,23 @@ pub(super) fn sophus_quat_product_camera_suffix_f32(
     let mut x11 = [0.0_f32; 4];
     let mut x8 = [0.0_f32; 4];
     for lane in 0..4 {
-        x11[lane] = b_vec[lane].mul_add(a_ff[lane], -x1[lane]);
-        x8[lane] = b_vec[lane].mul_add(a_ff[lane], x1[lane]);
+        x11[lane] = b_vec[lane].fused_mul_add(a_ff[lane], -x1[lane]);
+        x8[lane] = b_vec[lane].fused_mul_add(a_ff[lane], x1[lane]);
     }
     x8[3] = x11[3];
 
     let b52 = [bz, bx, by, by];
     let a49 = [ay, az, ax, ay];
     for lane in 0..4 {
-        x1[lane] = (-b52[lane]).mul_add(a49[lane], x8[lane]);
-        x8[lane] = a49[lane].mul_add(b52[lane], x8[lane]);
+        x1[lane] = (-b52[lane]).fused_mul_add(a49[lane], x8[lane]);
+        x8[lane] = a49[lane].fused_mul_add(b52[lane], x8[lane]);
     }
     x8[3] = x1[3];
 
     let b89 = [by, bz, bx, bz];
     let a92 = [az, ax, ay, az];
     for lane in 0..4 {
-        x8[lane] = (-b89[lane]).mul_add(a92[lane], x8[lane]);
+        x8[lane] = (-b89[lane]).fused_mul_add(a92[lane], x8[lane]);
     }
     let pair0 = x8[0] * x8[0] + x8[2] * x8[2];
     let pair1 = x8[1] * x8[1] + x8[3] * x8[3];
@@ -799,8 +800,8 @@ pub(super) fn eigen_matrix_product_3x3_f32(
     for row in 0..3 {
         for column in 0..3 {
             let value = left[(row, 1)] * right[(1, column)];
-            let value = left[(row, 2)].mul_add(right[(2, column)], value);
-            result[(row, column)] = left[(row, 0)].mul_add(right[(0, column)], value);
+            let value = left[(row, 2)].fused_mul_add(right[(2, column)], value);
+            result[(row, column)] = left[(row, 0)].fused_mul_add(right[(0, column)], value);
         }
     }
     result
@@ -818,11 +819,11 @@ pub(super) fn eigen_matrix_product_6x6_f32(
     for row in 0..6 {
         for column in 0..6 {
             let value = left[(row, 0)] * right[(0, column)];
-            let value = left[(row, 1)].mul_add(right[(1, column)], value);
-            let value = left[(row, 2)].mul_add(right[(2, column)], value);
-            let value = left[(row, 3)].mul_add(right[(3, column)], value);
-            let value = left[(row, 4)].mul_add(right[(4, column)], value);
-            result[(row, column)] = left[(row, 5)].mul_add(right[(5, column)], value);
+            let value = left[(row, 1)].fused_mul_add(right[(1, column)], value);
+            let value = left[(row, 2)].fused_mul_add(right[(2, column)], value);
+            let value = left[(row, 3)].fused_mul_add(right[(3, column)], value);
+            let value = left[(row, 4)].fused_mul_add(right[(4, column)], value);
+            result[(row, column)] = left[(row, 5)].fused_mul_add(right[(5, column)], value);
         }
     }
     result
@@ -849,11 +850,11 @@ pub(super) fn eigen_matrix_product_2x6_f32(
             // packet assignment observed in the pinned clean libbasalt:
             // (k4 + k5) + k3, then (k1 + k2) + k0, then the pair add.
             let high = left[(row, 4)] * right[(4, column)];
-            let high = left[(row, 5)].mul_add(right[(5, column)], high);
-            let high = left[(row, 3)].mul_add(right[(3, column)], high);
+            let high = left[(row, 5)].fused_mul_add(right[(5, column)], high);
+            let high = left[(row, 3)].fused_mul_add(right[(3, column)], high);
             let low = left[(row, 1)] * right[(1, column)];
-            let low = left[(row, 2)].mul_add(right[(2, column)], low);
-            let low = left[(row, 0)].mul_add(right[(0, column)], low);
+            let low = left[(row, 2)].fused_mul_add(right[(2, column)], low);
+            let low = left[(row, 0)].fused_mul_add(right[(0, column)], low);
             result[(row, column)] = high + low;
         }
     }
@@ -924,19 +925,19 @@ pub(super) fn sophus_rotate_f32(
     // Sophus `SO3Base::operator*(Point)` is `p + q.w() * uv +
     // q.vec().cross(uv)` after `uv = q.vec().cross(p); uv += uv`.
     // Spell the pinned native cross/FMA lane order explicitly.
-    let uv_x = q.j.mul_add(point.z, -(q.k * point.y));
-    let uv_y = q.k.mul_add(point.x, -(q.i * point.z));
-    let uv_z = q.i.mul_add(point.y, -(q.j * point.x));
+    let uv_x = q.j.fused_mul_add(point.z, -(q.k * point.y));
+    let uv_y = q.k.fused_mul_add(point.x, -(q.i * point.z));
+    let uv_z = q.i.fused_mul_add(point.y, -(q.j * point.x));
     let uv2_x = uv_x + uv_x;
     let uv2_y = uv_y + uv_y;
     let uv2_z = uv_z + uv_z;
-    let cross_x = q.j.mul_add(uv2_z, -(q.k * uv2_y));
-    let cross_y = q.k.mul_add(uv2_x, -(q.i * uv2_z));
-    let cross_z = q.i.mul_add(uv2_y, -(q.j * uv2_x));
+    let cross_x = q.j.fused_mul_add(uv2_z, -(q.k * uv2_y));
+    let cross_y = q.k.fused_mul_add(uv2_x, -(q.i * uv2_z));
+    let cross_z = q.i.fused_mul_add(uv2_y, -(q.j * uv2_x));
     Vector3::new(
-        q.w.mul_add(uv2_x, point.x) + cross_x,
-        q.w.mul_add(uv2_y, point.y) + cross_y,
-        q.w.mul_add(uv2_z, point.z) + cross_z,
+        q.w.fused_mul_add(uv2_x, point.x) + cross_x,
+        q.w.fused_mul_add(uv2_y, point.y) + cross_y,
+        q.w.fused_mul_add(uv2_z, point.z) + cross_z,
     )
 }
 
@@ -959,12 +960,12 @@ pub(super) fn sophus_rotate_difference_f32(
     // The packet layout is [x,y], [y,z], and [z,x].  Keep each independently
     // formed lane: Eigen's three products are not common-subexpression
     // eliminated, and their duplicate cross terms can round differently.
-    let uv_a_x = (-q.k).mul_add(dy, q.j * dz);
-    let uv_a_y = (-q.i).mul_add(dz, q.k * dx);
-    let uv_b_y = q.k.mul_add(dx, -(q.i * dz));
-    let uv_b_z = q.i.mul_add(dy, -(q.j * dx));
-    let uv_c_z = q.i.mul_add(dy, -(q.j * dx));
-    let uv_c_x = q.j.mul_add(dz, -(q.k * dy));
+    let uv_a_x = (-q.k).fused_mul_add(dy, q.j * dz);
+    let uv_a_y = (-q.i).fused_mul_add(dz, q.k * dx);
+    let uv_b_y = q.k.fused_mul_add(dx, -(q.i * dz));
+    let uv_b_z = q.i.fused_mul_add(dy, -(q.j * dx));
+    let uv_c_z = q.i.fused_mul_add(dy, -(q.j * dx));
+    let uv_c_x = q.j.fused_mul_add(dz, -(q.k * dy));
 
     let uv2_a_x = uv_a_x + uv_a_x;
     let uv2_a_y = uv_a_y + uv_a_y;
@@ -974,14 +975,14 @@ pub(super) fn sophus_rotate_difference_f32(
     let uv2_c_x = uv_c_x + uv_c_x;
 
     // Second cross packet: [cross.x, cross.y].
-    let cross_x = q.j.mul_add(uv2_c_z, -(q.k * uv2_b_y));
-    let cross_y = q.k.mul_add(uv2_c_x, -(q.i * uv2_b_z));
-    let cross_z = q.i.mul_add(uv2_b_y, -(q.j * uv2_c_x));
+    let cross_x = q.j.fused_mul_add(uv2_c_z, -(q.k * uv2_b_y));
+    let cross_y = q.k.fused_mul_add(uv2_c_x, -(q.i * uv2_b_z));
+    let cross_z = q.i.fused_mul_add(uv2_b_y, -(q.j * uv2_c_x));
 
     Vector3::new(
-        q.w.mul_add(uv2_a_x, dx) + cross_x,
-        q.w.mul_add(uv2_a_y, dy) + cross_y,
-        q.w.mul_add(uv2_c_z, dz) + cross_z,
+        q.w.fused_mul_add(uv2_a_x, dx) + cross_x,
+        q.w.fused_mul_add(uv2_a_y, dy) + cross_y,
+        q.w.fused_mul_add(uv2_c_z, dz) + cross_z,
     )
 }
 
@@ -1021,14 +1022,14 @@ pub(super) fn eigen_quaternion_matrix_f32(rotation: UnitQuaternion<f32>) -> Matr
     let tzz = tz * q.k;
     Matrix3::new(
         1.0_f32 - (tyy + tzz),
-        (-tz).mul_add(q.w, txy),
-        ty.mul_add(q.w, txz),
-        tz.mul_add(q.w, txy),
-        1.0_f32 - q.i.mul_add(tx, tzz),
-        (-tx).mul_add(q.w, tyz),
-        (-ty).mul_add(q.w, txz),
-        tx.mul_add(q.w, tyz),
-        1.0_f32 - q.i.mul_add(tx, tyy),
+        (-tz).fused_mul_add(q.w, txy),
+        ty.fused_mul_add(q.w, txz),
+        tz.fused_mul_add(q.w, txy),
+        1.0_f32 - q.i.fused_mul_add(tx, tzz),
+        (-tx).fused_mul_add(q.w, tyz),
+        (-ty).fused_mul_add(q.w, txz),
+        tx.fused_mul_add(q.w, tyz),
+        1.0_f32 - q.i.fused_mul_add(tx, tyy),
     )
 }
 
@@ -1050,14 +1051,14 @@ pub(super) fn eigen_quaternion_matrix_native_f32(rotation: UnitQuaternion<f32>) 
     let tzz = tz * q.k;
     Matrix3::new(
         1.0_f32 - (tyy + tzz),
-        (-tz).mul_add(q.w, txy),
-        ty.mul_add(q.w, txz),
-        tz.mul_add(q.w, txy),
-        1.0_f32 - q.i.mul_add(tx, tzz),
-        (-tx).mul_add(q.w, tyz),
-        (-ty).mul_add(q.w, txz),
-        tx.mul_add(q.w, tyz),
-        1.0_f32 - q.i.mul_add(tx, tyy),
+        (-tz).fused_mul_add(q.w, txy),
+        ty.fused_mul_add(q.w, txz),
+        tz.fused_mul_add(q.w, txy),
+        1.0_f32 - q.i.fused_mul_add(tx, tzz),
+        (-tx).fused_mul_add(q.w, tyz),
+        (-ty).fused_mul_add(q.w, txz),
+        tx.fused_mul_add(q.w, tyz),
+        1.0_f32 - q.i.fused_mul_add(tx, tyy),
     )
 }
 
@@ -1076,9 +1077,11 @@ pub(super) fn eigen_homogeneous_landmark_direction_f32(
     for row in 0..3 {
         for column in 0..2 {
             let pair23 = transform_top_left[(row, 2)] * source_jup[(2, column)];
-            let pair23 = transform_top_left[(row, 3)].mul_add(source_jup[(3, column)], pair23);
+            let pair23 =
+                transform_top_left[(row, 3)].fused_mul_add(source_jup[(3, column)], pair23);
             let pair01 = transform_top_left[(row, 0)] * source_jup[(0, column)];
-            let pair01 = transform_top_left[(row, 1)].mul_add(source_jup[(1, column)], pair01);
+            let pair01 =
+                transform_top_left[(row, 1)].fused_mul_add(source_jup[(1, column)], pair01);
             result[(row, column)] = pair23 + pair01;
         }
     }
@@ -1181,9 +1184,9 @@ pub(super) fn eigen_homogeneous_point_product_f32(
         transform[(3, 0)] * x,
     ];
     for row in 0..4 {
-        accumulator[row] = transform[(row, 1)].mul_add(y, accumulator[row]);
-        accumulator[row] = transform[(row, 2)].mul_add(z, accumulator[row]);
-        accumulator[row] = transform[(row, 3)].mul_add(rho, accumulator[row]);
+        accumulator[row] = transform[(row, 1)].fused_mul_add(y, accumulator[row]);
+        accumulator[row] = transform[(row, 2)].fused_mul_add(z, accumulator[row]);
+        accumulator[row] = transform[(row, 3)].fused_mul_add(rho, accumulator[row]);
     }
     SMatrix::<f32, 4, 1>::from_column_slice(&accumulator)
 }
@@ -1226,10 +1229,10 @@ pub(super) fn project_double_sphere_with_jacobian_f32(
     let w2 = (w1 + xi) / w2_denominator.sqrt();
     let valid = z > -w2 * d1;
 
-    let k = xi.mul_add(d1, z);
-    let d2 = k.mul_add(k, r2).sqrt();
+    let k = xi.fused_mul_add(d1, z);
+    let d2 = k.fused_mul_add(k, r2).sqrt();
     let one_minus_alpha = 1.0_f32 - alpha;
-    let norm = alpha.mul_add(d2, one_minus_alpha * k);
+    let norm = alpha.fused_mul_add(d2, one_minus_alpha * k);
     if !valid || !norm.is_finite() || norm <= f32::EPSILON {
         return None;
     }
@@ -1240,17 +1243,17 @@ pub(super) fn project_double_sphere_with_jacobian_f32(
     let tt2 = xi * z / d1 + 1.0_f32;
     let d_norm_d_r2 =
         (xi * (1.0_f32 - alpha) / d1 + alpha * (xi * k / d1 + 1.0_f32) / d2) / norm_sq;
-    let tmp2_numerator = tt2.mul_add(one_minus_alpha, alpha * k * tt2 / d2);
+    let tmp2_numerator = tt2.fused_mul_add(one_minus_alpha, alpha * k * tt2 / d2);
     let tmp2 = tmp2_numerator / norm_sq;
     let mut jacobian = SMatrix::<f32, 2, 3>::zeros();
-    jacobian[(0, 0)] = (-xx).mul_add(d_norm_d_r2, 1.0_f32 / norm) * fx;
+    jacobian[(0, 0)] = (-xx).fused_mul_add(d_norm_d_r2, 1.0_f32 / norm) * fx;
     jacobian[(1, 0)] = -fy * xy * d_norm_d_r2;
     jacobian[(0, 1)] = -fx * xy * d_norm_d_r2;
-    jacobian[(1, 1)] = (-yy).mul_add(d_norm_d_r2, 1.0_f32 / norm) * fy;
+    jacobian[(1, 1)] = (-yy).fused_mul_add(d_norm_d_r2, 1.0_f32 / norm) * fy;
     jacobian[(0, 2)] = -fx * x * tmp2;
     jacobian[(1, 2)] = -fy * y * tmp2;
     Some((
-        Vector2::new(fx.mul_add(mx, cx), fy.mul_add(my, cy)),
+        Vector2::new(fx.fused_mul_add(mx, cx), fy.fused_mul_add(my, cy)),
         jacobian,
     ))
 }
@@ -1274,37 +1277,37 @@ pub(super) fn eigen_landmark_jacobian_f32(
     // remains portable while preserving the packet lane order and operation
     // grouping in source.
     let pair01 = [
-        projection_jacobian[(0, 1)].mul_add(
+        projection_jacobian[(0, 1)].fused_mul_add(
             point_wrt_landmark[(1, 0)],
             projection_jacobian[(0, 0)] * point_wrt_landmark[(0, 0)],
         ),
-        projection_jacobian[(1, 1)].mul_add(
+        projection_jacobian[(1, 1)].fused_mul_add(
             point_wrt_landmark[(1, 0)],
             projection_jacobian[(1, 0)] * point_wrt_landmark[(0, 0)],
         ),
-        projection_jacobian[(0, 1)].mul_add(
+        projection_jacobian[(0, 1)].fused_mul_add(
             point_wrt_landmark[(1, 1)],
             projection_jacobian[(0, 0)] * point_wrt_landmark[(0, 1)],
         ),
-        projection_jacobian[(1, 1)].mul_add(
+        projection_jacobian[(1, 1)].fused_mul_add(
             point_wrt_landmark[(1, 1)],
             projection_jacobian[(1, 0)] * point_wrt_landmark[(0, 1)],
         ),
     ];
     let pair23 = [
-        projection_jacobian[(0, 3)].mul_add(
+        projection_jacobian[(0, 3)].fused_mul_add(
             point_wrt_landmark[(3, 0)],
             projection_jacobian[(0, 2)] * point_wrt_landmark[(2, 0)],
         ),
-        projection_jacobian[(1, 3)].mul_add(
+        projection_jacobian[(1, 3)].fused_mul_add(
             point_wrt_landmark[(3, 0)],
             projection_jacobian[(1, 2)] * point_wrt_landmark[(2, 0)],
         ),
-        projection_jacobian[(0, 3)].mul_add(
+        projection_jacobian[(0, 3)].fused_mul_add(
             point_wrt_landmark[(3, 1)],
             projection_jacobian[(0, 2)] * point_wrt_landmark[(2, 1)],
         ),
-        projection_jacobian[(1, 3)].mul_add(
+        projection_jacobian[(1, 3)].fused_mul_add(
             point_wrt_landmark[(3, 1)],
             projection_jacobian[(1, 2)] * point_wrt_landmark[(2, 1)],
         ),
@@ -1316,20 +1319,20 @@ pub(super) fn eigen_landmark_jacobian_f32(
         pair01[3] + pair23[3],
     ];
 
-    let tail_pair01 = projection_jacobian[(0, 1)].mul_add(
+    let tail_pair01 = projection_jacobian[(0, 1)].fused_mul_add(
         point_wrt_landmark[(1, 2)],
         projection_jacobian[(0, 0)] * point_wrt_landmark[(0, 2)],
     );
-    let tail_pair23 = projection_jacobian[(0, 3)].mul_add(
+    let tail_pair23 = projection_jacobian[(0, 3)].fused_mul_add(
         point_wrt_landmark[(3, 2)],
         projection_jacobian[(0, 2)] * point_wrt_landmark[(2, 2)],
     );
     let tail_row0 = tail_pair01 + tail_pair23;
-    let tail_pair01 = projection_jacobian[(1, 1)].mul_add(
+    let tail_pair01 = projection_jacobian[(1, 1)].fused_mul_add(
         point_wrt_landmark[(1, 2)],
         projection_jacobian[(1, 0)] * point_wrt_landmark[(0, 2)],
     );
-    let tail_pair23 = projection_jacobian[(1, 3)].mul_add(
+    let tail_pair23 = projection_jacobian[(1, 3)].fused_mul_add(
         point_wrt_landmark[(3, 2)],
         projection_jacobian[(1, 2)] * point_wrt_landmark[(2, 2)],
     );
@@ -1358,8 +1361,8 @@ pub(super) fn eigen_relative_pose_jacobian_f32(
     for row in 0..2 {
         for column in 0..6 {
             let pair01 = projection_jacobian[(row, 0)] * point_wrt_relative_pose[(0, column)];
-            let pair01 =
-                projection_jacobian[(row, 1)].mul_add(point_wrt_relative_pose[(1, column)], pair01);
+            let pair01 = projection_jacobian[(row, 1)]
+                .fused_mul_add(point_wrt_relative_pose[(1, column)], pair01);
             let pair23 = projection_jacobian[(row, 2)] * point_wrt_relative_pose[(2, column)];
             result[(row, column)] = pair01 + pair23;
         }

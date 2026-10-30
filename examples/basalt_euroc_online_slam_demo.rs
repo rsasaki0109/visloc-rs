@@ -33,6 +33,20 @@
 //! `--save-map DIR` also saves the final map (keyframe poses, ORB landmarks
 //! and descriptors, as a COLMAP text model plus descriptor store) for
 //! `basalt_euroc_localize_demo`; see `examples/basalt_map/map_files.rs`.
+//! With `--equalize-local-contrast`, the mapper equalizes each keyframe
+//! image's local contrast before ORB extraction
+//! (`visloc_basalt::contrast::LocalContrast`, for maps that must localize
+//! images taken under other lighting); `map.json` records it, and
+//! localization applies the same to its images. The VIO tracks the raw
+//! images either way. With `--smooth-features SIGMA`, the mapper blurs each
+//! keyframe image (after any equalization) before ORB extraction
+//! (`visloc_basalt::smoothing::GaussianSmoothing`, for grainy images whose
+//! noise ORB picks up); `map.json` records it too. `--detector-quality Q`
+//! sets the ORB detector's quality level (upstream 0.01; lower keeps weak
+//! texture next to strong corners), recorded too. With `--extra-descriptors`, each landmark also keeps
+//! the descriptors of up to three of its views that differ most from its
+//! main one (`landmark_descriptors_extra.txt`), which localization matches
+//! too.
 
 #[path = "basalt_map/map_files.rs"]
 mod map_files;
@@ -50,9 +64,11 @@ use std::{
 
 use serde_json::json;
 use visloc_basalt::{
+    contrast::LocalContrast,
     mapper_online::{
         run_mapper_thread, OnlineIngestReport, OnlineMapperConfig, OnlineNfrMapper, SentImageFilter,
     },
+    smoothing::GaussianSmoothing,
     vio::{FramePoseData, FrameStateData, MargData},
     BasaltAdapterError, BasaltAdapterOutput, BasaltVioEstimatorAdapter, EurocSensorDataset,
     RejectReason, TimingBreakdown,
@@ -77,6 +93,13 @@ struct Args {
     frontend_stats_csv: Option<PathBuf>,
     /// Save the final map for localization (`map_files` layout).
     save_map: Option<PathBuf>,
+    /// Equalize the keyframes' local contrast before ORB extraction.
+    equalize_local_contrast: bool,
+    /// `--smooth-features SIGMA`: blur before ORB extraction.
+    feature_smoothing: Option<f64>,
+    /// `--detector-quality Q`: the ORB detector's quality level.
+    feature_quality_level: Option<f32>,
+    extra_descriptors: bool,
     max_frames: Option<usize>,
     optimize_every_k: usize,
     periodic_iterations: usize,
@@ -365,6 +388,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             loop_closure_max_rotation_error_deg: args.loop_closure_max_rotation_error_deg,
             local_ba_window: args.local_ba_window,
             local_ba_iterations: args.local_ba_iterations,
+            local_contrast: args.equalize_local_contrast.then(LocalContrast::default),
+            feature_smoothing: args
+                .feature_smoothing
+                .map(|sigma| GaussianSmoothing { sigma }),
+            feature_quality_level: args.feature_quality_level,
             ..OnlineMapperConfig::default()
         },
     );
@@ -821,6 +849,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &export,
             calibration,
             mapper.feature_config.max_points,
+            &map_files::Frontend {
+                local_contrast: args.equalize_local_contrast.then(LocalContrast::default),
+                smoothing: args
+                    .feature_smoothing
+                    .map(|sigma| GaussianSmoothing { sigma }),
+                quality_level: args.feature_quality_level,
+            },
+            args.extra_descriptors,
         )?;
         eprintln!(
             "saved map: images={} landmarks={} observations={} -> {}",
@@ -1101,6 +1137,10 @@ impl Args {
         let mut out_dir = PathBuf::from("target/basalt_euroc_online_slam_demo");
         let mut frontend_stats_csv = None;
         let mut save_map = None;
+        let mut equalize_local_contrast = false;
+        let mut feature_smoothing = None;
+        let mut feature_quality_level = None;
+        let mut extra_descriptors = false;
         let mut max_frames = None;
         let mut optimize_every_k = OnlineMapperConfig::default().optimize_every_k;
         let mut periodic_iterations = OnlineMapperConfig::default().periodic_iterations;
@@ -1157,6 +1197,28 @@ impl Args {
                     frontend_stats_csv = Some(PathBuf::from(next(&mut arguments, &option)?))
                 }
                 "--save-map" => save_map = Some(PathBuf::from(next(&mut arguments, &option)?)),
+                "--equalize-local-contrast" => equalize_local_contrast = true,
+                "--smooth-features" => {
+                    let sigma = next(&mut arguments, &option)?
+                        .to_string_lossy()
+                        .parse::<f64>()
+                        .map_err(|error| format!("invalid --smooth-features: {error}"))?;
+                    if !(sigma.is_finite() && sigma > 0.0) {
+                        return Err("--smooth-features needs a positive sigma".into());
+                    }
+                    feature_smoothing = Some(sigma);
+                }
+                "--detector-quality" => {
+                    let quality = next(&mut arguments, &option)?
+                        .to_string_lossy()
+                        .parse::<f32>()
+                        .map_err(|error| format!("invalid --detector-quality: {error}"))?;
+                    if !(quality.is_finite() && quality > 0.0 && quality <= 1.0) {
+                        return Err("--detector-quality needs a level in (0, 1]".into());
+                    }
+                    feature_quality_level = Some(quality);
+                }
+                "--extra-descriptors" => extra_descriptors = true,
                 "--max-frames" => {
                     max_frames = Some(
                         next(&mut arguments, &option)?
@@ -1358,6 +1420,10 @@ impl Args {
             out_dir,
             frontend_stats_csv,
             save_map,
+            equalize_local_contrast,
+            feature_smoothing,
+            feature_quality_level,
+            extra_descriptors,
             max_frames,
             optimize_every_k,
             periodic_iterations,
@@ -1401,6 +1467,8 @@ impl Args {
          [--pipeline | --no-pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] \
          [--mapper-queue-capacity N] [--retained-marg-diagnostics] [--num-opt-iter N] \
          [--match-top-k N] [--frontend-stats-csv <path>] [--save-map DIR] \
+         [--equalize-local-contrast] [--smooth-features SIGMA] [--detector-quality Q] \
+         [--extra-descriptors] \
          [--projection-rematch] [--local-mapping] [--imu-seed-klt] \
          [--projection-host-window N] [--projection-radius PX] \
          [--loop-match-max-rot-error DEG] \
@@ -1582,6 +1650,30 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(args.save_map, Some(PathBuf::from("maps/mh01")));
+        assert!(!args.equalize_local_contrast);
+        assert_eq!(args.feature_smoothing, None);
+        assert_eq!(args.feature_quality_level, None);
+        assert!(!args.extra_descriptors);
+        let args = Args::parse(
+            [
+                "--euroc-dir",
+                "d",
+                "--calibration",
+                "c.json",
+                "--equalize-local-contrast",
+                "--smooth-features",
+                "1.5",
+                "--detector-quality",
+                "0.002",
+                "--extra-descriptors",
+            ]
+            .map(Into::into),
+        )
+        .expect("parses");
+        assert!(args.equalize_local_contrast);
+        assert_eq!(args.feature_smoothing, Some(1.5));
+        assert_eq!(args.feature_quality_level, Some(0.002));
+        assert!(args.extra_descriptors);
     }
 
     #[test]

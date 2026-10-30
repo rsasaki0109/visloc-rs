@@ -218,6 +218,7 @@ pipelines/
   mapping/             local mapping skeleton, staged updates
   slam/                online SLAM MVP, BA, PGO, relocalization
   fusion/              loose-coupling sensor prior foundations
+  objects/             2D multi-object tracking (ByteTrack), CLEAR MOT
 examples/              executable examples (see Demos table above)
 scripts/               sweep / benchmark / smoke scripts
 docs/                  design notes, demo guides, EuRoC closeout, plan docs
