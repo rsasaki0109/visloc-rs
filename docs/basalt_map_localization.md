@@ -830,18 +830,25 @@ image (`map.json` records it). ORB's descriptor compares single pixels, so
 on grainy images noise flips its bits; it was made for OpenLORIS-Scene's
 T265 images
 ([grainy images](openloris_map_localization.md#grainy-images-blur-before-orb)).
-On EuRoC, with the MH_01 and V2_01 maps rebuilt with it (sigma 1.5; 17,760
-and 8,649 landmarks instead of 15,495 and 8,251), VIO + map,
+On EuRoC, with the three maps rebuilt with it (sigma 1.5; MH_01 17,760
+landmarks instead of 15,495, V2_01 8,649 instead of 8,251), VIO + map,
 `--localize-every 5`:
 
-| Query → map | Raw map: RMSE / max, fixes, ms per image | Blurred map |
+| Query → map | Raw map: RMSE / max, fixes | Blurred map |
 |---|---|---|
-| MH_02 → MH_01 | 1.97 / 5.3 cm, 599, 30 ms | 2.03 / 5.8 cm, 607, 35 ms |
-| V2_02 → V2_01 | 3.52 / 12.1 cm, 268, 28 ms | 3.07 / 10.5 cm, 353, 37 ms |
-| V2_03 → V2_01 | 29.3 / 69.9 cm, 5, 25 ms | 28.8 / 89.9 cm, 36, 35 ms |
+| MH_02 → MH_01 | 1.97 / 5.3 cm, 599 | 2.03 / 5.8 cm, 607 |
+| MH_03 → MH_01 | 4.53 / 10.3 cm, 300 | 4.85 / 10.9 cm, 303 |
+| MH_04 → MH_01 | 22.0 / 43.8 cm, 48 | 22.4 / 44.4 cm, 50 |
+| MH_05 → MH_01 | 15.5 / 28.2 cm, 59 | 16.8 / 29.7 cm, 71 |
+| V1_02 → V1_01 | 3.46 / 6.3 cm, 187 | 3.57 / 6.3 cm, 235 |
+| V1_03 → V1_01 | 4.80 / 10.4 cm, 105 | **4.25** / 8.7 cm, 205 |
+| V2_02 → V2_01 | 3.52 / 12.1 cm, 268 | **3.07** / 10.5 cm, 353 |
+| V2_03 → V2_01 | 29.3 / 69.9 cm, 5 | 28.8 / 89.9 cm, 36 |
 
-More images localize, most in V2_03 (36 instead of 5), at about the same
-error, for 5–9 ms more per image. It stays off by default.
+More images localize everywhere, but EuRoC's images are clean and the
+blur takes fine detail with it: five queries get 0.06–1.3 cm worse, three
+better. It costs 5–9 ms per image. It stays off by default: it is for
+grainy images, like the T265's.
 
 ## Reproduce
 
