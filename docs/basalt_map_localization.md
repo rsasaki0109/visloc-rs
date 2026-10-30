@@ -916,6 +916,25 @@ bit. Per image, single thread:
 Both runs give byte-identical trajectories. What is left on office1-7 is
 mostly PnP (8 ms) and the frontend, sharing the CPU with the VIO.
 
+### Localizing more often
+
+With the faster frontend, every image can be localized. VIO + map,
+`--localize-every` 5, 2 and 1 (RMSE / max, localizations):
+
+| Query → map | Every 5th | Every 2nd | Every image |
+|---|---|---|---|
+| MH_02 → MH_01 | 1.97 / 5.3 cm, 599 | 1.93 / 5.0 cm, 1,495 | 1.93 / 5.0 cm, 2,985 |
+| V2_02 → V2_01 | 3.52 / 12.1 cm, 268 | 3.51 / 12.6 cm, 647 | 3.50 / 12.3 cm, 1,318 |
+| V2_03 → V2_01 | 29.3 / 69.9 cm, 5 | **23.9** / 70.9 cm, 19 | 23.7 / 71.0 cm, 48 |
+| office1-6 → office1-1 | 3.08 / 4.3 cm, 130 | 3.19 / 4.4 cm, 318 | 3.19 / 4.4 cm, 639 |
+| office1-7 → office1-2, blurred, quality 0.003 | 2.66 / 4.7 cm, 186 | 2.49 / 4.6 cm, 477 | 2.53 / 4.5 cm, 944 |
+
+Where fixes come every few frames, the VIO barely drifts between them, and
+the error is the fixes' own: more of them change it by 0.2 cm at most.
+Only V2_03, whose fixes are rare, gains (more of its images localize
+where it passes near the map). The cost is 2.5 or 5 times the
+localization work. The default stays at every 5th image.
+
 ## Reproduce
 
 ```bash

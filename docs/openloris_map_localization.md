@@ -498,8 +498,30 @@ corridor1-3 still does not localize in it (VIO + map): none of 1,141
 attempts, against 1 of 1,086 in corridor1-5's map alone. Against the
 merged map, which holds a session that drove its path the same way, its
 images give a median of 3 inliers (14 at most). What stops corridor1-3 is
-not the direction: its images do not match the other sessions'
-(corridor1-1, by contrast, localizes 360 times in corridor1-5's map).
+not the direction but the light. It was recorded at night: the ceiling
+lamps are on, the windows dark, the floor mirrors the lamps, and where a
+lit room shines at a corridor's end the exposure drops and the walls go
+dark. corridor1-1 and corridor1-2 were recorded by day, the lamps off and
+the windows bright. Image pairs within 0.3 m and 15° of each other by the
+ground truth, blurred, matched with OpenCV's ORB and checked against the
+epipolar geometry:
+
+| Pair of sessions | Pairs | Consistent matches: median (p90) |
+|---|---|---|
+| corridor1-1 / corridor1-2 (day / day) | 88 | 24 (118) |
+| corridor1-3 / corridor1-2 (night / day) | 63 | 11 (21) |
+| corridor1-3 / corridor1-1 (night / day) | 58 | 7 (41) |
+
+**The merged map makes corridor1-1 worse.** corridor1-2's own SLAM is
+1.1 m from its ground truth, so one rigid transform places it right only
+around the 54 keyframes that registered. Against the merged map,
+corridor1-1 localizes 233 times instead of 255, and those against
+corridor1-2's part land up to 4.6 m off (scored with corridor1-5's
+alignment: localizations 48.5 cm RMSE instead of 4.4 cm, VIO + map 1.22
+m instead of 0.89 m). A second session helps a map only if its own drift
+is small where it adds views; deforming it into place was tried on EuRoC
+and did not pay
+([details](basalt_map_localization.md#merging-maps-of-several-flights)).
 
 ### Two more scenes: cafe and home
 
@@ -525,6 +547,40 @@ In the café the settings add 15% more localizations at the same error; in
 the home, six times as many. Home's ground truth has a pose every 0.1 s at
 best, so few of them get scored, and those few are less accurate than in
 the café. The market (41.5 GB to download) was not tried.
+
+**Why the maps are 17–19 cm off, and what does not fix it.**
+
+- **No loop can close.** Neither cafe1-1 nor home1-1 comes back to a place
+  facing the same way (within 0.5 m and 30°, 10 s or more later); 84% and
+  63% of their poses are passed again only facing the other way. The
+  mapper accepts no loop in cafe1-1 and one or two in home1-1, against 684
+  in EuRoC's MH_01.
+- **The scale explains a part in the café only.** Fitted to the wheel
+  odometry, the SLAM is 4.5% (cafe1-1) and 3.1% (home1-1) long. With the
+  baseline scaled by that ([as in the office](#correcting-the-scale)),
+  cafe1-1's map is 15.0 cm from the ground truth instead of 18.5 cm;
+  home1-1's 18.5 instead of 18.0 cm. The localizations do not change
+  (cafe1-2: 5.8 cm, local fit).
+- **The rest cannot be told apart from the ground truth's own error.**
+  Neither a time offset nor a fixed offset of the ground truth's reference
+  point in the body (fitted along with the alignment) takes it below 8–13
+  cm, and the fitted offsets disagree between sessions. At this level the
+  2D laser ground truth does not resolve the maps' error.
+
+Wheel odometry + map on the same rescaled maps, calibrated by
+`wheel_calibration_replay` from the VIO and its localizations, without and
+with the gyro's heading
+([above](#the-wheels-heading-from-a-gyro)); RMSE of the map poses with
+the map's fixed alignment:
+
+| Query | VIO + map | Wheels + map | Wheels with the gyro's heading + map |
+|---|---|---|---|
+| cafe1-2 | 19.7 cm | 28.8 cm | **18.0 cm** |
+| home1-2 | 25.1 cm | 26.5 cm | 25.9 cm |
+
+In the café, where the robot turns 915° in 90 s, the gyro's heading brings
+the wheels to the VIO's level. In the home the three are within the
+ground truth's resolution.
 
 ## On ROS 2
 
