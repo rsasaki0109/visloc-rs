@@ -94,6 +94,9 @@ impl ImuPreintegratedDelta {
 pub struct ImuPreintegrator {
     delta: ImuPreintegratedDelta,
     noise: Option<ImuNoiseModel>,
+    /// The noise densities are continuous and each step gets variance for
+    /// its own length (see `EstimatorConfig::imu_noise_per_step`).
+    per_step: bool,
 }
 
 impl ImuPreintegrator {
@@ -101,7 +104,16 @@ impl ImuPreintegrator {
         Self {
             delta: ImuPreintegratedDelta::identity(bias_gyro, bias_accel),
             noise: None,
+            per_step: false,
         }
+    }
+    /// Continuous noise densities, discretized by each step's length (see
+    /// `EstimatorConfig::imu_noise_per_step`); `false` keeps the per-sample
+    /// densities of the pinned model.
+    #[must_use]
+    pub const fn with_per_step_noise(mut self, per_step: bool) -> Self {
+        self.per_step = per_step;
+        self
     }
     pub fn with_noise(mut self, noise: ImuNoiseModel) -> Option<Self> {
         if noise.is_valid() {
@@ -243,9 +255,11 @@ impl ImuPreintegrator {
             gyro_noise
                 .fixed_view_mut::<3, 3>(3, 0)
                 .copy_from(&(Matrix3::identity() * dt));
+            let step = if self.per_step { 1.0 / dt } else { 1.0 };
             self.delta.covariance = cov_f * self.delta.covariance * cov_f.transpose()
-                + (accel_noise * accel_noise.transpose()) * (n.accel_density * n.accel_density)
-                + (gyro_noise * gyro_noise.transpose()) * (n.gyro_density * n.gyro_density);
+                + (accel_noise * accel_noise.transpose())
+                    * (n.accel_density * n.accel_density * step)
+                + (gyro_noise * gyro_noise.transpose()) * (n.gyro_density * n.gyro_density * step);
             self.delta.covariance =
                 (self.delta.covariance + self.delta.covariance.transpose()) * 0.5;
         }

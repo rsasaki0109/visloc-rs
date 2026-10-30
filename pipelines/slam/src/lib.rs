@@ -165,6 +165,12 @@ pub use imu_preintegration::{
     ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator, Matrix9,
 };
 
+pub mod imu_metric_scale;
+pub use imu_metric_scale::{
+    estimate_imu_scale, FrameTiming, ImuSamples, ImuScaleConfig, ImuScaleError, ImuScaleEstimate,
+    RunScale, ScaleFrame,
+};
+
 pub mod g2o;
 pub use g2o::{read_g2o, write_g2o, G2oError};
 

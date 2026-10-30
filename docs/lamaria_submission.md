@@ -143,6 +143,22 @@ like the Short test sequences that score lowest, 61.09 / 64.30
 adds 10-20 minutes per sequence on a runner. On the test set it moves the day
 trajectories by 0.3 m or less (submission 4).
 
+`--ba-pass-features aliked` (off by default) gives the batch pass ALIKED
+keypoints matched by LightGlue, with SIFT kept online (`lamaria_ba_chain.py
+--pass-features`). It needs a GPU with torch and LightGlue, so it runs on a
+local machine, not on the workflow's runners. It applies only to the Short
+track (`--ba-pass-features-tracks`) and to device 1WM093701G1276
+(`--ba-pass-features-serials`, read from the recording's factory calibration).
+The two Short training sequences of that device gain 6.4 and 9.3 (R_11_5cp and
+R_12_10cp). The four other day sequences tried lose 1.2-12.7: sequence_1_19
+and 1_20 from the other device, 2_11 and 3_18 from the same device
+([lamaria_batch_ba.md](lamaria_batch_ba.md#learned-features)).
+With `--ba-pass-match online` those keypoints are matched within the online
+result's epipolar band instead of the VIO's, and the two R sequences reach
+97.02 and 79.31 instead of 92.20 and 73.96
+([lamaria_batch_ba.md](lamaria_batch_ba.md#learned-matches-without-the-vios-band)).
+Submission 6 runs it on the same five sequences.
+
 IMU rectification is on by default
 ([`lamaria_imu_rectification.md`](lamaria_imu_rectification.md); +4.35 Score on
 average across one training sequence per non-Short track). It fetches only the

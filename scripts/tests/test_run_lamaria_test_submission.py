@@ -73,6 +73,29 @@ class TrackTests(unittest.TestCase):
             self.assertTrue((repo / config).is_file(), config)
 
 
+class PassFeaturesTests(unittest.TestCase):
+    def args(self, features="aliked"):
+        return make_args(ba_pass_features=features,
+                         ba_pass_features_tracks=list(submission.DEFAULT_PASS_FEATURES_TRACKS),
+                         ba_pass_features_serials=list(submission.DEFAULT_PASS_FEATURES_SERIALS))
+
+    def test_only_short_sequences_of_the_device_get_learned_keypoints(self):
+        self.assertEqual(submission.pass_features(self.args(), 1, "1WM093701G1276"), "aliked")
+        self.assertIsNone(submission.pass_features(self.args(), 1, "1WM09370081264"))
+        self.assertIsNone(submission.pass_features(self.args(), 2, "1WM093701G1276"))
+        self.assertIsNone(submission.pass_features(self.args(), 1, None))
+
+    def test_off_by_default(self):
+        self.assertIsNone(submission.pass_features(self.args(None), 1, "1WM093701G1276"))
+
+    def test_the_serial_comes_from_the_factory_calibration(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(submission.device_serial(Path(d), "sequence_1_1"))
+            (Path(d) / "sequence_1_1_factory_calib.json").write_text('{"Serial": "1WM093701G1276"}')
+            self.assertEqual(submission.device_serial(Path(d), "sequence_1_1"), "1WM093701G1276")
+
+
 
 class DivergenceTests(unittest.TestCase):
     def write(self, speed, seconds=60, rate=20):

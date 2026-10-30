@@ -11,6 +11,7 @@
 //! - [`init`]: initial gaussians from coloured SfM points.
 //! - [`densify`]: Inria-style clone / split / prune on the host.
 //! - [`equirect`]: 360° panorama detection and cube faces cut from them.
+//! - [`dual_fisheye`]: pinhole faces cut from an Insta360's two lenses.
 //! - `trainer` (feature `gpu`): the on-device training loop.
 //! - `mesh` (feature `gpu`): TSDF fusion of rendered depth + surface nets.
 //!
@@ -20,6 +21,7 @@
 pub mod config;
 pub mod dataset;
 pub mod densify;
+pub mod dual_fisheye;
 pub mod equirect;
 #[cfg(feature = "euroc")]
 pub mod euroc;

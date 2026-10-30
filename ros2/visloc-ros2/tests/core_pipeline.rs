@@ -71,6 +71,116 @@ fn vio_core_tracks_a_static_synthetic_stereo_rig() {
     assert!(up.z > 0.99, "body x should point up, got {up:?}");
 }
 
+/// The synthetic rig's sensor packets for `frame_count` frames.
+fn synthetic_packets(
+    frame_count: i64,
+) -> Vec<visloc_ros2::sync::SensorPacket<visloc_basalt::RawU16Image>> {
+    let stereo = SyntheticStereo::euroc_sized();
+    let mut inputs = VioInputs::new(1_000_000, 8, 64, 4000, vio_core().cam_time_offset_ns());
+    let mut packets = Vec::new();
+    let mut imu_ns = START_NS - 100 * IMU_PERIOD_NS;
+    for frame in 0..frame_count {
+        let stamp = START_NS + frame * CAMERA_PERIOD_NS;
+        while imu_ns <= stamp {
+            inputs.push_imu(imu_sample_from_msg(&stationary_imu_msg(imu_ns)).unwrap());
+            imu_ns += IMU_PERIOD_NS;
+        }
+        for right in [false, true] {
+            let image = decode_luma(&stereo.image_msg(right, stamp))
+                .unwrap()
+                .to_basalt()
+                .unwrap();
+            if right {
+                inputs.push_right(stamp, image);
+            } else {
+                inputs.push_left(stamp, image);
+            }
+        }
+        packets.extend(std::iter::from_fn(|| inputs.pop_ready()));
+    }
+    packets
+}
+
+#[test]
+fn vio_stages_on_two_threads_match_the_serial_core() {
+    for imu_seed_klt in [false, true] {
+        let options = VioOptions {
+            imu_seed_klt,
+            ..VioOptions::default()
+        };
+        let build = || {
+            let calibration = std::fs::read_to_string(euroc_calibration_path()).unwrap();
+            let config = std::fs::read_to_string(euroc_config_path()).unwrap();
+            VioCore::from_json(&calibration, &config, &options).unwrap()
+        };
+        let packets = synthetic_packets(30);
+        assert_eq!(packets.len(), 30);
+
+        let mut serial = build();
+        let expected = packets
+            .clone()
+            .into_iter()
+            .map(|packet| serial.process(packet).unwrap())
+            .collect::<Vec<_>>();
+
+        // The node's arrangement: tracking on one thread, the estimator on
+        // another, the frontend seeded with the latest gyro bias. Waiting
+        // for each estimate before tracking the next frame makes that bias
+        // the previous frame's, as on the serial path.
+        let (frontend, mut backend) = build().into_stages();
+        let (packet_tx, packet_rx) = std::sync::mpsc::channel();
+        let (tracked_tx, tracked_rx) = std::sync::mpsc::sync_channel(1);
+        let tracker = std::thread::spawn(move || {
+            let mut frontend = frontend;
+            for (packet, gyro_bias) in packet_rx {
+                tracked_tx
+                    .send(frontend.track(packet, gyro_bias).unwrap())
+                    .unwrap();
+            }
+        });
+        let mut gyro_bias = nalgebra::Vector3::zeros();
+        let mut actual = Vec::new();
+        for packet in packets {
+            packet_tx.send((packet, gyro_bias)).unwrap();
+            let tracked = tracked_rx.recv().unwrap();
+            assert_eq!(tracked.frame_id(), actual.len() as u64);
+            let estimate = backend.estimate(tracked).unwrap();
+            gyro_bias = estimate.gyro_bias;
+            actual.push(estimate);
+        }
+        drop(packet_tx);
+        tracker.join().unwrap();
+        assert_eq!(actual, expected, "imu_seed_klt={imu_seed_klt}");
+    }
+}
+
+#[test]
+fn vio_stages_ignore_the_bias_without_imu_seeding() {
+    // Without `imu_seed_klt` the frontend may run ahead of the estimator
+    // (the node's real-time arrangement) and still match the serial core.
+    let packets = synthetic_packets(20);
+    let mut serial = vio_core();
+    let expected = packets
+        .clone()
+        .into_iter()
+        .map(|packet| serial.process(packet).unwrap())
+        .collect::<Vec<_>>();
+    let (mut frontend, mut backend) = vio_core().into_stages();
+    let tracked = packets
+        .into_iter()
+        .map(|packet| {
+            frontend
+                .track(packet, nalgebra::Vector3::new(0.3, -0.2, 0.1))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let actual = tracked
+        .into_iter()
+        .map(|frame| backend.estimate(frame).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
 #[test]
 fn vio_core_rejects_wrong_resolution() {
     let mut core = vio_core();
