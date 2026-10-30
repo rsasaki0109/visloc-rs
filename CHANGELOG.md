@@ -55,17 +55,20 @@ All notable changes to `visloc-rs` will be documented here.
   The `visloc-gsplat-train` example (feature `euroc`) stitches an X5
   `.insv`'s two lenses with their factory calibration, no Insta360 Studio
   involved: every `--step`-th frame to JPEGs, or one video through ffmpeg
-  (`--video`), 6,464 x 3,232 by default.
-  - The back lens's rotation is fitted to SIFT matches along the seam in 16
-    frames (`dual_fisheye::seam_pairs`, `fit_back_lens_rotation`): across
-    the lenses' parallax exactly, along it up to one shared shift. The
-    recorded angles give only its turn about the axis (the fit lands within
-    0.05° of it); the tilt, 0.6–2.0° on four cameras, they do not give.
-  - The shared shift gives the scene's typical distance along the seam
-    (1.8–2.7 m on five OverMaps360 walks), and the seam is stitched for it
-    (`stitch_equirect`'s `parallax`; `--distance` sets it).
-  - The two lenses then put the same thing 0.13–0.20° apart along the seam
-    (median), against 1.0–1.1° with the recorded angles stitched far away.
+  (`--video`), 6,496 x 3,248 by default (`dual_fisheye::stitch_equirect`).
+  - The back lens is fitted to SIFT matches along the seam in 16 frames
+    (`dual_fisheye::seam_pairs`, `fit_back_lens`): its rotation and its
+    optical centre, across the lenses' parallax exactly and along it up to
+    one shared shift. The recorded angles give only the turn about the axis
+    (the fit lands within TBD of it); the tilt, up to TBD on four cameras,
+    they do not give. The two lenses' optical centres sit TBD px apart from
+    where the calibration puts them relative to each other.
+  - The shared shift gives the scene's typical distance along the seam, and
+    the seam is stitched for it (`stitch_equirect`'s `parallax`;
+    `--distance` sets it).
+  - On five OverMaps360 walks the two lenses then put the same thing TBD
+    apart along the seam (median), against 1.0–1.1° with the recorded
+    angles stitched far away.
   - `--back-lens factory` or a `gsplat_photos --insv` run's
     `back_lens.txt` skip the fit; `--frame` stitches side-by-side images.
 - **`gsplat_photos --insv`: Insta360 video straight to a metric model.**
@@ -73,12 +76,9 @@ All notable changes to `visloc-rs` will be documented here.
   side (one ffmpeg command), with no Insta360 Studio export.
 
   - `visloc_io::insv` reads each lens's factory calibration (unified model)
-    from the `.insv` metadata. The video holds each lens's calibration
-    image upside down, centred on the middle of the lens's calibration
-    square (not on the calibrated centre, 2–15 px away), at 1.386
-    calibration px per video px (docs/insta360_lens.md). Where the two
-    lenses meet they then agree to 0.025–0.046° across their parallax,
-    against 0.11–0.22° with the centre in the middle.
+    from the `.insv` metadata. The video's lens image is the square spanning
+    the 200° image circle around the calibrated centre
+    (docs/insta360_lens.md).
   - `visloc_gsplat_train::dual_fisheye` cuts each lens into five 90° faces
     within 90° of its axis. A frame's ten faces are solved as one rig, with
     the back lens's pose refined by the mapper. The video's IMU scales the

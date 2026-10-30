@@ -30,36 +30,29 @@ pub struct FisheyeLens {
     centre: [f64; 2],
 }
 
-/// Calibration pixels per pixel of an X5 video's 3840 px lens image: the
-/// video's square spans about 5,322 of the calibration's 5,376 px
-/// (docs/insta360_lens.md).
-pub const X5_CALIBRATION_PX_PER_VIDEO_PX: f64 = 1.386;
-
 impl FisheyeLens {
-    /// `lens` in a `size x size` lens image of the video. The video holds
-    /// each lens upside down relative to its calibration: the square around
-    /// the middle of the lens's calibration square (not around `(cx, cy)`)
-    /// that spans [`X5_CALIBRATION_PX_PER_VIDEO_PX`] x 3840 calibration
-    /// pixels, scaled to `size` (docs/insta360_lens.md).
+    /// `lens` in an `size x size` lens image: the calibration's pixels
+    /// scaled by `size / (2 circle_radius)`, the optical centre in the
+    /// middle.
     pub fn from_insv(lens: &InsvLens, size: u32) -> Self {
-        let s = size as f64 / (3840.0 * X5_CALIBRATION_PX_PER_VIDEO_PX);
-        let mid = size as f64 / 2.0 - 0.5;
-        // The middle of the lens's own square in the side-by-side
-        // calibration image (pixel centres at integers).
-        let side = lens.calibration_size[0] / 2.0;
-        let middle_x = (lens.cx / side).floor() * side + side / 2.0 - 0.5;
-        let middle_y = lens.calibration_size[1] / 2.0 - 0.5;
+        let s = size as f64 / (2.0 * lens.circle_radius);
         Self {
             xi: lens.xi,
             fx: lens.fx * s,
             fy: lens.fy * s,
             radial: lens.radial,
-            // Upside down, the model's y and with it p1 change sign.
-            tangential: [-lens.tangential[0], lens.tangential[1]],
-            centre: [
-                mid + (lens.cx - middle_x) * s,
-                mid - (lens.cy - middle_y) * s,
-            ],
+            tangential: lens.tangential,
+            centre: [size as f64 / 2.0 - 0.5; 2],
+        }
+    }
+
+    /// The same lens with its optical centre `offset` pixels away (x right,
+    /// y down): [`fit_back_lens`] measures how far the back lens's sits
+    /// from where the front lens's puts it.
+    pub fn shifted(&self, offset: [f64; 2]) -> Self {
+        Self {
+            centre: [self.centre[0] + offset[0], self.centre[1] + offset[1]],
+            ..self.clone()
         }
     }
 
@@ -466,12 +459,15 @@ pub fn seam_pairs(
         .collect()
 }
 
-/// The back lens on the camera as [`fit_back_lens_rotation`] finds it along
-/// the seam.
+/// The back lens on the camera as [`fit_back_lens`] finds it along the
+/// seam.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeamFit {
     /// The back lens's rotation (as [`back_lens_rotation`]).
     pub rotation: Matrix3<f64>,
+    /// How far the back lens's optical centre sits from its model's, in its
+    /// image's pixels ([`FisheyeLens::shifted`]).
+    pub centre_offset: [f64; 2],
     /// The shift towards the lenses' axes the pairs share (radians): the
     /// baseline over the scene's typical distance along the seam.
     pub parallax: f64,
@@ -482,88 +478,128 @@ pub struct SeamFit {
     pub pairs: usize,
 }
 
-/// The back lens's rotation (as [`back_lens_rotation`]) that best aligns
-/// `pairs` ([`seam_pairs`]), refined from `initial`. The lenses sit apart
-/// along `baseline` (the back lens's centre in the front lens's frame), so a
-/// point at a finite distance shows the back lens a direction shifted towards
-/// the front lens's axis: the fit takes each pair's offset across that
-/// shift exactly (parallax cannot cause it) and along it up to one offset
-/// shared by all pairs (the scene's typical parallax), robustly.
-pub fn fit_back_lens_rotation(
+/// The back lens's rotation (as [`back_lens_rotation`]) and optical centre
+/// that best align `pairs` ([`seam_pairs`], whose back-lens rays `back`
+/// gave), refined from `initial`. The lenses sit apart along `baseline` (the
+/// back lens's centre in the front lens's frame), so a point at a finite
+/// distance shows the back lens a direction shifted towards the front
+/// lens's axis: the fit takes each pair's offset across that shift exactly
+/// (parallax cannot cause it) and along it up to one offset shared by all
+/// pairs (the scene's typical parallax), robustly.
+pub fn fit_back_lens(
     pairs: &[SeamPair],
+    back: &FisheyeLens,
     initial: &Matrix3<f64>,
     baseline: &Vector3<f64>,
 ) -> SeamFit {
+    use nalgebra::{SMatrix, SVector};
     let e = if baseline.norm() > 0.0 {
         -baseline.normalize()
     } else {
         -Vector3::z()
     };
-    // Each pair's directions across and along its parallax (none on the
-    // baseline itself, far from any seam).
-    let frames: Vec<Option<(Vector3<f64>, Vector3<f64>)>> = pairs
+    // Per pair: the directions across and along its parallax, and how the
+    // back lens's ray turns as its optical centre moves (radians per pixel):
+    // the pixel stays, so the ray is the one a pixel `offset` away saw.
+    let frames: Vec<Option<(Vector3<f64>, Vector3<f64>, SMatrix<f64, 3, 2>)>> = pairs
         .iter()
-        .map(|(a, _)| {
+        .map(|(a, b)| {
             let n = a.cross(&e);
-            (n.norm() > 1e-6).then(|| {
-                let n = n.normalize();
-                (n, n.cross(a))
-            })
+            if n.norm() < 1e-6 {
+                return None;
+            }
+            let n = n.normalize();
+            let side = if b.y.abs() < 0.9 {
+                Vector3::y()
+            } else {
+                Vector3::x()
+            };
+            let t1 = b.cross(&side).try_normalize(1e-9)?;
+            let t2 = b.cross(&t1);
+            let h = 1e-4;
+            let p0 = back.project(b)?;
+            let p1 = back.project(&(b + h * t1))?;
+            let p2 = back.project(&(b + h * t2))?;
+            let m = nalgebra::Matrix2::new(
+                (p1.0 - p0.0) / h,
+                (p2.0 - p0.0) / h,
+                (p1.1 - p0.1) / h,
+                (p2.1 - p0.1) / h,
+            );
+            let turn = SMatrix::<f64, 3, 2>::from_columns(&[t1, t2]) * m.try_inverse()?;
+            Some((n, n.cross(a), -turn))
         })
         .collect();
+    let back_ray = |b: &Vector3<f64>, turn: &SMatrix<f64, 3, 2>, offset: &SVector<f64, 2>| {
+        (b + turn * offset).normalize()
+    };
     let mut rot = *initial;
+    let mut offset = SVector::<f64, 2>::zeros();
     let mut along_offset = 0.0;
-    // Pairs more than 2° off the initial rotation are mismatches.
-    let gate = |rot: &Matrix3<f64>| -> Vec<bool> {
+    // Pairs more than 2° off the current fit are mismatches.
+    let gate = |rot: &Matrix3<f64>, offset: &SVector<f64, 2>| -> Vec<bool> {
         pairs
             .iter()
             .zip(&frames)
-            .map(|((a, b), f)| f.is_some() && a.dot(&(rot * b)) > 2f64.to_radians().cos())
+            .map(|((a, b), f)| {
+                f.as_ref().is_some_and(|(_, _, turn)| {
+                    a.dot(&(rot * back_ray(b, turn, offset))) > 2f64.to_radians().cos()
+                })
+            })
             .collect()
     };
-    let mut keep = gate(initial);
+    let mut keep = gate(initial, &offset);
     let scale = 0.1f64.to_radians();
-    for _ in 0..15 {
-        let mut jtj = nalgebra::Matrix4::<f64>::zeros();
-        let mut jtr = nalgebra::Vector4::<f64>::zeros();
+    for _ in 0..20 {
+        let mut jtj = SMatrix::<f64, 6, 6>::zeros();
+        let mut jtr = SVector::<f64, 6>::zeros();
         for (((_, b), f), &k) in pairs.iter().zip(&frames).zip(&keep) {
-            let (Some((n, ep)), true) = (f, k) else {
+            let (Some((n, ep, turn)), true) = (f, k) else {
                 continue;
             };
-            let q = rot * b;
+            let q = rot * back_ray(b, turn, &offset);
+            let dq = rot * turn; // d q / d offset
             for (dir, c, dc) in [(n, 0.0, 0.0), (ep, along_offset, -1.0)] {
                 let r = q.dot(dir) - c;
                 // Soft-L1 weight for iteratively reweighted least squares.
                 let w = 1.0 / (1.0 + (r / scale).powi(2)).sqrt();
                 let g = q.cross(dir);
-                let j = nalgebra::Vector4::new(g.x, g.y, g.z, dc);
+                let d = dq.transpose() * dir;
+                let j = SVector::<f64, 6>::from_column_slice(&[g.x, g.y, g.z, d[0], d[1], dc]);
                 jtj += w * j * j.transpose();
                 jtr += w * j * r;
             }
         }
-        let Some(step) = (jtj + nalgebra::Matrix4::identity() * 1e-9)
-            .lu()
-            .solve(&(-jtr))
-        else {
+        // Keep the centre within reach of the linearisation (a few pixels
+        // per step) with a light prior.
+        jtj += SMatrix::<f64, 6, 6>::from_diagonal(&SVector::from_column_slice(&[
+            1e-9, 1e-9, 1e-9, 1e-12, 1e-12, 1e-9,
+        ]));
+        let Some(step) = jtj.lu().solve(&(-jtr)) else {
             break;
         };
         let omega = Vector3::new(step[0], step[1], step[2]);
         rot = nalgebra::Rotation3::new(omega).into_inner() * rot;
-        along_offset += step[3];
-        if omega.norm() < 1e-9 {
+        offset += SVector::<f64, 2>::new(step[3], step[4]);
+        along_offset += step[5];
+        keep = gate(&rot, &offset);
+        if omega.norm() < 1e-9 && step.fixed_rows::<2>(3).norm() < 1e-4 {
             break;
         }
-        keep = gate(&rot);
     }
     let mut across: Vec<f64> = pairs
         .iter()
         .zip(&frames)
         .zip(&keep)
-        .filter_map(|(((_, b), f), &k)| Some((rot * b).dot(&f.filter(|_| k)?.0).abs()))
+        .filter_map(|(((_, b), f), &k)| {
+            let (n, _, turn) = f.as_ref().filter(|_| k)?;
+            Some((rot * back_ray(b, turn, &offset)).dot(n).abs())
+        })
         .collect();
     across.sort_by(f64::total_cmp);
     SeamFit {
         rotation: rot,
+        centre_offset: [offset[0], offset[1]],
         parallax: along_offset,
         across: across.get(across.len() / 2).copied().unwrap_or(f64::NAN),
         pairs: across.len(),
@@ -609,67 +645,25 @@ mod tests {
             circle_radius: 2646.5,
             angles: [0.4, -0.2, 89.8],
             translation: [0.0; 3],
-            calibration_size: [10752.0, 5376.0],
         }
     }
 
     #[test]
-    fn the_video_holds_the_calibration_upside_down_around_its_middle() {
-        // A ray lands where the calibration puts its mirror image (y
-        // flipped), mapped from the middle of the lens's calibration square
-        // upside down and scaled; for the back lens, the right half's.
+    fn the_image_circle_spans_the_lens_image() {
+        // The calibration's 200° circle reaches the square's edges.
         let size = 3840;
-        let s = X5_CALIBRATION_PX_PER_VIDEO_PX;
-        let mid = size as f64 / 2.0 - 0.5;
-        for (lens, middle_x) in [
-            (x5_like(), 2687.5),
-            (
-                InsvLens {
-                    cx: 8080.0,
-                    ..x5_like()
-                },
-                8063.5,
-            ),
-        ] {
-            let model = FisheyeLens::from_insv(&lens, size);
-            for ray in [
-                Vector3::new(0.0, 0.0, 1.0),
-                Vector3::new(0.3, -0.2, 0.9),
-                Vector3::new(-0.8, 0.5, 0.1),
-            ] {
-                // The calibration's model of the mirrored ray, in its pixels.
-                let m = Vector3::new(ray.x, -ray.y, ray.z);
-                let zs = m.z + lens.xi * m.norm();
-                let (x, y) = (m.x / zs, m.y / zs);
-                let r2 = x * x + y * y;
-                let [k1, k2, k3] = lens.radial;
-                let [p1, p2] = lens.tangential;
-                let rad = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
-                let xd = x * rad + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
-                let yd = y * rad + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
-                let (cu, cv) = (lens.fx * xd + lens.cx, lens.fy * yd + lens.cy);
-                let want = (mid + (cu - middle_x) / s, mid - (cv - 2687.5) / s);
-                let got = model.project(&ray).unwrap();
-                assert!(
-                    (got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9,
-                    "{got:?} {want:?}"
-                );
-            }
-        }
-        // The axis lands (cx, cy) from the middle, upside down.
         let lens = FisheyeLens::from_insv(&x5_like(), size);
-        let (x, y) = lens.project(&Vector3::z()).unwrap();
-        assert!((x - (mid + 12.5 / s)).abs() < 1e-9 && (y - (mid + 7.5 / s)).abs() < 1e-9);
-        // The 200° circle nearly spans the square: 2646.5 / 1.386 = 1909 px.
-        let t = 100f64.to_radians();
+        let c = size as f64 / 2.0 - 0.5;
         for phi in [0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            let t = 100f64.to_radians();
             let ray = Vector3::new(t.sin() * phi.cos(), t.sin() * phi.sin(), t.cos());
-            let (u, v) = lens.project(&ray).unwrap();
-            let r = (u - x).hypot(v - y);
-            assert!((r - 2646.5 / s).abs() < 0.01 * r, "{r}");
+            let (x, y) = lens.project(&ray).unwrap();
+            let r = (x - c).hypot(y - c);
+            assert!((r - size as f64 / 2.0).abs() < 0.01 * size as f64, "{r}");
         }
-        // About 2,066 px faces match the axis's resolution at 3840 px.
-        assert!((natural_face_size(&lens) as i64 - 2054).abs() < 5);
+        assert_eq!(lens.project(&Vector3::z()), Some((c, c)));
+        // About 2,065 px faces match the axis's resolution at 3840 px.
+        assert!((natural_face_size(&lens) as i64 - 2065).abs() < 5);
     }
 
     #[test]
@@ -893,6 +887,85 @@ mod tests {
         ));
         assert!(near < 2.0, "{near}");
         assert!(far > 3.0 * near, "{far} vs {near}");
+    }
+
+    #[test]
+    fn the_seam_fit_finds_the_back_lens_rotation_and_centre() {
+        // Directions along the seam seen by the front lens and, at 2 m from
+        // the camera, by a back lens 1.3° past the half turn whose optical
+        // centre is 9 px right and 4 px up of its model's.
+        let size = 3840u32;
+        let lens = FisheyeLens::from_insv(&x5_like(), size);
+        let truth = nalgebra::Rotation3::from_euler_angles(0.012, -0.018, 0.009).into_inner()
+            * back_lens_rotation();
+        let offset = [9.0, -4.0];
+        let shifted = lens.shifted(offset);
+        let baseline = Vector3::new(-0.001, 0.0004, -0.032);
+        let distance = 2.0;
+        // The model's ray through a pixel, by Newton steps on `project`.
+        let unproject = |lens: &FisheyeLens, px: (f64, f64), guess: Vector3<f64>| {
+            let mut r = guess.normalize();
+            for _ in 0..20 {
+                let side = if r.y.abs() < 0.9 {
+                    Vector3::y()
+                } else {
+                    Vector3::x()
+                };
+                let t1 = r.cross(&side).normalize();
+                let t2 = r.cross(&t1);
+                let p0 = lens.project(&r).unwrap();
+                let h = 1e-6;
+                let p1 = lens.project(&(r + h * t1)).unwrap();
+                let p2 = lens.project(&(r + h * t2)).unwrap();
+                let m = nalgebra::Matrix2::new(
+                    (p1.0 - p0.0) / h,
+                    (p2.0 - p0.0) / h,
+                    (p1.1 - p0.1) / h,
+                    (p2.1 - p0.1) / h,
+                );
+                let d = m.try_inverse().unwrap() * nalgebra::Vector2::new(px.0 - p0.0, px.1 - p0.1);
+                r = (r + d[0] * t1 + d[1] * t2).normalize();
+            }
+            r
+        };
+        let mut pairs = Vec::new();
+        for i in 0..400 {
+            let phi = i as f64 * 0.0157 * 4.0;
+            let theta = (86.0 + 8.0 * ((i * 7) % 11) as f64 / 10.0).to_radians();
+            let front = Vector3::new(
+                theta.sin() * phi.cos(),
+                theta.sin() * phi.sin(),
+                theta.cos(),
+            );
+            // The back lens sees the point 2 m away from its own centre.
+            let seen = truth.transpose() * (distance * front - baseline);
+            let px = shifted.project(&seen).unwrap();
+            pairs.push((front, unproject(&lens, px, seen)));
+        }
+        let fit = fit_back_lens(&pairs, &lens, &back_lens_rotation(), &baseline);
+        let angle = ((fit.rotation * truth.transpose()).trace() - 1.0) / 2.0;
+        assert!(
+            angle.clamp(-1.0, 1.0).acos().to_degrees() < 0.02,
+            "{:?}",
+            fit.rotation
+        );
+        assert!(
+            (fit.centre_offset[0] - 9.0).abs() < 0.5 && (fit.centre_offset[1] + 4.0).abs() < 0.5,
+            "{:?}",
+            fit.centre_offset
+        );
+        // The shared shift: the baseline over the distance.
+        assert!(
+            (fit.parallax - baseline.norm() / distance).abs() < 0.1 * baseline.norm() / distance,
+            "{}",
+            fit.parallax
+        );
+        assert!(
+            fit.across < 0.005f64.to_radians() && fit.pairs == 400,
+            "{} {}",
+            fit.across,
+            fit.pairs
+        );
     }
 
     #[test]

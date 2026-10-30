@@ -33,8 +33,8 @@ use std::time::Instant;
 
 use nalgebra::{Matrix3, Vector3};
 use visloc_gsplat_train::dual_fisheye::{
-    back_lens_rotation, factory_back_lens_rotation, fit_back_lens_rotation, seam_pairs,
-    stitch_equirect, FisheyeLens, SeamFit, SeamPair,
+    back_lens_rotation, factory_back_lens_rotation, fit_back_lens, seam_pairs, stitch_equirect,
+    FisheyeLens, SeamFit, SeamPair,
 };
 use visloc_io::insv::read_insv_telemetry;
 
@@ -59,6 +59,10 @@ An Insta360 video's dual-fisheye frames -> equirectangular (360°) frames.
                      (--back-lens auto then fits on all of them)
   --quality 92       JPEG quality of --out frames
 ";
+
+/// The back lens's rotation, its optical centre's offset (pixels) and the
+/// distance the seam is stitched at (none: far away).
+type BackLens = (Matrix3<f64>, [f64; 2], Option<f64>);
 
 /// Frames the automatic back-lens fit samples from a video.
 const FIT_FRAMES: u64 = 16;
@@ -105,19 +109,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let factory = factory_back_lens_rotation(front, back);
-    // The back lens's centre in the front lens's frame: the recorded
-    // translation, whose y the video's upside-down lens images flip.
-    let t = back.translation;
-    let baseline = Vector3::new(t[0], -t[1], t[2]);
+    // The back lens's centre in the front lens's frame, as recorded.
+    let baseline = Vector3::from(back.translation);
     let blend = blend.max(0.0).to_radians();
-    // The back lens's rotation, and the distance its seam is stitched at.
-    let fit = |pairs: &[SeamPair]| -> (Matrix3<f64>, Option<f64>) {
+    // The back lens's rotation and optical centre, and the distance its
+    // seam is stitched at.
+    let fit = |pairs: &[SeamPair], lens: &FisheyeLens| -> BackLens {
         let SeamFit {
             rotation,
+            centre_offset,
             parallax,
             across,
             pairs: kept,
-        } = fit_back_lens_rotation(pairs, &factory, &baseline);
+        } = fit_back_lens(pairs, lens, &factory, &baseline);
         // The baseline over the shared shift; none for a shift too small to
         // tell from far away (beyond 300 m).
         let distance = (parallax > baseline.norm() / 300.0).then(|| baseline.norm() / parallax);
@@ -128,18 +132,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(f64::to_degrees);
         eprintln!(
             "back lens: {:.3}° past the half turn ({:+.3}, {:+.3}, {:+.3}), {:.3}° from the \
-             recorded angles; {kept} of {} matches along the seam, median {:.3}° across their \
-             parallax; the scene along the seam about {} away",
+             recorded angles, optical centre ({:+.1}, {:+.1}) px; {kept} of {} matches along \
+             the seam, median {:.3}° across their parallax; the scene along the seam about {} \
+             away",
             angle_between(&rotation, &back_lens_rotation()),
             past.x,
             past.y,
             past.z,
             angle_between(&rotation, &factory),
+            centre_offset[0],
+            centre_offset[1],
             pairs.len(),
             across.to_degrees(),
             distance.map_or("far".to_string(), |d| format!("{d:.1} m"))
         );
-        (rotation, distance)
+        (rotation, centre_offset, distance)
     };
     // The back lens's centre over the stitching distance (`stitch_equirect`).
     let parallax = |fitted: Option<f64>| -> Vector3<f64> {
@@ -157,18 +164,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|p| image::open(p).map(|i| i.to_rgb8()))
             .collect::<Result<_, _>>()?;
         let size = images[0].height();
-        let lenses = [
+        let mut lenses = [
             FisheyeLens::from_insv(front, size),
             FisheyeLens::from_insv(back, size),
         ];
-        let (rotation, fitted) = match back_lens.as_str() {
-            "auto" => fit(&images
-                .iter()
-                .flat_map(|img| seam_pairs(img, &lenses, &factory))
-                .collect::<Vec<_>>()),
-            "factory" => (factory, None),
-            file => (read_back_lens(Path::new(file))?, None),
+        let (rotation, centre, fitted) = match back_lens.as_str() {
+            "auto" => fit(
+                &images
+                    .iter()
+                    .flat_map(|img| seam_pairs(img, &lenses, &factory))
+                    .collect::<Vec<_>>(),
+                &lenses[1],
+            ),
+            "factory" => (factory, [0.0; 2], None),
+            file => (read_back_lens(Path::new(file))?, [0.0; 2], None),
         };
+        lenses[1] = lenses[1].shifted(centre);
         let parallax = parallax(fitted);
         let w = width.unwrap_or_else(|| natural_width(&lenses));
         for (path, img) in frames.iter().zip(&images) {
@@ -195,11 +206,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (size, stack) = lens_streams(&video)?;
-    let lenses = [
+    let mut lenses = [
         FisheyeLens::from_insv(front, size),
         FisheyeLens::from_insv(back, size),
     ];
-    let (rotation, fitted) = match back_lens.as_str() {
+    let (rotation, centre, fitted) = match back_lens.as_str() {
         "auto" => {
             let every = frame_count(&video).map_or(30, |n| (n / FIT_FRAMES).max(1));
             let t = Instant::now();
@@ -214,11 +225,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "fitting the back lens on {taken} frames ({:.1} s)",
                 t.elapsed().as_secs_f64()
             );
-            fit(&pairs)
+            fit(&pairs, &lenses[1])
         }
-        "factory" => (factory, None),
-        file => (read_back_lens(Path::new(file))?, None),
+        "factory" => (factory, [0.0; 2], None),
+        file => (read_back_lens(Path::new(file))?, [0.0; 2], None),
     };
+    lenses[1] = lenses[1].shifted(centre);
     let parallax = parallax(fitted);
     let w = width.unwrap_or_else(|| natural_width(&lenses)).max(2) & !1;
     let h = w / 2;
