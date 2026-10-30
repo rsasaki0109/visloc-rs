@@ -19,7 +19,10 @@ all-features = true
 default = []
 # GPU rendering / training (wgpu). Same toolchain boundary as
 # `visloc-gsplat-render/gpu`: needs Rust >= 1.85, so it is opt-in.
-gpu = ["visloc-gsplat-render/gpu", "visloc-gsplat-core/mesh", "dep:rayon", "dep:wgpu", "dep:bytemuck", "dep:visloc-sift-gpu", "visloc-sift-gpu?/gpu", "dep:visloc-ba-gpu", "visloc-ba-gpu?/gpu"]
+gpu = ["mesh", "visloc-gsplat-render/gpu", "dep:rayon", "dep:wgpu", "dep:bytemuck", "dep:visloc-sift-gpu", "visloc-sift-gpu?/gpu", "dep:visloc-ba-gpu", "visloc-ba-gpu?/gpu"]
+# TSDF mesh extraction from rendered depth (`mesh::fuse_views`), without a
+# renderer of its own (the wgpu one is `gpu`).
+mesh = ["visloc-gsplat-core/mesh", "dep:rayon"]
 # Raw EuRoC -> dataset via visloc-rs SIFT + incremental SfM (no COLMAP/Python).
 euroc = ["dep:rayon", "dep:visloc-slam", "dep:visloc-vision"]
 

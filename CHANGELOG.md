@@ -6,6 +6,76 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **CUDA 3DGS rasterizer and trainer (`visloc-gsplat-cuda`, experimental,
+  opt-in).** This is a CUDA backend for 3DGS rendering and training, for
+  machines where wgpu cannot reach the GPU (WSL2 exposes CUDA but no NVIDIA
+  Vulkan driver). It also serves as a reference for CUDA-level
+  optimizations.
+  - The packaging follows the DPVO kernels: `native/gsplat_cuda/gsplat_cuda.cu`
+    is built by `scripts/build_gsplat_cuda.sh` and loaded at runtime. Cargo
+    never compiles CUDA, and the crate is `publish = false`.
+  - The rasterizer's maths is the wgpu renderer's. Against the CPU f64
+    oracle, every parameter gradient is within 4.2e-6 of its largest value;
+    the tests use the wgpu tests' tolerances, 3e-3.
+  - The training step is the wgpu trainer's: L1 + D-SSIM, Adam with brush's
+    aux losses, refine statistics and mean noise. The scene, its moments and
+    the images stay on the device.
+  - `CudaTrainer` (example `gsplat_train_cuda`) runs the wgpu trainer's
+    brush-strategy loop.
+  - On south-building (1024x768, 112 train / 16 eval views) it trains 30k
+    steps in 691 s on an 8 GB laptop GPU, ending at 1.41M gaussians and
+    23.22 dB held-out PSNR. The README's wgpu run reached 22.77 dB with a
+    different SfM and the depth-normal loss.
+  - Rasterizer optimizations cut a training step from 30.9 to 21 GPU ms;
+    before them the run took 978 s.
+    - Sub-tile masks: 8x4 sub-tiles per warp, 8 bits in the sorted value.
+    - `project_bwd` skips gaussians that blended into nothing.
+    - Gradients go to global memory with native float reductions; on this
+      GPU the shared-memory float atomic was a CAS loop.
+    - Three dense runs spread over 22.71–23.22 dB.
+  - `--sparse-sh-adam` (opt-in) updates SH only for blended gaussians,
+    halving the optimizer (18 ms per step). In training it saved 5% at
+    22.87 dB.
+  - Meshes from CUDA:
+    - The median depth comes from the splat centre, or with
+      `--planar-depth` from where the ray meets the splat's plane.
+    - `gsplat_mesh_cuda` meshes a trained splat; `gsplat_train_cuda --mesh`
+      meshes after training.
+    - The TSDF fusion is shared with wgpu
+      (`visloc_gsplat_train::mesh::fuse_views`, behind the new `mesh`
+      feature).
+  - **ETH3D geometry.** Three high-res training scenes, on their
+    ground-truth poses at 1600x1067, score a mean F1 of 33.1% at 2 cm
+    (terrains 34.1%, playground 43.9%, office 21.4%). visloc-mvs's clouds
+    score 80.0% on the same scenes. The mesh options needed are 1 cm
+    voxels, no support filter, depths up to 20 m, min weight 1 and planar
+    depth; `gsplat_photos`' defaults score 20.8%. See
+    `scripts/eth3d_3dgs_mesh.sh`.
+- **Depth priors for 3DGS (opt-in).**
+  - `visloc-mvs --save-fused-depth` writes each view's depths that fusion's
+    source views agree with.
+  - `gsplat_train_cuda --depth-prior <dir> [--depth-weight 0.1]` trains the
+    splat's expected depth against them, with a relative L1. A map of another
+    size is resampled by nearest neighbour.
+  - The expected-depth channel's gradients match an exact colour-channel
+    identity to 1.8e-7.
+  - On the three ETH3D scenes, weight 0.1 raises the 3DGS mesh's mean F1
+    at 2 cm from 33.1% to 35.0% (office 21.4% → 25.5%); weights 0.5 and 1.0
+    give 34.0% and 35.3%. Accuracy rises by up to 32 points, but
+    completeness does not, and the mesh stays far below the MVS cloud that
+    supervised it (67.6%).
+  - CUDA ABI 5.
+- **`colmap_resize`** (example of `visloc-gsplat-train`) scales a COLMAP text
+  model of pinhole images and the images themselves to a maximum or an
+  exact size (`--size` makes cameras of slightly different sizes, as in some
+  ETH3D scenes, share one).
+- **`scripts/build_eth3d_evaluator.sh`** builds the official ETH3D
+  multi-view evaluator on current toolchains (CMake 4, Boost 1.90, PCL 1.15).
+  - See [docs/gsplat_cuda.md](docs/gsplat_cuda.md).
+- **`visloc_gsplat_train::config`.** `TrainConfig` moved here from the
+  wgpu-only `trainer` module, together with the image packing, brush's
+  bounds and `population_to_scene`, so that a trainer without wgpu can use
+  them. `trainer::TrainConfig` is still exported.
 - **`--detector-quality Q`: a lower ORB detector threshold (opt-in).** The
   mapping detector keeps corners stronger than 1% of the image's strongest
   (upstream's quality level); in OpenLORIS-Scene's corridor a few bright

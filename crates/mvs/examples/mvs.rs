@@ -10,7 +10,7 @@
 //!     [--scales 3] [--gpu] \
 //!     [--view-selection confidence|sampled] [--init-top-k 3] \
 //!     [--restorer infinity|start|off] [--detail-threshold 0.1] [--no-planar-prior] \
-//!     [--save-depth] [--save-maps | --load-maps] [--min-consistent 1] \
+//!     [--save-depth] [--save-maps | --load-maps] [--save-fused-depth] [--min-consistent 1] \
 //!     [--max-reproj 2] [--max-depth-diff 0.01] [--max-normal-angle 10] \
 //!     [--min-mean-consistency 0.15] [--no-average] \
 //!     [--deformable] [--deformable-local-refine] [--deformable-strong-median] \
@@ -27,7 +27,11 @@
 //! scales (experimental: below the defaults on ETH3D, see docs/mvs.md);
 //! `--deformable-local-refine` and `--deformable-strong-median` add APD's
 //! local refinement (CPU only) and strong-only median filter to those
-//! passes.
+//! passes. `--save-fused-depth` writes each view's depths that fusion's
+//! source views agree with (0 elsewhere; what `--mesh` fuses) to
+//! `<out>/fused_depth/<image name>.bin`: width and height (`u32`), then the
+//! camera-z depths (`f32`), little-endian. They can supervise a 3DGS
+//! (`gsplat_train_cuda --depth-prior`).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -51,7 +55,7 @@ options:
   --geom-passes 2  --geom-iterations 3  --no-planar-prior
   --view-selection confidence|sampled  --init-top-k 3
   --restorer infinity|start|off  --detail-threshold 0.1
-  --save-depth  --save-maps | --load-maps
+  --save-depth  --save-maps | --load-maps  --save-fused-depth
   --min-consistent 1  --max-reproj 2  --max-depth-diff 0.01
   --max-normal-angle 10  --min-mean-consistency 0.15  --no-average
   --deformable  --deformable-local-refine  --deformable-strong-median
@@ -65,6 +69,26 @@ See docs/mvs.md.";
 fn usage_error(message: &str) -> ! {
     eprintln!("{message}\n\n{USAGE}");
     std::process::exit(2)
+}
+
+/// A fused depth map as raw little-endian data: width and height (`u32`),
+/// then the depths (`f32`). Creates the parent directories.
+fn write_fused_depth(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    depth: &[f32],
+) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut bytes = Vec::with_capacity(8 + depth.len() * 4);
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    for d in depth {
+        bytes.extend_from_slice(&d.to_le_bytes());
+    }
+    std::fs::write(path, bytes)
 }
 
 fn main() {
@@ -87,6 +111,7 @@ fn main() {
     let mut save_depth = false;
     let mut save_maps = false;
     let mut load_maps = false;
+    let mut save_fused_depth = false;
     let mut planar_prior = None;
     let prior_options = PlanarPriorOptions::default();
     let mut fusion_options = fusion_options;
@@ -126,6 +151,7 @@ fn main() {
             "--save-depth" => save_depth = true,
             "--save-maps" => save_maps = true,
             "--load-maps" => load_maps = true,
+            "--save-fused-depth" => save_fused_depth = true,
             "--min-consistent" => fusion_options.min_consistent_views = value().parse().unwrap(),
             "--max-reproj" => fusion_options.max_reproj_error = value().parse().unwrap(),
             "--max-depth-diff" => fusion_options.max_relative_depth_diff = value().parse().unwrap(),
@@ -369,11 +395,20 @@ fn main() {
 
     let t = Instant::now();
     let mut mesher = mesh_options.as_ref().map(|o| TsdfMesher::new(&ws, o));
-    let points = match mesher.as_mut() {
-        Some(mesher) => fuse_with(&ws, maps, &fusion_options, &mut |v, depth| {
-            mesher.integrate(&ws.views[v], depth)
-        }),
-        None => fuse(&ws, maps, &fusion_options),
+    let points = if mesher.is_some() || save_fused_depth {
+        fuse_with(&ws, maps, &fusion_options, &mut |v, depth| {
+            if let Some(mesher) = mesher.as_mut() {
+                mesher.integrate(&ws.views[v], depth);
+            }
+            if save_fused_depth {
+                let view = &ws.views[v];
+                let path = out.join("fused_depth").join(format!("{}.bin", view.name));
+                write_fused_depth(&path, view.width as u32, view.height as u32, depth)
+                    .expect("writing a fused depth map");
+            }
+        })
+    } else {
+        fuse(&ws, maps, &fusion_options)
     };
     eprintln!(
         "fusion: {} points in {:.1} s",

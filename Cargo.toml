@@ -38,6 +38,7 @@ members = [
     "crates/ba-gpu",
     "crates/mvs",
     "crates/dpvo-cuda-runtime",
+    "crates/gsplat-cuda",
     "pipelines/localization",
     "pipelines/tracking",
     "pipelines/mapping",

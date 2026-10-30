@@ -9,6 +9,38 @@ All of its phases have since landed or been closed.
 Scope rule for this round: **no new GPU work.** GPU paths (wgpu SfM, 3DGS,
 DPVO CUDA) stay as they are; nothing here depends on them.
 
+**Update 2026-10-29: GPU work resumes on a local laptop.** The laptop has an
+8 GB GPU and runs WSL2, where the GPU is reachable through CUDA but not
+through wgpu (no NVIDIA Vulkan driver). New GPU work is therefore an opt-in
+CUDA backend that follows the DPVO pattern
+([`gsplat_cuda.md`](gsplat_cuda.md)); wgpu stays the main implementation.
+The planned order:
+
+1. CUDA 3DGS rasterizer: forward and backward, checked against the CPU
+   oracle. Done.
+2. CUDA trainer on top of it. Measure south-building PSNR and time against
+   the wgpu trainer's recorded numbers. Done: 30k steps in 691 s, held-out
+   PSNR 23.22 dB. The README's wgpu run reached 22.77 dB with a different
+   SfM and the depth-normal loss. The first version took 978 s; sub-tile
+   masks and direct global gradient adds cut a step from 30.9 to 21 GPU ms.
+   The remaining large stages are the dense Adam (opt-in sparse SH Adam
+   halves it), raster_bwd and the sort.
+3. Score `gsplat_mesh`'s mesh on ETH3D, which gives 3DGS geometry a
+   baseline (visloc-mvs's mesh: F1 79.3% at 2 cm). Then move TSDF
+   integration to CUDA: it is 28 of the 34 mesh minutes on SmallCity.
+   Baseline done: on terrains, playground and office the 3DGS mesh scores
+   a mean F1 of 33.1% at 2 cm, against 80.0% for visloc-mvs's clouds
+   ([`gsplat_cuda.md`](gsplat_cuda.md#geometry-on-eth3d)). visloc-mvs
+   depth supervision (`--depth-prior`, weight 0.1) raises it to 35.0%:
+   accuracy rises, completeness does not
+   ([`gsplat_cuda.md`](gsplat_cuda.md#depth-prior-from-visloc-mvs)). Next
+   are the depth-normal loss and the TSDF on the GPU: at 1 cm, the CPU TSDF
+   peaks at 9.7 GB on playground.
+4. The rasterizer optimizations from Kopanas's
+   [3DGS CUDA write-up](https://grgkopanas.github.io/3dgs_cuda_blog/), one at
+   a time.
+5. Two-view verification on the GPU: 450 s of SmallCity's 600 s front end.
+
 ## Track 1: Correctness and release hygiene
 
 | Item | Status | Gate |
