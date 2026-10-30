@@ -850,6 +850,21 @@ blur takes fine detail with it: five queries get 0.06–1.3 cm worse, three
 better. It costs 5–9 ms per image. It stays off by default: it is for
 grainy images, like the T265's.
 
+**Why V2_03's 36 fixes do not lower its RMSE.** With the blurred map the
+fixes themselves are 2.4 cm off (RMSE; 5.0 cm at most), and the VIO + map
+pose is 11.5 cm off at the median instead of 28.4 cm with the raw map.
+The RMSE comes from three stretches of
+10–30 s without a fix, where the VIO drifts by up to 90 cm. In them, 70–100%
+of the images are more than 0.5 m (or 30°) from every V2_01 viewpoint, and
+the rest give a median of 4 inliers. Even at the start, slow (0.12 m/s)
+and next to V2_01's own start, the images give a median of 7. The fixes
+come back once the flight returns to where V2_01 flew. A map with V2_02
+merged in covers half the flight
+([merging maps](#merging-maps-of-several-flights)) and still localizes
+0.3% of its images: where covered, they give too few inliers (the pixel
+noise found under Results above). So V2_03 is short of
+both, and no frontend setting tried here fills those stretches.
+
 ### A lower detector threshold
 
 `basalt_euroc_online_slam_demo --detector-quality Q` keeps corners down to
@@ -880,6 +895,26 @@ five, depends on which ones arrive (as with
 [local contrast equalization](#local-contrast-equalization) above). It
 costs up to 3 ms per image. It stays at 0.01 by default; lower it, with the
 blur, for dim, low-contrast images.
+
+### A faster ORB frontend
+
+The times on this page were measured before the mapping frontend was made
+faster without changing its output. The corner detector's filters run
+along whole rows and reflect only at their ends; the minimum distance
+between corners is checked only against chosen corners in the cells
+around a candidate; the blur sums its taps across a row at a time. Every
+sum keeps its order, so corners, descriptors and maps are the same to the
+bit. Per image, single thread:
+
+| | Before | After |
+|---|---|---|
+| EuRoC (752x480): detection | 25.5 ms | 4.4 ms |
+| T265 (848x800), blur and quality 0.003: blur + detection + description | 50 ms | 14 ms |
+| Localize demo, VIO + map, MH_02 → MH_01 (median) | 28.9 ms | 14.5 ms |
+| ... office1-7 → office1-2, blurred map at quality 0.003 | 69.9 ms | 34.6 ms |
+
+Both runs give byte-identical trajectories. What is left on office1-7 is
+mostly PnP (8 ms) and the frontend, sharing the CPU with the VIO.
 
 ## Reproduce
 

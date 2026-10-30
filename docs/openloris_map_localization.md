@@ -425,7 +425,9 @@ the pairs share 38 consistent matches:
   14 with the blur).
 - **No other session fills the quarter of the path the map misses.**
   corridor1-3 covers most of it, but none of its images (every 5th, 421)
-  localizes in corridor1-5's map, so `basalt_map_merge` cannot register it.
+  localizes in corridor1-5's map, so `basalt_map_merge` cannot register it
+  (with a lower detector threshold, another session can:
+  [below](#two-corridor-sessions-in-one-map)).
 - **Local contrast equalization does not help here:** 5,138 landmarks,
   32% of corridor1-5's own images, 57 localizations of corridor1-1.
 
@@ -480,6 +482,49 @@ shipped and rebuilt):
 office1-7, whose images never reached the 30 inliers a localization needs,
 now localizes 186 times and is 2.66 cm off. For the T265, build maps with
 `--smooth-features 1.5 --detector-quality 0.003`. Both stay off by default.
+
+### Two corridor sessions in one map
+
+A second session can add the views corridor1-5's map lacks:
+corridor1-2, by the ground truth, covers 97% of corridor1-3's path within
+1 m and 45° of its heading, where corridor1-5 covers 44%. With both maps
+built blurred at quality 0.003, `basalt_map_merge` registers corridor1-2
+into corridor1-5's map: 54 of its 1,736 keyframes localize and agree, 5.6
+cm apart (RMS), and the merged map has 25,338 landmarks. Its yaw to
+corridor1-5's frame, 20.9°, is within 2.2° of what the two sessions'
+ground truths give.
+
+corridor1-3 still does not localize in it (VIO + map): none of 1,141
+attempts, against 1 of 1,086 in corridor1-5's map alone. Against the
+merged map, which holds a session that drove its path the same way, its
+images give a median of 3 inliers (14 at most). What stops corridor1-3 is
+not the direction: its images do not match the other sessions'
+(corridor1-1, by contrast, localizes 360 times in corridor1-5's map).
+
+### Two more scenes: cafe and home
+
+The same comparison in two other scenes, each scene's map built from its
+first session and the second session localized in it (VIO + map,
+`--localize-every 5`). Their ground truth comes from a 2D laser (z = 0,
+level). The maps themselves are 17–19 cm from it after a rigid fit, almost
+all of it horizontal: the VIO drifts that much over 30–40 m with no loop
+closed. So each localization is scored with the local fit used in the
+corridor, on the map poses within 3 m.
+
+| | Raw map | Blurred, quality 0.003 |
+|---|---|---|
+| cafe1-1's map: landmarks | 12,422 | 14,072 |
+| cafe1-2's localizations | 180 | 207 |
+| ... their error, local fit: RMSE / median (scored) | 5.8 / 4.3 cm (146) | 5.7 / 3.8 cm (167) |
+| home1-1's map: landmarks | 13,856 | 24,250 |
+| home1-2's localizations | 29 | **177** |
+| ... their error, local fit: RMSE / median (scored) | 9.5 cm (3) | 15.1 / 12.9 cm (26) |
+| Time per image (median), cafe / home | 40 / 22 ms | 56 / 58 ms |
+
+In the café the settings add 15% more localizations at the same error; in
+the home, six times as many. Home's ground truth has a pose every 0.1 s at
+best, so few of them get scored, and those few are less accurate than in
+the café. The market (41.5 GB to download) was not tried.
 
 ## On ROS 2
 

@@ -54,29 +54,29 @@ impl GaussianSmoothing {
         };
         let r = radius as usize;
         let pixels = image.pixels();
-        // Along each row: taps read straight from the row inside it, and
-        // reflected within `radius` of its ends.
+        // Along each row: inside it, one tap at a time across the row (each
+        // output still sums its taps in order); within `radius` of its ends,
+        // the taps reflected.
         let mut rows = vec![0.0_f32; width * height];
         let mut line = vec![0.0_f32; width];
+        let inside = r..width.saturating_sub(r).max(r);
         for y in 0..height {
             for (value, &pixel) in line.iter_mut().zip(&pixels[y * width..(y + 1) * width]) {
                 *value = f32::from(pixel);
             }
             let out = &mut rows[y * width..(y + 1) * width];
-            for (x, out) in out.iter_mut().enumerate() {
-                *out = if x >= r && x + r < width {
-                    kernel
-                        .iter()
-                        .zip(&line[x - r..=x + r])
-                        .map(|(weight, value)| weight * value)
-                        .sum()
-                } else {
-                    kernel
-                        .iter()
-                        .zip(-radius..=radius)
-                        .map(|(weight, i)| weight * line[reflect(x as isize + i, width)])
-                        .sum()
-                };
+            for (tap, weight) in kernel.iter().enumerate().filter(|_| !inside.is_empty()) {
+                let source = &line[inside.start + tap - r..inside.end + tap - r];
+                for (out, value) in out[inside.clone()].iter_mut().zip(source) {
+                    *out += weight * value;
+                }
+            }
+            for x in (0..width).filter(|x| !inside.contains(x)) {
+                out[x] = kernel
+                    .iter()
+                    .zip(-radius..=radius)
+                    .map(|(weight, i)| weight * line[reflect(x as isize + i, width)])
+                    .sum();
             }
         }
         // Down each column, a whole row at a time.
@@ -159,6 +159,52 @@ mod tests {
                 assert!(
                     (got - expected).abs() <= 1.0,
                     "{x} {y}: {got} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rows_match_the_reflected_sums_to_the_bit() {
+        // Each output summed tap by tap, every read reflected, then down
+        // each column the same way.
+        let image =
+            RawU16Image::from_fn(31, 9, |x, y| ((x * 7919 + y * 104_729) % 65_521) as u16 + 1)
+                .expect("image");
+        let smoothing = GaussianSmoothing { sigma: 1.5 };
+        let radius = (3.0 * smoothing.sigma).ceil() as isize;
+        let mut kernel = (-radius..=radius)
+            .map(|i| (-((i * i) as f64) / (2.0 * 1.5 * 1.5)).exp() as f32)
+            .collect::<Vec<_>>();
+        let total: f32 = kernel.iter().sum();
+        kernel.iter_mut().for_each(|weight| *weight /= total);
+        let reflect = |i: isize, len: isize| {
+            let i = i.rem_euclid(2 * (len - 1));
+            if i < len {
+                i
+            } else {
+                2 * (len - 1) - i
+            }
+        };
+        let sum = |at: &dyn Fn(isize) -> f32| -> f32 {
+            kernel
+                .iter()
+                .zip(-radius..=radius)
+                .map(|(weight, i)| weight * at(i))
+                .sum()
+        };
+        let pixel =
+            |x: isize, y: isize| f32::from(image.pixel(x as usize, y as usize).expect("pixel"));
+        let row = |x: isize, y: isize| sum(&|i| pixel(reflect(x + i, 31), y));
+        let smoothed = smoothing.apply(&image);
+        for y in 0..9 {
+            for x in 0..31 {
+                let column = sum(&|i| row(x, reflect(y + i, 9)));
+                let expected = column.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+                assert_eq!(
+                    smoothed.pixel(x as usize, y as usize),
+                    Some(expected),
+                    "{x} {y}"
                 );
             }
         }

@@ -194,83 +194,92 @@ pub fn detect_keypoints_mapping_with(
     // Keeping the intermediate arithmetic f32 is important: the final four
     // selected points are close in response and f64/direct-convolution
     // arithmetic changes the OpenCV ordering at the 800-point cutoff.
-    let pixel = |x: i32, y: i32| -> f32 {
-        let xx = reflect101(x, width as i32) as usize;
-        let yy = reflect101(y, height as i32) as usize;
-        f32::from(image.pixel(xx, yy).unwrap_or(0) >> 8)
-    };
-    let mut dx = vec![0.0_f32; width * height];
-    let mut dy = vec![0.0_f32; width * height];
+    // Each pass runs along whole rows, reflecting only at their ends; the
+    // sums keep their order, so the response is the same to the bit.
+    let gray = image
+        .pixels()
+        .iter()
+        .map(|&pixel| f32::from(pixel >> 8))
+        .collect::<Vec<_>>();
+    let (left, right) = (1, width - 2); // reflect101(-1) and reflect101(width)
+    let scale = 1.0_f32 / (4.0 * 3.0 * 255.0);
     let mut dx_horizontal = vec![0.0_f32; width * height];
     let mut dy_horizontal = vec![0.0_f32; width * height];
-    let scale = 1.0_f32 / (4.0 * 3.0 * 255.0);
-    for y in 0..height {
-        for x in 0..width {
-            let xi = x as i32;
-            let yi = y as i32;
-            // Separable Sobel kernels: d/dx = [1,2,1]ᵀ[-1,0,1],
-            // d/dy = [-1,0,1]ᵀ[1,2,1].
-            dx_horizontal[y * width + x] = -pixel(xi - 1, yi) + pixel(xi + 1, yi);
-            dy_horizontal[y * width + x] =
-                pixel(xi - 1, yi) + 2.0 * pixel(xi, yi) + pixel(xi + 1, yi);
+    for ((row, dx_row), dy_row) in gray
+        .chunks_exact(width)
+        .zip(dx_horizontal.chunks_exact_mut(width))
+        .zip(dy_horizontal.chunks_exact_mut(width))
+    {
+        // Separable Sobel kernels: d/dx = [1,2,1]ᵀ[-1,0,1],
+        // d/dy = [-1,0,1]ᵀ[1,2,1].
+        let mut sobel = |x: usize, before: usize, after: usize| {
+            dx_row[x] = -row[before] + row[after];
+            dy_row[x] = row[before] + 2.0 * row[x] + row[after];
+        };
+        sobel(0, left, 1);
+        for x in 1..width - 1 {
+            sobel(x, x - 1, x + 1);
         }
-    }
-    for y in 0..height {
-        for x in 0..width {
-            let yi = y as i32;
-            let row = |values: &[f32], yy: i32| -> f32 {
-                values[reflect101(yy, height as i32) as usize * width + x]
-            };
-            dx[y * width + x] = (row(&dx_horizontal, yi - 1)
-                + 2.0 * row(&dx_horizontal, yi)
-                + row(&dx_horizontal, yi + 1))
-                * scale;
-            dy[y * width + x] =
-                (-row(&dy_horizontal, yi - 1) + row(&dy_horizontal, yi + 1)) * scale;
-        }
+        sobel(width - 1, width - 2, right);
     }
 
-    let mut cov_xx = vec![0.0_f32; width * height];
-    let mut cov_xy = vec![0.0_f32; width * height];
-    let mut cov_yy = vec![0.0_f32; width * height];
-    for index in 0..width * height {
-        cov_xx[index] = dx[index] * dx[index];
-        cov_xy[index] = dx[index] * dy[index];
-        cov_yy[index] = dy[index] * dy[index];
-    }
+    // The gradient products of a row, summed along it at once.
     let mut box_xx = vec![0.0_f32; width * height];
     let mut box_xy = vec![0.0_f32; width * height];
     let mut box_yy = vec![0.0_f32; width * height];
+    let mut products = [
+        vec![0.0_f32; width],
+        vec![0.0_f32; width],
+        vec![0.0_f32; width],
+    ];
     for y in 0..height {
+        let (above, below) = (
+            reflect101(y as i32 - 1, height as i32) as usize,
+            reflect101(y as i32 + 1, height as i32) as usize,
+        );
+        let row = |row: usize| row * width..(row + 1) * width;
+        let (dx_above, dx_here, dx_below) = (
+            &dx_horizontal[row(above)],
+            &dx_horizontal[row(y)],
+            &dx_horizontal[row(below)],
+        );
+        let (dy_above, dy_below) = (&dy_horizontal[row(above)], &dy_horizontal[row(below)]);
+        let [xx, xy, yy] = &mut products;
         for x in 0..width {
-            let xi = x as i32;
-            let sum3 = |values: &[f32]| -> f32 {
-                values[y * width + reflect101(xi - 1, width as i32) as usize]
-                    + values[y * width + x]
-                    + values[y * width + reflect101(xi + 1, width as i32) as usize]
-            };
-            box_xx[y * width + x] = sum3(&cov_xx);
-            box_xy[y * width + x] = sum3(&cov_xy);
-            box_yy[y * width + x] = sum3(&cov_yy);
+            let dx = (dx_above[x] + 2.0 * dx_here[x] + dx_below[x]) * scale;
+            let dy = (-dy_above[x] + dy_below[x]) * scale;
+            xx[x] = dx * dx;
+            xy[x] = dx * dy;
+            yy[x] = dy * dy;
+        }
+        for (values, sums) in products.iter().zip([&mut box_xx, &mut box_xy, &mut box_yy]) {
+            let sum = &mut sums[row(y)];
+            sum[0] = values[left] + values[0] + values[1];
+            for x in 1..width - 1 {
+                sum[x] = values[x - 1] + values[x] + values[x + 1];
+            }
+            sum[width - 1] = values[width - 2] + values[width - 1] + values[right];
         }
     }
     // OpenCV computes cornerMinEigenVal for the complete image, including
     // the border.  The subsequent goodFeaturesToTrack scan starts at one
     // pixel in, but its 3x3 dilation reads those border responses; leaving
     // them at zero creates false maxima at x/y == 1.
-    for y in 0..height {
+    for (y, out) in response.chunks_exact_mut(width).enumerate() {
+        let rows = [
+            reflect101(y as i32 - 1, height as i32) as usize,
+            y,
+            reflect101(y as i32 + 1, height as i32) as usize,
+        ]
+        .map(|row| row * width..(row + 1) * width);
+        let [xx0, xx1, xx2] = rows.clone().map(|range| &box_xx[range]);
+        let [xy0, xy1, xy2] = rows.clone().map(|range| &box_xy[range]);
+        let [yy0, yy1, yy2] = rows.map(|range| &box_yy[range]);
         for x in 0..width {
-            let yi = y as i32;
-            let yy0 = reflect101(yi - 1, height as i32) as usize;
-            let yy1 = y;
-            let yy2 = reflect101(yi + 1, height as i32) as usize;
-            let index0 = yy0 * width + x;
-            let index1 = yy1 * width + x;
-            let index2 = yy2 * width + x;
-            let a = (box_xx[index0] + box_xx[index1] + box_xx[index2]) * 0.5;
-            let b = box_xy[index0] + box_xy[index1] + box_xy[index2];
-            let c = (box_yy[index0] + box_yy[index1] + box_yy[index2]) * 0.5;
-            response[y * width + x] = (a + c) - ((a - c) * (a - c) + b * b).sqrt();
+            let a = (xx0[x] + xx1[x] + xx2[x]) * 0.5;
+            let b = xy0[x] + xy1[x] + xy2[x];
+            let c = (yy0[x] + yy1[x] + yy2[x]) * 0.5;
+            out[x] = (a + c) - ((a - c) * (a - c) + b * b).sqrt();
         }
     }
 
@@ -308,14 +317,26 @@ pub fn detect_keypoints_mapping_with(
 
     // OpenCV's `goodFeaturesToTrack` checks candidates in response order and
     // accepts a point iff every chosen point is at least minDistance away.
-    let min_distance_sq = 8.0_f32 * 8.0;
+    // Chosen points are kept in cells of that size, so only the 3x3 cells
+    // around a candidate can hold one too close.
+    const MIN_DISTANCE: usize = 8;
+    let min_distance_sq = (MIN_DISTANCE * MIN_DISTANCE) as f32;
+    let (cells_x, cells_y) = (width / MIN_DISTANCE + 1, height / MIN_DISTANCE + 1);
+    let mut cells = vec![Vec::<(f32, f32)>::new(); cells_x * cells_y];
     let mut points = Vec::with_capacity(num_features.min(candidates.len()));
     for (_, x, y) in candidates {
-        if points.iter().all(|point: &Point2<f64>| {
-            let dx = point.x as f32 - x as f32;
-            let dy = point.y as f32 - y as f32;
-            dx * dx + dy * dy >= min_distance_sq
-        }) {
+        let (cell_x, cell_y) = (x / MIN_DISTANCE, y / MIN_DISTANCE);
+        let far = (cell_y.saturating_sub(1)..=(cell_y + 1).min(cells_y - 1)).all(|row| {
+            (cell_x.saturating_sub(1)..=(cell_x + 1).min(cells_x - 1)).all(|column| {
+                cells[row * cells_x + column].iter().all(|&(px, py)| {
+                    let dx = px - x as f32;
+                    let dy = py - y as f32;
+                    dx * dx + dy * dy >= min_distance_sq
+                })
+            })
+        });
+        if far {
+            cells[cell_y * cells_x + cell_x].push((x as f32, y as f32));
             points.push(Point2::new(x as f64, y as f64));
             if points.len() == num_features {
                 break;
@@ -2534,6 +2555,107 @@ mod tests {
         // At 0.1% they come in.
         let low = detect_keypoints_mapping_with(&image, 50, 0.001);
         assert!(right(&low) >= 10, "{low:?}");
+    }
+
+    /// The detector written pixel by pixel, every read reflected, and the
+    /// distance checked against every chosen point.
+    fn direct_detection(
+        image: &crate::pyramid::RawU16Image,
+        num_features: usize,
+        quality_level: f32,
+    ) -> Vec<nalgebra::Point2<f64>> {
+        use super::{reflect101, EDGE_THRESHOLD};
+        let (width, height) = (image.width() as i32, image.height() as i32);
+        let at = |values: &[f32], x: i32, y: i32| {
+            values[(reflect101(y, height) * width + reflect101(x, width)) as usize]
+        };
+        let pass = |values: &[f32], f: &dyn Fn(&[f32], i32, i32) -> f32| {
+            (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|(x, y)| f(values, x, y))
+                .collect::<Vec<_>>()
+        };
+        let gray = pass(&[], &|_, x, y| {
+            f32::from(image.pixel(x as usize, y as usize).unwrap() >> 8)
+        });
+        let scale = 1.0_f32 / (4.0 * 3.0 * 255.0);
+        let dx_h = pass(&gray, &|v, x, y| -at(v, x - 1, y) + at(v, x + 1, y));
+        let dy_h = pass(&gray, &|v, x, y| {
+            at(v, x - 1, y) + 2.0 * at(v, x, y) + at(v, x + 1, y)
+        });
+        let dx = pass(&dx_h, &|v, x, y| {
+            (at(v, x, y - 1) + 2.0 * at(v, x, y) + at(v, x, y + 1)) * scale
+        });
+        let dy = pass(&dy_h, &|v, x, y| {
+            (-at(v, x, y - 1) + at(v, x, y + 1)) * scale
+        });
+        let product =
+            |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| a * b).collect::<Vec<_>>();
+        let sums = [product(&dx, &dx), product(&dx, &dy), product(&dy, &dy)].map(|c| {
+            let row = pass(&c, &|v, x, y| {
+                at(v, x - 1, y) + at(v, x, y) + at(v, x + 1, y)
+            });
+            pass(&row, &|v, x, y| {
+                at(v, x, y - 1) + at(v, x, y) + at(v, x, y + 1)
+            })
+        });
+        let response = (0..sums[0].len())
+            .map(|i| {
+                let (a, b, c) = (sums[0][i] * 0.5, sums[1][i], sums[2][i] * 0.5);
+                (a + c) - ((a - c) * (a - c) + b * b).sqrt()
+            })
+            .collect::<Vec<_>>();
+        let quality = response.iter().copied().fold(0.0_f32, f32::max) * quality_level;
+        let mut candidates = Vec::new();
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let value = at(&response, x, y);
+                let peak = (-1..=1)
+                    .flat_map(|j| (-1..=1).map(move |i| (i, j)))
+                    .all(|(i, j)| value >= at(&response, x + i, y + j));
+                if value >= quality && peak {
+                    candidates.push((value, x, y));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| b.1.cmp(&a.1))
+        });
+        let mut points = Vec::<nalgebra::Point2<f64>>::new();
+        for (_, x, y) in candidates {
+            if points.len() < num_features
+                && points.iter().all(|p| {
+                    let (dx, dy) = (p.x as f32 - x as f32, p.y as f32 - y as f32);
+                    dx * dx + dy * dy >= 64.0
+                })
+            {
+                points.push(nalgebra::Point2::new(f64::from(x), f64::from(y)));
+            }
+        }
+        let edge =
+            |v: f64, size: i32| v >= EDGE_THRESHOLD && v < f64::from(size) - EDGE_THRESHOLD - 1.0;
+        points
+            .into_iter()
+            .filter(|p| edge(p.x, width) && edge(p.y, height))
+            .collect()
+    }
+
+    #[test]
+    fn detection_matches_the_direct_computation() {
+        use super::detect_keypoints_mapping_with;
+        // Texture at many contrasts, on an odd size.
+        let image = crate::pyramid::RawU16Image::from_fn(131, 97, |x, y| {
+            let value = (x * 37 + y * 101 + (x * y) % 13 * 29) % 251;
+            (value as u16 * (1 + (x / 24) as u16) / 4) << 8
+        })
+        .expect("image");
+        for (num_features, quality) in [(60, 0.01), (400, 0.001), (12, 0.2)] {
+            let fast = detect_keypoints_mapping_with(&image, num_features, quality);
+            assert!(!fast.is_empty());
+            assert_eq!(fast, direct_detection(&image, num_features, quality));
+        }
     }
 
     #[test]
