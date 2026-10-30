@@ -145,24 +145,15 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        // Descriptors from equalized and raw images do not match each other.
-        if other.local_contrast != merged.local_contrast {
+        // Features extracted differently (equalized or raw, blurred or not)
+        // do not match each other.
+        if other.frontend != merged.frontend {
             return Err(format!(
-                "{}: built with {:?} local contrast equalization, the base map with {:?}; \
+                "{}: features extracted with {:?}, the base map's with {:?}; \
                  build both the same way",
                 dir.display(),
-                other.local_contrast,
-                merged.local_contrast
-            )
-            .into());
-        }
-        if other.feature_smoothing != merged.feature_smoothing {
-            return Err(format!(
-                "{}: built with {:?} blur before ORB, the base map with {:?}; \
-                 build both the same way",
-                dir.display(),
-                other.feature_smoothing,
-                merged.feature_smoothing
+                other.frontend,
+                merged.frontend
             )
             .into());
         }

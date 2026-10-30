@@ -34,9 +34,11 @@ by those localizations.
   ([below](#across-lighting-local-contrast-equalization)), the daylight
   session office1-4 gets a map pose for 33% of its frames at 2.6 cm. The
   dawn session office1-5 still gets none.
-- **Grainy images:** blurring before ORB (`--smooth-features 1.5`)
-  localizes up to ten times as many images across sessions at about the
-  same error ([below](#grainy-images-blur-before-orb)).
+- **Grainy images:** blurring before ORB (`--smooth-features 1.5`) and a
+  lower detector threshold (`--detector-quality 0.003`) localize many more
+  images across sessions: office1-7 186 times instead of 5, at 2.66 cm
+  instead of 6.86 cm, and corridor1-1's VIO + map is 13 cm off at the
+  median instead of 71 cm ([below](#grainy-images-blur-before-orb)).
 - **A long run:** over the corridor's 284 s and 232 m, the wheels'
   heading drifts 38° in two minutes. Once each few seconds of the wheel
   calibration's fit get their own heading, its offset stays at
@@ -414,8 +416,8 @@ the pairs share 38 consistent matches:
 |---|---|---|
 | Map landmarks | 7,036 | 9,620 |
 | corridor1-5's own images that localize (every 5th) | 33.5% | 52.1% |
-| corridor1-1, VIO + map: localizations; RMSE against the map around it | 57; 1.26 m | 75; 1.02 m |
-| ... wheel odometry with the gyro's heading + map | 58; 0.70 m | 76; 0.67 m |
+| corridor1-1, VIO + map: localizations; RMSE against the map around it | 57; 1.55 m | 75; 1.35 m |
+| ... wheel odometry with the gyro's heading + map | 58; 0.95 m | 76; 0.93 m |
 | Time per image (median, ORB included) | 43.5 ms | 54.1 ms |
 
 - **The localizations still come at the same two places**, more of them.
@@ -438,6 +440,46 @@ map, `--localize-every 5`, the maps as shipped and rebuilt with the blur):
 
 On EuRoC: [basalt_map_localization.md](basalt_map_localization.md#blurring-before-orb).
 It stays off by default.
+
+### And a lower detector threshold
+
+The detector keeps corners stronger than 1% of the image's strongest
+(OpenCV's quality level). In the corridor a few bright corners (lamps,
+door frames against the windows) set that bar, and the walls' weaker
+texture falls below it: the blurred images give 201 corners each.
+`basalt_euroc_online_slam_demo --detector-quality Q` sets the level for a
+map, `map.json` records it, and localization detects the same way. On the
+near-identical pairs, blurred, 0.3% gives 421 corners and 60 consistent
+matches per pair, 0.1% 756 and 82 (1%: 201 and 38). Splitting the image
+into cells, each with its share of the corner budget, gave fewer corners
+for the same matches and was dropped.
+
+| corridor1-1 → corridor1-5 | Blurred | Blurred, quality 0.003 | Blurred, quality 0.001 |
+|---|---|---|---|
+| Map landmarks | 9,620 | 15,815 | 19,042 |
+| corridor1-5's own images that localize (every 5th) | 52.1% | 73.4% | 76.4% |
+| corridor1-1, VIO + map: localizations (their RMSE); RMSE / median | 75 (2.9 cm); 1.35 m / 62 cm | 360 (4.9 cm); **0.94 m / 13 cm** | 130 (3.5 cm); 1.43 m / 54 cm |
+| ... wheel odometry with the gyro's heading + map | 76 (2.9 cm); 0.93 m / 64 cm | 164 (3.9 cm); 0.66 m / 48 cm | 254 (5.3 cm); 0.67 m / 28 cm |
+| Time per image (median) | 54 ms | 74 ms | 103 ms |
+
+- **At 0.003 corridor1-1 localizes along much more of the path.** Its VIO +
+  map is 13 cm off at the median, from 71 cm with the raw map; what is
+  left comes from the stretches the map does not cover.
+- **0.001 takes in noise too.** More corners, but the VIO + map gets fewer
+  localizations (130) and the wheel odometry's are less accurate.
+
+In the office, with both (VIO + map, `--localize-every 5`, the maps as
+shipped and rebuilt):
+
+| Query → map | Raw map: RMSE / max, localizations | Blurred | Blurred, quality 0.003 |
+|---|---|---|---|
+| office1-3 → A | 2.83 / 3.7 cm, 34 | 2.97 / 3.8 cm, 43 | 2.76 / 3.7 cm, 56 |
+| office1-6 → A | 3.08 / 4.3 cm, 130 | 3.26 / 4.5 cm, 180 | 3.15 / 4.5 cm, 213 |
+| office1-7 → B | 6.86 / 13.7 cm, 5 | 6.61 / 13.2 cm, 52 | **2.66** / 4.7 cm, 186 |
+
+office1-7, whose images never reached the 30 inliers a localization needs,
+now localizes 186 times and is 2.66 cm off. For the T265, build maps with
+`--smooth-features 1.5 --detector-quality 0.003`. Both stay off by default.
 
 ## On ROS 2
 
@@ -522,12 +564,20 @@ defaults), RMSE / max of `map_pose`, moved to the IMU:
 | As is | 8.01 / 14.0 cm | 12.10 / 22.8 cm |
 | Calibrated in the run from the map's localizations alone | **5.49 / 9.5 cm** | 10.89 / 21.6 cm |
 | ... from the VIO and the localizations | 5.46 / 9.4 cm | 10.88 / 21.5 cm |
+| ... with the gyro's heading (`imu`), from the localizations alone | 5.34 / 9.4 cm | 10.00 / 17.2 cm |
+| ... from the VIO and the localizations | 5.26 / 7.3 cm | 10.01 / 17.2 cm |
 | ... without the scale (`apply_scale:=false`) | 5.40 / 9.0 cm | — |
 | From office1-3's offline calibration, saved | 4.92 / 8.3 cm | 4.66 / 10.4 cm |
 | ... refined in the run from the localizations | 5.01 / 9.3 cm | 4.66 / 10.5 cm |
 | ... refined from the VIO and the localizations | 5.16 / 9.7 cm | 4.89 / 10.9 cm |
 | From the other session's VIO calibration, refined | 5.07 / 9.2 cm | 9.79 / 19.5 cm |
 
+- **The gyro's heading helps through ROS 2 too**
+  ([below](#the-wheels-heading-from-a-gyro)). With `-r imu:=/imu0`, the
+  node takes the bag's T265 IMU (bias 5.4 and −9.3°/min); run again without
+  it, the rows above come out within 0.08 cm. On 4 cores the VIO node
+  drops a different share of frames from run to run (123–410 of about
+  1,100), which moves the VIO rows by a few millimetres either way.
 - **Without a VIO or a saved calibration, the map calibrates the wheels.**
   office1-6's 131 localizations give (0.7, 4.8) cm, a 1.87° lean and a
   scale of 1.018 within the run, and the error falls from 8.01 to 5.49 cm.
@@ -552,20 +602,25 @@ longer: corridor1-1 drives 232 m in 284 s along a loop of corridors, turning
 2,026° in all by its wheel odometry. Their ground truth comes from a 2D laser
 SLAM, not motion capture. The map is corridor1-5's (146 s, 126 m; 1,836
 keyframe images, 7,036 landmarks), built as above. Its SLAM closes no loop:
-it is 1.33 m RMSE and up to 3.9 m off the ground truth, and 3% long. So the
-localizations are scored against the map around them: each is put in the
-ground truth's frame through the stretch of the map's own trajectory within
-5 m of it (`evaluate_map_localization.py --mode local`). Scored that way,
-the map's own SLAM poses are 3.5 cm off at the median; the laser ground
+it is 1.33 m RMSE and up to 3.9 m off the ground truth, and 3% long. It
+cannot close one. corridor1-5 drives each corridor out and back, and every
+place it passes twice (921 pairs of its poses within 1 m and over 30 s
+apart) it passes facing the other way, so its forward cameras never see
+the same view twice. Fitting a scale too leaves 1.17 m: the error is
+mostly the VIO's heading drift. So the localizations are scored against
+the map around them: each is put in the ground truth's frame through the
+stretch of the map's own trajectory within 5 m of it
+(`evaluate_map_localization.py --mode local`). Scored that way,
+the map's own SLAM poses are 3.2 cm off at the median; the laser ground
 truth jumps by up to 0.7 m in places.
 
 - **Few images localize across these sessions.** 57 of the 2,426 images
   corridor1-1 tries localize, at two places (66–68 s and 206–214 s). Each
-  is 3.0 cm RMSE from the map around it. A quarter of corridor1-1's path
+  is 3.1 cm RMSE from the map around it. A quarter of corridor1-1's path
   lies more than 1 m from corridor1-5's, up to 22 m. Between those two
-  places the VIO + map drifts up to 2.8 m (49 cm at the median). The wheel
-  odometry gets 12 localizations and drifts 3 m. This run therefore does
-  not measure the wheel odometry + map. It measures whether the
+  places the VIO + map drifts up to 3.8 m (71 cm at the median). The wheel
+  odometry gets 12 localizations and drifts by metres. This run therefore
+  does not measure the wheel odometry + map. It measures whether the
   calibration keeps up.
 - **The wheels slip in turns.** Their heading drifts 15° off the VIO's in
   one 350° turn in place, and 38° after 120 s. The VIO stays within 1.3–5°
@@ -634,9 +689,11 @@ and is corrected for that.
   replay) gets 58 localizations instead of 12: with the heading held, the
   prediction still points the projection search at the right landmarks
   140 s after the last localization. Scored against the map around each
-  pose, its RMSE falls from 3.1 m (median 2.9 m, max 8.5 m) to 0.70 m
-  (median 0.59 m, max 2.1 m). The VIO + map gets 1.27 m: its own drift
-  over the last 70 s, with no localization, reaches 2.7 m.
+  pose, its RMSE falls to 0.95 m (median 0.68 m, max 2.9 m). Without the
+  gyro it is 3.5 m (median 2.2 m, max 8.5 m) where it is scored at all:
+  more than half its poses drift over 5 m from the map. The VIO + map gets
+  1.55 m: with no localization over the last 70 s, its own drift reaches
+  3.8 m.
 - **What remains is mostly the wheels' scale.** 60 s of driving is about
   50 m, and 1.1% of it is 0.55 m.
 - **The short office sessions gain too.** Through the replay (VIO and

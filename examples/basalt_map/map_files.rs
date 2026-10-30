@@ -31,9 +31,11 @@ use std::path::{Path, PathBuf};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use serde_json::{json, Value};
 use visloc_basalt::contrast::LocalContrast;
+use visloc_basalt::mapper::features::MAPPING_QUALITY_LEVEL;
 use visloc_basalt::mapper::{localization_camera_id, LocalizationMapExport};
 use visloc_basalt::smoothing::GaussianSmoothing;
 use visloc_basalt::BasaltCalibration;
+use visloc_basalt::RawU16Image;
 use visloc_core::geometry::SE3;
 use visloc_core::types::{LandmarkDescriptorStore, Observation, VisualMap};
 use visloc_rs::io::colmap::{write_colmap_text_model, ColmapMapProvider};
@@ -66,12 +68,9 @@ pub struct SavedMap {
     pub imu_from_camera: Vec<SE3>,
     /// Detector budget the map's keyframes were built with.
     pub max_points: usize,
-    /// Local contrast equalization the map's keyframes were built with,
-    /// which localization must apply to its images too.
-    pub local_contrast: Option<LocalContrast>,
-    /// The blur the map's keyframes were built with (after the
-    /// equalization), which localization must apply to its images too.
-    pub feature_smoothing: Option<GaussianSmoothing>,
+    /// How the map's keyframe features were extracted, which localization
+    /// must repeat on its images.
+    pub frontend: Frontend,
     /// `map.json` as read.
     pub summary: Value,
     /// `images.csv`, empty when the file is missing.
@@ -110,6 +109,68 @@ pub fn se3_from_json(value: &Value) -> Option<SE3> {
         UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz)),
         Vector3::new(tx, ty, tz),
     ))
+}
+
+/// How a map's keyframe features were extracted besides the budget; the
+/// defaults are upstream's (raw images, quality level 0.01).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Frontend {
+    /// Local contrast equalization first (`feature_local_contrast`).
+    pub local_contrast: Option<LocalContrast>,
+    /// Then a blur (`feature_smoothing_sigma`).
+    pub smoothing: Option<GaussianSmoothing>,
+    /// The detector's quality level (`feature_quality_level`).
+    pub quality_level: Option<f32>,
+}
+
+impl Frontend {
+    /// The image as the map's keyframes were before ORB extraction.
+    pub fn prepare(&self, image: &RawU16Image) -> RawU16Image {
+        let image = match &self.local_contrast {
+            Some(local_contrast) => local_contrast.apply(image),
+            None => image.clone(),
+        };
+        match &self.smoothing {
+            Some(smoothing) => smoothing.apply(&image),
+            None => image,
+        }
+    }
+
+    /// The detector's quality level.
+    pub fn quality_level(&self) -> f32 {
+        self.quality_level.unwrap_or(MAPPING_QUALITY_LEVEL)
+    }
+
+    /// `map.json`'s entries for it, set on `summary`.
+    pub fn write_json(&self, summary: &mut Value) {
+        if let Some(local_contrast) = &self.local_contrast {
+            summary["feature_local_contrast"] = local_contrast_json(local_contrast);
+        }
+        if let Some(smoothing) = &self.smoothing {
+            summary["feature_smoothing_sigma"] = json!(smoothing.sigma);
+        }
+        if let Some(quality_level) = self.quality_level {
+            summary["feature_quality_level"] = json!(quality_level);
+        }
+    }
+
+    /// From `map.json`'s entries; absent ones are upstream's.
+    pub fn from_json(summary: &Value) -> Result<Self, String> {
+        let quality_level = match summary.get("feature_quality_level") {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_f64() {
+                Some(level) if level.is_finite() && level > 0.0 && level <= 1.0 => {
+                    Some(level as f32)
+                }
+                _ => return Err(format!("map.json: bad feature_quality_level {value}")),
+            },
+        };
+        Ok(Self {
+            local_contrast: local_contrast_from_json(summary)?,
+            smoothing: feature_smoothing_from_json(summary)?,
+            quality_level,
+        })
+    }
 }
 
 /// `map.json`'s `feature_local_contrast` entry.
@@ -153,17 +214,15 @@ pub fn feature_smoothing_from_json(summary: &Value) -> Result<Option<GaussianSmo
 }
 
 /// Writes `export` under `map_dir` as a one-session map; returns the
-/// `map.json` summary. `local_contrast` and `feature_smoothing` are the
-/// equalization and the blur the keyframes' features were extracted with,
-/// if any; with `extra_descriptors`, the export's extra descriptors go to
+/// `map.json` summary. `frontend` is how the keyframes' features were
+/// extracted; with `extra_descriptors`, the export's extra descriptors go to
 /// `landmark_descriptors_extra.txt`.
 pub fn save(
     map_dir: &Path,
     export: &LocalizationMapExport,
     calibration: &BasaltCalibration,
     max_points: usize,
-    local_contrast: Option<&LocalContrast>,
-    feature_smoothing: Option<&GaussianSmoothing>,
+    frontend: &Frontend,
     extra_descriptors: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let images = export
@@ -199,12 +258,7 @@ pub fn save(
         "feature_max_points": max_points,
         "cameras": cameras,
     });
-    if let Some(local_contrast) = local_contrast {
-        summary["feature_local_contrast"] = local_contrast_json(local_contrast);
-    }
-    if let Some(feature_smoothing) = feature_smoothing {
-        summary["feature_smoothing_sigma"] = json!(feature_smoothing.sigma);
-    }
+    frontend.write_json(&mut summary);
     let extra_path = extra_descriptors_path(map_dir);
     if extra_descriptors {
         fs::create_dir_all(map_dir)?;
@@ -313,8 +367,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         .get("feature_max_points")
         .and_then(Value::as_u64)
         .ok_or("map.json: missing feature_max_points")? as usize;
-    let local_contrast = local_contrast_from_json(&summary)?;
-    let feature_smoothing = feature_smoothing_from_json(&summary)?;
+    let frontend = Frontend::from_json(&summary)?;
     let images_path = map_dir.join("images.csv");
     let images = if images_path.exists() {
         read_images(&images_path)?
@@ -362,8 +415,7 @@ pub fn load(map_dir: &Path) -> Result<SavedMap, Box<dyn std::error::Error>> {
         extra_descriptors,
         imu_from_camera,
         max_points,
-        local_contrast,
-        feature_smoothing,
+        frontend,
         summary,
         images,
     })

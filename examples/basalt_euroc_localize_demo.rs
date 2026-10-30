@@ -105,14 +105,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use nalgebra::{Point2, Quaternion, UnitQuaternion, Vector3};
-use visloc_basalt::contrast::LocalContrast;
 use visloc_basalt::euroc::{read_camera_image, read_camera_manifest};
+use visloc_basalt::mapper::features::detect_keypoints_mapping_with;
 use visloc_basalt::mapper::{
-    compute_angles, compute_descriptors, detect_keypoints_mapping, localization_camera_id,
-    orb_descriptor_to_f32,
+    compute_angles, compute_descriptors, localization_camera_id, orb_descriptor_to_f32,
 };
 use visloc_basalt::pyramid::RawU16Image;
-use visloc_basalt::smoothing::GaussianSmoothing;
 use visloc_basalt::{BasaltVioEstimatorAdapter, EurocSensorDataset};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, LocalizationFailureReason, LocalizationResult, QueryImage};
@@ -433,19 +431,15 @@ fn pipeline(args: &Args) -> Pipeline {
 }
 
 /// The mapper keyframe frontend, with descriptors unpacked like the map's,
-/// on the image equalized and blurred like the map's keyframes if they were.
+/// on the image prepared and with the detector set like the map's keyframes.
 fn query_image(
     image: &RawU16Image,
     camera: &Camera,
     max_points: usize,
-    local_contrast: Option<&LocalContrast>,
-    feature_smoothing: Option<&GaussianSmoothing>,
+    frontend: &map_files::Frontend,
 ) -> Result<QueryImage, Box<dyn std::error::Error>> {
-    let equalized = local_contrast.map(|local_contrast| local_contrast.apply(image));
-    let image = equalized.as_ref().unwrap_or(image);
-    let smoothed = feature_smoothing.map(|feature_smoothing| feature_smoothing.apply(image));
-    let image = smoothed.as_ref().unwrap_or(image);
-    let corners = detect_keypoints_mapping(image, max_points);
+    let image = &frontend.prepare(image);
+    let corners = detect_keypoints_mapping_with(image, max_points, frontend.quality_level());
     let angles = compute_angles(image, &corners, true);
     let descriptors = compute_descriptors(image, &corners, &angles)?;
     Ok(QueryImage {
@@ -555,15 +549,22 @@ impl Localizer {
             } else {
                 String::new()
             },
-            map.local_contrast
+            map.frontend
+                .local_contrast
                 .map(|c| format!(
                     ", local contrast equalized ({} tiles, clip {})",
                     c.tiles, c.clip_limit
                 ))
                 .unwrap_or_default()
                 + &map
-                    .feature_smoothing
+                    .frontend
+                    .smoothing
                     .map(|s| format!(", blurred (sigma {})", s.sigma))
+                    .unwrap_or_default()
+                + &map
+                    .frontend
+                    .quality_level
+                    .map(|q| format!(", detector quality {q}"))
                     .unwrap_or_default()
         );
         let retrieval = args.retrieval_keyframes.map(|top_k| {
@@ -605,13 +606,7 @@ impl Localizer {
         stale_min_inliers: Option<usize>,
     ) -> Result<Attempt, Box<dyn std::error::Error>> {
         let started = Instant::now();
-        let query = query_image(
-            image,
-            &self.camera,
-            self.max_points,
-            self.map.local_contrast.as_ref(),
-            self.map.feature_smoothing.as_ref(),
-        )?;
+        let query = query_image(image, &self.camera, self.max_points, &self.map.frontend)?;
         let packed = self.index.pack_query(&query.descriptors);
         let projected_raw =
             predicted
@@ -1191,10 +1186,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
+    use visloc_basalt::contrast::LocalContrast;
     use visloc_basalt::mapper::{
         MapperImageFeatures, MapperLandmark, MapperObservation, NfrMapper, NfrMapperLandmarkDb,
         TimeCamId,
     };
+    use visloc_basalt::smoothing::GaussianSmoothing;
     use visloc_basalt::vio::landmarks::StereographicDirection;
     use visloc_basalt::{BasaltCalibration, DoubleSphereCamera};
 
@@ -1520,32 +1517,30 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&map_dir);
-        map_files::save(&map_dir, &export, &calibration, 800, None, None, true).expect("save");
-        let saved = map_files::load(&map_dir).expect("load");
-        assert_eq!(saved.local_contrast, None);
-        assert_eq!(saved.feature_smoothing, None);
-        // The extra descriptors round-trip; a map saved without them has none.
-        assert_eq!(saved.extra_descriptors, export.extra_descriptors);
-        let equalized = LocalContrast {
-            tiles: 6,
-            clip_limit: 3.0,
-        };
         map_files::save(
             &map_dir,
             &export,
             &calibration,
             800,
-            Some(&equalized),
-            Some(&GaussianSmoothing { sigma: 1.5 }),
-            false,
+            &map_files::Frontend::default(),
+            true,
         )
         .expect("save");
+        let saved = map_files::load(&map_dir).expect("load");
+        assert_eq!(saved.frontend, map_files::Frontend::default());
+        // The extra descriptors round-trip; a map saved without them has none.
+        assert_eq!(saved.extra_descriptors, export.extra_descriptors);
+        let frontend = map_files::Frontend {
+            local_contrast: Some(LocalContrast {
+                tiles: 6,
+                clip_limit: 3.0,
+            }),
+            smoothing: Some(GaussianSmoothing { sigma: 1.5 }),
+            quality_level: Some(0.002),
+        };
+        map_files::save(&map_dir, &export, &calibration, 800, &frontend, false).expect("save");
         let resaved = map_files::load(&map_dir).expect("load");
-        assert_eq!(resaved.local_contrast, Some(equalized));
-        assert_eq!(
-            resaved.feature_smoothing,
-            Some(GaussianSmoothing { sigma: 1.5 })
-        );
+        assert_eq!(resaved.frontend, frontend);
         assert!(resaved.extra_descriptors.is_empty());
         fs::remove_dir_all(&map_dir).expect("cleanup");
         assert_eq!(saved.map.landmarks.len(), points.len());

@@ -157,6 +157,10 @@ pub enum FeaturePipelineError {
     ZeroStereoBaseline,
 }
 
+/// Upstream's quality level: corners weaker than this fraction of the
+/// image's strongest are dropped (OpenCV's `qualityLevel`).
+pub const MAPPING_QUALITY_LEVEL: f32 = 0.01;
+
 /// Detects Shi--Tomasi corners in the same role as OpenCV's
 /// `goodFeaturesToTrack(image, ..., 800, 0.01, 8)` used by
 /// `detectKeypointsMapping`.
@@ -166,6 +170,17 @@ pub enum FeaturePipelineError {
 /// suppression, and response-descending selection.  Coordinates are integer
 /// pixel centers represented as `f64`, matching the unrefined OpenCV output.
 pub fn detect_keypoints_mapping(image: &RawU16Image, num_features: usize) -> Vec<Point2<f64>> {
+    detect_keypoints_mapping_with(image, num_features, MAPPING_QUALITY_LEVEL)
+}
+
+/// [`detect_keypoints_mapping`] with another quality level: lower keeps
+/// weak texture that a few strong corners (lamps, windows) would otherwise
+/// put below the bar.
+pub fn detect_keypoints_mapping_with(
+    image: &RawU16Image,
+    num_features: usize,
+    quality_level: f32,
+) -> Vec<Point2<f64>> {
     if num_features == 0 || image.width() < 7 || image.height() < 7 {
         return Vec::new();
     }
@@ -263,7 +278,7 @@ pub fn detect_keypoints_mapping(image: &RawU16Image, num_features: usize) -> Vec
     if !max_response.is_finite() || max_response <= 0.0 {
         return Vec::new();
     }
-    let quality = max_response * 0.01;
+    let quality = max_response * quality_level;
     let mut candidates = Vec::<(f32, usize, usize)>::new();
     for y in 1..height.saturating_sub(1) {
         for x in 1..width.saturating_sub(1) {
@@ -2274,7 +2289,18 @@ pub fn extract_mapper_features(
     camera: &DoubleSphereCamera,
     config: OfflineMapperConfig,
 ) -> Result<MapperImageFeatures, FeaturePipelineError> {
-    let corners = detect_keypoints_mapping(image, config.max_points);
+    extract_mapper_features_with(image, camera, config, MAPPING_QUALITY_LEVEL)
+}
+
+/// [`extract_mapper_features`] with the detector's quality level
+/// ([`detect_keypoints_mapping_with`]).
+pub fn extract_mapper_features_with(
+    image: &RawU16Image,
+    camera: &DoubleSphereCamera,
+    config: OfflineMapperConfig,
+    quality_level: f32,
+) -> Result<MapperImageFeatures, FeaturePipelineError> {
+    let corners = detect_keypoints_mapping_with(image, config.max_points, quality_level);
     let corner_angles = compute_angles(image, &corners, true);
     let descriptors = compute_descriptors(image, &corners, &corner_angles)?;
     let rays = unproject_rays(camera, &corners)?;
@@ -2472,6 +2498,44 @@ fn hamming_distance(a: &[u8; 32], b: &[u8; 32]) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    /// A grey image with one bright square (strong corners) at the left and
+    /// faint dots (weak corners) over the right half.
+    fn lamp_and_texture() -> crate::pyramid::RawU16Image {
+        crate::pyramid::RawU16Image::from_fn(160, 120, |x, y| {
+            let lamp = (30..50).contains(&x) && (50..70).contains(&y);
+            let dot = x >= 80 && x % 12 == 0 && y % 12 == 0;
+            let level: u16 = if lamp {
+                250
+            } else if dot {
+                110
+            } else {
+                100
+            };
+            level << 8
+        })
+        .expect("image")
+    }
+
+    #[test]
+    fn a_lower_quality_level_reaches_weak_texture() {
+        use super::{
+            detect_keypoints_mapping, detect_keypoints_mapping_with, MAPPING_QUALITY_LEVEL,
+        };
+        let image = lamp_and_texture();
+        let upstream = detect_keypoints_mapping(&image, 50);
+        assert_eq!(
+            detect_keypoints_mapping_with(&image, 50, MAPPING_QUALITY_LEVEL),
+            upstream
+        );
+        // The lamp's corners set the bar: the faint dots stay below 1% of it.
+        let right =
+            |points: &[nalgebra::Point2<f64>]| points.iter().filter(|p| p.x >= 80.0).count();
+        assert_eq!(right(&upstream), 0, "{upstream:?}");
+        // At 0.1% they come in.
+        let low = detect_keypoints_mapping_with(&image, 50, 0.001);
+        assert!(right(&low) >= 10, "{low:?}");
+    }
+
     #[test]
     fn stewenius_schur_rejects_nonfinite_inputs() {
         use nalgebra::Complex;
