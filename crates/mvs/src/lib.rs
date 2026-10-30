@@ -9,18 +9,24 @@
 //! points that enough source views agree on, and [`mod@mesh`] fuses their
 //! depths into a TSDF mesh.
 
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod deformable;
 pub mod fusion;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod mesh;
 pub mod model;
+#[cfg(any(feature = "gpu", feature = "cuda"))]
+mod pass_setup;
 pub mod patch_match;
 pub mod pipeline;
 pub mod planar_prior;
 pub mod ply;
 pub mod workspace;
 
+#[cfg(feature = "cuda")]
+pub use cuda::CudaPatchMatch;
 pub use deformable::Deformable;
 pub use fusion::{fuse, fuse_with, FusedPoint, FusionOptions};
 #[cfg(feature = "gpu")]

@@ -2,8 +2,8 @@
 
 `visloc-mvs` turns a COLMAP sparse model with undistorted (pinhole) images
 into a dense point cloud: a depth and normal map per image by PatchMatch,
-fused into `fused.ply`. It runs on the CPU, or on the GPU through wgpu with
-`--features gpu`.
+fused into `fused.ply`. It runs on the CPU, on the GPU through wgpu with
+`--features gpu`, or on CUDA with `--features cuda` ([On CUDA](#on-cuda)).
 
 ```text
 cargo run --release -p visloc-mvs --features gpu --example mvs -- \
@@ -112,6 +112,49 @@ are half-float texture layers that the texture unit samples bilinearly, as
 ACMM samples CUDA textures. The GPU differs from the CPU path only by
 rounding: on ETH3D pipes at 400 px its F1 score is 34.44% against the
 CPU's 34.47%.
+
+### On CUDA
+
+Where wgpu cannot reach the GPU (WSL2 exposes CUDA but no NVIDIA Vulkan
+driver), `--features cuda` runs the shaders as CUDA kernels, line for line:
+
+```text
+scripts/build_mvs_cuda.sh <lib dir>
+VISLOC_MVS_CUDA_LIB=<lib dir>/libvisloc_mvs_cuda.so \
+cargo run --release -p visloc-mvs --features cuda --example mvs -- \
+    --sparse <dir> --images <image dir> --out <dir> --cuda
+```
+
+- **Packaging.** `native/mvs_cuda/mvs_cuda.cu` is built by the script and
+  loaded at runtime (`visloc_mvs::CudaPatchMatch`), after an ABI version
+  check. Cargo never compiles CUDA. The CPU prepares each pass as for the
+  GPU (cameras, grey levels, starting planes; `pass_setup.rs`) and still
+  finds a deformable pass's nearest strong pixels.
+- **Sampling.** The kernels sample the source images bilinearly in f32
+  in software, as the CPU path does, where the shader's texture holds half
+  floats. The photometric score of a map is within 1e-4 of the CPU's at the
+  median (the GPU's: 1e-3).
+- **Tests.** The wgpu and CUDA tests are the same checks against the CPU
+  path (`pass_setup::checks`); the CUDA ones run when
+  `VISLOC_MVS_CUDA_LIB` is set.
+
+On three ETH3D scenes (our SfM, an 8 GB laptop GPU against the CPU of the
+same laptop), CUDA scores what the CPU path does, 16 to 21 times faster.
+F1 at 2 cm, with accuracy / completeness, and the whole `mvs` run:
+
+| Scene | Images | CPU | CUDA |
+|---|---|---|---|
+| office, 800 px | 26 | 56.75% (83.8 / 42.9), 468 s | 56.75% (83.8 / 42.9), 28 s |
+| playground, 800 px | 38 | 61.33% (85.2 / 47.9), 804 s | 61.35% (85.2 / 47.9), 49 s |
+| terrains, 1600 px | 42 | 84.73% (92.5 / 78.1), 4483 s | 85.05% (92.7 / 78.6), 209 s |
+| office, 1600 px | 26 | | 72.76% (88.6 / 61.7), 102 s |
+| playground, 1600 px | 38 | | 67.69% (84.1 / 56.6), 177 s |
+
+- **Same results.** At the CPU runs' sizes the scores agree within 0.32
+  points. The rounding differs, so the clouds are not identical.
+- **Resolution is now affordable.** The CPU runs took office and
+  playground at 800 px for time. At 1600 px, in 2 to 3 minutes, office
+  gains 16.0 points and playground 6.4.
 
 **Memory.** A view keeps its colours, 3 bytes a pixel; its grey levels
 are the colours' luma, computed when the view is matched. A depth map

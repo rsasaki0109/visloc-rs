@@ -4,93 +4,15 @@
 //! view selection, refinement and their random numbers), so the two differ
 //! only by floating-point rounding.
 
-use bytemuck::{Pod, Zeroable};
 use visloc_gsplat_render::{GpuContext, GpuError};
 
-use crate::deformable::{self, Class, Deformable, MAX_ANCHORS};
+use crate::deformable::{self, Class, MAX_ANCHORS};
+use crate::pass_setup::{Params, PassSetup};
 use crate::patch_match::{
-    finish_pass_depth_map, DepthMap, DetailRestorer, PatchMatchOptions, ViewSelection, MAX_COST,
-    MAX_SOURCES,
+    finish_pass_depth_map, DepthMap, DetailRestorer, PatchMatchOptions, MAX_COST,
 };
 use crate::planar_prior::{PlanarPrior, PlanarPriorOptions};
-use crate::workspace::{luma, Workspace};
-
-/// Uniform parameters of one dispatch (`Params` in the shader).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-struct Params {
-    width: u32,
-    height: u32,
-    num_sources: u32,
-    color: u32,
-    iteration: u32,
-    seed: u32,
-    view_id: u32,
-    geometric: u32,
-    fx: f32,
-    fy: f32,
-    cx: f32,
-    cy: f32,
-    depth_min: f32,
-    depth_max: f32,
-    tau: f32,
-    tau1: f32,
-    beta: f32,
-    n1: u32,
-    n2: u32,
-    init_top_k: u32,
-    geom_lambda: f32,
-    geom_delta: f32,
-    depth_perturbation: f32,
-    normal_perturbation: f32,
-    window_radius: i32,
-    window_step: i32,
-    sigma_spatial: f32,
-    sigma_color: f32,
-    /// 0: [`ViewSelection::Confidence`], 1: [`ViewSelection::Sampled`].
-    view_selection: u32,
-    inv_texture_width: f32,
-    inv_texture_height: f32,
-    /// 1 in the planar prior pass, with its posterior's terms and its
-    /// bandwidths.
-    planar_prior: u32,
-    prior_inv_alpha: f32,
-    prior_gamma: f32,
-    prior_depth_weight: f32,
-    prior_angle_weight: f32,
-    prior_depth_sigma: f32,
-    prior_angle_sigma: f32,
-    /// The detail restorer: 0 [`DetailRestorer::Off`], 1
-    /// [`DetailRestorer::Start`], 2 [`DetailRestorer::Infinity`]; its
-    /// margin.
-    restore: u32,
-    restore_margin: f32,
-    /// 1 when the pass has deformable patches, with their settings (the
-    /// RANSAC threshold in depth units) and the mean baseline to the
-    /// sources.
-    deformable: u32,
-    sweep: i32,
-    peak_radius: i32,
-    max_peak_cost: f32,
-    strong_cost: f32,
-    peak_spread: f32,
-    sectors: u32,
-    ransac_threshold: f32,
-    min_inliers: u32,
-    center_weight: f32,
-    baseline: f32,
-}
-
-/// A source view as the shader reads it (`Source`).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-struct GpuSource {
-    r0: [f32; 4],
-    r1: [f32; 4],
-    r2: [f32; 4],
-    k: [f32; 4],
-    dims: [u32; 4],
-}
+use crate::workspace::Workspace;
 
 /// Uniform slots are this far apart (wgpu's minimum offset alignment).
 const SLOT: u64 = 256;
@@ -281,233 +203,28 @@ impl GpuPatchMatch {
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let reference = &ws.views[view];
-        let (w, h) = (reference.width, reference.height);
-        let source_ids: Vec<usize> = reference
-            .sources
-            .iter()
-            .take(MAX_SOURCES)
-            .copied()
-            .collect();
-
-        // The reference image, the sources' (one texture layer each, half
-        // floats) and each source's earlier depth map.
-        let texture_width = source_ids
-            .iter()
-            .map(|&s| ws.views[s].width)
-            .max()
-            .unwrap_or(1);
-        let texture_height = source_ids
-            .iter()
-            .map(|&s| ws.views[s].height)
-            .max()
-            .unwrap_or(1);
-        let mut layers: Vec<u16> =
-            Vec::with_capacity(texture_width * texture_height * source_ids.len().max(1));
-        let mut prior_len = 0usize;
-        let mut sources = Vec::with_capacity(source_ids.len());
-        for &s in &source_ids {
-            let source = &ws.views[s];
-            let r = source.rotation * reference.rotation.transpose();
-            let t = source.translation - r * reference.translation;
-            let prior_offset = prior_len as u32;
-            if let Some(maps) = prior {
-                assert_eq!(
-                    maps[s].depth.len(),
-                    source.width * source.height,
-                    "source view {s}'s earlier depth map"
-                );
-                prior_len += maps[s].depth.len();
-            }
-            sources.push(GpuSource {
-                r0: [
-                    r[(0, 0)] as f32,
-                    r[(0, 1)] as f32,
-                    r[(0, 2)] as f32,
-                    t.x as f32,
-                ],
-                r1: [
-                    r[(1, 0)] as f32,
-                    r[(1, 1)] as f32,
-                    r[(1, 2)] as f32,
-                    t.y as f32,
-                ],
-                r2: [
-                    r[(2, 0)] as f32,
-                    r[(2, 1)] as f32,
-                    r[(2, 2)] as f32,
-                    t.z as f32,
-                ],
-                k: [
-                    source.fx as f32,
-                    source.fy as f32,
-                    source.cx as f32,
-                    source.cy as f32,
-                ],
-                dims: [source.width as u32, source.height as u32, 0, prior_offset],
-            });
-            let start = layers.len();
-            layers.resize(start + texture_width * texture_height, 0);
-            let layer = &mut layers[start..];
-            for y in 0..source.height {
-                let texels = &mut layer[y * texture_width..y * texture_width + source.width];
-                let pixels = y * source.width..(y + 1) * source.width;
-                if source.gray.is_empty() {
-                    // The colours' luma, as View::gray_levels computes it.
-                    for (texel, &c) in texels.iter_mut().zip(&source.rgb[pixels]) {
-                        *texel = f16_bits(luma(c));
-                    }
-                } else {
-                    for (texel, &g) in texels.iter_mut().zip(&source.gray[pixels]) {
-                        *texel = f16_bits(g);
-                    }
-                }
-            }
-        }
-        if source_ids.is_empty() {
-            layers.resize(texture_width * texture_height, 0);
-        }
-        // The starting planes as (normal, depth), depth 0 for a random one.
-        let mut init_planes: Vec<[f32; 4]> = match start {
-            Some(map) => {
-                assert_eq!((map.width, map.height), (w, h), "starting depth map size");
-                map.depth
-                    .iter()
-                    .zip(&map.normal)
-                    .map(|(&d, n)| [n[0], n[1], n[2], d.max(0.0)])
-                    .collect()
-            }
-            None => vec![[0.0; 4]; w * h],
-        };
-        if let (Some((prior_options, planar)), Some(map)) = (planar, start) {
-            assert_eq!((planar.width, planar.height), (w, h), "prior size");
-            assert_eq!(map.cost.len(), w * h, "the start needs its costs");
-            let (fx, fy) = (reference.fx as f32, reference.fy as f32);
-            let (cx, cy) = (reference.cx as f32, reference.cy as f32);
-            for (i, init) in init_planes.iter_mut().enumerate() {
-                let Some([nx, ny, nz, rho]) = planar.plane(i) else {
-                    continue;
-                };
-                if map.depth[i] > 0.0 && map.cost[i] < prior_options.credible_cost {
-                    continue;
-                }
-                let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
-                let denom = nx * (x - cx) / fx + ny * (y - cy) / fy + nz;
-                let depth = rho / denom;
-                if denom < -1e-6 && depth > 0.0 && depth.is_finite() {
-                    *init = [nx, ny, nz, depth];
-                }
-            }
-        }
-
-        // Deformable patches in a pass that starts from a map, and the
-        // result's pixels sorted for the next pass.
-        let deformable = options
-            .deformable
-            .as_ref()
-            .filter(|_| start.is_some() && options.iterations > 0);
-        let sort = options.sort_pixels.as_ref();
-        let center = reference.center();
-        let baseline = if source_ids.is_empty() {
-            0.0
-        } else {
-            source_ids
-                .iter()
-                .map(|&s| (ws.views[s].center() - center).norm() as f32)
-                .sum::<f32>()
-                / source_ids.len() as f32
-        };
-        let base = Params {
-            width: w as u32,
-            height: h as u32,
-            num_sources: sources.len() as u32,
-            color: 0,
-            iteration: 0,
-            seed: options.seed,
-            view_id: view as u32,
-            geometric: u32::from(prior.is_some()),
-            fx: reference.fx as f32,
-            fy: reference.fy as f32,
-            cx: reference.cx as f32,
-            cy: reference.cy as f32,
-            depth_min: reference.depth_range.0,
-            depth_max: reference.depth_range.1,
-            tau: options.tau0,
-            tau1: options.tau1,
-            beta: options.beta,
-            n1: options.n1 as u32,
-            n2: options.n2 as u32,
-            init_top_k: options.init_top_k as u32,
-            geom_lambda: options.geom_lambda,
-            geom_delta: options.geom_delta,
-            depth_perturbation: options.depth_perturbation,
-            normal_perturbation: options.normal_perturbation,
-            window_radius: options.window_radius,
-            window_step: options.window_step,
-            sigma_spatial: options.sigma_spatial,
-            sigma_color: options.sigma_color,
-            view_selection: u32::from(options.view_selection == ViewSelection::Sampled),
-            inv_texture_width: 1.0 / texture_width as f32,
-            inv_texture_height: 1.0 / texture_height as f32,
-            planar_prior: u32::from(planar.is_some()),
-            prior_inv_alpha: planar.map_or(0.0, |(o, _)| 1.0 / o.alpha),
-            prior_gamma: planar.map_or(0.0, |(o, _)| o.gamma),
-            prior_depth_weight: planar.map_or(0.0, |(o, _)| {
-                let sigma = o.depth_bandwidth * (reference.depth_range.1 - reference.depth_range.0);
-                1.0 / (2.0 * sigma * sigma)
-            }),
-            prior_angle_weight: planar.map_or(0.0, |(o, _)| {
-                let sigma = o.angle_bandwidth_deg.to_radians();
-                1.0 / (2.0 * sigma * sigma)
-            }),
-            prior_depth_sigma: planar.map_or(0.0, |(o, _)| {
-                o.depth_bandwidth * (reference.depth_range.1 - reference.depth_range.0)
-            }),
-            prior_angle_sigma: planar.map_or(0.0, |(o, _)| o.angle_bandwidth_deg.to_radians()),
-            restore: match restorer {
-                DetailRestorer::Off => 0,
-                DetailRestorer::Start(_) => 1,
-                DetailRestorer::Infinity(_) => 2,
-            },
-            restore_margin: match restorer {
-                DetailRestorer::Off => 0.0,
-                DetailRestorer::Start(margin) | DetailRestorer::Infinity(margin) => margin,
-            },
-            deformable: 0,
-            sweep: 0,
-            peak_radius: 0,
-            max_peak_cost: 0.0,
-            strong_cost: 0.0,
-            peak_spread: 0.0,
-            sectors: 0,
-            ransac_threshold: 0.0,
-            min_inliers: 0,
-            center_weight: 0.0,
-            baseline,
-        };
-        let with_settings = |params: Params, d: &Deformable| Params {
-            sweep: d.sweep.min(30),
-            peak_radius: d.peak_radius,
-            max_peak_cost: d.max_peak_cost,
-            strong_cost: d.strong_cost,
-            peak_spread: d.peak_spread,
-            sectors: d.sectors as u32,
-            ransac_threshold: d.ransac_threshold
-                * (reference.depth_range.1 - reference.depth_range.0),
-            min_inliers: d.min_inliers as u32,
-            center_weight: d.center_weight,
-            ..params
-        };
-        let base = match deformable {
-            Some(d) => Params {
-                deformable: 1,
-                ..with_settings(base, d)
-            },
-            None => base,
-        };
+        let PassSetup {
+            w,
+            h,
+            source_ids,
+            sources,
+            texture_width,
+            texture_height,
+            layers,
+            prior_len,
+            init_planes,
+            base,
+            propagate,
+            deformable,
+            sort,
+        } = PassSetup::new(ws, view, options, prior, start, planar, restorer);
+        // The texture holds half floats (the f32 layers are freed here).
+        let layers: Vec<u16> = layers.into_iter().map(f16_bits).collect();
+        let deformable = deformable.as_ref();
         // Slot 0 for `init`, then one per (iteration, colour), then
         // `classify` and `find_anchors` at the start, then `classify` at
         // the end.
-        let slots = 1 + 2 * options.iterations;
+        let slots = 1 + propagate.len();
         let anchor_slot = slots;
         let sort_slot = slots + 1;
         let mut uniform_bytes = vec![0u8; (slots + 2) * SLOT as usize];
@@ -518,23 +235,13 @@ impl GpuPatchMatch {
         };
         put(0, base);
         put(anchor_slot, base);
-        if let Some(d) = sort {
-            put(sort_slot, with_settings(base, d));
+        if let Some((_, params)) = &sort {
+            put(sort_slot, *params);
         }
-        for iteration in 0..options.iterations {
-            let t = iteration as f32;
-            for color in 0..2 {
-                put(
-                    1 + 2 * iteration + color,
-                    Params {
-                        color: color as u32,
-                        iteration: iteration as u32,
-                        tau: options.tau0 * (-t * t / options.alpha).exp(),
-                        ..base
-                    },
-                );
-            }
+        for (k, params) in propagate.iter().enumerate() {
+            put(1 + k, *params);
         }
+        let sort = sort.as_ref().map(|(d, _)| d);
 
         // wgpu zero-initializes buffers, so only data is uploaded.
         let zeroed = |label: &str, len: usize| -> wgpu::Buffer {
@@ -934,180 +641,59 @@ fn read_into<T: bytemuck::Pod>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::patch_match::{estimate, photometric_score, plane_scene, plane_scene_truth};
-    use crate::planar_prior::{mean_relative_error, planar_prior, textureless_scene};
+    use crate::pass_setup::checks;
 
-    /// The planar prior pass fills a textureless region on the GPU as on the
-    /// CPU (`planar_prior`'s test).
-    #[test]
-    fn gpu_prior_fills_a_textureless_region() {
+    checks::impl_device!(GpuPatchMatch);
+
+    /// A device on the first adapter; the tests skip without one.
+    fn gpu() -> Option<GpuPatchMatch> {
         let Some(ctx) = visloc_gsplat_render::try_context() else {
             eprintln!("no GPU adapter; skipping");
-            return;
+            return None;
         };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let (ws, inner) = textureless_scene();
-        let options = PatchMatchOptions::default();
-        let photometric = gpu.estimate(&ws, 0, &options, None);
-        let prior_options = PlanarPriorOptions::default();
-        let prior = planar_prior(&ws.views[0], &photometric, &prior_options);
-        let with_prior =
-            gpu.estimate_with_prior(&ws, 0, &options, &prior_options, &photometric, &prior);
-        let truth = plane_scene_truth(&ws, 0);
-        let before = mean_relative_error(&photometric, &truth, &inner);
-        let after = mean_relative_error(&with_prior, &truth, &inner);
-        assert!(after < 0.01, "with the prior: {after}");
-        assert!(
-            before > 5.0 * after,
-            "photometric {before} vs prior {after}"
-        );
+        Some(GpuPatchMatch::with_context(ctx))
     }
 
-    /// The GPU recovers the synthetic plane like the CPU path, with and
-    /// without geometric consistency, under either view selection.
     #[test]
-    fn gpu_patch_match_recovers_a_plane() {
-        let Some(ctx) = visloc_gsplat_render::try_context() else {
-            eprintln!("no GPU adapter; skipping");
-            return;
-        };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let ws = plane_scene();
-        for view_selection in [ViewSelection::Confidence, ViewSelection::Sampled] {
-            let options = PatchMatchOptions {
-                iterations: 4,
-                view_selection,
-                ..PatchMatchOptions::default()
-            };
-            check(&gpu, &ws, &options);
+    fn gpu_prior_fills_a_textureless_region() {
+        if let Some(gpu) = gpu() {
+            checks::prior_fills_a_textureless_region(&gpu);
         }
     }
 
-    /// The detail restorer on the GPU as on the CPU (`patch_match`'s test):
-    /// from a start 2% too deep, the restorer against the start's cost keeps
-    /// it, the one against the plane at infinity re-estimates.
+    #[test]
+    fn gpu_patch_match_recovers_a_plane() {
+        if let Some(gpu) = gpu() {
+            checks::recovers_a_plane(&gpu);
+        }
+    }
+
     #[test]
     fn gpu_restorer_matches_the_cpu() {
-        let Some(ctx) = visloc_gsplat_render::try_context() else {
-            eprintln!("no GPU adapter; skipping");
-            return;
-        };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let ws = plane_scene();
-        let truth = plane_scene_truth(&ws, 0);
-        let mut start = truth.clone();
-        start.depth.iter_mut().for_each(|d| *d *= 1.02);
-        let options = PatchMatchOptions::default();
-        let inside: Vec<usize> = (8..40)
-            .flat_map(|y| (12..52).map(move |x| y * 64 + x))
-            .collect();
-        let error = |restorer| {
-            let map = gpu.estimate_from(&ws, 0, &options, &start, restorer);
-            mean_relative_error(&map, &truth, &inside)
-        };
-        let kept = error(DetailRestorer::Start(0.1));
-        assert!(kept > 0.015, "against the start: {kept}");
-        let error = error(DetailRestorer::Infinity(0.1));
-        assert!(error < 0.002, "against infinity: {error}");
+        if let Some(gpu) = gpu() {
+            checks::restorer_matches_the_cpu(&gpu);
+        }
     }
 
-    /// Deformable patches fill a textureless region on the GPU as on the
-    /// CPU (`patch_match`'s test).
     #[test]
     fn gpu_deformable_patches_fill_a_textureless_region() {
-        let Some(ctx) = visloc_gsplat_render::try_context() else {
-            eprintln!("no GPU adapter; skipping");
-            return;
-        };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let (ws, inner) = textureless_scene();
-        let options = PatchMatchOptions::default();
-        let photometric = gpu.estimate(&ws, 0, &options, None);
-        let deformable = PatchMatchOptions {
-            deformable: Some(crate::deformable::Deformable::default()),
-            ..options.clone()
-        };
-        let truth = plane_scene_truth(&ws, 0);
-        let plain = gpu.estimate_from(&ws, 0, &options, &photometric, DetailRestorer::Off);
-        let with = gpu.estimate_from(&ws, 0, &deformable, &photometric, DetailRestorer::Off);
-        let before = mean_relative_error(&plain, &truth, &inner);
-        let after = mean_relative_error(&with, &truth, &inner);
-        assert!(after < 0.015, "deformable: {after}");
-        assert!(
-            before > 10.0 * after,
-            "plain {before} vs deformable {after}"
-        );
+        if let Some(gpu) = gpu() {
+            checks::deformable_patches_fill_a_textureless_region(&gpu);
+        }
     }
 
-    /// On the GPU the strong-only median filters with the pass's classes:
-    /// a pass whose pixels are all weak keeps every depth as estimated,
-    /// and one whose pixels are all strong filters every depth.
     #[test]
     fn gpu_strong_median_follows_the_pass_classes() {
-        let Some(ctx) = visloc_gsplat_render::try_context() else {
-            eprintln!("no GPU adapter; skipping");
-            return;
-        };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let (ws, _) = textureless_scene();
-        let options = PatchMatchOptions::default();
-        let start = gpu.estimate(&ws, 0, &options, None);
-        let with_classes = |class: Class| DepthMap {
-            classes: vec![class; start.depth.len()],
-            ..start.clone()
-        };
-        let deformable = |strong_median: bool, median_filter: bool| PatchMatchOptions {
-            deformable: Some(crate::deformable::Deformable {
-                strong_median,
-                ..crate::deformable::Deformable::default()
-            }),
-            median_filter,
-            ..options.clone()
-        };
-        let run = |o: &PatchMatchOptions, class: Class| {
-            gpu.estimate_from(&ws, 0, o, &with_classes(class), DetailRestorer::Off)
-        };
-        let weak_median = run(&deformable(true, true), Class::Weak);
-        let weak_unfiltered = run(&deformable(false, false), Class::Weak);
-        assert_eq!(weak_median.depth, weak_unfiltered.depth);
-        let strong_median = run(&deformable(true, true), Class::Strong);
-        let strong_unfiltered = run(&deformable(false, false), Class::Strong);
-        assert_ne!(strong_median.depth, strong_unfiltered.depth);
+        if let Some(gpu) = gpu() {
+            checks::strong_median_follows_the_pass_classes(&gpu);
+        }
     }
 
-    /// `deformable_passes_take_the_start_classes` on the GPU.
     #[test]
     fn gpu_deformable_passes_take_the_start_classes() {
-        let Some(ctx) = visloc_gsplat_render::try_context() else {
-            eprintln!("no GPU adapter; skipping");
-            return;
-        };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let (ws, inner) = textureless_scene();
-        let options = PatchMatchOptions::default();
-        let sorting = PatchMatchOptions {
-            sort_pixels: Some(crate::deformable::Deformable::default()),
-            ..options.clone()
-        };
-        let photometric = gpu.estimate(&ws, 0, &sorting, None);
-        assert_eq!(photometric.classes.len(), photometric.depth.len());
-        assert!(inner.iter().any(|&i| photometric.classes[i] == Class::Weak));
-        let deformable = PatchMatchOptions {
-            deformable: Some(crate::deformable::Deformable::default()),
-            ..options.clone()
-        };
-        let truth = plane_scene_truth(&ws, 0);
-        let with = gpu.estimate_from(&ws, 0, &deformable, &photometric, DetailRestorer::Off);
-        let after = mean_relative_error(&with, &truth, &inner);
-        assert!(after < 0.015, "deformable: {after}");
-        assert!(with.classes.is_empty());
-        let all_strong = DepthMap {
-            classes: vec![Class::Strong; photometric.depth.len()],
-            ..photometric.clone()
-        };
-        let plain = gpu.estimate_from(&ws, 0, &options, &photometric, DetailRestorer::Off);
-        let strong = gpu.estimate_from(&ws, 0, &deformable, &all_strong, DetailRestorer::Off);
-        assert_eq!(strong.depth, plain.depth);
+        if let Some(gpu) = gpu() {
+            checks::deformable_passes_take_the_start_classes(&gpu);
+        }
     }
 
     #[test]
@@ -1134,64 +720,8 @@ mod tests {
     /// texture unit's half floats and interpolation weights.
     #[test]
     fn gpu_photometric_score_matches_the_cpu() {
-        let Some(ctx) = visloc_gsplat_render::try_context() else {
-            eprintln!("no GPU adapter; skipping");
-            return;
-        };
-        let gpu = GpuPatchMatch::with_context(ctx);
-        let ws = plane_scene();
-        let options = PatchMatchOptions::default();
-        let mut map = plane_scene_truth(&ws, 0);
-        // A pixel without depth scores the maximum on both.
-        map.depth[0] = 0.0;
-        let cpu = photometric_score(&ws, 0, &options, &map);
-        let on_gpu = gpu.photometric_score(&ws, 0, &options, &map);
-        assert_eq!(on_gpu[0], MAX_COST);
-        let mut differences: Vec<f32> = cpu
-            .iter()
-            .zip(&on_gpu)
-            .map(|(a, b)| (a - b).abs())
-            .collect();
-        differences.sort_by(f32::total_cmp);
-        let at = |q: f64| differences[((differences.len() - 1) as f64 * q) as usize];
-        assert!(at(0.5) < 1e-3, "median difference {}", at(0.5));
-        assert!(at(0.99) < 1e-2, "99th percentile difference {}", at(0.99));
-    }
-
-    fn check(gpu: &GpuPatchMatch, ws: &Workspace, options: &PatchMatchOptions) {
-        let within = |map: &DepthMap| {
-            let mut good = 0;
-            for y in 8..40 {
-                for x in 12..52 {
-                    if (map.depth[y * 64 + x] - 4.0).abs() < 0.04 {
-                        good += 1;
-                    }
-                }
-            }
-            good
-        };
-        let inside = 32 * 40;
-        let map = gpu.estimate(ws, 0, options, None);
-        let cpu = estimate(ws, 0, options, None);
-        assert!(
-            within(&map) * 10 >= inside * 9,
-            "GPU {:?}: {} of {inside}",
-            options.view_selection,
-            within(&map)
-        );
-        assert!(
-            within(&cpu) * 10 >= inside * 9,
-            "CPU {:?}: {} of {inside}",
-            options.view_selection,
-            within(&cpu)
-        );
-        let maps: Vec<DepthMap> = (0..3).map(|v| gpu.estimate(ws, v, options, None)).collect();
-        let refined = gpu.estimate(ws, 0, options, Some(&maps));
-        assert!(
-            within(&refined) * 10 >= inside * 9,
-            "GPU geometric {:?}: {}",
-            options.view_selection,
-            within(&refined)
-        );
+        if let Some(gpu) = gpu() {
+            checks::photometric_score_matches_the_cpu(&gpu, 1e-3, 1e-2);
+        }
     }
 }
