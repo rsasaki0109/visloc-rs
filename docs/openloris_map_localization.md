@@ -526,6 +526,40 @@ the home, six times as many. Home's ground truth has a pose every 0.1 s at
 best, so few of them get scored, and those few are less accurate than in
 the café. The market (41.5 GB to download) was not tried.
 
+**Why the maps are 17–19 cm off, and what does not fix it.**
+
+- **No loop can close.** Neither cafe1-1 nor home1-1 comes back to a place
+  facing the same way (within 0.5 m and 30°, 10 s or more later); 84% and
+  63% of their poses are passed again only facing the other way. The
+  mapper accepts no loop in cafe1-1 and one or two in home1-1, against 684
+  in EuRoC's MH_01.
+- **The scale explains a part in the café only.** Fitted to the wheel
+  odometry, the SLAM is 4.5% (cafe1-1) and 3.1% (home1-1) long. With the
+  baseline scaled by that ([as in the office](#correcting-the-scale)),
+  cafe1-1's map is 15.0 cm from the ground truth instead of 18.5 cm;
+  home1-1's 18.5 instead of 18.0 cm. The localizations do not change
+  (cafe1-2: 5.8 cm, local fit).
+- **The rest cannot be told apart from the ground truth's own error.**
+  Neither a time offset nor a fixed offset of the ground truth's reference
+  point in the body (fitted along with the alignment) takes it below 8–13
+  cm, and the fitted offsets disagree between sessions. At this level the
+  2D laser ground truth does not resolve the maps' error.
+
+Wheel odometry + map on the same rescaled maps, calibrated by
+`wheel_calibration_replay` from the VIO and its localizations, without and
+with the gyro's heading
+([above](#the-wheels-heading-from-a-gyro)); RMSE of the map poses with
+the map's fixed alignment:
+
+| Query | VIO + map | Wheels + map | Wheels with the gyro's heading + map |
+|---|---|---|---|
+| cafe1-2 | 19.7 cm | 28.8 cm | **18.0 cm** |
+| home1-2 | 25.1 cm | 26.5 cm | 25.9 cm |
+
+In the café, where the robot turns 915° in 90 s, the gyro's heading brings
+the wheels to the VIO's level. In the home the three are within the
+ground truth's resolution.
+
 ## On ROS 2
 
 The same runs, through the nodes instead of the demo: each session as a
