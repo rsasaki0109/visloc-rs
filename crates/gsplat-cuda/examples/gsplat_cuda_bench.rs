@@ -169,6 +169,9 @@ fn main() {
 
     let mut stage_ms: Vec<(String, Vec<f32>)> = Vec::new();
     let mut isects = Vec::new();
+    // Host wall time of each training step (it returns once the GPU is
+    // done), which also counts the work between the timed stages.
+    let mut step_ms = Vec::new();
     for it in 0..args.iters + 1 {
         let vi = it % views.len();
         let mut num_intersections = None;
@@ -195,7 +198,11 @@ fn main() {
                 depth_weight: 0.0,
                 normal_weight: 0.0,
             };
+            let t = std::time::Instant::now();
             cuda.train_step(&step).expect("train step");
+            if it > 0 {
+                step_ms.push(t.elapsed().as_secs_f32() * 1e3);
+            }
         } else {
             let frame = cuda
                 .render(&views[vi], [0.0; 3], scene.sh_degree)
@@ -242,4 +249,7 @@ fn main() {
         println!("{:<12} {other:8.3} ms", "loss + optim");
     }
     println!("{:<12} {:8.3} ms", "total", forward + backward + other);
+    if !step_ms.is_empty() {
+        println!("{:<12} {:8.3} ms", "step wall", median(&mut step_ms));
+    }
 }

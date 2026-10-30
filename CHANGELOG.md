@@ -36,6 +36,9 @@ All notable changes to `visloc-rs` will be documented here.
   - `--sparse-sh-adam` (opt-in) updates SH only for blended gaussians,
     halving the optimizer (18 ms per step). In training it saved 5% at
     22.87 dB.
+  - Tried and not adopted, each under 1% per step: the two-stage sort, a
+    vectorized Adam and dropping the gradient memset.
+    `gsplat_cuda_bench --data` now also reports each step's wall time.
   - Meshes from CUDA:
     - The median depth comes from the splat centre, or with
       `--planar-depth` from where the ray meets the splat's plane.

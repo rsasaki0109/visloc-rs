@@ -41,7 +41,10 @@ The planned order:
    TSDF ran out of 11 GB ([`gsplat_cuda.md`](gsplat_cuda.md#tsdf-on-the-gpu)).
 4. The rasterizer optimizations from Kopanas's
    [3DGS CUDA write-up](https://grgkopanas.github.io/3dgs_cuda_blog/), one at
-   a time.
+   a time. Stopped at about 21 ms per step: the two-stage sort, a vectorized
+   Adam and dropping the gradient memset each gained under 1%. The dense
+   Adam is bound by memory, and raster_bwd needs steps 5 and 6
+   ([`gsplat_cuda.md`](gsplat_cuda.md#tried-and-not-adopted)).
 5. Two-view verification on the GPU: 450 s of SmallCity's 600 s front end.
 
 ## Track 1: Correctness and release hygiene
