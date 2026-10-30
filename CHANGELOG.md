@@ -128,7 +128,9 @@ All notable changes to `visloc-rs` will be documented here.
   - With those 1600 px maps, the hybrid meshes (`--depth-maps`) of the same
     splats score 64.2% instead of 62.7% with a plain splat, and 68.1%
     instead of 65.7% with a prior-trained one (mean ETH3D mesh F1 at 2 cm;
-    office +3.8 to +4.8 points).
+    office +3.8 to +4.8 points). With the prior trained on those maps as
+    well, the prior-30 hybrid reaches 70.5% (office 59.0% → 66.9%), and
+    the splat's own expected-depth mesh 67.7% instead of 63.6%.
   - The wgpu path's pass preparation moved to `pass_setup.rs`, shared by
     both backends, as are their tests (`pass_setup::checks`).
   - The crate's `unsafe_code` lint is `deny` instead of `forbid`; the

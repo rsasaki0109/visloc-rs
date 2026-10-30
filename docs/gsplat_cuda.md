@@ -35,7 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
-| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 68.1% |
+| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 70.5% (the prior trained on it too) |
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 
@@ -600,7 +600,29 @@ follows. The earlier mean is in brackets:
   the holes it gains up to 2.5 points.
 - **terrains moves by 0.5 points or less.** Only the rounding of its maps
   changed.
-- The prior-trained splats still learned from the 800 px maps.
+- The prior-trained splats above still learned from the 800 px maps.
+
+Retrained on the 1600 px maps (playground and office; terrains' prior was
+1600 px already), with the same settings and meshed from the expected
+depth, the prior-trained splats score as follows. The first number in each
+cell is from the splats trained on the 800 px maps, meshed the same way:
+
+| Splat | Mesh | playground | office | mean of three |
+|---|---|---|---|---|
+| prior 30, every view | splat alone | 60.4% → 62.0% | 52.3% → **62.9%** (81.0 / 51.5) | 63.6% → 67.7% |
+| prior 30, every view | MVS + splat | 65.3% → 64.5% | 59.0% → **66.9%** (82.8 / 56.1) | 68.1% → **70.5%** |
+| prior 30 → 1, held out | splat alone | 51.1% → 52.0% | 42.0% → 54.9% | 54.6% → 59.2% |
+| prior 30 → 1, held out | MVS + splat | 64.7% → 64.2% | 55.4% → 64.6% | 66.6% → 69.5% |
+| prior 30 → 1, held out | held-out PSNR | 18.51 → 18.51 dB | 21.75 → 20.91 dB | −1.06 dB against the plain splat |
+
+- **office gains about 10 points.** Its 1600 px cloud scores 72.8%
+  against 56.8% at 800 px, and the splat follows its prior. The splat
+  alone comes within 10 points of that cloud. The hybrid reaches 66.9%.
+- **playground does not gain.** The splat alone gains 0.9 and 1.6 points;
+  the hybrid moves by 0.8 points or less. Each number is one training run.
+- **The fade costs office more image.** Against the plain splat, office's
+  held-out PSNR falls by 1.40 dB instead of 0.56. Over the three scenes the
+  fade now costs 1.06 dB.
 
 ## TSDF on the GPU
 
@@ -692,9 +714,9 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
 ## Next
 
 1. **Geometry.** Fusing the MVS depth and letting a plain splat fill its
-   holes reaches 64.2% with the image untouched (68.1% with a prior-trained
-   splat), from 1600 px MVS on CUDA. Next: train the priors on the 1600 px
-   maps too. Meshing the expected depth with a strong depth prior
+   holes reaches 64.2% with the image untouched, from 1600 px MVS on CUDA,
+   and 70.5% with a splat trained on that depth as its prior. Meshing the
+   expected depth with a strong depth prior
    brings the mesh within a few points of its MVS prior, at 1.8 dB of
    held-out PSNR; fading the prior halves that cost and keeps most of the
    gain. Open: a prior that leaves the image alone (on separate geometry
