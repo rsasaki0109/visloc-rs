@@ -1128,6 +1128,44 @@ would fix it. Nor do these:
 Over a one-way route, the heading beyond a minute is the integrated
 gyroscope's, and the cameras and the IMU leave its bias undetermined.
 
+### Far points out of view
+
+Long tracks would hold the heading, but a head-worn camera keeps far points
+in view only briefly. Along the BA's trajectory of sequence_3_18 (300–420 s
+and 900–1,020 s), a direction on the horizon is in cam0's or cam1's view
+(rectified, 758 × 572) 22–24 % of the time, for a median of 1.0 s at a time,
+4.4 s at the 90th percentile and never 30 s. Pyramidal KLT at 20 Hz
+(forward-backward within 0.5 px) comes close to that limit: on 300–330 s its
+tracks last a median of 0.65 s, 2.7 s at the 90th percentile and 11 s at
+most, and 55 % of those lasting 2 s or more triangulate within 2 px RMS along
+the BA's trajectory (median depth 12 m). A better tracker cannot make them
+much longer.
+
+Nor do the points come back recognizably. For 351 such landmarks at least
+20 m away (300–480 s), each return into view was searched for by warping the
+patch around the landmark's middle observation into the new image (the plane
+through the point facing that camera) and by normalized cross-correlation
+within ±30 px of its projection. A find counts as right within 2 px of the
+epipolar line, which a random one is in 5–8 % of the cases:
+
+| Out of view for | Returns | Right among the finds (NCC ≥ 0.7) | Right among the returns |
+|---|---:|---:|---:|
+| 0 (the track's own ends) | 368 | 82 % | 76 % |
+| 1–5 s | 438 | 56 % | 52 % |
+| 5–20 s | 770 | 33 % | 26 % |
+| 20–60 s | 1,558 | 20 % | 15 % |
+| 60 s or more | 2,447 | 9 % | 3 % |
+
+Walking for 20–60 s moves the camera 25–80 m, as far as the "far" points
+themselves, so their look changes as much as their place. The links within
+20 s the chain already has from its matches up to 64 keyframes apart.
+
+The pseudo-GT could not serve as the reference here. Its orientations are
+those of another body frame, 105° from the IMU's, and at 3.3 Hz it cannot be
+interpolated to every image while the head turns. The BA's trajectory was
+used instead; its own error may count some right finds after long gaps as
+wrong.
+
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
