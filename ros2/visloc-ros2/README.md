@@ -565,7 +565,18 @@ point corrected but not the lean.
 [details](../../docs/openloris_map_localization.md#and-a-lower-detector-threshold)).
 `map.json` records both, and `visloc_map_localize_node` blurs and detects
 every image the way the map was built, so neither the node nor the launch
-file has a setting for it.
+file has a setting for it. Played into the nodes at real time
+(`visloc_vio_node` + `visloc_map_localize_node`, `extrinsics:=tf`), office1-7
+against office1-2's map:
+
+| office1-2's map | Localized (first 200 attempts) | `map_pose` RMSE / max | Dropped images |
+|---|---|---|---|
+| As built by default | 23 | 5.30 / 10.2 cm | 4 |
+| `--smooth-features 1.5 --detector-quality 0.003` | 167 | **2.60 / 4.1 cm** | 3 |
+
+The node keeps up: an attempt takes about 73 ms (median of the attempts it
+logs, VIO running alongside), and at every 5th image of the 30 Hz camera it
+has 167 ms.
 
 ## `visloc_wheel_calibration_node`
 
