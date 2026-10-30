@@ -1265,6 +1265,59 @@ the velocity check see a wrong speed held constant, which is how
 sequence_5_11's trajectory stays 15 % short and still passes. The chain does
 not bridge rides.
 
+### The platform filter where it stays off
+
+The platform filter ([`platform.rs`](../pipelines/basalt/src/platform.rs))
+turns on where enough tracks move beyond the gyroscope's rotation with one
+common translation: at least 8 of them and 15 % of those it evaluates, in 14 of
+20 frames, while the accelerometer is quiet. Its test, run on KLT tracks of the
+rides (forward-backward within 0.5 px; they last longer than the VIO's, so the
+counts are an upper bound), per camera (cam0 / cam1):
+
+| Ride | Translation inliers per frame (median) | Their share | 20-frame windows that turn the filter on |
+|---|---:|---:|---:|
+| training sequence_5_12, 83–166 s | 76 / 40 | 34 % / 19 % | 83 % / 64 % |
+| test sequence_5_5, 10.5–12.7 min (missed) | 7 / 8 | 7 % / 7 % | 21 % / 12 % |
+| test sequence_5_6, 14.0–15.5 min (missed) | 4 / 6 | 2 % / 3 % | 7 % / 11 % |
+| test sequence_5_9, 5.2–7.0 min (kept since submission 4) | 19 / 25 | 19 % / 22 % | 48 % / 56 % |
+
+On a walk (sequence_5_12, 20–70 s) 2 % of cam0's windows would, as the
+accelerometer is rarely quiet there.
+
+Looser thresholds (`VISLOC_PLATFORM_PARAMS=min_inliers=5,min_inlier_share=0.05,evidence_on=10`)
+let the VIO move through sequence_5_5's tram ride: 201 m of path and 165 m
+net from 10.5 to 12.7 min, against 56 m and 3 m in submission 6, with the
+walks before and after within 1 % of its path. They find 55 rides there,
+though, and false ones on the training sequences, whose VIO loses (CP Score
+of the VIO alone):
+
+| Sequence | Default thresholds | Looser | Rides (frames), default → looser |
+|---|---:|---:|---|
+| sequence_5_12 | **6.40** | 5.05 | 10 (1,843) → 16 (1,933) |
+| sequence_5_11 | **39.34** | 33.59 | 13 (1,533) → 21 (1,892) |
+
+The defaults stay. Loosening only while the accelerometer disagrees with the
+VIO's velocity ([Finding the rides the VIO missed](#finding-the-rides-the-vio-missed))
+would leave the training sequences as they are, but nothing in the training
+set could show what it does on a missed ride.
+
+Nor does a missed ride made on purpose. With a training ride frozen in the
+VIO (standing still through it, the rest moved back by its displacement), the
+chain keeps the standstill whatever matches its pass:
+
+| Sequence | Chain from the real VIO | Ride frozen: SIFT | ALIKED, essential matrix | ALIKED, two essential matrices¹ |
+|---|---:|---:|---:|---:|
+| sequence_5_12 (83–166 s) | 5.80 | 6.62 | 6.62 | 6.93 |
+| sequence_5_11 (119–188 s) | **51.46** | 44.47 | 44.44 | 44.33 |
+
+¹ A second essential matrix fitted to the first one's outliers (the street
+outside the cabin); an experiment, not kept.
+
+On sequence_5_12 the chain from the real VIO covers 267 m between the CPs at
+19 s and 208 s (surveyed: 257 m), and the frozen ones 1 m with SIFT and 13 m
+with the two essential matrices. The solve moves a trajectory only near where
+it starts, and the street's observations do not triangulate from a standstill.
+
 ### Low light: matching guided by the solve
 
 Matching the low-light sequences again, guided by the pipeline's final
