@@ -483,8 +483,8 @@ now localizes 186 times and is 2.66 cm off. For the T265, build maps with
 
 ### Two more scenes: cafe and home
 
-The same comparison in two other scenes, each session's map built from its
-first session and the second localized in it (VIO + map,
+The same comparison in two other scenes, each scene's map built from its
+first session and the second session localized in it (VIO + map,
 `--localize-every 5`). Their ground truth comes from a 2D laser (z = 0,
 level). The maps themselves are 17–19 cm from it after a rigid fit, almost
 all of it horizontal: the VIO drifts that much over 30–40 m with no loop
