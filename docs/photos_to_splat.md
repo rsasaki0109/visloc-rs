@@ -92,6 +92,175 @@ that looks like panoramas gets a warning: 2:1 images whose left and right
 edges meet and whose top and bottom rows are poles, or whose metadata says
 equirectangular. The pinhole model gives no usable result on them.
 
+`--insv VIDEO.insv` takes an Insta360's raw dual-fisheye frames instead of
+panoramas. Each image has the two lenses side by side, front lens on the
+left, as ffmpeg's `hstack` of the video's two streams produces.
+
+- **Faces.** Each lens is cut into five 90° faces, at most `--max-size`
+  square: one along its axis and four tilted 45° from it. All of them stay
+  within 90° of the axis. The cut uses the lens calibration in the video's
+  metadata ([insta360_lens.md](insta360_lens.md)).
+- **Rig.** A frame's ten faces are solved as one rig. The back lens's pose
+  on it starts from a half turn and is refined by the mapper, so nothing is
+  stitched. `--window` counts frames.
+- **Scale.** The video's IMU scales the model to metres (next section).
+- **Cameras.** The calibration is decoded for the X5; videos from other
+  cameras stop with an error.
+
+## Metric scale from the camera's IMU
+
+SfM leaves the model in arbitrary units. When the photos are frames of a
+video and the camera logged its IMU, `--imu FILE` scales the model to
+metres right after SfM: sparse/0, the splats and the mesh all come out in
+metres (`<out>/port` keeps the mapper's units). It is the per-run
+visual-inertial alignment of arXiv 2610.35554 with a rolling-shutter
+term, validated on the 50 OverMaps360 walks
+([insta360_imu_scale.md](insta360_imu_scale.md); Rust:
+`visloc_slam::estimate_imu_scale`).
+
+- **The IMU**: an Insta360 `.insv` (the IMU and frame timestamps in its
+  trailer; only the file's end is read), or a CSV file
+  `time, gx, gy, gz, ax, ay, az` in seconds, rad/s and m/s² (EuRoC's
+  `imu0/data.csv` and OverMaps360's `insta360_imu.csv` are recognised by
+  their headers).
+- **The frames**: each photo's file name must end in its frame number
+  (the last run of digits, e.g. ffmpeg's `%06d.jpg`). The frame period and
+  the offset to the IMU clock are searched from the gyro against the
+  model's rotations. With an `.insv` the search starts from the video's
+  frame period, so name the frames by their number in the video (ffmpeg's
+  `-frame_pts 1`). With a CSV it starts from the IMU span over the largest
+  frame number. `--imu-frame-period S` gives the starting period
+  otherwise. With `--equirect` the panoramas are the frames.
+- **The output**: the log prints the timing, the rotation residual and the
+  scale; `<out>/imu_scale.txt` lists every run. A rotation residual of more
+  than a few tenths of a degree means the frames and the IMU do not match
+  (wrong numbering, stabilised video).
+
+**From an Insta360 video.** The `.insv` holds the frames, the lens
+calibration and the IMU, so it goes in directly (decoded for the X5;
+[insta360_lens.md](insta360_lens.md)). With ffmpeg on `PATH`, one command:
+
+```text
+gsplat_photos --insv VID.insv --out run
+```
+
+- **Frames.** It cuts every `--frame-step`-th frame (default 10, 0.33 s at
+  29.97 fps) into `run/frames`, both lenses side by side and named by their
+  number in the video. The frames are scaled to the faces' resolution, and a
+  later run reuses them.
+- **Timing.** The frame timing search starts from the video's frame period,
+  from its trailer. Frames 10 apart are well inside the alignment's 1.2 s
+  gap limit.
+- **Manual cut.** To cut the frames yourself, pass them with `--images`:
+  `ffmpeg -i VID.insv -filter_complex "[0:v:0][0:v:1]hstack=inputs=2,select='not(mod(n\,10))'" -fps_mode passthrough -frame_pts 1 -q:v 2 frames/%06d.jpg`.
+- **On a CPU.** The defaults suit a GPU: 1600 px faces (the X5's lenses
+  resolve about 2,066 px on their axes), up to 8,192 SIFT keypoints, and a
+  20-frame matching window. On a CPU, use `--max-size 1024
+  --max-keypoints 4096 --window 2`. On the mall walk below (200 frames,
+  4 CPU cores, both with `--window 2`):
+
+  | Settings | Peak memory | Time | Faces, points | IMU \|g\| | Scale vs the dataset's |
+  | --- | ---: | ---: | --- | --- | ---: |
+  | defaults (1600 px, 8,192 keypoints) | 9.5 GB | 2 h 23 min | 2000, 216,788 | 9.78 m/s² | +3.2% |
+  | `--max-size 1024 --max-keypoints 4096` | 4.5 GB | 37 min | 2000, 190,451 | 9.80 m/s² | +1.2% |
+
+  The defaults spend 1 h 47 min matching. The default window matches ten
+  times as many pairs.
+
+The test run used OverMaps360's walk 0313afa5:
+
+- **Input.** That `.insv` keeps every 10th frame of the recording. The run
+  took every 2nd frame of its first 400: 200 frames, 0.67 s apart, 133 s
+  and 165 m of walking.
+- **Settings.** `--imu-frame-period 0.333683`, because the trailer times the
+  full-rate recording; `--max-size 640 --window 2 --cpu`.
+- **SfM.** All 2,000 faces registered, with 288,261 points at 0.58 px mean
+  reprojection error. It took 23 min on 4 CPU cores and peaked at 9.1 GB,
+  with every frame and face in memory as they were then (now the faces go
+  to disk as they are cut).
+- **IMU.** It found the frame timing (offset 0.266 s, rotation residual
+  0.07°) and gave 1.5927 m per SfM unit.
+- **Back lens.** The refined pose puts it 3.22 cm behind the front one; the
+  calibration says 3.23 cm. On the other walks below it lands 2.1–6.8 cm
+  behind, so the offset is only weakly determined.
+- **Against the dataset.** Aligned to the dataset's own model over the 143
+  frames both have, the run implies 1.0504 m per dataset unit. The dataset's
+  model gives 1.0401, over the same frames and over the whole walk (+1.0%).
+  The median residual is 15 cm.
+
+Four more walks, each run the same way on its first 400 frames, once
+with 640 px lens faces and once with 1024 px (`--max-size`):
+
+| Walk | Scene | Faces registered, 640 / 1024 px | \|g\|, 640 / 1024 px | Gyro bias, rotation residual | Scale vs the dataset's, 640 px | 1024 px |
+| --- | --- | ---: | --- | --- | ---: | ---: |
+| 0313afa5 | city street | 2000 / 2000 | 9.94 / 9.94 m/s² | 0.10°/s, 0.02° | +1.0% | +1.1% |
+| 0c05c38a | temple courtyard | 2000 / 2000 | 9.81 / 9.79 m/s² | 0.11°/s, 0.06° | −2.5% | −1.7% |
+| 3b81dbc3 | residential street | 1998 / 1998 | 9.77 / 9.77 m/s² | 0.17°/s, 0.09° | −3.7% | −3.6% |
+| 9d2fe9b1 | tropical park | 1987 / 1986 | 9.78 / 9.76 m/s² | 1.80°/s, 0.05° | +1.7% | +1.8% |
+| 5bb3848a | shopping mall, indoors | 2000 / 2000 | 9.57 / 9.80 m/s² | 0.08°/s, 0.04° | +12.0% | +1.2% |
+
+The scale columns compare two IMU estimates over the same frames: this
+run's, on its own model, against the one on the dataset's model. Both fit
+the camera's gyro bias
+([insta360_imu_scale.md](insta360_imu_scale.md#gyro-bias)); the rotation
+residual is what is left, at 1024 px (within 0.01° of 640 px).
+
+- **SfM.** Every walk reconstructs at both sizes.
+- **Outdoors.** One 133 s run of the IMU alignment lands within 4%. 1024 px
+  faces move each walk by at most 0.8 points, so outdoors the error is the
+  alignment's, not the faces'. The 50-walk study found about 2.5% error at
+  1 s frame spacing ([insta360_imu_scale.md](insta360_imu_scale.md));
+  longer clips give more runs to average.
+- **Indoors.** With 640 px faces the mall is off by 12%, and its fitted
+  gravity, 9.57 m/s², marks a weak fit. With 1024 px faces gravity is
+  9.80 m/s² and the scale is +1.2%.
+- **The park.** Its camera's gyro reads 1.8°/s off. Before the estimator
+  fitted that bias, it left a 1.18° rotation residual at both face sizes,
+  pulled the frame timing 18 ms off over the clip, and gave a scale 3.3%
+  lower.
+- **Face size.** In the mall, the first frames at the full 0.33 s spacing
+  compare as follows:
+
+  | Faces | Frames | IMU fit | Rotation residual, \|g\| | Scale vs the dataset's |
+  | --- | ---: | --- | --- | ---: |
+  | 640 px | 100 (33 s) | fails its gravity check | – | – |
+  | 1024 px | 100 (33 s) | passes | 0.023°, 9.73 m/s² (the dataset's model: 0.023°) | +5.5% |
+  | 1024 px | 200 (66 s) | passes | 0.026°, 9.61 m/s² | +5.3% |
+
+  Keep `--max-size` at its default, 1600, or at least 1024, for metric
+  output.
+- **Memory.** The lens faces are written to disk as each frame is cut,
+  and SIFT reads them back. The SIFT descriptors are kept as COLMAP's
+  bytes, a quarter of their f32 size, and are turned into f32 only where
+  they are matched. On 4 CPU cores:
+  - The mall walk above (200 frames, 1024 px faces) peaks at 4.5 GB in
+    37 min, with the same output as with f32 descriptors (7.8 GB).
+  - With every frame and face in memory, 200 frames at 1024 px were killed
+    at 14 GB on a 15 GB machine.
+  - The other four walks, run with f32 descriptors, peaked at 8.7–9.3 GB in
+    42–47 min.
+- **Warning signs.** Distrust the scale when |g| is more than about
+  0.2 m/s² from 9.81, or the rotation residual (after the gyro bias fit) is
+  more than a few tenths of a degree.
+
+**Through Insta360 Studio** (not tried here; Studio is the maker's desktop
+application). Studio's export drops the IMU, so pass the original `.insv`:
+
+1. In Insta360 Studio, export the clip as a 360° (equirectangular) video
+   with FlowState stabilisation, direction lock and horizon levelling off.
+   Stabilised frames turn independently of the camera, and the gyro no
+   longer matches them.
+2. Cut every 10th frame, named by its number in the video:
+   `ffmpeg -i export.mp4 -vf "select=not(mod(n\,10))" -fps_mode passthrough -frame_pts 1 frames/%06d.jpg`.
+3. `gsplat_photos --images frames --out run --equirect --imu original.insv`.
+
+On 136 frames (67 s) of the same walk, view 0 of lens 0 at 1600 px (the
+dataset's perspective views), `gsplat_photos --imu` registered all frames,
+found the dataset's frame timing (0.333683 s per frame) and scaled its
+model by 6.58. Aligned to the dataset's own model, it implies 1.0402 m per
+dataset unit, against 1.0401 from the dataset's model over the whole walk
+(1.1 cm median residual).
+
 To train on panoramas that another tool already solved (such as COLMAP
 4.1), point `gsplat_train --data <colmap_root>` at the model: for
 an `EQUIRECTANGULAR` camera it cuts the same cube faces (`--max-face-size`,

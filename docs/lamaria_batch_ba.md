@@ -1680,6 +1680,254 @@ None loses more than 0.05; the gain is large only where the VIO's heading
 drifts fast, as on R_12_10cp. sequence_2_12, whose heading goes wrong in its
 first minutes, does not move.
 
+### Learned features
+
+SIFT rarely finds a landmark again as the view changes (see [Where the second
+sequences' heading drift comes from](#where-the-second-sequences-heading-drift-comes-from)).
+`features --extractor aliked|disk|superpoint` replaces it with one of
+[LightGlue](https://github.com/cvg/LightGlue)'s learned extractors on the GPU,
+and `match` and `loops` then match with LightGlue instead of the ratio test.
+The VIO's epipolar band stays as the filter of LightGlue's matches, and `loops`
+keeps its essential-matrix check. The learned keypoints have no size, so their
+observations keep `--pixel-sigma`. (SuperPoint's weights are licensed for
+non-commercial use only; ALIKED's and DISK's are not restricted.)
+
+Each extractor keeps its 1,024 best keypoints per image (`--num-features 1024
+--detection-threshold 0`). With the same number in every image, LightGlue
+matches 16 image pairs per call: one pair per call takes about 27 ms on an 8 GB
+GPU whatever the number of keypoints, 16 pairs of 1,024 keypoints 9 ms per pair
+in half precision (98.8 % of the matches of LightGlue one pair at a time).
+sequence_3_18's 97,000–103,000 image pairs take 15–16 min, against 73 s for
+SIFT's ratio test on eight cores.
+
+[`scripts/lamaria_track_stats.py`](../scripts/lamaria_track_stats.py) counts
+how often a solve's landmarks are found again. It projects each landmark into
+both cameras of every keyframe within 32 of its observed span; of the keyframes
+where it lands inside an image, it counts those that observe it. For SIFT on
+sequence_3_18 that is 7.8 % (the 8.9 % above came from a smaller count, 564,507
+keyframes against 17.2 million). Each variant below runs the pass's first solve
+(`ba1`) from the chain's online result, with the chain's options and its own
+features and VIO-guided matches. (On this machine the chain itself ends at
+54.27 on sequence_3_18, 64.61 on R_12_10cp and 88.65 on sequence_1_20, against
+54.28, 64.30 and 86.98 on GitHub Actions.)
+
+| sequence_3_18 | SIFT | ALIKED | DISK | SuperPoint |
+|---|---:|---:|---:|---:|
+| Keyframes that see a landmark and observe it | 7.8 % | 7.8 % | 7.8 % | 7.5 % |
+| Keyframes per landmark, mean (99th percentile) | 3.07 (14) | 2.83 (10) | 2.96 (11) | 2.72 (10) |
+| Landmarks | 439,618 | 387,907 | 467,008 | 343,315 |
+| Tracks dropped with two features in one image | 12,095 | 54,182 | 35,068 | 36,811 |
+| Not observed, a keypoint within 3 px | 23.8 % | 12.9 % | 13.2 % | 15.3 % |
+| Cost per observation | 0.14 | 0.32 | 0.37 | 0.45 |
+| CP Score | **54.35** | 49.02 | 48.75 | 49.22 |
+| Pose recall at 1 m | **41.2 %** | 32.0 % | 29.3 % | 35.8 % |
+
+| R_12_10cp | SIFT | ALIKED | DISK | SuperPoint |
+|---|---:|---:|---:|---:|
+| Keyframes that see a landmark and observe it | 7.0 % | 7.1 % | 7.1 % | 6.7 % |
+| Keyframes per landmark, mean (99th percentile) | 3.03 (14) | 2.91 (11) | 3.08 (12) | 2.67 (9) |
+| Landmarks | 179,017 | 181,794 | 223,316 | 158,822 |
+| Tracks dropped with two features in one image | 6,540 | 24,726 | 17,692 | 17,928 |
+| Not observed, a keypoint within 3 px | 25.1 % | 14.0 % | 11.8 % | 16.2 % |
+| Cost per observation | 0.14 | 0.30 | 0.35 | 0.45 |
+| CP Score | 63.27 | **68.15** | 62.02 | 64.42 |
+| Pose recall at 1 m | 51.3 % | **84.3 %** | 51.8 % | 59.6 % |
+
+"Not observed, a keypoint within 3 px" is the share of the images that see a
+landmark without observing it where a keypoint lies within 3 px of its
+projection; at their densities, chance alone gives about 9 % for SIFT and 7 %
+for the learned keypoints.
+
+None of them finds the landmarks again more often, and the longest tracks get
+shorter. The learned detectors fire at the same point less often than SIFT as
+the view changes; their keypoints are less precise (2.1–3.3 times SIFT's cost
+per observation, as on sequence_4_10's window in [Low light: features after
+denoising](#low-light-features-after-denoising)); and LightGlue's matches
+disagree more between image pairs, so 2.7–4.5 times as many tracks are
+dropped. ALIKED on sequence_1_20 gives the same picture (7.4 % against 7.5 %,
+first solve 87.53 against 88.00).
+
+The first solve's score follows none of this: ALIKED loses 5.3 on
+sequence_3_18 and gains 4.9 on R_12_10cp, where DISK loses 1.3 and SuperPoint
+gains 1.2. As the tracks are no longer than SIFT's, the eight day sequences were
+not run.
+
+ALIKED's gain on R_12_10cp is spread over the whole sequence. Against the
+pseudo-GT (one similarity for the whole trajectory), its first solve is 0.77 m
+off on average, against 0.98 m for SIFT's. The scale and heading of each 60 s
+window, fitted to the pseudo-GT after that alignment, wander a little less:
+scale 0.986–1.036 against 0.977–1.038 (standard deviation 0.012 against
+0.015), heading standard deviation 0.57° against 0.64°. With the error that
+close to the evaluation's 1 m, the small gain moves the pose recall at 1 m from
+51 % to 84 %. On sequence_3_18 it goes the other way (1.73 m against 1.47 m).
+
+R_11_5cp, the other Short training sequence that is not a `sequence_1_*`,
+gains the same way: the first solve is 0.38 m off on average against 0.57 m,
+its 60 s windows' heading has a standard deviation of 0.31° against 0.74°, and
+it scores 85.23 against 81.32 (the chain with SIFT ends at 85.81).
+
+The whole chain was then run two ways, both against the chain with SIFT on
+this machine:
+
+- with ALIKED throughout (`lamaria_ba_chain.py --features aliked`), the online
+  windows included;
+- with SIFT online and ALIKED in the pass after it (`--pass-features aliked`).
+  The pass reads ALIKED's keypoints, matches and revisits, all guided by the VIO
+  like the online windows' own, and the rematch goes there too.
+
+| Sequence | Device | SIFT | ALIKED | SIFT online, ALIKED pass |
+|---|---|---:|---:|---:|
+| R_11_5cp | 1WM093701G1276 | 85.81 | 92.12 | **92.20** |
+| R_12_10cp | 1WM093701G1276 | 64.61 | 72.03 | **73.96** |
+| sequence_1_19 | 1WM09370081264 | **82.25** | 73.34 | 81.00 |
+| sequence_1_20 | 1WM09370081264 | **88.65** | 63.13 | 86.95 |
+| sequence_2_11 | 1WM093701G1276 | **89.25** | | 76.56 |
+| sequence_3_18 | 1WM093701G1276 | **54.27** | | 49.23 |
+
+With ALIKED in the online windows, sequence_1_20's heading turns by 2° over its
+17 minutes (+0.9° … −1.2° per 60 s window against the pseudo-GT). Its online
+result is 1.36 m off on average, against 0.38 m with SIFT. With SIFT online,
+the pass gains 6.4 and 9.3 on the two R sequences and loses 1.2–12.7 on the
+four others. Neither variant goes into the chain's defaults, and the remaining
+day sequences were not run.
+
+The device does not explain the split: sequence_2_11 and 3_18 come from the
+R sequences' device too. Nothing else measured sets the R sequences apart:
+
+- SIFT finds as many keypoints there (1,358–1,370 per image, against
+  1,221–1,432 on the four others).
+- ALIKED and LightGlue find as many matches per image pair (128–130, against
+  112–128).
+- The first solve's cost per observation is that of sequence_2_11 and 3_18
+  (0.13 with SIFT, 0.29–0.32 with ALIKED).
+
+Only their images are a little darker: a mean grey level of 68–69, against
+75–82.
+
+The pass with ALIKED shortens every trajectory, by 0.25–0.82 % (the scale of
+one similarity to the pseudo-GT). The evaluation fits a similarity to the
+control points as well, so that scale costs nothing either way. What the
+scores follow is the shape left after the fit: the mean error after one
+similarity, and the spread of the heading over 60 s windows fitted after it.
+
+| Sequence | Mean error, SIFT | SIFT online, ALIKED pass | Heading spread, SIFT | SIFT online, ALIKED pass |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 0.58 m | **0.24 m** | 0.88° | **0.25°** |
+| R_12_10cp | 0.89 m | **0.60 m** | 0.58° | **0.49°** |
+| sequence_1_19 | **0.44 m** | 0.46 m | **0.19°** | 0.29° |
+| sequence_1_20 | **0.28 m** | 0.38 m | 0.21° | 0.21° |
+| sequence_2_11 | **0.30 m** | 0.59 m | **0.19°** | 0.45° |
+| sequence_3_18 | **1.46 m** | 1.71 m | 1.07° | 1.07° |
+
+(Heading spread: the standard deviation over the 60 s windows.) ALIKED
+steadies the heading where SIFT's wanders, as on the two R sequences. Where
+SIFT's heading already holds within 0.2°, ALIKED unsettles it, as on
+sequence_2_11.
+
+In low light the chain ends with its online windows, so ALIKED goes there too
+(`--features aliked`, after the same CLAHE and non-local means as SIFT;
+learned matching had not been tried in low light, see [Low light: features
+after denoising](#low-light-features-after-denoising)). It loses on both
+low-light training sequences, both chains on this machine from the same VIO:
+
+| Sequence | SIFT | ALIKED | Mean error, SIFT | ALIKED | Heading spread, SIFT | ALIKED |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_4_10 | **59.80** | 49.25 | **1.33 m** | 1.90 m | **1.10°** | 1.96° |
+| sequence_4_11 | **71.07** | 48.26 | **0.77 m** | 3.15 m | **1.11°** | 2.38° |
+
+As on sequence_1_20 by day, the online windows with ALIKED let the heading
+wander: per 60 s window it reaches +6.5° on sequence_4_10 and +4.4° on 4_11.
+
+### Learned matches without the VIO's band
+
+The VIO's epipolar band lets a drifting VIO pick the matches ([Matching guided
+by a drifting VIO](#matching-guided-by-a-drifting-vio)). LightGlue matches
+without any guidance, so the pass with ALIKED can keep its matches by other
+means:
+
+- `match --verify essential` keeps those an essential matrix explains,
+  checked as a revisit is (RANSAC at 1 px, at least 20 inliers, the rotation
+  within 10° of the VIO's), whatever the VIO's translation.
+- `match --vio online.tum` keeps those within the online result's band instead
+  of the VIO's (`lamaria_ba_chain.py --pass-match online`).
+
+Each runs with SIFT online, ALIKED's revisits (searched near the VIO) and the
+rematch guided by the pass, on this machine:
+
+| Sequence | SIFT | The VIO's band | Essential matrix | The online result's band |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 85.81 | 92.20 | 96.98 | **97.02** |
+| R_12_10cp | 64.61 | 73.96 | 75.43 | **79.31** |
+| sequence_1_19 | **82.25** | 81.00 | 68.16 | 70.16 |
+| sequence_1_20 | **88.65** | 86.95 | 86.15 | 80.78 |
+| sequence_2_11 | **89.25** | 76.56 | 83.14 | 82.43 |
+| sequence_3_18 | 54.27 | 49.23 | **62.12** | 53.92 |
+| **Mean** | 77.47 | 76.65 | **78.66** | 77.27 |
+| The two R sequences | 75.21 | 83.08 | 86.21 | **88.17** |
+| The four others | **78.61** | 73.44 | 74.89 | 71.82 |
+
+None of the variants beats SIFT outside the R sequences, and none of them
+keeps its place across all six sequences. sequence_3_18 gains 7.8 with the
+essential matrix, and sequence_1_19 loses 14.1 with it.
+
+- **The essential matrix and the far pairs.** It keeps few pairs far apart. On
+  sequence_1_19, at 128–256 keyframes apart, it keeps 3–142 image pairs per
+  offset, against about 2,000 in the band. The few matches of such a pair rarely
+  reach 20 inliers. Without them the heading of sequence_1_19's first solve
+  spreads 0.67° over the 60 s windows, against 0.27° in the VIO's band. The
+  online result's band keeps the far pairs and spreads 0.65° all the same.
+- **The revisits.** On sequence_2_11 the first solve with the essential matrix
+  scores 88.41, against 77.04 for SIFT's. The solve with the revisits then
+  loses 5.4, where SIFT's gains 12.0. With ALIKED, 40,553 tracks are dropped for
+  two features in one image (SIFT 7,669), and the revisits leave 7,857
+  keyframe blocks outside the band (SIFT 36,461).
+  - Dropping only the conflicting images' features of such a track helps
+    R_12_10cp (77.16) and loses on sequence_2_11 (78.51) and 3_18 (57.53).
+  - A pass without the revisits (the rematch guided by its first solve, no
+    `--loops`) loses on all three tried. With the online result's band,
+    sequence_1_19 scores 68.31, 2_11 71.24 and R_12_10cp 73.57.
+
+The online result's band does best on the two R sequences, and it replaces
+the VIO's for the Short sequences of device 1WM093701G1276 in submission 6
+([lamaria_test_results.md](lamaria_test_results.md)).
+
+### Revisits for place recognition
+
+`loops` looks for revisits near the trajectory that guides it (the VIO, and
+the pass's `ba2` when matching again): keyframes more than 64 apart, within
+15 m and with camera axes within 60° ([Revisits](#revisits)). A global image
+descriptor (NetVLAD, MixVPR, SALAD) would find a revisit however far the
+trajectory has drifted, but only the revisits outside that gate need one. In
+the pseudo-GT, at the keyframes' 2 Hz, a keyframe is on a revisit when it lies
+within 15 m and 60° of heading of another after at least 50 m walked in
+between (so standing at a crossing does not count):
+
+| Sequence | Minutes | Walked | Keyframes on a revisit | Longest time between the visits |
+|---|---:|---:|---:|---:|
+| R_11_5cp | 7.9 | 459 m | 23.2 % | 136 s |
+| R_12_10cp | 16.9 | 984 m | 0 % | |
+| sequence_1_19 | 15.3 | 975 m | 0.2 % | 54 s |
+| sequence_1_20 | 16.9 | 1,117 m | 15.0 % | 131 s |
+| sequence_2_11 | 19.8 | 1,261 m | 13.2 % | 221 s |
+| sequence_2_12 | 27.9 | 2,033 m | 15.9 % | 211 s |
+| sequence_3_17 | 29.8 | 1,946 m | 4.4 % | 66 s |
+| sequence_3_18 | 28.2 | 1,651 m | 3.7 % | 70 s |
+| sequence_4_10 | 23.6 | 1,410 m | 10.5 % | 76 s |
+| sequence_4_11 | 18.8 | 1,062 m | 2.0 % | 74 s |
+
+Every revisit comes within four minutes of the first visit, too soon for the
+VIO to drift out of the gate. On sequence_1_20 and 3_18 (the chain's first
+`loops`, guided by the VIO), each revisit of the pseudo-GT (at least 10
+keyframe pairs) has 71–100 % of its keyframe pairs within 15 m in the VIO as
+well. `loops` verifies pairs on 7 of sequence_1_20's 9 revisits (93 % of their
+keyframe pairs) and on 2 of sequence_3_18's 3 (96 %). The ones it misses are
+13–14 m apart in the VIO at the median, inside the gate: their images fail the
+essential-matrix check, so a global descriptor would propose them again to no
+effect. The sequences furthest
+behind, R_12_10cp and 3_18, barely revisit at all, and sequence_2_12's
+revisits come after its first ten minutes, too late for the heading that goes
+wrong at its start. Place recognition was not tried.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
@@ -1771,6 +2019,26 @@ python scripts/lamaria_batch_ba.py solve --work work/$S --vio out/$S.lc.tum --ca
   takes the estimates from the states.
 - **Keypoint sizes.** `solve --sigma-size 2.7 --sigma-size-pow 0.35` gives
   larger keypoints a larger pixel sigma (`features` stores the sizes).
+- **Learned features.** `features --extractor aliked|disk|superpoint
+  --num-features 1024 --detection-threshold 0` needs torch and LightGlue (tried
+  with cvg/LightGlue 5a650c4 and torch 2.14.1 on CUDA 13.0); `match` and `loops`
+  then match with LightGlue (`--lg-batch` pairs per call, `--lg-threshold`,
+  `--no-lg-mp` for single precision; `--matcher ratio` for the ratio test, whose
+  `--max-desc` is then unlimited). `lamaria_ba_chain.py --features` passes the
+  extractor to the features step (1,024 keypoints at detection threshold 0 by
+  default), and `--pass-features` gives the pass by day an extractor of its own
+  in `work/<extractor>`. They do not find the landmarks again more often (see
+  [Learned features](#learned-features)).
+- **Learned matches without the VIO's band.** `match --verify essential`
+  keeps LightGlue's matches that an essential matrix explains (`--min-inliers`
+  20, `--max-rot` 10°, fitted on `--jobs` threads) instead of those within the
+  band. `lamaria_ba_chain.py --pass-match online|essential` picks the pass's
+  matching: the online result's band, or the essential matrix (default `vio`,
+  the VIO's band). See [Learned matches without the VIO's
+  band](#learned-matches-without-the-vios-band).
+- **Track statistics.** `scripts/lamaria_track_stats.py --states
+  ba1_states.npz --calib CALIB --work WORK` prints how often a solve's landmarks
+  are observed where they are visible, and the track lengths.
 - **Recommended.** The [table above](#with-the-focal-lengths-the-keypoint-sizes-and-denoising)
   uses `--est-focal --sigma-size 2.7 --sigma-size-pow 0.35` in both solves,
   `features --clahe --denoise 7` in low light, and no `--est-focal` on the

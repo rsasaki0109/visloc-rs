@@ -1680,6 +1680,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "visloc-objects"
+version = "0.3.1"
+dependencies = [
+ "image",
+ "nalgebra",
+ "ort",
+ "rand",
+]
+
+[[package]]
 name = "visloc-rs"
 version = "0.3.1"
 dependencies = [
@@ -1698,6 +1708,7 @@ dependencies = [
  "visloc-io",
  "visloc-localization",
  "visloc-mapping",
+ "visloc-objects",
  "visloc-sift-gpu",
  "visloc-slam",
  "visloc-tracking",

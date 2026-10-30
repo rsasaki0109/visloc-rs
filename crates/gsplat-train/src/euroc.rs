@@ -670,9 +670,8 @@ pub fn undistort_gray(
 
 /// Ratio-tested mutual nearest neighbours: one descriptor matrix product
 /// serves both directions (`CrossCheckMatcher` computes it twice).
-pub(crate) fn cpu_matches(fi: &FeatureSet, fj: &FeatureSet) -> Vec<DescriptorMatch> {
-    BruteForceMatcher { ratio: Some(0.8) }
-        .match_descriptors_cross_checked(&fi.descriptors, &fj.descriptors)
+pub(crate) fn cpu_matches(di: &[Vec<f32>], dj: &[Vec<f32>]) -> Vec<DescriptorMatch> {
+    BruteForceMatcher { ratio: Some(0.8) }.match_descriptors_cross_checked(di, dj)
 }
 
 pub(crate) fn verify_pair(
@@ -954,7 +953,7 @@ pub fn build_euroc_dataset(
         }
         pairs
             .par_iter()
-            .map(|&(i, j)| cpu_matches(&features[i], &features[j]))
+            .map(|&(i, j)| cpu_matches(&features[i].descriptors, &features[j].descriptors))
             .collect()
     };
 
