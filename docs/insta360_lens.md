@@ -115,13 +115,15 @@ with the back lens's rotation fitted, they do not quite:
 
 The back lens's optical centre sits 5–21 px from where the model puts it
 relative to the front lens's (the same for both walks of camera B). The
-calibration predicts that offset to within 3.5 px if the video held each lens's calibration image upside down and
-centred on the middle of its 5376 px square rather than on `(cx, cy)`.
-The matches fix only the relative offset, though, and moving each lens's
-centre to where that reading puts it (2–15 px from the middle) makes SfM
-worse: on walk 9d2fe9b1 the metric scale goes from +1.7% to +12.5% of the
-dataset's (640 px faces; +1.8% to +13.1% at 1024 px), with |g| 9.6, and
-the other four walks move 0.8–2.0 points further from it at 1024 px. So
+calibration predicts that offset to within 3.5 px if the video held each
+lens's calibration image upside down and centred on the middle of its
+5376 px square rather than on `(cx, cy)`. The matches fix only the
+relative offset, though, and moving each lens's centre to where that
+reading puts it (2–15 px from the middle) makes SfM worse: on walk
+9d2fe9b1 the metric scale goes from +1.7% to +11.9% of the dataset's
+(640 px faces), with |g| 9.56. With a scale of 1.386 calibration px per
+video px for every camera as well, it goes from +1.8% to +13.1% at
+1024 px, and the other four walks move 0.8–2.0 points further from it. So
 `gsplat_photos --insv` keeps both centres in the middle, and `insv_stitch`
 moves the back lens's by the offset it measures along the seam
 ([below](#stitching)). The black edge of check 1 shows where the camera
@@ -190,7 +192,7 @@ stitches images of the two lenses side by side instead.
 How far apart the two lenses put the same thing along the seam (the
 median over all matches in 40 frames per walk; the fit used 20 of them):
 
-| Walk | Recorded angles, far away | Fitted: rotation, centre, shift |  Shift along the parallax |
+| Walk | Recorded angles, far away | Fitted: rotation, centre, shift | Shift along the parallax |
 | --- | ---: | ---: | --- |
 | 0313afa5 | 0.89° | 0.17° | −0.18° |
 | 0c05c38a | 0.85° | 0.17° | +0.74° (2.4 m) |
