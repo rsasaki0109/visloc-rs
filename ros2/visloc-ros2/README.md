@@ -558,6 +558,15 @@ dataset's `base_link` is 5–8 cm from that point and leans 1.9°, with the
 camera 0.9 m above it; office1-7's wheel odometry was 4.67 cm with the
 point corrected but not the lean.
 
+**A dim, grainy camera such as the T265.** Build its map with
+`basalt_euroc_online_slam_demo --smooth-features 1.5 --detector-quality
+0.003`: on OpenLORIS-Scene that took office1-7 against office1-2's map from
+5 localizations to 186 and from 6.86 to 2.66 cm (VIO + map, offline demo;
+[details](../../docs/openloris_map_localization.md#and-a-lower-detector-threshold)).
+`map.json` records both, and `visloc_map_localize_node` blurs and detects
+every image the way the map was built, so neither the node nor the launch
+file has a setting for it.
+
 ## `visloc_wheel_calibration_node`
 
 Wheel odometry reports the point the robot turns about, in a level frame, at
