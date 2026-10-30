@@ -1,60 +1,53 @@
 # LaMAria: GPU のローカル PC への引き継ぎ
 
-2026-10-27 時点。ここまでの作業はクラウド（GitHub Actions、GPU なし）で進めてきた。この先は GPU のあるローカル PC で、データを外部 SSD に置いて続ける。
+2026-10-31 時点。2026-10-27 まではクラウド（GitHub Actions、GPU なし）で進め、そのあと 8 GB の GPU を積んだローカル PC（Windows の WSL2 Ubuntu、データは外付け SSD の NTFS）で続けた。
 
 ## 現状
 
-提出 4 回目（2026-10-27）の成績。手法名は visloc-rs
-（<https://lamaria.ethz.ch/method_info.php?id=48>）で、4 位。
+提出 6 回目（2026-10-30）の成績。手法名は visloc-rs
+（<https://lamaria.ethz.ch/method_info.php?id=48>）で、5 位（参考枠の Aria's SLAM を含む）。
 
 | | Short | Medium | Long | Low light | Moving | 平均 |
 |---|---:|---:|---:|---:|---:|---:|
-| visloc-rs（提出 4） | 68.9 | 56.8 | 54.1 | 60.6 | 30.6 | 54.2 |
-| GroundedSLAM | 80.2 | 61.6 | 59.9 | 67.7 | 41.9 | 62.3 |
+| visloc-rs（提出 6） | 69.7 | 56.8 | 54.1 | 60.6 | 30.6 | 54.3 |
+| GroundedSLAM（2026-10-29 更新） | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
 | RedComet | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
+| FPV-SLAM、両眼（2026-10-28 更新） | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
 
 - **手法**: Rust 版 Basalt の VIO のあとに、バッチ VI-BA のチェーンをつなぐ。チェーンの中身は SIFT、VIO で導いた照合、union-find のトラック、ループ補正、録画後のパス、パスで導いた再照合。
+  - 機器 1WM093701G1276 の Short の 5 系列だけ、パスで ALIKED のキーポイントを LightGlue で照合する（提出 5 から）。
   - 使うセンサーは SLAM カメラ 2 台と 1 kHz の IMU だけ。各系列で VIO は 1 本だけ走らせる。
   - 詳細:
     - [lamaria_submission.md](lamaria_submission.md)（提出パイプライン）
     - [lamaria_batch_ba.md](lamaria_batch_ba.md)（BA と実験の記録）
     - [lamaria_test_results.md](lamaria_test_results.md)（提出ごとの結果）
-- **残っている差**: GroundedSLAM との差 8.1 点の大半は次の 2 つ
-  ([lamaria_test_results.md](lamaria_test_results.md#against-groundedslam-sequence-by-sequence))。
-  - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Long の弱い系列）。
-  - 路面電車のドア窓越しに街並みが見えず、乗車区間を見落とすこと（Moving の 5_5、5_6、5_9）。
-- **試して効かなかったこと**: カメラと IMU の範囲の手がかりは一通り試して記録してある。
-  - 縮尺: 地面の高さ、歩幅、同時刻ステレオ、加速度計の軸別スケール、レバーアーム。
-  - 向き: 地球自転、太陽、建物の水平線。
-  - Moving: IMU だけで乗車区間をつなぐこと。
-  - 記録の場所は [Slow heading drift](lamaria_batch_ba.md#slow-heading-drift) と
-    [Finding the rides the VIO missed](lamaria_batch_ba.md#finding-the-rides-the-vio-missed)。
+- **点を落としている所**: 制御点がすべて 1 m 以内に入った系列では、Short で平均 86.0 点取れている（GroundedSLAM の Short は 87.0）。
+  差は、系列の途中から溜まる 1〜5 m のずれでほぼ説明できる。
+  - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Medium・Long の弱い系列）。
+  - 路面電車のドア窓越しに街並みが少ししか見えず、乗車区間を見落とすこと（Moving の 5_5、5_6）。
 
-## GPU で次にやること
+## GPU の PC でやったこと（2026-10-27〜31）
 
-1. **学習特徴点＋学習照合を BA チェーンに入れる（本命）。**
-   - **狙い**: sequence_3_18 では、BA のランドマークが映るはずのキーフレームのうち、SIFT が同じ点を見つけ直せるのは 8.9 % しかない
-     （[Where the second sequences' heading drift comes from](lamaria_batch_ba.md#where-the-second-sequences-heading-drift-comes-from)）。
-     視点が変わってもトラックが続けば、一方向のルートのずれを長い区間で縛れる。
-   - **候補**: SuperPoint、ALIKED、DISK のいずれかと LightGlue の組み合わせ、または XFeat と LighterGlue。
-   - **差し込む場所**: `scripts/lamaria_batch_ba.py` の 2 か所。
-     - `features`: `features.npz` に `kf_ns`、`offsets`、`xy`、`desc`、`size` を書く。
-     - `match`: `matches.npz` に `pairs`、`matches` を書く。VIO で導いたエピポーラの帯は、学習照合のあとの外れ値除去として残してよい。
-   - **以前の否定的な結果**: 暗い 4_10 の窓で、XFeat と ALIKED を SIFT と同じ比率検定で照合した。
-     キーポイントの位置精度が低く（再投影誤差 0.52〜0.60 px、SIFT は 0.47 px）、結果は悪かった
-     （[Low light: features after denoising](lamaria_batch_ba.md#low-light-features-after-denoising)）。
-     昼間の系列と学習照合は、まだ試していない。
-   - **進め方**: まず sequence_3_18 か R_12_10cp で、同じ点を見つけ直せる割合が 8.9 % から伸びるかを測る。
-     伸びたら、下の「基準の値」の学習系列で CP スコアを比べる。
-2. **場所認識で再訪問を拾う。**
-   - 今の `loops` は、VIO の位置で近くにあるキーフレームを探す方式で、ずれの許容幅（drift gate）がある。
-   - NetVLAD、MixVPR、SALAD などの大域記述子なら、ずれても再訪問を見つけられる。
-   - ただし一方向のルートには再訪問がないので、効くのは往復のある系列。
+| やったこと | 結果 | 記録 |
+|---|---|---|
+| 学習特徴点（ALIKED、DISK、SuperPoint）と LightGlue をチェーンに入れる | パスの ALIKED が効くのは機器 1WM093701G1276 の Short（R 系列）だけ。テストの 5 系列で 57.2 → 61.5（提出 5、平均 +0.2） | [Learned features](lamaria_batch_ba.md#learned-features) |
+| 場所認識で再訪問を拾う | パスの再訪問として採用（#360） | [Revisits for place recognition](lamaria_batch_ba.md#revisits-for-place-recognition) |
+| ALIKED の照合を VIO の帯なしで（エッセンシャル行列、online の結果の帯） | 学習 R の 2 本では online の帯が +5.1。テストの 5 系列では 61.5 → 60.0（提出 6） | [Learned matches without the VIO's band](lamaria_batch_ba.md#learned-matches-without-the-vios-band) |
+| 遠くの点を長く追う・見つけ直す | 頭に付けたカメラでは、遠くの点が視野に続けて入るのは中央値 1 秒。20 秒以上外れた点を見つけ直すと 8 割が誤り | [Far points out of view](lamaria_batch_ba.md#far-points-out-of-view) |
+| 乗車区間の見落とし（プラットフォームフィルターを緩める、乗車区間を凍らせて再現） | 5_5 の乗車区間は動くようになるが、学習系列で誤検出して点を落とす。凍らせた乗車区間はチェーンで戻らない | [The platform filter where it stays off](lamaria_batch_ba.md#the-platform-filter-where-it-stays-off) |
+
+## 残っている案
+
+- 今の構成（Basalt の VIO と SIFT のバッチ BA）の調整は、どれも 1 回 ±0.3 点以下。学習系列が少ないので、その大きさでは選び方自体があてにならない（提出 6）。
+- **条件付きのプラットフォームフィルター**: IMU の速度変化と VIO の速度が食い違うときだけ条件を緩める。学習系列は変わらないはずだが、効果は学習で確かめられない。当たっても平均 +0.4〜0.8。
+- **新しい VIO / 前段**: GroundedSLAM との差（約 18 点）を詰めるには、ずれそのものを減らす新しい部品が要る。数週間規模で、効く保証はない。
 
 ## 外部 SSD のデータ配置
 
-- **ファイルシステム**: ext4 などの Linux のものにする。
-  - BA チェーンは `work/<seq>/ba/rematch/features.npz` をシンボリックリンクで張る。exFAT や NTFS では動かない。
+- **ファイルシステム**: ext4 などの Linux のものが無難。
+  - BA チェーンは `work/<seq>/ba/rematch/features.npz` をシンボリックリンクで張る。exFAT では動かない。
+  - NTFS でも、WSL2 の drvfs で uid=1000 に再マウントすれば動いた（`mount -t drvfs D: /mnt/d -o uid=1000,gid=1000`。root の所有のままだと、チェーンのファイルのコピーが chmod で失敗する）。
+  - drvfs からの読み込みは、メモリが断片化したり Windows 側のメモリが足りなくなったりすると、`Cannot allocate memory (os error 12)` で失敗する。root で `echo 3 > /proc/sys/vm/drop_caches; echo 1 > /proc/sys/vm/compact_memory` を定期的に回す。長い VIO は、画像を ext4 にコピーしてから走らせると確実。
   - 抽出した画像は 1 系列で数万ファイルになる。
 - **容量**:
   - テスト 63 系列は ASL で約 862 GB。1 系列の画像は最大 29 GB。
@@ -153,10 +146,12 @@ python evaluate_wrt_pgt.py --estimate $E/$S.txt --gt_estimate $LAMARIA_DATA/gt/$
   - `--split test` に、系列名を省略するか `--sequences` で指定する。
   - 系列ごとの推定は `--slam-dir` に溜まり、終わると `--work-dir` の隣に `submission.zip` ができる。
 - **アップロード**: 手で <https://lamaria.ethz.ch> に上げる。
-  - 既存の手法 visloc-rs の「Re-upload results」を使う。
+  - Submissions の visloc-rs の「Update results」を開き、「Test set sequences」を選ぶ。
   - 上げるのは `slam/<seq>.txt` が 63 個入った zip。GitHub の artifact をダウンロードすると zip が二重になっているので、中身の zip を上げる。
-  - 更新理由を求められる。
+  - 更新理由（1〜2 文、具体的に）を求められる。
   - 評価が終わってから 24 時間は、次の評価ができない。
+  - zip は提出の番号を付けた名前で残す（`submission6_upload.zip` など）。提出スクリプトは `--slam-dir` の親に毎回 `submission.zip` を書き直す。提出 5 の zip を取り違えて上げ直したことがある（点は 63 系列とも同じで、評価は毎回同じ結果になる）。
+  - 手法の説明は、Submissions で手法名を押すと編集できる（評価の制限とは別）。
 - 提出ファイルは git に入れない。
 
 ## 守ること
@@ -164,4 +159,6 @@ python evaluate_wrt_pgt.py --estimate $E/$S.txt --gt_estimate $LAMARIA_DATA/gt/$
 - GPS と磁気センサーは使わない。カメラ 2 台と IMU だけ。
 - VIO は 1 系列につき 1 本。複数の VIO の結果を組み合わせない。
 - テストの正解は見られない。設定の良し悪しは学習系列で決める。テスト系列を使うのは、正解なしで分かる診断（乗車区間の長さなど）だけにする。
+  - テストの点を見て設定を戻すのも、テストで選ぶことになるので避ける（提出 6 はそのまま）。
 - PR の作成とマージは、リポジトリの持ち主の了承を得てから。
+- 文書・コミット・PR に GPU の機種名は書かない（「8 GB の GPU」と書く）。
