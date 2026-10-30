@@ -520,6 +520,25 @@ at 1 cm and depths up to 20 m on every scene. F1 at 2 cm:
   a strong prior and mesh the expected depth; for novel views, keep the
   prior low or off.
 
+**Held-out image quality, and a prior that fades.** These runs hold out every
+8th view (`--holdout 8`), so the training views drop to 36, 33 and 22. They
+report PSNR and SSIM on the held-out views at 30k, and mesh from all views.
+`--depth-weight-final W` moves the prior's weight log-linearly from
+`--depth-weight` to W over the run, as the mean's learning rate does.
+
+| Prior | Held-out PSNR (terrains / playground / office) | SSIM | vs no prior | Mesh F1 at 2 cm, expected depth (terrains / playground / office) | mean |
+|---|---|---|---|---|---|
+| none | 25.79 / 19.27 / 22.31 dB | 0.897 / 0.698 / 0.917 | | 5.1 / 8.3 / 8.8% (median: 34.3 / 43.5 / 22.6%) | 6.1% (median 33.5%) |
+| 30, constant | 24.15 / 18.13 / 19.65 dB | 0.878 / 0.645 / 0.880 | −1.81 dB | 79.0 / 60.4 / 50.1% | 63.2% |
+| 30 → 1 | 24.77 / 18.51 / 21.75 dB | 0.885 / 0.670 / 0.907 | −0.79 dB | 70.6 / 51.1 / 42.0% | 54.6% |
+
+- **The fade halves the image's cost.** It keeps 21 of the constant prior's
+  30 points over the plain median mesh. office loses only 0.56 dB.
+- **Holding views out costs the geometry nothing.** With the prior constant
+  at 30 the meshes match the all-view runs (63.2% against 63.6%).
+- **The choice.** Constant for the best mesh, a fade for a mesh and images
+  together; the prior off for the best images.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
@@ -610,10 +629,11 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
 ## Next
 
 1. **Geometry.** Meshing the expected depth with a strong depth prior
-   brings the mesh within a few points of its MVS prior, at the price of
-   the image fit. Open: keeping held-out image quality while doing so (a
-   prior that fades out, or one on the geometry channels only), and why the
-   median depth lags.
+   brings the mesh within a few points of its MVS prior, at 1.8 dB of
+   held-out PSNR; fading the prior halves that cost and keeps most of the
+   gain. Open: a prior that leaves the image alone (on separate geometry
+   channels, or splats the photometric loss cannot move off the surface),
+   and why the median depth lags.
 2. **Speed.** A step takes about 21 ms. The dense optimizer (6.7 ms) is
    bound by memory, so it only gets faster with fewer bytes per element,
    such as bf16 moments or the opt-in sparse SH Adam. raster_bwd (6.1 ms)

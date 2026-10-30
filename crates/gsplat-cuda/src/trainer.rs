@@ -78,6 +78,9 @@ pub struct CudaTrainer {
     last_refine: Option<DensifyReport>,
     sparse_sh_adam: bool,
     depth_weight: f32,
+    // The depth weight at the last step (log-linear from depth_weight), if it
+    // changes.
+    depth_weight_final: Option<f32>,
     last_depth_loss: f32,
     last_normal_loss: f32,
 }
@@ -162,6 +165,7 @@ impl CudaTrainer {
             last_refine: None,
             sparse_sh_adam: false,
             depth_weight: 0.0,
+            depth_weight_final: None,
             last_depth_loss: 0.0,
             last_normal_loss: 0.0,
         })
@@ -266,7 +270,7 @@ impl CudaTrainer {
             noise_scale,
             noise_max,
             sparse_sh_adam: self.sparse_sh_adam as u32,
-            depth_weight: self.depth_weight,
+            depth_weight: self.depth_weight_at(frac),
             normal_weight: if self.step >= self.cfg.normal_start {
                 self.cfg.normal_weight
             } else {
@@ -462,6 +466,25 @@ impl CudaTrainer {
         self.gs.set_depth_priors(w, h, &depths)?;
         self.depth_weight = weight;
         Ok(found)
+    }
+
+    /// Let the depth prior's weight move log-linearly from the one given to
+    /// [`load_depth_priors`](Self::load_depth_priors) to `last` over the run,
+    /// as the mean's learning rate does (`None`: constant). A prior that
+    /// fades lets the photometric loss refine the splats after the prior has
+    /// placed them.
+    pub fn set_depth_weight_final(&mut self, last: Option<f32>) {
+        self.depth_weight_final = last;
+    }
+
+    fn depth_weight_at(&self, frac: f32) -> f32 {
+        match self.depth_weight_final {
+            Some(last) if self.depth_weight > 0.0 && last > 0.0 => {
+                (self.depth_weight.ln() * (1.0 - frac) + last.ln() * frac).exp()
+            }
+            Some(last) => self.depth_weight * (1.0 - frac) + last * frac,
+            None => self.depth_weight,
+        }
     }
 
     /// Render a view with the current SH degree (row-major RGB).

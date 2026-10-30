@@ -8,7 +8,8 @@
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
 //!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
-//!   [--depth-prior <dir> [--depth-weight 0.1]] [--normal-weight 0.005 [--normal-start 7000]]
+//!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
+//!   [--normal-weight 0.005 [--normal-start 7000]]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
@@ -18,7 +19,8 @@
 //! from every view after training, as `gsplat_mesh_cuda` with its defaults.
 //! `--depth-prior` adds a depth loss against `<dir>/<image name>.bin` (e.g.
 //! `visloc-mvs --save-fused-depth`'s `fused_depth`): `--depth-weight` x the
-//! mean relative error of the expected depth where the prior has one.
+//! mean relative error of the expected depth where the prior has one;
+//! `--depth-weight-final` moves the weight log-linearly to W over the run.
 //! `--normal-weight` adds the depth-normal consistency loss from
 //! `--normal-start` on (the wgpu trainer's `normal_weight` / `normal_start`).
 
@@ -49,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut planar = false;
     let mut depth_prior: Option<PathBuf> = None;
     let mut depth_weight = 0.1f32;
+    let mut depth_weight_final: Option<f32> = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -73,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--planar-depth" => planar = true,
             "--depth-prior" => depth_prior = Some(PathBuf::from(next()?)),
             "--depth-weight" => depth_weight = next()?.parse()?,
+            "--depth-weight-final" => depth_weight_final = Some(next()?.parse()?),
             "--normal-weight" => cfg.normal_weight = next()?.parse()?,
             "--normal-start" => cfg.normal_start = next()?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
@@ -108,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     trainer.set_sparse_sh_adam(sparse_sh_adam);
     if let Some(dir) = &depth_prior {
         let found = trainer.load_depth_priors(dir, depth_weight)?;
+        trainer.set_depth_weight_final(depth_weight_final);
         println!(
             "depth priors for {found} / {} training views (weight {depth_weight})",
             dataset.train.len()
