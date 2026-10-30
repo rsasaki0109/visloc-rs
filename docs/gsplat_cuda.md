@@ -35,7 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
-| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7% |
+| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 68.1% |
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 
@@ -576,6 +576,32 @@ accuracy / completeness:
   plain splat. For the best geometry, use the hybrid with a prior-trained
   splat.
 
+#### With 1600 px MVS depth
+
+visloc-mvs on CUDA ([docs/mvs.md](mvs.md#on-cuda)) takes playground and
+office to 1600 px as well, in 2 to 3 minutes, where the CPU had taken them
+at 800 px in 8 to 13. The same splats, meshed the same way with the CUDA
+runs' 1600 px maps (terrains' maps were 1600 px already), score as
+follows. The earlier mean is in brackets:
+
+| Mesh | Splat | terrains | playground | office | mean |
+|---|---|---|---|---|---|
+| MVS depth only | | 74.7% | 48.6% (85.7 / 33.9) | 42.4% (98.9 / 27.0) | 55.2% (54.6%) |
+| MVS + splat (planar median) | plain, every view | 79.0% | 64.7% (70.5 / 59.8) | 48.8% | 64.2% (62.7%) |
+| MVS + splat (planar median) | plain, every 8th view held out | 79.4% | 64.4% | 48.4% | 64.1% (62.3%) |
+| MVS + splat (expected depth) | prior 30 → 1, held out | 79.8% | 64.7% | 55.4% | 66.6% (64.3%) |
+| MVS + splat (expected depth) | prior 30, every view | **79.9%** | **65.3%** | **59.0%** (66.6 / 52.9) | **68.1%** (65.7%) |
+
+- **office gains the most.** Its maps alone gain 3.5 points, and its
+  hybrid meshes gain 3.8 to 4.8.
+- **playground's maps alone lose 1.9 points** (completeness 36.1% →
+  33.9%), although its cloud gains 6.4 points and its maps cover about as
+  many pixels (32.7% of each view, against 33.7%). With the splat filling
+  the holes it gains up to 2.5 points.
+- **terrains moves by 0.5 points or less.** Only the rounding of its maps
+  changed.
+- The prior-trained splats still learned from the 800 px maps.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
@@ -666,8 +692,9 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
 ## Next
 
 1. **Geometry.** Fusing the MVS depth and letting a plain splat fill its
-   holes reaches 62.7% with the image untouched (65.7% with a prior-trained
-   splat). Meshing the expected depth with a strong depth prior
+   holes reaches 64.2% with the image untouched (68.1% with a prior-trained
+   splat), from 1600 px MVS on CUDA. Next: train the priors on the 1600 px
+   maps too. Meshing the expected depth with a strong depth prior
    brings the mesh within a few points of its MVS prior, at 1.8 dB of
    held-out PSNR; fading the prior halves that cost and keeps most of the
    gain. Open: a prior that leaves the image alone (on separate geometry
