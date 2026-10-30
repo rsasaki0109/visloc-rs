@@ -438,30 +438,11 @@ impl CudaTrainer {
         let mut depths = vec![0.0f32; per * self.views.len()];
         let mut found = 0;
         for (k, view) in self.views.iter().enumerate() {
-            let Ok(bytes) = std::fs::read(dir.join(format!("{}.bin", view.name))) else {
-                continue;
-            };
-            if bytes.len() < 8 {
-                continue;
+            let path = dir.join(format!("{}.bin", view.name));
+            if let Some(map) = crate::mesh::read_depth_map(&path, w, h) {
+                depths[k * per..(k + 1) * per].copy_from_slice(&map);
+                found += 1;
             }
-            let pw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            let ph = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-            if pw == 0 || ph == 0 || bytes.len() != 8 + (pw * ph) as usize * 4 {
-                continue;
-            }
-            let at = |x: u32, y: u32| {
-                let o = 8 + ((y * pw + x) as usize) * 4;
-                f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
-            };
-            let map = &mut depths[k * per..(k + 1) * per];
-            for y in 0..h {
-                let sy = ((y as u64 * ph as u64) / h as u64) as u32;
-                for x in 0..w {
-                    let sx = ((x as u64 * pw as u64) / w as u64) as u32;
-                    map[(y * w + x) as usize] = at(sx, sy);
-                }
-            }
-            found += 1;
         }
         self.gs.set_depth_priors(w, h, &depths)?;
         self.depth_weight = weight;

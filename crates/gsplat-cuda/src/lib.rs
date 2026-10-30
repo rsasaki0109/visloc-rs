@@ -158,6 +158,10 @@ pub struct TsdfParams {
     /// opacity `1 - T` exceeds 0.5 (the channel the depth losses train)
     /// instead of the median depth; `planar` is then ignored (0 = no).
     pub expected: u32,
+    /// With depth maps ([`CudaGsplat::tsdf_surface_with_maps`]): 1 fuses a
+    /// map's depth where it has one and the splat's elsewhere, 2 the maps'
+    /// alone (0 = no maps).
+    pub override_mode: u32,
 }
 
 /// The surface of a TSDF fused on the device, before its quads are
@@ -244,6 +248,7 @@ type TsdfMeshFn = unsafe extern "C" fn(
     *const TsdfParams,
     c_int,
     *const GscCamera,
+    *const c_float,
     *mut u32,
     *mut u32,
     *mut u32,
@@ -448,7 +453,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 9;
+    pub const ABI_VERSION: u32 = 10;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -926,18 +931,46 @@ impl CudaGsplat {
         views: &[&CameraView],
         params: &TsdfParams,
     ) -> Result<TsdfSurface, GsplatCudaError> {
+        self.tsdf_surface_with_maps(views, params, None)
+    }
+
+    /// [`tsdf_surface`](Self::tsdf_surface) with per-view depth maps (one
+    /// per view at its size, view after view; > 0 where they have a depth)
+    /// that replace the splat's depth as `params.override_mode` says.
+    pub fn tsdf_surface_with_maps(
+        &mut self,
+        views: &[&CameraView],
+        params: &TsdfParams,
+        maps: Option<&[f32]>,
+    ) -> Result<TsdfSurface, GsplatCudaError> {
         let cams: Vec<GscCamera> = views.iter().map(|v| GscCamera::from_view(v)).collect();
         let n = c_int::try_from(cams.len())
             .map_err(|_| GsplatCudaError::Input("too many views".into()))?;
+        let pixels: usize = cams
+            .iter()
+            .map(|c| c.width as usize * c.height as usize)
+            .sum();
+        if maps.is_some_and(|m| m.len() != pixels) {
+            return Err(GsplatCudaError::Input(
+                "depth maps need one float per pixel of every view".into(),
+            ));
+        }
+        if maps.is_none() && params.override_mode != 0 {
+            return Err(GsplatCudaError::Input(
+                "override_mode needs depth maps".into(),
+            ));
+        }
         let (mut nv, mut ne, mut nb, mut ns) = (0u32, 0u32, 0u32, 0u32);
         // SAFETY: `params` is a live `repr(C)` struct, `cams` holds `n`
-        // cameras and the counters outlive the call.
+        // cameras, `maps` (when given) every view's pixels, and the counters
+        // outlive the call.
         let code = unsafe {
             (self.api.tsdf_mesh)(
                 self.ctx(),
                 params,
                 n,
                 cams.as_ptr(),
+                maps.map_or(std::ptr::null(), <[f32]>::as_ptr),
                 &mut nv,
                 &mut ne,
                 &mut nb,

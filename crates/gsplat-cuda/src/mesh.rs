@@ -69,11 +69,54 @@ pub fn extract_mesh(
     })
 }
 
+/// Read a depth map as `visloc-mvs --save-fused-depth` writes it (width and
+/// height `u32`, then camera-z `f32` depths, 0 where there is none),
+/// resampled to `width x height` by nearest neighbour. `None` if the file is
+/// missing or malformed.
+pub fn read_depth_map(path: &std::path::Path, width: u32, height: u32) -> Option<Vec<f32>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 8 {
+        return None;
+    }
+    let pw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let ph = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    if pw == 0 || ph == 0 || bytes.len() != 8 + (pw * ph) as usize * 4 {
+        return None;
+    }
+    let at = |x: u32, y: u32| {
+        let o = 8 + ((y * pw + x) as usize) * 4;
+        f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+    };
+    let mut map = vec![0.0f32; (width * height) as usize];
+    for y in 0..height {
+        let sy = ((y as u64 * ph as u64) / height as u64) as u32;
+        for x in 0..width {
+            let sx = ((x as u64 * pw as u64) / width as u64) as u32;
+            map[(y * width + x) as usize] = at(sx, sy);
+        }
+    }
+    Some(map)
+}
+
+/// Per-view depth maps fused in place of the splat's depth wherever they
+/// have one (> 0), e.g. visloc-mvs's fused depth ([`read_depth_map`]): one
+/// map per view of [`extract_mesh_gpu`], each at its view's size, view
+/// after view.
+#[derive(Debug, Clone, Copy)]
+pub struct DepthMaps<'a> {
+    pub maps: &'a [f32],
+    /// Where a map has no depth, fuse the splat's (`false`: nothing, so
+    /// the mesh is the maps' alone).
+    pub fill_from_splat: bool,
+}
+
 /// [`extract_mesh`] with the TSDF fused and extracted on the device
 /// ([`CudaGsplat::tsdf_surface`], `slab_blocks` blocks at a time, 0: 65536;
 /// the views are kept on the device up to 2 GiB): the same voxel size,
 /// depth range, carving, minimum weight and filters. Unlike `fuse_views`,
-/// every block sees every view.
+/// every block sees every view. With `maps`, their depths replace the
+/// splat's where they have one.
+#[allow(clippy::too_many_arguments)]
 pub fn extract_mesh_gpu(
     gs: &mut CudaGsplat,
     sh_degree: u32,
@@ -82,6 +125,7 @@ pub fn extract_mesh_gpu(
     support: &[[f32; 3]],
     opts: &MeshOptions,
     slab_blocks: u32,
+    maps: Option<DepthMaps<'_>>,
 ) -> Result<(Mesh, String), GsplatCudaError> {
     let scale = scene_scale(views, support);
     let voxel = opts.voxel.unwrap_or(scale / 256.0);
@@ -97,9 +141,14 @@ pub fn extract_mesh_gpu(
         slab_blocks,
         cache_mb: 2048,
         expected: (depth == MeshDepth::Expected) as u32,
+        override_mode: match maps {
+            None => 0,
+            Some(m) if m.fill_from_splat => 1,
+            Some(_) => 2,
+        },
     };
     let t0 = Instant::now();
-    let surface = gs.tsdf_surface(views, &params)?;
+    let surface = gs.tsdf_surface_with_maps(views, &params, maps.map(|m| m.maps))?;
     let fused = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
     let mut mesh = surface_mesh(&surface);

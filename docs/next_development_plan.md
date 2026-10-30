@@ -39,7 +39,9 @@ The planned order:
    Meshing the expected depth instead, which those losses train, with the
    prior at weight 30 reaches 63.6% (the prior's MVS clouds: 67.6%), at the
    price of the image fit: 1.8 dB of held-out PSNR, or 0.8 dB with the
-   prior fading 30 → 1 (54.6%)
+   prior fading 30 → 1 (54.6%). Fusing the MVS depth with a plain splat
+   filling its holes reaches 62.7% with the image untouched (65.7% with the
+   prior-trained splat)
    ([`gsplat_cuda.md`](gsplat_cuda.md#meshing-the-depth-the-losses-train)).
    TSDF on the GPU done for the CUDA meshes: the same F1 in 4–5x less time
    and 1/6 of the memory, and playground at 1 cm in 4.2 GB, where the CPU

@@ -13,3 +13,7 @@ pipelines/basalt/** text eol=lf
 benchmarks/basalt/** text eol=lf
 configs/basalt/** text eol=lf
 examples/basalt_euroc_vio_demo.rs text eol=lf
+
+# Shell scripts run under WSL2 or Linux from a Windows checkout too
+# (scripts/build_gsplat_cuda.sh); CRLF breaks their shebang and every line.
+*.sh text eol=lf

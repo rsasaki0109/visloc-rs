@@ -147,7 +147,7 @@ fn one_view(depth: MeshDepth) {
     let opts = options(voxel);
     let (cpu, _) = extract_mesh(&mut gs, 0, depth, &views, &[], &opts).expect("cpu mesh");
     let (gpu, summary) =
-        extract_mesh_gpu(&mut gs, 0, depth, &views, &[], &opts, 0).expect("gpu mesh");
+        extract_mesh_gpu(&mut gs, 0, depth, &views, &[], &opts, 0, None).expect("gpu mesh");
     eprintln!(
         "{depth:?}: {summary}; cpu {} vertices, {} triangles",
         cpu.vertices.len(),
@@ -212,6 +212,7 @@ fn slabs_do_not_change_the_surface() {
         slab_blocks,
         cache_mb,
         expected: 0,
+        override_mode: 0,
     };
     let one = gs.tsdf_surface(&views, &params(0, 64)).expect("one slab");
     let many = gs.tsdf_surface(&views, &params(3, 64)).expect("many slabs");
@@ -281,5 +282,71 @@ fn slabs_do_not_change_the_surface() {
         frac[2] > 0.95,
         "only {:.1}% of the vertices agree with the CPU",
         100.0 * frac[2]
+    );
+}
+
+/// Depth maps replace the rendered depth exactly: maps holding the planar
+/// median depth, fused alone (mode 2) into a median-depth TSDF, give the
+/// planar TSDF's surface bit for bit; empty maps with the splat filling in
+/// (mode 1) give the plain surface.
+#[test]
+fn depth_maps_replace_the_rendered_depth() {
+    let Some(mut gs) = gsplat() else { return };
+    gs.set_scene(&PackedScene::from_scene(&wall()))
+        .expect("upload");
+    let vs: Vec<CameraView> = (0..3)
+        .map(|k| view(-0.1 + 0.1 * k as f32, -0.3 + 0.3 * k as f32))
+        .collect();
+    let views: Vec<&CameraView> = vs.iter().collect();
+    let voxel = 0.03;
+    let params = |planar, override_mode| TsdfParams {
+        voxel,
+        trunc: 4.0 * voxel,
+        max_depth: 20.0,
+        min_weight: 1.0,
+        carve: 1,
+        free_space: 1,
+        planar,
+        sh_active_degree: 0,
+        slab_blocks: 0,
+        cache_mb: 64,
+        expected: 0,
+        override_mode,
+    };
+    let mut planar_maps = Vec::new();
+    for v in &views {
+        planar_maps.extend(gs.render_depth(v, [0.0; 3], 0, true).expect("render").depth);
+    }
+    let key = |s: &visloc_gsplat_cuda::TsdfSurface| {
+        let mut v: Vec<([i32; 3], [u32; 3], [u8; 3])> = (0..s.cells.len())
+            .map(|i| (s.cells[i], s.positions[i].map(f32::to_bits), s.colors[i]))
+            .collect();
+        v.sort_unstable();
+        let mut e = s.edges.clone();
+        e.sort_unstable();
+        (v, e)
+    };
+    let planar = gs.tsdf_surface(&views, &params(1, 0)).expect("planar");
+    let from_maps = gs
+        .tsdf_surface_with_maps(&views, &params(0, 2), Some(&planar_maps))
+        .expect("maps only");
+    assert!(planar.cells.len() > 1000, "too small a surface to compare");
+    assert!(
+        key(&planar) == key(&from_maps),
+        "maps-only surface differs from the planar one"
+    );
+    let plain = gs.tsdf_surface(&views, &params(0, 0)).expect("plain");
+    let empty = vec![0.0f32; planar_maps.len()];
+    let filled = gs
+        .tsdf_surface_with_maps(&views, &params(0, 1), Some(&empty))
+        .expect("empty maps");
+    assert!(
+        key(&plain) == key(&filled),
+        "empty maps changed the surface"
+    );
+    eprintln!(
+        "maps: planar {} vertices, plain {} vertices, both reproduced exactly",
+        planar.cells.len(),
+        plain.cells.len()
     );
 }

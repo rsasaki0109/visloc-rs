@@ -113,6 +113,22 @@ All notable changes to `visloc-rs` will be documented here.
   - Verification alone takes 5.3 s once the CPU matcher no longer holds
     every core.
   - `CudaGsplat` is `Send`. CUDA ABI 8.
+- **Meshes from MVS depth with the splat filling its holes
+  (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir> [--depth-maps-only]`,
+  `visloc_gsplat_cuda::mesh::DepthMaps`).**
+  - The GPU TSDF fuses per-view depth maps (visloc-mvs `--save-fused-depth`)
+    wherever they have a depth, and the splat's depth elsewhere.
+    `CudaGsplat::tsdf_surface_with_maps` and `TsdfParams::override_mode` do
+    this.
+  - With a plain splat, whose image is untouched, the ETH3D mesh F1 at 2 cm
+    is 62.7%, against 33.3% for the splat's own mesh and 54.6% for the MVS
+    depth alone. With a splat trained with the depth prior at 30 it is
+    65.7%.
+  - `mesh::read_depth_map` reads and resamples a map; the trainer's
+    `load_depth_priors` uses it.
+  - `.gitattributes` keeps `*.sh` in LF, so the scripts run under WSL2 from
+    a Windows checkout.
+  - CUDA ABI 10.
 - **Meshes from the expected depth (`gsplat_mesh_cuda --expected-depth`,
   `visloc_gsplat_cuda::mesh::MeshDepth`).**
   - The depth prior and the depth-normal loss train the expected depth, but

@@ -59,7 +59,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 9;
+constexpr uint32_t kAbiVersion = 10;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -1588,7 +1588,7 @@ struct Ctx {
     // voxels, the extraction output, and on the host the surface of the last
     // fusion until visloc_gsplat_cuda_tsdf_take.
     Buf tsdf_table, tsdf_keys, tsdf_slab_table, tsdf_slab_keys, tsdf_sdf, tsdf_w, tsdf_col, tsdf_counts,
-        tsdf_out_cells, tsdf_out_pos, tsdf_out_col, tsdf_out_edges, tsdf_cache_depth, tsdf_cache_rgb;
+        tsdf_out_cells, tsdf_out_pos, tsdf_out_col, tsdf_out_edges, tsdf_cache_depth, tsdf_cache_rgb, tsdf_override;
     std::vector<int32_t> tsdf_cells, tsdf_edges;
     std::vector<float> tsdf_pos;
     std::vector<uint8_t> tsdf_col_host;
@@ -2025,7 +2025,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->tsdf_table,  &ctx->tsdf_keys, &ctx->tsdf_slab_table, &ctx->tsdf_slab_keys,
                    &ctx->tsdf_sdf,    &ctx->tsdf_w,    &ctx->tsdf_col, &ctx->tsdf_counts,
                    &ctx->match_words, &ctx->match_norms, &ctx->match_fwd, &ctx->match_rev, &ctx->match_partial,
-                   &ctx->tsdf_out_cells, &ctx->tsdf_out_pos, &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb,
+                   &ctx->tsdf_out_cells, &ctx->tsdf_out_pos, &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb, &ctx->tsdf_override,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum};
     for (Buf* b : bufs) free_buf(*b);
