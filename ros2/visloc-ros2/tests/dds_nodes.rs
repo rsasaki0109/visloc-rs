@@ -14,8 +14,8 @@ use common::*;
 use visloc_ros2::dds::{output_qos, publish_logged, sensor_qos, spawn_receiver, RosNode};
 use visloc_ros2::image::mono8_image;
 use visloc_ros2::msgs::{
-    DiagnosticArray, Header, Image, Imu, Int32, Odometry, PoseStamped, PoseWithCovariance,
-    PoseWithCovarianceStamped, TfMessage, Time,
+    DiagnosticArray, Header, Image, Imu, Int32, Odometry, PointCloud2, PoseStamped,
+    PoseWithCovariance, PoseWithCovarianceStamped, TfMessage, Time,
 };
 
 /// A per-process, per-test domain id in RustDDS's usable range.
@@ -318,6 +318,23 @@ fn map_localize_node_publishes_map_to_odom_for_a_stationary_robot() {
         let _ = tf_tx.send(msg);
     })
     .unwrap();
+    // Subscribed after the node published its map cloud: transient-local
+    // durability still delivers it.
+    std::thread::sleep(Duration::from_secs(2));
+    let cloud_sub = test_node
+        .subscription::<PointCloud2>(
+            "map_cloud",
+            ros2_client::QosProfile::subscription_default()
+                .reliability_reliable(ros2_client::qos::WhenFull::Wait(Duration::from_millis(20)))
+                .durability(ros2_client::qos::Durability::TransientLocal)
+                .history(ros2_client::qos::History::KeepLast { depth: 1 }),
+        )
+        .unwrap();
+    let (cloud_tx, cloud_rx) = mpsc::channel();
+    spawn_receiver("map-cloud-rx", cloud_sub, move |msg: PointCloud2| {
+        let _ = cloud_tx.send(msg);
+    })
+    .unwrap();
     let (pose_tx, pose_rx) = mpsc::channel();
     spawn_receiver(
         "map-pose-rx",
@@ -377,6 +394,13 @@ fn map_localize_node_publishes_map_to_odom_for_a_stationary_robot() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 
+    let cloud = cloud_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("map_cloud reaches a late transient-local subscriber");
+    assert_eq!(cloud.header.frame_id, "map");
+    assert!(cloud.width > 200, "{} points", cloud.width);
+    assert_eq!(cloud.data.len(), 12 * cloud.width as usize);
+
     let tf = tf.unwrap_or_else(|| panic!("no /tf after sending {sent} frames"));
     let transform = &tf.transforms[0];
     assert_eq!(transform.header.frame_id, "map");
@@ -399,4 +423,183 @@ fn map_localize_node_publishes_map_to_odom_for_a_stationary_robot() {
         "map pose {p:?}"
     );
     assert!(pose.pose.covariance.0[0] > 0.0);
+}
+
+#[test]
+fn map_localize_node_takes_the_camera_extrinsics_from_tf_static() {
+    use nalgebra::{UnitQuaternion, Vector3};
+    use ros2_client::qos::{Durability, History, WhenFull};
+    use ros2_client::QosProfile;
+    use visloc_core::geometry::SE3;
+    use visloc_ros2::msgs::{Quaternion, Transform, TransformStamped, Vector3 as RosVector3};
+
+    let domain = domain_id(4);
+    let dir = std::env::temp_dir().join(format!(
+        "visloc_ros2_dds_basalt_map_tf_{}",
+        std::process::id()
+    ));
+    write_basalt_map(&dir);
+    let mut node = spawn_node(
+        env!("CARGO_BIN_EXE_visloc_map_localize_node"),
+        &[
+            "--map".into(),
+            dir.display().to_string(),
+            "--domain-id".into(),
+            domain.to_string(),
+            "--localize-every".into(),
+            "1".into(),
+            "--extrinsics".into(),
+            "tf".into(),
+            "--remap".into(),
+            "image=/camera/image_raw".into(),
+        ],
+    );
+
+    let mut test_node = RosNode::new(domain, "/", "map_localize_tf_test_driver").unwrap();
+    // Latched like static_transform_publisher: sent once, before the node
+    // has been discovered.
+    let tf_static_pub = test_node
+        .publisher::<TfMessage>(
+            "/tf_static",
+            QosProfile::publisher_default()
+                .reliability_reliable(WhenFull::Wait(Duration::from_millis(20)))
+                .durability(Durability::TransientLocal)
+                .history(History::KeepLast { depth: 1 }),
+        )
+        .unwrap();
+    let image_pub = test_node
+        .publisher::<Image>("/camera/image_raw", output_qos(2))
+        .unwrap();
+    let odom_pub = test_node
+        .publisher::<Odometry>("odom", output_qos(10))
+        .unwrap();
+    let tf_sub = test_node
+        .subscription::<TfMessage>("/tf", sensor_qos(10))
+        .unwrap();
+    let pose_sub = test_node
+        .subscription::<PoseWithCovarianceStamped>("map_pose", sensor_qos(10))
+        .unwrap();
+    let (tf_tx, tf_rx) = mpsc::channel();
+    spawn_receiver("tf-rx", tf_sub, move |msg: TfMessage| {
+        let _ = tf_tx.send(msg);
+    })
+    .unwrap();
+    let (pose_tx, pose_rx) = mpsc::channel();
+    spawn_receiver(
+        "map-pose-rx",
+        pose_sub,
+        move |msg: PoseWithCovarianceStamped| {
+            let _ = pose_tx.send(msg);
+        },
+    )
+    .unwrap();
+
+    // The camera sits on the robot's base_link, ahead, to the side and above
+    // it, yawed. The map image puts the camera at the map origin, so the
+    // base is at the inverse of that offset.
+    let base_from_camera = SE3::new(
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.5),
+        Vector3::new(0.3, -0.1, 0.5),
+    );
+    let (t, q) = (base_from_camera.translation, base_from_camera.rotation);
+    publish_logged(
+        &tf_static_pub,
+        TfMessage {
+            transforms: vec![TransformStamped {
+                header: Header::new(Time::from_nanos(0), "base_link"),
+                child_frame_id: "camera".into(),
+                transform: Transform {
+                    translation: RosVector3 {
+                        x: t.x,
+                        y: t.y,
+                        z: t.z,
+                    },
+                    rotation: Quaternion {
+                        x: q.i,
+                        y: q.j,
+                        z: q.k,
+                        w: q.w,
+                    },
+                },
+            }],
+        },
+        "tf_static",
+    );
+    let map_from_base = base_from_camera.inverse();
+    let odom_from_base = SE3::new(
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
+        Vector3::new(1.0, 2.0, 0.0),
+    );
+    let expected_map_from_odom = map_from_base.compose(&odom_from_base.inverse());
+
+    let image = basalt_map_image();
+    let started = Instant::now();
+    let (mut tf, mut pose) = (None, None);
+    let mut sent = 0i64;
+    while started.elapsed() < Duration::from_secs(60) && (tf.is_none() || pose.is_none()) {
+        node.assert_running();
+        let stamp = Time::from_nanos(START_NS + sent * CAMERA_PERIOD_NS);
+        publish_logged(
+            &odom_pub,
+            Odometry {
+                header: Header::new(stamp, "odom"),
+                child_frame_id: "base_link".into(),
+                pose: PoseWithCovariance {
+                    pose: visloc_ros2::vio::ros_pose(&odom_from_base),
+                    ..PoseWithCovariance::default()
+                },
+                ..Odometry::default()
+            },
+            "odom",
+        );
+        publish_logged(
+            &image_pub,
+            mono8_image(
+                Header::new(stamp, "camera"),
+                BASALT_MAP_WIDTH as u32,
+                BASALT_MAP_HEIGHT as u32,
+                image.clone(),
+            ),
+            "image",
+        );
+        sent += 1;
+        std::thread::sleep(Duration::from_millis(250));
+        if let Some(msg) = tf_rx.try_iter().last() {
+            tf = Some(msg);
+        }
+        if let Some(msg) = pose_rx.try_iter().last() {
+            pose = Some(msg);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let tf = tf.unwrap_or_else(|| panic!("no /tf after sending {sent} frames"));
+    let transform = &tf.transforms[0];
+    assert_eq!(
+        (
+            transform.header.frame_id.as_str(),
+            transform.child_frame_id.as_str()
+        ),
+        ("map", "odom")
+    );
+    let t = transform.transform.translation;
+    assert!(
+        (Vector3::new(t.x, t.y, t.z) - expected_map_from_odom.translation).norm() < 0.01,
+        "map -> odom {t:?}, expected {:?}",
+        expected_map_from_odom.translation
+    );
+    let q = transform.transform.rotation;
+    let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q.w, q.x, q.y, q.z));
+    assert!(
+        rotation.angle_to(&expected_map_from_odom.rotation) < 0.01,
+        "{rotation:?}"
+    );
+
+    let pose = pose.unwrap_or_else(|| panic!("no map_pose after sending {sent} frames"));
+    let p = pose.pose.pose.position;
+    assert!(
+        (Vector3::new(p.x, p.y, p.z) - map_from_base.translation).norm() < 0.01,
+        "map pose {p:?}, expected {:?}",
+        map_from_base.translation
+    );
 }

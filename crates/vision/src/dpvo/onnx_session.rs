@@ -444,13 +444,8 @@ fn compact_group_ids(keys: &[i64]) -> Vec<i64> {
 }
 
 fn build_session(path: &Path, backend: OnnxBackend) -> Result<Session, DpvoOnnxError> {
-    use ort::ep::{CPU, CUDA};
-
-    let providers = match backend {
-        OnnxBackend::CudaThenCpu => vec![CUDA::default().build(), CPU::default().build()],
-        OnnxBackend::Cuda => vec![CUDA::default().build().error_on_failure()],
-        OnnxBackend::Cpu => vec![CPU::default().build()],
-    };
+    let providers = crate::features::superpoint_onnx::execution_providers(backend)
+        .map_err(DpvoOnnxError::from_ort)?;
 
     Session::builder()
         .map_err(DpvoOnnxError::from_ort)?

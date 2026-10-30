@@ -1,6 +1,7 @@
 //! Eigen-ordered f32 kernels: local IMU blocks, gram / gemv products and packet reductions.
 
 use super::*;
+use crate::fma::FusedMulAdd;
 
 pub(super) const IMU_LOCAL_ROWS: usize = 15;
 pub(super) const IMU_LOCAL_COLS: usize = AOM_NAV_DOF * 2;
@@ -38,12 +39,13 @@ pub(super) fn local_imu_h_b_15x30(
                 let mut even = 0.0_f32;
                 let mut odd = 0.0_f32;
                 for depth in (0..8).step_by(2) {
-                    even = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], even);
-                    odd = jacobian[(depth + 1, row)].mul_add(jacobian[(depth + 1, column)], odd);
+                    even = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], even);
+                    odd = jacobian[(depth + 1, row)]
+                        .fused_mul_add(jacobian[(depth + 1, column)], odd);
                 }
                 let mut value = add_f32_exact(even, odd);
                 for depth in 8..IMU_LOCAL_ROWS {
-                    value = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], value);
+                    value = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], value);
                 }
                 value
             } else if row >= 28 && column < 28 {
@@ -55,9 +57,10 @@ pub(super) fn local_imu_h_b_15x30(
                 let mut even = [0.0_f32; 4];
                 let mut odd = [0.0_f32; 4];
                 for (lane, depth) in (0..8).step_by(2).enumerate() {
-                    even[lane] = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], 0.0);
-                    odd[lane] =
-                        jacobian[(depth + 1, row)].mul_add(jacobian[(depth + 1, column)], 0.0);
+                    even[lane] =
+                        jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], 0.0);
+                    odd[lane] = jacobian[(depth + 1, row)]
+                        .fused_mul_add(jacobian[(depth + 1, column)], 0.0);
                 }
                 let mut even_sum = add_f32_exact(
                     add_f32_exact(even[0], even[1]),
@@ -66,18 +69,19 @@ pub(super) fn local_imu_h_b_15x30(
                 let mut odd_sum =
                     add_f32_exact(add_f32_exact(odd[0], odd[1]), add_f32_exact(odd[2], odd[3]));
                 for depth in (8..14).step_by(2) {
-                    even_sum = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], even_sum);
-                    odd_sum =
-                        jacobian[(depth + 1, row)].mul_add(jacobian[(depth + 1, column)], odd_sum);
+                    even_sum =
+                        jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], even_sum);
+                    odd_sum = jacobian[(depth + 1, row)]
+                        .fused_mul_add(jacobian[(depth + 1, column)], odd_sum);
                 }
                 let reduced = add_f32_exact(even_sum, odd_sum);
-                jacobian[(14, row)].mul_add(jacobian[(14, column)], reduced)
+                jacobian[(14, row)].fused_mul_add(jacobian[(14, column)], reduced)
             } else {
                 // Full packet rows and the X1 columns retain direct depth
                 // order, including the scalar tail.
                 let mut value = 0.0_f32;
                 for depth in 0..IMU_LOCAL_ROWS {
-                    value = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], value);
+                    value = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], value);
                 }
                 value
             };
@@ -111,7 +115,7 @@ pub(super) fn local_imu_h_b_15x30(
             );
         }
         for depth in 12..IMU_LOCAL_ROWS {
-            value = jacobian[(depth, column)].mul_add(residual[depth], value);
+            value = jacobian[(depth, column)].fused_mul_add(residual[depth], value);
         }
         local_b[column] = value;
     }
@@ -220,7 +224,7 @@ fn eigen_predux4_f32(lanes: [f32; 4]) -> f32 {
 fn eigen_q2_dot_fma_f32(jacobian: &DMatrix<f32>, row: usize, column: usize) -> f32 {
     let mut value = 0.0_f32;
     for depth in 0..jacobian.nrows() {
-        value = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], value);
+        value = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], value);
     }
     value
 }
@@ -235,12 +239,12 @@ fn eigen_q2_dot_packet_parity_f32(jacobian: &DMatrix<f32>, row: usize, column: u
     let mut even = 0.0_f32;
     let mut odd = 0.0_f32;
     for depth in (0..peeled_depth).step_by(2) {
-        even = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], even);
-        odd = jacobian[(depth + 1, row)].mul_add(jacobian[(depth + 1, column)], odd);
+        even = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], even);
+        odd = jacobian[(depth + 1, row)].fused_mul_add(jacobian[(depth + 1, column)], odd);
     }
     let mut value = add_f32_exact(even, odd);
     for depth in peeled_depth..jacobian.nrows() {
-        value = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], value);
+        value = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], value);
     }
     value
 }
@@ -407,7 +411,8 @@ fn eigen_q2_packet_dot_fma_f32(
     let mut lanes = [0.0_f32; 8];
     for depth in (0..peeled_depth).step_by(8) {
         for lane in 0..8 {
-            lanes[lane] = jacobian[(depth + lane, row)].mul_add(rhs[depth + lane], lanes[lane]);
+            lanes[lane] =
+                jacobian[(depth + lane, row)].fused_mul_add(rhs[depth + lane], lanes[lane]);
         }
     }
     eigen_predux8_f32(lanes)
@@ -469,7 +474,7 @@ pub(super) fn eigen_q2_transpose_gemv_f32(
             for depth in (peeled_depth..half_depth).step_by(4) {
                 for lane in 0..4 {
                     lanes[lane] = jacobian[(depth + lane, output_row)]
-                        .mul_add(rhs[depth + lane], lanes[lane]);
+                        .fused_mul_add(rhs[depth + lane], lanes[lane]);
                 }
             }
             value = add_f32_exact(value, eigen_predux4_f32(lanes));
@@ -507,7 +512,7 @@ pub(super) fn accumulate_gram_f32_eigen(
         for column in 0..jacobian.ncols() {
             let mut value = 0.0_f32;
             for depth in 0..9 {
-                value = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], value);
+                value = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], value);
             }
             accumulator[(row, column)] += value;
         }
@@ -583,17 +588,18 @@ pub(super) fn eigen_prior_packet_tail_gram_candidate_f32(j: &DMatrix<f32>) -> DM
             for depth in 0..depth8 {
                 let group = (depth & 7) / 2;
                 let lane = depth & 1;
-                accum[group][lane] = j[(depth, row)].mul_add(j[(depth, col)], accum[group][lane]);
+                accum[group][lane] =
+                    j[(depth, row)].fused_mul_add(j[(depth, col)], accum[group][lane]);
             }
             let mut low = (accum[0][0] + accum[1][0]) + (accum[2][0] + accum[3][0]);
             let mut high = (accum[0][1] + accum[1][1]) + (accum[2][1] + accum[3][1]);
             for depth in (depth8..depth2).step_by(2) {
-                low = j[(depth, row)].mul_add(j[(depth, col)], low);
-                high = j[(depth + 1, row)].mul_add(j[(depth + 1, col)], high);
+                low = j[(depth, row)].fused_mul_add(j[(depth, col)], low);
+                high = j[(depth + 1, row)].fused_mul_add(j[(depth + 1, col)], high);
             }
             let mut value = low + high;
             for depth in depth2..j.nrows() {
-                value = j[(depth, row)].mul_add(j[(depth, col)], value);
+                value = j[(depth, row)].fused_mul_add(j[(depth, col)], value);
             }
             product[(row, col)] = value;
         }
@@ -625,20 +631,20 @@ pub(super) fn eigen_prior_compact_gram_f32(compact: &DMatrix<f32>) -> DMatrix<f3
             let mut odd = 0.0_f32;
             for depth in 0..16 {
                 if depth & 1 == 0 {
-                    even = compact[(depth, row)].mul_add(compact[(depth, column)], even);
+                    even = compact[(depth, row)].fused_mul_add(compact[(depth, column)], even);
                 } else {
-                    odd = compact[(depth, row)].mul_add(compact[(depth, column)], odd);
+                    odd = compact[(depth, row)].fused_mul_add(compact[(depth, column)], odd);
                 }
             }
             let mut value = even + odd;
             for depth in 16..21 {
-                value = compact[(depth, row)].mul_add(compact[(depth, column)], value);
+                value = compact[(depth, row)].fused_mul_add(compact[(depth, column)], value);
             }
             product[(row, column)] = value;
         }
         let mut scalar = 0.0_f32;
         for depth in 0..21 {
-            scalar = compact[(depth, row)].mul_add(compact[(depth, 20)], scalar);
+            scalar = compact[(depth, row)].fused_mul_add(compact[(depth, 20)], scalar);
         }
         product[(row, 20)] = scalar;
     }
@@ -649,22 +655,22 @@ pub(super) fn eigen_prior_compact_gram_f32(compact: &DMatrix<f32>) -> DMatrix<f3
             let group = (depth & 7) / 2;
             let lane = depth & 1;
             accum[group][lane] =
-                compact[(depth, 20)].mul_add(compact[(depth, column)], accum[group][lane]);
+                compact[(depth, 20)].fused_mul_add(compact[(depth, column)], accum[group][lane]);
         }
         let low = (accum[0][0] + accum[1][0]) + (accum[2][0] + accum[3][0]);
         let high = (accum[0][1] + accum[1][1]) + (accum[2][1] + accum[3][1]);
-        let mut merged_low = compact[(16, 20)].mul_add(compact[(16, column)], low);
-        let mut merged_high = compact[(17, 20)].mul_add(compact[(17, column)], high);
-        merged_low = compact[(18, 20)].mul_add(compact[(18, column)], merged_low);
-        merged_high = compact[(19, 20)].mul_add(compact[(19, column)], merged_high);
+        let mut merged_low = compact[(16, 20)].fused_mul_add(compact[(16, column)], low);
+        let mut merged_high = compact[(17, 20)].fused_mul_add(compact[(17, column)], high);
+        merged_low = compact[(18, 20)].fused_mul_add(compact[(18, column)], merged_low);
+        merged_high = compact[(19, 20)].fused_mul_add(compact[(19, column)], merged_high);
         product[(20, column)] =
-            compact[(20, 20)].mul_add(compact[(20, column)], merged_low + merged_high);
+            compact[(20, 20)].fused_mul_add(compact[(20, column)], merged_low + merged_high);
     }
     // Column 20 is handled by Eigen's scalar 1x1 remainder kernel, not the
     // swapped four-column panel above.
     let mut scalar = 0.0_f32;
     for depth in 0..21 {
-        scalar = compact[(depth, 20)].mul_add(compact[(depth, 20)], scalar);
+        scalar = compact[(depth, 20)].fused_mul_add(compact[(depth, 20)], scalar);
     }
     product[(20, 20)] = scalar;
     product
@@ -682,14 +688,15 @@ fn eigen_prior27_tail_gram_f32(compact: &DMatrix<f32>) -> DMatrix<f32> {
             for depth in 0..24 {
                 let group = (depth & 7) / 2;
                 let lane = depth & 1;
-                accum[group][lane] =
-                    compact[(depth, row)].mul_add(compact[(depth, column)], accum[group][lane]);
+                accum[group][lane] = compact[(depth, row)]
+                    .fused_mul_add(compact[(depth, column)], accum[group][lane]);
             }
             let low = (accum[0][0] + accum[1][0]) + (accum[2][0] + accum[3][0]);
             let high = (accum[0][1] + accum[1][1]) + (accum[2][1] + accum[3][1]);
-            let low = compact[(24, row)].mul_add(compact[(24, column)], low);
-            let high = compact[(25, row)].mul_add(compact[(25, column)], high);
-            product[(row, column)] = compact[(26, row)].mul_add(compact[(26, column)], low + high);
+            let low = compact[(24, row)].fused_mul_add(compact[(24, column)], low);
+            let high = compact[(25, row)].fused_mul_add(compact[(25, column)], high);
+            product[(row, column)] =
+                compact[(26, row)].fused_mul_add(compact[(26, column)], low + high);
         }
     }
     product
@@ -828,7 +835,7 @@ pub(super) fn eigen_prior_row_major_gemv_39_f32(
     DVector::from_fn(39, |row, _| {
         let mut lanes = [0.0_f32; 8];
         for k in 0..32 {
-            lanes[k % 8] = matrix[(row, k)].mul_add(vector[k], lanes[k % 8]);
+            lanes[k % 8] = matrix[(row, k)].fused_mul_add(vector[k], lanes[k % 8]);
         }
         let mut value = eigen_predux8_f32(lanes);
         if row == 38 {
@@ -841,7 +848,7 @@ pub(super) fn eigen_prior_row_major_gemv_39_f32(
         }
         for k in 36..39 {
             if row >= 36 {
-                value = matrix[(row, k)].mul_add(vector[k], value);
+                value = matrix[(row, k)].fused_mul_add(vector[k], value);
             } else {
                 value += matrix[(row, k)] * vector[k];
             }
@@ -864,7 +871,7 @@ pub(super) fn eigen_prior_row_major_gemv_45_f32(
     DVector::from_fn(45, |row, _| {
         let mut lanes = [0.0_f32; 8];
         for depth in 0..40 {
-            lanes[depth % 8] = matrix[(row, depth)].mul_add(vector[depth], lanes[depth % 8]);
+            lanes[depth % 8] = matrix[(row, depth)].fused_mul_add(vector[depth], lanes[depth % 8]);
         }
         let mut value = eigen_predux8_f32(lanes);
         if row == 44 {
@@ -877,7 +884,7 @@ pub(super) fn eigen_prior_row_major_gemv_45_f32(
                     add_f32_exact(half[1], half[3]),
                 ),
             );
-            matrix[(row, 44)].mul_add(vector[44], value)
+            matrix[(row, 44)].fused_mul_add(vector[44], value)
         } else if row >= 40 {
             for depth in 40..45 {
                 value = add_f32_exact(value, mul_f32_exact(matrix[(row, depth)], vector[depth]));
@@ -905,12 +912,12 @@ pub(super) fn eigen_prior_row_major_gemv_51_f32(
     DVector::from_fn(51, |row, _| {
         let mut lanes = [0.0_f32; 8];
         for depth in 0..48 {
-            lanes[depth % 8] = matrix[(row, depth)].mul_add(vector[depth], lanes[depth % 8]);
+            lanes[depth % 8] = matrix[(row, depth)].fused_mul_add(vector[depth], lanes[depth % 8]);
         }
         let mut value = eigen_predux8_f32(lanes);
         for depth in 48..51 {
             value = if row >= 48 {
-                matrix[(row, depth)].mul_add(vector[depth], value)
+                matrix[(row, depth)].fused_mul_add(vector[depth], value)
             } else {
                 add_f32_exact(value, mul_f32_exact(matrix[(row, depth)], vector[depth]))
             };
@@ -931,11 +938,11 @@ pub(super) fn eigen_prior_row_major_gemv_57_f32(
     DVector::from_fn(57, |row, _| {
         let mut lanes = [0.0_f32; 8];
         for depth in 0..56 {
-            lanes[depth % 8] = matrix[(row, depth)].mul_add(vector[depth], lanes[depth % 8]);
+            lanes[depth % 8] = matrix[(row, depth)].fused_mul_add(vector[depth], lanes[depth % 8]);
         }
         let value = eigen_predux8_f32(lanes);
         if row == 56 {
-            matrix[(row, 56)].mul_add(vector[56], value)
+            matrix[(row, 56)].fused_mul_add(vector[56], value)
         } else {
             add_f32_exact(value, mul_f32_exact(matrix[(row, 56)], vector[56]))
         }
@@ -953,9 +960,9 @@ pub(super) fn eigen_prior_row_major_gemv_33(
     // no Packet4 for depth33, then vfma231ss at392204.
     let mut lanes = [0.0_f32; 8];
     for depth in 0..32 {
-        lanes[depth % 8] = matrix[(32, depth)].mul_add(vector[depth], lanes[depth % 8]);
+        lanes[depth % 8] = matrix[(32, depth)].fused_mul_add(vector[depth], lanes[depth % 8]);
     }
-    result[32] = matrix[(32, 32)].mul_add(vector[32], eigen_predux8_f32(lanes));
+    result[32] = matrix[(32, 32)].fused_mul_add(vector[32], eigen_predux8_f32(lanes));
     result
 }
 
@@ -968,12 +975,12 @@ fn eigen_prior_row_major_gemv_27(matrix: &DMatrix<f32>, vector: &DVector<f32>) -
     for row in 24..27 {
         let mut lanes = [0.0_f32; 8];
         for depth in 0..24 {
-            lanes[depth % 8] = matrix[(row, depth)].mul_add(vector[depth], lanes[depth % 8]);
+            lanes[depth % 8] = matrix[(row, depth)].fused_mul_add(vector[depth], lanes[depth % 8]);
         }
         let q: [f32; 4] = std::array::from_fn(|k| lanes[k] + lanes[k + 4]);
         let mut value = (q[0] + q[2]) + (q[1] + q[3]);
         for depth in 24..27 {
-            value = matrix[(row, depth)].mul_add(vector[depth], value);
+            value = matrix[(row, depth)].fused_mul_add(vector[depth], value);
         }
         result[row] = value;
     }
@@ -999,7 +1006,7 @@ fn eigen_prior_row_major_gemv_21(matrix: &DMatrix<f32>, vector: &DVector<f32>) -
         for depth in (0..16).step_by(8) {
             for lane in 0..8 {
                 lanes[lane] =
-                    matrix[(row, depth + lane)].mul_add(vector[depth + lane], lanes[lane]);
+                    matrix[(row, depth + lane)].fused_mul_add(vector[depth + lane], lanes[lane]);
             }
         }
         let q0 = add_f32_exact(lanes[0], lanes[4]);
@@ -1017,7 +1024,8 @@ fn eigen_prior_row_major_gemv_21(matrix: &DMatrix<f32>, vector: &DVector<f32>) -
     let mut lanes = [0.0_f32; 8];
     for depth in (0..16).step_by(8) {
         for lane in 0..8 {
-            lanes[lane] = matrix[(row, depth + lane)].mul_add(vector[depth + lane], lanes[lane]);
+            lanes[lane] =
+                matrix[(row, depth + lane)].fused_mul_add(vector[depth + lane], lanes[lane]);
         }
     }
     let q0 = add_f32_exact(lanes[0], lanes[4]);
@@ -1028,14 +1036,14 @@ fn eigen_prior_row_major_gemv_21(matrix: &DMatrix<f32>, vector: &DVector<f32>) -
 
     let mut half = [0.0_f32; 4];
     for lane in 0..4 {
-        half[lane] = matrix[(row, 16 + lane)].mul_add(vector[16 + lane], half[lane]);
+        half[lane] = matrix[(row, 16 + lane)].fused_mul_add(vector[16 + lane], half[lane]);
     }
     let h0 = add_f32_exact(half[0], half[2]);
     let h1 = add_f32_exact(half[1], half[3]);
     value = add_f32_exact(value, add_f32_exact(h0, h1));
     // GCC contracts Eigen's scalar remainder at the final depth even though
     // the earlier scalar tail updates are ordinary multiply/add operations.
-    value = matrix[(row, 20)].mul_add(vector[20], value);
+    value = matrix[(row, 20)].fused_mul_add(vector[20], value);
     result[row] = value;
     result
 }
@@ -1058,14 +1066,14 @@ pub(super) fn accumulate_transpose_vector_f32_eigen(
     assert_eq!(jacobian.ncols(), accumulator.len());
     if exact_imu_rows && jacobian.nrows() == 9 {
         for column in 0..jacobian.ncols() {
-            let lane0 = jacobian[(0, column)].mul_add(residual[0], 0.0_f32);
-            let lane1 = jacobian[(1, column)].mul_add(residual[1], 0.0_f32);
-            let lane2 = jacobian[(2, column)].mul_add(residual[2], 0.0_f32);
-            let lane3 = jacobian[(3, column)].mul_add(residual[3], 0.0_f32);
-            let lane4 = jacobian[(4, column)].mul_add(residual[4], 0.0_f32);
-            let lane5 = jacobian[(5, column)].mul_add(residual[5], 0.0_f32);
-            let lane6 = jacobian[(6, column)].mul_add(residual[6], 0.0_f32);
-            let lane7 = jacobian[(7, column)].mul_add(residual[7], 0.0_f32);
+            let lane0 = jacobian[(0, column)].fused_mul_add(residual[0], 0.0_f32);
+            let lane1 = jacobian[(1, column)].fused_mul_add(residual[1], 0.0_f32);
+            let lane2 = jacobian[(2, column)].fused_mul_add(residual[2], 0.0_f32);
+            let lane3 = jacobian[(3, column)].fused_mul_add(residual[3], 0.0_f32);
+            let lane4 = jacobian[(4, column)].fused_mul_add(residual[4], 0.0_f32);
+            let lane5 = jacobian[(5, column)].fused_mul_add(residual[5], 0.0_f32);
+            let lane6 = jacobian[(6, column)].fused_mul_add(residual[6], 0.0_f32);
+            let lane7 = jacobian[(7, column)].fused_mul_add(residual[7], 0.0_f32);
             let q0 = lane0 + lane4;
             let q1 = lane1 + lane5;
             let q2 = lane2 + lane6;
@@ -1078,7 +1086,7 @@ pub(super) fn accumulate_transpose_vector_f32_eigen(
     for column in 0..jacobian.ncols() {
         let mut value = 0.0_f32;
         for row in 0..jacobian.nrows() {
-            value = jacobian[(row, column)].mul_add(residual[row], value);
+            value = jacobian[(row, column)].fused_mul_add(residual[row], value);
         }
         accumulator[column] += value;
     }
@@ -1107,7 +1115,7 @@ pub(super) fn eigen_row_major_gemv_f32(
         while column < full_end {
             for lane in 0..8 {
                 lanes[lane] =
-                    matrix[(row, column + lane)].mul_add(vector[column + lane], lanes[lane]);
+                    matrix[(row, column + lane)].fused_mul_add(vector[column + lane], lanes[lane]);
             }
             column += 8;
         }
@@ -1127,8 +1135,8 @@ pub(super) fn eigen_row_major_gemv_f32(
         let mut half_lanes = [0.0_f32; 4];
         while column < half_end {
             for lane in 0..4 {
-                half_lanes[lane] =
-                    matrix[(row, column + lane)].mul_add(vector[column + lane], half_lanes[lane]);
+                half_lanes[lane] = matrix[(row, column + lane)]
+                    .fused_mul_add(vector[column + lane], half_lanes[lane]);
             }
             column += 4;
         }
@@ -1155,11 +1163,11 @@ pub(super) fn eigen_visual_model_dot_f32(increment: &DVector<f32>, residual: &DV
     if increment.is_empty() {
         return 0.0_f32;
     }
-    let first_right = 0.5_f32.mul_add(increment[0], residual[0]);
+    let first_right = 0.5_f32.fused_mul_add(increment[0], residual[0]);
     let mut value = increment[0] * first_right;
     for index in 1..increment.len() {
-        let right = 0.5_f32.mul_add(increment[index], residual[index]);
-        value = increment[index].mul_add(right, value);
+        let right = 0.5_f32.fused_mul_add(increment[index], residual[index]);
+        value = increment[index].fused_mul_add(right, value);
     }
     value
 }

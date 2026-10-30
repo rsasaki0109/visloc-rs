@@ -1,5 +1,6 @@
 """Unit tests for scripts/lamaria_batch_ba.py (numpy parts, the loop edge's PnP if opencv is there and the IMU
 graph's warm start if gtsam is)."""
+import argparse
 import importlib.util
 import pathlib
 import unittest
@@ -17,6 +18,14 @@ try:
     HAVE_GTSAM = True
 except ImportError:
     HAVE_GTSAM = False
+
+try:
+    import torch  # noqa: F401
+    from lightglue import LightGlue
+    LightGlue(features="aliked")  # the weights must be there (downloaded once)
+    HAVE_LIGHTGLUE = True
+except Exception:  # noqa: BLE001 - no torch, no LightGlue, or no network for the weights
+    HAVE_LIGHTGLUE = False
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "lamaria_batch_ba.py"
 spec = importlib.util.spec_from_file_location("lamaria_batch_ba", SCRIPT)
@@ -412,6 +421,20 @@ class ModeVectorTest(unittest.TestCase):
         np.testing.assert_allclose((p2 - pts) / k_, vl[1], atol=1e-4)
 
 
+class TrackTest(unittest.TestCase):
+    def test_a_track_with_two_features_in_one_image_is_dropped(self):
+        offsets = np.arange(0, 19, 3)  # three keyframes, two cameras, three features per image
+        # images 0, 2 and 4 are camera 0 of keyframes 0-2; a wrong match also joins feature 1 of image 4 to the
+        # track of feature 0, a second track runs through feature 1 of images 0 and 2
+        pairs = np.array([[0, 0, 1, 0], [1, 0, 2, 0], [1, 0, 2, 0], [0, 0, 1, 0]])
+        matches = np.array([[0, 0], [0, 0], [0, 1], [1, 1]])
+        g = lambda img, f: int(offsets[img] + f)  # noqa: E731
+        tracks, image_of, conflicts = lb.build_tracks(offsets, pairs, matches, 4)
+        self.assertEqual(conflicts, 1)
+        self.assertEqual([sorted(t.tolist()) for t in tracks], [[g(0, 1), g(2, 1)]])
+        np.testing.assert_array_equal(image_of[[g(4, 0), g(4, 1)]], [4, 4])
+
+
 class MatchingTest(unittest.TestCase):
     def test_best_two(self):
         keys = np.array([0, 0, 1, 0, 1])
@@ -465,6 +488,150 @@ class MatchingTest(unittest.TestCase):
             m = lb._unguided_matches(desc_a, desc_b, 0.8, 300.0, method=method)
             self.assertEqual(len(m), 80)
             np.testing.assert_array_equal(perm[m[:, 1]], m[:, 0])
+
+    def test_ratio_matcher_takes_learned_descriptors(self):
+        rng = np.random.default_rng(5)
+        cams = two_cameras()
+        k = cams[0]["K"]
+        kf_r = np.array([np.eye(3), lb.so3_exp(np.array([0.0, 0.05, 0.0]))])
+        kf_p = np.array([[0.0, 0.0, 0.0], [0.8, 0.1, 0.0]])
+        lb._G.update(cams=[cams[0], cams[0]], kf_p=kf_p, kf_r=kf_r, ratio=0.8, max_desc=np.inf)
+        r_wc0, c0 = lb._cam_pose(0, 0)
+        r_wc1, c1 = lb._cam_pose(1, 0)
+        n = 150
+        xy0 = rng.uniform([50, 50], [730, 530], size=(n, 2))
+        rays = np.c_[xy0, np.ones(n)] @ np.linalg.inv(k).T
+        world = c0 + (rays * rng.uniform(3, 20, size=n)[:, None]) @ r_wc0.T
+        cam1 = (world - c1) @ r_wc1
+        xy1 = (cam1 @ k.T)[:, :2] / cam1[:, 2:3]
+        desc0 = rng.normal(size=(n, 256))  # unit-length, SuperPoint's length, stored in half precision
+        desc0 /= np.linalg.norm(desc0, axis=1, keepdims=True)
+        desc1 = desc0 + 0.02 * rng.normal(size=(n, 256))
+        desc1 /= np.linalg.norm(desc1, axis=1, keepdims=True)
+        perm = rng.permutation(n)
+        lb._G.update(offsets=np.array([0, n, n, 2 * n, 2 * n]), xy=np.concatenate([xy0, xy1[perm]]).astype(np.float32),
+                     desc=np.concatenate([desc0, desc1[perm]]).astype(np.float16))
+        _, m = lb._match_worker((0, 0, 1, 0, 2.0))  # with or without numba
+        self.assertGreater(len(m), 0.9 * n)
+        np.testing.assert_array_equal(m[:, 1], np.argsort(perm)[m[:, 0]])
+
+    def test_band_of_learned_matches_is_the_ratio_matchers_band(self):
+        rng = np.random.default_rng(9)
+        cams = two_cameras()
+        kf_r = np.array([np.eye(3), lb.so3_exp(np.array([0.0, 0.05, 0.0]))])
+        kf_p = np.array([[0.0, 0.0, 0.0], [0.8, 0.1, 0.0]])
+        lb._G.update(cams=[cams[0], cams[0]], kf_p=kf_p, kf_r=kf_r)
+        k = cams[0]["K"]
+        r_wc0, c0 = lb._cam_pose(0, 0)
+        r_wc1, c1 = lb._cam_pose(1, 0)
+        n = 100
+        xy0 = rng.uniform([50, 50], [730, 530], size=(n, 2))
+        rays = np.c_[xy0, np.ones(n)] @ np.linalg.inv(k).T
+        world = c0 + (rays * rng.uniform(3, 20, size=n)[:, None]) @ r_wc0.T
+        cam1 = (world - c1) @ r_wc1
+        xy1 = (cam1 @ k.T)[:, :2] / cam1[:, 2:3]
+        self.assertLess(lb._band_dist(0, 0, 1, 0, xy0, xy1).max() * k[0, 0], 1e-6)  # true matches: on the line
+        # shifted across the epipolar line by 5 px: 5 px off
+        r_ba = r_wc1.T @ r_wc0
+        line = np.c_[rays] @ (lb.skew(r_wc1.T @ (c0 - c1)) @ r_ba).T
+        normal = line[:, :2] / np.hypot(line[:, 0], line[:, 1])[:, None]
+        d = lb._band_dist(0, 0, 1, 0, xy0, xy1 + 5 * normal)
+        np.testing.assert_allclose(d * k[0, 0], 5.0, rtol=0.02)
+
+    @unittest.skipUnless(HAVE_CV2, "needs opencv-python")
+    def test_essential_verification_keeps_true_matches_the_drifted_band_drops(self):
+        rng = np.random.default_rng(13)
+        cams = two_cameras()
+        k = cams[0]["K"]
+        kf_r = np.array([np.eye(3), lb.so3_exp(np.array([0.0, 0.05, 0.0]))])
+        lb._G.update(cams=[cams[0], cams[0]], kf_p=np.array([[0.0, 0.0, 0.0], [0.8, 0.1, 0.0]]), kf_r=kf_r)
+        r_wc0, c0 = lb._cam_pose(0, 0)
+        r_wc1, c1 = lb._cam_pose(1, 0)
+        n, wrong = 150, 40
+        xy0 = rng.uniform([50, 50], [730, 530], size=(n, 2))
+        rays = np.c_[xy0, np.ones(n)] @ np.linalg.inv(k).T
+        world = c0 + (rays * rng.uniform(3, 20, size=n)[:, None]) @ r_wc0.T
+        cam1 = (world - c1) @ r_wc1
+        xy1 = (cam1 @ k.T)[:, :2] / cam1[:, 2:3]
+        true = np.c_[np.arange(n), np.arange(n)]
+        bad = np.c_[rng.integers(0, n, wrong), rng.integers(0, n, wrong)]
+        bad = bad[bad[:, 0] != bad[:, 1]]
+        m = np.concatenate([true, bad]).astype(np.int32)
+        # the VIO has drifted: right rotation, translation 0.6 m off
+        lb._G.update(kf_p=np.array([[0.0, 0.0, 0.0], [0.8, 0.6, 0.3]]), offsets=np.array([0, n, n, 2 * n, 2 * n]),
+                     xy=np.concatenate([xy0, xy1]).astype(np.float32), desc=np.zeros((2 * n, 8), np.float32),
+                     min_inliers=20, max_rot=10.0)
+        pair = (0, 0, 1, 0, 6.0)
+        in_band = lb._band_dist(0, 0, 1, 0, xy0, xy1) < pair[4] / k[0, 0]
+        self.assertLess(in_band.mean(), 0.5)
+        saved = lb._lightglue_pairs
+        try:
+            lb._lightglue_pairs = lambda pairs, a: iter([(pairs[0], m)])
+            count = [0, 0]
+            (_, kept), = lb._lightglue_essential([pair], argparse.Namespace(jobs=2), count)
+        finally:
+            lb._lightglue_pairs = saved
+        kept = {tuple(x) for x in kept}
+        self.assertGreater(len(kept & {tuple(x) for x in true}), 0.95 * n)
+        self.assertLessEqual(len(kept - {tuple(x) for x in true}), 3)
+        self.assertEqual(count, [len(m), len(kept)])
+
+    def test_learned_features_default_to_lightglue_without_a_descriptor_limit(self):
+        self.assertEqual(lb._matcher("auto", "sift"), "ratio")
+        self.assertEqual(lb._matcher("auto", "aliked"), "lightglue")
+        self.assertEqual(lb._matcher("ratio", "aliked"), "ratio")
+        self.assertEqual(lb._max_desc(None, "sift"), 300.0)
+        self.assertTrue(np.isinf(lb._max_desc(None, "disk")))
+        self.assertEqual(lb._max_desc(0.9, "disk"), 0.9)
+        with self.assertRaises(SystemExit):
+            lb._matcher("lightglue", "sift")
+
+    @unittest.skipUnless(HAVE_LIGHTGLUE, "needs torch and LightGlue with its ALIKED weights")
+    def test_batched_lightglue_matches_lightglue_pair_by_pair(self):
+        import torch
+        from lightglue import LightGlue
+        torch.manual_seed(0)
+        lg = LightGlue(features="aliked", depth_confidence=-1, width_confidence=-1).eval()
+
+        def image(n):
+            xy = torch.rand(1, n, 2) * torch.tensor([757.0, 571.0])
+            return {"keypoints": xy, "descriptors": torch.nn.functional.normalize(torch.randn(1, n, 128), dim=-1),
+                    "image_size": torch.tensor([[758.0, 572.0]])}
+
+        base = [image(96) for _ in range(3)]
+        # the second image of a pair: the first one's keypoints moved a little, half of them and new ones
+        pairs = []
+        for f, n_new in zip(base, (0, 30, 50)):
+            keep = torch.arange(96 - n_new)
+            g = image(96)
+            g["keypoints"][0, keep] = f["keypoints"][0, keep] + torch.randn(len(keep), 2)
+            g["descriptors"][0, keep] = torch.nn.functional.normalize(
+                f["descriptors"][0, keep] + 0.05 * torch.randn(len(keep), 128), dim=-1)
+            pairs.append((f, g))
+        with torch.inference_mode():
+            ref = [lg({"image0": f, "image1": g})["matches"][0].numpy() for f, g in pairs]
+        self.assertGreater(min(len(r) for r in ref), 30)
+        same = lb._lightglue_batch(lg, [f for f, _ in pairs], [g for _, g in pairs], False)  # 96 keypoints everywhere
+        for r, m in zip(ref, same):
+            np.testing.assert_array_equal(m, r)
+        trimmed = [(f, {k: v[:, :80] if k != "image_size" else v for k, v in g.items()}) for f, g in pairs]
+        trimmed[1] = (trimmed[1][0], pairs[1][1])  # 80, 96 and 80 keypoints in b: padded and masked
+        with torch.inference_mode():
+            ref = [lg({"image0": f, "image1": g})["matches"][0].numpy() for f, g in trimmed]
+        padded = lb._lightglue_batch(lg, [f for f, _ in trimmed], [g for _, g in trimmed], False)
+        for r, m in zip(ref, padded):
+            np.testing.assert_array_equal(m, r)
+
+    def test_features_written_before_the_extractor_was_recorded_are_sift(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            np.savez(pathlib.Path(d) / "features.npz", kf_ns=np.zeros(1, np.int64), offsets=np.zeros(3, np.int64))
+            self.assertEqual(lb.feature_kind(d), ("sift", None))
+            np.savez(pathlib.Path(d) / "features.npz", kf_ns=np.zeros(1, np.int64), extractor=np.array("aliked"),
+                     image_wh=np.array([[758, 572], [757, 569]], np.int32))
+            kind, wh = lb.feature_kind(d)
+            self.assertEqual(kind, "aliked")
+            self.assertEqual(wh.tolist(), [[758, 572], [757, 569]])
 
 
 @unittest.skipUnless(HAVE_CV2, "needs opencv-python")

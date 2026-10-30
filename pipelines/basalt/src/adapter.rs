@@ -131,6 +131,47 @@ impl BasaltVioEstimatorAdapter {
         self.process_impl(frame, false, false)
     }
 
+    /// Runs only the estimator, on tracks a different frontend produced for
+    /// the frame (the browser build tracks on the GPU), with the lean
+    /// outputs of [`Self::process_without_marg_data_no_trace`]. This
+    /// adapter's own frontend is not used, so its tracks go stale: keep to
+    /// one of the two frontends for an adapter's lifetime.
+    pub fn process_tracks_no_trace(
+        &mut self,
+        mut tracks: TrackFrameOutput,
+        imu: &[ImuSample],
+        initialization_imu: Option<ImuSample>,
+    ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
+        let started = self.timing.start();
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(imu, &mut tracks.observations);
+        }
+        let estimator_started = self.timing.start();
+        let estimator = self
+            .estimator
+            .process_adapter_frame(
+                tracks.frame.frame_id,
+                tracks.frame.timestamp_ns,
+                &tracks.observations,
+                imu,
+                initialization_imu,
+                None,
+                false,
+                false,
+            )
+            .map_err(BasaltAdapterError::Estimator);
+        self.timing
+            .finish(TimingBucket::AdapterEstimator, estimator_started);
+        let estimator = estimator?;
+        self.last_gyro_bias = estimator.state.gyro_bias_rad_s;
+        self.timing.finish(TimingBucket::AdapterTotal, started);
+        Ok(BasaltAdapterOutput {
+            tracks,
+            estimator,
+            imu_count: imu.len(),
+        })
+    }
+
     fn process_impl(
         &mut self,
         frame: EurocSensorFrame,
@@ -369,6 +410,113 @@ impl BasaltVioEstimatorAdapter {
         consumer_timing.merge_from(self.estimator.timing_breakdown());
         Ok((producer_timing, consumer_timing))
     }
+
+    /// Splits the adapter into its frontend and estimator halves so a live
+    /// caller (a ROS node, say) can run them on two threads of its own,
+    /// overlapping frontend tracking of frame `N+1` with the estimator step
+    /// of frame `N`, as [`Self::process_euroc_stream_pipelined`] does for a
+    /// recorded EuRoC sequence.
+    ///
+    /// Both stages run the lean path of
+    /// [`Self::process_without_marg_data_no_trace`]. Feeding every frame to
+    /// [`BasaltVioFrontendStage::process`] and its packets, in order, to
+    /// [`BasaltVioEstimatorStage::process`] gives exactly that path's
+    /// results, except that the frontend's optional IMU rotation seed
+    /// (`config.optical_flow_imu_seed_rotation`) uses whichever gyro bias
+    /// the caller passes rather than the estimator's estimate from the
+    /// previous frame.
+    pub fn into_stages(self) -> (BasaltVioFrontendStage, BasaltVioEstimatorStage) {
+        (
+            BasaltVioFrontendStage {
+                frontend: self.frontend,
+                platform: self.platform,
+                timing: self.timing,
+            },
+            BasaltVioEstimatorStage {
+                estimator: self.estimator,
+            },
+        )
+    }
+}
+
+/// Frontend tracking output of one frame, bound for
+/// [`BasaltVioEstimatorStage::process`].
+#[derive(Debug)]
+pub struct BasaltFrontendPacket {
+    pub tracks: TrackFrameOutput,
+    imu: Vec<ImuSample>,
+    initialization_imu: Option<ImuSample>,
+}
+
+/// The frontend half of [`BasaltVioEstimatorAdapter::into_stages`].
+#[derive(Debug)]
+pub struct BasaltVioFrontendStage {
+    frontend: DirectKltStream,
+    platform: Option<crate::platform::PlatformFilter>,
+    timing: TimingBreakdown,
+}
+
+impl BasaltVioFrontendStage {
+    /// Tracks one frame. `gyro_bias` (IMU frame, rad/s) bias-corrects the
+    /// optional IMU rotation seed; pass the latest estimate the estimator
+    /// stage has produced, or zero.
+    pub fn process(
+        &mut self,
+        frame: EurocSensorFrame,
+        gyro_bias: Vector3<f64>,
+    ) -> Result<BasaltFrontendPacket, BasaltAdapterError> {
+        let stereo =
+            crate::StereoFrame::new(frame.frame_id, frame.timestamp_ns, frame.cam0, frame.cam1);
+        let mut tracks = self.frontend.process_frame_with_timing_imu(
+            stereo,
+            &frame.imu,
+            gyro_bias,
+            &mut self.timing,
+        )?;
+        if let Some(platform) = self.platform.as_mut() {
+            platform.apply(&frame.imu, &mut tracks.observations);
+        }
+        Ok(BasaltFrontendPacket {
+            tracks,
+            imu: frame.imu,
+            initialization_imu: frame.initialization_imu,
+        })
+    }
+}
+
+/// The estimator half of [`BasaltVioEstimatorAdapter::into_stages`].
+#[derive(Debug)]
+pub struct BasaltVioEstimatorStage {
+    estimator: BasaltVioEstimator,
+}
+
+impl BasaltVioEstimatorStage {
+    /// Runs the estimator step for one frontend packet; packets must arrive
+    /// in the order the frontend stage produced them.
+    pub fn process(
+        &mut self,
+        packet: BasaltFrontendPacket,
+    ) -> Result<BasaltAdapterOutput, BasaltAdapterError> {
+        let imu_count = packet.imu.len();
+        let estimator = self
+            .estimator
+            .process_adapter_frame(
+                packet.tracks.frame.frame_id,
+                packet.tracks.frame.timestamp_ns,
+                &packet.tracks.observations,
+                &packet.imu,
+                packet.initialization_imu,
+                None,
+                false,
+                false,
+            )
+            .map_err(BasaltAdapterError::Estimator)?;
+        Ok(BasaltAdapterOutput {
+            tracks: packet.tracks,
+            estimator,
+            imu_count,
+        })
+    }
 }
 
 /// Builds the Basalt VIO estimator from the pinned calibration/config
@@ -412,14 +560,19 @@ fn vio_estimator_from_parts(
                 // public f64 noise model; otherwise an f64 product cast
                 // down by preintegration is one ulp below Eigen's
                 // discrete covariance (e.g. 3d51b717 vs 3d51b718).
-                gyro_density: sample_density_f32(
-                    calibration.gyro_noise_std,
-                    calibration.imu_update_rate_hz,
-                ),
-                accel_density: sample_density_f32(
-                    calibration.accel_noise_std,
-                    calibration.imu_update_rate_hz,
-                ),
+                //
+                // With `imu_noise_per_step` the densities stay continuous;
+                // the preintegration discretizes them by each step's length.
+                gyro_density: if estimator_config.imu_noise_per_step {
+                    rms_density(calibration.gyro_noise_std)
+                } else {
+                    sample_density_f32(calibration.gyro_noise_std, calibration.imu_update_rate_hz)
+                },
+                accel_density: if estimator_config.imu_noise_per_step {
+                    rms_density(calibration.accel_noise_std)
+                } else {
+                    sample_density_f32(calibration.accel_noise_std, calibration.imu_update_rate_hz)
+                },
             },
             BiasRandomWalkNoise {
                 // Basalt stores the *inverse* calibration standard

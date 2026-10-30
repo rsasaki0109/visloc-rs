@@ -1,5 +1,6 @@
 //! Basalt landmark and keyframe contracts, independent of generic PnP.
 use crate::camera::DoubleSphereCamera;
+use crate::fma::FusedMulAdd;
 use nalgebra::{Matrix3, Matrix3x2, Matrix4, Point2, Point3, UnitQuaternion, Vector3, Vector4};
 use std::collections::BTreeMap;
 use visloc_core::geometry::SE3;
@@ -13,7 +14,7 @@ use visloc_core::geometry::SE3;
 /// ulp for some landmarks.
 #[inline]
 fn eigen_norm3_f32(x: f32, y: f32, z: f32) -> f32 {
-    x.mul_add(x, z.mul_add(z, y * y)).sqrt()
+    x.fused_mul_add(x, z.fused_mul_add(z, y * y)).sqrt()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -124,10 +125,10 @@ impl StereographicDirection {
         let norm_inv2 = norm_inv * norm_inv;
         let xy = u * v;
         nalgebra::SMatrix::from_row_slice(&[
-            (-x2).mul_add(norm_inv2, norm_inv),
+            (-x2).fused_mul_add(norm_inv2, norm_inv),
             -xy * norm_inv2,
             -xy * norm_inv2,
-            (-y2).mul_add(norm_inv2, norm_inv),
+            (-y2).fused_mul_add(norm_inv2, norm_inv),
             -u * norm_inv2,
             -v * norm_inv2,
         ])
@@ -299,9 +300,10 @@ impl LibstdcxxUnorderedOrder {
     #[inline]
     const fn bucket_for(hash: u64, bucket_count: usize) -> usize {
         // std::hash<int64_t> is the identity hash on the pinned libstdc++
-        // target.  Casting before modulo preserves its size_t conversion for
-        // signed IDs as well (the VIO IDs used here are non-negative).
-        (hash as usize) % bucket_count
+        // target, whose size_t is 64-bit: reduce the full 64-bit hash, so a
+        // 32-bit target (wasm32) picks the same bucket (the VIO IDs used
+        // here are non-negative).
+        (hash % bucket_count as u64) as usize
     }
 
     fn find_node(&self, key: u64) -> Option<usize> {
@@ -346,7 +348,9 @@ impl LibstdcxxUnorderedOrder {
         // Exact GCC 11 libstdc++ __prime_list used by
         // _Prime_rehash_policy::_M_next_bkt.  This table is intentionally
         // sparse (for example, a request for 514 selects 541, not 521).
-        const GCC11_BUCKETS: &[usize] = &[
+        // `u64`: the 64-bit ABI's table runs past a 32-bit `usize` (wasm32),
+        // where those entries can never be requested.
+        const GCC11_BUCKETS: &[u64] = &[
             2,
             3,
             5,
@@ -653,7 +657,11 @@ impl LibstdcxxUnorderedOrder {
             18446744073709551557,
             18446744073709551557,
         ];
-        if let Some(&bucket) = GCC11_BUCKETS.iter().find(|&&bucket| bucket >= minimum) {
+        if let Some(bucket) = GCC11_BUCKETS
+            .iter()
+            .find(|&&bucket| bucket >= minimum as u64)
+            .and_then(|&bucket| usize::try_from(bucket).ok())
+        {
             return bucket;
         }
 
@@ -1305,6 +1313,7 @@ pub(crate) fn sophus_so3_inverse(rotation: UnitQuaternion<f32>) -> UnitQuaternio
 /// disassembly; the fallback keeps the same coefficient mapping with ordinary
 /// scalar operations for targets without those features.
 mod sophus_packet {
+    use crate::fma::FusedMulAdd;
     use nalgebra::{Quaternion, UnitQuaternion};
 
     pub(super) fn quaternion_product(
@@ -1360,13 +1369,16 @@ mod sophus_packet {
         let [bx, by, bz, bw] = second;
         [
             // x = aw*bx + ax*bw + ay*bz - az*by
-            (-az).mul_add(by, ay.mul_add(bz, aw.mul_add(bx, ax * bw))),
+            (-az).fused_mul_add(by, ay.fused_mul_add(bz, aw.fused_mul_add(bx, ax * bw))),
             // y = aw*by + ay*bw + az*bx - ax*bz
-            (-ax).mul_add(bz, az.mul_add(bx, aw.mul_add(by, ay * bw))),
+            (-ax).fused_mul_add(bz, az.fused_mul_add(bx, aw.fused_mul_add(by, ay * bw))),
             // z = aw*bz + az*bw + ax*by - ay*bx
-            (-ay).mul_add(bx, ax.mul_add(by, aw.mul_add(bz, az * bw))),
+            (-ay).fused_mul_add(bx, ax.fused_mul_add(by, aw.fused_mul_add(bz, az * bw))),
             // w = aw*bw - ax*bx - ay*by - az*bz
-            (-az).mul_add(bz, (-ay).mul_add(by, bw.mul_add(aw, -(bx * ax)))),
+            (-az).fused_mul_add(
+                bz,
+                (-ay).fused_mul_add(by, bw.fused_mul_add(aw, -(bx * ax))),
+            ),
         ]
     }
 
@@ -1432,13 +1444,13 @@ fn sophus_rotation_matrix(rotation: UnitQuaternion<f32>) -> Matrix3<f32> {
     let tzz = tz * q.k;
     Matrix3::new(
         1.0_f32 - (tyy + tzz),
-        (-tz).mul_add(q.w, txy),
-        ty.mul_add(q.w, txz),
-        tz.mul_add(q.w, txy),
+        (-tz).fused_mul_add(q.w, txy),
+        ty.fused_mul_add(q.w, txz),
+        tz.fused_mul_add(q.w, txy),
         1.0_f32 - (txx + tzz),
-        (-tx).mul_add(q.w, tyz),
-        (-ty).mul_add(q.w, txz),
-        tx.mul_add(q.w, tyz),
+        (-tx).fused_mul_add(q.w, tyz),
+        (-ty).fused_mul_add(q.w, txz),
+        tx.fused_mul_add(q.w, tyz),
         1.0_f32 - (txx + tyy),
     )
 }
@@ -1760,7 +1772,7 @@ fn triangulate_dlt_matrix_f32_with_optional_trace(
             - f0.z * if column == 0 { 1.0_f32 } else { 0.0_f32 };
         a[(1, column)] = f0.y * if column == 2 { 1.0_f32 } else { 0.0_f32 }
             - f0.z * if column == 1 { 1.0_f32 } else { 0.0_f32 };
-        a[(2, column)] = (-f1.z).mul_add(
+        a[(2, column)] = (-f1.z).fused_mul_add(
             candidate_matrix[(0, column)],
             f1.x * candidate_matrix[(2, column)],
         );
@@ -1768,12 +1780,12 @@ fn triangulate_dlt_matrix_f32_with_optional_trace(
         // pinned compiler emits only the final (row3,col3) lane with the
         // opposite FMA operand at 4b2cd5, after rounding the other product.
         a[(3, column)] = if column == 3 {
-            f1.y.mul_add(
+            f1.y.fused_mul_add(
                 candidate_matrix[(2, column)],
                 (-f1.z) * candidate_matrix[(1, column)],
             )
         } else {
-            (-f1.z).mul_add(
+            (-f1.z).fused_mul_add(
                 candidate_matrix[(1, column)],
                 f1.y * candidate_matrix[(2, column)],
             )
@@ -1947,8 +1959,8 @@ fn apply_left_f32(matrix: &mut Matrix4<f32>, p: usize, q: usize, c: f32, s: f32)
         // the pinned native build. Spell the two sums as FMAs so the f32
         // rounding boundary is the same (the temporary values are kept
         // before either destination is written).
-        matrix[(p, column)] = c.mul_add(xp, s * xq);
-        matrix[(q, column)] = (-s).mul_add(xp, c * xq);
+        matrix[(p, column)] = c.fused_mul_add(xp, s * xq);
+        matrix[(q, column)] = (-s).fused_mul_add(xp, c * xq);
     }
 }
 
@@ -1956,8 +1968,8 @@ fn apply_right_f32(matrix: &mut Matrix4<f32>, p: usize, q: usize, c: f32, s: f32
     for row in 0..4 {
         let xp = matrix[(row, p)];
         let xq = matrix[(row, q)];
-        matrix[(row, p)] = c.mul_add(xp, (-s) * xq);
-        matrix[(row, q)] = s.mul_add(xp, c * xq);
+        matrix[(row, p)] = c.fused_mul_add(xp, (-s) * xq);
+        matrix[(row, q)] = s.fused_mul_add(xp, c * xq);
     }
 }
 
@@ -1968,32 +1980,32 @@ fn real_2x2_jacobi_svd_f32(m00: f32, m01: f32, m10: f32, m11: f32) -> ((f32, f32
         (1.0_f32, 0.0_f32)
     } else {
         let u = t / d;
-        let tmp = u.mul_add(u, 1.0_f32).sqrt();
+        let tmp = u.fused_mul_add(u, 1.0_f32).sqrt();
         (u / tmp, 1.0_f32 / tmp)
     };
     // `rot1 * m` is the temporary 2x2 block used by Eigen before deriving
     // its right Jacobi rotation.
-    let a00 = left1_c.mul_add(m00, left1_s * m10);
-    let a01 = left1_c.mul_add(m01, left1_s * m11);
-    let a11 = (-left1_s).mul_add(m01, left1_c * m11);
+    let a00 = left1_c.fused_mul_add(m00, left1_s * m10);
+    let a01 = left1_c.fused_mul_add(m01, left1_s * m11);
+    let a11 = (-left1_s).fused_mul_add(m01, left1_c * m11);
     let deno = 2.0_f32 * a01.abs();
     let (right_c, right_s) = if deno < f32::MIN_POSITIVE {
         (1.0_f32, 0.0_f32)
     } else {
         let tau = (a00 - a11) / deno;
-        let w = tau.mul_add(tau, 1.0_f32).sqrt();
+        let w = tau.fused_mul_add(tau, 1.0_f32).sqrt();
         let t = if tau > 0.0_f32 {
             1.0_f32 / (tau + w)
         } else {
             1.0_f32 / (tau - w)
         };
         let sign_t = if t > 0.0_f32 { 1.0_f32 } else { -1.0_f32 };
-        let n = 1.0_f32 / t.mul_add(t, 1.0_f32).sqrt();
+        let n = 1.0_f32 / t.fused_mul_add(t, 1.0_f32).sqrt();
         (n, -sign_t * (a01 / a01.abs()) * t.abs() * n)
     };
     // Eigen stores j_left = rot1 * j_right.transpose().
-    let left_c = left1_c.mul_add(right_c, left1_s * right_s);
-    let left_s = (-left1_c).mul_add(right_s, left1_s * right_c);
+    let left_c = left1_c.fused_mul_add(right_c, left1_s * right_s);
+    let left_s = (-left1_c).fused_mul_add(right_s, left1_s * right_c);
     ((left_c, left_s), (right_c, right_s))
 }
 

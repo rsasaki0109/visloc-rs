@@ -6,6 +6,7 @@
 //! in that same camera frame. Image bounds are not imposed by `project`, so a
 //! valid point outside the sensor rectangle can still be used by an optimizer.
 
+use crate::fma::FusedMulAdd;
 use nalgebra::{Point2, Point3, Vector3};
 use thiserror::Error;
 
@@ -197,38 +198,40 @@ impl DoubleSphereCamera {
         // (`mx * mx + my * my`) into one FMA. Keep this reduction explicit;
         // it is the first expression-order boundary that can differ from a
         // generic f32 translation.
-        let r_sq = mx.mul_add(mx, my * my);
+        let r_sq = mx.fused_mul_add(mx, my * my);
         // Keep the scalar temporaries and expression order of
         // DoubleSphereCamera<float>::unproject. The pinned native build
         // contracts the scalar reductions with FMA; algebraically equivalent
         // rewrites can differ by one or more f32 ulps here.
         let xi2_2 = alpha * alpha;
         let xi1_2 = xi * xi;
-        let sqrt2 = (-(2.0_f32 * alpha - 1.0_f32)).mul_add(r_sq, 1.0_f32).sqrt();
+        let sqrt2 = (-(2.0_f32 * alpha - 1.0_f32))
+            .fused_mul_add(r_sq, 1.0_f32)
+            .sqrt();
         if !sqrt2.is_finite() {
             return None;
         }
         // The header writes `alpha * sqrt2 + Scalar(1) - alpha`; retain its
         // left-associative additions rather than evaluating `(1 - alpha)`
         // first, while preserving the native multiply-add contraction.
-        let norm2 = alpha.mul_add(sqrt2, 1.0_f32) - alpha;
+        let norm2 = alpha.fused_mul_add(sqrt2, 1.0_f32) - alpha;
         if !norm2.is_finite() || norm2.abs() <= f32::EPSILON {
             return None;
         }
         // GCC's native upstream build contracts the numerator subtraction
         // into `1 - alpha^2 * r_sq` and the subsequent norm/sqrt reductions
         // into the same scalar FMA order.
-        let mz = (-xi2_2).mul_add(r_sq, 1.0_f32) / norm2;
-        let norm1 = mz.mul_add(mz, r_sq);
+        let mz = (-xi2_2).fused_mul_add(r_sq, 1.0_f32) / norm2;
+        let norm1 = mz.fused_mul_add(mz, r_sq);
         if !norm1.is_finite() || norm1 <= f32::EPSILON {
             return None;
         }
-        let sqrt1 = mz.mul_add(mz, (1.0_f32 - xi1_2) * r_sq).sqrt();
+        let sqrt1 = mz.fused_mul_add(mz, (1.0_f32 - xi1_2) * r_sq).sqrt();
         if !sqrt1.is_finite() {
             return None;
         }
-        let k = mz.mul_add(xi, sqrt1) / norm1;
-        let ray = Vector3::new(k * mx, k * my, k.mul_add(mz, -xi));
+        let k = mz.fused_mul_add(xi, sqrt1) / norm1;
+        let ray = Vector3::new(k * mx, k * my, k.fused_mul_add(mz, -xi));
         if !ray.iter().all(|value| value.is_finite()) || ray.norm() <= f32::EPSILON {
             return None;
         }

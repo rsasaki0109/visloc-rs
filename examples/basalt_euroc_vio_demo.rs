@@ -129,6 +129,11 @@ struct Args {
     /// (`frame_id,timestamp_ns,camera_id,track_id,x,y`), e.g. for rendering
     /// tracking overlays. Off by default.
     dump_tracks: Option<PathBuf>,
+    /// `--object-boxes FILE`: camera-0 boxes of possibly moving objects per
+    /// frame (CSV `timestamp_ns,object_id,class_id,score,x_min,y_min,x_max,y_max`,
+    /// as `yolox_track_demo --boxes-csv` writes it). Turns on the
+    /// moving-object filter (`visloc_basalt::dynamic_objects`). Off by default.
+    object_boxes: Option<PathBuf>,
 }
 
 const NATIVE_COMPANION_BINDING_SCHEMA: &str = "basalt.rust.native_companion_binding.v1";
@@ -243,6 +248,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     adapter
         .estimator
         .set_lean_marg_data(!args.retained_marg_diagnostics);
+    if let Some(path) = &args.object_boxes {
+        let boxes = visloc_basalt::dynamic_objects::read_object_boxes_csv(path)?;
+        println!(
+            "object boxes: {} frames from {}",
+            boxes.len(),
+            path.display()
+        );
+        adapter
+            .estimator
+            .set_object_boxes(boxes, Default::default());
+    }
     let frame_limit = args
         .max_frames
         .unwrap_or(dataset.frame_count())
@@ -468,6 +484,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         summary.push_str(&format!(
             "platform_rides={}\nplatform_ride_frames={}\nplatform_dropped_observations={}\n",
             stats.rides, stats.ride_frames, stats.dropped_observations
+        ));
+    }
+    if let Some(stats) = adapter.estimator.dynamic_object_stats() {
+        summary.push_str(&format!(
+            "object_box_frames={}\nobject_boxes={}\nmoving_object_boxes={}\n\
+             undecided_object_boxes={}\nmoving_object_dropped_observations={}\n",
+            stats.frames_with_boxes,
+            stats.boxes,
+            stats.moving_boxes,
+            stats.undecided_boxes,
+            stats.dropped_observations
         ));
     }
 
@@ -947,6 +974,7 @@ impl Args {
         let mut mono = false;
         let mut mono_vo = false;
         let mut dump_tracks = None;
+        let mut object_boxes = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let option = argument.to_string_lossy();
@@ -979,6 +1007,9 @@ impl Args {
                 "--no-trace" => no_trace = true,
                 "--dump-tracks" => {
                     dump_tracks = Some(next_path(&mut arguments, &option)?);
+                }
+                "--object-boxes" => {
+                    object_boxes = Some(next_path(&mut arguments, &option)?);
                 }
                 "--no-marg-data" => no_marg_data = true,
                 "--retained-marg-diagnostics" => retained_marg_diagnostics = true,
@@ -1051,11 +1082,12 @@ impl Args {
             mono,
             mono_vo,
             dump_tracks,
+            object_boxes,
         })
     }
 
     fn usage() -> String {
-        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE]".into()
+        "usage: basalt_euroc_vio_demo --euroc-dir DIR --calibration FILE [--config FILE] [--out-dir DIR] [--max-frames N] [--no-trace] [--no-marg-data] [--retained-marg-diagnostics] [--native-companion-binding FILE] [--pipeline] [--pipeline-capacity N] [--decode-threads N] [--threads N] [--mono] [--mono-vo] [--dump-tracks FILE] [--object-boxes FILE]".into()
     }
 }
 
@@ -1234,6 +1266,23 @@ mod tests {
         ]);
         assert!(args.mono && args.mono_vo);
         assert!(Args::usage().contains("--mono-vo"));
+    }
+
+    #[test]
+    fn object_boxes_flag_defaults_off_and_is_parsed() {
+        let args = parse(&["--euroc-dir", "dataset", "--calibration", "calib.json"]);
+        assert!(args.object_boxes.is_none());
+
+        let args = parse(&[
+            "--euroc-dir",
+            "dataset",
+            "--calibration",
+            "calib.json",
+            "--object-boxes",
+            "boxes.csv",
+        ]);
+        assert_eq!(args.object_boxes, Some(PathBuf::from("boxes.csv")));
+        assert!(Args::usage().contains("--object-boxes"));
     }
 
     #[test]
