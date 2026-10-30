@@ -60,15 +60,17 @@ All notable changes to `visloc-rs` will be documented here.
     (`dual_fisheye::seam_pairs`, `fit_back_lens`): its rotation and its
     optical centre, across the lenses' parallax exactly and along it up to
     one shared shift. The recorded angles give only the turn about the axis
-    (the fit lands within TBD of it); the tilt, up to TBD on four cameras,
-    they do not give. The two lenses' optical centres sit TBD px apart from
-    where the calibration puts them relative to each other.
-  - The shared shift gives the scene's typical distance along the seam, and
-    the seam is stitched for it (`stitch_equirect`'s `parallax`;
-    `--distance` sets it).
-  - On five OverMaps360 walks the two lenses then put the same thing TBD
-    apart along the seam (median), against 1.0–1.1° with the recorded
-    angles stitched far away.
+    (the fit lands within 0.06° of it), not the tilt. The back lens's
+    optical centre sits 5–21 px from where the calibration puts it relative
+    to the front lens's (`FisheyeLens::shifted`); `gsplat_photos --insv`
+    keeps the model as it is, which gives it the better metric scale.
+  - The shared shift is stitched in (`stitch_equirect`'s `parallax`): the
+    scene's typical distance along the seam (1.8–3.0 m outdoors), or the
+    lens models' scale where it points away from the axes. `--distance`
+    sets a distance instead.
+  - On five OverMaps360 walks the two lenses then put the same thing
+    0.12–0.18° apart along the seam (median), against 0.85–1.15° with the
+    recorded angles stitched far away.
   - `--back-lens factory` or a `gsplat_photos --insv` run's
     `back_lens.txt` skip the fit; `--frame` stitches side-by-side images.
 - **`gsplat_photos --insv`: Insta360 video straight to a metric model.**

@@ -105,17 +105,17 @@ towards the lenses' axes; across that direction the two lenses must agree
 at any distance. On SIFT matches there (40 frames 3.3 s apart per walk),
 with the back lens's rotation fitted, they do not quite:
 
-| Walk (camera) | Median disagreement across the parallax | With the back lens's optical centre moved too | The move |
+| Walk (camera) | Median disagreement across the parallax | With the back lens's optical centre moved too | The move (3840 px lens image) |
 | --- | ---: | ---: | --- |
-| 0313afa5 (A) | 0.217° | TBD | TBD |
-| 0c05c38a (B) | 0.114° | TBD | TBD |
-| 3b81dbc3 (B) | 0.111° | TBD | TBD |
-| 9d2fe9b1 (C) | 0.148° | TBD | TBD |
-| 5bb3848a (D) | 0.145° | TBD | TBD |
+| 0313afa5 (A) | 0.217° | 0.045° | (+20.5, +5.2) px |
+| 0c05c38a (B) | 0.114° | 0.026° | (+5.7, −4.7) px |
+| 3b81dbc3 (B) | 0.111° | 0.030° | (+4.2, −4.5) px |
+| 9d2fe9b1 (C) | 0.148° | 0.029° | (+14.8, −3.2) px |
+| 5bb3848a (D) | 0.145° | 0.022° | (+17.3, +1.9) px |
 
-The two optical centres are 5–21 px apart from where the model puts them
-relative to each other. The calibration predicts that offset to within
-3 px if the video held each lens's calibration image upside down and
+The back lens's optical centre sits 5–21 px from where the model puts it
+relative to the front lens's (the same for both walks of camera B). The
+calibration predicts that offset to within 3.5 px if the video held each lens's calibration image upside down and
 centred on the middle of its 5376 px square rather than on `(cx, cy)`.
 The matches fix only the relative offset, though, and moving each lens's
 centre to where that reading puts it (2–15 px from the middle) makes SfM
@@ -136,11 +136,11 @@ turn, is the sum of the two third angles minus 180°:
 
 | Camera (walk) | Recorded angles | SfM rig (`gsplat_photos --insv`, 1024 px) | Along the seam (`insv_stitch`) |
 | --- | ---: | ---: | ---: |
-| A (0313afa5) | +0.94° | +0.87° | TBD |
-| B (0c05c38a) | −1.63° | −1.64° | TBD |
-| B (3b81dbc3) | −1.63° | −1.63° | TBD |
-| C (9d2fe9b1) | −1.52° | −1.43° | TBD |
-| D (5bb3848a) | +0.70° | +0.64° | TBD |
+| A (0313afa5) | +0.94° | +0.87° | +0.92° |
+| B (0c05c38a) | −1.63° | −1.64° | −1.61° |
+| B (3b81dbc3) | −1.63° | −1.63° | −1.62° |
+| C (9d2fe9b1) | −1.52° | −1.43° | −1.47° |
+| D (5bb3848a) | +0.70° | +0.64° | +0.68° |
 
 The first two angles are not decoded: the reading of them as Euler angles
 that fits the four cameras' SfM rigs best still misses by 0.5° (RMS). The back
@@ -182,7 +182,7 @@ stitches images of the two lenses side by side instead.
 - **Distance.** Where the lenses meet, things at different distances
   cannot all line up: at 2 m they are 0.9° apart. The shared shift gives
   the scene's typical distance along the seam, and the back lens samples
-  where it sees a sphere that far away (`--distance` sets it).
+  where it sees a sphere that far away (`--distance M` sets one instead).
 - **Seam.** Each direction takes the lens whose axis is nearer, the two
   mixed linearly over `--blend` (2°) where they meet. There is no exposure
   matching or optical flow.
@@ -190,4 +190,17 @@ stitches images of the two lenses side by side instead.
 How far apart the two lenses put the same thing along the seam (the
 median over all matches in 40 frames per walk; the fit used 20 of them):
 
-TBD-TABLE
+| Walk | Recorded angles, far away | Fitted: rotation, centre, shift |  Shift along the parallax |
+| --- | ---: | ---: | --- |
+| 0313afa5 | 0.89° | 0.17° | −0.18° |
+| 0c05c38a | 0.85° | 0.17° | +0.74° (2.4 m) |
+| 3b81dbc3 | 0.90° | 0.18° | +1.03° (1.8 m) |
+| 9d2fe9b1 | 0.89° | 0.12° | +0.58° (3.0 m) |
+| 5bb3848a | 1.15° | 0.15° | −0.17° |
+
+0.17° is about 3 px in a 6,496 px panorama. The rotation alone, without
+the centre, leaves 0.33–0.93°. On two walks the shared shift points away
+from the axes, which no distance explains: the lens models disagree a
+little on the scale at the seam there, and the stitch takes that shift all
+the same. On 4 CPU cores the fit takes 1.5–3 minutes for its 16 frames,
+and stitching a frame about 1 s.
