@@ -501,7 +501,8 @@ pub fn fit_back_lens(
     // Per pair: the directions across and along its parallax, and how the
     // back lens's ray turns as its optical centre moves (radians per pixel):
     // the pixel stays, so the ray is the one a pixel `offset` away saw.
-    let frames: Vec<Option<(Vector3<f64>, Vector3<f64>, SMatrix<f64, 3, 2>)>> = pairs
+    type PairFrame = (Vector3<f64>, Vector3<f64>, SMatrix<f64, 3, 2>);
+    let frames: Vec<Option<PairFrame>> = pairs
         .iter()
         .map(|(a, b)| {
             let n = a.cross(&e);
