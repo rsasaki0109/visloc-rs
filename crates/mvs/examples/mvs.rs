@@ -7,7 +7,7 @@
 //!     --sparse <dir with cameras.txt/images.txt/points3D.txt> \
 //!     --images <image dir> --out <dir> [--max-image-size 3200] \
 //!     [--sources 10] [--iterations 3] [--geom-passes 2] [--geom-iterations 3] \
-//!     [--scales 3] [--gpu] \
+//!     [--scales 3] [--gpu | --cuda] \
 //!     [--view-selection confidence|sampled] [--init-top-k 3] \
 //!     [--restorer infinity|start|off] [--detail-threshold 0.1] [--no-planar-prior] \
 //!     [--save-depth] [--save-maps | --load-maps] [--save-fused-depth] [--min-consistent 1] \
@@ -20,18 +20,20 @@
 //! Three scales in ACMMP's order by default: at every scale a photometric
 //! pass, ACMP's planar prior pass (`--no-planar-prior` leaves it out) and
 //! the geometric passes; `--scales 1` runs one. `--gpu` (a `--features gpu`
-//! build) runs PatchMatch on the GPU. `--mesh` also writes `mesh.ply`: the
-//! depths that source views agree with in a TSDF (voxels of one pixel's
-//! footprint by default), extracted with surface nets. `--deformable` adds
-//! APD-MVS's deformable patches for weak-texture pixels at the finer
-//! scales (experimental: below the defaults on ETH3D, see docs/mvs.md);
-//! `--deformable-local-refine` and `--deformable-strong-median` add APD's
-//! local refinement (CPU only) and strong-only median filter to those
-//! passes. `--save-fused-depth` writes each view's depths that fusion's
-//! source views agree with (0 elsewhere; what `--mesh` fuses) to
-//! `<out>/fused_depth/<image name>.bin`: width and height (`u32`), then the
-//! camera-z depths (`f32`), little-endian. They can supervise a 3DGS
-//! (`gsplat_train_cuda --depth-prior`).
+//! build) runs PatchMatch on the GPU, `--cuda` (a `--features cuda` build,
+//! with `VISLOC_MVS_CUDA_LIB` naming the library that
+//! `scripts/build_mvs_cuda.sh` builds) on CUDA. `--mesh` also writes
+//! `mesh.ply`: the depths that source views agree with in a TSDF (voxels of
+//! one pixel's footprint by default), extracted with surface nets.
+//! `--deformable` adds APD-MVS's deformable patches for weak-texture pixels
+//! at the finer scales (experimental: below the defaults on ETH3D, see
+//! docs/mvs.md); `--deformable-local-refine` and
+//! `--deformable-strong-median` add APD's local refinement (CPU only) and
+//! strong-only median filter to those passes. `--save-fused-depth` writes
+//! each view's depths that fusion's source views agree with (0 elsewhere;
+//! what `--mesh` fuses) to `<out>/fused_depth/<image name>.bin`: width and
+//! height (`u32`), then the camera-z depths (`f32`), little-endian. They can
+//! supervise a 3DGS (`gsplat_train_cuda --depth-prior`).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -51,7 +53,7 @@ Dense multi-view stereo on a COLMAP sparse model with undistorted (pinhole)
 images; writes <out>/fused.ply (and mesh.ply with --mesh).
 
 options:
-  --max-image-size 3200  --sources 10  --iterations 3  --scales 3  --gpu
+  --max-image-size 3200  --sources 10  --iterations 3  --scales 3  --gpu | --cuda
   --geom-passes 2  --geom-iterations 3  --no-planar-prior
   --view-selection confidence|sampled  --init-top-k 3
   --restorer infinity|start|off  --detail-threshold 0.1
@@ -108,6 +110,7 @@ fn main() {
     let mut restorer = "infinity".to_owned();
     let mut detail_threshold = 0.1f32;
     let mut use_gpu = false;
+    let mut use_cuda = false;
     let mut save_depth = false;
     let mut save_maps = false;
     let mut load_maps = false;
@@ -146,6 +149,7 @@ fn main() {
             "--restorer" => restorer = value(),
             "--detail-threshold" => detail_threshold = value().parse().unwrap(),
             "--gpu" => use_gpu = true,
+            "--cuda" => use_cuda = true,
             "--planar-prior" => planar_prior = Some(true),
             "--no-planar-prior" => planar_prior = Some(false),
             "--save-depth" => save_depth = true,
@@ -215,8 +219,9 @@ fn main() {
         deformable || !(local_refine || strong_median),
         "--deformable-local-refine and --deformable-strong-median need --deformable"
     );
+    assert!(!(use_gpu && use_cuda), "--gpu or --cuda, not both");
     assert!(
-        !(use_gpu && local_refine),
+        !((use_gpu || use_cuda) && local_refine),
         "--deformable-local-refine runs on the CPU only"
     );
     let restorer = match restorer.as_str() {
@@ -246,6 +251,21 @@ fn main() {
     });
     #[cfg(not(feature = "gpu"))]
     assert!(!use_gpu, "--gpu needs a build with --features gpu");
+    #[cfg(feature = "cuda")]
+    let cuda = use_cuda.then(|| {
+        let cuda = visloc_mvs::CudaPatchMatch::from_env()
+            .unwrap_or_else(|| {
+                usage_error(&format!(
+                    "--cuda needs {} to name the library (scripts/build_mvs_cuda.sh)",
+                    visloc_mvs::cuda::LIBRARY_ENV
+                ))
+            })
+            .expect("loading the CUDA MVS library");
+        eprintln!("CUDA PatchMatch");
+        cuda
+    });
+    #[cfg(not(feature = "cuda"))]
+    assert!(!use_cuda, "--cuda needs a build with --features cuda");
     let estimate_one = |ws: &Workspace,
                         view: usize,
                         options: &PatchMatchOptions,
@@ -253,6 +273,10 @@ fn main() {
         #[cfg(feature = "gpu")]
         if let Some(gpu) = &gpu {
             return gpu.estimate(ws, view, options, prior);
+        }
+        #[cfg(feature = "cuda")]
+        if let Some(cuda) = &cuda {
+            return cuda.estimate(ws, view, options, prior);
         }
         estimate(ws, view, options, prior)
     };
@@ -278,6 +302,10 @@ fn main() {
             if let Some(gpu) = &gpu {
                 return gpu.estimate_with_prior(ws, view, options, prior_options, start, prior);
             }
+            #[cfg(feature = "cuda")]
+            if let Some(cuda) = &cuda {
+                return cuda.estimate_with_prior(ws, view, options, prior_options, start, prior);
+            }
             estimate_with_prior(ws, view, options, prior_options, start, prior)
         };
         let mut map = estimate_prior();
@@ -294,6 +322,10 @@ fn main() {
         #[cfg(feature = "gpu")]
         if let Some(gpu) = &gpu {
             return gpu.estimate_from(ws, view, options, start, restorer);
+        }
+        #[cfg(feature = "cuda")]
+        if let Some(cuda) = &cuda {
+            return cuda.estimate_from(ws, view, options, start, restorer);
         }
         estimate_from(ws, view, options, start, restorer)
     };

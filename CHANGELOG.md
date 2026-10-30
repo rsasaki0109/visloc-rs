@@ -113,6 +113,22 @@ All notable changes to `visloc-rs` will be documented here.
   - Verification alone takes 5.3 s once the CPU matcher no longer holds
     every core.
   - `CudaGsplat` is `Send`. CUDA ABI 8.
+- **PatchMatch MVS on CUDA (`visloc-mvs --features cuda`, `mvs --cuda`,
+  opt-in).**
+  - `native/mvs_cuda/mvs_cuda.cu`, built by `scripts/build_mvs_cuda.sh`,
+    runs the wgpu shaders as CUDA kernels. `visloc_mvs::CudaPatchMatch`
+    loads it at runtime from `VISLOC_MVS_CUDA_LIB`, so Cargo never compiles
+    CUDA.
+  - On ETH3D (8 GB laptop GPU) it scores what the CPU path does, 16 to 21
+    times faster: terrains at 1600 px 84.73% → 85.05% F1 in 209 s instead
+    of 4483 s, playground and office at 800 px within 0.02 points in 49 s
+    and 28 s instead of 804 s and 468 s.
+  - At 1600 px office scores 72.8% and playground 67.7%, in 102 s and
+    177 s.
+  - The wgpu path's pass preparation moved to `pass_setup.rs`, shared by
+    both backends, as are their tests (`pass_setup::checks`).
+  - The crate's `unsafe_code` lint is `deny` instead of `forbid`; the
+    `cuda` module alone allows it.
 - **Meshes from MVS depth with the splat filling its holes
   (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir> [--depth-maps-only]`,
   `visloc_gsplat_cuda::mesh::DepthMaps`).**
