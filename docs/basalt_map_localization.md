@@ -881,6 +881,26 @@ five, depends on which ones arrive (as with
 costs up to 3 ms per image. It stays at 0.01 by default; lower it, with the
 blur, for dim, low-contrast images.
 
+### A faster ORB frontend
+
+The times on this page were measured before the mapping frontend was made
+faster without changing its output. The corner detector's filters run
+along whole rows and reflect only at their ends; the minimum distance
+between corners is checked only against chosen corners in the cells
+around a candidate; the blur sums its taps across a row at a time. Every
+sum keeps its order, so corners, descriptors and maps are the same to the
+bit. Per image, single thread:
+
+| | Before | After |
+|---|---|---|
+| EuRoC (752x480): detection | 25.5 ms | 4.4 ms |
+| T265 (848x800), blur and quality 0.003: blur + detection + description | 50 ms | 14 ms |
+| Localize demo, VIO + map, MH_02 → MH_01 (median) | 28.9 ms | 14.5 ms |
+| ... office1-7 → office1-2, blurred map at quality 0.003 | 69.9 ms | 34.6 ms |
+
+Both runs give byte-identical trajectories. What is left on office1-7 is
+mostly PnP (8 ms) and the frontend, sharing the CPU with the VIO.
+
 ## Reproduce
 
 ```bash

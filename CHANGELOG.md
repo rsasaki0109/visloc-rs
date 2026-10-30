@@ -595,6 +595,20 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **The mapping ORB frontend is about four times faster, with the same
+  output.** The corner detector (`detect_keypoints_mapping_with`) runs each
+  filter along whole rows, reflecting only at their ends, and checks the
+  minimum distance only against the chosen corners in the 3x3 cells around
+  a candidate; the blur (`GaussianSmoothing`) sums its taps across a row at
+  a time. Every sum keeps its order, so corners, descriptors and maps are
+  the same to the bit (a test compares the detector with the direct
+  computation). On a T265 image (848x800) with the blur and quality 0.003,
+  detection, blur and description take 14 ms instead of 50 ms; on an EuRoC
+  image detection takes 4 ms instead of 25 ms. The localize demo's median
+  time per image falls from 28.9 to 14.5 ms on MH_02 against MH_01 and
+  from 69.9 to 34.6 ms on office1-7 against office1-2's blurred map, with
+  byte-identical trajectories. Times quoted elsewhere were measured before.
+
 - **The IMU scale fits the gyro's bias.** A constant gyro bias bends every
   frame-to-frame rotation, and with it the camera-from-IMU fit and the
   frame-timing search.
