@@ -539,20 +539,21 @@ impl Mesh {
                 }
             }
         }
-        let mut count: HashMap<u32, usize> = HashMap::new();
+        // Triangles per root (a vertex index).
+        let mut count = vec![0usize; n];
         let roots: Vec<u32> = self
             .triangles
             .iter()
             .map(|t| find(&mut parent, t[0]))
             .collect();
-        for r in &roots {
-            *count.entry(*r).or_default() += 1;
+        for &r in &roots {
+            count[r as usize] += 1;
         }
         let tris = std::mem::take(&mut self.triangles);
         self.triangles = tris
             .into_iter()
             .zip(roots)
-            .filter(|(_, r)| count[r] >= min_tris)
+            .filter(|&(_, r)| count[r as usize] >= min_tris)
             .map(|(t, _)| t)
             .collect();
     }

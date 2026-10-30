@@ -18,6 +18,7 @@ all-features = true
 [dependencies]
 libloading = "0.9"
 nalgebra = { workspace = true }
+rayon = { workspace = true }
 visloc-gsplat-core = { path = "../gsplat-core", version = "0.3.1" }
 visloc-gsplat-render = { path = "../gsplat-render", version = "0.3.1" }
 visloc-gsplat-train = { path = "../gsplat-train", version = "0.3.1", default-features = false, features = ["mesh"] }

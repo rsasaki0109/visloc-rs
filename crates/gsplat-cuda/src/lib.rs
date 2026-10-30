@@ -126,6 +126,51 @@ pub struct StepParams {
     pub normal_weight: f32,
 }
 
+/// Settings of [`CudaGsplat::tsdf_surface`] (`GscTsdfParams` in the CUDA
+/// source); lengths in world units.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TsdfParams {
+    pub voxel: f32,
+    /// Truncation distance.
+    pub trunc: f32,
+    /// Depths beyond this are background.
+    pub max_depth: f32,
+    /// Voxels fused from fewer views are unknown when extracting.
+    pub min_weight: f32,
+    /// Carve free space along pixels without a surface (0 = no).
+    pub carve: u32,
+    /// Update voxels in front of the truncation band as free space (0 = no).
+    pub free_space: u32,
+    /// Planar median depth (see [`CudaGsplat::render_depth`]; 0 = no).
+    pub planar: u32,
+    pub sh_active_degree: i32,
+    /// Blocks of 8^3 voxels fused at a time (0 = 65536): the device holds
+    /// one slab's voxels, 20 bytes each.
+    pub slab_blocks: u32,
+    /// Keep every view's depth and colour on the device (16 bytes per
+    /// pixel) when they fit in this many MiB, instead of rendering every
+    /// view again for each slab (0 = always render).
+    pub cache_mb: u32,
+}
+
+/// The surface of a TSDF fused on the device, before its quads are
+/// assembled (see [`CudaGsplat::tsdf_surface`]).
+#[derive(Debug, Clone, Default)]
+pub struct TsdfSurface {
+    /// Per vertex, the origin voxel of its cell.
+    pub cells: Vec<[i32; 3]>,
+    pub positions: Vec<[f32; 3]>,
+    pub colors: Vec<[u8; 3]>,
+    /// Per grid edge with a sign change: its origin voxel and
+    /// `axis | 4` if the origin is outside (positive), `axis` otherwise.
+    pub edges: Vec<[i32; 4]>,
+    /// Blocks allocated over every view's truncation band.
+    pub blocks: usize,
+    /// Slabs they were fused in.
+    pub slabs: usize,
+}
+
 type AbiVersionFn = unsafe extern "C" fn() -> u32;
 type CreateFn = unsafe extern "C" fn() -> *mut c_void;
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
@@ -188,6 +233,18 @@ type SetDepthPriorsFn = unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *cons
 type RefineStatsFn = unsafe extern "C" fn(*mut c_void, *mut c_float, *mut c_float) -> c_int;
 type ApplyActionsFn = unsafe extern "C" fn(*mut c_void, *const u32, u32, *mut c_int) -> c_int;
 type StageTimesFn = unsafe extern "C" fn(*mut c_void, *mut c_float, c_int) -> c_int;
+type TsdfMeshFn = unsafe extern "C" fn(
+    *mut c_void,
+    *const TsdfParams,
+    c_int,
+    *const GscCamera,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+) -> c_int;
+type TsdfTakeFn =
+    unsafe extern "C" fn(*mut c_void, *mut i32, *mut c_float, *mut u8, *mut i32) -> c_int;
 
 #[derive(Debug)]
 pub enum GsplatCudaError {
@@ -313,6 +370,8 @@ struct Api {
     refine_stats: RefineStatsFn,
     apply_actions: ApplyActionsFn,
     stage_times: StageTimesFn,
+    tsdf_mesh: TsdfMeshFn,
+    tsdf_take: TsdfTakeFn,
 }
 
 /// The native context: a scene, its Adam state and the training images on
@@ -357,7 +416,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 6;
+    pub const ABI_VERSION: u32 = 7;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -406,6 +465,8 @@ impl CudaGsplat {
                 refine_stats: symbol(&library, "visloc_gsplat_cuda_get_refine_stats", path)?,
                 apply_actions: symbol(&library, "visloc_gsplat_cuda_apply_actions", path)?,
                 stage_times: symbol(&library, "visloc_gsplat_cuda_stage_times", path)?,
+                tsdf_mesh: symbol(&library, "visloc_gsplat_cuda_tsdf_mesh", path)?,
+                tsdf_take: symbol(&library, "visloc_gsplat_cuda_tsdf_take", path)?,
             };
             (version, create, stage_names, api)
         };
@@ -816,6 +877,61 @@ impl CudaGsplat {
         };
         self.check(code)?;
         Ok(sums)
+    }
+
+    /// Render the current scene's median depth from every view, fuse it into
+    /// a TSDF on the device and extract the surface with surface nets
+    /// (`visloc_gsplat_core::mesh::Tsdf`'s maths; see
+    /// `native/gsplat_cuda/tsdf.cuh`). Every block is allocated before any
+    /// view is fused, and the blocks are fused in slabs along x of at most
+    /// `slab_blocks`, so memory stays bounded at any voxel size;
+    /// [`crate::mesh::surface_mesh`] assembles the quads.
+    pub fn tsdf_surface(
+        &mut self,
+        views: &[&CameraView],
+        params: &TsdfParams,
+    ) -> Result<TsdfSurface, GsplatCudaError> {
+        let cams: Vec<GscCamera> = views.iter().map(|v| GscCamera::from_view(v)).collect();
+        let n = c_int::try_from(cams.len())
+            .map_err(|_| GsplatCudaError::Input("too many views".into()))?;
+        let (mut nv, mut ne, mut nb, mut ns) = (0u32, 0u32, 0u32, 0u32);
+        // SAFETY: `params` is a live `repr(C)` struct, `cams` holds `n`
+        // cameras and the counters outlive the call.
+        let code = unsafe {
+            (self.api.tsdf_mesh)(
+                self.ctx(),
+                params,
+                n,
+                cams.as_ptr(),
+                &mut nv,
+                &mut ne,
+                &mut nb,
+                &mut ns,
+            )
+        };
+        self.check(code)?;
+        let (nv, ne) = (nv as usize, ne as usize);
+        let mut s = TsdfSurface {
+            cells: vec![[0; 3]; nv],
+            positions: vec![[0.0; 3]; nv],
+            colors: vec![[0; 3]; nv],
+            edges: vec![[0; 4]; ne],
+            blocks: nb as usize,
+            slabs: ns as usize,
+        };
+        // SAFETY: the outputs hold the vertex and edge counts the native
+        // side just reported, in its layouts (3 / 3 / 3 / 4 values each).
+        let code = unsafe {
+            (self.api.tsdf_take)(
+                self.ctx(),
+                s.cells.as_mut_ptr().cast(),
+                s.positions.as_mut_ptr().cast(),
+                s.colors.as_mut_ptr().cast(),
+                s.edges.as_mut_ptr().cast(),
+            )
+        };
+        self.check(code)?;
+        Ok(s)
     }
 
     /// brush's refine statistics since the last refine.

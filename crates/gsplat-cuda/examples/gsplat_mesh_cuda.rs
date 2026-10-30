@@ -7,7 +7,8 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_mesh_cuda -- \
 //!   --ply scene.ply --data <colmap_root> --out mesh.ply \
 //!   [--voxel V] [--trunc-voxels 4] [--max-depth D] [--min-component 500] \
-//!   [--min-weight 3] [--no-carve] [--support-voxels 10] [--planar-depth]
+//!   [--min-weight 3] [--no-carve] [--support-voxels 10] [--planar-depth] \
+//!   [--gpu-tsdf [--slab-blocks 65536]]
 //! ```
 //!
 //! Renders the median depth of the splat from every dataset view, fuses the
@@ -15,12 +16,14 @@
 //! the same defaults and filters as `gsplat_mesh` (see
 //! `visloc_gsplat_train::mesh`). `--planar-depth` takes each pixel's median
 //! depth where its ray meets the plane of the splat that takes the
-//! transmittance to 0.5, instead of that splat's centre depth.
+//! transmittance to 0.5, instead of that splat's centre depth. `--gpu-tsdf`
+//! fuses and extracts on the device instead (`extract_mesh_gpu`), at most
+//! `--slab-blocks` blocks of 8^3 voxels at a time.
 
 use std::path::PathBuf;
 
 use visloc_gsplat_core::ply::load_ply;
-use visloc_gsplat_cuda::mesh::extract_mesh;
+use visloc_gsplat_cuda::mesh::{extract_mesh, extract_mesh_gpu};
 use visloc_gsplat_cuda::CudaGsplat;
 use visloc_gsplat_render::packing::PackedScene;
 use visloc_gsplat_train::dataset::load_colmap_dataset;
@@ -33,6 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = PathBuf::from("mesh.ply");
     let mut opts = MeshOptions::default();
     let mut planar = false;
+    let mut gpu_tsdf = false;
+    let mut slab_blocks = 0u32;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -47,6 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--no-carve" => opts.carve = false,
             "--support-voxels" => opts.support_voxels = next()?.parse()?,
             "--planar-depth" => planar = true,
+            "--gpu-tsdf" => gpu_tsdf = true,
+            "--slab-blocks" => slab_blocks = next()?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -79,7 +86,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "set VISLOC_GSPLAT_CUDA_LIB to the library built by scripts/build_gsplat_cuda.sh",
     )??;
     gs.set_scene(&PackedScene::from_scene(&scene))?;
-    let (mesh, summary) = extract_mesh(&mut gs, scene.sh_degree, planar, &views, &support, &opts)?;
+    let (mesh, summary) = if gpu_tsdf {
+        extract_mesh_gpu(
+            &mut gs,
+            scene.sh_degree,
+            planar,
+            &views,
+            &support,
+            &opts,
+            slab_blocks,
+        )?
+    } else {
+        extract_mesh(&mut gs, scene.sh_degree, planar, &views, &support, &opts)?
+    };
     println!("{summary}");
     mesh.write_ply(&out)?;
     println!("wrote {}", out.display());

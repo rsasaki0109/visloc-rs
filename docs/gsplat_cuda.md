@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 6).
+  version (currently 7).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -34,6 +34,7 @@ The packaging follows the DPVO CUDA kernels:
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
+| TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -337,7 +338,8 @@ F1 at 2 cm, with accuracy / completeness in parentheses:
   - Planar median depth.
   - Exception: playground uses 1.5 cm voxels and depths up to 14 m. At
     1 cm the CPU TSDF ran out of WSL2's 11 GB, and even this setting peaks
-    at 9.7 GB.
+    at 9.7 GB. The GPU TSDF ([below](#tsdf-on-the-gpu)) meshes it at 1 cm
+    and 20 m in 4.2 GB: 44.5%.
 - **visloc-mvs cloud.** From `docs/mvs.md` (3200 px, all 13 scenes on an
   L4). For meshes from MVS depth maps, the 13-scene mean is 79.3%.
 
@@ -438,13 +440,63 @@ completeness:
   not fall during training. The wgpu trainer saw the same on bonsai (-3.3 dB
   at 7k with 0.05) and uses 0.005.
 
+## TSDF on the GPU
+
+`gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
+the mesh on the device (`native/gsplat_cuda/tsdf.cuh`). It uses the same
+maths as the CPU `Tsdf` and the same options and filters: 8^3-voxel
+blocks over the truncation band, running means, free-space carving and
+surface nets.
+
+- **Allocation first.** Every view is rendered once and the blocks its
+  truncation band crosses go into a hash set on the device. So every block
+  sees every view. The CPU allocates as it fuses, and a block first touched
+  by view k misses views 0 to k-1.
+- **Slabs.** The sorted blocks are fused in slabs along x of at most
+  `--slab-blocks` blocks (default 65536, 0.67 GB of voxels). Each slab also
+  holds the next layer up for the cells on its top face. Each slab yields
+  its vertices (one per cell) and its edges with a sign change. The host
+  assembles the quads across slabs by sorted lookup, in parallel.
+- **View cache.** The views' depth and colour stay on the device when they
+  fit in 2 GiB (16 bytes per pixel); otherwise every slab renders the views
+  again.
+- **Memory.** The CPU `Tsdf` keeps 20 bytes per voxel for the whole
+  volume. The device keeps them for one slab, and the host keeps only the
+  output.
+
+`tests/tsdf.rs`:
+
+- **One view.** Both allocate before fusing, so the meshes match:
+  - every vertex within 4e-4 voxels;
+  - colours within 1 of 255;
+  - the same triangles.
+- **Four views.** The surface is bit-identical whether it is fused in 1 slab
+  or 30, with or without the view cache. 99.8% of its vertices lie within
+  0.01 voxels of the CPU's.
+
+On the ETH3D scenes above (baseline splats, the ETH3D-oriented options,
+1 cm voxels and depths up to 20 m everywhere), while another training run
+shared the GPU:
+
+| Scene | Blocks | CPU TSDF: F1 at 2 cm, wall, peak RSS | GPU TSDF: F1 at 2 cm, wall, peak RSS |
+|---|---|---|---|
+| terrains | 834k | 34.1%, 24.0 s, 10.3 GB | 34.1%, 5.4 s, 1.6 GB |
+| playground | 2.35M | out of memory (11 GB) | 44.5%, 12.0 s, 4.2 GB |
+| office | 786k | 21.4%, 20.3 s, 9.8 GB | 21.2%, 4.5 s, 1.5 GB |
+
+- **Quality.** F1 is the CPU's to 0.2 points. The GPU carves a little more:
+  every block sees every view, so it has slightly fewer triangles.
+- **Time.** Wall times include loading the splat and writing the mesh. On
+  playground the fusion takes 6.5 s, the quads 1.9 s and the filters 1.0 s
+  (`remove_small_components` now counts in a vector instead of a hash map).
+- **Without the cache.** Each of playground's 38 slabs rendered the 38 views
+  again, and fusion took 31.6 s.
+
 ## Next
 
 1. **Geometry.** Neither the depth prior nor the depth-normal loss raised
    completeness, where most of the gap to MVS is. Untried: losses on the
    median depth the mesh is built from, and multi-view consistency.
-2. **TSDF on the GPU.** At 1 cm the CPU TSDF dominates meshing and runs out
-   of memory on large scenes.
-3. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;
+2. **Speed.** The remaining large stages are the dense optimizer (8.0 ms;
    sparse SH Adam halves it), raster_bwd (6.9 ms: the write-up's steps 5
    and 6), raster (2.6 ms) and the sort (1.5 ms: the two-stage sort).

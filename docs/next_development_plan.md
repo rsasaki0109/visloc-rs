@@ -36,8 +36,9 @@ The planned order:
    ([`gsplat_cuda.md`](gsplat_cuda.md#depth-prior-from-visloc-mvs)). The
    depth-normal loss (CUDA, weight 0.005) does not help: 32.0% alone, 34.0%
    with the prior ([`gsplat_cuda.md`](gsplat_cuda.md#depth-normal-loss)).
-   Next is the TSDF on the GPU: at 1 cm, the CPU TSDF peaks at 9.7 GB on
-   playground.
+   TSDF on the GPU done for the CUDA meshes: the same F1 in 4–5x less time
+   and 1/6 of the memory, and playground at 1 cm in 4.2 GB, where the CPU
+   TSDF ran out of 11 GB ([`gsplat_cuda.md`](gsplat_cuda.md#tsdf-on-the-gpu)).
 4. The rasterizer optimizations from Kopanas's
    [3DGS CUDA write-up](https://grgkopanas.github.io/3dgs_cuda_blog/), one at
    a time.

@@ -1594,6 +1594,7 @@ version = "0.3.1"
 dependencies = [
  "libloading 0.9.0",
  "nalgebra",
+ "rayon",
  "visloc-gsplat-core",
  "visloc-gsplat-render",
  "visloc-gsplat-train",
