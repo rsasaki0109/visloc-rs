@@ -157,27 +157,9 @@ pub enum FeaturePipelineError {
     ZeroStereoBaseline,
 }
 
-/// How [`detect_keypoints_mapping_with`] picks its corners; the default is
-/// upstream's (`detectKeypointsMapping`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MappingDetector {
-    /// Corners weaker than this fraction of the image's strongest are
-    /// dropped (OpenCV's `qualityLevel`; upstream 0.01).
-    pub quality_level: f32,
-    /// With `n > 0`, the image is split into `n` x `n` cells and each takes at
-    /// most its share of the budget, so that a few strong corners (lamps,
-    /// windows) do not take it all from the weaker texture elsewhere.
-    pub grid_cells: usize,
-}
-
-impl Default for MappingDetector {
-    fn default() -> Self {
-        Self {
-            quality_level: 0.01,
-            grid_cells: 0,
-        }
-    }
-}
+/// Upstream's quality level: corners weaker than this fraction of the
+/// image's strongest are dropped (OpenCV's `qualityLevel`).
+pub const MAPPING_QUALITY_LEVEL: f32 = 0.01;
 
 /// Detects Shi--Tomasi corners in the same role as OpenCV's
 /// `goodFeaturesToTrack(image, ..., 800, 0.01, 8)` used by
@@ -188,15 +170,16 @@ impl Default for MappingDetector {
 /// suppression, and response-descending selection.  Coordinates are integer
 /// pixel centers represented as `f64`, matching the unrefined OpenCV output.
 pub fn detect_keypoints_mapping(image: &RawU16Image, num_features: usize) -> Vec<Point2<f64>> {
-    detect_keypoints_mapping_with(image, num_features, &MappingDetector::default())
+    detect_keypoints_mapping_with(image, num_features, MAPPING_QUALITY_LEVEL)
 }
 
-/// [`detect_keypoints_mapping`] with another quality level and, optionally,
-/// a per-cell share of the budget.
+/// [`detect_keypoints_mapping`] with another quality level: lower keeps
+/// weak texture that a few strong corners (lamps, windows) would otherwise
+/// put below the bar.
 pub fn detect_keypoints_mapping_with(
     image: &RawU16Image,
     num_features: usize,
-    detector: &MappingDetector,
+    quality_level: f32,
 ) -> Vec<Point2<f64>> {
     if num_features == 0 || image.width() < 7 || image.height() < 7 {
         return Vec::new();
@@ -295,7 +278,7 @@ pub fn detect_keypoints_mapping_with(
     if !max_response.is_finite() || max_response <= 0.0 {
         return Vec::new();
     }
-    let quality = max_response * detector.quality_level;
+    let quality = max_response * quality_level;
     let mut candidates = Vec::<(f32, usize, usize)>::new();
     for y in 1..height.saturating_sub(1) {
         for x in 1..width.saturating_sub(1) {
@@ -326,30 +309,14 @@ pub fn detect_keypoints_mapping_with(
     // OpenCV's `goodFeaturesToTrack` checks candidates in response order and
     // accepts a point iff every chosen point is at least minDistance away.
     let min_distance_sq = 8.0_f32 * 8.0;
-    let cells = detector.grid_cells;
-    let cell_quota = if cells > 0 {
-        num_features.div_ceil(cells * cells)
-    } else {
-        usize::MAX
-    };
-    let mut cell_counts = vec![0_usize; (cells * cells).max(1)];
     let mut points = Vec::with_capacity(num_features.min(candidates.len()));
     for (_, x, y) in candidates {
-        let cell = if cells > 0 {
-            (y * cells / height) * cells + x * cells / width
-        } else {
-            0
-        };
-        if cell_counts[cell] >= cell_quota {
-            continue;
-        }
         if points.iter().all(|point: &Point2<f64>| {
             let dx = point.x as f32 - x as f32;
             let dy = point.y as f32 - y as f32;
             dx * dx + dy * dy >= min_distance_sq
         }) {
             points.push(Point2::new(x as f64, y as f64));
-            cell_counts[cell] += 1;
             if points.len() == num_features {
                 break;
             }
@@ -2322,7 +2289,18 @@ pub fn extract_mapper_features(
     camera: &DoubleSphereCamera,
     config: OfflineMapperConfig,
 ) -> Result<MapperImageFeatures, FeaturePipelineError> {
-    let corners = detect_keypoints_mapping(image, config.max_points);
+    extract_mapper_features_with(image, camera, config, MAPPING_QUALITY_LEVEL)
+}
+
+/// [`extract_mapper_features`] with the detector's quality level
+/// ([`detect_keypoints_mapping_with`]).
+pub fn extract_mapper_features_with(
+    image: &RawU16Image,
+    camera: &DoubleSphereCamera,
+    config: OfflineMapperConfig,
+    quality_level: f32,
+) -> Result<MapperImageFeatures, FeaturePipelineError> {
+    let corners = detect_keypoints_mapping_with(image, config.max_points, quality_level);
     let corner_angles = compute_angles(image, &corners, true);
     let descriptors = compute_descriptors(image, &corners, &corner_angles)?;
     let rays = unproject_rays(camera, &corners)?;
@@ -2539,31 +2517,23 @@ mod tests {
     }
 
     #[test]
-    fn the_default_detector_is_upstreams_and_the_options_reach_weak_texture() {
-        use super::{detect_keypoints_mapping, detect_keypoints_mapping_with, MappingDetector};
+    fn a_lower_quality_level_reaches_weak_texture() {
+        use super::{
+            detect_keypoints_mapping, detect_keypoints_mapping_with, MAPPING_QUALITY_LEVEL,
+        };
         let image = lamp_and_texture();
         let upstream = detect_keypoints_mapping(&image, 50);
         assert_eq!(
-            detect_keypoints_mapping_with(&image, 50, &MappingDetector::default()),
+            detect_keypoints_mapping_with(&image, 50, MAPPING_QUALITY_LEVEL),
             upstream
         );
         // The lamp's corners set the bar: the faint dots stay below 1% of it.
         let right =
             |points: &[nalgebra::Point2<f64>]| points.iter().filter(|p| p.x >= 80.0).count();
         assert_eq!(right(&upstream), 0, "{upstream:?}");
-        // A lower bar and a share per cell bring them in.
-        let options = MappingDetector {
-            quality_level: 0.001,
-            grid_cells: 4,
-        };
-        let spread = detect_keypoints_mapping_with(&image, 50, &options);
-        assert!(right(&spread) >= 10, "{spread:?}");
-        // No cell takes more than its share of the budget (50 / 16 -> 4).
-        let mut counts = [0; 16];
-        for point in &spread {
-            counts[(point.y as usize * 4 / 120) * 4 + point.x as usize * 4 / 160] += 1;
-        }
-        assert!(counts.iter().all(|&count| count <= 4), "{counts:?}");
+        // At 0.1% they come in.
+        let low = detect_keypoints_mapping_with(&image, 50, 0.001);
+        assert!(right(&low) >= 10, "{low:?}");
     }
 
     #[test]
