@@ -1128,6 +1128,44 @@ would fix it. Nor do these:
 Over a one-way route, the heading beyond a minute is the integrated
 gyroscope's, and the cameras and the IMU leave its bias undetermined.
 
+### Far points out of view
+
+Long tracks would hold the heading, but a head-worn camera keeps far points
+in view only briefly. Along the BA's trajectory of sequence_3_18 (300–420 s
+and 900–1,020 s), a direction on the horizon is in cam0's or cam1's view
+(rectified, 758 × 572) 22–24 % of the time, for a median of 1.0 s at a time,
+4.4 s at the 90th percentile and never 30 s. Pyramidal KLT at 20 Hz
+(forward-backward within 0.5 px) comes close to that limit: on 300–330 s its
+tracks last a median of 0.65 s, 2.7 s at the 90th percentile and 11 s at
+most, and 55 % of those lasting 2 s or more triangulate within 2 px RMS along
+the BA's trajectory (median depth 12 m). A better tracker cannot make them
+much longer.
+
+Nor do the points come back recognizably. For 351 such landmarks at least
+20 m away (300–480 s), each return into view was searched for by warping the
+patch around the landmark's middle observation into the new image (the plane
+through the point facing that camera) and by normalized cross-correlation
+within ±30 px of its projection. A find counts as right within 2 px of the
+epipolar line, which a random one is in 5–8 % of the cases:
+
+| Out of view for | Returns | Right among the finds (NCC ≥ 0.7) | Right among the returns |
+|---|---:|---:|---:|
+| 0 (the track's own ends) | 368 | 82 % | 76 % |
+| 1–5 s | 438 | 56 % | 52 % |
+| 5–20 s | 770 | 33 % | 26 % |
+| 20–60 s | 1,558 | 20 % | 15 % |
+| 60 s or more | 2,447 | 9 % | 3 % |
+
+Walking for 20–60 s moves the camera 25–80 m, as far as the "far" points
+themselves, so their look changes as much as their place. The links within
+20 s the chain already has from its matches up to 64 keyframes apart.
+
+The pseudo-GT could not serve as the reference here. Its orientations are
+those of another body frame, 105° from the IMU's, and at 3.3 Hz it cannot be
+interpolated to every image while the head turns. The BA's trajectory was
+used instead; its own error may count some right finds after long gaps as
+wrong.
+
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
@@ -1226,6 +1264,59 @@ sequence_5_9's ride 265 m, against the 447 m of the run that kept it. Nor does
 the velocity check see a wrong speed held constant, which is how
 sequence_5_11's trajectory stays 15 % short and still passes. The chain does
 not bridge rides.
+
+### The platform filter where it stays off
+
+The platform filter ([`platform.rs`](../pipelines/basalt/src/platform.rs))
+turns on where enough tracks move beyond the gyroscope's rotation with one
+common translation: at least 8 of them and 15 % of those it evaluates, in 14 of
+20 frames, while the accelerometer is quiet. Its test, run on KLT tracks of the
+rides (forward-backward within 0.5 px; they last longer than the VIO's, so the
+counts are an upper bound), per camera (cam0 / cam1):
+
+| Ride | Translation inliers per frame (median) | Their share | 20-frame windows that turn the filter on |
+|---|---:|---:|---:|
+| training sequence_5_12, 83–166 s | 76 / 40 | 34 % / 19 % | 83 % / 64 % |
+| test sequence_5_5, 10.5–12.7 min (missed) | 7 / 8 | 7 % / 7 % | 21 % / 12 % |
+| test sequence_5_6, 14.0–15.5 min (missed) | 4 / 6 | 2 % / 3 % | 7 % / 11 % |
+| test sequence_5_9, 5.2–7.0 min (kept since submission 4) | 19 / 25 | 19 % / 22 % | 48 % / 56 % |
+
+On a walk (sequence_5_12, 20–70 s) 2 % of cam0's windows would, as the
+accelerometer is rarely quiet there.
+
+Looser thresholds (`VISLOC_PLATFORM_PARAMS=min_inliers=5,min_inlier_share=0.05,evidence_on=10`)
+let the VIO move through sequence_5_5's tram ride: 201 m of path and 165 m
+net from 10.5 to 12.7 min, against 56 m and 3 m in submission 6, with the
+walks before and after within 1 % of its path. They find 55 rides there,
+though, and false ones on the training sequences, whose VIO loses (CP Score
+of the VIO alone):
+
+| Sequence | Default thresholds | Looser | Rides (frames), default → looser |
+|---|---:|---:|---|
+| sequence_5_12 | **6.40** | 5.05 | 10 (1,843) → 16 (1,933) |
+| sequence_5_11 | **39.34** | 33.59 | 13 (1,533) → 21 (1,892) |
+
+The defaults stay. Loosening only while the accelerometer disagrees with the
+VIO's velocity ([Finding the rides the VIO missed](#finding-the-rides-the-vio-missed))
+would leave the training sequences as they are, but nothing in the training
+set could show what it does on a missed ride.
+
+Nor does a missed ride made on purpose. With a training ride frozen in the
+VIO (standing still through it, the rest moved back by its displacement), the
+chain keeps the standstill whatever matches its pass:
+
+| Sequence | Chain from the real VIO | Ride frozen: SIFT | ALIKED, essential matrix | ALIKED, two essential matrices¹ |
+|---|---:|---:|---:|---:|
+| sequence_5_12 (83–166 s) | 5.80 | 6.62 | 6.62 | 6.93 |
+| sequence_5_11 (119–188 s) | **51.46** | 44.47 | 44.44 | 44.33 |
+
+¹ A second essential matrix fitted to the first one's outliers (the street
+outside the cabin); an experiment, not kept.
+
+On sequence_5_12 the chain from the real VIO covers 267 m between the CPs at
+19 s and 208 s (surveyed: 257 m), and the frozen ones 1 m with SIFT and 13 m
+with the two essential matrices. The solve moves a trajectory only near where
+it starts, and the street's observations do not triangulate from a standstill.
 
 ### Low light: matching guided by the solve
 
@@ -1887,9 +1978,10 @@ essential matrix, and sequence_1_19 loses 14.1 with it.
     `--loops`) loses on all three tried. With the online result's band,
     sequence_1_19 scores 68.31, 2_11 71.24 and R_12_10cp 73.57.
 
-The online result's band does best on the two R sequences, and it replaces
-the VIO's for the Short sequences of device 1WM093701G1276 in submission 6
-([lamaria_test_results.md](lamaria_test_results.md)).
+The online result's band does best on the two R sequences. It replaced the
+VIO's for the five Short test sequences of device 1WM093701G1276 in
+submission 6, and four of them lost: 60.0 on average, against 61.5 with the
+VIO's band ([lamaria_test_results.md](lamaria_test_results.md)).
 
 ### Revisits for place recognition
 
