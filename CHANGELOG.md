@@ -6,6 +6,20 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`--detector-quality Q`: a lower ORB detector threshold (opt-in).** The
+  mapping detector keeps corners stronger than 1% of the image's strongest
+  (upstream's quality level); in OpenLORIS-Scene's corridor a few bright
+  corners push the walls' texture below that.
+  `basalt_euroc_online_slam_demo --detector-quality Q` builds a map with
+  another level (`map.json`: `feature_quality_level`), and the localize demo
+  and `visloc_map_localize_node` detect the same way
+  (`visloc_basalt::mapper::features::detect_keypoints_mapping_with`).
+  With the blur at 0.003: corridor1-1 localizes 360 times in corridor1-5's
+  map instead of 75, its VIO + map 13 cm off at the median instead of 62 cm;
+  office1-7 186 times instead of 52, at 2.66 cm instead of 6.61 cm. About
+  20 ms more per image. Off by default. `map_files::Frontend` gathers the
+  examples' equalization, blur and quality level.
+
 - **Blur before ORB (opt-in).** ORB's descriptor compares single pixels,
   and on OpenLORIS-Scene's grainy T265 images noise flips its bits: two
   near-identical views from two corridor sessions shared 22 consistent

@@ -34,9 +34,11 @@ by those localizations.
   ([below](#across-lighting-local-contrast-equalization)), the daylight
   session office1-4 gets a map pose for 33% of its frames at 2.6 cm. The
   dawn session office1-5 still gets none.
-- **Grainy images:** blurring before ORB (`--smooth-features 1.5`)
-  localizes up to ten times as many images across sessions at about the
-  same error ([below](#grainy-images-blur-before-orb)).
+- **Grainy images:** blurring before ORB (`--smooth-features 1.5`) and a
+  lower detector threshold (`--detector-quality 0.003`) localize many more
+  images across sessions: office1-7 186 times instead of 5, at 2.66 cm
+  instead of 6.86 cm, and corridor1-1's VIO + map is 13 cm off at the
+  median instead of 71 cm ([below](#grainy-images-blur-before-orb)).
 - **A long run:** over the corridor's 284 s and 232 m, the wheels'
   heading drifts 38° in two minutes. Once each few seconds of the wheel
   calibration's fit get their own heading, its offset stays at
@@ -438,6 +440,46 @@ map, `--localize-every 5`, the maps as shipped and rebuilt with the blur):
 
 On EuRoC: [basalt_map_localization.md](basalt_map_localization.md#blurring-before-orb).
 It stays off by default.
+
+### And a lower detector threshold
+
+The detector keeps corners stronger than 1% of the image's strongest
+(OpenCV's quality level). In the corridor a few bright corners (lamps,
+door frames against the windows) set that bar, and the walls' weaker
+texture falls below it: the blurred images give 201 corners each.
+`basalt_euroc_online_slam_demo --detector-quality Q` sets the level for a
+map, `map.json` records it, and localization detects the same way. On the
+near-identical pairs, blurred, 0.3% gives 421 corners and 60 consistent
+matches per pair, 0.1% 756 and 82 (1%: 201 and 38). Splitting the image
+into cells, each with its share of the corner budget, gave fewer corners
+for the same matches and was dropped.
+
+| corridor1-1 → corridor1-5 | Blurred | Blurred, quality 0.003 | Blurred, quality 0.001 |
+|---|---|---|---|
+| Map landmarks | 9,620 | 15,815 | 19,042 |
+| corridor1-5's own images that localize (every 5th) | 52.1% | 73.4% | 76.4% |
+| corridor1-1, VIO + map: localizations (their RMSE); RMSE / median | 75 (2.9 cm); 1.35 m / 62 cm | 360 (4.9 cm); **0.94 m / 13 cm** | 130 (3.5 cm); 1.43 m / 54 cm |
+| ... wheel odometry with the gyro's heading + map | 76 (2.9 cm); 0.93 m / 64 cm | 164 (3.9 cm); 0.66 m / 48 cm | 254 (5.3 cm); 0.67 m / 28 cm |
+| Time per image (median) | 54 ms | 74 ms | 103 ms |
+
+- **At 0.003 corridor1-1 localizes along much more of the path.** Its VIO +
+  map is 13 cm off at the median, from 71 cm with the raw map; what is
+  left comes from the stretches the map does not cover.
+- **0.001 takes in noise too.** More corners, but the VIO + map gets fewer
+  localizations (130) and the wheel odometry's are less accurate.
+
+In the office, with both (VIO + map, `--localize-every 5`, the maps as
+shipped and rebuilt):
+
+| Query → map | Raw map: RMSE / max, localizations | Blurred | Blurred, quality 0.003 |
+|---|---|---|---|
+| office1-3 → A | 2.83 / 3.7 cm, 34 | 2.97 / 3.8 cm, 43 | 2.76 / 3.7 cm, 56 |
+| office1-6 → A | 3.08 / 4.3 cm, 130 | 3.26 / 4.5 cm, 180 | 3.15 / 4.5 cm, 213 |
+| office1-7 → B | 6.86 / 13.7 cm, 5 | 6.61 / 13.2 cm, 52 | **2.66** / 4.7 cm, 186 |
+
+office1-7, whose images never reached the 30 inliers a localization needs,
+now localizes 186 times and is 2.66 cm off. For the T265, build maps with
+`--smooth-features 1.5 --detector-quality 0.003`. Both stay off by default.
 
 ## On ROS 2
 
