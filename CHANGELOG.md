@@ -17,8 +17,10 @@ All notable changes to `visloc-rs` will be documented here.
   With the blur at 0.003: corridor1-1 localizes 360 times in corridor1-5's
   map instead of 75, its VIO + map 13 cm off at the median instead of 62 cm;
   office1-7 186 times instead of 52, at 2.66 cm instead of 6.61 cm. About
-  20 ms more per image. Off by default. `map_files::Frontend` gathers the
-  examples' equalization, blur and quality level.
+  20 ms more per image. On EuRoC's bright, textured images, alone, it adds
+  fixes in the Vicon rooms but not accuracy (six of the eight queries
+  0.04–11 cm worse), so it stays off by default. `map_files::Frontend`
+  gathers the examples' equalization, blur and quality level.
 
 - **Blur before ORB (opt-in).** ORB's descriptor compares single pixels,
   and on OpenLORIS-Scene's grainy T265 images noise flips its bits: two
