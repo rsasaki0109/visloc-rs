@@ -274,6 +274,28 @@ All notable changes to `visloc-rs` will be documented here.
   frames of an OverMaps360 walk the metric model agrees with the dataset's
   IMU scale within 0.01%. The `imu_metric_scale` example runs the estimator
   on any COLMAP model.
+- **`insv_stitch`: an Insta360 video to equirectangular (360°) frames.**
+  The `visloc-gsplat-train` example (feature `euroc`) stitches an X5
+  `.insv`'s two lenses with their factory calibration, no Insta360 Studio
+  involved: every `--step`-th frame to JPEGs, or one video through ffmpeg
+  (`--video`), 6,496 x 3,248 by default (`dual_fisheye::stitch_equirect`).
+  - The back lens is fitted to SIFT matches along the seam in 16 frames
+    (`dual_fisheye::seam_pairs`, `fit_back_lens`): its rotation and its
+    optical centre, across the lenses' parallax exactly and along it up to
+    one shared shift. The recorded angles give only the turn about the axis
+    (the fit lands within 0.06° of it), not the tilt. The back lens's
+    optical centre sits 5–21 px from where the calibration puts it relative
+    to the front lens's (`FisheyeLens::shifted`); `gsplat_photos --insv`
+    keeps the model as it is, which gives it the better metric scale.
+  - The shared shift is stitched in (`stitch_equirect`'s `parallax`): the
+    scene's typical distance along the seam (1.8–3.0 m outdoors), or the
+    lens models' scale where it points away from the axes. `--distance`
+    sets a distance instead.
+  - On five OverMaps360 walks the two lenses then put the same thing
+    0.12–0.18° apart along the seam (median), against 0.85–1.15° with the
+    recorded angles stitched far away.
+  - `--back-lens factory` or a `gsplat_photos --insv` run's
+    `back_lens.txt` skip the fit; `--frame` stitches side-by-side images.
 - **`gsplat_photos --insv`: Insta360 video straight to a metric model.**
   The input is the video's raw dual-fisheye frames, both lenses side by
   side (one ffmpeg command), with no Insta360 Studio export.
@@ -290,6 +312,7 @@ All notable changes to `visloc-rs` will be documented here.
   - Without `--images`, `gsplat_photos --insv VID.insv --out run` cuts the
     frames itself with ffmpeg (`--frame-step`, default 10;
     `dual_fisheye::extract_dual_fisheye_frames`).
+  - The refined back lens goes to `<out>/back_lens.txt`.
   - On 200 frames each of five OverMaps360 walks (CPU, 13–30 min), SfM
     registered 99.4–100% of the faces.
     - Outdoors, the metric scale is within 4% of the dataset's IMU scale

@@ -63,6 +63,11 @@ path = "examples/gsplat_photos.rs"
 required-features = ["gpu", "euroc"]
 
 [[example]]
+name = "insv_stitch"
+path = "examples/insv_stitch.rs"
+required-features = ["euroc"]
+
+[[example]]
 name = "gsplat_euroc"
 path = "examples/gsplat_euroc.rs"
 required-features = ["gpu", "euroc"]

@@ -665,6 +665,86 @@ fn imu_metric_scale(
     Ok(e.scale)
 }
 
+/// The back lens's pose on the camera as the mapper refined it, from the
+/// front faces of each registered dual-fisheye frame (images `10 i` and
+/// `10 i + 5`, the two lenses' axes): the mean rotation taking a direction
+/// in the back lens's frame to the front lens's, and the back lens's mean
+/// centre in the front lens's frame. Written to `<out>/back_lens.txt`,
+/// which `insv_stitch --back-lens` reads.
+fn write_back_lens(
+    poses: &[Option<visloc_core::geometry::Pose>],
+    metric: bool,
+    out_dir: &Path,
+    log: &mut dyn FnMut(&str),
+) -> Result<(), EurocError> {
+    let mut quats: Vec<nalgebra::UnitQuaternion<f64>> = Vec::new();
+    let mut centre = Vector3::zeros();
+    for frame in poses.chunks_exact(10) {
+        let (Some(front), Some(back)) = (&frame[0], &frame[5]) else {
+            continue;
+        };
+        let (f, b) = (&front.world_to_camera, &back.world_to_camera);
+        // Back lens to front lens: camera-to-world of the back, then
+        // world-to-camera of the front.
+        quats.push(f.rotation * b.rotation.inverse());
+        centre += f.rotation * back.camera_center_world().coords + f.translation;
+    }
+    let Some(first) = quats.first().copied() else {
+        return Ok(());
+    };
+    let n = quats.len() as f64;
+    let sum = quats.iter().fold(nalgebra::Vector4::zeros(), |acc, q| {
+        let v = q.as_ref().coords;
+        if v.dot(&first.as_ref().coords) < 0.0 {
+            acc - v
+        } else {
+            acc + v
+        }
+    });
+    let rotation = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::from(sum))
+        .to_rotation_matrix()
+        .into_inner();
+    let centre = centre / n;
+    let off = rotation * dual_fisheye::back_lens_rotation().transpose();
+    let beyond = ((off.trace() - 1.0) / 2.0)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
+    let unit = if metric { "m" } else { "model units" };
+    log(&format!(
+        "insv: back lens {beyond:.3}° past the half turn, centre ({:.4}, {:.4}, {:.4}) {unit} \
+         in the front lens's frame ({} frames)",
+        centre.x,
+        centre.y,
+        centre.z,
+        quats.len()
+    ));
+    let r = &rotation;
+    let text = format!(
+        "# The back lens on the camera as gsplat_photos --insv refined it ({} frames)\n\
+         # rotation: a direction in the back lens's frame to the front lens's, row by row\n\
+         rotation {:.9} {:.9} {:.9} {:.9} {:.9} {:.9} {:.9} {:.9} {:.9}\n\
+         # the back lens's centre in the front lens's frame ({unit})\n\
+         centre {:.6} {:.6} {:.6}\n\
+         beyond_half_turn_deg {beyond:.4}\n",
+        quats.len(),
+        r[(0, 0)],
+        r[(0, 1)],
+        r[(0, 2)],
+        r[(1, 0)],
+        r[(1, 1)],
+        r[(1, 2)],
+        r[(2, 0)],
+        r[(2, 1)],
+        r[(2, 2)],
+        centre.x,
+        centre.y,
+        centre.z
+    );
+    let path = out_dir.join("back_lens.txt");
+    std::fs::write(&path, text).map_err(|source| EurocError::Io { path, source })
+}
+
 /// Read, decode (oriented) and scale the photos (or panoramas), and read
 /// their EXIF focal lengths and whether the metadata names a 360°
 /// panorama, in parallel. Keeps the most common resolution (one camera for
@@ -1784,6 +1864,9 @@ pub fn build_photo_dataset(
             track.position = Point3::from(track.position.coords * scale);
         }
         metric_scale = Some(scale);
+    }
+    if per_source == 10 {
+        write_back_lens(&poses, metric_scale.is_some(), out_dir, log)?;
     }
 
     let points: Vec<ColoredPoint> = tracks
