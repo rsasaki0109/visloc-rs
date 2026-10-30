@@ -498,8 +498,30 @@ corridor1-3 still does not localize in it (VIO + map): none of 1,141
 attempts, against 1 of 1,086 in corridor1-5's map alone. Against the
 merged map, which holds a session that drove its path the same way, its
 images give a median of 3 inliers (14 at most). What stops corridor1-3 is
-not the direction: its images do not match the other sessions'
-(corridor1-1, by contrast, localizes 360 times in corridor1-5's map).
+not the direction but the light. It was recorded at night: the ceiling
+lamps are on, the windows dark, the floor mirrors the lamps, and where a
+lit room shines at a corridor's end the exposure drops and the walls go
+dark. corridor1-1 and corridor1-2 were recorded by day, the lamps off and
+the windows bright. Image pairs within 0.3 m and 15° of each other by the
+ground truth, blurred, matched with OpenCV's ORB and checked against the
+epipolar geometry:
+
+| Pair of sessions | Pairs | Consistent matches: median (p90) |
+|---|---|---|
+| corridor1-1 / corridor1-2 (day / day) | 88 | 24 (118) |
+| corridor1-3 / corridor1-2 (night / day) | 63 | 11 (21) |
+| corridor1-3 / corridor1-1 (night / day) | 58 | 7 (41) |
+
+**The merged map makes corridor1-1 worse.** corridor1-2's own SLAM is
+1.1 m from its ground truth, so one rigid transform places it right only
+around the 54 keyframes that registered. Against the merged map,
+corridor1-1 localizes 233 times instead of 255, and those against
+corridor1-2's part land up to 4.6 m off (scored with corridor1-5's
+alignment: localizations 48.5 cm RMSE instead of 4.4 cm, VIO + map 1.22
+m instead of 0.89 m). A second session helps a map only if its own drift
+is small where it adds views; deforming it into place was tried on EuRoC
+and did not pay
+([details](basalt_map_localization.md#merging-maps-of-several-flights)).
 
 ### Two more scenes: cafe and home
 
