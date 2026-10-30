@@ -504,7 +504,14 @@ impl ReducedNormalSystemF32 {
         let compact = self.compact_back_substitution.as_ref()?;
         let payload = self.model_decrease_payload.as_ref()?;
         let step = as_f32_vector(state_step);
-        let mut decrease = 0.0_f32;
+        // One `decrease` update per factor, in factor order; a visual term
+        // names its payload ordinal and is evaluated below.
+        enum Term {
+            Add(f32),
+            Sub(f32),
+            Visual(usize),
+        }
+        let mut terms = Vec::with_capacity(factors.len());
         let mut deferred_prior = Vec::new();
         let mut visual_ordinal = 0;
         let mut paired_bias_index = None;
@@ -519,7 +526,7 @@ impl ReducedNormalSystemF32 {
             if factor.kind == FactorKind::Imu {
                 if let Some(bias) = factors.get(factor_index + 1) {
                     if let Some(dot) = imu_bias_pair_model_dot_f32(factor, bias, &step) {
-                        decrease -= dot;
+                        terms.push(Term::Sub(dot));
                         paired_bias_index = Some(factor_index + 1);
                         continue;
                     }
@@ -537,7 +544,7 @@ impl ReducedNormalSystemF32 {
                 if factor.kind == FactorKind::Prior {
                     deferred_prior.push(contribution);
                 } else {
-                    decrease += contribution;
+                    terms.push(Term::Add(contribution));
                 }
                 continue;
             }
@@ -557,24 +564,44 @@ impl ReducedNormalSystemF32 {
             {
                 return None;
             }
-            let q1 = entry.view(&compact.storage)?;
-            let dot = qr_payload_model_dot_reuse_f32(
-                &q1,
-                &visual.q2_state,
-                &visual.q2_residual,
-                state_step,
-                tolerance,
-            )?;
-            decrease -= dot;
+            terms.push(Term::Visual(visual_ordinal));
             visual_ordinal += 1;
+        }
+        if visual_ordinal != payload.visual.len() || visual_ordinal != compact.entries.len() {
+            return None;
+        }
+        // Each visual dot is a pure function of its own retained Q1/Q2 rows
+        // and the shared step, so evaluating them in parallel and folding
+        // them below in factor order keeps the f32 rounding tree of the
+        // sequential loop.
+        let visual_dots: Vec<Option<f32>> = payload.visual[..visual_ordinal]
+            .par_iter()
+            .map(|visual| {
+                let q1 = compact
+                    .entries
+                    .get(visual.compact_entry_index)?
+                    .view(&compact.storage)?;
+                qr_payload_model_dot_reuse_f32(
+                    &q1,
+                    &visual.q2_state,
+                    &visual.q2_residual,
+                    state_step,
+                    tolerance,
+                )
+            })
+            .collect();
+        let mut decrease = 0.0_f32;
+        for term in terms {
+            match term {
+                Term::Add(value) => decrease += value,
+                Term::Sub(value) => decrease -= value,
+                Term::Visual(ordinal) => decrease -= visual_dots[ordinal]?,
+            }
         }
         for contribution in deferred_prior {
             decrease += contribution;
         }
-        if visual_ordinal != payload.visual.len()
-            || visual_ordinal != compact.entries.len()
-            || !decrease.is_finite()
-        {
+        if !decrease.is_finite() {
             return None;
         }
         Some(decrease as f64)

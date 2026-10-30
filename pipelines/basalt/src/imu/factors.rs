@@ -4,6 +4,7 @@
 //! is converted to a square-root information matrix before it is applied to
 //! both the residual and both navigation-state Jacobian blocks.
 
+use crate::fma::FusedMulAdd;
 use crate::imu::ImuPreintegratedDelta;
 use crate::vio::landmarks::{sophus_so3_inverse, sophus_so3_product};
 use crate::BasaltNavState;
@@ -729,13 +730,13 @@ fn eigen_rotation_matrix_f32(rotation: &UnitQuaternion<f32>) -> SMatrix<f32, 3, 
 
     SMatrix::<f32, 3, 3>::new(
         1.0_f32 - (tyy + tzz),
-        (-tz).mul_add(q.w, txy),
-        ty.mul_add(q.w, txz),
-        tz.mul_add(q.w, txy),
+        (-tz).fused_mul_add(q.w, txy),
+        ty.fused_mul_add(q.w, txz),
+        tz.fused_mul_add(q.w, txy),
         1.0_f32 - (txx + tzz),
-        (-tx).mul_add(q.w, tyz),
-        (-ty).mul_add(q.w, txz),
-        tx.mul_add(q.w, tyz),
+        (-tx).fused_mul_add(q.w, tyz),
+        (-ty).fused_mul_add(q.w, txz),
+        tx.fused_mul_add(q.w, tyz),
         1.0_f32 - (txx + tyy),
     )
 }
@@ -747,8 +748,8 @@ fn eigen_current_rotation_matrix_f32(rotation: &UnitQuaternion<f32>) -> SMatrix<
     let q = rotation.quaternion();
     let mut result = eigen_rotation_matrix_f32(rotation);
     let tx = q.i + q.i;
-    result[(1, 1)] = 1.0 - q.i.mul_add(tx, q.k * (q.k + q.k));
-    result[(2, 2)] = 1.0 - q.i.mul_add(tx, q.j * (q.j + q.j));
+    result[(1, 1)] = 1.0 - q.i.fused_mul_add(tx, q.k * (q.k + q.k));
+    result[(2, 2)] = 1.0 - q.i.fused_mul_add(tx, q.j * (q.j + q.j));
     result
 }
 
@@ -776,9 +777,9 @@ fn eigen_translation_operand_f32(
     let half_gravity = gravity * 0.5_f32;
     let gravity_dt = half_gravity * dt;
     Vector3::new(
-        (-gravity_dt.x).mul_add(dt, (-dt).mul_add(velocity_from.x, difference.x)),
-        (-gravity_dt.y).mul_add(dt, (-dt).mul_add(velocity_from.y, difference.y)),
-        (-gravity_dt.z).mul_add(dt, (-dt).mul_add(velocity_from.z, difference.z)),
+        (-gravity_dt.x).fused_mul_add(dt, (-dt).fused_mul_add(velocity_from.x, difference.x)),
+        (-gravity_dt.y).fused_mul_add(dt, (-dt).fused_mul_add(velocity_from.y, difference.y)),
+        (-gravity_dt.z).fused_mul_add(dt, (-dt).fused_mul_add(velocity_from.z, difference.z)),
     )
 }
 
@@ -794,7 +795,7 @@ fn eigen_velocity_operand_f32(
     dt: f32,
 ) -> Vector3<f32> {
     Vector3::from_fn(|index, _| {
-        (-gravity[index]).mul_add(dt, velocity_to[index] - velocity_from[index])
+        (-gravity[index]).fused_mul_add(dt, velocity_to[index] - velocity_from[index])
     })
 }
 
@@ -808,12 +809,12 @@ fn eigen_matrix_vector_f32(matrix: &SMatrix<f32, 3, 3>, vector: Vector3<f32>) ->
     let x0 = vector.x;
     let x1 = vector.y;
     let x2 = vector.z;
-    let row0 = matrix[(0, 2)].mul_add(x2, matrix[(0, 1)] * x1);
-    let row0 = matrix[(0, 0)].mul_add(x0, row0);
-    let row1 = matrix[(1, 2)].mul_add(x2, matrix[(1, 1)] * x1);
-    let row1 = matrix[(1, 0)].mul_add(x0, row1);
-    let row2 = matrix[(2, 2)].mul_add(x2, matrix[(2, 1)] * x1);
-    let row2 = matrix[(2, 0)].mul_add(x0, row2);
+    let row0 = matrix[(0, 2)].fused_mul_add(x2, matrix[(0, 1)] * x1);
+    let row0 = matrix[(0, 0)].fused_mul_add(x0, row0);
+    let row1 = matrix[(1, 2)].fused_mul_add(x2, matrix[(1, 1)] * x1);
+    let row1 = matrix[(1, 0)].fused_mul_add(x0, row1);
+    let row2 = matrix[(2, 2)].fused_mul_add(x2, matrix[(2, 1)] * x1);
+    let row2 = matrix[(2, 0)].fused_mul_add(x0, row2);
     Vector3::new(row0, row1, row2)
 }
 
@@ -832,14 +833,14 @@ fn eigen_matrix_vector_velocity_f32(
     let x1 = vector.y;
     let x2 = vector.z;
     let row0 = matrix[(0, 2)] * x2;
-    let row0 = matrix[(0, 1)].mul_add(x1, row0);
-    let row0 = matrix[(0, 0)].mul_add(x0, row0);
+    let row0 = matrix[(0, 1)].fused_mul_add(x1, row0);
+    let row0 = matrix[(0, 0)].fused_mul_add(x0, row0);
     let row1 = matrix[(1, 2)] * x2;
-    let row1 = matrix[(1, 1)].mul_add(x1, row1);
-    let row1 = matrix[(1, 0)].mul_add(x0, row1);
+    let row1 = matrix[(1, 1)].fused_mul_add(x1, row1);
+    let row1 = matrix[(1, 0)].fused_mul_add(x0, row1);
     let row2 = matrix[(2, 2)] * x2;
-    let row2 = matrix[(2, 1)].mul_add(x1, row2);
-    let row2 = matrix[(2, 0)].mul_add(x0, row2);
+    let row2 = matrix[(2, 1)].fused_mul_add(x1, row2);
+    let row2 = matrix[(2, 0)].fused_mul_add(x0, row2);
     Vector3::new(row0, row1, row2)
 }
 
@@ -855,8 +856,8 @@ fn eigen_matrix_vector_9x3_f32(
 ) -> SMatrix<f32, 9, 1> {
     SMatrix::<f32, 9, 1>::from_fn(|row, _| {
         let value = matrix[(row, 0)] * vector.x;
-        let value = matrix[(row, 1)].mul_add(vector.y, value);
-        matrix[(row, 2)].mul_add(vector.z, value)
+        let value = matrix[(row, 1)].fused_mul_add(vector.y, value);
+        matrix[(row, 2)].fused_mul_add(vector.z, value)
     })
 }
 
@@ -871,8 +872,8 @@ fn eigen_matrix_product_f32(
     for column in 0..3 {
         for row in 0..3 {
             let mut value = left[(row, 1)] * right[(1, column)];
-            value = left[(row, 2)].mul_add(right[(2, column)], value);
-            value = left[(row, 0)].mul_add(right[(0, column)], value);
+            value = left[(row, 2)].fused_mul_add(right[(2, column)], value);
+            value = left[(row, 0)].fused_mul_add(right[(0, column)], value);
             result[(row, column)] = value;
         }
     }
@@ -887,8 +888,8 @@ fn eigen_matrix_product_f32(
 #[inline]
 fn eigen_squared_norm3_f32(value: Vector3<f32>) -> f32 {
     let mut result = value.y * value.y;
-    result = value.z.mul_add(value.z, result);
-    value.x.mul_add(value.x, result)
+    result = value.z.fused_mul_add(value.z, result);
+    value.x.fused_mul_add(value.x, result)
 }
 
 /// Eigen's AVX column-major 9x9-by-9x1 `GemvProduct` at the active float
@@ -903,7 +904,7 @@ fn eigen_whiten_residual_f32(
     for row in 0..9 {
         let mut value = 0.0_f32;
         for column in 0..9 {
-            value = whitener[(row, column)].mul_add(residual[column], value);
+            value = whitener[(row, column)].fused_mul_add(residual[column], value);
         }
         result[row] = value;
     }
@@ -925,17 +926,18 @@ fn eigen_whiten_jacobian_f32(whitener: &Matrix9F32, jacobian: &Matrix9x30F32) ->
             let mut even = 0.0_f32;
             let mut odd = 0.0_f32;
             for depth in (0..8).step_by(2) {
-                even = whitener[(row, depth)].mul_add(jacobian[(depth, column)], even);
+                even = whitener[(row, depth)].fused_mul_add(jacobian[(depth, column)], even);
             }
             for depth in (1..8).step_by(2) {
-                odd = whitener[(row, depth)].mul_add(jacobian[(depth, column)], odd);
+                odd = whitener[(row, depth)].fused_mul_add(jacobian[(depth, column)], odd);
             }
-            result[(row, column)] = whitener[(row, 8)].mul_add(jacobian[(8, column)], even + odd);
+            result[(row, column)] =
+                whitener[(row, 8)].fused_mul_add(jacobian[(8, column)], even + odd);
         }
         for column in 28..30 {
             let mut value = 0.0_f32;
             for depth in 0..9 {
-                value = whitener[(row, depth)].mul_add(jacobian[(depth, column)], value);
+                value = whitener[(row, depth)].fused_mul_add(jacobian[(depth, column)], value);
             }
             result[(row, column)] = value;
         }
@@ -954,9 +956,9 @@ fn eigen_whiten_jacobian_f32(whitener: &Matrix9F32, jacobian: &Matrix9x30F32) ->
                 let even_depth = 2 * pair;
                 let odd_depth = even_depth + 1;
                 blocks[pair][column] =
-                    whitener[(8, even_depth)].mul_add(jacobian[(even_depth, col)], 0.0_f32);
+                    whitener[(8, even_depth)].fused_mul_add(jacobian[(even_depth, col)], 0.0_f32);
                 blocks[pair][4 + column] =
-                    whitener[(8, odd_depth)].mul_add(jacobian[(odd_depth, col)], 0.0_f32);
+                    whitener[(8, odd_depth)].fused_mul_add(jacobian[(odd_depth, col)], 0.0_f32);
             }
         }
         for lane in 0..8 {
@@ -967,13 +969,13 @@ fn eigen_whiten_jacobian_f32(whitener: &Matrix9F32, jacobian: &Matrix9x30F32) ->
         for column in 0..4 {
             let col = base + column;
             let reduced = blocks[0][column] + blocks[0][4 + column];
-            result[(8, col)] = whitener[(8, 8)].mul_add(jacobian[(8, col)], reduced);
+            result[(8, col)] = whitener[(8, 8)].fused_mul_add(jacobian[(8, col)], reduced);
         }
     }
     for column in 28..30 {
         let mut value = 0.0_f32;
         for depth in 0..9 {
-            value = whitener[(8, depth)].mul_add(jacobian[(depth, column)], value);
+            value = whitener[(8, depth)].fused_mul_add(jacobian[(depth, column)], value);
         }
         result[(8, column)] = value;
     }
@@ -1000,27 +1002,29 @@ fn eigen_whiten_block_f32<const C: usize>(
                 let mut even = 0.0_f32;
                 let mut odd = 0.0_f32;
                 for depth in (0..8).step_by(2) {
-                    even = whitener[(row, depth)].mul_add(rhs[(depth, column)], even);
+                    even = whitener[(row, depth)].fused_mul_add(rhs[(depth, column)], even);
                 }
                 for depth in (1..8).step_by(2) {
-                    odd = whitener[(row, depth)].mul_add(rhs[(depth, column)], odd);
+                    odd = whitener[(row, depth)].fused_mul_add(rhs[(depth, column)], odd);
                 }
-                result[(row, column)] = whitener[(row, 8)].mul_add(rhs[(8, column)], even + odd);
+                result[(row, column)] =
+                    whitener[(row, 8)].fused_mul_add(rhs[(8, column)], even + odd);
             } else if row == 8 && column < packet_cols4 {
                 // Eigen's swapped tail loads two depth values into each
                 // half-packet.  After four two-depth blocks it merges the
                 // even and odd lanes separately, reduces the halves, and
                 // finally fuses the depth-8 remainder.
                 let terms: [f32; 8] = std::array::from_fn(|depth| {
-                    whitener[(row, depth)].mul_add(rhs[(depth, column)], 0.0_f32)
+                    whitener[(row, depth)].fused_mul_add(rhs[(depth, column)], 0.0_f32)
                 });
                 let even = (terms[0] + terms[2]) + (terms[4] + terms[6]);
                 let odd = (terms[1] + terms[3]) + (terms[5] + terms[7]);
-                result[(row, column)] = whitener[(row, 8)].mul_add(rhs[(8, column)], even + odd);
+                result[(row, column)] =
+                    whitener[(row, 8)].fused_mul_add(rhs[(8, column)], even + odd);
             } else {
                 let mut value = 0.0_f32;
                 for depth in 0..9 {
-                    value = whitener[(row, depth)].mul_add(rhs[(depth, column)], value);
+                    value = whitener[(row, depth)].fused_mul_add(rhs[(depth, column)], value);
                 }
                 result[(row, column)] = value;
             }
@@ -1041,7 +1045,7 @@ pub(crate) fn trial_imu_quadratic_stages_f32(
         let products: [f32; 8] = std::array::from_fn(|i| left[i] * right[i]);
         let half: [f32; 4] = std::array::from_fn(|i| products[i] + products[i + 4]);
         let sum = (half[0] + half[2]) + (half[1] + half[3]);
-        left[8].mul_add(right[8], sum)
+        left[8].fused_mul_add(right[8], sum)
     };
     let mut weighted = SMatrix::<f32, 9, 1>::zeros();
     for column in 0..9 {
@@ -1069,11 +1073,11 @@ pub(crate) fn trial_bias_cost_f32(
         let weight = (sqrt_weight * sqrt_weight) / dt;
         let residual = a.map(|v| v as f32) - b.map(|v| v as f32);
         let coefficient = residual.map(|v| (0.5_f32 * v) * weight);
-        coefficient.z.mul_add(
+        coefficient.z.fused_mul_add(
             residual.z,
             coefficient
                 .y
-                .mul_add(residual.y, coefficient.x * residual.x),
+                .fused_mul_add(residual.y, coefficient.x * residual.x),
         )
     };
     Ok((
@@ -1120,7 +1124,7 @@ pub fn imu_row_products_f32(
         for column in 0..30 {
             let mut value = 0.0_f32;
             for depth in 0..9 {
-                value = jacobian[(depth, row)].mul_add(jacobian[(depth, column)], value);
+                value = jacobian[(depth, row)].fused_mul_add(jacobian[(depth, column)], value);
             }
             hessian[(row, column)] = value;
         }
@@ -1128,14 +1132,14 @@ pub fn imu_row_products_f32(
 
     let mut gradient = Vector30F32::zeros();
     for column in 0..30 {
-        let lane0 = jacobian[(0, column)].mul_add(residual[0], 0.0_f32);
-        let lane1 = jacobian[(1, column)].mul_add(residual[1], 0.0_f32);
-        let lane2 = jacobian[(2, column)].mul_add(residual[2], 0.0_f32);
-        let lane3 = jacobian[(3, column)].mul_add(residual[3], 0.0_f32);
-        let lane4 = jacobian[(4, column)].mul_add(residual[4], 0.0_f32);
-        let lane5 = jacobian[(5, column)].mul_add(residual[5], 0.0_f32);
-        let lane6 = jacobian[(6, column)].mul_add(residual[6], 0.0_f32);
-        let lane7 = jacobian[(7, column)].mul_add(residual[7], 0.0_f32);
+        let lane0 = jacobian[(0, column)].fused_mul_add(residual[0], 0.0_f32);
+        let lane1 = jacobian[(1, column)].fused_mul_add(residual[1], 0.0_f32);
+        let lane2 = jacobian[(2, column)].fused_mul_add(residual[2], 0.0_f32);
+        let lane3 = jacobian[(3, column)].fused_mul_add(residual[3], 0.0_f32);
+        let lane4 = jacobian[(4, column)].fused_mul_add(residual[4], 0.0_f32);
+        let lane5 = jacobian[(5, column)].fused_mul_add(residual[5], 0.0_f32);
+        let lane6 = jacobian[(6, column)].fused_mul_add(residual[6], 0.0_f32);
+        let lane7 = jacobian[(7, column)].fused_mul_add(residual[7], 0.0_f32);
         let q0 = lane0 + lane4;
         let q1 = lane1 + lane5;
         let q2 = lane2 + lane6;
@@ -1270,7 +1274,7 @@ fn so3_jacobian_inverse_f32(phi: Vector3<f32>, sign: f32) -> SMatrix<f32, 3, 3> 
     // reduction schedules.
     let half = 0.5_f32 * sign;
     let mut result = SMatrix::<f32, 3, 3>::from_fn(|row, column| {
-        h[(row, column)].mul_add(half, if row == column { 1.0 } else { 0.0 })
+        h[(row, column)].fused_mul_add(half, if row == column { 1.0 } else { 0.0 })
     });
     if theta2 > SOPHUS_EPSILON_F32 {
         let theta = theta2.sqrt();
@@ -1888,7 +1892,7 @@ fn eigen_ldlt_inner_product_scalar_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
     debug_assert!(!lhs.is_empty());
     let mut result = lhs[0] * rhs[0];
     for index in 1..lhs.len() {
-        result = lhs[index].mul_add(rhs[index], result);
+        result = lhs[index].fused_mul_add(rhs[index], result);
     }
     result
 }
@@ -1973,7 +1977,7 @@ fn eigen_ldlt_backward_apply_f32(
     variant: BackwardInternalVariant,
 ) -> f32 {
     if variant.use_fma_subtract() {
-        (-1.0_f32).mul_add(correction, destination)
+        (-1.0_f32).fused_mul_add(correction, destination)
     } else {
         destination - correction
     }
@@ -2005,14 +2009,14 @@ fn eigen_ldlt_backward_panel_sum_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
     let first = product(0);
     match lhs.len() {
         1 => first,
-        2 => lhs[1].mul_add(rhs[1], first),
+        2 => lhs[1].fused_mul_add(rhs[1], first),
         3 => {
             let first_two = first + product(1);
             first_two + product(2)
         }
         4 => {
             let first_three = (first + product(1)) + product(2);
-            lhs[3].mul_add(rhs[3], first_three)
+            lhs[3].fused_mul_add(rhs[3], first_three)
         }
         5 => {
             let first_two = first + product(1);
@@ -2025,7 +2029,7 @@ fn eigen_ldlt_backward_panel_sum_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
             let first_three = first_two + product(2);
             let first_four = first_three + product(3);
             let first_five = first_four + product(4);
-            lhs[5].mul_add(rhs[5], first_five)
+            lhs[5].fused_mul_add(rhs[5], first_five)
         }
         7 => {
             let first_two = first + product(1);
@@ -2055,13 +2059,13 @@ fn eigen_ldlt_gemv_sub_dynamic_f32(
             let column = col_start + offset;
             for lane in 0..8 {
                 let row = row_start + row_offset + lane;
-                correction[lane] = matrix[(row, column)].mul_add(*value, correction[lane]);
+                correction[lane] = matrix[(row, column)].fused_mul_add(*value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = row_start + row_offset + lane;
             matrix[(row, col_start + x.len())] =
-                (-1.0_f32).mul_add(value, matrix[(row, col_start + x.len())]);
+                (-1.0_f32).fused_mul_add(value, matrix[(row, col_start + x.len())]);
         }
         row_offset += 8;
     }
@@ -2071,13 +2075,13 @@ fn eigen_ldlt_gemv_sub_dynamic_f32(
             let column = col_start + offset;
             for lane in 0..4 {
                 let row = row_start + row_offset + lane;
-                correction[lane] = matrix[(row, column)].mul_add(*value, correction[lane]);
+                correction[lane] = matrix[(row, column)].fused_mul_add(*value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = row_start + row_offset + lane;
             matrix[(row, col_start + x.len())] =
-                (-1.0_f32).mul_add(value, matrix[(row, col_start + x.len())]);
+                (-1.0_f32).fused_mul_add(value, matrix[(row, col_start + x.len())]);
         }
         row_offset += 4;
     }
@@ -2087,13 +2091,13 @@ fn eigen_ldlt_gemv_sub_dynamic_f32(
             let column = col_start + offset;
             for lane in 0..2 {
                 let row = row_start + row_offset + lane;
-                correction[lane] = matrix[(row, column)].mul_add(*value, correction[lane]);
+                correction[lane] = matrix[(row, column)].fused_mul_add(*value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = row_start + row_offset + lane;
             matrix[(row, col_start + x.len())] =
-                (-1.0_f32).mul_add(value, matrix[(row, col_start + x.len())]);
+                (-1.0_f32).fused_mul_add(value, matrix[(row, col_start + x.len())]);
         }
         row_offset += 2;
     }
@@ -2101,10 +2105,10 @@ fn eigen_ldlt_gemv_sub_dynamic_f32(
         let row = row_start + row_offset;
         let mut correction = 0.0_f32;
         for (offset, value) in x.iter().enumerate() {
-            correction = matrix[(row, col_start + offset)].mul_add(*value, correction);
+            correction = matrix[(row, col_start + offset)].fused_mul_add(*value, correction);
         }
         matrix[(row, col_start + x.len())] =
-            (-1.0_f32).mul_add(correction, matrix[(row, col_start + x.len())]);
+            (-1.0_f32).fused_mul_add(correction, matrix[(row, col_start + x.len())]);
         row_offset += 1;
     }
 }
@@ -2131,12 +2135,12 @@ fn eigen_ldlt_gemv_vector_sub_dynamic_f32(
                 } else {
                     matrix[(row, column)]
                 };
-                correction[lane] = coefficient.mul_add(value, correction[lane]);
+                correction[lane] = coefficient.fused_mul_add(value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = row_start + row_offset + lane;
-            result[row] = (-1.0_f32).mul_add(value, result[row]);
+            result[row] = (-1.0_f32).fused_mul_add(value, result[row]);
         }
         row_offset += 8;
     }
@@ -2152,12 +2156,12 @@ fn eigen_ldlt_gemv_vector_sub_dynamic_f32(
                 } else {
                     matrix[(row, column)]
                 };
-                correction[lane] = coefficient.mul_add(value, correction[lane]);
+                correction[lane] = coefficient.fused_mul_add(value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = row_start + row_offset + lane;
-            result[row] = (-1.0_f32).mul_add(value, result[row]);
+            result[row] = (-1.0_f32).fused_mul_add(value, result[row]);
         }
         row_offset += 4;
     }
@@ -2173,12 +2177,12 @@ fn eigen_ldlt_gemv_vector_sub_dynamic_f32(
                 } else {
                     matrix[(row, column)]
                 };
-                correction[lane] = coefficient.mul_add(value, correction[lane]);
+                correction[lane] = coefficient.fused_mul_add(value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = row_start + row_offset + lane;
-            result[row] = (-1.0_f32).mul_add(value, result[row]);
+            result[row] = (-1.0_f32).fused_mul_add(value, result[row]);
         }
         row_offset += 2;
     }
@@ -2192,9 +2196,9 @@ fn eigen_ldlt_gemv_vector_sub_dynamic_f32(
             } else {
                 matrix[(row, column)]
             };
-            correction = coefficient.mul_add(result[column], correction);
+            correction = coefficient.fused_mul_add(result[column], correction);
         }
-        result[row] = (-1.0_f32).mul_add(correction, result[row]);
+        result[row] = (-1.0_f32).fused_mul_add(correction, result[row]);
         row_offset += 1;
     }
 }
@@ -2210,7 +2214,7 @@ fn eigen_ldlt_forward_solve_dynamic_f32(result: &mut DVector<f32>, matrix: &DMat
             if value != 0.0 {
                 for row_offset in (offset + 1)..panel_width {
                     let row = panel_start + row_offset;
-                    result[row] = (-value).mul_add(matrix[(row, index)], result[row]);
+                    result[row] = (-value).fused_mul_add(matrix[(row, index)], result[row]);
                 }
             }
         }
@@ -2413,7 +2417,7 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
                 for depth in 0..8 {
                     let column = col_start + column_offset + depth;
                     packet[lane][depth] =
-                        coefficient(row, column).mul_add(result[column], packet[lane][depth]);
+                        coefficient(row, column).fused_mul_add(result[column], packet[lane][depth]);
                 }
             }
             column_offset += 8;
@@ -2426,7 +2430,8 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
             let column = col_start + column_offset;
             for lane in 0..8 {
                 let row = row_start + row_offset + lane;
-                reduced[lane] = coefficient(row, column).mul_add(result[column], reduced[lane]);
+                reduced[lane] =
+                    coefficient(row, column).fused_mul_add(result[column], reduced[lane]);
             }
             column_offset += 1;
         }
@@ -2446,7 +2451,7 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
                 for depth in 0..8 {
                     let column = col_start + column_offset + depth;
                     packet[lane][depth] =
-                        coefficient(row, column).mul_add(result[column], packet[lane][depth]);
+                        coefficient(row, column).fused_mul_add(result[column], packet[lane][depth]);
                 }
             }
             column_offset += 8;
@@ -2459,7 +2464,8 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
             let column = col_start + column_offset;
             for lane in 0..4 {
                 let row = row_start + row_offset + lane;
-                reduced[lane] = coefficient(row, column).mul_add(result[column], reduced[lane]);
+                reduced[lane] =
+                    coefficient(row, column).fused_mul_add(result[column], reduced[lane]);
             }
             column_offset += 1;
         }
@@ -2479,7 +2485,7 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
                 for depth in 0..8 {
                     let column = col_start + column_offset + depth;
                     packet[lane][depth] =
-                        coefficient(row, column).mul_add(result[column], packet[lane][depth]);
+                        coefficient(row, column).fused_mul_add(result[column], packet[lane][depth]);
                 }
             }
             column_offset += 8;
@@ -2492,7 +2498,8 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
             let column = col_start + column_offset;
             for lane in 0..2 {
                 let row = row_start + row_offset + lane;
-                reduced[lane] = coefficient(row, column).mul_add(result[column], reduced[lane]);
+                reduced[lane] =
+                    coefficient(row, column).fused_mul_add(result[column], reduced[lane]);
             }
             column_offset += 1;
         }
@@ -2510,7 +2517,8 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
         while col_count - column_offset >= 8 {
             for depth in 0..8 {
                 let column = col_start + column_offset + depth;
-                reduced8[depth] = coefficient(row, column).mul_add(result[column], reduced8[depth]);
+                reduced8[depth] =
+                    coefficient(row, column).fused_mul_add(result[column], reduced8[depth]);
             }
             column_offset += 8;
         }
@@ -2519,7 +2527,8 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
         while col_count - column_offset >= 4 {
             for depth in 0..4 {
                 let column = col_start + column_offset + depth;
-                reduced4[depth] = coefficient(row, column).mul_add(result[column], reduced4[depth]);
+                reduced4[depth] =
+                    coefficient(row, column).fused_mul_add(result[column], reduced4[depth]);
             }
             column_offset += 4;
         }
@@ -2528,7 +2537,8 @@ fn eigen_ldlt_gemv_row_major_sub_dynamic_f32(
         while col_count - column_offset >= 2 {
             for depth in 0..2 {
                 let column = col_start + column_offset + depth;
-                reduced2[depth] = coefficient(row, column).mul_add(result[column], reduced2[depth]);
+                reduced2[depth] =
+                    coefficient(row, column).fused_mul_add(result[column], reduced2[depth]);
             }
             column_offset += 2;
         }
@@ -2567,7 +2577,7 @@ where
     debug_assert!(!lhs.is_empty());
     let mut result = lhs[0] * rhs[0];
     for index in 1..lhs.len() {
-        result = lhs[index].mul_add(rhs[index], result);
+        result = lhs[index].fused_mul_add(rhs[index], result);
     }
     result
 }
@@ -2582,12 +2592,12 @@ fn eigen_ldlt_gemv_sub_f32(matrix: &mut Matrix9F32, pivot: usize, rows: usize, t
         for (index, value) in temporary.iter().enumerate() {
             for lane in 0..4 {
                 let row = pivot + 1 + row_offset + lane;
-                correction[lane] = matrix[(row, index)].mul_add(*value, correction[lane]);
+                correction[lane] = matrix[(row, index)].fused_mul_add(*value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = pivot + 1 + row_offset + lane;
-            matrix[(row, pivot)] = (-1.0_f32).mul_add(value, matrix[(row, pivot)]);
+            matrix[(row, pivot)] = (-1.0_f32).fused_mul_add(value, matrix[(row, pivot)]);
         }
         row_offset += 4;
     }
@@ -2596,12 +2606,12 @@ fn eigen_ldlt_gemv_sub_f32(matrix: &mut Matrix9F32, pivot: usize, rows: usize, t
         for (index, value) in temporary.iter().enumerate() {
             for lane in 0..2 {
                 let row = pivot + 1 + row_offset + lane;
-                correction[lane] = matrix[(row, index)].mul_add(*value, correction[lane]);
+                correction[lane] = matrix[(row, index)].fused_mul_add(*value, correction[lane]);
             }
         }
         for (lane, value) in correction.into_iter().enumerate() {
             let row = pivot + 1 + row_offset + lane;
-            matrix[(row, pivot)] = (-1.0_f32).mul_add(value, matrix[(row, pivot)]);
+            matrix[(row, pivot)] = (-1.0_f32).fused_mul_add(value, matrix[(row, pivot)]);
         }
         row_offset += 2;
     }
@@ -2609,9 +2619,9 @@ fn eigen_ldlt_gemv_sub_f32(matrix: &mut Matrix9F32, pivot: usize, rows: usize, t
         let row = pivot + 1 + row_offset;
         let mut correction = 0.0_f32;
         for (index, value) in temporary.iter().enumerate() {
-            correction = matrix[(row, index)].mul_add(*value, correction);
+            correction = matrix[(row, index)].fused_mul_add(*value, correction);
         }
-        matrix[(row, pivot)] = (-1.0_f32).mul_add(correction, matrix[(row, pivot)]);
+        matrix[(row, pivot)] = (-1.0_f32).fused_mul_add(correction, matrix[(row, pivot)]);
         row_offset += 1;
     }
 }
@@ -2622,16 +2632,16 @@ fn eigen_ldlt_forward_solve_f32(result: &mut Matrix9F32, matrix: &Matrix9F32) {
             let value = result[(pivot, column)];
             for row in (pivot + 1)..8 {
                 result[(row, column)] =
-                    (-value).mul_add(matrix[(row, pivot)], result[(row, column)]);
+                    (-value).fused_mul_add(matrix[(row, pivot)], result[(row, column)]);
             }
         }
     }
     for column in 0..9 {
         let mut correction = 0.0_f32;
         for pivot in 0..8 {
-            correction = matrix[(8, pivot)].mul_add(result[(pivot, column)], correction);
+            correction = matrix[(8, pivot)].fused_mul_add(result[(pivot, column)], correction);
         }
-        result[(8, column)] = (-1.0_f32).mul_add(correction, result[(8, column)]);
+        result[(8, column)] = (-1.0_f32).fused_mul_add(correction, result[(8, column)]);
     }
 }
 

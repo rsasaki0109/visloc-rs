@@ -52,17 +52,19 @@ use visloc_core::geometry::SE3;
 
 use crate::{
     calibration::BasaltCalibration,
+    contrast::LocalContrast,
     pyramid::{ImageError, RawU16Image},
+    smoothing::GaussianSmoothing,
     vio::margdata::{MargData, OfImageData},
     ImuSample,
 };
 
 use crate::mapper::{
     features::{
-        extract_mapper_features, match_stereo_features, match_temporal_ransac,
+        extract_mapper_features_with, match_stereo_features, match_temporal_ransac,
         match_temporal_ransac_seeded, match_temporal_stage, mutual_descriptor_matches,
         query_bow_candidates, BowQueryCandidate, FeaturePipelineError, MapperImageFeatures,
-        MapperImageId,
+        MapperImageId, MAPPING_QUALITY_LEVEL,
     },
     hamming_distance,
     session::{
@@ -298,6 +300,20 @@ pub struct OnlineMapperConfig {
     pub local_ba_window: usize,
     /// LM iteration budget for the local windowed BA.
     pub local_ba_iterations: usize,
+    /// Equalize each keyframe image's local contrast before ORB detection
+    /// and description (`crate::contrast`), for maps that must localize
+    /// images taken under other lighting. `None` (the default) extracts from
+    /// the raw image. The VIO always tracks the raw images.
+    pub local_contrast: Option<LocalContrast>,
+    /// Blur each keyframe image (after `local_contrast`) before ORB
+    /// detection and description (`crate::smoothing`), for grainy images
+    /// whose noise ORB's pixel comparisons would pick up. `None` (the
+    /// default) extracts from the image as is.
+    pub feature_smoothing: Option<GaussianSmoothing>,
+    /// The ORB detector's quality level
+    /// (`features::detect_keypoints_mapping_with`); `None` (the default) is
+    /// upstream's 0.01. Lower keeps weak texture next to strong corners.
+    pub feature_quality_level: Option<f32>,
 }
 
 impl Default for OnlineMapperConfig {
@@ -325,6 +341,9 @@ impl Default for OnlineMapperConfig {
             loop_closure_max_metric_residual_deg: 5.0,
             local_ba_window: 0,
             local_ba_iterations: 4,
+            local_contrast: None,
+            feature_smoothing: None,
+            feature_quality_level: None,
         }
     }
 }
@@ -750,8 +769,15 @@ impl OnlineNfrMapper {
             jobs.par_iter()
                 .map(|&(key, timestamp_index, image_index)| {
                     let image = &eligible_timestamps[timestamp_index].images[image_index];
-                    extract_one_image_features(image, &calibration, self.mapper.feature_config)
-                        .map(|features| (key, timestamp_index, features))
+                    extract_one_image_features(
+                        image,
+                        &calibration,
+                        self.mapper.feature_config,
+                        self.config.local_contrast,
+                        self.config.feature_smoothing,
+                        self.config.feature_quality_level,
+                    )
+                    .map(|features| (key, timestamp_index, features))
                 })
                 .collect();
         mapper_trace!("ingest_packet: parallel detect done");
@@ -2203,6 +2229,9 @@ fn extract_one_image_features(
     image: &OfImageData,
     calibration: &BasaltCalibration,
     feature_config: OfflineMapperConfig,
+    local_contrast: Option<LocalContrast>,
+    feature_smoothing: Option<GaussianSmoothing>,
+    feature_quality_level: Option<f32>,
 ) -> Result<MapperImageFeatures, OnlineMapperError> {
     let timestamp_ns = image.timestamp_ns;
     let camera_id = image.camera_id;
@@ -2229,12 +2258,24 @@ fn extract_one_image_features(
             source,
         }
     })?;
-    extract_mapper_features(&raw, camera, feature_config).map_err(|source| {
-        OnlineMapperError::Extraction {
-            timestamp_ns,
-            camera_id,
-            source,
-        }
+    let raw = match local_contrast {
+        Some(local_contrast) => local_contrast.apply(&raw),
+        None => raw,
+    };
+    let raw = match feature_smoothing {
+        Some(feature_smoothing) => feature_smoothing.apply(&raw),
+        None => raw,
+    };
+    extract_mapper_features_with(
+        &raw,
+        camera,
+        feature_config,
+        feature_quality_level.unwrap_or(MAPPING_QUALITY_LEVEL),
+    )
+    .map_err(|source| OnlineMapperError::Extraction {
+        timestamp_ns,
+        camera_id,
+        source,
     })
 }
 

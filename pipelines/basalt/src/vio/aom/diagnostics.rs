@@ -83,7 +83,13 @@ pub(crate) fn begin_diagnostic_lm_run() -> DiagnosticLmRunGuard {
 
 pub(super) fn next_diagnostic_lm_run_id() -> u128 {
     let sequence = NEXT_DIAGNOSTIC_LM_RUN_ID.fetch_add(1, Ordering::Relaxed);
-    (u128::from(std::process::id()) << 64) | u128::from(sequence)
+    // `std::process::id` panics on wasm32-unknown-unknown (the browser
+    // build), which has one "process": the run ids stay unique within it.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    let process = std::process::id();
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    let process = 0u32;
+    (u128::from(process) << 64) | u128::from(sequence)
 }
 
 fn active_diagnostic_lm_context() -> Option<DiagnosticLmContext> {
