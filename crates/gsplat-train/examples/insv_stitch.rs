@@ -4,8 +4,9 @@
 //!
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features euroc --example insv_stitch -- \
-//!     VIDEO.insv (--out <folder> | --video OUT.mp4) [--step 1] [--width PX] [--blend 2] \
-//!     [--back-lens auto|factory|back_lens.txt] [--distance M] [--frame SIDE_BY_SIDE.jpg]
+//!     VIDEO.insv (--out <folder> | --video OUT.mp4) [--step 1] [--width PX] [--seam morph] \
+//!     [--blend DEG] [--back-lens auto|factory|back_lens.txt] [--distance M] \
+//!     [--frame SIDE_BY_SIDE.jpg]
 //! ```
 //!
 //! Frames are decoded with ffmpeg (on `PATH`), both lenses side by side,
@@ -24,7 +25,10 @@
 //! and a file from the `back_lens.txt` a `gsplat_photos --insv` run wrote
 //! (docs/insta360_lens.md). The lenses are 3.2 cm apart, so where they meet
 //! things at different distances cannot all line up: the seam is stitched
-//! for the distance the fit finds typical along it (`--distance` sets it).
+//! for the distance the fit finds typical along it (`--distance` sets it),
+//! and in each frame the two lenses are matched along the seam and one
+//! morphed into the other across it (`--seam morph`;
+//! `dual_fisheye::SeamDisparity`), so things nearer or farther show once.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -34,7 +38,7 @@ use std::time::Instant;
 use nalgebra::{Matrix3, Vector3};
 use visloc_gsplat_train::dual_fisheye::{
     back_lens_rotation, factory_back_lens_rotation, fit_back_lens, seam_pairs, stitch_equirect,
-    FisheyeLens, SeamFit, SeamPair,
+    FisheyeLens, SeamDisparity, SeamFit, SeamPair,
 };
 use visloc_io::insv::read_insv_telemetry;
 
@@ -47,7 +51,10 @@ An Insta360 video's dual-fisheye frames -> equirectangular (360°) frames.
   --video OUT.mp4    encode the stitched frames into one video with ffmpeg instead
   --step 1           stitch every N-th frame
   --width PX         panorama width (height = width / 2; default: the lenses' resolution)
-  --blend 2          degrees over which the two lenses are mixed at the seam
+  --seam morph       morph: match the lenses along the seam in each frame and morph one
+                     into the other across it; blend: only mix them
+  --blend DEG        degrees over which the two lenses meet at the seam (default: 6 with
+                     --seam morph, 2 with blend)
   --back-lens auto   the back lens's rotation: auto (fitted along the seam in 16 frames),
                      factory (the recorded angles alone), or a gsplat_photos --insv run's
                      back_lens.txt
@@ -73,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut video: Option<PathBuf> = None;
     let (mut out, mut encode): (Option<PathBuf>, Option<PathBuf>) = (None, None);
     let mut frames: Vec<PathBuf> = Vec::new();
-    let (mut step, mut width, mut blend, mut quality) = (1u32, None, 2.0f64, 92u8);
+    let (mut step, mut width, mut blend, mut quality) = (1u32, None, None::<f64>, 92u8);
+    let mut morph = true;
     let mut back_lens = String::from("auto");
     let mut distance: Option<f64> = None;
     while let Some(a) = args.next() {
@@ -84,7 +92,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--frame" => frames.push(PathBuf::from(next()?)),
             "--step" => step = next()?.parse::<u32>()?.max(1),
             "--width" => width = Some(next()?.parse::<u32>()?),
-            "--blend" => blend = next()?.parse()?,
+            "--blend" => blend = Some(next()?.parse()?),
+            "--seam" => {
+                morph = match next()?.as_str() {
+                    "morph" => true,
+                    "blend" => false,
+                    s => return Err(format!("--seam morph or blend, not {s}").into()),
+                }
+            }
             "--quality" => quality = next()?.parse()?,
             "--back-lens" => back_lens = next()?,
             "--distance" => distance = Some(next()?.parse()?),
@@ -112,7 +127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let factory = factory_back_lens_rotation(front, back);
     // The back lens's centre in the front lens's frame, as recorded.
     let baseline = Vector3::from(back.translation);
-    let blend = blend.max(0.0).to_radians();
+    let blend = blend
+        .unwrap_or(if morph { 6.0 } else { 2.0 })
+        .max(0.0)
+        .to_radians();
     // The back lens's rotation and optical centre, and the shift along the
     // parallax its seam is stitched with.
     let fit = |pairs: &[SeamPair], lens: &FisheyeLens| -> BackLens {
@@ -200,7 +218,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let t = Instant::now();
-            let pano = stitch_equirect(img, &lenses, &rotation, &parallax, w, blend);
+            let seam = morph
+                .then(|| SeamDisparity::measure(img, &lenses, &rotation, &parallax, &baseline));
+            let pano = stitch_equirect(img, &lenses, &rotation, &parallax, w, blend, seam.as_ref());
             let name = dir
                 .join(path.file_stem().unwrap_or_default())
                 .with_extension("jpg");
@@ -276,7 +296,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t = Instant::now();
     let mut n = 0u64;
     decode_frames(&video, size, stack, step as u64, |index, img| {
-        let pano = stitch_equirect(&img, &lenses, &rotation, &parallax, w, blend);
+        let seam =
+            morph.then(|| SeamDisparity::measure(&img, &lenses, &rotation, &parallax, &baseline));
+        let pano = stitch_equirect(&img, &lenses, &rotation, &parallax, w, blend, seam.as_ref());
         if let Some(dir) = &out {
             save_jpeg(&pano, &dir.join(format!("{index:06}.jpg")), quality)?;
         }

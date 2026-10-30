@@ -294,6 +294,16 @@ All notable changes to `visloc-rs` will be documented here.
   - On five OverMaps360 walks the two lenses then put the same thing
     0.12–0.18° apart along the seam (median), against 0.85–1.15° with the
     recorded angles stitched far away.
+  - Each frame's two lenses are matched along the seam and one morphed
+    into the other across a 6° band (`dual_fisheye::SeamDisparity`,
+    `stitch_equirect`'s `disparity`), so things nearer or farther than the
+    stitching distance show once: census costs and semi-global matching on
+    strips rectified about the lenses' baseline. On the five walks' frames
+    the fit did not use, the lenses then put the same thing 0.033–0.038°
+    apart within 5° of the seam (median), against 0.11–0.19° with one
+    distance; about 0.6 s more per frame. `--seam blend` only mixes the
+    lenses. Exposure is not matched: in the overlap the lenses agree
+    within 1.7% per colour.
   - `--back-lens factory` or a `gsplat_photos --insv` run's
     `back_lens.txt` skip the fit; `--frame` stitches side-by-side images.
 - **`gsplat_photos --insv`: Insta360 video straight to a metric model.**

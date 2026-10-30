@@ -109,7 +109,8 @@ left, as ffmpeg's `hstack` of the video's two streams produces.
   cameras stop with an error.
 - **Panoramas instead.** The `insv_stitch` example stitches the two
   lenses into equirectangular frames or video, for `--equirect` or any
-  360° viewer ([insta360_lens.md](insta360_lens.md#stitching)).
+  360° viewer, morphing one lens into the other along the seam
+  ([insta360_lens.md](insta360_lens.md#stitching)).
 
 ## Metric scale from the camera's IMU
 

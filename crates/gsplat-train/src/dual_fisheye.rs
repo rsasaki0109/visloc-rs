@@ -298,9 +298,12 @@ pub fn lens_face(
 /// infinity), and the back lens samples where it sees that sphere. Each
 /// direction takes the lens whose axis is nearer; within `blend` radians of
 /// where both are as far, the two are mixed, linearly across the band.
-/// Bilinear samples, no filtering: make `width` about the lenses'
-/// resolution (`2π` times [`FisheyeLens::axial_resolution`]) or downscale
-/// the frame first.
+/// With a `disparity` measured on the same frame (with the same `back` and
+/// `parallax`), the band also morphs one lens into the other: a thing the
+/// two see apart moves from where the front lens sees it to where the back
+/// lens does, so it shows once, wherever it is. Bilinear samples, no
+/// filtering: make `width` about the lenses' resolution (`2π` times
+/// [`FisheyeLens::axial_resolution`]) or downscale the frame first.
 pub fn stitch_equirect(
     frame: &image::RgbImage,
     lenses: &[FisheyeLens; 2],
@@ -308,6 +311,7 @@ pub fn stitch_equirect(
     parallax: &Vector3<f64>,
     width: u32,
     blend: f64,
+    disparity: Option<&SeamDisparity>,
 ) -> image::RgbImage {
     use std::f64::consts::PI;
     let (w, h) = (width.max(2) & !1, width.max(2) / 2);
@@ -317,6 +321,7 @@ pub fn stitch_equirect(
         return pano;
     }
     let to_back = back.transpose();
+    let seen = SEEN_DEG.to_radians().cos();
     let row_bytes = 3 * w as usize;
     let rows_per = (h as usize).div_ceil(
         std::thread::available_parallelism()
@@ -344,25 +349,46 @@ pub fn stitch_equirect(
                         } else {
                             0.0
                         };
-                        let mut rgb = [0.0; 3];
-                        for (lens, weight, dir, x0) in [
-                            (&lenses[0], w_front, &ray, 0),
-                            (&lenses[1], 1.0 - w_front, &ray_back, size),
-                        ] {
-                            if weight <= 0.0 {
-                                continue;
+                        // Across the band, each lens samples where it sees
+                        // what shows here, part of the way to the other's view.
+                        let (ray_front, ray_back) = match disparity {
+                            Some(seam) if w_front > 0.0 && w_front < 1.0 => {
+                                let (u, v) = seam.coordinates(&ray);
+                                let d = seam.disparity(u, v);
+                                let to = seam.at(u, v + w_front * d);
+                                (
+                                    seam.at(u, v - (1.0 - w_front) * d),
+                                    (to_back * (to - parallax)).normalize(),
+                                )
                             }
-                            if let Some(c) = lens
-                                .project(dir)
-                                .and_then(|(px, py)| sample_half(frame, x0, size, px, py))
-                            {
+                            _ => (ray, ray_back),
+                        };
+                        // A lens that does not see there (beyond its image
+                        // circle) leaves it to the other.
+                        let samples = [
+                            (&lenses[0], w_front, &ray_front, 0),
+                            (&lenses[1], 1.0 - w_front, &ray_back, size),
+                        ]
+                        .map(|(lens, weight, dir, x0)| {
+                            let c = (weight > 0.0)
+                                .then(|| lens.project(dir))
+                                .flatten()
+                                .and_then(|(px, py)| sample_half(frame, x0, size, px, py));
+                            (weight, c, dir.z >= seen)
+                        });
+                        let any_seen = samples.iter().any(|(_, c, s)| c.is_some() && *s);
+                        let (mut rgb, mut total) = ([0.0; 3], 0.0);
+                        for (weight, c, s) in samples {
+                            if let Some(c) = c.filter(|_| s || !any_seen) {
                                 for k in 0..3 {
                                     rgb[k] += weight * c[k];
                                 }
+                                total += weight;
                             }
                         }
+                        let total = if total > 0.0 { total } else { 1.0 };
                         for k in 0..3 {
-                            out[k] = rgb[k].round().clamp(0.0, 255.0) as u8;
+                            out[k] = (rgb[k] / total).round().clamp(0.0, 255.0) as u8;
                         }
                     }
                 }
@@ -370,6 +396,516 @@ pub fn stitch_equirect(
         }
     });
     pano
+}
+
+/// How far apart the two lenses see things along their seam, for
+/// [`stitch_equirect`] to morph one lens into the other across it.
+///
+/// The seam's frame turns about the lenses' baseline: a direction is `u`
+/// around it and `v` from the plane across it, towards the front lens's
+/// axis. Where the front lens sees `(u, v)`, the back lens, as
+/// [`stitch_equirect`] samples it, sees the same thing at `(u, v + D)`. The
+/// lenses sit apart along the baseline, so a thing nearer or farther than
+/// the stitching distance moves along `v` only: `D` is the disparity of a
+/// stereo pair rectified about the baseline, which
+/// [`SeamDisparity::measure`] matches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeamDisparity {
+    /// The seam's frame in the front lens's (columns: `u = 0`, `u = π/2`,
+    /// and the baseline towards the front lens).
+    frame: Matrix3<f64>,
+    /// Samples per radian, along and across the seam.
+    per_rad: f64,
+    /// `v` at the top of the first row (radians); rows go towards the back
+    /// lens.
+    top: f64,
+    width: usize,
+    height: usize,
+    /// `D` per sample (radians).
+    values: Vec<f32>,
+}
+
+/// How far across the seam [`SeamDisparity::measure`] looks, either side
+/// (degrees): the lenses both see about 8° either side.
+const SEAM_HALF_DEG: f64 = 7.0;
+/// The largest disparity [`SeamDisparity::measure`] looks for (degrees):
+/// the 3.2 cm baseline's parallax at half a metre.
+const MAX_DISPARITY_DEG: f64 = 3.5;
+/// How far off its axis a lens's samples count as seen (degrees); the
+/// camera blacks out beyond about 98°.
+const SEEN_DEG: f64 = 96.0;
+
+impl SeamDisparity {
+    /// Matches the two lenses of `frame` along their seam, as
+    /// [`stitch_equirect`] takes `frame`, `lenses`, `back` and `parallax`;
+    /// `baseline` is the back lens's centre in the front lens's frame.
+    ///
+    /// Both lenses are rendered into the seam's frame, about 7° either
+    /// side of it at half the lenses' axial resolution, matched by 7 x 7
+    /// census costs aggregated along four paths (semi-global matching) for
+    /// disparities up to 3.5°, and the result smoothed. Where a lens does
+    /// not see, or nothing matches, `D` comes from the neighbours, else 0.
+    pub fn measure(
+        frame: &image::RgbImage,
+        lenses: &[FisheyeLens; 2],
+        back: &Matrix3<f64>,
+        parallax: &Vector3<f64>,
+        baseline: &Vector3<f64>,
+    ) -> Self {
+        let per_rad = 0.5
+            * lenses[0]
+                .axial_resolution()
+                .max(lenses[1].axial_resolution());
+        let top = SEAM_HALF_DEG.to_radians();
+        let width = (2.0 * std::f64::consts::PI * per_rad).round().max(8.0) as usize;
+        let height = (2.0 * top * per_rad).round().max(8.0) as usize;
+        let mut seam = Self {
+            frame: seam_frame(baseline),
+            per_rad,
+            top,
+            width,
+            height,
+            values: vec![0.0; width * height],
+        };
+        let size = frame.height();
+        if frame.width() != 2 * size || size == 0 {
+            return seam;
+        }
+        let [front, back_strip] = seam.render(frame, lenses, back, parallax);
+        let range = (MAX_DISPARITY_DEG.to_radians() * per_rad).round() as usize;
+        let raw = sgm_disparity(&front, &back_strip, width, height, range);
+        seam.values = smooth_disparity(&raw, width, height)
+            .into_iter()
+            .map(|d| (d / per_rad) as f32)
+            .collect();
+        seam
+    }
+
+    /// The front lens's and the back lens's grey seam strips (`NaN` where
+    /// a lens does not see), each sample the mean of 2 x 2 rays.
+    fn render(
+        &self,
+        frame: &image::RgbImage,
+        lenses: &[FisheyeLens; 2],
+        back: &Matrix3<f64>,
+        parallax: &Vector3<f64>,
+    ) -> [Vec<f32>; 2] {
+        let size = frame.height();
+        let to_back = back.transpose();
+        let seen = SEEN_DEG.to_radians().cos();
+        let mut strips = [
+            vec![0f32; self.width * self.height],
+            vec![0f32; self.width * self.height],
+        ];
+        for (k, strip) in strips.iter_mut().enumerate() {
+            par_rows(strip, self.width, |first, rows| {
+                for (r, row) in rows.chunks_mut(self.width).enumerate() {
+                    let j = first + r;
+                    for (i, out) in row.iter_mut().enumerate() {
+                        let mut sum = 0.0;
+                        for (di, dj) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                            let d = self.direction(i as f64 + di, j as f64 + dj);
+                            let ray = if k == 0 {
+                                d
+                            } else {
+                                (to_back * (d - parallax)).normalize()
+                            };
+                            match (ray.z > seen)
+                                .then(|| lenses[k].project(&ray))
+                                .flatten()
+                                .and_then(|(px, py)| {
+                                    sample_half(frame, k as u32 * size, size, px, py)
+                                }) {
+                                Some(c) => sum += 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2],
+                                None => {
+                                    sum = f64::NAN;
+                                    break;
+                                }
+                            }
+                        }
+                        *out = (sum / 4.0) as f32;
+                    }
+                }
+            });
+        }
+        strips
+    }
+
+    /// The direction (front lens's frame) at column `x` and row `y` of the
+    /// grid (pixel centres at `+ 0.5`).
+    fn direction(&self, x: f64, y: f64) -> Vector3<f64> {
+        self.at(x / self.per_rad, self.top - y / self.per_rad)
+    }
+
+    /// `ray`'s `(u, v)` in the seam's frame (radians).
+    fn coordinates(&self, ray: &Vector3<f64>) -> (f64, f64) {
+        let l = self.frame.transpose() * ray;
+        (l.y.atan2(l.x), (l.z / l.norm()).clamp(-1.0, 1.0).asin())
+    }
+
+    /// The direction at `(u, v)` (front lens's frame).
+    fn at(&self, u: f64, v: f64) -> Vector3<f64> {
+        self.frame * Vector3::new(v.cos() * u.cos(), v.cos() * u.sin(), v.sin())
+    }
+
+    /// `D` at `(u, v)` (radians), bilinear; the nearest row beyond the
+    /// grid.
+    fn disparity(&self, u: f64, v: f64) -> f64 {
+        let x = (u * self.per_rad - 0.5).rem_euclid(self.width as f64);
+        let y = ((self.top - v) * self.per_rad - 0.5).clamp(0.0, (self.height - 1) as f64);
+        let (x0, y0) = (x.floor() as usize % self.width, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1) % self.width, (y0 + 1).min(self.height - 1));
+        let (fx, fy) = (x - x.floor(), y - y.floor());
+        let p = |x: usize, y: usize| self.values[y * self.width + x] as f64;
+        (p(x0, y0) * (1.0 - fx) + p(x1, y0) * fx) * (1.0 - fy)
+            + (p(x0, y1) * (1.0 - fx) + p(x1, y1) * fx) * fy
+    }
+
+    /// `D` at the direction `ray` (front lens's frame; radians): how much
+    /// farther towards the front lens's axis the back lens sees what the
+    /// front lens sees along `ray`.
+    pub fn disparity_at(&self, ray: &Vector3<f64>) -> f64 {
+        let (u, v) = self.coordinates(ray);
+        self.disparity(u, v)
+    }
+}
+
+/// The seam's frame about `baseline` (columns: `u = 0` towards the front
+/// lens's x, `u = π/2`, and the baseline towards the front lens).
+fn seam_frame(baseline: &Vector3<f64>) -> Matrix3<f64> {
+    let e3 = if baseline.norm() > 0.0 {
+        -baseline.normalize()
+    } else {
+        Vector3::z()
+    };
+    let e1 = (Vector3::x() - e3 * e3.x).normalize();
+    Matrix3::from_columns(&[e1, e3.cross(&e1), e3])
+}
+
+/// `f` of every index below `width * height`, a block of rows per thread.
+fn par_map<T: Send + Clone + Default>(
+    width: usize,
+    height: usize,
+    f: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let mut out = vec![T::default(); width * height];
+    par_rows(&mut out, width, |first, rows| {
+        for (k, o) in rows.iter_mut().enumerate() {
+            *o = f(first * width + k);
+        }
+    });
+    out
+}
+
+/// Hands `f` blocks of whole rows of `data` (`unit` items each), one per
+/// thread, with the index of each block's first row.
+fn par_rows<T: Send>(data: &mut [T], unit: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    let rows = data.len() / unit.max(1);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let per = rows.div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (k, block) in data.chunks_mut(per * unit.max(1)).enumerate() {
+            let f = &f;
+            scope.spawn(move || f(k * per, block));
+        }
+    });
+}
+
+/// Census window of [`sgm_disparity`] (odd).
+const CENSUS: usize = 7;
+/// Semi-global matching's penalties for a disparity step of one and of
+/// more, in census bits.
+const SGM_P1: u16 = 8;
+const SGM_P2: u16 = 64;
+/// How many samples before its first a path around the strip starts.
+const SGM_WARM: usize = 128;
+/// How much more (percent) the next best disparity, not next to the best,
+/// must cost for the best to count.
+const SGM_UNIQUE: u32 = 5;
+
+/// The disparity (samples, sub-sample) at each sample of `a` against `b`
+/// (`width x height`, `NaN` where unseen): `a(x, y)` matches
+/// `b(x, y - d)` for `d` within `±range`, the strips wrapping around in
+/// `x`. `NaN` where `a`'s census is incomplete.
+fn sgm_disparity(a: &[f32], b: &[f32], width: usize, height: usize, range: usize) -> Vec<f64> {
+    let (ca, cb) = (census(a, width, height), census(b, width, height));
+    let nd = 2 * range + 1;
+    let max_cost = (CENSUS * CENSUS - 1) as u8;
+    // Matching costs, `nd` per sample. A disparity that leaves what `b`
+    // sees costs the sample's mean, favouring none.
+    let mut cost = vec![max_cost / 2; width * height * nd];
+    par_rows(&mut cost, width * nd, |first, rows| {
+        for (r, row) in rows.chunks_mut(width * nd).enumerate() {
+            let y = first + r;
+            for x in 0..width {
+                let Some(ca) = ca[y * width + x] else {
+                    continue;
+                };
+                let costs = &mut row[x * nd..(x + 1) * nd];
+                let (mut sum, mut seen) = (0u32, 0u32);
+                for (k, c) in costs.iter_mut().enumerate() {
+                    let yb = y as isize + range as isize - k as isize;
+                    *c = match (0..height as isize)
+                        .contains(&yb)
+                        .then(|| cb[yb as usize * width + x])
+                        .flatten()
+                    {
+                        Some(cb) => {
+                            let c = (ca ^ cb).count_ones() as u8;
+                            sum += c as u32;
+                            seen += 1;
+                            c
+                        }
+                        None => u8::MAX,
+                    };
+                }
+                if seen > 0 {
+                    let mean = (sum / seen) as u8;
+                    for c in costs.iter_mut().filter(|c| **c == u8::MAX) {
+                        *c = mean;
+                    }
+                }
+            }
+        }
+    });
+    // Aggregated along the rows both ways, then the columns both ways.
+    let mut total = vec![0u16; width * height * nd];
+    par_rows(&mut total, width * nd, |first, rows| {
+        let mut prev = vec![0u16; nd];
+        let mut here = vec![0u16; nd];
+        for (r, row) in rows.chunks_mut(width * nd).enumerate() {
+            let y = first + r;
+            let costs = &cost[y * width * nd..(y + 1) * width * nd];
+            for forward in [true, false] {
+                prev.iter_mut().for_each(|p| *p = 0);
+                // The strip wraps around: each path starts a stretch early,
+                // so it has history where it starts counting.
+                let warm = width.min(SGM_WARM);
+                for step in 0..width + warm {
+                    let i = (width - warm + step) % width;
+                    let x = if forward { i } else { width - 1 - i };
+                    sgm_step(&costs[x * nd..(x + 1) * nd], &prev, &mut here);
+                    if step >= warm {
+                        for (t, h) in row[x * nd..(x + 1) * nd].iter_mut().zip(&here) {
+                            *t += h;
+                        }
+                    }
+                    std::mem::swap(&mut prev, &mut here);
+                }
+            }
+        }
+    });
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let block = width.div_ceil(threads);
+    let columns: Vec<Vec<u16>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..width)
+            .step_by(block)
+            .map(|x0| {
+                let cost = &cost;
+                scope.spawn(move || {
+                    let x1 = (x0 + block).min(width);
+                    let n = (x1 - x0) * nd;
+                    let mut sums = vec![0u16; height * n];
+                    let mut prev = vec![0u16; n];
+                    let mut here = vec![0u16; n];
+                    for down in [true, false] {
+                        prev.iter_mut().for_each(|p| *p = 0);
+                        for step in 0..height {
+                            let y = if down { step } else { height - 1 - step };
+                            let costs = &cost[(y * width + x0) * nd..(y * width + x1) * nd];
+                            for c in 0..x1 - x0 {
+                                let s = c * nd..(c + 1) * nd;
+                                sgm_step(&costs[s.clone()], &prev[s.clone()], &mut here[s]);
+                            }
+                            for (t, h) in sums[y * n..(y + 1) * n].iter_mut().zip(&here) {
+                                *t += h;
+                            }
+                            std::mem::swap(&mut prev, &mut here);
+                        }
+                    }
+                    sums
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("sgm thread"))
+            .collect()
+    });
+    for (b, sums) in columns.iter().enumerate() {
+        let x0 = b * block;
+        let n = sums.len() / height.max(1);
+        for y in 0..height {
+            let dst = &mut total[(y * width + x0) * nd..(y * width + x0) * nd + n];
+            for (t, s) in dst.iter_mut().zip(&sums[y * n..(y + 1) * n]) {
+                *t += s;
+            }
+        }
+    }
+    // The cheapest disparity, refined by a parabola through its neighbours;
+    // none where another, not next to it, costs about as little (nothing to
+    // match, as in a blown-out sky).
+    par_map(width, height, |p| {
+        if ca[p].is_none() {
+            return f64::NAN;
+        }
+        let s = &total[p * nd..(p + 1) * nd];
+        let (k, best) = s
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, v)| **v)
+            .map_or((range, 0), |(k, v)| (k, *v as u32));
+        let second = s
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| j.abs_diff(k) > 1)
+            .map(|(_, v)| *v as u32)
+            .min()
+            .unwrap_or(u32::MAX);
+        if second * 100 <= best * (100 + SGM_UNIQUE) {
+            return f64::NAN;
+        }
+        let mut d = k as f64;
+        if k > 0 && k + 1 < nd {
+            let (l, c, r) = (s[k - 1] as f64, s[k] as f64, s[k + 1] as f64);
+            let curve = l - 2.0 * c + r;
+            if curve > 0.0 {
+                d += 0.5 * (l - r) / curve;
+            }
+        }
+        d - range as f64
+    })
+}
+
+/// One step of a semi-global matching path: `here` from this sample's
+/// `costs` and the path's previous sample.
+fn sgm_step(costs: &[u8], prev: &[u16], here: &mut [u16]) {
+    let best = prev.iter().copied().min().unwrap_or(0);
+    let n = costs.len();
+    for k in 0..n {
+        let mut m = prev[k].min(best + SGM_P2);
+        if k > 0 {
+            m = m.min(prev[k - 1] + SGM_P1);
+        }
+        if k + 1 < n {
+            m = m.min(prev[k + 1] + SGM_P1);
+        }
+        here[k] = costs[k] as u16 + m - best;
+    }
+}
+
+/// The `CENSUS x CENSUS` census transform of `img` (`width x height`): a
+/// bit per neighbour, set when it is darker than the centre; `None` where
+/// the window leaves the image or meets `NaN`. Wraps around in `x`.
+fn census(img: &[f32], width: usize, height: usize) -> Vec<Option<u64>> {
+    let r = CENSUS / 2;
+    par_map(width, height, |p| {
+        let (x, y) = (p % width, p / width);
+        let centre = img[p];
+        if centre.is_nan() || y < r || y + r >= height {
+            return None;
+        }
+        let mut bits = 0u64;
+        for dy in 0..CENSUS {
+            for dx in 0..CENSUS {
+                if dx == r && dy == r {
+                    continue;
+                }
+                let v = img[(y + dy - r) * width + (x + width + dx - r) % width];
+                if v.is_nan() {
+                    return None;
+                }
+                bits = (bits << 1) | (v < centre) as u64;
+            }
+        }
+        Some(bits)
+    })
+}
+
+/// `raw` disparities (`NaN` where none) median-filtered, holes filled
+/// from their neighbours (else 0), and smoothed.
+fn smooth_disparity(raw: &[f64], width: usize, height: usize) -> Vec<f64> {
+    // 5 x 5 median of the known values.
+    let r = 2isize;
+    let median: Vec<f64> = par_map(width, height, |p| {
+        let (x, y) = ((p % width) as isize, (p / width) as isize);
+        let (mut window, mut n) = ([0.0; 25], 0);
+        for dy in -r..=r {
+            let yy = y + dy;
+            if !(0..height as isize).contains(&yy) {
+                continue;
+            }
+            for dx in -r..=r {
+                let xx = (x + dx).rem_euclid(width as isize);
+                let v = raw[yy as usize * width + xx as usize];
+                if v.is_finite() {
+                    window[n] = v;
+                    n += 1;
+                }
+            }
+        }
+        if n < 5 {
+            return f64::NAN;
+        }
+        let window = &mut window[..n];
+        window.sort_by(f64::total_cmp);
+        window[n / 2]
+    });
+    // Normalised box blurs: a light one where most is known, a wide one to
+    // fill the holes.
+    let (mut value, mut weight): (Vec<f64>, Vec<f64>) = median
+        .iter()
+        .map(|&v| if v.is_finite() { (v, 1.0) } else { (0.0, 0.0) })
+        .unzip();
+    for radius in [2, 2] {
+        value = box_blur(&value, width, height, radius);
+        weight = box_blur(&weight, width, height, radius);
+    }
+    let (mut wide, mut wide_weight) = (value.clone(), weight.clone());
+    for radius in [8, 8, 8] {
+        wide = box_blur(&wide, width, height, radius);
+        wide_weight = box_blur(&wide_weight, width, height, radius);
+    }
+    (0..width * height)
+        .map(|p| {
+            if weight[p] > 0.5 {
+                value[p] / weight[p]
+            } else if wide_weight[p] > 1e-3 {
+                wide[p] / wide_weight[p]
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// A `(2 radius + 1)`-wide box blur of `img`, wrapping in `x` and clamped
+/// in `y`.
+fn box_blur(img: &[f64], width: usize, height: usize, radius: usize) -> Vec<f64> {
+    let n = (2 * radius + 1) as f64;
+    let mut rows = vec![0.0; img.len()];
+    for y in 0..height {
+        let line = &img[y * width..(y + 1) * width];
+        let mut sum: f64 = (0..=2 * radius)
+            .map(|k| line[(k + width - radius) % width])
+            .sum();
+        for x in 0..width {
+            rows[y * width + x] = sum / n;
+            sum += line[(x + radius + 1) % width] - line[(x + width - radius) % width];
+        }
+    }
+    let mut out = vec![0.0; img.len()];
+    for x in 0..width {
+        for y in 0..height {
+            let mut sum = 0.0;
+            for k in 0..=2 * radius {
+                let yy = (y + k).saturating_sub(radius).min(height - 1);
+                sum += rows[yy * width + x];
+            }
+            out[y * width + x] = sum / n;
+        }
+    }
+    out
 }
 
 /// A direction seen by both lenses: its ray in the front lens's frame and
@@ -786,7 +1322,7 @@ mod tests {
             sum / n
         };
         let none = Vector3::zeros();
-        let pano = stitch_equirect(&frame, &lenses, &back, &none, 1024, 2f64.to_radians());
+        let pano = stitch_equirect(&frame, &lenses, &back, &none, 1024, 2f64.to_radians(), None);
         assert_eq!((pano.width(), pano.height()), (1024, 512));
         let mean = error(&pano);
         // About a level of interpolation error, nothing like a misplaced seam.
@@ -799,6 +1335,7 @@ mod tests {
             &none,
             1024,
             0.0,
+            None,
         ));
         assert!(plain > 3.0 * mean, "{plain} vs {mean}");
     }
@@ -877,6 +1414,7 @@ mod tests {
             &(centre / radius),
             1024,
             blend,
+            None,
         ));
         let far = seam_error(&stitch_equirect(
             &frame,
@@ -885,9 +1423,186 @@ mod tests {
             &Vector3::zeros(),
             1024,
             blend,
+            None,
         ));
         assert!(near < 2.0, "{near}");
         assert!(far > 3.0 * near, "{far} vs {near}");
+    }
+
+    #[test]
+    fn semi_global_matching_finds_a_shift_across_the_strip() {
+        // A random texture, the second strip shifted by 3 samples on the
+        // left half and by -1.5 on the right.
+        let (w, h) = (160usize, 48usize);
+        let mut seed = 7u64;
+        let mut noise = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let texture: Vec<f32> = (0..w * (h + 20)).map(|_| 255.0 * noise()).collect();
+        // Bilinear along y, the texture's row 10 at y = 0.
+        let at = |x: usize, y: f64| {
+            let y = y + 10.0;
+            let (y0, f) = (y.floor() as usize, y - y.floor());
+            texture[y0 * w + x] * (1.0 - f as f32) + texture[(y0 + 1) * w + x] * f as f32
+        };
+        let shift = |x: usize| if x < w / 2 { 3.0 } else { -1.5 };
+        let a: Vec<f32> = (0..w * h).map(|p| at(p % w, (p / w) as f64)).collect();
+        // `a(x, y)` is `b(x, y - d)`.
+        let b: Vec<f32> = (0..w * h)
+            .map(|p| at(p % w, (p / w) as f64 + shift(p % w)))
+            .collect();
+        let d = sgm_disparity(&a, &b, w, h, 6);
+        let mut errors: Vec<f64> = (0..w * h)
+            .filter(|p| {
+                let (x, y) = (p % w, p / w);
+                (8..h - 8).contains(&y) && x % (w / 2) > 4 && x % (w / 2) < w / 2 - 4
+            })
+            .map(|p| (d[p] - shift(p % w)).abs())
+            .collect();
+        errors.sort_by(f64::total_cmp);
+        let median = errors[errors.len() / 2];
+        let p90 = errors[errors.len() * 9 / 10];
+        assert!(median < 0.2 && p90 < 0.5, "{median} {p90}");
+    }
+
+    #[test]
+    fn the_seam_morph_shows_things_once_whatever_their_distance() {
+        // A textured world 1 m away above the lenses' horizontal plane and
+        // 4 m below it, the back lens 3.2 cm behind the front one: no one
+        // stitching distance fits both, the measured disparity does.
+        use std::f64::consts::PI;
+        let size = 768u32;
+        let lens = FisheyeLens::from_insv(&x5_like(), size);
+        let back = back_lens_rotation();
+        let centre = Vector3::new(0.0, 0.0, -0.032);
+        let radius = |d: &Vector3<f64>| if d.y < 0.0 { 1.0 } else { 4.0 };
+        // Random cells about 1-2° wide, by direction from the front lens.
+        let colour = |d: &Vector3<f64>| {
+            let d = d.normalize();
+            let cell = |k: f64, salt: u64| {
+                let q = (d * k).map(|c| c.floor() as i64 as u64);
+                let h = (q.x.wrapping_mul(73856093) ^ q.y.wrapping_mul(19349663))
+                    ^ q.z.wrapping_mul(83492791)
+                    ^ salt;
+                (h.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8
+            };
+            [cell(40.0, 1), cell(57.0, 2), cell(31.0, 3)]
+        };
+        // What the back lens sees along `dir` (front lens's frame): the
+        // nearer of the two surfaces its ray meets where they are.
+        let seen_from_back = |dir: &Vector3<f64>| {
+            [1.0, 4.0]
+                .into_iter()
+                .filter_map(|r: f64| {
+                    let b = centre.dot(dir);
+                    let t = -b + (b * b - centre.norm_squared() + r * r).sqrt();
+                    let p = centre + t * dir;
+                    (radius(&p) == r).then_some((t, p))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, p)| p)
+        };
+        // Each pixel shows the direction of a dense grid nearest its centre.
+        let mut frame = image::RgbImage::new(2 * size, size);
+        let mut nearest = vec![f64::MAX; (size * size) as usize];
+        let (nt, np) = (1100, 3200);
+        for i in 0..nt {
+            for j in 0..np {
+                let th = (i as f64 + 0.5) / nt as f64 * 100f64.to_radians();
+                let ph = (j as f64 + 0.5) / np as f64 * 2.0 * PI;
+                let d = Vector3::new(th.sin() * ph.cos(), th.sin() * ph.sin(), th.cos());
+                let Some((x, y)) = lens.project(&d) else {
+                    continue;
+                };
+                let (xr, yr) = (x.round(), y.round());
+                if xr < 0.0 || yr < 0.0 || xr >= size as f64 || yr >= size as f64 {
+                    continue;
+                }
+                let (xr, yr) = (xr as u32, yr as u32);
+                let off = (x - xr as f64).hypot(y - yr as f64);
+                let slot = &mut nearest[(yr * size + xr) as usize];
+                if off >= *slot {
+                    continue;
+                }
+                *slot = off;
+                frame.put_pixel(xr, yr, image::Rgb(colour(&d)));
+                if let Some(p) = seen_from_back(&(back * d)) {
+                    frame.put_pixel(xr + size, yr, image::Rgb(colour(&p)));
+                }
+            }
+        }
+        let lenses = [lens.clone(), lens];
+        let none = Vector3::zeros();
+        let seam = SeamDisparity::measure(&frame, &lenses, &back, &none, &centre);
+        // The measured disparity against the true one, 3° either side.
+        let mut errors = Vec::new();
+        for y in 0..seam.height {
+            for x in 0..seam.width {
+                let d = seam.direction(x as f64 + 0.5, y as f64 + 0.5);
+                let (u, v) = seam.coordinates(&d);
+                let near_step = (u.abs() - PI / 2.0).abs() > 0.3;
+                if v.abs() > 3f64.to_radians() || !near_step {
+                    continue;
+                }
+                let (_, seen) = seam.coordinates(&(radius(&d) * d - centre));
+                errors.push((seam.values[y * seam.width + x] as f64 - (seen - v)).abs());
+            }
+        }
+        errors.sort_by(f64::total_cmp);
+        let median = errors[errors.len() / 2].to_degrees();
+        assert!(median < 0.2, "{median}°");
+        // The seam's band in the panorama against a single view of the
+        // world: the front lens's for a fixed distance, which leaves the
+        // back lens's view of things at other distances beside it; where
+        // the morph puts each thing, between the two lenses' views, for the
+        // morph (the true disparity, at the front lens's share of the band,
+        // as `stitch_equirect` mixes them).
+        let blend = 6f64.to_radians();
+        let seam_error = |pano: &image::RgbImage, morphed: bool| {
+            let (w, h) = (pano.width(), pano.height());
+            let (mut sum, mut count) = (0.0, 0.0);
+            for y in (h / 8..7 * h / 8).step_by(2) {
+                for x in 0..w {
+                    let lon = (x as f64 + 0.5) / w as f64 * 2.0 * PI - PI;
+                    let lat = PI / 2.0 - (y as f64 + 0.5) / h as f64 * PI;
+                    let d = Vector3::new(lat.cos() * lon.sin(), -lat.sin(), lat.cos() * lon.cos());
+                    if d.z.abs() > 4f64.to_radians().sin() || d.y.abs() < 0.2 {
+                        continue;
+                    }
+                    let shown = if morphed {
+                        let (u, v) = seam.coordinates(&d);
+                        let (_, seen) = seam.coordinates(&(radius(&d) * d - centre));
+                        let off_front = d.z.clamp(-1.0, 1.0).acos();
+                        let off_back = (back.transpose() * d).z.clamp(-1.0, 1.0).acos();
+                        let w_front =
+                            ((off_back - off_front) / (2.0 * blend) + 0.5).clamp(0.0, 1.0);
+                        seam.at(u, v - (1.0 - w_front) * (seen - v))
+                    } else {
+                        d
+                    };
+                    let (want, got) = (colour(&shown), pano.get_pixel(x, y).0);
+                    for c in 0..3 {
+                        sum += (want[c] as f64 - got[c] as f64).abs();
+                        count += 1.0;
+                    }
+                }
+            }
+            sum / count
+        };
+        let stitch = |parallax: &Vector3<f64>, seam: Option<&SeamDisparity>| {
+            stitch_equirect(&frame, &lenses, &back, parallax, 1024, blend, seam)
+        };
+        let morphed = seam_error(&stitch(&none, Some(&seam)), true);
+        for distance in [1.0, 2.0, 4.0, f64::INFINITY] {
+            let fixed = seam_error(&stitch(&(centre / distance), None), false);
+            assert!(
+                morphed < 0.6 * fixed,
+                "{morphed} vs {fixed} at {distance} m"
+            );
+        }
     }
 
     #[test]

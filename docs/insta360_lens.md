@@ -182,12 +182,15 @@ stitches images of the two lenses side by side instead.
   centre to the matches: across the parallax exactly, along it up to one
   shift all matches share, robustly (`dual_fisheye::fit_back_lens`).
 - **Distance.** Where the lenses meet, things at different distances
-  cannot all line up: at 2 m they are 0.9° apart. The shared shift gives
-  the scene's typical distance along the seam, and the back lens samples
-  where it sees a sphere that far away (`--distance M` sets one instead).
-- **Seam.** Each direction takes the lens whose axis is nearer, the two
-  mixed linearly over `--blend` (2°) where they meet. There is no exposure
-  matching or optical flow.
+  cannot all line up on one sphere: at 2 m they are 0.9° apart. The
+  shared shift gives the scene's typical distance along the seam, and the
+  back lens samples where it sees a sphere that far away (`--distance M`
+  sets one instead).
+- **Seam.** Each direction takes the lens whose axis is nearer. Over a
+  band 6° wide where they meet (`--blend`), the two lenses of each frame
+  are matched and one morphed into the other, so what is nearer or
+  farther than that sphere shows once ([below](#the-morph)). `--seam
+  blend` only mixes them, over 2°. There is no exposure matching.
 
 How far apart the two lenses put the same thing along the seam (the
 median over all matches in 40 frames per walk; the fit used 20 of them):
@@ -205,4 +208,50 @@ the centre, leaves 0.33–0.93°. On two walks the shared shift points away
 from the axes, which no distance explains: the lens models disagree a
 little on the scale at the seam there, and the stitch takes that shift all
 the same. On 4 CPU cores the fit takes 1.5–3 minutes for its 16 frames,
-and stitching a frame about 1 s.
+and stitching a frame about 1 s, 1.8 s with the morph.
+
+### The morph
+
+The lenses sit 3.2 cm apart along their axes, so a thing nearer or
+farther than the stitching sphere moves only towards or away from the
+axes between their views. Around the baseline the seam is a rectified
+stereo pair (`dual_fisheye::SeamDisparity`):
+
+- **Strips.** Both lenses are rendered 7° either side of the seam, at half
+  their axial resolution (9 samples per degree on the X5), each row a
+  circle about the baseline.
+- **Matching.** 7 x 7 census costs, aggregated along four paths
+  (semi-global matching), for disparities up to 3.5° (half a metre
+  away), refined to a fraction of a sample; then a 5 x 5 median and a
+  light blur. Where a lens does not see, the neighbours fill in.
+- **Morph.** Across the band each lens samples part of the way towards
+  where the other sees the same thing, the front lens's share falling from
+  1 to 0, so a thing slides from where the front lens sees it to where the
+  back lens does.
+
+How far apart the lenses put the same thing within 5° of the seam, in the
+20 frames per walk the fit did not use (SIFT matches, median / 90th
+percentile; OpenCV's DIS optical flow on the same strips for reference):
+
+| Walk | Matches | One distance | Measured disparity | DIS |
+| --- | ---: | ---: | ---: | ---: |
+| 0313afa5 | 4,640 | 0.175° / 0.42° | 0.038° / 0.20° | 0.040° / 0.17° |
+| 0c05c38a | 7,027 | 0.147° / 0.85° | 0.034° / 0.14° | 0.036° / 0.13° |
+| 3b81dbc3 | 4,199 | 0.189° / 0.60° | 0.035° / 0.17° | 0.036° / 0.14° |
+| 9d2fe9b1 | 7,724 | 0.108° / 0.35° | 0.034° / 0.13° | 0.041° / 0.13° |
+| 5bb3848a | 3,475 | 0.119° / 0.39° | 0.033° / 0.15° | 0.037° / 0.16° |
+
+- **Seen.** 0.035° is about 0.6 px of the panorama. On a painted ceiling
+  about 2 m away (0c05c38a) the plain blend shows its patterns twice,
+  the morph once.
+- **Video.** Over 30 consecutive frames of the park walk, the panorama
+  changes from frame to frame 1.1% more in the band than beside it with
+  the morph, 2.0% more with the plain blend: the morph adds no flicker.
+- **Exposure.** In the overlap the two lenses' brightness agrees within
+  1.7% per colour (front over back 0.986–1.017, the median over the
+  overlap per walk). Across the overlap the ratio drifts by up to 1.7% per
+  degree, each lens darker towards its edge, which the band spreads out.
+- **Test.** A synthetic world 1 m away above the horizon and 4 m below
+  it: the measured disparity is within 0.09° of the true one (median),
+  and the band twice as close to a single view of the world as with any
+  one distance.
