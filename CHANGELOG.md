@@ -131,6 +131,11 @@ All notable changes to `visloc-rs` will be documented here.
     office +3.8 to +4.8 points). With the prior trained on those maps as
     well, the prior-30 hybrid reaches 70.5% (office 59.0% → 66.9%), and
     the splat's own expected-depth mesh 67.7% instead of 63.6%.
+  - Three more scenes end to end (pipes, terrace, kicker): the prior-30
+    hybrid scores 81.2% (76.8 / 87.3 / 79.5%), 75.8% over six scenes. A
+    plain splat can hurt: on pipes its hybrid scores 67.8% against 68.9%
+    for the MVS depth alone. courtyard's meshes were too large for the
+    evaluator on this machine.
   - The wgpu path's pass preparation moved to `pass_setup.rs`, shared by
     both backends, as are their tests (`pass_setup::checks`).
   - The crate's `unsafe_code` lint is `deny` instead of `forbid`; the
