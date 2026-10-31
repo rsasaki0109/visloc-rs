@@ -185,8 +185,10 @@ __global__ void __launch_bounds__(kBlock) tsdf_integrate_kernel(GscCamera cam, T
         if (u < 0.f || vv < 0.f || u >= wf || vv >= hf) continue;
         const size_t pix = size_t(vv) * cam.width + size_t(u);
         const float d = depth[pix * depth_stride];
+        // Unknown (a depth map's hole, override_depth_kernel): no update.
+        if (d < 0.f) continue;
         const size_t i = size_t(blockIdx.x) * kTsdfBV + v;
-        if (d <= 0.f || d > a.max_depth) {
+        if (d == 0.f || d > a.max_depth) {
             // Nothing opaque (or only background) along this pixel: free space.
             if (a.carve && (d <= 0.f || pc[2] < d - a.trunc)) {
                 const float w0 = wt[i], wn = w0 + 1.f;
@@ -306,7 +308,8 @@ __global__ void expected_depth_kernel(uint32_t npix, const float* __restrict__ a
 }
 
 // A depth map's value where it has one (> 0); elsewhere the rendered depth,
-// or none (0) with `only`.
+// or with `only` unknown (-1): a map without a depth at a pixel did not see
+// free space there, so tsdf_integrate_kernel leaves its ray alone.
 __global__ void override_depth_kernel(uint32_t npix, const float* __restrict__ map, bool only,
                                       float* __restrict__ depth_out) {
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -315,7 +318,7 @@ __global__ void override_depth_kernel(uint32_t npix, const float* __restrict__ m
     if (m > 0.f)
         depth_out[i * 2] = m;
     else if (only)
-        depth_out[i * 2] = 0.f;
+        depth_out[i * 2] = -1.f;
 }
 
 uint32_t next_pow2(uint64_t n) {

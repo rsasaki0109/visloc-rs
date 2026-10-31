@@ -35,7 +35,7 @@ The packaging follows the DPVO CUDA kernels:
 | Depth prior: an expected-depth channel and a relative L1 against visloc-mvs's fused depth (`--depth-prior`, opt-in) | Done; ETH3D mesh F1 33.1% → 35.0% at w = 0.1 |
 | Depth-normal loss (2DGS / PGSR style, the wgpu trainer's `normal_weight` / `normal_start`): a normal channel next to the expected depth (`--normal-weight`, opt-in) | Done; no gain on ETH3D (mean F1 32.0% at w = 0.005 against 33.1%) |
 | TSDF fusion and surface nets on the device, in slabs of bounded memory (`gsplat_mesh_cuda --gpu-tsdf`, `mesh::extract_mesh_gpu`) | Done; same ETH3D F1 as the CPU, 4–5x faster, 1/6 the memory |
-| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 70.5% (the prior trained on it too) |
+| MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 70.5% (the prior trained on it too); over six scenes, with map holes unknown and no component filter, 71.4% and 76.5% (MVS depth alone 70.2%) |
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 
@@ -650,10 +650,50 @@ F1 at 2 cm; the means also include terrains, playground and office:
   MVS depth alone.
 - **The MVS depth's mesh keeps much less than its cloud.** On kicker the
   cloud is 79.7% complete, the TSDF mesh of the same depth 31.7%
-  (playground: 56.6% and 33.9%). Not explained yet.
+  (playground: 56.6% and 33.9%). The maps' holes carved the other views'
+  surfaces away ([below](#map-holes-are-unknown)).
 - **courtyard:** the MVS cloud scores 84.3% (90.6 / 78.8, 182 s). Its 1 cm
   meshes are 1.0 to 1.8 GB, and the evaluator ran out of memory on them in
   this 11 GB WSL2 VM, so courtyard has no mesh scores.
+
+#### Map holes are unknown
+
+kicker's maps hold the information: back-projected as points, its fused
+depth scores 82.7% (82.1 / 83.3), more complete than its cloud. The TSDF
+lost it in two places.
+
+- **The maps' holes carved free space.** A pixel without a surface carves
+  its whole ray as free space, which is right for the splat's depth: 0
+  means nothing opaque there. A map's 0 means that the pixel's depth was
+  not confirmed by other views, and two thirds to three quarters of each
+  view's pixels are 0 (playground, office). Fused alone
+  (`--depth-maps-only`), each hole erased the surfaces that other views
+  had seen along its ray. A map's hole is now unknown: it adds no surface
+  and carves nothing.
+- **The component filter dropped real surface.** It removes connected
+  pieces under 500 triangles, which are floaters in a splat's mesh. In
+  the MVS depth's mesh they are mostly pieces of surface. With
+  `--depth-maps`, `gsplat_mesh_cuda`'s `--min-component` now defaults to
+  0.
+
+F1 at 2 cm, before → after. The hybrids fill the holes from the splat, so
+only the filter changes them:
+
+| Mesh | terrains | playground | office | pipes | terrace | kicker | mean |
+|---|---|---|---|---|---|---|---|
+| MVS depth only | 74.7 → **81.6%** | 48.6 → **57.9%** | 42.4 → 49.2% | 68.9 → 70.6% | 85.5 → 86.8% | 47.8 → **75.0%** | 61.3 → **70.2%** |
+| MVS + plain splat | 79.0 → 79.7% | 64.7 → 65.6% | 48.8 → 52.1% | 67.8 → 68.5% | 87.6 → 87.6% | 72.5 → 75.0% | 70.1 → 71.4% |
+| MVS + prior-30 splat | 79.9 → 80.2% | 64.5 → 65.3% | 66.9 → 67.2% | 76.8 → 78.6% | 87.3 → 87.4% | 79.5 → 80.4% | 75.8 → **76.5%** |
+
+- **Each change on its own** (MVS depth only): the filter off with holes
+  still carving scores 67.0% on average, and holes unknown with the filter
+  on 66.8%. Together they score 70.2%.
+- **Holes unknown is not better everywhere.** With the filter off, it
+  gains 17.8 points on kicker and 4.3 on terrains, but loses 1.6 on office
+  and 2.7 on pipes: there the carving also removed wrong depths.
+- **terrains' MVS depth alone now beats both hybrids** (81.6% against
+  80.2%). On the other scenes the better hybrid still adds 0.8 (terrace)
+  to 18.0 points (office).
 
 ## TSDF on the GPU
 
