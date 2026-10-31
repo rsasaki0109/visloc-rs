@@ -1253,6 +1253,63 @@ diagnosis only):
 A quarter of the drift goes, the rest stays: it is the VIO's short window,
 which the chain's matches and revisits take out, not its calibration.
 
+### A device's gyroscope correction
+
+The rectified gyroscope still leaves a correction that depends on the device.
+Fitted against the pseudo-GT's rotation changes over about 1 s (diagnosis
+only): a symmetric correction, ω ← (I + δM) ω, with three axis scales and
+three non-orthogonality terms. It is linearized around the measured
+integration, with a bias per 60 s and a time offset. The antisymmetric part
+is left out, since the fixed rotation between the IMU and the pseudo-GT's body
+absorbs it.
+
+| Sequence | Device | Scale x / y / z | Non-orthogonality xy / xz | Time offset | Residual, before → after |
+|---|---|---|---|---:|---|
+| sequence_1_19 | 1WM09370081264 | +0.13 / −0.01 / **+0.22 %** | −1.04 / −0.84 mrad | +0.6 ms | 0.229° → 0.115° |
+| sequence_1_20 | 1WM09370081264 | +0.12 / −0.07 / **+0.19 %** | −1.12 / −0.64 mrad | +0.5 ms | 0.219° → 0.106° |
+| R_11_5cp | 1WM093701G1276 | −0.23 / −0.21 / **−0.13 %** | −0.99 / −0.89 mrad | +1.0 ms | 0.287° → 0.134° |
+| R_12_10cp | 1WM093701G1276 | −0.19 / −0.20 / **−0.15 %** | −0.85 / −0.75 mrad | +1.1 ms | 0.259° → 0.125° |
+| sequence_2_11 | 1WM093701G1276 | −0.02 / −0.04 / **−0.13 %** | −0.48 / −0.90 mrad | +1.1 ms | 0.212° → 0.120° |
+| sequence_3_18 | 1WM093701G1276 | +0.01 / −0.03 / **−0.13 %** | −0.54 / −0.94 mrad | +1.4 ms | 0.252° → 0.130° |
+| sequence_4_10 | 1WM093701G1276 | −0.12 / −0.15 / **−0.13 %** | −0.63 / −0.32 mrad | +0.4 ms | 0.180° → 0.145° |
+| sequence_4_11 | 1WM093701G1276 | −0.16 / −0.17 / **−0.12 %** | −0.49 / −0.72 mrad | +0.4 ms | 0.183° → 0.128° |
+
+The z axis's scale splits by device: +0.19 … +0.22 % on 1WM09370081264,
+−0.12 … −0.15 % on all six sequences of 1WM093701G1276. The biases and the
+time offset alone take most of the residual down (sequence_3_18: 0.133°,
+sequence_1_20: 0.136°).
+
+The VIO takes the correction well. With a correction fitted on the device's
+other sequences (leave one out: sequence_1_19's for 1_20, the mean of the
+other five for 1WM093701G1276), CP Score of the VIO alone and its heading
+change over 256 s:
+
+| Sequence | Without | With the device's correction |
+|---|---:|---:|
+| sequence_1_20 | 33.55 (−2.79°) | **40.12** (−1.56°) |
+| sequence_3_18 | 19.94 (+4.24°) | **26.38** (+2.79°) |
+| sequence_4_11 | 41.95 (−1.78°) | **53.83** (−0.99°) |
+
+The chain does not. With the correction in the VIO that starts it, in the IMU
+it integrates, or in both (CP Score; the chain repeats its results exactly for
+the same inputs, so every difference is the correction's):
+
+| Sequence | Neither | The VIO | The chain's IMU | Both |
+|---|---:|---:|---:|---:|
+| sequence_1_20 | **88.65** | 77.94 | 77.62 | 79.04 |
+| sequence_2_11 | **89.25** | 84.03 | 83.37 | 84.24 |
+| sequence_3_18 | 54.27 | 53.83 | 58.15 | **58.18** |
+| sequence_4_10 | **59.80** | 47.53 | 57.87 | 56.43 |
+| sequence_4_11 | 71.07 | 66.51 | **73.40** | 69.87 |
+| **Mean** | **72.61** | 65.97 | 70.08 | 69.55 |
+
+The device's correction is not kept. What it shows is how far the chain moves
+when its input moves a little. A sequence changes by up to 11 points.
+sequence_1_20 and 2_11, near 89, lose 5–11 whatever changes, and
+sequence_3_18 gains. On five to eight training sequences, gains of 2–3 points
+in the mean cannot be told from that (and submission 6's did not carry over to
+the test set, [lamaria_test_results.md](lamaria_test_results.md)).
+
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
