@@ -7,7 +7,7 @@
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
-//!     [--frame-step 10] [--imu FILE [--imu-frame-period S]]
+//!     [--frame-step 10] [--insv-calibrate | --insv-lenses lenses.txt] [--imu FILE [--imu-frame-period S]]
 //! ```
 //!
 //! SIFT runs on the GPU (`visloc_sift_gpu::VlfeatSiftGpu`, an f32 port of
@@ -31,6 +31,11 @@
 //! scales the model to metres (docs/photos_to_splat.md). Without
 //! `--images`, every `--frame-step`-th frame is cut from the video with
 //! ffmpeg into `<out>/frames` (kept and reused by later runs).
+//! `--insv-calibrate` reconstructs twice: first into `<out>/calibration`,
+//! from which both lenses' optical centres and focal lengths are
+//! calibrated (`<out>/lenses.txt`), then with the faces cut from the
+//! calibrated lenses; `--insv-lenses` takes such a `lenses.txt` instead
+//! (docs/insta360_lens.md).
 //!
 //! SfM from `visloc_gsplat_train::photos` (EXIF focal, SIFT, GPU matching,
 //! the COLMAP-port mapper, intrinsics refinement), brush-strategy training,
@@ -44,10 +49,11 @@ use visloc_gsplat_core::ply::save_ply;
 use visloc_gsplat_render::GpuContext;
 use visloc_gsplat_train::dataset::load_view_rgb_mask;
 use visloc_gsplat_train::dual_fisheye::extract_dual_fisheye_frames;
+use visloc_gsplat_train::dual_fisheye::LensCalibration;
 use visloc_gsplat_train::init::seed_scene;
 use visloc_gsplat_train::mesh::{extract_from_splat, MeshOptions};
 use visloc_gsplat_train::metrics::psnr_masked;
-use visloc_gsplat_train::photos::{build_photo_dataset, PhotoSfmConfig};
+use visloc_gsplat_train::photos::{build_photo_dataset, calibrate_insv_lenses, PhotoSfmConfig};
 use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
 const USAGE: &str = "\
@@ -85,6 +91,10 @@ SfM:
                            its IMU scales the model to metres. Without --images, the frames
                            are cut with ffmpeg into <out>/frames
   --frame-step 10          with --insv and no --images: every N-th video frame
+  --insv-calibrate         with --insv: reconstruct once into <out>/calibration, calibrate
+                           both lenses' optical centres and focal lengths from it
+                           (<out>/lenses.txt), then reconstruct with the calibrated lenses
+  --insv-lenses FILE       with --insv: cut the faces from the lenses in this lenses.txt
 metric scale (video frames named by frame number):
   --imu FILE               IMU log of the camera (Insta360 .insv, or CSV: SI, EuRoC or
                            OverMaps360 counts);
@@ -107,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut normal_weight = 0.0f32;
     let mut appearance = false;
     let mut frame_step = 10u32;
+    let mut insv_calibrate = false;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -164,6 +175,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Scale the model to metres from the camera's IMU log.
             "--imu" => sfm.imu = Some(PathBuf::from(next()?)),
             "--insv" => sfm.insv = Some(PathBuf::from(next()?)),
+            "--insv-calibrate" => insv_calibrate = true,
+            "--insv-lenses" => {
+                let path = PathBuf::from(next()?);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                sfm.insv_lenses = Some(
+                    LensCalibration::from_text(&text)
+                        .map_err(|e| format!("{}: {e}", path.display()))?,
+                );
+            }
             "--frame-step" => frame_step = next()?.parse()?,
             "--imu-frame-period" => sfm.imu_frame_period = Some(next()?.parse()?),
             "--no-mesh" => mesh = false,
@@ -203,6 +224,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (None, None) => return Err("--images <folder> is required (--help for usage)".into()),
     };
     let t0 = Instant::now();
+    if insv_calibrate {
+        if sfm.insv.is_none() {
+            return Err("--insv-calibrate needs --insv".into());
+        }
+        let first = out.join("calibration");
+        std::fs::create_dir_all(&first)?;
+        println!(
+            "insv: reconstructing into {} to calibrate the lenses",
+            first.display()
+        );
+        build_photo_dataset(&images, &first, &sfm, &mut |m: &str| println!("{m}"))?;
+        let cal = calibrate_insv_lenses(&first, &sfm, &mut |m: &str| println!("{m}"))?;
+        std::fs::write(out.join("lenses.txt"), cal.to_text())?;
+        sfm.insv_lenses = Some(cal);
+        println!(
+            "insv: reconstructing with the calibrated lenses ({:.1} s so far)",
+            t0.elapsed().as_secs_f64()
+        );
+    }
 
     let (dataset, points, report) =
         build_photo_dataset(&images, &out, &sfm, &mut |m: &str| println!("{m}"))?;
