@@ -317,9 +317,10 @@ All notable changes to `visloc-rs` will be documented here.
     and the points. `photos::calibrate_insv_lenses` feeds it a run's
     observations and SIFT matches along the seam, which pin the two
     centres to each other.
-  - On three OverMaps360 walks the camera track came closer to the
-    dataset's (0.148 → 0.109 m, PARK_TRACK and 0.343 → 0.085 m median
-    distance). The metric scale moved by up to PARK_SCALE_MOVE points.
+  - On three OverMaps360 walks, the median distance to the dataset's
+    camera track went 0.148 → 0.109 m and 0.343 → 0.159 m, but
+    0.307 → 0.340 m on the park walk. The metric scale moved by up to 5
+    points. It is not the default.
   - `--insv-lenses lenses.txt` and `insv_stitch --lenses` reuse a
     calibration (`dual_fisheye::LensCalibration`,
     `PhotoSfmConfig::insv_lenses`, `FisheyeLens::with_focal_scale`).

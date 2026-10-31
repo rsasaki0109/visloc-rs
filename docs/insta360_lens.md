@@ -211,12 +211,16 @@ is against the dataset's IMU scale.
 | Walk | Metric scale, first → second | Track shape, first → second | Reprojection (median) |
 | --- | ---: | ---: | ---: |
 | 0313afa5 | +1.0% → +0.1% | 0.148 → 0.109 m | 0.422 → 0.406 px |
-| 9d2fe9b1 | PARK_SCALE | PARK_TRACK | PARK_REPROJ |
-| 5bb3848a | +12.0% → +8.1% | 0.343 → 0.085 m | 0.475 → 0.469 px |
+| 9d2fe9b1 | +1.7% → −3.4% | 0.307 → 0.340 m | 0.513 → 0.509 px |
+| 5bb3848a | +12.0% → +7.7% | 0.343 → 0.159 m | 0.475 → 0.469 px |
 
-The tracks come closer to the dataset's on every walk. The scale moves by
-up to PARK_SCALE_MOVE points, in either direction. The calibration takes
-one more reconstruction, so `--insv-calibrate` is not the default.
+The tracks come much closer to the dataset's on two walks and drift a
+little further on the third. The scale moves by up to 5 points, in
+either direction. How much it helps also depends on the calibration: on
+walk 5bb3848a the 120-frame one (2.3 px from the 200-frame one) brought
+the track to 0.085 m. A calibration that helps one walk can hurt another,
+and it takes one more reconstruction, so `--insv-calibrate` is not the
+default.
 
 ## Stitching
 

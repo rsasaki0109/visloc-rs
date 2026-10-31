@@ -108,8 +108,9 @@ left, as ffmpeg's `hstack` of the video's two streams produces.
 - **Calibrated lenses.** `--insv-calibrate` reconstructs twice: the first
   run calibrates each lens's optical centre and focal lengths
   (`<out>/lenses.txt`), and the second cuts the faces from the calibrated
-  lenses. On three walks the camera track came 26–75% closer to the
-  dataset's ([insta360_lens.md](insta360_lens.md#calibrating-both-lenses)).
+  lenses. On two of three walks the camera track came much closer to the
+  dataset's, on the third a little further
+  ([insta360_lens.md](insta360_lens.md#calibrating-both-lenses)).
   `--insv-lenses lenses.txt` reuses a calibration.
 - **Cameras.** The calibration is decoded for the X5; videos from other
   cameras stop with an error.
