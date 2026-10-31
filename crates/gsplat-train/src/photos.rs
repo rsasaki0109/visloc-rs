@@ -159,6 +159,10 @@ pub struct PhotoSfmConfig {
     /// The video's IMU gives the model metric scale unless `imu` names
     /// another log. Not with `equirect`.
     pub insv: Option<PathBuf>,
+    /// With `insv`: the lenses as [`calibrate_insv_lenses`] found them (each
+    /// one's optical centre and focal lengths on the factory calibration),
+    /// applied when the faces are cut.
+    pub insv_lenses: Option<dual_fisheye::LensCalibration>,
     /// Match the candidate pairs with this instead of the CPU (or wgpu)
     /// matcher, e.g. `visloc-gsplat-cuda`'s CUDA matcher. If it fails, the
     /// CPU matches.
@@ -208,6 +212,7 @@ impl Default for PhotoSfmConfig {
             imu: None,
             imu_frame_period: None,
             insv: None,
+            insv_lenses: None,
             matcher: None,
         }
     }
@@ -745,6 +750,315 @@ fn write_back_lens(
     std::fs::write(&path, text).map_err(|source| EurocError::Io { path, source })
 }
 
+/// Calibrates an Insta360's two lenses from a [`build_photo_dataset`] run
+/// `run` on its dual-fisheye frames (`cfg.insv`, as that run had it): every
+/// observation in the run's model (`sparse/0`) goes back to its lens image
+/// through the model the faces were cut with, and
+/// [`dual_fisheye::calibrate_lenses`] refines each lens's optical centre
+/// and focal lengths, the back lens's pose, the frames and the points, on
+/// at most 200 frames spread over the run. The result is on the factory
+/// calibration (`cfg.insv_lenses` included), for `insv_lenses`
+/// (docs/insta360_lens.md).
+pub fn calibrate_insv_lenses(
+    run: &Path,
+    cfg: &PhotoSfmConfig,
+    log: &mut dyn FnMut(&str),
+) -> Result<dual_fisheye::LensCalibration, EurocError> {
+    use std::collections::HashMap;
+    let fail = |m: String| EurocError::Sfm(format!("insv lens calibration: {m}"));
+    let read = |name: &str| {
+        let path = run.join(name);
+        std::fs::read_to_string(&path).map_err(|source| EurocError::Io { path, source })
+    };
+    let video = cfg
+        .insv
+        .as_ref()
+        .ok_or_else(|| fail("no insv video".into()))?;
+    let telemetry = visloc_io::insv::read_insv_telemetry(video).map_err(|e| fail(e.to_string()))?;
+    let [front, back] = telemetry.lenses.as_slice() else {
+        return Err(fail(format!("no lens calibration in {}", video.display())));
+    };
+    // The lens images' size: the frames' height.
+    let names = read("image_names.txt")?;
+    let source = names
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .ok_or_else(|| fail("empty image_names.txt".into()))?;
+    let (_, size) = image::image_dimensions(source).map_err(|e| fail(format!("{source}: {e}")))?;
+    let mut models = [
+        FisheyeLens::from_insv(front, size),
+        FisheyeLens::from_insv(back, size),
+    ];
+    if let Some(prior) = &cfg.insv_lenses {
+        models = prior.apply(&models, size);
+    }
+    let numbers = |l: &str| -> Vec<f64> {
+        l.split_whitespace()
+            .filter_map(|x| x.parse().ok())
+            .collect()
+    };
+    let cameras: HashMap<u64, [f64; 4]> = read("sparse/0/cameras.txt")?
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let v: Vec<&str> = l.split_whitespace().collect();
+            let p: Vec<f64> = v.get(4..8)?.iter().filter_map(|x| x.parse().ok()).collect();
+            (v.get(1) == Some(&"PINHOLE") && p.len() == 4)
+                .then(|| (v[0].parse().ok().unwrap_or(0), [p[0], p[1], p[2], p[3]]))
+        })
+        .collect();
+    let points: HashMap<i64, Vector3<f64>> = read("sparse/0/points3D.txt")?
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let v = numbers(l);
+            (v.len() >= 4).then(|| (v[0] as i64, Vector3::new(v[1], v[2], v[3])))
+        })
+        .collect();
+    // Faces: image `i` is face `i % 5` of lens `(i % 10) / 5` of frame
+    // `i / 10`; its lens's pose is the face's turned by the face's rotation.
+    struct Face {
+        frame: usize,
+        lens: usize,
+        rotation: Matrix3<f64>,
+        camera: [f64; 4],
+        observations: Vec<(f64, f64, i64)>,
+    }
+    let rotations = dual_fisheye::lens_face_rotations();
+    let images = read("sparse/0/images.txt")?;
+    let lines: Vec<&str> = images.lines().filter(|l| !l.starts_with('#')).collect();
+    let mut faces = Vec::new();
+    let mut lens_poses: HashMap<(usize, usize), (Matrix3<f64>, Vector3<f64>)> = HashMap::new();
+    for pair in lines.chunks(2) {
+        let head: Vec<&str> = pair[0].split_whitespace().collect();
+        let (Some(name), Some(v)) = (head.get(9), head.get(1..9)) else {
+            continue;
+        };
+        let v: Vec<f64> = v.iter().filter_map(|x| x.parse().ok()).collect();
+        let index: Option<usize> = name
+            .trim_start_matches("frame_")
+            .trim_end_matches(".png")
+            .parse()
+            .ok();
+        let (Some(i), true) = (index, v.len() == 8) else {
+            continue;
+        };
+        let Some(&camera) = cameras.get(&(v[7] as u64)) else {
+            continue;
+        };
+        let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+            v[0], v[1], v[2], v[3],
+        ));
+        let rotation = rotations[i % 5].1;
+        let (frame, lens) = (i / 10, (i % 10) / 5);
+        lens_poses.entry((frame, lens)).or_insert((
+            rotation * q.to_rotation_matrix().into_inner(),
+            rotation * Vector3::new(v[4], v[5], v[6]),
+        ));
+        let observations = pair
+            .get(1)
+            .map(|l| {
+                numbers(l)
+                    .chunks_exact(3)
+                    .filter(|o| o[2] >= 0.0)
+                    .map(|o| (o[0], o[1], o[2] as i64))
+                    .collect()
+            })
+            .unwrap_or_default();
+        faces.push(Face {
+            frame,
+            lens,
+            rotation,
+            camera,
+            observations,
+        });
+    }
+    // At most 200 frames with the front lens posed, spread over the run.
+    let mut posed: Vec<usize> = lens_poses
+        .keys()
+        .filter(|k| k.1 == 0)
+        .map(|k| k.0)
+        .collect();
+    posed.sort_unstable();
+    let keep = posed.len().min(200);
+    if keep < 3 {
+        return Err(fail(format!(
+            "{} frames posed in {}",
+            posed.len(),
+            run.display()
+        )));
+    }
+    let chosen: Vec<usize> = (0..keep).map(|k| posed[k * posed.len() / keep]).collect();
+    let slot: HashMap<usize, usize> = chosen.iter().enumerate().map(|(k, &f)| (f, k)).collect();
+    let frames: Vec<(Matrix3<f64>, Vector3<f64>)> =
+        chosen.iter().map(|f| lens_poses[&(*f, 0)]).collect();
+    // The back lens on the front one: the mean over the chosen frames.
+    let pairs: Vec<(nalgebra::UnitQuaternion<f64>, Vector3<f64>)> = chosen
+        .iter()
+        .filter_map(|f| {
+            let (rf, tf) = lens_poses.get(&(*f, 0))?;
+            let (rb, tb) = lens_poses.get(&(*f, 1))?;
+            let r = rb * rf.transpose();
+            Some((nalgebra::UnitQuaternion::from_matrix(&r), tb - r * tf))
+        })
+        .collect();
+    let Some((first, _)) = pairs.first().copied() else {
+        return Err(fail("no frame with both lenses posed".into()));
+    };
+    let q = pairs
+        .iter()
+        .fold(nalgebra::Vector4::zeros(), |acc, (q, _)| {
+            let v = q.as_ref().coords;
+            if v.dot(&first.as_ref().coords) < 0.0 {
+                acc - v
+            } else {
+                acc + v
+            }
+        });
+    let back_pose = (
+        nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::from(q))
+            .to_rotation_matrix()
+            .into_inner(),
+        pairs.iter().map(|p| p.1).sum::<Vector3<f64>>() / pairs.len() as f64,
+    );
+    // Points seen at least three times in the chosen frames, at most 20,000.
+    let mut seen: HashMap<i64, usize> = HashMap::new();
+    for face in faces.iter().filter(|f| slot.contains_key(&f.frame)) {
+        for o in &face.observations {
+            *seen.entry(o.2).or_default() += 1;
+        }
+    }
+    let mut ids: Vec<i64> = seen
+        .iter()
+        .filter(|(id, n)| **n >= 3 && points.contains_key(id))
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    let stride = ids.len().div_ceil(20_000).max(1);
+    let ids: Vec<i64> = ids.into_iter().step_by(stride).collect();
+    let index: HashMap<i64, usize> = ids.iter().enumerate().map(|(k, id)| (*id, k)).collect();
+    let mut xyz: Vec<Vector3<f64>> = ids.iter().map(|id| points[id]).collect();
+    // Each observation where the lens image shows it: back through the
+    // face's pinhole and rotation, then the model the face was cut with.
+    let mut observations = Vec::new();
+    for face in &faces {
+        let Some(&frame) = slot.get(&face.frame) else {
+            continue;
+        };
+        let [fx, fy, cx, cy] = face.camera;
+        for &(x, y, id) in &face.observations {
+            let Some(&point) = index.get(&id) else {
+                continue;
+            };
+            let ray = face.rotation * Vector3::new((x - cx) / fx, (y - cy) / fy, 1.0);
+            if let Some((u, v)) = models[face.lens].project(&ray) {
+                observations.push(dual_fisheye::LensObservation {
+                    frame,
+                    lens: face.lens,
+                    point,
+                    pixel: [u, v],
+                });
+            }
+        }
+    }
+    let t0 = std::time::Instant::now();
+    // The faces see each lens within 90° of its axis only, which leaves the
+    // two centres free to move together a little. Where the lenses see the
+    // same things (SIFT along the seam, `dual_fisheye::seam_pairs`, in up to
+    // 16 frames) pins them to each other: each match is a point both lenses
+    // of its frame see, started at the scene's typical distance.
+    let sources: HashMap<usize, &str> = names
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let i: usize = it
+                .next()?
+                .trim_start_matches("frame_")
+                .trim_end_matches(".png")
+                .parse()
+                .ok()?;
+            Some((i / 10, it.next()?))
+        })
+        .collect();
+    let mut depths: Vec<f64> = observations
+        .iter()
+        .filter(|o| o.lens == 0)
+        .step_by(97)
+        .map(|o| (frames[o.frame].0 * xyz[o.point] + frames[o.frame].1).norm())
+        .collect();
+    depths.sort_by(f64::total_cmp);
+    let depth = depths.get(depths.len() / 2).copied().unwrap_or(1.0);
+    let seam_frames = keep.min(16);
+    let mut seam = 0;
+    for k in 0..seam_frames {
+        let slot = k * keep / seam_frames;
+        let Some(path) = sources.get(&chosen[slot]) else {
+            continue;
+        };
+        let Ok(img) = image::open(path) else {
+            continue;
+        };
+        let (r, t) = frames[slot];
+        for (front_ray, back_ray) in
+            dual_fisheye::seam_pairs(&img.to_rgb8(), &models, &back_pose.0.transpose())
+        {
+            let (Some(a), Some(b)) = (models[0].project(&front_ray), models[1].project(&back_ray))
+            else {
+                continue;
+            };
+            let point = xyz.len();
+            xyz.push(r.transpose() * (front_ray * depth - t));
+            for (lens, pixel) in [(0, [a.0, a.1]), (1, [b.0, b.1])] {
+                observations.push(dual_fisheye::LensObservation {
+                    frame: slot,
+                    lens,
+                    point,
+                    pixel,
+                });
+            }
+            seam += 1;
+        }
+    }
+    let mut cal =
+        dual_fisheye::calibrate_lenses(&models, size, &observations, &frames, &back_pose, &xyz);
+    if let Some(prior) = &cfg.insv_lenses {
+        let s = size as f64 / prior.size.max(1) as f64;
+        for k in 0..2 {
+            for a in 0..2 {
+                cal.centre_offsets[k][a] += prior.centre_offsets[k][a] * s;
+            }
+            cal.focal_scales[k] *= prior.focal_scales[k];
+        }
+    }
+    let to_video = 3840.0 / size as f64;
+    let past = cal.back_rotation * dual_fisheye::back_lens_rotation().transpose();
+    log(&format!(
+        "insv: lenses calibrated on {} frames, {} points, {} observations, {seam} seam matches \
+         ({:.1} s): optical \
+         centres ({:+.1}, {:+.1}) and ({:+.1}, {:+.1}) px from the factory model's (of a \
+         3840 px lens image), focal lengths x{:.4} / x{:.4}; the back lens {:.2}° past the \
+         half turn; reprojection {:.3} -> {:.3} px",
+        frames.len(),
+        xyz.len(),
+        observations.len(),
+        t0.elapsed().as_secs_f64(),
+        cal.centre_offsets[0][0] * to_video,
+        cal.centre_offsets[0][1] * to_video,
+        cal.centre_offsets[1][0] * to_video,
+        cal.centre_offsets[1][1] * to_video,
+        cal.focal_scales[0],
+        cal.focal_scales[1],
+        ((past.trace() - 1.0) / 2.0)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees(),
+        cal.reprojection[0],
+        cal.reprojection[1],
+    ));
+    Ok(cal)
+}
+
 /// Read, decode (oriented) and scale the photos (or panoramas), and read
 /// their EXIF focal lengths and whether the metadata names a 360°
 /// panorama, in parallel. Keeps the most common resolution (one camera for
@@ -906,10 +1220,13 @@ fn write_lens_faces(
     }
     let size = natural_face(height).min(cfg.max_size).max(1);
     let faces = dual_fisheye::lens_face_rotations();
-    let lens_models: Vec<FisheyeLens> = lenses
+    let mut lens_models: Vec<FisheyeLens> = lenses
         .iter()
         .map(|l| FisheyeLens::from_insv(l, height))
         .collect();
+    if let (Some(cal), [front, back]) = (&cfg.insv_lenses, lens_models.as_slice()) {
+        lens_models = cal.apply(&[front.clone(), back.clone()], height).to_vec();
+    }
     let per_frame = lens_models.len() * faces.len();
     let path = |i: usize| dir.join(format!("frame_{i:05}.png"));
     files

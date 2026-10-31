@@ -56,10 +56,31 @@ impl FisheyeLens {
         }
     }
 
+    /// The same lens with its focal lengths `scale` times as long
+    /// ([`calibrate_lenses`]).
+    pub fn with_focal_scale(&self, scale: f64) -> Self {
+        Self {
+            fx: self.fx * scale,
+            fy: self.fy * scale,
+            ..self.clone()
+        }
+    }
+
     /// Where `ray` (lens frame) lands in the lens image. The model holds
     /// within the image circle, 100° off the axis; `None` far behind it,
     /// where the unified model has no image.
     pub fn project(&self, ray: &Vector3<f64>) -> Option<(f64, f64)> {
+        self.project_adjusted(ray, 1.0, [0.0; 2])
+    }
+
+    /// [`FisheyeLens::project`] with the focal lengths `scale` times as long
+    /// and the optical centre `offset` pixels away.
+    fn project_adjusted(
+        &self,
+        ray: &Vector3<f64>,
+        scale: f64,
+        offset: [f64; 2],
+    ) -> Option<(f64, f64)> {
         let zs = ray.z + self.xi * ray.norm();
         if zs <= 1e-9 * ray.norm() {
             return None;
@@ -71,7 +92,10 @@ impl FisheyeLens {
         let radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
         let xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
         let yd = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
-        Some((self.fx * xd + self.centre[0], self.fy * yd + self.centre[1]))
+        Some((
+            scale * self.fx * xd + self.centre[0] + offset[0],
+            scale * self.fy * yd + self.centre[1] + offset[1],
+        ))
     }
 
     /// Pixels per radian along the optical axis.
@@ -1143,6 +1167,463 @@ pub fn fit_back_lens(
     }
 }
 
+/// A point seen by one lens in one frame, for [`calibrate_lenses`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LensObservation {
+    /// The frame (an index into the frames' poses).
+    pub frame: usize,
+    /// The lens: 0 the front one, 1 the back one.
+    pub lens: usize,
+    /// The point (an index into the points).
+    pub point: usize,
+    /// Where the lens image shows the point (pixels).
+    pub pixel: [f64; 2],
+}
+
+/// The two lenses of a dual-fisheye camera as [`calibrate_lenses`] finds
+/// them, relative to the models it started from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LensCalibration {
+    /// The lens image size (pixels) the centre offsets are in.
+    pub size: u32,
+    /// Each lens's optical centre from its model's (pixels, x right, y
+    /// down; the front lens first), as [`FisheyeLens::shifted`] takes it.
+    pub centre_offsets: [[f64; 2]; 2],
+    /// Each lens's focal lengths over its model's
+    /// ([`FisheyeLens::with_focal_scale`]).
+    pub focal_scales: [f64; 2],
+    /// The back lens's rotation on the camera, as [`back_lens_rotation`].
+    pub back_rotation: Matrix3<f64>,
+    /// The back lens's centre in the front lens's frame (the points'
+    /// units).
+    pub back_centre: Vector3<f64>,
+    /// The observations' median reprojection error before and after
+    /// (pixels).
+    pub reprojection: [f64; 2],
+}
+
+impl LensCalibration {
+    /// `lenses`, models of `size` px lens images, calibrated.
+    pub fn apply(&self, lenses: &[FisheyeLens; 2], size: u32) -> [FisheyeLens; 2] {
+        let s = size as f64 / self.size.max(1) as f64;
+        std::array::from_fn(|k| {
+            lenses[k]
+                .with_focal_scale(self.focal_scales[k])
+                .shifted([self.centre_offsets[k][0] * s, self.centre_offsets[k][1] * s])
+        })
+    }
+
+    /// The calibration as `lenses.txt` holds it: a `key values…` line each.
+    pub fn to_text(&self) -> String {
+        let [f, b] = self.centre_offsets;
+        let r = &self.back_rotation;
+        format!(
+            "# Insta360 lens calibration (gsplat_photos --insv-calibrate; docs/insta360_lens.md)\n\
+             size {}\n\
+             front_centre_offset {:.4} {:.4}\n\
+             back_centre_offset {:.4} {:.4}\n\
+             focal_scales {:.6} {:.6}\n\
+             back_rotation {}\n\
+             back_centre {:.6} {:.6} {:.6}\n\
+             reprojection_px {:.4} {:.4}\n",
+            self.size,
+            f[0],
+            f[1],
+            b[0],
+            b[1],
+            self.focal_scales[0],
+            self.focal_scales[1],
+            (0..9)
+                .map(|k| format!("{:.9}", r[(k / 3, k % 3)]))
+                .collect::<Vec<_>>()
+                .join(" "),
+            self.back_centre.x,
+            self.back_centre.y,
+            self.back_centre.z,
+            self.reprojection[0],
+            self.reprojection[1],
+        )
+    }
+
+    /// Reads [`LensCalibration::to_text`]'s text.
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        let row = |key: &str, n: usize| -> Result<Vec<f64>, String> {
+            let values: Vec<f64> = text
+                .lines()
+                .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+                .ok_or(format!("no {key} line"))?
+                .split_whitespace()
+                .map(|v| v.parse::<f64>().map_err(|e| format!("{key}: {e}")))
+                .collect::<Result<_, _>>()?;
+            if values.len() == n {
+                Ok(values)
+            } else {
+                Err(format!("{key}: {} numbers, not {n}", values.len()))
+            }
+        };
+        let (f, b) = (
+            row("front_centre_offset", 2)?,
+            row("back_centre_offset", 2)?,
+        );
+        let scales = row("focal_scales", 2)?;
+        let c = row("back_centre", 3)?;
+        Ok(Self {
+            size: row("size", 1)?[0] as u32,
+            centre_offsets: [[f[0], f[1]], [b[0], b[1]]],
+            focal_scales: [scales[0], scales[1]],
+            back_rotation: Matrix3::from_row_slice(&row("back_rotation", 9)?),
+            back_centre: Vector3::new(c[0], c[1], c[2]),
+            reprojection: row("reprojection_px", 2).map_or([f64::NAN; 2], |r| [r[0], r[1]]),
+        })
+    }
+}
+
+/// Calibrates both lenses of a dual-fisheye camera from points they see:
+/// each lens's optical centre and focal lengths, with the back lens's pose
+/// on the camera, every frame's pose and the points refined along, in the
+/// lens images' pixels (a bundle adjustment through the unified model; the
+/// first frame held, soft-L1 at 1 px, the points eliminated).
+///
+/// `lenses` are the models the pixels are measured against, in `size` px
+/// lens images; `frames` the front lens's poses (world to lens, `x = R X +
+/// t`); `back` the back lens's from the front lens's (`x_back = R x + t`).
+/// Near the axis an optical centre's offset looks like a turn of the lens,
+/// but not towards the image circle, where the unified model packs the
+/// pixels differently: the offsets stand out from the poses where the
+/// lenses see widely. The cost grows with the cube of the frames: a hundred
+/// or two are plenty.
+pub fn calibrate_lenses(
+    lenses: &[FisheyeLens; 2],
+    size: u32,
+    observations: &[LensObservation],
+    frames: &[(Matrix3<f64>, Vector3<f64>)],
+    back: &(Matrix3<f64>, Vector3<f64>),
+    points: &[Vector3<f64>],
+) -> LensCalibration {
+    use nalgebra::{DMatrix, DVector, Rotation3, SMatrix, Vector2};
+    // The camera-side parameters: 6 per frame but the first (rotation, then
+    // translation), then the back lens's rotation and translation, the two
+    // centre offsets and the two log focal scales.
+    const NG: usize = 12;
+    const M: usize = 15; // at most 6 frame + 9 global parameters per observation
+    let nf = frames.len();
+    let base = 6 * nf.saturating_sub(1);
+    let nc = base + NG;
+    let mut rot: Vec<Matrix3<f64>> = frames.iter().map(|f| f.0).collect();
+    let mut tr: Vec<Vector3<f64>> = frames.iter().map(|f| f.1).collect();
+    let (mut rb, mut tb) = *back;
+    let mut intr = [0.0f64; 6]; // offsets (front x, y, back x, y), log scales
+    let mut pts = points.to_vec();
+    let mut lengths: Vec<f64> = pts.iter().map(|p| p.norm()).collect();
+    lengths.sort_by(f64::total_cmp);
+    let scene = lengths
+        .get(lengths.len() / 2)
+        .copied()
+        .unwrap_or(1.0)
+        .max(1e-3);
+    let exp = |w: &Vector3<f64>| Rotation3::new(*w).into_inner();
+    // An observation's residual (pixels) with the given parameters.
+    let residual = |o: &LensObservation,
+                    r: &Matrix3<f64>,
+                    t: &Vector3<f64>,
+                    rb: &Matrix3<f64>,
+                    tb: &Vector3<f64>,
+                    intr: &[f64; 6],
+                    x: &Vector3<f64>|
+     -> Option<Vector2<f64>> {
+        let mut p = r * x + t;
+        if o.lens == 1 {
+            p = rb * p + tb;
+        }
+        let l = o.lens;
+        let (u, v) =
+            lenses[l].project_adjusted(&p, intr[4 + l].exp(), [intr[2 * l], intr[2 * l + 1]])?;
+        Some(Vector2::new(u - o.pixel[0], v - o.pixel[1]))
+    };
+    let usable: Vec<LensObservation> = observations
+        .iter()
+        .copied()
+        .filter(|o| o.frame < nf && o.point < pts.len() && o.lens < 2)
+        .filter(|o| {
+            residual(
+                o,
+                &rot[o.frame],
+                &tr[o.frame],
+                &rb,
+                &tb,
+                &intr,
+                &pts[o.point],
+            )
+            .is_some_and(|r| r.norm() < 50.0)
+        })
+        .collect();
+    let mut by_point: Vec<Vec<usize>> = vec![Vec::new(); pts.len()];
+    for (i, o) in usable.iter().enumerate() {
+        by_point[o.point].push(i);
+    }
+    let errors = |rot: &[Matrix3<f64>],
+                  tr: &[Vector3<f64>],
+                  rb: &Matrix3<f64>,
+                  tb: &Vector3<f64>,
+                  intr: &[f64; 6],
+                  pts: &[Vector3<f64>]|
+     -> Vec<Option<Vector2<f64>>> {
+        usable
+            .iter()
+            .map(|o| residual(o, &rot[o.frame], &tr[o.frame], rb, tb, intr, &pts[o.point]))
+            .collect()
+    };
+    let cost = |res: &[Option<Vector2<f64>>]| -> f64 {
+        res.iter()
+            .map(|r| r.map_or(100.0, |r| 2.0 * ((1.0 + r.norm_squared()).sqrt() - 1.0)))
+            .sum()
+    };
+    let median = |res: &[Option<Vector2<f64>>]| -> f64 {
+        let mut e: Vec<f64> = res.iter().flatten().map(|r| r.norm()).collect();
+        e.sort_by(f64::total_cmp);
+        e.get(e.len() / 2).copied().unwrap_or(f64::NAN)
+    };
+    let mut res = errors(&rot, &tr, &rb, &tb, &intr, &pts);
+    let before = median(&res);
+    let mut current = cost(&res);
+    let mut lambda = 1e-3;
+    for _ in 0..50 {
+        // Weighted Jacobians per observation (soft-L1 as reweighting).
+        struct Lin {
+            cols: [usize; M],
+            m: usize,
+            jc: SMatrix<f64, 2, M>,
+            jp: SMatrix<f64, 2, 3>,
+            r: Vector2<f64>,
+        }
+        let lin: Vec<Option<Lin>> = usable
+            .iter()
+            .zip(&res)
+            .map(|(o, r)| {
+                let r = (*r)?;
+                let w = (1.0 + r.norm_squared()).powf(-0.25);
+                let f = o.frame;
+                let at = |dr: Vector3<f64>,
+                          dt: Vector3<f64>,
+                          dbr: Vector3<f64>,
+                          dbt: Vector3<f64>,
+                          di: [f64; 6],
+                          dx: Vector3<f64>| {
+                    let mut i2 = intr;
+                    for k in 0..6 {
+                        i2[k] += di[k];
+                    }
+                    residual(
+                        o,
+                        &(exp(&dr) * rot[f]),
+                        &(tr[f] + dt),
+                        &(exp(&dbr) * rb),
+                        &(tb + dbt),
+                        &i2,
+                        &(pts[o.point] + dx),
+                    )
+                };
+                let z = Vector3::zeros();
+                let unit = |k: usize, h: f64| {
+                    let mut v = Vector3::zeros();
+                    v[k] = h;
+                    v
+                };
+                let diff = |plus: Option<Vector2<f64>>, minus: Option<Vector2<f64>>, h: f64| match (
+                    plus, minus,
+                ) {
+                    (Some(a), Some(b)) => (a - b) / (2.0 * h),
+                    _ => Vector2::zeros(),
+                };
+                let (ha, ht, hi, hk) = (1e-6, 1e-6 * scene, 1e-3, 1e-6);
+                let mut cols = [0usize; M];
+                let mut jc = SMatrix::<f64, 2, M>::zeros();
+                let mut m = 0;
+                if f > 0 {
+                    for k in 0..6 {
+                        let (h, d) = if k < 3 {
+                            (ha, unit(k, ha))
+                        } else {
+                            (ht, unit(k - 3, ht))
+                        };
+                        let (p, n) = if k < 3 {
+                            (at(d, z, z, z, [0.0; 6], z), at(-d, z, z, z, [0.0; 6], z))
+                        } else {
+                            (at(z, d, z, z, [0.0; 6], z), at(z, -d, z, z, [0.0; 6], z))
+                        };
+                        jc.set_column(m, &(diff(p, n, h) * w));
+                        cols[m] = 6 * (f - 1) + k;
+                        m += 1;
+                    }
+                }
+                if o.lens == 1 {
+                    for k in 0..6 {
+                        let (h, d) = if k < 3 {
+                            (ha, unit(k, ha))
+                        } else {
+                            (ht, unit(k - 3, ht))
+                        };
+                        let (p, n) = if k < 3 {
+                            (at(z, z, d, z, [0.0; 6], z), at(z, z, -d, z, [0.0; 6], z))
+                        } else {
+                            (at(z, z, z, d, [0.0; 6], z), at(z, z, z, -d, [0.0; 6], z))
+                        };
+                        jc.set_column(m, &(diff(p, n, h) * w));
+                        cols[m] = base + k;
+                        m += 1;
+                    }
+                }
+                let l = o.lens;
+                for (k, h) in [(2 * l, hi), (2 * l + 1, hi), (4 + l, hk)] {
+                    let mut d = [0.0; 6];
+                    d[k] = h;
+                    let mut dn = [0.0; 6];
+                    dn[k] = -h;
+                    jc.set_column(
+                        m,
+                        &(diff(at(z, z, z, z, d, z), at(z, z, z, z, dn, z), h) * w),
+                    );
+                    cols[m] = base + 6 + k;
+                    m += 1;
+                }
+                let mut jp = SMatrix::<f64, 2, 3>::zeros();
+                for k in 0..3 {
+                    let d = unit(k, ht);
+                    jp.set_column(
+                        k,
+                        &(diff(
+                            at(z, z, z, z, [0.0; 6], d),
+                            at(z, z, z, z, [0.0; 6], -d),
+                            ht,
+                        ) * w),
+                    );
+                }
+                Some(Lin {
+                    cols,
+                    m,
+                    jc,
+                    jp,
+                    r: r * w,
+                })
+            })
+            .collect();
+        // The reduced camera system, the points eliminated, for each damping
+        // tried until the cost falls.
+        let mut improved = false;
+        while lambda < 1e8 {
+            let mut s = DMatrix::<f64>::zeros(nc, nc);
+            let mut g = DVector::<f64>::zeros(nc);
+            for l in lin.iter().flatten() {
+                for a in 0..l.m {
+                    g[l.cols[a]] += l.jc.column(a).dot(&l.r);
+                    for b in 0..l.m {
+                        s[(l.cols[a], l.cols[b])] += l.jc.column(a).dot(&l.jc.column(b));
+                    }
+                }
+            }
+            let diag: Vec<f64> = (0..nc).map(|k| s[(k, k)]).collect();
+            let mut point_solve: Vec<Option<(nalgebra::Matrix3<f64>, Vector3<f64>)>> =
+                vec![None; pts.len()];
+            for (p, obs) in by_point.iter().enumerate() {
+                let mut v = nalgebra::Matrix3::<f64>::zeros();
+                let mut bp = Vector3::<f64>::zeros();
+                let members: Vec<&Lin> = obs.iter().filter_map(|&i| lin[i].as_ref()).collect();
+                if members.len() < 2 {
+                    continue;
+                }
+                for l in &members {
+                    v += l.jp.transpose() * l.jp;
+                    bp += l.jp.transpose() * l.r;
+                }
+                for k in 0..3 {
+                    v[(k, k)] *= 1.0 + lambda;
+                    v[(k, k)] += 1e-12;
+                }
+                let Some(vi) = v.try_inverse() else { continue };
+                // W_i = Jc_i^T Jp_i; S -= W_i V^-1 W_j^T, g -= W_i V^-1 bp.
+                let ws: Vec<SMatrix<f64, M, 3>> =
+                    members.iter().map(|l| l.jc.transpose() * l.jp).collect();
+                for (li, wi) in members.iter().zip(&ws) {
+                    let y = wi * vi;
+                    let gy = y * bp;
+                    for a in 0..li.m {
+                        g[li.cols[a]] -= gy[a];
+                    }
+                    for (lj, wj) in members.iter().zip(&ws) {
+                        let block = y * wj.transpose();
+                        for a in 0..li.m {
+                            for b in 0..lj.m {
+                                s[(li.cols[a], lj.cols[b])] -= block[(a, b)];
+                            }
+                        }
+                    }
+                }
+                point_solve[p] = Some((vi, bp));
+            }
+            for (k, d) in diag.iter().enumerate() {
+                s[(k, k)] += lambda * d + 1e-12;
+            }
+            let Some(chol) = s.clone().cholesky() else {
+                lambda *= 5.0;
+                continue;
+            };
+            let dc = chol.solve(&(-&g));
+            // The step: frames, back lens, intrinsics, then the points.
+            let mut rot2 = rot.clone();
+            let mut tr2 = tr.clone();
+            for f in 1..nf {
+                let k = 6 * (f - 1);
+                rot2[f] = exp(&Vector3::new(dc[k], dc[k + 1], dc[k + 2])) * rot[f];
+                tr2[f] = tr[f] + Vector3::new(dc[k + 3], dc[k + 4], dc[k + 5]);
+            }
+            let rb2 = exp(&Vector3::new(dc[base], dc[base + 1], dc[base + 2])) * rb;
+            let tb2 = tb + Vector3::new(dc[base + 3], dc[base + 4], dc[base + 5]);
+            let mut intr2 = intr;
+            for k in 0..6 {
+                intr2[k] += dc[base + 6 + k];
+            }
+            let mut pts2 = pts.clone();
+            for (p, obs) in by_point.iter().enumerate() {
+                let Some((vi, bp)) = point_solve[p] else {
+                    continue;
+                };
+                let mut rhs = bp;
+                for l in obs.iter().filter_map(|&i| lin[i].as_ref()) {
+                    let mut wdc = Vector3::zeros();
+                    for a in 0..l.m {
+                        wdc += l.jp.transpose() * l.jc.column(a) * dc[l.cols[a]];
+                    }
+                    rhs += wdc;
+                }
+                pts2[p] = pts[p] - vi * rhs;
+            }
+            let res2 = errors(&rot2, &tr2, &rb2, &tb2, &intr2, &pts2);
+            let c2 = cost(&res2);
+            if c2 < current {
+                let gain = (current - c2) / current.max(1e-12);
+                (rot, tr, rb, tb, intr, pts, res, current) =
+                    (rot2, tr2, rb2, tb2, intr2, pts2, res2, c2);
+                lambda = (lambda / 3.0).max(1e-9);
+                improved = gain > 1e-8;
+
+                break;
+            }
+            lambda *= 5.0;
+        }
+        if !improved {
+            break;
+        }
+    }
+    LensCalibration {
+        size,
+        centre_offsets: [[intr[0], intr[1]], [intr[2], intr[3]]],
+        focal_scales: [intr[4].exp(), intr[5].exp()],
+        back_rotation: rb.transpose(),
+        back_centre: -(rb.transpose() * tb),
+        reprojection: [before, median(&res)],
+    }
+}
+
 /// The bilinear sample at `(px, py)` of the `size x size` half of `frame`
 /// starting at column `x0`; `None` outside it.
 fn sample_half(frame: &image::RgbImage, x0: u32, size: u32, px: f64, py: f64) -> Option<[f64; 3]> {
@@ -1603,6 +2084,148 @@ mod tests {
                 "{morphed} vs {fixed} at {distance} m"
             );
         }
+    }
+
+    #[test]
+    fn the_lens_calibration_finds_both_optical_centres() {
+        // Points around a walk of 10 frames seen by two lenses whose optical
+        // centres sit 4 and 6 px from their models' (1190 px lens images),
+        // focal lengths 0.2% apart, the back lens 1° past the half turn.
+        use nalgebra::Rotation3;
+        let size = 1190u32;
+        let model = FisheyeLens::from_insv(&x5_like(), size);
+        let lenses = [model.clone(), model.clone()];
+        let truth = [
+            model.shifted([4.0, -3.0]).with_focal_scale(1.002),
+            model.shifted([2.0, 5.5]).with_focal_scale(0.999),
+        ];
+        let back_rotation = Rotation3::from_axis_angle(&Vector3::z_axis(), 1f64.to_radians())
+            .into_inner()
+            * back_lens_rotation();
+        let back_centre = Vector3::new(0.0, 0.0, -0.032);
+        let back = (
+            back_rotation.transpose(),
+            -(back_rotation.transpose() * back_centre),
+        );
+        let mut seed = 11u64;
+        let mut uniform = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let frames: Vec<(Matrix3<f64>, Vector3<f64>)> = (0..10)
+            .map(|f| {
+                let r = Rotation3::from_euler_angles(0.03 * (f as f64).sin(), 0.3 * f as f64, 0.02)
+                    .into_inner();
+                let c = Vector3::new(0.8 * f as f64, 0.05 * (f as f64 * 0.7).sin(), 0.0);
+                (r, -(r * c))
+            })
+            .collect();
+        let points: Vec<Vector3<f64>> = (0..700)
+            .map(|_| {
+                let (z, a) = (
+                    2.0 * uniform() - 1.0,
+                    2.0 * std::f64::consts::PI * uniform(),
+                );
+                let d = Vector3::new(
+                    (1.0 - z * z).sqrt() * a.cos(),
+                    z,
+                    (1.0 - z * z).sqrt() * a.sin(),
+                );
+                Vector3::new(4.0 + 4.0 * uniform(), 0.0, 0.0) + d * (2.0 + 6.0 * uniform())
+            })
+            .collect();
+        let mut observations = Vec::new();
+        for (f, (r, t)) in frames.iter().enumerate() {
+            for (p, x) in points.iter().enumerate() {
+                let front = r * x + t;
+                for (lens, ray) in [(0, front), (1, back.0 * front + back.1)] {
+                    // Within 90° of the axis, as the lens faces see.
+                    if ray.z <= 0.05 * ray.norm() {
+                        continue;
+                    }
+                    let (u, v) = truth[lens].project(&ray).unwrap();
+                    let noise = [0.3 * (uniform() - 0.5), 0.3 * (uniform() - 0.5)];
+                    observations.push(LensObservation {
+                        frame: f,
+                        lens,
+                        point: p,
+                        pixel: [u + noise[0], v + noise[1]],
+                    });
+                }
+            }
+        }
+        // Started from the models, the half turn, slightly moved poses and
+        // points.
+        let start: Vec<(Matrix3<f64>, Vector3<f64>)> = frames
+            .iter()
+            .enumerate()
+            .map(|(f, (r, t))| {
+                let turn = if f == 0 { 0.0 } else { 0.002 };
+                (
+                    Rotation3::from_euler_angles(turn, -turn, turn).into_inner() * r,
+                    t + Vector3::repeat(0.01 * (f > 0) as u8 as f64),
+                )
+            })
+            .collect();
+        let half_turn = back_lens_rotation();
+        let start_back = (
+            half_turn.transpose(),
+            -(half_turn.transpose() * Vector3::new(0.0, 0.0, -0.03)),
+        );
+        let start_points: Vec<Vector3<f64>> = points
+            .iter()
+            .map(|p| p + Vector3::new(0.01, -0.01, 0.01))
+            .collect();
+        let cal = calibrate_lenses(
+            &lenses,
+            size,
+            &observations,
+            &start,
+            &start_back,
+            &start_points,
+        );
+        for (lens, want) in [[4.0, -3.0], [2.0, 5.5]].iter().enumerate() {
+            let got = cal.centre_offsets[lens];
+            assert!(
+                (got[0] - want[0]).hypot(got[1] - want[1]) < 0.3,
+                "lens {lens}: {got:?}"
+            );
+        }
+        assert!(
+            (cal.focal_scales[0] - 1.002).abs() < 3e-4,
+            "{:?}",
+            cal.focal_scales
+        );
+        assert!(
+            (cal.focal_scales[1] - 0.999).abs() < 3e-4,
+            "{:?}",
+            cal.focal_scales
+        );
+        let angle = ((cal.back_rotation * back_rotation.transpose()).trace() - 1.0) / 2.0;
+        assert!(
+            angle.clamp(-1.0, 1.0).acos().to_degrees() < 0.05,
+            "{}",
+            cal.back_rotation
+        );
+        assert!(
+            cal.reprojection[1] < 0.15 && cal.reprojection[0] > 1.0,
+            "{:?}",
+            cal.reprojection
+        );
+        // Through the text file and back.
+        let again = LensCalibration::from_text(&cal.to_text()).unwrap();
+        assert!((again.centre_offsets[1][1] - cal.centre_offsets[1][1]).abs() < 1e-3);
+        assert_eq!(again.size, size);
+        // Applied to the models, the calibration gives the true lenses.
+        let ray = Vector3::new(0.3, -0.2, 0.9);
+        let fixed = cal.apply(&lenses, size);
+        let (a, b) = (
+            fixed[0].project(&ray).unwrap(),
+            truth[0].project(&ray).unwrap(),
+        );
+        assert!((a.0 - b.0).hypot(a.1 - b.1) < 0.3);
     }
 
     #[test]

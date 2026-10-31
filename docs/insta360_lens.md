@@ -124,8 +124,9 @@ reading puts it (2–15 px from the middle) makes SfM worse: on walk
 (640 px faces), with |g| 9.56. With a scale of 1.386 calibration px per
 video px for every camera as well, it goes from +1.8% to +13.1% at
 1024 px, and the other four walks move 0.8–2.0 points further from it. So
-`gsplat_photos --insv` keeps both centres in the middle, and `insv_stitch`
-moves the back lens's by the offset it measures along the seam
+`gsplat_photos --insv` keeps both centres in the middle unless it calibrates
+them from the video itself ([below](#calibrating-both-lenses)), and
+`insv_stitch` moves the back lens's by the offset it measures along the seam
 ([below](#stitching)). The black edge of check 1 shows where the camera
 masks the image, which need not be the optics.
 
@@ -161,6 +162,66 @@ Without the tilt the seam shows things twice, a degree apart.
 - **`insv_stitch`** fits the back lens along the seam ([below](#stitching)),
   or takes `back_lens.txt` or the recorded angles alone.
 
+## Calibrating both lenses
+
+```text
+gsplat_photos --insv VID.insv --out run --insv-calibrate
+```
+
+`--insv-calibrate` reconstructs twice. The first run goes into
+`run/calibration`. Each lens's optical centre and focal lengths are
+calibrated from it and written to `run/lenses.txt`, and the second run
+cuts the faces from the calibrated lenses. `--insv-lenses lenses.txt` and
+`insv_stitch --lenses lenses.txt` reuse a calibration.
+
+- **The fit** (`photos::calibrate_insv_lenses`,
+  `dual_fisheye::calibrate_lenses`). Every observation in the first model
+  goes back to its lens image, through the model its face was cut with. A
+  bundle adjustment in those pixels, through the unified model, then
+  refines per lens an optical-centre offset and a focal-length factor,
+  with the back lens's pose on the camera, the frames (at most 200) and the
+  points (at most 20,000). It is robust (soft-L1 at 1 px), with the
+  points eliminated, and takes about a minute.
+- **The seam pins it.** The faces show each lens only within 90° of its
+  axis. There, both centres moving together looks almost like a turn of
+  the whole camera, which the frames absorb. Without more, which frames
+  are used moved the front lens's centre by up to 12 px on walk 5bb3848a
+  (5.7–17.8 px, 100 to 199 of its frames), at almost the same cost. So SIFT
+  matches along the seam in 16 of the frames join the fit, each a point
+  both lenses of a frame see. With them, 120 or 200 frames agree within
+  2.3 px on two walks; on walk 9d2fe9b1 the back lens's centre moves by
+  4.6 px.
+- **The seam agrees.** On walk 0313afa5, `insv_stitch --lenses` then finds
+  the back lens 2 px from where the calibration put it, against 20.5 px
+  without it.
+
+The calibration on each walk (200 frames, 640 px faces; offsets in a 3840
+px lens image):
+
+| Walk (camera) | Front lens's centre | Back lens's centre | Focal lengths |
+| --- | --- | --- | --- |
+| 0313afa5 (A) | (+9.2, −5.4) px | (+10.0, −0.6) px | x0.9964, x0.9942 |
+| 9d2fe9b1 (C) | (+7.9, −4.8) px | (+3.5, −7.0) px | x1.0019, x0.9991 |
+| 5bb3848a (D) | (+8.1, +1.3) px | (+8.3, +3.6) px | x0.9955, x0.9968 |
+
+What the second run gives, against the first. Track shape is the median
+distance from the dataset's camera track after a similarity fit; the scale
+is against the dataset's IMU scale.
+
+| Walk | Metric scale, first → second | Track shape, first → second | Reprojection (median) |
+| --- | ---: | ---: | ---: |
+| 0313afa5 | +1.0% → +0.1% | 0.148 → 0.109 m | 0.422 → 0.406 px |
+| 9d2fe9b1 | +1.7% → −3.4% | 0.307 → 0.340 m | 0.513 → 0.509 px |
+| 5bb3848a | +12.0% → +7.7% | 0.343 → 0.159 m | 0.475 → 0.469 px |
+
+The tracks come much closer to the dataset's on two walks and drift a
+little further on the third. The scale moves by up to 5 points, in
+either direction. How much it helps also depends on the calibration: on
+walk 5bb3848a the 120-frame one (2.3 px from the 200-frame one) brought
+the track to 0.085 m. A calibration that helps one walk can hurt another,
+and it takes one more reconstruction, so `--insv-calibrate` is not the
+default.
+
 ## Stitching
 
 ```text
@@ -181,6 +242,8 @@ stitches images of the two lenses side by side instead.
   matches them with SIFT, and fits the back lens's rotation and optical
   centre to the matches: across the parallax exactly, along it up to one
   shift all matches share, robustly (`dual_fisheye::fit_back_lens`).
+  `--lenses lenses.txt` starts it from a calibration of both lenses
+  ([above](#calibrating-both-lenses)).
 - **Distance.** Where the lenses meet, things at different distances
   cannot all line up on one sphere: at 2 m they are 0.9° apart. The
   shared shift gives the scene's typical distance along the seam, and the
