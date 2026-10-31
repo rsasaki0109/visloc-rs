@@ -1141,6 +1141,13 @@ most, and 55 % of those lasting 2 s or more triangulate within 2 px RMS along
 the BA's trajectory (median depth 12 m). A better tracker cannot make them
 much longer.
 
+Nor would the fisheye's whole image. The rectified images keep 115° × 100°
+of the SLAM cameras' view, about 152° × 114° on the 640 × 480 fisheye at the
+same focal length. Over the whole fisheye a horizon direction is in cam0's view
+29–30 % of the time instead of 21–23 %, and in both cameras' 8.1–8.9 % instead
+of 3.7–4.4 %, but still for a median of 1.1 s at a time (4.0–4.3 s at the
+90th percentile).
+
 Nor do the points come back recognizably. For 351 such landmarks at least
 20 m away (300–480 s), each return into view was searched for by warping the
 patch around the landmark's middle observation into the new image (the plane
@@ -1165,6 +1172,33 @@ those of another body frame, 105° from the IMU's, and at 3.3 Hz it cannot be
 interpolated to every image while the head turns. The BA's trajectory was
 used instead; its own error may count some right finds after long gaps as
 wrong.
+
+### The gyroscope's share of the drift
+
+Against the pseudo-GT (its orientations turned into the IMU's frame by the
+rotation fitted to their changes), the chain's heading error changes over
+256 s by 0.00° on average on sequence_1_20 and +0.03° on 2_11, with a spread
+of 0.29–0.30° as over 1 s (the pseudo-GT's own noise); by −0.30° on 1_19 and
+by −0.71° on 3_18 (spread 0.66°). Where the chain loses, the mean grows in
+proportion to the time: a drift, not a random walk of noisy rotations.
+
+On sequence_3_18 the pass solve once more, with the gyroscope's noise density
+10 and 100 times the calibration's (the accelerometer's unchanged), so that
+the cameras decide the rotations:
+
+| Trajectory | Heading error at the end | Change over 256 s (mean) | CP Score |
+|---|---:|---:|---:|
+| The VIO | −26.9° | −6.80° | |
+| The online result (the pass's start) | −3.1° | −0.93° | |
+| The pass solve | −2.6° | −0.71° | **54.35** |
+| Gyroscope noise ×10 | −2.1° | −0.64° | 52.09 |
+| Gyroscope noise ×100 | −1.3° | −0.51° | 54.07 |
+
+Without the gyroscope the drift shrinks by a third and the score stays. The
+gyroscope's model does not make the drift. The cameras' constraints are too
+weak over minutes to take out what the solve starts from ([The solution keeps
+its starting point's drift](#the-solution-keeps-its-starting-points-drift)),
+and a head-worn camera does not give them longer ones.
 
 ### A ride the VIO halves
 
