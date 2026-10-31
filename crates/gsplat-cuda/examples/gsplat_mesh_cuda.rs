@@ -23,7 +23,9 @@
 //! `--slab-blocks` blocks of 8^3 voxels at a time. `--depth-maps <dir>` fuses
 //! `<dir>/<image name>.bin` (visloc-mvs `--save-fused-depth`) in place of the
 //! splat's depth wherever a map has one, and the splat's elsewhere
-//! (`--depth-maps-only`: nowhere else).
+//! (`--depth-maps-only`: nowhere else; a map's hole is unknown, not free
+//! space). With depth maps `--min-component` defaults to 0: their small
+//! components are mostly surface, not floaters.
 
 use std::path::PathBuf;
 
@@ -47,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut slab_blocks = 0u32;
     let mut depth_maps: Option<PathBuf> = None;
     let mut maps_only = false;
+    let mut min_component = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -56,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--voxel" => opts.voxel = Some(next()?.parse()?),
             "--trunc-voxels" => opts.trunc_voxels = next()?.parse()?,
             "--max-depth" => opts.max_depth = Some(next()?.parse()?),
-            "--min-component" => opts.min_component = next()?.parse()?,
+            "--min-component" => min_component = Some(next()?.parse()?),
             "--min-weight" => opts.min_weight = next()?.parse()?,
             "--no-carve" => opts.carve = false,
             "--support-voxels" => opts.support_voxels = next()?.parse()?,
@@ -71,6 +74,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let ply = ply.ok_or("--ply <scene.ply> is required")?;
     let data = data.ok_or("--data <colmap root> is required")?;
+    // Depth maps' small components are mostly surface, not floaters.
+    opts.min_component = min_component.unwrap_or(if depth_maps.is_some() {
+        0
+    } else {
+        opts.min_component
+    });
 
     let scene = load_ply(&ply)?;
     let dataset = load_colmap_dataset(&data, None)?;

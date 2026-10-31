@@ -160,7 +160,8 @@ pub struct TsdfParams {
     pub expected: u32,
     /// With depth maps ([`CudaGsplat::tsdf_surface_with_maps`]): 1 fuses a
     /// map's depth where it has one and the splat's elsewhere, 2 the maps'
-    /// alone (0 = no maps).
+    /// alone, a map's hole being unknown (no update, no carving) rather
+    /// than free space (0 = no maps).
     pub override_mode: u32,
 }
 

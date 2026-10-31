@@ -341,6 +341,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **`gsplat_mesh_cuda --depth-maps-only` carved surfaces away through the
+  maps' holes.** The GPU TSDF carved free space along every pixel without
+  a depth, but a depth map's 0 is unknown, not free: each view's holes
+  (two thirds to three quarters of its pixels) erased the surfaces that
+  other views had seen. A map's hole now adds nothing and carves nothing.
+  With `--depth-maps`, `--min-component` also defaults to 0, since the
+  maps' small components are mostly surface, not floaters. Over six ETH3D
+  scenes the MVS depth's own mesh scores 70.2% F1 at 2 cm instead of
+  61.3% (kicker 47.8% → 75.0%), and the hybrids 71.4% and 76.5% instead of
+  70.1% and 75.8%. With the filter off either way, treating holes as
+  unknown loses 1.6 and 2.7 points on office and pipes, where carving had
+  also removed wrong depths.
 - **Wheel calibration: the offset wandered on long runs.** A robot's
   wheels slip in turns in place, and on OpenLORIS-Scene's corridor
   (corridor1-1: 284 s, 232 m) their heading drifted 38° off the VIO's in

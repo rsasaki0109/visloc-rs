@@ -287,8 +287,9 @@ fn slabs_do_not_change_the_surface() {
 
 /// Depth maps replace the rendered depth exactly: maps holding the planar
 /// median depth, fused alone (mode 2) into a median-depth TSDF, give the
-/// planar TSDF's surface bit for bit; empty maps with the splat filling in
-/// (mode 1) give the plain surface.
+/// planar TSDF's surface bit for bit, as without carving, since a map's
+/// hole is unknown rather than free space; empty maps with the splat
+/// filling in (mode 1) give the plain surface.
 #[test]
 fn depth_maps_replace_the_rendered_depth() {
     let Some(mut gs) = gsplat() else { return };
@@ -326,14 +327,28 @@ fn depth_maps_replace_the_rendered_depth() {
         e.sort_unstable();
         (v, e)
     };
-    let planar = gs.tsdf_surface(&views, &params(1, 0)).expect("planar");
+    let planar = gs
+        .tsdf_surface(
+            &views,
+            &TsdfParams {
+                carve: 0,
+                ..params(1, 0)
+            },
+        )
+        .expect("planar");
     let from_maps = gs
         .tsdf_surface_with_maps(&views, &params(0, 2), Some(&planar_maps))
         .expect("maps only");
     assert!(planar.cells.len() > 1000, "too small a surface to compare");
     assert!(
         key(&planar) == key(&from_maps),
-        "maps-only surface differs from the planar one"
+        "maps-only surface differs from the planar one without carving"
+    );
+    // The maps' holes carve nothing: the carved planar surface differs.
+    let carved = gs.tsdf_surface(&views, &params(1, 0)).expect("carved");
+    assert!(
+        key(&carved) != key(&from_maps),
+        "carving changed nothing, so the test cannot tell holes from free space"
     );
     let plain = gs.tsdf_surface(&views, &params(0, 0)).expect("plain");
     let empty = vec![0.0f32; planar_maps.len()];

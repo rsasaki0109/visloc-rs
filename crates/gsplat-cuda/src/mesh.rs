@@ -106,7 +106,8 @@ pub fn read_depth_map(path: &std::path::Path, width: u32, height: u32) -> Option
 pub struct DepthMaps<'a> {
     pub maps: &'a [f32],
     /// Where a map has no depth, fuse the splat's (`false`: nothing, so
-    /// the mesh is the maps' alone).
+    /// the mesh is the maps' alone; a hole is unknown, so it carves no free
+    /// space through the other views' surfaces).
     pub fill_from_splat: bool,
 }
 
