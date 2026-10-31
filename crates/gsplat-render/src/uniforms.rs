@@ -37,8 +37,16 @@ pub struct ProjectUniforms {
     /// SH degree actually evaluated (<= `sh_degree`, which sets the buffer
     /// stride); trainers raise it progressively. Higher bands read as 0.
     pub sh_active_degree: u32,
-    /// Padding to keep the struct 16-byte aligned for storage/uniform use.
-    pub _pad: [u32; 3],
+    /// The camera's lens (gsplat-core's `Lens`): 0 the undistorted
+    /// pinhole, 1 a distorted pinhole, 2 an equidistant (fisheye)
+    /// projection.
+    pub lens_kind: u32,
+    /// Widest ray angle drawn (radians).
+    pub max_theta: f32,
+    /// Padding: the distortion starts on a 16-byte boundary.
+    pub _pad: u32,
+    /// Distortion `[k1, k2, k3, k4, p1, p2, sx1, sy1]`.
+    pub lens: [f32; 8],
 }
 
 /// The uniform block consumed by the `rasterize` kernel.
@@ -109,8 +117,17 @@ impl ProjectUniforms {
             num_visible: 0,
             num_intersections: 0,
             sh_active_degree: sh_degree,
-            _pad: [0; 3],
+            lens_kind: view.camera.lens.kind(),
+            max_theta: view.camera.lens.max_theta,
+            _pad: 0,
+            lens: view.camera.lens.coeffs,
         }
+    }
+
+    /// The camera is an undistorted pinhole, which the geometry channels
+    /// (planar depth, normals) need.
+    pub fn is_pinhole(&self) -> bool {
+        self.lens_kind == 0
     }
 
     pub fn num_tiles(&self) -> u32 {
@@ -147,5 +164,30 @@ mod tests {
         assert_eq!(u.total_splats, 10);
         // camera centre is -R^T t = -t for identity rotation.
         assert_eq!(u.camera_center, [0.0, 0.0, 5.0, 0.0]);
+        assert_eq!(u.lens_kind, 0);
+    }
+
+    /// The layout of common.wgsl's `ProjectUniforms`: the distortion is a
+    /// pair of vec4s on a 16-byte boundary.
+    #[test]
+    fn uniforms_match_the_wgsl_layout() {
+        assert_eq!(std::mem::offset_of!(ProjectUniforms, sh_active_degree), 128);
+        assert_eq!(std::mem::offset_of!(ProjectUniforms, lens), 144);
+        assert_eq!(std::mem::size_of::<ProjectUniforms>(), 176);
+    }
+
+    #[test]
+    fn uniforms_carry_the_lens() {
+        use visloc_gsplat_core::lens::{Lens, Projection};
+        let camera = PinholeCamera::new(64, 48, 30.0, 30.0, 32.0, 24.0).with_lens(Lens::new(
+            Projection::Equidistant,
+            [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ));
+        let view = CameraView::new(Matrix3::identity(), Vector3::zeros(), camera);
+        let u = ProjectUniforms::from_view(&view, 0, 1);
+        assert_eq!(u.lens_kind, 2);
+        assert_eq!(u.lens[0], 0.1);
+        assert_eq!(u.max_theta, camera.lens.max_theta);
+        assert!(!u.is_pinhole());
     }
 }

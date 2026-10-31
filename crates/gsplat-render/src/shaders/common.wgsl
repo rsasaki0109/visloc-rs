@@ -27,10 +27,165 @@ struct ProjectUniforms {
     num_intersections: u32,
     // SH degree evaluated (<= sh_degree, the buffer stride).
     sh_active_degree: u32,
+    // The lens (gsplat-core's `Lens`): LENS_* kind, the widest ray angle
+    // drawn (radians), the distortion k1..k4 and p1 p2 sx1 sy1.
+    lens_kind: u32,
+    max_theta: f32,
     pad0: u32,
-    pad1: u32,
-    pad2: u32,
+    lens_k: vec4<f32>,
+    lens_p: vec4<f32>,
 };
+
+// ProjectUniforms::lens_kind: the undistorted pinhole (the original path),
+// a distorted pinhole, an equidistant (fisheye) projection.
+const LENS_PINHOLE: u32 = 0u;
+const LENS_DISTORTED: u32 = 1u;
+const LENS_EQUIDISTANT: u32 = 2u;
+
+// Below this (r / z)^2 the equidistant scale theta / r and its lateral
+// derivative come from their series in r / z (lens.rs's SERIES_S2): the
+// closed forms cancel catastrophically near the axis in f32.
+const LENS_SERIES_S2: f32 = 1e-2;
+
+// Dual numbers for the lens: the value in x, its gradient with respect to the
+// camera-space point in yzw. Sums, differences, negation and scaling by a
+// constant are the vec4 operations.
+fn dc(v: f32) -> vec4<f32> {
+    return vec4<f32>(v, 0.0, 0.0, 0.0);
+}
+fn dmul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(a.x * b.x, a.yzw * b.x + a.x * b.yzw);
+}
+fn ddiv(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    let inv = 1.0 / b.x;
+    let q = a.x * inv;
+    return vec4<f32>(q, (a.yzw - q * b.yzw) * inv);
+}
+fn dsqrt(a: vec4<f32>) -> vec4<f32> {
+    let s = sqrt(a.x);
+    return vec4<f32>(s, a.yzw * (0.5 / s));
+}
+// The angle of (x, y).
+fn datan2(y: vec4<f32>, x: vec4<f32>) -> vec4<f32> {
+    let inv = 1.0 / (x.x * x.x + y.x * y.x);
+    return vec4<f32>(atan2(y.x, x.x), (x.x * y.yzw - y.x * x.yzw) * inv);
+}
+
+// The distorted normalized coordinates (mx, my) of a camera-space point and
+// their Jacobian rows (j0 = d mx / d(x, y, z), j1 = d my / d(x, y, z)), all as
+// duals in the point.
+struct LensOut {
+    mx: vec4<f32>,
+    my: vec4<f32>,
+    j00: vec4<f32>,
+    j01: vec4<f32>,
+    j02: vec4<f32>,
+    j10: vec4<f32>,
+    j11: vec4<f32>,
+    j12: vec4<f32>,
+};
+
+// gsplat-core's `lens_coords` for a camera with lens_kind != LENS_PINHOLE,
+// on duals: the derivatives of the Jacobian's entries are what
+// project_backward chains through. Called with constant duals (dc) where
+// only values are needed.
+fn lens_coords(u: ProjectUniforms, x: vec4<f32>, y: vec4<f32>, z: vec4<f32>) -> LensOut {
+    var n0: vec4<f32>;
+    var n1: vec4<f32>;
+    var a00: vec4<f32>;
+    var a01: vec4<f32>;
+    var a02: vec4<f32>;
+    var a10: vec4<f32>;
+    var a11: vec4<f32>;
+    var a12: vec4<f32>;
+    if (u.lens_kind == LENS_EQUIDISTANT) {
+        let r2 = dmul(x, x) + dmul(y, y);
+        let rho2 = r2 + dmul(z, z);
+        var scale: vec4<f32>;
+        var lateral: vec4<f32>;
+        if (z.x > 0.0 && r2.x < LENS_SERIES_S2 * z.x * z.x) {
+            // atan(s) / s and (1 / (1 + s^2) - atan(s) / s) / s^2 in s = r / z.
+            let iz = ddiv(dc(1.0), z);
+            let s2 = dmul(r2, dmul(iz, iz));
+            scale = dmul(iz, dc(1.0) + dmul(s2, dc(-1.0 / 3.0) + dmul(s2, dc(1.0 / 5.0) + s2 * (-1.0 / 7.0))));
+            lateral = dmul(
+                dmul(dmul(iz, iz), iz),
+                dc(-2.0 / 3.0) + dmul(s2, dc(4.0 / 5.0) + dmul(s2, dc(-6.0 / 7.0) + s2 * (8.0 / 9.0))),
+            );
+        } else {
+            let r = dsqrt(r2);
+            scale = ddiv(datan2(r, z), r);
+            lateral = ddiv(ddiv(z, rho2) - scale, r2);
+        }
+        let ds_dz = -ddiv(dc(1.0), rho2);
+        let xy = dmul(dmul(x, y), lateral);
+        n0 = dmul(scale, x);
+        n1 = dmul(scale, y);
+        a00 = scale + dmul(dmul(x, x), lateral);
+        a01 = xy;
+        a02 = dmul(x, ds_dz);
+        a10 = xy;
+        a11 = scale + dmul(dmul(y, y), lateral);
+        a12 = dmul(y, ds_dz);
+    } else {
+        let iz = ddiv(dc(1.0), z);
+        let iz2 = dmul(iz, iz);
+        n0 = dmul(x, iz);
+        n1 = dmul(y, iz);
+        a00 = iz;
+        a01 = dc(0.0);
+        a02 = -dmul(x, iz2);
+        a10 = dc(0.0);
+        a11 = iz;
+        a12 = -dmul(y, iz2);
+    }
+    var o: LensOut;
+    if (all(u.lens_k == vec4<f32>(0.0)) && all(u.lens_p == vec4<f32>(0.0))) {
+        o.mx = n0;
+        o.my = n1;
+        o.j00 = a00;
+        o.j01 = a01;
+        o.j02 = a02;
+        o.j10 = a10;
+        o.j11 = a11;
+        o.j12 = a12;
+        return o;
+    }
+    // COLMAP's distortion (lens.rs's `distort`).
+    let k1 = u.lens_k.x;
+    let k2 = u.lens_k.y;
+    let k3 = u.lens_k.z;
+    let k4 = u.lens_k.w;
+    let p1 = u.lens_p.x;
+    let p2 = u.lens_p.y;
+    let sx1 = u.lens_p.z;
+    let sy1 = u.lens_p.w;
+    let uu = dmul(n0, n0);
+    let vv = dmul(n1, n1);
+    let uv = dmul(n0, n1);
+    let t2 = uu + vv;
+    let radial = dmul(t2, dc(k1) + dmul(t2, dc(k2) + dmul(t2, dc(k3) + t2 * k4)));
+    let g = dc(k1) + dmul(t2, dc(2.0 * k2) + dmul(t2, dc(3.0 * k3) + t2 * (4.0 * k4)));
+    o.mx = n0 + dmul(n0, radial) + uv * (2.0 * p1) + (t2 + uu * 2.0) * p2 + t2 * sx1;
+    o.my = n1 + dmul(n1, radial) + uv * (2.0 * p2) + (t2 + vv * 2.0) * p1 + t2 * sy1;
+    let cross = dmul(uv, g) * 2.0 + n0 * (2.0 * p1) + n1 * (2.0 * p2);
+    let d00 = dc(1.0) + radial + dmul(uu, g) * 2.0 + n1 * (2.0 * p1) + n0 * (6.0 * p2) + n0 * (2.0 * sx1);
+    let d01 = cross + n1 * (2.0 * sx1);
+    let d10 = cross + n0 * (2.0 * sy1);
+    let d11 = dc(1.0) + radial + dmul(vv, g) * 2.0 + n0 * (2.0 * p2) + n1 * (6.0 * p1) + n1 * (2.0 * sy1);
+    o.j00 = dmul(d00, a00) + dmul(d01, a10);
+    o.j01 = dmul(d00, a01) + dmul(d01, a11);
+    o.j02 = dmul(d00, a02) + dmul(d01, a12);
+    o.j10 = dmul(d10, a00) + dmul(d11, a10);
+    o.j11 = dmul(d10, a01) + dmul(d11, a11);
+    o.j12 = dmul(d10, a02) + dmul(d11, a12);
+    return o;
+}
+
+// The angle between the optical axis and the ray to camera-space point p.
+fn lens_ray_angle(p: vec3<f32>) -> f32 {
+    return atan2(length(p.xy), p.z);
+}
 
 struct RasterUniforms {
     tile_bw: u32,
@@ -215,7 +370,19 @@ fn compute_projected(
         return p;
     }
     let p_cam = world_to_camera(u, mean);
-    if (p_cam.z <= 0.1) {
+    // A pinhole draws what lies 0.1 in front of it, sorted by z; a fisheye
+    // what lies 0.1 from its centre, even behind the image plane, sorted by
+    // the distance; a lens stops at max_theta (cpu_render's project_point).
+    var depth = p_cam.z;
+    if (u.lens_kind == LENS_EQUIDISTANT) {
+        depth = length(p_cam);
+        if (depth <= 0.1) {
+            return p;
+        }
+    } else if (p_cam.z <= 0.1) {
+        return p;
+    }
+    if (u.lens_kind != LENS_PINHOLE && lens_ray_angle(p_cam) > u.max_theta) {
         return p;
     }
 
@@ -250,12 +417,22 @@ fn compute_projected(
     let lim_y = 1.3 * 0.5 * f32(u.img_h) / u.fy;
     let tx = clamp(p_cam.x * inv_z, -lim_x, lim_x) * p_cam.z;
     let ty = clamp(p_cam.y * inv_z, -lim_y, lim_y) * p_cam.z;
-    let j00 = u.fx * inv_z;
-    let j02 = -u.fx * tx * inv_z2;
-    let j11 = u.fy * inv_z;
-    let j12 = -u.fy * ty * inv_z2;
-    let j0 = vec3<f32>(j00, 0.0, j02);
-    let j1 = vec3<f32>(0.0, j11, j12);
+    var j0 = vec3<f32>(u.fx * inv_z, 0.0, -u.fx * tx * inv_z2);
+    var j1 = vec3<f32>(0.0, u.fy * inv_z, -u.fy * ty * inv_z2);
+    var proj_u = p_cam.x * j0.x + u.cx;
+    var proj_v = p_cam.y * j1.y + u.cy;
+    if (u.lens_kind != LENS_PINHOLE) {
+        // The lens at the point; a distorted pinhole linearises at the
+        // clamped point, a fisheye at the point itself.
+        var l = lens_coords(u, dc(p_cam.x), dc(p_cam.y), dc(p_cam.z));
+        proj_u = u.fx * l.mx.x + u.cx;
+        proj_v = u.fy * l.my.x + u.cy;
+        if (u.lens_kind == LENS_DISTORTED) {
+            l = lens_coords(u, dc(tx), dc(ty), dc(p_cam.z));
+        }
+        j0 = u.fx * vec3<f32>(l.j00.x, l.j01.x, l.j02.x);
+        j1 = u.fy * vec3<f32>(l.j10.x, l.j11.x, l.j12.x);
+    }
     let cj0 = vec3<f32>(
         j0.x * cov[0].x + j0.y * cov[0].y + j0.z * cov[0].z,
         j0.x * cov[1].x + j0.y * cov[1].y + j0.z * cov[1].z,
@@ -299,8 +476,6 @@ fn compute_projected(
     // rectangle (hard edges). The frustum clamp above bounds near-plane blow-ups
     // and the tile rect below is clipped to the image.
 
-    let proj_u = p_cam.x * j00 + u.cx;
-    let proj_v = p_cam.y * j11 + u.cy;
     let w = f32(u.img_w);
     let h = f32(u.img_h);
     if (proj_u + ext_x < 0.0 || proj_v + ext_y < 0.0 ||
@@ -322,7 +497,7 @@ fn compute_projected(
     p.opacity = opacity;
     p.radius = radius;
     p.extent_k = k;
-    p.depth = p_cam.z;
+    p.depth = depth;
     p.tx0 = u32(floor(x0f)) / 16u;
     p.ty0 = u32(floor(y0f)) / 16u;
     p.tx1 = u32(floor(x1f)) / 16u;

@@ -849,7 +849,7 @@ fn non_pinhole_lens_with_stereo_or_unknown_model_is_rejected() {
 
     let mut unknown = truth_bundle();
     unknown.camera = camera_with(
-        CameraModel::Unknown("THIN_PRISM_FISHEYE".into()),
+        CameraModel::Unknown("SOME_FUTURE_MODEL".into()),
         vec![500.0, 500.0, 320.0, 240.0],
     );
     unknown.fix_pose(10);

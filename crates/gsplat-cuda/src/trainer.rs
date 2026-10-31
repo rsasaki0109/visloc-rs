@@ -110,7 +110,20 @@ impl CudaTrainer {
         if cfg.appearance {
             return Err(CudaTrainError::Unsupported("per-image appearance"));
         }
-        let views = dataset.train.clone();
+        let mut views = dataset.train.clone();
+        // The depth-normal loss back-projects pixels through a pinhole: with
+        // it a distorted pinhole trains without its distortion, a fisheye
+        // not at all.
+        if cfg.normal_weight > 0.0 {
+            for v in &mut views {
+                v.camera = v
+                    .camera
+                    .pinhole_geometry()
+                    .ok_or(CudaTrainError::Unsupported(
+                        "the depth-normal loss with fisheye views",
+                    ))?;
+            }
+        }
         let first = views.first().ok_or(CudaTrainError::NoViews)?;
         let (width, height) = (first.camera.camera.width, first.camera.camera.height);
         for v in dataset.train.iter().chain(&dataset.eval) {

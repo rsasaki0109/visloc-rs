@@ -84,9 +84,9 @@ fn d_image(w: u32, h: u32) -> Vec<[f32; 3]> {
 
 const BG: [f32; 3] = [0.1, 0.2, 0.3];
 
-fn check_forward(scene: &Scene, w: u32, h: u32) {
+fn check_forward(scene: &Scene, view: &CameraView) {
     let Some(mut cuda) = rasterizer() else { return };
-    let view = view(w, h);
+    let view = *view;
     let cpu = render_f64(scene, &view, BG.map(f64::from));
     cuda.set_scene(&PackedScene::from_scene(scene))
         .expect("upload");
@@ -113,9 +113,10 @@ fn check_forward(scene: &Scene, w: u32, h: u32) {
 /// Screen-space gradients per gaussian and component, tolerances scaled by
 /// each component's largest magnitude (f32 vs f64 and alpha-gate ties at
 /// footprint edges add absolute noise).
-fn check_screen_grads(scene: &Scene, w: u32, h: u32) {
+fn check_screen_grads(scene: &Scene, view: &CameraView) {
     let Some(mut cuda) = rasterizer() else { return };
-    let view = view(w, h);
+    let view = *view;
+    let (w, h) = (view.camera.width, view.camera.height);
     let d = d_image(w, h);
     let d64: Vec<[f64; 3]> = d.iter().map(|p| p.map(f64::from)).collect();
     let cpu = render_backward_screen(scene, &view, BG.map(f64::from), &d64);
@@ -144,9 +145,10 @@ fn check_screen_grads(scene: &Scene, w: u32, h: u32) {
 /// Parameter gradients against the oracle. With `active = Some(a)` SH is
 /// evaluated only up to degree `a`: the oracle runs on the scene with the
 /// higher bands zeroed, and those bands' gradients must come back as 0.
-fn check_param_grads(scene: &Scene, w: u32, h: u32, active: Option<u32>) {
+fn check_param_grads(scene: &Scene, view: &CameraView, active: Option<u32>) {
     let Some(mut cuda) = rasterizer() else { return };
-    let view = view(w, h);
+    let view = *view;
+    let (w, h) = (view.camera.width, view.camera.height);
     let d = d_image(w, h);
     let d64: Vec<[f64; 3]> = d.iter().map(|p| p.map(f64::from)).collect();
     let rest_full = sh_rest_coeffs_per_channel(scene.sh_degree);
@@ -237,51 +239,155 @@ fn check_param_grads(scene: &Scene, w: u32, h: u32, active: Option<u32>) {
 
 #[test]
 fn forward_matches_cpu() {
-    check_forward(&random_scene(64, 11, 3, 0.0), 96, 80);
+    check_forward(&random_scene(64, 11, 3, 0.0), &view(96, 80));
 }
 
 #[test]
 fn forward_matches_cpu_dense_tiles() {
     // Hundreds of faint splats per tile: several forward batches of 256 and
     // backward batches of 128 per tile, without saturating.
-    check_forward(&random_scene(2500, 3, 1, -3.0), 64, 48);
+    check_forward(&random_scene(2500, 3, 1, -3.0), &view(64, 48));
 }
 
 #[test]
 fn screen_grads_match_cpu_small() {
-    check_screen_grads(&random_scene(3, 7, 2, 0.0), 40, 32);
+    check_screen_grads(&random_scene(3, 7, 2, 0.0), &view(40, 32));
 }
 
 #[test]
 fn screen_grads_match_cpu_many_tiles() {
-    check_screen_grads(&random_scene(64, 11, 3, 0.0), 96, 80);
+    check_screen_grads(&random_scene(64, 11, 3, 0.0), &view(96, 80));
 }
 
 #[test]
 fn screen_grads_match_cpu_dense_tiles() {
-    check_screen_grads(&random_scene(2500, 3, 1, -3.0), 64, 48);
+    check_screen_grads(&random_scene(2500, 3, 1, -3.0), &view(64, 48));
 }
 
 #[test]
 fn param_grads_match_cpu_small() {
-    check_param_grads(&random_scene(3, 7, 2, 0.0), 40, 32, None);
+    check_param_grads(&random_scene(3, 7, 2, 0.0), &view(40, 32), None);
 }
 
 #[test]
 fn param_grads_match_cpu_many_tiles() {
-    check_param_grads(&random_scene(64, 11, 3, 0.0), 96, 80, None);
+    check_param_grads(&random_scene(64, 11, 3, 0.0), &view(96, 80), None);
 }
 
 #[test]
 fn param_grads_respect_active_sh_degree() {
     let scene = random_scene(24, 5, 3, 0.0);
-    check_param_grads(&scene, 64, 48, Some(1));
-    check_param_grads(&scene, 64, 48, Some(0));
+    check_param_grads(&scene, &view(64, 48), Some(1));
+    check_param_grads(&scene, &view(64, 48), Some(0));
 }
 
 #[test]
 fn param_grads_match_cpu_dense_tiles() {
-    check_param_grads(&random_scene(2500, 3, 1, -3.0), 64, 48, None);
+    check_param_grads(&random_scene(2500, 3, 1, -3.0), &view(64, 48), None);
+}
+
+/// The same scenes through lenses (gsplat-core's `Lens`): a distorted
+/// pinhole, a fisheye seeing them ~35° off its axis, ETH3D's thin-prism rig
+/// lens, and a wide fisheye turned so that part of the scene lies past 90°
+/// (behind its image plane).
+fn lens_views(w: u32, h: u32) -> Vec<(&'static str, CameraView)> {
+    use visloc_gsplat_core::lens::{Lens, Projection};
+    let (wf, hf) = (w as f32, h as f32);
+    let turned = |angle: f32, focal: f32, lens: Lens| {
+        let r = nalgebra::Rotation3::from_axis_angle(&Vector3::y_axis(), angle)
+            * nalgebra::Rotation3::from_euler_angles(0.05, -0.08, 0.03);
+        CameraView::new(
+            r.into_inner(),
+            Vector3::new(0.1, -0.05, 0.2),
+            PinholeCamera::new(w, h, focal * wf, focal * wf, 0.5 * wf, 0.5 * hf).with_lens(lens),
+        )
+    };
+    let base = view(w, h);
+    vec![
+        (
+            "radtan",
+            CameraView {
+                camera: base.camera.with_lens(Lens::new(
+                    Projection::Pinhole,
+                    [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+                )),
+                ..base
+            },
+        ),
+        (
+            "fisheye 35°",
+            turned(
+                0.6,
+                0.4,
+                Lens::new(
+                    Projection::Equidistant,
+                    [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ),
+            ),
+        ),
+        (
+            "thin prism",
+            turned(
+                0.25,
+                0.7,
+                Lens::new(
+                    Projection::Equidistant,
+                    [
+                        -0.0654481,
+                        -0.0781379,
+                        0.115547,
+                        -0.0710756,
+                        -0.00131596,
+                        0.00171383,
+                        -0.0103304,
+                        0.00700661,
+                    ],
+                ),
+            ),
+        ),
+        (
+            "fisheye past 90°",
+            turned(1.5, 0.2, Lens::new(Projection::Equidistant, [0.0; 8])),
+        ),
+    ]
+}
+
+#[test]
+fn lens_forward_matches_cpu() {
+    for (name, view) in lens_views(96, 80) {
+        eprintln!("{name}");
+        check_forward(&random_scene(64, 11, 3, 0.0), &view);
+    }
+}
+
+#[test]
+fn lens_screen_grads_match_cpu() {
+    for (name, view) in lens_views(96, 80) {
+        eprintln!("{name}");
+        check_screen_grads(&random_scene(64, 11, 3, 0.0), &view);
+    }
+}
+
+#[test]
+fn lens_param_grads_match_cpu() {
+    for (name, view) in lens_views(96, 80) {
+        eprintln!("{name}");
+        check_param_grads(&random_scene(64, 11, 3, 0.0), &view, None);
+    }
+}
+
+/// The geometry the pinhole-only paths cannot follow is refused: the
+/// planar depth, the normals and the TSDF with a fisheye camera.
+#[test]
+fn lens_geometry_is_refused() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let scene = random_scene(16, 3, 0, 0.0);
+    cuda.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let (_, fisheye) = lens_views(64, 48).remove(1);
+    assert!(cuda.render_depth(&fisheye, BG, 0, true).is_err());
+    assert!(cuda.render_geometry(&fisheye, BG, 0).is_err());
+    assert!(cuda.render_depth(&fisheye, BG, 0, false).is_ok());
 }
 
 /// A flat, round gaussian facing the camera at depth `z` with opacity `a`.

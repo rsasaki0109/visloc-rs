@@ -1,5 +1,4 @@
-//! Minimal pinhole camera and camera-to-world transform for the reference
-//! renderer.
+//! Minimal camera and camera-to-world transform for the reference renderer.
 //!
 //! The COLMAP / 3DGS convention stores the **world-to-camera** rotation and
 //! translation in `images.txt` (quaternion `(w, x, y, z)`, then `t`), with the
@@ -9,7 +8,11 @@
 
 use nalgebra::{Matrix3, Vector3};
 
-/// Pinhole intrinsics (the COLMAP `PINHOLE` / `SIMPLE_PINHOLE` shape).
+use crate::lens::{Lens, Projection};
+
+/// Pixel intrinsics (the COLMAP `PINHOLE` / `SIMPLE_PINHOLE` shape) and the
+/// lens in front of them: an undistorted pinhole unless
+/// [`PinholeCamera::with_lens`] sets a distortion or a fisheye projection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeCamera {
     pub width: u32,
@@ -18,6 +21,7 @@ pub struct PinholeCamera {
     pub fy: f32,
     pub cx: f32,
     pub cy: f32,
+    pub lens: Lens,
 }
 
 impl PinholeCamera {
@@ -29,11 +33,24 @@ impl PinholeCamera {
             fy,
             cx,
             cy,
+            lens: Lens::PINHOLE,
         }
     }
 
-    /// Project a camera-space point to pixels, returning `(u, v, depth)`.
-    /// Depth is the camera-space `z` (positive in front).
+    /// This camera behind `lens`, its [`Lens::max_theta`] fitted to the
+    /// image ([`Lens::fit_max_theta`]).
+    pub fn with_lens(self, lens: Lens) -> Self {
+        let lens = if lens.is_pinhole() {
+            Lens::PINHOLE
+        } else {
+            lens.fit_max_theta(self.fx, self.fy, self.cx, self.cy, self.width, self.height)
+        };
+        Self { lens, ..self }
+    }
+
+    /// Project a camera-space point to pixels through an undistorted
+    /// pinhole, returning `(u, v, depth)`. Depth is the camera-space `z`
+    /// (positive in front). The lens is not applied.
     pub fn project(&self, p_cam: Vector3<f32>) -> (f32, f32, f32) {
         let z = p_cam.z;
         let inv = if z.abs() > f32::EPSILON { 1.0 / z } else { 0.0 };
@@ -67,6 +84,24 @@ impl CameraView {
     /// Transform a world point into the camera frame.
     pub fn world_to_camera_point(&self, p_world: Vector3<f32>) -> Vector3<f32> {
         self.rotation * p_world + self.translation
+    }
+
+    /// This view for the code that still back-projects pixels through a
+    /// pinhole (TSDF meshing, the planar median depth, the depth-normal
+    /// loss): a distorted pinhole without its distortion, as those paths
+    /// treated every camera before lenses were rendered, or `None` for an
+    /// equidistant (fisheye) lens, whose rays they cannot follow.
+    pub fn pinhole_geometry(&self) -> Option<Self> {
+        match self.camera.lens.projection {
+            Projection::Equidistant => None,
+            Projection::Pinhole => Some(Self {
+                camera: PinholeCamera {
+                    lens: Lens::PINHOLE,
+                    ..self.camera
+                },
+                ..*self
+            }),
+        }
     }
 
     /// Camera centre in world coordinates (`C = -R^T t`).

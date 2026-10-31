@@ -6,6 +6,28 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **3DGS through fisheye and distorted lenses (`visloc_gsplat_core::lens`).**
+  See [docs/fisheye.md](docs/fisheye.md).
+  - A camera's intrinsics carry a `Lens`: the pinhole or the equidistant
+    (fisheye) projection, with COLMAP's radial, tangential and thin-prism
+    distortion.
+  - COLMAP datasets with `SIMPLE_RADIAL`, `RADIAL`, `OPENCV`,
+    `OPENCV_FISHEYE`, `RADIAL_FISHEYE`, `SIMPLE_RADIAL_FISHEYE` or
+    `THIN_PRISM_FISHEYE` cameras now train on their images as they are.
+    Before, the first three loaded with their distortion dropped, and the
+    fisheye models did not load.
+  - The CPU reference, the f64 gradient oracle, CUDA and wgpu linearise the
+    lens at each gaussian, rays past 90° included. A fisheye sorts by
+    distance, and its depth channels hold the distance. The backward passes
+    get the Jacobian's derivatives from dual numbers.
+  - Meshes, the planar median depth and the depth-normal loss still
+    back-project through a pinhole. They take a distorted pinhole without
+    its distortion, as before, and refuse fisheye views.
+  - CUDA ABI 11 (`GscCamera` carries the lens). The wgpu kernels are
+    validated with naga in a test that needs no GPU.
+  - `visloc-core` and `visloc-io`: COLMAP's `THIN_PRISM_FISHEYE`
+    (`CameraModel::ThinPrismFisheye`), with projection, unprojection and
+    point Jacobian.
 - **CUDA 3DGS rasterizer and trainer (`visloc-gsplat-cuda`, experimental,
   opt-in).** This is a CUDA backend for 3DGS rendering and training, for
   machines where wgpu cannot reach the GPU (WSL2 exposes CUDA but no NVIDIA

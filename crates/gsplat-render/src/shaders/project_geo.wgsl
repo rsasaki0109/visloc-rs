@@ -1,6 +1,7 @@
 // Geometry channels, per visible gaussian (compact order): the camera-space
 // normal -- the rotation axis of the smallest scale, flipped to face the
-// camera -- and the camera-space depth, as 4 floats in `geo_splats`.
+// camera -- and the camera-space depth (the distance for a fisheye), as 4
+// floats in `geo_splats`.
 
 @group(0) @binding(0) var<uniform> u: ProjectUniforms;
 @group(0) @binding(1) var<storage, read> transforms: array<f32>;
@@ -32,5 +33,10 @@ fn project_geo(@builtin(global_invocation_id) gid3: vec3<u32>) {
     if (dot(n, p) > 0.0) {
         n = -n;
     }
-    geo_splats[compact] = vec4<f32>(n, p.z);
+    // A fisheye's depth is the distance (compute_projected's).
+    var depth = p.z;
+    if (u.lens_kind == LENS_EQUIDISTANT) {
+        depth = length(p);
+    }
+    geo_splats[compact] = vec4<f32>(n, depth);
 }

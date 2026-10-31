@@ -135,10 +135,51 @@ pub fn scan() -> Kernel {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn select_geo_keeps_one_branch() {
         let src = "a\n// #if GEO\ng\n// #else\nplain\n// #endif\nb\n";
         assert_eq!(super::select_geo(src, true), "a\ng\nb\n");
         assert_eq!(super::select_geo(src, false), "a\nplain\nb\n");
+    }
+
+    /// Every kernel (both variants of the geometry ones) parses and
+    /// validates with naga, as wgpu does before building a pipeline, so a
+    /// shader edit is checked without a GPU.
+    #[test]
+    fn every_kernel_validates() {
+        use naga::valid::{
+            Capabilities, ShaderStages, SubgroupOperationSet, ValidationFlags, Validator,
+        };
+        let kernels = [
+            rasterize_backward_variant(false),
+            rasterize_backward_variant(true),
+            project_backward_variant(false),
+            project_backward_variant(true),
+            project_geo(),
+            project_forward(),
+            project_visible(),
+            map_gaussians(),
+            gather_compact(),
+            tile_offsets(),
+            rasterize_variant(false),
+            rasterize_variant(true),
+            rasterize_depth(),
+            radix(),
+            scan(),
+        ];
+        for kernel in kernels {
+            let module = naga::front::wgsl::parse_str(&kernel.source).unwrap_or_else(|e| {
+                panic!("{}: {}", kernel.name, e.emit_to_string(&kernel.source))
+            });
+            Validator::new(ValidationFlags::all(), Capabilities::all())
+                .subgroup_stages(ShaderStages::all())
+                .subgroup_operations(SubgroupOperationSet::all())
+                .validate(&module)
+                .unwrap_or_else(|e| {
+                    panic!("{}: {}", kernel.name, e.emit_to_string(&kernel.source))
+                });
+        }
     }
 }

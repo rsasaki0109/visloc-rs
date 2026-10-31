@@ -28,6 +28,7 @@ pub mod backward;
 pub mod camera;
 pub mod cpu_render;
 pub mod gaussian;
+pub mod lens;
 #[cfg(feature = "mesh")]
 pub mod mesh;
 pub mod ply;
@@ -40,6 +41,7 @@ pub mod colmap_scene;
 pub use camera::{CameraView, PinholeCamera};
 pub use cpu_render::{render, Image};
 pub use gaussian::{Gaussian, Scene};
+pub use lens::{Lens, Projection};
 pub use ply::{load_ply, save_ply, PlyError};
 pub use sh::{eval_sh_color, SH_C0};
 pub use splat::{load_splat, save_splat, SplatError};

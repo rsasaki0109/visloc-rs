@@ -81,12 +81,20 @@ pub fn scene_scale(views: &[&CameraView], support: &[[f32; 3]]) -> f32 {
 /// gives a view's row-major RGB and median depth (camera z, 0 = no surface),
 /// from whichever renderer holds the splat. Returns the mesh and a one-line
 /// summary.
+///
+/// The TSDF back-projects through a pinhole: a distorted pinhole's views are
+/// rendered and fused without their distortion
+/// ([`CameraView::pinhole_geometry`]), and a fisheye view panics (callers
+/// check with [`pinhole_geometry_views`] first).
 pub fn fuse_views<E>(
     views: &[&CameraView],
     support: &[[f32; 3]],
     opts: &MeshOptions,
     mut render: impl FnMut(&CameraView) -> Result<(Vec<[f32; 3]>, Vec<f32>), E>,
 ) -> Result<(Mesh, String), E> {
+    let geometry = pinhole_geometry_views(views).expect("fuse_views: a fisheye view");
+    let views: Vec<&CameraView> = geometry.iter().collect();
+    let views = views.as_slice();
     let scale = scene_scale(views, support);
     let voxel = opts.voxel.unwrap_or(scale / 256.0);
     let max_depth = opts.max_depth.unwrap_or(2.0 * scale);
@@ -123,8 +131,15 @@ pub fn fuse_views<E>(
     Ok((mesh, summary))
 }
 
+/// The views as the pinhole-only geometry code takes them
+/// ([`CameraView::pinhole_geometry`]), or `None` if one is a fisheye.
+pub fn pinhole_geometry_views(views: &[&CameraView]) -> Option<Vec<CameraView>> {
+    views.iter().map(|v| v.pinhole_geometry()).collect()
+}
+
 /// [`fuse_views`] with the wgpu renderer: render `scene`'s median depth from
-/// every view. Returns the mesh, a one-line summary and the context.
+/// every view. Returns the mesh, a one-line summary and the context; an
+/// error for fisheye views.
 #[cfg(feature = "gpu")]
 pub fn extract_from_splat(
     ctx: visloc_gsplat_render::GpuContext,
@@ -133,6 +148,11 @@ pub fn extract_from_splat(
     support: &[[f32; 3]],
     opts: &MeshOptions,
 ) -> Result<(Mesh, String, visloc_gsplat_render::GpuContext), visloc_gsplat_render::GpuError> {
+    if pinhole_geometry_views(views).is_none() {
+        return Err(visloc_gsplat_render::GpuError::Unsupported(
+            "meshes from fisheye views (the TSDF back-projects through a pinhole)",
+        ));
+    }
     let mut ctx = Some(ctx);
     let mut renderer: Option<(u32, u32, visloc_gsplat_render::Renderer)> = None;
     let fused = fuse_views(
