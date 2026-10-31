@@ -1200,6 +1200,59 @@ weak over minutes to take out what the solve starts from ([The solution keeps
 its starting point's drift](#the-solution-keeps-its-starting-points-drift)),
 and a head-worn camera does not give them longer ones.
 
+### A learned dense front end, and the VIO's calibration
+
+Measured below at the poses whose timestamps match the pseudo-GT's within
+2 ms, without interpolation (a keyframe trajectory cannot be interpolated
+while the head turns): the body rotation fitted to the rotations' changes
+between consecutive matches, the world rotation to the first 60 s, then the
+error's rotation about the pseudo-GT's vertical. It counts the other way round
+from the section above (the pass solve drifts by + here).
+
+DROID-SLAM (monocular, its TartanAir weights, the frontend without the final
+global BA) on sequence_3_18's rectified cam0, 300–700 s, at 10 Hz and
+384 × 504:
+
+| Trajectory | Rotation change over 1–3 s, off the pseudo-GT's (median) | Heading change over 256 s (mean) |
+|---|---:|---:|
+| The chain's pass solve | **0.07°** | **+1.34°** |
+| The VIO | 0.07° | +7.04° |
+| DROID-SLAM | 0.26° | +14.1° |
+
+At 5 Hz and 240 × 312 (300–1,020 s) DROID-SLAM is 1.9–3.0° off over 1–3 s on
+either camera and turns by 22–34° per 256 s. A learned dense front end does
+not hold the heading better here; DBA-Fusion, which fuses DROID-SLAM's dense
+BA with an IMU (monocular, GPL-3.0), was not pursued.
+
+The VIO's drift takes the device's sign. Heading change over 256 s (mean),
+whole sequences:
+
+| Sequence | Device | VIO | Chain |
+|---|---|---:|---:|
+| sequence_1_19 | 1WM09370081264 | −1.27° | +0.19° |
+| sequence_1_20 | 1WM09370081264 | −2.79° | +0.02° |
+| R_11_5cp | 1WM093701G1276 | +1.12° | +1.74° |
+| R_12_10cp | 1WM093701G1276 | +3.55° | +0.31° |
+| sequence_2_11 | 1WM093701G1276 | +1.88° | +0.01° |
+| sequence_3_18 | 1WM093701G1276 | +4.24° | +0.49° |
+| sequence_4_10 (night) | 1WM093701G1276 | +0.57° | +0.13° |
+| sequence_4_11 (night) | 1WM093701G1276 | −1.78° | −0.19° |
+
+The chain takes most of it out; what it leaves is on 1WM093701G1276. Its own
+calibration explains little of the VIO's drift, though. sequence_3_18's VIO
+again, with the chain's estimate of each camera's rotation (mean of the eight
+segments) and of the focal lengths (a calibration that knows the answer,
+diagnosis only):
+
+| VIO calibration | Heading change over 256 s | Heading error at the end | CP Score (VIO alone) |
+|---|---:|---:|---:|
+| The device table's | +4.24° | +26.6° | 19.94 |
+| The chain's camera rotations | +3.93° | +24.5° | 22.41 |
+| The chain's camera rotations and focal lengths | +3.20° | +20.1° | 24.61 |
+
+A quarter of the drift goes, the rest stays: it is the VIO's short window,
+which the chain's matches and revisits take out, not its calibration.
+
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
