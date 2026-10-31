@@ -756,7 +756,7 @@ fn write_back_lens(
 /// through the model the faces were cut with, and
 /// [`dual_fisheye::calibrate_lenses`] refines each lens's optical centre
 /// and focal lengths, the back lens's pose, the frames and the points, on
-/// at most 120 frames spread over the run. The result is on the factory
+/// at most 200 frames spread over the run. The result is on the factory
 /// calibration (`cfg.insv_lenses` included), for `insv_lenses`
 /// (docs/insta360_lens.md).
 pub fn calibrate_insv_lenses(
@@ -874,14 +874,14 @@ pub fn calibrate_insv_lenses(
             observations,
         });
     }
-    // At most 120 frames with the front lens posed, spread over the run.
+    // At most 200 frames with the front lens posed, spread over the run.
     let mut posed: Vec<usize> = lens_poses
         .keys()
         .filter(|k| k.1 == 0)
         .map(|k| k.0)
         .collect();
     posed.sort_unstable();
-    let keep = posed.len().min(120);
+    let keep = posed.len().min(200);
     if keep < 3 {
         return Err(fail(format!(
             "{} frames posed in {}",

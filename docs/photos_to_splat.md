@@ -105,6 +105,12 @@ left, as ffmpeg's `hstack` of the video's two streams produces.
   stitched; `<out>/back_lens.txt` holds the refined pose. `--window`
   counts frames.
 - **Scale.** The video's IMU scales the model to metres (next section).
+- **Calibrated lenses.** `--insv-calibrate` reconstructs twice: the first
+  run calibrates each lens's optical centre and focal lengths
+  (`<out>/lenses.txt`), and the second cuts the faces from the calibrated
+  lenses. On three walks the camera track came 26–75% closer to the
+  dataset's ([insta360_lens.md](insta360_lens.md#calibrating-both-lenses)).
+  `--insv-lenses lenses.txt` reuses a calibration.
 - **Cameras.** The calibration is decoded for the X5; videos from other
   cameras stop with an error.
 - **Panoramas instead.** The `insv_stitch` example stitches the two

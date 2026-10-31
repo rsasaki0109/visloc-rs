@@ -5,8 +5,8 @@
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features euroc --example insv_stitch -- \
 //!     VIDEO.insv (--out <folder> | --video OUT.mp4) [--step 1] [--width PX] [--seam morph] \
-//!     [--blend DEG] [--back-lens auto|factory|back_lens.txt] [--distance M] \
-//!     [--frame SIDE_BY_SIDE.jpg]
+//!     [--blend DEG] [--back-lens auto|factory|back_lens.txt] [--lenses lenses.txt] \
+//!     [--distance M] [--frame SIDE_BY_SIDE.jpg]
 //! ```
 //!
 //! Frames are decoded with ffmpeg (on `PATH`), both lenses side by side,
@@ -23,7 +23,9 @@
 //! see the same things along the seam, in 16 frames spread over the video
 //! (`--back-lens auto`); `factory` takes it from the recorded angles alone,
 //! and a file from the `back_lens.txt` a `gsplat_photos --insv` run wrote
-//! (docs/insta360_lens.md). The lenses are 3.2 cm apart, so where they meet
+//! (docs/insta360_lens.md); `--lenses` takes both lenses (optical centres,
+//! focal lengths, the back lens's rotation) from a `gsplat_photos
+//! --insv-calibrate` run's `lenses.txt`. The lenses are 3.2 cm apart, so where they meet
 //! things at different distances cannot all line up: the seam is stitched
 //! for the distance the fit finds typical along it (`--distance` sets it),
 //! and in each frame the two lenses are matched along the seam and one
@@ -38,7 +40,7 @@ use std::time::Instant;
 use nalgebra::{Matrix3, Vector3};
 use visloc_gsplat_train::dual_fisheye::{
     back_lens_rotation, factory_back_lens_rotation, fit_back_lens, seam_pairs, stitch_equirect,
-    FisheyeLens, SeamDisparity, SeamFit, SeamPair,
+    FisheyeLens, LensCalibration, SeamDisparity, SeamFit, SeamPair,
 };
 use visloc_io::insv::read_insv_telemetry;
 
@@ -56,8 +58,10 @@ An Insta360 video's dual-fisheye frames -> equirectangular (360°) frames.
   --blend DEG        degrees over which the two lenses meet at the seam (default: 6 with
                      --seam morph, 2 with blend)
   --back-lens auto   the back lens's rotation: auto (fitted along the seam in 16 frames),
-                     factory (the recorded angles alone), or a gsplat_photos --insv run's
-                     back_lens.txt
+                     factory (the recorded angles alone, or --lenses' rotation), or a
+                     gsplat_photos --insv run's back_lens.txt
+  --lenses FILE      both lenses as a gsplat_photos --insv-calibrate run calibrated them
+                     (lenses.txt): optical centres, focal lengths, the back lens's rotation
   --distance M       stitch the seam for things this far away (metres; inf: far away;
                      default: the scene's typical distance along the seam with
                      --back-lens auto, far away otherwise)
@@ -84,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut morph = true;
     let mut back_lens = String::from("auto");
     let mut distance: Option<f64> = None;
+    let mut calibration: Option<LensCalibration> = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -103,6 +108,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--quality" => quality = next()?.parse()?,
             "--back-lens" => back_lens = next()?,
             "--distance" => distance = Some(next()?.parse()?),
+            "--lenses" => {
+                let path = PathBuf::from(next()?);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                calibration = Some(
+                    LensCalibration::from_text(&text)
+                        .map_err(|e| format!("{}: {e}", path.display()))?,
+                );
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return Ok(());
@@ -125,6 +139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let factory = factory_back_lens_rotation(front, back);
+    // Where the back lens's rotation starts: the calibration's, else the
+    // recorded angles'.
+    let start = calibration.as_ref().map_or(factory, |c| c.back_rotation);
+    let calibrated = |lenses: [FisheyeLens; 2], size: u32| match &calibration {
+        Some(c) => c.apply(&lenses, size),
+        None => lenses,
+    };
     // The back lens's centre in the front lens's frame, as recorded.
     let baseline = Vector3::from(back.translation);
     let blend = blend
@@ -140,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             parallax,
             across,
             pairs: kept,
-        } = fit_back_lens(pairs, lens, &factory, &baseline);
+        } = fit_back_lens(pairs, lens, &start, &baseline);
         // A shift towards the axes is the scene's distance; one away from
         // them, which no distance gives, is the lenses' models disagreeing
         // on the scale at the seam, and the stitch takes it all the same.
@@ -193,19 +214,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|p| image::open(p).map(|i| i.to_rgb8()))
             .collect::<Result<_, _>>()?;
         let size = images[0].height();
-        let mut lenses = [
-            FisheyeLens::from_insv(front, size),
-            FisheyeLens::from_insv(back, size),
-        ];
+        let mut lenses = calibrated(
+            [
+                FisheyeLens::from_insv(front, size),
+                FisheyeLens::from_insv(back, size),
+            ],
+            size,
+        );
         let (rotation, centre, fitted) = match back_lens.as_str() {
             "auto" => fit(
                 &images
                     .iter()
-                    .flat_map(|img| seam_pairs(img, &lenses, &factory))
+                    .flat_map(|img| seam_pairs(img, &lenses, &start))
                     .collect::<Vec<_>>(),
                 &lenses[1],
             ),
-            "factory" => (factory, [0.0; 2], None),
+            "factory" => (start, [0.0; 2], None),
             file => (read_back_lens(Path::new(file))?, [0.0; 2], None),
         };
         lenses[1] = lenses[1].shifted(centre);
@@ -237,10 +261,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (size, stack) = lens_streams(&video)?;
-    let mut lenses = [
-        FisheyeLens::from_insv(front, size),
-        FisheyeLens::from_insv(back, size),
-    ];
+    let mut lenses = calibrated(
+        [
+            FisheyeLens::from_insv(front, size),
+            FisheyeLens::from_insv(back, size),
+        ],
+        size,
+    );
     let (rotation, centre, fitted) = match back_lens.as_str() {
         "auto" => {
             let every = frame_count(&video).map_or(30, |n| (n / FIT_FRAMES).max(1));
@@ -248,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut pairs = Vec::new();
             let mut taken = 0;
             decode_frames(&video, size, stack, every, |_, img| {
-                pairs.extend(seam_pairs(&img, &lenses, &factory));
+                pairs.extend(seam_pairs(&img, &lenses, &start));
                 taken += 1;
                 Ok(taken < FIT_FRAMES)
             })?;
@@ -258,7 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             fit(&pairs, &lenses[1])
         }
-        "factory" => (factory, [0.0; 2], None),
+        "factory" => (start, [0.0; 2], None),
         file => (read_back_lens(Path::new(file))?, [0.0; 2], None),
     };
     lenses[1] = lenses[1].shifted(centre);

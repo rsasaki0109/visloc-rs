@@ -306,6 +306,23 @@ All notable changes to `visloc-rs` will be documented here.
     within 1.7% per colour.
   - `--back-lens factory` or a `gsplat_photos --insv` run's
     `back_lens.txt` skip the fit; `--frame` stitches side-by-side images.
+- **`gsplat_photos --insv-calibrate`: both Insta360 lenses calibrated
+  from the video.** The first reconstruction goes into `<out>/calibration`.
+  From it each lens's optical centre and focal lengths are calibrated
+  (`<out>/lenses.txt`), and the second reconstruction cuts the faces from
+  the calibrated lenses.
+  - `dual_fisheye::calibrate_lenses` is a bundle adjustment in the lens
+    images' pixels through the unified model (points eliminated,
+    soft-L1). It refines the lenses with the back lens's pose, the frames
+    and the points. `photos::calibrate_insv_lenses` feeds it a run's
+    observations and SIFT matches along the seam, which pin the two
+    centres to each other.
+  - On three OverMaps360 walks the camera track came closer to the
+    dataset's (0.148 → 0.109 m, PARK_TRACK and 0.343 → 0.085 m median
+    distance). The metric scale moved by up to PARK_SCALE_MOVE points.
+  - `--insv-lenses lenses.txt` and `insv_stitch --lenses` reuse a
+    calibration (`dual_fisheye::LensCalibration`,
+    `PhotoSfmConfig::insv_lenses`, `FisheyeLens::with_focal_scale`).
 - **`gsplat_photos --insv`: Insta360 video straight to a metric model.**
   The input is the video's raw dual-fisheye frames, both lenses side by
   side (one ffmpeg command), with no Insta360 Studio export.
