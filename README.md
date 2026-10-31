@@ -17,11 +17,6 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/hero_metric_objects_kitti.gif" alt="Objects in metres from one camera and an IMU on KITTI raw drive 0084. Top: the camera image with YOLOX boxes; each car is labelled with its height, its distance and its speed or 'parked'. Bottom left: a top view following the camera with a ring every 10 m, the cars' positions and the moving ones' paths. Bottom right: the whole drive from above; mono + IMU follows the ground truth, while the visual-only VO, drawn as metres, covers a few metres near the start; a readout gives the camera's own speed from each, tens of km/h from the ground truth and mono + IMU and under 1 km/h from the visual-only VO." width="800"><br>
-  <sub>Objects in metres from one camera and an IMU, offline, on KITTI raw drive 0084. Each car's foot is where the bottom of its box meets the ground: the VIO's metric scale puts the camera a measured height above the ground, and gravity gives down. That gives the height, the distance and, from the foot's path, the speed. Against KITTI's 3D boxes on five drives, car heights come out <b>11 % off</b> (median, 110 cars) with mono + IMU and <b>6 %</b> with stereo + IMU; pedestrians 7 cm (stereo + IMU). Speed is the weak part: still cars 0.15 m/s, moving cars 2–3 m/s off. With the IMU off (bottom right), the visual-only VO draws the 219 m drive as 5.7 m, 39× too small. <a href="docs/object_tracking.md#metric-accuracy-on-kitti-raw-phase-4">Details</a>. Images: <a href="https://www.cvlibs.net/datasets/kitti/raw_data.php">KITTI raw</a> (CC BY-NC-SA 3.0).</sub>
-</p>
-
-<p align="center">
   <img src="docs/assets/hero_map_localization.gif" alt="Map-based localization on EuRoC: the 3D landmarks of a map saved by the stereo-inertial SLAM from the MH_01 flight, with the MH_02 flight's visual-inertial odometry corrected into its frame. Inset: the current camera image with the keypoints that matched the map in green. In the map: the current camera in red with green rays to the landmarks it matched, and its map-frame trajectory so far in orange, unbroken, tracing the flight's loops through the machine hall." width="720"><br>
   <sub>Map-based localization: EuRoC MH_02 in a map that the stereo-inertial SLAM saved from MH_01, a different flight. The map fixes correct the VIO into the map frame, so every frame gets a map pose (orange): <b>3,039 of the 3,040 frames, at 1.9 cm RMSE</b> against ground truth. Green: the keypoints that matched the map, searched around where the corrected VIO predicts each landmark (98% of the images match; 81% when each image is matched alone), and rays to those landmarks. The same runs in real time as ROS 2 nodes. <a href="docs/basalt_map_localization.md">Details and the other EuRoC queries</a>.</sub>
 </p>
@@ -351,7 +346,7 @@ speed. On KITTI raw, against the tracklets (median errors):
 must start at rest.</sub>
 
 `scripts/run_kitti_objects_eval.sh` runs a drive end to end, and
-`scripts/render_objects_gif.py` draws the GIF at the top. The method,
+`scripts/render_objects_gif.py` draws a GIF of a drive. The method,
 results on LaMAria and TUM-VI, and what still fails:
 [object tracking](docs/object_tracking.md).
 
