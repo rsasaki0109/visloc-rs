@@ -1303,12 +1303,38 @@ the same inputs, so every difference is the correction's):
 | sequence_4_11 | 71.07 | 66.51 | **73.40** | 69.87 |
 | **Mean** | **72.61** | 65.97 | 70.08 | 69.55 |
 
-The device's correction is not kept. What it shows is how far the chain moves
-when its input moves a little. A sequence changes by up to 11 points.
-sequence_1_20 and 2_11, near 89, lose 5–11 whatever changes, and
-sequence_3_18 gains. On five to eight training sequences, gains of 2–3 points
-in the mean cannot be told from that (and submission 6's did not carry over to
-the test set, [lamaria_test_results.md](lamaria_test_results.md)).
+The device's correction is not kept. Against the chain on a slightly noisier
+IMU (next section), the correction in the chain's IMU costs 7.6 points on
+sequence_1_20 and 5.0 on 2_11, and gains 3.5 on 3_18 and 2.0 on 4_11. Those
+differences are well beyond what the noise moves.
+
+### How far the chain moves for nothing
+
+The chain repeats its results exactly for the same inputs. To see how far it
+moves for an input change that should not matter, the same chain call ran
+from the VIO as it ran, on the IMU with a tenth of its own noise density added
+(three seeds; per sample 0.0089 rad/s × 0.1 and 0.51 m/s² × 0.1), with the
+run's SIFT keyframes linked:
+
+| Sequence | As it ran | Seed 1 | Seed 2 | Seed 3 | Seeds 1–3 (mean ± std) |
+|---|---:|---:|---:|---:|---:|
+| sequence_4_11 | 71.07 | 70.86 | 71.63 | 71.56 | 71.35 ± 0.43 |
+| sequence_4_10 | 59.80 | 58.03 | 57.46 | 57.68 | 57.72 ± 0.29 |
+| sequence_1_20 | 88.65 | 84.33 | 85.43 | 85.97 | 85.24 ± 0.84 |
+| sequence_3_18 | 54.27 | 55.01 | 54.11 | 54.80 | 54.64 ± 0.47 |
+| sequence_2_11 | 89.25 | 88.12 | 88.48 | 88.50 | 88.37 ± 0.21 |
+| **Mean** | 72.61 | 71.27 | 71.42 | 71.70 | 71.46 ± 0.22 |
+
+Between the seeds a sequence moves by 0.2–0.8 (std) and the mean of five by
+0.2. The runs as they ran are on the lucky side, though: 3.4 points above the
+seeds on sequence_1_20, 2.1 on 4_10, 0.9 on 2_11, 1.2 on the mean. The
+chain's options were chosen on these exact inputs, and a sequence it has not
+seen, like the test set's, is closer to a perturbed one.
+
+A change is therefore measured against the seeds, not against the run as it
+ran. It runs with the same three seeds, each seed is compared with the same
+seed, and the change is kept if it raises the mean by about three times the
+seeds' spread (0.7) and raises most of the sequences.
 
 ### A ride the VIO halves
 
