@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 10).
+  version (currently 11).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 

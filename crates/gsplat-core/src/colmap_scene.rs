@@ -13,6 +13,7 @@ use visloc_io::colmap::{read_colmap_binary_model, read_colmap_text_model, Colmap
 
 use crate::camera::{CameraView, PinholeCamera};
 use crate::gaussian::{Gaussian, Scene};
+use crate::lens::{Lens, Projection};
 
 /// Errors from loading a COLMAP model into a 3DGS scene.
 #[derive(Debug, thiserror::Error)]
@@ -152,13 +153,15 @@ pub fn seed_scene_from_landmarks(
 /// Build a rendering [`CameraView`] from a visloc camera and pose.
 ///
 /// `pose` is the visloc convention (`world_to_camera` SE3); its rotation is
-/// converted to a `Matrix3<f32>` and the intrinsics are read from the COLMAP
-/// parameter layout for the camera model.
+/// converted to a `Matrix3<f32>`, the intrinsics are read from the COLMAP
+/// parameter layout for the camera model, and its distortion becomes the
+/// view's [`Lens`] ([`lens_of`]).
 pub fn camera_view_from(
     camera: &visloc_core::types::Camera,
     pose: &visloc_core::geometry::Pose,
 ) -> Result<CameraView, ColmapSceneError> {
     let (fx, fy, cx, cy) = pinhole_intrinsics(camera)?;
+    let lens = lens_of(camera)?;
     let r = pose
         .world_to_camera
         .rotation
@@ -180,15 +183,83 @@ pub fn camera_view_from(
     Ok(CameraView::new(
         rotation,
         translation,
-        PinholeCamera::new(camera.width, camera.height, fx, fy, cx, cy),
+        PinholeCamera::new(camera.width, camera.height, fx, fy, cx, cy).with_lens(lens),
     ))
 }
 
-/// Extract `(fx, fy, cx, cy)` from a COLMAP camera parameter list.
+/// The [`Lens`] of a COLMAP camera model, in gsplat-core's coefficient
+/// order `[k1, k2, k3, k4, p1, p2, sx1, sy1]`:
 ///
-/// - `SIMPLE_PINHOLE`: `fx, cx, cy` (fy = fx)
-/// - `PINHOLE`: `fx, fy, cx, cy`
-/// - `OPENCV`: `fx, fy, cx, cy, k1, k2, p1, p2` (distortion ignored here)
+/// - pinhole projection: `SIMPLE_PINHOLE` and `PINHOLE` (with visloc's
+///   optional trailing `k1 k2`, [`visloc_core::types::Camera::pinhole_radial`]),
+///   `SIMPLE_RADIAL`, `RADIAL`, `OPENCV`, and `FULL_OPENCV` without its
+///   rational denominator (`k4 = k5 = k6 = 0`);
+/// - equidistant projection: `SIMPLE_RADIAL_FISHEYE`, `RADIAL_FISHEYE`,
+///   `OPENCV_FISHEYE`, `THIN_PRISM_FISHEYE`.
+///
+/// Other models (a rational `FULL_OPENCV`, `FOV`, Double Sphere,
+/// equirectangular) are unsupported.
+pub fn lens_of(camera: &visloc_core::types::Camera) -> Result<Lens, ColmapSceneError> {
+    let unsupported = || ColmapSceneError::UnsupportedCamera {
+        camera_id: camera.id,
+        model: camera.model.clone(),
+    };
+    let at = |i: usize| camera.params.get(i).copied().unwrap_or(0.0) as f32;
+    let (projection, coeffs) = match &camera.model {
+        CameraModel::SimplePinhole => (Projection::Pinhole, [0.0; 8]),
+        CameraModel::Pinhole => (
+            Projection::Pinhole,
+            [at(4), at(5), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        CameraModel::SimpleRadial => (
+            Projection::Pinhole,
+            [at(3), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        CameraModel::Radial => (
+            Projection::Pinhole,
+            [at(3), at(4), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        CameraModel::OpenCv => (
+            Projection::Pinhole,
+            [at(4), at(5), 0.0, 0.0, at(6), at(7), 0.0, 0.0],
+        ),
+        CameraModel::FullOpenCv => {
+            if [at(9), at(10), at(11)] != [0.0; 3] {
+                return Err(unsupported());
+            }
+            (
+                Projection::Pinhole,
+                [at(4), at(5), at(8), 0.0, at(6), at(7), 0.0, 0.0],
+            )
+        }
+        CameraModel::SimpleRadialFisheye => (
+            Projection::Equidistant,
+            [at(3), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        CameraModel::RadialFisheye => (
+            Projection::Equidistant,
+            [at(3), at(4), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        CameraModel::OpenCvFisheye => (
+            Projection::Equidistant,
+            [at(4), at(5), at(6), at(7), 0.0, 0.0, 0.0, 0.0],
+        ),
+        CameraModel::ThinPrismFisheye => (
+            Projection::Equidistant,
+            [at(4), at(5), at(8), at(9), at(6), at(7), at(10), at(11)],
+        ),
+        _ => return Err(unsupported()),
+    };
+    Ok(Lens::new(projection, coeffs))
+}
+
+/// Extract `(fx, fy, cx, cy)` from a COLMAP camera parameter list (the
+/// distortion is [`lens_of`]'s).
+///
+/// - `SIMPLE_PINHOLE`, `SIMPLE_RADIAL`, `RADIAL` and their fisheye
+///   counterparts: `f, cx, cy, ...` (fy = fx)
+/// - `PINHOLE`, `OPENCV`, `FULL_OPENCV`, `OPENCV_FISHEYE`,
+///   `THIN_PRISM_FISHEYE`: `fx, fy, cx, cy, ...`
 pub fn pinhole_intrinsics(
     camera: &visloc_core::types::Camera,
 ) -> Result<(f32, f32, f32, f32), ColmapSceneError> {
@@ -208,17 +279,19 @@ pub fn pinhole_intrinsics(
             need(3)?;
             Ok((p[0] as f32, p[0] as f32, p[1] as f32, p[2] as f32))
         }
-        CameraModel::SimpleRadial => {
-            // [f, cx, cy, k] — focal shared, one radial term ignored here.
+        CameraModel::SimpleRadial
+        | CameraModel::Radial
+        | CameraModel::SimpleRadialFisheye
+        | CameraModel::RadialFisheye => {
+            // [f, cx, cy, k1(, k2)]: one focal length.
             need(4)?;
             Ok((p[0] as f32, p[0] as f32, p[1] as f32, p[2] as f32))
         }
-        CameraModel::Pinhole | CameraModel::OpenCv => {
-            need(4)?;
-            Ok((p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32))
-        }
-        CameraModel::Radial | CameraModel::FullOpenCv => {
-            // [fx, fy, cx, cy, ...distortion] — distortion ignored here.
+        CameraModel::Pinhole
+        | CameraModel::OpenCv
+        | CameraModel::FullOpenCv
+        | CameraModel::OpenCvFisheye
+        | CameraModel::ThinPrismFisheye => {
             need(4)?;
             Ok((p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32))
         }
@@ -329,5 +402,80 @@ mod tests {
             scene_from_visual_map(&map, DEFAULT_SEED_LOG_SCALE),
             Err(ColmapSceneError::NoLandmarks)
         ));
+    }
+
+    fn camera(model: CameraModel, params: Vec<f64>) -> Camera {
+        Camera {
+            id: 1,
+            model,
+            width: 752,
+            height: 480,
+            params,
+        }
+    }
+
+    #[test]
+    fn lenses_follow_the_colmap_models() {
+        let opencv = lens_of(&camera(
+            CameraModel::OpenCv,
+            vec![500.0, 500.0, 376.0, 240.0, -0.2, 0.05, 0.001, -0.002],
+        ))
+        .unwrap();
+        assert_eq!(opencv.projection, Projection::Pinhole);
+        assert_eq!(
+            opencv.coeffs,
+            [-0.2, 0.05, 0.0, 0.0, 0.001, -0.002, 0.0, 0.0]
+        );
+        // COLMAP's [.. k1 k2 p1 p2 k3 k4 sx1 sy1] to [k1 k2 k3 k4 p1 p2 sx1 sy1].
+        let thin_prism = lens_of(&camera(
+            CameraModel::ThinPrismFisheye,
+            vec![
+                540.0, 540.0, 413.0, 245.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+            ],
+        ))
+        .unwrap();
+        assert_eq!(thin_prism.projection, Projection::Equidistant);
+        assert_eq!(thin_prism.coeffs, [1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]);
+        let fisheye = lens_of(&camera(
+            CameraModel::RadialFisheye,
+            vec![300.0, 376.0, 240.0, 0.1, -0.01],
+        ))
+        .unwrap();
+        assert_eq!(fisheye.coeffs[..2], [0.1, -0.01]);
+        assert!(lens_of(&camera(
+            CameraModel::SimplePinhole,
+            vec![500.0, 376.0, 240.0]
+        ))
+        .unwrap()
+        .is_pinhole());
+        // A rational FULL_OPENCV, FOV and Double Sphere cannot be drawn.
+        let rational = vec![
+            500.0, 500.0, 376.0, 240.0, -0.2, 0.05, 0.0, 0.0, 0.01, 0.1, 0.0, 0.0,
+        ];
+        assert!(lens_of(&camera(CameraModel::FullOpenCv, rational)).is_err());
+        assert!(lens_of(&camera(
+            CameraModel::Fov,
+            vec![500.0, 500.0, 376.0, 240.0, 0.9]
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn fisheye_views_get_their_lens_and_field_of_view() {
+        let cam = camera(
+            CameraModel::OpenCvFisheye,
+            vec![200.0, 200.0, 376.0, 240.0, 0.02, -0.01, 0.0, 0.0],
+        );
+        let view = camera_view_from(&cam, &identity_pose()).unwrap();
+        assert_eq!(view.camera.lens.projection, Projection::Equidistant);
+        assert_eq!((view.camera.fx, view.camera.cx), (200.0, 376.0));
+        // The corners are ~2.2 rad off the axis at f = 200 px: max_theta is
+        // fitted to the image, well past 90°.
+        assert!(
+            view.camera.lens.max_theta > 2.0,
+            "{}",
+            view.camera.lens.max_theta
+        );
+        assert!(view.pinhole_geometry().is_none());
     }
 }

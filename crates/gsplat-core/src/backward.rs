@@ -22,6 +22,7 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use crate::camera::CameraView;
 use crate::gaussian::{Gaussian, Scene};
+use crate::lens::{extended_lens_coords, lens_coords, ray_angle, LensScalar, Projection};
 use crate::sh::{SH_BASIS_COEFFS, SH_C0};
 
 /// Number of non-SH parameters per gaussian differentiated with duals:
@@ -67,6 +68,29 @@ impl D {
             D::c(hi)
         } else {
             self
+        }
+    }
+}
+
+impl LensScalar for D {
+    fn from_f64(v: f64) -> Self {
+        D::c(v)
+    }
+    fn value(self) -> f64 {
+        self.v
+    }
+    fn sqrt(self) -> Self {
+        D::sqrt(self)
+    }
+    fn atan2(self, x: Self) -> Self {
+        let inv = 1.0 / (x.v * x.v + self.v * self.v);
+        let mut d = [0.0; NP];
+        for (i, out) in d.iter_mut().enumerate() {
+            *out = (x.v * self.d[i] - self.v * x.d[i]) * inv;
+        }
+        D {
+            v: self.v.atan2(x.v),
+            d,
         }
     }
 }
@@ -222,9 +246,22 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
     let p_cam: [D; 3] = std::array::from_fn(|i| {
         mean[0] * rv(i, 0) + mean[1] * rv(i, 1) + mean[2] * rv(i, 2) + t[i] as f64
     });
-    if p_cam[2].v <= 0.1 {
-        return None;
-    }
+    // The same gates and sort depth as `cpu_render::project_point`.
+    let lens = view.camera.lens;
+    let p_val = p_cam.map(|x| x.v);
+    let depth = if lens.projection == Projection::Equidistant && !lens.is_pinhole() {
+        let distance = (p_val[0] * p_val[0] + p_val[1] * p_val[1] + p_val[2] * p_val[2]).sqrt();
+        let widest = (lens.max_theta as f64).max(std::f64::consts::FRAC_PI_2);
+        if distance <= 0.1 || ray_angle(p_val) > widest {
+            return None;
+        }
+        distance
+    } else {
+        if p_val[2] <= 0.1 {
+            return None;
+        }
+        p_val[2]
+    };
 
     // Rotation from the normalised quaternion (w, x, y, z).
     let n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
@@ -268,7 +305,9 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
         std::array::from_fn(|j| ws[i][0] * rv(j, 0) + ws[i][1] * rv(j, 1) + ws[i][2] * rv(j, 2))
     });
 
-    // EWA Jacobian, linearised at a point clamped to 1.3x the frustum.
+    // EWA Jacobian, linearised at a point clamped to 1.3x the frustum (a
+    // pinhole's), or at the point itself (a fisheye's), past max_theta at
+    // the point's turn onto the cone; the screen mean.
     let z = p_cam[2];
     let inv_z = one / z;
     let inv_z2 = inv_z * inv_z;
@@ -276,8 +315,30 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
     let lim_y = 1.3 * 0.5 * h / fy;
     let tx = (p_cam[0] * inv_z).clamp(-lim_x, lim_x) * z;
     let ty = (p_cam[1] * inv_z).clamp(-lim_y, lim_y) * z;
-    let j0 = [inv_z * fx, D::c(0.0), -(tx * inv_z2) * fx];
-    let j1 = [D::c(0.0), inv_z * fy, -(ty * inv_z2) * fy];
+    let (j0, j1, u, v) = if lens.is_pinhole() {
+        (
+            [inv_z * fx, D::c(0.0), -(tx * inv_z2) * fx],
+            [D::c(0.0), inv_z * fy, -(ty * inv_z2) * fy],
+            p_cam[0] * inv_z * fx + cx,
+            p_cam[1] * inv_z * fy + cy,
+        )
+    } else {
+        let ([mu, mv], rows, q) = extended_lens_coords(&lens, p_cam);
+        let rows = match lens.projection {
+            Projection::Pinhole => {
+                let inv_qz = one / q[2];
+                let clamped = |c: D, lim: f64| (c * inv_qz).clamp(-lim, lim) * q[2];
+                lens_coords(&lens, [clamped(q[0], lim_x), clamped(q[1], lim_y), q[2]]).1
+            }
+            Projection::Equidistant => rows,
+        };
+        (
+            rows[0].map(|x| x * fx),
+            rows[1].map(|x| x * fy),
+            mu * fx + cx,
+            mv * fy + cy,
+        )
+    };
     let jcj = |a: &[D; 3], b: &[D; 3]| {
         let mut acc = D::c(0.0);
         for i in 0..3 {
@@ -309,8 +370,6 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
     let ext_x = (k * a.v).sqrt();
     let ext_y = (k * c.v).sqrt();
 
-    let u = p_cam[0] * inv_z * fx + cx;
-    let v = p_cam[1] * inv_z * fy + cy;
     if u.v + ext_x < 0.0 || v.v + ext_y < 0.0 || u.v - ext_x > w - 1.0 || v.v - ext_y > h - 1.0 {
         return None;
     }
@@ -350,7 +409,7 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
 
     Some(Proj {
         index,
-        depth: z.v,
+        depth,
         u,
         v,
         conic,
@@ -693,6 +752,88 @@ mod tests {
         )
     }
 
+    /// The pinhole view, then the same scene through lenses: a distorted
+    /// pinhole, a fisheye seeing it ~50° off the axis, ETH3D's thin-prism
+    /// rig lens, a wide fisheye seeing it past 90° (behind the image plane),
+    /// and narrow ones (a fisheye and a distorted pinhole) seeing it past
+    /// their `max_theta`, through the lens's extension.
+    fn test_views() -> Vec<(&'static str, CameraView)> {
+        use crate::lens::{Lens, Projection};
+        let turned = |angle: f64, camera: PinholeCamera| {
+            let r = nalgebra::Rotation3::from_axis_angle(&Vector3::y_axis(), angle as f32)
+                * nalgebra::Rotation3::from_euler_angles(0.05, -0.08, 0.03);
+            CameraView::new(r.into_inner(), Vector3::new(0.1, -0.05, 0.2), camera)
+        };
+        let base = test_view();
+        let radtan = Lens::new(
+            Projection::Pinhole,
+            [-0.15, 0.03, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+        );
+        let kb = Lens::new(
+            Projection::Equidistant,
+            [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        let thin_prism = Lens::new(
+            Projection::Equidistant,
+            [
+                -0.0654481,
+                -0.0781379,
+                0.115547,
+                -0.0710756,
+                -0.00131596,
+                0.00171383,
+                -0.0103304,
+                0.00700661,
+            ],
+        );
+        let equidistant = Lens::new(Projection::Equidistant, [0.0; 8]);
+        vec![
+            ("pinhole", base),
+            (
+                "radtan",
+                CameraView {
+                    camera: base.camera.with_lens(radtan),
+                    ..base
+                },
+            ),
+            (
+                "fisheye 50°",
+                turned(
+                    0.9,
+                    PinholeCamera::new(40, 32, 14.0, 14.5, 20.0, 16.0).with_lens(kb),
+                ),
+            ),
+            (
+                "thin prism",
+                turned(
+                    0.3,
+                    PinholeCamera::new(40, 32, 30.0, 30.0, 21.0, 15.0).with_lens(thin_prism),
+                ),
+            ),
+            (
+                "fisheye past 90°",
+                turned(
+                    1.75,
+                    PinholeCamera::new(40, 32, 8.0, 8.0, 20.0, 16.0).with_lens(equidistant),
+                ),
+            ),
+            (
+                "fisheye past its cone",
+                turned(
+                    0.35,
+                    PinholeCamera::new(40, 32, 150.0, 150.0, 20.0, 16.0).with_lens(kb),
+                ),
+            ),
+            (
+                "radtan past its cone",
+                turned(
+                    0.36,
+                    PinholeCamera::new(40, 32, 150.0, 150.0, 20.0, 16.0).with_lens(radtan),
+                ),
+            ),
+        ]
+    }
+
     fn weights(n: usize) -> Vec<[f64; 3]> {
         (0..n)
             .map(|i| {
@@ -740,22 +881,29 @@ mod tests {
     #[test]
     fn f64_forward_matches_cpu_render() {
         let scene = test_scene();
-        let view = test_view();
         let bg = [0.1f32, 0.2, 0.3];
-        let a = crate::cpu_render::render(&scene, &view, bg);
-        let b = render_f64(&scene, &view, bg.map(|x| x as f64));
-        let max = a
-            .rgb
-            .iter()
-            .zip(&b)
-            .flat_map(|(x, y)| (0..3).map(move |c| (x[c] as f64 - y[c]).abs()))
-            .fold(0.0, f64::max);
-        assert!(max < 1e-4, "f32 vs f64 forward differ by {max}");
+        for (name, view) in test_views() {
+            let a = crate::cpu_render::render(&scene, &view, bg);
+            let b = render_f64(&scene, &view, bg.map(|x| x as f64));
+            let max = a
+                .rgb
+                .iter()
+                .zip(&b)
+                .flat_map(|(x, y)| (0..3).map(move |c| (x[c] as f64 - y[c]).abs()))
+                .fold(0.0, f64::max);
+            assert!(max < 1e-4, "{name}: f32 vs f64 forward differ by {max}");
+        }
     }
 
     #[test]
     fn gradients_match_finite_differences() {
-        let view = test_view();
+        for (name, view) in test_views() {
+            check_gradients(name, &view);
+        }
+    }
+
+    fn check_gradients(view_name: &str, view: &CameraView) {
+        let view = *view;
         let bg = [0.1, 0.2, 0.3];
         let n = (view.camera.width * view.camera.height) as usize;
         let w = weights(n);
@@ -813,7 +961,7 @@ mod tests {
                     |n: &f64| (analytic - n).abs() <= 2e-3 * n.abs().max(analytic.abs()).max(1e-2);
                 assert!(
                     numeric.iter().any(agrees),
-                    "gaussian {which} {name}: analytic {analytic:.6e} vs FD {numeric:?}"
+                    "{view_name}: gaussian {which} {name}: analytic {analytic:.6e} vs FD {numeric:?}"
                 );
             }
         }
@@ -823,15 +971,49 @@ mod tests {
     fn gradients_are_nonzero() {
         // Guard against a vacuous FD match (e.g. everything culled).
         let scene = test_scene();
-        let view = test_view();
-        let n = (view.camera.width * view.camera.height) as usize;
-        let grads = render_backward(&scene, &view, [0.1, 0.2, 0.3], &weights(n));
-        for i in 0..3 {
-            assert!(
-                grads.mean[i].iter().any(|x| x.abs() > 1e-6),
-                "mean grad {i}"
-            );
-            assert!(grads.opacity_logit[i].abs() > 1e-6, "opacity grad {i}");
+        for (name, view) in test_views() {
+            let n = (view.camera.width * view.camera.height) as usize;
+            let grads = render_backward(&scene, &view, [0.1, 0.2, 0.3], &weights(n));
+            for i in 0..3 {
+                assert!(
+                    grads.mean[i].iter().any(|x| x.abs() > 1e-6),
+                    "{name}: mean grad {i}"
+                );
+                assert!(
+                    grads.opacity_logit[i].abs() > 1e-6,
+                    "{name}: opacity grad {i}"
+                );
+            }
+        }
+    }
+
+    /// The lens views draw the scene where intended: ~50° and past 90° off
+    /// the axis, the latter behind the image plane, and past the narrow
+    /// lenses' cones.
+    #[test]
+    fn lens_views_see_the_scene_off_axis() {
+        let scene = test_scene();
+        let views = test_views();
+        let angle = |view: &CameraView| {
+            let p = view.world_to_camera_point(scene.gaussians[0].mean);
+            ray_angle([p.x, p.y, p.z].map(f64::from)).to_degrees()
+        };
+        assert!((40.0..60.0).contains(&angle(&views[2].1)));
+        let past = &views[4].1;
+        assert!(angle(past) > 90.0 && past.world_to_camera_point(scene.gaussians[0].mean).z < 0.0);
+        assert!(!project_all(&scene, past).is_empty());
+        // Every centre lies past the narrow lenses' max_theta, yet all of
+        // them are drawn (gradients_are_nonzero checks they reach pixels).
+        for (name, view) in &views[5..] {
+            for g in &scene.gaussians {
+                let p = view.world_to_camera_point(g.mean);
+                let theta = ray_angle([p.x, p.y, p.z].map(f64::from));
+                assert!(
+                    theta > view.camera.lens.max_theta as f64 + 0.005,
+                    "{name}: {theta}"
+                );
+            }
+            assert_eq!(project_all(&scene, view).len(), 3, "{name}");
         }
     }
 }

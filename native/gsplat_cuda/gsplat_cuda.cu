@@ -45,21 +45,31 @@
 extern "C" {
 
 // World-to-camera rotation (row-major) and translation, camera centre in
-// world coordinates, pinhole intrinsics and image size. Mirrored by
-// `GscCamera` in crates/gsplat-cuda/src/lib.rs.
+// world coordinates, pinhole intrinsics and image size, and the lens in
+// front of them (gsplat-core's `Lens`, see lens.cuh): lens_kind 0 is the
+// undistorted pinhole, 1 a distorted pinhole, 2 an equidistant (fisheye)
+// projection; lens holds the distortion [k1 k2 k3 k4 p1 p2 sx1 sy1] and
+// max_theta the widest ray angle the lens is followed to (radians; past it,
+// its first-order extension). Mirrored by `GscCamera` in
+// crates/gsplat-cuda/src/lib.rs.
 struct GscCamera {
     float rot[9];
     float t[3];
     float center[3];
     float fx, fy, cx, cy;
     uint32_t width, height;
+    uint32_t lens_kind;
+    float lens[8];
+    float max_theta;
 };
 
 }  // extern "C"
 
+#include "lens.cuh"
+
 namespace {
 
-constexpr uint32_t kAbiVersion = 10;
+constexpr uint32_t kAbiVersion = 11;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -107,7 +117,123 @@ __device__ inline void quat_to_rot(float qw, float qx, float qy, float qz, float
 
 __device__ inline float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
 
+// compute_projected for a camera with a lens (lens_kind != kLensPinhole):
+// the lens's Jacobian (lens.cuh) in place of the pinhole's.
+__device__ Projected compute_projected_lens(const GscCamera& c, const float* tr, float raw_opac) {
+    Projected p = {};
+    p.ok = false;
+    const float opacity = 1.f / (1.f + expf(-raw_opac));
+    if (opacity < 1e-4f) return p;
+    const float* W = c.rot;
+    const float mx = tr[0], my = tr[1], mz = tr[2];
+    const float px = W[0] * mx + W[1] * my + W[2] * mz + c.t[0];
+    const float py = W[3] * mx + W[4] * my + W[5] * mz + c.t[1];
+    const float pz = W[6] * mx + W[7] * my + W[8] * mz + c.t[2];
+    // A distorted pinhole draws what lies 0.1 in front of it, sorted by z; a
+    // fisheye what lies 0.1 from its centre within the wider of max_theta
+    // and 90 degrees, even behind the image plane, sorted by the distance
+    // (cpu_render's project_point).
+    float depth = pz;
+    if (c.lens_kind == kLensEquidistant) {
+        depth = sqrtf(px * px + py * py + pz * pz);
+        if (depth <= 0.1f || lens_ray_angle(px, py, pz) > fmaxf(c.max_theta, 1.57079633f)) return p;
+    } else if (pz <= 0.1f) {
+        return p;
+    }
+
+    float R[9];
+    quat_to_rot(tr[3], tr[4], tr[5], tr[6], R);
+    const float sx = expf(tr[7]), sy = expf(tr[8]), sz = expf(tr[9]);
+    const float s2[3] = {sx * sx, sy * sy, sz * sz};
+    float rw[9];  // W R
+#pragma unroll
+    for (int i = 0; i < 3; ++i)
+#pragma unroll
+        for (int j = 0; j < 3; ++j)
+            rw[i * 3 + j] = W[i * 3] * R[j] + W[i * 3 + 1] * R[3 + j] + W[i * 3 + 2] * R[6 + j];
+    // cov_cam = (W R) diag(s^2) (W R)^T
+    float cov[6];  // 00 01 02 11 12 22
+    {
+        int n = 0;
+#pragma unroll
+        for (int i = 0; i < 3; ++i)
+#pragma unroll
+            for (int j = i; j < 3; ++j)
+                cov[n++] = rw[i * 3] * s2[0] * rw[j * 3] + rw[i * 3 + 1] * s2[1] * rw[j * 3 + 1] +
+                           rw[i * 3 + 2] * s2[2] * rw[j * 3 + 2];
+    }
+    const float cov00 = cov[0], cov01 = cov[1], cov02 = cov[2];
+    const float cov11 = cov[3], cov12 = cov[4], cov22 = cov[5];
+
+    // The lens at the point, past max_theta its extension from the point's
+    // turn q onto the cone; a distorted pinhole linearises at q clamped to
+    // 1.3x the frustum (Inria rasterizer), a fisheye at q itself.
+    const float lim_x = 1.3f * 0.5f * float(c.width) / c.fx;
+    const float lim_y = 1.3f * 0.5f * float(c.height) / c.fy;
+    const float pt[3] = {px, py, pz};
+    float m[2], J[2][3], q[3];
+    lens_extended(c, pt, m, J, q);
+    if (c.lens_kind == kLensDistorted) {
+        const float inv_qz = 1.f / q[2];
+        const float lin[3] = {clampf(q[0] * inv_qz, -lim_x, lim_x) * q[2], clampf(q[1] * inv_qz, -lim_y, lim_y) * q[2],
+                              q[2]};
+        float ml[2];
+        lens_coords(c, lin, ml, J);
+    }
+    const float j0[3] = {c.fx * J[0][0], c.fx * J[0][1], c.fx * J[0][2]};
+    const float j1[3] = {c.fy * J[1][0], c.fy * J[1][1], c.fy * J[1][2]};
+    // j^T cov j' over the symmetric camera covariance.
+    auto jcj = [&](const float* x, const float* y) {
+        return x[0] * (cov00 * y[0] + cov01 * y[1] + cov02 * y[2]) +
+               x[1] * (cov01 * y[0] + cov11 * y[1] + cov12 * y[2]) +
+               x[2] * (cov02 * y[0] + cov12 * y[1] + cov22 * y[2]);
+    };
+    const float a = jcj(j0, j0) + 0.3f;
+    const float b = jcj(j0, j1);
+    const float cc = jcj(j1, j1) + 0.3f;
+    const float u = c.fx * m[0] + c.cx;
+    const float v = c.fy * m[1] + c.cy;
+    const float det = a * cc - b * b;
+    if (!(det > 0.f)) return p;
+    const float mid = 0.5f * (a + cc);
+    const float lambda1 = mid + sqrtf(fmaxf(mid * mid - det, 0.f));
+    if (lambda1 <= 0.f) return p;
+    // Only d^T C^-1 d <= k = 2 ln(255 opacity) can reach alpha >= 1/255.
+    const float k = 2.f * logf(255.f * opacity);
+    if (!(k > 0.f)) return p;
+    const float ext_x = sqrtf(k * a);
+    const float ext_y = sqrtf(k * cc);
+    if (!(ext_x == ext_x) || !(ext_y == ext_y)) return p;
+
+    const float w = float(c.width), h = float(c.height);
+    if (u + ext_x < 0.f || v + ext_y < 0.f || u - ext_x > w - 1.f || v - ext_y > h - 1.f) return p;
+    const float x0f = fmaxf(u - ext_x, 0.f);
+    const float y0f = fmaxf(v - ext_y, 0.f);
+    const float x1f = fminf(u + ext_x, w - 1.f);
+    const float y1f = fminf(v + ext_y, h - 1.f);
+    if (x1f < x0f || y1f < y0f) return p;
+
+    const float inv_det = 1.f / det;
+    p.ok = true;
+    p.u = u;
+    p.v = v;
+    p.c00 = cc * inv_det;
+    p.c01 = -b * inv_det;
+    p.c11 = a * inv_det;
+    p.opacity = opacity;
+    p.extent_k = k;
+    p.depth = depth;
+    p.tx0 = int(floorf(x0f)) / kTile;
+    p.ty0 = int(floorf(y0f)) / kTile;
+    p.tx1 = int(floorf(x1f)) / kTile;
+    p.ty1 = int(floorf(y1f)) / kTile;
+    return p;
+}
+
+// A gaussian's screen footprint: the undistorted pinhole's path; a camera
+// with a lens goes to compute_projected_lens.
 __device__ Projected compute_projected(const GscCamera& c, const float* tr, float raw_opac) {
+    if (c.lens_kind != kLensPinhole) return compute_projected_lens(c, tr, raw_opac);
     Projected p = {};
     p.ok = false;
     const float opacity = 1.f / (1.f + expf(-raw_opac));
@@ -740,6 +866,9 @@ __device__ inline void mat_vec(const float* a, const float* v, float* o) {
 }
 __device__ inline float dot3(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 
+// kLens: the camera has a lens (lens_kind != kLensPinhole); the pinhole
+// instantiation compiles to the code before lenses.
+template <bool kLens>
 __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, const float* __restrict__ transforms,
                                    const float* __restrict__ opacity, const float* __restrict__ sh,
                                    const uint32_t* __restrict__ tiles, const float* __restrict__ screen_grads,
@@ -805,7 +934,7 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
     mat_mul(W, sigma, ws);
     mat_mult(ws, W, sc);
 
-    // EWA Jacobian with the 1.3x frustum clamp.
+    // EWA Jacobian with the 1.3x frustum clamp (a fisheye's at the point).
     const float inv_z = 1.f / p[2];
     const float inv_z2 = inv_z * inv_z;
     const float lim_x = 1.3f * 0.5f * float(cam.width) / cam.fx;
@@ -816,8 +945,39 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
     const bool clamped_y = ry < -lim_y || ry > lim_y;
     const float tx = clampf(rx, -lim_x, lim_x) * p[2];
     const float ty = clampf(ry, -lim_y, lim_y) * p[2];
-    const float j0[3] = {cam.fx * inv_z, 0.f, -cam.fx * tx * inv_z2};
-    const float j1[3] = {0.f, cam.fy * inv_z, -cam.fy * ty * inv_z2};
+    constexpr bool lens = kLens;
+    float j0[3] = {cam.fx * inv_z, 0.f, -cam.fx * tx * inv_z2};
+    float j1[3] = {0.f, cam.fy * inv_z, -cam.fy * ty * inv_z2};
+    // With a lens: d j_r[k] / d p[m] and d(u, v) / d p, from the lens (past
+    // max_theta its extension) on duals in p. The clamped coordinate of a
+    // distorted pinhole's linearisation point q is clamp * q_z, so it follows
+    // q_z alone (zero gradient on the clamped side, as without a lens).
+    float dj0[3][3], dj1[3][3], du[3], dv[3];
+    if constexpr (lens) {
+        const Dual3 P[3] = {dual_var(p[0], 0), dual_var(p[1], 1), dual_var(p[2], 2)};
+        Dual3 m[2], J[2][3], Q[3];
+        lens_extended(cam, P, m, J, Q);
+        if (cam.lens_kind == kLensDistorted) {
+            const float inv_qz = 1.f / Q[2].v;
+            const float qx = Q[0].v * inv_qz, qy = Q[1].v * inv_qz;
+            const Dual3 L[3] = {qx < -lim_x || qx > lim_x ? Q[2] * clampf(qx, -lim_x, lim_x) : Q[0],
+                                qy < -lim_y || qy > lim_y ? Q[2] * clampf(qy, -lim_y, lim_y) : Q[1], Q[2]};
+            Dual3 ml[2];
+            lens_coords(cam, L, ml, J);
+        }
+#pragma unroll
+        for (int k = 0; k < 3; ++k) {
+            j0[k] = cam.fx * J[0][k].v;
+            j1[k] = cam.fy * J[1][k].v;
+            du[k] = cam.fx * m[0].d[k];
+            dv[k] = cam.fy * m[1].d[k];
+#pragma unroll
+            for (int q = 0; q < 3; ++q) {
+                dj0[k][q] = cam.fx * J[0][k].d[q];
+                dj1[k][q] = cam.fy * J[1][k].d[q];
+            }
+        }
+    }
     float sj0[3], sj1[3];
     mat_vec(sc, j0, sj0);
     mat_vec(sc, j1, sj1);
@@ -855,24 +1015,45 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
 
     // J and the screen mean -> camera-space point.
     float gp[3] = {0.f, 0.f, 0.f};
-    gp[2] = gj0[0] * (-cam.fx * inv_z2) + gj1[1] * (-cam.fy * inv_z2);
-    if (clamped_x) {
-        gp[2] += gj0[2] * cam.fx * clampf(rx, -lim_x, lim_x) * inv_z2;
+    if constexpr (lens) {
+#pragma unroll
+        for (int q = 0; q < 3; ++q) {
+            float acc = g_u * du[q] + g_v * dv[q];
+#pragma unroll
+            for (int k = 0; k < 3; ++k) acc += gj0[k] * dj0[k][q] + gj1[k] * dj1[k][q];
+            gp[q] = acc;
+        }
     } else {
-        gp[0] += gj0[2] * (-cam.fx * inv_z2);
-        gp[2] += gj0[2] * 2.f * cam.fx * p[0] * inv_z2 * inv_z;
+        gp[2] = gj0[0] * (-cam.fx * inv_z2) + gj1[1] * (-cam.fy * inv_z2);
+        if (clamped_x) {
+            gp[2] += gj0[2] * cam.fx * clampf(rx, -lim_x, lim_x) * inv_z2;
+        } else {
+            gp[0] += gj0[2] * (-cam.fx * inv_z2);
+            gp[2] += gj0[2] * 2.f * cam.fx * p[0] * inv_z2 * inv_z;
+        }
+        if (clamped_y) {
+            gp[2] += gj1[2] * cam.fy * clampf(ry, -lim_y, lim_y) * inv_z2;
+        } else {
+            gp[1] += gj1[2] * (-cam.fy * inv_z2);
+            gp[2] += gj1[2] * 2.f * cam.fy * p[1] * inv_z2 * inv_z;
+        }
+        gp[0] += g_u * cam.fx * inv_z;
+        gp[1] += g_v * cam.fy * inv_z;
+        gp[2] -= (g_u * cam.fx * p[0] + g_v * cam.fy * p[1]) * inv_z2;
     }
-    if (clamped_y) {
-        gp[2] += gj1[2] * cam.fy * clampf(ry, -lim_y, lim_y) * inv_z2;
+    // The expected-depth channel blends the centres' depth: camera z, or
+    // the distance for a fisheye.
+    if constexpr (lens) {
+        if (g_depth && cam.lens_kind == kLensEquidistant) {
+            const float d = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+#pragma unroll
+            for (int q = 0; q < 3; ++q) gp[q] += g_depth[i] * p[q] / d;
+        } else if (g_depth) {
+            gp[2] += g_depth[i];
+        }
     } else {
-        gp[1] += gj1[2] * (-cam.fy * inv_z2);
-        gp[2] += gj1[2] * 2.f * cam.fy * p[1] * inv_z2 * inv_z;
+        if (g_depth) gp[2] += g_depth[i];
     }
-    gp[0] += g_u * cam.fx * inv_z;
-    gp[1] += g_v * cam.fy * inv_z;
-    gp[2] -= (g_u * cam.fx * p[0] + g_v * cam.fy * p[1]) * inv_z2;
-    // The expected-depth channel blends the centres' camera z.
-    if (g_depth) gp[2] += g_depth[i];
 
     // p = W m + t  ->  dL/dm = W^T gp.
     float gmean[3];
@@ -1856,10 +2037,15 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0) {
     GSC_TRY(stage_end(ctx, kRasterBwd));
     GSC_TRY(stage_begin(ctx, kProjectBwd));
     if (n > 0) {
-        project_bwd_kernel<<<blocks_for(n), 256>>>(n, ctx->cam, ctx->rest_pc(), ctx->act, ctx->p(0), ctx->p(1),
-                                                   ctx->p(2), static_cast<const uint32_t*>(ctx->tiles.ptr),
-                                                   screen_grads, g[0], g[1], g[2], zero_sh ? 1 : 0, touched, g_depth,
-                                                   g_normal);
+        const auto* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
+        if (ctx->cam.lens_kind != kLensPinhole)
+            project_bwd_kernel<true><<<blocks_for(n), 256>>>(n, ctx->cam, ctx->rest_pc(), ctx->act, ctx->p(0),
+                                                             ctx->p(1), ctx->p(2), tiles, screen_grads, g[0], g[1],
+                                                             g[2], zero_sh ? 1 : 0, touched, g_depth, g_normal);
+        else
+            project_bwd_kernel<false><<<blocks_for(n), 256>>>(n, ctx->cam, ctx->rest_pc(), ctx->act, ctx->p(0),
+                                                              ctx->p(1), ctx->p(2), tiles, screen_grads, g[0], g[1],
+                                                              g[2], zero_sh ? 1 : 0, touched, g_depth, g_normal);
         GSC_CHECK(ctx, cudaGetLastError());
     }
     GSC_TRY(stage_end(ctx, kProjectBwd));
@@ -2121,6 +2307,11 @@ GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* ca
                                                float* out_expected, float* out_normal) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
+    // The planar depth and the normals intersect each pixel's pinhole ray.
+    if (cam && cam->lens_kind != kLensPinhole && (planar || out_normal)) {
+        ctx->error = "render_depth: the planar depth and normals need an undistorted pinhole camera";
+        return -1;
+    }
     GSC_TRY(set_camera(ctx, cam, bg, sh_active_degree));
     float* d;
     GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &d));
@@ -2274,6 +2465,10 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     GSC_TRY(set_camera(ctx, &p->cam, p->bg, p->sh_active_degree));
     const bool depth_on = p->depth_weight > 0.f;
     const bool normal_on = p->normal_weight > 0.f;
+    if (normal_on && p->cam.lens_kind != kLensPinhole) {
+        ctx->error = "train_step: the depth-normal loss needs an undistorted pinhole camera";
+        return -1;
+    }
     if (depth_on && (ctx->num_priors != ctx->num_images || p->cam.width != ctx->gt_w || p->cam.height != ctx->gt_h)) {
         ctx->error = "train_step: a depth weight needs a depth prior per uploaded image";
         return -1;

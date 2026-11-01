@@ -380,6 +380,13 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
         ctx->error = "tsdf_mesh: override_mode needs depth maps";
         return -1;
     }
+    // Voxels are projected, and depths back-projected, through a pinhole.
+    for (int v = 0; v < num_views; ++v) {
+        if (cams[v].lens_kind != kLensPinhole) {
+            ctx->error = "tsdf_mesh: every view needs an undistorted pinhole camera";
+            return -1;
+        }
+    }
     std::vector<size_t> view_px(num_views + 1, 0);
     for (int v = 0; v < num_views; ++v) view_px[v + 1] = view_px[v] + size_t(cams[v].width) * cams[v].height;
     ctx->tsdf_cells.clear();

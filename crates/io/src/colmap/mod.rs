@@ -1279,6 +1279,7 @@ fn colmap_param_count(model: &CameraModel) -> Option<usize> {
         CameraModel::Fov => 5,
         CameraModel::SimpleRadialFisheye => 4,
         CameraModel::RadialFisheye => 5,
+        CameraModel::ThinPrismFisheye => 12,
         CameraModel::Equirectangular => 2,
         CameraModel::DoubleSphere | CameraModel::Unknown(_) => return None,
     })
@@ -1359,6 +1360,7 @@ fn camera_model_to_colmap_name(model: &CameraModel) -> &str {
         CameraModel::OpenCvFisheye => "OPENCV_FISHEYE",
         CameraModel::SimpleRadialFisheye => "SIMPLE_RADIAL_FISHEYE",
         CameraModel::RadialFisheye => "RADIAL_FISHEYE",
+        CameraModel::ThinPrismFisheye => "THIN_PRISM_FISHEYE",
         CameraModel::Fov => "FOV",
         CameraModel::Equirectangular => "EQUIRECTANGULAR",
         // Double Sphere is not a COLMAP model; the writers reject it through
@@ -1467,6 +1469,7 @@ fn colmap_id_from_camera_model(model: &CameraModel) -> Result<i32, ColmapError> 
         CameraModel::Fov => 7,
         CameraModel::SimpleRadialFisheye => 8,
         CameraModel::RadialFisheye => 9,
+        CameraModel::ThinPrismFisheye => 10,
         CameraModel::Equirectangular => 17,
         CameraModel::DoubleSphere => {
             return Err(ColmapError::InvalidExportInput(
@@ -1501,7 +1504,7 @@ fn camera_model_from_colmap_id(model_id: i32) -> Result<(CameraModel, usize), Co
         7 => Ok((CameraModel::Fov, 5)),
         8 => Ok((CameraModel::SimpleRadialFisheye, 4)),
         9 => Ok((CameraModel::RadialFisheye, 5)),
-        10 => Ok((CameraModel::Unknown("THIN_PRISM_FISHEYE".to_owned()), 12)),
+        10 => Ok((CameraModel::ThinPrismFisheye, 12)),
         17 => Ok((CameraModel::Equirectangular, 2)),
         other => Err(ColmapError::InvalidBinary {
             file: "cameras.bin",
@@ -1523,6 +1526,7 @@ mod multi_camera_writer_tests {
             (CameraModel::Fov, 7, 5),
             (CameraModel::SimpleRadialFisheye, 8, 4),
             (CameraModel::RadialFisheye, 9, 5),
+            (CameraModel::ThinPrismFisheye, 10, 12),
         ] {
             assert_eq!(colmap_id_from_camera_model(&model).unwrap(), id);
             let (decoded, count) = camera_model_from_colmap_id(id).unwrap();

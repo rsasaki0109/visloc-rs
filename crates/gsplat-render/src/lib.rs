@@ -383,18 +383,9 @@ mod gpu_tests {
         Scene::new(gaussians, degree)
     }
 
-    /// GPU screen-space gradients (rasterize_backward + grad_reduce) against
-    /// the f64 CPU reference, per gaussian and component.
-    fn check_screen_grads(scene: &Scene, w: u32, h: u32) {
-        let Some(ctx) = try_context() else {
-            eprintln!("skipping screen-grad check: no GPU adapter");
-            return;
-        };
-        if !ctx.features.contains(wgpu::Features::SUBGROUP) {
-            eprintln!("skipping screen-grad check: no SUBGROUP support");
-            return;
-        }
-        let view = CameraView::new(
+    /// The gradient checks' pinhole view of `random_scene`.
+    fn grad_view(w: u32, h: u32) -> CameraView {
+        CameraView::new(
             nalgebra::Rotation3::from_euler_angles(0.05, -0.08, 0.03).into_inner(),
             Vector3::new(0.1, -0.05, 0.2),
             PinholeCamera::new(
@@ -405,7 +396,117 @@ mod gpu_tests {
                 w as f32 * 0.5,
                 h as f32 * 0.5,
             ),
-        );
+        )
+    }
+
+    /// The same scenes through lenses (gsplat-core's `Lens`): a distorted
+    /// pinhole, a fisheye seeing them ~35° off its axis, ETH3D's thin-prism
+    /// rig lens, a wide fisheye turned so that part of the scene lies past
+    /// 90° (behind its image plane), and narrow ones (a fisheye and a
+    /// distorted pinhole) with much of the scene past their `max_theta`.
+    /// The CUDA tests use the same.
+    fn lens_views(w: u32, h: u32) -> Vec<(&'static str, CameraView)> {
+        use visloc_gsplat_core::lens::{Lens, Projection};
+        let (wf, hf) = (w as f32, h as f32);
+        let turned = |angle: f32, focal: f32, lens: Lens| {
+            let r = nalgebra::Rotation3::from_axis_angle(&Vector3::y_axis(), angle)
+                * nalgebra::Rotation3::from_euler_angles(0.05, -0.08, 0.03);
+            CameraView::new(
+                r.into_inner(),
+                Vector3::new(0.1, -0.05, 0.2),
+                PinholeCamera::new(w, h, focal * wf, focal * wf, 0.5 * wf, 0.5 * hf)
+                    .with_lens(lens),
+            )
+        };
+        let base = grad_view(w, h);
+        vec![
+            (
+                "radtan",
+                CameraView {
+                    camera: base.camera.with_lens(Lens::new(
+                        Projection::Pinhole,
+                        [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+                    )),
+                    ..base
+                },
+            ),
+            (
+                "fisheye 35°",
+                turned(
+                    0.6,
+                    0.4,
+                    Lens::new(
+                        Projection::Equidistant,
+                        [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    ),
+                ),
+            ),
+            (
+                "thin prism",
+                turned(
+                    0.25,
+                    0.7,
+                    Lens::new(
+                        Projection::Equidistant,
+                        [
+                            -0.0654481,
+                            -0.0781379,
+                            0.115547,
+                            -0.0710756,
+                            -0.00131596,
+                            0.00171383,
+                            -0.0103304,
+                            0.00700661,
+                        ],
+                    ),
+                ),
+            ),
+            (
+                "fisheye past 90°",
+                turned(1.5, 0.2, Lens::new(Projection::Equidistant, [0.0; 8])),
+            ),
+            (
+                "fisheye past its cone",
+                turned(
+                    0.0,
+                    2.5,
+                    Lens::new(
+                        Projection::Equidistant,
+                        [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    ),
+                ),
+            ),
+            (
+                "radtan past its cone",
+                turned(
+                    0.0,
+                    2.5,
+                    Lens::new(
+                        Projection::Pinhole,
+                        [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+                    ),
+                ),
+            ),
+        ]
+    }
+
+    /// GPU screen-space gradients (rasterize_backward + grad_reduce) against
+    /// the f64 CPU reference, per gaussian and component.
+    fn check_screen_grads(scene: &Scene, w: u32, h: u32) {
+        check_screen_grads_on(scene, &grad_view(w, h));
+    }
+
+    fn check_screen_grads_on(scene: &Scene, view: &CameraView) {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping screen-grad check: no GPU adapter");
+            return;
+        };
+        if !ctx.features.contains(wgpu::Features::SUBGROUP) {
+            eprintln!("skipping screen-grad check: no SUBGROUP support");
+            return;
+        }
+        let view = *view;
+        let (w, h) = (view.camera.width, view.camera.height);
         let bg = [0.1f32, 0.2, 0.3];
         let d_image: Vec<[f32; 3]> = (0..(w * h) as usize)
             .map(|i| {
@@ -456,6 +557,10 @@ mod gpu_tests {
     /// compare against the CPU oracle on the scene with the higher bands
     /// zeroed, whose gradients for those bands must come back as 0.
     fn check_param_grads_active(scene: &Scene, w: u32, h: u32, active: Option<u32>) {
+        check_param_grads_on(scene, &grad_view(w, h), active);
+    }
+
+    fn check_param_grads_on(scene: &Scene, view: &CameraView, active: Option<u32>) {
         let Some(ctx) = try_context() else {
             eprintln!("skipping param-grad check: no GPU adapter");
             return;
@@ -464,18 +569,8 @@ mod gpu_tests {
             eprintln!("skipping param-grad check: no SUBGROUP support");
             return;
         }
-        let view = CameraView::new(
-            nalgebra::Rotation3::from_euler_angles(0.05, -0.08, 0.03).into_inner(),
-            Vector3::new(0.1, -0.05, 0.2),
-            PinholeCamera::new(
-                w,
-                h,
-                w as f32 * 1.1,
-                w as f32 * 1.1,
-                w as f32 * 0.5,
-                h as f32 * 0.5,
-            ),
-        );
+        let view = *view;
+        let (w, h) = (view.camera.width, view.camera.height);
         let bg = [0.1f32, 0.2, 0.3];
         let d_image: Vec<[f32; 3]> = (0..(w * h) as usize)
             .map(|i| {
@@ -611,6 +706,44 @@ mod gpu_tests {
     fn gpu_screen_grads_match_cpu_many_tiles() {
         let scene = random_scene(64, 11, 3);
         check_screen_grads(&scene, 96, 80);
+    }
+
+    #[test]
+    fn gpu_lens_forward_matches_cpu() {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping lens forward check: no GPU adapter");
+            return;
+        };
+        let scene = random_scene(64, 11, 3);
+        let bg = [0.1f32, 0.2, 0.3];
+        let mut renderer = Renderer::new(ctx, &scene, 96, 80).expect("renderer");
+        for (name, view) in lens_views(96, 80) {
+            let cpu = visloc_gsplat_core::backward::render_f64(&scene, &view, bg.map(f64::from));
+            let gpu = renderer.render(&view, bg);
+            let worst = cpu
+                .iter()
+                .zip(&gpu.rgb)
+                .flat_map(|(c, g)| (0..3).map(move |k| (c[k] - g[k] as f64).abs()))
+                .fold(0.0, f64::max);
+            eprintln!("{name}: max abs error {worst:.2e}");
+            assert!(worst < 2e-3, "{name}: max abs error {worst} vs CPU");
+        }
+    }
+
+    #[test]
+    fn gpu_lens_screen_grads_match_cpu() {
+        for (name, view) in lens_views(96, 80) {
+            eprintln!("{name}");
+            check_screen_grads_on(&random_scene(64, 11, 3), &view);
+        }
+    }
+
+    #[test]
+    fn gpu_lens_param_grads_match_cpu() {
+        for (name, view) in lens_views(96, 80) {
+            eprintln!("{name}");
+            check_param_grads_on(&random_scene(64, 11, 3), &view, None);
+        }
     }
 
     /// Geometry channels (alpha-weighted normal + depth): the backward pass

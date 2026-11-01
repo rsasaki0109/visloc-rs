@@ -14,6 +14,7 @@
 //! - 2D covariance (the EWA splatting approximation, dropping the Jacobian's
 //!   third column): `Σ' = J W Σ Wᵀ Jᵀ` with `W` the world-to-camera rotation
 //!   and `J` the affine part of the projective Jacobian at the projected mean
+//!   (of the camera's [`crate::lens::Lens`] for a distorted or fisheye one)
 //! - screen-space extent: `x = mean2d + Σ'^(1/2) * z`, and a pixel is covered
 //!   when `zᵀz <= 1`
 
@@ -21,6 +22,7 @@ use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 
 use crate::camera::CameraView;
 use crate::gaussian::Scene;
+use crate::lens::{extended_lens_coords, lens_coords, Projection};
 use crate::sh::eval_sh_color;
 
 /// Rendered image (linear RGB, row-major, top-left origin).
@@ -75,6 +77,81 @@ struct Projected {
     color: [f32; 3],
 }
 
+/// The screen position, the EWA Jacobian (rows in pixels per camera-space
+/// unit, third row zero) and the sort depth of camera-space point `p_cam`,
+/// or `None` where the camera does not draw it.
+///
+/// A pinhole, distorted or not, draws what lies 0.1 in front of it, with
+/// depth `z`, and linearises at a point clamped to 1.3x the frustum, as the
+/// Inria rasterizer does: outside it the Jacobian blows up and near-camera
+/// primitives would otherwise explode to huge footprints. An equidistant
+/// (fisheye) lens draws what lies 0.1 from its centre within the wider of
+/// [`crate::lens::Lens::max_theta`] and 90°, even behind the image plane,
+/// at the point itself, with the distance as the depth. Past `max_theta` a
+/// lens is its first-order extension there ([`extended_lens_coords`]).
+fn project_point(view: &CameraView, p_cam: Vector3<f32>) -> Option<(f32, f32, Matrix3<f32>, f32)> {
+    let cam = &view.camera;
+    let (fx, fy) = (cam.fx, cam.fy);
+    let lens = &cam.lens;
+    let jacobian = |rows: [[f32; 3]; 2]| {
+        Matrix3::new(
+            fx * rows[0][0],
+            fx * rows[0][1],
+            fx * rows[0][2],
+            fy * rows[1][0],
+            fy * rows[1][1],
+            fy * rows[1][2],
+            0.0,
+            0.0,
+            0.0,
+        )
+    };
+    let clamped = |p: [f32; 3]| {
+        let inv_z = 1.0 / p[2];
+        let lim_x = 1.3 * 0.5 * cam.width as f32 / fx;
+        let lim_y = 1.3 * 0.5 * cam.height as f32 / fy;
+        [
+            (p[0] * inv_z).clamp(-lim_x, lim_x) * p[2],
+            (p[1] * inv_z).clamp(-lim_y, lim_y) * p[2],
+            p[2],
+        ]
+    };
+    let p = [p_cam.x, p_cam.y, p_cam.z];
+    if lens.is_pinhole() {
+        if p_cam.z <= 0.1 {
+            return None;
+        }
+        let (u, v, _z) = cam.project(p_cam);
+        let inv_z = 1.0 / p_cam.z;
+        let inv_z2 = inv_z * inv_z;
+        let [tx, ty, _] = clamped(p);
+        let j = jacobian([[inv_z, 0.0, -tx * inv_z2], [0.0, inv_z, -ty * inv_z2]]);
+        return Some((u, v, j, p_cam.z));
+    }
+    let depth = match lens.projection {
+        Projection::Pinhole => {
+            if p_cam.z <= 0.1 {
+                return None;
+            }
+            p_cam.z
+        }
+        Projection::Equidistant => {
+            let distance = p_cam.norm();
+            let widest = (lens.max_theta as f64).max(std::f64::consts::FRAC_PI_2);
+            if distance <= 0.1 || crate::lens::ray_angle(p.map(f64::from)) > widest {
+                return None;
+            }
+            distance
+        }
+    };
+    let ([mu, mv], rows, q) = extended_lens_coords(lens, p);
+    let rows = match lens.projection {
+        Projection::Pinhole => lens_coords(lens, clamped(q)).1,
+        Projection::Equidistant => rows,
+    };
+    Some((fx * mu + cam.cx, fy * mv + cam.cy, jacobian(rows), depth))
+}
+
 /// Render `scene` from `view` on the CPU.
 ///
 /// Gaussians are composited **front-to-back** (nearest first) with per-pixel
@@ -98,9 +175,9 @@ pub fn render(scene: &Scene, view: &CameraView, bg: [f32; 3]) -> Image {
             continue;
         }
         let p_cam = view.world_to_camera_point(g.mean);
-        if p_cam.z <= 0.1 {
+        let Some((u, v, j, depth)) = project_point(view, p_cam) else {
             continue;
-        }
+        };
 
         use nalgebra::UnitQuaternion;
         let r_mat = UnitQuaternion::from_quaternion(g.unit_rotation())
@@ -109,29 +186,6 @@ pub fn render(scene: &Scene, view: &CameraView, bg: [f32; 3]) -> Image {
         let s2 = Vector3::new(scale.x * scale.x, scale.y * scale.y, scale.z * scale.z);
         let sigma = r_mat * Matrix3::from_diagonal(&s2) * r_mat.transpose();
 
-        let (u, v, _z) = view.camera.project(p_cam);
-        let fx = view.camera.fx;
-        let fy = view.camera.fy;
-        let inv_z = 1.0 / p_cam.z;
-        let inv_z2 = inv_z * inv_z;
-        // Linearise the projection at a point clamped to 1.3x the frustum (as
-        // the Inria rasterizer does): outside it the Jacobian blows up and
-        // near-camera primitives would otherwise explode to huge footprints.
-        let lim_x = 1.3 * 0.5 * w as f32 / fx;
-        let lim_y = 1.3 * 0.5 * h as f32 / fy;
-        let tx = (p_cam.x * inv_z).clamp(-lim_x, lim_x) * p_cam.z;
-        let ty = (p_cam.y * inv_z).clamp(-lim_y, lim_y) * p_cam.z;
-        let j = Matrix3::new(
-            fx * inv_z,
-            0.0,
-            -fx * tx * inv_z2,
-            0.0,
-            fy * inv_z,
-            -fy * ty * inv_z2,
-            0.0,
-            0.0,
-            0.0,
-        );
         let cov_cam = rot_wc * sigma * rot_wc.transpose();
         let cov2 = j * cov_cam * j.transpose();
         let a = cov2[(0, 0)] + 0.3;
@@ -176,7 +230,7 @@ pub fn render(scene: &Scene, view: &CameraView, bg: [f32; 3]) -> Image {
         }
 
         projected.push(Projected {
-            depth: p_cam.z,
+            depth,
             u,
             v,
             inv_cov,

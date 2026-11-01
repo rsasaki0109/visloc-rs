@@ -14,6 +14,11 @@
 //   [a b; b c] = J Sc J^T + 0.3 I;  conic Q = [a b; b c]^-1 = [A B; B C]
 //   (u, v) = (fx x/z + cx, fy y/z + cy);  opacity = sigmoid(logit)
 //   colour = max(0, SH(dir) + 0.5),  dir = (m - camera centre) / |.|
+// With a lens (lens_kind != LENS_PINHOLE) J and (u, v) are lens_extended's
+// (scaled by fx, fy), evaluated on duals so that the derivatives of J's
+// entries come with them; a distorted pinhole still linearises at the
+// clamped point, a fisheye at the point itself (past max_theta, at its turn
+// onto the cone).
 //
 // Matrices are WGSL mat3x3 (column-major: m[c][r]); everything stays in
 // registers -- no runtime-indexed local arrays, which spill to local memory.
@@ -142,8 +147,38 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
     let clamped_y = ry < -lim_y || ry > lim_y;
     let tx = clamp(rx, -lim_x, lim_x) * p.z;
     let ty = clamp(ry, -lim_y, lim_y) * p.z;
-    let j0 = vec3<f32>(u.fx * inv_z, 0.0, -u.fx * tx * inv_z2);
-    let j1 = vec3<f32>(0.0, u.fy * inv_z, -u.fy * ty * inv_z2);
+    var j0 = vec3<f32>(u.fx * inv_z, 0.0, -u.fx * tx * inv_z2);
+    var j1 = vec3<f32>(0.0, u.fy * inv_z, -u.fy * ty * inv_z2);
+    let lens = u.lens_kind != LENS_PINHOLE;
+    var l: LensOut;
+    var lens_u = vec4<f32>(0.0);
+    var lens_v = vec4<f32>(0.0);
+    if (lens) {
+        let dx = vec4<f32>(p.x, 1.0, 0.0, 0.0);
+        let dy = vec4<f32>(p.y, 0.0, 1.0, 0.0);
+        let dz = vec4<f32>(p.z, 0.0, 0.0, 1.0);
+        let e = lens_extended(u, dx, dy, dz);
+        l = e.l;
+        lens_u = l.mx;
+        lens_v = l.my;
+        if (u.lens_kind == LENS_DISTORTED) {
+            // The clamped coordinate of q is clamp * q_z: it follows q_z alone.
+            let inv_qz = 1.0 / e.qz.x;
+            let qx = e.qx.x * inv_qz;
+            let qy = e.qy.x * inv_qz;
+            var lx = e.qx;
+            var ly = e.qy;
+            if (qx < -lim_x || qx > lim_x) {
+                lx = e.qz * clamp(qx, -lim_x, lim_x);
+            }
+            if (qy < -lim_y || qy > lim_y) {
+                ly = e.qz * clamp(qy, -lim_y, lim_y);
+            }
+            l = lens_coords(u, lx, ly, e.qz);
+        }
+        j0 = u.fx * vec3<f32>(l.j00.x, l.j01.x, l.j02.x);
+        j1 = u.fy * vec3<f32>(l.j10.x, l.j11.x, l.j12.x);
+    }
     let sj0 = sc * j0;
     let sj1 = sc * j1;
     let ca = dot(j0, sj0) + 0.3;
@@ -171,26 +206,35 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
 
     // J and the screen mean -> camera-space point.
     var gp = vec3<f32>(0.0, 0.0, 0.0);
-    gp.z = gj0.x * (-u.fx * inv_z2) + gj1.y * (-u.fy * inv_z2);
-    if (clamped_x) {
-        gp.z = gp.z + gj0.z * u.fx * clamp(rx, -lim_x, lim_x) * inv_z2;
+    if (lens) {
+        gp = u.fx * (g_u * lens_u.yzw + gj0.x * l.j00.yzw + gj0.y * l.j01.yzw + gj0.z * l.j02.yzw)
+            + u.fy * (g_v * lens_v.yzw + gj1.x * l.j10.yzw + gj1.y * l.j11.yzw + gj1.z * l.j12.yzw);
     } else {
-        gp.x = gp.x + gj0.z * (-u.fx * inv_z2);
-        gp.z = gp.z + gj0.z * 2.0 * u.fx * p.x * inv_z2 * inv_z;
+        gp.z = gj0.x * (-u.fx * inv_z2) + gj1.y * (-u.fy * inv_z2);
+        if (clamped_x) {
+            gp.z = gp.z + gj0.z * u.fx * clamp(rx, -lim_x, lim_x) * inv_z2;
+        } else {
+            gp.x = gp.x + gj0.z * (-u.fx * inv_z2);
+            gp.z = gp.z + gj0.z * 2.0 * u.fx * p.x * inv_z2 * inv_z;
+        }
+        if (clamped_y) {
+            gp.z = gp.z + gj1.z * u.fy * clamp(ry, -lim_y, lim_y) * inv_z2;
+        } else {
+            gp.y = gp.y + gj1.z * (-u.fy * inv_z2);
+            gp.z = gp.z + gj1.z * 2.0 * u.fy * p.y * inv_z2 * inv_z;
+        }
+        gp.x = gp.x + g_u * u.fx * inv_z;
+        gp.y = gp.y + g_v * u.fy * inv_z;
+        gp.z = gp.z - (g_u * u.fx * p.x + g_v * u.fy * p.y) * inv_z2;
     }
-    if (clamped_y) {
-        gp.z = gp.z + gj1.z * u.fy * clamp(ry, -lim_y, lim_y) * inv_z2;
-    } else {
-        gp.y = gp.y + gj1.z * (-u.fy * inv_z2);
-        gp.z = gp.z + gj1.z * 2.0 * u.fy * p.y * inv_z2 * inv_z;
-    }
-    gp.x = gp.x + g_u * u.fx * inv_z;
-    gp.y = gp.y + g_v * u.fy * inv_z;
-    gp.z = gp.z - (g_u * u.fx * p.x + g_v * u.fy * p.y) * inv_z2;
 // #if GEO
     let g_geo = geo_grads[compact];
-    // depth = p.z
-    gp.z = gp.z + g_geo.w;
+    // depth = p.z, or the distance for a fisheye
+    if (u.lens_kind == LENS_EQUIDISTANT) {
+        gp = gp + g_geo.w * p / length(p);
+    } else {
+        gp.z = gp.z + g_geo.w;
+    }
 // #endif
 
     // p = W m + t  ->  dL/dm = W^T gp.

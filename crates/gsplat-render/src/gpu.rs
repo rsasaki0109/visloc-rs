@@ -11,6 +11,8 @@ pub enum GpuError {
     Device(#[from] wgpu::RequestDeviceError),
     #[error("the GPU device lacks a required feature: {0}")]
     MissingFeature(&'static str),
+    #[error("not supported: {0}")]
+    Unsupported(&'static str),
 }
 
 /// A ready-to-use wgpu device and queue.

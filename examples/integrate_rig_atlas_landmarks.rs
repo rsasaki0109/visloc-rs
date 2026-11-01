@@ -6771,6 +6771,7 @@ fn camera_model_name(model: &CameraModel) -> Result<&'static str, String> {
         CameraModel::OpenCvFisheye => Ok("OPENCV_FISHEYE"),
         CameraModel::SimpleRadialFisheye => Ok("SIMPLE_RADIAL_FISHEYE"),
         CameraModel::RadialFisheye => Ok("RADIAL_FISHEYE"),
+        CameraModel::ThinPrismFisheye => Ok("THIN_PRISM_FISHEYE"),
         CameraModel::Fov => Ok("FOV"),
         CameraModel::Equirectangular => Ok("EQUIRECTANGULAR"),
         CameraModel::DoubleSphere => Err("Double Sphere is not a COLMAP model".to_owned()),

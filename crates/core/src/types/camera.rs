@@ -26,6 +26,10 @@ pub enum CameraModel {
     SimpleRadialFisheye,
     /// Equidistant with two radial coefficients: `[f, cx, cy, k1, k2]`.
     RadialFisheye,
+    /// COLMAP `THIN_PRISM_FISHEYE`: equidistant coordinates with radial,
+    /// tangential and thin-prism terms,
+    /// `[fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, sx1, sy1]`.
+    ThinPrismFisheye,
     /// Devernay FOV model: `[fx, fy, cx, cy, omega]`.
     Fov,
     /// Double Sphere model: `[fx, fy, cx, cy, xi, alpha]`.
@@ -52,6 +56,7 @@ impl CameraModel {
             "OPENCV_FISHEYE" => Self::OpenCvFisheye,
             "SIMPLE_RADIAL_FISHEYE" => Self::SimpleRadialFisheye,
             "RADIAL_FISHEYE" => Self::RadialFisheye,
+            "THIN_PRISM_FISHEYE" => Self::ThinPrismFisheye,
             "FOV" => Self::Fov,
             "EQUIRECTANGULAR" => Self::Equirectangular,
             other => Self::Unknown(other.to_owned()),
@@ -71,6 +76,7 @@ impl CameraModel {
             Self::OpenCvFisheye => "OPENCV_FISHEYE",
             Self::SimpleRadialFisheye => "SIMPLE_RADIAL_FISHEYE",
             Self::RadialFisheye => "RADIAL_FISHEYE",
+            Self::ThinPrismFisheye => "THIN_PRISM_FISHEYE",
             Self::Fov => "FOV",
             Self::Equirectangular => "EQUIRECTANGULAR",
             Self::DoubleSphere => return None,
@@ -90,7 +96,11 @@ impl CameraModel {
     pub const fn is_fisheye(&self) -> bool {
         matches!(
             self,
-            Self::OpenCvFisheye | Self::SimpleRadialFisheye | Self::RadialFisheye | Self::Fov
+            Self::OpenCvFisheye
+                | Self::SimpleRadialFisheye
+                | Self::RadialFisheye
+                | Self::ThinPrismFisheye
+                | Self::Fov
         )
     }
 }
@@ -256,7 +266,10 @@ impl Camera {
                 let f = *self.params.first()?;
                 Some((f, f, *self.params.get(1)?, *self.params.get(2)?))
             }
-            CameraModel::OpenCvFisheye | CameraModel::Fov | CameraModel::DoubleSphere => Some((
+            CameraModel::OpenCvFisheye
+            | CameraModel::ThinPrismFisheye
+            | CameraModel::Fov
+            | CameraModel::DoubleSphere => Some((
                 *self.params.first()?,
                 *self.params.get(1)?,
                 *self.params.get(2)?,
@@ -317,6 +330,7 @@ impl Camera {
             CameraModel::OpenCvFisheye
                 | CameraModel::SimpleRadialFisheye
                 | CameraModel::RadialFisheye
+                | CameraModel::ThinPrismFisheye
                 | CameraModel::Fov
                 | CameraModel::DoubleSphere
                 | CameraModel::Equirectangular
@@ -385,6 +399,10 @@ impl Camera {
                     0.0,
                 ];
                 project_equidistant(fx, fy, cx, cy, k, point_camera)
+            }
+            CameraModel::ThinPrismFisheye => {
+                let [fx, fy, cx, cy] = params4(&self.params)?;
+                project_thin_prism(fx, fy, cx, cy, extra_coeffs(&self.params), point_camera)
             }
             CameraModel::Fov => {
                 let [fx, fy, cx, cy] = params4(&self.params)?;
@@ -470,6 +488,9 @@ impl Camera {
             | CameraModel::RadialFisheye => {
                 equidistant_point_jacobian(fx, fy, self.equidistant_coeffs(), point_camera)?
             }
+            CameraModel::ThinPrismFisheye => {
+                thin_prism_point_jacobian(fx, fy, extra_coeffs(&self.params), point_camera)?
+            }
             CameraModel::Fov => {
                 let omega = *self.params.get(4)?;
                 fov_point_jacobian(fx, fy, omega, point_camera)?
@@ -551,6 +572,9 @@ impl Camera {
                     0.0,
                 ];
                 unproject_equidistant(fx, fy, cx, cy, k, point)
+            }
+            CameraModel::ThinPrismFisheye => {
+                unproject_thin_prism(fx, fy, cx, cy, extra_coeffs(&self.params), point)
             }
             CameraModel::Fov => {
                 let omega = *self.params.get(4)?;
@@ -790,6 +814,143 @@ fn unproject_equidistant(
     let radial = theta.tan();
     let scale = radial / r_d;
     normalize_ray(Vector3::new(scale * xd, scale * yd, 1.0))
+}
+
+/// The eight coefficients after `fx fy cx cy` (missing ones zero): for
+/// `THIN_PRISM_FISHEYE`, `[k1, k2, p1, p2, k3, k4, sx1, sy1]`.
+fn extra_coeffs(params: &[f64]) -> [f64; 8] {
+    full_opencv_coeffs(params)
+}
+
+/// Equidistant coordinates `θ (x, y) / r` of a camera-frame point
+/// (`θ = atan2(r, z)`, so rays past 90° project too) and their 2×3
+/// Jacobian; on the optical axis the pinhole limit `(x, y) / z`.
+fn equidistant_coords(point: &Point3<f64>) -> Option<([f64; 2], [[f64; 3]; 2])> {
+    let (x, y, z) = (point.x, point.y, point.z);
+    let r2 = x * x + y * y;
+    let r = r2.sqrt();
+    if r <= EPS {
+        if z <= 0.0 {
+            return None;
+        }
+        let z2 = z * z;
+        return Some((
+            [x / z, y / z],
+            [[1.0 / z, 0.0, -x / z2], [0.0, 1.0 / z, -y / z2]],
+        ));
+    }
+    let rho2 = r2 + z * z;
+    let scale = r.atan2(z) / r;
+    // ∂scale/∂X = X/r² · (Z/ρ² − scale), likewise for Y; ∂scale/∂Z = −1/ρ².
+    let lateral = (z / rho2 - scale) / r2;
+    let ds_dz = -1.0 / rho2;
+    Some((
+        [scale * x, scale * y],
+        [
+            [scale + x * x * lateral, x * y * lateral, x * ds_dz],
+            [x * y * lateral, scale + y * y * lateral, y * ds_dz],
+        ],
+    ))
+}
+
+/// COLMAP's thin-prism fisheye distortion of equidistant coordinates
+/// `(u, v)` (`|(u, v)| = θ`) and its 2×2 Jacobian.
+fn thin_prism_distort(u: f64, v: f64, k: [f64; 8]) -> ([f64; 2], [[f64; 2]; 2]) {
+    let [k1, k2, p1, p2, k3, k4, sx1, sy1] = k;
+    let t2 = u * u + v * v;
+    let radial = t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4)));
+    // d(radial)/d(θ²)
+    let g = k1 + t2 * (2.0 * k2 + t2 * (3.0 * k3 + t2 * 4.0 * k4));
+    let du = u * radial + 2.0 * p1 * u * v + p2 * (t2 + 2.0 * u * u) + sx1 * t2;
+    let dv = v * radial + 2.0 * p2 * u * v + p1 * (t2 + 2.0 * v * v) + sy1 * t2;
+    let jacobian = [
+        [
+            1.0 + radial + 2.0 * u * u * g + 2.0 * p1 * v + 6.0 * p2 * u + 2.0 * sx1 * u,
+            2.0 * u * v * g + 2.0 * p1 * u + 2.0 * p2 * v + 2.0 * sx1 * v,
+        ],
+        [
+            2.0 * u * v * g + 2.0 * p2 * v + 2.0 * p1 * u + 2.0 * sy1 * u,
+            1.0 + radial + 2.0 * v * v * g + 2.0 * p2 * u + 6.0 * p1 * v + 2.0 * sy1 * v,
+        ],
+    ];
+    ([u + du, v + dv], jacobian)
+}
+
+fn project_thin_prism(
+    fx: f64,
+    fy: f64,
+    cx: f64,
+    cy: f64,
+    k: [f64; 8],
+    point: &Point3<f64>,
+) -> Option<Point2<f64>> {
+    let ([u, v], _) = equidistant_coords(point)?;
+    let ([mu, mv], _) = thin_prism_distort(u, v, k);
+    finite_point(Point2::new(fx * mu + cx, fy * mv + cy))
+}
+
+/// Point Jacobian of [`project_thin_prism`].
+fn thin_prism_point_jacobian(
+    fx: f64,
+    fy: f64,
+    k: [f64; 8],
+    point: &Point3<f64>,
+) -> Option<Matrix2x3<f64>> {
+    let ([u, v], base) = equidistant_coords(point)?;
+    let (_, lens) = thin_prism_distort(u, v, k);
+    let mut jacobian = Matrix2x3::zeros();
+    for col in 0..3 {
+        jacobian[(0, col)] = fx * (lens[0][0] * base[0][col] + lens[0][1] * base[1][col]);
+        jacobian[(1, col)] = fy * (lens[1][0] * base[0][col] + lens[1][1] * base[1][col]);
+    }
+    Some(jacobian)
+}
+
+/// Unit ray of a thin-prism fisheye pixel: Newton on the 2-D distortion
+/// from the distorted coordinates, then the equidistant ray; `None` where
+/// it does not converge or the ray would pass 180°.
+fn unproject_thin_prism(
+    fx: f64,
+    fy: f64,
+    cx: f64,
+    cy: f64,
+    k: [f64; 8],
+    point: &Point2<f64>,
+) -> Option<Vector3<f64>> {
+    let xd = (point.x - cx) / fx;
+    let yd = (point.y - cy) / fy;
+    let (mut u, mut v) = (xd, yd);
+    for _ in 0..30 {
+        let ([mu, mv], [[a, b], [c, d]]) = thin_prism_distort(u, v, k);
+        let (ru, rv) = (mu - xd, mv - yd);
+        let det = a * d - b * c;
+        if !det.is_finite() || det.abs() <= EPS {
+            break;
+        }
+        let step_u = (d * ru - b * rv) / det;
+        let step_v = (a * rv - c * ru) / det;
+        u -= step_u;
+        v -= step_v;
+        if !(u.is_finite() && v.is_finite()) {
+            return None;
+        }
+        if step_u.abs() + step_v.abs() < 1e-14 {
+            break;
+        }
+    }
+    let ([mu, mv], _) = thin_prism_distort(u, v, k);
+    if (mu - xd).abs() + (mv - yd).abs() > 1e-9 {
+        return None;
+    }
+    let theta = (u * u + v * v).sqrt();
+    if theta.is_nan() || theta >= std::f64::consts::PI {
+        return None;
+    }
+    if theta <= EPS {
+        return normalize_ray(Vector3::new(u, v, 1.0));
+    }
+    let s = theta.sin() / theta;
+    normalize_ray(Vector3::new(s * u, s * v, theta.cos()))
 }
 
 /// Devernay FOV model: `r_d = atan(2 r tan(ω/2)) / ω`.
@@ -1363,7 +1524,66 @@ mod tests {
             with(CameraModel::Fov, vec![500.0, 495.0, 640.0, 480.0, 0.9]),
             Camera::double_sphere(1, 1280, 960, 350.0, 352.0, 640.0, 480.0, -0.2, 0.6),
             Camera::equirectangular(1, 2048, 1024),
+            eth3d_rig_camera(),
         ]
+    }
+
+    /// Camera 0 of ETH3D's delivery_area rig (`rig_calibration/cameras.txt`).
+    fn eth3d_rig_camera() -> Camera {
+        Camera {
+            id: 1,
+            model: CameraModel::ThinPrismFisheye,
+            width: 752,
+            height: 480,
+            params: vec![
+                538.731,
+                538.615,
+                413.003,
+                244.558,
+                -0.0654481,
+                -0.0781379,
+                -0.00131596,
+                0.00171383,
+                0.115547,
+                -0.0710756,
+                -0.0103304,
+                0.00700661,
+            ],
+        }
+    }
+
+    #[test]
+    fn thin_prism_fisheye_round_trips_and_matches_colmap() {
+        let camera = eth3d_rig_camera();
+        assert_eq!(
+            CameraModel::from_colmap_name("THIN_PRISM_FISHEYE"),
+            CameraModel::ThinPrismFisheye
+        );
+        assert_eq!(camera.model.colmap_name(), Some("THIN_PRISM_FISHEYE"));
+        assert!(camera.model.is_fisheye());
+        for point in [
+            Point3::new(0.0, 0.0, 2.0),
+            Point3::new(0.3, -0.2, 2.0),
+            Point3::new(-0.9, 0.6, 1.5),
+            Point3::new(1.0, 0.5, 1.2),
+        ] {
+            round_trip(&camera, point);
+        }
+        // COLMAP's ImgFromCam (atan of the pinhole radius, then the
+        // distortion of the equidistant coordinates), written out.
+        let p: Point3<f64> = Point3::new(0.4, -0.3, 1.1);
+        let [fx, fy, cx, cy] = params4(&camera.params).unwrap();
+        let [k1, k2, p1, p2, k3, k4, sx1, sy1] = extra_coeffs(&camera.params);
+        let (u0, v0) = (p.x / p.z, p.y / p.z);
+        let r = (u0 * u0 + v0 * v0).sqrt();
+        let theta = r.atan();
+        let (u, v) = (theta / r * u0, theta / r * v0);
+        let t2 = u * u + v * v;
+        let radial = k1 * t2 + k2 * t2 * t2 + k3 * t2.powi(3) + k4 * t2.powi(4);
+        let du = u * radial + 2.0 * p1 * u * v + p2 * (t2 + 2.0 * u * u) + sx1 * t2;
+        let dv = v * radial + 2.0 * p2 * u * v + p1 * (t2 + 2.0 * v * v) + sy1 * t2;
+        let expected = Point2::new(fx * (u + du) + cx, fy * (v + dv) + cy);
+        assert!((camera.project(&p).unwrap() - expected).norm() < 1e-9);
     }
 
     #[test]
@@ -1418,7 +1638,7 @@ mod tests {
             .is_none());
         let unknown = Camera {
             id: 1,
-            model: CameraModel::Unknown("THIN_PRISM_FISHEYE".into()),
+            model: CameraModel::Unknown("SOME_FUTURE_MODEL".into()),
             width: 640,
             height: 480,
             params: vec![500.0, 500.0, 320.0, 240.0],

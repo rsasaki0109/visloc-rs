@@ -34,6 +34,8 @@ wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 image = { version = "=0.25.5", default-features = false, features = ["png"] }
+# wgpu 30's own shader compiler: validates the kernels without a GPU.
+naga = { version = "30", features = ["wgsl-in"] }
 
 [[example]]
 name = "gsplat_gpu_render"

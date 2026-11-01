@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use visloc_gsplat_core::camera::CameraView;
-use visloc_gsplat_train::mesh::{fuse_views, scene_scale, Mesh, MeshOptions};
+use visloc_gsplat_train::mesh::{
+    fuse_views, pinhole_geometry_views, scene_scale, Mesh, MeshOptions,
+};
 
 use crate::{CudaGsplat, GsplatCudaError, TsdfParams, TsdfSurface};
 
@@ -38,9 +40,21 @@ impl MeshDepth {
     }
 }
 
+/// The views as the pinhole-only TSDF takes them (a distorted pinhole
+/// without its distortion), or an error for a fisheye view.
+fn geometry_views(views: &[&CameraView]) -> Result<Vec<CameraView>, GsplatCudaError> {
+    pinhole_geometry_views(views).ok_or_else(|| {
+        GsplatCudaError::Input(
+            "meshes from fisheye views (the TSDF back-projects through a pinhole)".into(),
+        )
+    })
+}
+
 /// Render the current scene's `depth` (SH up to `sh_degree`) from every
 /// view, fuse, extract, filter by `support` and drop small components.
-/// Returns the mesh and a one-line summary.
+/// Returns the mesh and a one-line summary. The views of a distorted
+/// pinhole are rendered and fused without their distortion; fisheye views
+/// are an error.
 pub fn extract_mesh(
     gs: &mut CudaGsplat,
     sh_degree: u32,
@@ -49,7 +63,9 @@ pub fn extract_mesh(
     support: &[[f32; 3]],
     opts: &MeshOptions,
 ) -> Result<(Mesh, String), GsplatCudaError> {
-    fuse_views(views, support, opts, |view| {
+    let geometry = geometry_views(views)?;
+    let views: Vec<&CameraView> = geometry.iter().collect();
+    fuse_views(&views, support, opts, |view| {
         let frame = gs.render_depth(view, [0.0; 3], sh_degree, depth == MeshDepth::Planar)?;
         let rgb = frame
             .rgb
@@ -116,7 +132,7 @@ pub struct DepthMaps<'a> {
 /// the views are kept on the device up to 2 GiB): the same voxel size,
 /// depth range, carving, minimum weight and filters. Unlike `fuse_views`,
 /// every block sees every view. With `maps`, their depths replace the
-/// splat's where they have one.
+/// splat's where they have one. The same cameras as [`extract_mesh`].
 #[allow(clippy::too_many_arguments)]
 pub fn extract_mesh_gpu(
     gs: &mut CudaGsplat,
@@ -128,6 +144,9 @@ pub fn extract_mesh_gpu(
     slab_blocks: u32,
     maps: Option<DepthMaps<'_>>,
 ) -> Result<(Mesh, String), GsplatCudaError> {
+    let geometry = geometry_views(views)?;
+    let views: Vec<&CameraView> = geometry.iter().collect();
+    let views = views.as_slice();
     let scale = scene_scale(views, support);
     let voxel = opts.voxel.unwrap_or(scale / 256.0);
     let params = TsdfParams {

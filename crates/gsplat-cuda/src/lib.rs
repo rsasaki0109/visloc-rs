@@ -53,6 +53,14 @@ pub struct GscCamera {
     pub cy: f32,
     pub width: u32,
     pub height: u32,
+    /// The lens ([`Lens::kind`](visloc_gsplat_core::lens::Lens::kind)): 0
+    /// the undistorted pinhole, 1 a distorted pinhole, 2 an equidistant
+    /// (fisheye) projection.
+    pub lens_kind: u32,
+    /// Distortion `[k1, k2, k3, k4, p1, p2, sx1, sy1]`.
+    pub lens: [f32; 8],
+    /// Widest ray angle the lens is followed to (radians; `Lens::max_theta`).
+    pub max_theta: f32,
 }
 
 impl GscCamera {
@@ -79,7 +87,16 @@ impl GscCamera {
             cy: view.camera.cy,
             width: view.camera.width,
             height: view.camera.height,
+            lens_kind: view.camera.lens.kind(),
+            lens: view.camera.lens.coeffs,
+            max_theta: view.camera.lens.max_theta,
         }
+    }
+
+    /// The camera is an undistorted pinhole, which the planar depth, the
+    /// normals and the TSDF need.
+    pub fn is_pinhole(&self) -> bool {
+        self.lens_kind == 0
     }
 }
 
@@ -454,7 +471,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 10;
+    pub const ABI_VERSION: u32 = 11;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
