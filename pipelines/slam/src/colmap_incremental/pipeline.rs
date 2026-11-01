@@ -977,7 +977,7 @@ mod tests {
             },
         ];
         for camera in lenses {
-            let (db, truth) = build_synthetic_lens_scene(camera.clone(), 10, 4);
+            let (db, truth) = build_synthetic_lens_scene(camera.clone(), 60.0, 10, 4);
             let mut options = PipelineOptions::default();
             options.mapper.init_min_num_inliers = 40;
             options.mapper.init_min_tri_angle_deg = 2.0;
@@ -1024,6 +1024,70 @@ mod tests {
             // The lens is left as calibrated.
             assert_eq!(model.camera(1).params, camera.params);
         }
+    }
+
+    /// A fisheye wider than 180° (Kannala-Brandt, 640 px square at f = 150:
+    /// ±122° across its sides) seeing points up to 100° off its axis, about
+    /// a fifth of them behind its image plane. The mapper takes it on unit
+    /// rays, as it does a panorama (`Camera::sees_behind`): the trajectory
+    /// comes out exact, and the points behind the image plane are
+    /// triangulated too.
+    #[test]
+    fn pipeline_reconstructs_through_a_fisheye_past_180_degrees() {
+        use visloc_core::types::Camera;
+        let camera = Camera::opencv_fisheye(
+            1,
+            640,
+            640,
+            150.0,
+            150.5,
+            322.0,
+            318.0,
+            [0.02, -0.004, 0.0005, -0.0001],
+        );
+        assert!(camera.sees_behind());
+        let (db, truth) = build_synthetic_lens_scene(camera, 100.0, 10, 4);
+        let mut options = PipelineOptions::default();
+        options.mapper.init_min_num_inliers = 40;
+        options.mapper.init_min_tri_angle_deg = 2.0;
+        options.mapper.abs_pose_min_num_inliers = 20;
+
+        let result = run(&options, &db);
+        assert!(!result.models.is_empty(), "no model");
+        let model = &result.models[0].reconstruction;
+        assert_eq!(model.num_reg_frames(), truth.len());
+        let (mut source, mut target) = (Vec::new(), Vec::new());
+        let mut worst_rotation = 0.0f64;
+        let first_got = model.frame(0).rig_from_world().rotation;
+        let first_gt = truth[&0].rotation;
+        for (&frame_id, gt) in &truth {
+            let got = model.frame(frame_id).rig_from_world();
+            source.push(Point3::from(got.inverse().translation));
+            target.push(Point3::from(gt.inverse().translation));
+            let rel_got = got.rotation * first_got.inverse();
+            let rel_gt = gt.rotation * first_gt.inverse();
+            worst_rotation = worst_rotation.max(rel_got.angle_to(&rel_gt));
+        }
+        let transform = umeyama_similarity_transform(&source, &target, true)
+            .expect("Umeyama alignment must succeed on a full trajectory");
+        let max_err = source
+            .iter()
+            .zip(&target)
+            .map(|(s, t)| (transform.apply(s) - t).norm())
+            .fold(0.0, f64::max);
+        assert!(max_err < 1e-3, "frame-centre error {max_err} m");
+        assert!(worst_rotation < 1e-4, "rotation error {worst_rotation} rad");
+        let first = model.frame(0).rig_from_world();
+        let behind = model
+            .point3d_ids()
+            .into_iter()
+            .filter(|&id| first.transform_point(&model.point3d(id).xyz).z < 0.0)
+            .count();
+        assert!(
+            model.num_points3d() > 100 && behind > 15,
+            "{} points, {behind} behind frame 0's image plane",
+            model.num_points3d()
+        );
     }
 
     /// `forced_init_pair` (plan §4.2 item 1 diagnostic) must seed the

@@ -94,8 +94,14 @@ impl GeneralizedCameraRig {
         correspondence: &GeneralizedCorrespondence2D3D,
     ) -> Option<(Point3<f64>, Vector3<f64>)> {
         let sensor = self.sensor(correspondence.sensor_index)?;
-        let normalized = sensor.camera.normalize_pixel(&correspondence.point2d)?;
-        let bearing_sensor = Vector3::new(normalized.x, normalized.y, 1.0).try_normalize(1e-15)?;
+        // A camera that sees behind itself (a fisheye past 180°) has rays
+        // the normalized plane cannot hold.
+        let bearing_sensor = if sensor.camera.sees_behind() {
+            sensor.camera.unit_ray_from_pixel(&correspondence.point2d)?
+        } else {
+            let normalized = sensor.camera.normalize_pixel(&correspondence.point2d)?;
+            Vector3::new(normalized.x, normalized.y, 1.0).try_normalize(1e-15)?
+        };
         let bearing_rig = sensor
             .sensor_from_rig
             .rotation

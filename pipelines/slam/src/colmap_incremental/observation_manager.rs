@@ -786,7 +786,7 @@ impl ObservationManager {
                     .filter_map(move |(point2d_idx, p)| {
                         let point3d_id = p.point3d_id?;
                         let xyz = recon_ref.point3d(point3d_id).xyz;
-                        let in_front = if camera.model.is_spherical() {
+                        let in_front = if camera.sees_behind() {
                             let point_camera = cam_from_world.transform_point(&xyz);
                             camera.sees_in_front(&point_camera, &p.xy)
                         } else {

@@ -1651,7 +1651,7 @@ fn angular_reprojection_error(
 ) -> f64 {
     let point_cam = cam_from_world.transform_point(&xyz);
     let predicted_ray = point_cam.coords.normalize();
-    let observed_ray = if camera.model.is_spherical() {
+    let observed_ray = if camera.sees_behind() {
         let Some(ray) = camera.unit_ray_from_pixel(&xy) else {
             return f64::MAX;
         };
@@ -2099,16 +2099,17 @@ pub(super) fn triangulate_dlt(views: &[(&SE3, Point2<f64>, &Camera)]) -> Option<
 
 /// One view's two DLT rows, `x * P_row2 - P_row0` and `y * P_row2 - P_row1`,
 /// with `P = [R | t]` in the normalized (unit-focal, zero-principal-point)
-/// camera frame; `None` when the pixel cannot be normalized. A spherical
-/// camera's ray `d` may point anywhere: its rows are the two of `d × (P X)
-/// = 0` that do not vanish with `d`'s largest component.
+/// camera frame; `None` when the pixel cannot be normalized. The ray `d` of a
+/// camera that sees behind itself (a panorama, a fisheye past 180°) may
+/// point anywhere: its rows are the two of `d × (P X) = 0` that do not vanish
+/// with `d`'s largest component.
 fn dlt_rows((cam_from_world, xy, camera): &(&SE3, Point2<f64>, &Camera)) -> Option<[[f64; 4]; 2]> {
     let r = cam_from_world.rotation.to_rotation_matrix();
     let t = cam_from_world.translation;
     let p0 = [r[(0, 0)], r[(0, 1)], r[(0, 2)], t.x];
     let p1 = [r[(1, 0)], r[(1, 1)], r[(1, 2)], t.y];
     let p2 = [r[(2, 0)], r[(2, 1)], r[(2, 2)], t.z];
-    if camera.model.is_spherical() {
+    if camera.sees_behind() {
         let d = camera.unit_ray_from_pixel(xy)?;
         let row = |a: f64, pa: &[f64; 4], b: f64, pb: &[f64; 4]| -> [f64; 4] {
             std::array::from_fn(|c| a * pa[c] - b * pb[c])
