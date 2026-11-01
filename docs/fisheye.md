@@ -223,6 +223,21 @@ model error, since the other cameras map well with the same model. This
 sequence of forward motion with little parallax has a soft bending mode:
 moving the principal point by half a pixel either way gives 1.2 or 7.9 cm.
 
+### End to end: distorted photos to a splat
+
+`gsplat_photos_cuda --camera` writes a COLMAP dataset with the lens, which
+`gsplat_train_cuda` trains through. It runs on the distorted images as they
+are, with no undistortion anywhere. Each run trains for 30k steps with
+every 8th image held out. The same images and lens with ETH3D's
+ground-truth poses are the reference:
+
+| Scene | Camera | SfM poses | ground-truth poses |
+|---|---|---|---|
+| delivery_area | cam7 | 27.64 dB | 27.76 dB |
+| terrains | cam4 | 25.39 dB | 25.48 dB |
+
+The splats on SfM poses come within 0.1 dB of those on the true poses.
+
 ## Validation data
 
 ETH3D's low-res many-view training scenes (`<scene>_rig.7z`) ship the
