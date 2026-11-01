@@ -76,7 +76,8 @@ constexpr float kLensSeriesS2 = 1e-2f;
 
 // The distorted normalized coordinates `m` of camera-space point `p` (before
 // the focal lengths) and their Jacobian `J` (rows: m_x, m_y; columns: x, y,
-// z), for a camera with lens_kind != kLensPinhole.
+// z), for a camera with lens_kind != kLensPinhole and `p` within max_theta
+// (lens_extended past it).
 template <class T>
 __device__ void lens_coords(const GscCamera& c, const T p[3], T m[2], T J[2][3]) {
     const T x = p[0], y = p[1], z = p[2];
@@ -155,3 +156,31 @@ __device__ void lens_coords(const GscCamera& c, const T p[3], T m[2], T J[2][3])
 
 // The angle between the optical axis and the ray to camera-space (x, y, z).
 __device__ inline float lens_ray_angle(float x, float y, float z) { return atan2f(sqrtf(x * x + y * y), z); }
+
+// lens_coords for any camera-space point p (lens.rs's extended_lens_coords):
+// within max_theta the lens itself; past it, the lens's first-order
+// extension at q, p turned towards the optical axis onto the max_theta cone
+// (same distance and azimuth): m(q) + J(q) (p - q). Writes m, the Jacobian at
+// q, and q.
+template <class T>
+__device__ void lens_extended(const GscCamera& c, const T p[3], T m[2], T J[2][3], T q[3]) {
+    if (lens_ray_angle(lens_value(p[0]), lens_value(p[1]), lens_value(p[2])) <= c.max_theta) {
+#pragma unroll
+        for (int k = 0; k < 3; ++k) q[k] = p[k];
+        lens_coords(c, p, m, J);
+        return;
+    }
+    const T r2 = p[0] * p[0] + p[1] * p[1];
+    const T rho = lens_sqrt(r2 + p[2] * p[2]);
+    float sin_t, cos_t;
+    sincosf(c.max_theta, &sin_t, &cos_t);
+    const T k = rho * sin_t / lens_sqrt(r2);
+    q[0] = p[0] * k;
+    q[1] = p[1] * k;
+    q[2] = rho * cos_t;
+    T mq[2];
+    lens_coords(c, q, mq, J);
+    const T d[3] = {p[0] - q[0], p[1] - q[1], p[2] - q[2]};
+#pragma unroll
+    for (int r = 0; r < 2; ++r) m[r] = mq[r] + J[r][0] * d[0] + J[r][1] * d[1] + J[r][2] * d[2];
+}

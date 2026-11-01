@@ -49,7 +49,8 @@ extern "C" {
 // front of them (gsplat-core's `Lens`, see lens.cuh): lens_kind 0 is the
 // undistorted pinhole, 1 a distorted pinhole, 2 an equidistant (fisheye)
 // projection; lens holds the distortion [k1 k2 k3 k4 p1 p2 sx1 sy1] and
-// max_theta the widest ray angle drawn (radians). Mirrored by `GscCamera` in
+// max_theta the widest ray angle the lens is followed to (radians; past it,
+// its first-order extension). Mirrored by `GscCamera` in
 // crates/gsplat-cuda/src/lib.rs.
 struct GscCamera {
     float rot[9];
@@ -129,17 +130,16 @@ __device__ Projected compute_projected_lens(const GscCamera& c, const float* tr,
     const float py = W[3] * mx + W[4] * my + W[5] * mz + c.t[1];
     const float pz = W[6] * mx + W[7] * my + W[8] * mz + c.t[2];
     // A distorted pinhole draws what lies 0.1 in front of it, sorted by z; a
-    // fisheye what lies 0.1 from its centre, even behind the image plane,
-    // sorted by the distance; both stop at max_theta (cpu_render's
-    // project_point).
+    // fisheye what lies 0.1 from its centre within the wider of max_theta
+    // and 90 degrees, even behind the image plane, sorted by the distance
+    // (cpu_render's project_point).
     float depth = pz;
     if (c.lens_kind == kLensEquidistant) {
         depth = sqrtf(px * px + py * py + pz * pz);
-        if (depth <= 0.1f) return p;
+        if (depth <= 0.1f || lens_ray_angle(px, py, pz) > fmaxf(c.max_theta, 1.57079633f)) return p;
     } else if (pz <= 0.1f) {
         return p;
     }
-    if (lens_ray_angle(px, py, pz) > c.max_theta) return p;
 
     float R[9];
     quat_to_rot(tr[3], tr[4], tr[5], tr[6], R);
@@ -165,17 +165,18 @@ __device__ Projected compute_projected_lens(const GscCamera& c, const float* tr,
     const float cov00 = cov[0], cov01 = cov[1], cov02 = cov[2];
     const float cov11 = cov[3], cov12 = cov[4], cov22 = cov[5];
 
-    // The lens at the point; a distorted pinhole linearises at the point
-    // clamped to 1.3x the frustum (Inria rasterizer), a fisheye at the point
-    // itself.
-    const float inv_z = 1.f / pz;
+    // The lens at the point, past max_theta its extension from the point's
+    // turn q onto the cone; a distorted pinhole linearises at q clamped to
+    // 1.3x the frustum (Inria rasterizer), a fisheye at q itself.
     const float lim_x = 1.3f * 0.5f * float(c.width) / c.fx;
     const float lim_y = 1.3f * 0.5f * float(c.height) / c.fy;
     const float pt[3] = {px, py, pz};
-    float m[2], J[2][3];
-    lens_coords(c, pt, m, J);
+    float m[2], J[2][3], q[3];
+    lens_extended(c, pt, m, J, q);
     if (c.lens_kind == kLensDistorted) {
-        const float lin[3] = {clampf(px * inv_z, -lim_x, lim_x) * pz, clampf(py * inv_z, -lim_y, lim_y) * pz, pz};
+        const float inv_qz = 1.f / q[2];
+        const float lin[3] = {clampf(q[0] * inv_qz, -lim_x, lim_x) * q[2], clampf(q[1] * inv_qz, -lim_y, lim_y) * q[2],
+                              q[2]};
         float ml[2];
         lens_coords(c, lin, ml, J);
     }
@@ -947,18 +948,20 @@ __global__ void project_bwd_kernel(int n, GscCamera cam, int rest_pc, int act, c
     constexpr bool lens = kLens;
     float j0[3] = {cam.fx * inv_z, 0.f, -cam.fx * tx * inv_z2};
     float j1[3] = {0.f, cam.fy * inv_z, -cam.fy * ty * inv_z2};
-    // With a lens: d j_r[k] / d p[m] and d(u, v) / d p, from the lens on
-    // duals in p. The clamped coordinate of a distorted pinhole's
-    // linearisation point is clamp * z, so it follows z alone (zero
-    // gradient on the clamped side, as without a lens).
+    // With a lens: d j_r[k] / d p[m] and d(u, v) / d p, from the lens (past
+    // max_theta its extension) on duals in p. The clamped coordinate of a
+    // distorted pinhole's linearisation point q is clamp * q_z, so it follows
+    // q_z alone (zero gradient on the clamped side, as without a lens).
     float dj0[3][3], dj1[3][3], du[3], dv[3];
     if constexpr (lens) {
         const Dual3 P[3] = {dual_var(p[0], 0), dual_var(p[1], 1), dual_var(p[2], 2)};
-        Dual3 m[2], J[2][3];
-        lens_coords(cam, P, m, J);
+        Dual3 m[2], J[2][3], Q[3];
+        lens_extended(cam, P, m, J, Q);
         if (cam.lens_kind == kLensDistorted) {
-            const Dual3 L[3] = {clamped_x ? P[2] * clampf(rx, -lim_x, lim_x) : P[0],
-                                clamped_y ? P[2] * clampf(ry, -lim_y, lim_y) : P[1], P[2]};
+            const float inv_qz = 1.f / Q[2].v;
+            const float qx = Q[0].v * inv_qz, qy = Q[1].v * inv_qz;
+            const Dual3 L[3] = {qx < -lim_x || qx > lim_x ? Q[2] * clampf(qx, -lim_x, lim_x) : Q[0],
+                                qy < -lim_y || qy > lim_y ? Q[2] * clampf(qy, -lim_y, lim_y) : Q[1], Q[2]};
             Dual3 ml[2];
             lens_coords(cam, L, ml, J);
         }

@@ -422,11 +422,16 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(opencv.projection, Projection::Pinhole);
-        assert_eq!(opencv.coeffs, [-0.2, 0.05, 0.0, 0.0, 0.001, -0.002, 0.0, 0.0]);
+        assert_eq!(
+            opencv.coeffs,
+            [-0.2, 0.05, 0.0, 0.0, 0.001, -0.002, 0.0, 0.0]
+        );
         // COLMAP's [.. k1 k2 p1 p2 k3 k4 sx1 sy1] to [k1 k2 k3 k4 p1 p2 sx1 sy1].
         let thin_prism = lens_of(&camera(
             CameraModel::ThinPrismFisheye,
-            vec![540.0, 540.0, 413.0, 245.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            vec![
+                540.0, 540.0, 413.0, 245.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+            ],
         ))
         .unwrap();
         assert_eq!(thin_prism.projection, Projection::Equidistant);
@@ -437,15 +442,22 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fisheye.coeffs[..2], [0.1, -0.01]);
-        assert!(lens_of(&camera(CameraModel::SimplePinhole, vec![500.0, 376.0, 240.0]))
-            .unwrap()
-            .is_pinhole());
+        assert!(lens_of(&camera(
+            CameraModel::SimplePinhole,
+            vec![500.0, 376.0, 240.0]
+        ))
+        .unwrap()
+        .is_pinhole());
         // A rational FULL_OPENCV, FOV and Double Sphere cannot be drawn.
         let rational = vec![
             500.0, 500.0, 376.0, 240.0, -0.2, 0.05, 0.0, 0.0, 0.01, 0.1, 0.0, 0.0,
         ];
         assert!(lens_of(&camera(CameraModel::FullOpenCv, rational)).is_err());
-        assert!(lens_of(&camera(CameraModel::Fov, vec![500.0, 500.0, 376.0, 240.0, 0.9])).is_err());
+        assert!(lens_of(&camera(
+            CameraModel::Fov,
+            vec![500.0, 500.0, 376.0, 240.0, 0.9]
+        ))
+        .is_err());
     }
 
     #[test]
@@ -459,7 +471,11 @@ mod tests {
         assert_eq!((view.camera.fx, view.camera.cx), (200.0, 376.0));
         // The corners are ~2.2 rad off the axis at f = 200 px: max_theta is
         // fitted to the image, well past 90°.
-        assert!(view.camera.lens.max_theta > 2.0, "{}", view.camera.lens.max_theta);
+        assert!(
+            view.camera.lens.max_theta > 2.0,
+            "{}",
+            view.camera.lens.max_theta
+        );
         assert!(view.pinhole_geometry().is_none());
     }
 }

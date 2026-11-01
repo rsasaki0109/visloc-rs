@@ -41,7 +41,7 @@ pub struct ProjectUniforms {
     /// pinhole, 1 a distorted pinhole, 2 an equidistant (fisheye)
     /// projection.
     pub lens_kind: u32,
-    /// Widest ray angle drawn (radians).
+    /// Widest ray angle the lens is followed to (radians; `Lens::max_theta`).
     pub max_theta: f32,
     /// Padding: the distortion starts on a 16-byte boundary.
     pub _pad: u32,

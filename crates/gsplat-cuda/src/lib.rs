@@ -59,7 +59,7 @@ pub struct GscCamera {
     pub lens_kind: u32,
     /// Distortion `[k1, k2, k3, k4, p1, p2, sx1, sy1]`.
     pub lens: [f32; 8],
-    /// Widest ray angle drawn (radians).
+    /// Widest ray angle the lens is followed to (radians; `Lens::max_theta`).
     pub max_theta: f32,
 }
 

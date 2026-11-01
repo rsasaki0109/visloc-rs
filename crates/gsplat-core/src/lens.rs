@@ -32,14 +32,16 @@ pub const LENS_COEFFS: usize = 8;
 
 /// A lens: its [`Projection`], the distortion coefficients
 /// `[k1, k2, k3, k4, p1, p2, sx1, sy1]` (see [`distort`]) and the widest ray
-/// angle from the optical axis that is drawn.
+/// angle from the optical axis it is followed to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lens {
     pub projection: Projection,
     pub coeffs: [f32; LENS_COEFFS],
-    /// Gaussians whose centre is farther than this from the optical axis
-    /// (radians) are not drawn: past the edge of the image, or where the
-    /// distortion polynomial folds back ([`Lens::fit_max_theta`]).
+    /// The lens is trusted out to this angle from the optical axis
+    /// (radians): past the edge of the image, or where the distortion
+    /// polynomial folds back ([`Lens::fit_max_theta`]). Gaussians centred
+    /// farther out are drawn through its first-order extension there
+    /// ([`extended_lens_coords`]).
     pub max_theta: f32,
 }
 
@@ -279,9 +281,8 @@ pub fn distort<T: LensScalar>(n: [T; 2], coeffs: &[f32; LENS_COEFFS]) -> ([T; 2]
 }
 
 /// The distorted normalized coordinates of camera-space point `p` (before
-/// the focal lengths) and their 2×3 Jacobian. The caller checks that the
-/// lens images `p` ([`ray_angle`] against [`Lens::max_theta`], and `z > 0`
-/// for a pinhole).
+/// the focal lengths) and their 2×3 Jacobian, for `p` within
+/// [`Lens::max_theta`] (and `z > 0` for a pinhole).
 pub fn lens_coords<T: LensScalar>(lens: &Lens, p: [T; 3]) -> ([T; 2], [[T; 3]; 2]) {
     let (n, nj) = match lens.projection {
         Projection::Pinhole => pinhole_coords(p),
@@ -294,6 +295,38 @@ pub fn lens_coords<T: LensScalar>(lens: &Lens, p: [T; 3]) -> ([T; 2], [[T; 3]; 2
     let row =
         |r: usize| -> [T; 3] { std::array::from_fn(|k| dj[r][0] * nj[0][k] + dj[r][1] * nj[1][k]) };
     (m, [row(0), row(1)])
+}
+
+/// [`lens_coords`] for any camera-space point `p`: within
+/// [`Lens::max_theta`] the lens itself; past it, the lens's first-order
+/// extension at `q`, `p` turned towards the optical axis onto the
+/// `max_theta` cone (same distance and azimuth): `m(q) + J(q) (p − q)`.
+/// Returns the coordinates, the Jacobian at `q`, and `q`.
+///
+/// Out there the distortion is not calibrated (and may fold), but a
+/// gaussian centred there can still reach into the image, as one off an
+/// undistorted pinhole's frustum does; culling it instead would hide it
+/// from the views it covers. The extension is continuous at the cone and
+/// moves a point by `sin(θ − max_theta)` times the lens's angular rate
+/// there, outwards up to `θ = max_theta + 90°`.
+pub fn extended_lens_coords<T: LensScalar>(
+    lens: &Lens,
+    p: [T; 3],
+) -> ([T; 2], [[T; 3]; 2], [T; 3]) {
+    if ray_angle(p.map(T::value)) <= lens.max_theta as f64 {
+        let (m, jac) = lens_coords(lens, p);
+        return (m, jac, p);
+    }
+    let [x, y, z] = p;
+    let r2 = x * x + y * y;
+    let rho = (r2 + z * z).sqrt();
+    let (sin, cos) = (lens.max_theta as f64).sin_cos();
+    let k = rho * T::from_f64(sin) / r2.sqrt();
+    let q = [x * k, y * k, rho * T::from_f64(cos)];
+    let (mq, jac) = lens_coords(lens, q);
+    let d = [x - q[0], y - q[1], z - q[2]];
+    let m = std::array::from_fn(|r| mq[r] + jac[r][0] * d[0] + jac[r][1] * d[1] + jac[r][2] * d[2]);
+    (m, jac, q)
 }
 
 /// Angle between the optical axis and the ray to camera-space point `p`.
@@ -409,6 +442,61 @@ mod tests {
             let expected = camera.project(&Point3::new(p[0], p[1], p[2])).unwrap();
             assert!((538.731 * u + 413.003 - expected.x).abs() < 1e-3);
             assert!((538.615 * v + 244.558 - expected.y).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn extension_meets_the_lens_and_keeps_moving_outwards() {
+        // ETH3D's narrow rig lens (camera 3), whose polynomial blows up
+        // past the image, fitted to its 752x480 image.
+        let lens = Lens::new(
+            Projection::Equidistant,
+            [
+                0.578522,
+                -0.483915,
+                -0.433404,
+                1.53835,
+                -0.00535528,
+                0.0063216,
+                -0.00547212,
+                0.00645311,
+            ],
+        )
+        .fit_max_theta(711.926, 710.904, 410.892, 250.748, 752, 480);
+        let edge = lens.max_theta as f64;
+        let at = |theta: f64, phi: f64| {
+            let p = [
+                theta.sin() * phi.cos(),
+                theta.sin() * phi.sin(),
+                theta.cos(),
+            ]
+            .map(|c| 3.0 * c);
+            extended_lens_coords(&lens, p)
+        };
+        for phi in [0.3, 2.0, 4.4] {
+            // Continuous at the cone, in the coordinates and the Jacobian.
+            let (a, ja, _) = at(edge - 1e-7, phi);
+            let (b, jb, q) = at(edge + 1e-7, phi);
+            assert!((ray_angle(q) - edge).abs() < 1e-9);
+            for r in 0..2 {
+                assert!((a[r] - b[r]).abs() < 1e-5, "{a:?} vs {b:?}");
+                for k in 0..3 {
+                    assert!((ja[r][k] - jb[r][k]).abs() < 1e-4);
+                }
+            }
+            // Then outwards, and bounded, until 90° past the cone.
+            let mut last = (a[0] * a[0] + a[1] * a[1]).sqrt();
+            let mut theta = edge + 0.05;
+            while theta < edge + 1.5 {
+                let (m, _, _) = at(theta, phi);
+                let radius = (m[0] * m[0] + m[1] * m[1]).sqrt();
+                assert!(
+                    radius > last && radius < 4.0,
+                    "{theta}: {radius} after {last}"
+                );
+                last = radius;
+                theta += 0.05;
+            }
         }
     }
 

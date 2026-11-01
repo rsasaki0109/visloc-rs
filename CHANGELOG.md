@@ -20,6 +20,11 @@ All notable changes to `visloc-rs` will be documented here.
     lens at each gaussian, rays past 90° included. A fisheye sorts by
     distance, and its depth channels hold the distance. The backward passes
     get the Jacobian's derivatives from dual numbers.
+  - Past the image, where the distortion is not calibrated, a gaussian is
+    drawn through the lens's first-order extension rather than culled
+    (`lens::extended_lens_coords`), as a pinhole draws one off its frustum.
+    Culling there let training park big gaussians just outside every
+    view's field, which then darkened any other camera's render.
   - Meshes, the planar median depth and the depth-normal loss still
     back-project through a pinhole. They take a distorted pinhole without
     its distortion, as before, and refuse fisheye views.

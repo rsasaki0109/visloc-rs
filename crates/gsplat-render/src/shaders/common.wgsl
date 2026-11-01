@@ -187,6 +187,42 @@ fn lens_ray_angle(p: vec3<f32>) -> f32 {
     return atan2(length(p.xy), p.z);
 }
 
+// lens_coords for any camera-space point (lens.rs's extended_lens_coords):
+// within max_theta the lens itself; past it, the lens's first-order
+// extension at q, the point turned towards the optical axis onto the
+// max_theta cone (same distance and azimuth): m(q) + J(q) (p - q). l holds
+// the coordinates and the Jacobian at q.
+struct LensExtended {
+    l: LensOut,
+    qx: vec4<f32>,
+    qy: vec4<f32>,
+    qz: vec4<f32>,
+};
+
+fn lens_extended(u: ProjectUniforms, x: vec4<f32>, y: vec4<f32>, z: vec4<f32>) -> LensExtended {
+    var o: LensExtended;
+    if (lens_ray_angle(vec3<f32>(x.x, y.x, z.x)) <= u.max_theta) {
+        o.l = lens_coords(u, x, y, z);
+        o.qx = x;
+        o.qy = y;
+        o.qz = z;
+        return o;
+    }
+    let r2 = dmul(x, x) + dmul(y, y);
+    let rho = dsqrt(r2 + dmul(z, z));
+    let k = ddiv(rho * sin(u.max_theta), dsqrt(r2));
+    o.qx = dmul(x, k);
+    o.qy = dmul(y, k);
+    o.qz = rho * cos(u.max_theta);
+    o.l = lens_coords(u, o.qx, o.qy, o.qz);
+    let dx = x - o.qx;
+    let dy = y - o.qy;
+    let dz = z - o.qz;
+    o.l.mx = o.l.mx + dmul(o.l.j00, dx) + dmul(o.l.j01, dy) + dmul(o.l.j02, dz);
+    o.l.my = o.l.my + dmul(o.l.j10, dx) + dmul(o.l.j11, dy) + dmul(o.l.j12, dz);
+    return o;
+}
+
 struct RasterUniforms {
     tile_bw: u32,
     img_w: u32,
@@ -371,18 +407,16 @@ fn compute_projected(
     }
     let p_cam = world_to_camera(u, mean);
     // A pinhole draws what lies 0.1 in front of it, sorted by z; a fisheye
-    // what lies 0.1 from its centre, even behind the image plane, sorted by
-    // the distance; a lens stops at max_theta (cpu_render's project_point).
+    // what lies 0.1 from its centre within the wider of max_theta and 90
+    // degrees, even behind the image plane, sorted by the distance
+    // (cpu_render's project_point).
     var depth = p_cam.z;
     if (u.lens_kind == LENS_EQUIDISTANT) {
         depth = length(p_cam);
-        if (depth <= 0.1) {
+        if (depth <= 0.1 || lens_ray_angle(p_cam) > max(u.max_theta, 1.57079633)) {
             return p;
         }
     } else if (p_cam.z <= 0.1) {
-        return p;
-    }
-    if (u.lens_kind != LENS_PINHOLE && lens_ray_angle(p_cam) > u.max_theta) {
         return p;
     }
 
@@ -422,13 +456,19 @@ fn compute_projected(
     var proj_u = p_cam.x * j0.x + u.cx;
     var proj_v = p_cam.y * j1.y + u.cy;
     if (u.lens_kind != LENS_PINHOLE) {
-        // The lens at the point; a distorted pinhole linearises at the
-        // clamped point, a fisheye at the point itself.
-        var l = lens_coords(u, dc(p_cam.x), dc(p_cam.y), dc(p_cam.z));
+        // The lens at the point, past max_theta its extension from the
+        // point's turn q onto the cone; a distorted pinhole linearises at q
+        // clamped, a fisheye at q itself.
+        let e = lens_extended(u, dc(p_cam.x), dc(p_cam.y), dc(p_cam.z));
+        var l = e.l;
         proj_u = u.fx * l.mx.x + u.cx;
         proj_v = u.fy * l.my.x + u.cy;
         if (u.lens_kind == LENS_DISTORTED) {
-            l = lens_coords(u, dc(tx), dc(ty), dc(p_cam.z));
+            let qz = e.qz.x;
+            let inv_qz = 1.0 / qz;
+            let qx = clamp(e.qx.x * inv_qz, -lim_x, lim_x) * qz;
+            let qy = clamp(e.qy.x * inv_qz, -lim_y, lim_y) * qz;
+            l = lens_coords(u, dc(qx), dc(qy), dc(qz));
         }
         j0 = u.fx * vec3<f32>(l.j00.x, l.j01.x, l.j02.x);
         j1 = u.fy * vec3<f32>(l.j10.x, l.j11.x, l.j12.x);

@@ -22,7 +22,7 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use crate::camera::CameraView;
 use crate::gaussian::{Gaussian, Scene};
-use crate::lens::{lens_coords, ray_angle, LensScalar, Projection};
+use crate::lens::{extended_lens_coords, lens_coords, ray_angle, LensScalar, Projection};
 use crate::sh::{SH_BASIS_COEFFS, SH_C0};
 
 /// Number of non-SH parameters per gaussian differentiated with duals:
@@ -251,7 +251,8 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
     let p_val = p_cam.map(|x| x.v);
     let depth = if lens.projection == Projection::Equidistant && !lens.is_pinhole() {
         let distance = (p_val[0] * p_val[0] + p_val[1] * p_val[1] + p_val[2] * p_val[2]).sqrt();
-        if distance <= 0.1 {
+        let widest = (lens.max_theta as f64).max(std::f64::consts::FRAC_PI_2);
+        if distance <= 0.1 || ray_angle(p_val) > widest {
             return None;
         }
         distance
@@ -261,9 +262,6 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
         }
         p_val[2]
     };
-    if !lens.is_pinhole() && ray_angle(p_val) > lens.max_theta as f64 {
-        return None;
-    }
 
     // Rotation from the normalised quaternion (w, x, y, z).
     let n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
@@ -308,7 +306,8 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
     });
 
     // EWA Jacobian, linearised at a point clamped to 1.3x the frustum (a
-    // pinhole's), or at the point itself (a fisheye's); the screen mean.
+    // pinhole's), or at the point itself (a fisheye's), past max_theta at
+    // the point's turn onto the cone; the screen mean.
     let z = p_cam[2];
     let inv_z = one / z;
     let inv_z2 = inv_z * inv_z;
@@ -324,12 +323,15 @@ fn project(index: usize, g: &Gaussian, view: &CameraView, sh_degree: u32) -> Opt
             p_cam[1] * inv_z * fy + cy,
         )
     } else {
-        let linearised = match lens.projection {
-            Projection::Pinhole => [tx, ty, z],
-            Projection::Equidistant => p_cam,
+        let ([mu, mv], rows, q) = extended_lens_coords(&lens, p_cam);
+        let rows = match lens.projection {
+            Projection::Pinhole => {
+                let inv_qz = one / q[2];
+                let clamped = |c: D, lim: f64| (c * inv_qz).clamp(-lim, lim) * q[2];
+                lens_coords(&lens, [clamped(q[0], lim_x), clamped(q[1], lim_y), q[2]]).1
+            }
+            Projection::Equidistant => rows,
         };
-        let ([mu, mv], _) = lens_coords(&lens, p_cam);
-        let (_, rows) = lens_coords(&lens, linearised);
         (
             rows[0].map(|x| x * fx),
             rows[1].map(|x| x * fy),
@@ -752,8 +754,9 @@ mod tests {
 
     /// The pinhole view, then the same scene through lenses: a distorted
     /// pinhole, a fisheye seeing it ~50° off the axis, ETH3D's thin-prism
-    /// rig lens, and a wide fisheye seeing it past 90° (behind the image
-    /// plane).
+    /// rig lens, a wide fisheye seeing it past 90° (behind the image plane),
+    /// and narrow ones (a fisheye and a distorted pinhole) seeing it past
+    /// their `max_theta`, through the lens's extension.
     fn test_views() -> Vec<(&'static str, CameraView)> {
         use crate::lens::{Lens, Projection};
         let turned = |angle: f64, camera: PinholeCamera| {
@@ -812,6 +815,20 @@ mod tests {
                 turned(
                     1.75,
                     PinholeCamera::new(40, 32, 8.0, 8.0, 20.0, 16.0).with_lens(equidistant),
+                ),
+            ),
+            (
+                "fisheye past its cone",
+                turned(
+                    0.35,
+                    PinholeCamera::new(40, 32, 150.0, 150.0, 20.0, 16.0).with_lens(kb),
+                ),
+            ),
+            (
+                "radtan past its cone",
+                turned(
+                    0.36,
+                    PinholeCamera::new(40, 32, 150.0, 150.0, 20.0, 16.0).with_lens(radtan),
                 ),
             ),
         ]
@@ -971,7 +988,8 @@ mod tests {
     }
 
     /// The lens views draw the scene where intended: ~50° and past 90° off
-    /// the axis, the latter behind the image plane.
+    /// the axis, the latter behind the image plane, and past the narrow
+    /// lenses' cones.
     #[test]
     fn lens_views_see_the_scene_off_axis() {
         let scene = test_scene();
@@ -984,5 +1002,18 @@ mod tests {
         let past = &views[4].1;
         assert!(angle(past) > 90.0 && past.world_to_camera_point(scene.gaussians[0].mean).z < 0.0);
         assert!(!project_all(&scene, past).is_empty());
+        // Every centre lies past the narrow lenses' max_theta, yet all of
+        // them are drawn (gradients_are_nonzero checks they reach pixels).
+        for (name, view) in &views[5..] {
+            for g in &scene.gaussians {
+                let p = view.world_to_camera_point(g.mean);
+                let theta = ray_angle([p.x, p.y, p.z].map(f64::from));
+                assert!(
+                    theta > view.camera.lens.max_theta as f64 + 0.005,
+                    "{name}: {theta}"
+                );
+            }
+            assert_eq!(project_all(&scene, view).len(), 3, "{name}");
+        }
     }
 }

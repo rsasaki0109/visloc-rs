@@ -22,7 +22,7 @@ use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 
 use crate::camera::CameraView;
 use crate::gaussian::Scene;
-use crate::lens::{lens_coords, Projection};
+use crate::lens::{extended_lens_coords, lens_coords, Projection};
 use crate::sh::eval_sh_color;
 
 /// Rendered image (linear RGB, row-major, top-left origin).
@@ -81,14 +81,14 @@ struct Projected {
 /// unit, third row zero) and the sort depth of camera-space point `p_cam`,
 /// or `None` where the camera does not draw it.
 ///
-/// An undistorted pinhole draws what lies 0.1 in front of it, with depth
-/// `z`. A distorted pinhole also stops at [`crate::lens::Lens::max_theta`].
-/// Both linearise at a point clamped to 1.3x the frustum, as the Inria
-/// rasterizer does: outside it the Jacobian blows up and near-camera
+/// A pinhole, distorted or not, draws what lies 0.1 in front of it, with
+/// depth `z`, and linearises at a point clamped to 1.3x the frustum, as the
+/// Inria rasterizer does: outside it the Jacobian blows up and near-camera
 /// primitives would otherwise explode to huge footprints. An equidistant
-/// (fisheye) lens draws what lies 0.1 from its centre within `max_theta`,
-/// even behind the image plane, at the true point, with the distance as the
-/// depth.
+/// (fisheye) lens draws what lies 0.1 from its centre within the wider of
+/// [`crate::lens::Lens::max_theta`] and 90°, even behind the image plane,
+/// at the point itself, with the distance as the depth. Past `max_theta` a
+/// lens is its first-order extension there ([`extended_lens_coords`]).
 fn project_point(view: &CameraView, p_cam: Vector3<f32>) -> Option<(f32, f32, Matrix3<f32>, f32)> {
     let cam = &view.camera;
     let (fx, fy) = (cam.fx, cam.fy);
@@ -106,16 +106,17 @@ fn project_point(view: &CameraView, p_cam: Vector3<f32>) -> Option<(f32, f32, Ma
             0.0,
         )
     };
-    let clamped = |p: Vector3<f32>| {
-        let inv_z = 1.0 / p.z;
+    let clamped = |p: [f32; 3]| {
+        let inv_z = 1.0 / p[2];
         let lim_x = 1.3 * 0.5 * cam.width as f32 / fx;
         let lim_y = 1.3 * 0.5 * cam.height as f32 / fy;
         [
-            (p.x * inv_z).clamp(-lim_x, lim_x) * p.z,
-            (p.y * inv_z).clamp(-lim_y, lim_y) * p.z,
-            p.z,
+            (p[0] * inv_z).clamp(-lim_x, lim_x) * p[2],
+            (p[1] * inv_z).clamp(-lim_y, lim_y) * p[2],
+            p[2],
         ]
     };
+    let p = [p_cam.x, p_cam.y, p_cam.z];
     if lens.is_pinhole() {
         if p_cam.z <= 0.1 {
             return None;
@@ -123,32 +124,31 @@ fn project_point(view: &CameraView, p_cam: Vector3<f32>) -> Option<(f32, f32, Ma
         let (u, v, _z) = cam.project(p_cam);
         let inv_z = 1.0 / p_cam.z;
         let inv_z2 = inv_z * inv_z;
-        let [tx, ty, _] = clamped(p_cam);
+        let [tx, ty, _] = clamped(p);
         let j = jacobian([[inv_z, 0.0, -tx * inv_z2], [0.0, inv_z, -ty * inv_z2]]);
         return Some((u, v, j, p_cam.z));
     }
-    let p = [p_cam.x, p_cam.y, p_cam.z];
-    let theta = crate::lens::ray_angle(p.map(f64::from));
-    if theta > lens.max_theta as f64 {
-        return None;
-    }
-    let (depth, linearised) = match lens.projection {
+    let depth = match lens.projection {
         Projection::Pinhole => {
             if p_cam.z <= 0.1 {
                 return None;
             }
-            (p_cam.z, clamped(p_cam))
+            p_cam.z
         }
         Projection::Equidistant => {
             let distance = p_cam.norm();
-            if distance <= 0.1 {
+            let widest = (lens.max_theta as f64).max(std::f64::consts::FRAC_PI_2);
+            if distance <= 0.1 || crate::lens::ray_angle(p.map(f64::from)) > widest {
                 return None;
             }
-            (distance, p)
+            distance
         }
     };
-    let ([mu, mv], _) = lens_coords(lens, p);
-    let (_, rows) = lens_coords(lens, linearised);
+    let ([mu, mv], rows, q) = extended_lens_coords(lens, p);
+    let rows = match lens.projection {
+        Projection::Pinhole => lens_coords(lens, clamped(q)).1,
+        Projection::Equidistant => rows,
+    };
     Some((fx * mu + cam.cx, fy * mv + cam.cy, jacobian(rows), depth))
 }
 

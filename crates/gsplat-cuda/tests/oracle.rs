@@ -288,8 +288,9 @@ fn param_grads_match_cpu_dense_tiles() {
 
 /// The same scenes through lenses (gsplat-core's `Lens`): a distorted
 /// pinhole, a fisheye seeing them ~35° off its axis, ETH3D's thin-prism rig
-/// lens, and a wide fisheye turned so that part of the scene lies past 90°
-/// (behind its image plane).
+/// lens, a wide fisheye turned so that part of the scene lies past 90°
+/// (behind its image plane), and narrow ones (a fisheye and a distorted
+/// pinhole) with much of the scene past their `max_theta`.
 fn lens_views(w: u32, h: u32) -> Vec<(&'static str, CameraView)> {
     use visloc_gsplat_core::lens::{Lens, Projection};
     let (wf, hf) = (w as f32, h as f32);
@@ -348,6 +349,28 @@ fn lens_views(w: u32, h: u32) -> Vec<(&'static str, CameraView)> {
         (
             "fisheye past 90°",
             turned(1.5, 0.2, Lens::new(Projection::Equidistant, [0.0; 8])),
+        ),
+        (
+            "fisheye past its cone",
+            turned(
+                0.0,
+                2.5,
+                Lens::new(
+                    Projection::Equidistant,
+                    [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ),
+            ),
+        ),
+        (
+            "radtan past its cone",
+            turned(
+                0.0,
+                2.5,
+                Lens::new(
+                    Projection::Pinhole,
+                    [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+                ),
+            ),
         ),
     ]
 }

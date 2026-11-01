@@ -14,10 +14,11 @@
 //   [a b; b c] = J Sc J^T + 0.3 I;  conic Q = [a b; b c]^-1 = [A B; B C]
 //   (u, v) = (fx x/z + cx, fy y/z + cy);  opacity = sigmoid(logit)
 //   colour = max(0, SH(dir) + 0.5),  dir = (m - camera centre) / |.|
-// With a lens (lens_kind != LENS_PINHOLE) J and (u, v) are lens_coords'
+// With a lens (lens_kind != LENS_PINHOLE) J and (u, v) are lens_extended's
 // (scaled by fx, fy), evaluated on duals so that the derivatives of J's
 // entries come with them; a distorted pinhole still linearises at the
-// clamped point, a fisheye at the point itself.
+// clamped point, a fisheye at the point itself (past max_theta, at its turn
+// onto the cone).
 //
 // Matrices are WGSL mat3x3 (column-major: m[c][r]); everything stays in
 // registers -- no runtime-indexed local arrays, which spill to local memory.
@@ -156,20 +157,24 @@ fn project_backward_one(compact: u32, gid: u32, row: u32, rest_pc: u32) {
         let dx = vec4<f32>(p.x, 1.0, 0.0, 0.0);
         let dy = vec4<f32>(p.y, 0.0, 1.0, 0.0);
         let dz = vec4<f32>(p.z, 0.0, 0.0, 1.0);
-        l = lens_coords(u, dx, dy, dz);
+        let e = lens_extended(u, dx, dy, dz);
+        l = e.l;
         lens_u = l.mx;
         lens_v = l.my;
         if (u.lens_kind == LENS_DISTORTED) {
-            // The clamped coordinate is clamp * z: it follows z alone.
-            var lx = dx;
-            var ly = dy;
-            if (clamped_x) {
-                lx = dz * clamp(rx, -lim_x, lim_x);
+            // The clamped coordinate of q is clamp * q_z: it follows q_z alone.
+            let inv_qz = 1.0 / e.qz.x;
+            let qx = e.qx.x * inv_qz;
+            let qy = e.qy.x * inv_qz;
+            var lx = e.qx;
+            var ly = e.qy;
+            if (qx < -lim_x || qx > lim_x) {
+                lx = e.qz * clamp(qx, -lim_x, lim_x);
             }
-            if (clamped_y) {
-                ly = dz * clamp(ry, -lim_y, lim_y);
+            if (qy < -lim_y || qy > lim_y) {
+                ly = e.qz * clamp(qy, -lim_y, lim_y);
             }
-            l = lens_coords(u, lx, ly, dz);
+            l = lens_coords(u, lx, ly, e.qz);
         }
         j0 = u.fx * vec3<f32>(l.j00.x, l.j01.x, l.j02.x);
         j1 = u.fy * vec3<f32>(l.j10.x, l.j11.x, l.j12.x);
