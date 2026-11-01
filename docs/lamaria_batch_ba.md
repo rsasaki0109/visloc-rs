@@ -1336,6 +1336,20 @@ ran. It runs with the same three seeds, each seed is compared with the same
 seed, and the change is kept if it raises the mean by about three times the
 seeds' spread (0.7) and raises most of the sequences.
 
+Submissions 5 and 6 chose the pass for the Short sequences of
+1WM093701G1276 on R_11_5cp and R_12_10cp as they ran. Against seed 1 the
+order and the gaps stay (as they ran in brackets):
+
+| Sequence | SIFT | ALIKED, the VIO's band | ALIKED, the online result's band |
+|---|---:|---:|---:|
+| R_11_5cp | 86.77 (85.81) | 92.67 (92.20) | **97.41** (97.02) |
+| R_12_10cp | 64.26 (64.61) | 74.63 (73.96) | **78.95** (79.31) |
+
+The gaps, 4.5–10 points, are far beyond the seeds' spread, so the further
+seeds were not run. Those choices were right on the training set. Submission
+6 lost on the test set because two training sequences did not stand for the
+five test sequences, not because of the noise.
+
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the
