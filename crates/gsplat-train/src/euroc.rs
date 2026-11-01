@@ -338,6 +338,10 @@ pub(crate) fn run_colmap_port(
     // the tracks its matches continue (on ETH3D it otherwise placed
     // kicker's DSC_6487 66° off and electro's images up to 3 m off).
     let mut applied = vec![
+        format!(
+            "abs_pose_max_error={}",
+            abs_pose_max_error_for(width, height)
+        ),
         "abs_pose_min_num_inliers=30".to_string(),
         "structure_less_registration_fallback=1".to_string(),
         "structure_less_min_verified=10".to_string(),
@@ -374,6 +378,17 @@ pub(crate) fn run_colmap_port(
         models.push(read_port_model(&model_dir, features).map_err(err)?);
     }
     Ok(models)
+}
+
+/// COLMAP's registration threshold (`abs_pose_max_error`, 12 px) for
+/// `width x height` images: 12 px at a 1600 px long side (gsplat_photos'
+/// working size, on which ETH3D's DSLR scenes were tuned), proportionally
+/// less on smaller images, never under 4 px. 12 px on 752x480 images let
+/// P3P keep poses the correspondences barely constrain: on ETH3D's rig
+/// cameras the mapper then fell, depending on the RANSAC seed, into
+/// solutions a metre off.
+fn abs_pose_max_error_for(width: u32, height: u32) -> f64 {
+    (12.0 * width.max(height) as f64 / 1600.0).clamp(4.0, 12.0)
 }
 
 /// `camera` in a manifest sensor row: the `fx fy cx cy` fields and what
@@ -1309,7 +1324,17 @@ pub fn build_euroc_dataset(
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_camera, sim3_ate_rmse};
+    use super::{abs_pose_max_error_for, manifest_camera, sim3_ate_rmse};
+
+    #[test]
+    fn registration_threshold_scales_with_the_images() {
+        // COLMAP's 12 px at gsplat_photos' 1600 px and above.
+        assert_eq!(abs_pose_max_error_for(1600, 1067), 12.0);
+        assert_eq!(abs_pose_max_error_for(6048, 4032), 12.0);
+        // ETH3D's 752x480 rig images, and the 4 px floor.
+        assert!((abs_pose_max_error_for(752, 480) - 5.64).abs() < 1e-9);
+        assert_eq!(abs_pose_max_error_for(512, 512), 4.0);
+    }
     use nalgebra::{Rotation3, Vector3};
     use visloc_core::types::{Camera, CameraModel};
 
