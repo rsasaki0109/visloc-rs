@@ -243,29 +243,43 @@ comparable. Two runs per camera:
 
 | Scene | Camera | lens | undistorted |
 |---|---|---|---|
-| delivery_area | cam4 | 11.65 cm | 1.91 cm |
-| delivery_area | cam5 | 1.54 cm | 112.6 cm (reversed) |
-| delivery_area | cam6 | 58.0 cm (reversed) | 1.74 cm |
-| delivery_area | cam7 | 1.84 cm | 1.32 cm |
+| delivery_area | cam4 | 1.38 cm | 1.74 cm |
+| delivery_area | cam5 | 1.03 cm | 1.77 cm |
+| delivery_area | cam6 | 2.65 cm | 2.05 cm |
+| delivery_area | cam7 | 1.65 cm | 1.78 cm |
 | terrains | cam4 | 0.40 cm | 0.39 cm |
-| terrains | cam5 | 0.34 cm | 0.36 cm |
-| terrains | cam6 | 1.99 cm | 1.36 cm |
-| terrains | cam7 | 1.29 cm | 2.61 cm |
+| terrains | cam5 | 0.33 cm | 0.36 cm |
+| terrains | cam6 | 1.26 cm | 1.51 cm |
+| terrains | cam7 | 0.78 cm | 0.93 cm |
 
-Leaving out one failed run on each side, both median about 1.4 cm: the
-distorted images through their lens map as well as the undistorted ones.
-On delivery_area cam4's distorted images, two other runs fail:
+Every run registers every image. The lens runs median 1.15 cm and the
+undistorted ones 1.6 cm: the distorted images through their lens map at
+least as well as the undistorted ones. On delivery_area cam4's distorted
+images, two other runs fail:
 
 - the calibration with its distortion dropped: 119.5 cm
 - no calibration, the self-calibrated pinhole prior: 103.7 cm
 
-The two failures, about 1 m off with rotations near 180°, are a depth
-reversal of the whole reconstruction. It happens on the undistorted,
-pinhole side too, so it is the mapper's, not the lens's, and is still
-open. delivery_area cam4's 11.65 cm looks like sensitivity rather than a
-model error, since the other cameras map well with the same model. This
-sequence of forward motion with little parallax has a soft bending mode:
-moving the principal point by half a pixel either way gives 1.2 or 7.9 cm.
+The table is with the registration threshold scaled to the image size
+(`abs_pose_max_error`, 5.6 px on these images). With COLMAP's fixed 12 px,
+two of the sixteen runs ended about a metre off, with every camera turned
+around: delivery_area cam5 undistorted and cam6 through the lens.
+delivery_area cam4 through the lens came out at 11.65 cm. Replaying three
+of these mappings over eight RANSAC seeds shows the cause: 12 px on
+752×480 images lets P3P keep poses that the correspondences barely pin
+down, and the seed then picks the solution.
+
+| Threshold | Centre RMSE over 8 seeds × 3 runs |
+|---|---|
+| 12 px (COLMAP's) | 1–119 cm, with 7 runs past 50 cm |
+| 8 px | 1–14 cm |
+| 6 px | 1.2–4.4 cm |
+| 4 px | 1.0–3.4 cm |
+
+Two other changes to the PnP did not help:
+
+- refining with Levenberg-Marquardt instead of Gauss-Newton
+- accepting the refined pose by its MSAC score instead of its inlier count
 
 ### End to end: distorted photos to a splat
 

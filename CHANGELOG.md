@@ -419,6 +419,17 @@ All notable changes to `visloc-rs` will be documented here.
   wrong point for every such pixel. The ray is now `(sin θ · x̂, cos θ)`.
   `THIN_PRISM_FISHEYE` was already right. A point straight behind such a
   camera no longer projects to the image centre.
+- **The photo mapper fell into wrong solutions on small images.**
+  `run_colmap_port` (behind `gsplat_photos` and the EuRoC path) used
+  COLMAP's registration threshold of 12 px whatever the image size. On
+  752x480 images that let P3P keep poses the correspondences barely pin
+  down. The mapper then followed the RANSAC seed into one of two solutions,
+  and on ETH3D's rig cameras about one run in three ended a metre off with
+  every camera turned around. The threshold now scales with the long side:
+  12 px at 1600 px and above (unchanged there), 5.6 px at 752, at least
+  4 px (`abs_pose_max_error_for`). Over 8 seeds on three such ETH3D runs,
+  4 or 6 px gives 1-4 cm on every seed, where 12 px gave 1-119 cm; 8 px
+  already lets some drift to 14 cm.
 - **`gsplat_photos_cuda` matched nothing.** With the default VLFeat-compatible
   SIFT, the descriptors live as bytes beside the features, but the external
   (CUDA) matcher was handed the features' empty descriptor lists, so every
