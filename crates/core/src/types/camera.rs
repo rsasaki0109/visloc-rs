@@ -361,12 +361,53 @@ impl Camera {
         residual
     }
 
+    /// Whether the image holds rays at or past 90° from the optical axis
+    /// (`z ≤ 0`), which the normalized image plane
+    /// ([`Self::normalize_pixel`]) cannot represent. True for a panorama,
+    /// a Double Sphere camera, and an equidistant fisheye whose image
+    /// corners lie past the radius its polynomial reaches at 90° (a lens
+    /// wider than 180° across the diagonal). A polynomial that folds back
+    /// before 90° ends the lens there. Geometry for such a camera goes
+    /// through [`Self::unit_ray_from_pixel`]. Cheap: four corners and
+    /// sixteen polynomial values.
+    pub fn sees_behind(&self) -> bool {
+        let radial = match self.model {
+            CameraModel::Equirectangular | CameraModel::DoubleSphere => return true,
+            CameraModel::OpenCvFisheye
+            | CameraModel::SimpleRadialFisheye
+            | CameraModel::RadialFisheye => self.equidistant_coeffs(),
+            CameraModel::ThinPrismFisheye => {
+                let k = extra_coeffs(&self.params);
+                [k[0], k[1], k[4], k[5]]
+            }
+            _ => return false,
+        };
+        let Some((fx, fy, cx, cy)) = self.intrinsics() else {
+            return false;
+        };
+        // The radius the lens reaches at 90°, if it keeps growing until there.
+        let mut radius_at_90 = 0.0;
+        for i in 1..=16 {
+            let theta = std::f64::consts::FRAC_PI_2 * i as f64 / 16.0;
+            let radius = theta * equidistant_poly(theta, radial);
+            if radius.is_nan() || radius <= radius_at_90 {
+                return false;
+            }
+            radius_at_90 = radius;
+        }
+        let (w, h) = (self.width as f64, self.height as f64);
+        [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)]
+            .iter()
+            .map(|&(u, v)| ((u - cx) / fx).hypot((v - cy) / fy))
+            .any(|r| r > radius_at_90)
+    }
+
     /// Whether the camera-frame point `point_camera` lies ahead along the
     /// ray of its observation at pixel `observed`: in front of the image
-    /// plane (`z > 0`) for every model but a spherical one, on the ray's
-    /// side of the centre for that.
+    /// plane (`z > 0`) for a camera that cannot see behind it, on the ray's
+    /// side of the centre for one that can ([`Self::sees_behind`]).
     pub fn sees_in_front(&self, point_camera: &Point3<f64>, observed: &Point2<f64>) -> bool {
-        if !self.model.is_spherical() {
+        if !self.sees_behind() {
             return point_camera.z > 0.0;
         }
         self.unit_ray_from_pixel(observed)
@@ -820,6 +861,10 @@ fn project_equidistant(
     let theta = r_xy.atan2(point.z);
     let theta_d = theta * equidistant_poly(theta, k);
     let (x, y) = if r_xy <= EPS {
+        // On the axis: the image centre ahead, nowhere behind.
+        if point.z <= 0.0 {
+            return None;
+        }
         (0.0, 0.0)
     } else {
         let scale = theta_d / r_xy;
@@ -869,9 +914,11 @@ fn unproject_equidistant(
     if !theta.is_finite() || !(0.0..std::f64::consts::PI).contains(&theta) {
         return None;
     }
-    let radial = theta.tan();
-    let scale = radial / r_d;
-    normalize_ray(Vector3::new(scale * xd, scale * yd, 1.0))
+    // `(sin θ, cos θ)`, not `(tan θ, 1)`: past 90° the latter is the mirror
+    // image of the ray, ahead of the camera.
+    let (sin, cos) = theta.sin_cos();
+    let scale = sin / r_d;
+    normalize_ray(Vector3::new(scale * xd, scale * yd, cos))
 }
 
 /// The eight coefficients after `fx fy cx cy` (missing ones zero): for
@@ -1458,6 +1505,83 @@ mod tests {
             CameraModel::Equirectangular.colmap_name(),
             Some("EQUIRECTANGULAR")
         );
+    }
+
+    /// A fisheye wider than 180° (TUM-VI's 512 px Kannala-Brandt lens):
+    /// rays past 90° from the axis unproject to themselves, not to their
+    /// mirror image ahead of the camera, and have no normalized-plane form.
+    #[test]
+    fn wide_fisheye_rays_round_trip_past_90_degrees() {
+        let tumvi = Camera::opencv_fisheye(
+            0,
+            512,
+            512,
+            190.978,
+            190.973,
+            254.932,
+            256.897,
+            [0.00348238, 0.000715034, -0.00205387, 0.000202936],
+        );
+        let thin_prism = Camera {
+            id: 1,
+            model: CameraModel::ThinPrismFisheye,
+            width: 512,
+            height: 512,
+            params: vec![
+                190.0, 190.0, 256.0, 256.0, 0.003, 0.0007, 0.0001, -0.0001, -0.002, 0.0002, 0.0003,
+                -0.0002,
+            ],
+        };
+        for camera in [tumvi, thin_prism] {
+            for (theta, phi) in [(0.3f64, 0.4f64), (1.4, 2.0), (1.65, -0.7), (1.68, 2.6)] {
+                let ray = Vector3::new(
+                    theta.sin() * phi.cos(),
+                    theta.sin() * phi.sin(),
+                    theta.cos(),
+                );
+                let pixel = camera.project(&Point3::from(ray * 3.0)).unwrap();
+                let back = camera.unit_ray_from_pixel(&pixel).unwrap();
+                assert!(
+                    (back - ray).norm() < 1e-9,
+                    "{:?} θ {theta}: {back:?} vs {ray:?}",
+                    camera.model
+                );
+                assert_eq!(
+                    camera.normalize_pixel(&pixel).is_some(),
+                    theta < std::f64::consts::FRAC_PI_2
+                );
+                // In front along its ray, wherever that points.
+                assert!(camera.sees_in_front(&Point3::from(ray * 2.0), &pixel));
+                assert!(!camera.sees_in_front(&Point3::from(-ray * 2.0), &pixel));
+            }
+            assert!(camera.sees_behind(), "{:?}", camera.model);
+            // Straight behind the camera is nowhere in the image.
+            assert!(camera.project(&Point3::new(0.0, 0.0, -2.0)).is_none());
+        }
+    }
+
+    #[test]
+    fn only_wide_cameras_see_behind() {
+        // ETH3D's rig lens: about 50° off the axis at its corners.
+        let eth3d = Camera {
+            id: 1,
+            model: CameraModel::ThinPrismFisheye,
+            width: 752,
+            height: 480,
+            params: vec![
+                541.9, 541.6, 413.8, 216.0, -0.0736, -0.039, 0.000245, -0.000164, 0.0489, -0.0407,
+                0.0018, 0.0088,
+            ],
+        };
+        assert!(!eth3d.sees_behind());
+        // An undistorted Kannala-Brandt lens on 512 x 512 px reaches 90° at
+        // its corners for f = 256 √2 / (π / 2): a little longer and shorter.
+        let fisheye = |f: f64| Camera::opencv_fisheye(0, 512, 512, f, f, 256.0, 256.0, [0.0; 4]);
+        let diagonal_90 = 256.0 * 2f64.sqrt() / std::f64::consts::FRAC_PI_2;
+        assert!(!fisheye(diagonal_90 * 1.01).sees_behind());
+        assert!(fisheye(diagonal_90 * 0.99).sees_behind());
+        assert!(Camera::equirectangular(1, 2048, 1024).sees_behind());
+        assert!(!Camera::pinhole(1, 640, 480, 100.0, 100.0, 320.0, 240.0).sees_behind());
     }
 
     #[test]

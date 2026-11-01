@@ -1759,10 +1759,10 @@ fn count_reprojected(
     tracks
         .iter()
         .filter(|(xy, xyz)| {
-            let in_cam = cam_from_world.rotation * xyz + cam_from_world.translation;
-            in_cam.z > 0.0
+            let in_cam = Point3::from(cam_from_world.rotation * xyz + cam_from_world.translation);
+            camera.sees_in_front(&in_cam, xy)
                 && camera
-                    .project(&Point3::from(in_cam))
+                    .project(&in_cam)
                     .is_some_and(|uv| (uv - xy).norm() <= max_error)
         })
         .count()
@@ -1949,9 +1949,10 @@ fn rescue_structure_less_pose(
 }
 
 /// The camera-frame ray of pixel `xy`: `(x, y, 1)` on the normalized image
-/// plane, or a spherical camera's unit ray, which may point behind it.
+/// plane, or the unit ray of a camera that sees behind itself (a panorama,
+/// a fisheye past 180°), which may point behind it.
 fn pixel_ray(camera: &visloc_core::types::Camera, xy: &Point2<f64>) -> Option<Vector3<f64>> {
-    if camera.model.is_spherical() {
+    if camera.sees_behind() {
         return camera.unit_ray_from_pixel(xy);
     }
     let n = camera.normalize_pixel(xy)?;

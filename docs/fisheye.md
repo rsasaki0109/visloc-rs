@@ -180,8 +180,52 @@ Still open:
 - Refining the distortion itself (COLMAP's `ba_refine_extra_params`).
 - A rig of differently calibrated cameras in `gsplat_photos`, such as
   ETH3D's four.
-- Rays past 180°. `normalize_pixel` drops pixels whose ray has `z ≤ 0`, so
-  E and PnP never see them.
+- Rays past 90° in a rig: the generalized (multi-camera) initialization and
+  PnP still take the normalized plane, and the unit-ray initialization
+  takes single-camera frames only.
+
+### Lenses wider than 180°
+
+A lens wider than 180° images rays at and behind its image plane, which
+`normalize_pixel` cannot represent. `Camera::sees_behind` tells such a camera
+apart:
+
+- a panorama
+- a Double Sphere camera
+- an equidistant fisheye whose image corners lie past the radius its
+  polynomial reaches at 90° (one that folds back before 90° ends there)
+
+Such a camera takes the mapper's unit-ray paths, which so far only
+panoramas took:
+
+- two-view verification on rays (`verify_spherical_pair`)
+- the unit-ray initialization
+- P3P bearings
+- triangulation rows and angular errors
+- in-front tests along the observed ray (`Camera::sees_in_front`)
+
+Bundle adjustment already projected through the lens at any angle. Lenses
+narrower than 180° keep the normalized-plane paths, unchanged.
+
+The Kannala-Brandt models (`OPENCV_FISHEYE` and its reduced forms) had
+unprojected rays past 90° to their mirror image: `(tan θ · x̂, 1)` points
+ahead of the camera there. It is `(sin θ · x̂, cos θ)` now.
+
+A synthetic 640 px Kannala-Brandt lens at f = 150 px spans ±122° across its
+sides. It sees points up to 100° off its axis, about a fifth of them behind
+its image plane. The mapper reconstructs its trajectory exactly and
+triangulates the points behind too; on the normalized plane it built no
+model at all.
+
+TUM-VI room1 is the real check: cam0, 512 px Kannala-Brandt at f = 191 px,
+195° across the diagonal. Every 10th frame gives 283 images.
+`gsplat_photos_cuda --camera OPENCV_FISHEYE ...` registers all of them,
+and their centres come within 0.44 cm RMSE of the motion-capture ground
+truth. Without the calibration, the self-calibrated pinhole prior is
+63 cm off. The normalized-plane path does just as well on this lens,
+though: only 1.6% of its SIFT keypoints lie past 90°, in the vignetted
+corners. Training the splat through the lens on that run's poses gives
+25.86 dB held out.
 
 ### ETH3D rig: SfM on one camera
 

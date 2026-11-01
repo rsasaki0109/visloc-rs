@@ -694,7 +694,7 @@ pub(crate) fn verify_pair(
     if dm.len() < min_matches {
         return None;
     }
-    if camera.model.is_spherical() {
+    if camera.sees_behind() {
         return verify_spherical_pair(camera, fi, fj, dm, min_matches);
     }
     let corrs: Vec<TwoViewCorrespondence> = dm
@@ -726,12 +726,14 @@ pub(crate) fn verify_pair(
     )
 }
 
-/// [`verify_pair`] for a spherical (equirectangular) camera: the
-/// essential matrix on unit rays (`visloc_vision::two_view::spherical`),
-/// with the pinhole path's 4 px over the panorama's pixels per radian as
-/// its angle, and its inliers that triangulate in front of both rays. A
-/// spherical camera is calibrated by construction: no fundamental matrix,
-/// homography or planar/panoramic configurations.
+/// [`verify_pair`] for a camera that sees behind itself (an
+/// equirectangular panorama, or a fisheye past 180°:
+/// `Camera::sees_behind`): the essential matrix on unit rays
+/// (`visloc_vision::two_view::spherical`), with the pinhole path's 4 px
+/// over the camera's pixels per radian as its angle, and its inliers that
+/// triangulate in front of both rays. Such a camera is calibrated by
+/// construction: no fundamental matrix, homography or planar/panoramic
+/// configurations. A match with a pixel off the lens (no ray) is dropped.
 fn verify_spherical_pair(
     camera: &Camera,
     fi: &FeatureSet,
@@ -743,12 +745,18 @@ fn verify_spherical_pair(
         estimate_spherical_relative_pose, SphericalRansacConfig,
     };
     let rays = |f: &FeatureSet, k: usize| camera.unit_ray_from_pixel(&f.keypoints[k]);
-    let (rays1, rays2): (Vec<_>, Vec<_>) = dm
-        .iter()
-        .map(|m| Some((rays(fi, m.query_index)?, rays(fj, m.train_index)?)))
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .unzip();
+    let mut kept = Vec::with_capacity(dm.len());
+    let (mut rays1, mut rays2) = (Vec::with_capacity(dm.len()), Vec::with_capacity(dm.len()));
+    for m in dm {
+        if let (Some(a), Some(b)) = (rays(fi, m.query_index), rays(fj, m.train_index)) {
+            kept.push(m);
+            rays1.push(a);
+            rays2.push(b);
+        }
+    }
+    if kept.len() < min_matches {
+        return None;
+    }
     let config = SphericalRansacConfig {
         max_angle: 4.0 / camera.pixels_per_radian()?,
         ..SphericalRansacConfig::default()
@@ -760,7 +768,7 @@ fn verify_spherical_pair(
     Some(
         pose.inliers
             .iter()
-            .map(|&i| (dm[i].query_index, dm[i].train_index))
+            .map(|&i| (kept[i].query_index, kept[i].train_index))
             .collect(),
     )
 }

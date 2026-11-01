@@ -94,9 +94,10 @@ impl PoseEstimator for P3PGrunert {
 }
 
 /// Unit bearing vector (camera frame) for a correspondence's image point;
-/// a spherical camera's may point behind it.
+/// that of a camera seeing behind itself (a panorama, a fisheye past 180°)
+/// may point behind it.
 fn bearing(camera: &Camera, c: &Correspondence2D3D) -> Option<Vector3<f64>> {
-    if camera.model.is_spherical() {
+    if camera.sees_behind() {
         return camera.unit_ray_from_pixel(&c.point2d);
     }
     let n = camera.normalize_pixel(&c.point2d)?;

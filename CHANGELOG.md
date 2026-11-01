@@ -6,6 +6,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **SfM through fisheye lenses wider than 180°.** A camera whose image holds
+  rays past 90° from its axis (`Camera::sees_behind`: a panorama, or an
+  equidistant fisheye whose corners lie past the radius its polynomial
+  reaches at 90°) goes through unit rays where a panorama already did:
+  two-view verification and initialization, P3P, triangulation, and the
+  front-of-camera tests (`Camera::sees_in_front`). Before, those used the
+  normalized image plane, which drops every ray at or behind it. Lenses
+  narrower than 180° keep the normalized-plane path.
 - **SfM through fisheye and distorted lenses.** See
   [docs/fisheye.md](docs/fisheye.md).
   - The COLMAP-port mapper's bundle adjustment projects through the
@@ -404,6 +412,13 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **Kannala-Brandt fisheyes unprojected rays past 90° to their mirror
+  image.** `OPENCV_FISHEYE`, `RADIAL_FISHEYE` and `SIMPLE_RADIAL_FISHEYE`
+  built the ray as `(tan θ · x̂, 1)`, which past 90° points ahead of the
+  camera, on the opposite side. `normalize_pixel` then handed E and PnP a
+  wrong point for every such pixel. The ray is now `(sin θ · x̂, cos θ)`.
+  `THIN_PRISM_FISHEYE` was already right. A point straight behind such a
+  camera no longer projects to the image centre.
 - **`gsplat_photos_cuda` matched nothing.** With the default VLFeat-compatible
   SIFT, the descriptors live as bytes beside the features, but the external
   (CUDA) matcher was handed the features' empty descriptor lists, so every

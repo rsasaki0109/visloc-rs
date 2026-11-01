@@ -153,6 +153,20 @@ pub fn find_second_initial_image(
     infos.into_iter().map(|(id, _)| id).collect()
 }
 
+/// The sensor-frame bearing of pixel `xy`: `(x, y, 1)` on the normalized
+/// image plane, or the unit ray of a camera that sees behind itself (a
+/// fisheye past 180°), which may point behind it.
+fn sensor_bearing(
+    camera: &super::reconstruction::Camera,
+    xy: &Point2<f64>,
+) -> Option<Vector3<f64>> {
+    if camera.sees_behind() {
+        return camera.unit_ray_from_pixel(xy);
+    }
+    let n = camera.normalize_pixel(xy)?;
+    Some(Vector3::new(n.x, n.y, 1.0))
+}
+
 /// Port of `EstimateInitialGeneralizedTwoViewGeometry` (`.cc:541-650`). See
 /// module doc for the GR6P reuse.
 #[allow(clippy::too_many_arguments)] // mirrors the COLMAP signature
@@ -191,14 +205,12 @@ fn estimate_initial_generalized_two_view_geometry(
             for (idx_a, idx_b) in matches_between_images(graph, recon, ia, ib) {
                 let xy_a = recon.image(ia).points2d[idx_a].xy;
                 let xy_b = recon.image(ib).points2d[idx_b].xy;
-                let (Some(na), Some(nb)) = (
-                    camera_a.normalize_pixel(&xy_a),
-                    camera_b.normalize_pixel(&xy_b),
+                let (Some(bearing_sensor_a), Some(bearing_sensor_b)) = (
+                    sensor_bearing(camera_a, &xy_a),
+                    sensor_bearing(camera_b, &xy_b),
                 ) else {
                     continue;
                 };
-                let bearing_sensor_a = Vector3::new(na.x, na.y, 1.0);
-                let bearing_sensor_b = Vector3::new(nb.x, nb.y, 1.0);
                 let bearing_rig_a = sensor_from_rig_a.rotation.inverse() * bearing_sensor_a;
                 let bearing_rig_b = sensor_from_rig_b.rotation.inverse() * bearing_sensor_b;
                 let (Ok(obs_a), Ok(obs_b)) = (
@@ -295,7 +307,22 @@ pub fn estimate_initial_two_view_geometry(
         ));
         return None;
     }
-    if camera1.model.is_spherical() || camera2.model.is_spherical() {
+    // A panorama always starts on unit rays; a fisheye past 180° too in a
+    // single-camera frame, while a rig of them takes the ordinary path: its
+    // pair gate on the rays ahead of the image plane, then the generalized
+    // re-solve on every ray.
+    let single_sensor = |image: &Image| {
+        recon
+            .rig(recon.frame(image.frame_id).rig_id())
+            .num_sensors()
+            <= 1
+    };
+    if camera1.model.is_spherical()
+        || camera2.model.is_spherical()
+        || ((camera1.sees_behind() || camera2.sees_behind())
+            && single_sensor(image1)
+            && single_sensor(image2))
+    {
         return estimate_initial_spherical_two_view_geometry(
             options, recon, &matches, image1, image2, &camera1, &camera2,
         );
@@ -392,7 +419,8 @@ pub fn estimate_initial_two_view_geometry(
 }
 
 /// Not in COLMAP's port: [`estimate_initial_two_view_geometry`] for a pair
-/// with a spherical (equirectangular) camera, on unit rays: the essential
+/// with a camera that sees behind itself (an equirectangular panorama, or a
+/// fisheye past 180°: `Camera::sees_behind`), on unit rays: the essential
 /// matrix from [`visloc_vision::two_view::spherical`] (its angular
 /// threshold `init_max_error` over the pixels per radian), no forward-
 /// motion gate (a panorama has no forward), and the triangulation angle

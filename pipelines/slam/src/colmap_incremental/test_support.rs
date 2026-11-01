@@ -280,11 +280,13 @@ pub(crate) fn build_synthetic_spherical_scene(
 }
 
 /// A single camera (`camera`, with its lens) moving sideways past 120 points
-/// spread up to 60° off its axis, 3-7 m away, every point inside every
-/// image and every pair within `window` frames matched point for point:
-/// the database and each frame's true `rig_from_world`.
+/// spread up to `max_off_axis_deg` off its axis (past 90°: behind its image
+/// plane), 3-7 m away, every point inside every image and every pair within
+/// `window` frames matched point for point: the database and each frame's
+/// true `rig_from_world`.
 pub(crate) fn build_synthetic_lens_scene(
     camera: Camera,
+    max_off_axis_deg: f64,
     num_frames: usize,
     window: usize,
 ) -> (DatabaseCache, BTreeMap<FrameT, SE3>) {
@@ -294,8 +296,9 @@ pub(crate) fn build_synthetic_lens_scene(
     let points: Vec<Point3<f64>> = (0..120)
         .map(|i| {
             let i = i as f64;
-            // A golden-angle spiral over the cap within 60° of +z.
-            let cos_theta = 1.0 - 0.5 * (i + 0.5) / 120.0;
+            // A golden-angle spiral over the cap around +z.
+            let cap = 1.0 - max_off_axis_deg.to_radians().cos();
+            let cos_theta = 1.0 - cap * (i + 0.5) / 120.0;
             let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
             let azimuth = i * 2.399_963;
             let r = 3.0 + 4.0 * (0.5 + 0.5 * (i * 1.7).sin());
