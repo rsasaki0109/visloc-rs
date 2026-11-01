@@ -6,6 +6,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Planar depth and the depth-normal loss through lenses.** Both now
+  follow each pixel's ray through the view's lens and use the lens's depth
+  (`z`, or a fisheye's distance). This covers the planar median depth
+  (`CudaGsplat::render_depth` with `planar`, `gsplat_mesh_cuda
+  --planar-depth`) and the depth-normal loss (`--normal-weight` in the CUDA
+  and wgpu trainers).
+  - A distorted pinhole trains the loss with its distortion instead of
+    without, and fisheye views are no longer refused.
+  - The CUDA library makes a camera's pixel rays on the device
+    (`lens_pixel_ray`, Newton's method) and keeps them while the camera
+    stays.
+  - The wgpu trainer makes them on the host (`lens::unproject`) and keeps
+    one buffer per camera.
+
+  On ETH3D's delivery_area rig, planar depth meshes the thin-prism splat
+  to 18.5% F1 at 5 cm, up from 16.1% with median depth. The undistorted
+  images reach 18.8% with planar depth. Only the device TSDF
+  (`gsplat_mesh_cuda --gpu-tsdf`) stays pinhole-only.
 - **Meshes through fisheye and distorted lenses.** The CPU TSDF
   (`visloc_gsplat_core::mesh::Tsdf`) fuses each depth frame through its
   view's lens:
@@ -21,8 +39,7 @@ All notable changes to `visloc-rs` will be documented here.
   with its distortion instead of without. On ETH3D's delivery_area rig, the
   splat trained through the thin-prism lens meshes to 16.1% F1 at 5 cm,
   against 17.9% for ETH3D's undistorted images and 11.1% with the
-  distortion dropped. The planar depth, the depth-normal loss and the
-  device TSDF stay pinhole-only.
+  distortion dropped.
 - **SfM through fisheye lenses wider than 180°.** A camera whose image holds
   rays past 90° from its axis (`Camera::sees_behind`: a panorama, or an
   equidistant fisheye whose corners lie past the radius its polynomial

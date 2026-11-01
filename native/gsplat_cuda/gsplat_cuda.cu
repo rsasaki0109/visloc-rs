@@ -531,8 +531,10 @@ __device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
 // drops to 0.5 or below; 0 when it never does) and the opacity 1 - T, as
 // rasterize_depth.wgsl. With `planar` the median depth is where the pixel's
 // ray meets that splat's plane (`plane`, plane_kernel) instead of the splat
-// centre's z (falling back to it at grazing angles); `intr` is (fx, fy, cx,
-// cy). With kDepth, `acc_depth` (nullable) also receives the expected depth
+// centre's depth (falling back to it at grazing angles); the ray is
+// `rays[pixel]` through a lens (camera_rays: the depth comes out as the
+// lens's, z or a fisheye's distance), else a pinhole's from `intr`, (fx, fy,
+// cx, cy). With kDepth, `acc_depth` (nullable) also receives the expected depth
 // sum_i T_i a_i z_i of the splat centres, the depth channel the depth-prior
 // and depth-normal losses train, and `acc_normal` (nullable, 3 floats per
 // pixel; needs `plane`) the normal channel sum_i T_i a_i n_i of the splats'
@@ -542,8 +544,9 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
     const float* __restrict__ depth, const float4* __restrict__ plane, int planar, float4 intr,
-    float* __restrict__ out_img, float* __restrict__ final_t, uint32_t* __restrict__ last_idx,
-    float* __restrict__ out_depth, float* __restrict__ acc_depth, float* __restrict__ acc_normal) {
+    const float3* __restrict__ rays, float* __restrict__ out_img, float* __restrict__ final_t,
+    uint32_t* __restrict__ last_idx, float* __restrict__ out_depth, float* __restrict__ acc_depth,
+    float* __restrict__ acc_normal) {
     __shared__ float2 s_xy[kBlock];
     __shared__ float4 s_co[kBlock];
     __shared__ float3 s_col[kBlock];
@@ -560,6 +563,9 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     const bool in_image = px < img_w && py < img_h;
     const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
     const uint2 range = ranges[tile];
+    // The pixel's ray through a lens (for the planar depth); a pinhole's
+    // comes from `intr`.
+    const float3 ray = kDepth && rays && in_image ? rays[py * img_w + px] : make_float3(0.f, 0.f, 0.f);
 
     float3 acc = make_float3(0.f, 0.f, 0.f);
     float trans = 1.f;
@@ -618,7 +624,9 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                             median = s_depth[s];
                             if (planar) {
                                 const float4 pl = s_plane[s];
-                                const float nr = pl.x * (sx - intr.z) / intr.x + pl.y * (sy - intr.w) / intr.y + pl.z;
+                                const float nr = rays ? pl.x * ray.x + pl.y * ray.y + pl.z * ray.z
+                                                      : pl.x * (sx - intr.z) / intr.x + pl.y * (sy - intr.w) / intr.y +
+                                                            pl.z;
                                 const float z = nr != 0.f ? pl.w / nr : 0.f;
                                 // Grazing planes put the hit far along the ray.
                                 if (z > 0.f && z < 2.f * median) median = z;
@@ -1290,7 +1298,8 @@ __global__ void __launch_bounds__(kBlock) depth_loss_kernel(uint32_t npix, const
 // Depth-normal consistency (2DGS / PGSR style), normal_loss.wgsl's two passes.
 // Per pixel the render gives N = sum_i w_i n_i (acc_normal), D = sum_i w_i z_i
 // (acc_depth) and alpha = 1 - T. With P(q) = D_q / alpha_q r(q),
-// r(q) = ((qx + 0.5 - cx) / fx, (qy + 0.5 - cy) / fy, 1), the depth map's
+// r(q) = ((qx + 0.5 - cx) / fx, (qy + 0.5 - cy) / fy, 1) (through a lens its
+// pixel ray, scaled to its depth: see NormalLossArgs::rays), the depth map's
 // normal is n_d = s c / |c|, c = (P(x+1) - P(x-1)) x (P(y+1) - P(y-1)), s = +-1
 // facing the camera, and L = weight / npix sum_p (1 - N_p . n_d(p)) over the
 // pixels whose own and 4-neighbour opacities exceed 0.5. The gradient reaches
@@ -1299,6 +1308,9 @@ struct NormalLossArgs {
     uint32_t w, h;
     float fx, fy, cx, cy;
     float coef;  // weight / npix
+    // Through a lens, r(q) is its pixel ray (camera_rays) and D the lens's
+    // depth (z, or a fisheye's distance); null for a pinhole.
+    const float3* rays;
 };
 
 __device__ inline float3 f3(float x, float y, float z) { return make_float3(x, y, z); }
@@ -1311,6 +1323,7 @@ __device__ inline float3 cross(float3 a, float3 b) {
 }
 
 __device__ inline float3 normal_ray(const NormalLossArgs& a, uint32_t x, uint32_t y) {
+    if (a.rays) return a.rays[y * a.w + x];
     return f3((float(x) + 0.5f - a.cx) / a.fx, (float(y) + 0.5f - a.cy) / a.fy, 1.f);
 }
 
@@ -1765,6 +1778,11 @@ struct Ctx {
     // the loss's per-pixel scratch, and per gaussian the normal gradient.
     Buf acc_normal, d_normal, gab, g_normal;
     bool have_normal = false;  // the last render has the depth and normal channels
+    // Per pixel the lens's ray (lens_pixel_ray) for the planar depth and the
+    // depth-normal loss through a lens, and the camera it was made for.
+    Buf rays;
+    GscCamera rays_cam = {};
+    bool rays_valid = false;
     // GPU TSDF (tsdf.cuh): the block table, the current slab's blocks and
     // voxels, the extraction output, and on the host the surface of the last
     // fusion until visloc_gsplat_cuda_tsdf_take.
@@ -1866,6 +1884,44 @@ int collect_stages(Ctx* ctx) {
     return 0;
 }
 
+__global__ void ray_lut_kernel(GscCamera cam, float3* __restrict__ rays) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= cam.width * cam.height) return;
+    const uint32_t x = i % cam.width, y = i / cam.width;
+    rays[i] = lens_pixel_ray(cam, float(x) + 0.5f, float(y) + 0.5f);
+}
+
+// Whether two cameras share their intrinsics, size and lens (their pixel
+// rays).
+bool same_rays(const GscCamera& a, const GscCamera& b) {
+    if (a.width != b.width || a.height != b.height || a.fx != b.fx || a.fy != b.fy || a.cx != b.cx ||
+        a.cy != b.cy || a.lens_kind != b.lens_kind)
+        return false;
+    for (int i = 0; i < 8; ++i)
+        if (a.lens[i] != b.lens[i]) return false;
+    return true;
+}
+
+// ctx->cam's pixel rays through its lens, made on the device and kept while
+// the camera's intrinsics stay (training cycles through views of a few
+// cameras); null for an undistorted pinhole, whose kernels compute its rays.
+int camera_rays(Ctx* ctx, const float3** out) {
+    *out = nullptr;
+    if (ctx->cam.lens_kind == kLensPinhole) return 0;
+    float3* rays;
+    const void* held = ctx->rays.ptr;
+    GSC_TRY(ensure(ctx, ctx->rays, ctx->pixels(), &rays));
+    if (ctx->rays.ptr != held) ctx->rays_valid = false;
+    if (!ctx->rays_valid || !same_rays(ctx->rays_cam, ctx->cam)) {
+        ray_lut_kernel<<<blocks_for(uint32_t(ctx->pixels())), 256>>>(ctx->cam, rays);
+        GSC_CHECK(ctx, cudaGetLastError());
+        ctx->rays_cam = ctx->cam;
+        ctx->rays_valid = true;
+    }
+    *out = rays;
+    return 0;
+}
+
 // Render the uploaded scene from ctx->cam; with `out_depth` (device, 2 floats
 // per pixel) also the median depth and opacity, at the splat planes when
 // `planar`, and (nullable) the expected-depth and normal channels.
@@ -1956,19 +2012,21 @@ int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float
     const dim3 grid(ctx->tile_bw, ctx->tile_bh);
     const float4 intr = make_float4(cam.fx, cam.fy, cam.cx, cam.cy);
     float4* plane = nullptr;
+    const float3* rays = nullptr;
     if (out_depth && (planar || acc_normal) && n > 0) {
         GSC_TRY(ensure(ctx, ctx->plane, n, &plane));
         plane_kernel<<<blocks_for(n), 256>>>(n, cam, ctx->p(0), tiles, plane);
         GSC_CHECK(ctx, cudaGetLastError());
+        if (planar) GSC_TRY(camera_rays(ctx, &rays));
     }
     if (out_depth)
         raster_fwd_kernel<true><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
-                                                  color, depth, plane, planar && plane, intr, image, final_t,
+                                                  color, depth, plane, planar && plane, intr, rays, image, final_t,
                                                   last_idx, out_depth, acc_depth, acc_normal);
     else
         raster_fwd_kernel<false><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
-                                                   color, depth, nullptr, 0, intr, image, final_t, last_idx, nullptr,
-                                                   nullptr, nullptr);
+                                                   color, depth, nullptr, 0, intr, nullptr, image, final_t, last_idx,
+                                                   nullptr, nullptr, nullptr);
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRaster));
     ctx->have_forward = true;
@@ -2078,7 +2136,9 @@ int run_normal_loss(Ctx* ctx, float weight, double* acc) {
     GSC_TRY(ensure(ctx, ctx->d_normal, size_t(npix) * 3, &d_normal));
     GSC_TRY(ensure(ctx, ctx->gab, size_t(npix) * 6, &gab));
     const GscCamera& cam = ctx->cam;
-    const NormalLossArgs a = {cam.width, cam.height, cam.fx, cam.fy, cam.cx, cam.cy, weight / float(npix)};
+    const float3* rays;
+    GSC_TRY(camera_rays(ctx, &rays));
+    const NormalLossArgs a = {cam.width, cam.height, cam.fx, cam.fy, cam.cx, cam.cy, weight / float(npix), rays};
     const auto* final_t = static_cast<const float*>(ctx->final_t.ptr);
     normal_grad_kernel<<<blocks_for(npix), kBlock>>>(a, static_cast<const float*>(ctx->acc_normal.ptr),
                                                      static_cast<const float*>(ctx->acc_depth.ptr), final_t,
@@ -2307,11 +2367,6 @@ GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* ca
                                                float* out_expected, float* out_normal) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
-    // The planar depth and the normals intersect each pixel's pinhole ray.
-    if (cam && cam->lens_kind != kLensPinhole && (planar || out_normal)) {
-        ctx->error = "render_depth: the planar depth and normals need an undistorted pinhole camera";
-        return -1;
-    }
     GSC_TRY(set_camera(ctx, cam, bg, sh_active_degree));
     float* d;
     GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &d));
@@ -2465,10 +2520,6 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     GSC_TRY(set_camera(ctx, &p->cam, p->bg, p->sh_active_degree));
     const bool depth_on = p->depth_weight > 0.f;
     const bool normal_on = p->normal_weight > 0.f;
-    if (normal_on && p->cam.lens_kind != kLensPinhole) {
-        ctx->error = "train_step: the depth-normal loss needs an undistorted pinhole camera";
-        return -1;
-    }
     if (depth_on && (ctx->num_priors != ctx->num_images || p->cam.width != ctx->gt_w || p->cam.height != ctx->gt_h)) {
         ctx->error = "train_step: a depth weight needs a depth prior per uploaded image";
         return -1;

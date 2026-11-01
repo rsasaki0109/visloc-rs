@@ -399,18 +399,87 @@ fn lens_param_grads_match_cpu() {
     }
 }
 
-/// The geometry the pinhole-only paths cannot follow is refused: the
-/// planar depth, the normals and the TSDF with a fisheye camera.
+/// The camera-space ray of every pixel centre through the camera's lens
+/// ([`visloc_gsplat_core::lens::unproject`]): `(x, y, 1)` for a pinhole
+/// projection, a unit vector for an equidistant one.
+fn pixel_rays(cam: &PinholeCamera) -> Vec<Vector3<f64>> {
+    let (w, h) = (cam.width as usize, cam.height as usize);
+    (0..w * h)
+        .map(|i| {
+            let m = [
+                ((i % w) as f64 + 0.5 - f64::from(cam.cx)) / f64::from(cam.fx),
+                ((i / w) as f64 + 0.5 - f64::from(cam.cy)) / f64::from(cam.fy),
+            ];
+            let r = visloc_gsplat_core::lens::unproject(&cam.lens, m).expect("pixel ray");
+            Vector3::new(r[0], r[1], r[2])
+        })
+        .collect()
+}
+
+/// Through a lens the planar depth is where each pixel's ray meets the
+/// splat's plane, in the lens's depth: camera z behind a distorted pinhole,
+/// the distance behind a fisheye.
 #[test]
-fn lens_geometry_is_refused() {
+fn lens_planar_depth_follows_the_pixel_rays() {
     let Some(mut cuda) = rasterizer() else { return };
-    let scene = random_scene(16, 3, 0, 0.0);
-    cuda.set_scene(&PackedScene::from_scene(&scene))
+    use visloc_gsplat_core::lens::{Lens, Projection};
+    let (w, h) = (64u32, 48u32);
+    let pinhole = PinholeCamera::new(w, h, 60.0, 60.0, 31.5, 23.5);
+    // An opaque disc at depth 5, turned 30 degrees about y: its plane has
+    // normal (sin 30, 0, cos 30) through (0, 0, 5).
+    let half = 15f32.to_radians();
+    let mut tilted = disc(5.0, 0.9, [0.5, 0.5, 0.5]);
+    tilted.rotation = Quaternion::new(half.cos(), 0.0, half.sin(), 0.0);
+    cuda.set_scene(&PackedScene::from_scene(&Scene::new(vec![tilted], 0)))
         .expect("upload");
-    let (_, fisheye) = lens_views(64, 48).remove(1);
-    assert!(cuda.render_depth(&fisheye, BG, 0, true).is_err());
-    assert!(cuda.render_geometry(&fisheye, BG, 0).is_err());
-    assert!(cuda.render_depth(&fisheye, BG, 0, false).is_ok());
+    let (s, c) = (30f64.to_radians().sin(), 30f64.to_radians().cos());
+    for (name, lens) in [
+        (
+            "radtan",
+            Lens::new(
+                Projection::Pinhole,
+                [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+            ),
+        ),
+        (
+            "fisheye",
+            Lens::new(
+                Projection::Equidistant,
+                [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ),
+    ] {
+        let view = CameraView::new(
+            nalgebra::Matrix3::identity(),
+            Vector3::zeros(),
+            pinhole.with_lens(lens),
+        );
+        let planar = cuda.render_depth(&view, BG, 0, true).expect("render");
+        let rays = pixel_rays(&view.camera);
+        let mut checked = 0;
+        for (i, r) in rays.iter().enumerate() {
+            if planar.opacity[i] <= 0.5 {
+                continue;
+            }
+            let want = 5.0 * c / (s * r.x + c * r.z);
+            let got = f64::from(planar.depth[i]);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "{name} pixel ({}, {}): planar {got} want {want}",
+                i % w as usize,
+                i / w as usize
+            );
+            checked += 1;
+        }
+        assert!(checked > 50, "{name}: only {checked} pixels covered");
+        // The normal channel is the disc's normal turned to the camera.
+        let geometry = cuda.render_geometry(&view, BG, 0).expect("geometry");
+        let centre = (23 * w + 31) as usize;
+        let n = &geometry.normal[centre * 3..centre * 3 + 3];
+        let along =
+            -(f64::from(n[0]) * s + f64::from(n[2]) * c) / f64::from(n[0].hypot(n[1]).hypot(n[2]));
+        assert!(along > 0.999, "{name}: normal {n:?}");
+    }
 }
 
 /// A flat, round gaussian facing the camera at depth `z` with opacity `a`.
@@ -700,19 +769,19 @@ fn normal_channel_gradients_match_the_colour_channel() {
 
 /// The depth-normal loss L(N, D) on the CPU in f64, alpha held fixed (see
 /// normal_grad_kernel): weight / npix * sum over the valid pixels of
-/// 1 - s N . n_d.
-fn normal_loss_cpu(cam: &PinholeCamera, weight: f64, n: &[f64], d: &[f64], alpha: &[f64]) -> f64 {
+/// 1 - s N . n_d, the points along the `rays` ([`pixel_rays`]).
+fn normal_loss_cpu(
+    cam: &PinholeCamera,
+    rays: &[Vector3<f64>],
+    weight: f64,
+    n: &[f64],
+    d: &[f64],
+    alpha: &[f64],
+) -> f64 {
     let (w, h) = (cam.width as usize, cam.height as usize);
-    let ray = |x: usize, y: usize| {
-        Vector3::new(
-            (x as f64 + 0.5 - f64::from(cam.cx)) / f64::from(cam.fx),
-            (y as f64 + 0.5 - f64::from(cam.cy)) / f64::from(cam.fy),
-            1.0,
-        )
-    };
     let point = |x: usize, y: usize| {
         let i = y * w + x;
-        ray(x, y) * (d[i] / alpha[i].max(1e-6))
+        rays[i] * (d[i] / alpha[i].max(1e-6))
     };
     let mut sum = 0.0;
     for y in 1..h - 1 {
@@ -748,20 +817,37 @@ fn normal_loss_cpu(cam: &PinholeCamera, weight: f64, n: &[f64], d: &[f64], alpha
 #[test]
 fn depth_normal_loss_matches_cpu() {
     let Some(mut cuda) = rasterizer() else { return };
-    let (w, h) = (40u32, 32u32);
-    let view = view(w, h);
+    check_normal_loss(&mut cuda, &view(40, 32), 320);
+}
+
+/// [`depth_normal_loss_matches_cpu`] through lenses: the points lie along
+/// the lens's pixel rays at its depth.
+#[test]
+fn lens_depth_normal_loss_matches_cpu() {
+    let Some(mut cuda) = rasterizer() else { return };
+    for (name, view) in lens_views(40, 32) {
+        eprintln!("{name}");
+        // The wide lenses see the scene in a small part of the image.
+        check_normal_loss(&mut cuda, &view, 50);
+    }
+}
+
+/// The loss must reach more than `min_pixels` pixels.
+fn check_normal_loss(cuda: &mut CudaGsplat, view: &CameraView, min_pixels: usize) {
+    let (w, h) = (view.camera.width, view.camera.height);
     let scene = random_scene(400, 11, 0, 3.0);
     cuda.set_scene(&PackedScene::from_scene(&scene))
         .expect("upload");
-    let f = cuda.render_geometry(&view, BG, 0).expect("render");
+    let f = cuda.render_geometry(view, BG, 0).expect("render");
     let weight = 0.7f32;
     let gpu = cuda.normal_loss(weight).expect("normal loss");
     let npix = (w * h) as usize;
+    let rays = pixel_rays(&view.camera);
     let n: Vec<f64> = f.normal.iter().map(|&v| f64::from(v)).collect();
     let d: Vec<f64> = f.expected.iter().map(|&v| f64::from(v)).collect();
     let alpha: Vec<f64> = f.opacity.iter().map(|&v| f64::from(v)).collect();
     let weight = f64::from(weight);
-    let cpu = normal_loss_cpu(&view.camera, weight, &n, &d, &alpha);
+    let cpu = normal_loss_cpu(&view.camera, &rays, weight, &n, &d, &alpha);
     assert!(
         (gpu.loss * weight - cpu).abs() < 1e-5 * cpu.abs().max(1e-3),
         "loss: gpu {} cpu {cpu}",
@@ -773,7 +859,7 @@ fn depth_normal_loss_matches_cpu() {
         .filter(|g| g.iter().any(|&v| v != 0.0))
         .count();
     assert!(
-        valid > npix / 4,
+        valid > min_pixels,
         "only {valid} of {npix} pixels in the loss"
     );
 
@@ -788,7 +874,7 @@ fn depth_normal_loss_matches_cpu() {
     let (mut worst_n, mut scale_n) = (0.0f64, 0.0f64);
     for i in 0..npix * 3 {
         let want = fd(&n, i, &|v| {
-            normal_loss_cpu(&view.camera, weight, v, &d, &alpha)
+            normal_loss_cpu(&view.camera, &rays, weight, v, &d, &alpha)
         });
         scale_n = scale_n.max(want.abs());
         worst_n = worst_n.max((f64::from(gpu.d_normal[i]) - want).abs());
@@ -796,7 +882,7 @@ fn depth_normal_loss_matches_cpu() {
     let (mut worst_d, mut scale_d) = (0.0f64, 0.0f64);
     for i in 0..npix {
         let want = fd(&d, i, &|v| {
-            normal_loss_cpu(&view.camera, weight, &n, v, &alpha)
+            normal_loss_cpu(&view.camera, &rays, weight, &n, v, &alpha)
         });
         scale_d = scale_d.max(want.abs());
         worst_d = worst_d.max((f64::from(gpu.d_depth[i]) - want).abs());

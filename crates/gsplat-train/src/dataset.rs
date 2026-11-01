@@ -13,8 +13,8 @@
 //! split so scores are comparable. Distorted and fisheye cameras are drawn
 //! through their lens (`visloc_gsplat_core::colmap_scene::lens_of`:
 //! `SIMPLE_RADIAL`, `RADIAL`, `OPENCV`, `OPENCV_FISHEYE`, `RADIAL_FISHEYE`,
-//! `THIN_PRISM_FISHEYE`, ...), so the images need no undistortion; meshes
-//! and the depth-normal loss still need pinhole or distorted-pinhole cameras.
+//! `THIN_PRISM_FISHEYE`, ...), so the images need no undistortion, for the
+//! meshes and the depth-normal loss too.
 //!
 //! The exception is COLMAP's `EQUIRECTANGULAR` camera (model 17, parameters
 //! `width, height`), as COLMAP 4.1 and other SfM tools write it for 360°
