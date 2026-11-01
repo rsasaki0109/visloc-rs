@@ -280,6 +280,23 @@ pub fn distort<T: LensScalar>(n: [T; 2], coeffs: &[f32; LENS_COEFFS]) -> ([T; 2]
     )
 }
 
+/// [`distort`] without its Jacobian, where only the point is needed.
+pub fn distort_point<T: LensScalar>(n: [T; 2], coeffs: &[f32; LENS_COEFFS]) -> [T; 2] {
+    let c = |i: usize| T::from_f64(coeffs[i] as f64);
+    let (k1, k2, k3, k4, p1, p2, sx1, sy1) = (c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7));
+    let two = T::from_f64(2.0);
+    let [u, v] = n;
+    let t2 = u * u + v * v;
+    let radial = t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4)));
+    let uu = u * u;
+    let vv = v * v;
+    let uv = u * v;
+    // `distort`'s expressions, in its order.
+    let du = u * radial + two * p1 * uv + p2 * (t2 + two * uu) + sx1 * t2;
+    let dv = v * radial + two * p2 * uv + p1 * (t2 + two * vv) + sy1 * t2;
+    [u + du, v + dv]
+}
+
 /// The distorted normalized coordinates of camera-space point `p` (before
 /// the focal lengths) and their 2×3 Jacobian, for `p` within
 /// [`Lens::max_theta`] (and `z > 0` for a pinhole).
@@ -327,6 +344,53 @@ pub fn extended_lens_coords<T: LensScalar>(
     let d = [x - q[0], y - q[1], z - q[2]];
     let m = std::array::from_fn(|r| mq[r] + jac[r][0] * d[0] + jac[r][1] * d[1] + jac[r][2] * d[2]);
     (m, jac, q)
+}
+
+/// The camera-space ray through distorted normalized coordinates `m`, the
+/// inverse of [`lens_coords`] up to scale: `(x, y, 1)` for a pinhole
+/// projection (so that `z` times it is the point at depth `z`), a unit
+/// vector for an equidistant one (`distance` times it). The distortion is
+/// inverted by Newton's method from `m`; `None` where that does not land
+/// back on `m` (past a fold of the polynomial).
+pub fn unproject(lens: &Lens, m: [f64; 2]) -> Option<[f64; 3]> {
+    let mut n = m;
+    if lens.coeffs != [0.0; LENS_COEFFS] {
+        for _ in 0..30 {
+            let (d, j) = distort(n, &lens.coeffs);
+            let r = [d[0] - m[0], d[1] - m[1]];
+            let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+            if !det.is_finite() || det.abs() < 1e-12 {
+                return None;
+            }
+            let step = [
+                (j[1][1] * r[0] - j[0][1] * r[1]) / det,
+                (j[0][0] * r[1] - j[1][0] * r[0]) / det,
+            ];
+            n = [n[0] - step[0], n[1] - step[1]];
+            if step[0].abs() + step[1].abs() < 1e-14 {
+                break;
+            }
+        }
+        let (d, _) = distort(n, &lens.coeffs);
+        let miss = (d[0] - m[0]).abs() + (d[1] - m[1]).abs();
+        if miss.is_nan() || miss >= 1e-9 {
+            return None;
+        }
+    }
+    match lens.projection {
+        Projection::Pinhole => Some([n[0], n[1], 1.0]),
+        Projection::Equidistant => {
+            let theta = n[0].hypot(n[1]);
+            if theta >= PI {
+                return None;
+            }
+            if theta < 1e-12 {
+                return Some([0.0, 0.0, 1.0]);
+            }
+            let s = theta.sin() / theta;
+            Some([n[0] * s, n[1] * s, theta.cos()])
+        }
+    }
 }
 
 /// Angle between the optical axis and the ray to camera-space point `p`.
@@ -443,6 +507,55 @@ mod tests {
             assert!((538.731 * u + 413.003 - expected.x).abs() < 1e-3);
             assert!((538.615 * v + 244.558 - expected.y).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn distort_point_is_distort_without_the_jacobian() {
+        for lens in lenses() {
+            for n in [[0.3f64, -0.2], [-0.9, 0.6], [1e-5, 2e-5]] {
+                assert_eq!(distort_point(n, &lens.coeffs), distort(n, &lens.coeffs).0);
+            }
+        }
+    }
+
+    #[test]
+    fn unproject_inverts_the_lens() {
+        let points: [[f64; 3]; 4] = [
+            [0.3, -0.2, 2.0],
+            [-0.9, 0.6, 1.5],
+            [1e-5, 2e-5, 1.0],
+            [0.0, 0.0, 2.5],
+        ];
+        for lens in lenses() {
+            for p in points {
+                let ([u, v], _) = lens_coords(&lens, p);
+                let ray = unproject(&lens, [u, v]).expect("inside the lens");
+                // The same direction, scaled as documented.
+                let scale = match lens.projection {
+                    Projection::Pinhole => p[2],
+                    Projection::Equidistant => (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt(),
+                };
+                for k in 0..3 {
+                    assert!(
+                        (ray[k] * scale - p[k]).abs() < 1e-9,
+                        "{lens:?} {p:?}: {ray:?}"
+                    );
+                }
+            }
+        }
+        // A fisheye past 90° comes back behind the image plane.
+        let fisheye = Lens::new(
+            Projection::Equidistant,
+            [0.02, -0.01, 0.003, -0.0005, 0.0, 0.0, 0.0, 0.0],
+        );
+        let p = [1.0, 0.5, -0.4];
+        let ([u, v], _) = lens_coords(&fisheye, p);
+        let ray = unproject(&fisheye, [u, v]).unwrap();
+        let norm = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        assert!(
+            (0..3).all(|k| (ray[k] * norm - p[k]).abs() < 1e-9),
+            "{ray:?}"
+        );
     }
 
     #[test]

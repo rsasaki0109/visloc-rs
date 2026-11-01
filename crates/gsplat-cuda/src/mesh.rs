@@ -40,21 +40,23 @@ impl MeshDepth {
     }
 }
 
-/// The views as the pinhole-only TSDF takes them (a distorted pinhole
-/// without its distortion), or an error for a fisheye view.
-fn geometry_views(views: &[&CameraView]) -> Result<Vec<CameraView>, GsplatCudaError> {
+/// The views as the pinhole-only paths take them (a distorted pinhole
+/// without its distortion), or an error for a fisheye view: the planar
+/// depth and the device TSDF back-project through a pinhole.
+fn geometry_views(views: &[&CameraView], what: &str) -> Result<Vec<CameraView>, GsplatCudaError> {
     pinhole_geometry_views(views).ok_or_else(|| {
-        GsplatCudaError::Input(
-            "meshes from fisheye views (the TSDF back-projects through a pinhole)".into(),
-        )
+        GsplatCudaError::Input(format!(
+            "{what} from fisheye views (it back-projects through a pinhole)"
+        ))
     })
 }
 
 /// Render the current scene's `depth` (SH up to `sh_degree`) from every
 /// view, fuse, extract, filter by `support` and drop small components.
-/// Returns the mesh and a one-line summary. The views of a distorted
-/// pinhole are rendered and fused without their distortion; fisheye views
-/// are an error.
+/// Returns the mesh and a one-line summary. The median and expected depths
+/// are rendered and fused through each view's lens, fisheyes included; the
+/// planar depth takes a distorted pinhole without its distortion and
+/// refuses a fisheye.
 pub fn extract_mesh(
     gs: &mut CudaGsplat,
     sh_degree: u32,
@@ -63,7 +65,11 @@ pub fn extract_mesh(
     support: &[[f32; 3]],
     opts: &MeshOptions,
 ) -> Result<(Mesh, String), GsplatCudaError> {
-    let geometry = geometry_views(views)?;
+    let geometry: Vec<CameraView> = if depth == MeshDepth::Planar {
+        geometry_views(views, "the planar depth")?
+    } else {
+        views.iter().map(|&v| *v).collect()
+    };
     let views: Vec<&CameraView> = geometry.iter().collect();
     fuse_views(&views, support, opts, |view| {
         let frame = gs.render_depth(view, [0.0; 3], sh_degree, depth == MeshDepth::Planar)?;
@@ -132,7 +138,9 @@ pub struct DepthMaps<'a> {
 /// the views are kept on the device up to 2 GiB): the same voxel size,
 /// depth range, carving, minimum weight and filters. Unlike `fuse_views`,
 /// every block sees every view. With `maps`, their depths replace the
-/// splat's where they have one. The same cameras as [`extract_mesh`].
+/// splat's where they have one. The device TSDF projects through a pinhole:
+/// a distorted pinhole goes without its distortion, and a fisheye view is
+/// an error ([`extract_mesh`] takes it).
 #[allow(clippy::too_many_arguments)]
 pub fn extract_mesh_gpu(
     gs: &mut CudaGsplat,
@@ -144,7 +152,7 @@ pub fn extract_mesh_gpu(
     slab_blocks: u32,
     maps: Option<DepthMaps<'_>>,
 ) -> Result<(Mesh, String), GsplatCudaError> {
-    let geometry = geometry_views(views)?;
+    let geometry = geometry_views(views, "the device TSDF (use the CPU one)")?;
     let views: Vec<&CameraView> = geometry.iter().collect();
     let views = views.as_slice();
     let scale = scene_scale(views, support);

@@ -16,6 +16,7 @@ use nalgebra::Vector3;
 use rayon::prelude::*;
 
 use crate::camera::CameraView;
+use crate::lens::{distort_point, unproject, Projection};
 
 const B: i32 = 8;
 const BV: usize = (B * B * B) as usize;
@@ -37,7 +38,10 @@ impl Block {
     }
 }
 
-/// A depth frame to fuse: per-pixel camera z (0 = no surface) and colour.
+/// A depth frame to fuse: per-pixel depth (0 = no surface) and colour. The
+/// depth is the renderers' for the view's lens: camera z for a pinhole,
+/// distorted or not, and the distance from the camera centre for an
+/// equidistant (fisheye) lens.
 pub struct DepthFrame<'a> {
     pub view: &'a CameraView,
     pub depth: &'a [f32],
@@ -63,6 +67,9 @@ pub struct Tsdf {
     /// Voxels fused from fewer observations are treated as unknown when
     /// extracting.
     pub min_weight: f32,
+    /// Skip blocks entirely behind every depth they project to (on by
+    /// default; it changes nothing but the time, off for comparing).
+    pub cull_occluded: bool,
     blocks: HashMap<[i32; 3], Box<Block>>,
 }
 
@@ -143,6 +150,7 @@ impl Tsdf {
             free_space: true,
             partial_cells: false,
             min_weight: 1.0,
+            cull_occluded: true,
             blocks: HashMap::new(),
         }
     }
@@ -159,13 +167,84 @@ impl Tsdf {
         ]
     }
 
-    /// Fuse one depth frame.
+    /// Fuse one depth frame, through the view's lens: voxels project
+    /// through it, and pixels back-project along its rays
+    /// ([`crate::lens::unproject`]).
     pub fn integrate(&mut self, f: &DepthFrame<'_>) {
         let cam = &f.view.camera;
         let (w, h) = (cam.width as usize, cam.height as usize);
         let rt = f.view.rotation.transpose();
         let t = f.view.translation;
         let center = f.view.camera_center();
+        let lens = cam.lens;
+        let pinhole = lens.is_pinhole();
+        let equidistant = lens.projection == Projection::Equidistant;
+        let distorted = lens.coeffs != [0.0; crate::lens::LENS_COEFFS];
+        // `max_theta` as the pinhole's `(x² + y²) / z²` (it is under 90°).
+        let tan2_max = lens
+            .max_theta
+            .min(std::f32::consts::FRAC_PI_2 - 1e-4)
+            .tan()
+            .powi(2);
+        // A camera-space point's pixel and depth (the frame's: z, or a
+        // fisheye's distance); `None` where the camera does not image it.
+        // The lens's own math (`lens_coords`) without the Jacobian, its angle
+        // taken once: this runs for every voxel of every view.
+        let project = |pc: Vector3<f32>| -> Option<(f32, f32, f32)> {
+            if pinhole {
+                // The device TSDF's arithmetic, bit for bit.
+                if pc.z <= 1e-6 {
+                    return None;
+                }
+                return Some((
+                    cam.fx * pc.x / pc.z + cam.cx,
+                    cam.fy * pc.y / pc.z + cam.cy,
+                    pc.z,
+                ));
+            }
+            let (n, depth) = if equidistant {
+                let r = pc.x.hypot(pc.y);
+                let theta = r.atan2(pc.z);
+                if theta > lens.max_theta {
+                    return None;
+                }
+                let depth = r.hypot(pc.z);
+                if r <= 1e-7 * depth {
+                    ([pc.x / pc.z, pc.y / pc.z], depth)
+                } else {
+                    let s = theta / r;
+                    ([pc.x * s, pc.y * s], depth)
+                }
+            } else {
+                if pc.z <= 1e-6 {
+                    return None;
+                }
+                let n = [pc.x / pc.z, pc.y / pc.z];
+                if n[0] * n[0] + n[1] * n[1] > tan2_max {
+                    return None;
+                }
+                (n, pc.z)
+            };
+            let [mx, my] = if distorted {
+                distort_point(n, &lens.coeffs)
+            } else {
+                n
+            };
+            Some((cam.fx * mx + cam.cx, cam.fy * my + cam.cy, depth))
+        };
+        // The ray through a pixel centre, scaled so that the frame's depth
+        // times it is the camera-space point.
+        let ray_of = |x: usize, y: usize| -> Option<Vector3<f32>> {
+            let m = [
+                (x as f32 + 0.5 - cam.cx) / cam.fx,
+                (y as f32 + 0.5 - cam.cy) / cam.fy,
+            ];
+            if pinhole {
+                return Some(Vector3::new(m[0], m[1], 1.0));
+            }
+            unproject(&lens, m.map(f64::from))
+                .map(|r| Vector3::new(r[0] as f32, r[1] as f32, r[2] as f32))
+        };
 
         // Allocate every block the truncation band of a surface pixel touches
         // (samples along the ray no further apart than half a block).
@@ -185,11 +264,10 @@ impl Tsdf {
                     if z <= 0.0 || z > self.max_depth {
                         continue;
                     }
-                    let pc = Vector3::new(
-                        (x as f32 + 0.5 - cam.cx) / cam.fx * z,
-                        (y as f32 + 0.5 - cam.cy) / cam.fy * z,
-                        z,
-                    );
+                    let Some(ray) = ray_of(x, y) else {
+                        continue;
+                    };
+                    let pc = ray * z;
                     let p = rt * (pc - t);
                     let dir = (p - center).normalize();
                     let mut last = None;
@@ -232,12 +310,98 @@ impl Tsdf {
         };
         let half = 0.5 * B as f32 * voxel;
         let radius = half * 3.0f32.sqrt();
+        // With a lens, the frustum is the `max_theta` cone instead: a block
+        // whose bounding sphere lies entirely outside it is skipped.
+        let outside_cone = |cc: &Vector3<f32>| -> bool {
+            let dist = cc.norm();
+            if dist <= radius {
+                return false;
+            }
+            let theta = cc.x.hypot(cc.y).atan2(cc.z);
+            theta - (radius / dist).asin() > lens.max_theta
+        };
+        let outside = |cc: &Vector3<f32>| -> bool {
+            if pinhole {
+                planes.iter().any(|n| n.dot(cc) < -radius)
+            } else {
+                outside_cone(cc)
+            }
+        };
         // Occlusion culling: a voxel more than `trunc` behind the surface
         // depth of its pixel is left unchanged, so a block whose nearest
         // voxel lies behind every such depth over the pixels it projects to
         // is skipped, again without changing the result.
         let far = FarPyramid::new(f.depth, w, h, trunc, max_depth);
+        let cull = self.cull_occluded;
+        // Through a lens the block's corners no longer bound where its
+        // voxels project; its bounding sphere's cone does. The pixels: the
+        // cone's axis and eight points of its rim through the lens, their
+        // box grown by a tenth about the axis's pixel (the rim's image bulges
+        // between the samples) and a pixel. The depth: the sphere's nearest.
+        // Not culled where the cone reaches past `max_theta`.
+        let occluded_through_lens = |key: &[i32; 3]| -> bool {
+            let centre = Vector3::new(
+                (key[0] * B) as f32 * voxel + half,
+                (key[1] * B) as f32 * voxel + half,
+                (key[2] * B) as f32 * voxel + half,
+            );
+            let cc = r * centre + t;
+            let dist = cc.norm();
+            if dist <= 2.0 * radius {
+                return false;
+            }
+            let axis = cc / dist;
+            let alpha = (radius / dist).asin();
+            if axis.x.hypot(axis.y).atan2(axis.z) + alpha >= lens.max_theta {
+                return false;
+            }
+            let Some((uc, vc, _)) = project(cc) else {
+                return false;
+            };
+            // Two unit vectors across the axis.
+            let helper = if axis.x.abs() < 0.9 {
+                Vector3::x()
+            } else {
+                Vector3::y()
+            };
+            let e1 = axis.cross(&helper).normalize();
+            let e2 = axis.cross(&e1);
+            let (sa, ca) = alpha.sin_cos();
+            let (mut umin, mut umax, mut vmin, mut vmax) = (uc, uc, vc, vc);
+            for k in 0..8 {
+                let phi = k as f32 * std::f32::consts::FRAC_PI_4;
+                let dir = axis * ca + (e1 * phi.cos() + e2 * phi.sin()) * sa;
+                let Some((u, v, _)) = project(dir * dist) else {
+                    return false;
+                };
+                umin = umin.min(u);
+                umax = umax.max(u);
+                vmin = vmin.min(v);
+                vmax = vmax.max(v);
+            }
+            let grow =
+                |lo: f32, hi: f32, c: f32| (c + 1.1 * (lo - c) - 1.0, c + 1.1 * (hi - c) + 1.0);
+            let ((umin, umax), (vmin, vmax)) = (grow(umin, umax, uc), grow(vmin, vmax, vc));
+            if umax < -1.0 || vmax < -1.0 || umin > w as f32 + 1.0 || vmin > h as f32 + 1.0 {
+                return false;
+            }
+            let clamp = |x: f32, n: usize| (x.floor().max(0.0) as usize).min(n - 1);
+            let (u0, u1) = (clamp(umin, w), clamp(umax, w));
+            let (v0, v1) = (clamp(vmin, h), clamp(vmax, h));
+            let nearest = if equidistant {
+                dist - radius
+            } else {
+                cc.z - radius
+            };
+            nearest * (1.0 - 1e-4) - 1e-4 * voxel > far.max(u0, v0, u1, v1)
+        };
         let occluded = |key: &[i32; 3]| -> bool {
+            if !cull {
+                return false;
+            }
+            if !pinhole {
+                return occluded_through_lens(key);
+            }
             let lo = Vector3::new(
                 (key[0] * B) as f32 + 0.5,
                 (key[1] * B) as f32 + 0.5,
@@ -282,7 +446,7 @@ impl Tsdf {
                 (key[2] * B) as f32 * voxel + half,
             );
             let cc = r * centre + t;
-            if planes.iter().any(|n| n.dot(&cc) < -radius) || occluded(key) {
+            if outside(&cc) || occluded(key) {
                 return;
             }
             for i in 0..BV {
@@ -293,12 +457,10 @@ impl Tsdf {
                     ((key[2] * B + lz) as f32 + 0.5) * voxel,
                 );
                 let pc = r * p + t;
-                if pc.z <= 1e-6 {
+                let Some((u, v, depth)) = project(pc) else {
                     continue;
-                }
-                let u = cam.fx * pc.x / pc.z + cam.cx;
-                let v = cam.fy * pc.y / pc.z + cam.cy;
-                if u < 0.0 || v < 0.0 || u >= w as f32 || v >= h as f32 {
+                };
+                if !(u >= 0.0 && v >= 0.0 && u < w as f32 && v < h as f32) {
                     continue;
                 }
                 let pix = v as usize * w + u as usize;
@@ -306,14 +468,14 @@ impl Tsdf {
                 if d <= 0.0 || d > max_depth {
                     // Nothing opaque (or only background) along this pixel:
                     // the voxel is free space.
-                    if carve && (d <= 0.0 || pc.z < d - trunc) {
+                    if carve && (d <= 0.0 || depth < d - trunc) {
                         let wn = blk.w[i] + 1.0;
                         blk.sdf[i] = (blk.sdf[i] * blk.w[i] + 1.0) / wn;
                         blk.w[i] = wn;
                     }
                     continue;
                 }
-                let sdf = d - pc.z;
+                let sdf = d - depth;
                 if sdf < -trunc || (!free_space && sdf > trunc) {
                     continue;
                 }
@@ -741,5 +903,119 @@ mod tests {
         let [a, b, c] = t.map(|i| Vector3::from(mesh.vertices[i as usize]));
         let n = (b - a).cross(&(c - a));
         assert!(n.dot(&a) > 0.0, "normal points inward");
+    }
+
+    /// The same sphere through lenses, seen about 25° off each camera's axis:
+    /// a fisheye (depth = distance) and a distorted pinhole (depth = z), the
+    /// depth maps cast along the lenses' own rays.
+    #[test]
+    fn fuses_sphere_through_lenses() {
+        use crate::lens::{Lens, Projection};
+        let (w, h) = (128u32, 128u32);
+        let lenses = [
+            Lens::new(
+                Projection::Equidistant,
+                [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            Lens::new(
+                Projection::Pinhole,
+                [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+            ),
+        ];
+        for lens in lenses {
+            let cam = PinholeCamera::new(w, h, 100.0, 100.0, 64.0, 64.0).with_lens(lens);
+            let equidistant = lens.projection == Projection::Equidistant;
+            let radius = 1.0f32;
+            let mut tsdf = Tsdf::new(0.02, 0.08, 10.0);
+            // The same without occlusion culling, which must change nothing.
+            let mut uncull = Tsdf::new(0.02, 0.08, 10.0);
+            uncull.cull_occluded = false;
+            let dirs: [Vector3<f32>; 6] = [
+                Vector3::x(),
+                -Vector3::x(),
+                Vector3::y(),
+                -Vector3::y(),
+                Vector3::z(),
+                -Vector3::z(),
+            ];
+            for d in dirs {
+                // Camera at 3 d looking past the origin, so that the sphere
+                // sits off its axis.
+                let up: Vector3<f32> = if d.y.abs() > 0.5 {
+                    Vector3::z()
+                } else {
+                    Vector3::y()
+                };
+                let c = d * 3.0;
+                let side = up.cross(&d).normalize();
+                let fwd = (-d + side * 0.47).normalize();
+                let right = up.cross(&fwd).normalize();
+                let down = fwd.cross(&right);
+                let r = Matrix3::from_rows(&[right.transpose(), down.transpose(), fwd.transpose()]);
+                let view = CameraView::new(r, -(r * c), cam);
+                let mut depth = vec![0.0f32; (w * h) as usize];
+                for y in 0..h {
+                    for x in 0..w {
+                        let m = [
+                            (x as f64 + 0.5 - 64.0) / 100.0,
+                            (y as f64 + 0.5 - 64.0) / 100.0,
+                        ];
+                        let Some(ray_c) = unproject(&cam.lens, m) else {
+                            continue;
+                        };
+                        let ray_c = Vector3::new(ray_c[0] as f32, ray_c[1] as f32, ray_c[2] as f32);
+                        let ray = (r.transpose() * ray_c).normalize();
+                        let b = c.dot(&ray);
+                        let disc = b * b - (c.norm_squared() - radius * radius);
+                        if disc > 0.0 {
+                            let p = c + ray * (-b - disc.sqrt());
+                            let pc = r * p + view.translation;
+                            depth[(y * w + x) as usize] =
+                                if equidistant { pc.norm() } else { pc.z };
+                        }
+                    }
+                }
+                let rgb = vec![[0.5f32; 3]; (w * h) as usize];
+                let frame = DepthFrame {
+                    view: &view,
+                    depth: &depth,
+                    rgb: &rgb,
+                };
+                tsdf.integrate(&frame);
+                uncull.integrate(&frame);
+            }
+            let mesh = tsdf.extract();
+            let reference = uncull.extract();
+            // (Blocks come out in hash-map order: compare the sorted vertices.)
+            let sorted = |m: &Mesh| {
+                let mut v: Vec<[u32; 3]> = m.vertices.iter().map(|p| p.map(f32::to_bits)).collect();
+                v.sort_unstable();
+                v
+            };
+            assert_eq!(
+                sorted(&mesh),
+                sorted(&reference),
+                "{:?}: culling changed the mesh",
+                lens.projection
+            );
+            assert!(
+                mesh.triangles.len() > 1000,
+                "{:?}: {} triangles",
+                lens.projection,
+                mesh.triangles.len()
+            );
+            let max_err = mesh
+                .vertices
+                .iter()
+                .map(|v| (Vector3::from(*v).norm() - radius).abs())
+                .fold(0.0f32, f32::max);
+            // Within 1.25 voxels: the barrel distortion spreads pixels thinner
+            // off the axis.
+            assert!(
+                max_err < 0.025,
+                "{:?}: max radial error {max_err}",
+                lens.projection
+            );
+        }
     }
 }

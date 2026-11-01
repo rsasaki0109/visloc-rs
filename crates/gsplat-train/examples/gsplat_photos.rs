@@ -78,7 +78,7 @@ SfM:
   --camera \"MODEL W H P..\" the photos' calibrated camera, a cameras.txt row without its id
                            (any COLMAP model, e.g. OPENCV_FISHEYE or THIN_PRISM_FISHEYE),
                            scaled to the working images and held fixed; SfM and training
-                           follow its lens on the images as they are (no mesh for a fisheye)
+                           follow its lens on the images as they are
   --no-refine-intrinsics   keep the intrinsics fixed
   --refine-intrinsics-max N  skip the final intrinsics refinement above N photos
   --exhaustive-max 300     match every pair up to this many photos
@@ -308,15 +308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     save_ply(&scene, &ply)?;
     println!("wrote {}", ply.display());
 
-    // The mesh back-projects depth through a pinhole; a fisheye has none.
-    let fisheye = dataset
-        .train
-        .iter()
-        .any(|v| v.camera.pinhole_geometry().is_none());
-    if mesh && fisheye {
-        println!("mesh: skipped (fisheye camera)");
-    }
-    if mesh && !fisheye {
+    if mesh {
         let views: Vec<_> = dataset
             .train
             .iter()
