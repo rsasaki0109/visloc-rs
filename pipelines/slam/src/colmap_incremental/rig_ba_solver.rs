@@ -143,7 +143,7 @@ use nalgebra::{
 use rayon::prelude::*;
 
 use visloc_core::geometry::SE3;
-use visloc_core::types::{Camera, CameraModel};
+use visloc_core::types::Camera;
 
 use crate::ba_accel::ReducedCameraSystem;
 use crate::block_cholesky::{solve_spd_blocks6_cached, BlockSymbolic};
@@ -187,7 +187,7 @@ impl Obs {
     }
 }
 
-/// The pinhole intrinsics and `sensor_from_rig` of observations
+/// The pinhole intrinsics, lens and `sensor_from_rig` of observations
 /// ([`Obs::camera`]).
 #[derive(Debug, Clone)]
 pub(crate) struct ObsCamera {
@@ -195,10 +195,53 @@ pub(crate) struct ObsCamera {
     fy: f64,
     cx: f64,
     cy: f64,
+    /// The lens between the sensor point and the intrinsics, for a camera
+    /// with distortion or a fisheye projection.
+    lens: Option<std::sync::Arc<Lens>>,
     sensor_from_rig: SE3,
     /// Index into [`ExtraBlocks::sensors`] when this `sensor_from_rig` is
     /// refined, else [`NO_SENSOR`].
     sensor: u32,
+}
+
+/// The lens of a camera with distortion or a non-pinhole projection
+/// (`visloc_core`'s Brown-Conrady, fisheye, FOV and Double Sphere models):
+/// the normalized coordinates `m = (pixel - c) / f` of a sensor point, and
+/// their Jacobian, from the camera's own projection and intrinsics. The
+/// solve's intrinsics `(fx, fy, cx, cy)`, refined or not, place them at
+/// `(fx m.x + cx, fy m.y + cy)`: every one of these models applies its
+/// focal lengths and principal point last.
+#[derive(Debug)]
+pub(crate) struct Lens {
+    camera: Camera,
+    intrinsics: (f64, f64, f64, f64),
+}
+
+impl Lens {
+    /// The lens of `camera`, or `None` for one without (an undistorted
+    /// pinhole, which the solver projects directly) or without pinhole
+    /// intrinsics (a panorama).
+    pub(crate) fn of(camera: &Camera) -> Option<Self> {
+        if camera.model.is_spherical() || camera.distortion_free() {
+            return None;
+        }
+        Some(Self {
+            intrinsics: camera.intrinsics()?,
+            camera: camera.clone(),
+        })
+    }
+
+    /// `m` of `point_sensor` and `dm / d(point_sensor)`; `None` where the
+    /// camera does not image it.
+    #[inline]
+    fn coords(&self, point_sensor: &Point3<f64>) -> Option<(Point2<f64>, SMatrix<f64, 2, 3>)> {
+        let (pixel, jacobian) = self.camera.project_with_point_jacobian(point_sensor)?;
+        let (fx, fy, cx, cy) = self.intrinsics;
+        let mut dm = jacobian;
+        dm.row_mut(0).unscale_mut(fx);
+        dm.row_mut(1).unscale_mut(fy);
+        Some((Point2::new((pixel.x - cx) / fx, (pixel.y - cy) / fy), dm))
+    }
 }
 
 /// [`ObsCamera::sensor`] of a camera whose `sensor_from_rig` is held fixed.
@@ -212,18 +255,27 @@ pub(crate) const fn equirectangular_intrinsics(width: f64, height: f64) -> (f64,
 }
 
 /// Pixel of a sensor-frame point and its `2×3` Jacobian, for the
-/// intrinsics `(fx, fy, cx, cy)`: a pinhole, or with `fx == 0`
-/// ([`equirectangular_intrinsics`]) an equirectangular panorama of
-/// `cx x cy` px (`visloc_core`'s `CameraModel::Equirectangular`), which
-/// projects every direction. `None` behind a pinhole sensor or on the
-/// panorama's vertical axis.
+/// intrinsics `(fx, fy, cx, cy)`: a pinhole, through `lens` when the camera
+/// has one, or with `fx == 0` ([`equirectangular_intrinsics`]) an
+/// equirectangular panorama of `cx x cy` px (`visloc_core`'s
+/// `CameraModel::Equirectangular`), which projects every direction. `None`
+/// behind a pinhole sensor, where the lens does not image the point, or on
+/// the panorama's vertical axis.
 #[inline]
 fn project_sensor_point(
     (fx, fy, cx, cy): (f64, f64, f64, f64),
+    lens: Option<&Lens>,
     point_sensor: &Point3<f64>,
 ) -> Option<(Point2<f64>, SMatrix<f64, 2, 3>)> {
     if fx == 0.0 {
         return project_equirectangular(cx, cy, point_sensor);
+    }
+    if let Some(lens) = lens {
+        let (m, dm) = lens.coords(point_sensor)?;
+        let mut projection = dm;
+        projection.row_mut(0).scale_mut(fx);
+        projection.row_mut(1).scale_mut(fy);
+        return Some((Point2::new(fx * m.x + cx, fy * m.y + cy), projection));
     }
     if point_sensor.z <= 0.0 {
         return None;
@@ -295,6 +347,7 @@ impl ObsCamera {
             fy,
             cx,
             cy,
+            lens: None,
             sensor_from_rig,
             sensor: NO_SENSOR,
         }
@@ -307,35 +360,52 @@ impl ObsCamera {
         self
     }
 
-    /// Every field's bits: equal keys, identical cameras.
-    fn key(&self) -> [u64; 12] {
+    /// The same camera behind `lens` ([`Lens::of`] the camera whose
+    /// intrinsics these are).
+    pub(crate) fn with_lens(mut self, lens: Option<std::sync::Arc<Lens>>) -> Self {
+        self.lens = lens;
+        self
+    }
+
+    /// Every field's bits, and the lens by identity: equal keys, identical
+    /// cameras.
+    fn key(&self) -> ObsCameraKey {
         let (q, t) = (
             self.sensor_from_rig.rotation.coords,
             self.sensor_from_rig.translation,
         );
-        [
-            self.fx.to_bits(),
-            self.fy.to_bits(),
-            self.cx.to_bits(),
-            self.cy.to_bits(),
-            q.x.to_bits(),
-            q.y.to_bits(),
-            q.z.to_bits(),
-            q.w.to_bits(),
-            t.x.to_bits(),
-            t.y.to_bits(),
-            t.z.to_bits(),
-            u64::from(self.sensor),
-        ]
+        (
+            [
+                self.fx.to_bits(),
+                self.fy.to_bits(),
+                self.cx.to_bits(),
+                self.cy.to_bits(),
+                q.x.to_bits(),
+                q.y.to_bits(),
+                q.z.to_bits(),
+                q.w.to_bits(),
+                t.x.to_bits(),
+                t.y.to_bits(),
+                t.z.to_bits(),
+                u64::from(self.sensor),
+            ],
+            self.lens
+                .as_ref()
+                .map_or(0, |lens| std::sync::Arc::as_ptr(lens) as usize),
+        )
     }
 }
 
+/// [`ObsCamera::key`]: the bits of its numbers and its lens's address.
+type ObsCameraKey = ([u64; 12], usize);
+
 /// Distinct [`ObsCamera`]s in first-use order, for
-/// [`PointMajorObs::cameras`]: cameras with the same bits share an index.
+/// [`PointMajorObs::cameras`]: cameras with the same bits (and lens) share
+/// an index.
 #[derive(Debug, Default)]
 pub(crate) struct ObsCameraTable {
     cameras: Vec<ObsCamera>,
-    index: std::collections::HashMap<[u64; 12], u32>,
+    index: std::collections::HashMap<ObsCameraKey, u32>,
 }
 
 impl ObsCameraTable {
@@ -447,13 +517,13 @@ impl ExtraBlocks {
         }
     }
 
-    /// `obs`'s intrinsics and `sensor_from_rig` under these blocks, its
+    /// `obs`'s intrinsics, `sensor_from_rig` and lens under these blocks, its
     /// camera `cameras[obs.camera]`.
     fn camera_of<'a>(
         &'a self,
         o: &Obs,
         cameras: &'a [ObsCamera],
-    ) -> ((f64, f64, f64, f64), &'a SE3) {
+    ) -> ((f64, f64, f64, f64), &'a SE3, Option<&'a Lens>) {
         let camera = &cameras[o.camera as usize];
         let k = match &self.camera {
             Some(c) => (c.params[0], c.params[1], c.params[2], c.params[3]),
@@ -464,7 +534,7 @@ impl ExtraBlocks {
         } else {
             &self.sensors[camera.sensor as usize]
         };
-        (k, sensor)
+        (k, sensor, camera.lens.as_deref())
     }
 }
 
@@ -1524,19 +1594,10 @@ impl From<&BaRigObservation> for RigObs {
 
 /// The pinhole intrinsics of a camera without lens distortion; `None` for
 /// any other, so a distorted sensor is reported as unsupported instead of
-/// being solved as a pinhole.
+/// being solved as a pinhole (this path carries no [`Lens`]).
 fn distortion_free_intrinsics(camera: &Camera) -> Option<(f64, f64, f64, f64)> {
-    let first_lens_param = match camera.model {
-        CameraModel::Pinhole | CameraModel::SimplePinhole => return camera.intrinsics(),
-        CameraModel::SimpleRadial | CameraModel::Radial => 3,
-        CameraModel::OpenCv | CameraModel::FullOpenCv => 4,
-        _ => return None,
-    };
     camera
-        .params
-        .iter()
-        .skip(first_lens_param)
-        .all(|&value| value == 0.0)
+        .distortion_free()
         .then(|| camera.intrinsics())
         .flatten()
 }
@@ -1620,7 +1681,7 @@ fn build_problem(input: &RigBaInput, rig_obs: &[RigObs]) -> Result<Problem, BaEr
     // Each observation's camera, deduplicated bit for bit (consecutive
     // observations mostly share one, so the previous one is tried first).
     let mut table = ObsCameraTable::default();
-    let mut previous: Option<([u64; 12], u32)> = None;
+    let mut previous: Option<(ObsCameraKey, u32)> = None;
     let camera_of_obs: Vec<u32> = rig_obs
         .iter()
         .map(|o| {
@@ -1812,7 +1873,8 @@ fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
 
 /// Residual `r = π(sensor_from_rig · pose · point_world) − xy` and its
 /// Jacobians w.r.t. the pose's `[ρ; ω]` local update (`2×6`) and the point
-/// (`2×3`). `None` when the point is behind the sensor (matches
+/// (`2×3`), `π` through `lens` when the camera has one. `None` when the
+/// point is behind the sensor or out of the lens's reach (matches
 /// `bundle.rs::cost()`'s "skip nonprojectable observations" convention — see
 /// module doc). See module doc for the formula citation and
 /// `tests::matches_bundle_rs_formula` / `tests::jacobian_matches_finite_difference`
@@ -1824,6 +1886,7 @@ fn residual_and_jacobians(
     fy: f64,
     cx: f64,
     cy: f64,
+    lens: Option<&Lens>,
     sensor_from_rig: &SE3,
     pose: &SE3,
     point_world: &Point3<f64>,
@@ -1831,7 +1894,7 @@ fn residual_and_jacobians(
 ) -> Option<(Vector2<f64>, SMatrix<f64, 2, 6>, SMatrix<f64, 2, 3>)> {
     let point_rig = pose.transform_point(point_world);
     let point_sensor = sensor_from_rig.transform_point(&point_rig);
-    let (predicted, projection) = project_sensor_point((fx, fy, cx, cy), &point_sensor)?;
+    let (predicted, projection) = project_sensor_point((fx, fy, cx, cy), lens, &point_sensor)?;
     let residual = pixel_residual(fx, cx, predicted, xy);
     let r_wc = pose.rotation.to_rotation_matrix().into_inner();
     let r_rs = sensor_from_rig.rotation.to_rotation_matrix().into_inner();
@@ -1992,12 +2055,13 @@ impl Linearization {
 /// for the rig point `p`.
 fn sensor_jacobian(
     intrinsics: (f64, f64, f64, f64),
+    lens: Option<&Lens>,
     sensor_from_rig: &SE3,
     point_rig: &Point3<f64>,
 ) -> SMatrix<f64, 2, 6> {
     let point_sensor = sensor_from_rig.transform_point(point_rig);
     // Only called for observations `residual_and_jacobians` projected.
-    let Some((_, projection)) = project_sensor_point(intrinsics, &point_sensor) else {
+    let Some((_, projection)) = project_sensor_point(intrinsics, lens, &point_sensor) else {
         return SMatrix::zeros();
     };
     let r_sr = sensor_from_rig.rotation.to_rotation_matrix().into_inner();
@@ -2056,17 +2120,17 @@ fn linearize_point(
 
     for o in obs_slice {
         let pose = &poses[o.frame_idx as usize];
-        let ((fx, fy, cx, cy), sensor_from_rig) = extras.camera_of(o, cameras);
+        let ((fx, fy, cx, cy), sensor_from_rig, lens) = extras.camera_of(o, cameras);
         let sensor = cameras[o.camera as usize].sensor;
         let Some((mut r, mut j_pose, mut j_point)) =
-            residual_and_jacobians(fx, fy, cx, cy, sensor_from_rig, pose, point_xyz, o.xy)
+            residual_and_jacobians(fx, fy, cx, cy, lens, sensor_from_rig, pose, point_xyz, o.xy)
         else {
             continue;
         };
         // The observation's extra nodes and their Jacobians (from the raw
         // residual): the camera's d(u, v)/d(focal, cx, cy) =
-        // [[x/z, 1, 0], [y/z, 0, 1]] (u = r.x + x_obs = fx x/z + cx), the
-        // sensor's [`sensor_jacobian`].
+        // [[m.x, 1, 0], [m.y, 0, 1]] (u = r.x + x_obs = fx m.x + cx, with
+        // m = (x, y) / z without a lens), the sensor's [`sensor_jacobian`].
         let mut j_extra: [Option<(u32, SMatrix<f64, 2, 6>)>; 2] = [None, None];
         if has_extras {
             if let Some(c) = &extras.camera {
@@ -2084,7 +2148,7 @@ fn linearize_point(
                 let point_rig = pose.transform_point(point_xyz);
                 j_extra[1] = Some((
                     sensor_base + sensor,
-                    sensor_jacobian((fx, fy, cx, cy), sensor_from_rig, &point_rig),
+                    sensor_jacobian((fx, fy, cx, cy), lens, sensor_from_rig, &point_rig),
                 ));
             }
         }
@@ -3262,20 +3326,29 @@ fn evaluate_cost(
             let mut c = 0.0;
             for o in &problem.obs[start as usize..end as usize] {
                 if skip_behind_now {
-                    let ((fx_now, ..), sensor_now) = problem.extras.camera_of(o, &problem.cameras);
-                    let point_now =
-                        problem.poses[o.frame_idx as usize].transform_point(&problem.points[p]);
-                    // A panorama sees behind itself.
-                    if fx_now != 0.0 && sensor_now.transform_point(&point_now).z <= 0.0 {
+                    let (k_now, sensor_now, lens_now) =
+                        problem.extras.camera_of(o, &problem.cameras);
+                    let point_now = sensor_now.transform_point(
+                        &problem.poses[o.frame_idx as usize].transform_point(&problem.points[p]),
+                    );
+                    // A panorama sees behind itself, a lens as far as it
+                    // reaches.
+                    let hidden = match lens_now {
+                        Some(lens) => lens.coords(&point_now).is_none(),
+                        None => k_now.0 != 0.0 && point_now.z <= 0.0,
+                    };
+                    if hidden {
                         continue;
                     }
                 }
                 let pose = &poses[o.frame_idx as usize];
-                let ((fx, fy, cx, cy), sensor_from_rig) = extras.camera_of(o, &problem.cameras);
+                let ((fx, fy, cx, cy), sensor_from_rig, lens) =
+                    extras.camera_of(o, &problem.cameras);
                 let point_rig = pose.transform_point(&points[p]);
                 let point_sensor = sensor_from_rig.transform_point(&point_rig);
-                let s = if fx == 0.0 {
-                    let Some((predicted, _)) = project_equirectangular(cx, cy, &point_sensor)
+                let s = if fx == 0.0 || lens.is_some() {
+                    let Some((predicted, _)) =
+                        project_sensor_point((fx, fy, cx, cy), lens, &point_sensor)
                     else {
                         continue;
                     };
@@ -3803,7 +3876,7 @@ mod tests {
         rig_residual_jacobians as legacy_rig_residual_jacobians, BaRigObservation,
     };
     use visloc_core::geometry::Pose;
-    use visloc_core::types::Camera;
+    use visloc_core::types::{Camera, CameraModel};
 
     fn sample_inputs() -> (f64, f64, f64, f64, SE3, SE3, Point3<f64>, Point2<f64>) {
         let fx = 480.0;
@@ -3828,7 +3901,7 @@ mod tests {
     fn jacobian_matches_finite_difference() {
         let (fx, fy, cx, cy, sensor_from_rig, pose, point, xy) = sample_inputs();
         let (r0, j_pose, j_point) =
-            residual_and_jacobians(fx, fy, cx, cy, &sensor_from_rig, &pose, &point, xy)
+            residual_and_jacobians(fx, fy, cx, cy, None, &sensor_from_rig, &pose, &point, xy)
                 .expect("projectable");
 
         let eps = 1e-6;
@@ -3837,14 +3910,32 @@ mod tests {
             d[k] = eps;
             let pose_plus = pose.compose(&SE3::exp(&d));
             let pose_minus = pose.compose(&SE3::exp(&(-d)));
-            let r_plus =
-                residual_and_jacobians(fx, fy, cx, cy, &sensor_from_rig, &pose_plus, &point, xy)
-                    .unwrap()
-                    .0;
-            let r_minus =
-                residual_and_jacobians(fx, fy, cx, cy, &sensor_from_rig, &pose_minus, &point, xy)
-                    .unwrap()
-                    .0;
+            let r_plus = residual_and_jacobians(
+                fx,
+                fy,
+                cx,
+                cy,
+                None,
+                &sensor_from_rig,
+                &pose_plus,
+                &point,
+                xy,
+            )
+            .unwrap()
+            .0;
+            let r_minus = residual_and_jacobians(
+                fx,
+                fy,
+                cx,
+                cy,
+                None,
+                &sensor_from_rig,
+                &pose_minus,
+                &point,
+                xy,
+            )
+            .unwrap()
+            .0;
             let numeric = (r_plus - r_minus) / (2.0 * eps);
             let analytic = j_pose.column(k);
             assert!(
@@ -3855,14 +3946,32 @@ mod tests {
         for k in 0..3 {
             let mut d = Vector3::<f64>::zeros();
             d[k] = eps;
-            let r_plus =
-                residual_and_jacobians(fx, fy, cx, cy, &sensor_from_rig, &pose, &(point + d), xy)
-                    .unwrap()
-                    .0;
-            let r_minus =
-                residual_and_jacobians(fx, fy, cx, cy, &sensor_from_rig, &pose, &(point - d), xy)
-                    .unwrap()
-                    .0;
+            let r_plus = residual_and_jacobians(
+                fx,
+                fy,
+                cx,
+                cy,
+                None,
+                &sensor_from_rig,
+                &pose,
+                &(point + d),
+                xy,
+            )
+            .unwrap()
+            .0;
+            let r_minus = residual_and_jacobians(
+                fx,
+                fy,
+                cx,
+                cy,
+                None,
+                &sensor_from_rig,
+                &pose,
+                &(point - d),
+                xy,
+            )
+            .unwrap()
+            .0;
             let numeric = (r_plus - r_minus) / (2.0 * eps);
             let analytic = j_point.column(k);
             assert!(
@@ -3885,16 +3994,18 @@ mod tests {
         let point = Point3::new(1.4, -0.6, -2.5);
         let point_sensor = sensor_from_rig.transform_point(&pose.transform_point(&point));
         assert!(point_sensor.z < 0.0);
-        let (predicted, _) = project_sensor_point((fx, fy, cx, cy), &point_sensor).unwrap();
+        let (predicted, _) = project_sensor_point((fx, fy, cx, cy), None, &point_sensor).unwrap();
         let xy = predicted + Vector2::new(3.0, -2.0);
         let residual = |sensor: &SE3, pose: &SE3, point: &Point3<f64>| {
-            residual_and_jacobians(fx, fy, cx, cy, sensor, pose, point, xy).expect("projectable")
+            residual_and_jacobians(fx, fy, cx, cy, None, sensor, pose, point, xy)
+                .expect("projectable")
         };
         let (r0, j_pose, j_point) = residual(&sensor_from_rig, &pose, &point);
         assert!((r0 - Vector2::new(-3.0, 2.0)).norm() < 1e-9);
         let eps = 1e-6;
         let j_sensor = sensor_jacobian(
             (fx, fy, cx, cy),
+            None,
             &sensor_from_rig,
             &pose.transform_point(&point),
         );
@@ -3924,7 +4035,7 @@ mod tests {
         // Predicted just right of the seam (x near 0), observed 2 px to
         // its left (x near 2048).
         let seam = Point3::new(-1.0e-3, 0.2, -1.0);
-        let (at_seam, _) = project_sensor_point((fx, fy, cx, cy), &seam).unwrap();
+        let (at_seam, _) = project_sensor_point((fx, fy, cx, cy), None, &seam).unwrap();
         assert!(at_seam.x < 1.0, "{at_seam:?}");
         let r = pixel_residual(
             fx,
@@ -3933,6 +4044,128 @@ mod tests {
             Point2::new(at_seam.x + 2048.0 - 2.0, at_seam.y),
         );
         assert!((r.x - 2.0).abs() < 1e-9, "{r:?}");
+    }
+
+    /// Through a lens: the prediction is the camera's own projection, and
+    /// the pose, point and sensor Jacobians match central differences, on
+    /// ETH3D's thin-prism rig lens, a Kannala-Brandt fisheye seeing a point
+    /// past 90°, and a distorted OpenCV pinhole. With refined intrinsics
+    /// (here a focal length 3% longer and a shifted principal point) the
+    /// lens keeps its normalized coordinates and takes the new ones.
+    #[test]
+    fn lens_jacobians_match_finite_difference() {
+        let (_, _, _, _, sensor_from_rig, pose, _, _) = sample_inputs();
+        let camera = |model: CameraModel, params: Vec<f64>| Camera {
+            id: 1,
+            model,
+            width: 752,
+            height: 480,
+            params,
+        };
+        let cases = [
+            (
+                camera(
+                    CameraModel::ThinPrismFisheye,
+                    vec![
+                        541.9, 541.6, 413.8, 216.0, -0.0736, -0.039, 0.000245, -0.000164, 0.0489,
+                        -0.0407, 0.0018, 0.0088,
+                    ],
+                ),
+                Point3::new(0.9, -0.5, 2.9),
+            ),
+            (
+                camera(
+                    CameraModel::OpenCvFisheye,
+                    vec![300.0, 301.0, 376.0, 240.0, 0.02, -0.005, 0.001, -0.0002],
+                ),
+                // About 100° off the sensor's axis, behind its image plane.
+                Point3::new(3.5, -0.4, -1.6),
+            ),
+            (
+                camera(
+                    CameraModel::OpenCv,
+                    vec![500.0, 498.0, 376.0, 240.0, -0.21, 0.04, 0.001, -0.0015],
+                ),
+                Point3::new(0.5, 0.3, 3.0),
+            ),
+        ];
+        for (camera, point) in cases {
+            let lens = Lens::of(&camera).expect("a lens");
+            let k0 = camera.intrinsics().unwrap();
+            let point_sensor = sensor_from_rig.transform_point(&pose.transform_point(&point));
+            let (predicted, _) = project_sensor_point(k0, Some(&lens), &point_sensor).unwrap();
+            let expected = camera.project(&point_sensor).unwrap();
+            assert!((predicted - expected).norm() < 1e-9, "{:?}", camera.model);
+            for k in [k0, (k0.0 * 1.03, k0.1 * 1.03, k0.2 + 4.0, k0.3 - 3.0)] {
+                let (fx, fy, cx, cy) = k;
+                let (predicted, _) = project_sensor_point(k, Some(&lens), &point_sensor).unwrap();
+                let m = Point2::new((expected.x - k0.2) / k0.0, (expected.y - k0.3) / k0.1);
+                assert!((predicted - Point2::new(fx * m.x + cx, fy * m.y + cy)).norm() < 1e-9);
+                let xy = predicted + Vector2::new(1.5, -2.5);
+                let residual = |sensor: &SE3, pose: &SE3, point: &Point3<f64>| {
+                    residual_and_jacobians(fx, fy, cx, cy, Some(&lens), sensor, pose, point, xy)
+                        .expect("projectable")
+                };
+                let (r0, j_pose, j_point) = residual(&sensor_from_rig, &pose, &point);
+                assert!((r0 - Vector2::new(-1.5, 2.5)).norm() < 1e-9);
+                let j_sensor = sensor_jacobian(
+                    k,
+                    Some(&lens),
+                    &sensor_from_rig,
+                    &pose.transform_point(&point),
+                );
+                let eps = 1e-6;
+                for c in 0..6 {
+                    let mut d = Vector6::<f64>::zeros();
+                    d[c] = eps;
+                    let numeric =
+                        (residual(&sensor_from_rig, &pose.compose(&SE3::exp(&d)), &point).0
+                            - residual(&sensor_from_rig, &pose.compose(&SE3::exp(&(-d))), &point)
+                                .0)
+                            / (2.0 * eps);
+                    assert!(
+                        (numeric - j_pose.column(c)).norm() < 1e-4,
+                        "{:?} pose col {c}",
+                        camera.model
+                    );
+                    let numeric =
+                        (residual(&sensor_from_rig.compose(&SE3::exp(&d)), &pose, &point).0
+                            - residual(&sensor_from_rig.compose(&SE3::exp(&(-d))), &pose, &point)
+                                .0)
+                            / (2.0 * eps);
+                    assert!(
+                        (numeric - j_sensor.column(c)).norm() < 1e-4,
+                        "{:?} sensor col {c}",
+                        camera.model
+                    );
+                }
+                for c in 0..3 {
+                    let mut d = Vector3::<f64>::zeros();
+                    d[c] = eps;
+                    let numeric = (residual(&sensor_from_rig, &pose, &(point + d)).0
+                        - residual(&sensor_from_rig, &pose, &(point - d)).0)
+                        / (2.0 * eps);
+                    assert!(
+                        (numeric - j_point.column(c)).norm() < 1e-4,
+                        "{:?} point col {c}",
+                        camera.model
+                    );
+                }
+            }
+        }
+        // No lens for an undistorted pinhole or one whose distortion is all
+        // zero; the panorama has none either.
+        assert!(Lens::of(&camera(
+            CameraModel::Pinhole,
+            vec![500.0, 500.0, 376.0, 240.0]
+        ))
+        .is_none());
+        assert!(Lens::of(&camera(
+            CameraModel::OpenCv,
+            vec![500.0, 500.0, 376.0, 240.0, 0.0, 0.0, 0.0, 0.0]
+        ))
+        .is_none());
+        assert!(Lens::of(&camera(CameraModel::Equirectangular, vec![752.0, 376.0])).is_none());
     }
 
     /// C2.5 task item 6(a) (second half): this module's independent
@@ -3955,7 +4188,7 @@ mod tests {
         let (r_legacy, j_pose_legacy, j_point_legacy) =
             legacy_rig_residual_jacobians(&obs, &legacy_pose, &point).expect("projectable");
         let (r_native, j_pose_native, j_point_native) =
-            residual_and_jacobians(fx, fy, cx, cy, &sensor_from_rig, &pose, &point, xy)
+            residual_and_jacobians(fx, fy, cx, cy, None, &sensor_from_rig, &pose, &point, xy)
                 .expect("projectable");
 
         assert!((r_legacy - r_native).norm() < 1e-12);
@@ -4662,6 +4895,14 @@ mod tests {
     /// a perturbed start.
     fn intrinsics_scene(truth: [f64; 4]) -> (RigBaInput, PointMajorObs, Vec<Point3<f64>>) {
         let [fx, fy, cx, cy] = truth;
+        intrinsics_scene_through(|x| Point2::new(fx * x.x / x.z + cx, fy * x.y / x.z + cy))
+    }
+
+    /// [`intrinsics_scene`] observed through `project` (camera-frame point to
+    /// pixel).
+    fn intrinsics_scene_through(
+        project: impl Fn(&Point3<f64>) -> Point2<f64>,
+    ) -> (RigBaInput, PointMajorObs, Vec<Point3<f64>>) {
         let poses: Vec<SE3> = (0..12)
             .map(|i| {
                 let t = i as f64 / 11.0 - 0.5;
@@ -4686,8 +4927,7 @@ mod tests {
         for point in &points {
             let start = obs.len() as u32;
             for (f, pose) in poses.iter().enumerate() {
-                let x = pose.transform_point(point);
-                let xy = Point2::new(fx * x.x / x.z + cx, fy * x.y / x.z + cy);
+                let xy = project(&pose.transform_point(point));
                 // Wrong intrinsics on the observations' camera: the camera
                 // block must not read them.
                 obs.push(Obs::new(f as u32, xy, 0));
@@ -4908,6 +5148,53 @@ mod tests {
         }
     }
 
+    /// The camera block in front of a lens: observations through a
+    /// Kannala-Brandt fisheye, whose lens the solver holds with other
+    /// intrinsics than the truth (it divides its own back out). Focal length
+    /// and principal point converge to the truth, the distortion as given.
+    #[test]
+    fn camera_block_recovers_intrinsics_through_a_lens() {
+        let truth = [300.0, 300.0, 322.0, 238.0];
+        let fisheye = |[fx, fy, cx, cy]: [f64; 4]| {
+            Camera::opencv_fisheye(1, 640, 480, fx, fy, cx, cy, [0.03, -0.01, 0.002, -0.0005])
+        };
+        let true_camera = fisheye(truth);
+        let (mut input, mut point_major, points) =
+            intrinsics_scene_through(|x| true_camera.project(x).expect("in view"));
+        let lens = Lens::of(&fisheye([290.0, 290.0, 330.0, 230.0])).expect("a lens");
+        point_major.cameras = vec![ObsCamera::new((1.0, 1.0, 0.0, 0.0), SE3::identity())
+            .with_lens(Some(std::sync::Arc::new(lens)))];
+        let mut extras = ExtraBlocks {
+            camera: Some(SharedIntrinsics {
+                params: [310.0, 310.0, 315.0, 245.0],
+                refine_focal_length: true,
+                refine_principal_point: true,
+            }),
+            sensors: Vec::new(),
+        };
+        let result = optimize_point_major(
+            &mut input,
+            point_major,
+            100,
+            LossFunction::Trivial,
+            None,
+            &mut extras,
+        )
+        .expect("solve");
+        let camera = extras.camera.expect("camera");
+        for (got, want) in camera.params.iter().zip(truth) {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "{:?} vs {truth:?}",
+                camera.params
+            );
+        }
+        assert!(result.final_cost < 1e-12, "cost {}", result.final_cost);
+        for (got, want) in input.points.iter().zip(&points) {
+            assert!((got - want).norm() < 1e-6);
+        }
+    }
+
     #[test]
     fn camera_block_recovers_intrinsics_on_the_iterative_path() {
         let truth = [500.0, 500.0, 322.0, 238.0];
@@ -4979,9 +5266,9 @@ mod tests {
     fn sensor_jacobian_matches_finite_difference() {
         let (fx, fy, cx, cy, sensor_from_rig, pose, point, xy) = sample_inputs();
         let point_rig = pose.transform_point(&point);
-        let analytic = sensor_jacobian((fx, fy, cx, cy), &sensor_from_rig, &point_rig);
+        let analytic = sensor_jacobian((fx, fy, cx, cy), None, &sensor_from_rig, &point_rig);
         let residual = |sensor: &SE3| {
-            residual_and_jacobians(fx, fy, cx, cy, sensor, &pose, &point, xy)
+            residual_and_jacobians(fx, fy, cx, cy, None, sensor, &pose, &point, xy)
                 .expect("projectable")
                 .0
         };

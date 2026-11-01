@@ -279,6 +279,93 @@ pub(crate) fn build_synthetic_spherical_scene(
     )
 }
 
+/// A single camera (`camera`, with its lens) moving sideways past 120 points
+/// spread up to 60° off its axis, 3-7 m away, every point inside every
+/// image and every pair within `window` frames matched point for point:
+/// the database and each frame's true `rig_from_world`.
+pub(crate) fn build_synthetic_lens_scene(
+    camera: Camera,
+    num_frames: usize,
+    window: usize,
+) -> (DatabaseCache, BTreeMap<FrameT, SE3>) {
+    let mut rig = Rig::new();
+    rig.set_rig_id(0);
+    rig.add_ref_sensor(SensorT::camera(camera.id));
+    let points: Vec<Point3<f64>> = (0..120)
+        .map(|i| {
+            let i = i as f64;
+            // A golden-angle spiral over the cap within 60° of +z.
+            let cos_theta = 1.0 - 0.5 * (i + 0.5) / 120.0;
+            let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
+            let azimuth = i * 2.399_963;
+            let r = 3.0 + 4.0 * (0.5 + 0.5 * (i * 1.7).sin());
+            Point3::new(
+                r * sin_theta * azimuth.cos(),
+                0.8 * r * sin_theta * azimuth.sin(),
+                r * cos_theta,
+            )
+        })
+        .collect();
+    let mut frames = BTreeMap::new();
+    let mut images = BTreeMap::new();
+    let mut truth = BTreeMap::new();
+    for k in 0..num_frames {
+        let id = k as ImageT;
+        let t = k as f64;
+        let centre = Vector3::new(
+            0.25 * t - 1.0,
+            0.03 * (t * 0.9).sin(),
+            0.05 * (t * 0.5).sin(),
+        );
+        let rotation =
+            UnitQuaternion::from_euler_angles(0.02 * (t * 0.7).sin(), 0.03 * t - 0.1, 0.0);
+        let pose = SE3::new(rotation, -(rotation * centre));
+        let mut frame = Frame::new(id, 0);
+        frame.add_data_id(DataT::camera(camera.id, id));
+        frames.insert(id, frame);
+        let mut image = Image::new(id, camera.id, id, format!("{k}.png"));
+        image.points2d = points
+            .iter()
+            .map(|p| {
+                let xy = camera
+                    .project(&pose.transform_point(p))
+                    .expect("the lens sees every point");
+                assert!(
+                    xy.x >= 0.0
+                        && xy.y >= 0.0
+                        && xy.x < camera.width as f64
+                        && xy.y < camera.height as f64,
+                    "frame {k}: {xy:?} off the image"
+                );
+                Point2D::new(xy)
+            })
+            .collect();
+        images.insert(id, image);
+        truth.insert(id, pose);
+    }
+    let mut graph = CorrespondenceGraph::new();
+    for id in 0..num_frames {
+        graph.add_image(id, points.len());
+    }
+    let matches: Vec<(usize, usize)> = (0..points.len()).map(|j| (j, j)).collect();
+    for a in 0..num_frames {
+        for b in a + 1..num_frames.min(a + window + 1) {
+            graph
+                .add_two_view_geometry(a, b, &matches, ConfigurationType::Calibrated)
+                .unwrap();
+        }
+    }
+    graph.finalize();
+    let mut cameras = BTreeMap::new();
+    cameras.insert(camera.id, camera);
+    let mut rigs = BTreeMap::new();
+    rigs.insert(0, rig);
+    (
+        DatabaseCache::from_parts(rigs, cameras, frames, images, graph),
+        truth,
+    )
+}
+
 /// Three single-camera frames seeing the same 60 points, every pair matched
 /// point for point: the database, each frame's true `rig_from_world` and
 /// the point count. Tests register frames 0 and 1 at their true poses and

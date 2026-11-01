@@ -6,6 +6,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **SfM through fisheye and distorted lenses.** See
+  [docs/fisheye.md](docs/fisheye.md).
+  - The COLMAP-port mapper's bundle adjustment projects through the
+    camera's lens (`rig_ba_solver::Lens`: any `visloc-core` model, via
+    `Camera::project_with_point_jacobian`). Before, it solved every camera
+    with a focal length as an undistorted pinhole, silently: a fisheye
+    trajectory came out centimetres off.
+  - Focal length and principal point refinement works in front of a lens,
+    and writes back only those parameters, keeping the distortion
+    (`Camera::set_intrinsics`).
+  - The rig manifest's sensor rows take any COLMAP model with its
+    parameters after the pose, and `run_colmap_port` writes them.
+  - `gsplat_photos` and `gsplat_photos_cuda` take `--camera "MODEL W H
+    PARAMS..."`, a calibrated camera for the photos. It is scaled to the
+    working images and held fixed. SfM and training then follow its lens on
+    the images as they are. `sparse/0/cameras.txt` keeps the model.
+  - `visloc-core`: `Camera::distortion_free`, `Camera::set_intrinsics` and
+    `CameraModel::colmap_param_count`.
 - **3DGS through fisheye and distorted lenses (`visloc_gsplat_core::lens`).**
   See [docs/fisheye.md](docs/fisheye.md).
   - A camera's intrinsics carry a `Lens`: the pinhole or the equidistant
@@ -386,6 +404,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **`gsplat_photos_cuda` matched nothing.** With the default VLFeat-compatible
+  SIFT, the descriptors live as bytes beside the features, but the external
+  (CUDA) matcher was handed the features' empty descriptor lists, so every
+  pair verified 0 matches and the mapper got no images. It now gets the
+  descriptors the CPU matcher uses.
 - **`gsplat_mesh_cuda --depth-maps-only` carved surfaces away through the
   maps' holes.** The GPU TSDF carved free space along every pixel without
   a depth, but a depth map's 0 is unknown, not free: each view's holes

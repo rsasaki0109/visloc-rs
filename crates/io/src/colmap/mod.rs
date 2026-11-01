@@ -1268,21 +1268,7 @@ pub fn parse_points3d_bin_with_colors(
 /// Number of `PARAMS[]` the COLMAP camera model carries in `cameras.txt` /
 /// `cameras.bin`, or `None` for models COLMAP does not define.
 fn colmap_param_count(model: &CameraModel) -> Option<usize> {
-    Some(match model {
-        CameraModel::SimplePinhole => 3,
-        CameraModel::Pinhole => 4,
-        CameraModel::SimpleRadial => 4,
-        CameraModel::Radial => 5,
-        CameraModel::OpenCv => 8,
-        CameraModel::OpenCvFisheye => 8,
-        CameraModel::FullOpenCv => 12,
-        CameraModel::Fov => 5,
-        CameraModel::SimpleRadialFisheye => 4,
-        CameraModel::RadialFisheye => 5,
-        CameraModel::ThinPrismFisheye => 12,
-        CameraModel::Equirectangular => 2,
-        CameraModel::DoubleSphere | CameraModel::Unknown(_) => return None,
-    })
+    model.colmap_param_count()
 }
 
 /// Map a camera onto the `(model, params)` record COLMAP expects.

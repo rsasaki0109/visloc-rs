@@ -59,6 +59,13 @@ pub struct PhotoSfmConfig {
     pub focal_px: Option<f64>,
     /// Principal point in working-image pixels (the image centre if unset).
     pub principal_point: Option<(f64, f64)>,
+    /// The photos' calibrated camera at its own image size, any COLMAP model
+    /// (a fisheye or a distorted lens included): scaled to the working
+    /// images and held fixed, in place of `focal_px`, `principal_point` and
+    /// the intrinsics refinement. SfM and training then follow its lens on
+    /// the images as they are, without undistorting them. Not with
+    /// `equirect` or `insv`.
+    pub camera: Option<Camera>,
     /// Match every pair up to this many images, else a sliding window.
     pub exhaustive_max: usize,
     /// Sliding-window size (images) past `exhaustive_max`.
@@ -187,6 +194,7 @@ impl Default for PhotoSfmConfig {
             max_size: 1600,
             focal_px: None,
             principal_point: None,
+            camera: None,
             exhaustive_max: 300,
             window: 20,
             min_matches: 15,
@@ -1273,6 +1281,55 @@ fn write_lens_faces(
     Ok((files, labels, paths, size))
 }
 
+/// A [`PhotoSfmConfig::camera`] from a `cameras.txt` row without its id:
+/// `MODEL WIDTH HEIGHT PARAMS...`, with exactly the model's COLMAP
+/// parameter count.
+pub fn parse_camera_row(row: &str) -> Result<Camera, String> {
+    let usage = "a camera is \"MODEL WIDTH HEIGHT PARAMS...\" (a cameras.txt row without its id)";
+    let camera = visloc_io::colmap::parse_cameras_txt(&format!("1 {row}"))
+        .map_err(|e| format!("{usage}: {e}"))?
+        .into_iter()
+        .next()
+        .ok_or(usage)?;
+    match camera.model.colmap_param_count() {
+        Some(n) if n == camera.params.len() && camera.intrinsics().is_some() => Ok(camera),
+        Some(n) => Err(format!(
+            "{}: {n} parameters, {} given",
+            row.split_whitespace().next().unwrap_or_default(),
+            camera.params.len()
+        )),
+        None => Err(format!("{usage}: unknown model {:?}", camera.model)),
+    }
+}
+
+/// `camera` on a `width x height` copy of its images, as camera 1: the
+/// focal lengths and principal point scale with the image, the distortion
+/// (on normalized coordinates) stays. The copy must keep the aspect ratio.
+fn scaled_camera(camera: &Camera, width: u32, height: u32) -> Result<Camera, EurocError> {
+    let (fx, fy, cx, cy) = camera.intrinsics().ok_or_else(|| {
+        EurocError::Camera(format!(
+            "camera model {:?} has no focal length",
+            camera.model
+        ))
+    })?;
+    let sx = width as f64 / camera.width as f64;
+    let sy = height as f64 / camera.height as f64;
+    if (sx / sy - 1.0).abs() > 0.01 {
+        return Err(EurocError::Camera(format!(
+            "the photos are {width}x{height}, the camera {}x{}: another aspect ratio",
+            camera.width, camera.height
+        )));
+    }
+    let mut scaled = Camera {
+        id: 1,
+        width,
+        height,
+        ..camera.clone()
+    };
+    scaled.set_intrinsics(fx * sx, fy * sy, cx * sx, cy * sy);
+    Ok(scaled)
+}
+
 /// Write a working image as PNG; with `mask_black`, RGBA with alpha 0 on
 /// its near-black regions.
 fn save_working_image(
@@ -1514,9 +1571,25 @@ pub fn build_photo_dataset(
         WorkImages::Disk(_) => Vec::new(),
     };
     f35s.sort_by(f64::total_cmp);
+    let calibrated = match &cfg.camera {
+        Some(_) if cfg.equirect || lenses.is_some() => {
+            return Err(EurocError::Camera(
+                "a calibrated camera does not combine with equirect or insv".into(),
+            ))
+        }
+        Some(camera) => Some(scaled_camera(camera, width, height)?),
+        None => None,
+    };
     let (focal_prior, focal_source) = match (cfg.focal_px, f35s.get(f35s.len() / 2)) {
         _ if cfg.equirect => (width as f64 / 2.0, "cube face, 90° field of view"),
         _ if lenses.is_some() => (width as f64 / 2.0, "lens face, 90° field of view"),
+        _ if calibrated.is_some() => (
+            calibrated
+                .as_ref()
+                .and_then(|c| c.intrinsics())
+                .map_or(0.0, |k| k.0),
+            "--camera",
+        ),
         (Some(f), _) => (f, "--focal"),
         (None, Some(f35)) => (f35 / 36.0 * long, "EXIF 35 mm"),
         (None, None) => (1.2 * long, "prior 1.2 x long side"),
@@ -1525,7 +1598,17 @@ pub fn build_photo_dataset(
     let (cx, cy) = cfg
         .principal_point
         .unwrap_or((width as f64 / 2.0, height as f64 / 2.0));
-    let camera = Camera::pinhole(1, width, height, focal_prior, focal_prior, cx, cy);
+    let camera = match calibrated {
+        Some(camera) => {
+            log(&format!(
+                "camera: {} {:?} (held fixed)",
+                camera.model.colmap_name().unwrap_or("?"),
+                camera.params
+            ));
+            camera
+        }
+        None => Camera::pinhole(1, width, height, focal_prior, focal_prior, cx, cy),
+    };
 
     let names: Vec<String> = (0..n).map(|i| format!("frame_{i:05}.png")).collect();
     if let WorkImages::Memory(images) = &work {
@@ -1879,9 +1962,12 @@ pub fn build_photo_dataset(
             .or_default()
             .push((i, j));
     }
-    // An external matcher takes every pair once it has the descriptors.
+    // An external matcher takes every pair once it has the descriptors (as
+    // the CPU matcher takes them: VLFeat-compatible ones live in
+    // `desc_bytes`, not in the features).
     let external = cfg.matcher.as_ref().and_then(|m| {
-        let sets: Vec<&[Vec<f32>]> = features.iter().map(|f| f.descriptors.as_slice()).collect();
+        let owned: Vec<_> = (0..n).map(descriptors).collect();
+        let sets: Vec<&[Vec<f32>]> = owned.iter().map(|d| d.as_ref()).collect();
         match m.set_features(&sets) {
             Ok(()) => {
                 log(&format!("matching with {m:?}"));
@@ -2010,8 +2096,9 @@ pub fn build_photo_dataset(
         verify_s
     ));
 
-    // A cube or lens face's intrinsics are exact.
-    let refine_intrinsics = cfg.refine_intrinsics && !cfg.equirect && lenses.is_none();
+    // A cube or lens face's intrinsics are exact, a `--camera` calibrated.
+    let refine_intrinsics =
+        cfg.refine_intrinsics && !cfg.equirect && lenses.is_none() && cfg.camera.is_none();
     // Past matching only the intrinsics refinement reads the descriptors
     // (13 GB of f32 for SmallCity at 4,000 SIFT); without it, free them
     // before the mapper, with it give the features their f32 descriptors.
@@ -2091,11 +2178,10 @@ pub fn build_photo_dataset(
     let (mut poses, mut tracks, mut reproj) = models.into_iter().next().expect("non-empty");
     let mut cam = camera.clone();
     if refine_intrinsics {
-        if let Some(params) = read_port_camera(out_dir) {
-            cam.params[..4].copy_from_slice(&params);
+        if let Some((fx, fy, cx, cy)) = read_port_camera(out_dir).and_then(|c| c.intrinsics()) {
+            cam.set_intrinsics(fx, fy, cx, cy);
             log(&format!(
-                "mapper intrinsics: fx {:.1} fy {:.1} cx {:.1} cy {:.1} px",
-                params[0], params[1], params[2], params[3]
+                "mapper intrinsics: fx {fx:.1} fy {fy:.1} cx {cx:.1} cy {cy:.1} px"
             ));
         }
     }
@@ -2293,11 +2379,14 @@ pub fn build_photo_dataset(
     // 3DGS, gsplat_train / gsplat_mesh --data) can use the reconstruction.
     let sparse = out_dir.join("sparse").join("0");
     std::fs::create_dir_all(&sparse).map_err(io(&sparse))?;
-    let p = &cam.params;
-    let cameras = format!(
-        "# Camera list\n1 PINHOLE {width} {height} {} {} {} {}\n",
-        p[0], p[1], p[2], p[3]
-    );
+    let (model, params) = visloc_io::colmap::colmap_camera_record(&cam);
+    let cameras = params.iter().fold(
+        format!(
+            "# Camera list\n1 {} {width} {height}",
+            model.colmap_name().unwrap_or("PINHOLE")
+        ),
+        |row, p| format!("{row} {p}"),
+    ) + "\n";
     // Image ids follow the registered images in order; point ids are the
     // track indices plus one. Each image lists its observations (x, y,
     // point id) and each point its track (image id, observation index), as

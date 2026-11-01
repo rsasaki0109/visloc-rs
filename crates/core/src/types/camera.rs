@@ -84,6 +84,27 @@ impl CameraModel {
         })
     }
 
+    /// Number of `PARAMS[]` the COLMAP camera model carries in
+    /// `cameras.txt` / `cameras.bin`, or `None` for models COLMAP does not
+    /// define.
+    pub const fn colmap_param_count(&self) -> Option<usize> {
+        Some(match self {
+            Self::SimplePinhole => 3,
+            Self::Pinhole => 4,
+            Self::SimpleRadial => 4,
+            Self::Radial => 5,
+            Self::OpenCv => 8,
+            Self::OpenCvFisheye => 8,
+            Self::FullOpenCv => 12,
+            Self::Fov => 5,
+            Self::SimpleRadialFisheye => 4,
+            Self::RadialFisheye => 5,
+            Self::ThinPrismFisheye => 12,
+            Self::Equirectangular => 2,
+            Self::DoubleSphere | Self::Unknown(_) => return None,
+        })
+    }
+
     /// Whether this model sees in every direction (the equirectangular
     /// panorama): rays behind the camera are valid, and there is no image
     /// plane to measure depth against.
@@ -248,6 +269,43 @@ impl Camera {
         let p1 = self.params.get(6).copied().unwrap_or(0.0);
         let p2 = self.params.get(7).copied().unwrap_or(0.0);
         (p1 != 0.0 || p2 != 0.0).then_some((p1, p2))
+    }
+
+    /// Whether this camera projects as an undistorted pinhole: a
+    /// Brown-Conrady model (`PINHOLE`, `SIMPLE_PINHOLE`, `SIMPLE_RADIAL`,
+    /// `RADIAL`, `OPENCV`, `FULL_OPENCV`) whose distortion coefficients, if
+    /// any, are all zero.
+    pub fn distortion_free(&self) -> bool {
+        let first_lens_param = match self.model {
+            CameraModel::SimplePinhole | CameraModel::SimpleRadial | CameraModel::Radial => 3,
+            CameraModel::Pinhole | CameraModel::OpenCv | CameraModel::FullOpenCv => 4,
+            _ => return false,
+        };
+        self.params
+            .iter()
+            .skip(first_lens_param)
+            .all(|&value| value == 0.0)
+    }
+
+    /// Sets the focal lengths and principal point ([`Self::intrinsics`]),
+    /// keeping the distortion. A model with one focal length takes the mean
+    /// of `fx` and `fy`. Returns `false`, changing nothing, for a model
+    /// without them (a panorama) or a camera missing the slots.
+    pub fn set_intrinsics(&mut self, fx: f64, fy: f64, cx: f64, cy: f64) -> bool {
+        let values: &[f64] = match self.model {
+            CameraModel::SimplePinhole
+            | CameraModel::SimpleRadial
+            | CameraModel::Radial
+            | CameraModel::SimpleRadialFisheye
+            | CameraModel::RadialFisheye => &[0.5 * (fx + fy), cx, cy],
+            CameraModel::Equirectangular | CameraModel::Unknown(_) => return false,
+            _ => &[fx, fy, cx, cy],
+        };
+        if self.params.len() < values.len() {
+            return false;
+        }
+        self.params[..values.len()].copy_from_slice(values);
+        true
     }
 
     pub fn intrinsics(&self) -> Option<(f64, f64, f64, f64)> {
@@ -1400,6 +1458,56 @@ mod tests {
             CameraModel::Equirectangular.colmap_name(),
             Some("EQUIRECTANGULAR")
         );
+    }
+
+    #[test]
+    fn set_intrinsics_keeps_the_distortion() {
+        let mut fisheye = Camera::opencv_fisheye(
+            1,
+            640,
+            480,
+            300.0,
+            301.0,
+            320.0,
+            240.0,
+            [0.1, 0.0, 0.0, 0.0],
+        );
+        assert!(fisheye.set_intrinsics(310.0, 312.0, 322.0, 238.0));
+        assert_eq!(
+            fisheye.params,
+            vec![310.0, 312.0, 322.0, 238.0, 0.1, 0.0, 0.0, 0.0]
+        );
+        // One focal length: the mean.
+        let mut radial = Camera {
+            id: 1,
+            model: CameraModel::SimpleRadial,
+            width: 640,
+            height: 480,
+            params: vec![500.0, 320.0, 240.0, -0.1],
+        };
+        assert!(radial.set_intrinsics(510.0, 520.0, 321.0, 239.0));
+        assert_eq!(radial.params, vec![515.0, 321.0, 239.0, -0.1]);
+        let mut panorama = Camera::equirectangular(1, 2048, 1024);
+        assert!(!panorama.set_intrinsics(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(panorama, Camera::equirectangular(1, 2048, 1024));
+    }
+
+    #[test]
+    fn distortion_free_cameras() {
+        let pinhole = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        assert!(pinhole.distortion_free());
+        let radial = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.1, 0.0);
+        assert!(!radial.distortion_free());
+        let opencv = Camera {
+            model: CameraModel::OpenCv,
+            params: vec![500.0, 500.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0],
+            ..pinhole.clone()
+        };
+        assert!(opencv.distortion_free());
+        // An equidistant projection is no pinhole, whatever its coefficients.
+        let fisheye = Camera::opencv_fisheye(1, 640, 480, 300.0, 300.0, 320.0, 240.0, [0.0; 4]);
+        assert!(!fisheye.distortion_free());
+        assert!(!Camera::equirectangular(1, 2048, 1024).distortion_free());
     }
 
     #[test]

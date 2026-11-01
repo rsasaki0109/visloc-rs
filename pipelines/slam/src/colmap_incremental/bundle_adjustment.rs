@@ -124,7 +124,9 @@ use crate::bundle::{BaConfig, BaRigObservation, BundleAdjustment};
 use visloc_core::geometry::{Pose, SE3};
 
 use super::reconstruction::Reconstruction;
-use super::rig_ba_solver::{Obs, ObsCamera, ObsCameraTable, PointMajorObs, RigBaInput, RigObs};
+use super::rig_ba_solver::{
+    Lens, Obs, ObsCamera, ObsCameraTable, PointMajorObs, RigBaInput, RigObs,
+};
 use super::types::{CameraT, FrameT, ImageT, Point2DT, Point3DT, RigT, SensorT};
 
 /// Port of `BundleAdjustmentGauge` (`bundle_adjustment.h:47-48`). See module
@@ -804,6 +806,10 @@ fn solve_native(
         camera: u32,
     }
     let mut cameras = ObsCameraTable::default();
+    // One lens per camera, shared by its images (and so by their entries
+    // in `cameras`).
+    let mut lenses: std::collections::HashMap<CameraT, Option<std::sync::Arc<Lens>>> =
+        std::collections::HashMap::new();
     // The refined sensors: each observed rig's calibrated non-reference
     // sensors, in (rig, sensor) order.
     let refine_sensors = options.refine_sensor_from_rig && !config.constant_sensors_from_rig;
@@ -826,9 +832,14 @@ fn solve_native(
         }
         let image_id = image_id as ImageT;
         let image = recon.image(image_id);
-        let Some(intrinsics) = solver_intrinsics(recon.camera(image.camera_id)) else {
+        let camera_model = recon.camera(image.camera_id);
+        let Some(intrinsics) = solver_intrinsics(camera_model) else {
             return false;
         };
+        let lens = lenses
+            .entry(image.camera_id)
+            .or_insert_with(|| Lens::of(camera_model).map(std::sync::Arc::new))
+            .clone();
         let rig_id = recon.frame(image.frame_id).rig_id();
         let sensor_id = SensorT::camera(image.camera_id);
         let sensor =
@@ -842,7 +853,8 @@ fn solve_native(
                     }
                 }
             });
-        let camera = ObsCamera::new(intrinsics, sensor_from_rig_for_image(recon, image_id));
+        let camera =
+            ObsCamera::new(intrinsics, sensor_from_rig_for_image(recon, image_id)).with_lens(lens);
         image_info.push(Some(ImageInfo {
             frame_idx: all_frame_ids
                 .binary_search(&image.frame_id)
@@ -853,8 +865,9 @@ fn solve_native(
             }),
         }));
     }
-    // The camera block: one PINHOLE/SIMPLE_PINHOLE camera behind every
-    // observation, not held constant, with a refine option on.
+    // The camera block: one camera with a focal length behind every
+    // observation, not held constant, with a refine option on. A lens keeps
+    // its distortion fixed.
     let mut shared_intrinsics = None;
     if (options.refine_focal_length || options.refine_principal_point)
         && !config.constant_intrinsics
@@ -866,13 +879,7 @@ fn solve_native(
             .map(|(image_id, _)| recon.image(image_id as ImageT).camera_id);
         let first = camera_ids.next();
         if let Some(camera_id) = first.filter(|&id| camera_ids.all(|other| other == id)) {
-            let camera = recon.camera(camera_id);
-            if matches!(
-                camera.model,
-                visloc_core::types::CameraModel::Pinhole
-                    | visloc_core::types::CameraModel::SimplePinhole
-            ) {
-                let (fx, fy, cx, cy) = camera.intrinsics().expect("pinhole intrinsics");
+            if let Some((fx, fy, cx, cy)) = recon.camera(camera_id).intrinsics() {
                 shared_intrinsics = Some((
                     camera_id,
                     super::rig_ba_solver::SharedIntrinsics {
@@ -943,12 +950,8 @@ fn solve_native(
             .add_sensor(sensor_id, Some(pose.clone()));
     }
     if let (Some((camera_id, _)), Some(k)) = (shared_intrinsics, extras.camera) {
-        let camera = recon.camera_mut(camera_id);
         let [fx, fy, cx, cy] = k.params;
-        camera.params = match camera.model {
-            visloc_core::types::CameraModel::SimplePinhole => vec![fx, cx, cy],
-            _ => vec![fx, fy, cx, cy],
-        };
+        recon.camera_mut(camera_id).set_intrinsics(fx, fy, cx, cy);
         eprintln!("BA_INTRINSICS camera={camera_id} fx={fx:.3} fy={fy:.3} cx={cx:.3} cy={cy:.3}");
     }
     eprintln!(
@@ -989,15 +992,17 @@ pub fn solve(
     }
     let accelerate = options.loss_function == LossFunction::Trivial
         && std::env::var_os("VISLOC_PORT_GPU_BA").is_some();
-    // The legacy and GPU paths project pinholes only.
-    if (options.backend == BaBackend::Native && !accelerate) || recon.has_spherical_camera() {
+    // The GPU path projects undistorted pinholes only, and the legacy one
+    // neither panoramas nor refined lens intrinsics.
+    if (options.backend == BaBackend::Native && !accelerate) || recon.has_non_pinhole_camera() {
         return solve_native(options, config, recon);
     }
     solve_legacy(options, config, recon, accelerate)
 }
 
 /// The native solver's `(fx, fy, cx, cy)` for `camera`: its pinhole
-/// intrinsics, or an equirectangular panorama's marker tuple
+/// intrinsics (a lens, [`Lens::of`], sits in front of them), or an
+/// equirectangular panorama's marker tuple
 /// ([`super::rig_ba_solver::equirectangular_intrinsics`]).
 fn solver_intrinsics(camera: &visloc_core::types::Camera) -> Option<(f64, f64, f64, f64)> {
     if camera.model == visloc_core::types::CameraModel::Equirectangular {

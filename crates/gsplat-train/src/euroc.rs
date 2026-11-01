@@ -257,20 +257,7 @@ pub(crate) fn run_colmap_port(
     let dir = out_dir.join("port");
     let feat_dir = dir.join("features");
     std::fs::create_dir_all(&feat_dir).map_err(|e| err(e.to_string()))?;
-    // A pinhole's `fx fy cx cy`; an equirectangular camera is its image
-    // size alone, marked by a trailing model name.
-    let spherical = camera.model.is_spherical();
-    let [fx, fy, cx, cy] = if spherical {
-        [0.0; 4]
-    } else {
-        [
-            camera.params[0],
-            camera.params[1],
-            camera.params[2],
-            camera.params[3],
-        ]
-    };
-    let model_suffix = if spherical { " EQUIRECTANGULAR" } else { "" };
+    let ([fx, fy, cx, cy], model_suffix) = manifest_camera(camera).map_err(err)?;
     let name = |i: usize| format!("frame_{i:05}.png");
     // Only images that take part in a verified pair (the port's
     // correspondence graph has no node for an isolated image); names keep
@@ -389,19 +376,40 @@ pub(crate) fn run_colmap_port(
     Ok(models)
 }
 
-/// `[fx, fy, cx, cy]` of the largest model `run_colmap_port` wrote under
-/// `out_dir` (`port/model0/cameras.txt`, one PINHOLE camera).
-pub(crate) fn read_port_camera(out_dir: &Path) -> Option<[f64; 4]> {
-    let text = std::fs::read_to_string(out_dir.join("port/model0/cameras.txt")).ok()?;
-    let row = text
-        .lines()
-        .find(|l| !l.starts_with('#') && !l.trim().is_empty())?;
-    let t: Vec<&str> = row.split_whitespace().collect();
-    if t.get(1) != Some(&"PINHOLE") || t.len() < 8 {
-        return None;
+/// `camera` in a manifest sensor row: the `fx fy cx cy` fields and what
+/// follows the pose. A pinhole is its intrinsics alone; an equirectangular
+/// camera its image size alone, marked by a trailing model name; a lens its
+/// intrinsics, then its COLMAP model and parameters.
+fn manifest_camera(camera: &Camera) -> Result<([f64; 4], String), String> {
+    if camera.model.is_spherical() {
+        return Ok(([0.0; 4], " EQUIRECTANGULAR".to_string()));
     }
-    let v: Vec<f64> = t[4..8].iter().filter_map(|x| x.parse().ok()).collect();
-    v.try_into().ok()
+    let (fx, fy, cx, cy) = camera
+        .intrinsics()
+        .ok_or_else(|| format!("camera model {:?} has no intrinsics", camera.model))?;
+    if camera.distortion_free() {
+        return Ok(([fx, fy, cx, cy], String::new()));
+    }
+    let (model, params) = visloc_io::colmap::colmap_camera_record(camera);
+    let name = model
+        .colmap_name()
+        .filter(|_| model.colmap_param_count() == Some(params.len()))
+        .ok_or_else(|| format!("camera model {model:?} is not a COLMAP model"))?;
+    let suffix = params
+        .iter()
+        .fold(format!(" {name}"), |row, p| format!("{row} {p}"));
+    Ok(([fx, fy, cx, cy], suffix))
+}
+
+/// The camera of the largest model `run_colmap_port` wrote under `out_dir`
+/// (`port/model0/cameras.txt`, one camera), with the intrinsics its bundle
+/// adjustments refined.
+pub(crate) fn read_port_camera(out_dir: &Path) -> Option<Camera> {
+    let text = std::fs::read_to_string(out_dir.join("port/model0/cameras.txt")).ok()?;
+    visloc_io::colmap::parse_cameras_txt(&text)
+        .ok()?
+        .into_iter()
+        .next()
 }
 
 /// Read a COLMAP text model written by the port back as poses + tracks.
@@ -1293,8 +1301,55 @@ pub fn build_euroc_dataset(
 
 #[cfg(test)]
 mod tests {
-    use super::sim3_ate_rmse;
+    use super::{manifest_camera, sim3_ate_rmse};
     use nalgebra::{Rotation3, Vector3};
+    use visloc_core::types::{Camera, CameraModel};
+
+    /// A lens goes into the manifest as its COLMAP model and parameters,
+    /// exactly (they read back as a `cameras.txt` row); a pinhole and a
+    /// panorama as before.
+    #[test]
+    fn manifest_rows_carry_the_lens() {
+        let fisheye = Camera {
+            id: 1,
+            model: CameraModel::ThinPrismFisheye,
+            width: 752,
+            height: 480,
+            params: vec![
+                541.911,
+                541.618,
+                413.804,
+                216.021,
+                -0.073603,
+                -0.0389836,
+                0.000245096,
+                -0.000164134,
+                0.0488935,
+                -0.0407165,
+                0.00180289,
+                0.00883219,
+            ],
+        };
+        let (k, suffix) = manifest_camera(&fisheye).unwrap();
+        assert_eq!(k, [541.911, 541.618, 413.804, 216.021]);
+        let row = format!(
+            "1{}",
+            suffix.replacen(" THIN_PRISM_FISHEYE", " THIN_PRISM_FISHEYE 752 480", 1)
+        );
+        let back = visloc_io::colmap::parse_cameras_txt(&row).unwrap();
+        assert_eq!(back[0], fisheye);
+        // visloc's pinhole with trailing k1 k2 is COLMAP's OPENCV.
+        let radial = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, -0.1, 0.01);
+        let (_, suffix) = manifest_camera(&radial).unwrap();
+        assert_eq!(suffix, " OPENCV 500 500 320 240 -0.1 0.01 0 0");
+        let pinhole = Camera::pinhole(1, 640, 480, 500.0, 501.0, 320.0, 240.0);
+        assert_eq!(
+            manifest_camera(&pinhole).unwrap(),
+            ([500.0, 501.0, 320.0, 240.0], String::new())
+        );
+        let panorama = Camera::equirectangular(1, 2048, 1024);
+        assert_eq!(manifest_camera(&panorama).unwrap().1, " EQUIRECTANGULAR");
+    }
 
     #[test]
     fn sim3_ate_is_zero_for_a_similar_trajectory_and_positive_otherwise() {

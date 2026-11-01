@@ -81,6 +81,7 @@ use nalgebra::{Point2, Quaternion, UnitQuaternion, Vector3};
 use thiserror::Error;
 
 use visloc_core::geometry::SE3;
+use visloc_core::types::CameraModel;
 use visloc_vision::two_view::{ConfigurationType, CorrespondenceGraph, PairMatches};
 
 use super::reconstruction::{Camera, Image, Point2D};
@@ -420,7 +421,9 @@ struct ParsedRigManifest {
 /// contract `examples/generalized_rig_sfm.rs::parse_manifest` reads (see
 /// module doc for why that function itself can't be called from here).
 /// Not in that contract: a sensor row may end in a camera model name,
-/// `EQUIRECTANGULAR` for a 360° panorama of `width x height` px.
+/// `EQUIRECTANGULAR` for a 360° panorama of `width x height` px, or any
+/// other COLMAP model followed by its whole `PARAMS[]` as `cameras.txt`
+/// lists them (which then replace `fx fy cx cy`), for a lens.
 fn parse_rig_manifest(path: &Path) -> Result<ParsedRigManifest, DatabaseCacheError> {
     let contents = fs::read_to_string(path).map_err(|source| DatabaseCacheError::Io {
         path: path.display().to_string(),
@@ -441,19 +444,39 @@ fn parse_rig_manifest(path: &Path) -> Result<ParsedRigManifest, DatabaseCacheErr
         };
         match tokens.first().copied() {
             Some("S") => {
-                // An optional 17th field names the camera model: only
-                // `EQUIRECTANGULAR` (its intrinsics fields are ignored).
-                let spherical = match tokens.get(16).copied() {
-                    _ if tokens.len() > 17 || tokens.len() < 16 => {
-                        return Err(err(format!(
-                            "sensor row requires 16 or 17 fields, found {}",
-                            tokens.len()
-                        )));
+                // An optional 17th field names the camera model:
+                // `EQUIRECTANGULAR` (its intrinsics fields are ignored), or a
+                // lens model followed by its parameters.
+                if tokens.len() < 16 {
+                    return Err(err(format!(
+                        "sensor row requires at least 16 fields, found {}",
+                        tokens.len()
+                    )));
+                }
+                let model = tokens
+                    .get(16)
+                    .map(|name| CameraModel::from_colmap_name(name));
+                let params = (17..tokens.len())
+                    .map(|i| parse_field::<f64>(&tokens, i, &err))
+                    .collect::<Result<Vec<f64>, _>>()?;
+                let spherical = model == Some(CameraModel::Equirectangular);
+                let lens = match model {
+                    None | Some(CameraModel::Pinhole | CameraModel::Equirectangular)
+                        if params.is_empty() =>
+                    {
+                        None
                     }
-                    None | Some("PINHOLE") => false,
-                    Some("EQUIRECTANGULAR") => true,
-                    Some(other) => {
-                        return Err(err(format!("unsupported sensor camera model {other:?}")));
+                    Some(ref model) if model.colmap_param_count() == Some(params.len()) => {
+                        Some(model.clone())
+                    }
+                    Some(model @ CameraModel::Unknown(_)) => {
+                        return Err(err(format!("unsupported sensor camera model {model:?}")));
+                    }
+                    model => {
+                        return Err(err(format!(
+                            "sensor camera model {model:?} with {} parameters",
+                            params.len()
+                        )));
                     }
                 };
                 let index: usize = parse_field(&tokens, 1, &err)?;
@@ -478,10 +501,16 @@ fn parse_rig_manifest(path: &Path) -> Result<ParsedRigManifest, DatabaseCacheErr
                 sensors.push(ManifestSensor {
                     index,
                     camera_id,
-                    camera: if spherical {
-                        Camera::equirectangular(camera_id, width, height)
-                    } else {
-                        Camera::pinhole(camera_id, width, height, fx, fy, cx, cy)
+                    camera: match lens {
+                        Some(model) => Camera {
+                            id: camera_id,
+                            model,
+                            width,
+                            height,
+                            params,
+                        },
+                        None if spherical => Camera::equirectangular(camera_id, width, height),
+                        None => Camera::pinhole(camera_id, width, height, fx, fy, cx, cy),
                     },
                     sensor_from_rig: SE3::new(
                         UnitQuaternion::new_normalize(quaternion),
@@ -797,12 +826,42 @@ mod tests {
             manifest.sensors[1].camera,
             Camera::pinhole(2, 640, 480, 500.0, 500.0, 320.0, 240.0)
         );
+        // A lens model's parameters follow its name and replace fx fy cx cy.
         fs::write(
             &path,
-            "S 0 1 640 480 500 500 320 240 1 0 0 0 0 0 0 OPENCV\n",
+            "S 0 1 752 480 0 0 0 0 1 0 0 0 0 0 0 THIN_PRISM_FISHEYE \
+             541.9 541.6 413.8 216.0 -0.07 -0.04 0.0002 -0.0002 0.05 -0.04 0.002 0.009\n\
+             S 1 2 640 480 0 0 0 0 1 0 0 0 0.1 0 0 OPENCV 500 501 320 240 -0.2 0.05 0.001 0.002\n\
+             F 0 a.png 0\n",
         )
         .unwrap();
-        assert!(parse_rig_manifest(&path).is_err());
+        let manifest = parse_rig_manifest(&path).unwrap();
+        assert_eq!(
+            manifest.sensors[0].camera.model,
+            CameraModel::ThinPrismFisheye
+        );
+        assert_eq!(manifest.sensors[0].camera.params.len(), 12);
+        assert_eq!(manifest.sensors[0].camera.params[4], -0.07);
+        assert_eq!(
+            manifest.sensors[1].camera,
+            Camera {
+                id: 2,
+                model: CameraModel::OpenCv,
+                width: 640,
+                height: 480,
+                params: vec![500.0, 501.0, 320.0, 240.0, -0.2, 0.05, 0.001, 0.002],
+            }
+        );
+        // A lens without its parameters, with too few, or an unknown model.
+        for row in [
+            "S 0 1 640 480 500 500 320 240 1 0 0 0 0 0 0 OPENCV\n",
+            "S 0 1 640 480 500 500 320 240 1 0 0 0 0 0 0 OPENCV 500 500 320 240 0.1\n",
+            "S 0 1 640 480 500 500 320 240 1 0 0 0 0 0 0 EQUIRECTANGULAR 640\n",
+            "S 0 1 640 480 500 500 320 240 1 0 0 0 0 0 0 SOMETHING_ELSE 1 2 3\n",
+        ] {
+            fs::write(&path, row).unwrap();
+            assert!(parse_rig_manifest(&path).is_err(), "{row}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

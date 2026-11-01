@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
 //!     (--images <folder> | --insv VIDEO.insv) --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
-//!     [--principal-point CX,CY] \
+//!     [--principal-point CX,CY] [--camera "MODEL W H PARAMS..."] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
@@ -53,7 +53,9 @@ use visloc_gsplat_train::dual_fisheye::LensCalibration;
 use visloc_gsplat_train::init::seed_scene;
 use visloc_gsplat_train::mesh::{extract_from_splat, MeshOptions};
 use visloc_gsplat_train::metrics::psnr_masked;
-use visloc_gsplat_train::photos::{build_photo_dataset, calibrate_insv_lenses, PhotoSfmConfig};
+use visloc_gsplat_train::photos::{
+    build_photo_dataset, calibrate_insv_lenses, parse_camera_row, PhotoSfmConfig,
+};
 use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
 const USAGE: &str = "\
@@ -73,6 +75,10 @@ SfM:
   --max-size 1600          longest image side
   --focal PX               focal length prior (default: EXIF, else 1.2 x the long side)
   --principal-point CX,CY  principal point prior (default: image centre)
+  --camera \"MODEL W H P..\" the photos' calibrated camera, a cameras.txt row without its id
+                           (any COLMAP model, e.g. OPENCV_FISHEYE or THIN_PRISM_FISHEYE),
+                           scaled to the working images and held fixed; SfM and training
+                           follow its lens on the images as they are (no mesh for a fisheye)
   --no-refine-intrinsics   keep the intrinsics fixed
   --refine-intrinsics-max N  skip the final intrinsics refinement above N photos
   --exhaustive-max 300     match every pair up to this many photos
@@ -130,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--steps" => steps = next()?.parse()?,
             "--max-size" => sfm.max_size = next()?.parse()?,
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
+            "--camera" => sfm.camera = Some(parse_camera_row(&next()?)?),
             "--principal-point" => {
                 let value = next()?;
                 let (x, y) = value
@@ -301,7 +308,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     save_ply(&scene, &ply)?;
     println!("wrote {}", ply.display());
 
-    if mesh {
+    // The mesh back-projects depth through a pinhole; a fisheye has none.
+    let fisheye = dataset
+        .train
+        .iter()
+        .any(|v| v.camera.pinhole_geometry().is_none());
+    if mesh && fisheye {
+        println!("mesh: skipped (fisheye camera)");
+    }
+    if mesh && !fisheye {
         let views: Vec<_> = dataset
             .train
             .iter()

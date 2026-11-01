@@ -8,7 +8,8 @@
 //! VISLOC_GSPLAT_CUDA_LIB=/tmp/gsplat_cuda/libvisloc_gsplat_cuda.so \
 //!   cargo run --release -p visloc-gsplat-cuda --features photos --example gsplat_photos_cuda -- \
 //!   --images <folder> --out <work dir> [--max-size 1600] [--focal F] \
-//!   [--exhaustive-max 300] [--window 20] [--max-keypoints 8192] [--cpu-match]
+//!   [--camera "MODEL W H PARAMS..."] [--exhaustive-max 300] [--window 20] \
+//!   [--max-keypoints 8192] [--cpu-match]
 //! ```
 //!
 //! `--cpu-match` matches on the CPU instead, for comparison: the matches are
@@ -20,7 +21,7 @@ use std::time::Instant;
 
 use visloc_gsplat_cuda::matching::CudaPairMatcher;
 use visloc_gsplat_cuda::CudaGsplat;
-use visloc_gsplat_train::photos::{build_photo_dataset, PhotoSfmConfig};
+use visloc_gsplat_train::photos::{build_photo_dataset, parse_camera_row, PhotoSfmConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -40,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--out" => out = Some(PathBuf::from(next()?)),
             "--max-size" => sfm.max_size = next()?.parse()?,
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
+            "--camera" => sfm.camera = Some(parse_camera_row(&next()?)?),
             "--exhaustive-max" => sfm.exhaustive_max = next()?.parse()?,
             "--window" => sfm.window = next()?.parse()?,
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
