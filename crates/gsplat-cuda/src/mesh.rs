@@ -40,9 +40,9 @@ impl MeshDepth {
     }
 }
 
-/// The views as the pinhole-only paths take them (a distorted pinhole
-/// without its distortion), or an error for a fisheye view: the planar
-/// depth and the device TSDF back-project through a pinhole.
+/// The views as the device TSDF takes them (a distorted pinhole without its
+/// distortion), or an error for a fisheye view: it back-projects through a
+/// pinhole.
 fn geometry_views(views: &[&CameraView], what: &str) -> Result<Vec<CameraView>, GsplatCudaError> {
     pinhole_geometry_views(views).ok_or_else(|| {
         GsplatCudaError::Input(format!(
@@ -53,10 +53,8 @@ fn geometry_views(views: &[&CameraView], what: &str) -> Result<Vec<CameraView>, 
 
 /// Render the current scene's `depth` (SH up to `sh_degree`) from every
 /// view, fuse, extract, filter by `support` and drop small components.
-/// Returns the mesh and a one-line summary. The median and expected depths
-/// are rendered and fused through each view's lens, fisheyes included; the
-/// planar depth takes a distorted pinhole without its distortion and
-/// refuses a fisheye.
+/// Returns the mesh and a one-line summary. Every depth is rendered and
+/// fused through each view's lens, fisheyes included.
 pub fn extract_mesh(
     gs: &mut CudaGsplat,
     sh_degree: u32,
@@ -65,13 +63,7 @@ pub fn extract_mesh(
     support: &[[f32; 3]],
     opts: &MeshOptions,
 ) -> Result<(Mesh, String), GsplatCudaError> {
-    let geometry: Vec<CameraView> = if depth == MeshDepth::Planar {
-        geometry_views(views, "the planar depth")?
-    } else {
-        views.iter().map(|&v| *v).collect()
-    };
-    let views: Vec<&CameraView> = geometry.iter().collect();
-    fuse_views(&views, support, opts, |view| {
+    fuse_views(views, support, opts, |view| {
         let frame = gs.render_depth(view, [0.0; 3], sh_degree, depth == MeshDepth::Planar)?;
         let rgb = frame
             .rgb

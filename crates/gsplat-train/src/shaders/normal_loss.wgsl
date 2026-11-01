@@ -3,8 +3,10 @@
 // Per pixel p the renderer gives N_p = sum_i w_i n_i (alpha-weighted
 // camera-space normals) and D_p = sum_i w_i z_i (alpha-weighted depth), and
 // alpha_p = 1 - T_p. With the surface point P(q) = (D_q / alpha_q) r(q),
-// r(q) = ((qx + 0.5 - cx) / fx, (qy + 0.5 - cy) / fy, 1), the normal of the
-// depth map is n_d = s c / |c|, c = (P(x+1) - P(x-1)) x (P(y+1) - P(y-1)),
+// r(q) = ((qx + 0.5 - cx) / fx, (qy + 0.5 - cy) / fy, 1) (through a lens its
+// pixel ray from `rays`, and D the lens's depth: z, or a fisheye's distance),
+// the normal of the depth map is n_d = s c / |c|,
+// c = (P(x+1) - P(x-1)) x (P(y+1) - P(y-1)),
 // with s = +-1 so that it faces the camera. The loss is
 //   L = weight / npix * sum_p (1 - N_p . n_d(p))
 // over pixels whose own and 4-neighbour opacities exceed 0.5. Gradients go to
@@ -25,7 +27,8 @@ struct NormalUniforms {
     cy: f32,
     // weight / npix
     coef: f32,
-    _pad: u32,
+    // 1: r(q) is rays[q] (the camera has a lens).
+    lensed: u32,
 };
 
 @group(0) @binding(0) var<uniform> nu: NormalUniforms;
@@ -34,8 +37,13 @@ struct NormalUniforms {
 @group(0) @binding(3) var<storage, read_write> d_geo: array<vec4<f32>>;
 // Two vec4 per pixel: (dL/da, 0), (dL/db, 0).
 @group(0) @binding(4) var<storage, read_write> gab: array<vec4<f32>>;
+// Per pixel, its ray through the lens (xyz); unread for a pinhole.
+@group(0) @binding(5) var<storage, read> rays: array<vec4<f32>>;
 
 fn ray(x: u32, y: u32) -> vec3<f32> {
+    if (nu.lensed != 0u) {
+        return rays[y * nu.w + x].xyz;
+    }
     return vec3<f32>((f32(x) + 0.5 - nu.cx) / nu.fx, (f32(y) + 0.5 - nu.cy) / nu.fy, 1.0);
 }
 

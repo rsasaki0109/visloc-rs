@@ -157,6 +157,53 @@ __device__ void lens_coords(const GscCamera& c, const T p[3], T m[2], T J[2][3])
 // The angle between the optical axis and the ray to camera-space (x, y, z).
 __device__ inline float lens_ray_angle(float x, float y, float z) { return atan2f(sqrtf(x * x + y * y), z); }
 
+// The ray through the pixel at (sx, sy) (a pixel centre is + 0.5), the
+// inverse of the lens (gsplat-core's lens::unproject): (x, y, 1) for a
+// pinhole projection, so that z times it is the point at depth z; a unit
+// vector for an equidistant one (the distance times it). The distortion is
+// inverted by Newton's method; zero where that does not land back on the
+// pixel (past a fold of the polynomial).
+__device__ inline float3 lens_pixel_ray(const GscCamera& c, float sx, float sy) {
+    const float mx = (sx - c.cx) / c.fx, my = (sy - c.cy) / c.fy;
+    const float* k = c.lens;
+    bool distorted = false;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) distorted |= k[i] != 0.f;
+    float u = mx, v = my;
+    if (distorted) {
+        const float k1 = k[0], k2 = k[1], k3 = k[2], k4 = k[3], p1 = k[4], p2 = k[5], sx1 = k[6], sy1 = k[7];
+        float res = 0.f;
+        for (int it = 0; it < 30; ++it) {
+            const float t2 = u * u + v * v;
+            const float radial = t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4)));
+            const float g = k1 + t2 * (2.f * k2 + t2 * (3.f * k3 + t2 * (4.f * k4)));
+            const float uu = u * u, vv = v * v, uv = u * v;
+            const float du = u * radial + 2.f * p1 * uv + p2 * (t2 + 2.f * uu) + sx1 * t2;
+            const float dv = v * radial + 2.f * p2 * uv + p1 * (t2 + 2.f * vv) + sy1 * t2;
+            const float rx = u + du - mx, ry = v + dv - my;
+            res = fabsf(rx) + fabsf(ry);
+            const float cross = 2.f * uv * g + 2.f * p1 * u + 2.f * p2 * v;
+            const float d00 = 1.f + radial + 2.f * uu * g + 2.f * p1 * v + 6.f * p2 * u + 2.f * sx1 * u;
+            const float d01 = cross + 2.f * sx1 * v;
+            const float d10 = cross + 2.f * sy1 * u;
+            const float d11 = 1.f + radial + 2.f * vv * g + 2.f * p2 * u + 6.f * p1 * v + 2.f * sy1 * v;
+            const float det = d00 * d11 - d01 * d10;
+            if (!(fabsf(det) > 1e-12f)) return make_float3(0.f, 0.f, 0.f);
+            const float su = (d11 * rx - d01 * ry) / det, sv = (d00 * ry - d10 * rx) / det;
+            u -= su;
+            v -= sv;
+            if (fabsf(su) + fabsf(sv) < 1e-7f) break;
+        }
+        if (!(res < 1e-4f)) return make_float3(0.f, 0.f, 0.f);
+    }
+    if (c.lens_kind != kLensEquidistant) return make_float3(u, v, 1.f);
+    const float theta = sqrtf(u * u + v * v);
+    if (!(theta < 3.14159265f)) return make_float3(0.f, 0.f, 0.f);
+    if (theta < 1e-12f) return make_float3(0.f, 0.f, 1.f);
+    const float s = sinf(theta) / theta;
+    return make_float3(u * s, v * s, cosf(theta));
+}
+
 // lens_coords for any camera-space point p (lens.rs's extended_lens_coords):
 // within max_theta the lens itself; past it, the lens's first-order
 // extension at q, p turned towards the optical axis onto the max_theta cone

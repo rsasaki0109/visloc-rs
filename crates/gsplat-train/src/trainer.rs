@@ -6,7 +6,7 @@
 //! loss); per-group Adam learning rates follow the Inria defaults (the mean's
 //! rate is scaled by the scene extent and decays exponentially).
 
-use visloc_gsplat_core::camera::CameraView;
+use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::cpu_render::Image;
 use visloc_gsplat_core::gaussian::Scene;
 use visloc_gsplat_render::{GpuContext, GpuError, GpuScene, PackedScene, PrefixScanner, Renderer};
@@ -105,7 +105,7 @@ struct NormalUniforms {
     cx: f32,
     cy: f32,
     coef: f32,
-    _pad: u32,
+    lensed: u32,
 }
 
 #[repr(C)]
@@ -134,6 +134,30 @@ struct NormalLoss {
     depth_grad: wgpu::ComputePipeline,
     uniforms: wgpu::Buffer,
     gab: wgpu::Buffer,
+    /// Bound for a pinhole, which computes its rays.
+    no_rays: wgpu::Buffer,
+    /// Each lens camera's pixel rays (normal_loss.wgsl's `rays`), made on
+    /// the host once per camera: a rig has a few.
+    rays: Vec<(PinholeCamera, wgpu::Buffer)>,
+}
+
+/// The pixel rays of a lens camera as normal_loss.wgsl reads them, one
+/// vec4 per pixel ([`visloc_gsplat_core::lens::unproject`] at the pixel
+/// centre; 0 where it fails).
+fn lens_rays(cam: &PinholeCamera) -> Vec<[f32; 4]> {
+    use rayon::prelude::*;
+    let w = cam.width as usize;
+    (0..w * cam.height as usize)
+        .into_par_iter()
+        .map(|i| {
+            let m = [
+                ((i % w) as f64 + 0.5 - f64::from(cam.cx)) / f64::from(cam.fx),
+                ((i / w) as f64 + 0.5 - f64::from(cam.cy)) / f64::from(cam.fy),
+            ];
+            visloc_gsplat_core::lens::unproject(&cam.lens, m)
+                .map_or([0.0; 4], |r| [r[0] as f32, r[1] as f32, r[2] as f32, 0.0])
+        })
+        .collect()
 }
 
 /// The trainer. Owns the renderer (and so the scene on the GPU).
@@ -294,6 +318,99 @@ fn groups_2d(threads: u32) -> (u32, u32) {
     (x, g.div_ceil(x))
 }
 
+impl NormalLoss {
+    /// The kernels and scratch for images of `npix` pixels.
+    fn new(dev: &wgpu::Device, npix: u32) -> Self {
+        Self {
+            normal_grad: pipeline(
+                dev,
+                "normal_grad",
+                include_str!("shaders/normal_loss.wgsl"),
+                "normal_grad",
+            ),
+            depth_grad: pipeline(
+                dev,
+                "depth_grad",
+                include_str!("shaders/normal_loss.wgsl"),
+                "depth_grad",
+            ),
+            uniforms: uniform(dev, "normal_uniforms", 32),
+            gab: storage(dev, "normal_gab", npix as u64 * 32),
+            no_rays: storage(dev, "normal_no_rays", 16),
+            rays: Vec::new(),
+        }
+    }
+
+    /// Encode both passes for a render from `cam`: the gradient of
+    /// `coef * sum (1 - N . n_d)` with respect to the geometry channels
+    /// `out_geo` (N, D) into `d_geo`, given the transmittance `final_t`.
+    #[allow(clippy::too_many_arguments)]
+    fn encode(
+        &mut self,
+        dev: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::ComputePass<'_>,
+        cam: &PinholeCamera,
+        coef: f32,
+        out_geo: &wgpu::Buffer,
+        final_t: &wgpu::Buffer,
+        d_geo: &wgpu::Buffer,
+    ) {
+        let npix = cam.width * cam.height;
+        let lensed = !cam.lens.is_pinhole();
+        let rays = if !lensed {
+            &self.no_rays
+        } else {
+            let at = match self.rays.iter().position(|(c, _)| c == cam) {
+                Some(at) => at,
+                None => {
+                    let buf = storage(dev, "normal_rays", npix as u64 * 16);
+                    queue.write_buffer(&buf, 0, bytemuck::cast_slice(&lens_rays(cam)));
+                    self.rays.push((*cam, buf));
+                    self.rays.len() - 1
+                }
+            };
+            &self.rays[at].1
+        };
+        let nu = NormalUniforms {
+            w: cam.width,
+            h: cam.height,
+            fx: cam.fx,
+            fy: cam.fy,
+            cx: cam.cx,
+            cy: cam.cy,
+            coef,
+            lensed: lensed as u32,
+        };
+        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&nu));
+        let bg_n = bind(
+            dev,
+            &self.normal_grad,
+            "normal_grad",
+            &[&self.uniforms, out_geo, final_t, d_geo, &self.gab, rays],
+        );
+        let bg_d = bind_slots(
+            dev,
+            &self.depth_grad,
+            "depth_grad",
+            &[
+                (0, &self.uniforms),
+                (2, final_t),
+                (3, d_geo),
+                (4, &self.gab),
+                (5, rays),
+            ],
+        );
+        let (x, y) = groups_2d(npix);
+        pass.set_pipeline(&self.normal_grad);
+        pass.set_bind_group(0, &bg_n, &[]);
+        pass.dispatch_workgroups(x, y, 1);
+        pass.set_pipeline(&self.depth_grad);
+        pass.set_bind_group(0, &bg_d, &[]);
+        pass.dispatch_workgroups(x, y, 1);
+    }
+}
+
 /// Blocking read of `len` f32 values from a device buffer.
 fn read_f32(dev: &wgpu::Device, queue: &wgpu::Queue, buf: &wgpu::Buffer, len: usize) -> Vec<f32> {
     if len == 0 {
@@ -355,17 +472,7 @@ impl Trainer {
         init: &Scene,
         cfg: TrainConfig,
     ) -> Result<Self, TrainError> {
-        let mut views = dataset.train.clone();
-        // The depth-normal loss back-projects pixels through a pinhole: with
-        // it a distorted pinhole trains without its distortion, a fisheye
-        // not at all.
-        if cfg.normal_weight > 0.0 {
-            for v in &mut views {
-                v.camera = v.camera.pinhole_geometry().ok_or(GpuError::Unsupported(
-                    "the depth-normal loss with fisheye views",
-                ))?;
-            }
-        }
+        let views = dataset.train.clone();
         let first = views.first().ok_or(TrainError::NoViews)?;
         let (width, height) = (first.camera.camera.width, first.camera.camera.height);
         for v in dataset.train.iter().chain(&dataset.eval) {
@@ -787,55 +894,21 @@ impl Trainer {
                     pass.dispatch_workgroups(1, 1, 1);
                 }
                 if normal_on {
-                    let nl = self.normal.get_or_insert_with(|| NormalLoss {
-                        normal_grad: pipeline(
-                            &dev,
-                            "normal_grad",
-                            include_str!("shaders/normal_loss.wgsl"),
-                            "normal_grad",
-                        ),
-                        depth_grad: pipeline(
-                            &dev,
-                            "depth_grad",
-                            include_str!("shaders/normal_loss.wgsl"),
-                            "depth_grad",
-                        ),
-                        uniforms: uniform(&dev, "normal_uniforms", 32),
-                        gab: storage(&dev, "normal_gab", npix as u64 * 32),
-                    });
-                    let cam = &view.camera;
-                    let nu = NormalUniforms {
-                        w: self.width,
-                        h: self.height,
-                        fx: cam.fx,
-                        fy: cam.fy,
-                        cx: cam.cx,
-                        cy: cam.cy,
-                        coef: self.cfg.normal_weight / npix as f32,
-                        _pad: 0,
-                    };
-                    queue.write_buffer(&nl.uniforms, 0, bytemuck::bytes_of(&nu));
+                    let nl = self
+                        .normal
+                        .get_or_insert_with(|| NormalLoss::new(&dev, npix));
                     let (out_geo, d_geo, final_t) =
                         st.renderer.geo_buffers().expect("geometry enabled above");
-                    let bg_n = bind(
+                    nl.encode(
                         &dev,
-                        &nl.normal_grad,
-                        "normal_grad",
-                        &[&nl.uniforms, out_geo, final_t, d_geo, &nl.gab],
+                        &queue,
+                        &mut pass,
+                        &view.camera,
+                        self.cfg.normal_weight / npix as f32,
+                        out_geo,
+                        final_t,
+                        d_geo,
                     );
-                    let bg_d = bind_slots(
-                        &dev,
-                        &nl.depth_grad,
-                        "depth_grad",
-                        &[(0, &nl.uniforms), (2, final_t), (3, d_geo), (4, &nl.gab)],
-                    );
-                    let (x, y) = groups_2d(npix);
-                    pass.set_pipeline(&nl.normal_grad);
-                    pass.set_bind_group(0, &bg_n, &[]);
-                    pass.dispatch_workgroups(x, y, 1);
-                    pass.set_pipeline(&nl.depth_grad);
-                    pass.set_bind_group(0, &bg_d, &[]);
-                    pass.dispatch_workgroups(x, y, 1);
                 }
             }
             queue.submit(Some(enc.finish()));
@@ -1382,5 +1455,170 @@ impl Trainer {
             },
             self.sh_degree,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Vector3;
+    use visloc_gsplat_core::lens::{Lens, Projection};
+
+    /// The depth-normal loss on the CPU in f64 (normal_loss.wgsl's), the
+    /// points along `rays`.
+    fn normal_loss_cpu(
+        w: usize,
+        h: usize,
+        rays: &[Vector3<f64>],
+        coef: f64,
+        geo: &[f64],
+        alpha: &[f64],
+    ) -> f64 {
+        let point = |x: usize, y: usize| {
+            let i = y * w + x;
+            rays[i] * (geo[i * 4 + 3] / alpha[i].max(1e-6))
+        };
+        let mut sum = 0.0;
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let i = y * w + x;
+                if [i, i - 1, i + 1, i - w, i + w]
+                    .iter()
+                    .any(|&j| alpha[j] <= 0.5)
+                {
+                    continue;
+                }
+                let c =
+                    (point(x + 1, y) - point(x - 1, y)).cross(&(point(x, y + 1) - point(x, y - 1)));
+                if c.norm() <= 1e-12 {
+                    continue;
+                }
+                let nd = c.normalize();
+                let s = if nd.dot(&point(x, y)) > 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let big_n = Vector3::new(geo[i * 4], geo[i * 4 + 1], geo[i * 4 + 2]);
+                sum += 1.0 - s * big_n.dot(&nd);
+            }
+        }
+        coef * sum
+    }
+
+    /// The wgpu depth-normal loss's gradients through a pinhole, a
+    /// distorted pinhole and a fisheye, against central differences of the
+    /// f64 loss on made-up geometry channels: a bumpy wall seen through each
+    /// lens's rays, at its depth, with a few transparent pixels.
+    #[test]
+    fn gpu_normal_loss_follows_the_lens() {
+        let Some(ctx) = visloc_gsplat_render::try_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let (dev, queue) = (&ctx.device, &ctx.queue);
+        let (w, h) = (24u32, 20u32);
+        let npix = (w * h) as usize;
+        let base = PinholeCamera::new(w, h, 20.0, 20.0, 11.5, 9.5);
+        let cams = [
+            ("pinhole", base),
+            (
+                "radtan",
+                base.with_lens(Lens::new(
+                    Projection::Pinhole,
+                    [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+                )),
+            ),
+            (
+                "fisheye",
+                base.with_lens(Lens::new(
+                    Projection::Equidistant,
+                    [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+                )),
+            ),
+        ];
+        let mut nl = NormalLoss::new(dev, w * h);
+        for (name, cam) in cams {
+            let rays: Vec<Vector3<f64>> = lens_rays(&cam)
+                .iter()
+                .map(|r| Vector3::new(r[0], r[1], r[2]).cast::<f64>())
+                .collect();
+            // A wall z = 4 + 0.3 x + bumps, at the lens's depth along each
+            // ray (z through a pinhole projection, the distance through an
+            // equidistant one); N a perturbed normal, both times alpha.
+            let mut geo = vec![0.0f32; npix * 4];
+            let mut final_t = vec![0.0f32; npix];
+            for i in 0..npix {
+                let (x, y) = ((i % w as usize) as f64, (i / w as usize) as f64);
+                let r = rays[i];
+                let z = 4.0 + 0.3 * r.x / r.z * 4.0 + 0.05 * (0.7 * x).sin() * (0.5 * y).cos();
+                let depth = z / r.z;
+                let alpha = if i % 37 == 5 {
+                    0.3
+                } else {
+                    0.8 + 0.15 * (0.3 * x + 0.2 * y).sin()
+                };
+                let n = Vector3::new(-0.3 + 0.1 * (0.4 * y).sin(), 0.05 * (0.6 * x).cos(), -1.0)
+                    .normalize();
+                for k in 0..3 {
+                    geo[i * 4 + k] = (alpha * n[k]) as f32;
+                }
+                geo[i * 4 + 3] = (alpha * depth) as f32;
+                final_t[i] = (1.0 - alpha) as f32;
+            }
+            let out_geo = storage(dev, "out_geo", npix as u64 * 16);
+            queue.write_buffer(&out_geo, 0, bytemuck::cast_slice(&geo));
+            let ft = storage(dev, "final_t", npix as u64 * 4);
+            queue.write_buffer(&ft, 0, bytemuck::cast_slice(&final_t));
+            let d_geo = storage(dev, "d_geo", npix as u64 * 16);
+            let coef = 0.7 / npix as f32;
+            let mut enc =
+                dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                nl.encode(dev, queue, &mut pass, &cam, coef, &out_geo, &ft, &d_geo);
+            }
+            let staging = dev.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: npix as u64 * 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            enc.copy_buffer_to_buffer(&d_geo, 0, &staging, 0, npix as u64 * 16);
+            queue.submit(Some(enc.finish()));
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            dev.poll(wgpu::PollType::wait_indefinitely()).ok();
+            let gpu: Vec<f32> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap()).to_vec();
+
+            let geo64: Vec<f64> = geo.iter().map(|&v| f64::from(v)).collect();
+            let alpha: Vec<f64> = final_t.iter().map(|&t| 1.0 - f64::from(t)).collect();
+            let coef = f64::from(coef);
+            let (w, h) = (w as usize, h as usize);
+            let (mut worst, mut scale) = ([0.0f64; 2], [0.0f64; 2]);
+            for (j, &g) in gpu.iter().enumerate() {
+                let hh = 1e-6 * geo64[j].abs().max(1.0);
+                let mut plus = geo64.clone();
+                plus[j] += hh;
+                let mut minus = geo64.clone();
+                minus[j] -= hh;
+                let want = (normal_loss_cpu(w, h, &rays, coef, &plus, &alpha)
+                    - normal_loss_cpu(w, h, &rays, coef, &minus, &alpha))
+                    / (2.0 * hh);
+                // Channel 0: the normal, 1: the depth.
+                let c = usize::from(j % 4 == 3);
+                scale[c] = scale[c].max(want.abs());
+                worst[c] = worst[c].max((f64::from(g) - want).abs());
+            }
+            let rel = [worst[0] / scale[0], worst[1] / scale[1]];
+            eprintln!(
+                "{name}: d_normal off by {:.2e}, d_depth by {:.2e}",
+                rel[0], rel[1]
+            );
+            assert!(rel[0] < 1e-4, "{name}: d_normal off by {:.2e}", rel[0]);
+            assert!(rel[1] < 1e-3, "{name}: d_depth off by {:.2e}", rel[1]);
+        }
+        // One ray buffer per lens camera.
+        assert_eq!(nl.rays.len(), 2);
     }
 }

@@ -93,8 +93,7 @@ impl GscCamera {
         }
     }
 
-    /// The camera is an undistorted pinhole, which the planar depth, the
-    /// normals and the TSDF need.
+    /// The camera is an undistorted pinhole, which the device TSDF needs.
     pub fn is_pinhole(&self) -> bool {
         self.lens_kind == 0
     }
@@ -340,8 +339,9 @@ pub struct Frame {
 pub struct DepthFrame {
     /// Row-major RGB, `width * height * 3` floats (background included).
     pub rgb: Vec<f32>,
-    /// Per pixel, the median depth: camera z of the splat at which the
-    /// transmittance first drops to 0.5 or below (0 when it never does).
+    /// Per pixel, the median depth: the depth of the splat at which the
+    /// transmittance first drops to 0.5 or below (0 when it never does), as
+    /// camera z, or a fisheye's distance from the camera centre.
     pub depth: Vec<f32>,
     /// Per pixel, the opacity `1 - T`.
     pub opacity: Vec<f32>,
@@ -676,7 +676,8 @@ impl CudaGsplat {
     /// (the wgpu renderer's `render_depth`), e.g. for mesh extraction. With
     /// `planar` the depth is where the pixel's ray meets the plane of the splat
     /// that takes the transmittance to 0.5 (normal: its smallest axis)
-    /// instead of that splat's centre depth.
+    /// instead of that splat's centre depth. Through a lens the ray is the
+    /// pixel's through it and the depth the lens's (see [`DepthFrame::depth`]).
     pub fn render_depth(
         &mut self,
         view: &CameraView,

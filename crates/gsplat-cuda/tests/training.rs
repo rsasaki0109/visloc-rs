@@ -6,6 +6,7 @@
 use nalgebra::{Quaternion, Rotation3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{sh_rest_coeffs_per_channel, Gaussian, Scene};
+use visloc_gsplat_core::lens::{Lens, Projection};
 use visloc_gsplat_cuda::{CudaGsplat, GscCamera, StepParams};
 use visloc_gsplat_render::packing::PackedScene;
 use visloc_gsplat_train::config::pack_rgba8;
@@ -284,17 +285,23 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
 }
 
 /// The depth-normal loss trains: with only the rotations learning, the
-/// splats of a dense scene, fitted to their own renders, turn until their
-/// blended normals agree better with the depth map's. Returns the mean
-/// depth-normal loss every 50 steps.
-fn fit_normals(gs: &mut CudaGsplat) -> Vec<f64> {
+/// splats of a dense scene, fitted to their own renders through `lens`, turn
+/// until their blended normals agree better with the depth map's. Returns
+/// the mean depth-normal loss every 50 steps.
+fn fit_normals(gs: &mut CudaGsplat, lens: Lens) -> Vec<f64> {
     let (w, h) = (96u32, 80u32);
     let mut scene = random_scene(400, 33, 0);
     for g in scene.gaussians.iter_mut() {
         g.opacity_logit += 2.5;
     }
     let views: Vec<CameraView> = (0..4)
-        .map(|k| view(w, h, -0.12 + 0.08 * k as f32))
+        .map(|k| {
+            let v = view(w, h, -0.12 + 0.08 * k as f32);
+            CameraView {
+                camera: v.camera.with_lens(lens),
+                ..v
+            }
+        })
         .collect();
     gs.set_scene(&PackedScene::from_scene(&scene))
         .expect("upload");
@@ -342,15 +349,24 @@ fn fit_normals(gs: &mut CudaGsplat) -> Vec<f64> {
 #[test]
 fn depth_normal_loss_falls_in_training() {
     let Some(mut gs) = gsplat() else { return };
-    let mean_loss = fit_normals(&mut gs);
-    eprintln!("depth-normal loss every 50 steps {mean_loss:.4?}");
-    assert!(mean_loss[0] > 0.0, "no pixel in the depth-normal loss");
-    assert!(
-        mean_loss.last().unwrap() < &(0.7 * mean_loss[0]),
-        "the depth-normal loss fell from {:.4} to only {:.4}",
-        mean_loss[0],
-        mean_loss.last().unwrap()
+    let fisheye = Lens::new(
+        Projection::Equidistant,
+        [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
     );
+    for (name, lens) in [("pinhole", Lens::PINHOLE), ("fisheye", fisheye)] {
+        let mean_loss = fit_normals(&mut gs, lens);
+        eprintln!("{name}: depth-normal loss every 50 steps {mean_loss:.4?}");
+        assert!(
+            mean_loss[0] > 0.0,
+            "{name}: no pixel in the depth-normal loss"
+        );
+        assert!(
+            mean_loss.last().unwrap() < &(0.7 * mean_loss[0]),
+            "{name}: the depth-normal loss fell from {:.4} to only {:.4}",
+            mean_loss[0],
+            mean_loss.last().unwrap()
+        );
+    }
 }
 
 #[test]

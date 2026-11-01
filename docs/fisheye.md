@@ -63,10 +63,19 @@ Jacobian `J` of the lens replaces the pinhole one in `Σ' = J W Σ Wᵀ Jᵀ`:
   and expected depths go through the CPU TSDF) mesh fisheye splats. A
   distorted pinhole is now meshed with its distortion, where it was meshed
   without it.
-- **Pinhole only, for now.** The planar median depth, the depth-normal loss
-  and the device TSDF (`gsplat_mesh_cuda --gpu-tsdf`) still back-project
-  through a pinhole. They take a distorted pinhole without its distortion
-  and refuse fisheye views (`CameraView::pinhole_geometry`).
+- **Planar depth and the depth-normal loss.** Both follow each pixel's ray
+  through the lens and give the lens's depth: `z`, or a fisheye's distance.
+  The planar median depth is where that ray meets the splat's plane. The
+  depth-normal loss builds its surface points along the rays. The CUDA
+  library makes a camera's rays on the device (`lens_pixel_ray`, Newton's
+  method in f32) and keeps them while the camera stays. The wgpu trainer
+  makes them on the host (`lens::unproject`) once per camera and keeps one
+  buffer per camera of a rig. An undistorted pinhole computes its rays in
+  the kernels as before.
+- **Pinhole only, for now.** The device TSDF (`gsplat_mesh_cuda
+  --gpu-tsdf`) still back-projects through a pinhole. It takes a distorted
+  pinhole without its distortion and refuses fisheye views
+  (`CameraView::pinhole_geometry`).
 
 ### Verified so far
 
@@ -109,6 +118,20 @@ a 64-gaussian scene:
 CUDA agrees with the oracle within 1e-6 in the forward pass and within
 1.2e-5 of each gradient's largest value. wgpu, run on lavapipe, agrees
 within 2e-5 and 2.1e-4.
+
+The geometry channels have tests of their own:
+
+- CUDA's planar depth meets a tilted disc where each pixel's ray does,
+  within 1e-3, behind a distorted pinhole and a fisheye
+  (`lens_planar_depth_follows_the_pixel_rays`).
+- CUDA's depth-normal loss and its gradients match an f64 CPU loss built
+  on `lens::unproject`'s rays, on the six lens views, within 2.5e-6 of the
+  largest gradient (`lens_depth_normal_loss_matches_cpu`).
+- wgpu's gradients do too, through a pinhole, a distorted pinhole and a
+  fisheye, within 5.1e-6 (`gpu_normal_loss_follows_the_lens`).
+- Trained through a fisheye, the depth-normal loss falls as it does
+  through a pinhole: 0.265 to 0.094 in 300 steps, against 0.286 to 0.099
+  (`depth_normal_loss_falls_in_training`).
 
 ### ETH3D rig: delivery_area
 
@@ -177,6 +200,26 @@ Occlusion culling uses the cone that a block's bounding sphere subtends:
 eight points of its rim through the lens, their box grown by 10% and a
 pixel. It leaves the mesh unchanged (`Tsdf::cull_occluded` compares with
 it off) but saves only about 10%. Most of the time is the lens projection.
+
+### Planar depth and the depth-normal loss through the lens
+
+The same scene, with the planar median depth (`gsplat_mesh_cuda
+--planar-depth`). It also has splats trained with the depth-normal loss
+(`gsplat_train_cuda --normal-weight 0.005`, from step 7000). Mesh F1 at
+2 / 5 / 10 cm:
+
+| Splat | Median depth | Planar depth |
+|---|---|---|
+| distorted images, through the lens | 6.1 / 16.1 / 27.2 % | 7.1 / 18.5 / 29.9 % |
+| the same, with the depth-normal loss | 6.1 / 16.1 / 26.9 % | 6.8 / 17.8 / 29.1 % |
+| ETH3D's undistorted images | 7.2 / 17.9 / 29.3 % | 7.5 / 18.8 / 29.6 % |
+| the same, with the depth-normal loss | 6.2 / 15.8 / 26.1 % | 6.8 / 16.9 / 27.4 % |
+
+Planar depth through the lens closes most of the gap to the undistorted
+images: 18.5% at 5 cm, against 18.8%. The depth-normal loss runs through
+the lens, but on these images it lowers F1 with either camera, as it gave
+no gain on ETH3D's DSLR scenes. Held-out PSNR moves from 26.17 to 26.13 dB
+through the lens, and from 33.29 to 32.64 dB on the undistorted images.
 
 ## SfM: mapping through the lens
 
