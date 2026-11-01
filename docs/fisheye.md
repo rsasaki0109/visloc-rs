@@ -54,10 +54,19 @@ Jacobian `J` of the lens replaces the pinhole one in `Σ' = J W Σ Wᵀ Jᵀ`:
 - **Near the axis.** The equidistant scale `θ / r` and its derivative cancel
   catastrophically in f32. Below `(r / z)² = 0.01` they come from their
   series.
-- **Pinhole only, for now.** The TSDF meshing, the planar median depth and
-  the depth-normal loss back-project pixels through a pinhole. They take a
-  distorted pinhole without its distortion, as they did before, and refuse
-  fisheye views (`CameraView::pinhole_geometry`).
+- **Meshes.** The CPU TSDF (`mesh::Tsdf`) fuses each view through its lens.
+  A voxel projects through the lens, and its depth compares with the
+  frame's in the renderers' terms: `z`, or a fisheye's distance. A pixel
+  back-projects along the lens's ray (`lens::unproject`, which inverts the
+  distortion by Newton's method). The frustum test becomes a `max_theta`
+  cone. `gsplat_mesh`, `gsplat_photos` and `gsplat_mesh_cuda` (whose median
+  and expected depths go through the CPU TSDF) mesh fisheye splats. A
+  distorted pinhole is now meshed with its distortion, where it was meshed
+  without it.
+- **Pinhole only, for now.** The planar median depth, the depth-normal loss
+  and the device TSDF (`gsplat_mesh_cuda --gpu-tsdf`) still back-project
+  through a pinhole. They take a distorted pinhole without its distortion
+  and refuse fisheye views (`CameraView::pinhole_geometry`).
 
 ### Verified so far
 
@@ -141,6 +150,34 @@ images it scored 9.6 dB on the undistorted views of the two narrow cameras.
 Training had left big dark gaussians just outside their fields of view,
 where the lens never drew them.
 
+### Meshes through the lens
+
+`gsplat_mesh_cuda` meshed the same three delivery_area splats: CUDA median
+depth, fused by the CPU TSDF, scored against the rig's laser scan with
+ETH3D's evaluator. Mesh F1 at 2 / 5 / 10 cm:
+
+| Splat | Mesh F1 |
+|---|---|
+| distorted images, through the lens | 6.1 / 16.1 / 27.2 % |
+| distorted images, distortion dropped | 3.9 / 11.1 / 20.3 % |
+| ETH3D's undistorted images | 7.2 / 17.9 / 29.3 % |
+
+The lens splat meshes about as well as the undistorted one, and better
+than the one that drops the distortion. All three score low: they are
+splats of 752×480 grey images.
+
+Fusing through a lens costs more per voxel than through a pinhole:
+
+- The fisheye's 948 views took 99 s to integrate, against 41 s for the
+  undistorted ones.
+- TUM-VI room1's 195° splat (283 views, 1.1 cm voxels) took 252 s and gave
+  1.6M triangles.
+
+Occlusion culling uses the cone that a block's bounding sphere subtends:
+eight points of its rim through the lens, their box grown by 10% and a
+pixel. It leaves the mesh unchanged (`Tsdf::cull_occluded` compares with
+it off) but saves only about 10%. Most of the time is the lens projection.
+
 ## SfM: mapping through the lens
 
 `visloc-core` has the camera models: `OpenCvFisheye`, `SimpleRadialFisheye`,
@@ -170,7 +207,7 @@ filters, and now for bundle adjustment too:
   takes the photos' calibrated camera, as a `cameras.txt` row without its
   id. It is scaled to the working images and held fixed. SfM and training
   then follow its lens on the images as they are. `sparse/0/cameras.txt`
-  keeps the model. The mesh step is skipped for a fisheye.
+  keeps the model.
 - **Two-view verification.** It fits E on normalized coordinates
   (`normalize_pixel`) and F and H on raw pixels, as COLMAP does. With strong
   distortion, E wins and the pair is classified as calibrated.

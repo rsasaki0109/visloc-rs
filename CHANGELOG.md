@@ -6,6 +6,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Meshes through fisheye and distorted lenses.** The CPU TSDF
+  (`visloc_gsplat_core::mesh::Tsdf`) fuses each depth frame through its
+  view's lens:
+  - A voxel projects through the lens, and its depth is compared in the
+    renderers' terms (`z`, or a fisheye's distance).
+  - Pixels back-project along the lens's rays (`lens::unproject`, the
+    distortion inverted by Newton's method).
+  - Frustum culling becomes a `max_theta` cone, and occlusion culling uses
+    each block's bounding cone.
+
+  `gsplat_mesh`, `gsplat_photos` and `gsplat_mesh_cuda` (median and
+  expected depth) now mesh fisheye splats. A distorted pinhole is meshed
+  with its distortion instead of without. On ETH3D's delivery_area rig, the
+  splat trained through the thin-prism lens meshes to 16.1% F1 at 5 cm,
+  against 17.9% for ETH3D's undistorted images and 11.1% with the
+  distortion dropped. The planar depth, the depth-normal loss and the
+  device TSDF stay pinhole-only.
 - **SfM through fisheye lenses wider than 180°.** A camera whose image holds
   rays past 90° from its axis (`Camera::sees_behind`: a panorama, or an
   equidistant fisheye whose corners lie past the radius its polynomial
