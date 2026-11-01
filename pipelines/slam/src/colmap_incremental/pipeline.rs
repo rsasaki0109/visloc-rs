@@ -735,7 +735,7 @@ mod tests {
     use visloc_tracking::umeyama_similarity_transform;
 
     use crate::colmap_incremental::test_support::{
-        build_synthetic_central_rig_scene, build_synthetic_rig_scene,
+        build_synthetic_central_rig_scene, build_synthetic_lens_scene, build_synthetic_rig_scene,
         build_synthetic_spherical_scene, build_three_view_scene,
     };
 
@@ -945,6 +945,85 @@ mod tests {
             "{} points",
             model.num_points3d()
         );
+    }
+
+    /// Fisheye lenses seeing points up to 60° off their axis: a
+    /// Kannala-Brandt one and ETH3D's thin-prism model. The mapper
+    /// reconstructs the trajectory exactly; before the bundle adjustment
+    /// followed the lens, it solved these cameras as pinholes.
+    #[test]
+    fn pipeline_reconstructs_through_fisheye_lenses() {
+        use visloc_core::types::{Camera, CameraModel};
+        let lenses = [
+            Camera::opencv_fisheye(
+                1,
+                752,
+                480,
+                220.0,
+                221.0,
+                380.0,
+                236.0,
+                [0.03, -0.01, 0.002, -0.0005],
+            ),
+            Camera {
+                id: 1,
+                model: CameraModel::ThinPrismFisheye,
+                width: 752,
+                height: 480,
+                params: vec![
+                    220.0, 219.5, 372.0, 244.0, -0.0654, -0.0781, -0.0013, 0.0017, 0.1155, -0.0711,
+                    -0.0103, 0.0070,
+                ],
+            },
+        ];
+        for camera in lenses {
+            let (db, truth) = build_synthetic_lens_scene(camera.clone(), 10, 4);
+            let mut options = PipelineOptions::default();
+            options.mapper.init_min_num_inliers = 40;
+            options.mapper.init_min_tri_angle_deg = 2.0;
+            options.mapper.abs_pose_min_num_inliers = 20;
+
+            let result = run(&options, &db);
+            assert!(!result.models.is_empty(), "{:?}: no model", camera.model);
+            let model = &result.models[0].reconstruction;
+            assert_eq!(model.num_reg_frames(), truth.len(), "{:?}", camera.model);
+            let (mut source, mut target) = (Vec::new(), Vec::new());
+            let mut worst_rotation = 0.0f64;
+            let first_got = model.frame(0).rig_from_world().rotation;
+            let first_gt = truth[&0].rotation;
+            for (&frame_id, gt) in &truth {
+                let got = model.frame(frame_id).rig_from_world();
+                source.push(Point3::from(got.inverse().translation));
+                target.push(Point3::from(gt.inverse().translation));
+                let rel_got = got.rotation * first_got.inverse();
+                let rel_gt = gt.rotation * first_gt.inverse();
+                worst_rotation = worst_rotation.max(rel_got.angle_to(&rel_gt));
+            }
+            let transform = umeyama_similarity_transform(&source, &target, true)
+                .expect("Umeyama alignment must succeed on a full trajectory");
+            let max_err = source
+                .iter()
+                .zip(&target)
+                .map(|(s, t)| (transform.apply(s) - t).norm())
+                .fold(0.0, f64::max);
+            assert!(
+                max_err < 1e-3,
+                "{:?}: frame-centre error {max_err} m",
+                camera.model
+            );
+            assert!(
+                worst_rotation < 1e-4,
+                "{:?}: rotation error {worst_rotation} rad",
+                camera.model
+            );
+            assert!(
+                model.num_points3d() > 100,
+                "{} points",
+                model.num_points3d()
+            );
+            // The lens is left as calibrated.
+            assert_eq!(model.camera(1).params, camera.params);
+        }
     }
 
     /// `forced_init_pair` (plan §4.2 item 1 diagnostic) must seed the

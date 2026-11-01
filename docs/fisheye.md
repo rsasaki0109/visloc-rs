@@ -141,17 +141,102 @@ images it scored 9.6 dB on the undistorted views of the two narrow cameras.
 Training had left big dark gaussians just outside their fields of view,
 where the lens never drew them.
 
-## SfM
+## SfM: mapping through the lens
 
 `visloc-core` has the camera models: `OpenCvFisheye`, `SimpleRadialFisheye`,
-`RadialFisheye`, `Fov`, `DoubleSphere` and, new here, COLMAP's
-`ThinPrismFisheye`. Each has projection, unprojection to a unit ray, and
-the point Jacobian. The COLMAP-port mapper reaches cameras through those.
-Two pieces are still missing:
+`RadialFisheye`, `Fov`, `DoubleSphere` and COLMAP's `ThinPrismFisheye`. Each
+has projection, unprojection to a unit ray, and the point Jacobian. The
+COLMAP-port mapper uses those for registration, triangulation and its
+filters, and now for bundle adjustment too:
 
-- Its bundle adjustment (`rig_ba_solver`) solves undistorted pinholes and
-  equirectangular panoramas only.
-- `gsplat_photos` builds a pinhole camera.
+- **Bundle adjustment.** The native solver (`rig_ba_solver`) projects a
+  camera with distortion or a fisheye projection through its `Lens`. The
+  lens gives the normalized coordinates `m = (pixel − c) / f` and their
+  Jacobian, from `Camera::project_with_point_jacobian`. The solve's
+  intrinsics then place them at `(fx m.x + cx, fy m.y + cy)`. Undistorted
+  pinholes keep the direct path. Before, the solver took any camera with a
+  focal length for an undistorted pinhole, without a warning. On a synthetic
+  Kannala-Brandt sequence the frame centres came out 3.7 cm off; through the
+  lens they are within 1 mm.
+- **Intrinsics refinement.** Focal length and principal point refinement
+  (`ba_refine_focal_length`, `ba_refine_principal_point`) works in front of
+  a lens, with the distortion fixed. `Camera::set_intrinsics` writes the
+  refined values back and keeps the distortion coefficients.
+- **Rig manifest.** A sensor row can carry any COLMAP model, with its
+  parameters after the pose, for example
+  `S 0 1 752 480 541.9 541.6 413.8 216.0 1 0 0 0 0 0 0 THIN_PRISM_FISHEYE 541.9 …`.
+  `run_colmap_port` writes such a row for a lens camera.
+- **`gsplat_photos`, `gsplat_photos_cuda`.** `--camera "MODEL W H PARAMS..."`
+  takes the photos' calibrated camera, as a `cameras.txt` row without its
+  id. It is scaled to the working images and held fixed. SfM and training
+  then follow its lens on the images as they are. `sparse/0/cameras.txt`
+  keeps the model. The mesh step is skipped for a fisheye.
+- **Two-view verification.** It fits E on normalized coordinates
+  (`normalize_pixel`) and F and H on raw pixels, as COLMAP does. With strong
+  distortion, E wins and the pair is classified as calibrated.
+
+Still open:
+
+- Refining the distortion itself (COLMAP's `ba_refine_extra_params`).
+- A rig of differently calibrated cameras in `gsplat_photos`, such as
+  ETH3D's four.
+- Rays past 180°. `normalize_pixel` drops pixels whose ray has `z ≤ 0`, so
+  E and PnP never see them.
+
+### ETH3D rig: SfM on one camera
+
+`gsplat_photos_cuda` ran on one rig camera's images at a time: 237 images
+for delivery_area, 165 for terrains, 752×480 grey. The run's camera
+centres are aligned to the ground truth by a similarity transform and
+scored by RMSE. Centres only: on these near-straight paths, a centre
+alignment leaves the roll about the path open, so rotation errors are not
+comparable. Two runs per camera:
+
+- **lens**: the distorted images with `--camera` and their
+  `THIN_PRISM_FISHEYE` calibration.
+- **undistorted**: ETH3D's undistorted images with their `PINHOLE`
+  calibration. This baseline the old pipeline could already run.
+
+| Scene | Camera | lens | undistorted |
+|---|---|---|---|
+| delivery_area | cam4 | 11.65 cm | 1.91 cm |
+| delivery_area | cam5 | 1.54 cm | 112.6 cm (reversed) |
+| delivery_area | cam6 | 58.0 cm (reversed) | 1.74 cm |
+| delivery_area | cam7 | 1.84 cm | 1.32 cm |
+| terrains | cam4 | 0.40 cm | 0.39 cm |
+| terrains | cam5 | 0.34 cm | 0.36 cm |
+| terrains | cam6 | 1.99 cm | 1.36 cm |
+| terrains | cam7 | 1.29 cm | 2.61 cm |
+
+Leaving out one failed run on each side, both median about 1.4 cm: the
+distorted images through their lens map as well as the undistorted ones.
+On delivery_area cam4's distorted images, two other runs fail:
+
+- the calibration with its distortion dropped: 119.5 cm
+- no calibration, the self-calibrated pinhole prior: 103.7 cm
+
+The two failures, about 1 m off with rotations near 180°, are a depth
+reversal of the whole reconstruction. It happens on the undistorted,
+pinhole side too, so it is the mapper's, not the lens's, and is still
+open. delivery_area cam4's 11.65 cm looks like sensitivity rather than a
+model error, since the other cameras map well with the same model. This
+sequence of forward motion with little parallax has a soft bending mode:
+moving the principal point by half a pixel either way gives 1.2 or 7.9 cm.
+
+### End to end: distorted photos to a splat
+
+`gsplat_photos_cuda --camera` writes a COLMAP dataset with the lens, which
+`gsplat_train_cuda` trains through. It runs on the distorted images as they
+are, with no undistortion anywhere. Each run trains for 30k steps with
+every 8th image held out. The same images and lens with ETH3D's
+ground-truth poses are the reference:
+
+| Scene | Camera | SfM poses | ground-truth poses |
+|---|---|---|---|
+| delivery_area | cam7 | 27.64 dB | 27.76 dB |
+| terrains | cam4 | 25.39 dB | 25.48 dB |
+
+The splats on SfM poses come within 0.1 dB of those on the true poses.
 
 ## Validation data
 
