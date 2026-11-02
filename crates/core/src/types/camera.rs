@@ -105,6 +105,25 @@ impl CameraModel {
         })
     }
 
+    /// Indices into [`Camera::params`] of the model's distortion parameters,
+    /// everything after its focal length(s) and principal point (COLMAP's
+    /// `extra_params_idxs`): `k1` of `SIMPLE_RADIAL` is `3..4`, `k1 k2 p1 p2`
+    /// of `OPENCV` `4..8`. Empty for the undistorted pinholes and the
+    /// panorama.
+    pub const fn extra_param_indices(&self) -> std::ops::Range<usize> {
+        match self {
+            Self::SimplePinhole => 3..3,
+            Self::Pinhole => 4..4,
+            Self::SimpleRadial | Self::SimpleRadialFisheye => 3..4,
+            Self::Radial | Self::RadialFisheye => 3..5,
+            Self::OpenCv | Self::OpenCvFisheye => 4..8,
+            Self::FullOpenCv | Self::ThinPrismFisheye => 4..12,
+            Self::Fov => 4..5,
+            Self::DoubleSphere => 4..6,
+            Self::Equirectangular | Self::Unknown(_) => 0..0,
+        }
+    }
+
     /// Whether this model sees in every direction (the equirectangular
     /// panorama): rays behind the camera are valid, and there is no image
     /// plane to measure depth against.
@@ -1360,6 +1379,35 @@ fn undistort_radial(xd: f64, yd: f64, k1: f64, k2: f64) -> Point2<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The distortion parameters follow the focal length(s) and principal
+    /// point and run to the end of COLMAP's parameter list.
+    #[test]
+    fn extra_params_close_the_parameter_list() {
+        for name in [
+            "SIMPLE_PINHOLE",
+            "PINHOLE",
+            "SIMPLE_RADIAL",
+            "RADIAL",
+            "OPENCV",
+            "FULL_OPENCV",
+            "OPENCV_FISHEYE",
+            "SIMPLE_RADIAL_FISHEYE",
+            "RADIAL_FISHEYE",
+            "THIN_PRISM_FISHEYE",
+            "FOV",
+        ] {
+            let model = CameraModel::from_colmap_name(name);
+            let extra = model.extra_param_indices();
+            let focal = if extra.start == 3 { 1 } else { 2 };
+            assert_eq!(extra.start, focal + 2, "{name}");
+            assert_eq!(Some(extra.end), model.colmap_param_count(), "{name}");
+        }
+        assert_eq!(CameraModel::DoubleSphere.extra_param_indices(), 4..6);
+        assert!(CameraModel::Equirectangular
+            .extra_param_indices()
+            .is_empty());
+    }
 
     fn round_trip(camera: &Camera, point: Point3<f64>) {
         let ray = point.coords.normalize();

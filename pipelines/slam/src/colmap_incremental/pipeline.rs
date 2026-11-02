@@ -130,7 +130,8 @@ impl Default for PipelineOptions {
 
 impl PipelineOptions {
     /// Apply one `key=value` override: COLMAP's `ba_refine_focal_length` /
-    /// `ba_refine_principal_point` / `ba_refine_sensor_from_rig` (`0`/`1`, on
+    /// `ba_refine_principal_point` / `ba_refine_extra_params` /
+    /// `ba_refine_sensor_from_rig` (`0`/`1`, on
     /// both the local and the global BA options), this port's
     /// `ba_global_final_converge_min_frames` (a frame count) and
     /// `complete_largest_model` (`0`/`1`), else
@@ -153,6 +154,12 @@ impl PipelineOptions {
                 let on = flag(value, key)?;
                 self.local_ba.refine_principal_point = on;
                 self.global_ba.refine_principal_point = on;
+                Ok(())
+            }
+            Some((key @ "ba_refine_extra_params", value)) => {
+                let on = flag(value, key)?;
+                self.local_ba.refine_extra_params = on;
+                self.global_ba.refine_extra_params = on;
                 Ok(())
             }
             Some((key @ "ba_refine_sensor_from_rig", value)) => {

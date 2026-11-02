@@ -286,6 +286,18 @@ filters, and now for bundle adjustment too:
   (`ba_refine_focal_length`, `ba_refine_principal_point`) works in front of
   a lens, with the distortion fixed. `Camera::set_intrinsics` writes the
   refined values back and keeps the distortion coefficients.
+- **Distortion refinement.** `ba_refine_extra_params` refines the camera's
+  distortion parameters with its focal length and principal point
+  (`CameraModel::extra_param_indices`, COLMAP's `extra_params_idxs`).
+  They join the camera's node of the reduced system: up to three in its
+  free slots after `[focal, cx, cy]`, the rest in a second node. So the
+  thin-prism model's eight fit too. Their Jacobian comes from central
+  differences through copies of the lens with one parameter moved by 1e-6
+  either way, one model-independent path for every lens. On synthetic
+  scenes out to 70° off the axis, a Kannala-Brandt fisheye's four
+  coefficients and a thin-prism fisheye's eight come back from zero, with
+  the focal length and principal point started 10 px off. The thin-prism
+  case is checked on both the direct and the iterative solve.
 - **Rig manifest.** A sensor row can carry any COLMAP model, with its
   parameters after the pose, for example
   `S 0 1 752 480 541.9 541.6 413.8 216.0 1 0 0 0 0 0 0 THIN_PRISM_FISHEYE 541.9 …`.
@@ -294,14 +306,16 @@ filters, and now for bundle adjustment too:
   takes the photos' calibrated camera, as a `cameras.txt` row without its
   id. It is scaled to the working images and held fixed. SfM and training
   then follow its lens on the images as they are. `sparse/0/cameras.txt`
-  keeps the model.
+  keeps the model. With `--refine-camera`, the mapper's bundle adjustments
+  refine that camera instead: focal length, principal point and
+  distortion. The camera can then be a rough model, such as a fisheye's
+  with the focal length of its field of view and zero distortion.
 - **Two-view verification.** It fits E on normalized coordinates
   (`normalize_pixel`) and F and H on raw pixels, as COLMAP does. With strong
   distortion, E wins and the pair is classified as calibrated.
 
 Still open:
 
-- Refining the distortion itself (COLMAP's `ba_refine_extra_params`).
 - A rig of differently calibrated cameras in `gsplat_photos`, such as
   ETH3D's four.
 - Rays past 90° in a rig: the generalized (multi-camera) initialization and
@@ -350,6 +364,31 @@ truth. Without the calibration, the self-calibrated pinhole prior is
 though: only 1.6% of its SIFT keypoints lie past 90°, in the vignetted
 corners. Training the splat through the lens on that run's poses gives
 25.86 dB held out.
+
+### TUM-VI from a rough fisheye model
+
+The same 283 images, started from a rough camera:
+`OPENCV_FISHEYE 512 512 175 175 256 256 0 0 0 0`. Its focal length is 8%
+short, its principal point is the image centre and its distortion is
+zero. Centre RMSE against the motion capture:
+
+| Camera | Registered | Centre RMSE | Rotation median |
+|---|---|---|---|
+| the calibration, held fixed | 283 / 283 | 0.44 cm | 0.33° |
+| the rough model, held fixed | 280 / 283 | 11.92 cm | 4.91° |
+| the rough model, `--refine-camera` | 283 / 283 | 0.48 cm | 0.30° |
+| `RADIAL_FISHEYE` from the same start, `--refine-camera` | 283 / 283 | 0.63 cm | 0.31° |
+
+Refined from the rough start, the camera lands close to the calibration:
+- focal length 191.12 px, against 190.98;
+- principal point (255.5, 257.3), against (254.9, 256.9);
+- radial mapping `f θ (1 + k1 θ² + …)` within 0.12 px of the calibration's
+  out to 85° off the axis, with `RADIAL_FISHEYE`'s two coefficients within
+  0.40 px.
+
+The four coefficients themselves differ from the calibration's past `k1`
+(0.0033 against 0.0035). Over this lens's field of view they trade off
+against each other, so only their mapping is pinned down.
 
 ### ETH3D rig: SfM on one camera
 

@@ -211,7 +211,7 @@ pub(crate) struct ObsCamera {
 /// solve's intrinsics `(fx, fy, cx, cy)`, refined or not, place them at
 /// `(fx m.x + cx, fy m.y + cy)`: every one of these models applies its
 /// focal lengths and principal point last.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Lens {
     camera: Camera,
     intrinsics: (f64, f64, f64, f64),
@@ -229,6 +229,15 @@ impl Lens {
             intrinsics: camera.intrinsics()?,
             camera: camera.clone(),
         })
+    }
+
+    /// `m` of `point_sensor` alone; `None` where the camera does not image
+    /// it.
+    #[inline]
+    fn normalized(&self, point_sensor: &Point3<f64>) -> Option<Point2<f64>> {
+        let pixel = self.camera.project(point_sensor)?;
+        let (fx, fy, cx, cy) = self.intrinsics;
+        Some(Point2::new((pixel.x - cx) / fx, (pixel.y - cy) / fy))
     }
 
     /// `m` of `point_sensor` and `dm / d(point_sensor)`; `None` where the
@@ -440,14 +449,17 @@ pub(crate) struct PointMajorObs {
 /// block with a `SubsetManifold` over the fixed parameters). Deviation: one
 /// focal step moves `fx` and `fy` together (square pixels, as COLMAP's
 /// `SIMPLE_PINHOLE`), where COLMAP's `PINHOLE` refines them independently.
-/// The observations' own intrinsics are ignored while it is set (see
-/// [`ExtraBlocks`]).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The observations' own intrinsics are ignored while it is set, and their
+/// lenses too while `lens` is (see [`ExtraBlocks`]).
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedIntrinsics {
     /// `[fx, fy, cx, cy]`.
     pub params: [f64; 4],
     pub refine_focal_length: bool,
     pub refine_principal_point: bool,
+    /// The camera's distortion, refined with it (COLMAP's
+    /// `ba_refine_extra_params`).
+    pub lens: Option<SharedLens>,
 }
 
 impl SharedIntrinsics {
@@ -460,13 +472,139 @@ impl SharedIntrinsics {
         ]
     }
 
-    fn stepped(&self, dk: &Vector6<f64>) -> Self {
-        let mut next = *self;
-        next.params[0] += dk[0];
-        next.params[1] += dk[0];
-        next.params[2] += dk[1];
-        next.params[3] += dk[2];
+    /// The number of distortion parameters refined.
+    fn n_extra(&self) -> usize {
+        self.lens.as_ref().map_or(0, |l| l.indices.len())
+    }
+
+    /// The camera's nodes: `[focal, cx, cy, e0, e1, e2]`, then
+    /// `[e3, ..., e8]` when more than three distortion parameters are
+    /// refined.
+    fn nodes(&self) -> usize {
+        if self.n_extra() > 3 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// The camera after its nodes stepped by `dk` (one per node).
+    fn stepped(&self, dk: &[Vector6<f64>]) -> Self {
+        let mut next = self.clone();
+        next.params[0] += dk[0][0];
+        next.params[1] += dk[0][0];
+        next.params[2] += dk[0][1];
+        next.params[3] += dk[0][2];
+        next.lens = self
+            .lens
+            .as_ref()
+            .map(|l| l.stepped(|k| if k < 3 { dk[0][3 + k] } else { dk[1][k - 3] }));
         next
+    }
+}
+
+/// At most this many distortion parameters are refined (COLMAP's
+/// `FULL_OPENCV` and `THIN_PRISM_FISHEYE` have eight): two camera nodes.
+const MAX_EXTRA_PARAMS: usize = 9;
+
+/// The shared camera's lens with its distortion parameters
+/// ([`CameraModel::extra_param_indices`]) refined. The lens divides the
+/// camera's own focal lengths and principal point back out ([`Lens`]), so
+/// only those parameters move it. Their Jacobian comes from central
+/// differences through probes: copies of the lens with one parameter moved
+/// by [`EXTRA_PARAM_STEP`] either way, rebuilt with each step.
+///
+/// [`CameraModel::extra_param_indices`]: visloc_core::types::CameraModel::extra_param_indices
+#[derive(Debug, Clone)]
+pub(crate) struct SharedLens {
+    lens: std::sync::Arc<Lens>,
+    /// Indices into the camera's `params` of the refined parameters.
+    indices: Vec<usize>,
+    /// Per refined parameter: the lens with it moved up and down by
+    /// [`EXTRA_PARAM_STEP`].
+    probes: Vec<(Lens, Lens)>,
+}
+
+/// The central-difference step of a distortion parameter. Its effect on
+/// `m` is at most of its size (every model's parameters multiply powers of
+/// a normalized radius or angle of order one), so rounding stays near
+/// 1e-10 of the derivative.
+const EXTRA_PARAM_STEP: f64 = 1e-6;
+
+impl PartialEq for SharedLens {
+    fn eq(&self, other: &Self) -> bool {
+        self.lens.camera == other.lens.camera && self.indices == other.indices
+    }
+}
+
+impl SharedLens {
+    /// `camera`'s lens with all its distortion parameters refined, or `None`
+    /// for a camera without any (an undistorted pinhole model), without
+    /// pinhole intrinsics (a panorama), or missing parameters.
+    pub(crate) fn new(camera: &Camera) -> Option<Self> {
+        let indices = camera.model.extra_param_indices();
+        if indices.is_empty()
+            || indices.len() > MAX_EXTRA_PARAMS
+            || camera.params.len() < indices.end
+            || camera.model.is_spherical()
+        {
+            return None;
+        }
+        let intrinsics = camera.intrinsics()?;
+        Some(Self::of(camera.clone(), indices.collect(), intrinsics))
+    }
+
+    fn of(camera: Camera, indices: Vec<usize>, intrinsics: (f64, f64, f64, f64)) -> Self {
+        let probes = indices
+            .iter()
+            .map(|&i| {
+                let moved = |d: f64| {
+                    let mut c = camera.clone();
+                    c.params[i] += d;
+                    Lens {
+                        camera: c,
+                        intrinsics,
+                    }
+                };
+                (moved(EXTRA_PARAM_STEP), moved(-EXTRA_PARAM_STEP))
+            })
+            .collect();
+        Self {
+            lens: std::sync::Arc::new(Lens { camera, intrinsics }),
+            indices,
+            probes,
+        }
+    }
+
+    /// The refined parameters: `(index into the camera's params, value)`.
+    pub(crate) fn params(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.indices
+            .iter()
+            .map(|&i| (i, self.lens.camera.params[i]))
+    }
+
+    /// The lens with parameter `k` (of the refined ones) moved by `step(k)`.
+    fn stepped(&self, step: impl Fn(usize) -> f64) -> Self {
+        let mut camera = self.lens.camera.clone();
+        for (k, &i) in self.indices.iter().enumerate() {
+            camera.params[i] += step(k);
+        }
+        Self::of(camera, self.indices.clone(), self.lens.intrinsics)
+    }
+
+    /// `dm / d(parameter k)` at `point_sensor` for each refined parameter;
+    /// zero where a probe does not image the point.
+    fn param_jacobian(
+        &self,
+        point_sensor: &Point3<f64>,
+    ) -> impl Iterator<Item = Vector2<f64>> + '_ {
+        let point = *point_sensor;
+        self.probes.iter().map(move |(up, down)| {
+            match (up.normalized(&point), down.normalized(&point)) {
+                (Some(a), Some(b)) => (a - b) / (2.0 * EXTRA_PARAM_STEP),
+                _ => Vector2::zeros(),
+            }
+        })
     }
 }
 
@@ -476,8 +614,9 @@ impl SharedIntrinsics {
 /// (COLMAP's `ba_refine_sensor_from_rig`; a sensor pose steps as
 /// `sensor_from_rig ∘ exp(ξ)`, like the frame poses). Each is one more 6-dim
 /// node of the reduced system after the free frames (the camera's
-/// `[focal, cx, cy]` padded with three fixed slots): an observation couples
-/// its frame, camera and sensor nodes directly, and its point couples them
+/// `[focal, cx, cy]` and up to three distortion parameters, a second node
+/// for the rest of them; unused slots fixed): an observation couples its
+/// frame, camera and sensor nodes directly, and its point couples them
 /// through the elimination, so the direct and iterative solves take them
 /// like frames. Fixed parameters keep a zero row and column (identity on
 /// the diagonal), hence a zero step.
@@ -489,15 +628,25 @@ pub(crate) struct ExtraBlocks {
 
 impl ExtraBlocks {
     fn len(&self) -> usize {
-        usize::from(self.camera.is_some()) + self.sensors.len()
+        self.camera_nodes() + self.sensors.len()
+    }
+
+    /// The camera's nodes, the first extra nodes ([`SharedIntrinsics::nodes`]).
+    fn camera_nodes(&self) -> usize {
+        self.camera.as_ref().map_or(0, SharedIntrinsics::nodes)
     }
 
     /// Which of extra node `e`'s 6 steps are free.
     fn free(&self, e: usize) -> [bool; 6] {
-        match (e, &self.camera) {
-            (0, Some(c)) => {
-                let [f, cx, cy] = c.free();
-                [f, cx, cy, false, false, false]
+        match &self.camera {
+            Some(c) if e < c.nodes() => {
+                let n = c.n_extra();
+                if e == 0 {
+                    let [f, cx, cy] = c.free();
+                    [f, cx, cy, n > 0, n > 1, n > 2]
+                } else {
+                    std::array::from_fn(|i| i + 3 < n)
+                }
             }
             _ => [true; 6],
         }
@@ -505,9 +654,9 @@ impl ExtraBlocks {
 
     /// The blocks after extra node `e` stepped by `dx[e]`.
     fn stepped(&self, dx: &[Vector6<f64>]) -> Self {
-        let offset = usize::from(self.camera.is_some());
+        let offset = self.camera_nodes();
         Self {
-            camera: self.camera.map(|c| c.stepped(&dx[0])),
+            camera: self.camera.as_ref().map(|c| c.stepped(&dx[..offset])),
             sensors: self
                 .sensors
                 .iter()
@@ -525,37 +674,42 @@ impl ExtraBlocks {
         cameras: &'a [ObsCamera],
     ) -> ((f64, f64, f64, f64), &'a SE3, Option<&'a Lens>) {
         let camera = &cameras[o.camera as usize];
-        let k = match &self.camera {
-            Some(c) => (c.params[0], c.params[1], c.params[2], c.params[3]),
-            None => (camera.fx, camera.fy, camera.cx, camera.cy),
+        let (k, lens) = match &self.camera {
+            Some(c) => (
+                (c.params[0], c.params[1], c.params[2], c.params[3]),
+                match &c.lens {
+                    Some(shared) => Some(&*shared.lens),
+                    None => camera.lens.as_deref(),
+                },
+            ),
+            None => (
+                (camera.fx, camera.fy, camera.cx, camera.cy),
+                camera.lens.as_deref(),
+            ),
         };
         let sensor = if camera.sensor == NO_SENSOR {
             &camera.sensor_from_rig
         } else {
             &self.sensors[camera.sensor as usize]
         };
-        (k, sensor, camera.lens.as_deref())
+        (k, sensor, lens)
     }
 }
 
 /// The reduced-system nodes an observation touches, as frame indices (extra
 /// nodes numbered after the `n_frames` frames, see [`ExtraBlocks`]): its
-/// frame, the camera and its sensor.
+/// frame, the camera's `camera_nodes` and its sensor.
 fn obs_nodes(
     o: &Obs,
     cameras: &[ObsCamera],
     n_frames: u32,
-    has_camera: bool,
+    camera_nodes: u32,
 ) -> impl Iterator<Item = u32> {
-    let sensor_base = n_frames + u32::from(has_camera);
+    let sensor_base = n_frames + camera_nodes;
     let sensor = cameras[o.camera as usize].sensor;
-    [
-        Some(o.frame_idx),
-        has_camera.then_some(n_frames),
-        (sensor != NO_SENSOR).then(|| sensor_base + sensor),
-    ]
-    .into_iter()
-    .flatten()
+    std::iter::once(o.frame_idx)
+        .chain(n_frames..sensor_base)
+        .chain((sensor != NO_SENSOR).then(|| sensor_base + sensor))
 }
 
 struct Problem {
@@ -798,7 +952,7 @@ fn build_reduced_system_pattern(
     (obs, cameras): (&[Obs], &[ObsCamera]),
     frame_fixed: &[bool],
     free_frame_slot: &[Option<u32>],
-    (n_frames, has_camera): (u32, bool),
+    (n_frames, camera_nodes): (u32, u32),
 ) -> (Vec<Vec<u32>>, Vec<(u32, u32)>, PairIndex, SlotIndex) {
     // Per-point work runs on rayon; the outputs (sorted unique edge list,
     // per-point free frames and pair -> edge indices) are pure functions of
@@ -808,7 +962,7 @@ fn build_reduced_system_pattern(
         .map(|&(start, end)| {
             let mut frames: Vec<u32> = obs[start as usize..end as usize]
                 .iter()
-                .flat_map(|o| obs_nodes(o, cameras, n_frames, has_camera))
+                .flat_map(|o| obs_nodes(o, cameras, n_frames, camera_nodes))
                 .filter(|&f| !frame_fixed[f as usize])
                 .collect();
             frames.sort_unstable();
@@ -1791,7 +1945,7 @@ fn assemble_problem(
         (&obs, &cameras),
         &frame_fixed,
         &free_frame_slot,
-        (n_frames as u32, extras.camera.is_some()),
+        (n_frames as u32, extras.camera_nodes() as u32),
     );
     let pattern_ms = t_start.elapsed().as_secs_f64() * 1e3 - setup_ms;
     let n_shards = elimination_shard_count(edges.len());
@@ -2116,7 +2270,7 @@ fn linearize_point(
     let mut direct: Vec<([u32; 2], Matrix6<f64>)> = Vec::new();
     let has_extras = extras.len() > 0;
     let camera_node = n_frames;
-    let sensor_base = n_frames + u32::from(extras.camera.is_some());
+    let sensor_base = n_frames + extras.camera_nodes() as u32;
 
     for o in obs_slice {
         let pose = &poses[o.frame_idx as usize];
@@ -2130,8 +2284,10 @@ fn linearize_point(
         // The observation's extra nodes and their Jacobians (from the raw
         // residual): the camera's d(u, v)/d(focal, cx, cy) =
         // [[m.x, 1, 0], [m.y, 0, 1]] (u = r.x + x_obs = fx m.x + cx, with
-        // m = (x, y) / z without a lens), the sensor's [`sensor_jacobian`].
-        let mut j_extra: [Option<(u32, SMatrix<f64, 2, 6>)>; 2] = [None, None];
+        // m = (x, y) / z without a lens) and d(u, v)/d(distortion parameter)
+        // = (fx, fy) * dm/d(parameter) ([`SharedLens::param_jacobian`]), the
+        // sensor's [`sensor_jacobian`].
+        let mut j_extra: [Option<(u32, SMatrix<f64, 2, 6>)>; 3] = [None, None, None];
         if has_extras {
             if let Some(c) = &extras.camera {
                 let free = c.free();
@@ -2142,11 +2298,27 @@ fn linearize_point(
                 j[(1, 0)] = pick(0, yn);
                 j[(0, 1)] = pick(1, 1.0);
                 j[(1, 2)] = pick(2, 1.0);
+                if let Some(shared) = &c.lens {
+                    let point_sensor =
+                        sensor_from_rig.transform_point(&pose.transform_point(point_xyz));
+                    let mut rest = SMatrix::<f64, 2, 6>::zeros();
+                    for (k, dm) in shared.param_jacobian(&point_sensor).enumerate() {
+                        let column = Vector2::new(fx * dm.x, fy * dm.y);
+                        if k < 3 {
+                            j.set_column(3 + k, &column);
+                        } else {
+                            rest.set_column(k - 3, &column);
+                        }
+                    }
+                    if c.nodes() > 1 {
+                        j_extra[1] = Some((camera_node + 1, rest));
+                    }
+                }
                 j_extra[0] = Some((camera_node, j));
             }
             if sensor != NO_SENSOR {
                 let point_rig = pose.transform_point(point_xyz);
-                j_extra[1] = Some((
+                j_extra[2] = Some((
                     sensor_base + sensor,
                     sensor_jacobian((fx, fy, cx, cy), lens, sensor_from_rig, &point_rig),
                 ));
@@ -2184,7 +2356,7 @@ fn linearize_point(
         }
         // The observation's nodes in `target_frames` (fixed frames have
         // none), frame first.
-        let mut touched: [Option<(usize, SMatrix<f64, 2, 6>)>; 3] = [None, None, None];
+        let mut touched: [Option<(usize, SMatrix<f64, 2, 6>)>; 4] = [None; 4];
         let nodes = std::iter::once((o.frame_idx, j_pose)).chain(j_extra.into_iter().flatten());
         for (t, (node, j)) in nodes.enumerate() {
             let Ok(slot) = target_frames.binary_search(&node) else {
@@ -2212,7 +2384,8 @@ fn linearize_point(
             let touched: Vec<(usize, SMatrix<f64, 2, 6>)> = touched.into_iter().flatten().collect();
             for (i, &(a, ja)) in touched.iter().enumerate() {
                 for &(b, jb) in &touched[i + 1..] {
-                    // Nodes ascend in `target_frames`: frame < camera < sensor.
+                    // Nodes ascend in `target_frames`: frame < camera
+                    // nodes < sensor.
                     let (lo, hi, j_lo, j_hi) = if a < b {
                         (a, b, ja, jb)
                     } else {
@@ -4903,15 +5076,6 @@ mod tests {
     fn intrinsics_scene_through(
         project: impl Fn(&Point3<f64>) -> Point2<f64>,
     ) -> (RigBaInput, PointMajorObs, Vec<Point3<f64>>) {
-        let poses: Vec<SE3> = (0..12)
-            .map(|i| {
-                let t = i as f64 / 11.0 - 0.5;
-                SE3::new(
-                    UnitQuaternion::from_euler_angles(0.08 * t, -0.25 * t, 0.05 * t),
-                    Vector3::new(-1.5 * t, 0.2 * t * t, 0.4 * t),
-                )
-            })
-            .collect();
         let points: Vec<Point3<f64>> = (0..300)
             .map(|p| {
                 let (a, b, c) = (p % 10, (p / 10) % 10, p / 100);
@@ -4919,6 +5083,48 @@ mod tests {
                     a as f64 * 0.4 - 1.8,
                     b as f64 * 0.3 - 1.4,
                     4.0 + c as f64 * 1.5 + 0.1 * a as f64,
+                )
+            })
+            .collect();
+        scene_through(points, project)
+    }
+
+    /// [`intrinsics_scene_through`] with points out to about 70° off the
+    /// cameras' axes, where a fisheye's distortion shows.
+    fn wide_scene_through(
+        project: impl Fn(&Point3<f64>) -> Point2<f64>,
+    ) -> (RigBaInput, PointMajorObs, Vec<Point3<f64>>) {
+        let mut points = Vec::new();
+        for az in -6..=6 {
+            for el in -4..=4 {
+                for r in [3.0, 5.5] {
+                    let (a, e) = (
+                        (az as f64 * 11.0f64).to_radians(),
+                        (el as f64 * 11.0f64).to_radians(),
+                    );
+                    let ripple = 0.2 * ((az + el) as f64).sin();
+                    points.push(Point3::new(
+                        (r + ripple) * a.sin() * e.cos(),
+                        (r + ripple) * e.sin(),
+                        (r + ripple) * a.cos() * e.cos(),
+                    ));
+                }
+            }
+        }
+        scene_through(points, project)
+    }
+
+    /// `points` seen from 12 frames through `project`, frames 0 and 1 fixed.
+    fn scene_through(
+        points: Vec<Point3<f64>>,
+        project: impl Fn(&Point3<f64>) -> Point2<f64>,
+    ) -> (RigBaInput, PointMajorObs, Vec<Point3<f64>>) {
+        let poses: Vec<SE3> = (0..12)
+            .map(|i| {
+                let t = i as f64 / 11.0 - 0.5;
+                SE3::new(
+                    UnitQuaternion::from_euler_angles(0.08 * t, -0.25 * t, 0.05 * t),
+                    Vector3::new(-1.5 * t, 0.2 * t * t, 0.4 * t),
                 )
             })
             .collect();
@@ -5122,6 +5328,7 @@ mod tests {
                 params: [510.0, 510.0, 315.0, 245.0],
                 refine_focal_length: true,
                 refine_principal_point: true,
+                lens: None,
             }),
             sensors: Vec::new(),
         };
@@ -5169,6 +5376,7 @@ mod tests {
                 params: [310.0, 310.0, 315.0, 245.0],
                 refine_focal_length: true,
                 refine_principal_point: true,
+                lens: None,
             }),
             sensors: Vec::new(),
         };
@@ -5195,6 +5403,109 @@ mod tests {
         }
     }
 
+    /// The camera block with the distortion refined
+    /// (`ba_refine_extra_params`): a wide scene seen through `truth`,
+    /// solved from `start`'s intrinsics and distortion, on the direct path or
+    /// (`iterative`) the edge-list PCG. Returns the refined camera
+    /// parameters, after checking the solve fits the observations.
+    fn refine_distortion(truth: &Camera, start: &Camera, iterative: bool) -> Vec<f64> {
+        let (mut input, point_major, _) =
+            wide_scene_through(|x| truth.project(x).expect("in view"));
+        let (fx, fy, cx, cy) = start.intrinsics().expect("intrinsics");
+        let extras = ExtraBlocks {
+            camera: Some(SharedIntrinsics {
+                params: [fx, fy, cx, cy],
+                refine_focal_length: true,
+                refine_principal_point: true,
+                lens: SharedLens::new(start),
+            }),
+            sensors: Vec::new(),
+        };
+        let mut problem = assemble_problem(&input, point_major, 0.0, extras).expect("problem");
+        if iterative {
+            problem.iterative_min_free_frames = 1;
+        }
+        let result = optimize_problem(
+            &mut input,
+            &mut problem,
+            Instant::now(),
+            0,
+            200,
+            LossFunction::Trivial,
+            None,
+        )
+        .expect("solve");
+        assert!(result.final_cost < 1e-10, "cost {}", result.final_cost);
+        let camera = problem.extras.camera.expect("camera");
+        let mut params = start.params.clone();
+        let [fx, _, cx, cy] = camera.params;
+        params[..4].copy_from_slice(&[fx, fx, cx, cy]);
+        for (i, value) in camera.lens.expect("lens").params() {
+            params[i] = value;
+        }
+        params
+    }
+
+    fn assert_params_near(got: &[f64], want: &[f64], tol: f64) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < tol, "{got:?} vs {want:?}");
+        }
+    }
+
+    /// A Kannala-Brandt fisheye's four coefficients (one camera node), from
+    /// zero and with the focal length and principal point off.
+    #[test]
+    fn camera_block_recovers_fisheye_distortion() {
+        let k = [0.03, -0.01, 0.002, -0.0005];
+        let truth = Camera::opencv_fisheye(1, 640, 480, 300.0, 300.0, 322.0, 238.0, k);
+        let start = Camera::opencv_fisheye(1, 640, 480, 310.0, 310.0, 315.0, 245.0, [0.0; 4]);
+        let got = refine_distortion(&truth, &start, false);
+        assert_params_near(&got[..4], &truth.params[..4], 1e-4);
+        assert_params_near(&got[4..], &k, 1e-6);
+    }
+
+    /// COLMAP's thin-prism fisheye: eight coefficients, so the camera takes
+    /// a second node; on the direct path and the edge-list PCG.
+    #[test]
+    fn camera_block_recovers_thin_prism_distortion() {
+        let thin_prism = |params: Vec<f64>| Camera {
+            id: 1,
+            model: CameraModel::ThinPrismFisheye,
+            width: 640,
+            height: 480,
+            params,
+        };
+        let k = [0.03, -0.01, 0.001, -0.0008, 0.002, -0.0005, 0.0006, -0.0004];
+        let mut truth = vec![300.0, 300.0, 322.0, 238.0];
+        truth.extend(k);
+        let truth = thin_prism(truth);
+        let mut start = vec![310.0, 310.0, 315.0, 245.0];
+        start.extend([0.0; 8]);
+        let start = thin_prism(start);
+        for iterative in [false, true] {
+            let got = refine_distortion(&truth, &start, iterative);
+            assert_params_near(&got[..4], &truth.params[..4], 1e-3);
+            assert_params_near(&got[4..], &k, 1e-5);
+        }
+    }
+
+    /// The distortion parameters of each model, in order.
+    #[test]
+    fn shared_lens_refines_the_extra_params() {
+        let radial = Camera {
+            id: 1,
+            model: CameraModel::Radial,
+            width: 640,
+            height: 480,
+            params: vec![500.0, 320.0, 240.0, -0.1, 0.02],
+        };
+        let lens = SharedLens::new(&radial).expect("a lens");
+        assert_eq!(lens.params().collect::<Vec<_>>(), [(3, -0.1), (4, 0.02)]);
+        let pinhole = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        assert!(SharedLens::new(&pinhole).is_none());
+        assert!(SharedLens::new(&Camera::equirectangular(1, 2000, 1000)).is_none());
+    }
+
     #[test]
     fn camera_block_recovers_intrinsics_on_the_iterative_path() {
         let truth = [500.0, 500.0, 322.0, 238.0];
@@ -5204,6 +5515,7 @@ mod tests {
                 params: [510.0, 510.0, 315.0, 245.0],
                 refine_focal_length: true,
                 refine_principal_point: true,
+                lens: None,
             }),
             sensors: Vec::new(),
         };
@@ -5240,6 +5552,7 @@ mod tests {
                 params: [510.0, 510.0, 322.0, 238.0],
                 refine_focal_length: true,
                 refine_principal_point: false,
+                lens: None,
             }),
             sensors: Vec::new(),
         };
