@@ -154,7 +154,15 @@ pub struct VlfeatSiftGpu {
     /// One plan for `extract`; `extract_batch` alternates two, so one image
     /// is detected while the host handles the previous one.
     plans: Vec<Plan>,
+    /// The plans of the most recent other keys, most recent last. A rig's
+    /// cameras interleave image sizes; rebuilding a plan for every size
+    /// change costs more than the extraction (4K: 22 ms per image at one
+    /// size, 140 ms with two interleaved sizes).
+    spare: Vec<Vec<Plan>>,
 }
+
+/// Plans kept for keys other than the current one.
+const SPARE_PLAN_KEYS: usize = 3;
 
 /// One refined DoG extremum read back from the GPU.
 #[derive(Clone, Copy)]
@@ -400,6 +408,7 @@ impl VlfeatSiftGpu {
             pipes,
             cap: INITIAL_CAP,
             plans: Vec::new(),
+            spare: Vec::new(),
         }
     }
 
@@ -543,10 +552,23 @@ impl VlfeatSiftGpu {
         Ok(())
     }
 
-    /// At least `count` plans for `key` (rebuilt when the key changed).
+    /// At least `count` plans for `key`: the current ones, a spare key's, or new ones.
     fn ensure_plans(&mut self, key: PlanKey, count: usize) -> Result<(), SiftGpuError> {
         if self.plans.first().map(|p| p.key) != Some(key) {
-            self.plans.clear();
+            let previous = std::mem::take(&mut self.plans);
+            if !previous.is_empty() {
+                self.spare.push(previous);
+            }
+            if let Some(index) = self.spare.iter().position(|plans| plans[0].key == key) {
+                self.plans = self.spare.remove(index);
+            }
+            // A grown candidate capacity replaces the smaller one for its size.
+            let same_size = |k: &PlanKey| (k.width, k.height) == (key.width, key.height);
+            self.spare
+                .retain(|plans| !(same_size(&plans[0].key) && plans[0].key.cap < key.cap));
+            if self.spare.len() > SPARE_PLAN_KEYS {
+                self.spare.drain(..self.spare.len() - SPARE_PLAN_KEYS);
+            }
         }
         while self.plans.len() < count {
             let plan = self.build_plan(key)?;
@@ -1411,6 +1433,9 @@ mod tests {
         let second_large = gpu.extract(&large_image, &config).unwrap();
         assert_eq!(first_small, second_small);
         assert_eq!(first_large, second_large);
+        // The other size's plan is kept for reuse, not rebuilt.
+        assert_eq!(gpu.spare.len(), 1);
+        assert_eq!(gpu.spare[0][0].key.width, 160);
         let mut fresh = VlfeatSiftGpu::new(gpu.into_context());
         assert_eq!(fresh.extract(&large_image, &config).unwrap(), first_large);
     }
