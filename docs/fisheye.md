@@ -72,10 +72,11 @@ Jacobian `J` of the lens replaces the pinhole one in `Σ' = J W Σ Wᵀ Jᵀ`:
   makes them on the host (`lens::unproject`) once per camera and keeps one
   buffer per camera of a rig. An undistorted pinhole computes its rays in
   the kernels as before.
-- **Pinhole only, for now.** The device TSDF (`gsplat_mesh_cuda
-  --gpu-tsdf`) still back-projects through a pinhole. It takes a distorted
-  pinhole without its distortion and refuses fisheye views
-  (`CameraView::pinhole_geometry`).
+- **The device TSDF.** `gsplat_mesh_cuda --gpu-tsdf` fuses through the
+  lens as well. A voxel projects by the CPU TSDF's arithmetic, in f32 on
+  the device (`lens_project`). A pixel back-projects along
+  `lens_pixel_ray`, and the frustum test is the `max_theta` cone. Every
+  geometry path of the splat now goes through the lens.
 
 ### Verified so far
 
@@ -132,6 +133,12 @@ The geometry channels have tests of their own:
 - Trained through a fisheye, the depth-normal loss falls as it does
   through a pinhole: 0.265 to 0.094 in 300 steps, against 0.286 to 0.099
   (`depth_normal_loss_falls_in_training`).
+- The device TSDF meshes one view through a distorted pinhole and a
+  distorted fisheye as the CPU TSDF does, from the median and the planar
+  depth (`lens_views_match_the_cpu_tsdf`). Through the pinhole every
+  vertex is the CPU's within 1e-3 voxels. Through the fisheye 99.97% are,
+  and the rest lie within 0.31 voxels: a voxel within rounding of a pixel
+  border can read its neighbour's depth.
 
 ### ETH3D rig: delivery_area
 
@@ -220,6 +227,25 @@ images: 18.5% at 5 cm, against 18.8%. The depth-normal loss runs through
 the lens, but on these images it lowers F1 with either camera, as it gave
 no gain on ETH3D's DSLR scenes. Held-out PSNR moves from 26.17 to 26.13 dB
 through the lens, and from 33.29 to 32.64 dB on the undistorted images.
+
+### The device TSDF through the lens
+
+The same splats, fused on the device (`gsplat_mesh_cuda --gpu-tsdf`).
+Mesh F1 at 2 / 5 / 10 cm, and the time to fuse the 948 views (CPU: render
+and integrate; GPU: render, fuse and extract):
+
+| Splat | Depth | CPU TSDF | GPU TSDF |
+|---|---|---|---|
+| distorted images, through the lens | median | 6.1 / 16.1 / 27.2 %, 115 s | 6.1 / 16.1 / 27.2 %, 8.8 s |
+| | planar | 7.1 / 18.5 / 29.9 %, 191 s | 7.1 / 18.4 / 29.9 %, 14.9 s |
+| ETH3D's undistorted images | median | 7.2 / 17.9 / 29.3 %, 54 s | 7.2 / 17.9 / 29.3 %, 14.5 s |
+| | planar | 7.5 / 18.8 / 29.6 %, 73 s | 7.5 / 18.7 / 29.6 %, 20.4 s |
+
+The device gives the CPU's F1 to 0.1 points, through the lens as through
+the pinhole. The lens costs the device almost nothing: 0.054 s per
+thousand blocks through it, against 0.049 s for the pinhole. On the CPU
+integrating through the lens took 4.4 times as long per block, so the
+device is 13 times faster there, against 3.6 to 3.7 times for the pinhole.
 
 ## SfM: mapping through the lens
 

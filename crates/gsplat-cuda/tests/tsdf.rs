@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use nalgebra::{Quaternion, Rotation3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{Gaussian, Scene};
+use visloc_gsplat_core::lens::{Lens, Projection};
 use visloc_gsplat_cuda::mesh::{extract_mesh, extract_mesh_gpu, surface_mesh, MeshDepth};
 use visloc_gsplat_cuda::{CudaGsplat, TsdfParams};
 use visloc_gsplat_render::packing::PackedScene;
@@ -182,6 +183,69 @@ fn one_view(depth: MeshDepth) {
         triangles_under(&cpu, &identity),
         "triangles differ"
     );
+}
+
+/// Through lenses, a distorted pinhole (depth camera z) and a distorted
+/// fisheye (depth the distance), one view still gives the CPU's mesh. The device projects voxels and back-projects
+/// pixels in its own float maths (the CPU inverts the distortion in f64), so
+/// a voxel within rounding of a pixel border may read its neighbour's depth:
+/// almost every vertex is the CPU's, the rest within a voxel of one.
+#[test]
+fn lens_views_match_the_cpu_tsdf() {
+    let Some(mut gs) = gsplat() else { return };
+    gs.set_scene(&PackedScene::from_scene(&wall()))
+        .expect("upload");
+    let lenses = [
+        Lens::new(
+            Projection::Pinhole,
+            [-0.2, 0.05, 0.0, 0.0, 0.002, -0.001, 0.0, 0.0],
+        ),
+        Lens::new(
+            Projection::Equidistant,
+            [0.03, -0.01, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+    ];
+    let voxel = 0.04;
+    let opts = options(voxel);
+    for lens in lenses {
+        let base = view(0.1, 0.3);
+        let v = CameraView {
+            camera: base.camera.with_lens(lens),
+            ..base
+        };
+        let views = [&v];
+        for depth in [MeshDepth::Median, MeshDepth::Planar] {
+            let (cpu, _) = extract_mesh(&mut gs, 0, depth, &views, &[], &opts).expect("cpu mesh");
+            let (gpu, summary) =
+                extract_mesh_gpu(&mut gs, 0, depth, &views, &[], &opts, 0, None).expect("gpu mesh");
+            assert!(cpu.triangles.len() > 1000, "too small a surface to compare");
+            let grid = Grid::new(&cpu.vertices, voxel);
+            let (mut exact, mut worst) = (0usize, 0.0f32);
+            for &p in &gpu.vertices {
+                let (_, d) = grid
+                    .nearest(p)
+                    .expect("a GPU vertex with no CPU vertex within a voxel");
+                exact += usize::from(d < 1e-3 * voxel);
+                worst = worst.max(d);
+            }
+            let frac = exact as f64 / gpu.vertices.len() as f64;
+            eprintln!(
+                "{:?} {depth:?}: {summary}; cpu {} vertices, {} triangles; {:.2}% within 1e-3 voxel, worst {:.2} voxel",
+                lens.projection,
+                cpu.vertices.len(),
+                cpu.triangles.len(),
+                100.0 * frac,
+                worst / voxel
+            );
+            let (nc, ng) = (cpu.vertices.len() as f64, gpu.vertices.len() as f64);
+            assert!((ng - nc).abs() <= 0.005 * nc, "vertex counts {ng} / {nc}");
+            assert!(
+                frac > 0.99,
+                "only {:.2}% of the vertices are the CPU's",
+                100.0 * frac
+            );
+        }
+    }
 }
 
 /// Slabs only bound memory: every block sees every view in the same order

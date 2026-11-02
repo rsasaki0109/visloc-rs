@@ -8,9 +8,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use visloc_gsplat_core::camera::CameraView;
-use visloc_gsplat_train::mesh::{
-    fuse_views, pinhole_geometry_views, scene_scale, Mesh, MeshOptions,
-};
+use visloc_gsplat_train::mesh::{fuse_views, scene_scale, Mesh, MeshOptions};
 
 use crate::{CudaGsplat, GsplatCudaError, TsdfParams, TsdfSurface};
 
@@ -38,17 +36,6 @@ impl MeshDepth {
             Self::Median
         }
     }
-}
-
-/// The views as the device TSDF takes them (a distorted pinhole without its
-/// distortion), or an error for a fisheye view: it back-projects through a
-/// pinhole.
-fn geometry_views(views: &[&CameraView], what: &str) -> Result<Vec<CameraView>, GsplatCudaError> {
-    pinhole_geometry_views(views).ok_or_else(|| {
-        GsplatCudaError::Input(format!(
-            "{what} from fisheye views (it back-projects through a pinhole)"
-        ))
-    })
 }
 
 /// Render the current scene's `depth` (SH up to `sh_degree`) from every
@@ -114,8 +101,8 @@ pub fn read_depth_map(path: &std::path::Path, width: u32, height: u32) -> Option
 
 /// Per-view depth maps fused in place of the splat's depth wherever they
 /// have one (> 0), e.g. visloc-mvs's fused depth ([`read_depth_map`]): one
-/// map per view of [`extract_mesh_gpu`], each at its view's size, view
-/// after view.
+/// map per view of [`extract_mesh_gpu`], each at its view's size and in its
+/// depth convention (camera z; a fisheye's distance), view after view.
 #[derive(Debug, Clone, Copy)]
 pub struct DepthMaps<'a> {
     pub maps: &'a [f32],
@@ -130,9 +117,8 @@ pub struct DepthMaps<'a> {
 /// the views are kept on the device up to 2 GiB): the same voxel size,
 /// depth range, carving, minimum weight and filters. Unlike `fuse_views`,
 /// every block sees every view. With `maps`, their depths replace the
-/// splat's where they have one. The device TSDF projects through a pinhole:
-/// a distorted pinhole goes without its distortion, and a fisheye view is
-/// an error ([`extract_mesh`] takes it).
+/// splat's where they have one. Like [`extract_mesh`], it fuses through
+/// each view's lens, fisheyes included.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_mesh_gpu(
     gs: &mut CudaGsplat,
@@ -144,9 +130,6 @@ pub fn extract_mesh_gpu(
     slab_blocks: u32,
     maps: Option<DepthMaps<'_>>,
 ) -> Result<(Mesh, String), GsplatCudaError> {
-    let geometry = geometry_views(views, "the device TSDF (use the CPU one)")?;
-    let views: Vec<&CameraView> = geometry.iter().collect();
-    let views = views.as_slice();
     let scale = scene_scale(views, support);
     let voxel = opts.voxel.unwrap_or(scale / 256.0);
     let params = TsdfParams {
