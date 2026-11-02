@@ -93,7 +93,7 @@ impl GscCamera {
         }
     }
 
-    /// The camera is an undistorted pinhole, which the device TSDF needs.
+    /// The camera is an undistorted pinhole (no lens maths on the device).
     pub fn is_pinhole(&self) -> bool {
         self.lens_kind == 0
     }
@@ -940,11 +940,11 @@ impl CudaGsplat {
 
     /// Render the current scene's median depth from every view, fuse it into
     /// a TSDF on the device and extract the surface with surface nets
-    /// (`visloc_gsplat_core::mesh::Tsdf`'s maths; see
-    /// `native/gsplat_cuda/tsdf.cuh`). Every block is allocated before any
-    /// view is fused, and the blocks are fused in slabs along x of at most
-    /// `slab_blocks`, so memory stays bounded at any voxel size;
-    /// [`crate::mesh::surface_mesh`] assembles the quads.
+    /// (`visloc_gsplat_core::mesh::Tsdf`'s maths, through each view's lens,
+    /// fisheyes included; see `native/gsplat_cuda/tsdf.cuh`). Every block is
+    /// allocated before any view is fused, and the blocks are fused in slabs
+    /// along x of at most `slab_blocks`, so memory stays bounded at any voxel
+    /// size; [`crate::mesh::surface_mesh`] assembles the quads.
     pub fn tsdf_surface(
         &mut self,
         views: &[&CameraView],
@@ -954,7 +954,8 @@ impl CudaGsplat {
     }
 
     /// [`tsdf_surface`](Self::tsdf_surface) with per-view depth maps (one
-    /// per view at its size, view after view; > 0 where they have a depth)
+    /// per view at its size, view after view, in its depth convention as
+    /// [`DepthFrame::depth`]; > 0 where they have a depth)
     /// that replace the splat's depth as `params.override_mode` says.
     pub fn tsdf_surface_with_maps(
         &mut self,

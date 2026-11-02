@@ -6,6 +6,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **The device TSDF through lenses (`gsplat_mesh_cuda --gpu-tsdf`).**
+  `CudaGsplat::tsdf_surface` and `mesh::extract_mesh_gpu` now fuse each
+  view through its lens, as the CPU TSDF does: voxels project through it
+  (`lens_project`), pixels back-project along its rays
+  (`lens_pixel_ray`), and the frustum test is the `max_theta` cone. A
+  distorted pinhole is fused with its distortion instead of without, and
+  fisheye views are no longer refused. `pinhole_geometry_views` in
+  `visloc-gsplat-train` is gone with its last caller. On ETH3D's
+  delivery_area rig the thin-prism splat meshes to the CPU's F1 within 0.1
+  points (16.1% at 5 cm from the median depth, 18.4% from the planar), and
+  fusion takes 8.8 s and 14.9 s instead of 115 s and 191 s.
 - **Planar depth and the depth-normal loss through lenses.** Both now
   follow each pixel's ray through the view's lens and use the lens's depth
   (`z`, or a fisheye's distance). This covers the planar median depth
@@ -22,8 +33,7 @@ All notable changes to `visloc-rs` will be documented here.
 
   On ETH3D's delivery_area rig, planar depth meshes the thin-prism splat
   to 18.5% F1 at 5 cm, up from 16.1% with median depth. The undistorted
-  images reach 18.8% with planar depth. Only the device TSDF
-  (`gsplat_mesh_cuda --gpu-tsdf`) stays pinhole-only.
+  images reach 18.8% with planar depth.
 - **Meshes through fisheye and distorted lenses.** The CPU TSDF
   (`visloc_gsplat_core::mesh::Tsdf`) fuses each depth frame through its
   view's lens:

@@ -127,12 +127,6 @@ pub fn fuse_views<E>(
     Ok((mesh, summary))
 }
 
-/// The views as the pinhole-only geometry code takes them
-/// ([`CameraView::pinhole_geometry`]), or `None` if one is a fisheye.
-pub fn pinhole_geometry_views(views: &[&CameraView]) -> Option<Vec<CameraView>> {
-    views.iter().map(|v| v.pinhole_geometry()).collect()
-}
-
 /// [`fuse_views`] with the wgpu renderer: render `scene`'s median depth from
 /// every view, through its lens. Returns the mesh, a one-line summary and
 /// the context.

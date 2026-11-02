@@ -204,6 +204,57 @@ __device__ inline float3 lens_pixel_ray(const GscCamera& c, float sx, float sy) 
     return make_float3(u * s, v * s, cosf(theta));
 }
 
+// lens_project's bound on a pinhole lens's (x^2 + y^2) / z^2: max_theta, which
+// is under 90 degrees.
+__device__ inline float lens_tan2_max(const GscCamera& c) {
+    const float t = tanf(fminf(c.max_theta, 1.57069633f));
+    return t * t;
+}
+
+// The pixel (u, v) of camera-space point `pc` and its depth (camera z, or an
+// equidistant lens's distance), for a camera with lens_kind != kLensPinhole
+// (gsplat-core's Tsdf::integrate, `project`): false where the camera does not
+// image it, past max_theta or (pinhole projection) behind z = 1e-6.
+// `tan2_max` is lens_tan2_max(c).
+__device__ inline bool lens_project(const GscCamera& c, float tan2_max, const float pc[3], float& u, float& v,
+                                    float& depth) {
+    float n[2];
+    if (c.lens_kind == kLensEquidistant) {
+        const float r = hypotf(pc[0], pc[1]);
+        const float theta = atan2f(r, pc[2]);
+        if (theta > c.max_theta) return false;
+        depth = hypotf(r, pc[2]);
+        if (r <= 1e-7f * depth) {
+            n[0] = pc[0] / pc[2];
+            n[1] = pc[1] / pc[2];
+        } else {
+            const float s = theta / r;
+            n[0] = pc[0] * s;
+            n[1] = pc[1] * s;
+        }
+    } else {
+        if (pc[2] <= 1e-6f) return false;
+        n[0] = pc[0] / pc[2];
+        n[1] = pc[1] / pc[2];
+        if (n[0] * n[0] + n[1] * n[1] > tan2_max) return false;
+        depth = pc[2];
+    }
+    const float* k = c.lens;
+    float mx = n[0], my = n[1];
+    if (k[0] != 0.f || k[1] != 0.f || k[2] != 0.f || k[3] != 0.f || k[4] != 0.f || k[5] != 0.f || k[6] != 0.f ||
+        k[7] != 0.f) {
+        const float k1 = k[0], k2 = k[1], k3 = k[2], k4 = k[3], p1 = k[4], p2 = k[5], sx1 = k[6], sy1 = k[7];
+        const float uu = n[0] * n[0], vv = n[1] * n[1], uv = n[0] * n[1];
+        const float t2 = uu + vv;
+        const float radial = t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4)));
+        mx = n[0] + (n[0] * radial + 2.f * p1 * uv + p2 * (t2 + 2.f * uu) + sx1 * t2);
+        my = n[1] + (n[1] * radial + 2.f * p2 * uv + p1 * (t2 + 2.f * vv) + sy1 * t2);
+    }
+    u = c.fx * mx + c.cx;
+    v = c.fy * my + c.cy;
+    return true;
+}
+
 // lens_coords for any camera-space point p (lens.rs's extended_lens_coords):
 // within max_theta the lens itself; past it, the lens's first-order
 // extension at q, p turned towards the optical axis onto the max_theta cone

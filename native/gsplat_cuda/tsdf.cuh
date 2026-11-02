@@ -3,7 +3,8 @@
 // visloc_gsplat_core::mesh::Tsdf's (8^3-voxel blocks allocated over the
 // truncation band of every surface pixel, running means of the truncated
 // SDF and colour, free-space carving, surface nets on the voxels fused from
-// at least `min_weight` views), with two differences:
+// at least `min_weight` views, voxels projected and pixels back-projected
+// through each view's lens), with two differences:
 //
 // - Every block is allocated before any view is fused, so each block sees
 //   every view (Tsdf::integrate allocates as it goes: a block first touched
@@ -82,8 +83,9 @@ struct TsdfArgs {
 };
 
 // Allocation: for every second pixel in x and y with a surface (median depth
-// in (0, max_depth]), the blocks its ray crosses within +-trunc of the
-// surface, sampled no further apart than half a block (Tsdf::integrate).
+// in (0, max_depth]), the blocks its ray (through the lens) crosses within
+// +-trunc of the surface, sampled no further apart than half a block
+// (Tsdf::integrate).
 __global__ void tsdf_alloc_kernel(GscCamera cam, TsdfArgs a, const float* __restrict__ depth_out,
                                   unsigned long long* table, uint32_t mask, uint32_t* counts) {
     const uint32_t hw = (cam.width + 1) / 2, hh = (cam.height + 1) / 2;
@@ -92,7 +94,15 @@ __global__ void tsdf_alloc_kernel(GscCamera cam, TsdfArgs a, const float* __rest
     const uint32_t x = (i % hw) * 2, y = (i / hw) * 2;
     const float z = depth_out[(size_t(y) * cam.width + x) * 2];
     if (z <= 0.f || z > a.max_depth) return;
-    const float pc[3] = {(float(x) + 0.5f - cam.cx) / cam.fx * z, (float(y) + 0.5f - cam.cy) / cam.fy * z, z};
+    float pc[3] = {(float(x) + 0.5f - cam.cx) / cam.fx * z, (float(y) + 0.5f - cam.cy) / cam.fy * z, z};
+    if (cam.lens_kind != kLensPinhole) {
+        // Along the lens's ray (scaled so that the depth times it is the point).
+        const float3 ray = lens_pixel_ray(cam, float(x) + 0.5f, float(y) + 0.5f);
+        if (ray.x == 0.f && ray.y == 0.f && ray.z == 0.f) return;
+        pc[0] = ray.x * z;
+        pc[1] = ray.y * z;
+        pc[2] = ray.z * z;
+    }
     const float d[3] = {pc[0] - cam.t[0], pc[1] - cam.t[1], pc[2] - cam.t[2]};
     const float* R = cam.rot;
     float p[3], dir[3];
@@ -150,7 +160,8 @@ __global__ void tsdf_reset_kernel(size_t n, float* sdf, float* w, float* col) {
 // Fuse one view into the slab's voxels (one block of threads per block, two
 // voxels per thread), as Tsdf::integrate. A block whose bounding sphere lies
 // outside one of the frustum's side / near planes (`planes`, unit normals in
-// camera space) is skipped: none of its voxels projects into the image.
+// camera space; through a lens, outside the max_theta cone) is skipped: none
+// of its voxels projects into the image.
 // `depth` holds the median depth every `depth_stride` floats (2 in
 // depth_out, 1 in the view cache).
 __global__ void __launch_bounds__(kBlock) tsdf_integrate_kernel(GscCamera cam, TsdfArgs a, float4 p0, float4 p1,
@@ -163,25 +174,41 @@ __global__ void __launch_bounds__(kBlock) tsdf_integrate_kernel(GscCamera cam, T
     const int bx = tsdf_key_x(key) * kTsdfB, by = tsdf_key_y(key) * kTsdfB, bz = tsdf_key_z(key) * kTsdfB;
     const float* R = cam.rot;
     const float half = 0.5f * kTsdfB * a.voxel;
+    const bool pinhole = cam.lens_kind == kLensPinhole;
     {
         const float c[3] = {float(bx) * a.voxel + half, float(by) * a.voxel + half, float(bz) * a.voxel + half};
         float cc[3];
         for (int r = 0; r < 3; ++r) cc[r] = R[r * 3] * c[0] + R[r * 3 + 1] * c[1] + R[r * 3 + 2] * c[2] + cam.t[r];
         const float radius = half * 1.7320508f;
-        const float4 planes[5] = {p0, p1, p2, p3, p4};
-        for (int k = 0; k < 5; ++k)
-            if (planes[k].x * cc[0] + planes[k].y * cc[1] + planes[k].z * cc[2] < -radius) return;
+        if (pinhole) {
+            const float4 planes[5] = {p0, p1, p2, p3, p4};
+            for (int k = 0; k < 5; ++k)
+                if (planes[k].x * cc[0] + planes[k].y * cc[1] + planes[k].z * cc[2] < -radius) return;
+        } else {
+            // Through a lens the frustum is the max_theta cone.
+            const float dist = sqrtf(cc[0] * cc[0] + cc[1] * cc[1] + cc[2] * cc[2]);
+            if (dist > radius && atan2f(hypotf(cc[0], cc[1]), cc[2]) - asinf(radius / dist) > cam.max_theta) return;
+        }
     }
     const float wf = float(cam.width), hf = float(cam.height);
+    const float tan2_max = pinhole ? 0.f : lens_tan2_max(cam);
     for (int v = threadIdx.x; v < kTsdfBV; v += blockDim.x) {
         const int lx = v % kTsdfB, ly = (v / kTsdfB) % kTsdfB, lz = v / (kTsdfB * kTsdfB);
         const float p[3] = {(float(bx + lx) + 0.5f) * a.voxel, (float(by + ly) + 0.5f) * a.voxel,
                             (float(bz + lz) + 0.5f) * a.voxel};
         float pc[3];
         for (int r = 0; r < 3; ++r) pc[r] = R[r * 3] * p[0] + R[r * 3 + 1] * p[1] + R[r * 3 + 2] * p[2] + cam.t[r];
-        if (pc[2] <= 1e-6f) continue;
-        const float u = cam.fx * pc[0] / pc[2] + cam.cx;
-        const float vv = cam.fy * pc[1] / pc[2] + cam.cy;
+        // The voxel's pixel and its depth in the view's convention (camera z,
+        // a fisheye's distance).
+        float u, vv, depth_v;
+        if (pinhole) {
+            if (pc[2] <= 1e-6f) continue;
+            u = cam.fx * pc[0] / pc[2] + cam.cx;
+            vv = cam.fy * pc[1] / pc[2] + cam.cy;
+            depth_v = pc[2];
+        } else if (!lens_project(cam, tan2_max, pc, u, vv, depth_v)) {
+            continue;
+        }
         if (u < 0.f || vv < 0.f || u >= wf || vv >= hf) continue;
         const size_t pix = size_t(vv) * cam.width + size_t(u);
         const float d = depth[pix * depth_stride];
@@ -190,14 +217,14 @@ __global__ void __launch_bounds__(kBlock) tsdf_integrate_kernel(GscCamera cam, T
         const size_t i = size_t(blockIdx.x) * kTsdfBV + v;
         if (d == 0.f || d > a.max_depth) {
             // Nothing opaque (or only background) along this pixel: free space.
-            if (a.carve && (d <= 0.f || pc[2] < d - a.trunc)) {
+            if (a.carve && (d <= 0.f || depth_v < d - a.trunc)) {
                 const float w0 = wt[i], wn = w0 + 1.f;
                 sdf[i] = (sdf[i] * w0 + 1.f) / wn;
                 wt[i] = wn;
             }
             continue;
         }
-        const float s = d - pc[2];
+        const float s = d - depth_v;
         if (s < -a.trunc || (!a.free_space && s > a.trunc)) continue;
         const float t = fminf(s / a.trunc, 1.f);
         const float w0 = wt[i], wn = w0 + 1.f;
@@ -362,10 +389,10 @@ struct GscTsdfParams {
 };
 
 // Render the current scene's median depth from each of `num_views` cameras,
-// fuse it into a TSDF on the device and extract the surface (see tsdf.cuh).
-// `maps` (nullable; host, one per view at its size, view after view, > 0
-// where they have a depth) replace the rendered depth as `override_mode`
-// says. The outputs are counts; visloc_gsplat_cuda_tsdf_take copies the
+// through its lens, fuse it into a TSDF on the device and extract the
+// surface (see tsdf.cuh). `maps` (nullable; host, one per view at its size,
+// view after view, in its depth convention, > 0 where they have a depth)
+// replace the rendered depth as `override_mode` says. The outputs are counts; visloc_gsplat_cuda_tsdf_take copies the
 // surface.
 GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p, int num_views,
                                             const GscCamera* cams, const float* maps, uint32_t* num_vertices,
@@ -379,13 +406,6 @@ GSC_EXPORT int visloc_gsplat_cuda_tsdf_mesh(void* handle, const GscTsdfParams* p
     if (p->override_mode != 0 && !maps) {
         ctx->error = "tsdf_mesh: override_mode needs depth maps";
         return -1;
-    }
-    // Voxels are projected, and depths back-projected, through a pinhole.
-    for (int v = 0; v < num_views; ++v) {
-        if (cams[v].lens_kind != kLensPinhole) {
-            ctx->error = "tsdf_mesh: every view needs an undistorted pinhole camera";
-            return -1;
-        }
     }
     std::vector<size_t> view_px(num_views + 1, 0);
     for (int v = 0; v < num_views; ++v) view_px[v + 1] = view_px[v] + size_t(cams[v].width) * cams[v].height;

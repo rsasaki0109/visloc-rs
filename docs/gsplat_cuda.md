@@ -718,6 +718,9 @@ surface nets.
 - **Memory.** The CPU `Tsdf` keeps 20 bytes per voxel for the whole
   volume. The device keeps them for one slab, and the host keeps only the
   output.
+- **Lenses.** Voxels project, and pixels back-project, through each
+  view's lens, fisheyes included, as on the CPU (see
+  [fisheye.md](fisheye.md)).
 
 `tests/tsdf.rs`:
 
@@ -728,6 +731,8 @@ surface nets.
 - **Four views.** The surface is bit-identical whether it is fused in 1 slab
   or 30, with or without the view cache. 99.8% of its vertices lie within
   0.01 voxels of the CPU's.
+- **Through lenses.** One view through a distorted pinhole and a fisheye
+  gives the CPU's mesh, 99.97% or more of the vertices within 1e-3 voxels.
 
 On the ETH3D scenes above (baseline splats, the ETH3D-oriented options,
 1 cm voxels and depths up to 20 m everywhere), while another training run
