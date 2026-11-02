@@ -25,7 +25,7 @@ use visloc_vision::features::sift::{
     GrayImage, SiftConfig, SiftDetector, SiftKeypoint, SiftNormalization,
 };
 
-use crate::extractor::{mapped, storage, SiftGpuError};
+use crate::extractor::{mapped, storage, u32_words, SiftGpuError};
 
 /// Uniform parameter slot stride and binding size.
 const SLOT: u64 = 256;
@@ -960,7 +960,7 @@ impl VlfeatSiftGpu {
         let plan = &self.plans[p];
         let n_det = plan.det_dims.len();
         let bytes = map_read(&self.ctx.device, &plan.staging, index, (n_det * 4) as u64).await;
-        let counts: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
+        let counts = u32_words(&bytes);
         match counts.iter().max() {
             Some(&max) if max as usize > plan.key.cap => Err(max as usize),
             _ => Ok(counts),
@@ -993,7 +993,7 @@ impl VlfeatSiftGpu {
         len: u64,
     ) -> Vec<Candidate> {
         let bytes = map_read(&self.ctx.device, &self.plans[p].staging, index, len).await;
-        let raw: &[u32] = bytemuck::cast_slice(&bytes);
+        let raw = u32_words(&bytes);
         let mut candidates = Vec::with_capacity(raw.len() / CAND_WORDS);
         let mut chunks = raw.chunks_exact(CAND_WORDS);
         for (o, &c) in counts.iter().enumerate() {
@@ -1322,6 +1322,21 @@ mod tests {
             }
         }
         px
+    }
+
+    /// A featureless image reads back no candidates: an empty readback,
+    /// which `bytemuck::cast_slice` rejected as misaligned (panic).
+    #[test]
+    fn featureless_images_have_no_features() {
+        let Some(ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let flat = vec![0.5f32; 160 * 112];
+        let image = GrayImage::new(160, 112, &flat).unwrap();
+        let mut gpu = VlfeatSiftGpu::new(ctx);
+        let (keypoints, descriptors) = gpu.extract(&image, &photos_config()).unwrap();
+        assert!(keypoints.is_empty() && descriptors.is_empty());
     }
 
     /// Keypoints of `a` with a counterpart in `b` (position within 0.01 px,
