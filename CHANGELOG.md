@@ -6,13 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
-- **A fisheye GIF in the README.** TUM-VI room1's splat, trained on the raw
-  195° frames, and its depth, drawn through the fisheye along the camera
-  path between the recorded views, with the nearest input frame inset
-  (`docs/assets/fisheye_tumvi.gif`). The new `gsplat_lens_frames_cuda`
-  example renders a splat and its depth through the dataset's lens along
-  its camera path, smoothed between views; `scripts/make_fisheye_gif.py`
-  lays out the GIF.
+- **A fisheye GIF in the README.** TUM-VI room1 from the raw 195° frames
+  to the splat, in three panels (`docs/assets/fisheye_tumvi.gif`):
+  - a raw frame with its SfM features, coloured by their angle off the
+    optical axis;
+  - the SfM model, with the camera drawn as a dome of its 195° field of
+    view and the points it sees in the same colours;
+  - the splat drawn through the same lens.
+
+  The new `gsplat_lens_frames_cuda` example renders a splat and its depth
+  through the dataset's lens along its camera path, smoothed between views,
+  and writes the frames' poses. `scripts/make_fisheye_gif.py` lays out the
+  GIF from them and the COLMAP model.
 - **Distortion refinement in bundle adjustment (`ba_refine_extra_params`,
   `gsplat_photos --refine-camera`).** COLMAP's `ba_refine_extra_params` now
   has a counterpart in the native solver. The shared camera's distortion

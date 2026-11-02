@@ -265,10 +265,10 @@ COLMAP's fisheye and distortion models, out past 180°. Fisheye frames go in
 as they are, with no resampling to pinhole views.
 
 <p align="center">
-  <img src="docs/assets/fisheye_tumvi.gif" alt="TUM-VI room1, 195° fisheye: the trained splat and its depth in colour, both drawn through the fisheye along the camera path between the recorded views, with the nearest input frame inset." width="610">
+  <img src="docs/assets/fisheye_tumvi.gif" alt="TUM-VI room1, 195° fisheye, three panels: a raw input frame with its SfM features coloured by their angle off the optical axis; the SfM points and camera path, the camera drawn as a 195° dome with the points it sees in the same colours; the trained splat drawn through the same lens." width="876">
 </p>
 
-<p align="center"><sub>TUM-VI room1, cam0's 195° fisheye: 283 raw frames, SfM and 3DGS through the lens (held-out PSNR 25.6 dB). The splat and its depth drawn through the fisheye along the camera path, between the recorded views, the nearest input frame inset. <a href="scripts/make_fisheye_gif.py">Script</a>, <a href="docs/fisheye.md">details</a>.</sub></p>
+<p align="center"><sub>TUM-VI room1, cam0's 195° fisheye: 283 raw frames, SfM and 3DGS through the lens (held-out PSNR 25.6 dB). Left, a raw frame and its SfM features, coloured by their angle off the optical axis. Middle, the SfM model, the camera drawn as its 195° field of view. Right, the splat through the same lens, between the recorded views too. <a href="scripts/make_fisheye_gif.py">Script</a>, <a href="docs/fisheye.md">details</a>.</sub></p>
 
 ## Visual-Inertial SLAM (Basalt Rust port)
 

@@ -5,21 +5,30 @@ resampling them to pinhole views first. This page covers what is done and
 what is still open.
 
 <p align="center">
-  <img src="assets/fisheye_tumvi.gif" alt="TUM-VI room1, 195° fisheye: the trained splat and its depth in colour, both drawn through the fisheye along the camera path between the recorded views, with the nearest input frame inset" width="610">
+  <img src="assets/fisheye_tumvi.gif" alt="TUM-VI room1, 195° fisheye, three panels: a raw input frame with its SfM features coloured by their angle off the optical axis; the SfM points and camera path, the camera drawn as a 195° dome with the points it sees in the same colours; the trained splat drawn through the same lens" width="876">
 </p>
 
-The splat of TUM-VI room1 (below), trained on the raw 195° frames, and its
-expected depth, both drawn through the fisheye. The camera follows the
-recorded path: every other view is a key, with three more frames between
-two keys (rotation interpolated spherically, centre linearly). The nearest
-input frame is inset. `gsplat_lens_frames_cuda` renders the frames and
-`scripts/make_fisheye_gif.py` lays them out:
+TUM-VI room1 (below), from the raw 195° frames to the splat:
+
+- **Left: a raw frame and its SfM features.** Each feature with a 3D point
+  is coloured by the angle of its ray off the optical axis. The dashed rings
+  are 45° and 90°; a feature outside the 90° ring sees behind the camera.
+- **Middle: the SfM model.** The points and the camera path, seen from
+  above. The camera is drawn as a dome of its 195° field of view, and the
+  points it sees take the colours of the left panel.
+- **Right: the splat through the same lens.** Between two recorded views
+  one more frame interpolates the rotation spherically and the centre
+  linearly.
+
+`gsplat_lens_frames_cuda` renders the frames and writes their poses;
+`scripts/make_fisheye_gif.py` reads them with the model and lays out the
+panels:
 
 ```bash
 gsplat_lens_frames_cuda --ply <run>/scene.ply --data <run> --out frames \
-  --every 2 --interp 4
-python scripts/make_fisheye_gif.py --frames frames --out fisheye_tumvi.gif \
-  --first 120 --count 100 --panel-width 300 --greys 40 --fps 12 --caption "..."
+  --every 1 --interp 2
+python scripts/make_fisheye_gif.py --frames frames --sparse <run>/sparse/0 \
+  --out fisheye_tumvi.gif --first 120 --count 120 --caption "..."
 ```
 
 ## 3DGS: drawing through the lens

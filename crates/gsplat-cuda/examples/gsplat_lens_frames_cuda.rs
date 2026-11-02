@@ -13,7 +13,9 @@
 //! `--interp` frames are rendered through the first key's camera (lens
 //! included), its rotation interpolated spherically and its centre
 //! linearly. Frame `j` gives `<dir>/splat_<j>.png` and `<dir>/depth_<j>.bin`;
-//! `<dir>/views.txt` lists `j`, the nearer key's image name and its path.
+//! `<dir>/views.txt` lists `j`, the nearer key's image name, the frame's
+//! world-to-camera pose as COLMAP writes it (`qw qx qy qz tx ty tz`) and the
+//! image's path.
 //!
 //! A depth file holds the expected depth where the opacity exceeds 0.5 (0
 //! elsewhere; smoother than the median depth), laid out as
@@ -77,11 +79,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let steps = if k + 1 < keys.len() { interp } else { 1 };
         for s in 0..steps {
             let t = s as f32 / interp as f32;
-            let rotation = qa
-                .try_slerp(&qb, t, 1e-6)
-                .unwrap_or(qa)
-                .to_rotation_matrix()
-                .into_inner();
+            let q = qa.try_slerp(&qb, t, 1e-6).unwrap_or(qa);
+            let rotation = q.to_rotation_matrix().into_inner();
             let centre = ca.lerp(&cb, t);
             let cam = CameraView::new(rotation, -(rotation * centre), a.camera);
             let frame = gs.render_depth(&cam, [0.0; 3], scene.sh_degree, false)?;
@@ -94,9 +93,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .collect();
             save_depth(&out.join(format!("depth_{j:04}.bin")), &cam, &expected)?;
             let near = if t < 0.5 { key } else { &keys[k + 1] };
+            let tr = cam.translation;
             list.push_str(&format!(
-                "{j} {} {}\n",
+                "{j} {} {} {} {} {} {} {} {} {}\n",
                 near.name,
+                q.w,
+                q.i,
+                q.j,
+                q.k,
+                tr.x,
+                tr.y,
+                tr.z,
                 near.image_path.display()
             ));
             j += 1;
