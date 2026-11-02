@@ -6,6 +6,24 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Distortion refinement in bundle adjustment (`ba_refine_extra_params`,
+  `gsplat_photos --refine-camera`).** COLMAP's `ba_refine_extra_params` now
+  has a counterpart in the native solver. The shared camera's distortion
+  parameters (`CameraModel::extra_param_indices`) are refined with its
+  focal length and principal point:
+  - up to three in the camera node's free slots, the rest in a second
+    node, so the thin-prism model's eight fit too;
+  - their Jacobian by central differences through the lens, one path for
+    every model.
+
+  `gsplat_photos --camera ... --refine-camera` and `gsplat_photos_cuda`
+  start from a rough camera and refine it in the mapper's bundle
+  adjustments, instead of holding it fixed. A manifest row now keeps a
+  model with zero distortion (`SIMPLE_RADIAL ... 0`) instead of reducing it
+  to a pinhole. On TUM-VI room1 (195° fisheye), a rough start (focal length
+  8% short, principal point centred, zero distortion) held fixed is 11.9 cm
+  off. Refined it is 0.48 cm off, against 0.44 cm for the calibration, and
+  its radial mapping lands within 0.12 px of the calibration's.
 - **The device TSDF through lenses (`gsplat_mesh_cuda --gpu-tsdf`).**
   `CudaGsplat::tsdf_surface` and `mesh::extract_mesh_gpu` now fuse each
   view through its lens, as the CPU TSDF does: voxels project through it

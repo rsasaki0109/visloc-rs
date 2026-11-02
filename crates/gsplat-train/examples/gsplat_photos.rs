@@ -79,6 +79,8 @@ SfM:
                            (any COLMAP model, e.g. OPENCV_FISHEYE or THIN_PRISM_FISHEYE),
                            scaled to the working images and held fixed; SfM and training
                            follow its lens on the images as they are
+  --refine-camera          refine --camera's focal length, principal point and distortion
+                           instead (a rough model, e.g. a fisheye's with zero distortion)
   --no-refine-intrinsics   keep the intrinsics fixed
   --refine-intrinsics-max N  skip the final intrinsics refinement above N photos
   --exhaustive-max 300     match every pair up to this many photos
@@ -137,6 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-size" => sfm.max_size = next()?.parse()?,
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
             "--camera" => sfm.camera = Some(parse_camera_row(&next()?)?),
+            "--refine-camera" => sfm.refine_camera = true,
             "--principal-point" => {
                 let value = next()?;
                 let (x, y) = value

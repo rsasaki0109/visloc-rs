@@ -36,12 +36,13 @@
 //!    `SetConstantSensorFromRigPose`: the config holds every sensor of the
 //!    solve constant or none, [`BundleAdjustmentConfig::set_constant_sensors_from_rig`]).
 //! 2. **Intrinsics and rig refinement on the native backend only, and
-//!    coarser.** `refine_focal_length` / `refine_principal_point` apply only
-//!    when one PINHOLE/SIMPLE_PINHOLE camera is behind every observation
-//!    (one focal step on `fx` and `fy`), `refine_sensor_from_rig` to every
-//!    calibrated non-reference sensor of the observed rigs; the control
-//!    config (`ba_refine_* = 0`, plan §0.1/§1.2) leaves all of them off.
-//!    `refine_extra_params` has no counterpart (pinhole models only).
+//!    coarser.** `refine_focal_length` / `refine_principal_point` /
+//!    `refine_extra_params` apply only when one camera with a focal length
+//!    is behind every observation (one focal step on `fx` and `fy`; the
+//!    distortion parameters' Jacobian by central differences),
+//!    `refine_sensor_from_rig` to every calibrated non-reference sensor of
+//!    the observed rigs; the control config (`ba_refine_* = 0`, plan
+//!    §0.1/§1.2) leaves all of them off.
 //! 3. **Point variable/constant policy now faithfully ports
 //!    `ParameterizePoints` (`bundle_adjustment_ceres.cc:538-555`) plus
 //!    `AddPointToProblem` (`bundle_adjustment_ceres.cc:819-879`).** COLMAP's
@@ -327,6 +328,11 @@ pub struct BundleAdjustmentOptions {
     /// default (the port's controls hold intrinsics fixed).
     pub refine_focal_length: bool,
     pub refine_principal_point: bool,
+    /// COLMAP's `refine_extra_params` (`ba_refine_extra_params`): the same
+    /// camera's distortion parameters
+    /// ([`visloc_core::types::CameraModel::extra_param_indices`]) join the
+    /// camera block, under the same conditions. Off by default.
+    pub refine_extra_params: bool,
     /// COLMAP's `refine_sensor_from_rig` (`ba_refine_sensor_from_rig`): the
     /// non-reference sensors' `sensor_from_rig` poses of the observed rigs
     /// become parameter blocks unless the config holds them constant
@@ -361,6 +367,7 @@ impl BundleAdjustmentOptions {
             gradient_tolerance_rel: Some(10.0),
             refine_focal_length: false,
             refine_principal_point: false,
+            refine_extra_params: false,
             refine_sensor_from_rig: false,
         }
     }
@@ -390,6 +397,7 @@ impl BundleAdjustmentOptions {
             gradient_tolerance_rel: Some(1.0),
             refine_focal_length: false,
             refine_principal_point: false,
+            refine_extra_params: false,
             refine_sensor_from_rig: false,
         }
     }
@@ -867,9 +875,11 @@ fn solve_native(
     }
     // The camera block: one camera with a focal length behind every
     // observation, not held constant, with a refine option on. A lens keeps
-    // its distortion fixed.
+    // its distortion fixed unless `refine_extra_params`.
     let mut shared_intrinsics = None;
-    if (options.refine_focal_length || options.refine_principal_point)
+    if (options.refine_focal_length
+        || options.refine_principal_point
+        || options.refine_extra_params)
         && !config.constant_intrinsics
     {
         let mut camera_ids = observed
@@ -879,18 +889,24 @@ fn solve_native(
             .map(|(image_id, _)| recon.image(image_id as ImageT).camera_id);
         let first = camera_ids.next();
         if let Some(camera_id) = first.filter(|&id| camera_ids.all(|other| other == id)) {
-            if let Some((fx, fy, cx, cy)) = recon.camera(camera_id).intrinsics() {
+            let camera = recon.camera(camera_id);
+            if let Some((fx, fy, cx, cy)) = camera.intrinsics() {
                 shared_intrinsics = Some((
                     camera_id,
                     super::rig_ba_solver::SharedIntrinsics {
                         params: [fx, fy, cx, cy],
                         refine_focal_length: options.refine_focal_length,
                         refine_principal_point: options.refine_principal_point,
+                        lens: options
+                            .refine_extra_params
+                            .then(|| super::rig_ba_solver::SharedLens::new(camera))
+                            .flatten(),
                     },
                 ));
             }
         }
     }
+    let shared_camera_id = shared_intrinsics.as_ref().map(|&(id, _)| id);
     let mut extras = super::rig_ba_solver::ExtraBlocks {
         camera: shared_intrinsics.map(|(_, k)| k),
         sensors: refined_sensors
@@ -949,10 +965,18 @@ fn solve_native(
             .rig_mut(rig_id)
             .add_sensor(sensor_id, Some(pose.clone()));
     }
-    if let (Some((camera_id, _)), Some(k)) = (shared_intrinsics, extras.camera) {
+    if let (Some(camera_id), Some(k)) = (shared_camera_id, &extras.camera) {
         let [fx, fy, cx, cy] = k.params;
-        recon.camera_mut(camera_id).set_intrinsics(fx, fy, cx, cy);
-        eprintln!("BA_INTRINSICS camera={camera_id} fx={fx:.3} fy={fy:.3} cx={cx:.3} cy={cy:.3}");
+        let camera = recon.camera_mut(camera_id);
+        camera.set_intrinsics(fx, fy, cx, cy);
+        let mut extra = String::new();
+        for (i, value) in k.lens.iter().flat_map(|l| l.params()) {
+            camera.params[i] = value;
+            extra.push_str(&format!(" p{i}={value:.6}"));
+        }
+        eprintln!(
+            "BA_INTRINSICS camera={camera_id} fx={fx:.3} fy={fy:.3} cx={cx:.3} cy={cy:.3}{extra}"
+        );
     }
     eprintln!(
         "BA_SOLVE backend={:?} frames={} obs={n_obs} landmarks={n_lm} fixed_landmarks={n_fixed_lm} iterations={} elapsed_ms={}",
