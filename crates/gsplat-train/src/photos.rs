@@ -66,6 +66,13 @@ pub struct PhotoSfmConfig {
     /// the images as they are, without undistorting them. Not with
     /// `equirect` or `insv`.
     pub camera: Option<Camera>,
+    /// Refine `camera` in the mapper's bundle adjustments instead of
+    /// holding it fixed: its focal length, principal point and distortion
+    /// parameters (COLMAP's `ba_refine_focal_length`,
+    /// `ba_refine_principal_point`, `ba_refine_extra_params`). For a camera
+    /// known only roughly, such as a fisheye model with the focal length of
+    /// its field of view and no distortion.
+    pub refine_camera: bool,
     /// Match every pair up to this many images, else a sliding window.
     pub exhaustive_max: usize,
     /// Sliding-window size (images) past `exhaustive_max`.
@@ -195,6 +202,7 @@ impl Default for PhotoSfmConfig {
             focal_px: None,
             principal_point: None,
             camera: None,
+            refine_camera: false,
             exhaustive_max: 300,
             window: 20,
             min_matches: 15,
@@ -1578,6 +1586,11 @@ pub fn build_photo_dataset(
             ))
         }
         Some(camera) => Some(scaled_camera(camera, width, height)?),
+        None if cfg.refine_camera => {
+            return Err(EurocError::Camera(
+                "refining the camera needs a camera to start from".into(),
+            ))
+        }
         None => None,
     };
     let (focal_prior, focal_source) = match (cfg.focal_px, f35s.get(f35s.len() / 2)) {
@@ -1601,9 +1614,14 @@ pub fn build_photo_dataset(
     let camera = match calibrated {
         Some(camera) => {
             log(&format!(
-                "camera: {} {:?} (held fixed)",
+                "camera: {} {:?} ({})",
                 camera.model.colmap_name().unwrap_or("?"),
-                camera.params
+                camera.params,
+                if cfg.refine_camera {
+                    "refined by the mapper"
+                } else {
+                    "held fixed"
+                }
             ));
             camera
         }
@@ -2122,7 +2140,16 @@ pub fn build_photo_dataset(
     // principal point of the centred prior is ~4 px off, which fixed
     // intrinsics turned into 2-5x larger camera-centre errors.
     let t0 = std::time::Instant::now();
-    let mut port_overrides: Vec<String> = if refine_intrinsics {
+    // A `--camera` to refine: the mapper's bundle adjustments refine its
+    // distortion too, and their result is final (the global refinement
+    // below holds a lens's distortion fixed).
+    let mut port_overrides: Vec<String> = if cfg.refine_camera {
+        vec![
+            "ba_refine_focal_length=1".into(),
+            "ba_refine_principal_point=1".into(),
+            "ba_refine_extra_params=1".into(),
+        ]
+    } else if refine_intrinsics {
         vec![
             "ba_refine_focal_length=1".into(),
             "ba_refine_principal_point=1".into(),
@@ -2177,7 +2204,19 @@ pub fn build_photo_dataset(
     )?;
     let (mut poses, mut tracks, mut reproj) = models.into_iter().next().expect("non-empty");
     let mut cam = camera.clone();
-    if refine_intrinsics {
+    if cfg.refine_camera {
+        match read_port_camera(out_dir) {
+            Some(c) if c.model == cam.model && c.params.len() == cam.params.len() => {
+                log(&format!(
+                    "mapper camera: {} {:?}",
+                    c.model.colmap_name().unwrap_or("?"),
+                    c.params
+                ));
+                cam.params = c.params;
+            }
+            _ => log("the mapper wrote no camera of the --camera model; keeping it"),
+        }
+    } else if refine_intrinsics {
         if let Some((fx, fy, cx, cy)) = read_port_camera(out_dir).and_then(|c| c.intrinsics()) {
             cam.set_intrinsics(fx, fy, cx, cy);
             log(&format!(

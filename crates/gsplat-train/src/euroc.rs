@@ -392,9 +392,10 @@ fn abs_pose_max_error_for(width: u32, height: u32) -> f64 {
 }
 
 /// `camera` in a manifest sensor row: the `fx fy cx cy` fields and what
-/// follows the pose. A pinhole is its intrinsics alone; an equirectangular
-/// camera its image size alone, marked by a trailing model name; a lens its
-/// intrinsics, then its COLMAP model and parameters.
+/// follows the pose. A pinhole model is its intrinsics alone; an
+/// equirectangular camera its image size alone, marked by a trailing model
+/// name; any other its intrinsics, then its COLMAP model and parameters,
+/// zero distortion included (so `ba_refine_extra_params` has them).
 fn manifest_camera(camera: &Camera) -> Result<([f64; 4], String), String> {
     if camera.model.is_spherical() {
         return Ok(([0.0; 4], " EQUIRECTANGULAR".to_string()));
@@ -402,7 +403,7 @@ fn manifest_camera(camera: &Camera) -> Result<([f64; 4], String), String> {
     let (fx, fy, cx, cy) = camera
         .intrinsics()
         .ok_or_else(|| format!("camera model {:?} has no intrinsics", camera.model))?;
-    if camera.distortion_free() {
+    if camera.distortion_free() && camera.model.extra_param_indices().is_empty() {
         return Ok(([fx, fy, cx, cy], String::new()));
     }
     let (model, params) = visloc_io::colmap::colmap_camera_record(camera);
@@ -1379,6 +1380,19 @@ mod tests {
         assert_eq!(
             manifest_camera(&pinhole).unwrap(),
             ([500.0, 501.0, 320.0, 240.0], String::new())
+        );
+        // A model with distortion parameters keeps them at zero, for
+        // `ba_refine_extra_params`.
+        let simple_radial = Camera {
+            id: 1,
+            model: CameraModel::SimpleRadial,
+            width: 640,
+            height: 480,
+            params: vec![500.0, 320.0, 240.0, 0.0],
+        };
+        assert_eq!(
+            manifest_camera(&simple_radial).unwrap().1,
+            " SIMPLE_RADIAL 500 320 240 0"
         );
         let panorama = Camera::equirectangular(1, 2048, 1024);
         assert_eq!(manifest_camera(&panorama).unwrap().1, " EQUIRECTANGULAR");

@@ -1326,7 +1326,10 @@ impl IncrementalMapper {
             // 1036-1065`): a camera is refined only while every registered
             // image of it is in the window, a rig's `sensor_from_rig` poses
             // only while every registered frame of it is.
-            if ba_options.refine_focal_length || ba_options.refine_principal_point {
+            if ba_options.refine_focal_length
+                || ba_options.refine_principal_point
+                || ba_options.refine_extra_params
+            {
                 let mut in_window: BTreeMap<CameraT, usize> = BTreeMap::new();
                 for &iid in &config_image_ids {
                     *in_window.entry(recon.image(iid).camera_id).or_default() += 1;

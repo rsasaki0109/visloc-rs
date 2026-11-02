@@ -8,7 +8,7 @@
 //! VISLOC_GSPLAT_CUDA_LIB=/tmp/gsplat_cuda/libvisloc_gsplat_cuda.so \
 //!   cargo run --release -p visloc-gsplat-cuda --features photos --example gsplat_photos_cuda -- \
 //!   --images <folder> --out <work dir> [--max-size 1600] [--focal F] \
-//!   [--camera "MODEL W H PARAMS..."] [--exhaustive-max 300] [--window 20] \
+//!   [--camera "MODEL W H PARAMS..." [--refine-camera]] [--exhaustive-max 300] [--window 20] \
 //!   [--max-keypoints 8192] [--cpu-match]
 //! ```
 //!
@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-size" => sfm.max_size = next()?.parse()?,
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
             "--camera" => sfm.camera = Some(parse_camera_row(&next()?)?),
+            "--refine-camera" => sfm.refine_camera = true,
             "--exhaustive-max" => sfm.exhaustive_max = next()?.parse()?,
             "--window" => sfm.window = next()?.parse()?,
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
