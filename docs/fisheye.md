@@ -4,6 +4,25 @@ The goal is to run SfM and 3DGS on fisheye images directly, without
 resampling them to pinhole views first. This page covers what is done and
 what is still open.
 
+<p align="center">
+  <img src="assets/fisheye_tumvi.gif" alt="TUM-VI room1, 195° fisheye: one view of the trained splat drawn through a lens swept from a 90° pinhole to the real fisheye, then the views, each input frame next to the splat and its depth through the same lens" width="850">
+</p>
+
+The splat of TUM-VI room1 (below), trained on the raw 195° frames. First
+one view, drawn through a lens swept from a 90° pinhole to the camera's
+own fisheye: an equidistant lens whose distortion starts as the tangent's
+series, so it images as a pinhole. Then every other view through its own
+lens, next to its input frame. The third panel is the splat's expected
+depth in colour. `gsplat_lens_frames_cuda` renders the frames and
+`scripts/make_fisheye_gif.py` lays them out:
+
+```bash
+gsplat_lens_frames_cuda --ply <run>/scene.ply --data <run> --out frames \
+  --every 4 --sweep frame_00100.png --sweep-frames 40
+python scripts/make_fisheye_gif.py --frames frames --out fisheye_tumvi.gif \
+  --every 2 --fps 6 --greys 64 --panel-width 280 --caption "..."
+```
+
 ## 3DGS: drawing through the lens
 
 A camera's intrinsics carry a lens (`visloc_gsplat_core::lens::Lens`):
