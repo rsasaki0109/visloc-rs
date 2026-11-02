@@ -7,11 +7,12 @@ All notable changes to `visloc-rs` will be documented here.
 ### Added
 
 - **A fisheye GIF in the README.** TUM-VI room1's splat, trained on the raw
-  195° frames, drawn through a lens swept from a 90° pinhole to the real
-  fisheye, then each view next to its input frame with the splat's depth
+  195° frames, and its depth, drawn through the fisheye along the camera
+  path between the recorded views, with the nearest input frame inset
   (`docs/assets/fisheye_tumvi.gif`). The new `gsplat_lens_frames_cuda`
-  example renders a splat and its depth through each view's lens and
-  through the sweep; `scripts/make_fisheye_gif.py` lays out the GIF.
+  example renders a splat and its depth through the dataset's lens along
+  its camera path, smoothed between views; `scripts/make_fisheye_gif.py`
+  lays out the GIF.
 - **The device TSDF through lenses (`gsplat_mesh_cuda --gpu-tsdf`).**
   `CudaGsplat::tsdf_surface` and `mesh::extract_mesh_gpu` now fuse each
   view through its lens, as the CPU TSDF does: voxels project through it
