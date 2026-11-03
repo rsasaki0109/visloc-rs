@@ -16,8 +16,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
-use visloc_rs::core::geometry::{Pose, SE3};
+use nalgebra::{Point3, UnitQuaternion, Vector3};
+use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{
     Camera, Frame, Keyframe, Landmark, LandmarkDescriptorStore, Observation, VisualMap,
 };
@@ -596,20 +596,4 @@ fn frame_from_keyframe(keyframe: &Keyframe, descriptors: &LandmarkDescriptorStor
     frame.keypoints = keypoints;
     frame.descriptors = keypoint_descriptors;
     frame
-}
-
-// Small visual-debug helper kept in the example so curious readers can inspect
-// the generated trajectory geometry without grepping the codebase.
-#[allow(dead_code)]
-fn pose_summary(pose: &SE3) -> String {
-    let r: Matrix3<f64> = pose.rotation.to_rotation_matrix().into_inner();
-    format!(
-        "t=[{:.3},{:.3},{:.3}] R col0=[{:.3},{:.3},{:.3}]",
-        pose.translation.x,
-        pose.translation.y,
-        pose.translation.z,
-        r[(0, 0)],
-        r[(1, 0)],
-        r[(2, 0)],
-    )
 }
