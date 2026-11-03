@@ -266,7 +266,7 @@
 //! for the loader and parity numbers, and the plan doc's "M3 results" section
 //! for the final measured max-abs-diff.
 
-use nalgebra::{DMatrix, DVector, Matrix6, Quaternion, SMatrix, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{DMatrix, DVector, Quaternion, SMatrix, UnitQuaternion, Vector2, Vector3};
 use visloc_core::geometry::SE3;
 
 /// `block_solve`'s hardcoded multiplicative diagonal damping (`ba.py:66`'s
@@ -1110,14 +1110,6 @@ pub fn dpvo_ba_step(
         // flagged patch on every iteration, not just the first.
         depth_damping: problem.depth_damping.clone(),
     })
-}
-
-// Silence an unused-import warning if `Matrix6` ever stops being needed
-// directly (kept as a documented type witness for `SE3::adjoint`'s return
-// type, matched against in the module doc's adjoint section).
-#[allow(dead_code)]
-const fn _adjoint_type_witness(m: Matrix6<f64>) -> Matrix6<f64> {
-    m
 }
 
 #[cfg(test)]

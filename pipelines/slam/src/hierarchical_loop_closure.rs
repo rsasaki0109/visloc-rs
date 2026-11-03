@@ -819,12 +819,12 @@ pub(crate) fn optimize_post_ba_pose_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
+    use nalgebra::{Point3, UnitQuaternion, Vector3};
     use visloc_core::geometry::{Pose, Sim3};
 
     use crate::{
-        HierarchicalSfmConfig, LocalSubmap, LocalSubmapFrame, LocalSubmapLandmark,
-        LocalSubmapObservation, LocalSubmapQuality, TrackBuildStats, VerifiedSubmapConstraint,
+        HierarchicalSfmConfig, LocalSubmap, LocalSubmapFrame, LocalSubmapQuality, TrackBuildStats,
+        VerifiedSubmapConstraint,
     };
 
     fn empty_submap(frame_id: u64) -> LocalSubmap {
@@ -1081,19 +1081,5 @@ mod tests {
     fn verification_frame_budget_clamps_at_registered_frame_boundaries() {
         assert_eq!(verification_frame_indices(9, 5), vec![4, 0, 8]);
         assert_eq!(verification_frame_indices(2, 5), vec![0, 1]);
-    }
-
-    #[allow(dead_code)]
-    fn landmark(id: u64, point: Point3<f64>, frame_id: u64) -> LocalSubmapLandmark {
-        LocalSubmapLandmark {
-            local_landmark_id: id,
-            position: point,
-            observations: vec![LocalSubmapObservation {
-                local_frame_index: 0,
-                source_frame_id: frame_id,
-                keypoint_index: id as usize,
-                pixel: Point2::origin(),
-            }],
-        }
     }
 }
