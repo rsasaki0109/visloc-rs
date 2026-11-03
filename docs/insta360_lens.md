@@ -38,6 +38,24 @@ calibration strings, numbers joined by `_`:
 lenses with the `p2_` radius as `InsvLens`. Other cameras or firmware may
 lay these out differently; `gsplat_photos --insv` then stops with an error.
 
+**Photos (`.insp`).** A One RS 1-Inch 360's photos (from
+[FIORD](https://zenodo.org/communities/fiord), firmware v2.0.11) are JPEGs
+with the same kind of trailer, indexed differently, and the same strings
+in it:
+- The circles' string starts `q2_` and runs on into a printable byte.
+- Its circle centres sit up to 4 px from the lenses' optical centres.
+- The photo is the calibration image itself: 6528 x 3264, the two lenses
+  side by side, each a square as tall as the photo.
+
+`visloc_io::insv::read_insta360_lenses` reads the lenses from either file,
+looking through the whole trailer. A lens takes the circle centred within 1%
+of its radius of its optical centre. `insta360_lens_cameras PHOTO.insp`
+prints each lens as a `gsplat_photos --camera` row for its half of the
+photo: the `OPENCV_FISHEYE` camera that matches the unified model out to
+100° off the axis (`FisheyeLens::kannala_brandt`). It fits within 0.06 px.
+The tangential terms are left out; they move pixels by up to 5 px
+([fisheye.md](fisheye.md#fiord-a-200-insta360-through-its-factory-calibration)).
+
 ## The model
 
 A ray `(x, y, z)` in the lens frame (x right, y down, z along the optical

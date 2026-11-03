@@ -24,6 +24,10 @@ visloc-gsplat-render = { path = "../gsplat-render", version = "0.3.1" }
 visloc-gsplat-train = { path = "../gsplat-train", version = "0.3.1", default-features = false, features = ["mesh"] }
 visloc-vision = { path = "../vision", version = "0.3.1", optional = true }
 
+[dev-dependencies]
+# PNG output of the examples (already a dependency of visloc-gsplat-train).
+image = { version = "=0.25.5", default-features = false, features = ["png"] }
+
 [features]
 default = []
 # Descriptor matching on the GPU for `build_photo_dataset`

@@ -68,6 +68,10 @@ path = "examples/insv_stitch.rs"
 required-features = ["euroc"]
 
 [[example]]
+name = "insta360_lens_cameras"
+path = "examples/insta360_lens_cameras.rs"
+
+[[example]]
 name = "gsplat_euroc"
 path = "examples/gsplat_euroc.rs"
 required-features = ["gpu", "euroc"]

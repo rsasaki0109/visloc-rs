@@ -5,7 +5,8 @@
 //!     (--images <folder> | --insv VIDEO.insv) --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
 //!     [--principal-point CX,CY] [--camera "MODEL W H PARAMS..."] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
-//!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12]
+//!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12] \
+//!     [--max-angle 100]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
 //!     [--frame-step 10] [--insv-calibrate | --insv-lenses lenses.txt] [--imu FILE [--imu-frame-period S]]
 //! ```
@@ -71,6 +72,8 @@ training:
   --normal-weight 0        normal regularisation weight (e.g. 0.005)
   --appearance             per-photo colour correction
   --mask-black N           leave near-black pixels (channels <= N) out of the loss
+  --max-angle DEG          leave pixels past DEG off --camera's axis out of the loss
+                           (e.g. 100: a 200° fisheye's image circle)
 SfM:
   --max-size 1600          longest image side
   --focal PX               focal length prior (default: EXIF, else 1.2 x the long side)
@@ -162,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Leave near-black regions (channels <= N, e.g. blacked-out
             // people and cars) out of the training loss and the PSNR.
             "--mask-black" => sfm.mask_black = Some(next()?.parse()?),
+            "--max-angle" => sfm.max_angle = Some(next()?.parse()?),
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             // Extra SIFT settings, e.g. `--sift-opt affine=1 --sift-opt
             // domain_size_pooling=1` for strongly oblique / wide-baseline photos.
@@ -278,7 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         steps,
         normal_weight,
         appearance,
-        alpha_mask: sfm.mask_black.is_some(),
+        alpha_mask: sfm.mask_black.is_some() || sfm.max_angle.is_some(),
         ..TrainConfig::brush_preset()
     };
     let t_train = Instant::now();

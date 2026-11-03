@@ -18,6 +18,8 @@
 //!
 //! The metadata record (id 0x101) also holds each lens's factory
 //! calibration as `_`-separated text ([`InsvLens`]; docs/insta360_lens.md).
+//! An `.insp` photo carries the same strings in its trailer, whose index
+//! differs; [`read_insta360_lenses`] reads them from either.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -79,6 +81,9 @@ pub struct InsvLens {
     /// The lens's position on the camera as recorded (metres; the back lens
     /// sits about 3 cm behind the front one).
     pub translation: [f64; 3],
+    /// The calibration image's width and height: the two lens images side
+    /// by side (10752 x 5376 on an X5). An `.insp` photo is that image.
+    pub image_size: [f64; 2],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +102,19 @@ pub enum InsvError {
 
 /// Reads the IMU and the video frame times from an `.insv` file's trailer.
 pub fn read_insv_telemetry(path: &Path) -> Result<InsvTelemetry, InsvError> {
+    parse_trailer(&read_trailer(path)?, path)
+}
+
+/// The lenses' factory calibration from an Insta360 file's trailer: an
+/// `.insv` video or an `.insp` photo. The calibration strings are looked
+/// for in the whole trailer, so a photo's differently indexed trailer reads
+/// too. Empty when there are none in the layout [`InsvLens`] reads.
+pub fn read_insta360_lenses(path: &Path) -> Result<Vec<InsvLens>, InsvError> {
+    Ok(parse_lenses(&String::from_utf8_lossy(&read_trailer(path)?)))
+}
+
+/// The file's trailer: its last `size` bytes, footer included.
+fn read_trailer(path: &Path) -> Result<Vec<u8>, InsvError> {
     let io = |source| InsvError::Io {
         path: path.to_path_buf(),
         source,
@@ -126,7 +144,7 @@ pub fn read_insv_telemetry(path: &Path) -> Result<InsvTelemetry, InsvError> {
     let mut trailer = vec![0u8; size as usize];
     file.seek(SeekFrom::End(-(size as i64))).map_err(io)?;
     file.read_exact(&mut trailer).map_err(io)?;
-    parse_trailer(&trailer, path)
+    Ok(trailer)
 }
 
 fn invalid(path: &Path, message: String) -> InsvError {
@@ -208,8 +226,8 @@ pub fn parse_trailer(trailer: &[u8], path: &Path) -> Result<InsvTelemetry, InsvE
 /// `2_` then per lens `xi_fx_fy_cx_cy_` three angles, three translations,
 /// `k1_k2_k3_p1_p2_` and the calibration image's width, height and a code
 /// (19 fields; then one more field), and the image circles' radii from the
-/// string after a letter and `2_` (`p2_` or `n2_` on X5s, per lens
-/// `radius_cx_cy_` three angles), matched by centre.
+/// string after a letter and `2_` (`p2_` or `n2_` on X5s, `q2_` on a One
+/// RS 1-Inch; per lens `radius_cx_cy_` three angles), matched by centre.
 fn parse_lenses(text: &str) -> Vec<InsvLens> {
     const PER_LENS: usize = 19;
     let runs = || {
@@ -218,14 +236,21 @@ fn parse_lenses(text: &str) -> Vec<InsvLens> {
     };
     let numbers = |s: &str| -> Option<Vec<f64>> { s.split('_').map(|t| t.parse().ok()).collect() };
     // Every `<letter>2_` string's per-lens `radius cx cy`, in order; a lens
-    // takes the first whose centre is its own.
+    // takes the first centred within 1% of the radius of its own centre (an
+    // X5's circles share the lenses' centres, a One RS 1-Inch's sit up to
+    // 4 px off).
     let circles: Vec<[f64; 3]> = runs()
         .flat_map(|r| {
             r.match_indices("2_").filter_map(move |(i, _)| {
                 if !r[..i].ends_with(|c: char| c.is_ascii_alphabetic()) {
                     return None;
                 }
-                let v = numbers(&r[i + 2..])?;
+                // The leading numbers: a One RS 1-Inch's string runs on into
+                // a printable byte (`…_3134H`).
+                let v: Vec<f64> = r[i + 2..]
+                    .split('_')
+                    .map_while(|t| t.parse().ok())
+                    .collect();
                 (v.len() >= 12).then(|| [[v[0], v[1], v[2]], [v[6], v[7], v[8]]])
             })
         })
@@ -249,7 +274,7 @@ fn parse_lenses(text: &str) -> Vec<InsvLens> {
             let (cx, cy) = (b[3], b[4]);
             let circle = circles
                 .iter()
-                .find(|c| (c[1] - cx).abs() < 1.0 && (c[2] - cy).abs() < 1.0)?;
+                .find(|c| (c[1] - cx).hypot(c[2] - cy) < 0.01 * c[0])?;
             Some(InsvLens {
                 xi: b[0],
                 fx: b[1],
@@ -261,6 +286,7 @@ fn parse_lenses(text: &str) -> Vec<InsvLens> {
                 radial: [b[11], b[12], b[13]],
                 tangential: [b[14], b[15]],
                 circle_radius: circle[0],
+                image_size: [b[16], b[17]],
             })
         })
         .collect();
@@ -392,11 +418,40 @@ mod tests {
         assert_eq!(back.circle_radius, 2651.0);
         assert_eq!(back.translation, [-0.001, 0.0004, -0.032]);
         assert_eq!(back.angles, [-0.4, -0.2, 91.1]);
+        assert_eq!(back.image_size, [10752.0, 5376.0]);
         // Some files write `n2_` instead of `p2_`.
         assert_eq!(parse_lenses(&text.replace("p2_", "n2_")), lenses);
         // Without the circles' string there is no lens image to map to.
         let no_circles = text.replace("p2_", "*2_");
         assert!(parse_lenses(&no_circles).is_empty());
+    }
+
+    #[test]
+    fn reads_the_lenses_of_a_photo() {
+        // An `.insp` (a One RS 1-Inch's layout, values rounded): its strings
+        // sit in a record the video index does not use, the circles' after
+        // `q2_` and running on into a printable byte, and the photo is the
+        // 6528 x 3264 calibration image.
+        let text = "v2.0.11_build3*q2_1629.280_1613.220_1613.590_-0.101_-0.670_179.651_\
+            1628.330_4873.050_1610.260_-0.049_-0.538_-0.227_6528_3264_3134H\u{0}\
+            2_2.014930_2984.350_2983.890_1616.120_1609.790_-0.159_-0.753_179.623_\
+            0.000000_0.000000_0.000000_0.2242_-0.2360_-1.0925_0.0017_-0.0010_6528_3264_62_\
+            2.014930_2978.770_2978.320_4877.630_1607.470_-0.168_-0.651_-0.215_\
+            -0.000179_-0.000198_-0.039961_0.2361_-0.3087_-0.9219_0.0009_-0.0016_6528_3264_62_199680\u{0}";
+        let path = std::env::temp_dir().join(format!("insp_{}.insp", std::process::id()));
+        let mut file = vec![0xffu8, 0xd8, 0xff, 0xe1]; // stands in for the JPEG
+        file.extend_from_slice(&trailer(&[(0x200, text.as_bytes().to_vec())]));
+        std::fs::write(&path, &file).unwrap();
+        let lenses = read_insta360_lenses(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(lenses.len(), 2);
+        assert_eq!(
+            (lenses[0].xi, lenses[0].fx, lenses[0].cx),
+            (2.01493, 2984.35, 1616.12)
+        );
+        assert_eq!(lenses[0].circle_radius, 1629.28);
+        assert_eq!((lenses[1].cx, lenses[1].circle_radius), (4877.63, 1628.33));
+        assert_eq!(lenses[1].image_size, [6528.0, 3264.0]);
     }
 
     #[test]
