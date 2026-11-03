@@ -9,7 +9,7 @@
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
 //!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
-//!   [--normal-weight 0.005 [--normal-start 7000]]
+//!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
@@ -23,8 +23,12 @@
 //! `--depth-weight-final` moves the weight log-linearly to W over the run.
 //! `--normal-weight` adds the depth-normal consistency loss from
 //! `--normal-start` on (the wgpu trainer's `normal_weight` / `normal_start`).
+//! `--alpha-mask` leaves the pixels with image alpha below 128 out of the
+//! loss (`gsplat_photos_cuda --mask-black`'s masked regions) and of the eval
+//! PSNR; SSIM takes the image's values there. `--save-eval` writes the final
+//! renders of the held-out views to `<dir>/<image name>.png`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use visloc_gsplat_core::ply::save_ply;
@@ -32,11 +36,12 @@ use visloc_gsplat_cuda::trainer::CudaTrainer;
 use visloc_gsplat_cuda::CudaGsplat;
 use visloc_gsplat_train::config::TrainConfig;
 use visloc_gsplat_train::dataset::{
-    find_model_dir, load_colmap_dataset_with, load_view_rgb, EquirectOptions,
+    find_model_dir, load_colmap_dataset_with, load_view_rgb, load_view_rgb_mask, EquirectOptions,
+    RgbAndMask,
 };
 use visloc_gsplat_train::init::{read_points3d, seed_scene};
 use visloc_gsplat_train::mesh::MeshOptions;
-use visloc_gsplat_train::metrics::{psnr, ssim};
+use visloc_gsplat_train::metrics::{psnr_masked, ssim};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -52,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut depth_prior: Option<PathBuf> = None;
     let mut depth_weight = 0.1f32;
     let mut depth_weight_final: Option<f32> = None;
+    let mut save_eval: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -79,6 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--depth-weight-final" => depth_weight_final = Some(next()?.parse()?),
             "--normal-weight" => cfg.normal_weight = next()?.parse()?,
             "--normal-start" => cfg.normal_start = next()?.parse()?,
+            "--alpha-mask" => cfg.alpha_mask = true,
+            "--save-eval" => save_eval = Some(PathBuf::from(next()?)),
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -98,10 +106,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dataset.train.len(),
         dataset.eval.len()
     );
-    let eval_gt: Vec<Vec<[f32; 3]>> = dataset
+    let eval_gt: Vec<RgbAndMask> = dataset
         .eval
         .iter()
-        .map(load_view_rgb)
+        .map(|v| {
+            if cfg.alpha_mask {
+                load_view_rgb_mask(v)
+            } else {
+                load_view_rgb(v).map(|rgb| (rgb, None))
+            }
+        })
         .collect::<Result<_, _>>()?;
 
     let gs = CudaGsplat::from_env().ok_or(
@@ -126,10 +140,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let eval = |trainer: &mut CudaTrainer| -> Result<(f64, f64), Box<dyn std::error::Error>> {
         let (mut p, mut s) = (0.0, 0.0);
-        for (v, gt) in dataset.eval.iter().zip(&eval_gt) {
-            let img = trainer.render(&v.camera)?;
+        for (v, (gt, valid)) in dataset.eval.iter().zip(&eval_gt) {
+            let mut img = trainer.render(&v.camera)?;
             let cam = &v.camera.camera;
-            p += psnr(&img, gt);
+            p += psnr_masked(&img, gt, valid.as_deref());
+            // SSIM has no mask: the masked pixels take the image's values.
+            if let Some(valid) = valid {
+                for ((px, g), &ok) in img.iter_mut().zip(gt).zip(valid) {
+                    if !ok {
+                        *px = *g;
+                    }
+                }
+            }
             s += ssim(&img, gt, cam.width as usize, cam.height as usize);
         }
         let k = dataset.eval.len().max(1) as f64;
@@ -207,6 +229,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     save_ply(&trainer.scene()?, &out)?;
     println!("wrote {}", out.display());
+    if let Some(dir) = &save_eval {
+        std::fs::create_dir_all(dir)?;
+        for v in &dataset.eval {
+            let cam = &v.camera.camera;
+            let bytes: Vec<u8> = trainer
+                .render(&v.camera)?
+                .iter()
+                .flatten()
+                .map(|&x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect();
+            let name = Path::new(&v.name).with_extension("png");
+            let path = dir.join(name.file_name().ok_or("eval view without a name")?);
+            image::save_buffer(&path, &bytes, cam.width, cam.height, image::ColorType::Rgb8)?;
+        }
+        println!(
+            "wrote {} eval renders to {}",
+            dataset.eval.len(),
+            dir.display()
+        );
+    }
     if let Some(path) = mesh_out {
         let views: Vec<_> = dataset
             .train

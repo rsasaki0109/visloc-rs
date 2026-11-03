@@ -6,6 +6,27 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Insta360 photos through their factory lens; masks past a fisheye's
+  field of view.** On FIORD's 200° MeetingRoom_In (front lens, 800 px), the
+  held-out PSNR within the image circle goes from 25.4 dB (FIORD's
+  calibration) to 29.6 dB. Details in docs/fisheye.md.
+  - **Reading the calibration.** `visloc_io::insv::read_insta360_lenses`
+    reads the lenses' factory calibration from an `.insp` photo as well as
+    an `.insv` video. It looks through the whole trailer (a photo's is
+    indexed differently), and `InsvLens::image_size` gives the
+    calibration image's size.
+  - **`insta360_lens_cameras PHOTO.insp`** prints each lens as a `--camera`
+    row: the `OPENCV_FISHEYE` camera of its half of the photo, fitted to
+    the unified model out to 100° (`FisheyeLens::in_photo`,
+    `FisheyeLens::kannala_brandt`).
+  - **`gsplat_photos --max-angle DEG`** (and `gsplat_photos_cuda`) leaves
+    the pixels past DEG off `--camera`'s axis out of training
+    (`PhotoSfmConfig::max_angle`), e.g. a 200° fisheye's dark rim and
+    corners.
+  - **`gsplat_photos_cuda --mask-black N`** is `gsplat_photos`'s.
+  - **`gsplat_train_cuda --alpha-mask`** leaves the masked pixels out of
+    the loss and the held-out PSNR.
+  - **`gsplat_train_cuda --save-eval DIR`** writes the held-out renders.
 - **Distortion refinement in bundle adjustment (`ba_refine_extra_params`,
   `gsplat_photos --refine-camera`).** COLMAP's `ba_refine_extra_params` now
   has a counterpart in the native solver. The shared camera's distortion

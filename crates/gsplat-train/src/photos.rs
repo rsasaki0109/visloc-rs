@@ -111,6 +111,12 @@ pub struct PhotoSfmConfig {
     /// datasets black out: the training images get alpha 0 there (grown by
     /// a few pixels over JPEG ringing), for `TrainConfig::alpha_mask`.
     pub mask_black: Option<u8>,
+    /// Leave out the pixels whose ray is farther than this many degrees
+    /// off the axis of `camera` (e.g. 100 for a 200° fisheye's image
+    /// circle, whose dark rim the calibration does not cover): the training
+    /// images get alpha 0 there, for `TrainConfig::alpha_mask`. Needs
+    /// `camera`.
+    pub max_angle: Option<f64>,
     /// Solve the large bundle adjustments' reduced camera systems on the
     /// GPU (`visloc_ba_gpu::GpuReducedSolver`; docs/gpu_bundle_adjustment.md):
     /// the result then differs from the CPU solve at the f32 level.
@@ -219,6 +225,7 @@ impl Default for PhotoSfmConfig {
             sift_overrides: Vec::new(),
             match_u8: true,
             mask_black: None,
+            max_angle: None,
             gpu_ba: false,
             gpu_sift: true,
             complete_model: true,
@@ -1264,7 +1271,7 @@ fn write_lens_faces(
                 for (k, (_, r)) in faces.iter().enumerate() {
                     let face = dual_fisheye::lens_face(&half, lens, r, size);
                     let i = per_frame * f + faces.len() * l + k;
-                    save_working_image(&face, &path(i), cfg.mask_black)?;
+                    save_working_image(&face, &path(i), cfg.mask_black, None)?;
                 }
             }
             Ok(())
@@ -1338,17 +1345,23 @@ fn scaled_camera(camera: &Camera, width: u32, height: u32) -> Result<Camera, Eur
     Ok(scaled)
 }
 
-/// Write a working image as PNG; with `mask_black`, RGBA with alpha 0 on
-/// its near-black regions.
+/// Write a working image as PNG; with `mask_black` or `outside` (pixels to
+/// leave out), RGBA with alpha 0 on its near-black regions and there.
 fn save_working_image(
     img: &image::RgbImage,
     path: &Path,
     mask_black: Option<u8>,
+    outside: Option<&[bool]>,
 ) -> Result<(), EurocError> {
-    match mask_black {
+    let masked = match (mask_black.map(|thr| black_regions(img, thr)), outside) {
+        (None, None) => None,
+        (Some(black), None) => Some(black),
+        (None, Some(out)) => Some(out.to_vec()),
+        (Some(black), Some(out)) => Some(black.iter().zip(out).map(|(a, b)| a | b).collect()),
+    };
+    match masked {
         None => img.save(path),
-        Some(thr) => {
-            let masked = black_regions(img, thr);
+        Some(masked) => {
             let mut rgba = image::RgbaImage::new(img.width(), img.height());
             for ((o, p), &m) in rgba.pixels_mut().zip(img.pixels()).zip(&masked) {
                 *o = image::Rgba([p[0], p[1], p[2], if m { 0 } else { 255 }]);
@@ -1627,13 +1640,46 @@ pub fn build_photo_dataset(
         }
         None => Camera::pinhole(1, width, height, focal_prior, focal_prior, cx, cy),
     };
+    // The pixels past `max_angle` off the lens's axis.
+    let outside: Option<Vec<bool>> = match cfg.max_angle {
+        None => None,
+        Some(_) if cfg.camera.is_none() => {
+            return Err(EurocError::Camera(
+                "max_angle needs a calibrated camera".into(),
+            ))
+        }
+        Some(deg) => {
+            let cos_max = deg.to_radians().cos();
+            let past = |x: u32, y: u32| {
+                camera
+                    .unit_ray_from_pixel(&Point2::new(x as f64 + 0.5, y as f64 + 0.5))
+                    .is_none_or(|ray| ray.z < cos_max)
+            };
+            let mask: Vec<bool> = (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|(x, y)| past(x, y))
+                .collect();
+            log(&format!(
+                "leaving out {:.1}% of each image, past {deg}° off the axis",
+                100.0 * mask.iter().filter(|&&m| m).count() as f64 / mask.len() as f64
+            ));
+            Some(mask)
+        }
+    };
 
     let names: Vec<String> = (0..n).map(|i| format!("frame_{i:05}.png")).collect();
     if let WorkImages::Memory(images) = &work {
         images
             .par_iter()
             .zip(&names)
-            .map(|((img, _), name)| save_working_image(img, &images_out.join(name), cfg.mask_black))
+            .map(|((img, _), name)| {
+                save_working_image(
+                    img,
+                    &images_out.join(name),
+                    cfg.mask_black,
+                    outside.as_deref(),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
     }
     let listing: String = names
