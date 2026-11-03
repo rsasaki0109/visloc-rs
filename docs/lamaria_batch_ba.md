@@ -1350,6 +1350,98 @@ seeds were not run. Those choices were right on the training set. Submission
 6 lost on the test set because two training sequences did not stand for the
 five test sequences, not because of the noise.
 
+### Where the device's correction gains
+
+The device's gyroscope correction in the chain's IMU gains on sequence_3_18
+and 4_11 and loses elsewhere ([A device's gyroscope
+correction](#a-devices-gyroscope-correction)). It turns the chain's heading by
+about the same amount whatever the chain had left, and the score follows
+whether what was left shrinks. Heading change over 256 s (mean, against the
+pseudo-GT as above) of the chain's result, without the correction and with it:
+
+| Sequence | Heading change, without → with | CP Score, without → with |
+|---|---:|---:|
+| sequence_1_20 | +0.02° → −0.11° | 88.65 → 77.62 |
+| sequence_2_11 | +0.01° → −0.24° | 89.25 → 83.37 |
+| sequence_3_18 | +0.49° → +0.21° | 54.27 → **58.15** |
+| sequence_4_10 | +0.13° → −0.16° | 59.80 → 57.87 |
+| sequence_4_11 | −0.19° → −0.04° | 71.07 → **73.40** |
+
+Where the chain held its heading (1_20, 2_11) the correction makes a drift;
+where it had one left (3_18, 4_11) the correction happens to turn against it.
+
+Each sequence's own fit (on its own pseudo-GT; diagnosis only) does the same
+on sequence_3_18, and loses less on 2_11, but still loses:
+
+| Sequence | Without | The device's (leave one out) | Its own fit |
+|---|---:|---:|---:|
+| sequence_2_11 | 89.25 (+0.01°) | 83.37 (−0.24°) | 87.55 (−0.11°) |
+| sequence_3_18 | 54.27 (+0.49°) | 58.15 (+0.21°) | 57.71 (+0.20°) |
+
+What turns the heading is the part both fits share, the z axis's scale
+(−0.13 %) and the non-orthogonality. The x and y scales, where the two
+differ (−0.14 and −0.15 % from the device, +0.01 and −0.03 % on sequence_3_18
+itself), go into the focal lengths the chain estimates: the device's
+correction moves them by +0.05–0.06 % on sequence_3_18 and +0.06–0.07 % on
+2_11 (both cameras), the own fit by 0.00 and +0.02 %.
+
+The chain cannot pick a correction by itself either. Its final cost and, in
+brackets, the IMU's rotation residual per factor:
+
+| Sequence | Without | The device's | Its own fit | CP Score, with the device's |
+|---|---:|---:|---:|---:|
+| sequence_1_20 | 91,149 (6.10) | **89,646** (5.10) | | −11.0 |
+| sequence_2_11 | **109,454** (3.83) | 110,625 (4.18) | 109,663 (3.87) | −5.9 |
+| sequence_3_18 | 203,355 (3.91) | 205,841 (4.62) | **203,274** (3.85) | +3.9 |
+
+On sequence_1_20 the correction fits the cameras better and loses 11
+points; on 3_18 it fits them worse and gains 3.9. Even the correction fitted
+on the sequence's own ground truth loses on 2_11. The gyroscope's calibration
+is not something the chain could correct on the test set, and the
+correction stays not kept.
+
+### All twelve training sequences under the seeds
+
+The seeds of [How far the chain moves for
+nothing](#how-far-the-chain-moves-for-nothing) covered five sequences. They
+now cover all twelve, each with the pass submission 6 runs on it (ALIKED
+within the online result's band on R_11_5cp and R_12_10cp, SIFT elsewhere).
+sequence_3_17 and 2_12 first ran through the driver as in the baseline
+(`--ba-chain`, the data on ext4); sequence_5_11 and 5_12 (Moving platform)
+are scored on the control points alone.
+
+| Sequence | As it ran | Seed 1 | Seed 2 | Seed 3 | Seeds 1–3 (mean ± std) |
+|---|---:|---:|---:|---:|---:|
+| R_11_5cp | 97.02 | 97.41 | 97.15 | 96.50 | 97.02 ± 0.47 |
+| R_12_10cp | 79.31 | 78.95 | 80.04 | 81.11 | 80.03 ± 1.08 |
+| sequence_1_19 | 82.25 | 82.95 | 83.01 | 82.66 | 82.87 ± 0.19 |
+| sequence_1_20 | 88.65 | 84.33 | 85.43 | 85.97 | 85.24 ± 0.84 |
+| sequence_2_11 | 89.25 | 88.12 | 88.48 | 88.50 | 88.37 ± 0.22 |
+| sequence_2_12 | 51.97 | 50.80 | 47.54 | 57.87 | 52.07 ± 5.28 |
+| sequence_3_17 | 79.87 | 80.08 | 79.86 | 80.06 | 80.00 ± 0.12 |
+| sequence_3_18 | 54.27 | 55.01 | 54.11 | 54.80 | 54.64 ± 0.47 |
+| sequence_4_10 | 59.80 | 58.03 | 57.46 | 57.68 | 57.73 ± 0.29 |
+| sequence_4_11 | 71.07 | 70.86 | 71.63 | 71.56 | 71.35 ± 0.43 |
+| sequence_5_11 | 51.46 | 51.55 | 51.44 | 51.43 | 51.47 ± 0.07 |
+| sequence_5_12 | 5.80 | 5.77 | 5.75 | 5.74 | 5.75 ± 0.02 |
+| **Mean of twelve** | 67.56 | 66.99 | 66.83 | 67.82 | 67.21 ± 0.54 |
+| **Mean of eleven (not 2_12)** | 68.98 | 68.46 | 68.58 | 68.73 | **68.59 ± 0.13** |
+
+- sequence_2_12 moves by 47.5–57.9 between the seeds; every other sequence
+  by 0.02–1.1 (std). With it, the mean of twelve moves by 0.5 for nothing;
+  without it, the mean of eleven by 0.13.
+- The runs as they ran are lucky only where the chain was tuned: 1.2 points
+  above the seeds on the mean of the first five (3.4 on sequence_1_20, 2.1 on
+  4_10), 0.2 below them on the mean of the seven others.
+
+A change is now measured on the eleven sequences other than sequence_2_12,
+with seeds 1–3, each seed against the same seed. It is kept if it raises the
+mean of eleven by about three times its spread (0.4) and raises most of the
+eleven. sequence_2_12 is run and reported but does not decide. Three seeds
+over the eleven take about eleven hours on the 8 GB GPU PC; the pass's
+ALIKED on R_12_10cp (50 minutes a run) and the first five (75 minutes a
+seed) take most of it.
+
 ### A ride the VIO halves
 
 Keyframes on a moving platform are easy to find without ground truth: the

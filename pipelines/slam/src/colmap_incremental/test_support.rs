@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
+use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use visloc_core::geometry::SE3;
 use visloc_vision::two_view::{ConfigurationType, CorrespondenceGraph};
@@ -18,8 +18,6 @@ pub(crate) struct SyntheticScene {
     pub db: DatabaseCache,
     pub ground_truth_rig_from_world: BTreeMap<FrameT, SE3>,
     pub ground_truth_points: Vec<Point3<f64>>,
-    #[allow(dead_code)]
-    pub cam2_from_rig: SE3,
     /// `(image_id_cam1, image_id_cam2)` per frame, in frame order.
     pub images_per_frame: Vec<(ImageT, ImageT)>,
 }
@@ -191,18 +189,8 @@ fn build_rig_scene(
         db,
         ground_truth_rig_from_world,
         ground_truth_points,
-        cam2_from_rig,
         images_per_frame,
     }
-}
-
-/// Squared-distance point cloud fit under the assumption both sets are
-/// already in the same (world) frame (no further alignment needed since the
-/// tests seed exact ground-truth poses and only check reconstructed 3D
-/// point / pose error).
-#[allow(dead_code)]
-pub(crate) fn point2_dist(a: Point2<f64>, b: Point2<f64>) -> f64 {
-    (a - b).norm()
 }
 
 /// `num_frames` single-camera frames of one equirectangular camera

@@ -1,6 +1,6 @@
 # LaMAria: GPU のローカル PC への引き継ぎ
 
-2026-10-31 時点。2026-10-27 まではクラウド（GitHub Actions、GPU なし）で進め、そのあと 8 GB の GPU を積んだローカル PC（Windows の WSL2 Ubuntu、データは外付け SSD の NTFS）で続けた。
+2026-11-02 時点。2026-10-27 まではクラウド（GitHub Actions、GPU なし）で進め、そのあと 8 GB の GPU を積んだローカル PC（Windows の WSL2 Ubuntu、データは外付け SSD の NTFS）で続けた。
 
 ## 現状
 
@@ -26,7 +26,7 @@
   - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Medium・Long の弱い系列）。
   - 路面電車のドア窓越しに街並みが少ししか見えず、乗車区間を見落とすこと（Moving の 5_5、5_6）。
 
-## GPU の PC でやったこと（2026-10-27〜31）
+## GPU の PC でやったこと（2026-10-27〜11-02）
 
 | やったこと | 結果 | 記録 |
 |---|---|---|
@@ -35,11 +35,14 @@
 | ALIKED の照合を VIO の帯なしで（エッセンシャル行列、online の結果の帯） | 学習 R の 2 本では online の帯が +5.1。テストの 5 系列では 61.5 → 60.0（提出 6） | [Learned matches without the VIO's band](lamaria_batch_ba.md#learned-matches-without-the-vios-band) |
 | 遠くの点を長く追う・見つけ直す | 頭に付けたカメラでは、遠くの点が視野に続けて入るのは中央値 1 秒。20 秒以上外れた点を見つけ直すと 8 割が誤り | [Far points out of view](lamaria_batch_ba.md#far-points-out-of-view) |
 | 乗車区間の見落とし（プラットフォームフィルターを緩める、乗車区間を凍らせて再現） | 5_5 の乗車区間は動くようになるが、学習系列で誤検出して点を落とす。凍らせた乗車区間はチェーンで戻らない | [The platform filter where it stays off](lamaria_batch_ba.md#the-platform-filter-where-it-stays-off) |
+| 機器ごとのジャイロ補正 | チェーンの向きを系列によらずほぼ同じだけ回す。3_18 と 4_11 で効いたのは、残っていたずれと逆向きに回ったから。系列自身の疑似正解で当てた補正でも 2_11 では下がり、チェーン自身のコストでは選べない。採らない | [Where the device's correction gains](lamaria_batch_ba.md#where-the-devices-correction-gains) |
+| 学習 12 系列すべてに種 1〜3 | 基準は sequence_2_12 を除く 11 系列で 68.59 ± 0.13。sequence_2_12 は種だけで 47.5〜57.9 動く | [All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds) |
 
 ## 残っている案
 
 - 今の構成（Basalt の VIO と SIFT のバッチ BA）の調整は、どれも 1 回 ±0.3 点以下。学習系列が少ないので、その大きさでは選び方自体があてにならない（提出 6）。
-- **評価の進め方**: 改善案は、IMU に雑音を少し足した種 1〜3 の実行どうしで比べる。同じ入力のままの実行は、平均で約 1.2 点甘く出る（[How far the chain moves for nothing](lamaria_batch_ba.md#how-far-the-chain-moves-for-nothing)）。
+- **評価の進め方**: 改善案は、IMU に雑音を少し足した種 1〜3 の実行どうしで比べる。対象は学習 12 系列のうち sequence_2_12 を除く 11 系列（基準は種 1〜3 の平均 68.59 ± 0.13）。平均を 0.4 以上上げ、過半の系列を上げれば採る。sequence_2_12 は種だけで 47.5〜57.9 動くので、結果は記録するが判断には使わない。3 種で約 11 時間かかる（[All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds)）。
+  - 同じ入力のままの実行は、チェーンの設定を選ぶのに使った 5 系列で約 1.2 点甘く出る。ほかの 7 系列では甘くならない。
 - **条件付きのプラットフォームフィルター**: IMU の速度変化と VIO の速度が食い違うときだけ条件を緩める。学習系列は変わらないはずだが、効果は学習で確かめられない。当たっても平均 +0.4〜0.8。
 - **新しい VIO / 前段**: GroundedSLAM との差（約 18 点）を詰めるには、ずれそのものを減らす新しい部品が要る。数週間規模で、効く保証はない。
 

@@ -468,6 +468,78 @@ ground-truth poses are the reference:
 
 The splats on SfM poses come within 0.1 dB of those on the true poses.
 
+### FIORD: a 200° Insta360 through its factory calibration
+
+[FIORD](https://zenodo.org/communities/fiord) (CC BY 4.0) has ten scenes
+taken with an Insta360 One RS 1-Inch 360. Its two 200° fisheyes each give
+a 3264 px colour square. Every scene comes with a COLMAP model of both
+lenses and a laser scan. The runs below take MeetingRoom_In's front lens
+(`cam1`, 106 photos) at 800 px. They train for 30k steps with every 8th
+photo held out.
+
+```bash
+insta360_lens_cameras IMG_20241120_000613_00_729.insp   # a --camera row per lens
+gsplat_photos_cuda --images meetingroom/fisheyeimages/cam1 --out run --max-size 800 \
+  --camera "OPENCV_FISHEYE 3264 3264 989.857 989.705 1616.62 1610.29 0.0236 -0.00764 -0.00356 0.00048" \
+  --max-angle 100
+gsplat_train_cuda --data run --alpha-mask
+```
+
+- **The lens.** The photos (`.insp`) carry each lens's factory unified
+  (Mei) model in their trailer, as X5 videos do
+  ([insta360_lens.md](insta360_lens.md)). `insta360_lens_cameras` fits
+  `OPENCV_FISHEYE` to it out to 100° off the axis, within 0.06 px. That
+  model has no tangential terms, so they are left out; they move pixels by
+  up to 5 px at full resolution (1.2 px at 800 px).
+- **FIORD's calibration.**
+  - COLMAP cannot take rays past 90°, so FIORD's model has no observation
+    beyond 88°.
+  - Its principal point is still the initial guess (1612, 1617).
+  - Its radius runs 1.1–2.4% longer than the factory model's: 16 px at 60°
+    off the axis and 28–38 px at 100°, at full resolution.
+- **The mask.** Past 100° lie the image circle's dark rim and the corners.
+  `--max-angle 100` leaves them out of the loss, and `--alpha-mask` out of
+  the held-out PSNR.
+
+SfM registers all 106 photos in 30 s either way. Its poses agree with
+FIORD's model to 0.26–0.29% of the path's extent and 0.2–0.4°. The lens
+shows at the rim. Here is the reprojection error at 800 px, each camera
+held fixed:
+
+| Camera | 0–75° | 75–85° | 85–90° | 90–95° | 95–100° | Rays past 90° |
+|---|---|---|---|---|---|---|
+| FIORD's | 0.49–0.52 px | 0.70 px | 1.00 px | 1.42 px | 1.72 px | 3.3% |
+| factory | 0.46–0.49 px | 0.59 px | 0.76 px | 0.82 px | 0.78 px | 4.4% |
+
+Held-out PSNR on the same pixels (within 398 px of the centre, the 200°
+circle), the same 14 photos:
+
+| Camera, poses | Training mask | PSNR |
+|---|---|---|
+| FIORD's calibration, poses and points | near-black (`--mask-black 8`) | 25.39 dB |
+| FIORD's, refined by the mapper (`--refine-camera`) | near-black | 25.56 dB |
+| factory, SfM | near-black | 28.30 dB |
+| factory, SfM | `--max-angle 100` | 29.58 dB |
+
+The near-black mask keeps the dark rim, which the splat cannot reproduce
+from other views. Refining FIORD's camera in the mapper fits the rays past
+90° worse than the factory model does: it keeps 0.5% of them, against
+4.4%.
+
+The last run by angle off the axis:
+
+| 0–55.7° | 55.7–75° | 75–85° | 85–90° | 90–95° | 95–100° |
+|---|---|---|---|---|---|
+| 31.51 dB | 32.38 dB | 30.53 dB | 26.29 dB | 26.59 dB | 23.26 dB |
+
+FIORD's undistorted images are pinholes over the central 111°. On them the
+same trainer reaches 30.96 dB. The fisheye run gives 31.51 dB within that
+cone (55.7° off the axis), and 29.58 dB over the whole 200°.
+
+Still open:
+- The tangential terms. `THIN_PRISM_FISHEYE` could take them.
+- Both lenses as one rig ([above](#sfm-mapping-through-the-lens)).
+
 ## Validation data
 
 ETH3D's low-res many-view training scenes (`<scene>_rig.7z`) ship the

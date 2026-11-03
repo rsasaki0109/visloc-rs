@@ -25,8 +25,7 @@ visloc-gsplat-train = { path = "../gsplat-train", version = "0.3.1", default-fea
 visloc-vision = { path = "../vision", version = "0.3.1", optional = true }
 
 [dev-dependencies]
-# PNG frames of the `gsplat_lens_frames_cuda` example (already a dependency
-# of visloc-gsplat-train).
+# PNG output of the examples (already a dependency of visloc-gsplat-train).
 image = { version = "=0.25.5", default-features = false, features = ["png"] }
 
 [features]

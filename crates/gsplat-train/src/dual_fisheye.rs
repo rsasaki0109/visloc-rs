@@ -46,6 +46,99 @@ impl FisheyeLens {
         }
     }
 
+    /// `lens` in its half of a photo (`.insp`), which is the calibration
+    /// image: the lenses side by side, each a square as tall as the image,
+    /// in the calibration's pixels.
+    pub fn in_photo(lens: &InsvLens) -> Self {
+        let side = lens.image_size[1];
+        Self {
+            xi: lens.xi,
+            fx: lens.fx,
+            fy: lens.fy,
+            radial: lens.radial,
+            tangential: lens.tangential,
+            centre: [lens.cx - (lens.cx / side).floor() * side, lens.cy],
+        }
+    }
+
+    /// The `OPENCV_FISHEYE` camera (Kannala-Brandt) closest to this lens out
+    /// to `max_angle` (radians) off its axis, for a `--camera` row: `fx fy
+    /// cx cy k1 k2 k3 k4` (COLMAP's pixel centres at half-integers), and the
+    /// largest radial difference between the two, in pixels.
+    ///
+    /// Both are radial, so they match where `r = f_kb θ (1 + k1 θ² + …)`
+    /// meets the unified model's radius: with `f_kb = f / (1 + xi)` the two
+    /// agree to first order on the axis, and `k1..k4` are the least-squares
+    /// fit of the rest. The tangential terms have no counterpart and are
+    /// left out; [`FisheyeLens::tangential_shift`] tells how far they move
+    /// a pixel.
+    pub fn kannala_brandt(&self, max_angle: f64) -> ([f64; 8], f64) {
+        const SAMPLES: usize = 400;
+        let [k1, k2, k3] = self.radial;
+        // The unified model's undistorted-to-distorted radius per unit focal.
+        let radius = |theta: f64| {
+            let m = theta.sin() / (theta.cos() + self.xi);
+            let m2 = m * m;
+            m * (1.0 + m2 * (k1 + m2 * (k2 + m2 * k3)))
+        };
+        let scale = 1.0 + self.xi;
+        let thetas: Vec<f64> = (1..=SAMPLES)
+            .map(|i| max_angle * i as f64 / SAMPLES as f64)
+            .collect();
+        let a = nalgebra::DMatrix::from_fn(SAMPLES, 4, |i, j| thetas[i].powi(2 * j as i32 + 2));
+        let b =
+            nalgebra::DVector::from_fn(SAMPLES, |i, _| radius(thetas[i]) * scale / thetas[i] - 1.0);
+        let k = a
+            .clone()
+            .svd(true, true)
+            .solve(&b, 1e-15)
+            .expect("the SVD has both factors");
+        let f = self.fx.max(self.fy);
+        let error = (0..SAMPLES)
+            .map(|i| {
+                let t = thetas[i];
+                let fit = t * (1.0 + (a.row(i) * &k)[0]) / scale;
+                (fit - radius(t)).abs() * f
+            })
+            .fold(0.0, f64::max);
+        (
+            [
+                self.fx / scale,
+                self.fy / scale,
+                self.centre[0] + 0.5,
+                self.centre[1] + 0.5,
+                k[0],
+                k[1],
+                k[2],
+                k[3],
+            ],
+            error,
+        )
+    }
+
+    /// The largest shift, in pixels, that the tangential terms make to a ray
+    /// up to `max_angle` (radians) off the axis.
+    pub fn tangential_shift(&self, max_angle: f64) -> f64 {
+        let plain = Self {
+            tangential: [0.0; 2],
+            ..self.clone()
+        };
+        (0..=36)
+            .flat_map(|a| (1..=20).map(move |t| (a, t)))
+            .filter_map(|(a, t)| {
+                let (phi, theta) = (a as f64 * 10f64.to_radians(), max_angle * t as f64 / 20.0);
+                let ray = Vector3::new(
+                    theta.sin() * phi.cos(),
+                    theta.sin() * phi.sin(),
+                    theta.cos(),
+                );
+                let (x, y) = self.project(&ray)?;
+                let (u, v) = plain.project(&ray)?;
+                Some((x - u).hypot(y - v))
+            })
+            .fold(0.0, f64::max)
+    }
+
     /// The same lens with its optical centre `offset` pixels away (x right,
     /// y down): [`fit_back_lens`] measures how far the back lens's sits
     /// from where the front lens's puts it.
@@ -1663,7 +1756,62 @@ mod tests {
             circle_radius: 2646.5,
             angles: [0.4, -0.2, 89.8],
             translation: [0.0; 3],
+            image_size: [10752.0, 5376.0],
         }
+    }
+
+    /// About a One RS 1-Inch's back lens in an `.insp` (6528 x 3264).
+    fn one_rs_back() -> InsvLens {
+        InsvLens {
+            xi: 2.01493,
+            fx: 2978.77,
+            fy: 2978.32,
+            cx: 4877.63,
+            cy: 1607.47,
+            radial: [0.23614, -0.30867, -0.92194],
+            tangential: [0.00094, -0.0016],
+            circle_radius: 1628.33,
+            angles: [-0.168, -0.651, -0.215],
+            translation: [0.0, 0.0, -0.04],
+            image_size: [6528.0, 3264.0],
+        }
+    }
+
+    #[test]
+    fn a_photo_lens_fits_opencv_fisheye() {
+        let lens = FisheyeLens::in_photo(&one_rs_back());
+        assert_eq!(lens.centre, [4877.63 - 3264.0, 1607.47]);
+        let max = 100f64.to_radians();
+        let (p, error) = lens.kannala_brandt(max);
+        assert!(error < 0.1, "{error}");
+        // Rays through both, without the tangential terms the fit leaves out.
+        let plain = FisheyeLens {
+            tangential: [0.0; 2],
+            ..lens.clone()
+        };
+        for (deg, phi) in [
+            (10.0, 0.3),
+            (45.0, 1.4),
+            (80.0, 2.9),
+            (95.0, 4.0),
+            (100.0, 5.5),
+        ] {
+            let t: f64 = f64::to_radians(deg);
+            let ray = Vector3::new(t.sin() * f64::cos(phi), t.sin() * f64::sin(phi), t.cos());
+            let (x, y) = plain.project(&ray).unwrap();
+            let d = t * (1.0 + t * t * (p[4] + t * t * (p[5] + t * t * (p[6] + t * t * p[7]))));
+            let (u, v) = (
+                p[0] * d * phi.cos() + p[2] - 0.5,
+                p[1] * d * phi.sin() + p[3] - 0.5,
+            );
+            assert!(
+                (x - u).hypot(y - v) < 0.1,
+                "{deg}°: ({x}, {y}) vs ({u}, {v})"
+            );
+        }
+        // The tangential terms move the rim by a pixel or two.
+        let shift = lens.tangential_shift(max);
+        assert!(shift > 0.5 && shift < 5.0, "{shift}");
     }
 
     #[test]

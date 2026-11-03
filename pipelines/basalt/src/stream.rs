@@ -1386,7 +1386,7 @@ mod tests {
     use nalgebra::{Matrix2, Vector2};
 
     use super::*;
-    use crate::{camera::DoubleSphereCamera, types::BasaltNavState};
+    use crate::camera::DoubleSphereCamera;
 
     #[test]
     fn gyro_integration_uses_left_samples_and_positive_intervals() {
@@ -1794,9 +1794,6 @@ mod tests {
             cam_time_offset_ns: 0,
         }
     }
-
-    #[allow(dead_code)]
-    fn _keep_types_linked(_: Matrix2<f32>, _: BasaltNavState) {}
 
     /// Run the real two-image cam1 KLT path on the first frame-12 divergence
     /// witness.  The normal test suite leaves this opt-in when the input-root
