@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("export_bounded_aliked_lightglue.py")
+SCRIPT = Path(__file__).resolve().parents[1] / "export_bounded_aliked_lightglue.py"
 SPEC = importlib.util.spec_from_file_location("bounded_aliked", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
