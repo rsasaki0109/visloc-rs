@@ -42,13 +42,14 @@
 <body>
 <aside>
   <h1><a href="../">visloc-rs</a> — photos to 3D, in your browser</h1>
-  <p>visloc-rs's SfM compiled to WebAssembly: SIFT, matching and two-view verification, then the COLMAP-port incremental mapper. It runs on this device; the photos are not uploaded.</p>
+  <p>visloc-rs's SfM compiled to WebAssembly: SIFT, matching and two-view verification, then the COLMAP-port incremental mapper. SIFT and matching run on the GPU through WebGPU where the browser has it. It all runs on this device; the photos are not uploaded.</p>
   <div class="buttons">
     <button class="go" id="sample">Run on the sample photos</button>
     <label class="file">Use your own photos (one camera, 10–60 shots)
       <input type="file" id="files" accept="image/jpeg,image/png" multiple></label>
   </div>
   <p id="credit"></p>
+  <p id="backend"></p>
   <div class="stage"><div class="row"><span>Features (SIFT)</span><b id="s-features"></b></div><div class="bar"><div id="b-features"></div></div></div>
   <div class="stage"><div class="row"><span>Matching and verification</span><b id="s-match"></b></div><div class="bar"><div id="b-match"></div></div></div>
   <div class="stage"><div class="row"><span>Incremental mapper</span><b id="s-map"></b></div><div class="bar"><div id="b-map"></div></div></div>

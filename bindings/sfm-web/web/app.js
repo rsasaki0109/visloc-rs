@@ -6,7 +6,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three";
 
 const $ = (id) => document.getElementById(id);
-const SETTINGS = { maxSize: 800, maxKeypoints: 2000, window: 8, exhaustiveMax: 40 };
+// `?cpu` keeps SIFT and matching off the GPU (to compare)
+const SETTINGS = { maxSize: 800, maxKeypoints: 2000, window: 8, exhaustiveMax: 40,
+  cpu: new URLSearchParams(location.search).has("cpu") };
 
 // ---------------------------------------------------------------- 3D view
 const canvas = $("view");
@@ -117,6 +119,7 @@ function reset() {
     $(`s-${id}`).textContent = "";
   }
   $("result").textContent = "";
+  $("backend").textContent = "";
   $("downloads").hidden = true;
   $("log").textContent = "";
 }
@@ -131,9 +134,13 @@ function run(photos, focal) {
   let tMatch = 0;
   worker.onmessage = (e) => {
     const m = e.data;
-    if (m.type === "photo") {
+    if (m.type === "backend") {
+      $("backend").textContent = m.gpu !== null ? `SIFT and matching on the GPU (WebGPU: ${m.gpu}).`
+        : `SIFT and matching on the CPU (${m.reason}).`;
+      log(m.gpu !== null ? `WebGPU: ${m.gpu}` : `CPU: ${m.reason}`);
+    } else if (m.type === "photo") {
       bar("b-features", (m.i + 1) / n);
-      $("s-features").textContent = `${m.i + 1} / ${n}`;
+      $("s-features").textContent = m.i + 1 < n ? `${m.i + 1} / ${n}` : `${n} / ${n}, ${(m.ms / 1000).toFixed(1)} s`;
       log(`${m.name}: ${m.keypoints} keypoints (${(m.ms / 1000).toFixed(1)} s)`);
     } else if (m.type === "match") {
       bar("b-match", m.done / m.total);
@@ -141,6 +148,7 @@ function run(photos, focal) {
       tMatch = m.ms;
     } else if (m.type === "mapping") {
       log(`matching: ${m.verified} pairs verified (${(tMatch / 1000).toFixed(1)} s)`);
+      $("s-match").textContent += `, ${(tMatch / 1000).toFixed(1)} s`;
       $("s-map").textContent = "running…";
       bar("b-map", 0.5);
     } else if (m.type === "model") {
