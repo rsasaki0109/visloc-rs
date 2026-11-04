@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>visloc-rs — 3D Gaussian splats in your browser</title>
+<style>
+  :root { --bg:#0e1116; --panel:rgba(22,27,34,0.82); --fg:#e6edf3; --muted:#9aa7b4; --accent:#35d0ba; --line:#30363d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden;
+               font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:grab; }
+  canvas.dragging { cursor:grabbing; }
+  .panel { position:fixed; background:var(--panel); border:1px solid var(--line); border-radius:8px;
+           backdrop-filter: blur(6px); }
+  #info { top:12px; left:12px; max-width:min(420px, calc(100vw - 24px)); padding:12px 14px; }
+  #info h1 { margin:0; font-size:16px; font-weight:650; }
+  #info h1 a { color:var(--accent); text-decoration:none; }
+  #info p { margin:6px 0 0; color:var(--muted); font-size:13px; line-height:1.45; }
+  #info select { margin-top:10px; width:100%; background:#161b22; color:var(--fg); border:1px solid var(--line);
+                 border-radius:6px; padding:6px 8px; font-size:13px; }
+  #views { margin-top:8px; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+  #views[hidden] { display:none; }
+  #views button { background:#161b22; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+                  padding:3px 9px; cursor:pointer; font-size:12px; }
+  #views button:hover { border-color:var(--accent); }
+  #credit { font-size:12px !important; }
+  #credit a, #info p a { color:var(--accent); }
+  #stats { bottom:12px; left:12px; padding:6px 10px; font:12px ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); }
+  #hint { bottom:12px; right:12px; padding:6px 10px; font-size:12px; color:var(--muted); }
+  #progress { position:fixed; top:0; left:0; height:3px; width:0; background:var(--accent); transition:width .1s; }
+  #message { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; padding:24px;
+             text-align:center; color:var(--muted); font-size:15px; line-height:1.6; pointer-events:none; }
+  @media (max-width: 600px) { #hint { display:none; } }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="progress"></div>
+<div id="message"></div>
+<div id="info" class="panel">
+  <h1><a href="../">visloc-rs</a> — 3D Gaussian splats</h1>
+  <p>Rendered in your browser by visloc-rs's own 3DGS rasterizer (Rust, compiled to WebAssembly, on WebGPU).</p>
+  <select id="scene" aria-label="Scene"></select>
+  <div id="views" hidden>
+    <button id="prev" title="previous capture viewpoint">◀</button>
+    <span id="view-name">capture view</span>
+    <button id="next" title="next capture viewpoint">▶</button>
+  </div>
+  <p id="credit"></p>
+</div>
+<div id="stats" class="panel">starting…</div>
+<div id="hint" class="panel">drag to orbit · right-drag or shift to pan · scroll or pinch to zoom</div>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

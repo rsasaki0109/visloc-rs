@@ -9,10 +9,12 @@
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
          font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-  main { max-width:760px; margin:0 auto; padding:28px 16px 32px; }
+  main { max-width:1120px; margin:0 auto; padding:28px 16px 32px; }
+  .pillars { display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:20px; margin-top:24px; }
+  .pillar { display:block; margin:0 0 6px; color:var(--accent); font-size:12px; font-weight:650; letter-spacing:.04em; text-transform:uppercase; }
   h1 { margin:0; font-size:24px; font-weight:650; color:var(--accent); }
   .sub { color:var(--muted); font-size:14px; margin-top:6px; line-height:1.5; }
-  .card { display:block; margin-top:24px; background:var(--panel); border:1px solid #30363d; border-radius:8px;
+  .card { display:block; background:var(--panel); border:1px solid #30363d; border-radius:8px;
           padding:20px; color:var(--fg); text-decoration:none; }
   .card:hover, .card:focus-visible { border-color:var(--accent); }
   .card h2 { margin:0 0 8px; font-size:18px; font-weight:650; }
@@ -30,11 +32,13 @@
 <body>
 <main>
   <h1>visloc-rs</h1>
-  <div class="sub">SfM, visual-inertial SLAM, 3D Gaussian Splatting and map-based localization in Rust.</div>
+  <div class="sub">SfM, visual-inertial SLAM, 3D Gaussian Splatting and map-based localization in Rust. Both pillars run in your browser, compiled to WebAssembly.</div>
+  <div class="pillars">
   <a class="card" href="slam/">
     <img src="assets/slam_demo_preview.jpg" width="760" height="454"
          alt="The demo tracking points in a video of a walk through a shopping mall, with the path drawn in a 3D map below">
     <p class="credit">The demo on an ADVIO iPhone walk (Cortés et al., ECCV 2018, CC BY-NC 4.0).</p>
+    <span class="pillar">Visual-inertial SLAM</span>
     <h2>Visual-inertial odometry in your browser</h2>
     <p>visloc-rs's port of the Basalt VIO, compiled to WebAssembly. It tracks the camera in metric 3D, on the device.</p>
     <ul>
@@ -43,6 +47,20 @@
     </ul>
     <span class="go">Open the demo</span>
   </a>
+  <a class="card" href="splat/">
+    <img src="assets/splat_viewer_preview.jpg" width="760" height="454"
+         alt="A 3D Gaussian splat of a courtyard with benches, a sofa and deck chairs in front of a brick facade">
+    <p class="credit">ETH3D courtyard (Schöps et al., CVPR 2017), CC BY-NC-SA 4.0.</p>
+    <span class="pillar">SfM · MVS · 3D Gaussian Splatting</span>
+    <h2>Photos to 3D Gaussian splats</h2>
+    <p>38 photos of a courtyard, posed by visloc-rs's SfM and trained by its 3DGS trainer, drawn by its own rasterizer on WebGPU.</p>
+    <ul>
+      <li><strong>Drag</strong> to look around, or let it glide through the viewpoints the photos were taken from.</li>
+      <li><strong>Needs WebGPU:</strong> a current Chrome, Edge or Safari.</li>
+    </ul>
+    <span class="go">Open the viewer</span>
+  </a>
+  </div>
   <footer>
     <a href="https://github.com/rsasaki0109/visloc-rs">Source on GitHub</a> &middot;
     <a href="https://github.com/rsasaki0109/visloc-rs/blob/main/docs/demo_strategy.md">Demo index</a>

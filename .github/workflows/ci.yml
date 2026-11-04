@@ -134,6 +134,45 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # The splat viewer (WebAssembly + WebGPU), checked like the browser VIO. The
+  # native tests' GPU part skips on runners without an adapter.
+  splat-web:
+    name: Splat viewer (bindings/splat-web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: bindings/splat-web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: splat-web
+          workspaces: bindings/splat-web -> target
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy (wasm32)
+        run: cargo clippy --locked --lib --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
   rust:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,9 @@
+[
+  {
+    "name": "ETH3D courtyard: 38 photos to 3D, all by visloc-rs",
+    "file": "scenes/courtyard.splat",
+    "cameras": "scenes/courtyard.cameras.json",
+    "view": 0,
+    "credit": "Posed by visloc-rs's SfM and trained by its 3DGS trainer from the 38 photos alone. Photos: <a href=\"https://www.eth3d.net\">ETH3D</a> (Schöps et al., CVPR 2017), CC BY-NC-SA 4.0; so is this scene (<a href=\"https://github.com/rsasaki0109/visloc-rs/blob/main/bindings/splat-web/web/scenes/README.md\">how it was made</a>)."
+  }
+]

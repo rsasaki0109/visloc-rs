@@ -1,8 +1,9 @@
 name: pages
 
 # The GitHub Pages site: docs/ as is, plus the browser VIO demo
-# (bindings/wasm, both builds from its build.sh) under slam/. Needs
-# Settings > Pages > Source set to "GitHub Actions".
+# (bindings/wasm, both builds from its build.sh) under slam/ and the splat
+# viewer (bindings/splat-web) under splat/. Needs Settings > Pages > Source
+# set to "GitHub Actions".
 
 on:
   push:
@@ -38,6 +39,7 @@ jobs:
           workspaces: |
             bindings/wasm -> target
             bindings/wasm -> target/mt
+            bindings/splat-web -> target
 
       - name: Install wasm-bindgen-cli
         run: |
@@ -47,13 +49,19 @@ jobs:
       - name: Build the browser VIO
         run: bindings/wasm/build.sh
 
+      # The same wasm-bindgen as the VIO (its Cargo.lock was seeded from bindings/wasm's).
+      - name: Build the splat viewer
+        run: bindings/splat-web/build.sh
+
       - name: Assemble the site
         run: |
           cp -r docs _site
           bindings/wasm/deploy_pages.sh --dir _site/slam
+          cp -r bindings/splat-web/web _site/splat
           test -f _site/slam/index.html
           test -f _site/slam/pkg/visloc_wasm_bg.wasm
           test -f _site/slam/pkg-mt/visloc_wasm_bg.wasm
+          test -f _site/splat/pkg/visloc_splat_web_bg.wasm
 
       - name: Upload
         uses: actions/upload-pages-artifact@v4

@@ -1,0 +1,39 @@
+[package]
+name = "visloc-splat-web"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "visloc-rs's 3D Gaussian Splatting renderer in the browser: WebGPU through wgpu, drawn into a canvas."
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/rsasaki0109/visloc-rs"
+publish = false
+
+# Standalone workspace, like `bindings/wasm`: excluded from the root workspace
+# (see `exclude` in the root Cargo.toml) so the wasm-bindgen dependencies stay
+# out of the root lockfile and its MSRV / deny / package gates. Depends on the
+# workspace crates by path.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytemuck = "1"
+nalgebra = "0.33"
+visloc-gsplat-core = { path = "../../crates/gsplat-core" }
+visloc-gsplat-render = { path = "../../crates/gsplat-render", features = ["gpu"] }
+wgpu = "30"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
