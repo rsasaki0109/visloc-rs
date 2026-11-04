@@ -55,11 +55,12 @@ the page looks for the `X-Visloc-Server` header that `serve.py` sends.
 The repository's GitHub Pages site carries it at
 <https://rsasaki0109.github.io/visloc-rs/slam/>: `.github/workflows/pages.yml`
 builds it on every push to `main` and publishes it next to `docs/`
-(`./deploy_pages.sh --dir <directory>` writes the site without pushing). The
-ADVIO demo is not in git, so the page hides "Watch a demo" there.
+(`./deploy_pages.sh --dir <directory>` writes the site without pushing),
+with the sensor-free demo, so a visitor without a phone can press "Watch a
+demo".
 
-The sensor-free demo (`web/demo/`, not in git) is built from an ADVIO
-sequence (CC BY-NC 4.0):
+The sensor-free demo (`web/demo/`: advio-02's first 60 s, a few MB; ADVIO is
+CC BY-NC 4.0, see `web/demo/README.md`) is built from an ADVIO sequence:
 
 ```bash
 python3 tools/make_advio_demo.py ~/datasets/advio/advio-02 web/demo/advio-02 --seconds 60

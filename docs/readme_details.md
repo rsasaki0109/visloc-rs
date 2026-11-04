@@ -33,7 +33,7 @@ repository front page. Current entry points and headline results remain in the
 - [Public COLMAP map-reuse demo(public_data_demo.md): classical vs deep localization artifacts.
 - [Unordered SfM benchmark(unordered_sfm_benchmark.md): South Building and Gerrard Hall reconstruction / 3DGS outputs.
 - [Tracking persistence benchmark(tracking_persistence_benchmark.md): death-spiral diagnosis, opt-in gate fixes, and honest coverage/ATE tradeoffs on EuRoC MH.
-- [Interactive trajectory viewer](https://rsasaki0109.github.io/visloc-rs/kitti3d/) and [EuRoC splat viewer](https://rsasaki0109.github.io/visloc-rs/euroc_splat/).
+- [VIO in your browser](https://rsasaki0109.github.io/visloc-rs/slam/): the Basalt VIO in WebAssembly, live on a phone or on a recorded ADVIO walk.
 
 `visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating
 where a robot or UAV is, from cameras and an IMU, when GNSS is jammed, occluded, or

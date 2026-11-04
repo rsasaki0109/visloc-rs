@@ -3,8 +3,6 @@
 # build.sh outputs
 /web/pkg/
 /web/pkg-mt/
-# Built from ADVIO (CC BY-NC 4.0) by tools/make_advio_demo.py
-/web/demo/
 # Sessions uploaded through serve.py
 /recordings/
 # Diagnostics posted by the page through serve.py
