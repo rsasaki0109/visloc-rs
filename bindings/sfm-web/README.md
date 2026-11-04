@@ -25,20 +25,37 @@ at Cargo.lock's `wasm-bindgen` (the lockfile was seeded from
 `bindings/wasm`'s, so one CLI serves all three). It copies three.js from
 `bindings/wasm/web/vendor`. One thread, so no COOP/COEP headers are needed.
 
-- `web/app.js`: the page. It runs the sample photos (`web/samples/`) or
-  photos the visitor picks, shows the cameras and points with three.js as
-  they come, and offers the model as PLY (points) and JSON (cameras,
-  intrinsics and points).
+- `web/app.js`: the page. It runs the sample photos (`web/samples/`) or the
+  visitor's: picked files, a picked folder, or files and folders dropped
+  anywhere on the page. It shows the cameras and points with three.js as
+  they come. It offers the model three ways:
+  - a COLMAP dataset (`colmap.zip`) for 3DGS trainers;
+  - PLY (the points);
+  - JSON (the cameras, intrinsics and points).
+- `colmap.zip` holds `images/` and `sparse/0/` (`cameras.txt`, `images.txt`,
+  `points3D.txt`, from `colmap_text`).
+  - The photos go in at their own size, and the intrinsics and keypoints
+    are scaled from the 800 px working size per axis.
+  - A photo whose EXIF orientation is not upright is redrawn upright (JPEG,
+    quality 0.95), as the SfM saw it, since trainers do not all apply the
+    tag.
+  - Whitespace in names becomes `_`.
+  - The trainers' loader here reads it, for example `colmap_resize`.
 - `web/worker.js`: decodes each photo with the browser's decoder (which
   applies its EXIF orientation), drives a `Session` (`init_gpu`,
-  `add_photo`, `plan_pairs`, `match_some`, `reconstruct`) and posts progress
-  back. It sends the GPU 16 pairs per dispatch, so that each dispatch ends
-  well inside the OS's GPU watchdog (2 s on Windows) on integrated GPUs too.
+  `add_photo`, `set_focal`, `plan_pairs`, `match_some`, `reconstruct`,
+  `colmap`) and posts progress back. It sends the GPU 16 pairs per
+  dispatch, so that each dispatch ends well inside the OS's GPU watchdog
+  (2 s on Windows) on integrated GPUs too.
 - The photos are shrunk to 800 px on the long side, with up to 2000
   keypoints each; each photo is matched with all others up to 40 photos and
-  with the next 8 in name order beyond that. All photos must be the
-  same size (one camera). Without a known focal length the mapper starts
-  from 1.2 times the long side and refines it, with the principal point.
+  with the next 8 in name order beyond that. All photos must be the same
+  size (one camera).
+- The mapper's starting focal length comes from the photos' EXIF where it
+  can (`read_exif`): the median 35 mm equivalent (tag 0xA405), converted on
+  the diagonal (`focal_from_35mm`). Without it, the mapper starts from 1.2
+  times the long side. Either way it refines the focal length and the
+  principal point.
 - The GPU matches f32 descriptors, not the u8 ones `gsplat_photos` matches
   natively: in a browser `dot4U8Packed` can be the slower of the two (2.4
   times on an AMD RDNA 2 iGPU).
@@ -62,4 +79,5 @@ verification 2.7 s:
 cargo run --release --example photos -- web/samples/courtyard --focal 440
 ```
 
-`cargo test` runs the mapper on a synthetic scene and checks the pair plan.
+`cargo test` runs the mapper on a synthetic scene, checks its COLMAP text,
+the pair plan, and the EXIF reader in both byte orders.
