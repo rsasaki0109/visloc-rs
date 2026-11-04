@@ -20,8 +20,15 @@ and points with three.js. On the ETH3D courtyard (38 photos at 800 px) a
 headless Edge took 50 s and placed all 38. The mapper reads its input from
 memory (`DatabaseCache::from_memory`); the §2 changes are in, with a clock
 that stands still on wasm (`visloc-slam`'s `time_compat`) instead of
-`web-time`. Still open: threads and WebGPU (W3), video, focal lengths from
-EXIF, and the COLMAP text export.
+`web-time`.
+
+And the WebGPU half of W3: where the browser has WebGPU, SIFT and matching
+run on the GPU (`visloc-sift-gpu`'s ports, through non-blocking
+`extract_async` / `match_pairs_async`). The same 38 photos take 10 s on an
+8 GB NVIDIA laptop GPU and 23 s on an AMD RDNA 2 iGPU, which is what
+browsers on such a laptop take by default (52 s on the CPU). There
+verification and the mapper (CPU, one thread) take 7 s of the 10. Still
+open: threads, video, focal lengths from EXIF, and the COLMAP text export.
 
 ## 0. Product UX (the target)
 

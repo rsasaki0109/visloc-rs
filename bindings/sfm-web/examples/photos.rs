@@ -10,8 +10,9 @@ use std::time::Instant;
 
 use visloc_core::types::Camera;
 use visloc_sfm_web::{
-    candidate_pairs, decode, extract, model_json, reconstruct, sift_config, verify_pair,
+    candidate_pairs, decode, extract, model_json, reconstruct, sift_config, verify_matches,
 };
+use visloc_vision::matching::BruteForceMatcher;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -72,14 +73,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let camera = Camera::pinhole(1, w, h, f, f, w as f64 / 2.0, h as f64 / 2.0);
     let t = Instant::now();
     let candidates = candidate_pairs(photos.len(), window, exhaustive_max);
+    let matches: Vec<_> = candidates
+        .iter()
+        .map(|&(i, j)| {
+            let (a, b) = (&photos[i].features, &photos[j].features);
+            BruteForceMatcher { ratio: Some(0.8) }
+                .match_descriptors_cross_checked(&a.descriptors, &b.descriptors)
+        })
+        .collect();
+    let t_match = t.elapsed().as_secs_f64();
+    let t = Instant::now();
     let pairs: Vec<_> = candidates
         .iter()
-        .filter_map(|&(i, j)| {
-            verify_pair(&camera, &photos[i].features, &photos[j].features, 15).map(|m| (i, j, m))
+        .zip(&matches)
+        .filter_map(|(&(i, j), dm)| {
+            let (a, b) = (&photos[i].features, &photos[j].features);
+            verify_matches(&camera, a, b, dm, 15).map(|m| (i, j, m))
         })
         .collect();
     println!(
-        "{} of {} pairs verified: {:.1} s",
+        "{} of {} pairs verified: matching {t_match:.1} s, verification {:.1} s",
         pairs.len(),
         candidates.len(),
         t.elapsed().as_secs_f64()

@@ -18,6 +18,11 @@
 //! 3090, 99.97% of its keypoints pair up with the CPU extractor's and
 //! descriptor bytes differ by 0.0007 on average (see
 //! `examples/sift_vlfeat_gpu_bench.rs`).
+//!
+//! `VlfeatSiftGpu::extract_async` / `extract_batch_async` and
+//! `GpuMatcher::match_pairs_async` give the same results without blocking
+//! on the GPU readbacks, for WebGPU in a browser (`bindings/sfm-web`), where
+//! nothing may block; the blocking calls wrap them.
 
 #[cfg(feature = "gpu")]
 mod descriptor_matcher;

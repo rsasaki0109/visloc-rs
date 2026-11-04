@@ -182,7 +182,20 @@ impl GpuMatcher {
         ratio: Option<f32>,
         cross_check: bool,
     ) -> Vec<Vec<DescriptorMatch>> {
-        let tops = self.top2(ctx, bank, pairs, cross_check);
+        pollster::block_on(self.match_pairs_async(ctx, bank, pairs, ratio, cross_check))
+    }
+
+    /// [`Self::match_pairs`] without blocking on the GPU readbacks, for a
+    /// browser (WebGPU), where nothing may block.
+    pub async fn match_pairs_async(
+        &self,
+        ctx: &GpuContext,
+        bank: &FeatureBank,
+        pairs: &[(usize, usize)],
+        ratio: Option<f32>,
+        cross_check: bool,
+    ) -> Vec<Vec<DescriptorMatch>> {
+        let tops = self.top2(ctx, bank, pairs, cross_check).await;
         pairs
             .iter()
             .zip(&tops)
@@ -242,7 +255,7 @@ impl GpuMatcher {
     /// Per pair, the top-2 of every query row, plus (with `reverse`) the
     /// top-2 of every train row against the query image, from the same
     /// dot products.
-    fn top2(
+    async fn top2(
         &self,
         ctx: &GpuContext,
         bank: &FeatureBank,
@@ -255,7 +268,7 @@ impl GpuMatcher {
             // reverse epilogue once the integer GEMM is this cheap.
             let both: Vec<(usize, usize)> =
                 pairs.iter().flat_map(|&(i, j)| [(i, j), (j, i)]).collect();
-            let mut tops = self.top2(ctx, bank, &both, false).into_iter();
+            let mut tops = self.top2_batched(ctx, bank, &both, false).await.into_iter();
             let mut result = Vec::with_capacity(pairs.len());
             while let (Some(f), Some(r)) = (tops.next(), tops.next()) {
                 result.push(PairTops {
@@ -265,6 +278,17 @@ impl GpuMatcher {
             }
             return result;
         }
+        self.top2_batched(ctx, bank, pairs, reverse).await
+    }
+
+    /// [`Self::top2`] in dispatches of bounded size.
+    async fn top2_batched(
+        &self,
+        ctx: &GpuContext,
+        bank: &FeatureBank,
+        pairs: &[(usize, usize)],
+        reverse: bool,
+    ) -> Vec<PairTops> {
         let mut result: Vec<PairTops> = Vec::with_capacity(pairs.len());
         let mut start = 0;
         while start < pairs.len() {
@@ -289,13 +313,16 @@ impl GpuMatcher {
                 parts += pt;
                 end += 1;
             }
-            result.extend(self.top2_batch(ctx, bank, &pairs[start..end], reverse, rows, parts));
+            result.extend(
+                self.top2_batch(ctx, bank, &pairs[start..end], reverse, rows, parts)
+                    .await,
+            );
             start = end;
         }
         result
     }
 
-    fn top2_batch(
+    async fn top2_batch(
         &self,
         ctx: &GpuContext,
         bank: &FeatureBank,
@@ -416,7 +443,8 @@ impl GpuMatcher {
             pass.dispatch_workgroups(max_t.div_ceil(64) as u32, pairs.len() as u32, 1);
         }
         queue.submit(Some(encoder.finish()));
-        let raw: Vec<u32> = bytemuck::cast_slice(&read_bytes(dev, queue, &out, rows * 16)).to_vec();
+        let raw: Vec<u32> =
+            bytemuck::cast_slice(&read_bytes(dev, queue, &out, rows * 16).await).to_vec();
         let read = |off: usize, n: usize| -> Vec<Top2> {
             (0..n)
                 .map(|r| {

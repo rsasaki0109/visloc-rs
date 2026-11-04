@@ -31,7 +31,12 @@ console_error_panic_hook = "0.1"
 # rand 0.8 -> getrandom 0.2: the browser crypto backend (feature unification
 # turns it on for the whole graph)
 getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+# SIFT and matching on WebGPU (`Session::init_gpu`)
+visloc-sift-gpu = { path = "../../crates/sift-gpu", features = ["gpu"] }
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wgpu = "30"
 
 [profile.release]
 opt-level = 3

@@ -32,11 +32,16 @@ async fn map_buffer_async(
 
     // wgpu invokes map callbacks while the device is polled. Drive that poll
     // on a helper thread so the async executor thread can remain unblocked.
-    let poll_device = device.clone();
-
-    std::thread::spawn(move || {
-        let _ = poll_device.poll(wgpu::PollType::wait_indefinitely());
-    });
+    // (In a browser the page's event loop completes the map instead.)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let poll_device = device.clone();
+        std::thread::spawn(move || {
+            let _ = poll_device.poll(wgpu::PollType::wait_indefinitely());
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = device;
 
     std::future::poll_fn(|cx| {
         {
@@ -50,6 +55,46 @@ async fn map_buffer_async(
         if let Some(result) = state.0.take() {
             std::task::Poll::Ready(result)
         } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// Resolves once `slice` is mapped for reading. Natively the device is first
+/// polled until submission `index` (or, for `None`, all work) is done, so
+/// under `pollster::block_on` this returns at once, as a blocking readback
+/// would; in a browser, where nothing may block, the page's event loop
+/// completes the map.
+pub(crate) async fn mapped(
+    device: &wgpu::Device,
+    slice: wgpu::BufferSlice<'_>,
+    index: Option<wgpu::SubmissionIndex>,
+) {
+    let state: Arc<Mutex<MapState>> = Arc::new(Mutex::new((None, None)));
+    let callback_state = Arc::clone(&state);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let mut state = callback_state.lock().expect("map callback lock");
+        state.0 = Some(result);
+        if let Some(waker) = state.1.take() {
+            waker.wake();
+        }
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: index,
+            timeout: None,
+        })
+        .ok();
+    #[cfg(target_arch = "wasm32")]
+    let _ = (device, index);
+    std::future::poll_fn(|cx| {
+        let mut state = state.lock().expect("map future lock");
+        if state.0.take().is_some() {
+            std::task::Poll::Ready(())
+        } else {
+            state.1 = Some(cx.waker().clone());
             std::task::Poll::Pending
         }
     })
@@ -250,7 +295,8 @@ fn gaussian_kernel(sigma: f64) -> Vec<f32> {
     raw.iter().map(|v| (v / sum) as f32).collect()
 }
 
-pub(crate) fn read_bytes(
+/// The first `len` bytes of `buffer`, copied out once the queue's work is done.
+pub(crate) async fn read_bytes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
@@ -271,12 +317,7 @@ pub(crate) fn read_bytes(
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, len as u64);
     queue.submit(Some(encoder.finish()));
     let slice = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device.poll(wgpu::PollType::wait_indefinitely()).ok();
-    let _ = rx.recv();
+    mapped(device, slice, None).await;
     let data = slice.get_mapped_range().expect("map range").to_vec();
     staging.unmap();
     data
