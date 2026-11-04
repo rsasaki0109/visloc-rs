@@ -6,6 +6,13 @@ requirement it adds is a static host that can send `COOP`/`COEP` response
 headers; GitHub Pages cannot). This document is the design + evidence record
 so the work can be resumed without repeating the spike.
 
+Since then, two pieces of it have landed. The browser VIO (`bindings/wasm`)
+runs with wasm threads on GitHub Pages through a service worker that adds
+the headers (`web/coi-sw.js`), so the hosting question below has an answer.
+And the viewer end of the pipeline runs there: `bindings/splat-web` draws
+visloc-rs's 3DGS rasterizer on WebGPU, showing a scene that visloc-rs posed
+and trained from photos (natively, for now).
+
 ## 0. Product UX (the target)
 
 > No upload, no install, no setup. Drop images or a video, run the pipeline in

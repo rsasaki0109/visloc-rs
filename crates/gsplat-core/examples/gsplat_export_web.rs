@@ -63,10 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = cameras {
         let text = std::fs::read_to_string(&path)?;
         let mut rows = Vec::new();
-        for line in text
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        {
+        // Per image a pose line, then its 2D points: a line of its own, empty
+        // when it has none (a long one must not be read as a pose).
+        let lines: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        for line in lines.iter().step_by(2) {
             let f: Vec<&str> = line.split_whitespace().collect();
             if f.len() < 10 {
                 continue;

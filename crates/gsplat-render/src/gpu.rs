@@ -70,6 +70,16 @@ impl GpuContext {
             apply_limit_buckets: false,
         }))
         .map_err(|_| GpuError::NoAdapter)?;
+        pollster::block_on(Self::from_adapter(instance, &adapter))
+    }
+
+    /// Create the device on an adapter the caller already has, e.g. one
+    /// compatible with a browser canvas's surface, where nothing may block:
+    /// the same limits and optional features as [`Self::with_backends`].
+    pub async fn from_adapter(
+        instance: wgpu::Instance,
+        adapter: &wgpu::Adapter,
+    ) -> Result<Self, GpuError> {
         let info = adapter.get_info();
         // Request the adapter's real limits so large scenes are not capped by
         // the conservative WebGPU defaults (e.g. 256 MiB buffers).
@@ -77,13 +87,14 @@ impl GpuContext {
         // Subgroup ops are used by the backward pass (training) when present.
         let features =
             adapter.features() & (wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY);
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
                 label: Some("visloc-gsplat-render"),
                 required_features: features,
                 required_limits: limits.clone(),
                 ..Default::default()
-            }))?;
+            })
+            .await?;
         Ok(Self {
             _instance: instance,
             device,
