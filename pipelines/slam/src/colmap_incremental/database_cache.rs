@@ -383,7 +383,64 @@ impl DatabaseCache {
 
         Ok(cache)
     }
+
+    /// [`Self::from_generalized_rig_export`]'s object graph and
+    /// correspondence graph from data already in memory, for a host with no
+    /// file system (a browser): one camera, a single-sensor rig, one frame
+    /// per image (image and frame `i` for `images[i]`, given as its name and
+    /// keypoints), and the verified pairs as `(image_i, image_j, matches)`
+    /// of point2D indices.
+    pub fn from_memory(
+        camera: Camera,
+        images: Vec<(String, Vec<Point2<f64>>)>,
+        pairs: &[MemoryPair],
+    ) -> Result<Self, DatabaseCacheError> {
+        let mut cache = DatabaseCache::new();
+        let camera_id = camera.id;
+        let mut rig = Rig::new();
+        rig.set_rig_id(0);
+        rig.add_ref_sensor(SensorT::camera(camera_id));
+        cache.add_camera(camera);
+        cache.add_rig(rig);
+        let counts: Vec<(usize, usize)> = images
+            .iter()
+            .enumerate()
+            .map(|(i, (_, keypoints))| (i, keypoints.len()))
+            .collect();
+        for (i, (name, keypoints)) in images.into_iter().enumerate() {
+            let (image_id, frame_id) = (i as ImageT, i as FrameT);
+            let mut frame = Frame::new(frame_id, 0);
+            frame.add_data_id(DataT::camera(camera_id, image_id));
+            cache.add_frame(frame);
+            let mut image = Image::new(image_id, camera_id, frame_id, name);
+            image.points2d = keypoints.into_iter().map(Point2D::new).collect();
+            cache.add_image(image);
+        }
+        let matches: Vec<PairMatches<'_>> = pairs
+            .iter()
+            .map(|(i, j, m)| PairMatches {
+                image_id1: *i,
+                image_id2: *j,
+                matches: m,
+                config: ConfigurationType::Calibrated,
+            })
+            .collect();
+        let (graph, _) = CorrespondenceGraph::finalized_from_pairs(&counts, &matches).map_err(
+            |(index, error)| {
+                DatabaseCacheError::Inconsistent(format!(
+                    "ingesting pair ({}, {}): {error}",
+                    pairs[index].0, pairs[index].1
+                ))
+            },
+        )?;
+        cache.correspondence_graph = graph;
+        Ok(cache)
+    }
 }
+
+/// A verified pair for [`DatabaseCache::from_memory`]: the two image indices
+/// and their matches as `(point2d_idx_in_i, point2d_idx_in_j)`.
+pub type MemoryPair = (usize, usize, Vec<(u32, u32)>);
 
 fn stem(file_name: &str) -> &str {
     match file_name.rfind('.') {
@@ -904,6 +961,40 @@ mod tests {
         assert_eq!(graph.find_correspondences(0, 0).len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_memory_builds_a_one_camera_graph() {
+        let keypoints = |n: usize| (0..n).map(|k| Point2::new(10.0 + k as f64, 20.0)).collect();
+        let cache = DatabaseCache::from_memory(
+            Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0),
+            vec![
+                ("a.jpg".into(), keypoints(3)),
+                ("b.jpg".into(), keypoints(3)),
+                ("c.jpg".into(), keypoints(2)),
+            ],
+            &[(0, 1, vec![(0, 0), (1, 1)]), (1, 2, vec![(2, 1)])],
+        )
+        .unwrap();
+        assert_eq!(cache.num_rigs(), 1);
+        assert_eq!(cache.num_cameras(), 1);
+        assert_eq!(cache.num_frames(), 3);
+        assert_eq!(cache.num_images(), 3);
+        assert!(cache.rig(0).is_ref_sensor(SensorT::camera(1)));
+        for i in 0..3 {
+            assert_eq!(cache.image(i).frame_id, i);
+            assert_eq!(cache.frame(i).num_data_ids(), 1);
+        }
+        assert_eq!(cache.image(2).name, "c.jpg");
+        assert_eq!(cache.image(2).num_points2d(), 2);
+        let graph = cache.correspondence_graph();
+        assert_eq!(graph.num_image_pairs(), 2);
+        // three matches, each ingested both ways
+        let total: usize = (0..cache.num_images())
+            .map(|id| graph.num_correspondences_for_image(id))
+            .sum();
+        assert_eq!(total, 6);
+        assert_eq!(graph.find_correspondences(1, 2).len(), 1);
     }
 
     #[test]

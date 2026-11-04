@@ -34,7 +34,7 @@ pub mod types;
 pub use bundle_adjustment::{
     BundleAdjustmentConfig, BundleAdjustmentOptions, Gauge, LocalBaPointPolicy,
 };
-pub use database_cache::{DatabaseCache, DatabaseCacheError};
+pub use database_cache::{DatabaseCache, DatabaseCacheError, MemoryPair};
 pub use incremental_triangulator::IncrementalTriangulator;
 pub use mapper::{IncrementalMapper, LocalBundleAdjustmentReport, Options as MapperOptions};
 pub use observation_manager::{ObservationManager, VisibilityPyramid};
