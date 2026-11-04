@@ -301,7 +301,7 @@ fn iterative_global_refinement(
     db: &DatabaseCache,
     recon: &mut Reconstruction,
 ) {
-    let t0 = std::time::Instant::now();
+    let t0 = crate::time_compat::Instant::now();
     mapper.iterative_global_refinement(
         options.ba_global_max_refinements,
         options.ba_global_max_refinement_change,
@@ -356,12 +356,12 @@ fn reconstruct_sub_model(
         } else {
             &[CandidateRound::Structure]
         };
-        let t_reg = std::time::Instant::now();
+        let t_reg = crate::time_compat::Instant::now();
         let mut attempts = 0usize;
         let mut find_ms = 0;
         let mut num_candidates = 0;
         for &round in rounds {
-            let t_find = std::time::Instant::now();
+            let t_find = crate::time_compat::Instant::now();
             let next_images = mapper.find_next_images(mapper_options, recon, round);
             find_ms += t_find.elapsed().as_millis();
             num_candidates += next_images.len();
@@ -402,7 +402,7 @@ fn reconstruct_sub_model(
             let image_id = registered_image_id.unwrap();
             let frame_id = recon.image(image_id).frame_id;
             let frame_images: Vec<ImageT> = recon.frame(frame_id).image_ids().collect();
-            let t_tri = std::time::Instant::now();
+            let t_tri = crate::time_compat::Instant::now();
             for iid in frame_images {
                 mapper.triangulate_image(
                     &options.triangulation,
@@ -417,7 +417,7 @@ fn reconstruct_sub_model(
                 t_tri.elapsed().as_millis(),
                 recon.num_points3d()
             );
-            let t_local = std::time::Instant::now();
+            let t_local = crate::time_compat::Instant::now();
             mapper.iterative_local_refinement(
                 options.ba_local_max_refinements,
                 options.ba_local_max_refinement_change,

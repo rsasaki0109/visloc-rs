@@ -2401,7 +2401,7 @@ mod tests {
         let mut tri = IncrementalTriangulator::new();
         let options = Options::default();
 
-        let start = std::time::Instant::now();
+        let start = crate::time_compat::Instant::now();
         let num_tris = tri.triangulate_image(&options, &mut recon, &graph, &mut obs, 0);
         let elapsed = start.elapsed();
 

@@ -1263,10 +1263,10 @@ impl IncrementalMapper {
         recon: &mut Reconstruction,
         graph: &CorrespondenceGraph,
     ) -> usize {
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         let completed = self.complete_tracks(tri_options, recon, graph);
         let complete_ms = t.elapsed().as_millis();
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         let merged = self.merge_tracks(tri_options, recon, graph);
         eprintln!(
             "TIMING complete_and_merge complete_ms={complete_ms} merge_ms={} completed={completed} merged={merged}",
@@ -1304,7 +1304,7 @@ impl IncrementalMapper {
         point3d_ids: &BTreeSet<Point3DT>,
     ) -> LocalBundleAdjustmentReport {
         let mut report = LocalBundleAdjustmentReport::default();
-        let t_find = std::time::Instant::now();
+        let t_find = crate::time_compat::Instant::now();
         let local_bundle = self.find_local_bundle(options, recon, image_id);
         let find_ms = t_find.elapsed().as_millis();
 
@@ -1374,10 +1374,10 @@ impl IncrementalMapper {
                 }
             }
 
-            let t_lba = std::time::Instant::now();
+            let t_lba = crate::time_compat::Instant::now();
             let ba_ok = bundle_adjustment::solve(ba_options, &config, recon);
             let lba_ms = t_lba.elapsed().as_millis();
-            let t_lmc = std::time::Instant::now();
+            let t_lmc = crate::time_compat::Instant::now();
             report.num_adjusted_observations = config_image_ids
                 .iter()
                 .map(|&iid| recon.image(iid).num_points3d())
@@ -1412,7 +1412,7 @@ impl IncrementalMapper {
                 variable_ids.len()
             );
         }
-        let t_lf = std::time::Instant::now();
+        let t_lf = crate::time_compat::Instant::now();
 
         let (num_filtered, unchanged) = self.obs.filter_points3d_in_images_unchanged(
             recon,
@@ -1457,12 +1457,12 @@ impl IncrementalMapper {
         recon: &mut Reconstruction,
         graph: &CorrespondenceGraph,
     ) -> bool {
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         self.obs
             .filter_observations_with_negative_depth(recon, graph);
         let filter_ms = t.elapsed().as_millis();
 
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         let mut config = BundleAdjustmentConfig::new();
         for &frame_id in recon.reg_frame_ids() {
             config.add_frame(recon, frame_id);
@@ -1484,7 +1484,7 @@ impl IncrementalMapper {
         let num_images = config.num_images();
         let num_points = recon.num_points3d();
         let config_ms = t.elapsed().as_millis();
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         let ok = bundle_adjustment::solve(ba_options, &config, recon);
         eprintln!(
             "TIMING global_ba_parts filter_ms={filter_ms} config_ms={config_ms} solve_ms={}",
@@ -1576,21 +1576,21 @@ impl IncrementalMapper {
         graph: &CorrespondenceGraph,
     ) {
         let mut ms = [0u128; 4];
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         self.complete_and_merge_tracks(tri_options, recon, graph);
         ms[0] += t.elapsed().as_millis();
-        let t = std::time::Instant::now();
+        let t = crate::time_compat::Instant::now();
         self.retriangulate(tri_options, recon, graph);
         ms[1] += t.elapsed().as_millis();
         for _ in 0..max_num_refinements {
             let num_observations: usize = recon.points3d().values().map(|p| p.track.len()).sum();
-            let t = std::time::Instant::now();
+            let t = crate::time_compat::Instant::now();
             self.adjust_global_bundle(ba_options, recon, graph);
             ms[2] += t.elapsed().as_millis();
-            let t = std::time::Instant::now();
+            let t = crate::time_compat::Instant::now();
             let mut num_changed = self.complete_and_merge_tracks(tri_options, recon, graph);
             ms[0] += t.elapsed().as_millis();
-            let t = std::time::Instant::now();
+            let t = crate::time_compat::Instant::now();
             num_changed += self.filter_points(options, recon, graph);
             ms[3] += t.elapsed().as_millis();
             eprintln!(

@@ -611,7 +611,7 @@ fn solve_native(
     recon: &mut Reconstruction,
 ) -> bool {
     use rayon::prelude::*;
-    let solve_started = std::time::Instant::now();
+    let solve_started = crate::time_compat::Instant::now();
 
     let frame_ids: BTreeSet<FrameT> = config
         .image_ids
@@ -944,7 +944,7 @@ fn solve_native(
         point_fixed,
         points: point_xyz,
     };
-    let started = std::time::Instant::now();
+    let started = crate::time_compat::Instant::now();
     let solved = super::rig_ba_solver::optimize_point_major(
         &mut input,
         PointMajorObs {
@@ -1045,7 +1045,7 @@ fn solve_legacy(
     recon: &mut Reconstruction,
     accelerate: bool,
 ) -> bool {
-    let solve_started = std::time::Instant::now();
+    let solve_started = crate::time_compat::Instant::now();
 
     let default_camera = recon
         .camera(
@@ -1262,7 +1262,7 @@ fn solve_legacy(
         ..BaConfig::default()
     };
 
-    let started = std::time::Instant::now();
+    let started = crate::time_compat::Instant::now();
     let n_obs = rig_obs.len();
     let n_lm = added_points.len();
     let n_fixed_lm = point_fixed.iter().filter(|&&fixed| fixed).count();

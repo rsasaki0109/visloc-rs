@@ -26,6 +26,7 @@ pub mod colmap_incremental;
 // Experimental, explicitly selected square-root landmark elimination.
 mod landmark_qr;
 mod process_memory;
+mod time_compat;
 pub use bundle::{
     build_sqrt_factor_rows, BaConfig, BaError, BaGeneralStereoObservation, BaGncResult,
     BaIterationStats, BaObservation, BaResult, BaRigObservation, BaStereoObservation,

@@ -135,7 +135,9 @@
 //! `add_constant_point`, `fix_gauge`), unchanged by this backend swap.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time_compat::Instant;
 
 use nalgebra::{
     DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, SMatrix, Vector2, Vector3, Vector6,

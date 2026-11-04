@@ -16,7 +16,7 @@
   .sub { color:var(--muted); font-size:14px; margin-top:6px; line-height:1.5; }
   .card { display:block; background:var(--panel); border:1px solid #30363d; border-radius:8px;
           padding:20px; color:var(--fg); text-decoration:none; }
-  .card:hover, .card:focus-visible { border-color:var(--accent); }
+  a.card:hover, a.card:focus-visible { border-color:var(--accent); }
   .card h2 { margin:0 0 8px; font-size:18px; font-weight:650; }
   .card p { margin:0 0 10px; color:var(--muted); font-size:14px; line-height:1.5; }
   .card img { display:block; width:100%; height:auto; border-radius:6px; margin:0 0 14px; }
@@ -24,7 +24,9 @@
   .card ul { margin:0 0 14px; padding-left:20px; color:var(--muted); font-size:14px; line-height:1.6; }
   .card strong { color:var(--fg); font-weight:600; }
   .go { display:inline-block; background:var(--accent); color:#0e1116; font-weight:650; font-size:14px;
-        border-radius:6px; padding:8px 14px; }
+        border-radius:6px; padding:8px 14px; text-decoration:none; }
+  .links { display:flex; flex-wrap:wrap; gap:10px; }
+  .links .go:hover, .links .go:focus-visible { outline:2px solid var(--fg); outline-offset:2px; }
   footer { margin-top:24px; color:var(--muted); font-size:13px; line-height:1.8; }
   footer a { color:var(--accent); text-decoration:none; }
 </style>
@@ -47,19 +49,22 @@
     </ul>
     <span class="go">Open the demo</span>
   </a>
-  <a class="card" href="splat/">
-    <img src="assets/splat_viewer_preview.jpg" width="760" height="454"
-         alt="A 3D Gaussian splat of a courtyard with benches, a sofa and deck chairs in front of a brick facade">
+  <div class="card">
+    <a href="splat/"><img src="assets/splat_viewer_preview.jpg" width="760" height="454"
+         alt="A 3D Gaussian splat of a courtyard with benches, a sofa and deck chairs in front of a brick facade"></a>
     <p class="credit">ETH3D courtyard (Schöps et al., CVPR 2017), CC BY-NC-SA 4.0.</p>
     <span class="pillar">SfM · MVS · 3D Gaussian Splatting</span>
     <h2>Photos to 3D Gaussian splats</h2>
     <p>38 photos of a courtyard, posed by visloc-rs's SfM and trained by its 3DGS trainer, drawn by its own rasterizer on WebGPU.</p>
     <ul>
-      <li><strong>Drag</strong> to look around, or let it glide through the viewpoints the photos were taken from.</li>
-      <li><strong>Needs WebGPU:</strong> a current Chrome, Edge or Safari.</li>
+      <li><strong>SfM in your browser:</strong> run the SfM on these photos, or on your own, and get the camera poses and a sparse point cloud. About a minute for 38 photos, in any current browser.</li>
+      <li><strong>Splat viewer:</strong> drag to look around, or let it glide through the viewpoints the photos were taken from. Needs WebGPU (a current Chrome, Edge or Safari).</li>
     </ul>
-    <span class="go">Open the viewer</span>
-  </a>
+    <div class="links">
+      <a class="go" href="sfm/">Run SfM in your browser</a>
+      <a class="go" href="splat/">Open the splat viewer</a>
+    </div>
+  </div>
   </div>
   <footer>
     <a href="https://github.com/rsasaki0109/visloc-rs">Source on GitHub</a> &middot;

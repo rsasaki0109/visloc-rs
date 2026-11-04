@@ -1,0 +1,40 @@
+[package]
+name = "visloc-sfm-web"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "visloc-rs's photo SfM in the browser: photos to camera poses and a sparse point cloud, in WebAssembly."
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/rsasaki0109/visloc-rs"
+publish = false
+
+# Standalone workspace, like `bindings/wasm` and `bindings/splat-web`:
+# excluded from the root workspace (see `exclude` in the root Cargo.toml) so
+# the wasm-bindgen dependencies stay out of the root lockfile and its MSRV /
+# deny / package gates. Depends on the workspace crates by path.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg"] }
+nalgebra = "0.33"
+serde_json = "1"
+visloc-core = { path = "../../crates/core" }
+visloc-slam = { path = "../../pipelines/slam" }
+visloc-vision = { path = "../../crates/vision" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+# rand 0.8 -> getrandom 0.2: the browser crypto backend (feature unification
+# turns it on for the whole graph)
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

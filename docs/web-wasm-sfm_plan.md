@@ -13,6 +13,16 @@ And the viewer end of the pipeline runs there: `bindings/splat-web` draws
 visloc-rs's 3DGS rasterizer on WebGPU, showing a scene that visloc-rs posed
 and trained from photos (natively, for now).
 
+Now W1 and W2 (§6) are done too, on the CPU and on one thread:
+`bindings/sfm-web` runs SIFT, matching, two-view verification and the
+mapper in a page's worker on GitHub Pages (`sfm/`), and shows the cameras
+and points with three.js. On the ETH3D courtyard (38 photos at 800 px) a
+headless Edge took 50 s and placed all 38. The mapper reads its input from
+memory (`DatabaseCache::from_memory`); the §2 changes are in, with a clock
+that stands still on wasm (`visloc-slam`'s `time_compat`) instead of
+`web-time`. Still open: threads and WebGPU (W3), video, focal lengths from
+EXIF, and the COLMAP text export.
+
 ## 0. Product UX (the target)
 
 > No upload, no install, no setup. Drop images or a video, run the pipeline in
@@ -189,3 +199,6 @@ Minimum microbenchmarks before any performance claim:
   changes were reverted when parking. Re-apply per §2 to resume.
 - No browser feature extractor/matcher, no string export, no UI, no host
   config. README is intentionally unchanged.
+
+(Both since superseded by `bindings/sfm-web`, except the string export; see
+the status at the top.)
