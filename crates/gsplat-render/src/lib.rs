@@ -350,6 +350,34 @@ mod gpu_tests {
         }
     }
 
+    #[test]
+    fn gpu_render_async_leaves_the_blocking_render_in_the_output_buffer() {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping gpu_render_async_leaves_the_blocking_render_in_the_output_buffer: no GPU adapter");
+            return;
+        };
+        // The browser path (awaited counters, no image readback) must leave in
+        // `output()` the image the blocking path returns.
+        let scene = random_scene(300, 7, 1);
+        let view = front_camera();
+        let bg = [0.1, 0.2, 0.3];
+        let mut renderer = Renderer::new(ctx, &scene, 64, 64).expect("renderer");
+        let blocking = renderer.render(&view, bg);
+        // Another view in between, so the async render has to rewrite the buffer.
+        let mut other = view;
+        other.translation.x += 0.3;
+        renderer.render(&other, bg);
+        pollster::block_on(renderer.render_async(&view, bg));
+        let out = renderer.output().clone();
+        let ctx = renderer.into_context();
+        let rgb: Vec<f32> = read_back_u32(&ctx, &out, 64 * 64 * 3)
+            .into_iter()
+            .map(f32::from_bits)
+            .collect();
+        let expect: Vec<f32> = blocking.rgb.iter().flatten().copied().collect();
+        assert_eq!(rgb, expect);
+    }
+
     /// Deterministic pseudo-random scene: `n` anisotropic, rotated,
     /// semi-transparent splats with degree-`degree` SH in front of the camera.
     fn random_scene(n: usize, seed: u32, degree: u32) -> Scene {

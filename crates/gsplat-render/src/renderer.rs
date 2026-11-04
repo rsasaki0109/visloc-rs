@@ -332,6 +332,66 @@ fn read_counters(
     (values[0], values[1])
 }
 
+/// [`read_counters`] without blocking: awaits the readback buffer's mapping.
+async fn read_counters_async(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    num_visible: &wgpu::Buffer,
+    num_intersections: &wgpu::Buffer,
+    readback: &wgpu::Buffer,
+) -> (u32, u32) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("readback"),
+    });
+    encoder.copy_buffer_to_buffer(num_visible, 0, readback, 0, 4);
+    encoder.copy_buffer_to_buffer(num_intersections, 0, readback, 4, 4);
+    queue.submit(Some(encoder.finish()));
+    let slice = readback.slice(..);
+    let mapped = MapFuture::default();
+    let done = mapped.clone();
+    slice.map_async(wgpu::MapMode::Read, move |_| done.complete());
+    // Natively the callback runs inside this poll; in a browser the event
+    // loop runs it later and the poll returns at once.
+    device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    mapped.await;
+    let data = slice.get_mapped_range().expect("map range");
+    let values: [u32; 2] = bytemuck::pod_read_unaligned(&data[..8]);
+    drop(data);
+    readback.unmap();
+    (values[0], values[1])
+}
+
+/// Resolves once a `map_async` callback has called [`MapFuture::complete`].
+#[derive(Clone, Default)]
+struct MapFuture(std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>);
+
+impl MapFuture {
+    fn complete(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        state.0 = true;
+        if let Some(waker) = state.1.take() {
+            waker.wake();
+        }
+    }
+}
+
+impl std::future::Future for MapFuture {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if state.0 {
+            std::task::Poll::Ready(())
+        } else {
+            state.1 = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    }
+}
+
 const RO: wgpu::BufferBindingType = wgpu::BufferBindingType::Storage { read_only: true };
 const RW: wgpu::BufferBindingType = wgpu::BufferBindingType::Storage { read_only: false };
 
@@ -863,12 +923,83 @@ impl Renderer {
         self.ctx
     }
 
+    /// The GPU context the renderer draws with (e.g. to present
+    /// [`Self::output`] on a surface with the same device).
+    pub fn context(&self) -> &GpuContext {
+        &self.ctx
+    }
+
     pub fn num_gaussians(&self) -> usize {
         self.scene.packed.num_gaussians
     }
 
     /// Render `view` and return the linear-RGB image.
     pub fn render(&mut self, view: &CameraView, bg: [f32; 3]) -> Image {
+        let (u, mut prof) = self.render_project(view, bg);
+
+        // ----- Host readback of compaction counts. -----
+        let counts = read_counters(
+            &self.ctx.device,
+            &self.ctx.queue,
+            &self.scratch.num_visible,
+            &self.scratch.num_intersections,
+            &self.scratch.readback,
+        );
+        self.render_rasterize(u, counts, &mut prof);
+
+        // A viewer renders to a surface and never reads the image back; this
+        // path exists so the true GPU frame cost can be measured.
+        if self.skip_readback {
+            return Image {
+                width: self.image_w,
+                height: self.image_h,
+                rgb: Vec::new(),
+            };
+        }
+
+        let t_read = std::time::Instant::now();
+        let rgb = read_f32s(
+            &self.ctx.device,
+            &self.ctx.queue,
+            &self.out_img,
+            (self.image_w as usize) * (self.image_h as usize) * 3,
+        );
+        if prof.enabled() {
+            eprintln!("[profile] image readback: {:?}", t_read.elapsed());
+        }
+        let rgb = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        Image {
+            width: self.image_w,
+            height: self.image_h,
+            rgb,
+        }
+    }
+
+    /// [`Self::render`] for a host that must not block on the GPU (a
+    /// browser): it awaits the compaction counts, and leaves the image in
+    /// [`Self::output`] instead of reading it back.
+    pub async fn render_async(&mut self, view: &CameraView, bg: [f32; 3]) {
+        let (u, mut prof) = self.render_project(view, bg);
+        let counts = read_counters_async(
+            &self.ctx.device,
+            &self.ctx.queue,
+            &self.scratch.num_visible,
+            &self.scratch.num_intersections,
+            &self.scratch.readback,
+        )
+        .await;
+        self.render_rasterize(u, counts, &mut prof);
+    }
+
+    /// The image the last render wrote, on the GPU: linear RGB, three `f32`
+    /// per pixel, row-major from the top-left (a storage buffer).
+    pub fn output(&self) -> &wgpu::Buffer {
+        &self.out_img
+    }
+
+    /// The first half of a render, up to the compaction counts: uploads the
+    /// uniforms, resets the dynamic buffers and submits `project_forward`.
+    fn render_project(&mut self, view: &CameraView, bg: [f32; 3]) -> (ProjectUniforms, StageTimer) {
         assert_eq!(
             view.camera.width, self.image_w,
             "view width matches renderer"
@@ -920,15 +1051,19 @@ impl Renderer {
             self.ctx.queue.submit(Some(encoder.finish()));
         }
         prof.mark(&self.ctx.device, "project_fwd");
+        (u, prof)
+    }
 
-        // ----- Host readback of compaction counts. -----
-        let (num_visible, num_intersections) = read_counters(
-            &self.ctx.device,
-            &self.ctx.queue,
-            &self.scratch.num_visible,
-            &self.scratch.num_intersections,
-            &self.scratch.readback,
-        );
+    /// The second half of a render, given the compaction counts: the depth
+    /// sort, `project_visible`, the scan, `map_gaussians`, the tile sort and
+    /// the rasterizer, which writes [`Self::output`].
+    fn render_rasterize(
+        &mut self,
+        u: ProjectUniforms,
+        (num_visible, num_intersections): (u32, u32),
+        prof: &mut StageTimer,
+    ) {
+        let num_tiles = u.num_tiles();
         prof.mark(&self.ctx.device, "counters");
         if prof.enabled() {
             eprintln!(
@@ -1073,33 +1208,6 @@ impl Renderer {
         if prof.enabled() {
             prof.report(nv, ni, num_tiles);
             eprintln!("[profile] {}", self.tile_list_stats(num_tiles));
-        }
-
-        // A viewer renders to a surface and never reads the image back; this
-        // path exists so the true GPU frame cost can be measured.
-        if self.skip_readback {
-            return Image {
-                width: self.image_w,
-                height: self.image_h,
-                rgb: Vec::new(),
-            };
-        }
-
-        let t_read = std::time::Instant::now();
-        let rgb = read_f32s(
-            &self.ctx.device,
-            &self.ctx.queue,
-            &self.out_img,
-            (self.image_w as usize) * (self.image_h as usize) * 3,
-        );
-        if prof.enabled() {
-            eprintln!("[profile] image readback: {:?}", t_read.elapsed());
-        }
-        let rgb = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-        Image {
-            width: self.image_w,
-            height: self.image_h,
-            rgb,
         }
     }
 
