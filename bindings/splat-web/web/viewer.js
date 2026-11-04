@@ -116,19 +116,28 @@ canvas.addEventListener("wheel", (e) => {
 async function fetchWithProgress(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  // Content-Length counts the bytes on the wire: compressed ones when the
+  // host gzips the file (GitHub Pages does), so it only guides the progress
+  // bar; the body is gathered as it comes.
   const total = Number(res.headers.get("content-length")) || 0;
-  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
-  const out = new Uint8Array(total);
+  const chunks = [];
   let got = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    out.set(value.subarray(0, Math.min(value.length, total - got)), got);
+    chunks.push(value);
     got += value.length;
-    $("progress").style.width = `${(100 * Math.min(got, total)) / total}%`;
+    if (total) $("progress").style.width = `${Math.min(100, (100 * got) / total)}%`;
   }
-  return got === total ? out : out.subarray(0, got);
+  const out = new Uint8Array(got);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
 }
 
 let viewer = null;
