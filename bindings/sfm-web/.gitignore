@@ -1,0 +1,4 @@
+/target/
+# build.sh outputs
+/web/pkg/
+/web/vendor/

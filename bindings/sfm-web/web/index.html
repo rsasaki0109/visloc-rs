@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>visloc-rs — photos to 3D in your browser</title>
+<script type="importmap">{ "imports": { "three": "./vendor/three.js" } }</script>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --fg:#e6edf3; --muted:#9aa7b4; --accent:#35d0ba; --line:#30363d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  body { display:grid; grid-template-columns: minmax(300px, 380px) 1fr; }
+  @media (max-width: 760px) { body { grid-template-columns: 1fr; grid-template-rows: auto 60vh; } }
+  aside { padding:18px; overflow:auto; border-right:1px solid var(--line); }
+  h1 { margin:0; font-size:17px; font-weight:650; }
+  h1 a { color:var(--accent); text-decoration:none; }
+  p { margin:8px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }
+  p a { color:var(--accent); }
+  .buttons { display:grid; gap:8px; margin-top:16px; }
+  button, label.file { display:block; text-align:center; font:inherit; font-size:14px; border-radius:8px; padding:10px; cursor:pointer; }
+  button.go { border:0; background:var(--accent); color:#0e1116; font-weight:650; }
+  button.go:disabled { opacity:.5; cursor:default; }
+  label.file { border:1px solid var(--line); background:var(--panel); color:var(--fg); }
+  label.file input { display:none; }
+  .stage { margin-top:16px; font-size:13px; }
+  .stage .row { display:flex; justify-content:space-between; color:var(--muted); margin-bottom:4px; }
+  .stage .row b { color:var(--fg); font-weight:600; }
+  .bar { height:6px; background:var(--panel); border-radius:3px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .15s; }
+  #result { margin-top:16px; font-size:13px; line-height:1.6; }
+  #result b { color:var(--accent); }
+  #downloads { display:flex; gap:8px; margin-top:8px; }
+  #downloads button { flex:1; border:1px solid var(--line); background:var(--panel); color:var(--fg); padding:7px; font-size:13px; }
+  #downloads[hidden] { display:none; }
+  #log { margin-top:14px; font:11px ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); white-space:pre-wrap; max-height:200px; overflow:auto; }
+  main { position:relative; min-height:300px; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #hint { position:absolute; left:12px; bottom:12px; font-size:12px; color:var(--muted); pointer-events:none; }
+</style>
+</head>
+<body>
+<aside>
+  <h1><a href="../">visloc-rs</a> — photos to 3D, in your browser</h1>
+  <p>visloc-rs's SfM compiled to WebAssembly: SIFT, matching and two-view verification, then the COLMAP-port incremental mapper. It runs on this device; the photos are not uploaded.</p>
+  <div class="buttons">
+    <button class="go" id="sample">Run on the sample photos</button>
+    <label class="file">Use your own photos (one camera, 10–60 shots)
+      <input type="file" id="files" accept="image/jpeg,image/png" multiple></label>
+  </div>
+  <p id="credit"></p>
+  <div class="stage"><div class="row"><span>Features (SIFT)</span><b id="s-features"></b></div><div class="bar"><div id="b-features"></div></div></div>
+  <div class="stage"><div class="row"><span>Matching and verification</span><b id="s-match"></b></div><div class="bar"><div id="b-match"></div></div></div>
+  <div class="stage"><div class="row"><span>Incremental mapper</span><b id="s-map"></b></div><div class="bar"><div id="b-map"></div></div></div>
+  <div id="result"></div>
+  <div id="downloads" hidden>
+    <button id="dl-ply">Points (.ply)</button>
+    <button id="dl-json">Model (.json)</button>
+  </div>
+  <div id="log"></div>
+</aside>
+<main>
+  <canvas id="view"></canvas>
+  <div id="hint">drag to orbit · right-drag to pan · scroll to zoom</div>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
