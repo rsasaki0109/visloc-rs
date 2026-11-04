@@ -1731,10 +1731,18 @@ $("live").addEventListener("click", () => {
 
 $("b-start").onclick = start;
 $("b-demo").onclick = startDemo;
-// The demo is not in git (tools/make_advio_demo.py builds it): offer it only
-// where the host has it.
+// web/demo/ carries advio-02 (tools/make_advio_demo.py builds others): offer
+// the demo only where the host has it.
 fetch(`demo/${new URLSearchParams(location.search).get("demo") || "advio-02"}.json`, { method: "HEAD" })
-  .then((r) => ($("b-demo").hidden = !r.ok))
+  .then((r) => {
+    $("b-demo").hidden = !r.ok;
+    // Without a touch screen (a computer) there are no motion sensors to start: the demo comes first.
+    if (r.ok && !matchMedia("(pointer: coarse)").matches) {
+      $("b-demo").className = "big";
+      $("b-start").className = "ghost";
+      $("b-start").before($("b-demo"));
+    }
+  })
   .catch(() => {});
 $("b-stop").onclick = () => stop("button");
 $("b-imu").onclick = () => (imuOnly ? stopImuOnly("button") : startImuOnly());
