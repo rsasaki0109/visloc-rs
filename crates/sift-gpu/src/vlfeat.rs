@@ -25,7 +25,7 @@ use visloc_vision::features::sift::{
     GrayImage, SiftConfig, SiftDetector, SiftKeypoint, SiftNormalization,
 };
 
-use crate::extractor::{storage, SiftGpuError};
+use crate::extractor::{mapped, storage, SiftGpuError};
 
 /// Uniform parameter slot stride and binding size.
 const SLOT: u64 = 256;
@@ -345,7 +345,7 @@ fn submit_copies(
 
 /// The first `len` bytes of `staging` once submission `index` is done (not
 /// waiting for later submissions).
-fn map_read(
+async fn map_read(
     device: &wgpu::Device,
     staging: &wgpu::Buffer,
     index: wgpu::SubmissionIndex,
@@ -355,17 +355,7 @@ fn map_read(
         return Vec::new();
     }
     let slice = staging.slice(..len);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(index),
-            timeout: None,
-        })
-        .ok();
-    let _ = rx.recv();
+    mapped(device, slice, Some(index)).await;
     let data = slice.get_mapped_range().expect("map range").to_vec();
     staging.unmap();
     data
@@ -451,20 +441,30 @@ impl VlfeatSiftGpu {
         image: &GrayImage<'_>,
         config: &SiftConfig,
     ) -> Result<(Vec<SiftKeypoint>, Vec<Vec<f32>>), SiftGpuError> {
+        pollster::block_on(self.extract_async(image, config))
+    }
+
+    /// [`Self::extract`] without blocking on the GPU readbacks, for a browser
+    /// (WebGPU), where nothing may block.
+    pub async fn extract_async(
+        &mut self,
+        image: &GrayImage<'_>,
+        config: &SiftConfig,
+    ) -> Result<(Vec<SiftKeypoint>, Vec<Vec<f32>>), SiftGpuError> {
         Self::check(image, config)?;
         let candidates = loop {
             self.ensure_plans(PlanKey::new(image.width, image.height, self.cap, config), 1)?;
             let index = self.submit_detect(0, image);
-            match self.read_counts(0, index) {
+            match self.read_counts(0, index).await {
                 Ok(counts) => {
                     let (index, len) = self.submit_candidate_copy(0, &counts);
-                    break self.read_candidates(0, index, &counts, len);
+                    break self.read_candidates(0, index, &counts, len).await;
                 }
                 Err(needed) => self.cap = needed.next_power_of_two(),
             }
         };
         let keypoints = select_keypoints(candidates, config);
-        let descriptors = self.describe(0, &keypoints, config);
+        let descriptors = self.describe(0, &keypoints, config).await;
         Ok((keypoints, descriptors))
     }
 
@@ -477,11 +477,25 @@ impl VlfeatSiftGpu {
         images: &[GrayImage<'_>],
         config: &SiftConfig,
     ) -> Result<Vec<(Vec<SiftKeypoint>, Vec<Vec<f32>>)>, SiftGpuError> {
+        pollster::block_on(self.extract_batch_async(images, config))
+    }
+
+    /// [`Self::extract_batch`] without blocking on the GPU readbacks.
+    #[allow(clippy::type_complexity)]
+    pub async fn extract_batch_async(
+        &mut self,
+        images: &[GrayImage<'_>],
+        config: &SiftConfig,
+    ) -> Result<Vec<(Vec<SiftKeypoint>, Vec<Vec<f32>>)>, SiftGpuError> {
         let same_size = images
             .windows(2)
             .all(|w| (w[0].width, w[0].height) == (w[1].width, w[1].height));
         if images.len() < 2 || !same_size {
-            return images.iter().map(|im| self.extract(im, config)).collect();
+            let mut out = Vec::with_capacity(images.len());
+            for image in images {
+                out.push(self.extract_async(image, config).await?);
+            }
+            return Ok(out);
         }
         for image in images {
             Self::check(image, config)?;
@@ -492,13 +506,13 @@ impl VlfeatSiftGpu {
         let mut pending = self.submit_detect(0, &images[0]);
         for i in 0..images.len() {
             let p = i % 2;
-            let counts = match self.read_counts(p, pending.clone()) {
+            let counts = match self.read_counts(p, pending.clone()).await {
                 Ok(counts) => counts,
                 Err(needed) => {
                     // An octave overflowed: grow, and finish one at a time.
                     self.cap = needed.next_power_of_two();
                     for image in &images[i..] {
-                        out.push(self.extract(image, config)?);
+                        out.push(self.extract_async(image, config).await?);
                     }
                     return Ok(out);
                 }
@@ -507,9 +521,9 @@ impl VlfeatSiftGpu {
             if i + 1 < images.len() {
                 pending = self.submit_detect(1 - p, &images[i + 1]);
             }
-            let candidates = self.read_candidates(p, index, &counts, len);
+            let candidates = self.read_candidates(p, index, &counts, len).await;
             let keypoints = select_keypoints(candidates, config);
-            let descriptors = self.describe(p, &keypoints, config);
+            let descriptors = self.describe(p, &keypoints, config).await;
             out.push((keypoints, descriptors));
         }
         Ok(out)
@@ -920,10 +934,10 @@ impl VlfeatSiftGpu {
 
     /// Plan `p`'s candidate counts per octave, `Err(needed)` when one
     /// overflowed the capacity.
-    fn read_counts(&self, p: usize, index: wgpu::SubmissionIndex) -> Result<Vec<u32>, usize> {
+    async fn read_counts(&self, p: usize, index: wgpu::SubmissionIndex) -> Result<Vec<u32>, usize> {
         let plan = &self.plans[p];
         let n_det = plan.det_dims.len();
-        let bytes = map_read(&self.ctx.device, &plan.staging, index, (n_det * 4) as u64);
+        let bytes = map_read(&self.ctx.device, &plan.staging, index, (n_det * 4) as u64).await;
         let counts: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
         match counts.iter().max() {
             Some(&max) if max as usize > plan.key.cap => Err(max as usize),
@@ -949,14 +963,14 @@ impl VlfeatSiftGpu {
     }
 
     /// Plan `p`'s candidates, octave by octave.
-    fn read_candidates(
+    async fn read_candidates(
         &self,
         p: usize,
         index: wgpu::SubmissionIndex,
         counts: &[u32],
         len: u64,
     ) -> Vec<Candidate> {
-        let bytes = map_read(&self.ctx.device, &self.plans[p].staging, index, len);
+        let bytes = map_read(&self.ctx.device, &self.plans[p].staging, index, len).await;
         let raw: &[u32] = bytemuck::cast_slice(&bytes);
         let mut candidates = Vec::with_capacity(raw.len() / CAND_WORDS);
         let mut chunks = raw.chunks_exact(CAND_WORDS);
@@ -985,7 +999,7 @@ impl VlfeatSiftGpu {
 
     /// Descriptors of `keypoints`, one dispatch per gradient level with that
     /// level's keypoints.
-    fn describe(
+    async fn describe(
         &mut self,
         p: usize,
         keypoints: &[SiftKeypoint],
@@ -1105,7 +1119,7 @@ impl VlfeatSiftGpu {
             &desc.staging,
             &[(&desc.out, 0, (n * 128) as u64)],
         );
-        let bytes = map_read(dev, &desc.staging, index, len);
+        let bytes = map_read(dev, &desc.staging, index, len).await;
         let mut descriptors = vec![Vec::new(); n];
         for (at, &i) in order.iter().enumerate() {
             descriptors[i] = bytes[at * 128..(at + 1) * 128]
