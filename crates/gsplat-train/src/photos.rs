@@ -4824,7 +4824,7 @@ mod tests {
                 "{f}"
             );
         }
-        for k in 0..6 {
+        for (k, &edge) in edges.iter().enumerate() {
             assert_eq!(
                 keypoints_of(&root.join("mem"), k),
                 keypoints_of(&root.join("str"), k),
@@ -4837,8 +4837,8 @@ mod tests {
                 "{name}"
             );
             let rgba = working_image(&root.join("str"), k);
-            assert_eq!(rgba.get_pixel(edges[k] - 2, 50).0[3], 255, "photo {k}");
-            assert_eq!(rgba.get_pixel(edges[k] + 2, 50).0[3], 0, "photo {k}");
+            assert_eq!(rgba.get_pixel(edge - 2, 50).0[3], 255, "photo {k}");
+            assert_eq!(rgba.get_pixel(edge + 2, 50).0[3], 0, "photo {k}");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
