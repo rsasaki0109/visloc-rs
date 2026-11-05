@@ -11,7 +11,9 @@ All notable changes to `visloc-rs` will be documented here.
   `<out>/images`, SIFT reads each back and drops it), so peak RAM no longer
   scales with the number of photos; the model is byte-identical to the
   in-memory run (tested). `--sift-threads N` caps the SIFT extraction
-  threads, each of which holds one image's scale space.
+  threads, each of which holds one image's scale space; with
+  `--stream-images` and no `--sift-threads` it defaults to the number of scale
+  spaces that fit in half the machine's memory.
 - **Per-image masks in SfM (`gsplat_photos --masks DIR`).** COLMAP's
   `ImageReader.mask_path` for the photos pipeline: a PNG per photo, zero
   masked out, keeps SIFT keypoints off the masked-out pixels on the CPU and

@@ -102,7 +102,9 @@ SfM:
   --stream-images          keep one image in memory at a time (read from the working PNGs
                            written to <out>/images) instead of all: peak RAM no longer scales
                            with the number of photos; same result
-  --sift-threads N         threads for SIFT extraction (each holds one image's scale space)
+  --sift-threads N         threads for SIFT extraction (each holds one image's scale space,
+                           ~7 GB at 3840 px). Default: all cores; with --stream-images, as
+                           many as fit in half the machine's memory (at least 1)
   --sift-opt key=value     extra SIFT settings (repeatable)
   --match-f32              match f32 descriptors instead of COLMAP's u8 ones
   --no-complete-model      leave the largest model as the mapper built it

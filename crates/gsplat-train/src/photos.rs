@@ -125,9 +125,11 @@ pub struct PhotoSfmConfig {
     /// whole reconstruction, are identical to the in-memory run. Not with
     /// `equirect` (its faces are cut in memory); `insv` already streams.
     pub stream_images: bool,
-    /// Threads for SIFT extraction (the global rayon pool if unset). Each
-    /// thread holds one image's scale space, several gigabytes at 3840 px,
-    /// so cap it when streaming large images.
+    /// Threads for SIFT extraction. Each thread holds one image's scale
+    /// space, several gigabytes at 3840 px. Unset: all cores, or with
+    /// `stream_images` as many as fit in half the machine's memory (see
+    /// [`default_sift_threads`]), so that streaming does not trade the
+    /// photos' memory for the scale spaces'.
     pub sift_threads: Option<usize>,
     /// A directory of per-image masks, COLMAP's `ImageReader.mask_path`: no
     /// SIFT keypoint is kept on a masked-out pixel, so matching and the
@@ -1158,6 +1160,42 @@ fn most_common_size(sizes: &[(u32, u32)]) -> (u32, u32) {
         .max_by_key(|c| c.len())
         .map(|c| c[0])
         .expect("at least 3 images")
+}
+
+/// Bytes of SIFT scale space one thread holds per pixel of its image. About
+/// 7 GB at 3840 x 3840 was observed (a measured figure from a 3840 px run
+/// on the CPU extractor, 475 B/px), rounded up to 480.
+const SIFT_BYTES_PER_PIXEL: u64 = 480;
+
+/// The machine's physical memory in bytes, if it can be read (Linux
+/// `/proc/meminfo`, macOS `sysctl hw.memsize`).
+fn physical_memory_bytes() -> Option<u64> {
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        let kib = text
+            .lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?;
+        return Some(kib * 1024);
+    }
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
+
+/// SIFT threads when streaming and `--sift-threads` is not given: as many
+/// as hold their scale spaces (`SIFT_BYTES_PER_PIXEL` per pixel) in half of
+/// `memory` (the rest is for the keypoints, matching and the mapper), at
+/// least 1 and at most `cores`. Without a readable `memory`, 16 GiB is
+/// assumed (a guess: a 32 GB machine).
+fn default_sift_threads(width: u32, height: u32, memory: Option<u64>, cores: usize) -> usize {
+    let budget = memory.unwrap_or(32 << 30) / 2;
+    let per_thread = (width as u64 * height as u64 * SIFT_BYTES_PER_PIXEL).max(1);
+    ((budget / per_thread) as usize).clamp(1, cores.max(1))
 }
 
 /// Whether a size is within 1% of `(width, height)` (undistorted crops a few
@@ -2229,7 +2267,10 @@ pub fn build_photo_dataset(
         log(&format!("gpu ba: reduced camera systems on {adapter}"));
     }
     // Images per GPU extraction batch: 256, or when streaming, as many as
-    // fit in about 2 GB of decoded RGB plus grey f32 (a batch holds them all).
+    // fit in about 2 GB of decoded RGB (3 B/px) plus grey f32 (4 B/px): a
+    // batch holds them all. The chunk loops (`extract_batched`,
+    // `extract_chunked`) prepare, extract and drop one chunk at a time and
+    // prefetch nothing, so 2 GB is also the peak, not half of it.
     #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
     let chunk_len: usize = if cfg.stream_images {
         ((2usize << 30) / (width as usize * height as usize * 7)).clamp(1, 256)
@@ -2380,7 +2421,21 @@ pub fn build_photo_dataset(
                 .collect::<Result<Vec<_>, EurocError>>()
         };
         // Each thread holds one image's scale space: `sift_threads` caps it.
-        let extracted = match cfg.sift_threads {
+        // Streaming exists to bound memory, so it caps it by default too.
+        let threads = cfg.sift_threads.or_else(|| {
+            if !cfg.stream_images {
+                return None;
+            }
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let t = default_sift_threads(width, height, physical_memory_bytes(), cores);
+            log(&format!(
+                "sift: {t} threads while streaming (scale space ~{:.1} GB each at {width}x{height}); \
+                 --sift-threads N overrides",
+                (width as u64 * height as u64 * SIFT_BYTES_PER_PIXEL) as f64 / 1e9
+            ));
+            Some(t)
+        });
+        let extracted = match threads {
             Some(t) => rayon::ThreadPoolBuilder::new()
                 .num_threads(t.max(1))
                 .build()
@@ -4763,5 +4818,137 @@ mod tests {
             assert_eq!(rgba.get_pixel(edges[k] + 2, 50).0[3], 0, "photo {k}");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Streaming with everything the working-image writer takes: a camera
+    /// with `max_angle`, `mask_black`, and photos of three sizes (the common
+    /// one, two 1% off that are resized to it, one far off that is dropped).
+    /// The streamed run must write the same working images (alpha included),
+    /// model and drop count as the in-memory run. Each part is checked to
+    /// matter: a blacked-out block (only `mask_black` clears it), pixels past
+    /// the angle (only `outside` clears them), and sizes (only the resize
+    /// makes the near-size photos 480x360).
+    #[test]
+    fn streamed_sfm_equals_in_memory_with_camera_angle_black_and_mixed_sizes() {
+        let root = std::env::temp_dir().join(format!("visloc_strmix_{}", std::process::id()));
+        let images = root.join("in");
+        std::fs::create_dir_all(&images).unwrap();
+        // (width, height, view index): 6 at the common size, 2 within 1%, 1 far off.
+        let sizes: [(u32, u32); 9] = [
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (476, 357),
+            (476, 357),
+            (240, 180),
+        ];
+        for (k, &(w, h)) in sizes.iter().enumerate() {
+            let centre = nalgebra::Vector3::new(-1.0 + 0.4 * k as f64, 0.05 * (k % 2) as f64, 0.0);
+            let mut img = room_photo(w, h, 420.0 * w as f64 / 480.0, centre, 0.04 * k as f64);
+            // A blacked-out block, in the part of the frame inside 25 degrees.
+            for y in (280 * h / 360)..(320 * h / 360) {
+                for x in (300 * w / 480)..(340 * w / 480) {
+                    img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+                }
+            }
+            img.save(images.join(format!("view_{k}.png"))).unwrap();
+        }
+        let cfg = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            max_size: 480,
+            eval_every: 0,
+            sift_threads: Some(2),
+            camera: Some(super::parse_camera_row("PINHOLE 480 360 420 420 240 180").unwrap()),
+            max_angle: Some(25.0),
+            mask_black: Some(12),
+            ..Default::default()
+        };
+        let streamed = super::PhotoSfmConfig {
+            stream_images: true,
+            ..cfg.clone()
+        };
+        let (_, mem_report, mem_logs) = run_photos(&images, &root.join("mem"), &cfg);
+        let (_, str_report, str_logs) = run_photos(&images, &root.join("str"), &streamed);
+        // The sizes were in play: 2 resized, 1 dropped, the same on both paths.
+        let counts = |logs: &[String]| -> (usize, usize) {
+            let l = logs
+                .iter()
+                .find(|m| m.contains("resized from within 1%"))
+                .unwrap();
+            let resized = l
+                .split("(")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap();
+            let dropped = l
+                .split("others dropped: ")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            (resized.parse().unwrap(), dropped.parse().unwrap())
+        };
+        assert_eq!(counts(&mem_logs), (2, 1), "{mem_logs:?}");
+        assert_eq!(counts(&str_logs), counts(&mem_logs), "{str_logs:?}");
+        assert!(mem_report.registered >= 4, "{mem_report:?}");
+        assert_eq!(mem_report.registered, str_report.registered);
+        for f in ["cameras.txt", "images.txt", "points3D.txt"] {
+            assert_eq!(
+                std::fs::read(root.join("mem/sparse/0").join(f)).unwrap(),
+                std::fs::read(root.join("str/sparse/0").join(f)).unwrap(),
+                "{f}"
+            );
+        }
+        // 8 photos kept; every working image (pixels and alpha) is the same.
+        for k in 0..8 {
+            let name = format!("images/frame_{k:05}.png");
+            assert_eq!(
+                std::fs::read(root.join("mem").join(&name)).unwrap(),
+                std::fs::read(root.join("str").join(&name)).unwrap(),
+                "{name}"
+            );
+            let a = working_image(&root.join("str"), k);
+            assert_eq!(a.dimensions(), (480, 360), "photo {k}");
+            // Black block (inside the angle): cleared by mask_black alone.
+            assert_eq!(a.get_pixel(320, 300).0[3], 0, "photo {k} black block");
+            // Past 25 degrees: cleared by the angle alone.
+            assert_eq!(a.get_pixel(3, 3).0[3], 0, "photo {k} outside");
+            // The centre is kept.
+            assert_eq!(a.get_pixel(240, 180).0[3], 255, "photo {k} centre");
+        }
+        assert!(!root.join("str/images/frame_00008.png").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The streaming default for SIFT threads follows the memory budget.
+    #[test]
+    fn default_sift_threads_fit_half_the_memory() {
+        let gib = 1u64 << 30;
+        // 3840 x 3840 needs ~7.1 GB a thread: 32 GiB machine -> 16 GiB -> 2.
+        assert_eq!(
+            super::default_sift_threads(3840, 3840, Some(32 * gib), 18),
+            2
+        );
+        // 24 GiB -> 12 GiB -> 1.
+        assert_eq!(
+            super::default_sift_threads(3840, 3840, Some(24 * gib), 18),
+            1
+        );
+        // A small image: bounded by the cores.
+        assert_eq!(super::default_sift_threads(640, 480, Some(64 * gib), 8), 8);
+        // Never zero, even when one thread does not fit.
+        assert_eq!(super::default_sift_threads(8000, 8000, Some(8 * gib), 8), 1);
+        // Unreadable memory: assumed 32 GiB.
+        assert_eq!(
+            super::default_sift_threads(3840, 3840, None, 18),
+            super::default_sift_threads(3840, 3840, Some(32 * gib), 18)
+        );
     }
 }
