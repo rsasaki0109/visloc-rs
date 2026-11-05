@@ -82,8 +82,8 @@ file name and not searched recursively, so a folder of `cam0/` photos needs
 `DIR` to be that camera's masks folder), where zero (black) means
 masked out and anything else is kept. A mask with an alpha channel is read
 through its alpha. `--flip-mask` swaps the two, for masks that paint the
-region to remove. This is also the layout of Spirula's `masks` folder, whose
-masks are 8-bit grey PNGs of 0 and 255 with the photos' size.
+region to remove. Masks named by file stem (`IMG_1.png`) are found too, so a
+folder of 8-bit grey PNGs of 0 and 255 with the photos' size works as is.
 
 - **SfM.** SIFT sees the whole photo, and the keypoints that land on a
   masked-out pixel are dropped afterwards, so matching and the mapper never

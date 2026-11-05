@@ -4,7 +4,7 @@
 //!
 //! A mask is a PNG named after its image, in a directory of its own (see
 //! [`mask_path`]). Zero (black) pixels are masked out and any other value is
-//! kept, in the convention of COLMAP and of the Spirula SfM; a mask with an
+//! kept, in the convention of COLMAP; a mask with an
 //! alpha channel is read through its alpha. A mask may be smaller or larger
 //! than the image so long as it has the same aspect: it is resized to the
 //! working image with nearest-neighbour sampling, so it stays binary.
@@ -20,7 +20,7 @@ use visloc_vision::features::sift::SiftKeypoint;
 use crate::euroc::EurocError;
 
 /// The mask of `image` in `dir`: `<file name>.png` (COLMAP's own naming,
-/// `IMG_1.jpg.png`) or else `<file stem>.png` (`IMG_1.png`, the Spirula
+/// `IMG_1.jpg.png`) or else `<file stem>.png` (`IMG_1.png`, the stem
 /// layout), whichever exists. `None` if neither does.
 pub fn mask_path(dir: &Path, image: &Path) -> Option<PathBuf> {
     let name = image.file_name()?.to_str()?;
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn zero_is_masked_out_and_anything_else_kept() {
-        // Left half 0, right half 255 (Spirula's masks), and a faint 1.
+        // Left half 0, right half 255 (a typical 0/255 mask), and a faint 1.
         let g = GrayImage::from_fn(8, 2, |x, y| {
             Luma([if x < 4 {
                 0
@@ -364,11 +364,11 @@ mod tests {
     }
 
     #[test]
-    fn mask_path_takes_the_colmap_name_or_the_spirula_stem() {
+    fn mask_path_takes_the_colmap_name_or_the_file_stem() {
         let tmp = Tmp::new("names");
         let dir = &tmp.0;
         let touch = |name: &str| std::fs::write(dir.join(name), b"x").unwrap();
-        touch("a.png"); // Spirula: a.jpg -> a.png
+        touch("a.png"); // stem: a.jpg -> a.png
         touch("b.jpg.png"); // COLMAP: b.jpg -> b.jpg.png
         touch("c.png");
         touch("c.jpg.png");
