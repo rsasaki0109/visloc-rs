@@ -1528,16 +1528,17 @@ fn save_working_image(
     })
 }
 
-/// A chunk of images' features from `vl.extract_batch`'s `batch`, the chunk's
-/// first image being image `start`: image `k`'s keypoints less those on its
-/// mask, `load_mask(start + k)`, decoded when they are filtered (a thread's
-/// worth at a time, not the chunk's at once). A batch the device cannot take
-/// (`Unsupported`, for photos past its binding limit) is extracted on the CPU.
+/// A chunk of `count` images' features from `vl.extract_batch`'s `batch`, the
+/// chunk's first image being image `start`: image `k`'s keypoints less those
+/// on its mask, `load_mask(start + k)`, decoded when they are filtered (a
+/// thread's worth at a time, not the chunk's at once). A batch the device
+/// cannot take (`Unsupported`, for photos past its binding limit) is
+/// extracted on the CPU, one image at a time, by `cpu_extract(k)`.
 #[cfg(feature = "gpu")]
 #[allow(clippy::type_complexity)]
 fn chunk_features(
     start: usize,
-    images: &[GrayImage<'_>],
+    count: usize,
     batch: Result<
         Vec<(
             Vec<visloc_vision::features::sift::SiftKeypoint>,
@@ -1545,7 +1546,15 @@ fn chunk_features(
         )>,
         visloc_sift_gpu::SiftGpuError,
     >,
-    sift_cfg: &SiftConfig,
+    cpu_extract: &mut dyn FnMut(
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
     features_of: &(dyn Fn(
         Vec<visloc_vision::features::sift::SiftKeypoint>,
         Vec<Vec<f32>>,
@@ -1554,17 +1563,12 @@ fn chunk_features(
           + Sync),
     load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
 ) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
-    let sift_err = |e: &dyn std::fmt::Display| EurocError::Sift(format!("{e}"));
     match batch {
-        Err(visloc_sift_gpu::SiftGpuError::Unsupported) => extract_chunk(
-            start,
-            images.len(),
-            &mut |k| extract_sift(&images[k], sift_cfg).map_err(|e| sift_err(&e)),
-            features_of,
-            load_mask,
-        ),
+        Err(visloc_sift_gpu::SiftGpuError::Unsupported) => {
+            extract_chunk(start, count, cpu_extract, features_of, load_mask)
+        }
         other => other
-            .map_err(|e| sift_err(&e))?
+            .map_err(|e| EurocError::Sift(format!("{e}")))?
             .into_par_iter()
             .enumerate()
             .map(|(k, (kps, desc))| Ok(features_of(kps, desc, load_mask(start + k)?.as_deref())))
@@ -1645,6 +1649,69 @@ fn extract_chunked<P>(
             start,
             count,
             &mut |k| extract(&chunk, k),
+            features_of,
+            load_mask,
+        )?;
+        done(&chunk, &features);
+        all.extend(features);
+    }
+    Ok(all)
+}
+
+/// Images extracted in batches, in chunks of `chunk_size`: for each chunk,
+/// `prepare(start, count)` readies the chunk's images (`count` from image
+/// `start`), `batch(&chunk)` extracts them all at once, `cpu_extract(&chunk,
+/// k)` extracts one on the CPU if the device cannot take the batch (see
+/// [`chunk_features`], which masks the keypoints with `load_mask(start + k)`),
+/// and `done(&chunk, &features)` sees the chunk's features. Returns every
+/// image's features.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn extract_batched<P>(
+    n: usize,
+    chunk_size: usize,
+    mut prepare: impl FnMut(usize, usize) -> Result<P, EurocError>,
+    mut batch: impl FnMut(
+        &P,
+    ) -> Result<
+        Result<
+            Vec<(
+                Vec<visloc_vision::features::sift::SiftKeypoint>,
+                Vec<Vec<f32>>,
+            )>,
+            visloc_sift_gpu::SiftGpuError,
+        >,
+        EurocError,
+    >,
+    mut cpu_extract: impl FnMut(
+        &P,
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+    mut done: impl FnMut(&P, &[(FeatureSet, Vec<u8>)]),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    let mut all = Vec::with_capacity(n);
+    for start in (0..n).step_by(chunk_size) {
+        let count = chunk_size.min(n - start);
+        let chunk = prepare(start, count)?;
+        let results = batch(&chunk)?;
+        let features = chunk_features(
+            start,
+            count,
+            results,
+            &mut |k| cpu_extract(&chunk, k),
             features_of,
             load_mask,
         )?;
@@ -2214,36 +2281,44 @@ pub fn build_photo_dataset(
                 "gpu sift: VLFeat-compatible extractor on {}",
                 vl.context().adapter_info.name
             ));
-            for start in (0..n).step_by(chunk_len) {
-                let chunk = (start..n.min(start + chunk_len))
-                    .into_par_iter()
-                    .map(|i| work.get(i))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
-                let images = grays
-                    .iter()
-                    .map(|g| GrayImage::new(width as usize, height as usize, g))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                // Pipelined: the GPU detects the next photo while the host
-                // handles the current one. Photos past the device's binding
-                // limit go to the CPU.
-                let batch = vl.extract_batch(&images, &sift_cfg);
-                features.extend(chunk_features(
-                    start,
-                    &images,
-                    batch,
-                    &sift_cfg,
-                    &features_of,
-                    &load_mask,
-                )?);
-                colours.extend(
-                    chunk
+            // Pipelined: the GPU detects the next photo while the host
+            // handles the current one. Photos past the device's binding
+            // limit go to the CPU.
+            features.extend(extract_batched(
+                n,
+                chunk_len,
+                |start, count| {
+                    let chunk = (start..start + count)
+                        .into_par_iter()
+                        .map(|i| work.get(i))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
+                    Ok((chunk, grays))
+                },
+                |(_, grays)| {
+                    let images = grays
                         .iter()
-                        .zip(&features[start..])
-                        .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
-                );
-            }
+                        .map(|g| GrayImage::new(width as usize, height as usize, g))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    Ok(vl.extract_batch(&images, &sift_cfg))
+                },
+                |(_, grays), k| {
+                    let gray = GrayImage::new(width as usize, height as usize, &grays[k])
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))
+                },
+                &features_of,
+                &load_mask,
+                |(chunk, _), features| {
+                    colours.extend(
+                        chunk
+                            .iter()
+                            .zip(features)
+                            .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
+                    )
+                },
+            )?);
             if cfg.gpu {
                 gpu_sift = Some(visloc_sift_gpu::SiftGpu::new(vl.into_context()));
             }
@@ -4002,6 +4077,77 @@ mod tests {
         assert!((256..N).all(|g| edges[g] != edges[0] && edges[g] != edges[g - 256]));
     }
 
+    /// `extract_batched`, the VLFeat GPU extractor's loop, over 260 images in
+    /// chunks of 256, with a fake batch extractor: image `g` has 100
+    /// keypoints on `x = 0.5 .. 99.5` and a mask from column `edges[g]`, so
+    /// it must keep exactly `edges[g]` of them, whether the batch comes from
+    /// the device or is refused (`Unsupported`) and the CPU extracts each
+    /// image. A mask looked up by the chunk's index, or with the chunk's
+    /// first image, keeps another number.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn batched_extraction_masks_each_image_by_its_global_index() {
+        use visloc_vision::features::sift::SiftKeypoint;
+        const N: usize = 260;
+        let edges: Vec<usize> = (0..N).map(|g| 10 + (37 * g) % 80).collect();
+        let load_mask = |g: usize| -> Result<Option<Vec<bool>>, super::EurocError> {
+            Ok(Some((0..100).map(|x| x >= edges[g]).collect()))
+        };
+        let features_of = |kps: Vec<_>, desc: Vec<_>, masked: Option<&[bool]>| {
+            let (kps, desc) =
+                crate::masks::drop_masked_keypoints(kps, desc, masked.unwrap(), 100, true);
+            (
+                super::FeatureSet {
+                    keypoints: kps
+                        .iter()
+                        .map(|k| nalgebra::Point2::new(k.x, k.y))
+                        .collect(),
+                    descriptors: desc,
+                },
+                Vec::new(),
+            )
+        };
+        let one_image = || {
+            let kps: Vec<SiftKeypoint> = (0..100)
+                .map(|x| {
+                    SiftKeypoint::from_location_scale_orientation(x as f64 + 0.5, 0.5, 1.0, 0.0)
+                })
+                .collect();
+            (kps, vec![Vec::new(); 100])
+        };
+        for refused in [false, true] {
+            let mut chunks = Vec::new();
+            let got = super::extract_batched(
+                N,
+                256,
+                |start, count| Ok((start, count)),
+                |&(_, count)| {
+                    Ok(if refused {
+                        Err(visloc_sift_gpu::SiftGpuError::Unsupported)
+                    } else {
+                        Ok((0..count).map(|_| one_image()).collect())
+                    })
+                },
+                |_, _| Ok(one_image()),
+                &features_of,
+                &load_mask,
+                |&(start, count), features| {
+                    assert_eq!(features.len(), count);
+                    chunks.push(start);
+                },
+            )
+            .unwrap();
+            assert_eq!(chunks, [0, 256]);
+            assert_eq!(got.len(), N);
+            for (g, (f, &e)) in got.iter().zip(&edges).enumerate() {
+                let xs: Vec<f64> = f.0.keypoints.iter().map(|p| p.x).collect();
+                assert_eq!(xs.len(), e, "refused {refused}: image {g}");
+                assert!(xs.iter().all(|&x| x < e as f64), "image {g}");
+            }
+        }
+        assert!((256..N).all(|g| edges[g] != edges[0] && edges[g] != edges[g - 256]));
+    }
+
     /// 260 small photos of the room (more than one 256-image extraction
     /// chunk) in `root/in`, each a step further along a sideways walk, and
     /// for each its own mask `view_k.png` in `root/masks`, `edges[k]`
@@ -4160,8 +4306,18 @@ mod tests {
             )
         };
         let by_chunk = |batch| {
-            super::chunk_features(START, &images, batch, &sift_cfg, &features_of, &load_mask)
-                .unwrap()
+            super::chunk_features(
+                START,
+                images.len(),
+                batch,
+                &mut |k| {
+                    extract_sift(&images[k], &sift_cfg)
+                        .map_err(|e| super::EurocError::Sift(format!("{e}")))
+                },
+                &features_of,
+                &load_mask,
+            )
+            .unwrap()
         };
         // The plain GPU extractor's path, one image at a time.
         let one_at_a_time = super::extract_chunk(
