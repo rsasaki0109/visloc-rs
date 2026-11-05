@@ -295,6 +295,16 @@ fn gaussian_kernel(sigma: f64) -> Vec<f32> {
     raw.iter().map(|v| (v / sum) as f32).collect()
 }
 
+/// The little-endian `u32` words of read-back `bytes`. Unlike
+/// `bytemuck::cast_slice`, it takes any alignment: an empty `Vec<u8>` (a
+/// readback of nothing) is only 1-aligned, which `cast_slice` rejects.
+pub(crate) fn u32_words(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect()
+}
+
 /// The first `len` bytes of `buffer`, copied out once the queue's work is done.
 pub(crate) async fn read_bytes(
     device: &wgpu::Device,

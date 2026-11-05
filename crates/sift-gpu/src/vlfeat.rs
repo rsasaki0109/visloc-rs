@@ -18,6 +18,7 @@
 //! level (devices may cap a binding at 128 MiB). Buffers, dispatches and
 //! bind groups are built once per image size and reused.
 
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use visloc_gsplat_render::GpuContext;
@@ -25,7 +26,7 @@ use visloc_vision::features::sift::{
     GrayImage, SiftConfig, SiftDetector, SiftKeypoint, SiftNormalization,
 };
 
-use crate::extractor::{mapped, storage, SiftGpuError};
+use crate::extractor::{mapped, storage, u32_words, SiftGpuError};
 
 /// Uniform parameter slot stride and binding size.
 const SLOT: u64 = 256;
@@ -146,7 +147,65 @@ struct DescBuffers {
     binds: Vec<wgpu::BindGroup>,
 }
 
+/// The large buffers of one plan slot: the image, the scale spaces'
+/// levels, the gradients, the candidates, the descriptors and their
+/// staging copies. They outlive the plans that bind them, and one is only
+/// reallocated when a plan needs it larger, so a stream that alternates
+/// image sizes (a rig's cameras) records new dispatches and bind groups
+/// (well under a millisecond) instead of allocating the buffers again
+/// (about 100 ms at 3840x2160), and holds the memory of its largest plan.
+#[derive(Default)]
+struct Pool {
+    buffers: HashMap<(&'static str, usize, usize), wgpu::Buffer>,
+    /// The buffers allocated so far, in order (for tests).
+    allocated: Vec<(&'static str, usize, usize)>,
+}
+
+impl Pool {
+    /// Buffer `(label, i, j)` with at least `bytes`, from `make` when the
+    /// kept one is smaller (or there is none).
+    fn get(
+        &mut self,
+        (label, i, j): (&'static str, usize, usize),
+        bytes: u64,
+        make: impl FnOnce(&'static str, u64) -> wgpu::Buffer,
+    ) -> wgpu::Buffer {
+        match self.buffers.get(&(label, i, j)) {
+            Some(buffer) if buffer.size() >= bytes => buffer.clone(),
+            _ => {
+                let buffer = make(label, bytes);
+                self.allocated.push((label, i, j));
+                self.buffers.insert((label, i, j), buffer.clone());
+                buffer
+            }
+        }
+    }
+
+    fn storage(
+        &mut self,
+        dev: &wgpu::Device,
+        key: (&'static str, usize, usize),
+        bytes: u64,
+    ) -> wgpu::Buffer {
+        self.get(key, bytes, |label, bytes| {
+            storage(dev, label, bytes, wgpu::BufferUsages::empty())
+        })
+    }
+
+    fn staging(
+        &mut self,
+        dev: &wgpu::Device,
+        key: (&'static str, usize, usize),
+        bytes: u64,
+    ) -> wgpu::Buffer {
+        self.get(key, bytes, |_, bytes| staging_buffer(dev, bytes))
+    }
+}
+
 /// VLFeat-compatible GPU SIFT extractor (owns its [`GpuContext`]).
+///
+/// Its buffers are sized for the largest image it has processed and kept
+/// across image sizes (see `Pool`); [`Self::clear_plan_cache`] frees them.
 pub struct VlfeatSiftGpu {
     ctx: GpuContext,
     pipes: Pipes,
@@ -154,6 +213,8 @@ pub struct VlfeatSiftGpu {
     /// One plan for `extract`; `extract_batch` alternates two, so one image
     /// is detected while the host handles the previous one.
     plans: Vec<Plan>,
+    /// `pools[p]`: the buffers of `plans[p]`, kept across keys.
+    pools: Vec<Pool>,
 }
 
 /// One refined DoG extremum read back from the GPU.
@@ -400,7 +461,15 @@ impl VlfeatSiftGpu {
             pipes,
             cap: INITIAL_CAP,
             plans: Vec::new(),
+            pools: Vec::new(),
         }
+    }
+
+    /// Free every plan and its buffers; the next extraction allocates them
+    /// again.
+    pub fn clear_plan_cache(&mut self) {
+        self.plans.clear();
+        self.pools.clear();
     }
 
     pub fn context(&self) -> &GpuContext {
@@ -543,19 +612,26 @@ impl VlfeatSiftGpu {
         Ok(())
     }
 
-    /// At least `count` plans for `key` (rebuilt when the key changed).
+    /// At least `count` plans for `key`, rebuilt from the kept buffers when
+    /// the key changed.
     fn ensure_plans(&mut self, key: PlanKey, count: usize) -> Result<(), SiftGpuError> {
         if self.plans.first().map(|p| p.key) != Some(key) {
             self.plans.clear();
         }
         while self.plans.len() < count {
-            let plan = self.build_plan(key)?;
-            self.plans.push(plan);
+            let index = self.plans.len();
+            if self.pools.len() <= index {
+                self.pools.push(Pool::default());
+            }
+            let mut pool = std::mem::take(&mut self.pools[index]);
+            let plan = self.build_plan(key, &mut pool);
+            self.pools[index] = pool;
+            self.plans.push(plan?);
         }
         Ok(())
     }
 
-    fn build_plan(&self, key: PlanKey) -> Result<Plan, SiftGpuError> {
+    fn build_plan(&self, key: PlanKey, pool: &mut Pool) -> Result<Plan, SiftGpuError> {
         let dev = &self.ctx.device;
         let queue = &self.ctx.queue;
         let (w0, h0) = (key.width, key.height);
@@ -632,44 +708,28 @@ impl VlfeatSiftGpu {
 
         let none = wgpu::BufferUsages::empty();
         let f32s = |n: usize| (n * 4) as u64;
-        let img = storage(dev, "vl-img", f32s(w0 * h0), none);
+        // The large buffers come from the pool; the small ones are new.
+        let img = pool.storage(dev, ("vl-img", 0, 0), f32s(w0 * h0));
         let wts = storage(dev, "vl-weights", f32s(weights.len()), none);
         queue.write_buffer(&wts, 0, bytemuck::cast_slice(&weights));
-        let tmp = storage(dev, "vl-tmp", f32s(tw * th), none);
-        let det_gauss: Vec<Vec<wgpu::Buffer>> = det_dims
-            .iter()
-            .map(|&(w, h)| {
-                (0..levels)
-                    .map(|_| storage(dev, "vl-gauss", f32s(w * h), none))
-                    .collect()
-            })
-            .collect();
-        let det_dog: Vec<Vec<wgpu::Buffer>> = det_dims
-            .iter()
-            .map(|&(w, h)| {
-                (0..levels - 1)
-                    .map(|_| storage(dev, "vl-dog", f32s(w * h), none))
-                    .collect()
-            })
-            .collect();
-        let desc_gauss: Vec<Vec<wgpu::Buffer>> = desc_dims
-            .iter()
-            .map(|&(w, h)| {
-                (0..levels)
-                    .map(|_| storage(dev, "vl-desc-gauss", f32s(w * h), none))
-                    .collect()
-            })
-            .collect();
-        let grad: Vec<Vec<wgpu::Buffer>> = desc_dims
-            .iter()
-            .map(|&(w, h)| {
-                (0..s)
-                    .map(|_| storage(dev, "vl-grad", f32s(2 * w * h), none))
-                    .collect()
-            })
-            .collect();
+        let tmp = pool.storage(dev, ("vl-tmp", 0, 0), f32s(tw * th));
+        let mut levels_of =
+            |label: &'static str, dims: &[(usize, usize)], count: usize, per_pixel: usize| {
+                dims.iter()
+                    .enumerate()
+                    .map(|(o, &(w, h))| {
+                        (0..count)
+                            .map(|l| pool.storage(dev, (label, o, l), f32s(per_pixel * w * h)))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+        let det_gauss = levels_of("vl-gauss", &det_dims, levels, 1);
+        let det_dog = levels_of("vl-dog", &det_dims, levels - 1, 1);
+        let desc_gauss = levels_of("vl-desc-gauss", &desc_dims, levels, 1);
+        let grad = levels_of("vl-grad", &desc_dims, s, 2);
         let cand: Vec<wgpu::Buffer> = (0..n_det)
-            .map(|_| storage(dev, "vl-cand", (cap * CAND_WORDS * 4) as u64, none))
+            .map(|o| pool.storage(dev, ("vl-cand", o, 0), (cap * CAND_WORDS * 4) as u64))
             .collect();
         let counters = storage(dev, "vl-counters", f32s(n_det.max(4)), none);
         let args = storage(
@@ -678,7 +738,11 @@ impl VlfeatSiftGpu {
             f32s(3 * n_det),
             wgpu::BufferUsages::INDIRECT,
         );
-        let staging = staging_buffer(dev, (n_det * cap * CAND_WORDS * 4) as u64);
+        let staging = pool.staging(
+            dev,
+            ("vl-staging", 0, 0),
+            (n_det * cap * CAND_WORDS * 4) as u64,
+        );
 
         let mut slots = Slots::default();
         let mut ops: Vec<Op> = Vec::new();
@@ -938,7 +1002,7 @@ impl VlfeatSiftGpu {
         let plan = &self.plans[p];
         let n_det = plan.det_dims.len();
         let bytes = map_read(&self.ctx.device, &plan.staging, index, (n_det * 4) as u64).await;
-        let counts: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
+        let counts = u32_words(&bytes);
         match counts.iter().max() {
             Some(&max) if max as usize > plan.key.cap => Err(max as usize),
             _ => Ok(counts),
@@ -971,7 +1035,7 @@ impl VlfeatSiftGpu {
         len: u64,
     ) -> Vec<Candidate> {
         let bytes = map_read(&self.ctx.device, &self.plans[p].staging, index, len).await;
-        let raw: &[u32] = bytemuck::cast_slice(&bytes);
+        let raw = u32_words(&bytes);
         let mut candidates = Vec::with_capacity(raw.len() / CAND_WORDS);
         let mut chunks = raw.chunks_exact(CAND_WORDS);
         for (o, &c) in counts.iter().enumerate() {
@@ -1037,16 +1101,16 @@ impl VlfeatSiftGpu {
         let queue = &self.ctx.queue;
         if plan.desc.as_ref().is_none_or(|d| d.capacity < n) {
             let capacity = n.next_power_of_two().max(1024);
-            let none = wgpu::BufferUsages::empty();
             let params = dev.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vl-desc-params"),
                 size: SLOT * n_groups as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let kps = storage(dev, "vl-desc-kps", (capacity * KP_WORDS * 4) as u64, none);
-            let out = storage(dev, "vl-desc-out", (capacity * 32 * 4) as u64, none);
-            let staging = staging_buffer(dev, (capacity * 128) as u64);
+            let pool = &mut self.pools[p];
+            let kps = pool.storage(dev, ("vl-desc-kps", 0, 0), (capacity * KP_WORDS * 4) as u64);
+            let out = pool.storage(dev, ("vl-desc-out", 0, 0), (capacity * 32 * 4) as u64);
+            let staging = pool.staging(dev, ("vl-desc-staging", 0, 0), (capacity * 128) as u64);
             let binds = (0..n_groups)
                 .map(|g| {
                     dev.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1302,6 +1366,21 @@ mod tests {
         px
     }
 
+    /// A featureless image reads back no candidates: an empty readback,
+    /// which `bytemuck::cast_slice` rejected as misaligned (panic).
+    #[test]
+    fn featureless_images_have_no_features() {
+        let Some(ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let flat = vec![0.5f32; 160 * 112];
+        let image = GrayImage::new(160, 112, &flat).unwrap();
+        let mut gpu = VlfeatSiftGpu::new(ctx);
+        let (keypoints, descriptors) = gpu.extract(&image, &photos_config()).unwrap();
+        assert!(keypoints.is_empty() && descriptors.is_empty());
+    }
+
     /// Keypoints of `a` with a counterpart in `b` (position within 0.01 px,
     /// scale within 0.1%, orientation within 0.01 rad), as index pairs.
     fn pair_up(a: &[SiftKeypoint], b: &[SiftKeypoint]) -> Vec<(usize, usize)> {
@@ -1391,8 +1470,8 @@ mod tests {
         assert_eq!(sd, bd);
     }
 
-    /// Alternating image sizes rebuild the plan each time and give what a
-    /// fresh extractor gives.
+    /// Alternating image sizes give what a fresh extractor gives, and only
+    /// rebuild the plan's dispatches.
     #[test]
     fn image_sizes_can_alternate() {
         let Some(ctx) = try_context() else {
@@ -1411,8 +1490,64 @@ mod tests {
         let second_large = gpu.extract(&large_image, &config).unwrap();
         assert_eq!(first_small, second_small);
         assert_eq!(first_large, second_large);
+        // The second round reuses the first round's buffers.
+        let allocated = gpu.pools[0].allocated.len();
+        assert_eq!(gpu.extract(&small_image, &config).unwrap(), first_small);
+        assert_eq!(gpu.extract(&large_image, &config).unwrap(), first_large);
+        assert_eq!(gpu.pools[0].allocated.len(), allocated);
         let mut fresh = VlfeatSiftGpu::new(gpu.into_context());
         assert_eq!(fresh.extract(&large_image, &config).unwrap(), first_large);
+    }
+
+    /// A smaller image after a larger one allocates nothing; a grown
+    /// candidate capacity only reallocates the candidate buffers and their
+    /// staging copy; a cleared cache allocates again and extracts the same.
+    #[test]
+    fn buffers_are_kept_for_the_largest_image() {
+        let Some(ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let config = photos_config();
+        let small = texture(160, 112);
+        let large = texture(256, 176);
+        let small_image = GrayImage::new(160, 112, &small).unwrap();
+        let large_image = GrayImage::new(256, 176, &large).unwrap();
+        let mut gpu = VlfeatSiftGpu::new(ctx);
+        let first_large = gpu.extract(&large_image, &config).unwrap();
+        let allocated = gpu.pools[0].allocated.len();
+        let first_small = gpu.extract(&small_image, &config).unwrap();
+        assert_eq!(gpu.pools[0].allocated.len(), allocated);
+
+        // A featureless image keeps the small capacity; the textured one of
+        // the same size outgrows it.
+        let flat = vec![0.5f32; 256 * 176];
+        let flat_image = GrayImage::new(256, 176, &flat).unwrap();
+        let mut grown = VlfeatSiftGpu::with_capacity(gpu.into_context(), 4);
+        grown.extract(&flat_image, &config).unwrap();
+        let allocated = grown.pools[0].allocated.len();
+        assert_eq!(grown.extract(&large_image, &config).unwrap(), first_large);
+        assert!(grown.cap > 4, "capacity grew to {}", grown.cap);
+        let reallocated = &grown.pools[0].allocated[allocated..];
+        let n_det = grown.plans[0].det_dims.len();
+        // The grown candidate lists and their staging copy, then the
+        // descriptor buffers the featureless image never needed.
+        assert_eq!(reallocated.len(), n_det + 1 + 3, "{reallocated:?}");
+        assert!(reallocated.iter().all(|(label, _, _)| {
+            [
+                "vl-cand",
+                "vl-staging",
+                "vl-desc-kps",
+                "vl-desc-out",
+                "vl-desc-staging",
+            ]
+            .contains(label)
+        }));
+
+        grown.clear_plan_cache();
+        assert!(grown.plans.is_empty() && grown.pools.is_empty());
+        assert_eq!(grown.extract(&large_image, &config).unwrap(), first_large);
+        assert_eq!(grown.extract(&small_image, &config).unwrap(), first_small);
     }
 
     /// The pipelined batch gives each image what `extract` gives it, also
