@@ -23,6 +23,12 @@
   button.go:disabled { opacity:.5; cursor:default; }
   label.file { border:1px solid var(--line); background:var(--panel); color:var(--fg); }
   label.file input { display:none; }
+  .pick { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  body.busy label.file { opacity:.5; pointer-events:none; }
+  p.small { font-size:12px; }
+  body.drop main::after { content:"Drop the photos to run the SfM on them"; position:absolute; inset:12px;
+    display:flex; align-items:center; justify-content:center; border:2px dashed var(--accent); border-radius:10px;
+    background:rgba(14,17,22,.8); color:var(--accent); font-size:16px; font-weight:600; }
   .stage { margin-top:16px; font-size:13px; }
   .stage .row { display:flex; justify-content:space-between; color:var(--muted); margin-bottom:4px; }
   .stage .row b { color:var(--fg); font-weight:600; }
@@ -45,9 +51,14 @@
   <p>visloc-rs's SfM compiled to WebAssembly: SIFT, matching and two-view verification, then the COLMAP-port incremental mapper. SIFT and matching run on the GPU through WebGPU where the browser has it. It all runs on this device; the photos are not uploaded.</p>
   <div class="buttons">
     <button class="go" id="sample">Run on the sample photos</button>
-    <label class="file">Use your own photos (one camera, 10–60 shots)
-      <input type="file" id="files" accept="image/jpeg,image/png" multiple></label>
+    <div class="pick">
+      <label class="file">Your photos…
+        <input type="file" id="files" accept="image/jpeg,image/png,image/webp" multiple></label>
+      <label class="file">A folder…
+        <input type="file" id="folder" webkitdirectory></label>
+    </div>
   </div>
+  <p class="small">Or drop photos or a folder anywhere on the page: one camera, 10 to 60 shots, all the same size. The focal length comes from their EXIF when they have it.</p>
   <p id="credit"></p>
   <p id="backend"></p>
   <div class="stage"><div class="row"><span>Features (SIFT)</span><b id="s-features"></b></div><div class="bar"><div id="b-features"></div></div></div>
@@ -55,6 +66,7 @@
   <div class="stage"><div class="row"><span>Incremental mapper</span><b id="s-map"></b></div><div class="bar"><div id="b-map"></div></div></div>
   <div id="result"></div>
   <div id="downloads" hidden>
+    <button id="dl-colmap" title="images/ and sparse/0/ (COLMAP text), for 3DGS trainers">COLMAP (.zip)</button>
     <button id="dl-ply">Points (.ply)</button>
     <button id="dl-json">Model (.json)</button>
   </div>

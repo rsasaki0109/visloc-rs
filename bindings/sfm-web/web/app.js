@@ -109,9 +109,18 @@ function showModel(m) {
 
 // ---------------------------------------------------------------- run
 let worker = null;
+// the last run: its photos (kept for the COLMAP export) and what the worker sent back
+let photos = [];
+let result = null;
 let model = null;
 const bar = (id, f) => { $(id).style.width = `${Math.round(100 * f)}%`; };
 const log = (line) => { $("log").textContent += line + "\n"; $("log").scrollTop = 1e9; };
+const busy = (on) => {
+  $("sample").disabled = on;
+  $("files").disabled = on;
+  $("folder").disabled = on;
+  document.body.classList.toggle("busy", on);
+};
 
 function reset() {
   for (const id of ["features", "match", "map"]) {
@@ -124,14 +133,15 @@ function reset() {
   $("log").textContent = "";
 }
 
-function run(photos, focal) {
+function run(list, focal) {
   reset();
-  $("sample").disabled = true;
-  $("files").disabled = true;
+  busy(true);
+  photos = list;
+  result = null;
   worker?.terminate();
   worker = new Worker("worker.js", { type: "module" });
   const n = photos.length;
-  let tMatch = 0;
+  let tMatch = 0, start = null;
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === "backend") {
@@ -142,6 +152,11 @@ function run(photos, focal) {
       bar("b-features", (m.i + 1) / n);
       $("s-features").textContent = m.i + 1 < n ? `${m.i + 1} / ${n}` : `${n} / ${n}, ${(m.ms / 1000).toFixed(1)} s`;
       log(`${m.name}: ${m.keypoints} keypoints (${(m.ms / 1000).toFixed(1)} s)`);
+    } else if (m.type === "focal") {
+      start = m;
+      log(m.from === "exif" ? `focal length from EXIF: ${m.mm35} mm (35 mm equivalent), ${m.px.toFixed(0)} px`
+        : m.from === "given" ? `focal length given: ${m.px.toFixed(0)} px`
+        : `no focal length in EXIF: starting from ${m.px.toFixed(0)} px (1.2 x the long side)`);
     } else if (m.type === "match") {
       bar("b-match", m.done / m.total);
       $("s-match").textContent = `${m.done} / ${m.total} pairs, ${m.verified} verified`;
@@ -152,24 +167,23 @@ function run(photos, focal) {
       $("s-map").textContent = "running…";
       bar("b-map", 0.5);
     } else if (m.type === "model") {
+      result = m;
       model = JSON.parse(m.model);
       bar("b-map", 1);
       $("s-map").textContent = `${(m.ms / 1000).toFixed(1)} s`;
+      const from = start?.from === "exif" ? ` (from ${start.px.toFixed(0)} px, EXIF)` : start?.from === "prior" ? ` (from ${start.px.toFixed(0)} px, a guess)` : "";
       $("result").innerHTML = `<b>${model.cameras.length} of ${n}</b> photos placed, <b>${(model.points.length / 3).toLocaleString()}</b> points, ` +
-        `focal ${model.intrinsics[0].toFixed(1)} px — ${(m.total_ms / 1000).toFixed(0)} s in all, on this device.`;
+        `focal ${model.intrinsics[0].toFixed(1)} px${from} — ${(m.total_ms / 1000).toFixed(0)} s in all, on this device.`;
       $("downloads").hidden = false;
       showModel(model);
-      done();
+      busy(false);
     } else if (m.type === "error") {
       $("result").textContent = `Stopped: ${m.message}`;
-      done();
+      busy(false);
     }
   };
-  const done = () => {
-    $("sample").disabled = false;
-    $("files").disabled = false;
-  };
-  worker.postMessage({ photos, focal, ...SETTINGS }, photos.map((p) => p.bytes));
+  // copied, not transferred: the page keeps the photos for the export
+  worker.postMessage({ photos, focal, ...SETTINGS });
 }
 
 $("sample").addEventListener("click", async () => {
@@ -177,19 +191,55 @@ $("sample").addEventListener("click", async () => {
   $("credit").innerHTML = s.credit;
   reset();
   $("s-features").textContent = "downloading…";
-  const photos = await Promise.all(s.files.map(async (f) => ({
+  const list = await Promise.all(s.files.map(async (f) => ({
     name: f,
     bytes: await (await fetch(`samples/${s.folder}/${f}`)).arrayBuffer(),
   })));
-  run(photos, s.focal);
+  run(list, s.focal);
 });
 
-$("files").addEventListener("change", async (e) => {
-  const files = [...e.target.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  if (files.length < 2) return;
+// The visitor's photos: picked files, a picked folder or anything dropped
+// on the page (files and folders), in name order.
+const IMAGE = /\.(jpe?g|png|webp)$/i;
+async function runFiles(files) {
+  files = files.filter((f) => IMAGE.test(f.name))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (files.length < 2) {
+    $("result").textContent = "Give it at least two photos (JPEG, PNG or WebP).";
+    return;
+  }
   $("credit").textContent = "";
-  const photos = await Promise.all(files.map(async (f) => ({ name: f.name, bytes: await f.arrayBuffer() })));
-  run(photos, 0);
+  run(await Promise.all(files.map(async (f) => ({ name: f.name, bytes: await f.arrayBuffer() }))), 0);
+}
+$("files").addEventListener("change", (e) => runFiles([...e.target.files]));
+$("folder").addEventListener("change", (e) => runFiles([...e.target.files]));
+
+// every file under a dropped entry
+async function entryFiles(entry) {
+  if (entry.isFile) return [await new Promise((ok, fail) => entry.file(ok, fail))];
+  if (!entry.isDirectory) return [];
+  const reader = entry.createReader();
+  const out = [];
+  for (;;) {
+    const batch = await new Promise((ok, fail) => reader.readEntries(ok, fail));
+    if (!batch.length) return out;
+    for (const e of batch) out.push(...(await entryFiles(e)));
+  }
+}
+addEventListener("dragover", (e) => {
+  e.preventDefault();
+  document.body.classList.add("drop");
+});
+addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) document.body.classList.remove("drop");
+});
+addEventListener("drop", async (e) => {
+  e.preventDefault();
+  document.body.classList.remove("drop");
+  if (document.body.classList.contains("busy")) return;
+  const entries = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  const files = entries.length ? (await Promise.all(entries.map(entryFiles))).flat() : [...e.dataTransfer.files];
+  runFiles(files);
 });
 
 // ---------------------------------------------------------------- downloads
@@ -201,7 +251,8 @@ function save(name, blob) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 $("dl-json").addEventListener("click", () => save("model.json", new Blob([JSON.stringify(model)], { type: "application/json" })));
-$("dl-ply").addEventListener("click", () => {
+
+function plyBlob() {
   const n = model.points.length / 3;
   const header = `ply\nformat binary_little_endian 1.0\nelement vertex ${n}\nproperty float x\nproperty float y\nproperty float z\n` +
     "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n";
@@ -210,5 +261,94 @@ $("dl-ply").addEventListener("click", () => {
     for (let k = 0; k < 3; k++) body.setFloat32(15 * i + 4 * k, model.points[3 * i + k], true);
     for (let k = 0; k < 3; k++) body.setUint8(15 * i + 12 + k, model.colours[3 * i + k]);
   }
-  save("points.ply", new Blob([header, body.buffer], { type: "application/octet-stream" }));
+  return new Blob([header, body.buffer], { type: "application/octet-stream" });
+}
+$("dl-ply").addEventListener("click", () => save("points.ply", plyBlob()));
+
+// A zip of stored (uncompressed) entries: photos do not compress, and the
+// text is small next to them.
+const CRC = new Uint32Array(256).map((_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function zip(files) {
+  const parts = [], central = [];
+  let offset = 0;
+  for (const { name, data } of files) {
+    const path = new TextEncoder().encode(name);
+    const crc = crc32(data);
+    const head = (sig, extra) => {
+      const h = new DataView(new ArrayBuffer(extra));
+      h.setUint32(0, sig, true);
+      return h;
+    };
+    // local header: version 20, UTF-8 names (flag bit 11), stored
+    const local = head(0x04034b50, 30);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0x0800, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true);
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, path.length, true);
+    parts.push(local, path, data);
+    const dir = head(0x02014b50, 46);
+    dir.setUint16(4, 20, true);
+    dir.setUint16(6, 20, true);
+    dir.setUint16(8, 0x0800, true);
+    dir.setUint32(16, crc, true);
+    dir.setUint32(20, data.length, true);
+    dir.setUint32(24, data.length, true);
+    dir.setUint16(28, path.length, true);
+    dir.setUint32(42, offset, true);
+    central.push(dir, path);
+    offset += 30 + path.length + data.length;
+  }
+  const size = central.reduce((s, p) => s + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true);
+  end.setUint32(12, size, true);
+  end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end], { type: "application/zip" });
+}
+
+// A COLMAP dataset as 3DGS trainers read it: images/ and sparse/0/ (text).
+// A photo goes in as it is when its pixels are already upright, else
+// redrawn upright (JPEG), as the browser showed it to the SfM.
+$("dl-colmap").addEventListener("click", async () => {
+  const button = $("dl-colmap");
+  button.disabled = true;
+  try {
+    const text = (s) => new TextEncoder().encode(s);
+    const [cameras, images, points] = result.colmap;
+    const files = [
+      { name: "sparse/0/cameras.txt", data: text(cameras) },
+      { name: "sparse/0/images.txt", data: text(images) },
+      { name: "sparse/0/points3D.txt", data: text(points) },
+    ];
+    for (const [k, c] of model.cameras.entries()) {
+      button.textContent = `Packing ${k + 1} / ${model.cameras.length}…`;
+      const bytes = photos[c.index].bytes;
+      let data = new Uint8Array(bytes);
+      if (result.orientations[c.index] > 1) {
+        const bitmap = await createImageBitmap(new Blob([bytes]));
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        canvas.getContext("2d").drawImage(bitmap, 0, 0);
+        bitmap.close();
+        data = new Uint8Array(await (await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 })).arrayBuffer());
+      }
+      files.push({ name: `images/${c.file}`, data });
+    }
+    save("colmap.zip", zip(files));
+  } finally {
+    button.textContent = "COLMAP (.zip)";
+    button.disabled = false;
+  }
 });

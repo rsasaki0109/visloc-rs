@@ -27,8 +27,13 @@ run on the GPU (`visloc-sift-gpu`'s ports, through non-blocking
 `extract_async` / `match_pairs_async`). The same 38 photos take 10 s on an
 8 GB NVIDIA laptop GPU and 23 s on an AMD RDNA 2 iGPU, which is what
 browsers on such a laptop take by default (52 s on the CPU). There
-verification and the mapper (CPU, one thread) take 7 s of the 10. Still
-open: threads, video, focal lengths from EXIF, and the COLMAP text export.
+verification and the mapper (CPU, one thread) take 7 s of the 10.
+
+And §0's export: the page writes a COLMAP dataset (`colmap.zip`: `images/`
+and `sparse/0/` as text, the photos upright at their own size). It takes a
+visitor's photos dropped as files or folders, and starts the mapper from
+their EXIF's 35 mm equivalent focal length. Still open: threads, video, and
+photos of several sizes (one camera each).
 
 ## 0. Product UX (the target)
 
