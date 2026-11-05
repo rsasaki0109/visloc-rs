@@ -19,10 +19,12 @@ All notable changes to `visloc-rs` will be documented here.
   masked out, keeps SIFT keypoints off the masked-out pixels on the CPU and
   both GPU extractors, and gives the training images alpha 0 there.
   `PhotoSfmConfig::mask_dir` / `mask_flip` (`--flip-mask`), the `masks`
-  module. A mask is resized to the working images with nearest-neighbour
-  sampling; a missing mask or one of another aspect is an error before any
-  image is decoded. Not with
-  `equirect` or `insv`. Also `gsplat_photos_cuda --masks`. Details in
+  module. A mask with alpha is read through its alpha, or through its
+  colour when the alpha is opaque everywhere (an RGBA export of a
+  black-and-white mask, which would otherwise mask nothing). A mask is
+  resized to the working images with nearest-neighbour sampling; a missing
+  mask or one of another aspect is an error before any image is decoded.
+  Not with `equirect` or `insv`. Also `gsplat_photos_cuda --masks`. Details in
   docs/photos_to_splat.md.
 - **Insta360 photos through their factory lens; masks past a fisheye's
   field of view.** On three of FIORD's 200° scenes (front lens, 800 px),

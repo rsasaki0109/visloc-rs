@@ -5,7 +5,10 @@
 //! A mask is a PNG named after its image, in a directory of its own (see
 //! [`mask_path`]). Zero (black) pixels are masked out and any other value is
 //! kept, in the convention of COLMAP; a mask with an
-//! alpha channel is read through its alpha. A mask may be smaller or larger
+//! alpha channel is read through its alpha, unless the alpha is opaque
+//! everywhere (an RGBA export of a black-and-white mask): it then says
+//! nothing, and the mask is read through its colour, as one without alpha
+//! is. A mask may be smaller or larger
 //! than the image so long as it has the same aspect: it is resized to the
 //! working image with nearest-neighbour sampling, so it stays binary.
 //!
@@ -159,8 +162,8 @@ fn same_aspect(a: (u32, u32), b: (u32, u32)) -> bool {
 
 /// `mask` resized to `width` x `height` by nearest-neighbour sampling at the
 /// pixel centres, as `true` where it is masked out: a pixel is kept if it is
-/// nonzero (its alpha, if it has one; any of its channels otherwise), and
-/// `flip` swaps the two.
+/// nonzero (its alpha, if it has one that is not opaque everywhere; any of
+/// its colour channels otherwise), and `flip` swaps the two.
 fn masked_out(
     mask: &DynamicImage,
     flip: bool,
@@ -168,13 +171,31 @@ fn masked_out(
     height: u32,
 ) -> Result<Vec<bool>, String> {
     use image::GenericImageView;
+    // An alpha that is opaque everywhere masks nothing: the mask is then in
+    // the colour, as written by an editor that adds an alpha channel to a
+    // black-and-white mask.
+    let opaque = match mask {
+        DynamicImage::ImageLumaA8(m) => m.pixels().all(|p| p.0[1] == u8::MAX),
+        DynamicImage::ImageLumaA16(m) => m.pixels().all(|p| p.0[1] == u16::MAX),
+        DynamicImage::ImageRgba8(m) => m.pixels().all(|p| p.0[3] == u8::MAX),
+        DynamicImage::ImageRgba16(m) => m.pixels().all(|p| p.0[3] == u16::MAX),
+        _ => false,
+    };
     let kept: Box<dyn Fn(u32, u32) -> bool + '_> = match mask {
         DynamicImage::ImageLuma8(m) => Box::new(|x, y| m.get_pixel(x, y).0[0] != 0),
         DynamicImage::ImageLuma16(m) => Box::new(|x, y| m.get_pixel(x, y).0[0] != 0),
+        DynamicImage::ImageLumaA8(m) if opaque => Box::new(|x, y| m.get_pixel(x, y).0[0] != 0),
+        DynamicImage::ImageLumaA16(m) if opaque => Box::new(|x, y| m.get_pixel(x, y).0[0] != 0),
         DynamicImage::ImageLumaA8(m) => Box::new(|x, y| m.get_pixel(x, y).0[1] != 0),
         DynamicImage::ImageLumaA16(m) => Box::new(|x, y| m.get_pixel(x, y).0[1] != 0),
         DynamicImage::ImageRgb8(m) => Box::new(|x, y| m.get_pixel(x, y).0.iter().any(|&c| c != 0)),
         DynamicImage::ImageRgb16(m) => Box::new(|x, y| m.get_pixel(x, y).0.iter().any(|&c| c != 0)),
+        DynamicImage::ImageRgba8(m) if opaque => {
+            Box::new(|x, y| m.get_pixel(x, y).0[..3].iter().any(|&c| c != 0))
+        }
+        DynamicImage::ImageRgba16(m) if opaque => {
+            Box::new(|x, y| m.get_pixel(x, y).0[..3].iter().any(|&c| c != 0))
+        }
         DynamicImage::ImageRgba8(m) => Box::new(|x, y| m.get_pixel(x, y).0[3] != 0),
         DynamicImage::ImageRgba16(m) => Box::new(|x, y| m.get_pixel(x, y).0[3] != 0),
         other => return Err(format!("unsupported pixel format {:?}", other.color())),
@@ -313,6 +334,68 @@ mod tests {
         });
         let m = masked_out(&DynamicImage::ImageLumaA8(la), false, 2, 1).unwrap();
         assert_eq!(m, [true, false]);
+    }
+
+    /// A black-and-white mask saved with an alpha channel that is opaque
+    /// everywhere: the alpha masks nothing, so the colour is the mask. Each
+    /// image's colour has a black pixel and a nonzero one.
+    #[test]
+    fn an_opaque_alpha_leaves_the_mask_to_the_colour() {
+        let rgba = RgbaImage::from_fn(3, 1, |x, _| match x {
+            0 => Rgba([0, 0, 0, 255]),
+            1 => Rgba([0, 0, 1, 255]),
+            _ => Rgba([255, 255, 255, 255]),
+        });
+        let rgba16 = image::ImageBuffer::<Rgba<u16>, _>::from_fn(3, 1, |x, _| {
+            Rgba([0, 0, if x == 0 { 0 } else { 255 }, u16::MAX])
+        });
+        let la = GrayAlphaImage::from_fn(3, 1, |x, _| LumaA([if x == 0 { 0 } else { 255 }, 255]));
+        let la16 = image::ImageBuffer::<LumaA<u16>, _>::from_fn(3, 1, |x, _| {
+            LumaA([if x == 0 { 0 } else { 255 }, u16::MAX])
+        });
+        for img in [
+            DynamicImage::ImageRgba8(rgba.clone()),
+            DynamicImage::ImageRgba16(rgba16),
+            DynamicImage::ImageLumaA8(la),
+            DynamicImage::ImageLumaA16(la16),
+        ] {
+            assert_eq!(
+                masked_out(&img, false, 3, 1).unwrap(),
+                [true, false, false],
+                "{:?}",
+                img.color()
+            );
+            assert_eq!(
+                masked_out(&img, true, 3, 1).unwrap(),
+                [false, true, true],
+                "{:?} flipped",
+                img.color()
+            );
+        }
+        // One pixel less than opaque, and the alpha is the mask again.
+        let mut faded = rgba;
+        faded.put_pixel(2, 0, Rgba([255, 255, 255, 254]));
+        let m = masked_out(&DynamicImage::ImageRgba8(faded), false, 3, 1).unwrap();
+        assert_eq!(m, [false, false, false]);
+    }
+
+    /// The same through a PNG on disk: an RGBA file of a black-and-white
+    /// mask with opaque alpha masks its black half.
+    #[test]
+    fn an_opaque_rgba_png_masks_its_black_pixels() {
+        let tmp = Tmp::new("opaque_rgba");
+        RgbaImage::from_fn(8, 6, |x, _| {
+            if x < 4 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        })
+        .save(tmp.0.join("a.png"))
+        .unwrap();
+        let masks = ImageMasks::find(&tmp.0, &[PathBuf::from("/x/a.jpg")], false).unwrap();
+        let m = masks.load(0, 8, 6).unwrap();
+        assert!((0..6).all(|y| (0..8).all(|x| at(&m, 8, x, y) == (x < 4))));
     }
 
     #[test]

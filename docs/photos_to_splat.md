@@ -81,7 +81,9 @@ with the camera out of the reconstruction, as COLMAP's
 file name and not searched recursively, so a folder of `cam0/` photos needs
 `DIR` to be that camera's masks folder), where zero (black) means
 masked out and anything else is kept. A mask with an alpha channel is read
-through its alpha. `--flip-mask` swaps the two, for masks that paint the
+through its alpha, unless the alpha is opaque everywhere (an RGBA export of
+a black-and-white mask): then it is read through its colour, like a mask
+without alpha. `--flip-mask` swaps the two, for masks that paint the
 region to remove. Masks named by file stem (`IMG_1.png`) are found too, so a
 folder of 8-bit grey PNGs of 0 and 255 with the photos' size works as is.
 
