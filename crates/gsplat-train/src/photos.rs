@@ -4361,44 +4361,47 @@ mod tests {
     /// Streaming with masks: each photo has its own mask (a different edge
     /// per photo, so a mask read for the wrong photo shows), and the
     /// streamed run, which reads photos and masks from disk one at a time,
-    /// writes the same model and the same alpha-carrying working images as
-    /// the in-memory run.
+    /// extracts the same keypoints, writes the same model and the same
+    /// alpha-carrying working images as the in-memory run.
     #[test]
     fn streamed_masked_sfm_equals_in_memory_masked_sfm() {
         let root = std::env::temp_dir().join(format!("visloc_strmask_{}", std::process::id()));
         let images = room_photos(&root);
-        let masks = root.join("masks");
-        std::fs::create_dir_all(&masks).unwrap();
-        // Photo k keeps the columns left of 0.45 + 0.07 k of its width.
-        let edge_of = |k: usize| 0.45 + 0.07 * k as f64;
-        for k in 0..6 {
-            let e = edge_of(k);
-            image::GrayImage::from_fn(PHOTO_W, PHOTO_H, |x, _| {
-                image::Luma([if (x as f64) < e * PHOTO_W as f64 {
-                    255
-                } else {
-                    0
-                }])
-            })
-            .save(masks.join(format!("view_{k}.png")))
-            .unwrap();
-        }
+        let edges: Vec<u32> = (0..6).map(|k| 128 + 16 * k).collect();
+        let native: Vec<u32> = edges.iter().map(|e| 3 * e).collect();
+        edge_masks(&root.join("masks"), 960, 720, &native, false);
         let cfg = super::PhotoSfmConfig {
             max_size: 320,
             focal_px: Some(420.0 * 320.0 / 480.0),
             eval_every: 0,
             sift_threads: Some(2),
-            mask_dir: Some(masks),
+            mask_dir: Some(root.join("masks")),
             ..Default::default()
         };
         let streamed = super::PhotoSfmConfig {
             stream_images: true,
             ..cfg.clone()
         };
-        let (_, mem_report, _) = run_photos(&images, &root.join("mem"), &cfg);
-        let (_, str_report, _) = run_photos(&images, &root.join("str"), &streamed);
+        let unmasked = super::PhotoSfmConfig {
+            mask_dir: None,
+            ..cfg.clone()
+        };
+        let (_, control_report, control_logs) =
+            run_photos(&images, &root.join("control"), &unmasked);
+        let (_, mem_report, mem_logs) = run_photos(&images, &root.join("mem"), &cfg);
+        let (_, str_report, str_logs) = run_photos(&images, &root.join("str"), &streamed);
+        // The masks did something (so equality below is about masked runs).
+        let (mean_control, _) = keypoint_counts(&control_logs);
+        let (mean_mem, dropped_mem) = keypoint_counts(&mem_logs);
+        let (mean_str, dropped_str) = keypoint_counts(&str_logs);
+        assert!(
+            dropped_mem > 100 && mean_mem < mean_control,
+            "{dropped_mem}"
+        );
+        assert_eq!((mean_mem, dropped_mem), (mean_str, dropped_str));
         assert!(mem_report.registered >= 4, "{mem_report:?}");
         assert_eq!(mem_report.registered, str_report.registered);
+        assert!(control_report.registered >= 4);
         for f in ["cameras.txt", "images.txt", "points3D.txt"] {
             assert_eq!(
                 std::fs::read(root.join("mem/sparse/0").join(f)).unwrap(),
@@ -4406,26 +4409,21 @@ mod tests {
                 "{f}"
             );
         }
-        // Photo `k`'s observations are all left of its own edge (width 320).
-        let obs = observations(&root.join("str"));
-        assert!(obs.len() > 300, "{} observations", obs.len());
-        for (k, x, _) in &obs {
-            assert!(*x < edge_of(*k) * 320.0 + 0.5, "photo {k}: x {x}");
-        }
         for k in 0..6 {
-            let name = format!("images/frame_{k:05}.png");
-            let a = std::fs::read(root.join("mem").join(&name)).unwrap();
             assert_eq!(
-                a,
+                keypoints_of(&root.join("mem"), k),
+                keypoints_of(&root.join("str"), k),
+                "keypoints of photo {k}"
+            );
+            let name = format!("images/frame_{k:05}.png");
+            assert_eq!(
+                std::fs::read(root.join("mem").join(&name)).unwrap(),
                 std::fs::read(root.join("str").join(&name)).unwrap(),
                 "{name}"
             );
-            let rgba = image::open(root.join("str").join(&name))
-                .unwrap()
-                .into_rgba8();
-            let edge = (edge_of(k) * 320.0) as u32;
-            assert_eq!(rgba.get_pixel(edge - 2, 50).0[3], 255, "photo {k}");
-            assert_eq!(rgba.get_pixel(edge + 2, 50).0[3], 0, "photo {k}");
+            let rgba = working_image(&root.join("str"), k);
+            assert_eq!(rgba.get_pixel(edges[k] - 2, 50).0[3], 255, "photo {k}");
+            assert_eq!(rgba.get_pixel(edges[k] + 2, 50).0[3], 0, "photo {k}");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
