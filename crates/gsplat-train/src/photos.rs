@@ -4755,9 +4755,21 @@ mod tests {
     /// streamed run, which reads photos and masks from disk one at a time,
     /// extracts the same keypoints, writes the same model and the same
     /// alpha-carrying working images as the in-memory run.
-    #[test]
-    fn streamed_masked_sfm_equals_in_memory_masked_sfm() {
-        let root = std::env::temp_dir().join(format!("visloc_strmask_{}", std::process::id()));
+    ///
+    /// The config below is `Default` plus `pin`, which says where SIFT and
+    /// matching run. It must pin them: `Default` has `gpu: true`, and in a
+    /// `gpu` build that sends matching to the GPU matcher, which this test
+    /// is not about (and which matches nothing on some devices, leaving the
+    /// mapper no pairs). The CPU test pins both to the CPU; the GPU test
+    /// keeps the GPU extractor, which is what the streaming chunk loop
+    /// drives, and matches on the CPU, like the other GPU tests here.
+    fn streamed_masked_sfm_equals_in_memory_masked_sfm_with(
+        tag: &str,
+        gpu_extractor: bool,
+        pin: impl Fn(&mut super::PhotoSfmConfig),
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("visloc_strmask_{tag}_{}", std::process::id()));
         let images = room_photos(&root);
         let edges: Vec<u32> = (0..6).map(|k| 128 + 16 * k).collect();
         let native: Vec<u32> = edges.iter().map(|e| 3 * e).collect();
@@ -4770,6 +4782,8 @@ mod tests {
             mask_dir: Some(root.join("masks")),
             ..Default::default()
         };
+        let mut cfg = cfg;
+        pin(&mut cfg);
         let streamed = super::PhotoSfmConfig {
             stream_images: true,
             ..cfg.clone()
@@ -4782,6 +4796,15 @@ mod tests {
             run_photos(&images, &root.join("control"), &unmasked);
         let (_, mem_report, mem_logs) = run_photos(&images, &root.join("mem"), &cfg);
         let (_, str_report, str_logs) = run_photos(&images, &root.join("str"), &streamed);
+        // The pin took effect: the GPU extractor ran in every run of the GPU
+        // test and in none of the CPU test's.
+        for logs in [&control_logs, &mem_logs, &str_logs] {
+            assert_eq!(
+                logs.iter()
+                    .any(|l| l.starts_with("gpu sift: VLFeat-compatible extractor")),
+                gpu_extractor
+            );
+        }
         // The masks did something (so equality below is about masked runs).
         let (mean_control, _) = keypoint_counts(&control_logs);
         let (mean_mem, dropped_mem) = keypoint_counts(&mem_logs);
@@ -4818,6 +4841,22 @@ mod tests {
             assert_eq!(rgba.get_pixel(edges[k] + 2, 50).0[3], 0, "photo {k}");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn streamed_masked_sfm_equals_in_memory_masked_sfm() {
+        streamed_masked_sfm_equals_in_memory_masked_sfm_with("cpu", false, |c| {
+            c.gpu = false;
+            c.gpu_sift = false;
+        });
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn streamed_masked_sfm_equals_in_memory_masked_sfm_gpu_extractor() {
+        if have_gpu() {
+            streamed_masked_sfm_equals_in_memory_masked_sfm_with("gpu", true, cpu_pairs);
+        }
     }
 
     /// Streaming with everything the working-image writer takes: a camera
