@@ -7,9 +7,11 @@ All notable changes to `visloc-rs` will be documented here.
 ### Added
 
 - **Insta360 photos through their factory lens; masks past a fisheye's
-  field of view.** On FIORD's 200° MeetingRoom_In (front lens, 800 px), the
-  held-out PSNR within the image circle goes from 25.4 dB (FIORD's
-  calibration) to 29.6 dB. Details in docs/fisheye.md.
+  field of view.** On three of FIORD's 200° scenes (front lens, 800 px),
+  the mask past 100° gains 0.7–1.8 dB of held-out PSNR over masking
+  near-black pixels. The factory lens gains another 1.1–1.4 dB over
+  FIORD's calibration where that is off, and ties where it is right.
+  Details in docs/fisheye.md.
   - **Reading the calibration.** `visloc_io::insv::read_insta360_lenses`
     reads the lenses' factory calibration from an `.insp` photo as well as
     an `.insv` video. It looks through the whole trailer (a photo's is
