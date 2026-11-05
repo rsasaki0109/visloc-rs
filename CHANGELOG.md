@@ -6,6 +6,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`gsplat_photos --stream-images`, `--sift-threads`.** `--stream-images`
+  keeps one working image in memory at a time (they are written to
+  `<out>/images`, SIFT reads each back and drops it), so peak RAM no longer
+  scales with the number of photos; the model is byte-identical to the
+  in-memory run (tested). `--sift-threads N` caps the SIFT extraction
+  threads, each of which holds one image's scale space.
 - **Insta360 photos through their factory lens; masks past a fisheye's
   field of view.** On FIORD's 200° MeetingRoom_In (front lens, 800 px), the
   held-out PSNR within the image circle goes from 25.4 dB (FIORD's

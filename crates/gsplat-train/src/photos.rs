@@ -117,6 +117,17 @@ pub struct PhotoSfmConfig {
     /// images get alpha 0 there, for `TrainConfig::alpha_mask`. Needs
     /// `camera`.
     pub max_angle: Option<f64>,
+    /// Keep one image at a time in memory instead of every working image
+    /// (peak RAM no longer scales with the number of images): the working
+    /// images are written to `out_dir/images` first, then SIFT reads each
+    /// back from disk and drops it after use. The features, and so the
+    /// whole reconstruction, are identical to the in-memory run. Not with
+    /// `equirect` (its faces are cut in memory); `insv` already streams.
+    pub stream_images: bool,
+    /// Threads for SIFT extraction (the global rayon pool if unset). Each
+    /// thread holds one image's scale space, several gigabytes at 3840 px,
+    /// so cap it when streaming large images.
+    pub sift_threads: Option<usize>,
     /// Solve the large bundle adjustments' reduced camera systems on the
     /// GPU (`visloc_ba_gpu::GpuReducedSolver`; docs/gpu_bundle_adjustment.md):
     /// the result then differs from the CPU solve at the f32 level.
@@ -226,6 +237,8 @@ impl Default for PhotoSfmConfig {
             match_u8: true,
             mask_black: None,
             max_angle: None,
+            stream_images: false,
+            sift_threads: None,
             gpu_ba: false,
             gpu_sift: true,
             complete_model: true,
@@ -1082,6 +1095,61 @@ pub fn calibrate_insv_lenses(
     Ok(cal)
 }
 
+/// One photo (or panorama) decoded, oriented and scaled to `max_size`, with
+/// its EXIF focal length (35 mm equivalent) and whether the metadata names a
+/// 360° panorama.
+fn decode_scaled(
+    p: &Path,
+    cfg: &PhotoSfmConfig,
+) -> Result<((image::RgbImage, Option<f64>), bool), EurocError> {
+    let bytes = std::fs::read(p).map_err(|source| EurocError::Io {
+        path: p.to_path_buf(),
+        source,
+    })?;
+    let img = load_oriented(p, &bytes)?;
+    let (w, h) = img.dimensions();
+    // A panorama is scaled for its faces (a quarter of its width) to
+    // be at most `max_size`.
+    let long = if cfg.equirect { w / 4 } else { w.max(h) };
+    let s = (cfg.max_size as f64 / long.max(1) as f64).min(1.0);
+    let img = if s < 1.0 {
+        resize_triangle(
+            &img,
+            ((w as f64 * s).round() as u32).max(1),
+            ((h as f64 * s).round() as u32).max(1),
+        )
+    } else {
+        img
+    };
+    Ok((
+        (img, exif_focal_35mm(&bytes)),
+        equirect::metadata_says_equirectangular(&bytes),
+    ))
+}
+
+const EQUIRECT_WARNING: &str = "images look like equirectangular (360°) panoramas; \
+     the pinhole reconstruction of them will not be usable. Cut them into cube \
+     faces with `equirect` (gsplat_photos --equirect)";
+
+/// The most common resolution among `sizes` (one camera for the trainer).
+fn most_common_size(sizes: &[(u32, u32)]) -> (u32, u32) {
+    let mut sizes = sizes.to_vec();
+    sizes.sort_unstable();
+    sizes
+        .chunk_by(|a, b| a == b)
+        .max_by_key(|c| c.len())
+        .map(|c| c[0])
+        .expect("at least 3 images")
+}
+
+/// Whether a size is within 1% of `(width, height)` (undistorted crops a few
+/// pixels apart, which can round to a different size after scaling): those
+/// are resized to it, the rest dropped.
+fn near_size((w, h): (u32, u32), (width, height): (u32, u32)) -> bool {
+    w.abs_diff(width) as f64 <= 0.01 * width as f64
+        && h.abs_diff(height) as f64 <= 0.01 * height as f64
+}
+
 /// Read, decode (oriented) and scale the photos (or panoramas), and read
 /// their EXIF focal lengths and whether the metadata names a 360°
 /// panorama, in parallel. Keeps the most common resolution (one camera for
@@ -1096,31 +1164,7 @@ fn load_photos(
     let t_load = std::time::Instant::now();
     let loaded: Vec<((image::RgbImage, Option<f64>), bool)> = files
         .par_iter()
-        .map(|p| -> Result<_, EurocError> {
-            let bytes = std::fs::read(p).map_err(|source| EurocError::Io {
-                path: p.clone(),
-                source,
-            })?;
-            let img = load_oriented(p, &bytes)?;
-            let (w, h) = img.dimensions();
-            // A panorama is scaled for its faces (a quarter of its width) to
-            // be at most `max_size`.
-            let long = if cfg.equirect { w / 4 } else { w.max(h) };
-            let s = (cfg.max_size as f64 / long.max(1) as f64).min(1.0);
-            let img = if s < 1.0 {
-                resize_triangle(
-                    &img,
-                    ((w as f64 * s).round() as u32).max(1),
-                    ((h as f64 * s).round() as u32).max(1),
-                )
-            } else {
-                img
-            };
-            Ok((
-                (img, exif_focal_35mm(&bytes)),
-                equirect::metadata_says_equirectangular(&bytes),
-            ))
-        })
+        .map(|p| decode_scaled(p, cfg))
         .collect::<Result<_, _>>()?;
     let (decoded, tagged_360): (Vec<_>, Vec<bool>) = loaded.into_iter().unzip();
     if !cfg.equirect {
@@ -1131,33 +1175,19 @@ fn load_photos(
             .count();
         if 2 * panoramas >= decoded.len() {
             log(&format!(
-                "warning: {panoramas} of {} images look like equirectangular (360°) panoramas; \
-                 the pinhole reconstruction of them will not be usable. Cut them into cube \
-                 faces with `equirect` (gsplat_photos --equirect)",
+                "warning: {panoramas} of {} {EQUIRECT_WARNING}",
                 decoded.len()
             ));
         }
     }
     // The most common resolution (one camera for the trainer).
-    let mut sizes: Vec<(u32, u32)> = decoded.iter().map(|d| d.0.dimensions()).collect();
-    sizes.sort_unstable();
-    let (width, height) = sizes
-        .chunk_by(|a, b| a == b)
-        .max_by_key(|c| c.len())
-        .map(|c| c[0])
-        .expect("at least 3 images");
-    // Sizes within 1% of it (undistorted crops a few pixels apart, which can
-    // round to a different size after scaling) are resized to it; the rest
-    // are dropped.
-    let near = |(w, h): (u32, u32)| {
-        w.abs_diff(width) as f64 <= 0.01 * width as f64
-            && h.abs_diff(height) as f64 <= 0.01 * height as f64
-    };
+    let sizes: Vec<(u32, u32)> = decoded.iter().map(|d| d.0.dimensions()).collect();
+    let (width, height) = most_common_size(&sizes);
     let mut resized = 0usize;
     let (files, decoded): (Vec<_>, Vec<_>) = files
         .into_iter()
         .zip(decoded)
-        .filter(|(_, d)| near(d.0.dimensions()))
+        .filter(|(_, d)| near_size(d.0.dimensions(), (width, height)))
         .map(|(f, (img, f35))| {
             if img.dimensions() == (width, height) {
                 return (f, (img, f35));
@@ -1175,6 +1205,88 @@ fn load_photos(
         t_load.elapsed().as_secs_f64()
     ));
     Ok((files, decoded, width, height))
+}
+
+/// What [`load_photos`] decides, without keeping the images: decodes each
+/// photo (a thread's worth at a time) for its scaled size, EXIF focal length
+/// and panorama check, then drops it. Returns the files kept, their EXIF
+/// focal lengths (35 mm equivalent) and the resolution. The images are
+/// decoded again, one at a time, by [`write_streamed_working_images`].
+#[allow(clippy::type_complexity)]
+fn scan_photos(
+    files: Vec<PathBuf>,
+    cfg: &PhotoSfmConfig,
+    log: &mut dyn FnMut(&str),
+) -> Result<(Vec<PathBuf>, Vec<Option<f64>>, u32, u32), EurocError> {
+    let t_load = std::time::Instant::now();
+    // (size, EXIF focal, looks like a panorama)
+    let scanned: Vec<((u32, u32), Option<f64>, bool)> = files
+        .par_iter()
+        .map(|p| -> Result<_, EurocError> {
+            let ((img, f35), tagged) = decode_scaled(p, cfg)?;
+            Ok((
+                img.dimensions(),
+                f35,
+                tagged || equirect::looks_equirectangular(&img),
+            ))
+        })
+        .collect::<Result<_, _>>()?;
+    let panoramas = scanned.iter().filter(|s| s.2).count();
+    if 2 * panoramas >= scanned.len() {
+        log(&format!(
+            "warning: {panoramas} of {} {EQUIRECT_WARNING}",
+            scanned.len()
+        ));
+    }
+    let sizes: Vec<(u32, u32)> = scanned.iter().map(|s| s.0).collect();
+    let (width, height) = most_common_size(&sizes);
+    let kept: Vec<_> = files
+        .into_iter()
+        .zip(scanned)
+        .filter(|(_, s)| near_size(s.0, (width, height)))
+        .collect();
+    let resized = kept.iter().filter(|(_, s)| s.0 != (width, height)).count();
+    let (files, f35s): (Vec<_>, Vec<_>) = kept.into_iter().map(|(f, s)| (f, s.1)).unzip();
+    log(&format!(
+        "{} images at {width}x{height} ({resized} resized from within 1%; others dropped: {}; \
+         scanned in {:.1} s, streaming from disk)",
+        files.len(),
+        sizes.len() - files.len(),
+        t_load.elapsed().as_secs_f64()
+    ));
+    Ok((files, f35s, width, height))
+}
+
+/// Write the working images `frame_{i}.png` of the streamed photos, one
+/// photo per thread at a time: the same pixels [`load_photos`] would hold
+/// in memory (decoded, scaled, resized to the common size), saved with
+/// `mask_black` / `outside` as alpha like the in-memory path does.
+#[allow(clippy::too_many_arguments)]
+fn write_streamed_working_images(
+    files: &[PathBuf],
+    cfg: &PhotoSfmConfig,
+    width: u32,
+    height: u32,
+    paths: &[PathBuf],
+    outside: Option<&[bool]>,
+) -> Result<(), EurocError> {
+    files
+        .par_iter()
+        .zip(paths)
+        .map(|(f, path)| -> Result<(), EurocError> {
+            let ((img, _), _) = decode_scaled(f, cfg)?;
+            let img = if img.dimensions() == (width, height) {
+                img
+            } else {
+                resize_triangle(&img, width, height)
+            };
+            // SEAM for per-image masks: the decoded full-size image is in hand
+            // here, so a training alpha from a mask file would be added to
+            // `save_working_image`'s `outside`-style argument at this call.
+            save_working_image(&img, path, cfg.mask_black, outside)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(())
 }
 
 /// Cut dual-fisheye frames into their lens faces (the front lens's five,
@@ -1512,6 +1624,15 @@ pub fn build_photo_dataset(
     } else {
         1
     };
+    if cfg.stream_images && cfg.equirect {
+        return Err(EurocError::Sfm(
+            "stream_images does not combine with equirect (its cube faces are cut in memory)"
+                .into(),
+        ));
+    }
+    // With `stream_images`, the working images' EXIF focal lengths (their
+    // pixels are written once the camera is known, below).
+    let mut streamed_f35: Option<Vec<Option<f64>>> = None;
     let (files, labels, work, width, height, panoramas) = if let Some(lenses) = &lenses {
         let (files, labels, paths, size) = write_lens_faces(files, lenses, cfg, &images_out, log)?;
         (files, labels, WorkImages::Disk(paths), size, size, None)
@@ -1573,6 +1694,14 @@ pub fn build_photo_dataset(
             size,
             panoramas,
         )
+    } else if cfg.stream_images {
+        let (files, f35s, width, height) = scan_photos(files, cfg, log)?;
+        let labels = files.iter().map(|f| f.display().to_string()).collect();
+        let paths = (0..files.len())
+            .map(|i| images_out.join(format!("frame_{i:05}.png")))
+            .collect();
+        streamed_f35 = Some(f35s);
+        (files, labels, WorkImages::Disk(paths), width, height, None)
     } else {
         let (files, decoded, width, height) = load_photos(files, cfg, log)?;
         let labels = files.iter().map(|f| f.display().to_string()).collect();
@@ -1587,9 +1716,10 @@ pub fn build_photo_dataset(
     };
     let n = work.len();
     let long = width.max(height) as f64;
-    let mut f35s: Vec<f64> = match &work {
-        WorkImages::Memory(images) => images.iter().filter_map(|d| d.1).collect(),
-        WorkImages::Disk(_) => Vec::new(),
+    let mut f35s: Vec<f64> = match (&work, &streamed_f35) {
+        (WorkImages::Memory(images), _) => images.iter().filter_map(|d| d.1).collect(),
+        (WorkImages::Disk(_), Some(f35s)) => f35s.iter().flatten().copied().collect(),
+        (WorkImages::Disk(_), None) => Vec::new(),
     };
     f35s.sort_by(f64::total_cmp);
     let calibrated = match &cfg.camera {
@@ -1681,6 +1811,17 @@ pub fn build_photo_dataset(
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+    } else if streamed_f35.is_some() {
+        let t = std::time::Instant::now();
+        let WorkImages::Disk(paths) = &work else {
+            unreachable!("streamed photos are on disk")
+        };
+        write_streamed_working_images(&files, cfg, width, height, paths, outside.as_deref())?;
+        log(&format!(
+            "wrote {} working images ({:.1} s)",
+            paths.len(),
+            t.elapsed().as_secs_f64()
+        ));
     }
     let listing: String = names
         .iter()
@@ -1783,6 +1924,14 @@ pub fn build_photo_dataset(
             .map_err(|e| EurocError::Sfm(format!("gpu: {e}")))?;
         log(&format!("gpu ba: reduced camera systems on {adapter}"));
     }
+    // Images per GPU extraction batch: 256, or when streaming, as many as
+    // fit in about 2 GB of decoded RGB plus grey f32 (a batch holds them all).
+    #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
+    let chunk_len: usize = if cfg.stream_images {
+        ((2usize << 30) / (width as usize * height as usize * 7)).clamp(1, 256)
+    } else {
+        256
+    };
     let t0 = std::time::Instant::now();
     #[cfg(feature = "gpu")]
     let mut gpu_sift = if cfg.gpu {
@@ -1828,8 +1977,8 @@ pub fn build_photo_dataset(
                 "gpu sift: VLFeat-compatible extractor on {}",
                 vl.context().adapter_info.name
             ));
-            for start in (0..n).step_by(256) {
-                let chunk = (start..n.min(start + 256))
+            for start in (0..n).step_by(chunk_len) {
+                let chunk = (start..n.min(start + chunk_len))
                     .into_par_iter()
                     .map(|i| work.get(i))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1875,8 +2024,8 @@ pub fn build_photo_dataset(
         #[allow(unused_mut)]
         let mut colours = Vec::with_capacity(n);
         #[cfg(feature = "gpu")]
-        for start in (0..n).step_by(256) {
-            let chunk = (start..n.min(start + 256))
+        for start in (0..n).step_by(chunk_len) {
+            let chunk = (start..n.min(start + chunk_len))
                 .into_par_iter()
                 .map(|i| work.get(i))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1900,22 +2049,32 @@ pub fn build_photo_dataset(
         }
         (features, colours)
     } else {
-        (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let img = work.get(i)?;
-                let g = gray_of(&img);
-                let gray = GrayImage::new(width as usize, height as usize, &g)
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let (kps, desc) =
-                    extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let f = to_features(kps, desc);
-                let colours = keypoint_colours(&img, &f.0.keypoints);
-                Ok((f, colours))
-            })
-            .collect::<Result<Vec<_>, EurocError>>()?
-            .into_iter()
-            .unzip()
+        let extract_all = || {
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let img = work.get(i)?;
+                    let g = gray_of(&img);
+                    let gray = GrayImage::new(width as usize, height as usize, &g)
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    let (kps, desc) = extract_sift(&gray, &sift_cfg)
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    let f = to_features(kps, desc);
+                    let colours = keypoint_colours(&img, &f.0.keypoints);
+                    Ok((f, colours))
+                })
+                .collect::<Result<Vec<_>, EurocError>>()
+        };
+        // Each thread holds one image's scale space: `sift_threads` caps it.
+        let extracted = match cfg.sift_threads {
+            Some(t) => rayon::ThreadPoolBuilder::new()
+                .num_threads(t.max(1))
+                .build()
+                .map_err(|e| EurocError::Sift(format!("sift thread pool: {e}")))?
+                .install(extract_all)?,
+            None => extract_all()?,
+        };
+        extracted.into_iter().unzip()
     };
     drop(work);
     let (features, desc_bytes): (Vec<FeatureSet>, Vec<Vec<u8>>) = sift.into_iter().unzip();
@@ -3186,6 +3345,104 @@ mod tests {
         assert_eq!(faces, 30);
         assert!(worst_deg < 0.05, "{worst_deg} deg");
         assert!(worst_m < 0.005, "{worst_m} m");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- streaming ------------------------------------------
+
+    /// Pinhole photos of the synthetic room: the six 90° faces of panoramas
+    /// from five viewpoints, `size` px square (30 photos).
+    fn room_photos(root: &Path, size: u32) -> PathBuf {
+        let images = root.join("photos");
+        std::fs::create_dir_all(&images).unwrap();
+        let faces = crate::equirect::cube_face_rotations();
+        for k in 0..5usize {
+            let c =
+                nalgebra::Vector3::new(-1.0 + 0.5 * k as f64, 0.1 * (k % 2) as f64, 0.3 * k as f64);
+            let pano = room_panorama(1024, c, 0.4 * k as f64);
+            for (name, r) in &faces {
+                crate::equirect::cube_face(&pano, r, size)
+                    .save(images.join(format!("p{k}_{name}.png")))
+                    .unwrap();
+            }
+        }
+        images
+    }
+
+    fn cpu_cfg(size: u32) -> super::PhotoSfmConfig {
+        super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            eval_every: 0,
+            focal_px: Some(size as f64 / 2.0),
+            sift_threads: Some(2),
+            ..Default::default()
+        }
+    }
+
+    /// `(report.registered, the text of the written model)`.
+    fn run_sfm(images: &Path, out: &Path, cfg: &super::PhotoSfmConfig) -> (usize, String) {
+        let (_, _, report) =
+            super::build_photo_dataset(images, out, cfg, &mut |_: &str| {}).unwrap();
+        let mut text = String::new();
+        for f in ["cameras.txt", "images.txt", "points3D.txt"] {
+            text += &std::fs::read_to_string(out.join("sparse/0").join(f)).unwrap();
+        }
+        (report.registered, text)
+    }
+
+    /// The image-point observations (x, y) of `images.txt` text.
+    fn observations(model: &str) -> Vec<(f64, f64)> {
+        let start = model.find("# Image list").unwrap();
+        let rest = &model[start..];
+        let end = rest.find("# 3D point list").unwrap_or(rest.len());
+        rest[..end]
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .skip(1)
+            .step_by(2)
+            .flat_map(|l| {
+                l.split_whitespace()
+                    .map(|v| v.parse::<f64>().unwrap())
+                    .collect::<Vec<_>>()
+                    .chunks(3)
+                    .map(|c| (c[0], c[1]))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The streamed run and the in-memory run write the same model, byte for
+    /// byte: same cameras, poses, points and observations.
+    #[test]
+    fn streamed_sfm_equals_in_memory_sfm() {
+        let root = std::env::temp_dir().join(format!("visloc_stream_{}", std::process::id()));
+        let images = room_photos(&root, 192);
+        let cfg = cpu_cfg(192);
+        let (reg_mem, mem) = run_sfm(&images, &root.join("mem"), &cfg);
+        let streamed = super::PhotoSfmConfig {
+            stream_images: true,
+            ..cfg.clone()
+        };
+        let (reg_str, str_) = run_sfm(&images, &root.join("str"), &streamed);
+        // Not a trivial model: otherwise "identical" proves nothing.
+        assert!(reg_mem >= 10, "{reg_mem} registered");
+        assert!(observations(&mem).len() > 1000);
+        assert_eq!(reg_mem, reg_str);
+        assert!(mem == str_, "streamed model differs from the in-memory one");
+        // The names listing and the working images match too.
+        assert_eq!(
+            std::fs::read(root.join("mem/image_names.txt")).unwrap(),
+            std::fs::read(root.join("str/image_names.txt")).unwrap()
+        );
+        for i in [0usize, 7, 29] {
+            let name = format!("images/frame_{i:05}.png");
+            assert_eq!(
+                std::fs::read(root.join("mem").join(&name)).unwrap(),
+                std::fs::read(root.join("str").join(&name)).unwrap(),
+                "{name}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

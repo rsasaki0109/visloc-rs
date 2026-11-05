@@ -6,7 +6,7 @@
 //!     [--principal-point CX,CY] [--camera "MODEL W H PARAMS..."] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12] \
-//!     [--max-angle 100]
+//!     [--max-angle 100] [--stream-images] [--sift-threads N]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
 //!     [--frame-step 10] [--insv-calibrate | --insv-lenses lenses.txt] [--imu FILE [--imu-frame-period S]]
 //! ```
@@ -90,6 +90,10 @@ SfM:
   --window 20              past --exhaustive-max: match a sliding window
   --retrieval K            past --exhaustive-max: also the K most similar photos
   --max-keypoints 8192     SIFT keypoints per image
+  --stream-images          keep one image in memory at a time (read from the working PNGs
+                           written to <out>/images) instead of all: peak RAM no longer scales
+                           with the number of photos; same result
+  --sift-threads N         threads for SIFT extraction (each holds one image's scale space)
   --sift-opt key=value     extra SIFT settings (repeatable)
   --match-f32              match f32 descriptors instead of COLMAP's u8 ones
   --no-complete-model      leave the largest model as the mapper built it
@@ -166,6 +170,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // people and cars) out of the training loss and the PSNR.
             "--mask-black" => sfm.mask_black = Some(next()?.parse()?),
             "--max-angle" => sfm.max_angle = Some(next()?.parse()?),
+            // One image in memory at a time instead of all of them.
+            "--stream-images" => sfm.stream_images = true,
+            "--sift-threads" => sfm.sift_threads = Some(next()?.parse()?),
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             // Extra SIFT settings, e.g. `--sift-opt affine=1 --sift-opt
             // domain_size_pooling=1` for strongly oblique / wide-baseline photos.
