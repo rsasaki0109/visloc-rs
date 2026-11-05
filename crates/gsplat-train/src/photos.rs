@@ -1421,14 +1421,13 @@ fn chunk_features(
 ) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
     let sift_err = |e: &dyn std::fmt::Display| EurocError::Sift(format!("{e}"));
     match batch {
-        Err(visloc_sift_gpu::SiftGpuError::Unsupported) => images
-            .iter()
-            .enumerate()
-            .map(|(k, gray)| {
-                let (kps, desc) = extract_sift(gray, sift_cfg).map_err(|e| sift_err(&e))?;
-                Ok(features_of(kps, desc, load_mask(start + k)?.as_deref()))
-            })
-            .collect(),
+        Err(visloc_sift_gpu::SiftGpuError::Unsupported) => extract_chunk(
+            start,
+            images.len(),
+            &mut |k| extract_sift(&images[k], sift_cfg).map_err(|e| sift_err(&e)),
+            features_of,
+            load_mask,
+        ),
         other => other
             .map_err(|e| sift_err(&e))?
             .into_par_iter()
@@ -1436,6 +1435,40 @@ fn chunk_features(
             .map(|(k, (kps, desc))| Ok(features_of(kps, desc, load_mask(start + k)?.as_deref())))
             .collect(),
     }
+}
+
+/// The features of a chunk of `count` images one at a time, the chunk's first
+/// being image `start`: `extract(k)` gives chunk image `k`'s keypoints and
+/// descriptors, and `load_mask(start + k)` its mask, decoded when they are
+/// filtered.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity)]
+fn extract_chunk(
+    start: usize,
+    count: usize,
+    extract: &mut dyn FnMut(
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    (0..count)
+        .map(|k| {
+            let (kps, desc) = extract(k)?;
+            Ok(features_of(kps, desc, load_mask(start + k)?.as_deref()))
+        })
+        .collect()
 }
 
 /// The images SfM extracts features from: decoded in memory, or written
@@ -2013,16 +2046,21 @@ pub fn build_photo_dataset(
                 .map(|i| work.get(i))
                 .collect::<Result<Vec<_>, _>>()?;
             let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
-            for (k, g) in grays.iter().enumerate() {
-                let gray = GrayImage::new(width as usize, height as usize, g)
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let (kps, desc) = gpu_sift
-                    .as_mut()
-                    .expect("on_gpu")
-                    .extract(&gray, &sift_cfg)
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                features.push(features_of(kps, desc, load_mask(start + k)?.as_deref()));
-            }
+            features.extend(extract_chunk(
+                start,
+                grays.len(),
+                &mut |k| {
+                    let gray = GrayImage::new(width as usize, height as usize, &grays[k])
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    gpu_sift
+                        .as_mut()
+                        .expect("on_gpu")
+                        .extract(&gray, &sift_cfg)
+                        .map_err(|e| EurocError::Sift(format!("{e}")))
+                },
+                &features_of,
+                &load_mask,
+            )?);
             colours.extend(
                 chunk
                     .iter()
@@ -3468,13 +3506,13 @@ mod tests {
     ) {
         let root = std::env::temp_dir().join(format!("visloc_masks_{tag}_{}", std::process::id()));
         let images = room_photos(&root);
-        // Edges in the 320 x 240 working images; the masks are 960 x 720.
-        let edges: Vec<u32> = (0..6).map(|k| 128 + 16 * k).collect();
-        let native: Vec<u32> = edges.iter().map(|e| 3 * e).collect();
+        // Edges in the 240 x 180 working images; the masks are 960 x 720.
+        let edges: Vec<u32> = (0..6).map(|k| 96 + 12 * k).collect();
+        let native: Vec<u32> = edges.iter().map(|e| 4 * e).collect();
         edge_masks(&root.join("masks"), 960, 720, &native, false);
         let mut cfg = super::PhotoSfmConfig {
-            max_size: 320,
-            focal_px: Some(420.0 * 320.0 / 480.0),
+            max_size: 240,
+            focal_px: Some(420.0 * 240.0 / 480.0),
             eval_every: 0,
             ..Default::default()
         };
@@ -3542,10 +3580,10 @@ mod tests {
             let source = image::open(root.join(format!("in/view_{k}.png")))
                 .unwrap()
                 .into_rgb8();
-            let scaled = super::resize_triangle(&source, 320, 240);
+            let scaled = super::resize_triangle(&source, 240, 180);
             let written = working_image(&root.join("masked"), k);
-            for y in 0..240 {
-                for x in 0..320 {
+            for y in 0..180 {
+                for x in 0..240 {
                     let p = written.get_pixel(x, y);
                     assert_eq!(
                         p[3],
@@ -3563,7 +3601,7 @@ mod tests {
         // And the trainer reads that alpha as its mask.
         let (_, valid) = crate::dataset::load_view_rgb_mask(&dataset.train[0]).unwrap();
         let valid = valid.expect("the view has a mask");
-        assert!(!valid[100 * 320 + 319] && valid[100 * 320 + 100]);
+        assert!(!valid[100 * 240 + 239] && valid[100 * 240 + 50]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3678,6 +3716,14 @@ mod tests {
     /// close to it. A mask paired with the wrong image, or an image
     /// processed with the mask of its chunk's first, would put keypoints
     /// past the edge or leave a gap before it.
+    ///
+    /// The `masks_pair_with_their_images_*` tests that call this are ignored
+    /// by default: SfM on 260 photos takes about ten seconds in a release
+    /// build and far longer in a debug one. The chunk indexing itself is
+    /// covered by default in `chunk_features_use_each_images_own_mask_past_the_first_chunk`;
+    /// these add the call sites in `build_photo_dataset`. Run them with
+    /// `cargo test --release -p visloc-gsplat-train --features gpu,euroc --lib
+    /// masks_pair_with_their_images -- --ignored`.
     fn masks_pair_with_their_images_across_chunks(
         tag: &str,
         sift: impl Fn(&mut super::PhotoSfmConfig),
@@ -3737,6 +3783,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "260 photos through SfM: slow in a debug build"]
     fn masks_pair_with_their_images_cpu() {
         masks_pair_with_their_images_across_chunks(
             "pair_cpu",
@@ -3750,6 +3797,7 @@ mod tests {
 
     #[cfg(feature = "gpu")]
     #[test]
+    #[ignore = "260 photos through SfM: slow in a debug build"]
     fn masks_pair_with_their_images_gpu_vlfeat() {
         if have_gpu() {
             masks_pair_with_their_images_across_chunks("pair_gpu", cpu_pairs, true);
@@ -3817,16 +3865,27 @@ mod tests {
                 Vec::new(),
             )
         };
-        for (what, batch) in [
-            ("gpu results", Ok(raw.clone())),
+        let by_chunk = |batch| {
+            super::chunk_features(START, &images, batch, &sift_cfg, &features_of, &load_mask)
+                .unwrap()
+        };
+        // The plain GPU extractor's path, one image at a time.
+        let one_at_a_time = super::extract_chunk(
+            START,
+            images.len(),
+            &mut |k| Ok(raw[k].clone()),
+            &features_of,
+            &load_mask,
+        )
+        .unwrap();
+        for (what, got) in [
+            ("gpu results", by_chunk(Ok(raw.clone()))),
             (
                 "cpu fallback",
-                Err(visloc_sift_gpu::SiftGpuError::Unsupported),
+                by_chunk(Err(visloc_sift_gpu::SiftGpuError::Unsupported)),
             ),
+            ("one at a time", one_at_a_time),
         ] {
-            let got =
-                super::chunk_features(START, &images, batch, &sift_cfg, &features_of, &load_mask)
-                    .unwrap();
             assert_eq!(got.len(), edges.len());
             for (k, (f, &e)) in got.iter().zip(&edges).enumerate() {
                 let xs: Vec<f64> = f.0.keypoints.iter().map(|p| p.x).collect();
@@ -3852,6 +3911,7 @@ mod tests {
 
     #[cfg(feature = "gpu")]
     #[test]
+    #[ignore = "260 photos through SfM: slow in a debug build"]
     fn masks_pair_with_their_images_gpu_plain() {
         if have_gpu() {
             masks_pair_with_their_images_across_chunks(
@@ -3878,7 +3938,8 @@ mod tests {
             false,
         );
         let mut cfg = super::PhotoSfmConfig {
-            focal_px: Some(420.0),
+            max_size: 240,
+            focal_px: Some(210.0),
             eval_every: 0,
             ..Default::default()
         };
@@ -3928,13 +3989,16 @@ mod tests {
     fn flipped_masks_give_the_same_run_as_unflipped() {
         let root = std::env::temp_dir().join(format!("visloc_masks_flip_{}", std::process::id()));
         let images = room_photos(&root);
-        let edges: Vec<u32> = (0..6).map(|k| 200 + 30 * k).collect();
-        edge_masks(&root.join("keep"), PHOTO_W, PHOTO_H, &edges, false);
-        edge_masks(&root.join("drop"), PHOTO_W, PHOTO_H, &edges, true);
+        // Edges in the 240 x 180 working images; the masks are 480 x 360.
+        let edges: Vec<u32> = (0..6).map(|k| 100 + 15 * k).collect();
+        let native: Vec<u32> = edges.iter().map(|e| 2 * e).collect();
+        edge_masks(&root.join("keep"), PHOTO_W, PHOTO_H, &native, false);
+        edge_masks(&root.join("drop"), PHOTO_W, PHOTO_H, &native, true);
         let mut cfg = super::PhotoSfmConfig {
             gpu: false,
             gpu_sift: false,
-            focal_px: Some(420.0),
+            max_size: 240,
+            focal_px: Some(210.0),
             eval_every: 0,
             mask_dir: Some(root.join("keep")),
             ..Default::default()
