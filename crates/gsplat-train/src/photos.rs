@@ -49,6 +49,7 @@ use crate::euroc::{
     apply_sift_override, cpu_matches, read_port_camera, run_colmap_port, verify_pair, EurocError,
 };
 use crate::init::ColoredPoint;
+use crate::masks::{drop_masked_keypoints, ImageMasks};
 
 /// Settings for [`build_photo_dataset`].
 #[derive(Debug, Clone)]
@@ -117,6 +118,21 @@ pub struct PhotoSfmConfig {
     /// images get alpha 0 there, for `TrainConfig::alpha_mask`. Needs
     /// `camera`.
     pub max_angle: Option<f64>,
+    /// A directory of per-image masks, COLMAP's `ImageReader.mask_path`: no
+    /// SIFT keypoint is kept on a masked-out pixel, so matching and the
+    /// mapper never see one, and the training images get alpha 0 there (for
+    /// `TrainConfig::alpha_mask`; the pixels themselves are not touched, so
+    /// SIFT still sees the whole image). Image `a.jpg`'s mask is
+    /// `a.jpg.png` or `a.png` ([`crate::masks::mask_path`]), zero meaning
+    /// masked out. Every image needs one. A mask is resized to the working
+    /// images (nearest neighbour) but must have their aspect. Not with
+    /// `equirect` or `insv`. Keypoints are dropped after the
+    /// `sift_max_keypoints` strongest are chosen, as COLMAP does, so a large
+    /// mask leaves fewer than that.
+    pub mask_dir: Option<PathBuf>,
+    /// With `mask_dir`: swap what the masks keep and what they hide, for
+    /// masks that paint the region to remove (`255` = masked out).
+    pub mask_flip: bool,
     /// Solve the large bundle adjustments' reduced camera systems on the
     /// GPU (`visloc_ba_gpu::GpuReducedSolver`; docs/gpu_bundle_adjustment.md):
     /// the result then differs from the CPU solve at the f32 level.
@@ -226,6 +242,8 @@ impl Default for PhotoSfmConfig {
             match_u8: true,
             mask_black: None,
             max_angle: None,
+            mask_dir: None,
+            mask_flip: false,
             gpu_ba: false,
             gpu_sift: true,
             complete_model: true,
@@ -1375,6 +1393,199 @@ fn save_working_image(
     })
 }
 
+/// A chunk of `count` images' features from `vl.extract_batch`'s `batch`, the
+/// chunk's first image being image `start`: image `k`'s keypoints less those
+/// on its mask, `load_mask(start + k)`, decoded when they are filtered (a
+/// thread's worth at a time, not the chunk's at once). A batch the device
+/// cannot take (`Unsupported`, for photos past its binding limit) is
+/// extracted on the CPU, one image at a time, by `cpu_extract(k)`.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity)]
+fn chunk_features(
+    start: usize,
+    count: usize,
+    batch: Result<
+        Vec<(
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        )>,
+        visloc_sift_gpu::SiftGpuError,
+    >,
+    cpu_extract: &mut dyn FnMut(
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    match batch {
+        Err(visloc_sift_gpu::SiftGpuError::Unsupported) => {
+            extract_chunk(start, count, cpu_extract, features_of, load_mask)
+        }
+        other => other
+            .map_err(|e| EurocError::Sift(format!("{e}")))?
+            .into_par_iter()
+            .enumerate()
+            .map(|(k, (kps, desc))| Ok(features_of(kps, desc, load_mask(start + k)?.as_deref())))
+            .collect(),
+    }
+}
+
+/// The features of a chunk of `count` images one at a time, the chunk's first
+/// being image `start`: `extract(k)` gives chunk image `k`'s keypoints and
+/// descriptors, and `load_mask(start + k)` its mask, decoded when they are
+/// filtered.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity)]
+fn extract_chunk(
+    start: usize,
+    count: usize,
+    extract: &mut dyn FnMut(
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    (0..count)
+        .map(|k| {
+            let (kps, desc) = extract(k)?;
+            Ok(features_of(kps, desc, load_mask(start + k)?.as_deref()))
+        })
+        .collect()
+}
+
+/// Images extracted one at a time in chunks of `chunk_size`: for each chunk,
+/// `prepare(start, count)` readies the chunk's images (`count` from image
+/// `start`), `extract(&chunk, k)` extracts the chunk's image `k`
+/// ([`extract_chunk`] masks it with `load_mask(start + k)`), and
+/// `done(&chunk, &features)` sees the chunk's features. Returns every
+/// image's features.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity)]
+fn extract_chunked<P>(
+    n: usize,
+    chunk_size: usize,
+    mut prepare: impl FnMut(usize, usize) -> Result<P, EurocError>,
+    mut extract: impl FnMut(
+        &P,
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+    mut done: impl FnMut(&P, &[(FeatureSet, Vec<u8>)]),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    let mut all = Vec::with_capacity(n);
+    for start in (0..n).step_by(chunk_size) {
+        let count = chunk_size.min(n - start);
+        let chunk = prepare(start, count)?;
+        let features = extract_chunk(
+            start,
+            count,
+            &mut |k| extract(&chunk, k),
+            features_of,
+            load_mask,
+        )?;
+        done(&chunk, &features);
+        all.extend(features);
+    }
+    Ok(all)
+}
+
+/// Images extracted in batches, in chunks of `chunk_size`: for each chunk,
+/// `prepare(start, count)` readies the chunk's images (`count` from image
+/// `start`), `batch(&chunk)` extracts them all at once, `cpu_extract(&chunk,
+/// k)` extracts one on the CPU if the device cannot take the batch (see
+/// [`chunk_features`], which masks the keypoints with `load_mask(start + k)`),
+/// and `done(&chunk, &features)` sees the chunk's features. Returns every
+/// image's features.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn extract_batched<P>(
+    n: usize,
+    chunk_size: usize,
+    mut prepare: impl FnMut(usize, usize) -> Result<P, EurocError>,
+    mut batch: impl FnMut(
+        &P,
+    ) -> Result<
+        Result<
+            Vec<(
+                Vec<visloc_vision::features::sift::SiftKeypoint>,
+                Vec<Vec<f32>>,
+            )>,
+            visloc_sift_gpu::SiftGpuError,
+        >,
+        EurocError,
+    >,
+    mut cpu_extract: impl FnMut(
+        &P,
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+    mut done: impl FnMut(&P, &[(FeatureSet, Vec<u8>)]),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    let mut all = Vec::with_capacity(n);
+    for start in (0..n).step_by(chunk_size) {
+        let count = chunk_size.min(n - start);
+        let chunk = prepare(start, count)?;
+        let results = batch(&chunk)?;
+        let features = chunk_features(
+            start,
+            count,
+            results,
+            &mut |k| cpu_extract(&chunk, k),
+            features_of,
+            load_mask,
+        )?;
+        done(&chunk, &features);
+        all.extend(features);
+    }
+    Ok(all)
+}
+
 /// The images SfM extracts features from: decoded in memory, or written
 /// already (lens faces) and read back, an image at a time. PNG is lossless,
 /// so the features are the same.
@@ -1462,6 +1673,21 @@ pub fn build_photo_dataset(
         return Err(EurocError::Sfm(
             "equirect: the cube faces' focal length is fixed; drop focal_px (--focal)".into(),
         ));
+    }
+    if cfg.mask_flip && cfg.mask_dir.is_none() {
+        return Err(EurocError::Sfm("masks: mask_flip needs mask_dir".into()));
+    }
+    if let Some(dir) = &cfg.mask_dir {
+        if cfg.equirect || cfg.insv.is_some() {
+            return Err(EurocError::Sfm(
+                "masks: not supported with equirect or insv, whose images are cut from the \
+                 photos; drop mask_dir (--masks)"
+                    .into(),
+            ));
+        }
+        // Fail on a missing mask, or one of another aspect, before decoding
+        // anything (the headers are enough).
+        ImageMasks::find(dir, &files, cfg.mask_flip)?.check_aspect(&files)?;
     }
     // The lenses of dual-fisheye frames, from the video's metadata.
     let lenses: Option<Vec<visloc_io::insv::InsvLens>> = match &cfg.insv {
@@ -1585,6 +1811,21 @@ pub fn build_photo_dataset(
             None,
         )
     };
+    // The masks of the images kept (`load_photos` drops some), one decoded
+    // when its image is processed.
+    let masks = match &cfg.mask_dir {
+        Some(dir) => {
+            let masks = ImageMasks::find(dir, &files, cfg.mask_flip)?;
+            log(&format!(
+                "masks: {} from {}{}",
+                files.len(),
+                dir.display(),
+                if cfg.mask_flip { " (flipped)" } else { "" }
+            ));
+            Some(masks)
+        }
+        None => None,
+    };
     let n = work.len();
     let long = width.max(height) as f64;
     let mut f35s: Vec<f64> = match &work {
@@ -1672,12 +1913,28 @@ pub fn build_photo_dataset(
         images
             .par_iter()
             .zip(&names)
-            .map(|((img, _), name)| {
+            .enumerate()
+            .map(|(i, ((img, _), name))| {
+                // The masks' alpha joins the other regions left out.
+                let from_file = masks
+                    .as_ref()
+                    .map(|m| m.load(i, width, height))
+                    .transpose()?;
+                let left_out: Option<std::borrow::Cow<[bool]>> =
+                    match (outside.as_deref(), from_file) {
+                        (None, None) => None,
+                        (Some(o), None) => Some(std::borrow::Cow::Borrowed(o)),
+                        (None, Some(m)) => Some(std::borrow::Cow::Owned(m)),
+                        (Some(o), Some(mut m)) => {
+                            m.iter_mut().zip(o).for_each(|(a, b)| *a |= b);
+                            Some(std::borrow::Cow::Owned(m))
+                        }
+                    };
                 save_working_image(
                     img,
                     &images_out.join(name),
                     cfg.mask_black,
-                    outside.as_deref(),
+                    left_out.as_deref(),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1773,6 +2030,35 @@ pub fn build_photo_dataset(
             (features, Vec::new())
         }
     };
+    // Image `i`'s mask (`true` = masked out), if there are masks: decoded
+    // when its keypoints are extracted, not kept.
+    let load_mask = |i: usize| -> Result<Option<Vec<bool>>, EurocError> {
+        masks.as_ref().map(|m| m.load(i, width, height)).transpose()
+    };
+    // An image's features, less the keypoints on its masked-out pixels, which
+    // the matcher and the mapper then never see.
+    let dropped = std::sync::atomic::AtomicUsize::new(0);
+    let features_of = |kps: Vec<visloc_vision::features::sift::SiftKeypoint>,
+                       desc: Vec<Vec<f32>>,
+                       masked: Option<&[bool]>|
+     -> (FeatureSet, Vec<u8>) {
+        let (kps, desc) = match masked {
+            None => (kps, desc),
+            Some(masked) => {
+                let before = kps.len();
+                let kept = drop_masked_keypoints(
+                    kps,
+                    desc,
+                    masked,
+                    width as usize,
+                    sift_cfg.vlfeat_compatible_detector,
+                );
+                dropped.fetch_add(before - kept.0.len(), std::sync::atomic::Ordering::Relaxed);
+                kept
+            }
+        };
+        to_features(kps, desc)
+    };
     #[cfg(not(feature = "gpu"))]
     if cfg.gpu_ba {
         return Err(EurocError::Sfm("gpu_ba needs the `gpu` feature".into()));
@@ -1828,42 +2114,44 @@ pub fn build_photo_dataset(
                 "gpu sift: VLFeat-compatible extractor on {}",
                 vl.context().adapter_info.name
             ));
-            for start in (0..n).step_by(256) {
-                let chunk = (start..n.min(start + 256))
-                    .into_par_iter()
-                    .map(|i| work.get(i))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
-                let images = grays
-                    .iter()
-                    .map(|g| GrayImage::new(width as usize, height as usize, g))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                // Pipelined: the GPU detects the next photo while the host
-                // handles the current one. Photos past the device's binding
-                // limit go to the CPU.
-                match vl.extract_batch(&images, &sift_cfg) {
-                    Err(visloc_sift_gpu::SiftGpuError::Unsupported) => {
-                        for gray in &images {
-                            let (kps, desc) = extract_sift(gray, &sift_cfg)
-                                .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                            features.push(to_features(kps, desc));
-                        }
-                    }
-                    other => {
-                        let results = other.map_err(|e| EurocError::Sift(format!("{e}")))?;
-                        for (kps, desc) in results {
-                            features.push(to_features(kps, desc));
-                        }
-                    }
-                }
-                colours.extend(
-                    chunk
+            // Pipelined: the GPU detects the next photo while the host
+            // handles the current one. Photos past the device's binding
+            // limit go to the CPU.
+            features.extend(extract_batched(
+                n,
+                256,
+                |start, count| {
+                    let chunk = (start..start + count)
+                        .into_par_iter()
+                        .map(|i| work.get(i))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
+                    Ok((chunk, grays))
+                },
+                |(_, grays)| {
+                    let images = grays
                         .iter()
-                        .zip(&features[start..])
-                        .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
-                );
-            }
+                        .map(|g| GrayImage::new(width as usize, height as usize, g))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    Ok(vl.extract_batch(&images, &sift_cfg))
+                },
+                |(_, grays), k| {
+                    let gray = GrayImage::new(width as usize, height as usize, &grays[k])
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))
+                },
+                &features_of,
+                &load_mask,
+                |(chunk, _), features| {
+                    colours.extend(
+                        chunk
+                            .iter()
+                            .zip(features)
+                            .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
+                    )
+                },
+            )?);
             if cfg.gpu {
                 gpu_sift = Some(visloc_sift_gpu::SiftGpu::new(vl.into_context()));
             }
@@ -1875,29 +2163,37 @@ pub fn build_photo_dataset(
         #[allow(unused_mut)]
         let mut colours = Vec::with_capacity(n);
         #[cfg(feature = "gpu")]
-        for start in (0..n).step_by(256) {
-            let chunk = (start..n.min(start + 256))
-                .into_par_iter()
-                .map(|i| work.get(i))
-                .collect::<Result<Vec<_>, _>>()?;
-            let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
-            for g in &grays {
-                let gray = GrayImage::new(width as usize, height as usize, g)
+        features.extend(extract_chunked(
+            n,
+            256,
+            |start, count| {
+                let chunk = (start..start + count)
+                    .into_par_iter()
+                    .map(|i| work.get(i))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
+                Ok((chunk, grays))
+            },
+            |(_, grays), k| {
+                let gray = GrayImage::new(width as usize, height as usize, &grays[k])
                     .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let (kps, desc) = gpu_sift
+                gpu_sift
                     .as_mut()
                     .expect("on_gpu")
                     .extract(&gray, &sift_cfg)
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                features.push(to_features(kps, desc));
-            }
-            colours.extend(
-                chunk
-                    .iter()
-                    .zip(&features[start..])
-                    .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
-            );
-        }
+                    .map_err(|e| EurocError::Sift(format!("{e}")))
+            },
+            &features_of,
+            &load_mask,
+            |(chunk, _), features| {
+                colours.extend(
+                    chunk
+                        .iter()
+                        .zip(features)
+                        .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
+                )
+            },
+        )?);
         (features, colours)
     } else {
         (0..n)
@@ -1909,7 +2205,7 @@ pub fn build_photo_dataset(
                     .map_err(|e| EurocError::Sift(format!("{e}")))?;
                 let (kps, desc) =
                     extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let f = to_features(kps, desc);
+                let f = features_of(kps, desc, load_mask(i)?.as_deref());
                 let colours = keypoint_colours(&img, &f.0.keypoints);
                 Ok((f, colours))
             })
@@ -1932,6 +2228,15 @@ pub fn build_photo_dataset(
         features.iter().map(|f| f.keypoints.len()).sum::<usize>() / n.max(1),
         t0.elapsed().as_secs_f64()
     ));
+    if masks.is_some() {
+        let kept: usize = features.iter().map(|f| f.keypoints.len()).sum();
+        let dropped = dropped.load(std::sync::atomic::Ordering::Relaxed);
+        log(&format!(
+            "masks: dropped {dropped} of {} keypoints ({:.1}%) on masked-out pixels",
+            kept + dropped,
+            100.0 * dropped as f64 / (kept + dropped).max(1) as f64
+        ));
+    }
 
     // Candidate pairs, never two faces of one panorama (they do not
     // overlap). The first image of the source after image `i`'s:
@@ -2920,32 +3225,57 @@ mod tests {
         v / (1.0 + 0.5 + 1.0 / 3.0 + 0.25)
     }
 
-    /// A `w x w/2` panorama taken at `centre` in a noise-textured box room
-    /// (x, z in [-4, 4] m, y in [-2.5, 2.5] m), turned by `yaw` about the
-    /// vertical.
+    /// The colour of the noise-textured box room (x, z in [-4, 4] m, y in
+    /// [-2.5, 2.5] m) along the ray from `centre` in the direction `d`.
+    fn room_colour(centre: nalgebra::Vector3<f64>, d: nalgebra::Vector3<f64>) -> image::Rgb<u8> {
+        let half = nalgebra::Vector3::new(4.0f64, 2.5, 4.0);
+        // The nearest wall along d.
+        let (t, axis) = (0..3)
+            .filter(|&a| d[a].abs() > 1e-12)
+            .map(|a| ((half[a].copysign(d[a]) - centre[a]) / d[a], a))
+            .fold((f64::INFINITY, 0), |b, c| if c.0 < b.0 { c } else { b });
+        let p = centre + t * d;
+        let (u, v) = match axis {
+            0 => (p.z, p.y),
+            1 => (p.x, p.z),
+            _ => (p.x, p.y),
+        };
+        let wall = (2 * axis + usize::from(d[axis] > 0.0)) as u64;
+        let c = |k: u64| (255.0 * value_noise(u + 10.0, v + 10.0, 3 * wall + k)) as u8;
+        image::Rgb([c(0), c(1), c(2)])
+    }
+
+    /// A `w x w/2` panorama taken at `centre` in the room, turned by `yaw`
+    /// about the vertical.
     fn room_panorama(w: u32, centre: nalgebra::Vector3<f64>, yaw: f64) -> image::RgbImage {
         use std::f64::consts::PI;
         let rot = nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw);
-        let half = nalgebra::Vector3::new(4.0f64, 2.5, 4.0);
         image::RgbImage::from_fn(w, w / 2, |x, y| {
             let lon = (x as f64 + 0.5) / w as f64 * 2.0 * PI - PI;
             let lat = PI / 2.0 - (y as f64 + 0.5) / (w / 2) as f64 * PI;
             let d = rot
                 * nalgebra::Vector3::new(lat.cos() * lon.sin(), -lat.sin(), lat.cos() * lon.cos());
-            // The nearest wall along d.
-            let (t, axis) = (0..3)
-                .filter(|&a| d[a].abs() > 1e-12)
-                .map(|a| ((half[a].copysign(d[a]) - centre[a]) / d[a], a))
-                .fold((f64::INFINITY, 0), |b, c| if c.0 < b.0 { c } else { b });
-            let p = centre + t * d;
-            let (u, v) = match axis {
-                0 => (p.z, p.y),
-                1 => (p.x, p.z),
-                _ => (p.x, p.y),
-            };
-            let wall = (2 * axis + usize::from(d[axis] > 0.0)) as u64;
-            let c = |k: u64| (255.0 * value_noise(u + 10.0, v + 10.0, 3 * wall + k)) as u8;
-            image::Rgb([c(0), c(1), c(2)])
+            room_colour(centre, d)
+        })
+    }
+
+    /// A `w x h` pinhole photo of the room (focal length `focal` px, the
+    /// principal point at the centre) taken at `centre`, turned by `yaw`.
+    fn room_photo(
+        w: u32,
+        h: u32,
+        focal: f64,
+        centre: nalgebra::Vector3<f64>,
+        yaw: f64,
+    ) -> image::RgbImage {
+        let rot = nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw);
+        image::RgbImage::from_fn(w, h, |x, y| {
+            let ray = nalgebra::Vector3::new(
+                (x as f64 + 0.5 - w as f64 / 2.0) / focal,
+                (y as f64 + 0.5 - h as f64 / 2.0) / focal,
+                1.0,
+            );
+            room_colour(centre, rot * ray.normalize())
         })
     }
 
@@ -3186,6 +3516,907 @@ mod tests {
         assert_eq!(faces, 30);
         assert!(worst_deg < 0.05, "{worst_deg} deg");
         assert!(worst_m < 0.005, "{worst_m} m");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const PHOTO_W: u32 = 480;
+    const PHOTO_H: u32 = 360;
+
+    /// Six photos of the synthetic room in `root/in` (`view_0.png` ...), a
+    /// sideways walk with a small turn.
+    fn room_photos(root: &Path) -> PathBuf {
+        let images = root.join("in");
+        std::fs::create_dir_all(&images).unwrap();
+        for k in 0..6 {
+            let centre = nalgebra::Vector3::new(-1.0 + 0.4 * k as f64, 0.05 * (k % 2) as f64, 0.0);
+            room_photo(PHOTO_W, PHOTO_H, 420.0, centre, 0.04 * k as f64)
+                .save(images.join(format!("view_{k}.png")))
+                .unwrap();
+        }
+        images
+    }
+
+    /// `edges.len()` masks `view_{k}.png` in `dir`, `mw x mh`, each with its
+    /// own edge: 255 left of column `edges[k]` and 0 from it on (`invert`:
+    /// the other way round). Distinct edges, so a mask paired with the wrong
+    /// image shows.
+    fn edge_masks(dir: &Path, mw: u32, mh: u32, edges: &[u32], invert: bool) {
+        std::fs::create_dir_all(dir).unwrap();
+        for (k, &edge) in edges.iter().enumerate() {
+            image::GrayImage::from_fn(mw, mh, |x, _| {
+                image::Luma([if (x < edge) != invert { 255 } else { 0 }])
+            })
+            .save(dir.join(format!("view_{k}.png")))
+            .unwrap();
+        }
+    }
+
+    /// Image `i`'s keypoints as the matcher and mapper got them
+    /// (`out/port/features`, in extraction order), if it took part in a
+    /// verified pair.
+    fn keypoints_of(out: &Path, i: usize) -> Option<Vec<(f64, f64)>> {
+        let text =
+            std::fs::read_to_string(out.join(format!("port/features/frame_{i:05}_features.txt")))
+                .ok()?;
+        Some(
+            text.lines()
+                .map(|l| {
+                    let mut v = l.split_whitespace().map(|x| x.parse().unwrap());
+                    (v.next().unwrap(), v.next().unwrap())
+                })
+                .collect(),
+        )
+    }
+
+    /// The pixel column a keypoint at `x` lies on, by the detector's
+    /// convention (see `drop_masked_keypoints`), written out independently.
+    fn pixel_of(x: f64, half_pixel: bool) -> i64 {
+        if half_pixel {
+            x.floor() as i64
+        } else {
+            (x + 0.5).floor() as i64
+        }
+    }
+
+    /// The mean keypoint count per image from a run's log, and the count the
+    /// masks dropped (0 without masks).
+    fn keypoint_counts(logs: &[String]) -> (usize, usize) {
+        let mean = logs
+            .iter()
+            .find_map(|m| m.strip_prefix("sift: mean "))
+            .map(|m| m.split_whitespace().next().unwrap().parse().unwrap())
+            .unwrap();
+        let dropped = logs
+            .iter()
+            .find_map(|m| m.strip_prefix("masks: dropped "))
+            .map_or(0, |m| m.split_whitespace().next().unwrap().parse().unwrap());
+        (mean, dropped)
+    }
+
+    fn run_photos(
+        images: &Path,
+        out: &Path,
+        cfg: &super::PhotoSfmConfig,
+    ) -> (crate::dataset::Dataset, super::PhotoSfmReport, Vec<String>) {
+        let mut logs = Vec::new();
+        let (dataset, _, report) = super::build_photo_dataset(images, out, cfg, &mut |m: &str| {
+            println!("{m}");
+            logs.push(m.to_string())
+        })
+        .unwrap();
+        (dataset, report, logs)
+    }
+
+    /// The working image `k` of a run, as RGBA.
+    fn working_image(out: &Path, k: usize) -> image::RgbaImage {
+        image::open(out.join(format!("images/frame_{k:05}.png")))
+            .unwrap()
+            .into_rgba8()
+    }
+
+    /// Photos of the room through SfM with and without a mask over the right
+    /// of each, each view with its own edge (masks twice the photos' size,
+    /// and `max_size` scaling the photos down, so the nearest-neighbour
+    /// resize is in play). Against the run without masks: each view's
+    /// keypoints are exactly the unmasked run's that lie left of its own
+    /// edge, by the detector's pixel convention `half_pixel`, and there are
+    /// some within half a pixel of an edge, so the other convention would
+    /// give other keypoints. The training images keep their pixels under the
+    /// mask and take alpha 0 from each view's own edge. `sift` adjusts the
+    /// SIFT path.
+    fn masked_sfm_keeps_keypoints_off_the_mask(
+        tag: &str,
+        sift: impl Fn(&mut super::PhotoSfmConfig),
+        min_registered: usize,
+        half_pixel: bool,
+    ) {
+        let root = std::env::temp_dir().join(format!("visloc_masks_{tag}_{}", std::process::id()));
+        let images = room_photos(&root);
+        // Edges in the 240 x 180 working images; the masks are 960 x 720.
+        let edges: Vec<u32> = (0..6).map(|k| 96 + 12 * k).collect();
+        let native: Vec<u32> = edges.iter().map(|e| 4 * e).collect();
+        edge_masks(&root.join("masks"), 960, 720, &native, false);
+        let mut cfg = super::PhotoSfmConfig {
+            max_size: 240,
+            focal_px: Some(420.0 * 240.0 / 480.0),
+            eval_every: 0,
+            ..Default::default()
+        };
+        sift(&mut cfg);
+
+        let (_, control, control_logs) = run_photos(&images, &root.join("control"), &cfg);
+        assert!(control.registered >= min_registered, "{control:?}");
+        let control_kps: Vec<Vec<(f64, f64)>> = (0..6)
+            .map(|k| keypoints_of(&root.join("control"), k).expect("control keypoints"))
+            .collect();
+        let right_of_edge: usize = control_kps
+            .iter()
+            .zip(&edges)
+            .map(|(kps, &e)| {
+                kps.iter()
+                    .filter(|p| pixel_of(p.0, half_pixel) >= e as i64)
+                    .count()
+            })
+            .sum();
+        // Keypoints whose pixel the two conventions disagree on, at an edge.
+        let at_edge: usize = control_kps
+            .iter()
+            .zip(&edges)
+            .map(|(kps, &e)| {
+                kps.iter()
+                    .filter(|p| pixel_of(p.0, true) < e as i64 && pixel_of(p.0, false) >= e as i64)
+                    .count()
+            })
+            .sum();
+        assert!(
+            right_of_edge > 500 && at_edge > 0,
+            "{right_of_edge} {at_edge}"
+        );
+
+        cfg.mask_dir = Some(root.join("masks"));
+        let (dataset, masked, logs) = run_photos(&images, &root.join("masked"), &cfg);
+        assert!(masked.registered >= min_registered, "{masked:?}");
+        let mut kept = 0;
+        for (k, &e) in edges.iter().enumerate() {
+            let want: Vec<(f64, f64)> = control_kps[k]
+                .iter()
+                .copied()
+                .filter(|p| pixel_of(p.0, half_pixel) < e as i64)
+                .collect();
+            let got = keypoints_of(&root.join("masked"), k).expect("masked keypoints");
+            assert!(
+                got == want,
+                "view {k}: {} keypoints, want {}",
+                got.len(),
+                want.len()
+            );
+            kept += got.len();
+        }
+        // The counts agree with the log.
+        let (mean_without, _) = keypoint_counts(&control_logs);
+        let (mean_with, dropped) = keypoint_counts(&logs);
+        assert_eq!(dropped, right_of_edge);
+        assert!(
+            mean_with < mean_without && kept > 500,
+            "{mean_with} {mean_without}"
+        );
+
+        // Training images: the photo's pixels, alpha 0 from the view's edge.
+        for (k, &e) in edges.iter().enumerate() {
+            let source = image::open(root.join(format!("in/view_{k}.png")))
+                .unwrap()
+                .into_rgb8();
+            let scaled = super::resize_triangle(&source, 240, 180);
+            let written = working_image(&root.join("masked"), k);
+            for y in 0..180 {
+                for x in 0..240 {
+                    let p = written.get_pixel(x, y);
+                    assert_eq!(
+                        p[3],
+                        if x < e { 255 } else { 0 },
+                        "view {k}: alpha at {x},{y}"
+                    );
+                    assert_eq!(
+                        p.0[..3],
+                        scaled.get_pixel(x, y).0,
+                        "view {k}: {x},{y} altered"
+                    );
+                }
+            }
+        }
+        // And the trainer reads that alpha as its mask.
+        let (_, valid) = crate::dataset::load_view_rgb_mask(&dataset.train[0]).unwrap();
+        let valid = valid.expect("the view has a mask");
+        assert!(!valid[100 * 240 + 239] && valid[100 * 240 + 50]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn masked_sfm_cpu() {
+        masked_sfm_keeps_keypoints_off_the_mask(
+            "cpu",
+            |c| {
+                c.gpu = false;
+                c.gpu_sift = false;
+            },
+            5,
+            true,
+        );
+    }
+
+    /// The default detector on the CPU: pixel `i` is centred on `x = i`.
+    #[test]
+    fn masked_sfm_cpu_plain_detector() {
+        masked_sfm_keeps_keypoints_off_the_mask(
+            "cpu_plain",
+            |c| {
+                c.gpu = false;
+                c.gpu_sift = false;
+                plain_detector(c);
+            },
+            3,
+            false,
+        );
+    }
+
+    /// SIFT settings for the default detector, with the contrast threshold
+    /// lowered for the smooth synthetic photos.
+    fn plain_detector(c: &mut super::PhotoSfmConfig) {
+        c.sift_overrides = vec![
+            "vlfeat_compatible_detector=0".into(),
+            "vlfeat_compatible_descriptor=0".into(),
+            "contrast_threshold=0.004".into(),
+        ];
+    }
+
+    /// The CPU matcher behind `PhotoSfmConfig::matcher`, so a test of the GPU
+    /// extractors does not also depend on the GPU matcher.
+    #[cfg(feature = "gpu")]
+    #[derive(Debug, Default)]
+    struct CpuPairs(std::sync::Mutex<Vec<Vec<Vec<f32>>>>);
+
+    #[cfg(feature = "gpu")]
+    impl super::PairMatcher for CpuPairs {
+        fn set_features(&self, descriptors: &[&[Vec<f32>]]) -> Result<(), String> {
+            *self.0.lock().unwrap() = descriptors.iter().map(|d| d.to_vec()).collect();
+            Ok(())
+        }
+        fn match_pairs(
+            &self,
+            pairs: &[(usize, usize)],
+        ) -> Result<Vec<Vec<visloc_vision::matching::DescriptorMatch>>, String> {
+            let d = self.0.lock().unwrap();
+            Ok(pairs
+                .iter()
+                .map(|&(i, j)| crate::euroc::cpu_matches(&d[i], &d[j]))
+                .collect())
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn cpu_pairs(c: &mut super::PhotoSfmConfig) {
+        c.matcher = Some(std::sync::Arc::new(CpuPairs::default()));
+    }
+
+    #[cfg(feature = "gpu")]
+    fn have_gpu() -> bool {
+        let ok = visloc_sift_gpu::GpuContext::new().is_ok();
+        if !ok {
+            eprintln!("no GPU adapter; skipping");
+        }
+        ok
+    }
+
+    /// The VLFeat-compatible extractor on the GPU (the default).
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn masked_sfm_gpu_vlfeat() {
+        if have_gpu() {
+            masked_sfm_keeps_keypoints_off_the_mask("gpu_vlfeat", cpu_pairs, 5, true);
+        }
+    }
+
+    /// The GPU extractor of the default detector (pixel `i` centred on
+    /// `x = i`).
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn masked_sfm_gpu_plain() {
+        if have_gpu() {
+            masked_sfm_keeps_keypoints_off_the_mask(
+                "gpu_plain",
+                |c| {
+                    cpu_pairs(c);
+                    plain_detector(c);
+                },
+                3,
+                false,
+            );
+        }
+    }
+
+    /// `extract_chunked`, the plain GPU extractor's loop, over 260 images in
+    /// chunks of 256, without extracting anything real: image `g` has 100
+    /// keypoints on `x = 0.5 .. 99.5` and a mask from column `edges[g]`, so
+    /// it must keep exactly `edges[g]` of them. Image `g` is the chunk's
+    /// image `g % 256`, so a mask looked up by the chunk's index, or by the
+    /// chunk's first image, keeps another number.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn chunked_extraction_masks_each_image_by_its_global_index() {
+        const N: usize = 260;
+        let edges: Vec<usize> = (0..N).map(|g| 10 + (37 * g) % 80).collect();
+        let load_mask = |g: usize| -> Result<Option<Vec<bool>>, super::EurocError> {
+            Ok(Some((0..100).map(|x| x >= edges[g]).collect()))
+        };
+        let features_of = |kps: Vec<_>, desc: Vec<_>, masked: Option<&[bool]>| {
+            let (kps, desc) =
+                crate::masks::drop_masked_keypoints(kps, desc, masked.unwrap(), 100, true);
+            (
+                super::FeatureSet {
+                    keypoints: kps
+                        .iter()
+                        .map(|k| nalgebra::Point2::new(k.x, k.y))
+                        .collect(),
+                    descriptors: desc,
+                },
+                Vec::new(),
+            )
+        };
+        let mut chunk_sizes = Vec::new();
+        let got = super::extract_chunked(
+            N,
+            256,
+            |start, count| Ok((start, count)),
+            |&(_, _), _| {
+                let kps = (0..100)
+                    .map(|x| {
+                        visloc_vision::features::sift::SiftKeypoint::from_location_scale_orientation(
+                            x as f64 + 0.5,
+                            0.5,
+                            1.0,
+                            0.0,
+                        )
+                    })
+                    .collect();
+                Ok((kps, vec![Vec::new(); 100]))
+            },
+            &features_of,
+            &load_mask,
+            |&(start, count), features| {
+                assert_eq!(features.len(), count);
+                chunk_sizes.push((start, count));
+            },
+        )
+        .unwrap();
+        assert_eq!(chunk_sizes, [(0, 256), (256, 4)]);
+        assert_eq!(got.len(), N);
+        for (g, (f, &e)) in got.iter().zip(&edges).enumerate() {
+            let xs: Vec<f64> = f.0.keypoints.iter().map(|p| p.x).collect();
+            assert_eq!(xs.len(), e, "image {g}");
+            assert!(xs.iter().all(|&x| x < e as f64), "image {g}");
+        }
+        // Every image has a different edge from the one of its chunk's first
+        // image, and from its chunk index (g % 256) neighbours.
+        assert!((256..N).all(|g| edges[g] != edges[0] && edges[g] != edges[g - 256]));
+    }
+
+    /// `extract_batched`, the VLFeat GPU extractor's loop, over 260 images in
+    /// chunks of 256, with a fake batch extractor: image `g` has 100
+    /// keypoints on `x = 0.5 .. 99.5` and a mask from column `edges[g]`, so
+    /// it must keep exactly `edges[g]` of them, whether the batch comes from
+    /// the device or is refused (`Unsupported`) and the CPU extracts each
+    /// image. A mask looked up by the chunk's index, or with the chunk's
+    /// first image, keeps another number.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn batched_extraction_masks_each_image_by_its_global_index() {
+        use visloc_vision::features::sift::SiftKeypoint;
+        const N: usize = 260;
+        let edges: Vec<usize> = (0..N).map(|g| 10 + (37 * g) % 80).collect();
+        let load_mask = |g: usize| -> Result<Option<Vec<bool>>, super::EurocError> {
+            Ok(Some((0..100).map(|x| x >= edges[g]).collect()))
+        };
+        let features_of = |kps: Vec<_>, desc: Vec<_>, masked: Option<&[bool]>| {
+            let (kps, desc) =
+                crate::masks::drop_masked_keypoints(kps, desc, masked.unwrap(), 100, true);
+            (
+                super::FeatureSet {
+                    keypoints: kps
+                        .iter()
+                        .map(|k| nalgebra::Point2::new(k.x, k.y))
+                        .collect(),
+                    descriptors: desc,
+                },
+                Vec::new(),
+            )
+        };
+        let one_image = || {
+            let kps: Vec<SiftKeypoint> = (0..100)
+                .map(|x| {
+                    SiftKeypoint::from_location_scale_orientation(x as f64 + 0.5, 0.5, 1.0, 0.0)
+                })
+                .collect();
+            (kps, vec![Vec::new(); 100])
+        };
+        for refused in [false, true] {
+            let mut chunks = Vec::new();
+            let got = super::extract_batched(
+                N,
+                256,
+                |start, count| Ok((start, count)),
+                |&(_, count)| {
+                    Ok(if refused {
+                        Err(visloc_sift_gpu::SiftGpuError::Unsupported)
+                    } else {
+                        Ok((0..count).map(|_| one_image()).collect())
+                    })
+                },
+                |_, _| Ok(one_image()),
+                &features_of,
+                &load_mask,
+                |&(start, count), features| {
+                    assert_eq!(features.len(), count);
+                    chunks.push(start);
+                },
+            )
+            .unwrap();
+            assert_eq!(chunks, [0, 256]);
+            assert_eq!(got.len(), N);
+            for (g, (f, &e)) in got.iter().zip(&edges).enumerate() {
+                let xs: Vec<f64> = f.0.keypoints.iter().map(|p| p.x).collect();
+                assert_eq!(xs.len(), e, "refused {refused}: image {g}");
+                assert!(xs.iter().all(|&x| x < e as f64), "image {g}");
+            }
+        }
+        assert!((256..N).all(|g| edges[g] != edges[0] && edges[g] != edges[g - 256]));
+    }
+
+    /// 260 small photos of the room (more than one 256-image extraction
+    /// chunk) in `root/in`, each a step further along a sideways walk, and
+    /// for each its own mask `view_k.png` in `root/masks`, `edges[k]`
+    /// columns wide. SfM then runs on them with a window of neighbours, and
+    /// every view's keypoints must lie left of its own edge, and reach
+    /// close to it. A mask paired with the wrong image, or an image
+    /// processed with the mask of its chunk's first, would put keypoints
+    /// past the edge or leave a gap before it.
+    ///
+    /// The `masks_pair_with_their_images_*` tests that call this are ignored
+    /// by default: SfM on 260 photos takes about ten seconds in a release
+    /// build and far longer in a debug one. The chunk indexing itself is
+    /// covered by default in `chunk_features_use_each_images_own_mask_past_the_first_chunk`;
+    /// these add the call sites in `build_photo_dataset`. Run them with
+    /// `cargo test --release -p visloc-gsplat-train --features gpu,euroc --lib
+    /// masks_pair_with_their_images -- --ignored`.
+    fn masks_pair_with_their_images_across_chunks(
+        tag: &str,
+        sift: impl Fn(&mut super::PhotoSfmConfig),
+        half_pixel: bool,
+    ) {
+        const N: usize = 260;
+        let root = std::env::temp_dir().join(format!("visloc_masks_{tag}_{}", std::process::id()));
+        let images = root.join("in");
+        std::fs::create_dir_all(&images).unwrap();
+        for k in 0..N {
+            let centre = nalgebra::Vector3::new(-3.2 + 0.025 * k as f64, 0.0, 0.0);
+            room_photo(160, 120, 140.0, centre, 0.0005 * k as f64)
+                .save(images.join(format!("view_{k:03}.png")))
+                .unwrap();
+        }
+        // Edges 30..=129 of 160 columns, every neighbour's different.
+        let edges: Vec<u32> = (0..N as u32).map(|k| 30 + (37 * k) % 100).collect();
+        let masks = root.join("masks");
+        std::fs::create_dir_all(&masks).unwrap();
+        for (k, &e) in edges.iter().enumerate() {
+            image::GrayImage::from_fn(160, 120, |x, _| image::Luma([if x < e { 255 } else { 0 }]))
+                .save(masks.join(format!("view_{k:03}.png")))
+                .unwrap();
+        }
+        let mut cfg = super::PhotoSfmConfig {
+            focal_px: Some(140.0),
+            eval_every: 0,
+            exhaustive_max: 0,
+            window: 8,
+            mask_dir: Some(masks),
+            ..Default::default()
+        };
+        sift(&mut cfg);
+        let out = root.join("out");
+        let _ = run_photos(&images, &out, &cfg);
+        let mut present = Vec::new();
+        for (k, &e) in edges.iter().enumerate() {
+            let Some(kps) = keypoints_of(&out, k) else {
+                continue;
+            };
+            present.push(k);
+            let columns: Vec<i64> = kps.iter().map(|p| pixel_of(p.0, half_pixel)).collect();
+            let furthest = *columns.iter().max().expect("keypoints");
+            assert!(
+                furthest < e as i64,
+                "view {k}: a keypoint on column {furthest}, edge {e}"
+            );
+            assert!(
+                furthest >= e as i64 - 25,
+                "view {k}: keypoints stop at {furthest}, edge {e}"
+            );
+        }
+        // Every view across the chunk boundary took part, and so was checked.
+        assert!(present.len() > N * 9 / 10, "{} of {N} views", present.len());
+        assert!((248..N).all(|k| present.contains(&k)), "{present:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[ignore = "260 photos through SfM: slow in a debug build"]
+    fn masks_pair_with_their_images_cpu() {
+        masks_pair_with_their_images_across_chunks(
+            "pair_cpu",
+            |c| {
+                c.gpu = false;
+                c.gpu_sift = false;
+            },
+            true,
+        );
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    #[ignore = "260 photos through SfM: slow in a debug build"]
+    fn masks_pair_with_their_images_gpu_vlfeat() {
+        if have_gpu() {
+            masks_pair_with_their_images_across_chunks("pair_gpu", cpu_pairs, true);
+        }
+    }
+
+    /// `chunk_features` for a chunk starting at image 256, past the first
+    /// chunk's boundary: with the GPU's results, and with the CPU fallback
+    /// for a batch the device cannot take (`Unsupported`, which needs photos
+    /// past its binding limit, so is given here). Image `256 + k` has
+    /// the mask with edge `edges[k]`; its keypoints must lie left of it.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn chunk_features_use_each_images_own_mask_past_the_first_chunk() {
+        use visloc_vision::features::sift::{extract_sift, GrayImage, SiftConfig};
+        const START: usize = 256;
+        let edges = [40usize, 70, 55, 85];
+        let (w, h) = (128usize, 96usize);
+        let grays: Vec<Vec<f32>> = (0..edges.len())
+            .map(|k| {
+                let centre = nalgebra::Vector3::new(-1.0 + 0.3 * k as f64, 0.0, 0.0);
+                room_photo(w as u32, h as u32, 110.0, centre, 0.05 * k as f64)
+                    .pixels()
+                    .map(|p| {
+                        (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0
+                    })
+                    .collect()
+            })
+            .collect();
+        let images: Vec<GrayImage> = grays
+            .iter()
+            .map(|g| GrayImage::new(w, h, g).unwrap())
+            .collect();
+        let sift_cfg = SiftConfig {
+            contrast_threshold: 0.004,
+            vlfeat_compatible_detector: true,
+            vlfeat_compatible_descriptor: true,
+            ..SiftConfig::default()
+        };
+        let raw: Vec<_> = images
+            .iter()
+            .map(|g| extract_sift(g, &sift_cfg).unwrap())
+            .collect();
+        // Only the chunk's own images have masks: asking for image `k` of the
+        // chunk instead of `256 + k` would hit one of these.
+        let load_mask = |i: usize| -> Result<Option<Vec<bool>>, super::EurocError> {
+            let edge = edges.get(i.wrapping_sub(START)).copied();
+            Ok(Some(
+                (0..w * h)
+                    .map(|p| edge.is_none_or(|e| p % w >= e))
+                    .collect(),
+            ))
+        };
+        let features_of = |kps: Vec<_>, desc: Vec<_>, masked: Option<&[bool]>| {
+            let (kps, desc) =
+                crate::masks::drop_masked_keypoints(kps, desc, masked.unwrap(), w, true);
+            (
+                super::FeatureSet {
+                    keypoints: kps
+                        .iter()
+                        .map(|k| nalgebra::Point2::new(k.x, k.y))
+                        .collect(),
+                    descriptors: desc,
+                },
+                Vec::new(),
+            )
+        };
+        let by_chunk = |batch| {
+            super::chunk_features(
+                START,
+                images.len(),
+                batch,
+                &mut |k| {
+                    extract_sift(&images[k], &sift_cfg)
+                        .map_err(|e| super::EurocError::Sift(format!("{e}")))
+                },
+                &features_of,
+                &load_mask,
+            )
+            .unwrap()
+        };
+        // The plain GPU extractor's path, one image at a time.
+        let one_at_a_time = super::extract_chunk(
+            START,
+            images.len(),
+            &mut |k| Ok(raw[k].clone()),
+            &features_of,
+            &load_mask,
+        )
+        .unwrap();
+        for (what, got) in [
+            ("gpu results", by_chunk(Ok(raw.clone()))),
+            (
+                "cpu fallback",
+                by_chunk(Err(visloc_sift_gpu::SiftGpuError::Unsupported)),
+            ),
+            ("one at a time", one_at_a_time),
+        ] {
+            assert_eq!(got.len(), edges.len());
+            for (k, (f, &e)) in got.iter().zip(&edges).enumerate() {
+                let xs: Vec<f64> = f.0.keypoints.iter().map(|p| p.x).collect();
+                let want = raw[k]
+                    .0
+                    .iter()
+                    .filter(|p| (p.x.floor() as usize) < e)
+                    .count();
+                // Some keypoints of the image are past its edge, so the mask
+                // of a neighbour (or none) would give other counts.
+                assert!(
+                    raw[k].0.iter().any(|p| (p.x.floor() as usize) >= e),
+                    "{what} {k}"
+                );
+                assert!(
+                    xs.iter().all(|&x| (x.floor() as usize) < e),
+                    "{what}: image {k}"
+                );
+                assert_eq!(xs.len(), want, "{what}: image {k}");
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    #[ignore = "260 photos through SfM: slow in a debug build"]
+    fn masks_pair_with_their_images_gpu_plain() {
+        if have_gpu() {
+            masks_pair_with_their_images_across_chunks(
+                "pair_plain",
+                |c| {
+                    cpu_pairs(c);
+                    plain_detector(c);
+                },
+                false,
+            );
+        }
+    }
+
+    /// A mask that keeps everything is no mask: the same model, byte for
+    /// byte, and the same keypoints.
+    fn all_keep_mask_is_no_mask(tag: &str, sift: impl Fn(&mut super::PhotoSfmConfig)) {
+        let root = std::env::temp_dir().join(format!("visloc_masks_{tag}_{}", std::process::id()));
+        let images = room_photos(&root);
+        edge_masks(
+            &root.join("masks"),
+            PHOTO_W,
+            PHOTO_H,
+            &[2 * PHOTO_W; 6],
+            false,
+        );
+        let mut cfg = super::PhotoSfmConfig {
+            max_size: 240,
+            focal_px: Some(210.0),
+            eval_every: 0,
+            ..Default::default()
+        };
+        sift(&mut cfg);
+        let (_, a, logs_a) = run_photos(&images, &root.join("a"), &cfg);
+        let (_, _, _) = run_photos(&images, &root.join("again"), &cfg);
+        cfg.mask_dir = Some(root.join("masks"));
+        let (_, b, logs_b) = run_photos(&images, &root.join("b"), &cfg);
+        assert!(a.registered >= 5);
+        assert_eq!(keypoint_counts(&logs_b), (keypoint_counts(&logs_a).0, 0));
+        for file in ["cameras.txt", "images.txt", "points3D.txt"] {
+            let read = |d: &str| std::fs::read(root.join(d).join("sparse/0").join(file)).unwrap();
+            // The run is deterministic, so a difference below is the mask's.
+            assert!(
+                read("a") == read("again"),
+                "{file}: two runs without masks differ"
+            );
+            assert!(
+                read("a") == read("b"),
+                "{file}: an all-keep mask changed the model"
+            );
+        }
+        assert_eq!((a.registered, a.points), (b.registered, b.points));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn all_keep_mask_matches_no_mask_cpu() {
+        all_keep_mask_is_no_mask("keep_cpu", |c| {
+            c.gpu = false;
+            c.gpu_sift = false;
+        });
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn all_keep_mask_matches_no_mask_gpu() {
+        if have_gpu() {
+            all_keep_mask_is_no_mask("keep_gpu", cpu_pairs);
+        }
+    }
+
+    /// `mask_flip` through SfM: masks painted the other way round (255 =
+    /// masked out) with the flip give the keypoints and the training alpha of
+    /// the masks as they are.
+    #[test]
+    fn flipped_masks_give_the_same_run_as_unflipped() {
+        let root = std::env::temp_dir().join(format!("visloc_masks_flip_{}", std::process::id()));
+        let images = room_photos(&root);
+        // Edges in the 240 x 180 working images; the masks are 480 x 360.
+        let edges: Vec<u32> = (0..6).map(|k| 100 + 15 * k).collect();
+        let native: Vec<u32> = edges.iter().map(|e| 2 * e).collect();
+        edge_masks(&root.join("keep"), PHOTO_W, PHOTO_H, &native, false);
+        edge_masks(&root.join("drop"), PHOTO_W, PHOTO_H, &native, true);
+        let mut cfg = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            max_size: 240,
+            focal_px: Some(210.0),
+            eval_every: 0,
+            mask_dir: Some(root.join("keep")),
+            ..Default::default()
+        };
+        let (_, _, _) = run_photos(&images, &root.join("plain"), &cfg);
+        cfg.mask_dir = Some(root.join("drop"));
+        cfg.mask_flip = true;
+        let (_, _, logs) = run_photos(&images, &root.join("flipped"), &cfg);
+        assert!(logs.iter().any(|m| m.ends_with("(flipped)")), "{logs:?}");
+        let mut dropped = 0;
+        for (k, &e) in edges.iter().enumerate() {
+            let a = keypoints_of(&root.join("plain"), k).unwrap();
+            let b = keypoints_of(&root.join("flipped"), k).unwrap();
+            assert!(
+                a == b && !a.is_empty(),
+                "view {k}: {} vs {}",
+                a.len(),
+                b.len()
+            );
+            assert!(a.iter().all(|p| p.0 < e as f64), "view {k}");
+            let alpha = |out: &str| working_image(&root.join(out), k);
+            assert!(
+                alpha("plain") == alpha("flipped"),
+                "view {k}: alpha differs"
+            );
+            assert_eq!(alpha("flipped").get_pixel(e, 5)[3], 0);
+            assert_eq!(alpha("flipped").get_pixel(e - 1, 5)[3], 255);
+            dropped += 1;
+        }
+        assert_eq!(dropped, 6);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mask and `max_angle` together: the training alpha is 0 wherever
+    /// either leaves a pixel out, and each of them leaves some out alone.
+    #[test]
+    fn mask_and_max_angle_both_leave_pixels_out_of_the_training_alpha() {
+        let root = std::env::temp_dir().join(format!("visloc_masks_angle_{}", std::process::id()));
+        let images = room_photos(&root);
+        // 320 x 240 working images, masks of that size dropping from column 256.
+        edge_masks(&root.join("masks"), 320, 240, &[256; 6], false);
+        let cfg = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            max_size: 320,
+            eval_every: 0,
+            camera: Some(super::parse_camera_row("PINHOLE 480 360 420 420 240 180").unwrap()),
+            max_angle: Some(25.0),
+            mask_dir: Some(root.join("masks")),
+            ..Default::default()
+        };
+        let (_, _, _) = run_photos(&images, &root.join("out"), &cfg);
+        let alpha = working_image(&root.join("out"), 0);
+        // The working camera: focal 280, principal point (160, 120).
+        let tan_max = 25.0f64.to_radians().tan();
+        let (mut by_mask, mut by_angle, mut by_both) = (0, 0, 0);
+        for y in 0..240u32 {
+            for x in 0..320u32 {
+                let r = (x as f64 + 0.5 - 160.0).hypot(y as f64 + 0.5 - 120.0) / 280.0;
+                if (r - tan_max).abs() < 1e-3 {
+                    continue;
+                }
+                let (masked, past) = (x >= 256, r > tan_max);
+                let want = if masked || past { 0 } else { 255 };
+                assert_eq!(alpha.get_pixel(x, y)[3], want, "alpha at {x},{y}");
+                match (masked, past) {
+                    (true, false) => by_mask += 1,
+                    (false, true) => by_angle += 1,
+                    (true, true) => by_both += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(by_mask > 1000 && by_angle > 1000 && by_both > 100);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn masks_are_validated_before_anything_is_decoded() {
+        let root = std::env::temp_dir().join(format!("visloc_masks_cfg_{}", std::process::id()));
+        let images = room_photos(&root);
+        let masks = root.join("masks");
+        edge_masks(&masks, PHOTO_W, PHOTO_H, &[300; 6], false);
+        let cpu = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            eval_every: 0,
+            ..Default::default()
+        };
+        // The error, and what the run did before it.
+        let fails = |cfg: &super::PhotoSfmConfig, out: &str| {
+            let mut logs = Vec::new();
+            match super::build_photo_dataset(&images, &root.join(out), cfg, &mut |m: &str| {
+                logs.push(m.to_string())
+            }) {
+                Err(e) => {
+                    // Nothing decoded: no log line about the images, and
+                    // no working images directory.
+                    assert!(logs.is_empty(), "{out}: {logs:?}");
+                    assert!(!root.join(out).join("images").exists(), "{out}");
+                    e.to_string()
+                }
+                Ok(_) => panic!("{out}: should fail"),
+            }
+        };
+        // A missing mask stops the run before any image is decoded.
+        std::fs::remove_file(masks.join("view_3.png")).unwrap();
+        let cfg = super::PhotoSfmConfig {
+            mask_dir: Some(masks.clone()),
+            ..cpu.clone()
+        };
+        let err = fails(&cfg, "missing");
+        assert!(
+            err.contains("1 of 6 images have no mask") && err.contains("view_3.png"),
+            "{err}"
+        );
+        // A mask of another aspect, the same.
+        edge_masks(&masks, PHOTO_W, PHOTO_W, &[300; 6], false);
+        let err = fails(&cfg, "aspect");
+        assert!(err.contains("not the aspect"), "{err}");
+        // Flip without masks, and masks with equirect or insv.
+        let err = fails(
+            &super::PhotoSfmConfig {
+                mask_flip: true,
+                ..cpu.clone()
+            },
+            "flip",
+        );
+        assert!(err.contains("mask_flip needs mask_dir"), "{err}");
+        let err = fails(
+            &super::PhotoSfmConfig {
+                equirect: true,
+                ..cfg.clone()
+            },
+            "equirect",
+        );
+        assert!(err.contains("not supported with equirect or insv"), "{err}");
+        let err = fails(
+            &super::PhotoSfmConfig {
+                insv: Some(PathBuf::from("/no/such/video.insv")),
+                ..cfg.clone()
+            },
+            "insv",
+        );
+        assert!(err.contains("not supported with equirect or insv"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

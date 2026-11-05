@@ -9,7 +9,8 @@
 //!   cargo run --release -p visloc-gsplat-cuda --features photos --example gsplat_photos_cuda -- \
 //!   --images <folder> --out <work dir> [--max-size 1600] [--focal F] \
 //!   [--camera "MODEL W H PARAMS..." [--refine-camera]] [--exhaustive-max 300] [--window 20] \
-//!   [--max-keypoints 8192] [--mask-black N] [--max-angle DEG] [--cpu-match]
+//!   [--max-keypoints 8192] [--mask-black N] [--max-angle DEG] [--masks DIR [--flip-mask]] \
+//!   [--cpu-match]
 //! ```
 //!
 //! `--cpu-match` matches on the CPU instead, for comparison: the matches are
@@ -17,6 +18,8 @@
 //! alpha 0 over near-black regions (channels <= N), and `--max-angle DEG`
 //! past DEG off `--camera`'s axis (e.g. 100: a 200° fisheye's image
 //! circle); `gsplat_train_cuda --alpha-mask` leaves them out of the loss.
+//! `--masks DIR` is `gsplat_photos`'s: per-image PNG masks keep SIFT keypoints
+//! off the masked-out pixels and give the working images alpha 0 there.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--window" => sfm.window = next()?.parse()?,
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             "--mask-black" => sfm.mask_black = Some(next()?.parse()?),
+            "--masks" => sfm.mask_dir = Some(PathBuf::from(next()?)),
+            "--flip-mask" => sfm.mask_flip = true,
             "--max-angle" => sfm.max_angle = Some(next()?.parse()?),
             "--cpu-match" => cpu_match = true,
             other => return Err(format!("unknown argument {other}").into()),
