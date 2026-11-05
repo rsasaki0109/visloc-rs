@@ -1471,6 +1471,54 @@ fn extract_chunk(
         .collect()
 }
 
+/// Images extracted one at a time in chunks of `chunk_size`: for each chunk,
+/// `prepare(start, count)` readies the chunk's images (`count` from image
+/// `start`), `extract(&chunk, k)` extracts the chunk's image `k`
+/// ([`extract_chunk`] masks it with `load_mask(start + k)`), and
+/// `done(&chunk, &features)` sees the chunk's features. Returns every
+/// image's features.
+#[cfg(feature = "gpu")]
+#[allow(clippy::type_complexity)]
+fn extract_chunked<P>(
+    n: usize,
+    chunk_size: usize,
+    mut prepare: impl FnMut(usize, usize) -> Result<P, EurocError>,
+    mut extract: impl FnMut(
+        &P,
+        usize,
+    ) -> Result<
+        (
+            Vec<visloc_vision::features::sift::SiftKeypoint>,
+            Vec<Vec<f32>>,
+        ),
+        EurocError,
+    >,
+    features_of: &(dyn Fn(
+        Vec<visloc_vision::features::sift::SiftKeypoint>,
+        Vec<Vec<f32>>,
+        Option<&[bool]>,
+    ) -> (FeatureSet, Vec<u8>)
+          + Sync),
+    load_mask: &(dyn Fn(usize) -> Result<Option<Vec<bool>>, EurocError> + Sync),
+    mut done: impl FnMut(&P, &[(FeatureSet, Vec<u8>)]),
+) -> Result<Vec<(FeatureSet, Vec<u8>)>, EurocError> {
+    let mut all = Vec::with_capacity(n);
+    for start in (0..n).step_by(chunk_size) {
+        let count = chunk_size.min(n - start);
+        let chunk = prepare(start, count)?;
+        let features = extract_chunk(
+            start,
+            count,
+            &mut |k| extract(&chunk, k),
+            features_of,
+            load_mask,
+        )?;
+        done(&chunk, &features);
+        all.extend(features);
+    }
+    Ok(all)
+}
+
 /// The images SfM extracts features from: decoded in memory, or written
 /// already (lens faces) and read back, an image at a time. PNG is lossless,
 /// so the features are the same.
@@ -2040,34 +2088,37 @@ pub fn build_photo_dataset(
         #[allow(unused_mut)]
         let mut colours = Vec::with_capacity(n);
         #[cfg(feature = "gpu")]
-        for start in (0..n).step_by(256) {
-            let chunk = (start..n.min(start + 256))
-                .into_par_iter()
-                .map(|i| work.get(i))
-                .collect::<Result<Vec<_>, _>>()?;
-            let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
-            features.extend(extract_chunk(
-                start,
-                grays.len(),
-                &mut |k| {
-                    let gray = GrayImage::new(width as usize, height as usize, &grays[k])
-                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                    gpu_sift
-                        .as_mut()
-                        .expect("on_gpu")
-                        .extract(&gray, &sift_cfg)
-                        .map_err(|e| EurocError::Sift(format!("{e}")))
-                },
-                &features_of,
-                &load_mask,
-            )?);
-            colours.extend(
-                chunk
-                    .iter()
-                    .zip(&features[start..])
-                    .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
-            );
-        }
+        features.extend(extract_chunked(
+            n,
+            256,
+            |start, count| {
+                let chunk = (start..start + count)
+                    .into_par_iter()
+                    .map(|i| work.get(i))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let grays: Vec<Vec<f32>> = chunk.par_iter().map(|img| gray_of(img)).collect();
+                Ok((chunk, grays))
+            },
+            |(_, grays), k| {
+                let gray = GrayImage::new(width as usize, height as usize, &grays[k])
+                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                gpu_sift
+                    .as_mut()
+                    .expect("on_gpu")
+                    .extract(&gray, &sift_cfg)
+                    .map_err(|e| EurocError::Sift(format!("{e}")))
+            },
+            &features_of,
+            &load_mask,
+            |(chunk, _), features| {
+                colours.extend(
+                    chunk
+                        .iter()
+                        .zip(features)
+                        .map(|(img, f)| keypoint_colours(img, &f.0.keypoints)),
+                )
+            },
+        )?);
         (features, colours)
     } else {
         (0..n)
@@ -3706,6 +3757,72 @@ mod tests {
                 false,
             );
         }
+    }
+
+    /// `extract_chunked`, the plain GPU extractor's loop, over 260 images in
+    /// chunks of 256, without extracting anything real: image `g` has 100
+    /// keypoints on `x = 0.5 .. 99.5` and a mask from column `edges[g]`, so
+    /// it must keep exactly `edges[g]` of them. Image `g` is the chunk's
+    /// image `g % 256`, so a mask looked up by the chunk's index, or by the
+    /// chunk's first image, keeps another number.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn chunked_extraction_masks_each_image_by_its_global_index() {
+        const N: usize = 260;
+        let edges: Vec<usize> = (0..N).map(|g| 10 + (37 * g) % 80).collect();
+        let load_mask = |g: usize| -> Result<Option<Vec<bool>>, super::EurocError> {
+            Ok(Some((0..100).map(|x| x >= edges[g]).collect()))
+        };
+        let features_of = |kps: Vec<_>, desc: Vec<_>, masked: Option<&[bool]>| {
+            let (kps, desc) =
+                crate::masks::drop_masked_keypoints(kps, desc, masked.unwrap(), 100, true);
+            (
+                super::FeatureSet {
+                    keypoints: kps
+                        .iter()
+                        .map(|k| nalgebra::Point2::new(k.x, k.y))
+                        .collect(),
+                    descriptors: desc,
+                },
+                Vec::new(),
+            )
+        };
+        let mut chunk_sizes = Vec::new();
+        let got = super::extract_chunked(
+            N,
+            256,
+            |start, count| Ok((start, count)),
+            |&(_, _), _| {
+                let kps = (0..100)
+                    .map(|x| {
+                        visloc_vision::features::sift::SiftKeypoint::from_location_scale_orientation(
+                            x as f64 + 0.5,
+                            0.5,
+                            1.0,
+                            0.0,
+                        )
+                    })
+                    .collect();
+                Ok((kps, vec![Vec::new(); 100]))
+            },
+            &features_of,
+            &load_mask,
+            |&(start, count), features| {
+                assert_eq!(features.len(), count);
+                chunk_sizes.push((start, count));
+            },
+        )
+        .unwrap();
+        assert_eq!(chunk_sizes, [(0, 256), (256, 4)]);
+        assert_eq!(got.len(), N);
+        for (g, (f, &e)) in got.iter().zip(&edges).enumerate() {
+            let xs: Vec<f64> = f.0.keypoints.iter().map(|p| p.x).collect();
+            assert_eq!(xs.len(), e, "image {g}");
+            assert!(xs.iter().all(|&x| x < e as f64), "image {g}");
+        }
+        // Every image has a different edge from the one of its chunk's first
+        // image, and from its chunk index (g % 256) neighbours.
+        assert!((256..N).all(|g| edges[g] != edges[0] && edges[g] != edges[g - 256]));
     }
 
     /// 260 small photos of the room (more than one 256-image extraction
