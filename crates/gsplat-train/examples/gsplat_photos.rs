@@ -6,10 +6,14 @@
 //!     [--principal-point CX,CY] [--camera "MODEL W H PARAMS..."] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12] \
-//!     [--max-angle 100] [--stream-images] [--sift-threads N]
+//!     [--max-angle 100] [--stream-images] [--sift-threads N] [--masks <folder> [--flip-mask]]
 //!     [--cpu] [--cpu-sift] [--no-complete-model] [--gpu-ba] [--equirect [--equirect-independent-faces | --equirect-native]]
 //!     [--frame-step 10] [--insv-calibrate | --insv-lenses lenses.txt] [--imu FILE [--imu-frame-period S]]
 //! ```
+//!
+//! `--masks` keeps SIFT keypoints off the masked-out pixels of per-image PNG
+//! masks (COLMAP's `mask_path`; zero = masked out) and leaves them out of
+//! the training loss too.
 //!
 //! SIFT runs on the GPU (`visloc_sift_gpu::VlfeatSiftGpu`, an f32 port of
 //! the CPU extractor) unless `--cpu-sift` or `--cpu`; `--cpu` also matches
@@ -74,6 +78,11 @@ training:
   --mask-black N           leave near-black pixels (channels <= N) out of the loss
   --max-angle DEG          leave pixels past DEG off --camera's axis out of the loss
                            (e.g. 100: a 200° fisheye's image circle)
+  --masks DIR              per-image masks (PNG, zero = masked out; photo a.jpg's mask is
+                           DIR/a.jpg.png or DIR/a.png, resized to the working images but of
+                           their aspect): no SIFT keypoint is kept on a masked-out pixel, and
+                           the pixels are left out of the loss. Every photo needs a mask
+  --flip-mask              with --masks: 255 is masked out instead, 0 kept
 SfM:
   --max-size 1600          longest image side
   --focal PX               focal length prior (default: EXIF, else 1.2 x the long side)
@@ -173,6 +182,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // One image in memory at a time instead of all of them.
             "--stream-images" => sfm.stream_images = true,
             "--sift-threads" => sfm.sift_threads = Some(next()?.parse()?),
+            // Per-image masks: keypoints stay off the masked-out pixels, which
+            // are also left out of the training loss.
+            "--masks" => sfm.mask_dir = Some(PathBuf::from(next()?)),
+            "--flip-mask" => sfm.mask_flip = true,
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             // Extra SIFT settings, e.g. `--sift-opt affine=1 --sift-opt
             // domain_size_pooling=1` for strongly oblique / wide-baseline photos.
@@ -289,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         steps,
         normal_weight,
         appearance,
-        alpha_mask: sfm.mask_black.is_some() || sfm.max_angle.is_some(),
+        alpha_mask: sfm.mask_black.is_some() || sfm.max_angle.is_some() || sfm.mask_dir.is_some(),
         ..TrainConfig::brush_preset()
     };
     let t_train = Instant::now();
