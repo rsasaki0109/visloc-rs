@@ -72,20 +72,23 @@ impl ImageMasks {
         })
     }
 
-    /// Fail if a mask does not have the aspect of the `width` x `height`
-    /// images (to 1%, like the photo loader's size tolerance): a mask of
-    /// another shape cannot be resized onto them without being stretched.
-    /// Reads the PNG headers only.
-    pub fn check_aspect(&self, width: u32, height: u32) -> Result<(), EurocError> {
-        for path in &self.paths {
+    /// Fail if a mask does not have the aspect of its image (to 1%, like
+    /// the photo loader's size tolerance, and as the image is oriented by its
+    /// EXIF tag): a mask of another shape cannot be resized onto the image
+    /// without being stretched. `images` are the images the masks were found
+    /// for. Reads the headers only, so it can run before any image is decoded.
+    pub fn check_aspect(&self, images: &[PathBuf]) -> Result<(), EurocError> {
+        for (path, image) in self.paths.iter().zip(images) {
             let (w, h) = image::image_dimensions(path).map_err(|source| EurocError::Image {
                 path: path.clone(),
                 source,
             })?;
-            if !same_aspect((w, h), (width, height)) {
+            let (iw, ih) = oriented_dimensions(image)?;
+            if !same_aspect((w, h), (iw, ih)) {
                 return Err(EurocError::Sfm(format!(
-                    "masks: {} is {w}x{h}, not the aspect of the {width}x{height} images",
-                    path.display()
+                    "masks: {} is {w}x{h}, not the aspect of {} ({iw}x{ih})",
+                    path.display(),
+                    image.display()
                 )));
             }
         }
@@ -117,6 +120,35 @@ impl ImageMasks {
         masked_out(&img, self.flip, width, height)
             .map_err(|e| EurocError::Sfm(format!("masks: {}: {e}", path.display())))
     }
+}
+
+/// The size of `path`'s image after its EXIF orientation is applied, from its
+/// header.
+fn oriented_dimensions(path: &Path) -> Result<(u32, u32), EurocError> {
+    use image::metadata::Orientation;
+    use image::ImageDecoder;
+    let io = |source| EurocError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let err = |source| EurocError::Image {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut decoder = image::ImageReader::open(path)
+        .map_err(io)?
+        .with_guessed_format()
+        .map_err(io)?
+        .into_decoder()
+        .map_err(err)?;
+    let (w, h) = decoder.dimensions();
+    Ok(match decoder.orientation().map_err(err)? {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => (h, w),
+        _ => (w, h),
+    })
 }
 
 /// Whether `a` and `b` (width, height) have the same aspect within 1%.
@@ -164,20 +196,28 @@ fn masked_out(
 
 /// `keypoints` and their `descriptors` without the keypoints inside the
 /// masked-out pixels of `masked` (`width` wide, `true` = masked out), in
-/// their order. A keypoint is in the pixel its position falls in: positions
-/// are in COLMAP's convention, where pixel `(i, j)` covers `[i, i+1) x
-/// [j, j+1)`.
+/// their order. A keypoint is in the pixel it lies on, which depends on the
+/// detector's convention for positions. With `half_pixel_centres` (the
+/// VLFeat-compatible detector, COLMAP's convention) pixel `i` covers
+/// `[i, i+1)`, so the pixel is `floor(x)`; without it (the default
+/// detector, on the CPU and the GPU) pixel `i` is centred on `x = i`, so the
+/// pixel is `round(x)`, as in `keypoint_colours`.
 pub fn drop_masked_keypoints(
     keypoints: Vec<SiftKeypoint>,
     descriptors: Vec<Vec<f32>>,
     masked: &[bool],
     width: usize,
+    half_pixel_centres: bool,
 ) -> (Vec<SiftKeypoint>, Vec<Vec<f32>>) {
     debug_assert_eq!(keypoints.len(), descriptors.len());
     let height = masked.len() / width.max(1);
+    let pixel = |v: f64| {
+        let v = if half_pixel_centres { v } else { v + 0.5 };
+        v.floor().max(0.0) as usize
+    };
     let outside = |k: &SiftKeypoint| {
-        let x = (k.x.floor().max(0.0) as usize).min(width.saturating_sub(1));
-        let y = (k.y.floor().max(0.0) as usize).min(height.saturating_sub(1));
+        let x = pixel(k.x).min(width.saturating_sub(1));
+        let y = pixel(k.y).min(height.saturating_sub(1));
         masked[y * width + x]
     };
     keypoints
@@ -368,36 +408,88 @@ mod tests {
         assert!(err.to_string().contains("not a directory"));
     }
 
+    /// A `w x h` JPEG whose EXIF orientation tag says `orientation`.
+    fn jpeg_with_orientation(w: u32, h: u32, orientation: u16) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&RgbImage::new(w, h))
+            .unwrap();
+        let mut tiff: Vec<u8> = b"II*\0".to_vec();
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend(0x0112u16.to_le_bytes());
+        tiff.extend(3u16.to_le_bytes());
+        tiff.extend(1u32.to_le_bytes());
+        tiff.extend(orientation.to_le_bytes());
+        tiff.extend(0u16.to_le_bytes());
+        tiff.extend(0u32.to_le_bytes());
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        out.extend(((tiff.len() + 8) as u16).to_be_bytes());
+        out.extend(b"Exif\0\0");
+        out.extend(&tiff);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
     #[test]
     fn a_mask_of_another_aspect_is_an_error_and_another_size_is_not() {
         let tmp = Tmp::new("aspect");
-        // Four-thirds masks of two sizes, and a square one.
-        GrayImage::from_pixel(8, 6, Luma([255]))
-            .save(tmp.0.join("small.png"))
-            .unwrap();
-        GrayImage::from_pixel(40, 30, Luma([255]))
-            .save(tmp.0.join("big.png"))
-            .unwrap();
-        GrayImage::from_pixel(8, 8, Luma([255]))
-            .save(tmp.0.join("square.png"))
-            .unwrap();
+        let (images_dir, masks_dir) = (tmp.0.join("images"), tmp.0.join("masks"));
+        std::fs::create_dir_all(&images_dir).unwrap();
+        std::fs::create_dir_all(&masks_dir).unwrap();
+        // Four-thirds photos; masks of two sizes (same aspect), a square one,
+        // and a portrait one for a photo stored landscape and turned by EXIF.
+        let png = |dir: &Path, name: &str, w: u32, h: u32| {
+            GrayImage::from_pixel(w, h, Luma([255]))
+                .save(dir.join(name))
+                .unwrap();
+        };
+        for name in ["small", "big", "square", "turned"] {
+            png(&images_dir, &format!("{name}.png"), 16, 12);
+        }
+        std::fs::write(
+            images_dir.join("turned.jpg"),
+            jpeg_with_orientation(16, 12, 6),
+        )
+        .unwrap();
+        std::fs::remove_file(images_dir.join("turned.png")).unwrap();
+        png(&masks_dir, "small.png", 8, 6);
+        png(&masks_dir, "big.png", 40, 30);
+        png(&masks_dir, "square.png", 8, 8);
+        png(&masks_dir, "turned.png", 12, 16);
         let masks = |names: &[&str]| {
             let images: Vec<PathBuf> = names
                 .iter()
-                .map(|n| PathBuf::from(format!("/x/{n}.jpg")))
+                .map(|n| {
+                    let ext = if *n == "turned" { "jpg" } else { "png" };
+                    images_dir.join(format!("{n}.{ext}"))
+                })
                 .collect();
-            ImageMasks::find(&tmp.0, &images, false).unwrap()
+            (
+                ImageMasks::find(&masks_dir, &images, false).unwrap(),
+                images,
+            )
         };
-        let ok = masks(&["small", "big"]);
-        ok.check_aspect(16, 12).unwrap();
+        let (ok, images) = masks(&["small", "big"]);
+        ok.check_aspect(&images).unwrap();
         assert_eq!(ok.load(0, 16, 12).unwrap().len(), 16 * 12);
         assert_eq!(ok.load(1, 4, 3).unwrap().len(), 4 * 3);
-        let bad = masks(&["small", "square"]);
-        let err = bad.check_aspect(16, 12).unwrap_err().to_string();
+        let (bad, images) = masks(&["small", "square"]);
+        let err = bad.check_aspect(&images).unwrap_err().to_string();
         assert!(err.contains("square.png") && err.contains("8x8"), "{err}");
         // `load` checks too, for a caller that skipped `check_aspect`.
         assert!(bad.load(1, 16, 12).is_err());
         assert!(bad.load(0, 16, 12).is_ok());
+        // The image is 12x16 once its EXIF orientation is applied.
+        let (turned, images) = masks(&["turned"]);
+        turned.check_aspect(&images).unwrap();
+        // The same photo without the tag would not match the portrait mask.
+        std::fs::write(
+            images_dir.join("turned.jpg"),
+            jpeg_with_orientation(16, 12, 1),
+        )
+        .unwrap();
+        assert!(turned.check_aspect(&images).is_err());
     }
 
     #[test]
@@ -405,20 +497,21 @@ mod tests {
         let kp = |x: f64, y: f64| SiftKeypoint::from_location_scale_orientation(x, y, 1.0, 0.0);
         // 4x2 image, the right half (x >= 2) masked out.
         let masked = [false, false, true, true, false, false, true, true];
-        let kps = vec![
-            kp(0.5, 0.5),
-            kp(1.99, 1.99),
-            kp(2.0, 0.5),
-            kp(3.9, 1.5),
-            kp(2.5, 0.2),
-        ];
-        let desc: Vec<Vec<f32>> = (0..5).map(|i| vec![i as f32]).collect();
-        let (k, d) = drop_masked_keypoints(kps, desc, &masked, 4);
-        // 1.99 is still pixel 1; 2.0 is pixel 2.
-        assert_eq!(
-            k.iter().map(|k| (k.x, k.y)).collect::<Vec<_>>(),
-            [(0.5, 0.5), (1.99, 1.99)]
-        );
+        let positions = [(0.5, 0.5), (1.99, 1.99), (2.0, 0.5), (3.9, 1.5), (2.5, 0.2)];
+        let run = |half_pixel: bool| {
+            let kps = positions.iter().map(|&(x, y)| kp(x, y)).collect();
+            let desc: Vec<Vec<f32>> = (0..5).map(|i| vec![i as f32]).collect();
+            let (k, d) = drop_masked_keypoints(kps, desc, &masked, 4, half_pixel);
+            (k.iter().map(|k| (k.x, k.y)).collect::<Vec<_>>(), d)
+        };
+        // Pixel i covers [i, i+1): 1.99 is still pixel 1; 2.0 is pixel 2.
+        let (k, d) = run(true);
+        assert_eq!(k, [(0.5, 0.5), (1.99, 1.99)]);
         assert_eq!(d, [vec![0.0], vec![1.0]]);
+        // Pixel i is centred on i: 1.99 is already pixel 2 (so is 1.5); 0.5
+        // rounds up to pixel 1 and stays.
+        let (k, d) = run(false);
+        assert_eq!(k, [(0.5, 0.5)]);
+        assert_eq!(d, [vec![0.0]]);
     }
 }
