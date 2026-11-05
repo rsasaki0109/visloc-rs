@@ -12,6 +12,8 @@
 //! - [`densify`]: Inria-style clone / split / prune on the host.
 //! - [`equirect`]: 360° panorama detection and cube faces cut from them.
 //! - [`dual_fisheye`]: pinhole faces cut from an Insta360's two lenses.
+//! - `masks` (feature `euroc`): per-image masks that keep SIFT keypoints off an
+//!   operator or a monopod.
 //! - `trainer` (feature `gpu`): the on-device training loop.
 //! - `mesh` (feature `gpu`): TSDF fusion of rendered depth + surface nets.
 //!
@@ -28,6 +30,8 @@ pub mod euroc;
 pub mod init;
 #[cfg(feature = "gpu")]
 pub mod loss;
+#[cfg(feature = "euroc")]
+pub mod masks;
 #[cfg(feature = "mesh")]
 pub mod mesh;
 pub mod metrics;

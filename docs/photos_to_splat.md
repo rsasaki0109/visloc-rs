@@ -72,6 +72,37 @@ The pipeline has three stages:
    `--normal-weight 0.005` depth-normal loss makes surfaces smoother for
    -0.2 dB.
 
+## Masks
+
+`--masks DIR` keeps an operator, a monopod or any other object that moves
+with the camera out of the reconstruction, as COLMAP's
+`ImageReader.mask_path` does. `DIR` holds one PNG per photo, named after it
+(`IMG_1.jpg` has `IMG_1.jpg.png` or `IMG_1.png`), where zero (black) means
+masked out and anything else is kept. A mask with an alpha channel is read
+through its alpha. `--flip-mask` swaps the two, for masks that paint the
+region to remove. This is also the layout of Spirula's `masks` folder, whose
+masks are 8-bit grey PNGs of 0 and 255 with the photos' size.
+
+- **SfM.** SIFT sees the whole photo, and the keypoints that land on a
+  masked-out pixel are dropped afterwards, so matching and the mapper never
+  see them. The pixels are not blacked out, so the mask edge makes no
+  features. As in COLMAP, the `--max-keypoints` strongest keypoints are
+  chosen first and the masked ones removed from them: a mask over a third
+  of the photo leaves a third fewer than the cap. Raise `--max-keypoints` to
+  compensate.
+- **Training.** The working images carry the mask as alpha 0, which the
+  trainer leaves out of the loss and the held-out PSNR (the same path as
+  `--mask-black`).
+- **Sizes.** A mask may be larger or smaller than the photo, but must have
+  its aspect (to 1%): it is resized to the working images by
+  nearest-neighbour sampling, so it stays binary. It is in the photo's
+  orientation after EXIF rotation, the one SfM sees.
+- **Every photo needs a mask.** A photo without one stops the run before
+  anything is decoded, naming the photo, rather than putting the masked
+  object back into those frames.
+- **Not with `--equirect` or `--insv`**, whose images are cut from the
+  photos.
+
 ## 360° cameras
 
 `--equirect` takes a folder of 2:1 equirectangular
