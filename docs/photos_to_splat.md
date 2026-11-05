@@ -109,6 +109,25 @@ folder of 8-bit grey PNGs of 0 and 255 with the photos' size works as is.
 - **Not with `--equirect` or `--insv`**, whose images are cut from the
   photos.
 
+## Large photo sets: `--stream-images`
+
+By default every decoded photo stays in memory for SIFT. `--stream-images`
+keeps one at a time instead: the photos are scanned for their sizes, written
+once as PNGs to `<out>/images`, and each is read back for SIFT and dropped.
+Peak memory no longer grows with the number of photos, and the model is
+byte-identical to the in-memory run. Streaming decodes each photo twice (the
+scan, then the working image) plus one PNG read, so it costs some time on
+small sets. It does not combine with `--equirect`.
+
+SIFT then holds one image's scale space per thread, about 7 GB at 3840 px,
+which would use up what streaming saved. With `--stream-images` and no
+`--sift-threads`, the thread count is the number of scale spaces that fit in
+half of the machine's memory (480 bytes per pixel, memory read from
+`/proc/meminfo` or `sysctl hw.memsize`, 32 GiB assumed if unreadable), at
+least 1 and at most the number of cores. The run logs the choice. On a 32 GB
+machine that is 2 threads at 3840 x 3840. Pass `--sift-threads N` to
+override it.
+
 ## 360° cameras
 
 `--equirect` takes a folder of 2:1 equirectangular

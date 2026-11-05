@@ -118,6 +118,19 @@ pub struct PhotoSfmConfig {
     /// images get alpha 0 there, for `TrainConfig::alpha_mask`. Needs
     /// `camera`.
     pub max_angle: Option<f64>,
+    /// Keep one image at a time in memory instead of every working image
+    /// (peak RAM no longer scales with the number of images): the working
+    /// images are written to `out_dir/images` first, then SIFT reads each
+    /// back from disk and drops it after use. The features, and so the
+    /// whole reconstruction, are identical to the in-memory run. Not with
+    /// `equirect` (its faces are cut in memory); `insv` already streams.
+    pub stream_images: bool,
+    /// Threads for SIFT extraction. Each thread holds one image's scale
+    /// space, several gigabytes at 3840 px. Unset: all cores, or with
+    /// `stream_images` as many as fit in half the machine's memory (see
+    /// [`default_sift_threads`]), so that streaming does not trade the
+    /// photos' memory for the scale spaces'.
+    pub sift_threads: Option<usize>,
     /// A directory of per-image masks, COLMAP's `ImageReader.mask_path`: no
     /// SIFT keypoint is kept on a masked-out pixel, so matching and the
     /// mapper never see one, and the training images get alpha 0 there (for
@@ -242,6 +255,8 @@ impl Default for PhotoSfmConfig {
             match_u8: true,
             mask_black: None,
             max_angle: None,
+            stream_images: false,
+            sift_threads: None,
             mask_dir: None,
             mask_flip: false,
             gpu_ba: false,
@@ -1100,6 +1115,97 @@ pub fn calibrate_insv_lenses(
     Ok(cal)
 }
 
+/// One photo (or panorama) decoded, oriented and scaled to `max_size`, with
+/// its EXIF focal length (35 mm equivalent) and whether the metadata names a
+/// 360° panorama.
+fn decode_scaled(
+    p: &Path,
+    cfg: &PhotoSfmConfig,
+) -> Result<((image::RgbImage, Option<f64>), bool), EurocError> {
+    let bytes = std::fs::read(p).map_err(|source| EurocError::Io {
+        path: p.to_path_buf(),
+        source,
+    })?;
+    let img = load_oriented(p, &bytes)?;
+    let (w, h) = img.dimensions();
+    // A panorama is scaled for its faces (a quarter of its width) to
+    // be at most `max_size`.
+    let long = if cfg.equirect { w / 4 } else { w.max(h) };
+    let s = (cfg.max_size as f64 / long.max(1) as f64).min(1.0);
+    let img = if s < 1.0 {
+        resize_triangle(
+            &img,
+            ((w as f64 * s).round() as u32).max(1),
+            ((h as f64 * s).round() as u32).max(1),
+        )
+    } else {
+        img
+    };
+    Ok((
+        (img, exif_focal_35mm(&bytes)),
+        equirect::metadata_says_equirectangular(&bytes),
+    ))
+}
+
+const EQUIRECT_WARNING: &str = "images look like equirectangular (360°) panoramas; \
+     the pinhole reconstruction of them will not be usable. Cut them into cube \
+     faces with `equirect` (gsplat_photos --equirect)";
+
+/// The most common resolution among `sizes` (one camera for the trainer).
+fn most_common_size(sizes: &[(u32, u32)]) -> (u32, u32) {
+    let mut sizes = sizes.to_vec();
+    sizes.sort_unstable();
+    sizes
+        .chunk_by(|a, b| a == b)
+        .max_by_key(|c| c.len())
+        .map(|c| c[0])
+        .expect("at least 3 images")
+}
+
+/// Bytes of SIFT scale space one thread holds per pixel of its image. About
+/// 7 GB at 3840 x 3840 was observed (a measured figure from a 3840 px run
+/// on the CPU extractor, 475 B/px), rounded up to 480.
+const SIFT_BYTES_PER_PIXEL: u64 = 480;
+
+/// The machine's physical memory in bytes, if it can be read (Linux
+/// `/proc/meminfo`, macOS `sysctl hw.memsize`).
+fn physical_memory_bytes() -> Option<u64> {
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        let kib = text
+            .lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?;
+        return Some(kib * 1024);
+    }
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
+
+/// SIFT threads when streaming and `--sift-threads` is not given: as many
+/// as hold their scale spaces (`SIFT_BYTES_PER_PIXEL` per pixel) in half of
+/// `memory` (the rest is for the keypoints, matching and the mapper), at
+/// least 1 and at most `cores`. Without a readable `memory`, 16 GiB is
+/// assumed (a guess: a 32 GB machine).
+fn default_sift_threads(width: u32, height: u32, memory: Option<u64>, cores: usize) -> usize {
+    let budget = memory.unwrap_or(32 << 30) / 2;
+    let per_thread = (width as u64 * height as u64 * SIFT_BYTES_PER_PIXEL).max(1);
+    ((budget / per_thread) as usize).clamp(1, cores.max(1))
+}
+
+/// Whether a size is within 1% of `(width, height)` (undistorted crops a few
+/// pixels apart, which can round to a different size after scaling): those
+/// are resized to it, the rest dropped.
+fn near_size((w, h): (u32, u32), (width, height): (u32, u32)) -> bool {
+    w.abs_diff(width) as f64 <= 0.01 * width as f64
+        && h.abs_diff(height) as f64 <= 0.01 * height as f64
+}
+
 /// Read, decode (oriented) and scale the photos (or panoramas), and read
 /// their EXIF focal lengths and whether the metadata names a 360°
 /// panorama, in parallel. Keeps the most common resolution (one camera for
@@ -1114,31 +1220,7 @@ fn load_photos(
     let t_load = std::time::Instant::now();
     let loaded: Vec<((image::RgbImage, Option<f64>), bool)> = files
         .par_iter()
-        .map(|p| -> Result<_, EurocError> {
-            let bytes = std::fs::read(p).map_err(|source| EurocError::Io {
-                path: p.clone(),
-                source,
-            })?;
-            let img = load_oriented(p, &bytes)?;
-            let (w, h) = img.dimensions();
-            // A panorama is scaled for its faces (a quarter of its width) to
-            // be at most `max_size`.
-            let long = if cfg.equirect { w / 4 } else { w.max(h) };
-            let s = (cfg.max_size as f64 / long.max(1) as f64).min(1.0);
-            let img = if s < 1.0 {
-                resize_triangle(
-                    &img,
-                    ((w as f64 * s).round() as u32).max(1),
-                    ((h as f64 * s).round() as u32).max(1),
-                )
-            } else {
-                img
-            };
-            Ok((
-                (img, exif_focal_35mm(&bytes)),
-                equirect::metadata_says_equirectangular(&bytes),
-            ))
-        })
+        .map(|p| decode_scaled(p, cfg))
         .collect::<Result<_, _>>()?;
     let (decoded, tagged_360): (Vec<_>, Vec<bool>) = loaded.into_iter().unzip();
     if !cfg.equirect {
@@ -1149,33 +1231,19 @@ fn load_photos(
             .count();
         if 2 * panoramas >= decoded.len() {
             log(&format!(
-                "warning: {panoramas} of {} images look like equirectangular (360°) panoramas; \
-                 the pinhole reconstruction of them will not be usable. Cut them into cube \
-                 faces with `equirect` (gsplat_photos --equirect)",
+                "warning: {panoramas} of {} {EQUIRECT_WARNING}",
                 decoded.len()
             ));
         }
     }
     // The most common resolution (one camera for the trainer).
-    let mut sizes: Vec<(u32, u32)> = decoded.iter().map(|d| d.0.dimensions()).collect();
-    sizes.sort_unstable();
-    let (width, height) = sizes
-        .chunk_by(|a, b| a == b)
-        .max_by_key(|c| c.len())
-        .map(|c| c[0])
-        .expect("at least 3 images");
-    // Sizes within 1% of it (undistorted crops a few pixels apart, which can
-    // round to a different size after scaling) are resized to it; the rest
-    // are dropped.
-    let near = |(w, h): (u32, u32)| {
-        w.abs_diff(width) as f64 <= 0.01 * width as f64
-            && h.abs_diff(height) as f64 <= 0.01 * height as f64
-    };
+    let sizes: Vec<(u32, u32)> = decoded.iter().map(|d| d.0.dimensions()).collect();
+    let (width, height) = most_common_size(&sizes);
     let mut resized = 0usize;
     let (files, decoded): (Vec<_>, Vec<_>) = files
         .into_iter()
         .zip(decoded)
-        .filter(|(_, d)| near(d.0.dimensions()))
+        .filter(|(_, d)| near_size(d.0.dimensions(), (width, height)))
         .map(|(f, (img, f35))| {
             if img.dimensions() == (width, height) {
                 return (f, (img, f35));
@@ -1193,6 +1261,90 @@ fn load_photos(
         t_load.elapsed().as_secs_f64()
     ));
     Ok((files, decoded, width, height))
+}
+
+/// What [`load_photos`] decides, without keeping the images: decodes each
+/// photo (a thread's worth at a time) for its scaled size, EXIF focal length
+/// and panorama check, then drops it. Returns the files kept, their EXIF
+/// focal lengths (35 mm equivalent) and the resolution. The images are
+/// decoded again, one at a time, by [`write_streamed_working_images`].
+#[allow(clippy::type_complexity)]
+fn scan_photos(
+    files: Vec<PathBuf>,
+    cfg: &PhotoSfmConfig,
+    log: &mut dyn FnMut(&str),
+) -> Result<(Vec<PathBuf>, Vec<Option<f64>>, u32, u32), EurocError> {
+    let t_load = std::time::Instant::now();
+    // (size, EXIF focal, looks like a panorama)
+    let scanned: Vec<((u32, u32), Option<f64>, bool)> = files
+        .par_iter()
+        .map(|p| -> Result<_, EurocError> {
+            let ((img, f35), tagged) = decode_scaled(p, cfg)?;
+            Ok((
+                img.dimensions(),
+                f35,
+                tagged || equirect::looks_equirectangular(&img),
+            ))
+        })
+        .collect::<Result<_, _>>()?;
+    let panoramas = scanned.iter().filter(|s| s.2).count();
+    if 2 * panoramas >= scanned.len() {
+        log(&format!(
+            "warning: {panoramas} of {} {EQUIRECT_WARNING}",
+            scanned.len()
+        ));
+    }
+    let sizes: Vec<(u32, u32)> = scanned.iter().map(|s| s.0).collect();
+    let (width, height) = most_common_size(&sizes);
+    let kept: Vec<_> = files
+        .into_iter()
+        .zip(scanned)
+        .filter(|(_, s)| near_size(s.0, (width, height)))
+        .collect();
+    let resized = kept.iter().filter(|(_, s)| s.0 != (width, height)).count();
+    let (files, f35s): (Vec<_>, Vec<_>) = kept.into_iter().map(|(f, s)| (f, s.1)).unzip();
+    log(&format!(
+        "{} images at {width}x{height} ({resized} resized from within 1%; others dropped: {}; \
+         scanned in {:.1} s, streaming from disk)",
+        files.len(),
+        sizes.len() - files.len(),
+        t_load.elapsed().as_secs_f64()
+    ));
+    Ok((files, f35s, width, height))
+}
+
+/// Write the working images `frame_{i}.png` of the streamed photos, one
+/// photo per thread at a time: the same pixels [`load_photos`] would hold
+/// in memory (decoded, scaled, resized to the common size), saved with
+/// `mask_black`, `outside` and the per-image masks as alpha like the in-memory
+/// path does.
+#[allow(clippy::too_many_arguments)]
+fn write_streamed_working_images(
+    files: &[PathBuf],
+    cfg: &PhotoSfmConfig,
+    width: u32,
+    height: u32,
+    paths: &[PathBuf],
+    outside: Option<&[bool]>,
+    masks: Option<&ImageMasks>,
+) -> Result<(), EurocError> {
+    files
+        .par_iter()
+        .zip(paths)
+        .enumerate()
+        .map(|(i, (f, path))| -> Result<(), EurocError> {
+            let ((img, _), _) = decode_scaled(f, cfg)?;
+            let img = if img.dimensions() == (width, height) {
+                img
+            } else {
+                resize_triangle(&img, width, height)
+            };
+            // The per-image mask is read here, from disk, with the one image.
+            let left_out = left_out_pixels(masks, i, width, height, outside)?;
+            save_working_image(&img, path, cfg.mask_black, left_out.as_deref())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(())
 }
 
 /// Cut dual-fisheye frames into their lens faces (the front lens's five,
@@ -1361,6 +1513,27 @@ fn scaled_camera(camera: &Camera, width: u32, height: u32) -> Result<Camera, Eur
     };
     scaled.set_intrinsics(fx * sx, fy * sy, cx * sx, cy * sy);
     Ok(scaled)
+}
+
+/// The pixels left out of image `i`'s training loss: `outside` (past
+/// `max_angle`) joined by the per-image mask's masked-out pixels, if any.
+fn left_out_pixels<'a>(
+    masks: Option<&ImageMasks>,
+    i: usize,
+    width: u32,
+    height: u32,
+    outside: Option<&'a [bool]>,
+) -> Result<Option<std::borrow::Cow<'a, [bool]>>, EurocError> {
+    let from_file = masks.map(|m| m.load(i, width, height)).transpose()?;
+    Ok(match (outside, from_file) {
+        (None, None) => None,
+        (Some(o), None) => Some(std::borrow::Cow::Borrowed(o)),
+        (None, Some(m)) => Some(std::borrow::Cow::Owned(m)),
+        (Some(o), Some(mut m)) => {
+            m.iter_mut().zip(o).for_each(|(a, b)| *a |= b);
+            Some(std::borrow::Cow::Owned(m))
+        }
+    })
 }
 
 /// Write a working image as PNG; with `mask_black` or `outside` (pixels to
@@ -1738,6 +1911,15 @@ pub fn build_photo_dataset(
     } else {
         1
     };
+    if cfg.stream_images && cfg.equirect {
+        return Err(EurocError::Sfm(
+            "stream_images does not combine with equirect (its cube faces are cut in memory)"
+                .into(),
+        ));
+    }
+    // With `stream_images`, the working images' EXIF focal lengths (their
+    // pixels are written once the camera is known, below).
+    let mut streamed_f35: Option<Vec<Option<f64>>> = None;
     let (files, labels, work, width, height, panoramas) = if let Some(lenses) = &lenses {
         let (files, labels, paths, size) = write_lens_faces(files, lenses, cfg, &images_out, log)?;
         (files, labels, WorkImages::Disk(paths), size, size, None)
@@ -1799,6 +1981,14 @@ pub fn build_photo_dataset(
             size,
             panoramas,
         )
+    } else if cfg.stream_images {
+        let (files, f35s, width, height) = scan_photos(files, cfg, log)?;
+        let labels = files.iter().map(|f| f.display().to_string()).collect();
+        let paths = (0..files.len())
+            .map(|i| images_out.join(format!("frame_{i:05}.png")))
+            .collect();
+        streamed_f35 = Some(f35s);
+        (files, labels, WorkImages::Disk(paths), width, height, None)
     } else {
         let (files, decoded, width, height) = load_photos(files, cfg, log)?;
         let labels = files.iter().map(|f| f.display().to_string()).collect();
@@ -1828,9 +2018,10 @@ pub fn build_photo_dataset(
     };
     let n = work.len();
     let long = width.max(height) as f64;
-    let mut f35s: Vec<f64> = match &work {
-        WorkImages::Memory(images) => images.iter().filter_map(|d| d.1).collect(),
-        WorkImages::Disk(_) => Vec::new(),
+    let mut f35s: Vec<f64> = match (&work, &streamed_f35) {
+        (WorkImages::Memory(images), _) => images.iter().filter_map(|d| d.1).collect(),
+        (WorkImages::Disk(_), Some(f35s)) => f35s.iter().flatten().copied().collect(),
+        (WorkImages::Disk(_), None) => Vec::new(),
     };
     f35s.sort_by(f64::total_cmp);
     let calibrated = match &cfg.camera {
@@ -1915,21 +2106,8 @@ pub fn build_photo_dataset(
             .zip(&names)
             .enumerate()
             .map(|(i, ((img, _), name))| {
-                // The masks' alpha joins the other regions left out.
-                let from_file = masks
-                    .as_ref()
-                    .map(|m| m.load(i, width, height))
-                    .transpose()?;
-                let left_out: Option<std::borrow::Cow<[bool]>> =
-                    match (outside.as_deref(), from_file) {
-                        (None, None) => None,
-                        (Some(o), None) => Some(std::borrow::Cow::Borrowed(o)),
-                        (None, Some(m)) => Some(std::borrow::Cow::Owned(m)),
-                        (Some(o), Some(mut m)) => {
-                            m.iter_mut().zip(o).for_each(|(a, b)| *a |= b);
-                            Some(std::borrow::Cow::Owned(m))
-                        }
-                    };
+                let left_out =
+                    left_out_pixels(masks.as_ref(), i, width, height, outside.as_deref())?;
                 save_working_image(
                     img,
                     &images_out.join(name),
@@ -1938,6 +2116,25 @@ pub fn build_photo_dataset(
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+    } else if streamed_f35.is_some() {
+        let t = std::time::Instant::now();
+        let WorkImages::Disk(paths) = &work else {
+            unreachable!("streamed photos are on disk")
+        };
+        write_streamed_working_images(
+            &files,
+            cfg,
+            width,
+            height,
+            paths,
+            outside.as_deref(),
+            masks.as_ref(),
+        )?;
+        log(&format!(
+            "wrote {} working images ({:.1} s)",
+            paths.len(),
+            t.elapsed().as_secs_f64()
+        ));
     }
     let listing: String = names
         .iter()
@@ -2069,6 +2266,17 @@ pub fn build_photo_dataset(
             .map_err(|e| EurocError::Sfm(format!("gpu: {e}")))?;
         log(&format!("gpu ba: reduced camera systems on {adapter}"));
     }
+    // Images per GPU extraction batch: 256, or when streaming, as many as
+    // fit in about 2 GB of decoded RGB (3 B/px) plus grey f32 (4 B/px): a
+    // batch holds them all. The chunk loops (`extract_batched`,
+    // `extract_chunked`) prepare, extract and drop one chunk at a time and
+    // prefetch nothing, so 2 GB is also the peak, not half of it.
+    #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
+    let chunk_len: usize = if cfg.stream_images {
+        ((2usize << 30) / (width as usize * height as usize * 7)).clamp(1, 256)
+    } else {
+        256
+    };
     let t0 = std::time::Instant::now();
     #[cfg(feature = "gpu")]
     let mut gpu_sift = if cfg.gpu {
@@ -2119,7 +2327,7 @@ pub fn build_photo_dataset(
             // limit go to the CPU.
             features.extend(extract_batched(
                 n,
-                256,
+                chunk_len,
                 |start, count| {
                     let chunk = (start..start + count)
                         .into_par_iter()
@@ -2165,7 +2373,7 @@ pub fn build_photo_dataset(
         #[cfg(feature = "gpu")]
         features.extend(extract_chunked(
             n,
-            256,
+            chunk_len,
             |start, count| {
                 let chunk = (start..start + count)
                     .into_par_iter()
@@ -2196,22 +2404,46 @@ pub fn build_photo_dataset(
         )?);
         (features, colours)
     } else {
-        (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let img = work.get(i)?;
-                let g = gray_of(&img);
-                let gray = GrayImage::new(width as usize, height as usize, &g)
-                    .map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let (kps, desc) =
-                    extract_sift(&gray, &sift_cfg).map_err(|e| EurocError::Sift(format!("{e}")))?;
-                let f = features_of(kps, desc, load_mask(i)?.as_deref());
-                let colours = keypoint_colours(&img, &f.0.keypoints);
-                Ok((f, colours))
-            })
-            .collect::<Result<Vec<_>, EurocError>>()?
-            .into_iter()
-            .unzip()
+        let extract_all = || {
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let img = work.get(i)?;
+                    let g = gray_of(&img);
+                    let gray = GrayImage::new(width as usize, height as usize, &g)
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    let (kps, desc) = extract_sift(&gray, &sift_cfg)
+                        .map_err(|e| EurocError::Sift(format!("{e}")))?;
+                    let f = features_of(kps, desc, load_mask(i)?.as_deref());
+                    let colours = keypoint_colours(&img, &f.0.keypoints);
+                    Ok((f, colours))
+                })
+                .collect::<Result<Vec<_>, EurocError>>()
+        };
+        // Each thread holds one image's scale space: `sift_threads` caps it.
+        // Streaming exists to bound memory, so it caps it by default too.
+        let threads = cfg.sift_threads.or_else(|| {
+            if !cfg.stream_images {
+                return None;
+            }
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let t = default_sift_threads(width, height, physical_memory_bytes(), cores);
+            log(&format!(
+                "sift: {t} threads while streaming (scale space ~{:.1} GB each at {width}x{height}); \
+                 --sift-threads N overrides",
+                (width as u64 * height as u64 * SIFT_BYTES_PER_PIXEL) as f64 / 1e9
+            ));
+            Some(t)
+        });
+        let extracted = match threads {
+            Some(t) => rayon::ThreadPoolBuilder::new()
+                .num_threads(t.max(1))
+                .build()
+                .map_err(|e| EurocError::Sift(format!("sift thread pool: {e}")))?
+                .install(extract_all)?,
+            None => extract_all()?,
+        };
+        extracted.into_iter().unzip()
     };
     drop(work);
     let (features, desc_bytes): (Vec<FeatureSet>, Vec<Vec<u8>>) = sift.into_iter().unzip();
@@ -4418,5 +4650,344 @@ mod tests {
         );
         assert!(err.contains("not supported with equirect or insv"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- streaming ------------------------------------------
+
+    /// Pinhole photos of the synthetic room: the six 90° faces of panoramas
+    /// from five viewpoints, `size` px square (30 photos).
+    fn stream_room_photos(root: &Path, size: u32) -> PathBuf {
+        let images = root.join("photos");
+        std::fs::create_dir_all(&images).unwrap();
+        let faces = crate::equirect::cube_face_rotations();
+        for k in 0..5usize {
+            let c =
+                nalgebra::Vector3::new(-1.0 + 0.5 * k as f64, 0.1 * (k % 2) as f64, 0.3 * k as f64);
+            let pano = room_panorama(1024, c, 0.4 * k as f64);
+            for (name, r) in &faces {
+                crate::equirect::cube_face(&pano, r, size)
+                    .save(images.join(format!("p{k}_{name}.png")))
+                    .unwrap();
+            }
+        }
+        images
+    }
+
+    fn stream_cpu_cfg(size: u32) -> super::PhotoSfmConfig {
+        super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            eval_every: 0,
+            focal_px: Some(size as f64 / 2.0),
+            sift_threads: Some(2),
+            ..Default::default()
+        }
+    }
+
+    /// `(report.registered, the text of the written model)`.
+    fn stream_run_sfm(images: &Path, out: &Path, cfg: &super::PhotoSfmConfig) -> (usize, String) {
+        let (_, _, report) =
+            super::build_photo_dataset(images, out, cfg, &mut |_: &str| {}).unwrap();
+        let mut text = String::new();
+        for f in ["cameras.txt", "images.txt", "points3D.txt"] {
+            text += &std::fs::read_to_string(out.join("sparse/0").join(f)).unwrap();
+        }
+        (report.registered, text)
+    }
+
+    /// The image-point observations (x, y) of `images.txt` text.
+    fn stream_observations(model: &str) -> Vec<(f64, f64)> {
+        let start = model.find("# Image list").unwrap();
+        let rest = &model[start..];
+        let end = rest.find("# 3D point list").unwrap_or(rest.len());
+        rest[..end]
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .skip(1)
+            .step_by(2)
+            .flat_map(|l| {
+                l.split_whitespace()
+                    .map(|v| v.parse::<f64>().unwrap())
+                    .collect::<Vec<_>>()
+                    .chunks(3)
+                    .map(|c| (c[0], c[1]))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The streamed run and the in-memory run write the same model, byte for
+    /// byte: same cameras, poses, points and observations.
+    #[test]
+    fn streamed_sfm_equals_in_memory_sfm() {
+        let root = std::env::temp_dir().join(format!("visloc_stream_{}", std::process::id()));
+        let images = stream_room_photos(&root, 192);
+        let cfg = stream_cpu_cfg(192);
+        let (reg_mem, mem) = stream_run_sfm(&images, &root.join("mem"), &cfg);
+        let streamed = super::PhotoSfmConfig {
+            stream_images: true,
+            ..cfg.clone()
+        };
+        let (reg_str, str_) = stream_run_sfm(&images, &root.join("str"), &streamed);
+        // Not a trivial model: otherwise "identical" proves nothing.
+        assert!(reg_mem >= 10, "{reg_mem} registered");
+        assert!(stream_observations(&mem).len() > 1000);
+        assert_eq!(reg_mem, reg_str);
+        assert!(mem == str_, "streamed model differs from the in-memory one");
+        // The names listing and the working images match too.
+        assert_eq!(
+            std::fs::read(root.join("mem/image_names.txt")).unwrap(),
+            std::fs::read(root.join("str/image_names.txt")).unwrap()
+        );
+        for i in [0usize, 7, 29] {
+            let name = format!("images/frame_{i:05}.png");
+            assert_eq!(
+                std::fs::read(root.join("mem").join(&name)).unwrap(),
+                std::fs::read(root.join("str").join(&name)).unwrap(),
+                "{name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Streaming with masks: each photo has its own mask (a different edge
+    /// per photo, so a mask read for the wrong photo shows), and the
+    /// streamed run, which reads photos and masks from disk one at a time,
+    /// extracts the same keypoints, writes the same model and the same
+    /// alpha-carrying working images as the in-memory run.
+    ///
+    /// The config below is `Default` plus `pin`, which says where SIFT and
+    /// matching run. It must pin them: `Default` has `gpu: true`, and in a
+    /// `gpu` build that sends matching to the GPU matcher, which this test
+    /// is not about (and which matches nothing on some devices, leaving the
+    /// mapper no pairs). The CPU test pins both to the CPU; the GPU test
+    /// keeps the GPU extractor, which is what the streaming chunk loop
+    /// drives, and matches on the CPU, like the other GPU tests here.
+    fn streamed_masked_sfm_equals_in_memory_masked_sfm_with(
+        tag: &str,
+        gpu_extractor: bool,
+        pin: impl Fn(&mut super::PhotoSfmConfig),
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("visloc_strmask_{tag}_{}", std::process::id()));
+        let images = room_photos(&root);
+        let edges: Vec<u32> = (0..6).map(|k| 128 + 16 * k).collect();
+        let native: Vec<u32> = edges.iter().map(|e| 3 * e).collect();
+        edge_masks(&root.join("masks"), 960, 720, &native, false);
+        let cfg = super::PhotoSfmConfig {
+            max_size: 320,
+            focal_px: Some(420.0 * 320.0 / 480.0),
+            eval_every: 0,
+            sift_threads: Some(2),
+            mask_dir: Some(root.join("masks")),
+            ..Default::default()
+        };
+        let mut cfg = cfg;
+        pin(&mut cfg);
+        let streamed = super::PhotoSfmConfig {
+            stream_images: true,
+            ..cfg.clone()
+        };
+        let unmasked = super::PhotoSfmConfig {
+            mask_dir: None,
+            ..cfg.clone()
+        };
+        let (_, control_report, control_logs) =
+            run_photos(&images, &root.join("control"), &unmasked);
+        let (_, mem_report, mem_logs) = run_photos(&images, &root.join("mem"), &cfg);
+        let (_, str_report, str_logs) = run_photos(&images, &root.join("str"), &streamed);
+        // The pin took effect: the GPU extractor ran in every run of the GPU
+        // test and in none of the CPU test's.
+        for logs in [&control_logs, &mem_logs, &str_logs] {
+            assert_eq!(
+                logs.iter()
+                    .any(|l| l.starts_with("gpu sift: VLFeat-compatible extractor")),
+                gpu_extractor
+            );
+        }
+        // The masks did something (so equality below is about masked runs).
+        let (mean_control, _) = keypoint_counts(&control_logs);
+        let (mean_mem, dropped_mem) = keypoint_counts(&mem_logs);
+        let (mean_str, dropped_str) = keypoint_counts(&str_logs);
+        assert!(
+            dropped_mem > 100 && mean_mem < mean_control,
+            "{dropped_mem}"
+        );
+        assert_eq!((mean_mem, dropped_mem), (mean_str, dropped_str));
+        assert!(mem_report.registered >= 4, "{mem_report:?}");
+        assert_eq!(mem_report.registered, str_report.registered);
+        assert!(control_report.registered >= 4);
+        for f in ["cameras.txt", "images.txt", "points3D.txt"] {
+            assert_eq!(
+                std::fs::read(root.join("mem/sparse/0").join(f)).unwrap(),
+                std::fs::read(root.join("str/sparse/0").join(f)).unwrap(),
+                "{f}"
+            );
+        }
+        for k in 0..6 {
+            assert_eq!(
+                keypoints_of(&root.join("mem"), k),
+                keypoints_of(&root.join("str"), k),
+                "keypoints of photo {k}"
+            );
+            let name = format!("images/frame_{k:05}.png");
+            assert_eq!(
+                std::fs::read(root.join("mem").join(&name)).unwrap(),
+                std::fs::read(root.join("str").join(&name)).unwrap(),
+                "{name}"
+            );
+            let rgba = working_image(&root.join("str"), k);
+            assert_eq!(rgba.get_pixel(edges[k] - 2, 50).0[3], 255, "photo {k}");
+            assert_eq!(rgba.get_pixel(edges[k] + 2, 50).0[3], 0, "photo {k}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn streamed_masked_sfm_equals_in_memory_masked_sfm() {
+        streamed_masked_sfm_equals_in_memory_masked_sfm_with("cpu", false, |c| {
+            c.gpu = false;
+            c.gpu_sift = false;
+        });
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn streamed_masked_sfm_equals_in_memory_masked_sfm_gpu_extractor() {
+        if have_gpu() {
+            streamed_masked_sfm_equals_in_memory_masked_sfm_with("gpu", true, cpu_pairs);
+        }
+    }
+
+    /// Streaming with everything the working-image writer takes: a camera
+    /// with `max_angle`, `mask_black`, and photos of three sizes (the common
+    /// one, two 1% off that are resized to it, one far off that is dropped).
+    /// The streamed run must write the same working images (alpha included),
+    /// model and drop count as the in-memory run. Each part is checked to
+    /// matter: a blacked-out block (only `mask_black` clears it), pixels past
+    /// the angle (only `outside` clears them), and sizes (only the resize
+    /// makes the near-size photos 480x360).
+    #[test]
+    fn streamed_sfm_equals_in_memory_with_camera_angle_black_and_mixed_sizes() {
+        let root = std::env::temp_dir().join(format!("visloc_strmix_{}", std::process::id()));
+        let images = root.join("in");
+        std::fs::create_dir_all(&images).unwrap();
+        // (width, height, view index): 6 at the common size, 2 within 1%, 1 far off.
+        let sizes: [(u32, u32); 9] = [
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (480, 360),
+            (476, 357),
+            (476, 357),
+            (240, 180),
+        ];
+        for (k, &(w, h)) in sizes.iter().enumerate() {
+            let centre = nalgebra::Vector3::new(-1.0 + 0.4 * k as f64, 0.05 * (k % 2) as f64, 0.0);
+            let mut img = room_photo(w, h, 420.0 * w as f64 / 480.0, centre, 0.04 * k as f64);
+            // A blacked-out block, in the part of the frame inside 25 degrees.
+            for y in (280 * h / 360)..(320 * h / 360) {
+                for x in (300 * w / 480)..(340 * w / 480) {
+                    img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+                }
+            }
+            img.save(images.join(format!("view_{k}.png"))).unwrap();
+        }
+        let cfg = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            max_size: 480,
+            eval_every: 0,
+            sift_threads: Some(2),
+            camera: Some(super::parse_camera_row("PINHOLE 480 360 420 420 240 180").unwrap()),
+            max_angle: Some(25.0),
+            mask_black: Some(12),
+            ..Default::default()
+        };
+        let streamed = super::PhotoSfmConfig {
+            stream_images: true,
+            ..cfg.clone()
+        };
+        let (_, mem_report, mem_logs) = run_photos(&images, &root.join("mem"), &cfg);
+        let (_, str_report, str_logs) = run_photos(&images, &root.join("str"), &streamed);
+        // The sizes were in play: 2 resized, 1 dropped, the same on both paths.
+        let counts = |logs: &[String]| -> (usize, usize) {
+            let l = logs
+                .iter()
+                .find(|m| m.contains("resized from within 1%"))
+                .unwrap();
+            let resized = l
+                .split("(")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap();
+            let dropped = l
+                .split("others dropped: ")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            (resized.parse().unwrap(), dropped.parse().unwrap())
+        };
+        assert_eq!(counts(&mem_logs), (2, 1), "{mem_logs:?}");
+        assert_eq!(counts(&str_logs), counts(&mem_logs), "{str_logs:?}");
+        assert!(mem_report.registered >= 4, "{mem_report:?}");
+        assert_eq!(mem_report.registered, str_report.registered);
+        for f in ["cameras.txt", "images.txt", "points3D.txt"] {
+            assert_eq!(
+                std::fs::read(root.join("mem/sparse/0").join(f)).unwrap(),
+                std::fs::read(root.join("str/sparse/0").join(f)).unwrap(),
+                "{f}"
+            );
+        }
+        // 8 photos kept; every working image (pixels and alpha) is the same.
+        for k in 0..8 {
+            let name = format!("images/frame_{k:05}.png");
+            assert_eq!(
+                std::fs::read(root.join("mem").join(&name)).unwrap(),
+                std::fs::read(root.join("str").join(&name)).unwrap(),
+                "{name}"
+            );
+            let a = working_image(&root.join("str"), k);
+            assert_eq!(a.dimensions(), (480, 360), "photo {k}");
+            // Black block (inside the angle): cleared by mask_black alone.
+            assert_eq!(a.get_pixel(320, 300).0[3], 0, "photo {k} black block");
+            // Past 25 degrees: cleared by the angle alone.
+            assert_eq!(a.get_pixel(3, 3).0[3], 0, "photo {k} outside");
+            // The centre is kept.
+            assert_eq!(a.get_pixel(240, 180).0[3], 255, "photo {k} centre");
+        }
+        assert!(!root.join("str/images/frame_00008.png").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The streaming default for SIFT threads follows the memory budget.
+    #[test]
+    fn default_sift_threads_fit_half_the_memory() {
+        let gib = 1u64 << 30;
+        // 3840 x 3840 needs ~7.1 GB a thread: 32 GiB machine -> 16 GiB -> 2.
+        assert_eq!(
+            super::default_sift_threads(3840, 3840, Some(32 * gib), 18),
+            2
+        );
+        // 24 GiB -> 12 GiB -> 1.
+        assert_eq!(
+            super::default_sift_threads(3840, 3840, Some(24 * gib), 18),
+            1
+        );
+        // A small image: bounded by the cores.
+        assert_eq!(super::default_sift_threads(640, 480, Some(64 * gib), 8), 8);
+        // Never zero, even when one thread does not fit.
+        assert_eq!(super::default_sift_threads(8000, 8000, Some(8 * gib), 8), 1);
+        // Unreadable memory: assumed 32 GiB.
+        assert_eq!(
+            super::default_sift_threads(3840, 3840, None, 18),
+            super::default_sift_threads(3840, 3840, Some(32 * gib), 18)
+        );
     }
 }
