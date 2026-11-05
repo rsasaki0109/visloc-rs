@@ -2342,6 +2342,38 @@ the recording. Why the extra matches hurt sequence_3_18 was not
 looked into: its final poses are 1.46 m off on average, too far off to tell
 RoMa's right matches from its wrong ones as on sequence_2_11.
 
+### What sequence_3_18 still loses
+
+Against the pseudo-GT (diagnosis only), the heading error of the chain's
+final poses on sequence_3_18 goes from −2.3° in the first 60 s windows to
++1.4° near the end, +0.11° per minute in a linear fit. Turning the
+trajectory's steps by the windows' heading error, or stretching them by the
+windows' scale, shows what each error costs:
+
+| Removed with the pseudo-GT | CP Score | Mean error | Heading spread | Scale spread |
+|---|---:|---:|---:|---:|
+| Nothing | 54.27 | 1.46 m | 1.07° | 1.48 % |
+| The heading's linear trend | 60.02 | 1.22 m | 0.57° | 1.48 % |
+| The heading per window | 69.35 | 0.78 m | 0.12° | 1.48 % |
+| The scale per window | 58.09 | 1.35 m | 1.07° | 0.42 % |
+| Both per window | **86.92** | **0.32 m** | **0.12°** | **0.42 %** |
+
+The heading alone is worth 15 points, the scale alone 4, both together 33.
+The heading over this one-way route is the integrated gyroscope's ([Where the
+second sequences' heading drift comes
+from](#where-the-second-sequences-heading-drift-comes-from)), and the route
+barely revisits ([Revisits for place
+recognition](#revisits-for-place-recognition)).
+
+The largest scale errors are in the windows at 780–900 s (0.936 and 0.985).
+At 825–870 s the wearer moves at 1.5 m/s, and |accel| spreads 3.0–3.6 m/s²
+over 5 s, against 2.0–2.3 when walking. The VIO overstates the speed there by
+10–40 %, the chain by 3–10 %. Hard motion does not do that in general,
+though: over 10 s stretches of six training sequences (the chain's and the
+VIO's trajectories), the ratio of the path length to the pseudo-GT's
+correlates with the |accel| spread at −0.15 … +0.30, with the sign changing
+between sequences.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
