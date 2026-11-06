@@ -143,8 +143,16 @@ pub struct PhotoSfmConfig {
     /// `sift_max_keypoints` strongest are chosen, as COLMAP does, so a large
     /// mask leaves fewer than that.
     pub mask_dir: Option<PathBuf>,
-    /// With `mask_dir`: swap what the masks keep and what they hide, for
-    /// masks that paint the region to remove (`255` = masked out).
+    /// One mask for every image, COLMAP's `ImageReader.camera_mask_path`:
+    /// for what moves with the camera and sits at the same pixels in every
+    /// frame, such as a tripod, a monopod or a car's bonnet. It works as a
+    /// `mask_dir` mask does, and with one a pixel is masked out where either
+    /// mask has it out. It must have the images' aspect. Not with
+    /// `equirect` or `insv`.
+    pub camera_mask: Option<PathBuf>,
+    /// With `mask_dir` or `camera_mask`: swap what the masks keep and what
+    /// they hide, for masks that paint the region to remove (`255` = masked
+    /// out).
     pub mask_flip: bool,
     /// Solve the large bundle adjustments' reduced camera systems on the
     /// GPU (`visloc_ba_gpu::GpuReducedSolver`; docs/gpu_bundle_adjustment.md):
@@ -258,6 +266,7 @@ impl Default for PhotoSfmConfig {
             stream_images: false,
             sift_threads: None,
             mask_dir: None,
+            camera_mask: None,
             mask_flip: false,
             gpu_ba: false,
             gpu_sift: true,
@@ -1847,20 +1856,29 @@ pub fn build_photo_dataset(
             "equirect: the cube faces' focal length is fixed; drop focal_px (--focal)".into(),
         ));
     }
-    if cfg.mask_flip && cfg.mask_dir.is_none() {
-        return Err(EurocError::Sfm("masks: mask_flip needs mask_dir".into()));
+    if cfg.mask_flip && cfg.mask_dir.is_none() && cfg.camera_mask.is_none() {
+        return Err(EurocError::Sfm(
+            "masks: mask_flip needs mask_dir or camera_mask".into(),
+        ));
     }
-    if let Some(dir) = &cfg.mask_dir {
+    if cfg.mask_dir.is_some() || cfg.camera_mask.is_some() {
         if cfg.equirect || cfg.insv.is_some() {
             return Err(EurocError::Sfm(
                 "masks: not supported with equirect or insv, whose images are cut from the \
-                 photos; drop mask_dir (--masks)"
+                 photos; drop mask_dir (--masks) and camera_mask (--camera-mask)"
                     .into(),
             ));
         }
         // Fail on a missing mask, or one of another aspect, before decoding
         // anything (the headers are enough).
-        ImageMasks::find(dir, &files, cfg.mask_flip)?.check_aspect(&files)?;
+        if let Some(masks) = ImageMasks::new(
+            cfg.mask_dir.as_deref(),
+            cfg.camera_mask.as_deref(),
+            &files,
+            cfg.mask_flip,
+        )? {
+            masks.check_aspect(&files)?;
+        }
     }
     // The lenses of dual-fisheye frames, from the video's metadata.
     let lenses: Option<Vec<visloc_io::insv::InsvLens>> = match &cfg.insv {
@@ -2003,19 +2021,15 @@ pub fn build_photo_dataset(
     };
     // The masks of the images kept (`load_photos` drops some), one decoded
     // when its image is processed.
-    let masks = match &cfg.mask_dir {
-        Some(dir) => {
-            let masks = ImageMasks::find(dir, &files, cfg.mask_flip)?;
-            log(&format!(
-                "masks: {} from {}{}",
-                files.len(),
-                dir.display(),
-                if cfg.mask_flip { " (flipped)" } else { "" }
-            ));
-            Some(masks)
-        }
-        None => None,
-    };
+    let masks = ImageMasks::new(
+        cfg.mask_dir.as_deref(),
+        cfg.camera_mask.as_deref(),
+        &files,
+        cfg.mask_flip,
+    )?;
+    if let Some(masks) = &masks {
+        log(&format!("masks: {}", masks.describe()));
+    }
     let n = work.len();
     let long = width.max(height) as f64;
     let mut f35s: Vec<f64> = match (&work, &streamed_f35) {
@@ -4578,6 +4592,59 @@ mod tests {
             }
         }
         assert!(by_mask > 1000 && by_angle > 1000 && by_both > 100);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One camera mask is the per-image masks with that mask for every
+    /// image: the same keypoints dropped and the same training alpha.
+    #[test]
+    fn a_camera_mask_is_every_image_given_that_mask() {
+        let root = std::env::temp_dir().join(format!("visloc_camera_mask_{}", std::process::id()));
+        let images = room_photos(&root);
+        edge_masks(&root.join("masks"), PHOTO_W, PHOTO_H, &[300; 6], false);
+        let cfg = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            eval_every: 0,
+            ..Default::default()
+        };
+        let (_, _, own) = run_photos(
+            &images,
+            &root.join("own"),
+            &super::PhotoSfmConfig {
+                mask_dir: Some(root.join("masks")),
+                ..cfg.clone()
+            },
+        );
+        let camera = super::PhotoSfmConfig {
+            camera_mask: Some(root.join("masks/view_0.png")),
+            ..cfg.clone()
+        };
+        let (_, _, one) = run_photos(&images, &root.join("one"), &camera);
+        assert!(keypoint_counts(&one).1 > 0);
+        assert_eq!(keypoint_counts(&own), keypoint_counts(&one));
+        let n = std::fs::read_dir(root.join("one/images")).unwrap().count();
+        assert_eq!(n, 6);
+        for k in 0..n {
+            let a = working_image(&root.join("one"), k);
+            assert_eq!(a, working_image(&root.join("own"), k), "view {k}");
+            assert_eq!(a.get_pixel(299, 5)[3], 255, "view {k}");
+            assert_eq!(a.get_pixel(300, 5)[3], 0, "view {k}");
+        }
+        assert!(one.iter().any(|m| m.starts_with("masks: the camera mask")));
+        // Not with equirect, like the per-image masks.
+        let err = super::build_photo_dataset(
+            &images,
+            &root.join("equirect"),
+            &super::PhotoSfmConfig {
+                equirect: true,
+                ..camera
+            },
+            &mut |_: &str| {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not supported with equirect or insv"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

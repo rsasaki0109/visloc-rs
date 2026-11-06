@@ -26,6 +26,16 @@ All notable changes to `visloc-rs` will be documented here.
   mask or one of another aspect is an error before any image is decoded.
   Not with `equirect` or `insv`. Also `gsplat_photos_cuda --masks`. Details in
   docs/photos_to_splat.md.
+- **One mask for every photo (`gsplat_photos --camera-mask FILE`).**
+  COLMAP's `ImageReader.camera_mask_path`, for what is fixed to the camera
+  (a tripod, a monopod): `PhotoSfmConfig::camera_mask`,
+  `ImageMasks::new`. It is read and resized like a `--masks` mask; with
+  `--masks` as well, a pixel is masked out where either mask has it out.
+  Also `gsplat_photos_cuda --camera-mask`. On FIORD's 200° scenes, whose
+  tripod sits at the top of every photo, a mask of it (1.8–2.0% of the
+  image circle) gains 0.2–0.6 dB of held-out PSNR off the tripod in the two
+  indoor scenes, 0.3–1.3 dB at 75–95° off the axis; the outdoor scene is
+  within run-to-run spread. Details in docs/fisheye.md.
 - **Insta360 photos through their factory lens; masks past a fisheye's
   field of view.** On three of FIORD's 200° scenes (front lens, 800 px),
   the mask past 100° gains 0.7–1.8 dB of held-out PSNR over masking

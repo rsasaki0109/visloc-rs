@@ -87,6 +87,14 @@ without alpha. `--flip-mask` swaps the two, for masks that paint the
 region to remove. Masks named by file stem (`IMG_1.png`) are found too, so a
 folder of 8-bit grey PNGs of 0 and 255 with the photos' size works as is.
 
+`--camera-mask FILE` gives every photo the same mask, as COLMAP's
+`ImageReader.camera_mask_path` does. It is for what sits at the same pixels
+in every frame because it is fixed to the camera, such as a tripod, a
+monopod or a car's bonnet. It is read and resized like a `--masks` mask.
+With `--masks` as well, a pixel is masked out where either mask has it out,
+and `--flip-mask` flips both. FIORD's 360° photos have their tripod in
+every frame ([fisheye.md](fisheye.md#fiord-a-200-insta360-through-its-factory-calibration)).
+
 - **SfM.** SIFT sees the whole photo, and the keypoints that land on a
   masked-out pixel are dropped afterwards, so matching and the mapper never
   see them. The pixels are not blacked out, so the mask edge makes no
@@ -104,10 +112,11 @@ folder of 8-bit grey PNGs of 0 and 255 with the photos' size works as is.
   its aspect (to 1%): it is resized to the working images by
   nearest-neighbour sampling, so it stays binary. It is in the photo's
   orientation after EXIF rotation, the one SfM sees.
-- **Every photo needs a mask.** A photo without one, or with a mask of
-  another aspect, stops the run before anything is decoded (the headers are
-  read), naming the photo, rather than putting the masked object back into
-  those frames.
+- **Every photo needs a mask** with `--masks`. A photo without one, or with
+  a mask of another aspect, stops the run before anything is decoded (the
+  headers are read), naming the photo, rather than putting the masked
+  object back into those frames. A camera mask of another aspect stops it
+  the same way.
 - **Not with `--equirect` or `--insv`**, whose images are cut from the
   photos.
 
