@@ -1047,7 +1047,7 @@ impl Trainer {
         self.step += 1;
 
         if let Some(b) = self.cfg.brush_refine.clone() {
-            if self.step % b.refine_every.max(1) == 0 {
+            if self.step.is_multiple_of(b.refine_every.max(1)) {
                 self.brush_refine_now(&b)?;
                 let dev = self.st().renderer.ctx.device.clone();
                 if let Some(p) = self.profile.as_mut() {
@@ -1056,8 +1056,8 @@ impl Trainer {
             }
         } else if let Some(d) = self.cfg.densify.clone() {
             let s = self.step;
-            let at_densify = s >= d.start && s <= d.stop && s % d.interval == 0;
-            let at_reset = s < d.stop && s % d.opacity_reset_interval == 0;
+            let at_densify = s >= d.start && s <= d.stop && s.is_multiple_of(d.interval);
+            let at_reset = s < d.stop && s.is_multiple_of(d.opacity_reset_interval);
             if at_densify || at_reset {
                 self.densify_now(&d, at_densify, at_reset)?;
                 let dev = self.st().renderer.ctx.device.clone();
@@ -1154,7 +1154,7 @@ impl Trainer {
             });
         }
 
-        if self.profile.is_some() && self.step % 1000 == 0 {
+        if self.profile.is_some() && self.step.is_multiple_of(1000) {
             eprintln!(
                 "[densify] {n} -> {n_after} on device in {:.0} ms",
                 t0.elapsed().as_secs_f64() * 1e3
