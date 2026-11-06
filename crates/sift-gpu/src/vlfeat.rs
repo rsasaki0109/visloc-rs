@@ -405,23 +405,25 @@ fn submit_copies(
 }
 
 /// The first `len` bytes of `staging` once submission `index` is done (not
-/// waiting for later submissions).
+/// waiting for later submissions); [`SiftGpuError::Readback`] on a lost
+/// device or a failed mapping.
 async fn map_read(
     device: &wgpu::Device,
     staging: &wgpu::Buffer,
     index: wgpu::SubmissionIndex,
     len: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, SiftGpuError> {
     if len == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let slice = staging.slice(..len);
-    mapped(device, slice, Some(index))
-        .await
-        .expect("map staging");
-    let data = slice.get_mapped_range().expect("map range").to_vec();
+    mapped(device, slice, Some(index)).await?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|error| SiftGpuError::Readback(error.to_string()))?
+        .to_vec();
     staging.unmap();
-    data
+    Ok(data)
 }
 
 impl VlfeatSiftGpu {
@@ -526,16 +528,16 @@ impl VlfeatSiftGpu {
         let candidates = loop {
             self.ensure_plans(PlanKey::new(image.width, image.height, self.cap, config), 1)?;
             let index = self.submit_detect(0, image);
-            match self.read_counts(0, index).await {
+            match self.read_counts(0, index).await? {
                 Ok(counts) => {
                     let (index, len) = self.submit_candidate_copy(0, &counts);
-                    break self.read_candidates(0, index, &counts, len).await;
+                    break self.read_candidates(0, index, &counts, len).await?;
                 }
                 Err(needed) => self.cap = needed.next_power_of_two(),
             }
         };
         let keypoints = select_keypoints(candidates, config);
-        let descriptors = self.describe(0, &keypoints, config).await;
+        let descriptors = self.describe(0, &keypoints, config).await?;
         Ok((keypoints, descriptors))
     }
 
@@ -577,7 +579,7 @@ impl VlfeatSiftGpu {
         let mut pending = self.submit_detect(0, &images[0]);
         for i in 0..images.len() {
             let p = i % 2;
-            let counts = match self.read_counts(p, pending.clone()).await {
+            let counts = match self.read_counts(p, pending.clone()).await? {
                 Ok(counts) => counts,
                 Err(needed) => {
                     // An octave overflowed: grow, and finish one at a time.
@@ -592,9 +594,9 @@ impl VlfeatSiftGpu {
             if i + 1 < images.len() {
                 pending = self.submit_detect(1 - p, &images[i + 1]);
             }
-            let candidates = self.read_candidates(p, index, &counts, len).await;
+            let candidates = self.read_candidates(p, index, &counts, len).await?;
             let keypoints = select_keypoints(candidates, config);
-            let descriptors = self.describe(p, &keypoints, config).await;
+            let descriptors = self.describe(p, &keypoints, config).await?;
             out.push((keypoints, descriptors));
         }
         Ok(out)
@@ -1000,15 +1002,19 @@ impl VlfeatSiftGpu {
 
     /// Plan `p`'s candidate counts per octave, `Err(needed)` when one
     /// overflowed the capacity.
-    async fn read_counts(&self, p: usize, index: wgpu::SubmissionIndex) -> Result<Vec<u32>, usize> {
+    async fn read_counts(
+        &self,
+        p: usize,
+        index: wgpu::SubmissionIndex,
+    ) -> Result<Result<Vec<u32>, usize>, SiftGpuError> {
         let plan = &self.plans[p];
         let n_det = plan.det_dims.len();
-        let bytes = map_read(&self.ctx.device, &plan.staging, index, (n_det * 4) as u64).await;
+        let bytes = map_read(&self.ctx.device, &plan.staging, index, (n_det * 4) as u64).await?;
         let counts = u32_words(&bytes);
-        match counts.iter().max() {
+        Ok(match counts.iter().max() {
             Some(&max) if max as usize > plan.key.cap => Err(max as usize),
             _ => Ok(counts),
-        }
+        })
     }
 
     /// Submit the copy of plan `p`'s candidates; the bytes copied.
@@ -1035,8 +1041,8 @@ impl VlfeatSiftGpu {
         index: wgpu::SubmissionIndex,
         counts: &[u32],
         len: u64,
-    ) -> Vec<Candidate> {
-        let bytes = map_read(&self.ctx.device, &self.plans[p].staging, index, len).await;
+    ) -> Result<Vec<Candidate>, SiftGpuError> {
+        let bytes = map_read(&self.ctx.device, &self.plans[p].staging, index, len).await?;
         let raw = u32_words(&bytes);
         let mut candidates = Vec::with_capacity(raw.len() / CAND_WORDS);
         let mut chunks = raw.chunks_exact(CAND_WORDS);
@@ -1060,7 +1066,7 @@ impl VlfeatSiftGpu {
                 });
             }
         }
-        candidates
+        Ok(candidates)
     }
 
     /// Descriptors of `keypoints`, one dispatch per gradient level with that
@@ -1070,9 +1076,9 @@ impl VlfeatSiftGpu {
         p: usize,
         keypoints: &[SiftKeypoint],
         config: &SiftConfig,
-    ) -> Vec<Vec<f32>> {
+    ) -> Result<Vec<Vec<f32>>, SiftGpuError> {
         if keypoints.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let plan = &self.plans[p];
         let s = plan.key.intervals;
@@ -1185,7 +1191,7 @@ impl VlfeatSiftGpu {
             &desc.staging,
             &[(&desc.out, 0, (n * 128) as u64)],
         );
-        let bytes = map_read(dev, &desc.staging, index, len).await;
+        let bytes = map_read(dev, &desc.staging, index, len).await?;
         let mut descriptors = vec![Vec::new(); n];
         for (at, &i) in order.iter().enumerate() {
             descriptors[i] = bytes[at * 128..(at + 1) * 128]
@@ -1193,7 +1199,7 @@ impl VlfeatSiftGpu {
                 .map(|&b| b as f32)
                 .collect();
         }
-        descriptors
+        Ok(descriptors)
     }
 }
 
