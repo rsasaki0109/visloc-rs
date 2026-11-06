@@ -9,7 +9,8 @@
 //!   cargo run --release -p visloc-gsplat-cuda --features photos --example gsplat_photos_cuda -- \
 //!   --images <folder> --out <work dir> [--max-size 1600] [--focal F] \
 //!   [--camera "MODEL W H PARAMS..." [--refine-camera]] [--exhaustive-max 300] [--window 20] \
-//!   [--max-keypoints 8192] [--mask-black N] [--max-angle DEG] [--masks DIR [--flip-mask]] \
+//!   [--max-keypoints 8192] [--mask-black N] [--max-angle DEG] [--masks DIR] \
+//!   [--camera-mask MASK.png] [--flip-mask] \
 //!   [--cpu-match]
 //! ```
 //!
@@ -20,6 +21,8 @@
 //! circle); `gsplat_train_cuda --alpha-mask` leaves them out of the loss.
 //! `--masks DIR` is `gsplat_photos`'s: per-image PNG masks keep SIFT keypoints
 //! off the masked-out pixels and give the working images alpha 0 there.
+//! `--camera-mask MASK.png` does the same with one mask for every photo, for
+//! what moves with the camera (a tripod, a monopod).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-keypoints" => sfm.sift_max_keypoints = next()?.parse()?,
             "--mask-black" => sfm.mask_black = Some(next()?.parse()?),
             "--masks" => sfm.mask_dir = Some(PathBuf::from(next()?)),
+            "--camera-mask" => sfm.camera_mask = Some(PathBuf::from(next()?)),
             "--flip-mask" => sfm.mask_flip = true,
             "--max-angle" => sfm.max_angle = Some(next()?.parse()?),
             "--cpu-match" => cpu_match = true,

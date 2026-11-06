@@ -542,7 +542,46 @@ MeetingRoom_In's, the same trainer reaches 30.96 dB. The fisheye runs give
 31.5–31.8 dB within that cone (55.7° off the axis). In all three scenes
 the PSNR falls past 75°.
 
+Most of that fall is the tripod. FIORD's photos are upside down: the top of
+the image circle looks at the ground, where the tripod's head and legs sit
+at the same pixels in every photo. The splat cannot put them anywhere in
+the scene, and the error concentrates there (the 60° of the circle around
+its top). They show sharply in the per-pixel median
+of a scene's photos. The mask here takes the dark pixels (luma < 90) of that
+median in the image's top sixth, grown by 4 px. It covers 1.8–2.0% of the
+circle. `--camera-mask` gives it to every photo:
+
+```bash
+gsplat_photos_cuda --images meetingroom/fisheyeimages/cam1 --out run --max-size 800 \
+  --camera "OPENCV_FISHEYE 3264 3264 ..." --max-angle 100 --camera-mask tripod.png
+```
+
+SfM drops the 1.5–3.8% of the keypoints that land on the tripod, still
+registers every photo, and agrees with FIORD's poses as before (0.18–0.38%
+of the extent, 0.38–0.70°). Here is the held-out PSNR of the factory runs
+on the pixels off the tripod, trained with and without it:
+
+| Scene | Tripod in training | 0–55.7° | 55.7–75° | 75–85° | 85–90° | 90–95° | 95–100° | 0–100° |
+|---|---|---|---|---|---|---|---|---|
+| MeetingRoom_In | in | 31.69 dB | 32.40 dB | 31.27 dB | 28.49 dB | 28.25 dB | 26.71 dB | 30.72 dB |
+| | masked out | 31.48 dB | 32.40 dB | 31.58 dB | 29.46 dB | 29.11 dB | 27.11 dB | 30.96 dB |
+| Building_In | in | 31.98 dB | 31.81 dB | 29.46 dB | 28.38 dB | 27.75 dB | 26.71 dB | 30.31 dB |
+| | masked out | 32.10 dB | 32.09 dB | 30.68 dB | 29.65 dB | 28.73 dB | 27.12 dB | 30.92 dB |
+| Bridge_Out | in | 31.67 dB | 31.08 dB | 28.19 dB | 29.25 dB | 27.48 dB | 26.20 dB | 29.80 dB |
+| | masked out | 31.86 dB | 31.15 dB | 27.93 dB | 29.33 dB | 27.93 dB | 26.20 dB | 29.85 dB |
+
+- **Scoring off the tripod** alone lifts the factory runs' 0–100° from
+  29.52, 28.53 and 29.00 dB to 30.72, 30.31 and 29.80 dB, and their 85–90°
+  ring by 2.1–3.0 dB.
+- **Training off the tripod** gains another 0.2 and 0.6 dB on
+  MeetingRoom_In and Building_In, 0.3–1.3 dB at 75–95°. On Bridge_Out the
+  difference is within the 0.2 dB between runs: its rim also holds people
+  walking by, and in one held-out view an object close to the lens.
+- **Off the tripod the PSNR still falls** past 85°: 2.0–2.5 dB at 85–90°
+  and 4.4–5.7 dB at 95–100°, below the 0–55.7° ring.
+
 Still open:
+- The rest of the fall at the rim.
 - The tangential terms. `THIN_PRISM_FISHEYE` could take them.
 - Both lenses as one rig ([above](#sfm-mapping-through-the-lens)).
 
