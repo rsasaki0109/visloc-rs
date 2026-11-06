@@ -517,6 +517,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **The GPU descriptor matcher found almost nothing on Apple Silicon
+  (#465).** Its shaders wrote shared memory one vec4 component per thread,
+  and on Metal a component store can compile to a read-modify-write of the
+  whole vec4, so concurrent writers lost each other's components (5 matches
+  where the CPU found 817). Every shared write is now a whole vec4 by one
+  thread; the matches are bit-identical on Vulkan.
 - **Kannala-Brandt fisheyes unprojected rays past 90° to their mirror
   image.** `OPENCV_FISHEYE`, `RADIAL_FISHEYE` and `SIMPLE_RADIAL_FISHEYE`
   built the ray as `(tan θ · x̂, 1)`, which past 90° points ahead of the
