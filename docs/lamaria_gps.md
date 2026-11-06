@@ -4,9 +4,10 @@ Until 2026-11-05 the LaMAria chain used the two SLAM cameras and the IMU only.
 Since then it may use any sensor the recordings carry. The leaderboard labels a
 method's sensors only as mono, bino and imu, so the method's description states
 the GPS. The GPS is used in one place: on the Moving platform track it bridges
-the jumps where the trajectory missed a ride or got its length wrong
-(submission 7). The walks are left as they are, and the training scores in the
-README use the cameras and the IMU only.
+the jumps where the trajectory missed a ride or got its length wrong.
+Submission 7 does this and takes the track from 30.6 to 47.3. The walks are
+left as they are, and the training scores in the README use the cameras and
+the IMU only.
 
 ## The GPS of the recordings
 
@@ -140,20 +141,25 @@ bytes fetched.
 
 Submission 6's estimates, through the script with its defaults. The residual
 is the median distance to the fixes after the fit, with one piece and with the
-pieces of the ramps found.
+pieces of the ramps found. The scores are the leaderboard's.
 
-| Sequence | Fixes | Ramps found | Moved | Residual, one piece → bridged | Largest other candidate |
-|---|---:|---|---:|---:|---:|
-| sequence_5_1 | 2248 | 153–183 s | 26.7 m | 3.92 → 3.88 m | 7.9 m |
-| sequence_5_2 | 1913 | 80–200 s | 70.5 m | 3.88 → 3.72 m | 11.5 m |
-| sequence_5_3 | 2192 | 2112–2352 s | 24.1 m | 4.59 → 3.90 m | 11.8 m |
-| sequence_5_4 | 1497 | 69–159 s | 308.3 m | 4.82 → 4.52 m | 18.4 m |
-| sequence_5_5 | 1865 | 655–715 s | 253.9 m | 5.02 → 4.12 m | 10.6 m |
-| sequence_5_6 | 1967 | 139–259, 349–589, 854–884 s | 27.5, 36.8, 244.4 m | 39.56 → 4.32 m | 18.6 m |
-| sequence_5_7 | 995 | 119–149 s | 153.8 m | 3.41 → 3.03 m | 5.6 m |
-| sequence_5_8 | 1165 | none | | 2.97 m | 8.7 m |
-| sequence_5_9 | 1419 | 210–450 s | 47.3 m | 7.00 → 3.60 m | 14.8 m |
-| sequence_5_10 | 1014 | none | | 2.79 m | 8.3 m |
+| Sequence | Fixes | Ramps found | Moved | Residual, one piece → bridged | Largest other candidate | Score, submission 6 → 7 |
+|---|---:|---|---:|---:|---:|---:|
+| sequence_5_1 | 2248 | 153–183 s | 26.7 m | 3.92 → 3.88 m | 7.9 m | 43.1 → 43.4 |
+| sequence_5_2 | 1913 | 80–200 s | 70.5 m | 3.88 → 3.72 m | 11.5 m | 44.2 → **51.7** |
+| sequence_5_3 | 2192 | 2112–2352 s | 24.1 m | 4.59 → 3.90 m | 11.8 m | 29.3 → **31.0** |
+| sequence_5_4 | 1497 | 69–159 s | 308.3 m | 4.82 → 4.52 m | 18.4 m | 39.2 → 36.2 |
+| sequence_5_5 | 1865 | 655–715 s | 253.9 m | 5.02 → 4.12 m | 10.6 m | 3.1 → **63.7** |
+| sequence_5_6 | 1967 | 139–259, 349–589, 854–884 s | 27.5, 36.8, 244.4 m | 39.56 → 4.32 m | 18.6 m | 2.4 → **35.2** |
+| sequence_5_7 | 995 | 119–149 s | 153.8 m | 3.41 → 3.03 m | 5.6 m | 29.6 → **69.2** |
+| sequence_5_8 | 1165 | none | | 2.97 m | 8.7 m | 72.3 |
+| sequence_5_9 | 1419 | 210–450 s | 47.3 m | 7.00 → 3.60 m | 14.8 m | 10.1 → **37.6** |
+| sequence_5_10 | 1014 | none | | 2.79 m | 8.3 m | 32.8 |
+| Track | | | | | | 30.6 → **47.3** |
+
+The track gains 16.7 points and the mean 3.3 (54.3 → 57.7). Seven of the
+eight bridged sequences gain; sequence_5_4 loses 3.0. The two missed trams
+gain the most: 5_5 by 60.6 and 5_6 by 32.8.
 
 - **The rides known before.** The ramps meet the rides found without GPS:
   - sequence_5_5's and 5_6's largest ramps fall in the tram standstills the
@@ -165,7 +171,8 @@ pieces of the ramps found.
 - **sequence_5_10** has no fix before 7.8 min, after its ride at 56–162 s.
   The other nine have fixes from their first 40 s.
 - **Close to the threshold.** sequence_5_1's step is 28.0 m and 5_3's 25.1 m.
-  Whether they are rides or a stretch of biased fixes is not known.
+  Whether they are rides or a stretch of biased fixes is not known; their
+  scores move by +0.3 and +1.7.
 - **The walks.** On the 53 walking sequences the search finds no step of
   25 m or more; the largest candidate is 24.9 m, on sequence_4_8.
   - sequence_1_17, 2_10 and 4_7 have no fix with an accuracy of 10 m or
@@ -174,10 +181,10 @@ pieces of the ramps found.
     ramps the fixes are sparse and the trajectory drifts away from them
     slowly, without a jump.
 
-Submission 7 is submission 6 with the eight bridged sequences replaced. Its
-scores will be added to [lamaria_test_results.md](lamaria_test_results.md)
-once the leaderboard has evaluated it. No test ground truth was used: the
-threshold and the options were set on the training sequences.
+Submission 7 is submission 6 with the eight bridged sequences replaced
+([lamaria_test_results.md](lamaria_test_results.md)); its 53 walks score as
+in submission 6. No test ground truth was used: the threshold and the options
+were set on the training sequences.
 
 The method's description on the leaderboard states the GPS, for example:
 
