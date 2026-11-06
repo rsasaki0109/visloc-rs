@@ -28,12 +28,13 @@
     - [lamaria_batch_ba.md](lamaria_batch_ba.md)（BA と実験の記録）
     - [lamaria_test_results.md](lamaria_test_results.md)（提出ごとの結果）
     - [lamaria_gps.md](lamaria_gps.md)（GPS の精度、向きの補正の否定結果、乗車のつなぎ直し）
+    - [lamaria_multisession.md](lamaria_multisession.md)（歩行の全録画をまとめて解く多セッションのポーズグラフ。提出 8 から）
 - **点を落としている所**: 制御点がすべて 1 m 以内に入った系列では、Short で平均 86.0 点取れている（GroundedSLAM の Short は 87.0）。
   差は、系列の途中から溜まる 1〜5 m のずれでほぼ説明できる。
   - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Medium・Long の弱い系列）。
   - 路面電車のドア窓越しに街並みが少ししか見えず、乗車区間を見落とすこと（Moving の 5_5、5_6）。VIO では今も見落とすが、提出 7 から GPS でつないでいる。
 
-## GPU の PC でやったこと（2026-10-27〜11-05）
+## GPU の PC でやったこと（2026-10-27〜11-07）
 
 | やったこと | 結果 | 記録 |
 |---|---|---|
@@ -46,6 +47,8 @@
 | 学習 12 系列すべてに種 1〜3 | 基準は sequence_2_12 を除く 11 系列で 68.59 ± 0.13。sequence_2_12 は種だけで 47.5〜57.9 動く | [All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds) |
 | 4〜16 秒離れたキーフレームを RoMa で密に照合し、SIFT のキーポイントに吸着させて足す | sequence_2_11 では吸着した対応の 93〜96 % が正しく、正しい対応が 3〜5 割増える（暗い 4_10 ではほぼ増えない）。それでも 2_11 は 89.25 → 88.96、3_18 は 54.27 → 52.29 で、3_18 は向きのばらつきが増える。録画の 3 倍強の時間がかかる。採らない | [Dense matches between distant keyframes](lamaria_batch_ba.md#dense-matches-between-distant-keyframes) |
 | sequence_3_18 に残る誤差の内訳（疑似正解で取り除く診断） | 今は 54.27。向きを除くと 69.35、縮尺を除くと 58.09、両方で 86.92。向きは片道のルートで積分したジャイロ任せ。速く動く区間で縮尺がずれるのは 3_18 だけで、ほかの系列には一貫して出ない | [What sequence_3_18 still loses](lamaria_batch_ba.md#what-sequence_3_18-still-loses) |
+| 歩行の録画をまとめて解く（同じ場所を通る録画の地図に ALIKED + LightGlue で位置を合わせ、全録画のキーフレームを 4 自由度のポーズグラフで解く。GPS は組の候補だけ） | テストの歩行 49 系列と一緒に解いた学習の歩行 6 系列で、合計 445.3 → 546.8（3_18 は 54.3 → 91.1、4_10 は 59.8 → 87.9）。設定はこの 6 系列で選んだ。提出 8 に使う | [lamaria_multisession.md](lamaria_multisession.md) |
+| マッチャーを FlexGlue や VisMatch のものに替える | FlexGlue は固定ペアで位置が決まる数が 2〜5 倍になるが、学習 8 系列のグラフでは LightGlue を超えない（504〜505 対 510.1）。RoMa v2 は GPU を共有した状態で、最初のマップの分も 1 時間で終わらなかった。採らない | [Other matchers](lamaria_multisession.md#other-matchers-a-negative-result) |
 
 ## 残っている案
 
