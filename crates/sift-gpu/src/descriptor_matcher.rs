@@ -38,11 +38,10 @@ impl Matcher for WgpuDescriptorMatcher {
             return Vec::new();
         }
         let (ctx, matcher) = &*self.inner;
-        match FeatureBank::upload(ctx, &[query, train]) {
-            Ok(bank) => matcher
-                .match_pairs(ctx, &bank, &[(0, 1)], self.ratio, false)
-                .pop()
-                .unwrap_or_default(),
+        match FeatureBank::upload(ctx, &[query, train])
+            .and_then(|bank| matcher.match_pairs(ctx, &bank, &[(0, 1)], self.ratio, false))
+        {
+            Ok(mut matches) => matches.pop().unwrap_or_default(),
             Err(_) => cpu(),
         }
     }

@@ -2646,7 +2646,10 @@ pub fn build_photo_dataset(
             if let Some((ctx, bank, m)) = &gpu_match {
                 let lp: Vec<(usize, usize)> =
                     pairs.iter().map(|&(i, j)| (local[i], local[j])).collect();
-                return m.match_pairs(ctx, bank, &lp, Some(0.8), true);
+                match m.match_pairs(ctx, bank, &lp, Some(0.8), true) {
+                    Ok(dms) => return dms,
+                    Err(e) => eprintln!("GPU matching failed ({e}); this chunk on the CPU"),
+                }
             }
             // The descriptors of the chunk's images, as f32 for this chunk.
             let mut used: Vec<usize> = pairs.iter().flat_map(|&(i, j)| [i, j]).collect();

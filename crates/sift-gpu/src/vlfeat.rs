@@ -416,7 +416,9 @@ async fn map_read(
         return Vec::new();
     }
     let slice = staging.slice(..len);
-    mapped(device, slice, Some(index)).await;
+    mapped(device, slice, Some(index))
+        .await
+        .expect("map staging");
     let data = slice.get_mapped_range().expect("map range").to_vec();
     staging.unmap();
     data

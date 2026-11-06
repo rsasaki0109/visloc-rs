@@ -362,9 +362,12 @@ fn cmd_exhaustive_matcher(args: &Args) -> Result<(), String> {
     let mut done = 0usize;
     for chunk in all.chunks(2048) {
         #[cfg(feature = "gpu")]
-        let chunk_matches: Option<Vec<Vec<DescriptorMatch>>> = gpu_bank
-            .as_ref()
-            .map(|(ctx, bank, m)| m.match_pairs(ctx, bank, chunk, Some(0.8), true));
+        let chunk_matches: Option<Vec<Vec<DescriptorMatch>>> =
+            gpu_bank.as_ref().and_then(|(ctx, bank, m)| {
+                m.match_pairs(ctx, bank, chunk, Some(0.8), true)
+                    .map_err(|e| eprintln!("GPU matching failed ({e}); this chunk on the CPU"))
+                    .ok()
+            });
         #[cfg(not(feature = "gpu"))]
         let chunk_matches: Option<Vec<Vec<DescriptorMatch>>> = None;
         let verified: Vec<PairwiseMatches> = chunk

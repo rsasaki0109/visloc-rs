@@ -248,7 +248,9 @@ mod tests {
         let sets = [&a, &b, &c, &d, &empty];
         for cross in [false, true] {
             for ratio in [None, Some(0.8)] {
-                let gpu = matcher.match_pairs(&ctx, &bank, &pairs, ratio, cross);
+                let gpu = matcher
+                    .match_pairs(&ctx, &bank, &pairs, ratio, cross)
+                    .unwrap();
                 for (p, &(i, j)) in pairs.iter().enumerate() {
                     let bf = BruteForceMatcher { ratio };
                     let cpu = if cross {
@@ -266,6 +268,55 @@ mod tests {
                         assert!((gm.distance - cm.distance).abs() < 1e-3);
                     }
                 }
+            }
+        }
+    }
+
+    /// A pair whose outputs do not fit the device's storage binding limit is
+    /// an error, not a wgpu validation panic; pairs within it still match.
+    #[test]
+    fn matcher_rejects_a_pair_past_the_binding_limit() {
+        let Some(mut ctx) = try_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let descriptors = |n: usize, seed: usize| -> Vec<Vec<f32>> {
+            (0..n)
+                .map(|i| {
+                    let mut d = vec![0.0f32; 128];
+                    d[(i * 7 + seed) % 128] = 1.0;
+                    d
+                })
+                .collect()
+        };
+        let (a, b, c) = (descriptors(300, 0), descriptors(200, 3), descriptors(20, 5));
+        let matcher = GpuMatcher::new(&ctx);
+        // 256 output records of 16 B.
+        ctx.limits.max_storage_buffer_binding_size = 256 * 16;
+        for bank in [
+            FeatureBank::upload(&ctx, &[&a, &b, &c]).unwrap(),
+            FeatureBank::upload_u8(&ctx, &[&a, &b, &c]).unwrap(),
+        ] {
+            for cross in [false, true] {
+                // 300 query rows (forward), 500 with the f32 cross-check.
+                let err = matcher
+                    .match_pairs(&ctx, &bank, &[(2, 1), (0, 1)], Some(0.8), cross)
+                    .err();
+                assert!(
+                    matches!(
+                        err,
+                        Some(SiftGpuError::PairTooLarge {
+                            query: 300,
+                            train: 200,
+                            limit: 256,
+                            ..
+                        })
+                    ),
+                    "cross {cross}: {err:?}"
+                );
+                // 20 + 200 rows and 1 * 200 partials fit.
+                let ok = matcher.match_pairs(&ctx, &bank, &[(2, 1), (1, 2)], None, cross);
+                assert_eq!(ok.unwrap().len(), 2);
             }
         }
     }
@@ -359,7 +410,9 @@ mod tests {
         ];
         for cross in [false, true] {
             for ratio in [None, Some(0.8)] {
-                let gpu = matcher.match_pairs(&ctx, &bank, &pairs, ratio, cross);
+                let gpu = matcher
+                    .match_pairs(&ctx, &bank, &pairs, ratio, cross)
+                    .unwrap();
                 for (p, &(i, j)) in pairs.iter().enumerate() {
                     let mut cpu = cpu_u8_matches(sets[i], sets[j], ratio);
                     if cross {
