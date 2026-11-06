@@ -13,9 +13,11 @@ named inline; nothing is tuned against ground truth unless stated.
   ~758×572, fx≈241 → ~115° HFOV) + IMU 1 kHz. Sequences run 0.5–2.9 km / 5–48
   min; the test set is 63 sequences (Short 18, Medium 10, Long 16, Low light 9,
   Moving platform 10). The raw VRS recordings also carry 1 Hz GPS fixes
-  (2.5 m median error against the pseudo-GT on sequence_4_10); by decision we
-  do not use them, nor any other sensor beyond the two SLAM cameras and the
-  IMU, so that the method stays visual-inertial like the leaderboard's.
+  (2.5 m median error against the pseudo-GT on sequence_4_10). Until
+  2026-11-05 the method used the two SLAM cameras and the IMU only. Since then
+  it may use any sensor the recordings carry, stated in the leaderboard's
+  method description. The GPS bridges the Moving platform track's missed rides
+  ([lamaria_gps.md](lamaria_gps.md)).
 - **Metric** (`cvg/lamaria` evaluator, unmodified): a robust Sim(3) alignment to
   surveyed control points, then a per-control-point piecewise score (20 points
   below 5 cm, decaying to 0 at 10 m). Report: **Score** 0–100, **CP@1m** recall,

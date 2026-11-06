@@ -16,11 +16,13 @@
 
 - **手法**: Rust 版 Basalt の VIO のあとに、バッチ VI-BA のチェーンをつなぐ。チェーンの中身は SIFT、VIO で導いた照合、union-find のトラック、ループ補正、録画後のパス、パスで導いた再照合。
   - 機器 1WM093701G1276 の Short の 5 系列だけ、パスで ALIKED のキーポイントを LightGlue で照合する（提出 5 から）。
-  - 使うセンサーは SLAM カメラ 2 台と 1 kHz の IMU だけ。各系列で VIO は 1 本だけ走らせる。
+  - 使うセンサーは SLAM カメラ 2 台と 1 kHz の IMU。各系列で VIO は 1 本だけ走らせる。
+  - 提出 7 から、Moving の系列だけ、乗車で軌跡が飛んだ所を raw 録画の GPS でつなぎ直す。
   - 詳細:
     - [lamaria_submission.md](lamaria_submission.md)（提出パイプライン）
     - [lamaria_batch_ba.md](lamaria_batch_ba.md)（BA と実験の記録）
     - [lamaria_test_results.md](lamaria_test_results.md)（提出ごとの結果）
+    - [lamaria_gps.md](lamaria_gps.md)（GPS の精度、向きの補正の否定結果、乗車のつなぎ直し）
 - **点を落としている所**: 制御点がすべて 1 m 以内に入った系列では、Short で平均 86.0 点取れている（GroundedSLAM の Short は 87.0）。
   差は、系列の途中から溜まる 1〜5 m のずれでほぼ説明できる。
   - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Medium・Long の弱い系列）。
@@ -160,7 +162,10 @@ python evaluate_wrt_pgt.py --estimate $E/$S.txt --gt_estimate $LAMARIA_DATA/gt/$
 
 ## 守ること
 
-- GPS と磁気センサーは使わない。カメラ 2 台と IMU だけ。
+- 記録にあるセンサーは使ってよい（2026-11-05 から。それまではカメラ 2 台と IMU だけ）。
+  - リーダーボードのセンサー表示は mono、bino、imu しかない。GPS などを使ったら、手法の説明に書く。
+  - 今の使い道は、Moving の乗車で軌跡が飛んだ所を GPS でつなぎ直すことだけ（[lamaria_gps.md](lamaria_gps.md)）。
+  - テストの GPS は、VRS の先頭の索引と GPS の記録だけを取る（`scripts/lamaria_vrs_fetch.py`）。raw データの取得になるので、持ち主の了承を得てから。
 - VIO は 1 系列につき 1 本。複数の VIO の結果を組み合わせない。
 - テストの正解は見られない。設定の良し悪しは学習系列で決める。テスト系列を使うのは、正解なしで分かる診断（乗車区間の長さなど）だけにする。
   - テストの点を見て設定を戻すのも、テストで選ぶことになるので避ける（提出 6 はそのまま）。

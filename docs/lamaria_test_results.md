@@ -4,9 +4,11 @@ Six submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
 to the 63 test sequences, run on GitHub Actions
 ([`lamaria_submission.yml`](../.github/workflows/lamaria_submission.yml)); the
 fifth and the sixth reran five Short sequences locally, on an 8 GB GPU. The
-system uses the two grayscale SLAM cameras and the 1 kHz IMU only (no GPS or
-magnetometer) and runs one VIO per sequence. Scores are the leaderboard's means
-per challenge.
+system runs one VIO per sequence on the two grayscale SLAM cameras and the
+1 kHz IMU. Submissions 1–6 use nothing else; submission 7 also bridges the
+Moving platform track's missed rides with the recordings' GPS
+([lamaria_gps.md](lamaria_gps.md)). Scores are the leaderboard's means per
+challenge.
 
 | Submission | Short | Medium | Long | Low light | Moving platform | Mean |
 |---|---:|---:|---:|---:|---:|---:|
@@ -133,6 +135,21 @@ reuses submission 5's online result, ALIKED keypoints, revisits, IMU and VIO.
   to choose between the bands. Going back to the VIO's band because of these
   scores would choose on the test set, so the training set's choice stands.
 
+**Submission 7** (prepared on 2026-11-06, not yet evaluated). Submission 6
+with eight Moving platform sequences bridged by GPS
+([lamaria_gps.md](lamaria_gps.md#test-set-submission-7)):
+- **Change.** Where the trajectory jumps by 25 m or more against the
+  recordings' 1 Hz GPS fixes, the pieces after each jump move to the GPS. Only
+  x and y change.
+- **Sequences.**
+  - sequence_5_4, 5_5, 5_6 and 5_7 move by 154–308 m (5_6 also by 27.5 and
+    36.8 m). The ramps of 5_4, 5_5 and 5_6 fall at the rides known before.
+  - sequence_5_1, 5_2, 5_3 and 5_9 move by 24–71 m.
+  - sequence_5_8 has no step, and sequence_5_10 has no fix during its ride.
+- **The walks** have no step of 25 m or more and are not changed.
+- **Fetch.** The GPS was fetched without the images: about 1.4 GB for the 63
+  recordings.
+
 ## Against GroundedSLAM, sequence by sequence
 
 GroundedSLAM's scores here are those before its upload of 2026-10-29.
@@ -181,7 +198,9 @@ from 61.09 to 64.30; on these test sequences it moved the scores by −0.4 …
   windows disagrees with the trajectory's by 1–3 m/s, against 0.2–0.3 m/s on
   the walks. Dead reckoning across a ride is 18 % short to 68 % long on the
   two training rides, so the chain does not bridge them ([Finding the rides
-  the VIO missed](lamaria_batch_ba.md#finding-the-rides-the-vio-missed)).
+  the VIO missed](lamaria_batch_ba.md#finding-the-rides-the-vio-missed)). The
+  recordings' GPS does bridge them, in submission 7
+  ([lamaria_gps.md](lamaria_gps.md)).
 - **The sun is no compass here.** On sequence_2_12 the saturated region the
   detector finds is overcast sky, and the Aria SLAM cameras see the sun only
   when it is low.
