@@ -28,7 +28,7 @@
   - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Medium・Long の弱い系列）。
   - 路面電車のドア窓越しに街並みが少ししか見えず、乗車区間を見落とすこと（Moving の 5_5、5_6）。
 
-## GPU の PC でやったこと（2026-10-27〜11-02）
+## GPU の PC でやったこと（2026-10-27〜11-05）
 
 | やったこと | 結果 | 記録 |
 |---|---|---|
@@ -39,6 +39,8 @@
 | 乗車区間の見落とし（プラットフォームフィルターを緩める、乗車区間を凍らせて再現） | 5_5 の乗車区間は動くようになるが、学習系列で誤検出して点を落とす。凍らせた乗車区間はチェーンで戻らない | [The platform filter where it stays off](lamaria_batch_ba.md#the-platform-filter-where-it-stays-off) |
 | 機器ごとのジャイロ補正 | チェーンの向きを系列によらずほぼ同じだけ回す。3_18 と 4_11 で効いたのは、残っていたずれと逆向きに回ったから。系列自身の疑似正解で当てた補正でも 2_11 では下がり、チェーン自身のコストでは選べない。採らない | [Where the device's correction gains](lamaria_batch_ba.md#where-the-devices-correction-gains) |
 | 学習 12 系列すべてに種 1〜3 | 基準は sequence_2_12 を除く 11 系列で 68.59 ± 0.13。sequence_2_12 は種だけで 47.5〜57.9 動く | [All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds) |
+| 4〜16 秒離れたキーフレームを RoMa で密に照合し、SIFT のキーポイントに吸着させて足す | sequence_2_11 では吸着した対応の 93〜96 % が正しく、正しい対応が 3〜5 割増える（暗い 4_10 ではほぼ増えない）。それでも 2_11 は 89.25 → 88.96、3_18 は 54.27 → 52.29 で、3_18 は向きのばらつきが増える。録画の 3 倍強の時間がかかる。採らない | [Dense matches between distant keyframes](lamaria_batch_ba.md#dense-matches-between-distant-keyframes) |
+| sequence_3_18 に残る誤差の内訳（疑似正解で取り除く診断） | 今は 54.27。向きを除くと 69.35、縮尺を除くと 58.09、両方で 86.92。向きは片道のルートで積分したジャイロ任せ。速く動く区間で縮尺がずれるのは 3_18 だけで、ほかの系列には一貫して出ない | [What sequence_3_18 still loses](lamaria_batch_ba.md#what-sequence_3_18-still-loses) |
 
 ## 残っている案
 
