@@ -1937,24 +1937,33 @@ pub(super) fn verify_pairs(
             #[cfg(feature = "gpu")]
             Some(bank) => {
                 let (ctx, gm) = GPU_NN.get().expect("gpu bank implies GPU_NN");
+                // Without GPU matches (a failed dispatch), the chunk on the CPU.
                 let verify_chunk =
-                    |chunk: &[(usize, usize)], dms: Vec<Vec<DescriptorMatch>>| -> Vec<_> {
-                        chunk
-                            .par_iter()
-                            .zip(dms.into_par_iter())
-                            .map(|(pair, dm)| verify_one(pair, Some(dm)))
-                            .collect()
+                    |chunk: &[(usize, usize)], dms: Option<Vec<Vec<DescriptorMatch>>>| -> Vec<_> {
+                        match dms {
+                            Some(dms) => chunk
+                                .par_iter()
+                                .zip(dms.into_par_iter())
+                                .map(|(pair, dm)| verify_one(pair, Some(dm)))
+                                .collect(),
+                            None => chunk.par_iter().map(|p| verify_one(p, None)).collect(),
+                        }
                     };
                 // Software pipeline: the GPU matches chunk k while the CPU
                 // verifies chunk k - 1.
                 let mut out = Vec::with_capacity(candidates.len());
-                let mut pending: Option<(&[(usize, usize)], Vec<Vec<DescriptorMatch>>)> = None;
+                let mut pending: Option<(&[(usize, usize)], Option<Vec<Vec<DescriptorMatch>>>)> =
+                    None;
                 for chunk in candidates.chunks(512) {
                     let ((dms, seconds), verified) = rayon::join(
                         || {
                             let started = std::time::Instant::now();
-                            let dms =
-                                gm.match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check);
+                            let dms = gm
+                                .match_pairs(ctx, &bank, chunk, Some(match_ratio), cross_check)
+                                .map_err(|e| {
+                                    eprintln!("GPU matching failed ({e}); this chunk on the CPU")
+                                })
+                                .ok();
                             (dms, started.elapsed().as_secs_f64())
                         },
                         || pending.take().map(|(c, d)| verify_chunk(c, d)),

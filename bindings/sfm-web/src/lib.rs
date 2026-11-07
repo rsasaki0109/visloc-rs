@@ -790,11 +790,11 @@ mod web {
                         sift,
                         matcher,
                         bank: Some(bank),
-                    }) => Some(
-                        matcher
-                            .match_pairs_async(sift.context(), bank, &batch, Some(0.8), true)
-                            .await,
-                    ),
+                    }) => matcher
+                        .match_pairs_async(sift.context(), bank, &batch, Some(0.8), true)
+                        .await
+                        // On a GPU failure, this batch on the CPU.
+                        .ok(),
                     _ => None,
                 };
                 let mut s = state.borrow_mut();

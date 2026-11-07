@@ -174,6 +174,10 @@ impl GpuMatcher {
     /// quantised descriptors, exactly). The cross-check's reverse direction
     /// reuses the forward dot products (f32), or matches the swapped entries
     /// in the same dispatch (u8).
+    ///
+    /// Fails with [`SiftGpuError::PairTooLarge`] when the outputs of one pair
+    /// do not fit the device's storage binding limit, and with
+    /// [`SiftGpuError::Readback`] on a lost device or a failed mapping.
     pub fn match_pairs(
         &self,
         ctx: &GpuContext,
@@ -181,7 +185,7 @@ impl GpuMatcher {
         pairs: &[(usize, usize)],
         ratio: Option<f32>,
         cross_check: bool,
-    ) -> Vec<Vec<DescriptorMatch>> {
+    ) -> Result<Vec<Vec<DescriptorMatch>>, SiftGpuError> {
         pollster::block_on(self.match_pairs_async(ctx, bank, pairs, ratio, cross_check))
     }
 
@@ -194,9 +198,9 @@ impl GpuMatcher {
         pairs: &[(usize, usize)],
         ratio: Option<f32>,
         cross_check: bool,
-    ) -> Vec<Vec<DescriptorMatch>> {
-        let tops = self.top2(ctx, bank, pairs, cross_check).await;
-        pairs
+    ) -> Result<Vec<Vec<DescriptorMatch>>, SiftGpuError> {
+        let tops = self.top2(ctx, bank, pairs, cross_check).await?;
+        Ok(pairs
             .iter()
             .zip(&tops)
             .map(|(&(i, j), t)| {
@@ -214,7 +218,7 @@ impl GpuMatcher {
                     .filter(|m| back[m.train_index] == m.query_index)
                     .collect()
             })
-            .collect()
+            .collect())
     }
 
     fn finish(
@@ -261,14 +265,17 @@ impl GpuMatcher {
         bank: &FeatureBank,
         pairs: &[(usize, usize)],
         reverse: bool,
-    ) -> Vec<PairTops> {
+    ) -> Result<Vec<PairTops>, SiftGpuError> {
         if reverse && bank.quantized {
             // u8 dot products are exact integers, so the swapped entry gives
             // the reverse top-2 bit for bit; two forward passes beat the fused
             // reverse epilogue once the integer GEMM is this cheap.
             let both: Vec<(usize, usize)> =
                 pairs.iter().flat_map(|&(i, j)| [(i, j), (j, i)]).collect();
-            let mut tops = self.top2_batched(ctx, bank, &both, false).await.into_iter();
+            let mut tops = self
+                .top2_batched(ctx, bank, &both, false)
+                .await?
+                .into_iter();
             let mut result = Vec::with_capacity(pairs.len());
             while let (Some(f), Some(r)) = (tops.next(), tops.next()) {
                 result.push(PairTops {
@@ -276,7 +283,7 @@ impl GpuMatcher {
                     reverse: r.forward,
                 });
             }
-            return result;
+            return Ok(result);
         }
         self.top2_batched(ctx, bank, pairs, reverse).await
     }
@@ -288,7 +295,32 @@ impl GpuMatcher {
         bank: &FeatureBank,
         pairs: &[(usize, usize)],
         reverse: bool,
-    ) -> Vec<PairTops> {
+    ) -> Result<Vec<PairTops>, SiftGpuError> {
+        // The outputs and the reverse partials are each bound whole as one
+        // storage buffer of 16 B records. A batch always takes its first
+        // pair, so a pair past the device's limit is an error up front
+        // rather than a wgpu validation panic.
+        let limit = (ctx
+            .limits
+            .max_storage_buffer_binding_size
+            .min(ctx.limits.max_buffer_size)
+            / 16) as usize;
+        for &(i, j) in pairs {
+            let (nq, nt) = (bank.counts[i], bank.counts[j]);
+            let (rows, parts) = if reverse {
+                (nq + nt, nq.div_ceil(128) * nt)
+            } else {
+                (nq, 0)
+            };
+            if rows.max(parts) > limit {
+                return Err(SiftGpuError::PairTooLarge {
+                    query: nq,
+                    train: nt,
+                    records: rows.max(parts),
+                    limit,
+                });
+            }
+        }
         let mut result: Vec<PairTops> = Vec::with_capacity(pairs.len());
         let mut start = 0;
         while start < pairs.len() {
@@ -315,11 +347,11 @@ impl GpuMatcher {
             }
             result.extend(
                 self.top2_batch(ctx, bank, &pairs[start..end], reverse, rows, parts)
-                    .await,
+                    .await?,
             );
             start = end;
         }
-        result
+        Ok(result)
     }
 
     async fn top2_batch(
@@ -330,7 +362,7 @@ impl GpuMatcher {
         reverse: bool,
         rows: usize,
         parts: usize,
-    ) -> Vec<PairTops> {
+    ) -> Result<Vec<PairTops>, SiftGpuError> {
         let dev = &ctx.device;
         let queue = &ctx.queue;
         let mut words: Vec<u32> = Vec::with_capacity(pairs.len() * 8);
@@ -362,13 +394,13 @@ impl GpuMatcher {
             max_t = max_t.max(nt);
         }
         if rows == 0 {
-            return pairs
+            return Ok(pairs
                 .iter()
                 .map(|_| PairTops {
                     forward: Vec::new(),
                     reverse: Vec::new(),
                 })
-                .collect();
+                .collect());
         }
         let use_ = wgpu::BufferUsages::empty();
         let entries = storage(dev, "match-entries", (words.len() * 4) as u64, use_);
@@ -444,7 +476,7 @@ impl GpuMatcher {
         }
         queue.submit(Some(encoder.finish()));
         let raw: Vec<u32> =
-            bytemuck::cast_slice(&read_bytes(dev, queue, &out, rows * 16).await).to_vec();
+            bytemuck::cast_slice(&read_bytes(dev, queue, &out, rows * 16).await?).to_vec();
         let read = |off: usize, n: usize| -> Vec<Top2> {
             (0..n)
                 .map(|r| {
@@ -457,7 +489,7 @@ impl GpuMatcher {
                 })
                 .collect()
         };
-        pairs
+        Ok(pairs
             .iter()
             .zip(&offs)
             .map(|(&(qi, ti), &(fwd, rev))| PairTops {
@@ -468,6 +500,6 @@ impl GpuMatcher {
                     Vec::new()
                 },
             })
-            .collect()
+            .collect())
     }
 }

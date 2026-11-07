@@ -542,6 +542,16 @@ All notable changes to `visloc-rs` will be documented here.
   - Holding the last keypoint as well cost one scene 0.4–0.8 dB: the
     outermost keypoints lie at the image circle's edge, past 100°.
   - Details in docs/fisheye.md.
+- **The GPU descriptor matcher found almost nothing on Apple Silicon
+  (#465).** Its shaders wrote shared memory one vec4 component per thread,
+  and on Metal a component store can compile to a read-modify-write of the
+  whole vec4, so concurrent writers lost each other's components (5 matches
+  where the CPU found 817). Every shared write is now a whole vec4 by one
+  thread; the matches are bit-identical on Vulkan.
+- **`VlfeatSiftGpu` panicked on an image without DoG candidates (#453).** A
+  flat image (sky, road, a blank frame) read back zero bytes, which were
+  rejected as misaligned. It now returns no features, as the CPU extractor
+  does.
 - **An Insta360 photo's lens centre had x and y swapped.** An `.insp`
   photo's calibration has the photo's axes transposed: its `cx` is the
   row in the lens's square and its `cy` the column.
@@ -1057,6 +1067,23 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **`GpuMatcher::match_pairs` returns a `Result` (#469).** Breaking:
+  `match_pairs` and `match_pairs_async` return
+  `Result<Vec<Vec<DescriptorMatch>>, SiftGpuError>`. A lost device or a
+  failed buffer mapping is `SiftGpuError::Readback`, and a pair whose
+  outputs do not fit the device's storage binding limit is
+  `SiftGpuError::PairTooLarge`; both panicked before. `VlfeatSiftGpu`'s
+  `extract` and `extract_batch` return readback failures too. The photo and
+  EuRoC pipelines, the `colmap` example, `unordered_sfm_demo` and the
+  browser SfM match a chunk that fails on the GPU on the CPU instead.
+- **`VlfeatSiftGpu` keeps its GPU buffers across image sizes (#453).** A
+  change of image size used to allocate every buffer again, on nearly every
+  frame of a rig whose cameras differ in resolution. The buffers are now
+  kept and grown to the largest image, and only the dispatches are
+  recorded again. On 40 interleaved rig images (3840x2160 and 1920x1536,
+  NVIDIA L40S) the median time per image falls from 140 to 20 ms, with the
+  same features and about the same peak memory (2860 MiB against 2852).
+  `clear_plan_cache()` frees them.
 - **The mapping ORB frontend is about four times faster, with the same
   output.** The corner detector (`detect_keypoints_mapping_with`) runs each
   filter along whole rows, reflecting only at their ends, and checks the

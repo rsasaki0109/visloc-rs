@@ -981,7 +981,10 @@ pub fn build_euroc_dataset(
     let match_pairs = |pairs: &[(usize, usize)]| -> Vec<Vec<DescriptorMatch>> {
         #[cfg(feature = "gpu")]
         if let Some((ctx, bank, m)) = &gpu_match {
-            return m.match_pairs(ctx, bank, pairs, Some(0.8), true);
+            match m.match_pairs(ctx, bank, pairs, Some(0.8), true) {
+                Ok(dms) => return dms,
+                Err(e) => eprintln!("GPU matching failed ({e}); this chunk on the CPU"),
+            }
         }
         pairs
             .par_iter()
