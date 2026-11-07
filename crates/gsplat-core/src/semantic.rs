@@ -1,0 +1,267 @@
+//! Semantic classes per gaussian, voted from per-pixel labels.
+//!
+//! A label image holds one class index per pixel ([`NO_LABEL`]: none). The
+//! renderer adds each splat's blending weight at a pixel (`T_i a_i`) to that
+//! pixel's class, over every view (`visloc_gsplat_cuda::CudaGsplat::
+//! vote_labels`). A gaussian then takes the class with the most weight
+//! ([`label_gaussians`]), and [`colour_by_class`] paints it in that class's
+//! colour, for a splat to overlay on the RGB one.
+//!
+//! The classes come from a `classes.txt`, one per line, `index r g b name`,
+//! the indices 0, 1, 2, ... in order ([`parse_classes`]).
+
+use crate::gaussian::Scene;
+use crate::sh::SH_C0;
+
+/// A label image's "no label" pixel, and a gaussian's class when no labelled
+/// pixel saw it.
+pub const NO_LABEL: u8 = 255;
+
+/// The colour of a gaussian no labelled pixel saw.
+pub const UNSEEN_COLOR: [u8; 3] = [40, 40, 40];
+
+/// A class of the label images: its name and display colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticClass {
+    pub name: String,
+    pub color: [u8; 3],
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SemanticError {
+    #[error("classes.txt line {line}: {message}")]
+    Classes { line: usize, message: String },
+    #[error("no classes")]
+    NoClasses,
+}
+
+/// Parse a `classes.txt`: per line `index r g b name` (the name may have
+/// spaces), indices 0, 1, 2, ... in order, at most 255 classes. Blank lines
+/// and lines starting with `#` are skipped.
+pub fn parse_classes(text: &str) -> Result<Vec<SemanticClass>, SemanticError> {
+    let mut classes = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let err = |message: &str| SemanticError::Classes {
+            line: i + 1,
+            message: message.to_owned(),
+        };
+        let mut f = line.split_whitespace();
+        let mut num = |what: &str| -> Result<u32, SemanticError> {
+            f.next()
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| err(&format!("expected {what}")))
+        };
+        let index = num("an index")?;
+        if index as usize != classes.len() {
+            return Err(err(&format!("index {index}, expected {}", classes.len())));
+        }
+        let mut color = [0u8; 3];
+        for c in &mut color {
+            *c = u8::try_from(num("r g b")?).map_err(|_| err("a colour above 255"))?;
+        }
+        let name = f.collect::<Vec<_>>().join(" ");
+        if name.is_empty() {
+            return Err(err("expected a name"));
+        }
+        classes.push(SemanticClass { name, color });
+    }
+    if classes.is_empty() {
+        return Err(SemanticError::NoClasses);
+    }
+    if classes.len() >= NO_LABEL as usize {
+        return Err(SemanticError::Classes {
+            line: 0,
+            message: format!("{} classes, at most 254", classes.len()),
+        });
+    }
+    Ok(classes)
+}
+
+/// A gaussian's class from its votes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GaussianLabel {
+    /// The class with the most weight ([`NO_LABEL`] without any).
+    pub class: u8,
+    /// That class's share of the gaussian's weight (0 without any).
+    pub confidence: f32,
+    /// The gaussian's weight over all classes and views.
+    pub weight: f32,
+}
+
+/// Each gaussian's class from `votes`, `num_classes` floats per gaussian
+/// (the weight each class's pixels gave it). Ties go to the lower class.
+pub fn label_gaussians(votes: &[f32], num_classes: usize) -> Vec<GaussianLabel> {
+    votes
+        .chunks_exact(num_classes.max(1))
+        .map(|v| {
+            let weight: f32 = v.iter().sum();
+            let (best, top) =
+                v.iter().enumerate().fold(
+                    (0, 0.0f32),
+                    |acc, (k, &w)| if w > acc.1 { (k, w) } else { acc },
+                );
+            if top > 0.0 {
+                GaussianLabel {
+                    class: best as u8,
+                    confidence: top / weight,
+                    weight,
+                }
+            } else {
+                GaussianLabel {
+                    class: NO_LABEL,
+                    confidence: 0.0,
+                    weight: 0.0,
+                }
+            }
+        })
+        .collect()
+}
+
+/// `scene` with every gaussian painted its class's colour ([`UNSEEN_COLOR`]
+/// without a class): degree-0 SH, the geometry and opacity unchanged.
+pub fn colour_by_class(
+    scene: &Scene,
+    labels: &[GaussianLabel],
+    classes: &[SemanticClass],
+) -> Scene {
+    let dc = |c: [u8; 3]| c.map(|v| (v as f32 / 255.0 - 0.5) / SH_C0);
+    let gaussians = scene
+        .gaussians
+        .iter()
+        .zip(labels)
+        .map(|(g, l)| {
+            let color = classes
+                .get(l.class as usize)
+                .map_or(UNSEEN_COLOR, |c| c.color);
+            let mut g = g.clone();
+            g.sh_dc = dc(color);
+            g.sh_rest.clear();
+            g.sh_degree = 0;
+            g
+        })
+        .collect();
+    Scene::new(gaussians, 0)
+}
+
+/// The classes as JSON for the web viewer's legend: per class its name,
+/// colour and `count` (e.g. gaussians), in index order.
+pub fn classes_json(classes: &[SemanticClass], counts: &[usize]) -> String {
+    let escape = |s: &str| {
+        s.chars()
+            .flat_map(|c| match c {
+                '"' => vec!['\\', '"'],
+                '\\' => vec!['\\', '\\'],
+                c if (c as u32) < 0x20 => vec![' '],
+                c => vec![c],
+            })
+            .collect::<String>()
+    };
+    let rows: Vec<String> = classes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            format!(
+                "{{\"index\":{i},\"name\":\"{}\",\"color\":[{},{},{}],\"count\":{}}}",
+                escape(&c.name),
+                c.color[0],
+                c.color[1],
+                c.color[2],
+                counts.get(i).copied().unwrap_or(0)
+            )
+        })
+        .collect();
+    format!("{{\"classes\":[\n{}\n]}}\n", rows.join(",\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gaussian::Gaussian;
+    use nalgebra::{Quaternion, Vector3};
+
+    #[test]
+    fn classes_parse_in_index_order() {
+        let text = "# index r g b name\n0 128 128 128 other\n\n1 230 25 75 coffee table\n";
+        let classes = parse_classes(text).unwrap();
+        assert_eq!(
+            classes,
+            vec![
+                SemanticClass {
+                    name: "other".into(),
+                    color: [128, 128, 128]
+                },
+                SemanticClass {
+                    name: "coffee table".into(),
+                    color: [230, 25, 75]
+                },
+            ]
+        );
+        assert!(parse_classes("1 0 0 0 chair\n").is_err());
+        assert!(parse_classes("0 0 300 0 chair\n").is_err());
+        assert!(parse_classes("0 0 0 0\n").is_err());
+        assert!(parse_classes("# nothing\n").is_err());
+    }
+
+    #[test]
+    fn a_gaussian_takes_the_class_with_the_most_weight() {
+        let votes = [
+            0.5, 1.5, 0.0, /**/ 0.0, 0.0, 0.0, /**/ 2.0, 0.0, 2.0,
+        ];
+        let labels = label_gaussians(&votes, 3);
+        assert_eq!(labels[0].class, 1);
+        assert!((labels[0].confidence - 0.75).abs() < 1e-6);
+        assert!((labels[0].weight - 2.0).abs() < 1e-6);
+        assert_eq!(labels[1].class, NO_LABEL);
+        assert_eq!(labels[1].confidence, 0.0);
+        // A tie goes to the lower class.
+        assert_eq!(labels[2].class, 0);
+    }
+
+    #[test]
+    fn colouring_keeps_the_geometry_and_paints_the_class() {
+        let g = Gaussian {
+            mean: Vector3::new(1.0, 2.0, 3.0),
+            scale_log: Vector3::new(-1.0, -2.0, -3.0),
+            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            opacity_logit: 0.7,
+            sh_dc: [0.1, 0.2, 0.3],
+            sh_rest: vec![0.01; 9],
+            sh_degree: 1,
+        };
+        let scene = Scene::new(vec![g.clone(), g], 1);
+        let classes = [SemanticClass {
+            name: "wall".into(),
+            color: [255, 0, 128],
+        }];
+        let labels = label_gaussians(&[1.0, 0.0], 1);
+        let out = colour_by_class(&scene, &labels, &classes);
+        assert_eq!(out.sh_degree, 0);
+        let rgb = |g: &Gaussian| g.sh_dc.map(|v| v * SH_C0 + 0.5);
+        let a = rgb(&out.gaussians[0]);
+        assert!(
+            (a[0] - 1.0).abs() < 1e-6 && a[1].abs() < 1e-6 && (a[2] - 128.0 / 255.0).abs() < 1e-6
+        );
+        let b = rgb(&out.gaussians[1]);
+        assert!((b[0] - 40.0 / 255.0).abs() < 1e-6);
+        assert_eq!(out.gaussians[0].mean, scene.gaussians[0].mean);
+        assert_eq!(out.gaussians[0].opacity_logit, 0.7);
+        assert!(out.gaussians[0].sh_rest.is_empty());
+    }
+
+    #[test]
+    fn the_legend_escapes_names() {
+        let classes = [SemanticClass {
+            name: "a \"b\"".into(),
+            color: [1, 2, 3],
+        }];
+        let json = classes_json(&classes, &[7]);
+        assert!(
+            json.contains(r#"{"index":0,"name":"a \"b\"","color":[1,2,3],"count":7}"#),
+            "{json}"
+        );
+    }
+}

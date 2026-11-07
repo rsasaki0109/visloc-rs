@@ -645,6 +645,17 @@ function createWorker(self) {
             vertexCount = e.data.vertexCount;
         } else if (e.data.vertexCount) {
             vertexCount = e.data.vertexCount;
+        } else if (e.data.colors) {
+            // RGB per splat (4 bytes each, the class overlay's blend) in
+            // place of the file's; the opacity stays.
+            const u = new Uint8Array(buffer);
+            const c = e.data.colors;
+            for (let i = 0; i < vertexCount && 4 * i + 2 < c.length; i++) {
+                u[32 * i + 24] = c[4 * i];
+                u[32 * i + 25] = c[4 * i + 1];
+                u[32 * i + 26] = c[4 * i + 2];
+            }
+            generateTexture();
         } else if (e.data.view) {
             viewProj = e.data.view;
             throttledSort();
@@ -746,7 +757,17 @@ async function main() {
     try {
         viewMatrix = JSON.parse(decodeURIComponent(location.hash.slice(1)));
         carousel = false;
-    } catch (err) {}
+    } catch (err) {
+        // ?cameras=cameras.json (gsplat_semantic_cuda --web): the capture
+        // viewpoints, for the number keys, starting from the first.
+        if (params.get("cameras")) {
+            const req = await fetch(new URL(params.get("cameras"), location.href));
+            if (req.ok) {
+                cameras = await req.json();
+                viewMatrix = getViewMatrix(cameras[0]);
+            }
+        }
+    }
     const url = new URL(
         params.get("url") || "euroc_v101.splat",
         location.href,
@@ -1498,8 +1519,90 @@ async function main() {
                 buffer: splatData.buffer,
                 vertexCount: Math.floor(bytesRead / rowLength),
             });
+            if (params.get("semantic")) {
+                await semanticOverlay(
+                    new URL(params.get("semantic"), location.href),
+                    splatData.slice(0, bytesRead),
+                    worker,
+                    parseFloat(params.get("blend") || "0") || 0,
+                );
+            }
         }
     }
+}
+
+// The class overlay, ?semantic=semantic.splat next to ?url=scene.splat (both
+// from gsplat_semantic_cuda --web): the same splats in the same order, painted
+// by class. A slider, or the M key, blends the scene's colours into the
+// classes' (?blend=1 starts on the classes); the legend comes from the
+// overlay's .json beside it.
+async function semanticOverlay(url, rgb, worker, start) {
+    const req = await fetch(url, { mode: "cors", credentials: "omit" });
+    if (req.status != 200)
+        throw new Error(req.status + " Unable to load " + req.url);
+    const sem = new Uint8Array(await req.arrayBuffer());
+    if (sem.length != rgb.length)
+        throw new Error(
+            "the class overlay has " + sem.length / 32 +
+                " splats, the scene " + rgb.length / 32,
+        );
+    const n = rgb.length / 32;
+    const colors = new Uint8Array(4 * n);
+    let pending = null;
+    const blend = (t) => {
+        for (let i = 0; i < n; i++) {
+            for (let c = 0; c < 3; c++) {
+                const a = rgb[32 * i + 24 + c];
+                colors[4 * i + c] = Math.round(a + t * (sem[32 * i + 24 + c] - a));
+            }
+        }
+        worker.postMessage({ colors });
+    };
+    // At most one blend per frame while the slider moves.
+    const request = (t) => {
+        if (pending === null) requestAnimationFrame(() => {
+            blend(pending);
+            pending = null;
+        });
+        pending = t;
+    };
+
+    const panel = document.createElement("div");
+    panel.id = "semantic";
+    panel.style.cssText =
+        "position:absolute;bottom:10px;left:15px;z-index:999;font-size:small;" +
+        "background:rgba(0,0,0,0.5);padding:6px 8px;border-radius:4px";
+    const slider = document.createElement("input");
+    Object.assign(slider, { type: "range", min: 0, max: 1, step: 0.05, value: start });
+    if (start > 0) request(start);
+    slider.style.verticalAlign = "middle";
+    slider.addEventListener("input", () => request(parseFloat(slider.value)));
+    const row = document.createElement("div");
+    row.append("RGB ", slider, " classes (M)");
+    panel.append(row);
+    window.addEventListener("keydown", (e) => {
+        if (e.code != "KeyM") return;
+        slider.value = parseFloat(slider.value) < 0.5 ? 1 : 0;
+        request(parseFloat(slider.value));
+    });
+    try {
+        const legend = await (
+            await fetch(new URL(url.pathname.replace(/\.splat$/, ".json"), url))
+        ).json();
+        const total = legend.classes.reduce((s, c) => s + c.count, 0) || 1;
+        for (const c of legend.classes) {
+            const item = document.createElement("div");
+            const swatch = document.createElement("span");
+            swatch.style.cssText =
+                "display:inline-block;width:10px;height:10px;margin-right:5px;" +
+                "background:rgb(" + c.color.join(",") + ")";
+            item.append(swatch, c.name + " " + ((100 * c.count) / total).toFixed(1) + "%");
+            panel.append(item);
+        }
+    } catch (err) {
+        console.log("no legend for the class overlay", err);
+    }
+    document.body.append(panel);
 }
 
 main().catch((err) => {

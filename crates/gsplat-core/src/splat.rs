@@ -170,6 +170,22 @@ pub fn save_splat(scene: &Scene, path: impl AsRef<Path>) -> Result<(), SplatErro
     Ok(())
 }
 
+/// The indices of the `max` most important gaussians, most important first:
+/// opacity times volume, the order antimatter15's viewer sorts by. Ties keep
+/// the scene's order, so two scenes of the same geometry give the same
+/// order.
+pub fn importance_order(scene: &Scene, max: usize) -> Vec<usize> {
+    let importance = |g: &crate::gaussian::Gaussian| {
+        g.opacity() * (g.scale_log.x + g.scale_log.y + g.scale_log.z).exp()
+    };
+    let mut order: Vec<usize> = (0..scene.len()).collect();
+    order.sort_by(|&a, &b| {
+        importance(&scene.gaussians[b]).total_cmp(&importance(&scene.gaussians[a]))
+    });
+    order.truncate(max);
+    order
+}
+
 #[inline]
 fn logit(p: f32) -> f32 {
     let p = p.clamp(1e-6, 1.0 - 1e-6);

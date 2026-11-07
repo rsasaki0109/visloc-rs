@@ -276,6 +276,9 @@ type TsdfTakeFn =
 type MatchSetFn = unsafe extern "C" fn(*mut c_void, c_int, *const u32, *const u8) -> c_int;
 type MatchTop2Fn =
     unsafe extern "C" fn(*mut c_void, c_int, *const u32, *mut i32, *mut i32) -> c_int;
+type VoteLabelsFn =
+    unsafe extern "C" fn(*mut c_void, *const GscCamera, *const u8, c_int, c_int) -> c_int;
+type GetVotesFn = unsafe extern "C" fn(*mut c_void, c_int, *mut c_float) -> c_int;
 
 /// A descriptor's best match among the other image's (see
 /// [`CudaGsplat::match_top2`]): scores `|other|^2 - 2 dot` in byte units
@@ -425,6 +428,8 @@ struct Api {
     tsdf_take: TsdfTakeFn,
     match_set: MatchSetFn,
     match_top2: MatchTop2Fn,
+    vote_labels: VoteLabelsFn,
+    get_votes: GetVotesFn,
 }
 
 /// The native context: a scene, its Adam state and the training images on
@@ -471,7 +476,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 11;
+    pub const ABI_VERSION: u32 = 12;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -524,6 +529,8 @@ impl CudaGsplat {
                 tsdf_take: symbol(&library, "visloc_gsplat_cuda_tsdf_take", path)?,
                 match_set: symbol(&library, "visloc_gsplat_cuda_match_set", path)?,
                 match_top2: symbol(&library, "visloc_gsplat_cuda_match_top2", path)?,
+                vote_labels: symbol(&library, "visloc_gsplat_cuda_vote_labels", path)?,
+                get_votes: symbol(&library, "visloc_gsplat_cuda_get_votes", path)?,
             };
             (version, create, stage_names, api)
         };
@@ -686,6 +693,62 @@ impl CudaGsplat {
         planar: bool,
     ) -> Result<DepthFrame, GsplatCudaError> {
         self.render_depth_channels(view, bg, sh_active_degree, planar, false)
+    }
+
+    /// Render the current scene from `view` and add its label votes to the
+    /// totals [`votes`](Self::votes) returns: at every pixel, each splat's
+    /// blending weight there (`T_i a_i`, as the render composites it) goes to
+    /// the pixel's class. `labels` holds the view's class per pixel,
+    /// row-major; a pixel of class `num_classes` or more casts no vote. With
+    /// `reset` the totals start at zero, as they do after any change of the
+    /// scene or of `num_classes`.
+    pub fn vote_labels(
+        &mut self,
+        view: &CameraView,
+        labels: &[u8],
+        num_classes: usize,
+        reset: bool,
+    ) -> Result<(), GsplatCudaError> {
+        let cam = GscCamera::from_view(view);
+        if labels.len() != cam.width as usize * cam.height as usize {
+            return Err(GsplatCudaError::Input(format!(
+                "{} labels for a {}x{} view",
+                labels.len(),
+                cam.width,
+                cam.height
+            )));
+        }
+        if !(1..=255).contains(&num_classes) {
+            return Err(GsplatCudaError::Input(format!(
+                "{num_classes} classes (1 to 255)"
+            )));
+        }
+        // SAFETY: `labels` holds width * height bytes, the size the native
+        // side reads; `cam` outlives the call.
+        let code = unsafe {
+            (self.api.vote_labels)(
+                self.ctx(),
+                &cam,
+                labels.as_ptr(),
+                num_classes as c_int,
+                c_int::from(reset),
+            )
+        };
+        self.check(code)?;
+        self.pixels = cam.width as usize * cam.height as usize;
+        Ok(())
+    }
+
+    /// The label votes [`vote_labels`](Self::vote_labels) has summed:
+    /// `num_classes` floats per gaussian, gaussian-major.
+    pub fn votes(&self, num_classes: usize) -> Result<Vec<f32>, GsplatCudaError> {
+        let mut out = vec![0.0f32; self.num_gaussians() * num_classes];
+        // SAFETY: `out` holds n * num_classes floats, the size the native side
+        // writes; it refuses a class count other than the votes'.
+        let code =
+            unsafe { (self.api.get_votes)(self.ctx(), num_classes as c_int, out.as_mut_ptr()) };
+        self.check(code)?;
+        Ok(out)
     }
 
     /// [`render_depth`](Self::render_depth) (centre median depth) plus the
