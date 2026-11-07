@@ -6,6 +6,28 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Objects in semantic splats (`gsplat_semantic_cuda --instances`,
+  `sam3_labels.py --instances`).**
+  - **Instances.** `sam3_labels.py --instances` writes each pixel's SAM 3
+    instance as well as its class.
+  - **Votes.** Each view's instance image votes on its own
+    (`vote_labels`). An instance's members are the gaussians that give it
+    at least half of their weight there (`semantic::view_instance_members`).
+  - **Merging.** Instances of one class in different views join when their
+    normalised member weights overlap by `--instance-overlap` (0.5),
+    chained by union-find. Each gaussian takes the object of its class with
+    the most weight. Objects seen in fewer than `--min-views` (3) views
+    drop (`semantic::merge_instances`).
+  - **Outputs.** `--out` gains an `instance` property. `--web` writes
+    `instances.splat`, each object its own colour (`instance_color`), and
+    `instances.json`. The viewer takes `&instances=`, and O switches
+    between classes and objects.
+  - **FIORD MeetingRoom_In.** 3,728 instances in 106 photos become 65
+    objects (25 chairs) in 2.6 s. `--check` merges the training views' and
+    matches 64.4% of the 525 held-out instances to an object at IoU 0.5
+    (weighted pixels): chairs 68.8%, tables 74.5%, windows 8.0%. Details in
+    docs/semantic_splat.md.
+
 - **A class per gaussian, voted from SAM 3 labels (`gsplat_semantic_cuda`,
   `scripts/sam3_labels.py`).**
   - **Labels.** `sam3_labels.py` runs SAM 3 (transformers `Sam3Model`) on a
