@@ -527,6 +527,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **The GPU descriptor matcher found almost nothing on Apple Silicon
+  (#465).** Its shaders wrote shared memory one vec4 component per thread,
+  and on Metal a component store can compile to a read-modify-write of the
+  whole vec4, so concurrent writers lost each other's components (5 matches
+  where the CPU found 817). Every shared write is now a whole vec4 by one
+  thread; the matches are bit-identical on Vulkan.
 - **An Insta360 photo's lens centre had x and y swapped.** An `.insp`
   photo's calibration has the photo's axes transposed: its `cx` is the
   row in the lens's square and its `cy` the column.

@@ -26,6 +26,14 @@
 // out of shared memory is one vec4. Every dot product still sums
 // k = 0..dim in order.
 //
+// Every write to shared memory is a whole vec4 by one thread. Threads that
+// each write one component of the same shared vec4 race where a component
+// store is compiled to a read-modify-write of the vec4: Metal does that, and
+// lost components there made the GEMM tiles and the folds wrong (issue
+// #465). So each thread transposes a 4-row x 4-k block in registers before
+// it writes the tile, and a top-2 partial is one vec4 (score, index, score,
+// index).
+//
 // Each thread offers its candidates to its own running top-2 in increasing
 // index order, so there the index tie-break can never fire and `insert_inc`
 // skips it; the folds across threads use the full `insert`.
@@ -67,12 +75,11 @@ struct Entry {
 const BIG: f32 = 3.0e38;
 const NONE: u32 = 0xFFFFFFFFu;
 
-// k-major tiles, four consecutive rows per vec4: qs[k * 32 + row / 4][row % 4].
-// After the GEMM they double as score scratch for the top-2 folds.
-var<workgroup> qs: array<vec4<u32>, 512>;
-var<workgroup> ts: array<vec4<u32>, 512>;
-var<workgroup> red_i1: array<u32, 2048>;
-var<workgroup> red_i2: array<u32, 2048>;
+// The k-major tiles, four consecutive rows per vec4: the query tile's row
+// `row`, k `k` is sh[k * 32 + row / 4][row % 4], the train tile's at
+// sh[512 + ...]. After the GEMM, sh is the scratch of
+// the top-2 folds, one partial per vec4.
+var<workgroup> sh: array<vec4<u32>, 2048>;
 
 struct Top2 {
     s1: f32,
@@ -112,48 +119,54 @@ fn insert_inc(t: Top2, s: f32, i: u32) -> Top2 {
     );
 }
 
-// Fold shared-memory partial `slot` (scores in qs/ts, indices in red_i*).
+// Fold shared-memory partial `slot`.
 fn fold(c: Top2, slot: u32) -> Top2 {
-    let r = insert(c, bitcast<f32>(qs[slot / 4u][slot % 4u]), red_i1[slot]);
-    return insert(r, bitcast<f32>(ts[slot / 4u][slot % 4u]), red_i2[slot]);
+    let w = sh[slot];
+    let r = insert(c, bitcast<f32>(w.x), w.y);
+    return insert(r, bitcast<f32>(w.z), w.w);
 }
 
 fn store(slot: u32, c: Top2) {
-    qs[slot / 4u][slot % 4u] = bitcast<u32>(c.s1);
-    ts[slot / 4u][slot % 4u] = bitcast<u32>(c.s2);
-    red_i1[slot] = c.i1;
-    red_i2[slot] = c.i2;
+    sh[slot] = vec4<u32>(bitcast<u32>(c.s1), c.i1, bitcast<u32>(c.s2), c.i2);
 }
 
-// One vec4 of a 128-row x 16-k tile (512 vec4, two per thread): fetch it
-// from the bank, then put it into the k-major shared tile.
-fn fetch(row_off: u32, nrows: u32, row0: u32, kc: u32, t: u32, s: u32) -> vec4<u32> {
-    let idx = t + 256u * s;
-    let row = idx / 4u;
-    let v = idx % 4u;
-    if (row0 + row < nrows) {
-        return desc[(row_off + row0 + row) * p.dim4 + kc * 4u + v];
+// vec4 `v` of k chunk `kc` of row `row` of a block of the bank (zero past
+// its `nrows` rows).
+fn fetch(row_off: u32, nrows: u32, row: u32, kc: u32, v: u32) -> vec4<u32> {
+    if (row < nrows) {
+        return desc[(row_off + row) * p.dim4 + kc * 4u + v];
     }
     return vec4<u32>(0u);
 }
 
-fn put(dst_is_q: bool, t: u32, s: u32, val: vec4<u32>) {
-    let idx = t + 256u * s;
-    let row = idx / 4u;
-    let v = idx % 4u;
-    let base = v * 4u * 32u + row / 4u;
-    let c = row % 4u;
-    if (dst_is_q) {
-        qs[base][c] = val.x;
-        qs[base + 32u][c] = val.y;
-        qs[base + 64u][c] = val.z;
-        qs[base + 96u][c] = val.w;
-    } else {
-        ts[base][c] = val.x;
-        ts[base + 32u][c] = val.y;
-        ts[base + 64u][c] = val.z;
-        ts[base + 96u][c] = val.w;
+// Thread `t`'s block of k chunk `kc` of the two 128-row x 16-k tiles:
+// threads 0..127 fill the query tile (rows from `row0`), 128..255 the train
+// tile (rows from `col0`), each one block of 4 rows x 4 k (vec4 `v` of rows
+// 4 g ..= 4 g + 3), so neighbouring threads fetch the neighbouring vec4s of
+// a row. The block goes in transposed, as four whole vec4s, one per k.
+fn put_block(t: u32, kc: u32, e: Entry, row0: u32, col0: u32) {
+    let b = t % 128u;
+    let v = b % 4u;
+    let g = b / 4u;
+    var off = e.t_off;
+    var nrows = e.nt;
+    var first = col0 + 4u * g;
+    var dst = 512u;
+    if (t < 128u) {
+        off = e.q_off;
+        nrows = e.nq;
+        first = row0 + 4u * g;
+        dst = 0u;
     }
+    let l0 = fetch(off, nrows, first + 0u, kc, v);
+    let l1 = fetch(off, nrows, first + 1u, kc, v);
+    let l2 = fetch(off, nrows, first + 2u, kc, v);
+    let l3 = fetch(off, nrows, first + 3u, kc, v);
+    let k0 = dst + 4u * v * 32u + g;
+    sh[k0] = vec4<u32>(l0.x, l1.x, l2.x, l3.x);
+    sh[k0 + 32u] = vec4<u32>(l0.y, l1.y, l2.y, l3.y);
+    sh[k0 + 64u] = vec4<u32>(l0.z, l1.z, l2.z, l3.z);
+    sh[k0 + 96u] = vec4<u32>(l0.w, l1.w, l2.w, l3.w);
 }
 
 @compute @workgroup_size(256)
@@ -226,16 +239,13 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         var acc7l = vec4<u32>(0u);
         var acc7h = vec4<u32>(0u);
         for (var kc = 0u; kc < nchunks; kc = kc + 1u) {
-            put(true, t, 0u, fetch(e.q_off, e.nq, row0, kc, t, 0u));
-            put(false, t, 0u, fetch(e.t_off, e.nt, col0, kc, t, 0u));
-            put(true, t, 1u, fetch(e.q_off, e.nq, row0, kc, t, 1u));
-            put(false, t, 1u, fetch(e.t_off, e.nt, col0, kc, t, 1u));
+            put_block(t, kc, e, row0, col0);
             workgroupBarrier();
             {
-                let al = qs[0u + ty];
-                let ah = qs[16u + ty];
-                let bl = ts[0u + tx];
-                let bh = ts[16u + tx];
+                let al = sh[0u + ty];
+                let ah = sh[16u + ty];
+                let bl = sh[512u + tx];
+                let bh = sh[528u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -254,10 +264,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[32u + ty];
-                let ah = qs[48u + ty];
-                let bl = ts[32u + tx];
-                let bh = ts[48u + tx];
+                let al = sh[32u + ty];
+                let ah = sh[48u + ty];
+                let bl = sh[544u + tx];
+                let bh = sh[560u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -276,10 +286,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[64u + ty];
-                let ah = qs[80u + ty];
-                let bl = ts[64u + tx];
-                let bh = ts[80u + tx];
+                let al = sh[64u + ty];
+                let ah = sh[80u + ty];
+                let bl = sh[576u + tx];
+                let bh = sh[592u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -298,10 +308,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[96u + ty];
-                let ah = qs[112u + ty];
-                let bl = ts[96u + tx];
-                let bh = ts[112u + tx];
+                let al = sh[96u + ty];
+                let ah = sh[112u + ty];
+                let bl = sh[608u + tx];
+                let bh = sh[624u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -320,10 +330,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[128u + ty];
-                let ah = qs[144u + ty];
-                let bl = ts[128u + tx];
-                let bh = ts[144u + tx];
+                let al = sh[128u + ty];
+                let ah = sh[144u + ty];
+                let bl = sh[640u + tx];
+                let bh = sh[656u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -342,10 +352,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[160u + ty];
-                let ah = qs[176u + ty];
-                let bl = ts[160u + tx];
-                let bh = ts[176u + tx];
+                let al = sh[160u + ty];
+                let ah = sh[176u + ty];
+                let bl = sh[672u + tx];
+                let bh = sh[688u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -364,10 +374,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[192u + ty];
-                let ah = qs[208u + ty];
-                let bl = ts[192u + tx];
-                let bh = ts[208u + tx];
+                let al = sh[192u + ty];
+                let ah = sh[208u + ty];
+                let bl = sh[704u + tx];
+                let bh = sh[720u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -386,10 +396,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[224u + ty];
-                let ah = qs[240u + ty];
-                let bl = ts[224u + tx];
-                let bh = ts[240u + tx];
+                let al = sh[224u + ty];
+                let ah = sh[240u + ty];
+                let bl = sh[736u + tx];
+                let bh = sh[752u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -408,10 +418,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[256u + ty];
-                let ah = qs[272u + ty];
-                let bl = ts[256u + tx];
-                let bh = ts[272u + tx];
+                let al = sh[256u + ty];
+                let ah = sh[272u + ty];
+                let bl = sh[768u + tx];
+                let bh = sh[784u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -430,10 +440,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[288u + ty];
-                let ah = qs[304u + ty];
-                let bl = ts[288u + tx];
-                let bh = ts[304u + tx];
+                let al = sh[288u + ty];
+                let ah = sh[304u + ty];
+                let bl = sh[800u + tx];
+                let bh = sh[816u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -452,10 +462,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[320u + ty];
-                let ah = qs[336u + ty];
-                let bl = ts[320u + tx];
-                let bh = ts[336u + tx];
+                let al = sh[320u + ty];
+                let ah = sh[336u + ty];
+                let bl = sh[832u + tx];
+                let bh = sh[848u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -474,10 +484,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[352u + ty];
-                let ah = qs[368u + ty];
-                let bl = ts[352u + tx];
-                let bh = ts[368u + tx];
+                let al = sh[352u + ty];
+                let ah = sh[368u + ty];
+                let bl = sh[864u + tx];
+                let bh = sh[880u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -496,10 +506,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[384u + ty];
-                let ah = qs[400u + ty];
-                let bl = ts[384u + tx];
-                let bh = ts[400u + tx];
+                let al = sh[384u + ty];
+                let ah = sh[400u + ty];
+                let bl = sh[896u + tx];
+                let bh = sh[912u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -518,10 +528,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[416u + ty];
-                let ah = qs[432u + ty];
-                let bl = ts[416u + tx];
-                let bh = ts[432u + tx];
+                let al = sh[416u + ty];
+                let ah = sh[432u + ty];
+                let bl = sh[928u + tx];
+                let bh = sh[944u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -540,10 +550,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[448u + ty];
-                let ah = qs[464u + ty];
-                let bl = ts[448u + tx];
-                let bh = ts[464u + tx];
+                let al = sh[448u + ty];
+                let ah = sh[464u + ty];
+                let bl = sh[960u + tx];
+                let bh = sh[976u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
@@ -562,10 +572,10 @@ fn top2(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
                 acc7h = acc7h + vec4<u32>(dot4U8Packed(ah.w, bh.x), dot4U8Packed(ah.w, bh.y), dot4U8Packed(ah.w, bh.z), dot4U8Packed(ah.w, bh.w));
             }
             {
-                let al = qs[480u + ty];
-                let ah = qs[496u + ty];
-                let bl = ts[480u + tx];
-                let bh = ts[496u + tx];
+                let al = sh[480u + ty];
+                let ah = sh[496u + ty];
+                let bl = sh[992u + tx];
+                let bh = sh[1008u + tx];
                 acc0l = acc0l + vec4<u32>(dot4U8Packed(al.x, bl.x), dot4U8Packed(al.x, bl.y), dot4U8Packed(al.x, bl.z), dot4U8Packed(al.x, bl.w));
                 acc0h = acc0h + vec4<u32>(dot4U8Packed(al.x, bh.x), dot4U8Packed(al.x, bh.y), dot4U8Packed(al.x, bh.z), dot4U8Packed(al.x, bh.w));
                 acc1l = acc1l + vec4<u32>(dot4U8Packed(al.y, bl.x), dot4U8Packed(al.y, bl.y), dot4U8Packed(al.y, bl.z), dot4U8Packed(al.y, bl.w));
