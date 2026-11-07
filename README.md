@@ -258,7 +258,10 @@ runs the same pipeline from a browser. Stages, the hero runs, 360° cameras,
 the web UI and the reproduction commands:
 [photos to splat and mesh](docs/photos_to_splat.md). A trained splat can
 also take a class and an object per gaussian, voted from SAM 3 labels of
-its photos, and the web viewer blends them in:
+its photos, and the web viewer blends them in. Trained with the labels
+(`gsplat_train_cuda --labels`), the splat agrees with SAM 3 on 89.8% of
+MeetingRoom_In's held-out pixels (79–85% without) and 92.4% of
+Building_In's (87%):
 [semantic splats](docs/semantic_splat.md).
 
 ## Visual-Inertial SLAM (Basalt Rust port)

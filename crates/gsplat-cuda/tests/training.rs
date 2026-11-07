@@ -209,6 +209,151 @@ fn refine_actions_scatter_rows() {
     assert_eq!(stats.seen, vec![0.0; 6]);
 }
 
+#[test]
+fn refine_actions_carry_the_logits() {
+    let Some(mut gs) = gsplat() else { return };
+    let scene = random_scene(5, 3, 0);
+    gs.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let k = 4;
+    let logits: Vec<f32> = (0..5 * k).map(|i| i as f32 * 0.5 - 3.0).collect();
+    gs.set_logits(k, Some(&logits)).expect("logits");
+    assert_eq!(gs.logits(k).expect("download"), logits);
+    // prune, keep, brush split, clone, keep: rows [1], [2, 2], [3, 3], [4].
+    gs.apply_actions(&[0, 1, 4, 2, 1], 7).expect("apply");
+    let out = gs.logits(k).expect("download");
+    let row = |z: &[f32], i: usize| z[i * k..(i + 1) * k].to_vec();
+    for (o, i) in [(0, 1), (1, 2), (2, 2), (3, 3), (4, 3), (5, 4)] {
+        assert_eq!(row(&out, o), row(&logits, i), "row {o}");
+    }
+    // A new scene starts its logits at zero.
+    gs.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    assert_eq!(gs.logits(k).expect("download"), vec![0.0; 5 * k]);
+}
+
+/// Labels rendered from known gaussians (each its own class of `k`, logits
+/// one-hot times 8) are fitted by logits from zero, the geometry held still
+/// (`geometry` false) or learning too; returns the mean cross-entropy every
+/// 50 steps and the share of labelled pixels whose blended class
+/// probabilities' largest is the label at the end.
+fn fit_labels(gs: &mut CudaGsplat, geometry: bool) -> (Vec<f64>, f64) {
+    let (w, h) = (64u32, 48u32);
+    let k = 5usize;
+    let mut scene = random_scene(60, 21, 0);
+    for g in scene.gaussians.iter_mut() {
+        g.opacity_logit += 2.0;
+    }
+    let views: Vec<CameraView> = (0..3)
+        .map(|i| view(w, h, -0.05 + 0.05 * i as f32))
+        .collect();
+    gs.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let truth: Vec<f32> = (0..scene.len())
+        .flat_map(|i| (0..k).map(move |c| if i % k == c { 8.0 } else { 0.0 }))
+        .collect();
+    gs.set_logits(k, Some(&truth)).expect("logits");
+    let mut images = Vec::new();
+    let mut labels = Vec::new();
+    for v in &views {
+        let f = gs.render(v, [0.0; 3], 0).expect("render");
+        let rgb: Vec<[f32; 3]> = f.rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        images.extend(pack_rgba8(&rgb, None));
+        let s = gs.render_classes(v, k).expect("classes");
+        labels.extend(s.chunks_exact(k).map(|p| {
+            // Background (little blended) has no label.
+            if p.iter().sum::<f32>() < 0.1 {
+                255
+            } else {
+                (0..k).max_by(|&a, &b| p[a].total_cmp(&p[b])).unwrap() as u8
+            }
+        }));
+    }
+    gs.set_images(w, h, &images).expect("images");
+    gs.set_labels(k, w, h, &labels).expect("labels");
+    assert_eq!(
+        gs.logits(k).expect("download"),
+        truth,
+        "labels kept the logits"
+    );
+    gs.set_logits(k, None).expect("zero logits");
+    gs.set_labels(k, w, h, &labels).expect("labels");
+    let mut mean_loss = Vec::new();
+    for step in 0..300u32 {
+        let t = (step + 1) as f32;
+        let p = StepParams {
+            camera: GscCamera::from_view(&views[step as usize % views.len()]),
+            image: step % views.len() as u32,
+            sh_active_degree: 0,
+            background: [0.0; 3],
+            ssim_weight: 0.0,
+            lr: if geometry {
+                [1e-3, 1e-3, 1e-3, 1e-2, 0.0, 0.0]
+            } else {
+                [0.0; 6]
+            },
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-15,
+            bc1: 1.0 - 0.9f32.powf(t),
+            bc2: 1.0 - 0.999f32.powf(t),
+            scale_aux_coef: 0.0,
+            opacity_aux_coef: 0.0,
+            accumulate_stats: 0,
+            noise_seed: step,
+            noise_scale: 0.0,
+            noise_max: 0.0,
+            sparse_sh_adam: 0,
+            depth_weight: 0.0,
+            normal_weight: 0.0,
+            semantic_weight: 1.0,
+            lr_semantic: 5e-2,
+            semantic_geometry: geometry as u32,
+        };
+        gs.train_step(&p).expect("step");
+        if (step + 1) % 50 == 0 {
+            let s = gs.take_loss().expect("loss");
+            mean_loss.push(s.semantic / s.steps as f64);
+        }
+    }
+    let (mut right, mut total) = (0usize, 0usize);
+    for (vi, v) in views.iter().enumerate() {
+        let s = gs.render_classes(v, k).expect("classes");
+        let per = (w * h) as usize;
+        for (p, &l) in s.chunks_exact(k).zip(&labels[vi * per..(vi + 1) * per]) {
+            if l < k as u8 {
+                total += 1;
+                right +=
+                    ((0..k).max_by(|&a, &b| p[a].total_cmp(&p[b])).unwrap() == l as usize) as usize;
+            }
+        }
+    }
+    (mean_loss, right as f64 / total.max(1) as f64)
+}
+
+#[test]
+fn labels_train_the_logits() {
+    let Some(mut gs) = gsplat() else { return };
+    for geometry in [false, true] {
+        let (mean_loss, agree) = fit_labels(&mut gs, geometry);
+        eprintln!(
+            "geometry {geometry}: cross-entropy every 50 steps {mean_loss:.4?}, {:.1}% of the labelled pixels agree",
+            100.0 * agree
+        );
+        assert!(
+            mean_loss.last().unwrap() < &(0.5 * mean_loss[0]),
+            "geometry {geometry}: the cross-entropy fell from {:.4} to only {:.4}",
+            mean_loss[0],
+            mean_loss.last().unwrap()
+        );
+        assert!(
+            agree > 0.9,
+            "geometry {geometry}: {:.1}% agree",
+            100.0 * agree
+        );
+    }
+}
+
 /// Fit perturbed colours and opacities back to targets rendered from known
 /// gaussians; returns the mean L1 every 50 steps. One extra gaussian sits
 /// behind every camera: it is never projected, so its SH must not move.
@@ -266,6 +411,9 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
             sparse_sh_adam: sparse_sh_adam as u32,
             depth_weight: 0.0,
             normal_weight: 0.0,
+            semantic_weight: 0.0,
+            lr_semantic: 0.0,
+            semantic_geometry: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -336,6 +484,9 @@ fn fit_normals(gs: &mut CudaGsplat, lens: Lens) -> Vec<f64> {
             sparse_sh_adam: 0,
             depth_weight: 0.0,
             normal_weight: 1.0,
+            semantic_weight: 0.0,
+            lr_semantic: 0.0,
+            semantic_geometry: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {

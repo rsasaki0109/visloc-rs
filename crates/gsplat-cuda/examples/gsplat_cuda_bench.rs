@@ -197,6 +197,9 @@ fn main() {
                 sparse_sh_adam: args.sparse_sh_adam as u32,
                 depth_weight: 0.0,
                 normal_weight: 0.0,
+                semantic_weight: 0.0,
+                lr_semantic: 0.0,
+                semantic_geometry: 0,
             };
             let t = std::time::Instant::now();
             cuda.train_step(&step).expect("train step");

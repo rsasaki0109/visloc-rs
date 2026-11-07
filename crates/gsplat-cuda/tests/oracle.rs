@@ -732,6 +732,102 @@ fn depth_channel_gradients_match_the_colour_channel() {
     assert!(worst < 1e-4, "depth channel off by {worst:.2e}");
 }
 
+/// The class channels are blended and differentiated as the colour is. Each
+/// splat's colour c (in [0.014, 0.27]) is made three of its class
+/// probabilities: logits ln c at channels `at..at + 3`, ln(1 - sum c) at one
+/// more, -40 at the rest, so the softmax is (c, 1 - sum c, ~0). On black,
+/// those channels must render the image, and a gradient on them alone must
+/// give the colour's screen, transform and opacity gradients. The logits'
+/// gradients must be the colour's through the softmax,
+/// p_j (g_j - sum_d g_d p_d).
+#[test]
+fn class_channels_match_the_colour_channel() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (64u32, 48u32);
+    let view = view(w, h);
+    let mut scene = random_scene(40, 9, 0, 0.0);
+    let sh0 = visloc_gsplat_core::sh::SH_C0;
+    let mut colour: Vec<[f32; 3]> = Vec::new();
+    for (i, g) in scene.gaussians.iter_mut().enumerate() {
+        let c = [0, 1, 2].map(|j| (0.05 + 0.9 * ((i * 3 + j) as f32 * 0.61).sin().abs()) / 3.5);
+        g.sh_dc = c.map(|v| (v - 0.5) / sh0);
+        colour.push(c);
+    }
+    let npix = (w * h) as usize;
+    cuda.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    let rgb = cuda.render(&view, [0.0; 3], 0).expect("render").rgb;
+    let d_img: Vec<f32> = d_image(w, h).into_iter().flatten().collect();
+    let by_rgb = cuda.backward(&d_img).expect("backward");
+    let scale = |v: &[f32]| v.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-9);
+    for (k, at) in [(4usize, 0usize), (9, 4), (16, 12)] {
+        let rest = at + 3;
+        let mut logits = vec![-40.0f32; scene.len() * k];
+        let mut probs = vec![0.0f32; scene.len() * k];
+        for (i, c) in colour.iter().enumerate() {
+            for j in 0..3 {
+                logits[i * k + at + j] = c[j].ln();
+                probs[i * k + at + j] = c[j];
+            }
+            let left = 1.0 - c.iter().sum::<f32>();
+            logits[i * k + rest] = left.ln();
+            probs[i * k + rest] = left;
+        }
+        cuda.set_logits(k, Some(&logits)).expect("logits");
+        let s = cuda.render_classes(&view, k).expect("render classes");
+        let mut worst = 0.0f32;
+        for p in 0..npix {
+            for c in 0..3 {
+                worst = worst.max((s[p * k + at + c] - rgb[p * 3 + c]).abs());
+            }
+        }
+        assert!(
+            worst < 1e-5,
+            "k {k}: class channels render off by {worst:.2e}"
+        );
+        let mut d_sem = vec![0.0f32; npix * k];
+        for p in 0..npix {
+            d_sem[p * k + at..p * k + at + 3].copy_from_slice(&d_img[p * 3..p * 3 + 3]);
+        }
+        let (by_sem, g_logits) = cuda.classes_backward(&d_sem, k).expect("backward");
+        let mut worst = 0.0f32;
+        let screen_scale = scale(&by_rgb.screen);
+        for i in 0..scene.len() {
+            // du dv dA dB dC dopacity and the refine weight.
+            for c in [0, 1, 2, 3, 4, 5, 9] {
+                let (a, b) = (by_rgb.screen[i * 10 + c], by_sem.screen[i * 10 + c]);
+                worst = worst.max((a - b).abs() / screen_scale);
+            }
+            // The colour's dr dg db through the softmax.
+            let g: Vec<f32> = (0..k)
+                .map(|j| {
+                    if (at..at + 3).contains(&j) {
+                        by_rgb.screen[i * 10 + 6 + j - at]
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let p = &probs[i * k..(i + 1) * k];
+            let dot: f32 = g.iter().zip(p).map(|(a, b)| a * b).sum();
+            for j in 0..k {
+                let want = p[j] * (g[j] - dot);
+                worst = worst.max((g_logits[i * k + j] - want).abs() / screen_scale);
+            }
+        }
+        let t_scale = scale(&by_rgb.transforms);
+        for (a, b) in by_rgb.transforms.iter().zip(&by_sem.transforms) {
+            worst = worst.max((a - b).abs() / t_scale);
+        }
+        let o_scale = scale(&by_rgb.opacity);
+        for (a, b) in by_rgb.opacity.iter().zip(&by_sem.opacity) {
+            worst = worst.max((a - b).abs() / o_scale);
+        }
+        eprintln!("{k} classes against the colour: worst error {worst:.2e}");
+        assert!(worst < 1e-4, "k {k}: class channels off by {worst:.2e}");
+    }
+}
+
 /// The camera-space normal the CUDA side blends for a splat of rotation `q`
 /// and log-scales `ls` at camera-space centre `p`: the axis of the smallest
 /// scale (ties to the lower axis), turned to face the camera when `flip` is

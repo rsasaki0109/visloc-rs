@@ -6,6 +6,35 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Training with the labels (`gsplat_train_cuda --labels`, CUDA ABI 13).**
+  - **Classes in training.** Every gaussian gets a logit per class (16 at
+    most). The softmax of its logits, its class probabilities, is blended
+    like colour (`sem_fwd_kernel`).
+  - **The loss.** `--semantic-weight` (0.02) times the mean cross-entropy
+    of each labelled pixel's normalised blend against SAM 3's label
+    (`sem_loss_kernel`).
+  - **The gradient.** It reaches the logits and, through alpha, the
+    gaussians' geometry, opacity and brush's refine weight
+    (`sem_bwd_kernel`). `--semantic-logits-only` keeps it to the logits.
+  - **Output.** `scene.ply` gains `class_logit_<c>` properties
+    (`ply::ply_properties` reads them back), and `gsplat_semantic_cuda
+    --logits` takes the classes from them.
+  - **API.** `CudaGsplat::set_labels`, `set_logits`, `logits`,
+    `render_classes` and `classes_backward`, `CudaTrainer::set_labels` with
+    `SemanticTraining`, and `semantic::label_from_logits`.
+  - **FIORD MeetingRoom_In** (held-out views, against SAM 3's labels):
+    pixel accuracy 79.4–84.5% over four runs without the labels, 89.8% at
+    the default weight. mIoU rises from 68.9–73.1% to 81.5%, and held-out
+    instances matched at IoU 0.5 from 64.4–66.1% to 76.8%, at the same
+    PSNR (32.69 dB).
+  - **Building_In:** pixel accuracy 87.2–87.3% → 92.4%, mIoU 57.8–58.2% →
+    71.9%, instances 26.1–26.2% → 45.4%, at the same PSNR. Its ceiling
+    lights' IoU goes from 19.6% to 81.5% at weight 0.05.
+  - **Cost.** The class passes double the training time. Details in
+    docs/semantic_splat.md.
+  - **Building_In with the vote alone** is in the doc too: 87.2% of the
+    held-out pixels and 26.1% of the instances.
+
 - **Objects in semantic splats (`gsplat_semantic_cuda --instances`,
   `sam3_labels.py --instances`).**
   - **Instances.** `sam3_labels.py --instances` writes each pixel's SAM 3
