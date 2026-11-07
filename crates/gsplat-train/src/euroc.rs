@@ -228,26 +228,36 @@ struct SfmOutcome {
     refined_camera: Option<Camera>,
 }
 
+/// How [`run_colmap_port`]'s images make up a rig's frames.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PortRig<'a> {
+    /// Each sensor's fixed rotation from the rig's frame to its own; the
+    /// first must be the identity.
+    pub sensor_from_rig: &'a [nalgebra::Matrix3<f64>],
+    /// Image `i`'s frame and sensor. Empty: consecutive images, image `i`
+    /// sensor `i % n` of frame `i / n`.
+    pub frames: &'a [(usize, usize)],
+}
+
 /// Run the COLMAP incremental-mapper port on our features/verified pairs:
 /// write its inputs (rig manifest, keypoints, VISLOC-COLMAP-1 pairs) under
 /// `out_dir/port`, run `colmap_incremental::pipeline::run`, and read the
 /// largest model back as poses + tracks.
 ///
 /// `rig`: `None` makes every image its own frame of a single-sensor rig.
-/// `Some(sensor_from_rig)` groups consecutive images into frames of
-/// `sensor_from_rig.len()` sensors that share one camera and one centre
-/// (image `i` is sensor `i % n` of frame `i / n`), each sensor rotated by
-/// its fixed `sensor_from_rig` (the first must be the identity): the
-/// mapper then solves one pose per frame.
+/// `Some` groups the images into frames of `sensor_from_rig.len()` sensors
+/// with one centre, each sensor rotated by its fixed `sensor_from_rig` (the
+/// first must be the identity): the mapper then solves one pose per frame.
+/// `cameras` is one camera for every sensor, or one per sensor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_colmap_port(
     out_dir: &Path,
-    camera: &Camera,
+    cameras: &[Camera],
     width: u32,
     height: u32,
     features: &[FeatureSet],
     pairwise: &[PairwiseMatches],
-    rig: Option<&[nalgebra::Matrix3<f64>]>,
+    rig: Option<PortRig>,
     mapper_overrides: &[String],
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<PortModel>, EurocError> {
@@ -257,7 +267,6 @@ pub(crate) fn run_colmap_port(
     let dir = out_dir.join("port");
     let feat_dir = dir.join("features");
     std::fs::create_dir_all(&feat_dir).map_err(|e| err(e.to_string()))?;
-    let ([fx, fy, cx, cy], model_suffix) = manifest_camera(camera).map_err(err)?;
     let name = |i: usize| format!("frame_{i:05}.png");
     // Only images that take part in a verified pair (the port's
     // correspondence graph has no node for an isolated image); names keep
@@ -273,12 +282,24 @@ pub(crate) fn run_colmap_port(
         slot[i] = k;
     }
     let identity = [nalgebra::Matrix3::identity()];
-    let sensors = rig.unwrap_or(&identity);
+    let (sensors, frames) = match &rig {
+        Some(rig) => (rig.sensor_from_rig, rig.frames),
+        None => (&identity[..], &[][..]),
+    };
+    if cameras.len() != 1 && cameras.len() != sensors.len() {
+        return Err(err(format!(
+            "{} cameras for {} sensors",
+            cameras.len(),
+            sensors.len()
+        )));
+    }
     let mut manifest = "# generalized-rig-manifest-v1\n".to_string();
     for (s, r) in sensors.iter().enumerate() {
         let q = nalgebra::UnitQuaternion::from_rotation_matrix(
             &nalgebra::Rotation3::from_matrix_unchecked(*r),
         );
+        let ([fx, fy, cx, cy], model_suffix) =
+            manifest_camera(&cameras[s.min(cameras.len() - 1)]).map_err(err)?;
         manifest.push_str(&format!(
             "S {s} {} {width} {height} {fx} {fy} {cx} {cy} {} {} {} {} 0 0 0{model_suffix}\n",
             s + 1,
@@ -290,7 +311,8 @@ pub(crate) fn run_colmap_port(
     }
     for &i in &order {
         let n = sensors.len();
-        manifest.push_str(&format!("F {} {} {}\n", i / n, name(i), i % n));
+        let (frame, sensor) = frames.get(i).copied().unwrap_or((i / n, i % n));
+        manifest.push_str(&format!("F {frame} {} {sensor}\n", name(i)));
         let text: String = features[i]
             .keypoints
             .iter()
@@ -698,8 +720,12 @@ pub(crate) fn cpu_matches(di: &[Vec<f32>], dj: &[Vec<f32>]) -> Vec<DescriptorMat
     BruteForceMatcher { ratio: Some(0.8) }.match_descriptors_cross_checked(di, dj)
 }
 
+/// The matches `dm` between images `fi` and `fj` that one two-view geometry
+/// explains, through `cameras`, the two images' cameras. Two lenses that
+/// differ (a dual fisheye's front and back) are verified on unit rays, as a
+/// camera that sees behind itself is ([`verify_spherical_pair`]).
 pub(crate) fn verify_pair(
-    camera: &Camera,
+    cameras: [&Camera; 2],
     fi: &FeatureSet,
     fj: &FeatureSet,
     dm: &[DescriptorMatch],
@@ -710,8 +736,10 @@ pub(crate) fn verify_pair(
     if dm.len() < min_matches {
         return None;
     }
-    if camera.sees_behind() {
-        return verify_spherical_pair(camera, fi, fj, dm, min_matches);
+    let [camera, other] = cameras;
+    let same_lens = camera.model == other.model && camera.params == other.params;
+    if camera.sees_behind() || other.sees_behind() || !same_lens {
+        return verify_spherical_pair(cameras, fi, fj, dm, min_matches);
     }
     let corrs: Vec<TwoViewCorrespondence> = dm
         .iter()
@@ -750,8 +778,10 @@ pub(crate) fn verify_pair(
 /// triangulate in front of both rays. Such a camera is calibrated by
 /// construction: no fundamental matrix, homography or planar/panoramic
 /// configurations. A match with a pixel off the lens (no ray) is dropped.
+/// `cameras` are `fi`'s and `fj`'s; with two lenses the angle is 4 px over
+/// their mean pixels per radian.
 fn verify_spherical_pair(
-    camera: &Camera,
+    cameras: [&Camera; 2],
     fi: &FeatureSet,
     fj: &FeatureSet,
     dm: &[DescriptorMatch],
@@ -760,11 +790,14 @@ fn verify_spherical_pair(
     use visloc_vision::two_view::spherical::{
         estimate_spherical_relative_pose, SphericalRansacConfig,
     };
-    let rays = |f: &FeatureSet, k: usize| camera.unit_ray_from_pixel(&f.keypoints[k]);
+    let rays = |c: &Camera, f: &FeatureSet, k: usize| c.unit_ray_from_pixel(&f.keypoints[k]);
     let mut kept = Vec::with_capacity(dm.len());
     let (mut rays1, mut rays2) = (Vec::with_capacity(dm.len()), Vec::with_capacity(dm.len()));
     for m in dm {
-        if let (Some(a), Some(b)) = (rays(fi, m.query_index), rays(fj, m.train_index)) {
+        if let (Some(a), Some(b)) = (
+            rays(cameras[0], fi, m.query_index),
+            rays(cameras[1], fj, m.train_index),
+        ) {
             kept.push(m);
             rays1.push(a);
             rays2.push(b);
@@ -773,8 +806,10 @@ fn verify_spherical_pair(
     if kept.len() < min_matches {
         return None;
     }
+    let pixels_per_radian =
+        0.5 * (cameras[0].pixels_per_radian()? + cameras[1].pixels_per_radian()?);
     let config = SphericalRansacConfig {
-        max_angle: 4.0 / camera.pixels_per_radian()?,
+        max_angle: 4.0 / pixels_per_radian,
         ..SphericalRansacConfig::default()
     };
     let pose = estimate_spherical_relative_pose(&rays1, &rays2, &config)?;
@@ -1065,7 +1100,7 @@ pub fn build_euroc_dataset(
             .zip(dms.into_par_iter())
             .filter_map(|(&(i, j), dm)| {
                 verify_pair(
-                    &camera,
+                    [&camera, &camera],
                     &features[i],
                     &features[j],
                     &dm,
@@ -1174,7 +1209,7 @@ pub fn build_euroc_dataset(
     let result = if cfg.colmap_port_mapper {
         let models = run_colmap_port(
             out_dir,
-            &camera,
+            std::slice::from_ref(&camera),
             width,
             height,
             &features,

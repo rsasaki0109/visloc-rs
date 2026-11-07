@@ -41,8 +41,11 @@ pub fn mask_path(dir: &Path, image: &Path) -> Option<PathBuf> {
 pub struct ImageMasks {
     /// Image `i`'s mask file; empty without a mask directory.
     paths: Vec<PathBuf>,
-    /// One mask for every image, on top of its own.
-    camera: Option<PathBuf>,
+    /// One mask per lens for every image through it, on top of its own.
+    camera: Vec<Option<PathBuf>>,
+    /// Image `i`'s lens, an index into `camera`; empty if every image is
+    /// through lens 0.
+    lens: Vec<usize>,
     /// Swap what the masks keep and what they hide.
     flip: bool,
 }
@@ -59,7 +62,20 @@ impl ImageMasks {
         images: &[PathBuf],
         flip: bool,
     ) -> Result<Option<Self>, EurocError> {
-        if let Some(camera) = camera {
+        Self::with_lenses(dir, &[camera], &[], images, flip)
+    }
+
+    /// [`ImageMasks::new`] for images through several lenses, such as a
+    /// dual fisheye's two: `cameras[l]` is lens `l`'s camera mask, and
+    /// `lens[i]` image `i`'s lens (empty: lens 0 for every image).
+    pub fn with_lenses(
+        dir: Option<&Path>,
+        cameras: &[Option<&Path>],
+        lens: &[usize],
+        images: &[PathBuf],
+        flip: bool,
+    ) -> Result<Option<Self>, EurocError> {
+        for camera in cameras.iter().flatten() {
             if !camera.is_file() {
                 return Err(EurocError::Sfm(format!(
                     "masks: the camera mask {} is not a file",
@@ -67,17 +83,25 @@ impl ImageMasks {
                 )));
             }
         }
-        let mut masks = match (dir, camera) {
-            (None, None) => return Ok(None),
-            (Some(dir), _) => Self::find(dir, images, flip)?,
-            (None, Some(_)) => Self {
+        let mut masks = match dir {
+            None if cameras.iter().all(Option::is_none) => return Ok(None),
+            Some(dir) => Self::find(dir, images, flip)?,
+            None => Self {
                 paths: Vec::new(),
-                camera: None,
+                camera: Vec::new(),
+                lens: Vec::new(),
                 flip,
             },
         };
-        masks.camera = camera.map(Path::to_path_buf);
+        masks.camera = cameras.iter().map(|c| c.map(Path::to_path_buf)).collect();
+        masks.lens = lens.to_vec();
         Ok(Some(masks))
+    }
+
+    /// Image `i`'s camera mask, if its lens has one.
+    fn camera_of(&self, i: usize) -> Option<&Path> {
+        let lens = self.lens.get(i).copied().unwrap_or(0);
+        self.camera.get(lens)?.as_deref()
     }
 
     /// The mask of every image in `images`, looked up in `dir` by
@@ -107,7 +131,8 @@ impl ImageMasks {
         }
         Ok(Self {
             paths: found.into_iter().flatten().collect(),
-            camera: None,
+            camera: Vec::new(),
+            lens: Vec::new(),
             flip,
         })
     }
@@ -124,17 +149,25 @@ impl ImageMasks {
                 source,
             })
         };
-        let camera = self
+        let cameras = self
             .camera
-            .as_deref()
-            .map(|path| Ok::<_, EurocError>((path, dimensions(path)?)))
-            .transpose()?;
+            .iter()
+            .map(|path| {
+                path.as_deref()
+                    .map(|path| Ok::<_, EurocError>((path, dimensions(path)?)))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         for (i, image) in images.iter().enumerate() {
             let own = self
                 .paths
                 .get(i)
                 .map(|path| Ok::<_, EurocError>((path.as_path(), dimensions(path)?)))
                 .transpose()?;
+            let camera = cameras
+                .get(self.lens.get(i).copied().unwrap_or(0))
+                .copied()
+                .flatten();
             let (iw, ih) = oriented_dimensions(image)?;
             for (path, (w, h)) in own.into_iter().chain(camera) {
                 if !same_aspect((w, h), (iw, ih)) {
@@ -150,16 +183,34 @@ impl ImageMasks {
     }
 
     /// Where the masks come from, for a log line: `<n> from <dir>`, `the
-    /// camera mask <file>`, or both.
+    /// camera mask <file>` (or one per lens), or both.
     pub fn describe(&self) -> String {
         let own = (!self.paths.is_empty()).then(|| {
             let dir = self.paths[0].parent().unwrap_or(Path::new(""));
             format!("{} from {}", self.paths.len(), dir.display())
         });
-        let camera = self
+        let files: Vec<String> = self
             .camera
-            .as_ref()
-            .map(|path| format!("the camera mask {}", path.display()));
+            .iter()
+            .flatten()
+            .map(|path| path.display().to_string())
+            .collect();
+        let camera = match files.len() {
+            0 => None,
+            1 if self.camera.len() == 1 => Some(format!("the camera mask {}", files[0])),
+            _ => Some(format!(
+                "the camera masks {}",
+                self.camera
+                    .iter()
+                    .enumerate()
+                    .map(|(l, p)| match p {
+                        Some(p) => format!("{} (lens {})", p.display(), l + 1),
+                        None => format!("none (lens {})", l + 1),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        };
         let flip = if self.flip { " (flipped)" } else { "" };
         match (own, camera) {
             (Some(own), Some(camera)) => format!("{own} and {camera}{flip}"),
@@ -169,17 +220,19 @@ impl ImageMasks {
     }
 
     /// Image `i`'s mask, resized to `width` x `height` (row-major): `true`
-    /// where the pixel is masked out by its own mask or the camera mask.
+    /// where the pixel is masked out by its own mask or its lens's camera
+    /// mask. An image with neither keeps every pixel.
     pub fn load(&self, i: usize, width: u32, height: u32) -> Result<Vec<bool>, EurocError> {
         let mut masked: Option<Vec<bool>> = None;
-        for path in self.paths.get(i).into_iter().chain(&self.camera) {
+        let own = self.paths.get(i).map(PathBuf::as_path);
+        for path in own.into_iter().chain(self.camera_of(i)) {
             let m = self.load_file(path, width, height)?;
             masked = Some(match masked {
                 None => m,
                 Some(a) => a.iter().zip(&m).map(|(a, b)| *a || *b).collect(),
             });
         }
-        masked.ok_or_else(|| EurocError::Sfm(format!("masks: image {i} has none")))
+        Ok(masked.unwrap_or_else(|| vec![false; width as usize * height as usize]))
     }
 
     /// One mask file, resized to `width` x `height`: `true` where masked out.
@@ -628,6 +681,68 @@ mod tests {
             .to_string();
         assert!(err.contains("is not a file"), "{err}");
         assert!(both.describe().contains("2 from") && both.describe().contains("camera mask"));
+    }
+
+    /// With two lenses, each image takes its own lens's camera mask: here
+    /// the front lens's drops the top row and the back lens has none, so a
+    /// back image keeps every pixel unless its own mask says otherwise.
+    #[test]
+    fn each_lens_takes_its_own_camera_mask() {
+        let tmp = Tmp::new("lenses");
+        GrayImage::from_fn(4, 4, |_, y| Luma([if y == 0 { 0 } else { 255 }]))
+            .save(tmp.0.join("front.png"))
+            .unwrap();
+        GrayImage::from_fn(4, 4, |x, _| Luma([if x == 3 { 0 } else { 255 }]))
+            .save(tmp.0.join("b.png"))
+            .unwrap();
+        let images = [
+            PathBuf::from("/x/a.jpg"),
+            PathBuf::from("/x/b.jpg"),
+            PathBuf::from("/x/c.jpg"),
+        ];
+        let front = tmp.0.join("front.png");
+        let masks =
+            ImageMasks::with_lenses(None, &[Some(&front), None], &[0, 1, 0], &images, false)
+                .unwrap()
+                .unwrap();
+        for (i, top) in [(0, true), (1, false), (2, true)] {
+            let m = masks.load(i, 4, 4).unwrap();
+            for (x, y) in (0..4).flat_map(|y| (0..4).map(move |x| (x, y))) {
+                assert_eq!(at(&m, 4, x, y), top && y == 0, "image {i} at {x},{y}");
+            }
+        }
+        assert!(
+            masks.describe().contains("(lens 1), none (lens 2)"),
+            "{}",
+            masks.describe()
+        );
+        // An own mask still applies to a back image.
+        std::fs::write(
+            tmp.0.join("a.png"),
+            std::fs::read(tmp.0.join("b.png")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.0.join("c.png"),
+            std::fs::read(tmp.0.join("b.png")).unwrap(),
+        )
+        .unwrap();
+        let both = ImageMasks::with_lenses(
+            Some(&tmp.0),
+            &[Some(&front), None],
+            &[0, 1, 0],
+            &images,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let m = both.load(1, 4, 4).unwrap();
+        assert!((0..4).all(|y| at(&m, 4, 3, y) && !at(&m, 4, 0, y)));
+        assert!(
+            ImageMasks::with_lenses(None, &[None, None], &[0, 1, 0], &images, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A `w x h` JPEG whose EXIF orientation tag says `orientation`.

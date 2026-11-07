@@ -297,15 +297,27 @@ filters, and now for bundle adjustment too:
   with the focal length of its field of view and zero distortion.
 - **Two-view verification.** It fits E on normalized coordinates
   (`normalize_pixel`) and F and H on raw pixels, as COLMAP does. With strong
-  distortion, E wins and the pair is classified as calibrated.
+  distortion, E wins and the pair is classified as calibrated. A pair of
+  two different lenses is verified on unit rays.
+- **Two lenses, one rig.** `gsplat_photos --back-images DIR --back-camera
+  "MODEL W H PARAMS..."` takes a dual fisheye's back lens beside
+  `--images`' front lens, each through its own calibration
+  ([photos_to_splat.md](photos_to_splat.md#360-cameras)). A frame's two
+  photos are one rig; the back lens starts half a turn about the vertical
+  and is refined.
+- **Rays past 90° in a rig.** The generalized (multi-camera) initialization
+  and PnP take a sensor's unit rays when its camera sees behind itself. A
+  central rig (every sensor at one centre, as the two lenses start) now
+  starts on unit rays like a single camera. A rig of sensors apart gates
+  its first pair on the rays ahead of both image planes, then re-solves on
+  every ray. Before, a rig of such lenses never started: one match past 90°
+  failed the gate.
 
 Still open:
 
-- A rig of differently calibrated cameras in `gsplat_photos`, such as
-  ETH3D's four.
-- Rays past 90° in a rig: the generalized (multi-camera) initialization and
-  PnP still take the normalized plane, and the unit-ray initialization
-  takes single-camera frames only.
+- A rig of other cameras in `gsplat_photos`, such as ETH3D's four.
+- Refining a rig's cameras: `--refine-camera` refines one shared camera, so
+  with a back lens both are held fixed.
 
 ### Lenses wider than 180°
 
@@ -639,11 +651,106 @@ Holding the lens out to the last keypoint instead of 99% of them cost
 MeetingRoom_In 0.4–0.8 dB: the outermost keypoints lie past 100°, where
 the polynomial then bends the fit inside.
 
-Still open:
-- The rest of the fall at the rim: with the refined lens, 1.0–2.4 dB at
-  85–90° below the 0–55.7° ring.
-- The tangential terms. `THIN_PRISM_FISHEYE` could take them.
-- Both lenses as one rig ([above](#sfm-mapping-through-the-lens)).
+The factory model's tangential terms (`p1`, `p2`, left out above) would
+move pixels by 0.8–1.0 px at 85–100° at 800 px. The photos show none of
+that:
+- SfM's residuals with the factory lens do not follow that shift. Their
+  correlation with it stays within ±0.08 in every ring. From 30° out, where
+  the shift passes 0.2 px, the least-squares gain on it stays within ±0.1
+  (1 would be the shift itself).
+- Tangential and thin-prism terms fitted to the residuals move points by
+  0.03 px at most, with the factory lens or the refined one.
+- Refined as `THIN_PRISM_FISHEYE` (the factory radius, the other four
+  terms from zero), the lens scores +0.04, −0.06 and −0.14 dB against the
+  refined `OPENCV_FISHEYE`, within the spread between runs. Its prism terms
+  trade off against the principal point, which moves by 0.5–0.9 px.
+
+What is left of the fall at the rim is mostly the scene, not the lens.
+Here are the refined runs:
+- **Photometry.** On MeetingRoom_In a gain per colour channel and ring
+  changes the PSNR by 0.02 dB at most, so there is no vignetting the splat
+  misses. Blurring the photo by 0.5 px gains 0.3–0.8 dB in every ring, the
+  rim no more than the rings inside it: the splat is smoother than the
+  photos everywhere.
+- **Transients.** In Bridge_Out three of the 34 held-out views carry most of
+  the fall: a hand at the lens, people walking past. Without them its
+  85–90° ring is 0.6 dB below the 0–55.7° ring, not 2.7 dB (on all of each
+  view's pixels).
+- **Coverage.** Score the pixels around each SfM point by how near its axis
+  a training view sees the point. Where one sees it within 30° of the axis,
+  Building_In's and Bridge_Out's rings out to 100° stay within 0.8 dB of
+  their centre. Where none does, they fall. In those two scenes the camera
+  turns little (41° and 14°, median), so the sides of the scene stay at
+  the rim of every photo.
+- **What remains.** Around well-covered points MeetingRoom_In still falls
+  0.7–2.0 dB from 75° on, and Bridge_Out's clean views 2.6–2.7 dB past 90°.
+  Past 90° the rasterizer sorts a lens's splats by their distance, not by
+  their depth, which turns negative there. The rest is open.
+
+#### Both lenses as one rig
+
+`--back-images` adds the back lens (`cam2`). Each photo goes through its
+own lens, and a frame's two photos are one rig
+([photos_to_splat.md](photos_to_splat.md#360-cameras)). The back lens's
+factory model is the second row `insta360_lens_cameras` prints, and its
+tripod mask is made as the front lens's. MeetingRoom_In and Building_In have
+both lenses' photos of every frame. Bridge_Out is left out: only 41 of its
+215 back photos share a frame with a front photo.
+
+```bash
+gsplat_photos_cuda --images meetingroom/fisheyeimages/cam1 --back-images meetingroom/fisheyeimages/cam2 \
+  --out run --max-size 800 --max-angle 100 \
+  --camera "OPENCV_FISHEYE 3264 3264 ..." --camera-mask tripod1.png \
+  --back-camera "OPENCV_FISHEYE 3264 3264 ..." --back-camera-mask tripod2.png
+gsplat_train_cuda --data run --alpha-mask
+```
+
+Every photo of both lenses registers (212 and 460). The back lens settles
+0.42–0.50° from the half turn. FIORD's model poses each photo by itself.
+There the back lens lies 0.32–0.42° from the half turn on average, and
+0.27–0.84° (median) from that average in any one frame. With the refined
+lenses (below), the rig's back lens lies within 0.21° of FIORD's average.
+The rig's poses of both lenses agree with FIORD's to 0.26–0.50% of the
+extent and 0.33–0.36° (median).
+
+The rig holds both cameras fixed. The refined runs pass each lens as
+`--refine-camera` refined it alone; the back lens comes out 0.3–0.4%
+shorter in focal length than the front one. Here is the front lens's
+held-out PSNR, off the tripod, with the tripod masked out. A frame's two
+photos are held out together, so the rig holds out the same front photos
+as the front lens alone.
+
+| Scene | Run (refined lenses) | Steps | 0–55.7° | 55.7–75° | 75–85° | 85–90° | 90–95° | 95–100° | 0–100° |
+|---|---|---|---|---|---|---|---|---|---|
+| MeetingRoom_In | front lens alone | 30k | 32.62 dB | 33.73 dB | 33.51 dB | 31.51 dB | 32.03 dB | 30.13 dB | 32.71 dB |
+| | | 60k | 32.79 dB | 33.63 dB | 33.43 dB | 31.54 dB | 32.21 dB | 30.57 dB | 32.80 dB |
+| | rig | 30k | 32.40 dB | 33.80 dB | 33.57 dB | 31.65 dB | 32.43 dB | 30.86 dB | 32.76 dB |
+| | | 60k | 32.57 dB | 33.82 dB | 33.52 dB | 31.45 dB | 32.12 dB | 30.66 dB | 32.76 dB |
+| Building_In | front lens alone | 30k | 33.09 dB | 32.81 dB | 31.61 dB | 30.72 dB | 29.47 dB | 29.67 dB | 31.99 dB |
+| | | 60k | 33.30 dB | 32.67 dB | 31.45 dB | 30.47 dB | 29.33 dB | 29.71 dB | 31.95 dB |
+| | rig | 30k | 32.92 dB | 33.48 dB | 32.65 dB | 31.77 dB | 31.03 dB | 31.10 dB | **32.66 dB** |
+| | | 60k | 33.12 dB | 33.04 dB | 32.27 dB | 31.50 dB | 30.78 dB | 31.18 dB | 32.51 dB |
+
+All runs are scored on the pixels every run keeps. The refined lenses'
+100° cone sits a fraction of a pixel off the factory one's and leaves out
+0.02% of the image at the circle's dark edge. That lifts every run by
+0.25–0.37 dB against the tables above.
+
+- **Building_In** gains 0.67 dB, 1.0–1.6 dB from 75° out. Its camera turns
+  little, so the front lens alone sees the sides of the scene only near its
+  rim (above).
+- **MeetingRoom_In** ties (+0.05 dB). Its camera turns most, and its front
+  lens alone already sees the scene near the axis.
+- **The centre** loses 0.17–0.22 dB in both.
+- **Twice the steps**, the same steps per photo as the front lens alone at
+  30k, change neither: 0.15 dB or less, for the rig and for the front lens
+  alone.
+- **The back lens's own held-out photos** (Building_In; on MeetingRoom_In
+  the back lens alone registers 100 of 106 photos, and its held-out photos
+  are other frames') score 29.46 dB in the rig against 29.28 dB alone:
+  1.0–2.2 dB more at 85–95°, 0.4 dB less at the centre.
+- **With the factory lenses** the rig loses 0.14 and 0.34 dB against the
+  front lens alone. The lenses need refining first.
 
 ## Validation data
 

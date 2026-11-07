@@ -186,6 +186,36 @@ left, as ffmpeg's `hstack` of the video's two streams produces.
   360° viewer, morphing one lens into the other along the seam
   ([insta360_lens.md](insta360_lens.md#stitching)).
 
+`--back-images DIR --back-camera "MODEL W H PARAMS..."` takes a dual
+fisheye's two lenses as they are, each through its own calibration, with
+no faces cut: `--images` and `--camera` are the front lens's, `DIR` and
+`--back-camera` the back lens's.
+
+- **Pairs.** A back photo pairs with the front photo of the same name once
+  each folder's common ending is cut off, from the separator (`_`, `-`, `.`
+  or a space) that ending starts at: FIORD's `IMG_..._729_fisheye1.png`
+  with `IMG_..._729_fisheye2.png`, or the same names in both folders. A
+  frame may lack either lens's photo. All photos must have one size.
+- **Rig.** A frame's photos are solved as one rig. The back lens starts half
+  a turn about the vertical (y) axis, at the front lens's centre, and is
+  refined; `<out>/back_lens.txt` holds the refined pose. Both cameras are
+  held fixed. To refine them, run each lens alone with `--refine-camera`
+  and pass the row its `sparse/0/cameras.txt` holds, without the id. Pairs
+  of a frame's two photos are not matched, and `--window` counts frames.
+- **Masks.** `--back-camera-mask` is the back lens's `--camera-mask`.
+  `--max-angle` holds for both lenses, each about its own axis.
+- **Training.** `sparse/0` has both cameras, and `<out>/image_frames.txt`
+  groups the images into frames, so `gsplat_train_cuda --holdout N` holds
+  out every N-th frame, both its photos.
+- **Not with** `--equirect`, `--insv`, `--imu`, `--stream-images` or
+  `--refine-camera`.
+
+On two FIORD scenes ([fisheye.md](fisheye.md#both-lenses-as-one-rig)),
+with both lenses refined first, the rig gains 0.67 dB of the front lens's
+held-out PSNR where the camera turns little, 1.0–1.6 dB from 75° off the
+axis, and ties where it turns most. With the factory lenses it loses
+0.1–0.3 dB.
+
 ## Metric scale from the camera's IMU
 
 SfM leaves the model in arbitrary units. When the photos are frames of a

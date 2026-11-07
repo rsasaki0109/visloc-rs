@@ -47,6 +47,7 @@ use crate::dual_fisheye::{self, FisheyeLens};
 use crate::equirect;
 use crate::euroc::{
     apply_sift_override, cpu_matches, read_port_camera, run_colmap_port, verify_pair, EurocError,
+    PortRig,
 };
 use crate::init::ColoredPoint;
 use crate::masks::{drop_masked_keypoints, ImageMasks};
@@ -72,8 +73,17 @@ pub struct PhotoSfmConfig {
     /// parameters (COLMAP's `ba_refine_focal_length`,
     /// `ba_refine_principal_point`, `ba_refine_extra_params`). For a camera
     /// known only roughly, such as a fisheye model with the focal length of
-    /// its field of view and no distortion.
+    /// its field of view and no distortion. Not with `back_lens`.
     pub refine_camera: bool,
+    /// A second lens on the camera, looking the other way, such as a dual
+    /// fisheye's back lens: the images are then the front lens's (`camera`)
+    /// and the back lens's own, solved as one rig of two sensors, one pose
+    /// per frame. The back lens's pose on the rig starts from a half turn
+    /// about the vertical (y) axis, at the front lens's centre, and is
+    /// refined. Needs `camera`; not with `equirect`, `insv`, `imu`,
+    /// `stream_images` or `refine_camera`. `window` and `eval_every` count
+    /// frames, and a frame is held out whole.
+    pub back_lens: Option<BackLens>,
     /// Match every pair up to this many images, else a sliding window.
     pub exhaustive_max: usize,
     /// Sliding-window size (images) past `exhaustive_max`.
@@ -226,6 +236,24 @@ pub struct PhotoSfmConfig {
     pub matcher: Option<std::sync::Arc<dyn PairMatcher>>,
 }
 
+/// The back lens of [`PhotoSfmConfig::back_lens`].
+#[derive(Debug, Clone)]
+pub struct BackLens {
+    /// Its photos, one per frame, of the front lens's size. A photo pairs
+    /// with the front lens's photo of the same name once each folder's
+    /// common ending is cut off, from the separator (`_`, `-`, `.` or a
+    /// space) it starts at: `IMG_1_fisheye1.jpg` with `IMG_1_fisheye2.jpg`,
+    /// `a.jpg` with `a.jpg` ([`pair_lens_photos`]). A frame may lack either
+    /// lens's photo.
+    pub images: PathBuf,
+    /// Its calibrated camera, at its own image size, as
+    /// [`PhotoSfmConfig::camera`] is the front lens's; held fixed.
+    pub camera: Camera,
+    /// Its [`PhotoSfmConfig::camera_mask`]; the front lens's applies to the
+    /// front lens's photos only.
+    pub camera_mask: Option<PathBuf>,
+}
+
 /// Descriptor matching for [`build_photo_dataset`]'s candidate pairs, in
 /// place of the CPU matcher: it must give what the CPU does, the ratio-tested
 /// (0.8) mutual nearest neighbours of
@@ -246,6 +274,7 @@ impl Default for PhotoSfmConfig {
             principal_point: None,
             camera: None,
             refine_camera: false,
+            back_lens: None,
             exhaustive_max: 300,
             window: 20,
             min_matches: 15,
@@ -735,22 +764,25 @@ fn imu_metric_scale(
     Ok(e.scale)
 }
 
-/// The back lens's pose on the camera as the mapper refined it, from the
-/// front faces of each registered dual-fisheye frame (images `10 i` and
+/// The back lens's pose on the camera as the mapper refined it, from each
+/// frame's front and back lens images `pairs` that are both registered
+/// (with `insv`, the front faces of a dual-fisheye frame, images `10 i` and
 /// `10 i + 5`, the two lenses' axes): the mean rotation taking a direction
 /// in the back lens's frame to the front lens's, and the back lens's mean
-/// centre in the front lens's frame. Written to `<out>/back_lens.txt`,
-/// which `insv_stitch --back-lens` reads.
+/// centre in the front lens's frame. Logged after `label`, and written to
+/// `<out>/back_lens.txt`, which `insv_stitch --back-lens` reads.
 fn write_back_lens(
     poses: &[Option<visloc_core::geometry::Pose>],
+    pairs: &[(usize, usize)],
+    label: &str,
     metric: bool,
     out_dir: &Path,
     log: &mut dyn FnMut(&str),
 ) -> Result<(), EurocError> {
     let mut quats: Vec<nalgebra::UnitQuaternion<f64>> = Vec::new();
     let mut centre = Vector3::zeros();
-    for frame in poses.chunks_exact(10) {
-        let (Some(front), Some(back)) = (&frame[0], &frame[5]) else {
+    for &(front, back) in pairs {
+        let (Some(front), Some(back)) = (&poses[front], &poses[back]) else {
             continue;
         };
         let (f, b) = (&front.world_to_camera, &back.world_to_camera);
@@ -782,7 +814,7 @@ fn write_back_lens(
         .to_degrees();
     let unit = if metric { "m" } else { "model units" };
     log(&format!(
-        "insv: back lens {beyond:.3}° past the half turn, centre ({:.4}, {:.4}, {:.4}) {unit} \
+        "{label}: back lens {beyond:.3}° past the half turn, centre ({:.4}, {:.4}, {:.4}) {unit} \
          in the front lens's frame ({} frames)",
         centre.x,
         centre.y,
@@ -791,7 +823,7 @@ fn write_back_lens(
     ));
     let r = &rotation;
     let text = format!(
-        "# The back lens on the camera as gsplat_photos --insv refined it ({} frames)\n\
+        "# The back lens on the camera as gsplat_photos refined it ({} frames)\n\
          # rotation: a direction in the back lens's frame to the front lens's, row by row\n\
          rotation {:.9} {:.9} {:.9} {:.9} {:.9} {:.9} {:.9} {:.9} {:.9}\n\
          # the back lens's centre in the front lens's frame ({unit})\n\
@@ -1475,6 +1507,101 @@ fn write_lens_faces(
     Ok((files, labels, paths, size))
 }
 
+/// The images in `dir` (by extension, [`IMAGE_EXTENSIONS`]), sorted.
+fn list_images(dir: &Path) -> Result<Vec<PathBuf>, EurocError> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|source| EurocError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// Photos and each one's frame and lens ([`pair_lens_photos`]).
+pub type LensFrames = (Vec<PathBuf>, Vec<(usize, usize)>);
+
+/// The frames of a two-lens camera's photos, `front` and `back`: a photo
+/// pairs with the other lens's photo whose name (without its extension) is
+/// the same once each list's common ending is cut off, from the separator
+/// (`_`, `-`, `.` or a space) that ending starts at. So `IMG_1_fisheye1.jpg`
+/// pairs with `IMG_1_fisheye2.jpg`, and `a.jpg` with `a.jpg`. Returns the
+/// photos, frame by frame in the order of those names, a frame's front
+/// photo before its back one, and each photo's frame and lens (0 front,
+/// 1 back). A frame may have one lens's photo only. Two photos of one lens
+/// with the same name are an error.
+pub fn pair_lens_photos(front: &[PathBuf], back: &[PathBuf]) -> Result<LensFrames, String> {
+    let keys = |files: &[PathBuf]| -> Vec<String> {
+        let stems: Vec<Vec<char>> = files
+            .iter()
+            .map(|f| {
+                f.file_stem()
+                    .map_or(String::new(), |s| s.to_string_lossy().into_owned())
+            })
+            .map(|s| s.chars().collect())
+            .collect();
+        let Some(first) = stems.first() else {
+            return Vec::new();
+        };
+        // The longest ending every name shares, in characters (one name
+        // shows none).
+        let common = stems
+            .iter()
+            .fold(first.len() * usize::from(stems.len() > 1), |n, s| {
+                n.min(
+                    first
+                        .iter()
+                        .rev()
+                        .zip(s.iter().rev())
+                        .take_while(|(a, b)| a == b)
+                        .count(),
+                )
+            });
+        // From its first separator on.
+        let ending = &first[first.len() - common..];
+        let cut = ending
+            .iter()
+            .position(|c| matches!(c, '_' | '-' | '.' | ' '))
+            .map_or(0, |k| common - k);
+        stems
+            .iter()
+            .map(|s| s[..s.len() - cut].iter().collect())
+            .collect()
+    };
+    let mut frames: std::collections::BTreeMap<String, [Option<usize>; 2]> =
+        std::collections::BTreeMap::new();
+    for (lens, files) in [front, back].into_iter().enumerate() {
+        for (i, key) in keys(files).into_iter().enumerate() {
+            let slot = &mut frames.entry(key).or_default()[lens];
+            if let Some(other) = slot.replace(i) {
+                return Err(format!(
+                    "back lens: {} and {} make the same frame",
+                    files[other].display(),
+                    files[i].display()
+                ));
+            }
+        }
+    }
+    let mut photos = Vec::with_capacity(front.len() + back.len());
+    let mut layout = Vec::with_capacity(front.len() + back.len());
+    for (frame, lenses) in frames.values().enumerate() {
+        for (lens, (files, slot)) in [front, back].into_iter().zip(lenses).enumerate() {
+            if let Some(i) = *slot {
+                photos.push(files[i].clone());
+                layout.push((frame, lens));
+            }
+        }
+    }
+    Ok((photos, layout))
+}
+
 /// A [`PhotoSfmConfig::camera`] from a `cameras.txt` row without its id:
 /// `MODEL WIDTH HEIGHT PARAMS...`, with exactly the model's COLMAP
 /// parameter count.
@@ -1828,16 +1955,53 @@ pub fn build_photo_dataset(
         let path = path.to_path_buf();
         move |source| EurocError::Io { path, source }
     };
-    let mut files: Vec<PathBuf> = std::fs::read_dir(images_dir)
-        .map_err(io(images_dir))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-        })
-        .collect();
-    files.sort();
+    let files = list_images(images_dir)?;
+    // With a back lens, its photos join the front lens's, a frame's front
+    // photo before its back one; `lens_frames` holds each image's frame and
+    // lens (0 front, 1 back).
+    let (files, lens_frames) = match &cfg.back_lens {
+        None => (files, None),
+        Some(_)
+            if cfg.camera.is_none()
+                || cfg.equirect
+                || cfg.insv.is_some()
+                || cfg.imu.is_some()
+                || cfg.stream_images
+                || cfg.refine_camera =>
+        {
+            return Err(EurocError::Sfm(
+                "back_lens: needs camera (--camera), and does not combine with equirect, insv, \
+                 imu, stream_images or refine_camera"
+                    .into(),
+            ))
+        }
+        Some(back) => {
+            let back_files = list_images(&back.images)?;
+            let (files, frames) = pair_lens_photos(&files, &back_files).map_err(EurocError::Sfm)?;
+            // A frame has one photo or two.
+            let num_frames = frames.last().map_or(0, |&(f, _)| f + 1);
+            let both = files.len() - num_frames;
+            log(&format!(
+                "back lens: {num_frames} frames, {both} with both lenses' photos ({} front, {} back)",
+                files.len() - back_files.len(),
+                back_files.len()
+            ));
+            (files, Some(frames))
+        }
+    };
+    // Each image's lens (all 0 without a back lens), and the lenses' camera
+    // masks.
+    let lens_of = |i: usize| {
+        lens_frames
+            .as_ref()
+            .map_or(0, |f: &Vec<(usize, usize)>| f[i].1)
+    };
+    let mut camera_masks = vec![cfg.camera_mask.as_deref()];
+    if let Some(back) = &cfg.back_lens {
+        camera_masks.push(back.camera_mask.as_deref());
+    }
+    let image_lenses: Vec<usize> = (0..files.len()).map(lens_of).collect();
+    let any_camera_mask = camera_masks.iter().any(Option::is_some);
     // Two panoramas already give faces that overlap.
     let min_images = if cfg.equirect || cfg.insv.is_some() {
         2
@@ -1856,12 +2020,12 @@ pub fn build_photo_dataset(
             "equirect: the cube faces' focal length is fixed; drop focal_px (--focal)".into(),
         ));
     }
-    if cfg.mask_flip && cfg.mask_dir.is_none() && cfg.camera_mask.is_none() {
+    if cfg.mask_flip && cfg.mask_dir.is_none() && !any_camera_mask {
         return Err(EurocError::Sfm(
             "masks: mask_flip needs mask_dir or camera_mask".into(),
         ));
     }
-    if cfg.mask_dir.is_some() || cfg.camera_mask.is_some() {
+    if cfg.mask_dir.is_some() || any_camera_mask {
         if cfg.equirect || cfg.insv.is_some() {
             return Err(EurocError::Sfm(
                 "masks: not supported with equirect or insv, whose images are cut from the \
@@ -1871,9 +2035,10 @@ pub fn build_photo_dataset(
         }
         // Fail on a missing mask, or one of another aspect, before decoding
         // anything (the headers are enough).
-        if let Some(masks) = ImageMasks::new(
+        if let Some(masks) = ImageMasks::with_lenses(
             cfg.mask_dir.as_deref(),
-            cfg.camera_mask.as_deref(),
+            &camera_masks,
+            &image_lenses,
             &files,
             cfg.mask_flip,
         )? {
@@ -1938,6 +2103,7 @@ pub fn build_photo_dataset(
     // With `stream_images`, the working images' EXIF focal lengths (their
     // pixels are written once the camera is known, below).
     let mut streamed_f35: Option<Vec<Option<f64>>> = None;
+    let listed = files.len();
     let (files, labels, work, width, height, panoramas) = if let Some(lenses) = &lenses {
         let (files, labels, paths, size) = write_lens_faces(files, lenses, cfg, &images_out, log)?;
         (files, labels, WorkImages::Disk(paths), size, size, None)
@@ -2019,11 +2185,19 @@ pub fn build_photo_dataset(
             None,
         )
     };
+    // The two lenses' photos are paired by frame: none may be dropped.
+    if lens_frames.is_some() && files.len() != listed {
+        return Err(EurocError::Sfm(format!(
+            "back lens: {} of {listed} photos are not of the most common size",
+            listed - files.len()
+        )));
+    }
     // The masks of the images kept (`load_photos` drops some), one decoded
     // when its image is processed.
-    let masks = ImageMasks::new(
+    let masks = ImageMasks::with_lenses(
         cfg.mask_dir.as_deref(),
-        cfg.camera_mask.as_deref(),
+        &camera_masks,
+        &image_lenses,
         &files,
         cfg.mask_flip,
     )?;
@@ -2086,8 +2260,24 @@ pub fn build_photo_dataset(
         }
         None => Camera::pinhole(1, width, height, focal_prior, focal_prior, cx, cy),
     };
-    // The pixels past `max_angle` off the lens's axis.
-    let outside: Option<Vec<bool>> = match cfg.max_angle {
+    // The back lens's camera, as camera 2.
+    let back_camera = match &cfg.back_lens {
+        Some(back) => {
+            let camera = Camera {
+                id: 2,
+                ..scaled_camera(&back.camera, width, height)?
+            };
+            log(&format!(
+                "back camera: {} {:?} (held fixed)",
+                camera.model.colmap_name().unwrap_or("?"),
+                camera.params
+            ));
+            Some(camera)
+        }
+        None => None,
+    };
+    // The pixels past `max_angle` off each lens's axis.
+    let outside: Option<Vec<Vec<bool>>> = match cfg.max_angle {
         None => None,
         Some(_) if cfg.camera.is_none() => {
             return Err(EurocError::Camera(
@@ -2096,22 +2286,32 @@ pub fn build_photo_dataset(
         }
         Some(deg) => {
             let cos_max = deg.to_radians().cos();
-            let past = |x: u32, y: u32| {
-                camera
-                    .unit_ray_from_pixel(&Point2::new(x as f64 + 0.5, y as f64 + 0.5))
-                    .is_none_or(|ray| ray.z < cos_max)
-            };
-            let mask: Vec<bool> = (0..height)
-                .flat_map(|y| (0..width).map(move |x| (x, y)))
-                .map(|(x, y)| past(x, y))
-                .collect();
-            log(&format!(
-                "leaving out {:.1}% of each image, past {deg}° off the axis",
-                100.0 * mask.iter().filter(|&&m| m).count() as f64 / mask.len() as f64
-            ));
-            Some(mask)
+            let mut masks = Vec::new();
+            for (lens, camera) in std::iter::once(&camera).chain(&back_camera).enumerate() {
+                let past = |x: u32, y: u32| {
+                    camera
+                        .unit_ray_from_pixel(&Point2::new(x as f64 + 0.5, y as f64 + 0.5))
+                        .is_none_or(|ray| ray.z < cos_max)
+                };
+                let mask: Vec<bool> = (0..height)
+                    .flat_map(|y| (0..width).map(move |x| (x, y)))
+                    .map(|(x, y)| past(x, y))
+                    .collect();
+                let of = match (lens, &back_camera) {
+                    (0, None) => "each image",
+                    (0, Some(_)) => "each front image",
+                    _ => "each back image",
+                };
+                log(&format!(
+                    "leaving out {:.1}% of {of}, past {deg}° off the axis",
+                    100.0 * mask.iter().filter(|&&m| m).count() as f64 / mask.len() as f64
+                ));
+                masks.push(mask);
+            }
+            Some(masks)
         }
     };
+    let outside_of = |i: usize| outside.as_ref().map(|o| o[lens_of(i)].as_slice());
 
     let names: Vec<String> = (0..n).map(|i| format!("frame_{i:05}.png")).collect();
     if let WorkImages::Memory(images) = &work {
@@ -2120,8 +2320,7 @@ pub fn build_photo_dataset(
             .zip(&names)
             .enumerate()
             .map(|(i, ((img, _), name))| {
-                let left_out =
-                    left_out_pixels(masks.as_ref(), i, width, height, outside.as_deref())?;
+                let left_out = left_out_pixels(masks.as_ref(), i, width, height, outside_of(i))?;
                 save_working_image(
                     img,
                     &images_out.join(name),
@@ -2135,13 +2334,14 @@ pub fn build_photo_dataset(
         let WorkImages::Disk(paths) = &work else {
             unreachable!("streamed photos are on disk")
         };
+        // One lens: `stream_images` does not take a back lens.
         write_streamed_working_images(
             &files,
             cfg,
             width,
             height,
             paths,
-            outside.as_deref(),
+            outside_of(0),
             masks.as_ref(),
         )?;
         log(&format!(
@@ -2183,7 +2383,22 @@ pub fn build_photo_dataset(
         }
         None => (work, n, per_source, width, height, camera, names, None),
     };
-    let source = |i: usize| i / per_source;
+    // Image `i`'s source: its panorama or frame. A source's images are
+    // consecutive; `source_start[s]` is source `s`'s first.
+    let source = |i: usize| lens_frames.as_ref().map_or(i / per_source, |f| f[i].0);
+    let num_sources = n.checked_sub(1).map_or(0, |last| source(last) + 1);
+    let mut source_start = vec![n; num_sources + 1];
+    for i in (0..n).rev() {
+        source_start[source(i)] = i;
+    }
+    // About how many images a source has (the window and retrieval count
+    // sources).
+    let per_frame = if lens_frames.is_some() { 2 } else { per_source };
+    // Image `i`'s camera.
+    let camera_of = |i: usize| match &back_camera {
+        Some(back) if lens_of(i) == 1 => back,
+        _ => &camera,
+    };
 
     // SIFT: COLMAP's VLFeat detector (subpixel localization) and descriptor.
     // The default detector reports integer pixel positions: on ETH3D
@@ -2485,17 +2700,18 @@ pub fn build_photo_dataset(
     }
 
     // Candidate pairs, never two faces of one panorama (they do not
-    // overlap). The first image of the source after image `i`'s:
-    let next_source = |i: usize| (source(i) + 1) * per_source;
+    // overlap), nor a frame's two lenses. The first image of the source
+    // after image `i`'s:
+    let next_source = |i: usize| source_start[source(i) + 1];
     let candidates: Vec<(usize, usize)> = if n <= cfg.exhaustive_max {
         (0..n)
             .flat_map(|i| (next_source(i)..n).map(move |j| (i, j)))
             .collect()
     } else {
-        // The window counts source images (panoramas).
+        // The window counts source images (panoramas, frames).
         let mut pairs: std::collections::BTreeSet<(usize, usize)> = (0..n)
             .flat_map(|i| {
-                let end = (next_source(i) + cfg.window * per_source).min(n);
+                let end = source_start[(source(i) + 1 + cfg.window).min(num_sources)];
                 (next_source(i)..end).map(move |j| (i, j))
             })
             .collect();
@@ -2505,7 +2721,7 @@ pub fn build_photo_dataset(
                 &features,
                 &descriptors,
                 cfg.retrieval_k,
-                cfg.window * per_source,
+                cfg.window * per_frame,
             )
             .into_iter()
             .filter(|&(i, j)| source(i) != source(j));
@@ -2604,7 +2820,7 @@ pub fn build_photo_dataset(
             .zip(dms.into_par_iter())
             .filter_map(|(&(i, j), dm)| {
                 verify_pair(
-                    &camera,
+                    [camera_of(i), camera_of(j)],
                     &features[i],
                     &features[j],
                     &dm,
@@ -2770,12 +2986,13 @@ pub fn build_photo_dataset(
     // frame. The back lens's pose on it starts from a half turn with no
     // offset and is refined, its faces' with it: on an X5 it settles about
     // 1.1° from the half turn, 3.6 cm behind, while the front lens's faces
-    // move by hundredths of a degree (docs/insta360_lens.md).
-    if lenses.is_some() {
+    // move by hundredths of a degree (docs/insta360_lens.md). A back lens
+    // (`back_lens`) starts and is refined the same way.
+    if lenses.is_some() || back_camera.is_some() {
         port_overrides.push("ba_refine_sensor_from_rig=1".into());
     }
     // Face `k`'s `sensor_from_rig`: the panorama's or front lens's (rig)
-    // frame to the face's.
+    // frame to the face's, or the back lens's.
     let rig: Option<Vec<nalgebra::Matrix3<f64>>> = if lenses.is_some() {
         Some(
             dual_fisheye::rig_face_rotations()
@@ -2783,6 +3000,11 @@ pub fn build_photo_dataset(
                 .map(|r| r.transpose())
                 .collect(),
         )
+    } else if back_camera.is_some() {
+        Some(vec![
+            nalgebra::Matrix3::identity(),
+            dual_fisheye::back_lens_rotation().transpose(),
+        ])
     } else {
         (cfg.equirect && cfg.equirect_rig && faces.is_none()).then(|| {
             equirect::cube_face_rotations()
@@ -2791,14 +3013,20 @@ pub fn build_photo_dataset(
                 .collect()
         })
     };
+    let port_cameras: Vec<Camera> = std::iter::once(camera.clone())
+        .chain(back_camera.clone())
+        .collect();
     let models = run_colmap_port(
         out_dir,
-        &camera,
+        &port_cameras,
         width,
         height,
         &features,
         &pairwise,
-        rig.as_deref(),
+        rig.as_deref().map(|sensor_from_rig| PortRig {
+            sensor_from_rig,
+            frames: lens_frames.as_deref().unwrap_or(&[]),
+        }),
         &port_overrides,
         log,
     )?;
@@ -2908,7 +3136,17 @@ pub fn build_photo_dataset(
         metric_scale = Some(scale);
     }
     if per_source == 10 {
-        write_back_lens(&poses, metric_scale.is_some(), out_dir, log)?;
+        let pairs: Vec<(usize, usize)> = (0..poses.len() / 10)
+            .map(|f| (10 * f, 10 * f + 5))
+            .collect();
+        write_back_lens(&poses, &pairs, "insv", metric_scale.is_some(), out_dir, log)?;
+    } else if let Some(frames) = &lens_frames {
+        // A frame's front image, then its back one.
+        let pairs: Vec<(usize, usize)> = (1..frames.len())
+            .filter(|&i| frames[i].1 == 1 && frames[i - 1] == (frames[i].0, 0))
+            .map(|i| (i - 1, i))
+            .collect();
+        write_back_lens(&poses, &pairs, "rig", false, out_dir, log)?;
     }
 
     let points: Vec<ColoredPoint> = tracks
@@ -2968,7 +3206,12 @@ pub fn build_photo_dataset(
         }
         None => (poses, names, cam, width, height, per_source),
     };
-    let source = |i: usize| i / per_source;
+    let source = |i: usize| lens_frames.as_ref().map_or(i / per_source, |f| f[i].0);
+    // Image `i`'s camera in the model (the refined one, with `refine_camera`).
+    let model_camera = |i: usize| match &back_camera {
+        Some(back) if lens_of(i) == 1 => back,
+        _ => &cam,
+    };
     // Faces that see fewer than `min_matches` SfM points (sky, or a camera
     // mount or selfie stick that moves with the camera) are left out of
     // training.
@@ -2981,8 +3224,13 @@ pub fn build_photo_dataset(
             }
         }
         let kept = poses.iter().filter(|p| p.is_some()).count();
+        let (label, what) = if back_camera.is_some() {
+            ("back lens", "images")
+        } else {
+            ("equirect", "faces")
+        };
         log(&format!(
-            "equirect: {kept} of {posed} posed faces see at least {} SfM points and are kept \
+            "{label}: {kept} of {posed} posed {what} see at least {} SfM points and are kept \
              for training",
             cfg.min_matches
         ));
@@ -3005,7 +3253,8 @@ pub fn build_photo_dataset(
         last_source = Some(source(i));
         let view = View {
             name: names[i].clone(),
-            camera: camera_view_from(&cam, pose).map_err(|e| EurocError::Camera(e.to_string()))?,
+            camera: camera_view_from(model_camera(i), pose)
+                .map_err(|e| EurocError::Camera(e.to_string()))?,
             image_path: images_out.join(&names[i]),
         };
         if cfg.eval_every > 0 && k.is_multiple_of(cfg.eval_every) {
@@ -3018,14 +3267,20 @@ pub fn build_photo_dataset(
     // 3DGS, gsplat_train / gsplat_mesh --data) can use the reconstruction.
     let sparse = out_dir.join("sparse").join("0");
     std::fs::create_dir_all(&sparse).map_err(io(&sparse))?;
-    let (model, params) = visloc_io::colmap::colmap_camera_record(&cam);
-    let cameras = params.iter().fold(
-        format!(
-            "# Camera list\n1 {} {width} {height}",
-            model.colmap_name().unwrap_or("PINHOLE")
-        ),
-        |row, p| format!("{row} {p}"),
-    ) + "\n";
+    // Camera 1, and a back lens's as camera 2.
+    let mut cameras = "# Camera list\n".to_string();
+    for (id, camera) in std::iter::once(&cam).chain(&back_camera).enumerate() {
+        let (model, params) = visloc_io::colmap::colmap_camera_record(camera);
+        cameras += &params.iter().fold(
+            format!(
+                "{} {} {width} {height}",
+                id + 1,
+                model.colmap_name().unwrap_or("PINHOLE")
+            ),
+            |row, p| format!("{row} {p}"),
+        );
+        cameras.push('\n');
+    }
     // Image ids follow the registered images in order; point ids are the
     // track indices plus one. Each image lists its observations (x, y,
     // point id) and each point its track (image id, observation index), as
@@ -3082,7 +3337,7 @@ pub fn build_photo_dataset(
         let q = pose.world_to_camera.rotation.quaternion();
         let t = pose.world_to_camera.translation;
         images_txt.push_str(&format!(
-            "{} {} {} {} {} {} {} {} 1 {}\n",
+            "{} {} {} {} {} {} {} {} {} {}\n",
             id + 1,
             q.w,
             q.i,
@@ -3091,6 +3346,7 @@ pub fn build_photo_dataset(
             t.x,
             t.y,
             t.z,
+            lens_of(i) + 1,
             names[i]
         ));
         let line: Vec<String> = observations[i]
@@ -3127,6 +3383,17 @@ pub fn build_photo_dataset(
         ("points3D.txt", points_txt),
     ] {
         let path = sparse.join(file);
+        std::fs::write(&path, text).map_err(io(&path))?;
+    }
+    // A back lens's frames, for the trainers to hold out whole
+    // ([`crate::dataset::FRAMES_FILE`]).
+    if let Some(frames) = &lens_frames {
+        let text: String = names
+            .iter()
+            .zip(frames)
+            .map(|(name, (frame, _))| format!("{name} {frame}\n"))
+            .collect();
+        let path = out_dir.join(crate::dataset::FRAMES_FILE);
         std::fs::write(&path, text).map_err(io(&path))?;
     }
 
@@ -3428,6 +3695,54 @@ mod tests {
         );
     }
 
+    /// FIORD's names pair by frame once `_fisheye1` and `_fisheye2` are cut
+    /// off, a frame may lack either lens, and the same names pair as they
+    /// are (an ending of digits is not cut).
+    #[test]
+    fn lens_photos_pair_by_name_without_the_common_ending() {
+        let paths = |names: &[&str]| -> Vec<PathBuf> {
+            names.iter().map(|n| Path::new("d").join(n)).collect()
+        };
+        let front = paths(&[
+            "IMG_00_729_fisheye1.png",
+            "IMG_00_731_fisheye1.png",
+            "IMG_00_740_fisheye1.png",
+        ]);
+        let back = paths(&[
+            "IMG_00_729_fisheye2.png",
+            "IMG_00_740_fisheye2.png",
+            "IMG_00_750_fisheye2.png",
+        ]);
+        let (photos, layout) = super::pair_lens_photos(&front, &back).unwrap();
+        let names: Vec<&str> = photos
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "IMG_00_729_fisheye1.png",
+                "IMG_00_729_fisheye2.png",
+                "IMG_00_731_fisheye1.png",
+                "IMG_00_740_fisheye1.png",
+                "IMG_00_740_fisheye2.png",
+                "IMG_00_750_fisheye2.png"
+            ]
+        );
+        assert_eq!(layout, [(0, 0), (0, 1), (1, 0), (2, 0), (2, 1), (3, 1)]);
+
+        let front = paths(&["f_010.jpg", "f_020.jpg", "f_030.jpg"]);
+        let back = paths(&["f_010.jpg", "f_030.jpg"]);
+        let (_, layout) = super::pair_lens_photos(&front, &back).unwrap();
+        assert_eq!(layout, [(0, 0), (0, 1), (1, 0), (2, 0), (2, 1)]);
+        // One photo of a lens: nothing is cut.
+        let (_, layout) = super::pair_lens_photos(&front, &back[..1]).unwrap();
+        assert_eq!(layout, [(0, 0), (0, 1), (1, 0), (2, 0)]);
+
+        let err = super::pair_lens_photos(&paths(&["a.jpg", "a.png"]), &[]).unwrap_err();
+        assert!(err.contains("make the same frame"), "{err}");
+    }
+
     #[test]
     fn black_regions_mask_blocks_not_specks() {
         let mut img = image::RgbImage::from_pixel(40, 30, image::Rgb([120, 110, 100]));
@@ -3526,6 +3841,183 @@ mod tests {
             );
             room_colour(centre, rot * ray.normalize())
         })
+    }
+
+    /// A `size` px square equidistant fisheye photo of the room, 200° across
+    /// the middle of each side (black past 100° off the axis), taken at
+    /// `centre` turned by `yaw`; with `back`, through a back lens looking
+    /// the other way ([`crate::dual_fisheye::back_lens_rotation`]).
+    fn room_fisheye(
+        size: u32,
+        centre: nalgebra::Vector3<f64>,
+        yaw: f64,
+        back: bool,
+    ) -> image::RgbImage {
+        let max = 100f64.to_radians();
+        let f = size as f64 / 2.0 / max;
+        let rot = nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw);
+        let lens = crate::dual_fisheye::back_lens_rotation();
+        image::RgbImage::from_fn(size, size, |x, y| {
+            let half = size as f64 / 2.0;
+            let (u, v) = (x as f64 + 0.5 - half, y as f64 + 0.5 - half);
+            let theta = u.hypot(v) / f;
+            if theta > max {
+                return image::Rgb([0, 0, 0]);
+            }
+            let s = theta.sin() / (f * theta).max(1e-12);
+            let d = nalgebra::Vector3::new(u * s, v * s, theta.cos());
+            room_colour(centre, rot * if back { lens * d } else { d })
+        })
+    }
+
+    /// A dual fisheye's two lenses through the whole CPU pipeline as one rig
+    /// (`back_lens`), one frame without its back photo: every photo
+    /// registers, at the true poses, the back lens settles at the half turn,
+    /// and whole frames are held out, by the builder and by the loader of
+    /// the model it writes.
+    /// `cargo test --release -p visloc-gsplat-train --features euroc --lib
+    /// back_lens_end_to_end -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn back_lens_end_to_end() {
+        let root = std::env::temp_dir().join(format!("visloc_back_lens_{}", std::process::id()));
+        let (front, back) = (root.join("front"), root.join("back"));
+        std::fs::create_dir_all(&front).unwrap();
+        std::fs::create_dir_all(&back).unwrap();
+        let size = 480u32;
+        let truth: Vec<(nalgebra::Vector3<f64>, f64)> = (0..6)
+            .map(|k| {
+                let c = nalgebra::Vector3::new(
+                    -1.0 + 0.4 * k as f64,
+                    0.1 * (k % 2) as f64,
+                    0.3 * k as f64,
+                );
+                (c, 0.35 * k as f64)
+            })
+            .collect();
+        for (k, &(c, yaw)) in truth.iter().enumerate() {
+            room_fisheye(size, c, yaw, false)
+                .save(front.join(format!("shot_{k}_fisheye1.png")))
+                .unwrap();
+            if k != 3 {
+                room_fisheye(size, c, yaw, true)
+                    .save(back.join(format!("shot_{k}_fisheye2.png")))
+                    .unwrap();
+            }
+        }
+        let f = size as f64 / 2.0 / 100f64.to_radians();
+        let half = size as f64 / 2.0;
+        let camera = super::parse_camera_row(&format!(
+            "OPENCV_FISHEYE {size} {size} {f} {f} {half} {half} 0 0 0 0"
+        ))
+        .unwrap();
+        let cfg = super::PhotoSfmConfig {
+            gpu: false,
+            gpu_sift: false,
+            camera: Some(camera.clone()),
+            max_angle: Some(100.0),
+            eval_every: 2,
+            back_lens: Some(super::BackLens {
+                images: back,
+                camera,
+                camera_mask: None,
+            }),
+            ..Default::default()
+        };
+        let out = root.join("out");
+        let mut logs = Vec::new();
+        let (dataset, _, report) =
+            super::build_photo_dataset(&front, &out, &cfg, &mut |m: &str| {
+                println!("{m}");
+                logs.push(m.to_string())
+            })
+            .unwrap();
+        assert!(logs
+            .iter()
+            .any(|m| m == "back lens: 6 frames, 5 with both lenses' photos (6 front, 5 back)"));
+        assert_eq!((report.images, report.registered), (11, 11));
+        let beyond: f64 = logs
+            .iter()
+            .find_map(|m| m.strip_prefix("rig: back lens "))
+            .and_then(|m| m.split('°').next())
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(beyond < 0.1, "{beyond}° past the half turn");
+
+        // Each working image's shot and lens, from image_names.txt.
+        let labels: std::collections::HashMap<String, (usize, bool)> =
+            std::fs::read_to_string(out.join("image_names.txt"))
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    let (name, label) = l.split_once(' ').unwrap();
+                    let stem = Path::new(label).file_stem().unwrap().to_str().unwrap();
+                    let k = stem[5..6].parse().unwrap();
+                    (name.to_string(), (k, stem.ends_with('2')))
+                })
+                .collect();
+        // Camera-to-world rotation of a shot's lens, truth and recovered.
+        let true_rotation = |k: usize, back: bool| {
+            let r = *nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::y_axis(), truth[k].1)
+                .matrix();
+            if back {
+                r * crate::dual_fisheye::back_lens_rotation()
+            } else {
+                r
+            }
+        };
+        let text = std::fs::read_to_string(out.join("sparse/0/images.txt")).unwrap();
+        let mut est = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')).step_by(2) {
+            let t: Vec<&str> = line.split_whitespace().collect();
+            let v: Vec<f64> = t[1..5].iter().map(|x| x.parse().unwrap()).collect();
+            let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+                v[0], v[1], v[2], v[3],
+            ));
+            let (k, is_back) = labels[t[9]];
+            assert_eq!(t[8], if is_back { "2" } else { "1" }, "{line}");
+            est.push((
+                q.to_rotation_matrix().transpose().into_inner(),
+                true_rotation(k, is_back),
+            ));
+        }
+        assert_eq!(est.len(), 11);
+        let mut worst = 0.0f64;
+        for (ra, ta) in &est {
+            for (rb, tb) in &est {
+                let off = (ra.transpose() * rb).transpose() * (ta.transpose() * tb);
+                worst = worst.max(
+                    nalgebra::Rotation3::from_matrix_unchecked(off)
+                        .angle()
+                        .to_degrees(),
+                );
+            }
+        }
+        assert!(worst < 0.1, "worst relative rotation {worst}°");
+        let cameras = std::fs::read_to_string(out.join("sparse/0/cameras.txt")).unwrap();
+        assert_eq!(cameras.lines().filter(|l| !l.starts_with('#')).count(), 2);
+
+        // Shots 0, 2 and 4 held out, both lenses: by the builder and, through
+        // image_frames.txt, by the loader.
+        let shots = |views: &[crate::dataset::View]| {
+            let mut s: Vec<(usize, bool)> = views.iter().map(|v| labels[&v.name]).collect();
+            s.sort();
+            s
+        };
+        let held = vec![
+            (0, false),
+            (0, true),
+            (2, false),
+            (2, true),
+            (4, false),
+            (4, true),
+        ];
+        assert_eq!(shots(&dataset.eval), held);
+        let loaded = crate::dataset::load_colmap_dataset(&out, Some(2)).unwrap();
+        assert_eq!(shots(&loaded.eval), held);
+        assert_eq!(loaded.train.len(), 5);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Five panoramas of the synthetic room in `root/in`, and the `(centre,
