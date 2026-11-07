@@ -15,6 +15,11 @@ per-pixel labels of its photos:
 4. **Look.** The web viewer (`docs/euroc_splat`) blends the splat's colours
    into the classes' or the objects' with a slider.
 
+The labels can also shape the training itself (`gsplat_train_cuda
+--labels`). The held-out pixels that agree with SAM 3 rise at the same
+PSNR: from 79–85% to 89.8% on MeetingRoom_In, and from 87% to 92.4% on
+Building_In ([Training with the labels](#training-with-the-labels)).
+
 <p align="center">
   <img src="assets/semantic_meetingroom.jpg" alt="FIORD MeetingRoom_In from two viewpoints: the trained splat in its colours (left), painted by the SAM 3 class of each gaussian (middle: table red, chairs green, floor yellow, ceiling blue, walls orange, windows purple, doors cyan, whiteboards magenta, ceiling lights lime), and by object (right: each chair, table, window and light its own colour)" width="900">
 </p>
@@ -186,6 +191,55 @@ At 0.5, by class:
 Windows rarely match. As for the classes, this is agreement with SAM 3's
 instances, not a ground truth.
 
+## Building_In
+
+The same steps on FIORD's Building_In, a lobby and its corridors: the front
+lens refined and its tripod masked out as for MeetingRoom_In, 230 photos at
+800 px, 214,131 gaussians.
+
+- **SAM 3:** twelve prompts for the scene, `floor, ceiling, wall, pillar,
+  door, window, stairs, ceiling light, floor mat, trash can, bench,
+  elevator`, with `--rotate 180`: 213 s for the 230 photos.
+- **The vote:** 1.6 s. 32% of the gaussians are "other" and 27% floor.
+- **Objects:** 11,604 view instances merge into 174 objects in 35 s, among
+  them 53 ceiling lights, 29 windows, 24 walls, 23 doors and 7 pillars.
+
+`--check` holds out 29 views and lets the other 201 vote:
+
+| | Pixel accuracy | mIoU (13 classes) |
+|---|---|---|
+| Held-out views | 87.2% | 57.8% |
+
+| Class | IoU | Class | IoU |
+|---|---|---|---|
+| floor | 96.6% | window | 48.6% |
+| ceiling | 91.2% | stairs | 90.2% |
+| wall | 60.3% | ceiling light | 18.0% |
+| pillar | 82.2% | floor mat | 38.3% |
+| door | 60.6% | trash can | 66.3% |
+| other | 55.0% | bench | 43.9% |
+| | | elevator | 0.3% |
+
+The objects match far less often than on MeetingRoom_In: 26.1% of the 1,502
+held-out instances at IoU 0.5 (64.4% there). 591 of those instances are
+ceiling lights, small and many down the corridors, and only 7.4% of them
+match. By class:
+
+| Class | Held-out instances | Matched at 0.5 |
+|---|---|---|
+| ceiling light | 591 | 7.4% |
+| wall | 217 | 44.2% |
+| door | 175 | 16.0% |
+| window | 125 | 23.2% |
+| floor | 103 | 28.2% |
+| pillar | 80 | 76.2% |
+| trash can | 78 | 34.6% |
+| floor mat | 44 | 36.4% |
+| ceiling | 37 | 97.3% |
+| bench | 23 | 65.2% |
+| stairs | 17 | 64.7% |
+| elevator | 12 | 0.0% |
+
 ## The viewer
 
 `docs/euroc_splat/index.html` (antimatter15's WebGL viewer) takes these
@@ -201,8 +255,97 @@ parameters:
 - `&cameras=cameras.json` starts at the first capture viewpoint, and the
   number keys step through the captures.
 
-## Not done
+## Training with the labels
 
-- **The labels in training.** The classes and objects come after training
-  and do not shape the gaussians. A gaussian that straddles two objects
-  takes one.
+The vote labels a splat after its training. A gaussian that straddles a
+chair and the floor then takes one class, and the gaussians end where the
+photos' colours put them. `gsplat_train_cuda --labels` uses the labels in
+training instead (CUDA only):
+
+- **Class probabilities.** Every gaussian gets a logit per class (at most
+  16 classes). Their softmax, the gaussian's class probabilities, is
+  blended into each pixel as the colour is.
+- **The loss.** At each labelled pixel of the step's view, the
+  cross-entropy `-log(P_y / sum_c P_c)` of the blend P against the label y.
+  Its mean over the labelled pixels, times `--semantic-weight` (0.02), is
+  added to the photometric loss.
+- **The gradient** reaches the logits and, through each splat's alpha, its
+  position, shape and opacity. It also counts towards brush's refine
+  weight, so the refine splits gaussians where the labels disagree with
+  them. `--semantic-logits-only` keeps it to the logits.
+- **Output.** `scene.ply` gains a `class_logit_<c>` property per class.
+  `gsplat_semantic_cuda --logits` takes the classes from them. Without
+  `--logits`, the trained splat is voted on as any other.
+
+```bash
+gsplat_train_cuda --data run --steps 30000 --holdout 8 --alpha-mask \
+    --out run/scene.ply --labels run/labels
+gsplat_semantic_cuda --ply run/scene.ply --data run --labels run/labels \
+    --out run/semantic.ply --instances [--logits] [--check]
+```
+
+Blending probabilities, not logits, keeps a gaussian's class the one it
+renders. A first version blended the logits themselves. It fit
+MeetingRoom_In's training views well (cross-entropy 0.18), but each
+gaussian's own logits then meant little: the class of a gaussian's largest
+logit agreed with 57.5% of the held-out pixels, against 79.4% for the vote
+on the same splat.
+
+### MeetingRoom_In
+
+30,000 steps with every 8th view held out, as above. `--check` scores the
+14 held-out views, which the training never saw.
+
+| Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
+|---|---|---|---|---|
+| Without the labels shaping the splat (4 runs) | 32.67–32.76 dB | 79.4–84.5% | 68.9–73.1% | 64.4–66.1% |
+| `--semantic-weight 0.02` | 32.69 dB | 89.8% | 81.5% | 76.8% |
+| `--semantic-weight 0.05` (2 runs) | 31.80, 32.34 dB | 90.6%, 90.9% | 83.1%, 83.3% | 78.9%, 79.2% |
+| `--semantic-weight 0.2` | 31.39 dB | 91.7% | 84.6% | 80.0% |
+
+- **Without the labels.** The four runs are:
+  - the splat above;
+  - a second plain run;
+  - two runs that trained the logits alone (`--semantic-logits-only`, one
+    with the first version), whose geometry trains as without labels.
+
+  The spread is the training's own run-to-run variation. The floor's IoU
+  alone ranges from 67.8% to 88.6% across them.
+- **Logits and votes.** In every run, the classes from the trained logits
+  score within 0.4 points of the vote on the same splat, in pixel accuracy
+  and in mIoU.
+- **Where it gains**, `--semantic-weight 0.05` against the plain run:
+  - Ceiling lights' IoU goes from 41.6% to 72.5%, windows' from 35.0% to
+    53.6%, walls' from 67.2% to 81.5% and chairs' from 75.8% to 84.2%.
+  - Objects: chairs match at 0.5 85.1% of the time (73.8% before), walls
+    84.6% (51.3%) and windows 28.0% (8.0%).
+- **The cost.**
+  - **Image quality.** At 0.02 the PSNR stays within the plain runs' range.
+    Higher weights trade PSNR for agreement, with more gaussians: 96,680
+    at 0.05 and 129,500 at 0.2, against 88,170.
+  - **Time.** The class passes take 5.6 ms per step, 1.4 ms forward and
+    4.2 ms backward, more than the rest of the step. 30k steps take 288 s
+    of training instead of 142 s.
+
+### Building_In
+
+The same settings, with 29 held-out views:
+
+| Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
+|---|---|---|---|---|
+| Without the labels shaping the splat (2 runs) | 31.98, 32.05 dB | 87.2%, 87.3% | 57.8%, 58.2% | 26.1%, 26.2% |
+| `--semantic-weight 0.02` | 31.97 dB | 92.4% | 71.9% | 45.4% |
+| `--semantic-weight 0.05` | 31.40 dB | 92.9% | 73.3% | 49.1% |
+
+- **Without the labels.** The two runs are the splat above and one with
+  `--semantic-logits-only`.
+- **Where it gains**, at 0.05 against the logits-only run:
+  - The corridors' many small ceiling lights: IoU from 19.6% to 81.5%, and
+    their instances matched at 0.5 from 9.0% to 49.2%.
+  - Doors from 60.4% to 81.4%, walls from 62.1% to 81.4%, the elevator
+    from 0.3% to 9.5%.
+- **The cost.** At 0.02 the PSNR stays, and 30k steps take 442 s of
+  training against 227 s.
+
+As before, these numbers measure agreement with SAM 3's labels of photos
+the training never saw, not with a ground truth.

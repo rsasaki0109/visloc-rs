@@ -121,6 +121,32 @@ pub fn label_gaussians(votes: &[f32], num_classes: usize) -> Vec<GaussianLabel> 
         .collect()
 }
 
+/// Each gaussian's class from trained logits, `num_classes` per gaussian: the
+/// class of the largest, its softmax probability as the confidence, weight 1.
+/// A gaussian whose logits are all zero (no labelled pixel trained them) gets
+/// [`NO_LABEL`].
+pub fn label_from_logits(logits: &[f32], num_classes: usize) -> Vec<GaussianLabel> {
+    logits
+        .chunks_exact(num_classes.max(1))
+        .map(|z| {
+            if z.iter().all(|&v| v == 0.0) {
+                return GaussianLabel {
+                    class: NO_LABEL,
+                    confidence: 0.0,
+                    weight: 0.0,
+                };
+            }
+            let top = z.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let p: Vec<f32> = z.iter().map(|&v| (v - top).exp()).collect();
+            label_gaussians(&p, num_classes)[0]
+        })
+        .map(|l| GaussianLabel {
+            weight: if l.class == NO_LABEL { 0.0 } else { 1.0 },
+            ..l
+        })
+        .collect()
+}
+
 /// `scene` with every gaussian painted its class's colour ([`UNSEEN_COLOR`]
 /// without a class): degree-0 SH, the geometry and opacity unchanged.
 pub fn colour_by_class(
@@ -422,6 +448,23 @@ mod tests {
         assert_eq!(labels[1].class, NO_LABEL);
         assert_eq!(labels[1].confidence, 0.0);
         // A tie goes to the lower class.
+        assert_eq!(labels[2].class, 0);
+    }
+
+    #[test]
+    fn trained_logits_give_their_softmax_class() {
+        let logits = [
+            0.0, 2.0, 0.0, /**/ 0.0, 0.0, 0.0, /**/ -1.0, -3.0, -2.0,
+        ];
+        let labels = label_from_logits(&logits, 3);
+        assert_eq!(labels[0].class, 1);
+        let e = 2.0f32.exp();
+        assert!((labels[0].confidence - e / (e + 2.0)).abs() < 1e-6);
+        assert_eq!(labels[0].weight, 1.0);
+        // Untrained: no class.
+        assert_eq!(labels[1].class, NO_LABEL);
+        assert_eq!(labels[1].weight, 0.0);
+        // All negative still has a largest.
         assert_eq!(labels[2].class, 0);
     }
 

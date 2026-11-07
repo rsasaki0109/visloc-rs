@@ -37,6 +37,9 @@ pub const LIBRARY_ENV: &str = "VISLOC_GSPLAT_CUDA_LIB";
 /// `|dL/du| W + |dL/dv| H`).
 pub const SCREEN_GRAD_FLOATS: usize = 10;
 
+/// Most classes the semantic logits take ([`CudaGsplat::set_labels`]).
+pub const MAX_SEMANTIC_CLASSES: usize = 16;
+
 /// Camera as the native ABI takes it (`GscCamera` in the CUDA source).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,6 +145,16 @@ pub struct StepParams {
     /// of the expected-depth map (0 = off; see
     /// [`CudaGsplat::normal_loss`]).
     pub normal_weight: f32,
+    /// Weight of the labels' cross-entropy: the mean over the image's
+    /// labelled pixels ([`CudaGsplat::set_labels`]) of `-log(P_y / sum_c
+    /// P_c)`, P the blend of the gaussians' class probabilities (the softmax
+    /// of their logits) and y the label (0 = off).
+    pub semantic_weight: f32,
+    /// Learning rate of the logits.
+    pub lr_semantic: f32,
+    /// The cross-entropy also moves the gaussians through their blending
+    /// weights, and counts towards brush's refine weight (0 = logits only).
+    pub semantic_geometry: u32,
 }
 
 /// Settings of [`CudaGsplat::tsdf_surface`] (`GscTsdfParams` in the CUDA
@@ -254,6 +267,7 @@ type TakeLossFn = unsafe extern "C" fn(
     *mut c_double,
     *mut c_double,
     *mut c_double,
+    *mut c_double,
     *mut u32,
 ) -> c_int;
 type SetDepthPriorsFn = unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const c_float) -> c_int;
@@ -279,6 +293,18 @@ type MatchTop2Fn =
 type VoteLabelsFn =
     unsafe extern "C" fn(*mut c_void, *const GscCamera, *const u8, c_int, c_int) -> c_int;
 type GetVotesFn = unsafe extern "C" fn(*mut c_void, c_int, *mut c_float) -> c_int;
+type SetLogitsFn = unsafe extern "C" fn(*mut c_void, c_int, *const c_float) -> c_int;
+type GetLogitsFn = unsafe extern "C" fn(*mut c_void, c_int, *mut c_float) -> c_int;
+type SetLabelsFn = unsafe extern "C" fn(*mut c_void, c_int, c_int, u32, u32, *const u8) -> c_int;
+type RenderClassesFn = unsafe extern "C" fn(*mut c_void, *const GscCamera, *mut c_float) -> c_int;
+type ClassesBackwardFn = unsafe extern "C" fn(
+    *mut c_void,
+    *const c_float,
+    *mut c_float,
+    *mut c_float,
+    *mut c_float,
+    *mut c_float,
+) -> c_int;
 
 /// A descriptor's best match among the other image's (see
 /// [`CudaGsplat::match_top2`]): scores `|other|^2 - 2 dot` in byte units
@@ -394,6 +420,8 @@ pub struct LossSums {
     /// Sum over steps of the depth-normal loss `mean (1 - N . n_d)` (0 when
     /// off).
     pub normal: f64,
+    /// Sum over steps of the labels' mean cross-entropy (0 when off).
+    pub semantic: f64,
     pub steps: u32,
 }
 
@@ -430,6 +458,11 @@ struct Api {
     match_top2: MatchTop2Fn,
     vote_labels: VoteLabelsFn,
     get_votes: GetVotesFn,
+    set_logits: SetLogitsFn,
+    get_logits: GetLogitsFn,
+    set_labels: SetLabelsFn,
+    render_classes: RenderClassesFn,
+    classes_backward: ClassesBackwardFn,
 }
 
 /// The native context: a scene, its Adam state and the training images on
@@ -442,6 +475,8 @@ pub struct CudaGsplat {
     pixels: usize,
     // Descriptors per image of the last set_match_descriptors.
     match_counts: Vec<u32>,
+    // Classes of the semantic logits (0: none).
+    logit_classes: usize,
     // Declared last: dropped after `context` is destroyed in Drop.
     _library: Library,
 }
@@ -476,7 +511,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 12;
+    pub const ABI_VERSION: u32 = 13;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -531,6 +566,11 @@ impl CudaGsplat {
                 match_top2: symbol(&library, "visloc_gsplat_cuda_match_top2", path)?,
                 vote_labels: symbol(&library, "visloc_gsplat_cuda_vote_labels", path)?,
                 get_votes: symbol(&library, "visloc_gsplat_cuda_get_votes", path)?,
+                set_logits: symbol(&library, "visloc_gsplat_cuda_set_logits", path)?,
+                get_logits: symbol(&library, "visloc_gsplat_cuda_get_logits", path)?,
+                set_labels: symbol(&library, "visloc_gsplat_cuda_set_labels", path)?,
+                render_classes: symbol(&library, "visloc_gsplat_cuda_render_classes", path)?,
+                classes_backward: symbol(&library, "visloc_gsplat_cuda_classes_backward", path)?,
             };
             (version, create, stage_names, api)
         };
@@ -551,6 +591,7 @@ impl CudaGsplat {
             sh_degree: 0,
             pixels: 0,
             match_counts: Vec::new(),
+            logit_classes: 0,
             _library: library,
         };
         // create() records a device failure (e.g. no CUDA device) in the
@@ -749,6 +790,172 @@ impl CudaGsplat {
             unsafe { (self.api.get_votes)(self.ctx(), num_classes as c_int, out.as_mut_ptr()) };
         self.check(code)?;
         Ok(out)
+    }
+
+    /// Give every gaussian `num_classes` (1 to [`MAX_SEMANTIC_CLASSES`])
+    /// semantic logits, gaussian-major (`None`: zeros), with fresh Adam
+    /// moments. [`set_scene`](Self::set_scene) zeroes them again, and
+    /// refines carry them along.
+    pub fn set_logits(
+        &mut self,
+        num_classes: usize,
+        logits: Option<&[f32]>,
+    ) -> Result<(), GsplatCudaError> {
+        if !(1..=MAX_SEMANTIC_CLASSES).contains(&num_classes) {
+            return Err(GsplatCudaError::Input(format!(
+                "{num_classes} classes (1 to {MAX_SEMANTIC_CLASSES})"
+            )));
+        }
+        if logits.is_some_and(|z| z.len() != self.num_gaussians() * num_classes) {
+            return Err(GsplatCudaError::Input(
+                "logits need num_classes floats per gaussian".into(),
+            ));
+        }
+        // SAFETY: `logits`, when passed, holds n * num_classes floats (checked
+        // above), the size the native side reads.
+        let code = unsafe {
+            (self.api.set_logits)(
+                self.ctx(),
+                num_classes as c_int,
+                logits.map_or(std::ptr::null(), <[f32]>::as_ptr),
+            )
+        };
+        self.check(code)?;
+        self.logit_classes = num_classes;
+        Ok(())
+    }
+
+    /// Classes of the semantic logits (0: none yet).
+    pub fn logit_classes(&self) -> usize {
+        self.logit_classes
+    }
+
+    fn check_logit_classes(&self, num_classes: usize) -> Result<(), GsplatCudaError> {
+        if num_classes == 0 || num_classes != self.logit_classes {
+            return Err(GsplatCudaError::Input(format!(
+                "{num_classes} classes, the logits have {}",
+                self.logit_classes
+            )));
+        }
+        Ok(())
+    }
+
+    /// The semantic logits: `num_classes` floats per gaussian,
+    /// gaussian-major.
+    pub fn logits(&self, num_classes: usize) -> Result<Vec<f32>, GsplatCudaError> {
+        self.check_logit_classes(num_classes)?;
+        let mut out = vec![0.0f32; self.num_gaussians() * num_classes];
+        // SAFETY: `out` holds n * num_classes floats, the size the native side
+        // writes; it refuses a class count other than the logits'.
+        let code =
+            unsafe { (self.api.get_logits)(self.ctx(), num_classes as c_int, out.as_mut_ptr()) };
+        self.check(code)?;
+        Ok(out)
+    }
+
+    /// Upload a label image per image of [`set_images`](Self::set_images)
+    /// (same order and size): each pixel's class, `num_classes` or more for
+    /// none, image-major. The logits start at zero unless
+    /// [`set_logits`](Self::set_logits) gave `num_classes` of them. Steps
+    /// with [`StepParams::semantic_weight`] > 0 train them.
+    pub fn set_labels(
+        &mut self,
+        num_classes: usize,
+        width: u32,
+        height: u32,
+        labels: &[u8],
+    ) -> Result<(), GsplatCudaError> {
+        if !(1..=MAX_SEMANTIC_CLASSES).contains(&num_classes) {
+            return Err(GsplatCudaError::Input(format!(
+                "{num_classes} classes (1 to {MAX_SEMANTIC_CLASSES})"
+            )));
+        }
+        let per = width as usize * height as usize;
+        if per == 0 || !labels.len().is_multiple_of(per) {
+            return Err(GsplatCudaError::Input(
+                "label buffer is not a whole number of images".into(),
+            ));
+        }
+        let count = c_int::try_from(labels.len() / per)
+            .map_err(|_| GsplatCudaError::Input("too many label images".into()))?;
+        // SAFETY: `labels` holds `count` images of width * height bytes.
+        let code = unsafe {
+            (self.api.set_labels)(
+                self.ctx(),
+                num_classes as c_int,
+                count,
+                width,
+                height,
+                labels.as_ptr(),
+            )
+        };
+        self.check(code)?;
+        self.logit_classes = num_classes;
+        Ok(())
+    }
+
+    /// Render the class channels as training blends them: per pixel
+    /// `P_c = sum_i T_i a_i p_ic`, p_i the softmax of gaussian i's logits,
+    /// blended as the colour is (background 0), `num_classes` floats per
+    /// pixel, row-major.
+    pub fn render_classes(
+        &mut self,
+        view: &CameraView,
+        num_classes: usize,
+    ) -> Result<Vec<f32>, GsplatCudaError> {
+        let cam = GscCamera::from_view(view);
+        let pixels = cam.width as usize * cam.height as usize;
+        self.check_logit_classes(num_classes)?;
+        let mut out = vec![0.0f32; pixels * num_classes];
+        // SAFETY: `out` holds width * height * num_classes floats, the size
+        // the native side writes for the logits' class count (checked above).
+        let code = unsafe { (self.api.render_classes)(self.ctx(), &cam, out.as_mut_ptr()) };
+        self.check(code)?;
+        self.pixels = pixels;
+        Ok(out)
+    }
+
+    /// Gradients of `L = sum_px dot(d_sem[px], P[px])` for the last
+    /// [`render_classes`](Self::render_classes) (`d_sem` `num_classes`
+    /// floats per pixel): the transforms' and opacity's (the SH's empty),
+    /// with the screen-space ones (the colour's zero), and the logits'
+    /// (through the softmax).
+    pub fn classes_backward(
+        &mut self,
+        d_sem: &[f32],
+        num_classes: usize,
+    ) -> Result<(Gradients, Vec<f32>), GsplatCudaError> {
+        if d_sem.len() != self.pixels * num_classes {
+            return Err(GsplatCudaError::Input(format!(
+                "d_sem has {} floats, the last frame needs {}",
+                d_sem.len(),
+                self.pixels * num_classes
+            )));
+        }
+        self.check_logit_classes(num_classes)?;
+        let n = self.num_gaussians();
+        let mut grads = Gradients {
+            transforms: vec![0.0; n * TRANSFORM_FLOATS],
+            opacity: vec![0.0; n],
+            sh: Vec::new(),
+            screen: vec![0.0; n * SCREEN_GRAD_FLOATS],
+        };
+        let mut g_logits = vec![0.0f32; n * num_classes];
+        // SAFETY: every output holds the size the native side writes for the
+        // current scene and the logits' class count (checked above), and
+        // `d_sem` the last frame's pixels times that count.
+        let code = unsafe {
+            (self.api.classes_backward)(
+                self.ctx(),
+                d_sem.as_ptr(),
+                grads.transforms.as_mut_ptr(),
+                grads.opacity.as_mut_ptr(),
+                g_logits.as_mut_ptr(),
+                grads.screen.as_mut_ptr(),
+            )
+        };
+        self.check(code)?;
+        Ok((grads, g_logits))
     }
 
     /// [`render_depth`](Self::render_depth) (centre median depth) plus the
@@ -984,6 +1191,7 @@ impl CudaGsplat {
             ssim: 0.0,
             depth: 0.0,
             normal: 0.0,
+            semantic: 0.0,
             steps: 0,
         };
         // SAFETY: the outputs are live scalars.
@@ -994,6 +1202,7 @@ impl CudaGsplat {
                 &mut sums.ssim,
                 &mut sums.depth,
                 &mut sums.normal,
+                &mut sums.semantic,
                 &mut sums.steps,
             )
         };

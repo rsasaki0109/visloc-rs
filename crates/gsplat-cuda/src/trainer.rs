@@ -9,7 +9,9 @@
 //! fading out at `aux_loss_time`, and every `refine_every` steps a refine
 //! whose actions the host picks from the device's statistics. The
 //! depth-normal loss (`normal_weight`) runs from `normal_start` on, as in
-//! the wgpu trainer. Not supported yet: the Inria densification rule and
+//! the wgpu trainer. With labels ([`CudaTrainer::set_labels`]) every step
+//! also trains a logit per class and gaussian against the view's labels
+//! (CUDA only). Not supported yet: the Inria densification rule and
 //! per-image appearance.
 
 use std::fmt;
@@ -52,6 +54,29 @@ impl fmt::Display for CudaTrainError {
 
 impl std::error::Error for CudaTrainError {}
 
+/// How [`CudaTrainer::set_labels`] trains the semantic logits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SemanticTraining {
+    /// Weight of the labels' mean cross-entropy
+    /// ([`StepParams::semantic_weight`]).
+    pub weight: f32,
+    /// Learning rate of the logits.
+    pub lr: f32,
+    /// The cross-entropy also moves the gaussians and counts towards brush's
+    /// refine weight; false trains the logits alone.
+    pub geometry: bool,
+}
+
+impl Default for SemanticTraining {
+    fn default() -> Self {
+        Self {
+            weight: 0.02,
+            lr: 2.5e-3,
+            geometry: true,
+        }
+    }
+}
+
 impl From<GsplatCudaError> for CudaTrainError {
     fn from(e: GsplatCudaError) -> Self {
         Self::Cuda(e)
@@ -83,6 +108,9 @@ pub struct CudaTrainer {
     depth_weight_final: Option<f32>,
     last_depth_loss: f32,
     last_normal_loss: f32,
+    // The semantic logits' classes and training, once labels are set.
+    semantic: Option<(usize, SemanticTraining)>,
+    last_semantic_loss: f32,
 }
 
 impl fmt::Debug for CudaTrainer {
@@ -170,6 +198,8 @@ impl CudaTrainer {
             depth_weight_final: None,
             last_depth_loss: 0.0,
             last_normal_loss: 0.0,
+            semantic: None,
+            last_semantic_loss: 0.0,
         })
     }
 
@@ -278,6 +308,9 @@ impl CudaTrainer {
             } else {
                 0.0
             },
+            semantic_weight: self.semantic.map_or(0.0, |(_, s)| s.weight),
+            lr_semantic: self.semantic.map_or(0.0, |(_, s)| s.lr),
+            semantic_geometry: self.semantic.is_some_and(|(_, s)| s.geometry) as u32,
         };
         self.gs.train_step(&params)?;
         self.step += 1;
@@ -406,7 +439,50 @@ impl CudaTrainer {
         let steps = sums.steps.max(1) as f64;
         self.last_depth_loss = (sums.depth / steps) as f32;
         self.last_normal_loss = (sums.normal / steps) as f32;
+        self.last_semantic_loss = (sums.semantic / steps) as f32;
         Ok((sums.l1 / steps) as f32)
+    }
+
+    /// Mean cross-entropy of the labels (unweighted) of the steps before the
+    /// last [`take_mean_loss`](Self::take_mean_loss).
+    pub fn last_semantic_loss(&self) -> f32 {
+        self.last_semantic_loss
+    }
+
+    /// Train a logit per class and gaussian (`num_classes`, at most
+    /// [`crate::MAX_SEMANTIC_CLASSES`]) with every step against `labels`:
+    /// one label image per training view, in the dataset's `train` order and
+    /// at the views' size, each pixel's class or `num_classes` or more for
+    /// none. The logits start at zero.
+    pub fn set_labels(
+        &mut self,
+        num_classes: usize,
+        labels: &[u8],
+        training: SemanticTraining,
+    ) -> Result<(), CudaTrainError> {
+        let first = &self.views[0].camera.camera;
+        if labels.len() != (first.width * first.height) as usize * self.views.len() {
+            return Err(CudaTrainError::Cuda(GsplatCudaError::Input(format!(
+                "{} label bytes for {} views of {}x{}",
+                labels.len(),
+                self.views.len(),
+                first.width,
+                first.height
+            ))));
+        }
+        self.gs
+            .set_labels(num_classes, first.width, first.height, labels)?;
+        self.semantic = Some((num_classes, training));
+        Ok(())
+    }
+
+    /// The semantic logits ([`set_labels`](Self::set_labels)'s
+    /// `num_classes` per gaussian, gaussian-major), if labels were set.
+    pub fn logits(&self) -> Result<Option<Vec<f32>>, CudaTrainError> {
+        match self.semantic {
+            Some((k, _)) => Ok(Some(self.gs.logits(k)?)),
+            None => Ok(None),
+        }
     }
 
     /// Mean depth-prior loss `|D - P| / P` (averaged over all pixels) of the

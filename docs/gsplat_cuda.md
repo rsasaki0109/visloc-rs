@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 12).
+  version (currently 13).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -39,6 +39,7 @@ The packaging follows the DPVO CUDA kernels:
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 | Label votes: each splat's blending weight per pixel class, summed over views (`CudaGsplat::vote_labels`, example `gsplat_semantic_cuda`) | Done; SAM 3 classes on FIORD's MeetingRoom_In, 82.6% of held-out pixels ([semantic_splat.md](semantic_splat.md)) |
+| Semantic training: a logit per class and gaussian, its softmax blended like colour, the cross-entropy against per-pixel labels into the logits and, through alpha, the geometry (`CudaTrainer::set_labels`, `gsplat_train_cuda --labels`) | Done; held-out pixels at the same PSNR: MeetingRoom_In 79.4–84.5% → 89.8%, Building_In 87.2–87.3% → 92.4%; training 2x slower ([semantic_splat.md](semantic_splat.md#training-with-the-labels)) |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -137,6 +138,16 @@ More tests check the depth and normal outputs:
   CPU render is that splat's blending weight per pixel, so its votes are
   those weights summed by label. Over two views, through a pinhole and
   through fisheyes (one past 90°), and after a reset: worst error 1.7e-5.
+- **Class channels** (semantic training's path).
+  - **Setup.** Each splat's colour c is made three of its k class
+    probabilities: logits ln c, then ln(1 - sum c) on one more channel and
+    -40 on the rest.
+  - **Forward.** On black, those three channels must render the image.
+  - **Backward.** A gradient on them alone must give the colour's screen,
+    transform and opacity gradients, and the logits' gradients must be the
+    colour's through the softmax.
+  - **Result.** For k = 4, 9 and 16 (the most), with the colour in
+    channels 0–2, 4–6 and 12–14: worst error 3.0e-7.
 
 `tests/training.rs` checks the training step:
 
@@ -147,6 +158,8 @@ More tests check the depth and normal outputs:
 | Refine scatter (prune, keep, clone, brush split) | Row order, split means symmetric about the parent, scales / sqrt 2, opacity 1 - sqrt(1 - a), statistics reset |
 | 300 steps on a scene rendered from known gaussians, colours and opacities perturbed, dense and sparse SH Adam | Mean L1 0.0175 → 0.0009 in both; a gaussian behind every camera keeps its SH bit for bit |
 | 300 steps of the depth-normal loss (weight 1) on a dense scene fitted to its own renders, only rotations learning | Depth-normal loss 0.286 → 0.099 |
+| Refine scatter with semantic logits | Each row's logits follow it (a split's and a clone's two rows keep the parent's); `set_scene` zeroes them |
+| 300 steps of the labels' cross-entropy (weight 1) from zero logits, against labels rendered from one-hot logits, geometry held still or learning | Cross-entropy 0.76 → 0.32 and 0.74 → 0.17; 95.2% and 96.5% of the labelled pixels agree |
 
 ## Training on south-building
 

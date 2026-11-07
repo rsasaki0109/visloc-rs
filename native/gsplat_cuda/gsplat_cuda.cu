@@ -29,6 +29,15 @@
 // (loss_l1, ssim, densify_stats, adam, mean_noise shaders). brush's refine
 // is split as in the wgpu trainer: the host reads the statistics and picks
 // an action per gaussian, the device scatters (densify_scatter.wgsl).
+//
+// Semantic training (ABI 13): with labels per image (set_labels), every
+// gaussian also carries a logit per class. A step blends the softmax of each
+// gaussian's logits, its class probabilities, like colour (softmax_kernel,
+// sem_fwd_kernel), adds the cross-entropy of the pixel's normalised blend
+// against its label (sem_loss_kernel), and differentiates it into the
+// logits (sem_bwd_kernel, softmax_bwd_kernel) and, through alpha, the
+// gaussians' geometry and opacity. Blending probabilities rather than
+// logits keeps each gaussian's own class the one it renders.
 
 #include <cuda_runtime.h>
 
@@ -69,13 +78,15 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 12;
+constexpr uint32_t kAbiVersion = 13;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
 // du dv dA dB dC dopacity dr dg db, and the refine weight (brush / AbsGS:
 // sum over pixels of |dL/du| W + |dL/dv| H).
 constexpr int kNumGrad = 10;
+// Classes of the semantic logits.
+constexpr int kMaxSem = 16;
 
 constexpr float kC0 = 0.2820948f;
 
@@ -720,10 +731,100 @@ __global__ void __launch_bounds__(kBlock) vote_kernel(uint32_t img_w, uint32_t i
     }
 }
 
+// The class channels of the last forward: per pixel
+// S_c = sum_i T_i a_i z_ic over the splats raster_fwd_kernel blended
+// (background 0), z_i the gaussian's `k` values (its class probabilities in
+// training), into acc_sem (k floats per pixel). Only the pixels with a label
+// below k are composited (every pixel when `labels` is null); the others get
+// zeros.
+__global__ void __launch_bounds__(kBlock) sem_fwd_kernel(uint32_t img_w, uint32_t img_h, int k,
+                                                         const uint2* __restrict__ ranges,
+                                                         const uint32_t* __restrict__ vals,
+                                                         const float2* __restrict__ xy,
+                                                         const float4* __restrict__ conic_op,
+                                                         const float* __restrict__ logits,
+                                                         const uint8_t* __restrict__ labels,
+                                                         float* __restrict__ acc_sem) {
+    __shared__ float2 s_xy[kBlock];
+    __shared__ float4 s_co[kBlock];
+    __shared__ uint32_t s_mask[kBlock];
+    __shared__ float s_z[kBlock * kMaxSem];
+    const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
+    const int tid = threadIdx.x;
+    const uint32_t warp_bit = 1u << (tid >> 5);
+    uint32_t lx, ly;
+    tile_pixel(tid, lx, ly);
+    const uint32_t px = blockIdx.x * kTile + lx;
+    const uint32_t py = blockIdx.y * kTile + ly;
+    const bool in_image = px < img_w && py < img_h;
+    const uint32_t pix = py * img_w + px;
+    const bool active = in_image && (!labels || labels[pix] < uint32_t(k));
+    const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
+    const uint2 range = ranges[tile];
+
+    float acc[kMaxSem];
+#pragma unroll
+    for (int c = 0; c < kMaxSem; ++c) acc[c] = 0.f;
+    float trans = 1.f;
+    bool done = !active;
+    for (uint32_t start = range.x; start < range.y; start += kBlock) {
+        // Also the barrier that protects the staged batch before it is reloaded.
+        if (__syncthreads_count(done) == kBlock) break;
+        const uint32_t cnt = min(uint32_t(kBlock), range.y - start);
+        if (uint32_t(tid) < cnt) {
+            const uint32_t v = vals[start + tid];
+            const uint32_t g = v & kIdMask;
+            s_xy[tid] = xy[g];
+            s_co[tid] = conic_op[g];
+            s_mask[tid] = v >> kIdBits;
+            for (int c = 0; c < k; ++c) s_z[tid * kMaxSem + c] = logits[size_t(g) * k + c];
+        }
+        __syncthreads();
+        if (!done) {
+            for (uint32_t s = 0; s < cnt; ++s) {
+                if (trans <= 1e-4f) break;
+                if (!(s_mask[s] & warp_bit)) continue;
+                const float dx = sx - s_xy[s].x;
+                const float dy = sy - s_xy[s].y;
+                const float4 co = s_co[s];
+                const float sigma = 0.5f * (co.x * dx * dx + co.z * dy * dy) + co.y * dx * dy;
+                if (sigma >= 0.f) {
+                    const float a = fminf(0.99f, co.w * expf(-sigma));
+                    if (a >= 1.f / 255.f) {
+                        const float w = trans * a;
+#pragma unroll
+                        for (int c = 0; c < kMaxSem; ++c)
+                            if (c < k) acc[c] += w * s_z[s * kMaxSem + c];
+                        trans *= 1.f - a;
+                    }
+                }
+            }
+            done = trans <= 1e-4f;
+        }
+    }
+    if (in_image) {
+#pragma unroll
+        for (int c = 0; c < kMaxSem; ++c)
+            if (c < k) acc_sem[size_t(pix) * k + c] = acc[c];
+    }
+}
+
 // One butterfly step: keep `lo` or `hi` by this lane's bit, add the partner's
 // other half.
 __device__ inline float xstep(float lo, float hi, bool h, int m) {
     return (h ? hi : lo) + __shfl_xor_sync(0xffffffffu, h ? lo : hi, m);
+}
+
+// 32 per-lane values summed over the warp by the transposed xor butterfly
+// (31 shuffles): lane l returns the warp's sum of v[l].
+__device__ inline float warp_sum32(float (&v)[32], int lane) {
+#pragma unroll
+    for (int m = 16; m >= 1; m >>= 1) {
+        const bool h = (lane & m) != 0;
+#pragma unroll
+        for (int i = 0; i < m; ++i) v[i] = xstep(v[i], v[i + m], h, m);
+    }
+    return v[0];
 }
 
 // Backward of raster_fwd_kernel for L = sum_px dot(d_image[px], C[px]):
@@ -902,6 +1003,139 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 if (kZ && (lane & 1) == 0 && comp == kNumGrad && z != 0.f) atomicAdd(&g_depth[s_gid[s]], z);
                 if (kN && (lane & 1) == 0 && comp > kNumGrad && comp <= kNumGrad + 3 && z != 0.f)
                     atomicAdd(&g_normal[size_t(s_gid[s]) * 3 + (comp - kNumGrad - 1)], z);
+            }
+        }
+        bend = bstart;
+    }
+}
+
+// Backward of sem_fwd_kernel for L = sum_px dot(d_sem[px], S[px]), walking
+// each tile back to front as raster_bwd_kernel does for the colour: each
+// splat's values get T_i a_i d_sem (into g_logits, k per gaussian), and with
+// `geometry` its share through alpha reaches screen_grads (du dv dA dB dC
+// dopacity and the refine weight). Only the pixels sem_fwd_kernel
+// composited pass a gradient. A splat's per-lane values (7 screen
+// components, then the k class values) are summed per warp by warp_sum32.
+__global__ void __launch_bounds__(kBlock) sem_bwd_kernel(
+    uint32_t img_w, uint32_t img_h, int k, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
+    const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float* __restrict__ logits,
+    const float* __restrict__ final_t, const uint32_t* __restrict__ last_idx, const uint8_t* __restrict__ labels,
+    const float* __restrict__ d_sem, int geometry, float* __restrict__ screen_grads,
+    float* __restrict__ g_logits) {
+    __shared__ float2 s_xy[kBwdBatch];
+    __shared__ float4 s_co[kBwdBatch];
+    __shared__ uint32_t s_gid[kBwdBatch];
+    __shared__ uint32_t s_cm[kBwdBatch];
+    __shared__ float s_z[kBwdBatch * kMaxSem];
+    __shared__ uint32_t s_last;
+    const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5, lane = tid & 31;
+    uint32_t lx, ly;
+    tile_pixel(tid, lx, ly);
+    const uint32_t px = blockIdx.x * kTile + lx;
+    const uint32_t py = blockIdx.y * kTile + ly;
+    const bool in_image = px < img_w && py < img_h;
+    const uint32_t pix = py * img_w + px;
+    const bool active = in_image && (!labels || labels[pix] < uint32_t(k));
+    const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
+    const uint2 range = ranges[tile];
+    const float fw = float(img_w), fh = float(img_h);
+
+    float t_cur = 1.f;
+    uint32_t last = 0;
+    float gs[kMaxSem], behind[kMaxSem];
+#pragma unroll
+    for (int c = 0; c < kMaxSem; ++c) {
+        gs[c] = active && c < k ? d_sem[size_t(pix) * k + c] : 0.f;
+        behind[c] = 0.f;
+    }
+    if (active) {
+        t_cur = final_t[pix];
+        last = last_idx[pix];
+    }
+    if (tid == 0) s_last = 0;
+    __syncthreads();
+    atomicMax(&s_last, last);
+    __syncthreads();
+    const uint32_t stop = min(s_last, range.y);
+
+    for (uint32_t bend = stop; bend > range.x;) {
+        const uint32_t bstart = bend - range.x > uint32_t(kBwdBatch) ? bend - kBwdBatch : range.x;
+        const uint32_t cnt = bend - bstart;
+        // Every warp must be done with the previous batch before its slots are reused.
+        __syncthreads();
+        if (uint32_t(tid) < cnt) {
+            const uint32_t v = vals[bstart + tid];
+            const uint32_t gi = v & kIdMask;
+            s_xy[tid] = xy[gi];
+            s_co[tid] = conic_op[gi];
+            s_gid[tid] = gi;
+            s_cm[tid] = v >> kIdBits;
+            for (int c = 0; c < k; ++c) s_z[tid * kMaxSem + c] = logits[size_t(gi) * k + c];
+        }
+        __syncthreads();
+
+        for (int s = int(cnt) - 1; s >= 0; --s) {
+            // Warp-uniform: the footprint misses this warp's sub-tile.
+            if (!((s_cm[s] >> warp) & 1u)) continue;
+            const uint32_t j = bstart + uint32_t(s);
+            float v[32];
+#pragma unroll
+            for (int c = 0; c < 32; ++c) v[c] = 0.f;
+            bool hit = false;
+            if (active && j < last) {
+                const float4 co = s_co[s];
+                const float dx = sx - s_xy[s].x;
+                const float dy = sy - s_xy[s].y;
+                // Same expressions as the forward, so the same splats pass.
+                const float sigma = 0.5f * (co.x * dx * dx + co.z * dy * dy) + co.y * dx * dy;
+                if (sigma >= 0.f) {
+                    const float e = expf(-sigma);
+                    const float raw = co.w * e;
+                    const float a = fminf(0.99f, raw);
+                    if (a >= 1.f / 255.f) {
+                        hit = true;
+                        const float t_before = t_cur / (1.f - a);
+                        const float w = a * t_before;
+                        float d_alpha = 0.f;
+#pragma unroll
+                        for (int c = 0; c < kMaxSem; ++c) {
+                            if (c < k) {
+                                const float z = s_z[s * kMaxSem + c];
+                                v[7 + c] = w * gs[c];
+                                d_alpha += (z - behind[c]) * gs[c];
+                                behind[c] = a * z + (1.f - a) * behind[c];
+                            }
+                        }
+                        d_alpha *= t_before;
+                        t_cur = t_before;
+                        // A clamped alpha passes no gradient to opacity, conic or mean.
+                        if (geometry && raw <= 0.99f) {
+                            const float d_sigma = -d_alpha * a;
+                            v[0] = d_sigma * -(co.x * dx + co.y * dy);
+                            v[1] = d_sigma * -(co.y * dx + co.z * dy);
+                            v[2] = d_sigma * 0.5f * dx * dx;
+                            v[3] = d_sigma * dx * dy;
+                            v[4] = d_sigma * 0.5f * dy * dy;
+                            v[5] = d_alpha * e;
+                            v[6] = fabsf(v[0]) * fw + fabsf(v[1]) * fh;
+                        }
+                    }
+                }
+            }
+            // Skip the reduction when no lane of this warp blended the splat.
+            if (__any_sync(0xffffffffu, hit)) {
+                const float z = warp_sum32(v, lane);
+                const size_t gi = s_gid[s];
+                if (z != 0.f) {
+                    if (lane < 6)
+                        atomicAdd(&screen_grads[gi * kNumGrad + lane], z);
+                    else if (lane == 6)
+                        atomicAdd(&screen_grads[gi * kNumGrad + 9], z);
+                    else if (lane < 7 + k)
+                        atomicAdd(&g_logits[gi * k + (lane - 7)], z);
+                }
             }
         }
         bend = bstart;
@@ -1357,6 +1591,64 @@ __global__ void __launch_bounds__(kBlock) depth_loss_kernel(uint32_t npix, const
     block_add(l, acc);
 }
 
+// Each gaussian's class probabilities, the softmax of its k logits.
+__global__ void softmax_kernel(int n, int k, const float* __restrict__ logits, float* __restrict__ probs) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* z = logits + size_t(i) * k;
+    float* p = probs + size_t(i) * k;
+    float top = z[0];
+    for (int c = 1; c < k; ++c) top = fmaxf(top, z[c]);
+    float sum = 0.f;
+    for (int c = 0; c < k; ++c) {
+        p[c] = expf(z[c] - top);
+        sum += p[c];
+    }
+    for (int c = 0; c < k; ++c) p[c] /= sum;
+}
+
+// The probabilities' gradient g (k per gaussian) through the softmax, in
+// place: dL/dz_c = p_c (g_c - sum_d g_d p_d).
+__global__ void softmax_bwd_kernel(int n, int k, const float* __restrict__ probs, float* __restrict__ g) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* p = probs + size_t(i) * k;
+    float* gi = g + size_t(i) * k;
+    float dot = 0.f;
+    for (int c = 0; c < k; ++c) dot += gi[c] * p[c];
+    for (int c = 0; c < k; ++c) gi[c] = p[c] * (gi[c] - dot);
+}
+
+// Labels: per pixel with a label y below k, P the blended class probabilities
+// (sem_fwd_kernel) and A = sum_c P_c its coverage, the cross-entropy
+// -log(P_y / A) of the normalised blend, over the `count` such pixels.
+// d_sem_c = weight (1 / A - [c = y] / P_y) / count, the gradient of weight *
+// the mean; zeros where there is no label or (almost) no splat.
+// acc += the unweighted mean.
+__global__ void __launch_bounds__(kBlock) sem_loss_kernel(uint32_t npix, int k, const uint8_t* __restrict__ labels,
+                                                          const float* __restrict__ acc_sem, float weight,
+                                                          float inv_count, float* __restrict__ d_sem,
+                                                          double* __restrict__ acc) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    float l = 0.f;
+    if (i < npix) {
+        const uint32_t label = labels[i];
+        const float* s = acc_sem + size_t(i) * k;
+        float* d = d_sem + size_t(i) * k;
+        float cover = 0.f;
+        for (int c = 0; c < k; ++c) cover += s[c];
+        if (label < uint32_t(k) && cover > 1e-4f) {
+            const float py = fmaxf(s[label], 1e-12f);
+            for (int c = 0; c < k; ++c)
+                d[c] = weight * inv_count * (1.f / cover - (uint32_t(c) == label ? 1.f / py : 0.f));
+            l = (logf(cover) - logf(py)) * inv_count;
+        } else {
+            for (int c = 0; c < k; ++c) d[c] = 0.f;
+        }
+    }
+    block_add(l, acc);
+}
+
 // Depth-normal consistency (2DGS / PGSR style), normal_loss.wgsl's two passes.
 // Per pixel the render gives N = sum_i w_i n_i (acc_normal), D = sum_i w_i z_i
 // (acc_depth) and alpha = 1 - T. With P(q) = D_q / alpha_q r(q),
@@ -1806,9 +2098,12 @@ enum Stage {
     kRasterBwd,
     kProjectBwd,
     kOptimizer,
+    kSemantic,
+    kSemanticBwd,
     kNumStages,
 };
-constexpr const char* kStageNames = "project,scan,duplicate,sort,ranges,raster,loss,raster_bwd,project_bwd,optimizer";
+constexpr const char* kStageNames =
+    "project,scan,duplicate,sort,ranges,raster,loss,raster_bwd,project_bwd,optimizer,semantic,semantic_bwd";
 
 struct Ctx {
     std::string error;
@@ -1862,6 +2157,13 @@ struct Ctx {
     // `vote_k` classes (0: none yet).
     Buf labels, votes;
     int vote_n = 0, vote_k = 0;
+    // Semantic training (sem_*_kernel): `sem_k` classes (0: none), per
+    // gaussian their logits, Adam moments, probabilities and gradient; per
+    // uploaded image its labels (`sem_images` of them) and labelled pixels;
+    // per pixel the last render's class channels and their gradient.
+    Buf sem, sem_m1, sem_m2, sem_prob, sem_grad, sem_labels, acc_sem, d_sem;
+    int sem_k = 0, sem_images = 0;
+    std::vector<uint32_t> sem_counts;
     int num_priors = 0;
     int num_images = 0;
     uint32_t gt_w = 0, gt_h = 0;
@@ -1938,14 +2240,11 @@ void clear_stages(Ctx* ctx) {
         ctx->ms[s] = 0.f;
     }
 }
-// Wait for the last recorded stage and read every stage's time.
+// Wait for every recorded stage (the enum's order is not the run's: the
+// semantic stages come between others) and read each one's time.
 int collect_stages(Ctx* ctx) {
-    for (int s = kNumStages - 1; s >= 0; --s) {
-        if (ctx->ran[s]) {
-            GSC_CHECK(ctx, cudaEventSynchronize(ctx->ev_end[s]));
-            break;
-        }
-    }
+    for (int s = 0; s < kNumStages; ++s)
+        if (ctx->ran[s]) GSC_CHECK(ctx, cudaEventSynchronize(ctx->ev_end[s]));
     for (int s = 0; s < kNumStages; ++s)
         if (ctx->ran[s]) GSC_CHECK(ctx, cudaEventElapsedTime(&ctx->ms[s], ctx->ev_start[s], ctx->ev_end[s]));
     return 0;
@@ -2106,8 +2405,17 @@ int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float
 // `zero_sh` false the SH gradients are written for every projected gaussian
 // instead, and left stale for the others). `geo`: 1 also differentiates the
 // expected-depth channel (d_depth), 2 the depth and normal channels (d_depth,
-// d_normal; the render must have them).
-int run_backward(Ctx* ctx, bool zero_sh, int geo = 0) {
+// d_normal; the render must have them). With `sem.on` the class channels'
+// d_sem is differentiated too, through the softmax to the logits
+// (sem_bwd_kernel, softmax_bwd_kernel, into sem_grad; the class channels
+// must have been rendered with the same labels); `rgb` false leaves the
+// colour out.
+struct SemBackward {
+    bool on = false;
+    const uint8_t* labels = nullptr;  // null: every pixel
+    bool geometry = true;             // alpha's share reaches the gaussians
+};
+int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool rgb = true) {
     if (!ctx->have_forward) {
         ctx->error = "backward called before render";
         return -1;
@@ -2145,7 +2453,9 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0) {
     const auto* d_image = static_cast<const float*>(ctx->d_image.ptr);
     const auto* depth = static_cast<const float*>(ctx->depth.ptr);
     const auto* d_depth = static_cast<const float*>(ctx->d_depth.ptr);
-    if (geo >= 2)
+    if (!rgb) {
+        // Nothing from the colour.
+    } else if (geo >= 2)
         raster_bwd_kernel<2><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
                                                color, final_t, last_idx, d_image, screen_grads, depth, d_depth,
                                                g_depth, static_cast<const float4*>(ctx->plane.ptr),
@@ -2160,6 +2470,22 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0) {
                                                nullptr, nullptr, nullptr, nullptr);
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRasterBwd));
+    if (sem.on) {
+        float* g_logits;
+        GSC_TRY(ensure_zero(ctx, ctx->sem_grad, size_t(n) * ctx->sem_k, &g_logits));
+        GSC_TRY(stage_begin(ctx, kSemanticBwd));
+        const auto* probs = static_cast<const float*>(ctx->sem_prob.ptr);
+        sem_bwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->sem_k, ranges, vals, xy, conic_op,
+                                         probs, final_t, last_idx, sem.labels,
+                                         static_cast<const float*>(ctx->d_sem.ptr), sem.geometry ? 1 : 0,
+                                         screen_grads, g_logits);
+        GSC_CHECK(ctx, cudaGetLastError());
+        if (n > 0) {
+            softmax_bwd_kernel<<<blocks_for(n), 256>>>(n, ctx->sem_k, probs, g_logits);
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
+        GSC_TRY(stage_end(ctx, kSemanticBwd));
+    }
     GSC_TRY(stage_begin(ctx, kProjectBwd));
     if (n > 0) {
         const auto* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
@@ -2192,7 +2518,7 @@ int set_camera(Ctx* ctx, const GscCamera* cam, const float* bg, int sh_active_de
     return 0;
 }
 
-constexpr int kNumLossSums = 4;  // L1, SSIM, depth prior, depth-normal
+constexpr int kNumLossSums = 5;  // L1, SSIM, depth prior, depth-normal, labels
 
 // The depth-normal loss of the last render (which has the depth and normal
 // channels): its gradient into d_normal, added to d_depth (written by the
@@ -2275,6 +2601,58 @@ int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0
     return 0;
 }
 
+// Zero logits and Adam moments for the current scene's gaussians.
+int reset_logits(Ctx* ctx) {
+    const size_t count = size_t(ctx->n) * ctx->sem_k;
+    float *z, *a, *b;
+    GSC_TRY(ensure_zero(ctx, ctx->sem, count, &z));
+    GSC_TRY(ensure_zero(ctx, ctx->sem_m1, count, &a));
+    GSC_TRY(ensure_zero(ctx, ctx->sem_m2, count, &b));
+    return 0;
+}
+
+// The gaussians' class probabilities (softmax_kernel, into sem_prob) and
+// their channels for the last forward into acc_sem (sem_fwd_kernel), on the
+// pixels with a label (`labels` null: every pixel).
+int run_sem_forward(Ctx* ctx, const uint8_t* labels) {
+    if (!ctx->have_forward || ctx->sem_k == 0) {
+        ctx->error = "semantic forward: needs a render and logits";
+        return -1;
+    }
+    float *acc_sem, *probs;
+    GSC_TRY(ensure(ctx, ctx->acc_sem, ctx->pixels() * ctx->sem_k, &acc_sem));
+    GSC_TRY(ensure(ctx, ctx->sem_prob, size_t(ctx->n) * ctx->sem_k, &probs));
+    if (ctx->n > 0) {
+        softmax_kernel<<<blocks_for(ctx->n), 256>>>(ctx->n, ctx->sem_k, static_cast<const float*>(ctx->sem.ptr),
+                                                    probs);
+        GSC_CHECK(ctx, cudaGetLastError());
+        const dim3 grid(ctx->tile_bw, ctx->tile_bh);
+        sem_fwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->sem_k,
+                                         static_cast<const uint2*>(ctx->ranges.ptr),
+                                         static_cast<const uint32_t*>(ctx->vals_sorted.ptr),
+                                         static_cast<const float2*>(ctx->xy.ptr),
+                                         static_cast<const float4*>(ctx->conic_op.ptr), probs, labels, acc_sem);
+        GSC_CHECK(ctx, cudaGetLastError());
+    }
+    return 0;
+}
+
+// The labels' cross-entropy for the last render against uploaded image
+// `image` (sem_loss_kernel): its gradient into d_sem, the unweighted mean
+// added to `acc`.
+int run_sem_loss(Ctx* ctx, uint32_t image, float weight, double* acc) {
+    const uint32_t npix = uint32_t(ctx->pixels());
+    const uint8_t* labels = static_cast<const uint8_t*>(ctx->sem_labels.ptr) + size_t(image) * npix;
+    float* d_sem;
+    GSC_TRY(ensure(ctx, ctx->d_sem, size_t(npix) * ctx->sem_k, &d_sem));
+    const uint32_t count = ctx->sem_counts[image];
+    sem_loss_kernel<<<blocks_for(npix), kBlock>>>(npix, ctx->sem_k, labels,
+                                                  static_cast<const float*>(ctx->acc_sem.ptr), weight,
+                                                  count > 0 ? 1.f / float(count) : 0.f, d_sem, acc);
+    GSC_CHECK(ctx, cudaGetLastError());
+    return 0;
+}
+
 }  // namespace
 
 extern "C" {
@@ -2299,6 +2677,9 @@ struct GscStepParams {
     uint32_t sparse_sh_adam;   // SH Adam only on the gaussians blended this frame
     float depth_weight;        // depth-prior loss (set_depth_priors; 0 = off)
     float normal_weight;       // depth-normal loss (0 = off)
+    float semantic_weight;     // labels' cross-entropy (set_labels; 0 = off)
+    float lr_semantic;         // learning rate of the logits
+    uint32_t semantic_geometry; // the labels also move the gaussians (0 = logits only)
 };
 
 #if defined(_WIN32)
@@ -2340,7 +2721,9 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->match_words, &ctx->match_norms, &ctx->match_fwd, &ctx->match_rev, &ctx->match_partial,
                    &ctx->tsdf_out_cells, &ctx->tsdf_out_pos, &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb, &ctx->tsdf_override,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
-                   &ctx->actions,     &ctx->counts,    &ctx->cum,      &ctx->labels,     &ctx->votes};
+                   &ctx->actions,     &ctx->counts,    &ctx->cum,      &ctx->labels,     &ctx->votes,
+                   &ctx->sem,         &ctx->sem_m1,    &ctx->sem_m2,   &ctx->sem_grad,   &ctx->sem_labels,
+                   &ctx->acc_sem,     &ctx->d_sem};
     for (Buf* b : bufs) free_buf(*b);
     for (int s = 0; s < kNumStages; ++s) {
         if (ctx->ev_start[s]) cudaEventDestroy(ctx->ev_start[s]);
@@ -2382,6 +2765,7 @@ GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, 
     float *w, *s;
     GSC_TRY(ensure_zero(ctx, ctx->weight_max, n, &w));
     GSC_TRY(ensure_zero(ctx, ctx->seen, n, &s));
+    if (ctx->sem_k > 0) GSC_TRY(reset_logits(ctx));
     GSC_CHECK(ctx, cudaDeviceSynchronize());
     return 0;
 }
@@ -2510,6 +2894,136 @@ GSC_EXPORT int visloc_gsplat_cuda_get_votes(void* handle, int num_classes, float
     return 0;
 }
 
+// Use `num_classes` (1..=16) semantic logits per gaussian: upload them
+// (n * num_classes floats, gaussian-major; null: zeros), with zero Adam
+// moments. set_scene zeroes them again, and refines carry them along.
+GSC_EXPORT int visloc_gsplat_cuda_set_logits(void* handle, int num_classes, const float* logits) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (num_classes < 1 || num_classes > kMaxSem) {
+        ctx->error = "set_logits: num_classes must be in 1..=16";
+        return -1;
+    }
+    if (ctx->sem_k != num_classes) ctx->sem_images = 0;
+    ctx->sem_k = num_classes;
+    GSC_TRY(reset_logits(ctx));
+    const size_t count = size_t(ctx->n) * num_classes;
+    if (logits && count > 0) GSC_CHECK(ctx, cudaMemcpy(ctx->sem.ptr, logits, count * sizeof(float), cudaMemcpyHostToDevice));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
+// The semantic logits: n * num_classes floats, gaussian-major, into `out`.
+GSC_EXPORT int visloc_gsplat_cuda_get_logits(void* handle, int num_classes, float* out) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (ctx->sem_k == 0 || num_classes != ctx->sem_k) {
+        ctx->error = "get_logits: no logits of this class count";
+        return -1;
+    }
+    const size_t count = size_t(ctx->n) * num_classes;
+    if (count > 0) GSC_CHECK(ctx, cudaMemcpy(out, ctx->sem.ptr, count * sizeof(float), cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// Upload a label image per uploaded image (same order and size), one byte
+// per pixel: the class, or num_classes or more for none, image-major. The
+// logits (num_classes per gaussian) start at zero unless set_logits gave
+// this many. A step with semantic_weight > 0 adds semantic_weight times the
+// mean cross-entropy over the image's labelled pixels.
+GSC_EXPORT int visloc_gsplat_cuda_set_labels(void* handle, int num_classes, int count, uint32_t width,
+                                             uint32_t height, const uint8_t* labels) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (num_classes < 1 || num_classes > kMaxSem) {
+        ctx->error = "set_labels: num_classes must be in 1..=16";
+        return -1;
+    }
+    if (count != ctx->num_images || width != ctx->gt_w || height != ctx->gt_h || (count > 0 && !labels)) {
+        ctx->error = "set_labels: one label image per uploaded image, of its size";
+        return -1;
+    }
+    if (ctx->sem_k != num_classes) {
+        ctx->sem_k = num_classes;
+        GSC_TRY(reset_logits(ctx));
+    }
+    const size_t per = size_t(width) * height;
+    uint8_t* d;
+    GSC_TRY(ensure(ctx, ctx->sem_labels, size_t(count) * per, &d));
+    if (count > 0) GSC_CHECK(ctx, cudaMemcpy(d, labels, size_t(count) * per, cudaMemcpyHostToDevice));
+    ctx->sem_counts.assign(size_t(count), 0);
+    for (size_t i = 0; i < size_t(count) * per; ++i)
+        if (labels[i] < num_classes) ctx->sem_counts[i / per]++;
+    ctx->sem_images = count;
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
+// Render the current scene from `cam` and its class channels (every pixel),
+// as training blends them: `out` (nullable) receives width * height *
+// num_classes floats, P_c = sum_i T_i a_i p_ic per pixel, p_i the softmax of
+// gaussian i's logits.
+GSC_EXPORT int visloc_gsplat_cuda_render_classes(void* handle, const GscCamera* cam, float* out) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (ctx->sem_k == 0) {
+        ctx->error = "render_classes: no logits (set_logits or set_labels)";
+        return -1;
+    }
+    const float bg[3] = {0.f, 0.f, 0.f};
+    GSC_TRY(set_camera(ctx, cam, bg, 0));
+    clear_stages(ctx);
+    GSC_TRY(run_forward(ctx));
+    GSC_TRY(run_sem_forward(ctx, nullptr));
+    GSC_TRY(collect_stages(ctx));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    if (out)
+        GSC_CHECK(ctx, cudaMemcpy(out, ctx->acc_sem.ptr, ctx->pixels() * ctx->sem_k * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// Gradients of L = sum_px dot(d_sem[px], P[px]) (num_classes floats per
+// pixel) for the last render_classes, as visloc_gsplat_cuda_backward's for
+// the colour (all outputs nullable): the transforms and opacity, the logits
+// (n * num_classes, through the softmax) and the 10 screen-space floats per
+// gaussian (the colour ones zero).
+GSC_EXPORT int visloc_gsplat_cuda_classes_backward(void* handle, const float* d_sem, float* g_transforms,
+                                                   float* g_opacity, float* g_logits, float* screen_grads) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (!d_sem || ctx->sem_k == 0) {
+        ctx->error = "classes_backward: d_sem and logits are required";
+        return -1;
+    }
+    const size_t pixels = ctx->pixels();
+    float* d;
+    GSC_TRY(ensure(ctx, ctx->d_sem, pixels * ctx->sem_k, &d));
+    GSC_CHECK(ctx, cudaMemcpy(d, d_sem, pixels * ctx->sem_k * sizeof(float), cudaMemcpyHostToDevice));
+    for (int s = kLoss; s < kNumStages; ++s) {
+        ctx->ran[s] = false;
+        ctx->ms[s] = 0.f;
+    }
+    SemBackward sem;
+    sem.on = true;
+    GSC_TRY(run_backward(ctx, true, 0, sem, false));
+    GSC_TRY(collect_stages(ctx));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    float* dst[2] = {g_transforms, g_opacity};
+    for (int k = 0; k < 2; ++k) {
+        const size_t count = size_t(ctx->n) * ctx->stride(k);
+        if (dst[k] && count > 0)
+            GSC_CHECK(ctx, cudaMemcpy(dst[k], ctx->grads[k].ptr, count * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+    if (g_logits && ctx->n > 0)
+        GSC_CHECK(ctx, cudaMemcpy(g_logits, ctx->sem_grad.ptr, size_t(ctx->n) * ctx->sem_k * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    if (screen_grads && ctx->n > 0)
+        GSC_CHECK(ctx, cudaMemcpy(screen_grads, ctx->screen_grads.ptr, size_t(ctx->n) * kNumGrad * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    return 0;
+}
+
 // The depth-normal loss (weight * mean (1 - N . n_d), see normal_grad_kernel)
 // of the last render, which must have come from render_depth with the normal
 // channel. `loss` (nullable) receives its unweighted value, `d_depth` and
@@ -2632,7 +3146,8 @@ GSC_EXPORT int visloc_gsplat_cuda_set_depth_priors(void* handle, int count, uint
 // One optimisation step on uploaded image `p->image` (the wgpu trainer's
 // step): render, (1 - w) L1 + w D-SSIM and its image gradient, backward,
 // refine statistics, Adam on every group with brush's aux losses, and mean
-// noise.
+// noise. With a semantic weight also the labels' cross-entropy and Adam on
+// the logits.
 GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* p) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
@@ -2643,8 +3158,14 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     GSC_TRY(set_camera(ctx, &p->cam, p->bg, p->sh_active_degree));
     const bool depth_on = p->depth_weight > 0.f;
     const bool normal_on = p->normal_weight > 0.f;
+    const bool sem_on = p->semantic_weight > 0.f;
     if (depth_on && (ctx->num_priors != ctx->num_images || p->cam.width != ctx->gt_w || p->cam.height != ctx->gt_h)) {
         ctx->error = "train_step: a depth weight needs a depth prior per uploaded image";
+        return -1;
+    }
+    if (sem_on && (ctx->sem_k == 0 || ctx->sem_images != ctx->num_images || p->cam.width != ctx->gt_w ||
+                   p->cam.height != ctx->gt_h)) {
+        ctx->error = "train_step: a semantic weight needs labels per uploaded image (set_labels)";
         return -1;
     }
     clear_stages(ctx);
@@ -2659,7 +3180,17 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     }
     GSC_TRY(run_loss(ctx, p->image, p->ssim_weight, depth_on ? p->depth_weight : 0.f,
                      normal_on ? p->normal_weight : 0.f));
-    GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0, normal_on ? 2 : (depth_on ? 1 : 0)));
+    SemBackward sem;
+    if (sem_on) {
+        sem.on = true;
+        sem.labels = static_cast<const uint8_t*>(ctx->sem_labels.ptr) + size_t(p->image) * ctx->pixels();
+        sem.geometry = p->semantic_geometry != 0;
+        GSC_TRY(stage_begin(ctx, kSemantic));
+        GSC_TRY(run_sem_forward(ctx, sem.labels));
+        GSC_TRY(run_sem_loss(ctx, p->image, p->semantic_weight, static_cast<double*>(ctx->loss_acc.ptr) + 4));
+        GSC_TRY(stage_end(ctx, kSemantic));
+    }
+    GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0, normal_on ? 2 : (depth_on ? 1 : 0), sem));
 
     const int n = ctx->n;
     const uint32_t* tiles = static_cast<const uint32_t*>(ctx->tiles.ptr);
@@ -2694,6 +3225,16 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
                 static_cast<float*>(ctx->m2[k].ptr));
             GSC_CHECK(ctx, cudaGetLastError());
         }
+        if (sem_on) {
+            const uint32_t k = uint32_t(ctx->sem_k);
+            const size_t n_elem = size_t(n) * k;
+            adam_kernel<<<blocks_for(n_elem), 256>>>(
+                n_elem, k, k, k, p->lr_semantic, p->lr_semantic, p->lr_semantic, p->beta1, p->beta2, p->eps, p->bc1,
+                p->bc2, 0, 0.f, nullptr, tiles, static_cast<float*>(ctx->sem.ptr),
+                static_cast<const float*>(ctx->sem_grad.ptr), static_cast<float*>(ctx->sem_m1.ptr),
+                static_cast<float*>(ctx->sem_m2.ptr));
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
         if (p->noise_scale > 0.f) {
             noise_kernel<<<blocks_for(n), 256>>>(n, p->noise_seed, p->noise_scale, p->noise_max, ctx->p(0),
                                                  ctx->p(1));
@@ -2721,10 +3262,11 @@ GSC_EXPORT int visloc_gsplat_cuda_loss_grad(void* handle, uint32_t image, float 
 }
 
 // Sums of the mean L1, of the SSIM (over pixels and channels), of the mean
-// depth-prior loss and of the mean depth-normal loss (both unweighted) since
-// the last call, and the number of steps; resets them.
+// depth-prior loss, of the mean depth-normal loss and of the labels' mean
+// cross-entropy (all unweighted) since the last call, and the number of
+// steps; resets them.
 GSC_EXPORT int visloc_gsplat_cuda_take_loss(void* handle, double* l1_sum, double* ssim_sum, double* depth_sum,
-                                            double* normal_sum, uint32_t* steps) {
+                                            double* normal_sum, double* semantic_sum, uint32_t* steps) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx) return -1;
     double acc[kNumLossSums] = {};
@@ -2733,6 +3275,7 @@ GSC_EXPORT int visloc_gsplat_cuda_take_loss(void* handle, double* l1_sum, double
     if (ssim_sum) *ssim_sum = acc[1];
     if (depth_sum) *depth_sum = acc[2];
     if (normal_sum) *normal_sum = acc[3];
+    if (semantic_sum) *semantic_sum = acc[4];
     if (steps) *steps = ctx->loss_steps;
     ctx->loss_steps = 0;
     return 0;
@@ -2804,6 +3347,28 @@ GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* ac
             ctx->params[k] = dp;
             ctx->m1[k] = dm1;
             ctx->m2[k] = dm2;
+        }
+        if (ctx->sem_k > 0) {
+            // The logits ride along as plain copies (a split's two halves keep
+            // the parent's).
+            const uint32_t stride = uint32_t(ctx->sem_k);
+            Buf dp, dm1, dm2;
+            float *p, *a, *b;
+            GSC_TRY(ensure(ctx, dp, size_t(total) * stride, &p));
+            GSC_TRY(ensure(ctx, dm1, size_t(total) * stride, &a));
+            GSC_TRY(ensure(ctx, dm2, size_t(total) * stride, &b));
+            scatter_kernel<<<blocks_for(n), 256>>>(n, stride, 3, seed, d_actions, cum,
+                                                   static_cast<const float*>(ctx->sem.ptr),
+                                                   static_cast<const float*>(ctx->sem_m1.ptr),
+                                                   static_cast<const float*>(ctx->sem_m2.ptr), p, a, b);
+            GSC_CHECK(ctx, cudaGetLastError());
+            GSC_CHECK(ctx, cudaDeviceSynchronize());
+            free_buf(ctx->sem);
+            free_buf(ctx->sem_m1);
+            free_buf(ctx->sem_m2);
+            ctx->sem = dp;
+            ctx->sem_m1 = dm1;
+            ctx->sem_m2 = dm2;
         }
     }
     ctx->n = int(total);

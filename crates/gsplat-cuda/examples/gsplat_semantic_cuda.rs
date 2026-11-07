@@ -7,7 +7,7 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_semantic_cuda -- \
 //!   --ply scene.ply --data <colmap_root> --labels <dir> --out semantic.ply \
 //!   [--web <dir> [--max 400000]] [--instances [--instance-overlap 0.5] [--min-views 3]] \
-//!   [--check [--holdout 8]]
+//!   [--check [--holdout 8]] [--logits]
 //! ```
 //!
 //! `<dir>` holds `classes.txt` (`index r g b name` per line) and a label
@@ -17,7 +17,9 @@
 //! pixel. Every view of the model (training and held out) votes: at each
 //! labelled pixel, each splat's blending weight there goes to the pixel's
 //! class, through the view's lens. A gaussian takes the class with the most
-//! weight (`visloc_gsplat_core::semantic`).
+//! weight (`visloc_gsplat_core::semantic`). With `--logits` the classes come
+//! instead from a splat trained with the labels (`gsplat_train_cuda
+//! --labels`): its `class_logit_<c>` properties, the largest's class.
 //!
 //! `--out` gets the splat painted by class (degree-0 SH, the geometry
 //! unchanged) with two extra float properties per gaussian: `class` (255:
@@ -50,10 +52,11 @@ use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
 use visloc_gsplat_core::gaussian::Scene;
-use visloc_gsplat_core::ply::{load_ply, save_ply_with};
+use visloc_gsplat_core::ply::{ply_properties, save_ply_with, scene_from_ply};
 use visloc_gsplat_core::semantic::{
-    classes_json, colour_by_class, instance_color, instances_json, label_gaussians,
-    merge_instances, paint, parse_classes, view_instance_members, ViewInstance, NO_INSTANCE,
+    classes_json, colour_by_class, instance_color, instances_json, label_from_logits,
+    label_gaussians, merge_instances, paint, parse_classes, view_instance_members, ViewInstance,
+    NO_INSTANCE,
 };
 use visloc_gsplat_core::splat::{importance_order, save_splat};
 use visloc_gsplat_cuda::CudaGsplat;
@@ -76,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut instances = false;
     let mut overlap = 0.5f32;
     let mut min_views = 3usize;
+    let mut from_logits = false;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -90,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--instances" => instances = true,
             "--instance-overlap" => overlap = next()?.parse()?,
             "--min-views" => min_views = next()?.parse()?,
+            "--logits" => from_logits = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -99,7 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let classes = parse_classes(&std::fs::read_to_string(labels.join("classes.txt"))?)?;
     let k = classes.len();
-    let scene = load_ply(&ply)?;
+    let ply_bytes = std::fs::read(&ply)?;
+    let scene = scene_from_ply(&ply_bytes)?;
     let dataset = load_colmap_dataset(&data, check.then_some(holdout))?;
     let views: Vec<_> = dataset.train.iter().chain(&dataset.eval).collect();
     println!(
@@ -152,30 +158,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "set VISLOC_GSPLAT_CUDA_LIB to the library built by scripts/build_gsplat_cuda.sh",
     )??;
     gs.set_scene(&PackedScene::from_scene(&scene))?;
-    let t0 = std::time::Instant::now();
-    let mut voted = 0usize;
     // With --check only the training views vote.
     let voters = if check {
         dataset.train.len()
     } else {
         views.len()
     };
-    for v in &views[..voters] {
-        if let Some(l) = view_labels(v)? {
-            gs.vote_labels(&v.camera, &l, k, voted == 0)?;
-            voted += 1;
+    let per = if from_logits {
+        let names: Vec<String> = (0..k).map(|c| format!("class_logit_{c}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut logits = vec![0.0f32; scene.len() * k];
+        for (c, column) in ply_properties(&ply_bytes, &refs)?.into_iter().enumerate() {
+            let column = column.ok_or_else(|| {
+                format!(
+                    "{} has no {} (train it with gsplat_train_cuda --labels)",
+                    ply.display(),
+                    names[c]
+                )
+            })?;
+            for (i, z) in column.into_iter().enumerate() {
+                logits[i * k + c] = z;
+            }
         }
-    }
-    if voted == 0 {
-        return Err(format!("no label image in {} for any view", labels.display()).into());
-    }
-    let votes = gs.votes(k)?;
-    let per = label_gaussians(&votes, k);
-    println!(
-        "{voted} of {} views voted in {:.1} s",
-        views.len(),
-        t0.elapsed().as_secs_f64()
-    );
+        println!("classes from the splat's {k} trained logits per gaussian");
+        label_from_logits(&logits, k)
+    } else {
+        let t0 = std::time::Instant::now();
+        let mut voted = 0usize;
+        for v in &views[..voters] {
+            if let Some(l) = view_labels(v)? {
+                gs.vote_labels(&v.camera, &l, k, voted == 0)?;
+                voted += 1;
+            }
+        }
+        if voted == 0 {
+            return Err(format!("no label image in {} for any view", labels.display()).into());
+        }
+        let votes = gs.votes(k)?;
+        println!(
+            "{voted} of {} views voted in {:.1} s",
+            views.len(),
+            t0.elapsed().as_secs_f64()
+        );
+        label_gaussians(&votes, k)
+    };
 
     let mut counts = vec![0usize; k];
     let mut unseen = 0usize;
@@ -305,7 +331,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|c| inter[c] as f64 / union[c] as f64)
             .collect();
         println!(
-            "check on {checked} held-out views (voted by the {voted} others): pixel accuracy {:.1}%, mIoU {:.1}% over {} classes",
+            "check on {checked} held-out views ({} by the {voters} others): pixel accuracy {:.1}%, mIoU {:.1}% over {} classes",
+            if from_logits { "trained" } else { "voted" },
             100.0 * right as f64 / total.max(1) as f64,
             100.0 * ious.iter().sum::<f64>() / ious.len().max(1) as f64,
             ious.len()

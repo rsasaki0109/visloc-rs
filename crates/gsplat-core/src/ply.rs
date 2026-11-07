@@ -210,6 +210,36 @@ pub fn scene_from_ply(bytes: &[u8]) -> Result<Scene, PlyError> {
     Ok(Scene::new(gaussians, sh_degree))
 }
 
+/// The float vertex properties `names` of a `.ply` blob, such as the extra
+/// ones [`encode_ply_with`] writes: one value per gaussian for each name the
+/// file has, `None` for the others.
+pub fn ply_properties(bytes: &[u8], names: &[&str]) -> Result<Vec<Option<Vec<f32>>>, PlyError> {
+    let (properties, vertex_count, body_start) = parse_header(bytes)?;
+    let body = &bytes[body_start..];
+    let stride = properties.len() * 4;
+    let expected = vertex_count * stride;
+    if body.len() < expected {
+        return Err(PlyError::SizeMismatch {
+            declared: expected,
+            actual: body.len(),
+        });
+    }
+    Ok(names
+        .iter()
+        .map(|name| {
+            let col = properties.iter().position(|p| p == name)?;
+            Some(
+                (0..vertex_count)
+                    .map(|row| {
+                        let off = row * stride + col * 4;
+                        f32::from_le_bytes(body[off..off + 4].try_into().unwrap())
+                    })
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
 /// Encode a [`Scene`] as a binary-little-endian Inria `.ply`.
 pub fn encode_ply(scene: &Scene) -> Result<Vec<u8>, PlyError> {
     encode_ply_with(scene, &[])
@@ -372,6 +402,21 @@ mod tests {
             encode_ply_with(&scene, &[("class", &[])]),
             Err(PlyError::ExtraLength { .. })
         ));
+    }
+
+    #[test]
+    fn extra_properties_read_back_by_name() {
+        let first = sample(2).gaussians[0].clone();
+        let mut second = first.clone();
+        second.opacity_logit = -0.75;
+        let scene = Scene::new(vec![first, second], 2);
+        let bytes = encode_ply_with(&scene, &[("a", &[1.0, 2.0]), ("b", &[-3.0, 4.5])]).unwrap();
+        let got = ply_properties(&bytes, &["b", "missing", "a", "opacity"]).unwrap();
+        assert_eq!(got[0], Some(vec![-3.0, 4.5]));
+        assert_eq!(got[1], None);
+        assert_eq!(got[2], Some(vec![1.0, 2.0]));
+        let opacity: Vec<f32> = scene.gaussians.iter().map(|g| g.opacity_logit).collect();
+        assert_eq!(got[3], Some(opacity));
     }
 
     #[test]

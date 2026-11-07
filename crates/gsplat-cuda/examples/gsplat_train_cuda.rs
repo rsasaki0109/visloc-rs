@@ -9,7 +9,8 @@
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
 //!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
-//!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>]
+//!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>] \
+//!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.0025] [--semantic-logits-only]]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
@@ -27,12 +28,20 @@
 //! loss (`gsplat_photos_cuda --mask-black`'s masked regions) and of the eval
 //! PSNR; SSIM takes the image's values there. `--save-eval` writes the final
 //! renders of the held-out views to `<dir>/<image name>.png`.
+//! `--labels` trains a logit per class and gaussian against the training
+//! views' labels (`scripts/sam3_labels.py`'s `<dir>/<image name>.png` and
+//! `classes.txt`): `--semantic-weight` x the mean cross-entropy over the
+//! labelled pixels, which also moves the gaussians unless
+//! `--semantic-logits-only`. The output then has the float properties
+//! `class_logit_<c>` per class, which `gsplat_semantic_cuda --logits` reads.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use visloc_gsplat_core::ply::save_ply;
-use visloc_gsplat_cuda::trainer::CudaTrainer;
+use image::imageops::FilterType;
+use visloc_gsplat_core::ply::{save_ply, save_ply_with};
+use visloc_gsplat_core::semantic::{parse_classes, NO_LABEL};
+use visloc_gsplat_cuda::trainer::{CudaTrainer, SemanticTraining};
 use visloc_gsplat_cuda::CudaGsplat;
 use visloc_gsplat_train::config::TrainConfig;
 use visloc_gsplat_train::dataset::{
@@ -58,6 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut depth_weight = 0.1f32;
     let mut depth_weight_final: Option<f32> = None;
     let mut save_eval: Option<PathBuf> = None;
+    let mut labels: Option<PathBuf> = None;
+    let mut semantic = SemanticTraining::default();
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -87,6 +98,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--normal-start" => cfg.normal_start = next()?.parse()?,
             "--alpha-mask" => cfg.alpha_mask = true,
             "--save-eval" => save_eval = Some(PathBuf::from(next()?)),
+            "--labels" => labels = Some(PathBuf::from(next()?)),
+            "--semantic-weight" => semantic.weight = next()?.parse()?,
+            "--semantic-lr" => semantic.lr = next()?.parse()?,
+            "--semantic-logits-only" => semantic.geometry = false,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -132,6 +147,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dataset.train.len()
         );
     }
+    let classes = match &labels {
+        Some(dir) => {
+            let classes = parse_classes(&std::fs::read_to_string(dir.join("classes.txt"))?)?;
+            // Each training view's labels at its size (none where a view has
+            // no label image).
+            let mut bytes = Vec::new();
+            let mut found = 0usize;
+            for v in &dataset.train {
+                let (w, h) = (v.camera.camera.width, v.camera.camera.height);
+                let path = dir.join(Path::new(&v.name).with_extension("png"));
+                if path.exists() {
+                    let mut img = image::open(&path)?.to_luma8();
+                    if img.dimensions() != (w, h) {
+                        img = image::imageops::resize(&img, w, h, FilterType::Nearest);
+                    }
+                    bytes.extend_from_slice(img.as_raw());
+                    found += 1;
+                } else {
+                    bytes.extend(std::iter::repeat_n(NO_LABEL, (w * h) as usize));
+                }
+            }
+            trainer.set_labels(classes.len(), &bytes, semantic)?;
+            println!(
+                "labels for {found} / {} training views, {} classes (weight {}, lr {}{})",
+                dataset.train.len(),
+                classes.len(),
+                semantic.weight,
+                semantic.lr,
+                if semantic.geometry {
+                    ""
+                } else {
+                    ", logits only"
+                }
+            );
+            classes
+        }
+        None => Vec::new(),
+    };
     println!(
         "setup {:.1}s, scene extent {:.3}",
         t0.elapsed().as_secs_f64(),
@@ -210,8 +263,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     String::new()
                 };
+                let labels = if classes.is_empty() {
+                    String::new()
+                } else {
+                    format!("  labels {:.4}", trainer.last_semantic_loss())
+                };
                 println!(
-                    "step {step:6}  l1 {loss:.4}{depth}{normal}{quality}  gaussians {}  ({train_s:.0}s)",
+                    "step {step:6}  l1 {loss:.4}{depth}{normal}{labels}{quality}  gaussians {}  ({train_s:.0}s)",
                     trainer.num_gaussians()
                 );
                 since = Instant::now();
@@ -227,7 +285,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "trained {} steps in {train_s:.1}s (evaluations left out)",
         cfg.steps
     );
-    save_ply(&trainer.scene()?, &out)?;
+    match trainer.logits()? {
+        Some(logits) => {
+            // One property per class: class_logit_<c>.
+            let k = classes.len();
+            let columns: Vec<Vec<f32>> = (0..k)
+                .map(|c| logits.iter().skip(c).step_by(k).copied().collect())
+                .collect();
+            let names: Vec<String> = (0..k).map(|c| format!("class_logit_{c}")).collect();
+            let extra: Vec<(&str, &[f32])> = names
+                .iter()
+                .zip(&columns)
+                .map(|(n, v)| (n.as_str(), v.as_slice()))
+                .collect();
+            save_ply_with(&trainer.scene()?, &extra, &out)?;
+        }
+        None => save_ply(&trainer.scene()?, &out)?,
+    }
     println!("wrote {}", out.display());
     if let Some(dir) = &save_eval {
         std::fs::create_dir_all(dir)?;
