@@ -527,6 +527,21 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **`--refine-camera` could fold a fisheye's lens on the initial pair.**
+  The mapper's first bundle adjustment refines the lens from the initial
+  pair's points alone. On one of FIORD's 200° scenes, from 36 points, its
+  `k1..k4` bent the radius back past 68°, so the radius shrank as the
+  angle grew. The lens stayed so until the final bundle adjustment, the
+  mapper dropped every observation past 76°, and the held-out PSNR fell
+  to 22.5 dB. The native bundle adjustment now refuses a step whose lens
+  stops growing with the angle, along any of eight directions, inside the
+  radius 99% of the solve's keypoints reach (`SharedLens::keeping_reach`).
+  - That scene then refines like the other two: the refined lens gains
+    0.4–0.8 dB of held-out PSNR over the factory lens on all three.
+  - On the other two scenes the refined lens is unchanged.
+  - Holding the last keypoint as well cost one scene 0.4–0.8 dB: the
+    outermost keypoints lie at the image circle's edge, past 100°.
+  - Details in docs/fisheye.md.
 - **The GPU descriptor matcher found almost nothing on Apple Silicon
   (#465).** Its shaders wrote shared memory one vec4 component per thread,
   and on Metal a component store can compile to a read-modify-write of the
