@@ -279,7 +279,10 @@ filters, and now for bundle adjustment too:
   scenes out to 70° off the axis, a Kannala-Brandt fisheye's four
   coefficients and a thin-prism fisheye's eight come back from zero, with
   the focal length and principal point started 10 px off. The thin-prism
-  case is checked on both the direct and the iterative solve.
+  case is checked on both the direct and the iterative solve. A step that
+  would fold the lens is refused: one whose image stops growing with the
+  angle, along any of eight directions, inside the radius 99% of the
+  solve's keypoints reach (as far as the lens it started from reaches).
 - **Rig manifest.** A sensor row can carry any COLMAP model, with its
   parameters after the pose, for example
   `S 0 1 752 480 541.9 541.6 413.8 216.0 1 0 0 0 0 0 0 THIN_PRISM_FISHEYE 541.9 …`.
@@ -603,9 +606,9 @@ longer lean (within 0.1 px). MeetingRoom_In's renders then sit 0.20–0.22 px
 off at 85–95°, against 0.15 px at the centre. The radius it finds is nearly
 the same in every scene. At 800 px it is longer than the factory radius
 by:
-- 0.9–1.0 px at 30°
-- 1.4–1.5 px at 60°
-- 0.8–1.0 px at 90°
+- 1.0 px at 30°
+- 1.4–1.6 px at 60°
+- 0.9–1.1 px at 90°
 - 0.1–0.5 px at 100°
 
 Here is the held-out PSNR off the tripod, with the tripod masked out:
@@ -613,21 +616,31 @@ Here is the held-out PSNR off the tripod, with the tripod masked out:
 | Scene | Lens | 0–55.7° | 75–85° | 85–90° | 90–95° | 0–100° |
 |---|---|---|---|---|---|---|
 | MeetingRoom_In | factory | 31.90 dB | 32.17 dB | 30.28 dB | 30.66 dB | 31.66 dB |
-| | refined | 32.41 dB | 33.28 dB | 31.50 dB | 32.12 dB | **32.42 dB** |
+| | refined | 32.46 dB | 33.37 dB | 31.47 dB | 31.97 dB | **32.41 dB** |
+| Building_In | factory | 32.16 dB | 30.90 dB | 30.04 dB | 29.09 dB | 31.09 dB |
+| | refined | 32.81 dB | 31.43 dB | 30.66 dB | 29.44 dB | **31.62 dB** |
 | Bridge_Out | factory | 31.46 dB | 27.96 dB | 29.73 dB | 28.49 dB | 29.81 dB |
-| | refined | 32.37 dB | 28.28 dB | 30.04 dB | 28.68 dB | **30.28 dB** |
+| | refined | 32.27 dB | 28.19 dB | 29.87 dB | 28.53 dB | **30.19 dB** |
 
-On Building_In the refinement ran off. Its `k1..k4` bent the radius back
-past 75°, so the radius shrank as the angle grew. The mapper then dropped
-every observation past 76°, and the PSNR fell to 22.5 dB. A run started
-from the centre as read (before the fix) converged on all three scenes.
-It moved the centre to 0.5–2 px from the swapped one and gained 0.5 dB
-on Building_In. Until the refinement cannot run off, leave it off.
+The refined lens gains 0.4–0.8 dB. Started from the centre as read
+(before the fix, 2.2 px off at 800 px), the refinement ends within
+0.05 px of the same centre and within 0.15 dB of these runs.
+
+On Building_In the refinement used to run off. The mapper's first bundle
+adjustment, on the initial pair's 36 points, refined the lens as well.
+Its `k1..k4` bent the radius back past 68°, so the radius shrank as the
+angle grew. The lens stayed so until the final bundle adjustment, the
+mapper dropped every observation past 76°, and the PSNR fell to 22.5 dB.
+The bundle adjustment now refuses a step that folds the lens inside the
+radius of its photos' keypoints (above). That holds Building_In's first
+pair at the factory lens, and the later bundle adjustments refine it as
+in the other scenes. On MeetingRoom_In and Bridge_Out it changes nothing.
+Holding the lens out to the last keypoint instead of 99% of them cost
+MeetingRoom_In 0.4–0.8 dB: the outermost keypoints lie past 100°, where
+the polynomial then bends the fit inside.
 
 Still open:
-- A lens refinement that cannot run off, e.g. one that keeps the radius
-  growing with the angle.
-- The rest of the fall at the rim: with the refined lens, 0.9–2.3 dB at
+- The rest of the fall at the rim: with the refined lens, 1.0–2.4 dB at
   85–90° below the 0–55.7° ring.
 - The tangential terms. `THIN_PRISM_FISHEYE` could take them.
 - Both lenses as one rig ([above](#sfm-mapping-through-the-lens)).

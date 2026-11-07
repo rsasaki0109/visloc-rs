@@ -593,6 +593,17 @@ fn point_policy(
 /// points through a bitmap ([`solve_native`]); larger ones in parallel.
 const DEDUP_BITMAP_MAX_IMAGES: usize = 64;
 
+/// The share of a solve's keypoints, nearest the principal point first, that
+/// a refined lens must keep imaging ([`SharedLens::keeping_reach`]). The
+/// last 1% sit at the image's very edge, where a fisheye's dark rim meets
+/// its image circle. On FIORD's 200° lens they lie from about 100° off the
+/// axis out. There a polynomial fitted to the rest is free to turn back,
+/// and holding it bends the fit inside: on one scene it cost 0.4–0.8 dB of
+/// held-out PSNR.
+///
+/// [`SharedLens::keeping_reach`]: super::rig_ba_solver::SharedLens::keeping_reach
+const REACH_KEYPOINT_SHARE: f64 = 0.99;
+
 /// [`solve`] for the native solver: the same problem as [`solve_legacy`]
 /// (frames, points, gauge, and every observation in the same order), built
 /// point by point from the tracks instead of image by image.
@@ -891,6 +902,25 @@ fn solve_native(
         if let Some(camera_id) = first.filter(|&id| camera_ids.all(|other| other == id)) {
             let camera = recon.camera(camera_id);
             if let Some((fx, fy, cx, cy)) = camera.intrinsics() {
+                // The lens must keep imaging out to where the solve's images
+                // hold keypoints, matched or not: the observations alone may
+                // sit near the axis. The outermost keypoints are left out
+                // (`REACH_KEYPOINT_SHARE`).
+                let keypoint_reach = || {
+                    let mut radii: Vec<f64> = observed
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &seen)| seen)
+                        .flat_map(|(image_id, _)| &recon.image(image_id as ImageT).points2d)
+                        .map(|p| (p.xy.x - cx).hypot(p.xy.y - cy))
+                        .collect();
+                    if radii.is_empty() {
+                        return 0.0;
+                    }
+                    let k =
+                        ((radii.len() as f64 * REACH_KEYPOINT_SHARE) as usize).min(radii.len() - 1);
+                    *radii.select_nth_unstable_by(k, f64::total_cmp).1
+                };
                 shared_intrinsics = Some((
                     camera_id,
                     super::rig_ba_solver::SharedIntrinsics {
@@ -900,7 +930,8 @@ fn solve_native(
                         lens: options
                             .refine_extra_params
                             .then(|| super::rig_ba_solver::SharedLens::new(camera))
-                            .flatten(),
+                            .flatten()
+                            .map(|lens| lens.keeping_reach(keypoint_reach())),
                     },
                 ));
             }

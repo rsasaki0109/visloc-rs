@@ -490,6 +490,19 @@ impl SharedIntrinsics {
         }
     }
 
+    /// Whether the camera still images as far out as its lens must
+    /// ([`SharedLens::keeping_reach`]).
+    fn keeps_reach(&self) -> bool {
+        let Some((lens, min_reach)) = self.lens.as_ref().and_then(|l| l.min_reach.map(|m| (l, m)))
+        else {
+            return true;
+        };
+        let mut camera = lens.lens.camera.clone();
+        let [fx, fy, cx, cy] = self.params;
+        camera.set_intrinsics(fx, fy, cx, cy);
+        lens_reach(&camera, min_reach + REACH_TOLERANCE) >= min_reach
+    }
+
     /// The camera after its nodes stepped by `dk` (one per node).
     fn stepped(&self, dk: &[Vector6<f64>]) -> Self {
         let mut next = self.clone();
@@ -525,6 +538,51 @@ pub(crate) struct SharedLens {
     /// Per refined parameter: the lens with it moved up and down by
     /// [`EXTRA_PARAM_STEP`].
     probes: Vec<(Lens, Lens)>,
+    /// The pixel radius out to which the lens must keep imaging
+    /// ([`SharedLens::keeping_reach`]); `None` leaves it free.
+    min_reach: Option<f64>,
+}
+
+/// How far a lens's reach ([`lens_reach`]) may fall short of where it must
+/// image, in pixels.
+const REACH_TOLERANCE: f64 = 1.0;
+
+/// The angle steps from the axis to straight behind it that [`lens_reach`]
+/// samples (a quarter degree each).
+const REACH_STEPS: usize = 720;
+
+/// How far out, in pixels from the principal point and up to `limit`,
+/// `camera` keeps imaging. Along eight directions, rays further off the
+/// axis must land further out. A lens whose distortion bends its radius
+/// back, or that stops imaging the rays, reaches only as far as it got.
+/// That is where its image folds over itself.
+pub(crate) fn lens_reach(camera: &Camera, limit: f64) -> f64 {
+    let Some((_, _, cx, cy)) = camera.intrinsics() else {
+        return 0.0;
+    };
+    (0..8)
+        .map(|a| {
+            let (sin_phi, cos_phi) = (a as f64 * std::f64::consts::FRAC_PI_4).sin_cos();
+            let mut reached = 0.0;
+            for i in 1..REACH_STEPS {
+                let (sin_t, cos_t) =
+                    (std::f64::consts::PI * i as f64 / REACH_STEPS as f64).sin_cos();
+                let ray = Point3::new(sin_t * cos_phi, sin_t * sin_phi, cos_t);
+                let Some(p) = camera.project(&ray) else {
+                    break;
+                };
+                let r = (p.x - cx).hypot(p.y - cy);
+                if r.is_nan() || r <= reached {
+                    break;
+                }
+                reached = r;
+                if r >= limit {
+                    return limit;
+                }
+            }
+            reached
+        })
+        .fold(limit, f64::min)
 }
 
 /// The central-difference step of a distortion parameter. Its effect on
@@ -575,7 +633,23 @@ impl SharedLens {
             lens: std::sync::Arc::new(Lens { camera, intrinsics }),
             indices,
             probes,
+            min_reach: None,
         }
+    }
+
+    /// The lens held to image out to `radius` pixels from the principal
+    /// point (where its images hold keypoints), or as far as it now does if
+    /// that is less, within [`REACH_TOLERANCE`]. The solve then rejects a
+    /// step that folds the lens's image short of there, as it rejects a step
+    /// that does not lower the cost.
+    ///
+    /// Without that, a few points near the axis leave the outer distortion
+    /// free. A 200° fisheye refined from an initial pair's 36 points bent
+    /// its radius back at 68°, and the mapper ended up dropping every
+    /// observation past 76° (docs/fisheye.md).
+    pub(crate) fn keeping_reach(mut self, radius: f64) -> Self {
+        self.min_reach = Some(lens_reach(&self.lens.camera, radius) - REACH_TOLERANCE);
+        self
     }
 
     /// The refined parameters: `(index into the camera's params, value)`.
@@ -591,7 +665,10 @@ impl SharedLens {
         for (k, &i) in self.indices.iter().enumerate() {
             camera.params[i] += step(k);
         }
-        Self::of(camera, self.indices.clone(), self.lens.intrinsics)
+        Self {
+            min_reach: self.min_reach,
+            ..Self::of(camera, self.indices.clone(), self.lens.intrinsics)
+        }
     }
 
     /// `dm / d(parameter k)` at `point_sensor` for each refined parameter;
@@ -3899,6 +3976,23 @@ fn optimize_problem(
         let t_apply = Instant::now();
         let (trial_poses, trial_points, trial_extras) = apply_step(problem, &dx_frames, &dx_points);
         apply_ms += t_apply.elapsed().as_secs_f64() * 1e3;
+        // A step that folds the camera's image short of where its lens must
+        // reach (`SharedLens::keeping_reach`) is rejected, as a step that
+        // did not lower the cost is: the trust region shrinks until the
+        // step keeps the lens.
+        if !trial_extras
+            .camera
+            .as_ref()
+            .is_none_or(SharedIntrinsics::keeps_reach)
+        {
+            trace_lines.push(format!(
+                "BA_TRACE it={it} cost={:.6} radius={radius:.6e} grad_inf_norm={grad_norm:.6e} lens_folds",
+                2.0 * half_cost
+            ));
+            radius /= decrease_factor;
+            decrease_factor *= 2.0;
+            continue;
+        }
         let t = Instant::now();
         // A solve meant to converge takes many steps at a large trust
         // radius, where a point can cross a camera's plane and come back;
@@ -5489,6 +5583,114 @@ mod tests {
             assert_params_near(&got[..4], &truth.params[..4], 1e-3);
             assert_params_near(&got[4..], &k, 1e-5);
         }
+    }
+
+    /// A lens reaches as far as its image grows outward: a fisheye through
+    /// its whole circle, and the one an initial pair refined only to where
+    /// its radius turns back.
+    #[test]
+    fn lens_reach_stops_where_the_image_folds() {
+        // FIORD's factory lens at 800 px, and that lens after one refinement
+        // from an initial pair's 36 points.
+        let factory = Camera::opencv_fisheye(
+            1,
+            800,
+            800,
+            242.57,
+            242.61,
+            394.68,
+            396.23,
+            [0.0236, -0.00764, -0.00356, 0.00048],
+        );
+        let refined = Camera::opencv_fisheye(
+            1,
+            800,
+            800,
+            232.67,
+            232.71,
+            394.73,
+            395.89,
+            [0.0937, 0.0466, -0.0110, -0.0490],
+        );
+        assert_eq!(lens_reach(&factory, 400.0), 400.0);
+        let folded = lens_reach(&refined, 400.0);
+        assert!(folded > 270.0 && folded < 280.0, "{folded}");
+        let pinhole = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        assert_eq!(lens_reach(&pinhole, 1000.0), 1000.0);
+    }
+
+    /// Points near the axis seen through a lens that folds at 71°: refined
+    /// freely, the camera takes that lens; held to image out to 400 px, it
+    /// stops short of it and keeps its reach.
+    #[test]
+    fn camera_block_keeps_the_lens_reaching_its_keypoints() {
+        let truth = Camera::opencv_fisheye(
+            1,
+            640,
+            480,
+            300.0,
+            300.0,
+            322.0,
+            238.0,
+            [0.0, 0.0, 0.0, -0.02],
+        );
+        let start = Camera::opencv_fisheye(1, 640, 480, 300.0, 300.0, 322.0, 238.0, [0.0; 4]);
+        assert!(lens_reach(&truth, 400.0) < 340.0);
+        let mut points = Vec::new();
+        for az in -3..=3 {
+            for el in -2..=2 {
+                for r in [3.0, 5.5] {
+                    let (a, e) = (
+                        (az as f64 * 10.0f64).to_radians(),
+                        (el as f64 * 10.0f64).to_radians(),
+                    );
+                    points.push(Point3::new(
+                        r * a.sin() * e.cos(),
+                        r * e.sin(),
+                        r * a.cos() * e.cos(),
+                    ));
+                }
+            }
+        }
+        let solve = |lens: SharedLens| {
+            let (mut input, point_major, _) =
+                scene_through(points.clone(), |x| truth.project(x).expect("in view"));
+            let extras = ExtraBlocks {
+                camera: Some(SharedIntrinsics {
+                    params: [300.0, 300.0, 322.0, 238.0],
+                    refine_focal_length: true,
+                    refine_principal_point: true,
+                    lens: Some(lens),
+                }),
+                sensors: Vec::new(),
+            };
+            let mut problem = assemble_problem(&input, point_major, 0.0, extras).expect("problem");
+            let result = optimize_problem(
+                &mut input,
+                &mut problem,
+                Instant::now(),
+                0,
+                200,
+                LossFunction::Trivial,
+                None,
+            )
+            .expect("solve");
+            let camera = problem.extras.camera.expect("camera");
+            let mut refined = start.clone();
+            let [fx, fy, cx, cy] = camera.params;
+            refined.set_intrinsics(fx, fy, cx, cy);
+            for (i, value) in camera.lens.expect("lens").params() {
+                refined.params[i] = value;
+            }
+            (refined, result.final_cost)
+        };
+        let lens = SharedLens::new(&start).expect("a lens");
+        let (free, free_cost) = solve(lens.clone());
+        assert!(free_cost < 1e-10, "cost {free_cost}");
+        assert!(lens_reach(&free, 400.0) < 340.0);
+        let (held, held_cost) = solve(lens.keeping_reach(400.0));
+        assert!(lens_reach(&held, 400.0) >= 400.0 - REACH_TOLERANCE);
+        assert!(held_cost > free_cost, "{held_cost} vs {free_cost}");
     }
 
     /// The distortion parameters of each model, in order.
