@@ -10,7 +10,9 @@
 //! Image names come from `images.txt` or `images.bin` (the visloc map keeps
 //! only ids). Views are sorted by image name and every `eval_every`-th one
 //! (index 0, N, 2N, ...) is held out, matching brush's and the Inria code's
-//! split so scores are comparable. Distorted and fisheye cameras are drawn
+//! split so scores are comparable. With a [`FRAMES_FILE`] (a rig's images,
+//! as `gsplat_photos --back-images` writes them) every `eval_every`-th frame
+//! is held out instead, all its images. Distorted and fisheye cameras are drawn
 //! through their lens (`visloc_gsplat_core::colmap_scene::lens_of`:
 //! `SIMPLE_RADIAL`, `RADIAL`, `OPENCV`, `OPENCV_FISHEYE`, `RADIAL_FISHEYE`,
 //! `THIN_PRISM_FISHEYE`, ...), so the images need no undistortion, for the
@@ -67,6 +69,8 @@ pub enum DatasetError {
         want_w: u32,
         want_h: u32,
     },
+    #[error("frames: {0}")]
+    Frames(String),
 }
 
 /// One posed image.
@@ -163,12 +167,23 @@ pub fn load_colmap_dataset_with(
         });
     }
     views.sort_by(|a, b| a.name.cmp(&b.name));
+    let frames = read_frames(root)?;
 
     let mut train = Vec::new();
     let mut eval = Vec::new();
-    for (i, v) in views.into_iter().enumerate() {
+    // A view's rank: its frame's, frames ranked in the order of their first
+    // view; a view without a frame is one by itself.
+    let mut frame_rank: HashMap<usize, usize> = HashMap::new();
+    let mut ranks = 0usize;
+    for v in views {
+        let frame = frames.as_ref().and_then(|f| f.get(&v.name).copied());
+        let rank = match frame {
+            Some(frame) => *frame_rank.entry(frame).or_insert(ranks),
+            None => ranks,
+        };
+        ranks = ranks.max(rank + 1);
         match eval_every {
-            Some(n) if n > 0 && i % n == 0 => eval.push(v),
+            Some(n) if n > 0 && rank % n == 0 => eval.push(v),
             _ => train.push(v),
         }
     }
@@ -177,6 +192,33 @@ pub fn load_colmap_dataset_with(
         train,
         eval,
     })
+}
+
+/// The file beside `images/` that groups a rig's images into frames: a line
+/// `<image name> <frame>` per image. [`load_colmap_dataset_with`] holds out
+/// whole frames when it is there.
+pub const FRAMES_FILE: &str = "image_frames.txt";
+
+/// `root`'s [`FRAMES_FILE`], image name to frame; `None` without one.
+fn read_frames(root: &Path) -> Result<Option<HashMap<String, usize>>, DatasetError> {
+    let path = root.join(FRAMES_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let mut frames = HashMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let parsed = line
+            .rsplit_once(' ')
+            .and_then(|(name, frame)| Some((name.to_string(), frame.trim().parse().ok()?)));
+        let Some((name, frame)) = parsed else {
+            return Err(DatasetError::Frames(format!(
+                "{}: not `<image name> <frame>`: {line:?}",
+                path.display()
+            )));
+        };
+        frames.insert(name, frame);
+    }
+    Ok(Some(frames))
 }
 
 /// The views of a model with `EQUIRECTANGULAR` cameras (see the module docs):
@@ -1074,6 +1116,30 @@ mod tests {
             (64, 48, 50.0, 51.0, 32.0, 24.0)
         );
         assert!(!tmp.0.join("equirect_faces").exists());
+    }
+
+    /// With a frames file, every `eval_every`-th frame is held out whole; a
+    /// view the file does not name is a frame by itself.
+    #[test]
+    fn a_frames_file_holds_out_whole_frames() {
+        let tmp = Tmp::new("frames");
+        let model = Model::pinhole();
+        write_images(&tmp.0, &model, &panorama(&pano_rotation(), None));
+        model.write(&tmp.0, false);
+        std::fs::write(tmp.0.join(FRAMES_FILE), "a.png 7\nb.png 7\n").unwrap();
+        let ds = load(&tmp.0, Some(2), &mut Vec::new());
+        let names = |vs: &[View]| vs.iter().map(|v| v.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&ds.eval), ["a.png", "b.png"]);
+        assert_eq!(names(&ds.train), ["c.png"]);
+        std::fs::write(tmp.0.join(FRAMES_FILE), "a.png 0\nb.png 1\nc.png 0\n").unwrap();
+        let ds = load(&tmp.0, Some(2), &mut Vec::new());
+        assert_eq!(names(&ds.eval), ["a.png", "c.png"]);
+        assert_eq!(names(&ds.train), ["b.png"]);
+        std::fs::write(tmp.0.join(FRAMES_FILE), "a.png\n").unwrap();
+        let err = load_colmap_dataset(&tmp.0, Some(2))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not `<image name> <frame>`"), "{err}");
     }
 
     #[test]

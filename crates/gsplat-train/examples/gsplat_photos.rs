@@ -4,6 +4,7 @@
 //! cargo run --release -p visloc-gsplat-train --features gpu,euroc --example gsplat_photos -- \
 //!     (--images <folder> | --insv VIDEO.insv) --out <work dir> [--steps 30000] [--max-size 1600] [--focal PX] \
 //!     [--principal-point CX,CY] [--camera "MODEL W H PARAMS..."] \
+//!     [--back-images <folder> --back-camera "MODEL W H PARAMS..." [--back-camera-mask MASK.png]] \
 //!     [--no-mesh] [--normal-weight 0.005] [--appearance] [--exhaustive-max 300] [--window 20]
 //!     [--retrieval 30] [--max-keypoints 8192] [--sift-opt key=value ...] [--match-f32] [--mask-black 12] \
 //!     [--max-angle 100] [--stream-images] [--sift-threads N] [--masks <folder>] [--camera-mask MASK.png] [--flip-mask]
@@ -61,7 +62,7 @@ use visloc_gsplat_train::init::seed_scene;
 use visloc_gsplat_train::mesh::{extract_from_splat, MeshOptions};
 use visloc_gsplat_train::metrics::psnr_masked;
 use visloc_gsplat_train::photos::{
-    build_photo_dataset, calibrate_insv_lenses, parse_camera_row, PhotoSfmConfig,
+    build_photo_dataset, calibrate_insv_lenses, parse_camera_row, BackLens, PhotoSfmConfig,
 };
 use visloc_gsplat_train::trainer::{TrainConfig, Trainer};
 
@@ -98,6 +99,12 @@ SfM:
                            follow its lens on the images as they are
   --refine-camera          refine --camera's focal length, principal point and distortion
                            instead (a rough model, e.g. a fisheye's with zero distortion)
+  --back-images DIR        a dual fisheye's back lens: its photos, paired with --images' by
+                           name once each folder's common ending is cut off (IMG_1_fisheye1
+                           with IMG_1_fisheye2); both lenses solved as one rig, the back lens
+                           starting half a turn about the vertical, a frame held out whole
+  --back-camera \"MODEL W H P..\"  the back lens's calibrated camera, held fixed
+  --back-camera-mask FILE  the back lens's --camera-mask
   --no-refine-intrinsics   keep the intrinsics fixed
   --refine-intrinsics-max N  skip the final intrinsics refinement above N photos
   --exhaustive-max 300     match every pair up to this many photos
@@ -149,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut appearance = false;
     let mut frame_step = 10u32;
     let mut insv_calibrate = false;
+    let (mut back_images, mut back_camera, mut back_mask) = (None, None, None);
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -163,6 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--focal" => sfm.focal_px = Some(next()?.parse()?),
             "--camera" => sfm.camera = Some(parse_camera_row(&next()?)?),
             "--refine-camera" => sfm.refine_camera = true,
+            // A dual fisheye's back lens, solved with the front one as a rig.
+            "--back-images" => back_images = Some(PathBuf::from(next()?)),
+            "--back-camera" => back_camera = Some(parse_camera_row(&next()?)?),
+            "--back-camera-mask" => back_mask = Some(PathBuf::from(next()?)),
             "--principal-point" => {
                 let value = next()?;
                 let (x, y) = value
@@ -236,6 +248,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             other => return Err(format!("unknown argument {other} (--help lists them)").into()),
         }
     }
+    sfm.back_lens = match (back_images, back_camera) {
+        (Some(images), Some(camera)) => Some(BackLens {
+            images,
+            camera,
+            camera_mask: back_mask,
+        }),
+        (None, None) if back_mask.is_none() => None,
+        _ => return Err("--back-images and --back-camera go together".into()),
+    };
     let out = out.ok_or("--out <work dir> is required (--help for usage)")?;
     std::fs::create_dir_all(&out)?;
     let images = match (images, &sfm.insv) {

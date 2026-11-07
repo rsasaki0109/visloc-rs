@@ -308,20 +308,18 @@ pub fn estimate_initial_two_view_geometry(
         return None;
     }
     // A panorama always starts on unit rays; a fisheye past 180° too in a
-    // single-camera frame, while a rig of them takes the ordinary path: its
-    // pair gate on the rays ahead of the image plane, then the generalized
-    // re-solve on every ray.
-    let single_sensor = |image: &Image| {
-        recon
-            .rig(recon.frame(image.frame_id).rig_id())
-            .num_sensors()
-            <= 1
+    // single-camera frame or a central rig (one centre, as a dual fisheye's
+    // two lenses start), whose pair pose is the frames' pose. A rig of them
+    // with sensors apart takes the ordinary path: its pair gate on the rays
+    // ahead of both image planes, then the generalized re-solve on every ray.
+    let central = |image: &Image| {
+        let rig = recon.rig(recon.frame(image.frame_id).rig_id());
+        rig.num_sensors() <= 1 || rig_is_central(rig)
     };
+    let sees_behind = camera1.sees_behind() || camera2.sees_behind();
     if camera1.model.is_spherical()
         || camera2.model.is_spherical()
-        || ((camera1.sees_behind() || camera2.sees_behind())
-            && single_sensor(image1)
-            && single_sensor(image2))
+        || (sees_behind && central(image1) && central(image2))
     {
         return estimate_initial_spherical_two_view_geometry(
             options, recon, &matches, image1, image2, &camera1, &camera2,
@@ -330,6 +328,11 @@ pub fn estimate_initial_two_view_geometry(
     let correspondences: Vec<TwoViewCorrespondence> = matches
         .iter()
         .map(|&(i1, i2)| TwoViewCorrespondence::new(image1.points2d[i1].xy, image2.points2d[i2].xy))
+        .filter(|c| {
+            !sees_behind
+                || (camera1.normalize_pixel(&c.previous_xy).is_some()
+                    && camera2.normalize_pixel(&c.current_xy).is_some())
+        })
         .collect();
 
     let mut estimator = RelativePoseEstimator::default();
@@ -424,7 +427,9 @@ pub fn estimate_initial_two_view_geometry(
 /// matrix from [`visloc_vision::two_view::spherical`] (its angular
 /// threshold `init_max_error` over the pixels per radian), no forward-
 /// motion gate (a panorama has no forward), and the triangulation angle
-/// gated per view direction (below). Single-camera frames only.
+/// gated per view direction (below). Single-camera frames, or central rigs
+/// (every sensor at the rig's origin): there the two images' relative pose
+/// gives the frames' without a generalized re-solve.
 fn estimate_initial_spherical_two_view_geometry(
     options: &InitGateOptions,
     recon: &Reconstruction,
@@ -440,10 +445,9 @@ fn estimate_initial_spherical_two_view_geometry(
     let (image_id1, image_id2) = (image1.image_id, image2.image_id);
     let frame1 = recon.frame(image1.frame_id);
     let frame2 = recon.frame(image2.frame_id);
-    if recon.rig(frame1.rig_id()).num_sensors() > 1 || recon.rig(frame2.rig_id()).num_sensors() > 1
-    {
+    if !rig_is_central(recon.rig(frame1.rig_id())) || !rig_is_central(recon.rig(frame2.rig_id())) {
         debug_init(&format!(
-            "init rejected: spherical camera in a multi-sensor rig (images {image_id1}/{image_id2})"
+            "init rejected: spherical camera in a rig of sensors apart (images {image_id1}/{image_id2})"
         ));
         return None;
     }

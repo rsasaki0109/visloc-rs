@@ -933,6 +933,11 @@ fn unproject_equidistant(
     if !theta.is_finite() || !(0.0..std::f64::consts::PI).contains(&theta) {
         return None;
     }
+    // Past the radius where `theta * poly(theta)` peaks (a corner beyond the
+    // image circle) there is no solution, and Newton stops anywhere.
+    if (theta * equidistant_poly(theta, k) - r_d).abs() > 1e-9 {
+        return None;
+    }
     // `(sin θ, cos θ)`, not `(tan θ, 1)`: past 90° the latter is the mirror
     // image of the ray, ahead of the camera.
     let (sin, cos) = theta.sin_cos();
@@ -1605,6 +1610,35 @@ mod tests {
             assert!(camera.sees_behind(), "{:?}", camera.model);
             // Straight behind the camera is nowhere in the image.
             assert!(camera.project(&Point3::new(0.0, 0.0, -2.0)).is_none());
+        }
+    }
+
+    /// FIORD's 200° front lens as `--refine-camera` refined it at 800 px: its
+    /// radius peaks 114° off the axis, 415 px from the centre. The image's
+    /// corners lie past that and have no ray; Newton used to stop anywhere
+    /// there, even within 40° of the axis.
+    #[test]
+    fn opencv_fisheye_has_no_ray_past_its_reach() {
+        let camera = Camera::opencv_fisheye(
+            0,
+            800,
+            800,
+            244.233,
+            244.270,
+            394.756,
+            396.346,
+            [0.029027, -0.017081, 0.000609, -0.000125],
+        );
+        let within = camera
+            .unit_ray_from_pixel(&Point2::new(394.756 + 400.0, 396.346))
+            .unwrap();
+        assert!(
+            (within.z.acos().to_degrees() - 100.4).abs() < 0.1,
+            "{within:?}"
+        );
+        for corner in [(3.5, 0.5), (45.5, 0.5), (95.5, 0.5), (799.5, 799.5)] {
+            let pixel = Point2::new(corner.0, corner.1);
+            assert!(camera.unit_ray_from_pixel(&pixel).is_none(), "{corner:?}");
         }
     }
 

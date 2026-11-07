@@ -36,6 +36,37 @@ All notable changes to `visloc-rs` will be documented here.
   image circle) gains 0.3–0.4 dB of held-out PSNR off the tripod in the two
   indoor scenes, 0.3–1.4 dB at 75–95° off the axis; the outdoor scene is
   within run-to-run spread. Details in docs/fisheye.md.
+- **A dual fisheye's two lenses as one rig (`gsplat_photos --back-images
+  DIR --back-camera "MODEL W H PARAMS..."`).** The back lens's photos join
+  the front lens's (`--images`, `--camera`), each through its own
+  calibration, with no faces cut (`PhotoSfmConfig::back_lens`, `BackLens`).
+  Also `gsplat_photos_cuda`.
+  - **Frames.** A back photo pairs with the front photo of the same name
+    once each folder's common ending is cut off, from the separator it
+    starts at (`pair_lens_photos`: FIORD's `..._fisheye1` with
+    `..._fisheye2`, or the same names). A frame may lack either photo.
+  - **Rig.** A frame's photos are one rig. The back lens starts half a turn
+    about the vertical and is refined (`<out>/back_lens.txt`); both cameras
+    are held fixed.
+  - **Per lens.** Each lens has its own `--max-angle` cone and camera mask
+    (`--back-camera-mask`, `ImageMasks::with_lenses`). A pair of the two
+    lenses is verified on unit rays (`verify_pair` takes both cameras).
+  - **Model.** `sparse/0` has both cameras. `<out>/image_frames.txt`
+    (`dataset::FRAMES_FILE`) makes the loader hold out whole frames.
+  - **Mapper.** A central rig of fisheyes past 180° (every sensor at one
+    centre) now starts on unit rays, as a single camera does. A rig of
+    sensors apart starts on the rays ahead of both image planes. Before,
+    one match past 90° kept such a rig from starting.
+  - **Tested.** A synthetic room through both lenses, one frame without its
+    back photo: every photo registers at the true poses (within 0.1°), and
+    the back lens settles 0.005° from the half turn.
+  - **FIORD.** On MeetingRoom_In and Building_In, every photo of both
+    lenses registers, and the back lens settles 0.42–0.50° past the half
+    turn, within 0.21° of FIORD's model's average. With both lenses
+    refined first, the front lens's held-out PSNR gains 0.67 dB on
+    Building_In (1.0–1.6 dB from 75° off the axis) and ties on
+    MeetingRoom_In. With the factory lenses it loses 0.1–0.3 dB. Details in
+    docs/fisheye.md.
 - **Insta360 photos through their factory lens; masks past a fisheye's
   field of view.** On three of FIORD's 200° scenes (front lens, 800 px),
   the mask past 100° gains 0.7–1.8 dB of held-out PSNR over masking
@@ -527,6 +558,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **A fisheye pixel past the lens's reach unprojected to a ray.** An
+  `OPENCV_FISHEYE` (or radial fisheye) lens's radius peaks at some angle,
+  and the pixels beyond it, such as the corners past a 200° lens's image
+  circle, have no ray. `Camera::unit_ray_from_pixel` solved for the angle by
+  Newton and took wherever it stopped, sometimes within 40° of the axis. It
+  now returns `None` unless the angle projects back to the pixel, as the
+  thin-prism model already did. With a lens refined on FIORD (radius peaking
+  114° off the axis, inside the 800 px image's corners), `--max-angle 100`
+  kept 1.4% of each image past 100°, dark corners included in training.
+  Two-lens rigs of those lenses (`--back-images`, above) trained so scored
+  1.1–1.4 dB lower on their held-out photos.
 - **`--refine-camera` could fold a fisheye's lens on the initial pair.**
   The mapper's first bundle adjustment refines the lens from the initial
   pair's points alone. On one of FIORD's 200° scenes, from 36 points, its
