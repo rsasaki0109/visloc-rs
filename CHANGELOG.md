@@ -33,13 +33,13 @@ All notable changes to `visloc-rs` will be documented here.
   `--masks` as well, a pixel is masked out where either mask has it out.
   Also `gsplat_photos_cuda --camera-mask`. On FIORD's 200° scenes, whose
   tripod sits at the top of every photo, a mask of it (1.8–2.0% of the
-  image circle) gains 0.2–0.6 dB of held-out PSNR off the tripod in the two
-  indoor scenes, 0.3–1.3 dB at 75–95° off the axis; the outdoor scene is
+  image circle) gains 0.3–0.4 dB of held-out PSNR off the tripod in the two
+  indoor scenes, 0.3–1.4 dB at 75–95° off the axis; the outdoor scene is
   within run-to-run spread. Details in docs/fisheye.md.
 - **Insta360 photos through their factory lens; masks past a fisheye's
   field of view.** On three of FIORD's 200° scenes (front lens, 800 px),
   the mask past 100° gains 0.7–1.8 dB of held-out PSNR over masking
-  near-black pixels. The factory lens gains another 1.1–1.4 dB over
+  near-black pixels. The factory lens gains another 1.3–1.8 dB over
   FIORD's calibration where that is off, and ties where it is right.
   Details in docs/fisheye.md.
   - **Reading the calibration.** `visloc_io::insv::read_insta360_lenses`
@@ -527,6 +527,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Fixed
 
+- **An Insta360 photo's lens centre had x and y swapped.** An `.insp`
+  photo's calibration has the photo's axes transposed: its `cx` is the
+  row in the lens's square and its `cy` the column.
+  `FisheyeLens::in_photo` (behind `insta360_lens_cameras`) read them as
+  they stand, so the centre landed 6 px off along each axis on FIORD's
+  One RS 1-Inch photos. It now swaps them, and `fx`/`fy` and `p1`/`p2`
+  with them.
+  - The swapped centres lie within 0.9 px of the image circles' centres.
+  - On FIORD's three scenes, the factory runs gain 0.1–0.4 dB of held-out
+    PSNR.
+  - Videos (`--insv`) are unchanged; they put the centre in the middle of
+    the lens image.
+  - Details in docs/insta360_lens.md and docs/fisheye.md.
 - **Kannala-Brandt fisheyes unprojected rays past 90° to their mirror
   image.** `OPENCV_FISHEYE`, `RADIAL_FISHEYE` and `SIMPLE_RADIAL_FISHEYE`
   built the ray as `(tan θ · x̂, 1)`, which past 90° points ahead of the
