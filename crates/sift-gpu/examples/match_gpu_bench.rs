@@ -71,9 +71,13 @@ fn main() {
     let matcher = GpuMatcher::new(ctx);
     let t_up = t.elapsed().as_secs_f64();
     // Warm-up, then timed.
-    let _ = matcher.match_pairs(ctx, &bank, &pairs[..1], Some(0.8), true);
+    let _ = matcher
+        .match_pairs(ctx, &bank, &pairs[..1], Some(0.8), true)
+        .unwrap();
     let t = Instant::now();
-    let gpu = matcher.match_pairs(ctx, &bank, &pairs, Some(0.8), true);
+    let gpu = matcher
+        .match_pairs(ctx, &bank, &pairs, Some(0.8), true)
+        .unwrap();
     let tg = t.elapsed().as_secs_f64();
     println!(
         "gpu: {} pairs in {:.3}s ({:.2} ms/pair, bank upload {:.3}s), mean {} matches",
@@ -103,12 +107,18 @@ fn main() {
         let t = Instant::now();
         let bank8 = FeatureBank::upload_u8(ctx, &sets).unwrap();
         let t_up8 = t.elapsed().as_secs_f64();
-        let _ = matcher.match_pairs(ctx, &bank8, &pairs[..1], Some(0.8), true);
+        let _ = matcher
+            .match_pairs(ctx, &bank8, &pairs[..1], Some(0.8), true)
+            .unwrap();
         let t = Instant::now();
-        let g8 = matcher.match_pairs(ctx, &bank8, &pairs, Some(0.8), true);
+        let g8 = matcher
+            .match_pairs(ctx, &bank8, &pairs, Some(0.8), true)
+            .unwrap();
         let t8 = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let f8 = matcher.match_pairs(ctx, &bank8, &pairs, Some(0.8), false);
+        let f8 = matcher
+            .match_pairs(ctx, &bank8, &pairs, Some(0.8), false)
+            .unwrap();
         let tf8 = t.elapsed().as_secs_f64();
         let (mut same, mut n32, mut n8) = (0usize, 0usize, 0usize);
         for (a, b) in gpu.iter().zip(&g8) {

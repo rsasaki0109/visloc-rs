@@ -65,12 +65,13 @@ async fn map_buffer_async(
 /// polled until submission `index` (or, for `None`, all work) is done, so
 /// under `pollster::block_on` this returns at once, as a blocking readback
 /// would; in a browser, where nothing may block, the page's event loop
-/// completes the map.
+/// completes the map. A lost device or a failed mapping is
+/// [`SiftGpuError::Readback`].
 pub(crate) async fn mapped(
     device: &wgpu::Device,
     slice: wgpu::BufferSlice<'_>,
     index: Option<wgpu::SubmissionIndex>,
-) {
+) -> Result<(), SiftGpuError> {
     let state: Arc<Mutex<MapState>> = Arc::new(Mutex::new((None, None)));
     let callback_state = Arc::clone(&state);
     slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -86,13 +87,15 @@ pub(crate) async fn mapped(
             submission_index: index,
             timeout: None,
         })
-        .ok();
+        .map_err(|error| SiftGpuError::Readback(error.to_string()))?;
     #[cfg(target_arch = "wasm32")]
     let _ = (device, index);
     std::future::poll_fn(|cx| {
         let mut state = state.lock().expect("map future lock");
-        if state.0.take().is_some() {
-            std::task::Poll::Ready(())
+        if let Some(result) = state.0.take() {
+            std::task::Poll::Ready(
+                result.map_err(|error| SiftGpuError::Readback(error.to_string())),
+            )
         } else {
             state.1 = Some(cx.waker().clone());
             std::task::Poll::Pending
@@ -108,6 +111,21 @@ pub enum SiftGpuError {
     Unsupported,
     #[error("image too small for SIFT: {width}x{height}")]
     ImageTooSmall { width: usize, height: usize },
+    /// A lost device or a failed buffer mapping.
+    #[error("reading back a GPU buffer failed: {0}")]
+    Readback(String),
+    /// The outputs of matching one image pair do not fit the device's
+    /// storage binding limit.
+    #[error(
+        "matching {query} against {train} descriptors needs {records} output records of 16 B, \
+         past the device's limit of {limit}"
+    )]
+    PairTooLarge {
+        query: usize,
+        train: usize,
+        records: usize,
+        limit: usize,
+    },
 }
 
 const MAX_OCTAVES: usize = 16;
@@ -311,9 +329,9 @@ pub(crate) async fn read_bytes(
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
     len: usize,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, SiftGpuError> {
     if len == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("sift-staging"),
@@ -327,10 +345,13 @@ pub(crate) async fn read_bytes(
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, len as u64);
     queue.submit(Some(encoder.finish()));
     let slice = staging.slice(..);
-    mapped(device, slice, None).await;
-    let data = slice.get_mapped_range().expect("map range").to_vec();
+    mapped(device, slice, None).await?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|error| SiftGpuError::Readback(error.to_string()))?
+        .to_vec();
     staging.unmap();
-    data
+    Ok(data)
 }
 
 pub(crate) fn storage(
