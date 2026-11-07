@@ -257,8 +257,8 @@ mesh from median depths. `--equirect` takes 360° panoramas, and `visloc_web`
 runs the same pipeline from a browser. Stages, the hero runs, 360° cameras,
 the web UI and the reproduction commands:
 [photos to splat and mesh](docs/photos_to_splat.md). A trained splat can
-also take a class per gaussian, voted from SAM 3 labels of its photos, and
-the web viewer blends it in:
+also take a class and an object per gaussian, voted from SAM 3 labels of
+its photos, and the web viewer blends them in:
 [semantic splats](docs/semantic_splat.md).
 
 ## Visual-Inertial SLAM (Basalt Rust port)

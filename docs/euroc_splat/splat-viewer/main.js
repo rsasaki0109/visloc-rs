@@ -1519,9 +1519,12 @@ async function main() {
                 buffer: splatData.buffer,
                 vertexCount: Math.floor(bytesRead / rowLength),
             });
-            if (params.get("semantic")) {
+            const overlays = ["semantic", "instances"]
+                .filter((p) => params.get(p))
+                .map((p) => new URL(params.get(p), location.href));
+            if (overlays.length) {
                 await semanticOverlay(
-                    new URL(params.get("semantic"), location.href),
+                    overlays,
                     splatData.slice(0, bytesRead),
                     worker,
                     parseFloat(params.get("blend") || "0") || 0,
@@ -1531,25 +1534,40 @@ async function main() {
     }
 }
 
-// The class overlay, ?semantic=semantic.splat next to ?url=scene.splat (both
-// from gsplat_semantic_cuda --web): the same splats in the same order, painted
-// by class. A slider, or the M key, blends the scene's colours into the
-// classes' (?blend=1 starts on the classes); the legend comes from the
-// overlay's .json beside it.
-async function semanticOverlay(url, rgb, worker, start) {
-    const req = await fetch(url, { mode: "cors", credentials: "omit" });
-    if (req.status != 200)
-        throw new Error(req.status + " Unable to load " + req.url);
-    const sem = new Uint8Array(await req.arrayBuffer());
-    if (sem.length != rgb.length)
-        throw new Error(
-            "the class overlay has " + sem.length / 32 +
-                " splats, the scene " + rgb.length / 32,
-        );
+// The class and instance overlays, ?semantic=semantic.splat and
+// &instances=instances.splat next to ?url=scene.splat (all from
+// gsplat_semantic_cuda --web): the same splats in the same order, painted by
+// class or by object. A slider, or the M key, blends the scene's colours into
+// the overlay's (?blend=1 starts on it); O switches the overlay. Each legend
+// comes from the overlay's .json beside it.
+async function semanticOverlay(urls, rgb, worker, start) {
+    const overlays = [];
+    for (const url of urls) {
+        const req = await fetch(url, { mode: "cors", credentials: "omit" });
+        if (req.status != 200)
+            throw new Error(req.status + " Unable to load " + req.url);
+        const bytes = new Uint8Array(await req.arrayBuffer());
+        if (bytes.length != rgb.length)
+            throw new Error(
+                url.pathname + " has " + bytes.length / 32 +
+                    " splats, the scene " + rgb.length / 32,
+            );
+        let legend = null;
+        try {
+            legend = await (
+                await fetch(new URL(url.pathname.replace(/\.splat$/, ".json"), url))
+            ).json();
+        } catch (err) {
+            console.log("no legend for", url.pathname, err);
+        }
+        overlays.push({ bytes, legend });
+    }
+    let current = 0;
     const n = rgb.length / 32;
     const colors = new Uint8Array(4 * n);
     let pending = null;
     const blend = (t) => {
+        const sem = overlays[current].bytes;
         for (let i = 0; i < n; i++) {
             for (let c = 0; c < 3; c++) {
                 const a = rgb[32 * i + 24 + c];
@@ -1578,30 +1596,45 @@ async function semanticOverlay(url, rgb, worker, start) {
     slider.style.verticalAlign = "middle";
     slider.addEventListener("input", () => request(parseFloat(slider.value)));
     const row = document.createElement("div");
-    row.append("RGB ", slider, " classes (M)");
-    panel.append(row);
-    window.addEventListener("keydown", (e) => {
-        if (e.code != "KeyM") return;
-        slider.value = parseFloat(slider.value) < 0.5 ? 1 : 0;
-        request(parseFloat(slider.value));
-    });
-    try {
-        const legend = await (
-            await fetch(new URL(url.pathname.replace(/\.splat$/, ".json"), url))
-        ).json();
+    const label = document.createElement("span");
+    row.append("RGB ", slider, " ", label);
+    const items = document.createElement("div");
+    panel.append(row, items);
+    // The legend: classes by share of the splats, or objects per class.
+    const show = () => {
+        const { legend } = overlays[current];
+        const objects = legend && legend.objects;
+        label.textContent =
+            (objects ? "objects" : "classes") + " (M" + (overlays.length > 1 ? ", O" : "") + ")";
+        items.replaceChildren();
+        if (!legend) return;
         const total = legend.classes.reduce((s, c) => s + c.count, 0) || 1;
         for (const c of legend.classes) {
+            if (objects && !c.count) continue;
             const item = document.createElement("div");
             const swatch = document.createElement("span");
             swatch.style.cssText =
                 "display:inline-block;width:10px;height:10px;margin-right:5px;" +
                 "background:rgb(" + c.color.join(",") + ")";
-            item.append(swatch, c.name + " " + ((100 * c.count) / total).toFixed(1) + "%");
-            panel.append(item);
+            item.append(
+                swatch,
+                c.name + " " + (objects ? "×" + c.count : ((100 * c.count) / total).toFixed(1) + "%"),
+            );
+            items.append(item);
         }
-    } catch (err) {
-        console.log("no legend for the class overlay", err);
-    }
+    };
+    show();
+    window.addEventListener("keydown", (e) => {
+        if (e.code == "KeyM") {
+            slider.value = parseFloat(slider.value) < 0.5 ? 1 : 0;
+        } else if (e.code == "KeyO" && overlays.length > 1) {
+            current = (current + 1) % overlays.length;
+            show();
+        } else {
+            return;
+        }
+        request(parseFloat(slider.value));
+    });
     document.body.append(panel);
 }
 

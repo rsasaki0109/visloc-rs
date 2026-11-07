@@ -15,6 +15,10 @@ Writes ``<out>/<image name>.png`` (the image's name with the extension
 replaced; 8-bit grey, the class index) and ``<out>/classes.txt`` (``index r g
 b name`` per line: 0 other, then the prompts in order). ``--preview`` also
 writes ``<out>/preview/<image name>.jpg``, the classes over the photo.
+``--instances`` also writes each pixel's instance, for
+``gsplat_semantic_cuda --instances``: ``<out>/instances/<image name>.png``
+(8-bit grey: 0 none, i the image's i-th instance, 255 no label) and ``.txt``
+(``id class score`` per instance, best scores first).
 
 Needs torch, a transformers with SAM 3 (``Sam3Model``), and access to the
 gated ``facebook/sam3`` checkpoint on the Hugging Face Hub (``hf auth
@@ -41,6 +45,7 @@ PALETTE = [
 ]
 OTHER = (128, 128, 128)
 NO_LABEL = 255
+MAX_INSTANCES = 254
 EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")
 
 
@@ -69,11 +74,14 @@ def encode_prompts(model, processor, prompts, device):
 
 
 def label_image(model, processor, rgb, texts, threshold, mask_threshold, device, dtype):
-    """Each pixel's class (0 other, k the k-th prompt) and the score of the
-    instance that gave it."""
+    """Each pixel's class (0 other, k the k-th prompt) and instance (0 none,
+    i the i-th entry of the returned list of (class, score), at most
+    MAX_INSTANCES), both from the highest-scoring instance over it."""
     w, h = rgb.size
     label = np.zeros((h, w), np.uint8)
+    inst = np.zeros((h, w), np.int32)
     best = np.zeros((h, w), np.float32)
+    found = []  # (class, score) per instance, 1-based ids in `inst`
     image_inputs = processor(images=rgb, return_tensors="pt").to(device)
     with torch.no_grad():
         # The image's features once, then one detection per prompt.
@@ -89,9 +97,18 @@ def label_image(model, processor, rgb, texts, threshold, mask_threshold, device,
             for mask, score in zip(result["masks"], result["scores"]):
                 score = float(score)
                 take = mask.cpu().numpy().astype(bool) & (score > best)
+                found.append((k, score))
                 label[take] = k
+                inst[take] = len(found)
                 best[take] = score
-    return label, best
+    # Renumber the instances that kept pixels, best scores first.
+    kept = [i for i in np.unique(inst) if i > 0]
+    kept.sort(key=lambda i: -found[i - 1][1])
+    kept = kept[:MAX_INSTANCES]
+    remap = np.zeros(len(found) + 1, np.uint8)
+    for new, old in enumerate(kept, start=1):
+        remap[old] = new
+    return label, remap[inst], [found[i - 1] for i in kept]
 
 
 def main():
@@ -110,6 +127,10 @@ def main():
     )
     ap.add_argument("--model", default="facebook/sam3")
     ap.add_argument("--preview", action="store_true", help="also write <out>/preview/*.jpg")
+    ap.add_argument(
+        "--instances", action="store_true",
+        help="also write <out>/instances/<image name>.png and .txt, each pixel's instance",
+    )
     args = ap.parse_args()
 
     prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
@@ -130,7 +151,7 @@ def main():
     model = Sam3Model.from_pretrained(args.model, torch_dtype=dtype).to(device).eval()
     processor = Sam3Processor.from_pretrained(args.model)
     texts = encode_prompts(model, processor, prompts, device)
-    palette =np.array(colors + [(0, 0, 0)] * (256 - len(colors)), np.uint8)
+    palette = np.array(colors + [(0, 0, 0)] * (256 - len(colors)), np.uint8)
     palette[NO_LABEL] = (0, 0, 0)
 
     counts = np.zeros(len(prompts) + 2, np.int64)  # classes, then no label
@@ -139,17 +160,27 @@ def main():
         img = Image.open(os.path.join(args.images, name))
         alpha = np.asarray(img.getchannel("A")) if "A" in img.getbands() else None
         rgb = img.convert("RGB")
-        label, _ = label_image(
+        label, inst, found = label_image(
             model, processor, rgb.rotate(args.rotate, expand=True), texts,
             args.threshold, args.mask_threshold, device, dtype,
         )
         label = np.ascontiguousarray(np.rot90(label, -args.rotate // 90))
+        inst = np.ascontiguousarray(np.rot90(inst, -args.rotate // 90))
         if alpha is not None:
             label[alpha < 128] = NO_LABEL
+            inst[alpha < 128] = NO_LABEL
         stem = os.path.splitext(name)[0]
         out = os.path.join(args.out, stem + ".png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         Image.fromarray(label, "L").save(out)
+        if args.instances:
+            base = os.path.join(args.out, "instances", stem)
+            os.makedirs(os.path.dirname(base), exist_ok=True)
+            Image.fromarray(inst, "L").save(base + ".png")
+            with open(base + ".txt", "w") as f:
+                f.write("# id class score\n")
+                for j, (k, score) in enumerate(found, start=1):
+                    f.write(f"{j} {k} {score:.4f}\n")
         counts[: len(prompts) + 1] += np.bincount(
             label[label != NO_LABEL].ravel(), minlength=len(prompts) + 1
         )[: len(prompts) + 1]
