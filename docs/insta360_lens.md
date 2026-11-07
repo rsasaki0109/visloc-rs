@@ -46,6 +46,18 @@ in it:
 - Its circle centres sit up to 4 px from the lenses' optical centres.
 - The photo is the calibration image itself: 6528 x 3264, the two lenses
   side by side, each a square as tall as the photo.
+- The calibration's axes are the photo's transposed. Its `cx` is the row
+  in the lens's square (plus 3264 on the back lens), and its `cy` is the
+  column. So `fx` and `fy` trade places, and so do `p1` and `p2`.
+  - Swapped, the centres are (1609.8, 1616.1) for the front lens and
+    (1607.5, 1613.6) for the back one.
+  - Both lie within 0.9 px of the image circles' centres, fitted to the
+    circles' dark rims on two scenes.
+  - On three scenes, `--refine-camera` moves the centre from where it was
+    read to 0.5–2 px from the swapped one.
+  - As read, both centres are 6–7 px off along each axis.
+  - The `fx`/`fy` and `p1`/`p2` swaps follow from the transposition. Their
+    effect is too small to check here.
 
 `visloc_io::insv::read_insta360_lenses` reads the lenses from either file,
 looking through the whole trailer. A lens takes the circle centred within 1%

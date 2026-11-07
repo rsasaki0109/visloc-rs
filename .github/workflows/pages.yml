@@ -72,7 +72,7 @@ jobs:
           test -f _site/sfm/vendor/three.js
 
       - name: Upload
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
 
   deploy:
     needs: build
@@ -83,4 +83,4 @@ jobs:
     steps:
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

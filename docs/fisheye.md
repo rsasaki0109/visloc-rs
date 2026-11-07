@@ -458,7 +458,7 @@ They train for 30k steps with every 8th photo held out.
 ```bash
 insta360_lens_cameras IMG_20241120_000613_00_729.insp   # a --camera row per lens
 gsplat_photos_cuda --images meetingroom/fisheyeimages/cam1 --out run --max-size 800 \
-  --camera "OPENCV_FISHEYE 3264 3264 989.857 989.705 1616.62 1610.29 0.0236 -0.00764 -0.00356 0.00048" \
+  --camera "OPENCV_FISHEYE 3264 3264 989.705 989.857 1610.29 1616.62 0.0236 -0.00764 -0.00356 0.00048" \
   --max-angle 100
 gsplat_train_cuda --data run --alpha-mask
 ```
@@ -470,6 +470,9 @@ them in `images/` and their model in `colmap/model/`.
   (Mei) model in their trailer, as X5 videos do
   ([insta360_lens.md](insta360_lens.md)). The three scenes' photos carry
   the same one, so they come from one camera.
+  - Its axes are the photo's transposed, so its `cx` and `cy` trade
+    places. Read as is, the centre is 6 px off along each axis at full
+    resolution, and the factory runs below lose 0.1–0.4 dB.
   - `insta360_lens_cameras` fits `OPENCV_FISHEYE` to it out to 100° off
     the axis, within 0.06 px.
   - That model has no tangential terms, so they are left out. They move
@@ -477,7 +480,7 @@ them in `images/` and their model in `colmap/model/`.
 - **FIORD's calibration.** FIORD calibrated each scene by itself, and the
   results differ. COLMAP cannot take rays past 90°, so MeetingRoom_In's
   model has no observation beyond 88°. All three keep the initial
-  principal point (1612, 1617), 1.1 and 1.6 px from the factory one at
+  principal point (1612, 1617), 0.4 and 0.1 px from the factory one at
   800 px. Here is how far each radius runs past the factory model's at
   800 px:
 
@@ -494,17 +497,17 @@ them in `images/` and their model in `colmap/model/`.
   reproduce from other views.
 
 SfM registers every photo with either camera. Its poses agree with FIORD's
-model to 0.16–0.40% of the path's extent and 0.2–0.7° (median). Here is
+model to 0.15–0.42% of the path's extent and 0.20–0.35° (median). Here is
 the reprojection error at 800 px (median), each camera held fixed:
 
 | Scene | Camera | 0–75° | 75–85° | 85–90° | 90–95° | 95–100° | Rays past 90° |
 |---|---|---|---|---|---|---|---|
 | MeetingRoom_In | FIORD's | 0.49–0.52 px | 0.70 px | 1.00 px | 1.42 px | 1.72 px | 3.3% |
-| | factory | 0.46–0.49 px | 0.58 px | 0.77 px | 0.81 px | 0.79 px | 4.4% |
+| | factory | 0.44–0.47 px | 0.52 px | 0.65 px | 0.72 px | 0.59 px | 4.5% |
 | Building_In | FIORD's | 0.37–0.47 px | 0.43 px | 0.56 px | 0.61 px | 0.87 px | 6.1% |
-| | factory | 0.42–0.49 px | 0.47 px | 0.58 px | 0.62 px | 0.57 px | 6.4% |
+| | factory | 0.40–0.48 px | 0.45 px | 0.55 px | 0.57 px | 0.49 px | 6.6% |
 | Bridge_Out | FIORD's | 0.40–0.59 px | 0.55 px | 0.82 px | 1.18 px | 1.17 px | 7.6% |
-| | factory | 0.30–0.43 px | 0.34 px | 0.38 px | 0.44 px | 0.47 px | 9.2% |
+| | factory | 0.27–0.42 px | 0.30 px | 0.33 px | 0.35 px | 0.36 px | 9.3% |
 
 Here is the held-out PSNR within 100° off the axis. In each scene the
 three runs are scored on the same photos (14, 29 and 34), and on the
@@ -512,37 +515,120 @@ pixels all three masks keep.
 
 | Camera | Training mask | MeetingRoom_In | Building_In | Bridge_Out |
 |---|---|---|---|---|
-| FIORD's | `--mask-black 8` | 26.48 dB | 28.07 dB | 26.10 dB |
-| FIORD's | `--max-angle 100` | 28.15 dB | 28.73 dB | 27.87 dB |
-| factory | `--max-angle 100` | **29.52 dB** | 28.53 dB | **29.00 dB** |
+| FIORD's | `--mask-black 8` | 26.53 dB | 28.07 dB | 26.10 dB |
+| FIORD's | `--max-angle 100` | 28.24 dB | 28.73 dB | 27.92 dB |
+| factory | `--max-angle 100` | **30.07 dB** | 28.83 dB | **29.22 dB** |
 
-Two runs of one setup differ by up to 0.2 dB: a second Building_In run
-gives 28.70 dB with FIORD's camera and 28.71 dB with the factory one.
+Two runs of one setup differ by up to 0.2 dB.
 
 - **The mask** gains 0.7–1.8 dB in every scene.
-- **The factory model** gains 1.1–1.4 dB where FIORD's calibration is off
+- **The factory model** gains 1.3–1.8 dB where FIORD's calibration is off
   (MeetingRoom_In, Bridge_Out). On Building_In FIORD's calibration is
   within 0.6 px of the factory model out to 95°, and the two tie. The
   factory model gives the right lens without a calibration of the scene.
 - **Refining in the mapper** (`--refine-camera`) does not fix FIORD's
   calibration. On MeetingRoom_In it gains 0.2 dB with FIORD's poses and
   the near-black mask. It also keeps only 0.5% of the rays past 90°,
-  where the factory model keeps 4.4%.
+  where the factory model keeps 4.5%.
 
 The factory runs by angle off the axis:
 
 | Scene | 0–55.7° | 55.7–75° | 75–85° | 85–90° | 90–95° | 95–100° |
 |---|---|---|---|---|---|---|
-| MeetingRoom_In | 31.81 dB | 32.45 dB | 30.53 dB | 26.41 dB | 26.63 dB | 23.60 dB |
-| Building_In | 32.10 dB | 31.86 dB | 28.39 dB | 25.39 dB | 23.55 dB | 23.27 dB |
-| Bridge_Out | 31.94 dB | 31.15 dB | 27.98 dB | 26.93 dB | 25.73 dB | 24.19 dB |
+| MeetingRoom_In | 32.07 dB | 32.69 dB | 31.24 dB | 26.97 dB | 27.25 dB | 24.51 dB |
+| Building_In | 32.43 dB | 32.31 dB | 28.90 dB | 25.63 dB | 23.78 dB | 23.36 dB |
+| Bridge_Out | 32.24 dB | 31.48 dB | 28.19 dB | 27.18 dB | 25.84 dB | 24.29 dB |
 
 FIORD's undistorted images are pinholes over the central 111°. On
 MeetingRoom_In's, the same trainer reaches 30.96 dB. The fisheye runs give
-31.5–31.8 dB within that cone (55.7° off the axis). In all three scenes
+32.1–32.4 dB within that cone (55.7° off the axis). In all three scenes
 the PSNR falls past 75°.
 
+Most of that fall is the tripod. FIORD's photos are upside down: the top of
+the image circle looks at the ground, where the tripod's head and legs sit
+at the same pixels in every photo. The splat cannot put them anywhere in
+the scene, and the error concentrates there (the 60° of the circle around
+its top). They show sharply in the per-pixel median
+of a scene's photos. The mask here takes the dark pixels (luma < 90) of that
+median in the image's top sixth, grown by 4 px. It covers 1.8–2.0% of the
+circle. `--camera-mask` gives it to every photo:
+
+```bash
+gsplat_photos_cuda --images meetingroom/fisheyeimages/cam1 --out run --max-size 800 \
+  --camera "OPENCV_FISHEYE 3264 3264 ..." --max-angle 100 --camera-mask tripod.png
+```
+
+SfM drops the 1.5–3.8% of the keypoints that land on the tripod, still
+registers every photo, and agrees with FIORD's poses as before (0.16–0.42%
+of the extent, 0.20–0.35°). Here is the held-out PSNR of the factory runs
+on the pixels off the tripod, trained with and without it:
+
+| Scene | Tripod in training | 0–55.7° | 55.7–75° | 75–85° | 85–90° | 90–95° | 95–100° | 0–100° |
+|---|---|---|---|---|---|---|---|---|
+| MeetingRoom_In | in | 31.92 dB | 32.63 dB | 31.83 dB | 29.29 dB | 29.43 dB | 28.25 dB | 31.33 dB |
+| | masked out | 31.90 dB | 32.79 dB | 32.17 dB | 30.28 dB | 30.66 dB | 28.54 dB | 31.66 dB |
+| Building_In | in | 32.20 dB | 32.26 dB | 30.07 dB | 28.61 dB | 28.37 dB | 27.23 dB | 30.73 dB |
+| | masked out | 32.16 dB | 32.12 dB | 30.90 dB | 30.04 dB | 29.09 dB | 27.38 dB | 31.09 dB |
+| Bridge_Out | in | 31.90 dB | 31.36 dB | 28.30 dB | 29.74 dB | 28.07 dB | 25.83 dB | 29.99 dB |
+| | masked out | 31.46 dB | 31.17 dB | 27.96 dB | 29.73 dB | 28.49 dB | 25.90 dB | 29.81 dB |
+
+- **Scoring off the tripod** alone lifts the factory runs' 0–100° from
+  30.07, 28.83 and 29.22 dB to 31.33, 30.73 and 29.99 dB, and their 85–90°
+  ring by 2.3–3.0 dB.
+- **Training off the tripod** gains another 0.3 and 0.4 dB on
+  MeetingRoom_In and Building_In, 0.3–1.4 dB at 75–95°. On Bridge_Out the
+  difference is within the 0.2 dB between runs: its rim also holds people
+  walking by, and in one held-out view an object close to the lens.
+- **Off the tripod the PSNR still falls** past 85°: 1.6–2.1 dB at 85–90°
+  and 3.4–5.6 dB at 95–100°, below the 0–55.7° ring.
+
+Part of the rest is the factory lens's radius. With the tripod masked out,
+SfM's reprojection residuals still lean one way, in most directions around
+the axis:
+- At 30–56° off the axis the keypoints lie 0.10–0.13 px further out than
+  the factory model puts them.
+- At 85–95° they lie 0.05–0.21 px further in.
+
+The splat shows that error only where some photos see a point near the
+centre and others near the rim. Between photos, MeetingRoom_In's camera
+turns most and Bridge_Out's least: their axes lie 86° and 14° from the
+mean axis (median). At 85–95°, MeetingRoom_In's held-out renders sit
+0.39–0.45 px off the photos, against 0.23 px at the centre (median over
+textured patches). Bridge_Out's sit 0.12–0.13 px off, the same as at its
+centre.
+
+`--refine-camera` refines the lens in the mapper's bundle adjustment,
+starting from the factory model. Where it converges, the residuals no
+longer lean (within 0.1 px). MeetingRoom_In's renders then sit 0.20–0.22 px
+off at 85–95°, against 0.15 px at the centre. The radius it finds is nearly
+the same in every scene. At 800 px it is longer than the factory radius
+by:
+- 0.9–1.0 px at 30°
+- 1.4–1.5 px at 60°
+- 0.8–1.0 px at 90°
+- 0.1–0.5 px at 100°
+
+Here is the held-out PSNR off the tripod, with the tripod masked out:
+
+| Scene | Lens | 0–55.7° | 75–85° | 85–90° | 90–95° | 0–100° |
+|---|---|---|---|---|---|---|
+| MeetingRoom_In | factory | 31.90 dB | 32.17 dB | 30.28 dB | 30.66 dB | 31.66 dB |
+| | refined | 32.41 dB | 33.28 dB | 31.50 dB | 32.12 dB | **32.42 dB** |
+| Bridge_Out | factory | 31.46 dB | 27.96 dB | 29.73 dB | 28.49 dB | 29.81 dB |
+| | refined | 32.37 dB | 28.28 dB | 30.04 dB | 28.68 dB | **30.28 dB** |
+
+On Building_In the refinement ran off. Its `k1..k4` bent the radius back
+past 75°, so the radius shrank as the angle grew. The mapper then dropped
+every observation past 76°, and the PSNR fell to 22.5 dB. A run started
+from the centre as read (before the fix) converged on all three scenes.
+It moved the centre to 0.5–2 px from the swapped one and gained 0.5 dB
+on Building_In. Until the refinement cannot run off, leave it off.
+
 Still open:
+- A lens refinement that cannot run off, e.g. one that keeps the radius
+  growing with the angle.
+- The rest of the fall at the rim: with the refined lens, 0.9–2.3 dB at
+  85–90° below the 0–55.7° ring.
 - The tangential terms. `THIN_PRISM_FISHEYE` could take them.
 - Both lenses as one rig ([above](#sfm-mapping-through-the-lens)).
 

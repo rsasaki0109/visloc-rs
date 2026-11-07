@@ -25,7 +25,9 @@ It is resumable: a sequence whose estimate already exists in `--slam-dir` is
 skipped, so an interrupted run can be restarted unchanged.
 
 The test-set scores of the submissions so far, and what changed between them,
-are in [lamaria_test_results.md](lamaria_test_results.md).
+are in [lamaria_test_results.md](lamaria_test_results.md). Since submission 7
+the Moving platform track's estimates also go through the GPS bridging of
+[lamaria_gps.md](lamaria_gps.md), outside this loop.
 
 ## Track layout
 

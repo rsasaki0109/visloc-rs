@@ -1,31 +1,41 @@
 # LaMAria test-set results
 
-Six submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
+Seven submissions of the BA chain ([lamaria_submission.md](lamaria_submission.md))
 to the 63 test sequences, run on GitHub Actions
 ([`lamaria_submission.yml`](../.github/workflows/lamaria_submission.yml)); the
-fifth and the sixth reran five Short sequences locally, on an 8 GB GPU. The
-system uses the two grayscale SLAM cameras and the 1 kHz IMU only (no GPS or
-magnetometer) and runs one VIO per sequence. Scores are the leaderboard's means
-per challenge.
+fifth and the sixth reran five Short sequences locally, on an 8 GB GPU, and the
+seventh bridged eight Moving platform sequences locally. The
+system runs one VIO per sequence on the two grayscale SLAM cameras and the
+1 kHz IMU. Submissions 1–6 use nothing else; submission 7 also bridges the
+Moving platform track's missed rides with the recordings' GPS
+([lamaria_gps.md](lamaria_gps.md)). Scores are the leaderboard's means per
+challenge.
 
 | Submission | Short | Medium | Long | Low light | Moving platform | Mean |
 |---|---:|---:|---:|---:|---:|---:|
 | 1 (2026-10-23) | 67.7 | 54.8 | 54.1 | 53.6 | 27.5 | 51.5 |
 | 2 (2026-10-24) | 67.7 | 54.8 | 54.1 | 59.3 | 26.9 | 52.6 |
 | 3 (2026-10-25) | 67.7 | 54.8 | **54.2** | **60.9** | 26.9 | 52.9 |
-| 4 (2026-10-27) | 68.9 | **56.8** | 54.1 | 60.6 | **30.6** | 54.2 |
-| 5 (2026-10-28) | **70.1** | **56.8** | 54.1 | 60.6 | **30.6** | **54.4** |
-| 6 (2026-10-30) | 69.7 | **56.8** | 54.1 | 60.6 | **30.6** | 54.3 |
+| 4 (2026-10-27) | 68.9 | **56.8** | 54.1 | 60.6 | 30.6 | 54.2 |
+| 5 (2026-10-28) | **70.1** | **56.8** | 54.1 | 60.6 | 30.6 | 54.4 |
+| 6 (2026-10-30) | 69.7 | **56.8** | 54.1 | 60.6 | 30.6 | 54.3 |
+| 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | **57.7** |
+| SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
 | GroundedSLAM (2026-10-29) | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
 | RedComet | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
+| FlexVIO | 73.1 | 62.9 | 56.7 | 69.7 | 28.1 | 58.1 |
 | FPV-SLAM, binocular (2026-10-28) | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
 
-visloc-rs ranks fifth on 2026-10-31, behind Aria's SLAM (reproduced by the
-LaMAria team), GroundedSLAM, RedComet and the binocular FPV-SLAM. Their last
-uploads raised GroundedSLAM's mean from 62.3 to 72.4 and FPV-SLAM's from 42.8
-to 56.3. The same chain averages 64.35 per track on the ten training
-sequences. Each track's first training sequence is the one the method was
-developed on, and the test set behaves like the second ones
+On 2026-11-06 visloc-rs ranks sixth by the mean of the five challenges (the
+leaderboard itself lists the methods by their Short score). Ahead of it are
+Aria's SLAM (reproduced by the LaMAria team, 75.9), SLAM Dunk, GroundedSLAM,
+RedComet and FlexVIO; the leaderboard lists all of them as bino + imu. On the
+Moving platform track visloc-rs is fifth, behind Aria's SLAM (55.0), RedComet,
+SLAM Dunk and GroundedSLAM. Before submission 7, SLAM Dunk and FlexVIO had
+joined, and the last uploads had raised GroundedSLAM's mean from 62.3 to 72.4
+and FPV-SLAM's from 42.8 to 56.3. The same chain averages 64.35 per track on
+the ten training sequences. Each track's first training sequence is the one
+the method was developed on, and the test set behaves like the second ones
 ([Two sequences per track](lamaria_batch_ba.md#two-sequences-per-track)).
 
 ## What changed between the submissions
@@ -133,6 +143,38 @@ reuses submission 5's online result, ALIKED keypoints, revisits, IMU and VIO.
   to choose between the bands. Going back to the VIO's band because of these
   scores would choose on the test set, so the training set's choice stands.
 
+**Submission 7.** Submission 6 with eight Moving platform sequences bridged
+by GPS ([lamaria_gps.md](lamaria_gps.md#test-set-submission-7)):
+- **Change.** Where the trajectory jumps by 25 m or more against the
+  recordings' 1 Hz GPS fixes, the pieces after each jump move to the GPS. Only
+  x and y change. The walks have no step of 25 m or more and are not changed.
+- **Fetch.** The GPS was fetched without the images: about 1.4 GB for the 63
+  recordings.
+- **Result.** The Moving platform track goes from 30.6 to 47.3 and the mean
+  from 54.3 to 57.7. The 53 walks score as in submission 6, and so do
+  sequence_5_8 (no step) and 5_10 (no fix during its ride, 32.8).
+
+  | Sequence | Moved | Score, submission 6 → 7 | CP recall at 1 m |
+  |---|---:|---:|---:|
+  | sequence_5_5 | 253.9 m | 3.1 → **63.7** | 3.7 → 66.7 % |
+  | sequence_5_7 | 153.8 m | 29.6 → **69.2** | 6.7 → 66.7 % |
+  | sequence_5_6 | 244.4, 36.8, 27.5 m | 2.4 → **35.2** | 0.0 → 17.2 % |
+  | sequence_5_9 | 47.3 m | 10.1 → **37.6** | 0.0 → 20.0 % |
+  | sequence_5_2 | 70.5 m | 44.2 → **51.7** | 14.8 → 29.6 % |
+  | sequence_5_3 | 24.1 m | 29.3 → **31.0** | 11.1 → 3.7 % |
+  | sequence_5_1 | 26.7 m | 43.1 → 43.4 | 12.0 → 12.0 % |
+  | sequence_5_4 | 308.3 m | 39.2 → 36.2 | 22.7 → 13.6 % |
+
+  - **The two missed trams** (sequence_5_5 and 5_6) gain 93 points between
+    them, and sequence_5_7 40. The four largest gains make 3.2 of the mean's
+    3.3.
+  - **sequence_5_4 loses 3.0.** Submission 4 had shortened its ride at
+    50–180 s from 600 m to 214 m, and the bridging moves everything after the
+    ride by 308 m. Why the score drops is not known without the test ground
+    truth.
+  - **The two steps close to the threshold** (sequence_5_1 at 28.0 m and 5_3
+    at 25.1 m) move their scores by +0.3 and +1.7.
+
 ## Against GroundedSLAM, sequence by sequence
 
 GroundedSLAM's scores here are those before its upload of 2026-10-29.
@@ -181,7 +223,12 @@ from 61.09 to 64.30; on these test sequences it moved the scores by −0.4 …
   windows disagrees with the trajectory's by 1–3 m/s, against 0.2–0.3 m/s on
   the walks. Dead reckoning across a ride is 18 % short to 68 % long on the
   two training rides, so the chain does not bridge them ([Finding the rides
-  the VIO missed](lamaria_batch_ba.md#finding-the-rides-the-vio-missed)).
+  the VIO missed](lamaria_batch_ba.md#finding-the-rides-the-vio-missed)). The
+  recordings' GPS bridges them in submission 7 (3.1 → 63.7 and 2.4 → 35.2,
+  [lamaria_gps.md](lamaria_gps.md)).
+- **After the GPS, the Moving track's lowest** are sequence_5_3 (31.0),
+  5_10 (32.8; no fix during its ride), 5_6 (35.2), 5_4 (36.2) and 5_9
+  (37.6).
 - **The sun is no compass here.** On sequence_2_12 the saturated region the
   detector finds is overcast sky, and the Aria SLAM cameras see the sun only
   when it is low.

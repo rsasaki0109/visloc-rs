@@ -303,12 +303,14 @@ VIO runs on both SLAM cameras and the IMU, and a visual-inertial bundle
 adjustment ([`scripts/lamaria_batch_ba.py`](scripts/lamaria_batch_ba.py))
 runs behind it: SIFT keyframes at 2 Hz, matches guided by the VIO, revisits,
 and the last 240 s solved again every 30 s, with the gyro bias free to move
-in the first minutes while the device warms up (by day). Cameras and IMU
-only: no GPS, no magnetometer. The chain is causal and keeps up with the
-recording on 4 CPU cores (about 4 CPU seconds per second of recording); one
-batch pass after the recording, its gyro bias free to drift slowly, adds the
-revisits over the whole sequence. Score per track
-(official evaluator, higher is better):
+in the first minutes while the device warms up (by day). The chain is causal
+and keeps up with the recording on 4 CPU cores (about 4 CPU seconds per second
+of recording); one batch pass after the recording, its gyro bias free to drift
+slowly, adds the revisits over the whole sequence. visloc-rs's training scores
+below use the cameras and the IMU only; on the test set's Moving platform
+track, the recordings' 1 Hz GPS also bridges the rides the VIO missed
+([docs/lamaria_gps.md](docs/lamaria_gps.md)). Score per track (official
+evaluator, higher is better):
 
 | Method | Sequences | Short | Medium | Long | Low light | Moving | Mean |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |

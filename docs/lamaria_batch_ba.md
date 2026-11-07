@@ -2296,6 +2296,84 @@ behind, R_12_10cp and 3_18, barely revisit at all, and sequence_2_12's
 revisits come after its first ten minutes, too late for the heading that goes
 wrong at its start. Place recognition was not tried.
 
+### Dense matches between distant keyframes
+
+SIFT's matches thin out and go wrong as the keyframes grow apart ([Matches far
+apart are wrong](#matches-far-apart-are-wrong)). RoMa
+(https://github.com/Parskatt/RoMa, outdoor weights) matches two images densely.
+Its warp, read at the chain's SIFT keypoints, gives matches the solve can take
+as they are: a keypoint of image a goes to the keypoint of image b within 3 px
+of RoMa's prediction, the warp back from that keypoint lands within 3 px of the
+first, and RoMa's certainty is above 0.5 both ways. On 15 keyframe pairs per
+offset, one camera, scored within 2 px of the epipolar lines of the chain's
+final poses ("new": RoMa's matches in the VIO's band on the keypoints that the
+pair's SIFT matches leave free, against SIFT's correct matches):
+
+| Sequence | Apart | SIFT matches | Correct | RoMa matches | Correct | New correct |
+|---|---:|---:|---:|---:|---:|---:|
+| sequence_2_11 | 4 s | 1,123 | 75 % | 827 | 93 % | +29 % |
+| | 8 s | 605 | 63 % | 349 | 93 % | +38 % |
+| | 16 s | 390 | 40 % | 162 | 96 % | +45 % |
+| | 32 s | 287 | 12 % | 9 | 78 % | +14 % |
+| sequence_4_10 | 4 s | 250 | 57 % | 31 | 94 % | +11 % |
+| | 8 s | 150 | 33 % | 4 | 100 % | +4 % |
+| | 16 s | 159 | 23 % | 9 | 0 % | 0 |
+
+RoMa then matched every fourth keyframe with those 8, 16 and 32 keyframes
+later, each camera with itself, and both match steps (VIO-guided and the
+rematch) took its matches within their band on the free keypoints: 32,317 and
+37,451 of 95,161 on sequence_2_11, 33,229 and 41,046 of 98,803 on 3_18. Both
+chains on this machine, from the VIO as it ran:
+
+| Sequence | Matches | Online | First solve | With the revisits | Matching again | Mean error | Heading spread |
+|---|---|---:|---:|---:|---:|---:|---:|
+| sequence_2_11 | SIFT | **78.48** | **77.04** | 89.00 | **89.25** | 0.30 m | **0.19°** |
+| | SIFT and RoMa | 73.81 | 73.59 | **89.13** | 88.96 | 0.30 m | 0.20° |
+| sequence_3_18 | SIFT | **53.91** | **54.35** | **54.32** | **54.27** | **1.46 m** | **1.07°** |
+| | SIFT and RoMa | 48.84 | 52.38 | 52.34 | 52.29 | 1.83 m | 1.37° |
+
+The online windows lose 4.7 and 5.1. On sequence_2_11 the pass makes up for it
+(−0.29, about the seeds' spread there, 0.22; see [How far the chain moves for
+nothing](#how-far-the-chain-moves-for-nothing)). On sequence_3_18 it does not:
+−1.98, four times the seeds' 0.47, and the heading wanders more. The seeds were
+not run, and RoMa is not in the chain. It would not have fitted the real-time
+chain either: at 1.1 s per image pair on an 8 GB GPU, it takes 3.2–3.4 times
+the recording. Why the extra matches hurt sequence_3_18 was not
+looked into: its final poses are 1.46 m off on average, too far off to tell
+RoMa's right matches from its wrong ones as on sequence_2_11.
+
+### What sequence_3_18 still loses
+
+Against the pseudo-GT (diagnosis only), the heading error of the chain's
+final poses on sequence_3_18 goes from −2.3° in the first 60 s windows to
++1.4° near the end, +0.11° per minute in a linear fit. Turning the
+trajectory's steps by the windows' heading error, or stretching them by the
+windows' scale, shows what each error costs:
+
+| Removed with the pseudo-GT | CP Score | Mean error | Heading spread | Scale spread |
+|---|---:|---:|---:|---:|
+| Nothing | 54.27 | 1.46 m | 1.07° | 1.48 % |
+| The heading's linear trend | 60.02 | 1.22 m | 0.57° | 1.48 % |
+| The heading per window | 69.35 | 0.78 m | 0.12° | 1.48 % |
+| The scale per window | 58.09 | 1.35 m | 1.07° | 0.42 % |
+| Both per window | **86.92** | **0.32 m** | **0.12°** | **0.42 %** |
+
+The heading alone is worth 15 points, the scale alone 4, both together 33.
+The heading over this one-way route is the integrated gyroscope's ([Where the
+second sequences' heading drift comes
+from](#where-the-second-sequences-heading-drift-comes-from)), and the route
+barely revisits ([Revisits for place
+recognition](#revisits-for-place-recognition)).
+
+The largest scale errors are in the windows at 780–900 s (0.936 and 0.985).
+At 825–870 s the wearer moves at 1.5 m/s, and |accel| spreads 3.0–3.6 m/s²
+over 5 s, against 2.0–2.3 when walking. The VIO overstates the speed there by
+10–40 %, the chain by 3–10 %. Hard motion does not do that in general,
+though: over 10 s stretches of six training sequences (the chain's and the
+VIO's trajectories), the ratio of the path length to the pseudo-GT's
+correlates with the |accel| spread at −0.15 … +0.30, with the sign changing
+between sequences.
+
 ## Usage
 
 [`scripts/lamaria_ba_chain.py`](../scripts/lamaria_ba_chain.py) runs the real-time chain behind a VIO
