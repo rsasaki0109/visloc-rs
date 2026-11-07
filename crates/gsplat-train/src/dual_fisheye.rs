@@ -49,15 +49,21 @@ impl FisheyeLens {
     /// `lens` in its half of a photo (`.insp`), which is the calibration
     /// image: the lenses side by side, each a square as tall as the image,
     /// in the calibration's pixels.
+    ///
+    /// The calibration's axes are the photo's transposed: `cx` is the row
+    /// in the lens's square (plus the square's offset), `cy` the column.
+    /// So `fx` and `fy` trade places, and so do `p1` and `p2`. The centre is
+    /// checked on FIORD's photos against the image circles' rims and the
+    /// principal point bundle adjustment finds (docs/insta360_lens.md).
     pub fn in_photo(lens: &InsvLens) -> Self {
         let side = lens.image_size[1];
         Self {
             xi: lens.xi,
-            fx: lens.fx,
-            fy: lens.fy,
+            fx: lens.fy,
+            fy: lens.fx,
             radial: lens.radial,
-            tangential: lens.tangential,
-            centre: [lens.cx - (lens.cx / side).floor() * side, lens.cy],
+            tangential: [lens.tangential[1], lens.tangential[0]],
+            centre: [lens.cy, lens.cx - (lens.cx / side).floor() * side],
         }
     }
 
@@ -1780,7 +1786,10 @@ mod tests {
     #[test]
     fn a_photo_lens_fits_opencv_fisheye() {
         let lens = FisheyeLens::in_photo(&one_rs_back());
-        assert_eq!(lens.centre, [4877.63 - 3264.0, 1607.47]);
+        // The calibration's axes are the photo's transposed.
+        assert_eq!(lens.centre, [1607.47, 4877.63 - 3264.0]);
+        assert_eq!((lens.fx, lens.fy), (2978.32, 2978.77));
+        assert_eq!(lens.tangential, [-0.0016, 0.00094]);
         let max = 100f64.to_radians();
         let (p, error) = lens.kannala_brandt(max);
         assert!(error < 0.1, "{error}");
