@@ -69,7 +69,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 11;
+constexpr uint32_t kAbiVersion = 12;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -654,6 +654,68 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                 acc_normal[pix * 3 + 1] = nacc.y;
                 acc_normal[pix * 3 + 2] = nacc.z;
             }
+        }
+    }
+}
+
+// Label votes of the last forward: at every pixel whose label is below
+// `num_classes`, each splat's blending weight there (T_i a_i, composited as
+// raster_fwd_kernel does) is added to votes[g * num_classes + label]. Pixels
+// labelled `num_classes` or more cast no vote.
+__global__ void __launch_bounds__(kBlock) vote_kernel(uint32_t img_w, uint32_t img_h,
+                                                      const uint2* __restrict__ ranges,
+                                                      const uint32_t* __restrict__ vals, const float2* __restrict__ xy,
+                                                      const float4* __restrict__ conic_op,
+                                                      const uint8_t* __restrict__ labels, uint32_t num_classes,
+                                                      float* __restrict__ votes) {
+    __shared__ float2 s_xy[kBlock];
+    __shared__ float4 s_co[kBlock];
+    __shared__ uint32_t s_id[kBlock];
+    __shared__ uint32_t s_mask[kBlock];
+    const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
+    const int tid = threadIdx.x;
+    const uint32_t warp_bit = 1u << (tid >> 5);
+    uint32_t lx, ly;
+    tile_pixel(tid, lx, ly);
+    const uint32_t px = blockIdx.x * kTile + lx;
+    const uint32_t py = blockIdx.y * kTile + ly;
+    const bool in_image = px < img_w && py < img_h;
+    const uint32_t label = in_image ? labels[py * img_w + px] : num_classes;
+    const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
+    const uint2 range = ranges[tile];
+
+    float trans = 1.f;
+    bool done = label >= num_classes;
+    for (uint32_t start = range.x; start < range.y; start += kBlock) {
+        // Also the barrier that protects the staged batch before it is reloaded.
+        if (__syncthreads_count(done) == kBlock) break;
+        const uint32_t cnt = min(uint32_t(kBlock), range.y - start);
+        if (uint32_t(tid) < cnt) {
+            const uint32_t v = vals[start + tid];
+            const uint32_t g = v & kIdMask;
+            s_xy[tid] = xy[g];
+            s_co[tid] = conic_op[g];
+            s_id[tid] = g;
+            s_mask[tid] = v >> kIdBits;
+        }
+        __syncthreads();
+        if (!done) {
+            for (uint32_t s = 0; s < cnt; ++s) {
+                if (trans <= 1e-4f) break;
+                if (!(s_mask[s] & warp_bit)) continue;
+                const float dx = sx - s_xy[s].x;
+                const float dy = sy - s_xy[s].y;
+                const float4 co = s_co[s];
+                const float sigma = 0.5f * (co.x * dx * dx + co.z * dy * dy) + co.y * dx * dy;
+                if (sigma >= 0.f) {
+                    const float a = fminf(0.99f, co.w * expf(-sigma));
+                    if (a >= 1.f / 255.f) {
+                        atomicAdd(&votes[size_t(s_id[s]) * num_classes + label], trans * a);
+                        trans *= 1.f - a;
+                    }
+                }
+            }
+            done = trans <= 1e-4f;
         }
     }
 }
@@ -1795,6 +1857,11 @@ struct Ctx {
     // squared norms, each image's first row, and the top-2 outputs.
     Buf match_words, match_norms, match_fwd, match_rev, match_partial;
     std::vector<uint32_t> match_first;
+    // Label votes (vote_kernel): the current view's labels, and per gaussian
+    // and class the summed blending weight, for `vote_n` gaussians and
+    // `vote_k` classes (0: none yet).
+    Buf labels, votes;
+    int vote_n = 0, vote_k = 0;
     int num_priors = 0;
     int num_images = 0;
     uint32_t gt_w = 0, gt_h = 0;
@@ -2273,7 +2340,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->match_words, &ctx->match_norms, &ctx->match_fwd, &ctx->match_rev, &ctx->match_partial,
                    &ctx->tsdf_out_cells, &ctx->tsdf_out_pos, &ctx->tsdf_out_col, &ctx->tsdf_out_edges, &ctx->tsdf_cache_depth, &ctx->tsdf_cache_rgb, &ctx->tsdf_override,
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
-                   &ctx->actions,     &ctx->counts,    &ctx->cum};
+                   &ctx->actions,     &ctx->counts,    &ctx->cum,      &ctx->labels,     &ctx->votes};
     for (Buf* b : bufs) free_buf(*b);
     for (int s = 0; s < kNumStages; ++s) {
         if (ctx->ev_start[s]) cudaEventDestroy(ctx->ev_start[s]);
@@ -2302,6 +2369,7 @@ GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, 
     ctx->n = n;
     ctx->sh_degree = sh_degree;
     ctx->have_forward = false;
+    ctx->vote_k = 0;
     const float* src[3] = {transforms, opacity, sh};
     for (int k = 0; k < 3; ++k) {
         const size_t count = size_t(n) * ctx->stride(k);
@@ -2384,6 +2452,61 @@ GSC_EXPORT int visloc_gsplat_cuda_render_depth(void* handle, const GscCamera* ca
         GSC_CHECK(ctx, cudaMemcpy(out_expected, expected, ctx->pixels() * sizeof(float), cudaMemcpyDeviceToHost));
     if (out_normal)
         GSC_CHECK(ctx, cudaMemcpy(out_normal, normal, ctx->pixels() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// Render the current scene from `cam` and add its label votes (vote_kernel)
+// to the totals: `labels` holds width * height bytes, each pixel's class
+// (`num_classes`, at most 255, or more: no vote). The totals start at zero
+// with `reset`, and whenever the scene or the class count changes.
+GSC_EXPORT int visloc_gsplat_cuda_vote_labels(void* handle, const GscCamera* cam, const uint8_t* labels,
+                                              int num_classes, int reset) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (num_classes < 1 || num_classes > 255) {
+        ctx->error = "vote_labels: num_classes must be in 1..=255";
+        return -1;
+    }
+    const float bg[3] = {0.f, 0.f, 0.f};
+    GSC_TRY(set_camera(ctx, cam, bg, 0));
+    float* votes;
+    if (reset || ctx->vote_k != num_classes || ctx->vote_n != ctx->n) {
+        GSC_TRY(ensure_zero(ctx, ctx->votes, size_t(ctx->n) * num_classes, &votes));
+        ctx->vote_n = ctx->n;
+        ctx->vote_k = num_classes;
+    } else {
+        GSC_TRY(ensure(ctx, ctx->votes, size_t(ctx->n) * num_classes, &votes));
+    }
+    uint8_t* lab;
+    GSC_TRY(ensure(ctx, ctx->labels, ctx->pixels(), &lab));
+    GSC_CHECK(ctx, cudaMemcpy(lab, labels, ctx->pixels(), cudaMemcpyHostToDevice));
+    clear_stages(ctx);
+    GSC_TRY(run_forward(ctx));
+    if (ctx->n > 0) {
+        const dim3 grid(ctx->tile_bw, ctx->tile_bh);
+        vote_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, static_cast<const uint2*>(ctx->ranges.ptr),
+                                      static_cast<const uint32_t*>(ctx->vals_sorted.ptr),
+                                      static_cast<const float2*>(ctx->xy.ptr),
+                                      static_cast<const float4*>(ctx->conic_op.ptr), lab, uint32_t(num_classes),
+                                      votes);
+        GSC_CHECK(ctx, cudaGetLastError());
+    }
+    GSC_TRY(collect_stages(ctx));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
+// The vote totals of visloc_gsplat_cuda_vote_labels: n * num_classes floats,
+// gaussian-major, into `out`.
+GSC_EXPORT int visloc_gsplat_cuda_get_votes(void* handle, int num_classes, float* out) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (ctx->vote_k != num_classes || ctx->vote_n != ctx->n) {
+        ctx->error = "get_votes: no votes for this scene and class count";
+        return -1;
+    }
+    const size_t count = size_t(ctx->n) * num_classes;
+    if (count > 0) GSC_CHECK(ctx, cudaMemcpy(out, ctx->votes.ptr, count * sizeof(float), cudaMemcpyDeviceToHost));
     return 0;
 }
 
@@ -2685,6 +2808,7 @@ GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* ac
     }
     ctx->n = int(total);
     ctx->have_forward = false;
+    ctx->vote_k = 0;
     float *w, *s;
     GSC_TRY(ensure_zero(ctx, ctx->weight_max, total, &w));
     GSC_TRY(ensure_zero(ctx, ctx->seen, total, &s));

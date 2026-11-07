@@ -32,6 +32,7 @@ pub mod lens;
 #[cfg(feature = "mesh")]
 pub mod mesh;
 pub mod ply;
+pub mod semantic;
 pub mod sh;
 pub mod splat;
 

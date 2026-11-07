@@ -18,7 +18,7 @@ The packaging follows the DPVO CUDA kernels:
 - `native/gsplat_cuda/gsplat_cuda.cu` is built into a shared library by
   `scripts/build_gsplat_cuda.sh`.
 - The crate loads it at runtime with `libloading` after checking its ABI
-  version (currently 11).
+  version (currently 12).
 - Cargo never compiles CUDA, and nothing in the default build depends on the
   crate. It is `publish = false`.
 
@@ -38,6 +38,7 @@ The packaging follows the DPVO CUDA kernels:
 | MVS depth maps fused in place of the splat's depth, the splat filling their holes (`gsplat_mesh_cuda --gpu-tsdf --depth-maps <dir>`, `mesh::DepthMaps`) | Done; with a plain splat (image untouched) ETH3D mesh F1 62.7%, with the depth prior at 30 65.7%; with 1600 px MVS on CUDA 64.2% and 70.5% (the prior trained on it too); over six scenes, with map holes unknown and no component filter, 71.4% and 76.5% (MVS depth alone 70.2%) |
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
+| Label votes: each splat's blending weight per pixel class, summed over views (`CudaGsplat::vote_labels`, example `gsplat_semantic_cuda`) | Done; SAM 3 classes on FIORD's MeetingRoom_In, 82.6% of held-out pixels ([semantic_splat.md](semantic_splat.md)) |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -132,6 +133,10 @@ More tests check the depth and normal outputs:
   normal and expected-depth channels against central differences of an f64
   CPU copy (opacity held constant, as in the kernel): 1.9e-6 and 2.5e-6 of
   their largest values.
+- **Label votes.** With one splat white and the rest black on black, the
+  CPU render is that splat's blending weight per pixel, so its votes are
+  those weights summed by label. Over two views, through a pinhole and
+  through fisheyes (one past 90°), and after a reset: worst error 1.7e-5.
 
 `tests/training.rs` checks the training step:
 

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use visloc_gsplat_core::gaussian::Scene;
 use visloc_gsplat_core::ply::load_ply;
-use visloc_gsplat_core::splat::save_splat;
+use visloc_gsplat_core::splat::{importance_order, save_splat};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -39,17 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = out.ok_or("--out is required")?;
     let scene = load_ply(&ply)?;
     let n = scene.len();
-    let importance = |g: &visloc_gsplat_core::gaussian::Gaussian| {
-        let opacity = 1.0 / (1.0 + (-g.opacity_logit).exp());
-        opacity * (g.scale_log.x + g.scale_log.y + g.scale_log.z).exp()
-    };
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        importance(&scene.gaussians[b]).total_cmp(&importance(&scene.gaussians[a]))
-    });
-    order.truncate(max);
     let kept = Scene::new(
-        order.iter().map(|&i| scene.gaussians[i].clone()).collect(),
+        importance_order(&scene, max)
+            .iter()
+            .map(|&i| scene.gaussians[i].clone())
+            .collect(),
         scene.sh_degree,
     );
     save_splat(&kept, &out)?;

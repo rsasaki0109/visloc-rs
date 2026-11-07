@@ -6,6 +6,34 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **A class per gaussian, voted from SAM 3 labels (`gsplat_semantic_cuda`,
+  `scripts/sam3_labels.py`).**
+  - **Labels.** `sam3_labels.py` runs SAM 3 (transformers `Sam3Model`) on a
+    run's images with text prompts. A pixel takes the prompt of the
+    highest-scoring instance over it, 0 ("other") where none, and 255 (no
+    vote) where the image's alpha masks it out. `--rotate` turns each image
+    upright for SAM 3: FIORD's upside-down photos otherwise swap floor and
+    ceiling.
+  - **Votes.** `CudaGsplat::vote_labels` renders a view and adds each
+    splat's blending weight (`T_i a_i`) at every labelled pixel to that
+    pixel's class, through the view's lens; `votes` returns the sums (ABI
+    12). They match the CPU f64 oracle to 1.7e-5, through a pinhole and
+    fisheyes.
+  - **Classes.** `semantic::label_gaussians` gives each gaussian its class
+    with the most weight and that class's share as its confidence.
+    `colour_by_class` paints the splat by class. `ply::encode_ply_with`
+    adds float properties (`class`, `class_confidence`).
+  - **Web.** `--web` writes the RGB and the class splats with the same
+    gaussians in the same order (`splat::importance_order`, now also
+    `gsplat_export_web`'s), the legend and the capture cameras. The viewer
+    in `docs/euroc_splat` takes `&semantic=` and blends the two with a
+    slider or M; `&cameras=` starts at the first capture.
+  - **FIORD MeetingRoom_In.** Ten prompts, 0.75 s per photo with SAM 3 on
+    an 8 GB laptop GPU, 0.5 s to vote 106 views. `--check` votes with the
+    training views only and scores the painted splat at the 14 held-out
+    views against SAM 3's labels of those photos: 82.6% of the pixels, mIoU
+    71.3% over 11 classes. Details in docs/semantic_splat.md.
+
 - **`gsplat_photos --stream-images`, `--sift-threads`.** `--stream-images`
   keeps one working image in memory at a time (they are written to
   `<out>/images`, SIFT reads each back and drops it), so peak RAM no longer

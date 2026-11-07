@@ -44,6 +44,12 @@ pub enum PlyError {
     SizeMismatch { declared: usize, actual: usize },
     #[error("no gaussians to write")]
     NothingToWrite,
+    #[error("extra property `{name}` has {values} values for {gaussians} gaussians")]
+    ExtraLength {
+        name: String,
+        values: usize,
+        gaussians: usize,
+    },
 }
 
 /// Parse the PLY header, returning the vertex property names in order and the
@@ -206,13 +212,28 @@ pub fn scene_from_ply(bytes: &[u8]) -> Result<Scene, PlyError> {
 
 /// Encode a [`Scene`] as a binary-little-endian Inria `.ply`.
 pub fn encode_ply(scene: &Scene) -> Result<Vec<u8>, PlyError> {
+    encode_ply_with(scene, &[])
+}
+
+/// [`encode_ply`] with extra float properties after the Inria ones, `(name,
+/// one value per gaussian)`, such as a class per gaussian. Readers that do not
+/// know them (this one included) skip them.
+pub fn encode_ply_with(scene: &Scene, extra: &[(&str, &[f32])]) -> Result<Vec<u8>, PlyError> {
     if scene.is_empty() {
         return Err(PlyError::NothingToWrite);
+    }
+    if let Some((name, values)) = extra.iter().find(|(_, v)| v.len() != scene.len()) {
+        return Err(PlyError::ExtraLength {
+            name: (*name).to_owned(),
+            values: values.len(),
+            gaussians: scene.len(),
+        });
     }
     let degree = scene.sh_degree;
     let coeffs = sh_rest_coeffs_per_channel(degree);
     let rest_total = coeffs * 3;
-    let stride = 17 + rest_total; // x,y,z,nx,ny,nz,dc0..2,rest...,op,scale0..2,rot0..3
+    // x,y,z,nx,ny,nz,dc0..2,rest...,op,scale0..2,rot0..3, extra...
+    let stride = 17 + rest_total + extra.len();
 
     let mut header = String::new();
     header.push_str("ply\n");
@@ -234,12 +255,15 @@ pub fn encode_ply(scene: &Scene) -> Result<Vec<u8>, PlyError> {
     for c in 0..4 {
         header.push_str(&format!("property float rot_{c}\n"));
     }
+    for (name, _) in extra {
+        header.push_str(&format!("property float {name}\n"));
+    }
     header.push_str("end_header\n");
 
     let mut out = Vec::with_capacity(header.len() + scene.len() * stride * 4);
     out.extend_from_slice(header.as_bytes());
     let mut push = |v: f32| out.extend_from_slice(&v.to_le_bytes());
-    for g in &scene.gaussians {
+    for (i, g) in scene.gaussians.iter().enumerate() {
         push(g.mean.x);
         push(g.mean.y);
         push(g.mean.z);
@@ -260,6 +284,9 @@ pub fn encode_ply(scene: &Scene) -> Result<Vec<u8>, PlyError> {
         push(g.rotation.i);
         push(g.rotation.j);
         push(g.rotation.k);
+        for (_, values) in extra {
+            push(values[i]);
+        }
     }
     Ok(out)
 }
@@ -267,6 +294,16 @@ pub fn encode_ply(scene: &Scene) -> Result<Vec<u8>, PlyError> {
 /// Write a [`Scene`] as a binary-little-endian Inria `.ply`.
 pub fn save_ply(scene: &Scene, path: impl AsRef<Path>) -> Result<(), PlyError> {
     fs::write(path, encode_ply(scene)?)?;
+    Ok(())
+}
+
+/// [`save_ply`] with extra float properties (see [`encode_ply_with`]).
+pub fn save_ply_with(
+    scene: &Scene,
+    extra: &[(&str, &[f32])],
+    path: impl AsRef<Path>,
+) -> Result<(), PlyError> {
+    fs::write(path, encode_ply_with(scene, extra)?)?;
     Ok(())
 }
 
@@ -318,6 +355,23 @@ mod tests {
         assert_eq!(decoded.sh_degree, 0);
         assert!(decoded.gaussians[0].sh_rest.is_empty());
         assert_eq!(decoded.gaussians[0].mean, scene.gaussians[0].mean);
+    }
+
+    #[test]
+    fn extra_properties_follow_and_are_skipped_on_read() {
+        let scene = sample(1);
+        let bytes = encode_ply_with(&scene, &[("class", &[3.0]), ("confidence", &[0.5])]).unwrap();
+        let header = String::from_utf8_lossy(&bytes[..bytes.len() - 4 * (17 + 9 + 2)]);
+        assert!(header.ends_with("property float class\nproperty float confidence\nend_header\n"));
+        assert_eq!(
+            &bytes[bytes.len() - 8..],
+            [3.0f32.to_le_bytes(), 0.5f32.to_le_bytes()].concat()
+        );
+        assert_eq!(scene_from_ply(&bytes).unwrap(), scene);
+        assert!(matches!(
+            encode_ply_with(&scene, &[("class", &[])]),
+            Err(PlyError::ExtraLength { .. })
+        ));
     }
 
     #[test]

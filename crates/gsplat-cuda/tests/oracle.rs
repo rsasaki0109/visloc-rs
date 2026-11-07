@@ -375,6 +375,90 @@ fn lens_views(w: u32, h: u32) -> Vec<(&'static str, CameraView)> {
     ]
 }
 
+/// Label votes against the oracle, summed over `views`: with splat `g` white
+/// and every other one black, on black, a pixel's colour is `g`'s blending
+/// weight there, so `g`'s votes are those colours summed by the pixel's
+/// label. Then again with the totals reset before the last view.
+fn check_votes(scene: &Scene, views: &[CameraView]) {
+    let Some(mut cuda) = rasterizer() else { return };
+    const K: usize = 4;
+    // Classes 0..K vote; K and 255 do not.
+    let labels = |v: &CameraView| -> Vec<u8> {
+        let w = v.camera.width;
+        (0..w * v.camera.height)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                if (x + 3 * y) % 11 == 0 {
+                    255
+                } else {
+                    ((x / 7 + y / 5) % (K as u32 + 1)) as u8
+                }
+            })
+            .collect()
+    };
+    let white = 0.5 / visloc_gsplat_core::sh::SH_C0;
+    let expected = |views: &[CameraView]| -> Vec<f64> {
+        let mut out = vec![0.0f64; scene.len() * K];
+        for g in 0..scene.len() {
+            let mut one = scene.clone();
+            for (i, s) in one.gaussians.iter_mut().enumerate() {
+                s.sh_dc = [if i == g { white } else { -white }; 3];
+            }
+            for v in views {
+                let weights = render_f64(&one, v, [0.0; 3]);
+                for (w, &l) in weights.iter().zip(&labels(v)) {
+                    if (l as usize) < K {
+                        out[g * K + l as usize] += w[0];
+                    }
+                }
+            }
+        }
+        out
+    };
+    let compare = |votes: &[f32], cpu: &[f64]| {
+        let mut max_err = 0.0f64;
+        for (a, b) in votes.iter().zip(cpu) {
+            let err = (*a as f64 - b).abs();
+            max_err = max_err.max(err);
+            assert!(err < 0.02 + 1e-3 * b.abs(), "vote {a} vs CPU {b}");
+        }
+        let total: f64 = cpu.iter().sum();
+        eprintln!("max abs error {max_err:.2e}, total weight {total:.1}");
+        assert!(total > 1.0, "the views see the scene");
+    };
+    cuda.set_scene(&PackedScene::from_scene(scene))
+        .expect("upload");
+    for (i, v) in views.iter().enumerate() {
+        cuda.vote_labels(v, &labels(v), K, i == 0).expect("vote");
+    }
+    compare(&cuda.votes(K).expect("votes"), &expected(views));
+    let last = &views[views.len() - 1..];
+    cuda.vote_labels(&last[0], &labels(&last[0]), K, true)
+        .expect("vote");
+    compare(&cuda.votes(K).expect("votes"), &expected(last));
+}
+
+#[test]
+fn votes_match_cpu() {
+    let turned = |angle: f32| CameraView {
+        rotation: (nalgebra::Rotation3::from_axis_angle(&Vector3::y_axis(), angle).into_inner()
+            * view(64, 48).rotation),
+        ..view(64, 48)
+    };
+    check_votes(&random_scene(48, 5, 0, 0.0), &[view(64, 48), turned(0.15)]);
+}
+
+#[test]
+fn lens_votes_match_cpu() {
+    let views: Vec<CameraView> = lens_views(64, 48)
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("fisheye 35") || name.ends_with("past 90°"))
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(views.len(), 2);
+    check_votes(&random_scene(48, 7, 0, 0.0), &views);
+}
+
 #[test]
 fn lens_forward_matches_cpu() {
     for (name, view) in lens_views(96, 80) {
