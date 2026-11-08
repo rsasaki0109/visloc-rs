@@ -16,10 +16,10 @@ per-pixel labels of its photos:
    into the classes' or the objects' with a slider.
 
 The labels can also shape the training itself (`gsplat_train_cuda
---labels`). The held-out pixels that agree with SAM 3 rise at the same
-PSNR: from 79–85% to 88.0% on MeetingRoom_In, and from 87% to 91.3% on
-Building_In. Outdoors, on Bridge_Out, they rise from 93.7% to 95.2%, 0.1 dB
-lower on average. Letting the labels change the splats' shapes too
+--labels`). The held-out pixels that agree with SAM 3 rise at the same or
+a higher PSNR: from 79–85% to 88.1–88.3% on MeetingRoom_In, from 87% to
+91.2–91.3% on Building_In, and outdoors, on Bridge_Out, from 93.7% to
+95.0%. Letting the labels change the splats' shapes too
 (`--semantic-shape`) gives 89.8%, 92.4% and 95.7%, but grows large splats
 that showed as floaters in some MeetingRoom_In runs
 ([Training with the labels](#training-with-the-labels)).
@@ -384,6 +384,10 @@ training instead (CUDA only):
   rotation) too, which agrees more with SAM 3 but grows large splats that
   can show as floaters ([Floaters and the shapes](#floaters-and-the-shapes)).
   `--semantic-logits-only` keeps it to the logits.
+- **The logits' learning rate**, `--semantic-lr`, is 0.01. Slower logits
+  leave the loss to the opacities early on, and the refine then prunes
+  gaussians it would have grown
+  ([The logits' learning rate](#the-logits-learning-rate)).
 - **In the colour kernels** (CUDA ABI 14). The loss needs only each
   pixel's label-class channel P_y and its coverage, which is 1 - T since
   the probabilities sum to 1. So the colour's forward blends P_y alongside
@@ -392,7 +396,9 @@ training instead (CUDA only):
   shares cancels in the softmax's backward and is left out.
 - **Output.** `scene.ply` gains a `class_logit_<c>` property per class.
   `gsplat_semantic_cuda --logits` takes the classes from them. Without
-  `--logits`, the trained splat is voted on as any other.
+  `--logits`, the trained splat is voted on as any other. The vote scores
+  as well or better: the logits spread thin classes over their neighbours
+  (Bridge_Out's lamp posts, below).
 
 ```bash
 gsplat_train_cuda --data run --steps 30000 --holdout 8 --alpha-mask \
@@ -416,7 +422,8 @@ on the same splat.
 | Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
 |---|---|---|---|---|
 | Without the labels shaping the splat (4 runs) | 32.67–32.76 dB | 79.4–84.5% | 68.9–73.1% | 64.4–66.1% |
-| `--semantic-weight 0.02`, the default (9 runs, logits) | 32.44–32.75 dB | 87.9–88.2% | 79.3–79.5% | 77.7% (one run) |
+| `--semantic-weight 0.02`, the default (3 runs, logits) | 32.54–32.64 dB | 88.1–88.3% | 79.5–79.6% | 75.4–76.2% |
+| The same at `--semantic-lr 0.0025` (9 runs, logits) | 32.44–32.75 dB | 87.9–88.2% | 79.3–79.5% | 77.7% (one run) |
 | `--semantic-shape`, weight 0.02 | 32.69 dB | 89.8% | 81.5% | 76.8% |
 | `--semantic-shape`, weight 0.05 (2 runs) | 31.80, 32.34 dB | 90.6%, 90.9% | 83.1%, 83.3% | 78.9%, 79.2% |
 | `--semantic-shape`, weight 0.2 | 31.39 dB | 91.7% | 84.6% | 80.0% |
@@ -464,7 +471,8 @@ The same settings, with 29 held-out views:
 | Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
 |---|---|---|---|---|
 | Without the labels shaping the splat (2 runs) | 31.98, 32.05 dB | 87.2%, 87.3% | 57.8%, 58.2% | 26.1%, 26.2% |
-| `--semantic-weight 0.02`, the default (2 runs, logits) | 32.00, 32.05 dB | 91.3%, 91.3% | 67.7%, 67.8% | 43.2%, 43.5% |
+| `--semantic-weight 0.02`, the default (2 runs, logits) | 32.10, 32.27 dB | 91.2%, 91.3% | 67.2%, 67.3% | 41.5%, 42.3% |
+| The same at `--semantic-lr 0.0025` (2 runs, logits) | 32.00, 32.05 dB | 91.3%, 91.3% | 67.7%, 67.8% | 43.2%, 43.5% |
 | `--semantic-shape`, weight 0.02 | 31.97 dB | 92.4% | 71.9% | 45.4% |
 | `--semantic-shape`, weight 0.05 | 31.40 dB | 92.9% | 73.3% | 49.1% |
 
@@ -472,7 +480,8 @@ The same settings, with 29 held-out views:
   `--semantic-logits-only`.
 - **Large splats** (footprint above 2,000 px² in a held-out view, see
   [Floaters and the shapes](#floaters-and-the-shapes)): 45 without the
-  labels, 50 and 59 at the default, 159 with `--semantic-shape`.
+  labels, 47 and 50 at the default, 50 and 59 at `--semantic-lr 0.0025`,
+  159 with `--semantic-shape`.
 - **Where it gains**, `--semantic-shape` at 0.05 against the logits-only
   run:
   - The corridors' many small ceiling lights: IoU from 19.6% to 81.5%, and
@@ -492,14 +501,19 @@ views:
 | Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
 |---|---|---|---|---|
 | Without the labels (2 runs, votes) | 31.17, 31.20 dB | 93.7%, 93.8% | 43.3%, 43.5% | 38.1%, 38.6% |
-| `--semantic-weight 0.02`, the default (4 runs, logits) | 30.91–31.17 dB | 95.2% | 47.2–47.5% | 39.7–42.2% |
-| `--semantic-shape`, weight 0.02 (2 runs, logits) | 30.98, 31.14 dB | 95.7%, 95.7% | 49.2%, 49.2% | 43.9%, 44.0% |
+| `--semantic-weight 0.02`, the default (2 runs, logits) | 31.31, 31.37 dB | 95.0%, 95.0% | 47.0%, 47.1% | 40.7%, 42.0% |
+| The same at `--semantic-lr 0.0025` (4 runs, logits) | 30.91–31.17 dB | 95.2% | 47.2–47.5% | 39.7–42.2% |
+| `--semantic-shape`, weight 0.02, `--semantic-lr 0.0025` (2 runs, logits) | 30.98, 31.14 dB | 95.7%, 95.7% | 49.2%, 49.2% | 43.9%, 44.0% |
 
 - **Without the labels.** These are two runs of this build. The splat
   above, from an earlier build, gave 31.32 dB and also 93.7%. Unlike
   indoors, the runs agree closely.
-- **Where it gains**, the default against the runs without the labels
-  (with the shapes in brackets):
+- **The runs at `--semantic-lr 0.0025`** are those the bullets below
+  compare. Before the logits' learning rate was raised to 0.01, they left
+  this splat with fewer gaussians and less PSNR
+  ([The logits' learning rate](#the-logits-learning-rate)).
+- **Where it gains**, the runs at 0.0025 against the runs without the
+  labels (with the shapes in brackets):
   - Windows' IoU goes from 49.4–52.6% to 70.6–71.1% (75.1%).
   - "Other" goes from 45% to 55% (59%), and buildings from 87–88% to 91%.
   - Bike racks go from 27–28% to 33–35% (38–39%), and railings from
@@ -509,24 +523,40 @@ views:
   - Trees go from 42–43% to 44–46%.
   - Lamp posts go from 12.5–12.6% to 13.0–13.6% from the logits. The vote
     on the same splats gives them 22.8–23.1%.
-  - The vote scores 95.8% of the pixels and an mIoU of 48.5–48.7%. The
-    lamp posts make most of the mIoU's difference. On MeetingRoom_In votes
-    and logits stay within 0.4 points.
+- **Logits and votes.** The vote on these splats scores 95.8% of the pixels
+  and an mIoU of 48.5–48.7%, above their logits, mostly through the lamp
+  posts. On MeetingRoom_In the two stay within 0.4 points.
+  - **The logits are trained.** In one run, the gaussians voted lamp post
+    have their largest logit 7.1 above the next (median), and 88% of them
+    have lamp post largest.
+  - **More lamp posts.** The logits give lamp post to 1,488 gaussians, the
+    vote to 1,252. The extra ones are mixed: 257 voted building and 67
+    railing, with 0.60 and 0.59 of their weight in that class (median).
+  - **Why.** The cross-entropy needs each pixel's class from some
+    gaussian. Where other gaussians already give a building, a gaussian
+    that lies partly on a lamp post serves the loss best as a lamp post.
+    The vote gives it the class with the most weight.
+  - **Painted from the logits**, such gaussians spread the lamp posts over
+    building pixels. Only 14.2% of the pixels the logits paint as lamp post
+    are lamp post in SAM 3's labels, against 25.8% for the vote.
+  - **So vote** on a splat trained with the labels (`gsplat_semantic_cuda`
+    without `--logits`) for its classes.
 - **People stay out.** Trained with the labels, the splat still keeps none
   of the people walking past: their IoU stays at 0.0–0.3%.
 - **The cost.**
-  - **Image quality.** None of the eight runs has floaters: no held-out
-    view is more than 1.7 dB below its median over the runs. The default's
-    PSNR is 0.1 dB lower on average (31.06 against 31.18 dB).
-  - **Gaussians.** The default has 9% fewer: 212,449–215,291 against
+  - **Image quality.** None of the runs has floaters: no held-out view is
+    more than 1.8 dB below its median over the runs. At 0.0025 the PSNR is
+    0.1 dB lower on average (31.06 against 31.18 dB). At 0.01 it is 0.16
+    dB higher (31.34).
+  - **Gaussians.** At 0.0025 there are 9% fewer: 212,449–215,291 against
     235,079 and 235,864. The runs with the shapes have 213,703 and
-    214,648.
+    214,648. At 0.01 there are 239,402 and 241,035.
   - **Large splats** (footprint above 2,000 px² in a held-out view): 92
-    and 94 without the labels, 90–141 at the default, and 142 and 152 with
-    the shapes. 88–94% of them are snow or sky, which also cover large
-    parts of the photos.
-  - **Time.** 30k steps took 213–214 s without the labels and 224–233 s
-    with them.
+    and 94 without the labels, 90–141 at 0.0025, 103 and 117 at 0.01, and
+    142 and 152 with the shapes. 86–94% of them are snow or sky, which also
+    cover large parts of the photos.
+  - **Time.** 30k steps took 213–214 s without the labels, 224–233 s with
+    them at 0.0025, and 241 and 248 s at 0.01 with its extra gaussians.
 
 As before, these numbers measure agreement with SAM 3's labels of photos
 the training never saw, not with a ground truth.
@@ -554,7 +584,7 @@ the other 14. None of the 10 runs without the labels had any.
 | Everything (`--semantic-shape`) | 8 | 95–156 | 32.35–32.73 dB, one 30.63 dB | 89.6–89.9%, the floater run 89.0% |
 | Everything but the centre | 1 | 128 | 32.47 dB | 89.6% |
 | Everything, the shape only shrinking | 2 | 11, 19 | 32.47, 32.57 dB | 87.6%, 87.9% |
-| Opacity and centre (the default) | 8 | 31–51 | 32.46–32.75 dB | 87.9–88.2% |
+| Opacity and centre (the default, at `--semantic-lr 0.0025`) | 8 | 31–51 | 32.46–32.75 dB | 87.9–88.2% |
 | Opacity alone | 2 | 36, 37 | 32.63, 32.68 dB | 87.6%, 87.9% |
 | Nothing (without the labels) | 8 | 22–45 | 32.57–32.77 dB | 79.4–84.5% (votes, the four runs above) |
 
@@ -563,7 +593,8 @@ the other 14. None of the 10 runs without the labels had any.
   the labels leave as few large splats as no labels do, and 88% of the
   pixels agree.
 - **No floaters** in the eight runs at the default, and their PSNR is
-  that of the runs without the labels.
+  that of the runs without the labels. The three at `--semantic-lr 0.01`
+  have none either, with 22–39 large splats.
 - **Outdoors**, on Bridge_Out, the shapes add fewer large splats: 142 and
   152, against 92 and 94 without the labels. Nearly all of them lie on the
   snow and in the sky. None of its eight runs, above, had floaters.
@@ -575,6 +606,53 @@ the other 14. None of the 10 runs without the labels had any.
 The eight runs at the default used a build that switched the conic's
 share off at run time. One run of this code gave 32.44 dB, 41 large
 splats and 88.0% of the pixels.
+
+### The logits' learning rate
+
+At `--semantic-lr 0.0025`, the first default, the labels left Bridge_Out's
+splat with 9% fewer gaussians and 0.1 dB less PSNR. The logits learned too
+slowly. At 0.01, now the default, neither is left.
+
+- **Pruning.** The logits start at zero, every class equally likely.
+  Until they learn the classes, the cross-entropy falls only through the
+  opacities: gaussians of the wrong class turn transparent, and the refine
+  prunes them. Between steps 1,000 and 5,000 the five logged refines
+  pruned 1,414–1,538 gaussians at 0.0025. Without the labels they pruned
+  410 and 433, and at 0.01, 557.
+- **Growth.** Each refine adds a tenth as many gaussians as are above its
+  threshold, and the replacements for the pruned ones count towards that
+  tenth. So every pruned gaussian is one fewer grown: 212,449–215,291
+  gaussians at the end, against 235,079 and 235,864 without the labels.
+- **The count and the PSNR.**
+  - Two runs without the labels but capped at 213,500 gaussians
+    (`--max-gaussians`) gave 31.09 and 31.15 dB, about half of the gap.
+  - Training the logits alone (`--semantic-logits-only`) gave 233,739
+    gaussians and 31.21 dB.
+
+The three scenes at both rates, with the classes from the logits:
+
+| Scene | `--semantic-lr` | Runs | Gaussians | PSNR | Pixel accuracy | mIoU | Large splats |
+|---|---|---|---|---|---|---|---|
+| MeetingRoom_In | 0.0025 | 8 | 92,574–93,264 | 32.46–32.75 dB | 87.9–88.2% | 79.3–79.5% | 31–51 |
+| | 0.01 | 3 | 95,296–95,492 | 32.54–32.64 dB | 88.1–88.3% | 79.5–79.6% | 22–39 |
+| Building_In | 0.0025 | 2 | 215,752, 215,968 | 32.00, 32.05 dB | 91.3%, 91.3% | 67.7%, 67.8% | 50, 59 |
+| | 0.01 | 2 | 228,404, 229,269 | 32.10, 32.27 dB | 91.2%, 91.3% | 67.2%, 67.3% | 47, 50 |
+| Bridge_Out | 0.0025 | 4 | 212,449–215,291 | 30.91–31.17 dB | 95.2% | 47.2–47.5% | 90–141 |
+| | 0.01 | 2 | 239,402, 241,035 | 31.31, 31.37 dB | 95.0%, 95.0% | 47.0%, 47.1% | 103, 117 |
+| | 0.025 | 1 | 244,091 | 31.40 dB | 94.9% | 46.9% | 94 |
+
+- **Indoors** the labels add gaussians rather than cost them: on
+  MeetingRoom_In, 87,689–88,852 without them, and more at either rate.
+  There the PSNR stays within the runs' spread at both rates. Building_In
+  gains about 13,000 gaussians and 0.16 dB on average at 0.01.
+- **The classes** agree about as often: from the logits, within 0.3 points
+  of the pixels. The objects match 1–2 points less often: 75.4–76.2% on
+  MeetingRoom_In (77.7% in one run at 0.0025), and 41.5% and 42.3% on
+  Building_In (43.2% and 43.5%).
+- **No floaters** at 0.01: no held-out view is more than 0.7 dB below its
+  median over its scene's runs.
+- **Faster still**, 0.025 on Bridge_Out adds little PSNR and agrees a
+  little less.
 
 ## Windows
 

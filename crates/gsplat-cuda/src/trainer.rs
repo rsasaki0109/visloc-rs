@@ -60,7 +60,9 @@ pub struct SemanticTraining {
     /// Weight of the labels' mean cross-entropy
     /// ([`StepParams::semantic_weight`]).
     pub weight: f32,
-    /// Learning rate of the logits.
+    /// Learning rate of the logits. Slower logits leave the cross-entropy
+    /// to the opacities early on: they turn more gaussians transparent,
+    /// whose pruning then holds back the refine's growth.
     pub lr: f32,
     /// What the cross-entropy moves besides the logits (by default the
     /// opacities and centres).
@@ -71,7 +73,7 @@ impl Default for SemanticTraining {
     fn default() -> Self {
         Self {
             weight: 0.02,
-            lr: 2.5e-3,
+            lr: 1e-2,
             geometry: LabelGeometry::default(),
         }
     }
