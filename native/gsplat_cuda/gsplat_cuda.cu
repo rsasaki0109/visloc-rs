@@ -96,6 +96,10 @@ constexpr uint32_t kAbiVersion = 16;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
+// The backward pass takes kBwdPix pixels per thread, kBwdThreads per tile.
+constexpr int kBwdPix = 2;
+constexpr int kBwdThreads = kBlock / kBwdPix;
+static_assert(kBwdPix == 2 && kBwdBatch <= kBwdThreads, "one staged splat per backward thread");
 // du dv dA dB dC dopacity dr dg db, and the refine weight (brush / AbsGS:
 // sum over pixels of |dL/du| W + |dL/dv| H).
 constexpr int kNumGrad = 10;
@@ -553,6 +557,11 @@ __device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
     ly = uint32_t((warp >> 1) * 4 + (lane >> 3));
 }
 
+// The backward's sub-tile q < kBwdPix of warp w: the warp covers the 8x8
+// block of sub-tiles 4 (w / 2) + w % 2 and the one below it (as tile_pixel
+// numbers them, 8x4 each).
+__device__ inline uint32_t bwd_subtile(int warp, int q) { return uint32_t(4 * (warp >> 1) + (warp & 1) + 2 * q); }
+
 // One block per 16x16 tile, one thread per pixel, splats staged in shared
 // memory 256 at a time; the block stops once every pixel is saturated. A
 // warp skips the splats whose footprint misses its 8x4 sub-tile (the mask in
@@ -860,18 +869,22 @@ __device__ inline float warp_sum32(float (&v)[32], int lane) {
 // per (tile, splat) screen-space gradients, walking each tile's list back to
 // front from its last blended entry. Each pixel recovers T before a splat
 // from T after it (T_before = T_after / (1 - alpha)) and keeps the colour
-// composited behind it. A splat's 256 per-pixel contributions are summed per
-// warp with a transposed xor butterfly (lanes 2c end up holding component c),
-// which then add them to the gaussian's record in screen_grads with one
-// global float reduction per component (fire-and-forget REDs; a shared-memory
-// float atomicAdd would be a CAS loop, and the warps that hit a splat are few).
-// A warp skips the splats whose footprint misses its sub-tile (the list
-// entry's mask). With kGeo >= 1 the expected-depth channel (raster_fwd_kernel's
-// acc_depth, background 0) is differentiated too, for `d_depth` per pixel:
-// its share reaches the opacity and conic through alpha, and the splat
-// centre's depth through `g_depth` (slot 10 of the butterfly). kGeo 2 adds
-// the normal channel (acc_normal; `d_normal` 3 floats per pixel) the same
-// way, the plane normals' share going to `g_normal` (slots 11-13).
+// composited behind it. Each thread takes two pixels (kBwdPix): warp w of the
+// kBwdThreads covers the 8x8 block of the 8x4 sub-tiles bwd_subtile(w, 0)
+// and (w, 1). A splat's per-lane contributions, the two pixels' summed, are
+// summed per warp with a transposed xor butterfly (lanes 2c end up holding
+// component c), which then add them to the gaussian's record in screen_grads
+// with one global float reduction per component (fire-and-forget REDs; a
+// shared-memory float atomicAdd would be a CAS loop, and the warps that hit a
+// splat are few). Two pixels per thread halve the butterflies and REDs per
+// pixel. A warp skips the splats whose footprint misses both its sub-tiles,
+// and a sub-tile's pixels those that miss it (the list entry's mask). With
+// kGeo >= 1 the expected-depth channel (raster_fwd_kernel's acc_depth,
+// background 0) is differentiated too, for `d_depth` per pixel: its share
+// reaches the opacity and conic through alpha, and the splat centre's depth
+// through `g_depth` (slot 10 of the butterfly). kGeo 2 adds the normal
+// channel (acc_normal; `d_normal` 3 floats per pixel) the same way, the plane
+// normals' share going to `g_normal` (slots 11-13).
 //
 // kLab adds the labels' cross-entropy (label_loss_kernel), its gradient
 // d_lab = (alpha, beta) per pixel: d/dP_c = alpha - beta [c = y] of the
@@ -884,10 +897,10 @@ __device__ inline float warp_sum32(float (&v)[32], int lane) {
 // channel composited behind the splat: with `lab_geo` 1 to the opacity and
 // the centre, 2 to the conic too, 0 to neither. The refine weight sums the
 // colour's and the labels' magnitudes, as separate passes would. Per warp
-// the first two labels go through the butterfly (slots 14, 15); lanes of
+// the first two labels go through the butterfly (slots 14, 15); pixels of
 // any other label add their own.
 template <int kGeo, bool kLab>
-__global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
+__global__ void __launch_bounds__(kBwdThreads) raster_bwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
     const float* __restrict__ final_t, const uint32_t* __restrict__ last_idx, const float* __restrict__ d_image,
@@ -909,54 +922,85 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
     const int warp = tid >> 5, lane = tid & 31;
-    uint32_t lx, ly;
-    tile_pixel(tid, lx, ly);
-    const uint32_t px = blockIdx.x * kTile + lx;
-    const uint32_t py = blockIdx.y * kTile + ly;
-    const bool in_image = px < img_w && py < img_h;
-    const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
     const uint2 range = ranges[tile];
     const float fw = float(img_w), fh = float(img_h);
-
-    float t_cur = 1.f;
-    uint32_t last = 0;
-    float3 g = make_float3(0.f, 0.f, 0.f);
-    float3 behind = bg;
-    float gz = 0.f, behind_z = 0.f;
-    float3 gn = make_float3(0.f, 0.f, 0.f), behind_n = make_float3(0.f, 0.f, 0.f);
     const int ks = lab_stride(sem_k);
-    uint32_t lab = 0xffu;
-    float2 gl = make_float2(0.f, 0.f);  // (alpha, beta)
-    float behind_all = 0.f, behind_y = 0.f;
-    if (in_image) {
-        const uint32_t pix = py * img_w + px;
-        t_cur = final_t[pix];
-        last = last_idx[pix];
-        g = make_float3(d_image[pix * 3], d_image[pix * 3 + 1], d_image[pix * 3 + 2]);
-        if (kZ) gz = d_depth[pix];
-        if (kN) gn = make_float3(d_normal[pix * 3], d_normal[pix * 3 + 1], d_normal[pix * 3 + 2]);
-        if (kLab) {
-            lab = labels[pix];
-            gl = d_lab[pix];
+
+    // Per pixel: its sub-tile, position, transmittance and gradients, and
+    // what is composited behind the current splat.
+    uint32_t st[kBwdPix];
+    bool in_image[kBwdPix];
+    float sx[kBwdPix], sy[kBwdPix];
+    float t_cur[kBwdPix];
+    uint32_t last[kBwdPix];
+    float3 g[kBwdPix], behind[kBwdPix];
+    float gz[kBwdPix], behind_z[kBwdPix];
+    float3 gn[kBwdPix], behind_n[kBwdPix];
+    uint32_t lab_col[kBwdPix];
+    bool lab_on[kBwdPix];
+    float2 gl[kBwdPix];  // (alpha, beta)
+    float behind_all[kBwdPix], behind_y[kBwdPix];
+    uint32_t last_max = 0;
+#pragma unroll
+    for (int q = 0; q < kBwdPix; ++q) {
+        st[q] = bwd_subtile(warp, q);
+        const uint32_t px = blockIdx.x * kTile + (st[q] & 1u) * 8u + uint32_t(lane & 7);
+        const uint32_t py = blockIdx.y * kTile + (st[q] >> 1) * 4u + uint32_t(lane >> 3);
+        in_image[q] = px < img_w && py < img_h;
+        sx[q] = float(px) + 0.5f;
+        sy[q] = float(py) + 0.5f;
+        t_cur[q] = 1.f;
+        last[q] = 0;
+        g[q] = make_float3(0.f, 0.f, 0.f);
+        behind[q] = bg;
+        gz[q] = 0.f;
+        behind_z[q] = 0.f;
+        gn[q] = make_float3(0.f, 0.f, 0.f);
+        behind_n[q] = make_float3(0.f, 0.f, 0.f);
+        uint32_t lab = 0xffu;
+        gl[q] = make_float2(0.f, 0.f);
+        behind_all[q] = 0.f;
+        behind_y[q] = 0.f;
+        if (in_image[q]) {
+            const uint32_t pix = py * img_w + px;
+            t_cur[q] = final_t[pix];
+            last[q] = last_idx[pix];
+            g[q] = make_float3(d_image[pix * 3], d_image[pix * 3 + 1], d_image[pix * 3 + 2]);
+            if (kZ) gz[q] = d_depth[pix];
+            if (kN) gn[q] = make_float3(d_normal[pix * 3], d_normal[pix * 3 + 1], d_normal[pix * 3 + 2]);
+            if (kLab) {
+                lab = labels[pix];
+                gl[q] = d_lab[pix];
+            }
         }
+        lab_on[q] = kLab && lab < uint32_t(sem_k) && gl[q].y != 0.f;
+        lab_col[q] = lab_on[q] ? lab : 0u;
+        last_max = max(last_max, last[q]);
     }
-    // The warp's first two labels (c0, c1; -1: none) and this lane's slot:
+    // The warp's first two labels (c0, c1; -1: none) and each pixel's slot:
     // 0, 1 for those, 2 for another label, 3 for no gradient.
-    const bool lab_on = kLab && lab < uint32_t(sem_k) && gl.y != 0.f;
-    const uint32_t lab_col = lab_on ? lab : 0u;
-    int c0 = -1, c1 = -1, slot = 3;
+    int c0 = -1, c1 = -1;
+    int slot[kBwdPix];
+#pragma unroll
+    for (int q = 0; q < kBwdPix; ++q) slot[q] = 3;
     if (kLab) {
-        const unsigned m0 = __ballot_sync(0xffffffffu, lab_on);
-        if (m0) {
-            c0 = __shfl_sync(0xffffffffu, int(lab_col), __ffs(m0) - 1);
-            const unsigned m1 = __ballot_sync(0xffffffffu, lab_on && int(lab_col) != c0);
-            if (m1) c1 = __shfl_sync(0xffffffffu, int(lab_col), __ffs(m1) - 1);
-        }
-        if (lab_on) slot = int(lab_col) == c0 ? 0 : (int(lab_col) == c1 ? 1 : 2);
+        // The first lane (pixel 0 before pixel 1) whose label passes `on`.
+        const auto first = [&](bool on0, bool on1) {
+            const unsigned m0 = __ballot_sync(0xffffffffu, on0);
+            const unsigned m1 = __ballot_sync(0xffffffffu, on1);
+            const int a = __shfl_sync(0xffffffffu, int(lab_col[0]), m0 ? __ffs(m0) - 1 : 0);
+            const int b = __shfl_sync(0xffffffffu, int(lab_col[1]), m1 ? __ffs(m1) - 1 : 0);
+            return m0 ? a : (m1 ? b : -1);
+        };
+        c0 = first(lab_on[0], lab_on[1]);
+        if (c0 >= 0) c1 = first(lab_on[0] && int(lab_col[0]) != c0, lab_on[1] && int(lab_col[1]) != c0);
+#pragma unroll
+        for (int q = 0; q < kBwdPix; ++q)
+            if (lab_on[q]) slot[q] = int(lab_col[q]) == c0 ? 0 : (int(lab_col[q]) == c1 ? 1 : 2);
     }
     if (tid == 0) s_last = 0;
     __syncthreads();
-    atomicMax(&s_last, last);
+    atomicMax(&s_last, last_max);
     __syncthreads();
     const uint32_t stop = min(s_last, range.y);
 
@@ -985,8 +1029,9 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
         __syncthreads();
 
         for (int s = int(cnt) - 1; s >= 0; --s) {
-            // Warp-uniform: the footprint misses this warp's sub-tile.
-            if (!((s_cm[s] >> warp) & 1u)) continue;
+            // Warp-uniform: the footprint misses both of this warp's sub-tiles.
+            const uint32_t cm = s_cm[s];
+            if (!((cm >> st[0]) & 1u) && !((cm >> st[1]) & 1u)) continue;
             const uint32_t j = bstart + uint32_t(s);
             float g_u = 0.f, g_v = 0.f, g_a = 0.f, g_b = 0.f, g_c = 0.f, g_o = 0.f, g_r = 0.f;
             float3 g_col = make_float3(0.f, 0.f, 0.f);
@@ -994,75 +1039,83 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
             float3 g_ns = make_float3(0.f, 0.f, 0.f);
             float g_l0 = 0.f, g_l1 = 0.f;
             bool hit = false;
-            if (in_image && j < last) {
+#pragma unroll
+            for (int q = 0; q < kBwdPix; ++q) {
+                // Warp-uniform: the footprint misses this sub-tile.
+                if (!((cm >> st[q]) & 1u)) continue;
+                if (!in_image[q] || j >= last[q]) continue;
                 const float4 co = s_co[s];
-                const float dx = sx - s_xy[s].x;
-                const float dy = sy - s_xy[s].y;
+                const float dx = sx[q] - s_xy[s].x;
+                const float dy = sy[q] - s_xy[s].y;
                 // Same expressions as the forward, so the same splats pass.
                 const float sigma = 0.5f * (co.x * dx * dx + co.z * dy * dy) + co.y * dx * dy;
-                if (sigma >= 0.f) {
-                    const float e = expf(-sigma);
-                    const float raw = co.w * e;
-                    const float a = fminf(0.99f, raw);
-                    if (a >= 1.f / 255.f) {
-                        hit = true;
-                        const float t_before = t_cur / (1.f - a);
-                        const float3 c = s_col[s];
-                        const float3 col = make_float3(fmaxf(c.x, 0.f), fmaxf(c.y, 0.f), fmaxf(c.z, 0.f));
-                        const float w = a * t_before;
-                        g_col = make_float3(w * g.x, w * g.y, w * g.z);
-                        float d_alpha =
-                            t_before * ((col.x - behind.x) * g.x + (col.y - behind.y) * g.y + (col.z - behind.z) * g.z);
-                        if (kZ) {
-                            const float z = s_z[s];
-                            g_zs = w * gz;
-                            d_alpha += t_before * (z - behind_z) * gz;
-                            behind_z = a * z + (1.f - a) * behind_z;
-                        }
-                        if (kN) {
-                            const float3 nv = s_n[s];
-                            g_ns = make_float3(w * gn.x, w * gn.y, w * gn.z);
-                            d_alpha += t_before * ((nv.x - behind_n.x) * gn.x + (nv.y - behind_n.y) * gn.y +
-                                                   (nv.z - behind_n.z) * gn.z);
-                            behind_n.x = a * nv.x + (1.f - a) * behind_n.x;
-                            behind_n.y = a * nv.y + (1.f - a) * behind_n.y;
-                            behind_n.z = a * nv.z + (1.f - a) * behind_n.z;
-                        }
-                        float d_alpha_lab = 0.f;
-                        if (kLab) {
-                            const float pz = s_prob[s * ks + lab_col];
-                            const float gy = -w * gl.y;
-                            if (slot == 0)
-                                g_l0 = gy;
-                            else if (slot == 1)
-                                g_l1 = gy;
-                            else if (slot == 2)
-                                atomicAdd(&g_logits[size_t(s_gid[s]) * sem_k + lab_col], gy);
-                            if (lab_geo) d_alpha_lab = t_before * (gl.x * (1.f - behind_all) - gl.y * (pz - behind_y));
-                            behind_all = a + (1.f - a) * behind_all;
-                            behind_y = a * pz + (1.f - a) * behind_y;
-                        }
-                        behind.x = a * col.x + (1.f - a) * behind.x;
-                        behind.y = a * col.y + (1.f - a) * behind.y;
-                        behind.z = a * col.z + (1.f - a) * behind.z;
-                        t_cur = t_before;
-                        // A clamped alpha passes no gradient to opacity, conic or mean.
-                        if (raw <= 0.99f) {
-                            const float d_alpha_all = kLab ? d_alpha + d_alpha_lab : d_alpha;
-                            const float d_sigma = -d_alpha_all * a;
-                            // The conic takes the labels' share with lab_geo 2 only.
-                            const float d_sigma_c = kLab && lab_geo < 2 ? -d_alpha * a : d_sigma;
-                            const float fu = -(co.x * dx + co.y * dy), fv = -(co.y * dx + co.z * dy);
-                            g_u = d_sigma * fu;
-                            g_v = d_sigma * fv;
-                            g_a = d_sigma_c * 0.5f * dx * dx;
-                            g_b = d_sigma_c * dx * dy;
-                            g_c = d_sigma_c * 0.5f * dy * dy;
-                            g_o = d_alpha_all * e;
-                            g_r = kLab ? (fabsf(d_alpha) + fabsf(d_alpha_lab)) * a * (fabsf(fu) * fw + fabsf(fv) * fh)
-                                       : fabsf(g_u) * fw + fabsf(g_v) * fh;
-                        }
-                    }
+                if (sigma < 0.f) continue;
+                const float e = expf(-sigma);
+                const float raw = co.w * e;
+                const float a = fminf(0.99f, raw);
+                if (a < 1.f / 255.f) continue;
+                hit = true;
+                const float t_before = t_cur[q] / (1.f - a);
+                const float3 c = s_col[s];
+                const float3 col = make_float3(fmaxf(c.x, 0.f), fmaxf(c.y, 0.f), fmaxf(c.z, 0.f));
+                const float w = a * t_before;
+                g_col.x += w * g[q].x;
+                g_col.y += w * g[q].y;
+                g_col.z += w * g[q].z;
+                float d_alpha = t_before * ((col.x - behind[q].x) * g[q].x + (col.y - behind[q].y) * g[q].y +
+                                            (col.z - behind[q].z) * g[q].z);
+                if (kZ) {
+                    const float z = s_z[s];
+                    g_zs += w * gz[q];
+                    d_alpha += t_before * (z - behind_z[q]) * gz[q];
+                    behind_z[q] = a * z + (1.f - a) * behind_z[q];
+                }
+                if (kN) {
+                    const float3 nv = s_n[s];
+                    g_ns.x += w * gn[q].x;
+                    g_ns.y += w * gn[q].y;
+                    g_ns.z += w * gn[q].z;
+                    d_alpha += t_before * ((nv.x - behind_n[q].x) * gn[q].x + (nv.y - behind_n[q].y) * gn[q].y +
+                                           (nv.z - behind_n[q].z) * gn[q].z);
+                    behind_n[q].x = a * nv.x + (1.f - a) * behind_n[q].x;
+                    behind_n[q].y = a * nv.y + (1.f - a) * behind_n[q].y;
+                    behind_n[q].z = a * nv.z + (1.f - a) * behind_n[q].z;
+                }
+                float d_alpha_lab = 0.f;
+                if (kLab) {
+                    const float pz = s_prob[s * ks + lab_col[q]];
+                    const float gy = -w * gl[q].y;
+                    if (slot[q] == 0)
+                        g_l0 += gy;
+                    else if (slot[q] == 1)
+                        g_l1 += gy;
+                    else if (slot[q] == 2)
+                        atomicAdd(&g_logits[size_t(s_gid[s]) * sem_k + lab_col[q]], gy);
+                    if (lab_geo)
+                        d_alpha_lab = t_before * (gl[q].x * (1.f - behind_all[q]) - gl[q].y * (pz - behind_y[q]));
+                    behind_all[q] = a + (1.f - a) * behind_all[q];
+                    behind_y[q] = a * pz + (1.f - a) * behind_y[q];
+                }
+                behind[q].x = a * col.x + (1.f - a) * behind[q].x;
+                behind[q].y = a * col.y + (1.f - a) * behind[q].y;
+                behind[q].z = a * col.z + (1.f - a) * behind[q].z;
+                t_cur[q] = t_before;
+                // A clamped alpha passes no gradient to opacity, conic or mean.
+                if (raw <= 0.99f) {
+                    const float d_alpha_all = kLab ? d_alpha + d_alpha_lab : d_alpha;
+                    const float d_sigma = -d_alpha_all * a;
+                    // The conic takes the labels' share with lab_geo 2 only.
+                    const float d_sigma_c = kLab && lab_geo < 2 ? -d_alpha * a : d_sigma;
+                    const float fu = -(co.x * dx + co.y * dy), fv = -(co.y * dx + co.z * dy);
+                    const float pu = d_sigma * fu, pv = d_sigma * fv;
+                    g_u += pu;
+                    g_v += pv;
+                    g_a += d_sigma_c * 0.5f * dx * dx;
+                    g_b += d_sigma_c * dx * dy;
+                    g_c += d_sigma_c * 0.5f * dy * dy;
+                    g_o += d_alpha_all * e;
+                    g_r += kLab ? (fabsf(d_alpha) + fabsf(d_alpha_lab)) * a * (fabsf(fu) * fw + fabsf(fv) * fh)
+                                : fabsf(pu) * fw + fabsf(pv) * fh;
                 }
             }
             // Skip the reduction when no lane of this warp blended the splat.
@@ -2632,7 +2685,7 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool
     const size_t smem = sem.labels_ce ? size_t(kBwdBatch) * lab_stride(ctx->sem_k) * sizeof(float) : 0;
     const auto raster = [&](auto geo_c, auto lab_c) {
         constexpr int kGeo = decltype(geo_c)::value;
-        raster_bwd_kernel<kGeo, decltype(lab_c)::value><<<grid, kBlock, smem>>>(
+        raster_bwd_kernel<kGeo, decltype(lab_c)::value><<<grid, kBwdThreads, smem>>>(
             ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op, color, final_t, last_idx, d_image,
             screen_grads, kGeo >= 1 ? depth : nullptr, kGeo >= 1 ? d_depth : nullptr, g_depth,
             kGeo >= 2 ? static_cast<const float4*>(ctx->plane.ptr) : nullptr,
