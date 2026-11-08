@@ -115,7 +115,10 @@ refined and the tripod masked out
 `--check` holds out every 8th view, as training did, and lets only the
 other 92 vote. It then renders the painted splat at the 14 held-out views
 and compares each pixel's class with SAM 3's label of that photo. A pixel's
-class is the class colour nearest its render.
+class is the class colour nearest its render. Per class it prints the IoU,
+the recall and the precision, each with the classes that took the rest
+([Windows](#windows)). `--check-images <dir>` writes each held-out view's
+classes as rendered and as labelled, as images in the class colours.
 
 | | Pixel accuracy | mIoU (11 classes) |
 |---|---|---|
@@ -130,8 +133,9 @@ class is the class colour nearest its render.
 | wall | 63.4% | projector | 92.5% |
 | other | 52.0% | | |
 
-Windows and ceiling lights score lowest. These numbers measure agreement
-with SAM 3's labels of the held-out photos, not with a ground truth.
+Windows and ceiling lights score lowest ([Windows](#windows) looks at
+why). These numbers measure agreement with SAM 3's labels of the held-out
+photos, not with a ground truth.
 
 ## Objects
 
@@ -303,6 +307,12 @@ on the same splat.
 | `--semantic-weight 0.05` (2 runs) | 31.80, 32.34 dB | 90.6%, 90.9% | 83.1%, 83.3% | 78.9%, 79.2% |
 | `--semantic-weight 0.2` | 31.39 dB | 91.7% | 84.6% | 80.0% |
 
+<p align="center">
+  <img src="assets/semantic_trained_meetingroom.jpg" alt="Two held-out views of MeetingRoom_In, upright, each as four panels: the photo, SAM 3's labels, the classes voted onto a splat trained without the labels, and the classes of a splat trained with them. With the labels, the windows on the left and the wall on the right (top row) and the door on the left (bottom row) come out as SAM 3 labels them. The glass wall on the right of the bottom row is a window in both splats, where SAM 3 left most of it unlabelled." width="900">
+</p>
+
+<p align="center"><sub>Two of the 14 held-out views, through the fisheye (<code>--check-images</code>): the photo, SAM 3's labels, the vote on a splat trained without them, and the classes of one trained with them (<code>--semantic-weight 0.02</code>). Pixel accuracy 74.9% → 90.1% (top) and 80.9% → 90.8% (bottom).</sub></p>
+
 - **Without the labels.** The four runs are:
   - the splat above;
   - a second plain run;
@@ -349,3 +359,42 @@ The same settings, with 29 held-out views:
 
 As before, these numbers measure agreement with SAM 3's labels of photos
 the training never saw, not with a ground truth.
+
+## Windows
+
+Windows score lowest of the named classes on both scenes. `--check` shows
+where their pixels go: the vote on a splat trained without the labels, and
+the classes of one trained with them (`--logits`, weight 0.02).
+
+| Scene, splat | Window recall | Missed as | Window precision | Taken from |
+|---|---|---|---|---|
+| MeetingRoom_In, plain | 48.6% | other 51.3% | 53.5% | other 39.7%, whiteboard 4.5% |
+| MeetingRoom_In, trained | 72.1% | other 27.9% | 67.5% | other 31.1% |
+| Building_In, plain | 61.1% | other 35.0%, door 2.7% | 70.4% | ceiling light 14.9%, other 12.5% |
+| Building_In, trained | 72.3% | other 25.0%, door 1.3% | 80.1% | other 11.8%, ceiling light 6.2% |
+
+- **With "other", not the walls.** Most window errors are pixels SAM 3
+  calls "other" (no prompt's instance covers them) and the splat calls
+  window, or the reverse. On Building_In ceiling lights also take 14.9% of
+  what the plain splat renders as window (6.2% trained). The walls take
+  under 1.5%.
+- **The least consistent votes.** A window gaussian's votes agree least
+  across photos: confidence 0.63 on the plain MeetingRoom_In splat (0.80
+  over all gaussians), 0.69 on Building_In (0.81).
+- **SAM 3 drops whole windows in some photos.** In two of MeetingRoom_In's
+  14 held-out photos (frames 16 and 64) SAM 3 labels no window. Both
+  splats render the glass wall at the back of the room there as window, as
+  SAM 3 labels it in other photos: 20,570 and 26,174 pixels in the trained
+  splat. Those two photos hold 46k of the 111k pixels the trained splat
+  calls window and SAM 3 does not, and 96% of the 111k are SAM 3's "other".
+  On Building_In, 8 of the 29 held-out photos have no SAM 3 window where
+  the trained splat renders 1,000–3,100 window pixels.
+- **A score just under the cut.** `sam3_labels.py` keeps instances scoring
+  0.5 or more (`--threshold`). The best "window" instance in frames 16 and
+  64 scores 0.47, against 0.64 and 0.68 in frames 32 and 56, where SAM 3
+  keeps the windows.
+
+So the 3D labels carry a window into the photos where SAM 3 dropped it, and
+`--check`, scoring against SAM 3, counts that as an error. The window IoU
+understates them. A lower threshold would keep those windows; whether it
+costs other classes more false positives is not measured.
