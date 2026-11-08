@@ -202,6 +202,37 @@ At 0.5, by class:
 Windows rarely match. As for the classes, this is agreement with SAM 3's
 instances, not a ground truth.
 
+### One object on its own
+
+`gsplat_extract` (in `visloc-gsplat-core`, no GPU) cuts classes or single
+objects out of a splat. It reads `--ply`, `scene.ply`, for the colours.
+It reads `--semantic`, `gsplat_semantic_cuda`'s `--out` for that splat, for
+each gaussian's class and object:
+
+```bash
+# Each class's objects, numbered from 1, largest first
+gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
+    --classes run/labels/classes.txt --list
+# The first chair, as PLY and for the web viewer (?url=chair.splat)
+gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
+    --classes run/labels/classes.txt --select chair:1 \
+    --out chair.ply --splat chair.splat
+```
+
+- **`--list`** prints per object its gaussians, its centre and the size of
+  the box that holds 90% of its gaussians' centres. On MeetingRoom_In
+  chair 1 has 1,041 gaussians in 0.34 × 0.52 × 0.36 (the model's units).
+  - The last of the 25 chairs have 1 to 70 gaussians. They are the
+    leftovers of objects whose gaussians went to another chair.
+- **`--select`.** `--select chair` keeps a whole class and `--select
+  chair:3` the third chair. Repeat it for more:
+  `--select table:1 --select chair` keeps the big table and all the
+  chairs, 15,027 of the 88,309 gaussians.
+- **Output.**
+  - `--out` keeps the gaussians' colours and adds their `class` and
+    `instance`.
+  - `--splat` writes them for the web viewer, largest first.
+
 ## Building_In
 
 The same steps on FIORD's Building_In, a lobby and its corridors: the front
