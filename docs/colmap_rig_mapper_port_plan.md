@@ -391,8 +391,9 @@ if (image.FramePtr()->RigPtr()->NumSensors() > 1) {
 
 ## 2. visloc-rs counterpart mapping and root-cause of the scale collapse
 
-Primary files: `pipelines/slam/src/rig_sfm.rs` (10321 lines, the rig mapper
-itself), `pipelines/slam/src/bundle.rs` (16346 lines, rig-aware BA),
+Primary files: `pipelines/slam/src/rig_sfm/` (the rig mapper itself; a
+single 10321-line `rig_sfm.rs` when this was written),
+`pipelines/slam/src/bundle.rs` (16346 lines, rig-aware BA),
 `pipelines/slam/src/camera_rig.rs` (569 lines, per-image camera / rig
 container used by the *non*-rig incremental path),
 `crates/vision/src/pnp/generalized.rs` (`GeneralizedPnPRansac`,
