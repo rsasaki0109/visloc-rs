@@ -535,8 +535,7 @@ the other 14. None of the 10 runs without the labels had any.
   that of the runs without the labels.
 - **Outdoors**, on Bridge_Out, the shapes add fewer large splats: 142 and
   152, against 92 and 94 without the labels. Nearly all of them lie on the
-  snow and in the sky. None of its eight runs had floaters
-  ([Bridge_Out](#bridge_out-1)).
+  snow and in the sky. None of its eight runs, above, had floaters.
 - **What did not help.** Making the cross-entropy linear below P_y / A =
   0.1 or 0.5, which bounds its gradient where the label's class is
   nearly absent, or leaving the labels out of the refine weight: 96–126
