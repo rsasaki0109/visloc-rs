@@ -104,6 +104,7 @@ pub struct CudaTrainer {
     bound_size: f32,
     last_refine: Option<DensifyReport>,
     sparse_sh_adam: bool,
+    bf16_moments: bool,
     depth_weight: f32,
     // The depth weight at the last step (log-linear from depth_weight), if it
     // changes.
@@ -196,6 +197,7 @@ impl CudaTrainer {
             bound_size,
             last_refine: None,
             sparse_sh_adam: false,
+            bf16_moments: false,
             depth_weight: 0.0,
             depth_weight_final: None,
             last_depth_loss: 0.0,
@@ -210,6 +212,13 @@ impl CudaTrainer {
     /// so brush's aux losses still fade the gaussians no view sees.
     pub fn set_sparse_sh_adam(&mut self, on: bool) {
         self.sparse_sh_adam = on;
+    }
+
+    /// Keep the Adam moments in bf16, rounded stochastically (off by
+    /// default: float). The dense optimizer moves 20 bytes per element
+    /// instead of 28, and the moments take half the memory.
+    pub fn set_bf16_moments(&mut self, on: bool) {
+        self.bf16_moments = on;
     }
 
     pub fn steps_done(&self) -> usize {
@@ -313,6 +322,7 @@ impl CudaTrainer {
             semantic_weight: self.semantic.map_or(0.0, |(_, s)| s.weight),
             lr_semantic: self.semantic.map_or(0.0, |(_, s)| s.lr),
             semantic_geometry: self.semantic.map_or(0, |(_, s)| s.geometry as u32),
+            moments_bf16: self.bf16_moments as u32,
         };
         self.gs.train_step(&params)?;
         self.step += 1;

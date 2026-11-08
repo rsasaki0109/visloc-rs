@@ -45,6 +45,12 @@
 // gaussians' opacities and centres but not their shapes unless asked
 // (semantic_geometry 2): through the shape they grew splats over the pixels
 // of their class, large ones that showed as floaters from other views.
+//
+// Since ABI 16 a step can keep the Adam moments in bf16 (moments_bf16): the
+// dense optimizer moves 20 bytes per element instead of 28. The moments are
+// rounded stochastically, as Adam's second moment changes by 0.1% a step
+// (beta2 0.999), under half a bf16 step (0.2%), and round to nearest would
+// leave it where it is.
 
 #include <cuda_runtime.h>
 
@@ -86,7 +92,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 15;
+constexpr uint32_t kAbiVersion = 16;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -2001,19 +2007,45 @@ __global__ void stats_kernel(int n, const uint32_t* __restrict__ tiles, const fl
     seen[i] += 1.f;
 }
 
+// PCG-style integer hash, uniform and normal samples (mean_noise.wgsl,
+// densify_scatter.wgsl).
+__device__ inline uint32_t hash_u32(uint32_t x) {
+    const uint32_t v = x * 747796405u + 2891336453u;
+    const uint32_t w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+__device__ inline float uniform01(uint32_t key) { return (float(hash_u32(key) >> 8u) + 0.5f) / 16777216.f; }
+__device__ inline float normal_sample(uint32_t key) {
+    const float u1 = uniform01(key * 2u + 1u);
+    const float u2 = uniform01(key * 2u + 2u);
+    return sqrtf(-2.f * logf(u1)) * cosf(6.2831853f * u2);
+}
+
+// Adam moments as float, or as bf16 (uint16_t, a float's top 16 bits). A
+// bf16 store rounds up with the probability of the dropped bits (`r`, 16
+// random bits), so small updates still move the moment on average.
+__device__ inline float load_moment(const float* m, size_t e) { return m[e]; }
+__device__ inline float load_moment(const uint16_t* m, size_t e) { return __uint_as_float(uint32_t(m[e]) << 16); }
+__device__ inline void store_moment(float* m, size_t e, float v, uint32_t) { m[e] = v; }
+__device__ inline void store_moment(uint16_t* m, size_t e, float v, uint32_t r) {
+    m[e] = uint16_t((__float_as_uint(v) + (r & 0xffffu)) >> 16);
+}
+
 // Adam over one parameter buffer of `stride`-float records: element
 // k = e % stride uses lr_a for k < split_a, lr_b for k < split_b, else lr_c.
 // brush's auxiliary losses ride along: aux_kind 1 adds
 // aux_coef * v * exp(p) to the log-scale elements (k >= 7), aux_kind 2 adds
 // aux_coef * v to every element (an opacity logit), with
 // v = 1e-3 + (1 if the gaussian was projected this frame). With
-// `sparse_touched`, gaussians whose flag is 0 are left as they are.
+// `sparse_touched`, gaussians whose flag is 0 are left as they are. `seed`
+// varies the bf16 moments' rounding from step to step.
+template <class M>
 __global__ void adam_kernel(size_t n_elem, uint32_t stride, uint32_t split_a, uint32_t split_b, float lr_a,
                             float lr_b, float lr_c, float beta1, float beta2, float eps, float bc1, float bc2,
                             int aux_kind, float aux_coef, const uint8_t* __restrict__ sparse_touched,
                             const uint32_t* __restrict__ tiles,
-                            float* __restrict__ params, const float* __restrict__ grads, float* __restrict__ m1,
-                            float* __restrict__ m2) {
+                            float* __restrict__ params, const float* __restrict__ grads, M* __restrict__ m1,
+                            M* __restrict__ m2, uint32_t seed) {
     const size_t e = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (e >= n_elem) return;
     // Sparse: gaussians the frame did not blend keep their values and moments.
@@ -2030,25 +2062,23 @@ __global__ void adam_kernel(size_t n_elem, uint32_t stride, uint32_t split_a, ui
             g += aux_coef * v;
         }
     }
-    const float m = beta1 * m1[e] + (1.f - beta1) * g;
-    const float vv = beta2 * m2[e] + (1.f - beta2) * g * g;
-    m1[e] = m;
-    m2[e] = vv;
+    const float m = beta1 * load_moment(m1, e) + (1.f - beta1) * g;
+    const float vv = beta2 * load_moment(m2, e) + (1.f - beta2) * g * g;
+    const uint32_t r = std::is_same<M, float>::value ? 0u : hash_u32(uint32_t(e) ^ seed);
+    store_moment(m1, e, m, r);
+    store_moment(m2, e, vv, r >> 16);
     params[e] = p - lr * (m / bc1) / (sqrtf(vv / bc2) + eps);
 }
 
-// PCG-style integer hash, uniform and normal samples (mean_noise.wgsl,
-// densify_scatter.wgsl).
-__device__ inline uint32_t hash_u32(uint32_t x) {
-    const uint32_t v = x * 747796405u + 2891336453u;
-    const uint32_t w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
-    return (w >> 22u) ^ w;
+// The moments converted when a step asks for the other precision (bf16
+// rounded to nearest).
+__global__ void moments_to_bf16_kernel(size_t n, const float* __restrict__ src, uint16_t* __restrict__ dst) {
+    const size_t e = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (e < n) dst[e] = uint16_t((__float_as_uint(src[e]) + 0x8000u) >> 16);
 }
-__device__ inline float uniform01(uint32_t key) { return (float(hash_u32(key) >> 8u) + 0.5f) / 16777216.f; }
-__device__ inline float normal_sample(uint32_t key) {
-    const float u1 = uniform01(key * 2u + 1u);
-    const float u2 = uniform01(key * 2u + 2u);
-    return sqrtf(-2.f * logf(u1)) * cosf(6.2831853f * u2);
+__global__ void moments_to_float_kernel(size_t n, const uint16_t* __restrict__ src, float* __restrict__ dst) {
+    const size_t e = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (e < n) dst[e] = __uint_as_float(uint32_t(src[e]) << 16);
 }
 
 // Rotate v by the normalised quaternion (w, x, y, z).
@@ -2102,11 +2132,12 @@ __global__ void action_counts_kernel(int n, const uint32_t* __restrict__ actions
 // (the parent shifted by -o and a fresh copy shifted by +o, o = R (N(0, 0.5)
 // * s), both with scales / sqrt 2 and opacity 1 - sqrt(1 - a)). Row 0 keeps
 // the parent's moments, row 1 starts at zero. kind: 0 transforms,
-// 1 opacity, 2 SH.
+// 1 opacity, 2 SH. The moments are float or bf16 (M, as adam_kernel's).
+template <class M>
 __global__ void scatter_kernel(int n, uint32_t stride, int kind, uint32_t seed, const uint32_t* __restrict__ actions,
                                const uint32_t* __restrict__ cum, const float* __restrict__ src_p,
-                               const float* __restrict__ src_m1, const float* __restrict__ src_m2,
-                               float* __restrict__ dst_p, float* __restrict__ dst_m1, float* __restrict__ dst_m2) {
+                               const M* __restrict__ src_m1, const M* __restrict__ src_m2,
+                               float* __restrict__ dst_p, M* __restrict__ dst_m1, M* __restrict__ dst_m2) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const uint32_t action = actions[i];
@@ -2130,8 +2161,8 @@ __global__ void scatter_kernel(int n, uint32_t stride, int kind, uint32_t seed, 
             for (int k = 3; k < 7; ++k) dst_p[d + k] = p[k];
             for (int k = 7; k < 10; ++k) dst_p[d + k] = p[k] - shrink;
             for (int k = 0; k < 10; ++k) {
-                dst_m1[d + k] = c == 1 ? 0.f : src_m1[src + k];
-                dst_m2[d + k] = c == 1 ? 0.f : src_m2[src + k];
+                dst_m1[d + k] = c == 1 ? M(0) : src_m1[src + k];
+                dst_m2[d + k] = c == 1 ? M(0) : src_m2[src + k];
             }
         }
         return;
@@ -2142,8 +2173,8 @@ __global__ void scatter_kernel(int n, uint32_t stride, int kind, uint32_t seed, 
         const float logit = logf(na / (1.f - na));
         for (uint32_t c = 0; c < 2; ++c) {
             dst_p[out0 + c] = logit;
-            dst_m1[out0 + c] = c == 1 ? 0.f : src_m1[src];
-            dst_m2[out0 + c] = c == 1 ? 0.f : src_m2[src];
+            dst_m1[out0 + c] = c == 1 ? M(0) : src_m1[src];
+            dst_m2[out0 + c] = c == 1 ? M(0) : src_m2[src];
         }
         return;
     }
@@ -2151,8 +2182,8 @@ __global__ void scatter_kernel(int n, uint32_t stride, int kind, uint32_t seed, 
         const size_t d = (out0 + c) * stride;
         for (uint32_t k = 0; k < stride; ++k) {
             dst_p[d + k] = src_p[src + k];
-            dst_m1[d + k] = c == 1 ? 0.f : src_m1[src + k];
-            dst_m2[d + k] = c == 1 ? 0.f : src_m2[src + k];
+            dst_m1[d + k] = c == 1 ? M(0) : src_m1[src + k];
+            dst_m2[d + k] = c == 1 ? M(0) : src_m2[src + k];
         }
     }
 }
@@ -2194,8 +2225,12 @@ struct Ctx {
     uint32_t tile_bw = 0, tile_bh = 0;
     uint32_t num_isect = 0;
     bool have_forward = false;
-    // Scene and its Adam moments, per group (transforms, opacity, SH).
+    // Scene and its Adam moments, per group (transforms, opacity, SH). The
+    // moments are bf16 (uint16_t) when `m_bf16`, else float; the semantic
+    // logits' moments stay float.
     Buf params[3], m1[3], m2[3];
+    bool m_bf16 = false;
+    uint32_t adam_steps = 0;  // seeds the bf16 moments' rounding
     // Per gaussian, per frame.
     Buf xy, conic_op, color, depth, rect, extk, tiles, offsets;
     // Intersections.
@@ -2304,6 +2339,49 @@ void free_buf(Buf& b) {
 }
 
 inline unsigned blocks_for(size_t n, unsigned per = 256) { return unsigned((n + per - 1) / per); }
+
+// `count` zeroed Adam moments for group k, in the context's precision.
+int zero_moments(Ctx* ctx, int k, size_t count) {
+    if (ctx->m_bf16) {
+        uint16_t *a, *b;
+        GSC_TRY(ensure_zero(ctx, ctx->m1[k], count, &a));
+        GSC_TRY(ensure_zero(ctx, ctx->m2[k], count, &b));
+    } else {
+        float *a, *b;
+        GSC_TRY(ensure_zero(ctx, ctx->m1[k], count, &a));
+        GSC_TRY(ensure_zero(ctx, ctx->m2[k], count, &b));
+    }
+    return 0;
+}
+
+// Convert every group's moments to bf16 or back to float.
+int convert_moments(Ctx* ctx, bool to_bf16) {
+    if (ctx->m_bf16 == to_bf16) return 0;
+    for (int k = 0; k < 3; ++k) {
+        const size_t count = size_t(ctx->n) * ctx->stride(k);
+        for (Buf* m : {&ctx->m1[k], &ctx->m2[k]}) {
+            Buf out;
+            if (to_bf16) {
+                uint16_t* dst;
+                GSC_TRY(ensure(ctx, out, count, &dst));
+                if (count > 0)
+                    moments_to_bf16_kernel<<<blocks_for(count), 256>>>(count, static_cast<const float*>(m->ptr), dst);
+            } else {
+                float* dst;
+                GSC_TRY(ensure(ctx, out, count, &dst));
+                if (count > 0)
+                    moments_to_float_kernel<<<blocks_for(count), 256>>>(count, static_cast<const uint16_t*>(m->ptr),
+                                                                        dst);
+            }
+            GSC_CHECK(ctx, cudaGetLastError());
+            GSC_CHECK(ctx, cudaDeviceSynchronize());
+            free_buf(*m);
+            *m = out;
+        }
+    }
+    ctx->m_bf16 = to_bf16;
+    return 0;
+}
 
 int stage_begin(Ctx* ctx, Stage s) {
     GSC_CHECK(ctx, cudaEventRecord(ctx->ev_start[s]));
@@ -2801,6 +2879,7 @@ struct GscStepParams {
     float semantic_weight;     // labels' cross-entropy (set_labels; 0 = off)
     float lr_semantic;         // learning rate of the logits
     uint32_t semantic_geometry; // the labels also move: 0 only the logits, 1 opacities and centres, 2 shapes too
+    uint32_t moments_bf16;      // keep the Adam moments in bf16 (converted when this changes)
 };
 
 #if defined(_WIN32)
@@ -2877,10 +2956,9 @@ GSC_EXPORT int visloc_gsplat_cuda_set_scene(void* handle, int n, int sh_degree, 
     const float* src[3] = {transforms, opacity, sh};
     for (int k = 0; k < 3; ++k) {
         const size_t count = size_t(n) * ctx->stride(k);
-        float *p, *a, *b;
+        float* p;
         GSC_TRY(ensure(ctx, ctx->params[k], count, &p));
-        GSC_TRY(ensure_zero(ctx, ctx->m1[k], count, &a));
-        GSC_TRY(ensure_zero(ctx, ctx->m2[k], count, &b));
+        GSC_TRY(zero_moments(ctx, k, count));
         if (count > 0) GSC_CHECK(ctx, cudaMemcpy(p, src[k], count * sizeof(float), cudaMemcpyHostToDevice));
     }
     float *w, *s;
@@ -3390,13 +3468,24 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
             {1, 1, 1, p->lr[3], p->lr[3], p->lr[3], p->opacity_aux_coef > 0.f ? 2 : 0, p->opacity_aux_coef, 0},
             {rl, 3, 3, p->lr[4], p->lr[5], p->lr[5], 0, 0.f, p->sparse_sh_adam ? 1 : 0},
         };
+        GSC_TRY(convert_moments(ctx, p->moments_bf16 != 0));
+        const uint32_t seed = ctx->adam_steps++ * 0x9e3779b9u;
         for (int k = 0; k < 3; ++k) {
             const size_t n_elem = size_t(n) * groups[k].stride;
-            adam_kernel<<<blocks_for(n_elem), 256>>>(
-                n_elem, groups[k].stride, groups[k].split_a, groups[k].split_b, groups[k].lr_a, groups[k].lr_b,
-                groups[k].lr_c, p->beta1, p->beta2, p->eps, p->bc1, p->bc2, groups[k].aux_kind, groups[k].aux_coef,
-                groups[k].sparse ? static_cast<const uint8_t*>(ctx->touched.ptr) : nullptr, tiles, ctx->p(k), static_cast<const float*>(ctx->grads[k].ptr), static_cast<float*>(ctx->m1[k].ptr),
-                static_cast<float*>(ctx->m2[k].ptr));
+            const uint8_t* sparse = groups[k].sparse ? static_cast<const uint8_t*>(ctx->touched.ptr) : nullptr;
+            const float* grads = static_cast<const float*>(ctx->grads[k].ptr);
+            if (ctx->m_bf16)
+                adam_kernel<<<blocks_for(n_elem), 256>>>(
+                    n_elem, groups[k].stride, groups[k].split_a, groups[k].split_b, groups[k].lr_a, groups[k].lr_b,
+                    groups[k].lr_c, p->beta1, p->beta2, p->eps, p->bc1, p->bc2, groups[k].aux_kind,
+                    groups[k].aux_coef, sparse, tiles, ctx->p(k), grads, static_cast<uint16_t*>(ctx->m1[k].ptr),
+                    static_cast<uint16_t*>(ctx->m2[k].ptr), seed);
+            else
+                adam_kernel<<<blocks_for(n_elem), 256>>>(
+                    n_elem, groups[k].stride, groups[k].split_a, groups[k].split_b, groups[k].lr_a, groups[k].lr_b,
+                    groups[k].lr_c, p->beta1, p->beta2, p->eps, p->bc1, p->bc2, groups[k].aux_kind,
+                    groups[k].aux_coef, sparse, tiles, ctx->p(k), grads, static_cast<float*>(ctx->m1[k].ptr),
+                    static_cast<float*>(ctx->m2[k].ptr), seed);
             GSC_CHECK(ctx, cudaGetLastError());
         }
         if (sem_on) {
@@ -3406,7 +3495,7 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
                 n_elem, k, k, k, p->lr_semantic, p->lr_semantic, p->lr_semantic, p->beta1, p->beta2, p->eps, p->bc1,
                 p->bc2, 0, 0.f, nullptr, tiles, static_cast<float*>(ctx->sem.ptr),
                 static_cast<const float*>(ctx->sem_grad.ptr), static_cast<float*>(ctx->sem_m1.ptr),
-                static_cast<float*>(ctx->sem_m2.ptr));
+                static_cast<float*>(ctx->sem_m2.ptr), 0u);
             GSC_CHECK(ctx, cudaGetLastError());
         }
         if (p->noise_scale > 0.f) {
@@ -3506,13 +3595,23 @@ GSC_EXPORT int visloc_gsplat_cuda_apply_actions(void* handle, const uint32_t* ac
         for (int k = 0; k < 3; ++k) {
             const size_t stride = ctx->stride(k);
             Buf dp, dm1, dm2;
-            float *p, *a, *b;
+            float* p;
             GSC_TRY(ensure(ctx, dp, size_t(total) * stride, &p));
-            GSC_TRY(ensure(ctx, dm1, size_t(total) * stride, &a));
-            GSC_TRY(ensure(ctx, dm2, size_t(total) * stride, &b));
-            scatter_kernel<<<blocks_for(n), 256>>>(n, uint32_t(stride), k, seed, d_actions, cum, ctx->p(k),
-                                                   static_cast<const float*>(ctx->m1[k].ptr),
-                                                   static_cast<const float*>(ctx->m2[k].ptr), p, a, b);
+            if (ctx->m_bf16) {
+                uint16_t *a, *b;
+                GSC_TRY(ensure(ctx, dm1, size_t(total) * stride, &a));
+                GSC_TRY(ensure(ctx, dm2, size_t(total) * stride, &b));
+                scatter_kernel<<<blocks_for(n), 256>>>(n, uint32_t(stride), k, seed, d_actions, cum, ctx->p(k),
+                                                       static_cast<const uint16_t*>(ctx->m1[k].ptr),
+                                                       static_cast<const uint16_t*>(ctx->m2[k].ptr), p, a, b);
+            } else {
+                float *a, *b;
+                GSC_TRY(ensure(ctx, dm1, size_t(total) * stride, &a));
+                GSC_TRY(ensure(ctx, dm2, size_t(total) * stride, &b));
+                scatter_kernel<<<blocks_for(n), 256>>>(n, uint32_t(stride), k, seed, d_actions, cum, ctx->p(k),
+                                                       static_cast<const float*>(ctx->m1[k].ptr),
+                                                       static_cast<const float*>(ctx->m2[k].ptr), p, a, b);
+            }
             GSC_CHECK(ctx, cudaGetLastError());
             GSC_CHECK(ctx, cudaDeviceSynchronize());
             free_buf(ctx->params[k]);

@@ -309,6 +309,7 @@ fn fit_labels(gs: &mut CudaGsplat, geometry: LabelGeometry) -> (Vec<f64>, f64) {
             semantic_weight: 1.0,
             lr_semantic: 5e-2,
             semantic_geometry: geometry as u32,
+            moments_bf16: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -356,8 +357,9 @@ fn labels_train_the_logits() {
 
 /// Fit perturbed colours and opacities back to targets rendered from known
 /// gaussians; returns the mean L1 every 50 steps. One extra gaussian sits
-/// behind every camera: it is never projected, so its SH must not move.
-fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
+/// behind every camera: it is never projected, so its SH must not move. The
+/// steps before `bf16_until` keep the Adam moments in bf16.
+fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool, bf16_until: u32) -> Vec<f64> {
     let (w, h) = (96u32, 80u32);
     let truth = random_scene(60, 21, 1);
     let views: Vec<CameraView> = (0..4)
@@ -414,6 +416,7 @@ fn fit(gs: &mut CudaGsplat, sparse_sh_adam: bool) -> Vec<f64> {
             semantic_weight: 0.0,
             lr_semantic: 0.0,
             semantic_geometry: 0,
+            moments_bf16: (step < bf16_until) as u32,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -487,6 +490,7 @@ fn fit_normals(gs: &mut CudaGsplat, lens: Lens) -> Vec<f64> {
             semantic_weight: 0.0,
             lr_semantic: 0.0,
             semantic_geometry: 0,
+            moments_bf16: 0,
         };
         gs.train_step(&p).expect("step");
         if (step + 1) % 50 == 0 {
@@ -523,9 +527,13 @@ fn depth_normal_loss_falls_in_training() {
 #[test]
 fn training_steps_fit_a_rendered_target() {
     let Some(mut gs) = gsplat() else { return };
-    for sparse in [false, true] {
-        let mean_loss = fit(&mut gs, sparse);
-        eprintln!("sparse SH Adam {sparse}: mean L1 every 50 steps {mean_loss:.4?}");
+    // Float moments, dense and sparse; bf16 moments throughout, and bf16 for
+    // the first half (converted to float and back at the next run's start).
+    for (sparse, bf16_until) in [(false, 0), (true, 0), (false, 300), (false, 150)] {
+        let mean_loss = fit(&mut gs, sparse, bf16_until);
+        eprintln!(
+            "sparse SH Adam {sparse}, bf16 moments until step {bf16_until}: mean L1 every 50 steps {mean_loss:.4?}"
+        );
         assert!(
             mean_loss.last().unwrap() < &(0.25 * mean_loss[0]),
             "L1 fell from {:.4} to only {:.4}",

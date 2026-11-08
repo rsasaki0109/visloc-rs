@@ -7,7 +7,7 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
 //!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
-//!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
+//!   [--sparse-sh-adam] [--bf16-moments] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
 //!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>] \
 //!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.01] \
@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut eval_every = 5000usize;
     let mut profile = false;
     let mut sparse_sh_adam = false;
+    let mut bf16_moments = false;
     let mut holdout = 8usize;
     let mut mesh_out: Option<PathBuf> = None;
     let mut planar = false;
@@ -90,6 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--profile" => profile = true,
             // SH Adam only on the gaussians each step blends.
             "--sparse-sh-adam" => sparse_sh_adam = true,
+            // Adam moments in bf16, rounded stochastically.
+            "--bf16-moments" => bf16_moments = true,
             "--holdout" => holdout = next()?.parse()?,
             "--mesh" => mesh_out = Some(PathBuf::from(next()?)),
             "--planar-depth" => planar = true,
@@ -142,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
     let mut trainer = CudaTrainer::new(gs, &dataset, &init, cfg.clone())?;
     trainer.set_sparse_sh_adam(sparse_sh_adam);
+    trainer.set_bf16_moments(bf16_moments);
     if let Some(dir) = &depth_prior {
         let found = trainer.load_depth_priors(dir, depth_weight)?;
         trainer.set_depth_weight_final(depth_weight_final);
