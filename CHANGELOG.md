@@ -39,6 +39,10 @@ All notable changes to `visloc-rs` will be documented here.
     photos: in two held-out MeetingRoom_In photos its best "window" scores
     0.47, under the 0.5 cut, and the splats carry the windows in from the
     other photos. The window IoU understates them.
+  - **A lower SAM 3 threshold.** At `--threshold 0.4` SAM 3 keeps those
+    windows on MeetingRoom_In. The window votes' confidence goes from 0.63
+    to 0.77, and the other named classes move by 2.3 points at most. At
+    0.3 walls and ceiling lights lose.
   - **A before/after figure**: two held-out MeetingRoom_In views, the vote
     on a plain splat against a splat trained with the labels (74.9% →
     90.1% and 80.9% → 90.8% of their pixels).
