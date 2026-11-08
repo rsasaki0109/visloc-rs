@@ -6,6 +6,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`sam3_labels.py --prompt-threshold`.** `--prompt-threshold window=0.4`
+  keeps one prompt's instances from its own score instead of
+  `--threshold`'s (docs/semantic_splat.md, "Windows alone at 0.4").
+  - **MeetingRoom_In.** With the windows alone at 0.4, SAM 3 keeps the
+    glass walls it dropped at 0.5: window IoU 34.2% → 63.6%, mIoU 73.8% →
+    75.5%. With every prompt at 0.4 the walls lost more.
+  - **Building_In.** The windows alone at 0.4 change little: window IoU
+    48.1% → 49.7%, mIoU 58.5% → 58.1%. Every prompt at 0.4 costs 3.1
+    points of mIoU.
+  - The default stays 0.5 for every prompt.
+
 - **Training with the labels inside the colour kernels (CUDA ABI 14).**
   - **The label channel.** The cross-entropy needs only each pixel's
     label-class channel P_y and its coverage 1 - T. `raster_fwd_kernel`

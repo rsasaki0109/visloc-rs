@@ -60,6 +60,9 @@ gated `facebook/sam3` checkpoint (`hf auth login`).
   photos are upside down, and without `--rotate 180` SAM 3 labels their
   floor as ceiling and their ceiling as floor. `--rotate` turns each image
   for SAM 3 and turns the labels back.
+- **Score threshold.** An instance counts from a score of `--threshold`
+  (0.5). `--prompt-threshold window=0.4` sets another for one prompt,
+  repeated for more ([Windows alone at 0.4](#windows-alone-at-04)).
 - **Instances.** `--instances` also writes each pixel's instance, the one
   that gave its class: `<out>/instances/<image name>.png` (0 none, i the
   image's i-th instance, 255 no label) and `.txt` (`id class score` per
@@ -440,5 +443,35 @@ checked against its own held-out labels:
   IoUs compare across rows only loosely. The confidence, how far the photos
   agree, needs no reference.
 
-On this room 0.4 suits the windows. `sam3_labels.py` uses one threshold
-for every prompt, and Building_In is untested at 0.4.
+On this room 0.4 suits the windows.
+
+### Windows alone at 0.4
+
+`--prompt-threshold window=0.4` lowers the cut for the windows alone, the
+other prompts staying at 0.5. On both scenes, against every prompt at 0.4
+and at 0.5, each label set voted onto the scene's plain splat:
+
+| Scene, threshold | Window gaussians | Window confidence | Window IoU | mIoU | Pixel accuracy | "Other" IoU |
+|---|---|---|---|---|---|---|
+| MeetingRoom_In, 0.5 | 7.5% | 0.63 | 34.2% | 73.8% | 84.7% | 52.5% |
+| MeetingRoom_In, all 0.4 | 17.2% | 0.77 | 64.1% | 74.9% | 84.5% | 41.1% |
+| MeetingRoom_In, window 0.4 | 16.9% | 0.78 | 63.6% | 75.5% | 84.9% | 44.3% |
+| Building_In, 0.5 | 4.4% | 0.69 | 48.1% | 58.5% | 87.4% | 54.9% |
+| Building_In, all 0.4 | 7.1% | 0.70 | 45.2% | 55.4% | 85.3% | 40.5% |
+| Building_In, window 0.4 | 7.1% | 0.71 | 49.7% | 58.1% | 86.7% | 49.4% |
+
+- **MeetingRoom_In.** The windows alone at 0.4 keep the glass walls, as
+  every prompt at 0.4 does. The other prompts stay nearer their IoUs at
+  0.5: walls 62.8% (61.1% with every prompt at 0.4, 63.4% at 0.5). The
+  mIoU and the pixel accuracy are the highest of the three.
+- **Building_In.**
+  - Every prompt at 0.4 costs: the mIoU falls from 58.5% to 55.4%, doors
+    from 62.0% to 54.3%, stairs from 92.5% to 87.2% and trash cans from
+    66.6% to 56.2%.
+  - The windows alone at 0.4 give 62% more window gaussians, but the
+    window IoU rises only from 48.1% to 49.7%. "Other" loses 5.5 points and
+    the mIoU ends 0.4 below that at 0.5.
+
+So the default stays 0.5 for every prompt. `--prompt-threshold window=0.4`
+helps where SAM 3 drops windows that score just under the cut, as on
+MeetingRoom_In. The window confidence and `--check` show whether it does.

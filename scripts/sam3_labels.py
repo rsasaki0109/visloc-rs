@@ -15,7 +15,9 @@ Writes ``<out>/<image name>.png`` (the image's name with the extension
 replaced; 8-bit grey, the class index) and ``<out>/classes.txt`` (``index r g
 b name`` per line: 0 other, then the prompts in order). ``--preview`` also
 writes ``<out>/preview/<image name>.jpg``, the classes over the photo.
-``--instances`` also writes each pixel's instance, for
+``--prompt-threshold window=0.4`` keeps that prompt's instances from a
+lower (or higher) score than ``--threshold``. ``--instances`` also writes
+each pixel's instance, for
 ``gsplat_semantic_cuda --instances``: ``<out>/instances/<image name>.png``
 (8-bit grey: 0 none, i the image's i-th instance, 255 no label) and ``.txt``
 (``id class score`` per instance, best scores first).
@@ -73,10 +75,11 @@ def encode_prompts(model, processor, prompts, device):
     return out
 
 
-def label_image(model, processor, rgb, texts, threshold, mask_threshold, device, dtype):
+def label_image(model, processor, rgb, texts, thresholds, mask_threshold, device, dtype):
     """Each pixel's class (0 other, k the k-th prompt) and instance (0 none,
     i the i-th entry of the returned list of (class, score), at most
-    MAX_INSTANCES), both from the highest-scoring instance over it."""
+    MAX_INSTANCES), both from the highest-scoring instance over it. The k-th
+    prompt keeps instances scoring ``thresholds[k - 1]`` or more."""
     w, h = rgb.size
     label = np.zeros((h, w), np.uint8)
     inst = np.zeros((h, w), np.int32)
@@ -86,7 +89,7 @@ def label_image(model, processor, rgb, texts, threshold, mask_threshold, device,
     with torch.no_grad():
         # The image's features once, then one detection per prompt.
         vision = model.get_vision_features(pixel_values=image_inputs.pixel_values.to(dtype))
-        for k, (text, mask) in enumerate(texts, start=1):
+        for k, ((text, mask), threshold) in enumerate(zip(texts, thresholds), start=1):
             outputs = model(vision_embeds=vision, text_embeds=text, attention_mask=mask)
             result = processor.post_process_instance_segmentation(
                 outputs,
@@ -119,6 +122,11 @@ def main():
     ap.add_argument("--out", required=True, help="the label directory to write")
     ap.add_argument("--prompts", required=True, help="comma-separated class prompts")
     ap.add_argument("--threshold", type=float, default=0.5, help="instance score to keep")
+    ap.add_argument(
+        "--prompt-threshold", action="append", default=[], metavar="PROMPT=SCORE",
+        help="instance score to keep for one prompt, in place of --threshold "
+        "(e.g. window=0.4); repeat for more prompts",
+    )
     ap.add_argument("--mask-threshold", type=float, default=0.5, help="mask probability")
     ap.add_argument(
         "--rotate", type=int, default=0, choices=(0, 90, 180, 270),
@@ -136,6 +144,12 @@ def main():
     prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
     if not prompts or len(prompts) > 254:
         sys.exit("--prompts: 1 to 254 classes")
+    thresholds = [args.threshold] * len(prompts)
+    for spec in args.prompt_threshold:
+        prompt, sep, score = spec.rpartition("=")
+        if not sep or prompt.strip() not in prompts:
+            sys.exit(f"--prompt-threshold {spec}: not PROMPT=SCORE with one of --prompts")
+        thresholds[prompts.index(prompt.strip())] = float(score)
     names = image_names(args.images)
     if not names:
         sys.exit(f"no images in {args.images}")
@@ -162,7 +176,7 @@ def main():
         rgb = img.convert("RGB")
         label, inst, found = label_image(
             model, processor, rgb.rotate(args.rotate, expand=True), texts,
-            args.threshold, args.mask_threshold, device, dtype,
+            thresholds, args.mask_threshold, device, dtype,
         )
         label = np.ascontiguousarray(np.rot90(label, -args.rotate // 90))
         inst = np.ascontiguousarray(np.rot90(inst, -args.rotate // 90))
