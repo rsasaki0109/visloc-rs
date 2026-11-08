@@ -9,33 +9,34 @@ the recordings together, also locally. The
 system runs one VIO per sequence on the two grayscale SLAM cameras and the
 1 kHz IMU. Submissions 1–6 use nothing else; submission 7 also bridges the
 Moving platform track's missed rides with the recordings' GPS
-([lamaria_gps.md](lamaria_gps.md)), and submission 9 also refines the
-recordings together across recordings, offline
-([lamaria_multisession.md](lamaria_multisession.md)). Submission 8 was built
-but never evaluated: the site was unreachable until submission 9 replaced it.
-Scores are the leaderboard's means per challenge.
+([lamaria_gps.md](lamaria_gps.md)). Submission 9 refined the recordings
+together across recordings, offline
+([lamaria_multisession.md](lamaria_multisession.md)), and was withdrawn: the
+entry goes back to submission 7 ([What changed between the
+submissions](#what-changed-between-the-submissions)).
+Submission 8 was built but never evaluated: the site was unreachable until
+submission 9 replaced it. Scores are the leaderboard's means per challenge.
 
 | Submission | Short | Medium | Long | Low light | Moving platform | Mean |
 |---|---:|---:|---:|---:|---:|---:|
 | 1 (2026-10-23) | 67.7 | 54.8 | 54.1 | 53.6 | 27.5 | 51.5 |
 | 2 (2026-10-24) | 67.7 | 54.8 | 54.1 | 59.3 | 26.9 | 52.6 |
-| 3 (2026-10-25) | 67.7 | 54.8 | 54.2 | 60.9 | 26.9 | 52.9 |
-| 4 (2026-10-27) | 68.9 | 56.8 | 54.1 | 60.6 | 30.6 | 54.2 |
-| 5 (2026-10-28) | 70.1 | 56.8 | 54.1 | 60.6 | 30.6 | 54.4 |
-| 6 (2026-10-30) | 69.7 | 56.8 | 54.1 | 60.6 | 30.6 | 54.3 |
-| 7 (2026-11-06) | 69.7 | 56.8 | 54.1 | 60.6 | 47.3 | 57.7 |
-| 9 (2026-11-08) | **87.8** | **81.6** | **87.5** | **82.7** | **66.7** | **81.3** |
+| 3 (2026-10-25) | 67.7 | 54.8 | **54.2** | **60.9** | 26.9 | 52.9 |
+| 4 (2026-10-27) | 68.9 | **56.8** | 54.1 | 60.6 | 30.6 | 54.2 |
+| 5 (2026-10-28) | **70.1** | **56.8** | 54.1 | 60.6 | 30.6 | 54.4 |
+| 6 (2026-10-30) | 69.7 | **56.8** | 54.1 | 60.6 | 30.6 | 54.3 |
+| 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | **57.7** |
+| 9 (2026-11-08, withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
+| Aria's SLAM (reference) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
 | GroundedSLAM (2026-10-29) | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
 | RedComet | 75.5 | 65.8 | 61.3 | 77.6 | 53.1 | 66.7 |
 | FlexVIO | 73.1 | 62.9 | 56.7 | 69.7 | 28.1 | 58.1 |
 | FPV-SLAM, binocular (2026-10-28) | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
 
-Submission 9's mean, 81.3, is above every mean in this table and above Aria's
-SLAM's 75.9, as listed on 2026-11-06. Against the methods in the table, it
-leads on Medium, Long and Moving platform (also above Aria's SLAM's 55.0). It
-trails SLAM Dunk on Short (87.8 against 89.6) and Low light (82.7 against
-85.4). The other methods' scores here were not checked again on 2026-11-08.
+The other methods' scores are those listed on 2026-11-08, unchanged since
+2026-11-06. Bold marks visloc-rs's best per challenge, leaving out the
+withdrawn submission 9.
 
 On 2026-11-06 visloc-rs ranked sixth by the mean of the five challenges (the
 leaderboard itself lists the methods by their Short score). Ahead of it were
@@ -230,6 +231,18 @@ not evaluated, because the site could not be reached; submission 9 contains it.
   | sequence_5_7 | 69.2 (kept) | 66.7 % |
   | sequence_5_5 | 63.7 (kept) | 66.7 % |
 
+- **Withdrawn (2026-11-08).** The entry goes back to submission 7, uploaded
+  again once 24 hours have passed since submission 9's evaluation.
+  - **The rules are silent.** The challenge's rules say nothing about using
+    other recordings.
+  - **The leading methods appear to solve each sequence alone.** From Short to
+    Long, Aria's SLAM loses 19.8 points, SLAM Dunk 18.5 and GroundedSLAM 16.2,
+    the drift of longer walks. Submission 9 loses 0.3.
+  - **So submission 9 is not comparable with them.**
+  - **From now on, each sequence's estimate comes from its own recording
+    only.** Submission 9's scores and estimates are not used to choose or tune
+    anything.
+
 ## Against GroundedSLAM, sequence by sequence
 
 GroundedSLAM's scores here are those before its upload of 2026-10-29.
@@ -271,9 +284,7 @@ from 61.09 to 64.30; on these test sequences it moved the scores by −0.4 …
   1_2 (29.0), 2_7 (32.0), 3_16 (35.4), 1_16 (35.7) and 4_3 (37.0), with pose
   recall at 5 m of 55–100 %. That is the one-way heading and scale drift of
   [Slow heading drift](lamaria_batch_ba.md#slow-heading-drift), which no
-  camera or IMU cue tried so far pins down. Other recordings of the same
-  streets do: in submission 9 these seven score 71.6–86.1. The lowest walks
-  are then sequence_4_2 (66.0), 1_4 (67.1), 4_5 (71.5), 2_3 and 2_7 (71.6).
+  camera or IMU cue tried so far pins down.
 - **The IMU shows the rides the VIO missed but cannot bridge them.**
   sequence_5_5 and 5_6 (3.1, 2.4) keep a tram's standstill over 10.5–12.7 min
   and 14.0–15.5 min: there the accelerometer's velocity change over 10 s
@@ -285,12 +296,13 @@ from 61.09 to 64.30; on these test sequences it moved the scores by −0.4 …
   [lamaria_gps.md](lamaria_gps.md)).
 - **After the GPS, the Moving track's lowest** are sequence_5_3 (31.0),
   5_10 (32.8; no fix during its ride), 5_6 (35.2), 5_4 (36.2) and 5_9
-  (37.6). After submission 9 they are 5_3 (41.9, CP recall at 1 m 18.5 %),
-  5_10 (59.4), 5_6 (62.4), 5_9 (62.5) and 5_5 (63.7, kept from submission 7).
-- **The GPS residual says little at the metre level.** In submission 9,
-  sequence_5_10's median residual moved by 0.04 m and its score by 26.6.
-  sequence_5_5 and 5_7 were kept for residuals 0.11 and 0.36 m larger
-  ([The Moving recordings](lamaria_multisession.md#the-moving-recordings)).
+  (37.6).
+- **Each sequence from its own recording only.** Solving the recordings
+  together (submission 9) was withdrawn. Its per-sequence scores and estimates
+  are not a guide for the single-session chain: choosing by them would tune on
+  the test set. Its parts can work inside one recording, for instance ALIKED +
+  LightGlue between keyframes of the same recording that pass the same place,
+  with the settings chosen on the training sequences.
 - **The sun is no compass here.** On sequence_2_12 the saturated region the
   detector finds is overcast sky, and the Aria SLAM cameras see the sun only
   when it is low.

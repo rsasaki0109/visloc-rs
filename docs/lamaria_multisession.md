@@ -6,9 +6,20 @@ recordings, though, cover the same few streets again and again. Here they are re
 - A pose graph over every recording's keyframes then takes these cross edges with each recording's own odometry.
 - GPS proposes which keyframes to try and places each recording roughly before the solve.
 
-The challenge's rules allow offline and multi-session processing and any recorded sensor, stated in the method's
-description. The six training walks were solved inside the test graph, and the settings were chosen on their
-scores; no test ground truth was used.
+**Withdrawn (2026-11-08).** No submission uses this any more. Each sequence's estimate again comes from its own
+recording only, and the leaderboard entry goes back to submission 7. The scripts stay as an experiment.
+- **The rules are silent.** The challenge's rules
+  ([documentation](https://lamaria.ethz.ch/slam_documentation)) say nothing about using other recordings,
+  offline processing or sensors.
+- **The other methods appear to solve each sequence alone.** From Short to Long, Aria's SLAM loses 19.8 points,
+  SLAM Dunk 18.5 and GroundedSLAM 16.2: the drift of a longer walk. Submission 9 loses 0.3, because other
+  recordings hold its long walks. Their descriptions do not say either way.
+- **So a score from the whole test set together is not comparable** with theirs.
+- **Its results guide nothing.** Submission 9's test scores and its estimates are not used to choose, tune,
+  initialize or supervise the single-session methods.
+
+The six training walks were solved inside the test graph, and the settings were chosen on their scores; no test
+ground truth was used.
 
 Submission 8 (2026-11-07) refined 49 test walks this way, but it was never evaluated: the site was unreachable
 until submission 9 replaced it. Submission 9 adds three walks with poor GPS and eight of the ten Moving recordings
@@ -18,7 +29,7 @@ until submission 9 replaced it. Submission 9 adds three walks with poor GPS and 
 | | Short | Medium | Long | Low light | Moving | Mean |
 |---|---:|---:|---:|---:|---:|---:|
 | Submission 7 | 69.7 | 56.8 | 54.1 | 60.6 | 47.3 | 57.7 |
-| Submission 9 | **87.8** | **81.6** | **87.5** | **82.7** | **66.7** | **81.3** |
+| Submission 9 (withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
 
 [lamaria_test_results.md](lamaria_test_results.md) has the sequences. On the six training walks inside the test
 graph, the chain scores 445.3 in total and submission 8's setting 546.8:
@@ -382,7 +393,7 @@ python scripts/lamaria_xs_graph.py $WORK $WORK/mv_solve $SEQS $LEFT $MV --hold $
   --edges $WORK/edges_{a,b,c}/edges.npy $WORK/left_{a,b}/edges.npy $WORK/mv/edges.npy
 ```
 
-The method's description on the leaderboard states the multi-session processing and the GPS:
+The method description drafted for submission 9 stated the multi-session processing and the GPS:
 
 > Multi-session: 49 test walks with usable GPS, plus six training walks without their ground truth, are refined
 > jointly offline in a 4-DoF pose graph, with cross-recording ALIKED+LightGlue localization and per-recording
