@@ -217,6 +217,9 @@ gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
 gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
     --classes run/labels/classes.txt --select chair:1 \
     --out chair.ply --splat chair.splat
+# The room without its chairs
+gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
+    --classes run/labels/classes.txt --drop chair --splat no_chairs.splat
 ```
 
 - **`--list`** prints per object its gaussians, its centre and the size of
@@ -228,10 +231,25 @@ gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
   chair:3` the third chair. Repeat it for more:
   `--select table:1 --select chair` keeps the big table and all the
   chairs, 15,027 of the 88,309 gaussians.
+- **`--drop`** takes the same and removes them: from the selection, or,
+  without `--select`, from the whole splat. `--drop chair` leaves the room
+  without its chairs, 76,149 gaussians. `--select table --drop table:1`
+  keeps the tables but the big one.
 - **Output.**
   - `--out` keeps the gaussians' colours and adds their `class` and
     `instance`.
   - `--splat` writes them for the web viewer, largest first.
+
+What stays where the chairs stood, on MeetingRoom_In:
+
+- **Other classes in their boxes.** The boxes `--list` gives the 25 chairs
+  hold 11,217 gaussians, and 2,025 of them stay.
+  - 879 are the table's: the chairs stand under its edge.
+  - 827 are "other" (72 of them opaque), and 297 are floor.
+- **Dark streaks on the floor.** Seen from above in the viewer, the floor
+  shows no holes where the chairs stood, but dark streaks where their legs
+  were. They stay with `--drop other` too, so they are floor gaussians
+  that took the legs' colour.
 
 ## Building_In
 
