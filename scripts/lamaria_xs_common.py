@@ -91,13 +91,19 @@ def gps_fit(traj, tns, g, lat0, lon0, iters=8, scale=5.0):
     which keyframes of two recordings pass the same place."""
     en = np.c_[R_EARTH * np.cos(lat0) * (np.radians(g["lon"]) - lon0), R_EARTH * (np.radians(g["lat"]) - lat0)]
     src = np.stack([np.interp(g["t_ns"], tns, traj[:, 1 + i]) for i in range(2)], 1)
-    wt = np.ones(len(en))
+    return rigid2d(src, en, iters, scale)
+
+
+def rigid2d(src, dst, iters=8, scale=5.0):
+    """The 2D rotation (2, 2) and translation taking points src (n, 2) to dst (Cauchy weights, `scale` metres), and
+    the residuals."""
+    wt = np.ones(len(dst))
     for _ in range(iters):
-        ms, md = wt @ src / wt.sum(), wt @ en / wt.sum()
-        u, _, vt = np.linalg.svd(((en - md) * wt[:, None]).T @ (src - ms))
+        ms, md = wt @ src / wt.sum(), wt @ dst / wt.sum()
+        u, _, vt = np.linalg.svd(((dst - md) * wt[:, None]).T @ (src - ms))
         r2 = u @ np.diag([1, np.sign(np.linalg.det(u @ vt))]) @ vt
         t2 = md - r2 @ ms
-        res = np.linalg.norm(src @ r2.T + t2 - en, axis=1)
+        res = np.linalg.norm(src @ r2.T + t2 - dst, axis=1)
         wt = 1 / (1 + (res / scale) ** 2)
     return r2, t2, res
 

@@ -140,6 +140,21 @@ class GraphTest(unittest.TestCase):
         self.assertGreater(min(e0[:2]), 0.2)
         self.assertLess(max(e1), 0.5 * min(e0))
 
+    def test_gps_terms_pull_a_recording_into_place(self):
+        s = "sequence_1_1"
+        recs = {s: self.recs[s]}
+        lat0, lon0 = common.gps_origin([recs[s]["gps"]])
+        g = graph.Graph(recs, [], self.axis, 0.04, 0.005, 0.15, 0.25)
+        g.add_gps(recs, lat0, lon0, 3.0)
+        x0 = graph.initial_state(recs, self.axis)
+        x0[:, :2] = x0[:, :2] @ common.rz(0.1)[:2, :2].T + [10.0, -5.0]  # 6 deg and 11 m off
+        x0[:, 3] += 0.1
+        x, *_ = graph.solve(g, x0, log=lambda m: None)
+        shift = common.R_EARTH * np.array([np.cos(lat0) * (np.radians(LON0) - lon0), np.radians(LAT0) - lat0])
+        err = x[:, :2] - (self.truth[s][0][:, :2] + shift)
+        self.assertLess(np.sqrt((err ** 2).sum(1).mean()), 1.0)
+        self.assertLess(np.degrees(np.abs(common.wrap(x[:, 3] - self.truth[s][1])).max()), 1.0)
+
     def test_an_unchanged_graph_keeps_the_trajectory(self):
         d = self.recs["sequence_1_1"]
         xs = np.c_[d["p"], common.yaw_of(d["rot"], self.axis)]
@@ -155,6 +170,20 @@ class GraphTest(unittest.TestCase):
         self.assertEqual(len(graph.load_edges([path], min_inliers=201)), 0)
         kept = graph.load_edges([path], exclude={"sequence_1_3"})
         self.assertTrue(kept and all("sequence_1_3" not in (e[0], e[2]) for e in kept))
+
+    def test_a_recording_joins_held_ones(self):
+        work = Path(self.work)
+        cmd = [sys.executable, str(SCRIPTS / "lamaria_xs_graph.py"), self.work]
+        edges = ["--edges", str(work / "edges.npy"), "--vce", "0"]  # the odometry weights depend on the others' bends
+        subprocess.run(cmd + [str(work / "all"), *self.names] + edges, check=True, capture_output=True)
+        (work / "hold").mkdir()
+        for s in self.names[:2]:
+            (work / "hold" / f"{s}.tum").write_bytes((work / "all" / f"{s}.tum").read_bytes())
+        subprocess.run(cmd + [str(work / "joined"), *self.names] + edges + ["--hold", str(work / "hold")],
+                       check=True, capture_output=True)
+        self.assertFalse((work / "joined" / f"{self.names[0]}.tum").exists())
+        a, b = np.loadtxt(work / "all" / f"{self.names[2]}.tum"), np.loadtxt(work / "joined" / f"{self.names[2]}.tum")
+        self.assertLess(np.abs(a[:, 1:4] - b[:, 1:4]).max(), 0.1)
 
     def test_command_line(self):
         out = Path(self.work) / "out"

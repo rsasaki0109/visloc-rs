@@ -84,6 +84,39 @@ class MatchTest(unittest.TestCase):
         later = match.plan_queries(recs, every=10, radius=12.0, max_maps=4, map_from=2)
         self.assertEqual({m: sorted(q) for m, q in later.items() if q}, {"E": ["A"]})  # A's third nearest map
 
+    def test_a_recording_is_placed_by_its_edges(self):
+        tilt = R.from_euler("y", 80, degrees=True).as_matrix()
+        t = np.arange(40.0)
+        truth = {"A": np.c_[1.3 * t, 0.4 * t, np.zeros(40)], "B": np.c_[1.3 * t, 0.4 * t + 1.0, np.full(40, 0.2)]}
+        heading = np.arctan2(0.4, 1.3)
+        frames = {"A": (0.5, np.array([3.0, -2.0])), "B": (-1.2, np.array([-40.0, 25.0]))}  # common = R own + t
+
+        def own(s, xyz):
+            th, off = frames[s]
+            return np.c_[(xyz[:, :2] - off) @ common.rz(th)[:2, :2], xyz[:, 2]]
+
+        recs = {}
+        for s in "AB":
+            th, _ = frames[s]
+            p = own(s, truth[s])
+            rot = np.repeat((common.rz(heading - th) @ tilt)[None], 40, axis=0)
+            tns = (1e12 + t * 1e9).astype(np.int64)
+            recs[s] = {"traj": np.c_[tns / 1e9, p, R.from_matrix(rot).as_quat()], "tns": tns, "gkf": tns,
+                       "p": p, "rot": rot}
+        match.place(recs["A"], common.rz(frames["A"][0])[:2, :2], frames["A"][1], 1)
+        edges = []
+        for k in range(0, 40, 3):  # B's keyframes in A's map and A's in B's
+            for sA, sB in (("A", "B"), ("B", "A")):
+                ra, rb = recs[sA]["rot"][k], recs[sB]["rot"][k]
+                th_a, th_b = frames[sA][0], frames[sB][0]
+                rb_in_a = common.rz(th_b - th_a) @ rb  # sB's pose in sA's own frame
+                pb_in_a = own(sA, truth[sB][k:k + 1])[0]
+                edges.append(match.edge(sA, k, sB, k, ra, recs[sA]["p"][k], rb_in_a, pb_in_a, 200, 1))
+        match.place_by_edges(recs, {"B"}, edges, 1, log=lambda m: None)
+        np.testing.assert_allclose(recs["B"]["r2"], common.rz(frames["B"][0])[:2, :2], atol=1e-9)
+        np.testing.assert_allclose(recs["B"]["t2"], frames["B"][1], atol=1e-9)
+        np.testing.assert_allclose(recs["B"]["en"], truth["B"][:, :2], atol=1e-9)
+
 
 if __name__ == "__main__":
     unittest.main()
