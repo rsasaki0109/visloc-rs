@@ -882,8 +882,12 @@ async function main() {
     gl.vertexAttribIPointer(a_index, 1, gl.INT, false, 0, 0);
     gl.vertexAttribDivisor(a_index, 1);
 
+    // The focal lengths and the view drawn last, for picking objects.
+    let focal = [camera.fx, camera.fy];
+    let drawnView = viewMatrix;
     const resize = () => {
-        gl.uniform2fv(u_focal, new Float32Array([camera.fx, camera.fy]));
+        focal = [camera.fx, camera.fy];
+        gl.uniform2fv(u_focal, new Float32Array(focal));
 
         projectionMatrix = getProjectionMatrix(
             camera.fx,
@@ -1386,6 +1390,7 @@ async function main() {
         inv2 = translate4(inv2, 0, -jumpDelta, 0);
         inv2 = rotate4(inv2, -0.1 * jumpDelta, 1, 0, 0);
         let actualViewMatrix = invert4(inv2);
+        drawnView = actualViewMatrix;
 
         const viewProj = multiply4(projectionMatrix, actualViewMatrix);
         worker.postMessage({ view: viewProj });
@@ -1528,6 +1533,12 @@ async function main() {
                     splatData.slice(0, bytesRead),
                     worker,
                     parseFloat(params.get("blend") || "0") || 0,
+                    () => ({
+                        view: drawnView,
+                        projection: projectionMatrix,
+                        fx: focal[0],
+                        fy: focal[1],
+                    }),
                 );
             }
         }
@@ -1540,8 +1551,16 @@ async function main() {
 // class or by object. A slider, or the M key, blends the scene's colours into
 // the overlay's (?blend=1 starts on it); O switches the overlay. Each legend
 // comes from the overlay's .json beside it.
-async function semanticOverlay(urls, rgb, worker, start) {
+//
+// With the objects' legend listing them, and instances.bin beside
+// instances.splat (each splat's object, u32), a click picks the object under
+// the cursor and dims the rest; Escape clears it. `camera()` gives the view
+// drawn last and its focal lengths.
+async function semanticOverlay(urls, rgb, worker, start, camera) {
     const overlays = [];
+    // Each splat's object, and per object its class, number and gaussians.
+    let ids = null;
+    let objects = null;
     for (const url of urls) {
         const req = await fetch(url, { mode: "cors", credentials: "omit" });
         if (req.status != 200)
@@ -1560,18 +1579,32 @@ async function semanticOverlay(urls, rgb, worker, start) {
         } catch (err) {
             console.log("no legend for", url.pathname, err);
         }
+        if (legend && legend.instances) {
+            try {
+                const req = await fetch(new URL(url.pathname.replace(/\.splat$/, ".bin"), url));
+                const buffer = req.ok ? await req.arrayBuffer() : null;
+                if (buffer && buffer.byteLength == rgb.length / 8) {
+                    ids = new Uint32Array(buffer);
+                    objects = legend;
+                }
+            } catch (err) {
+                console.log("no objects to pick in", url.pathname, err);
+            }
+        }
         overlays.push({ bytes, legend });
     }
     let current = 0;
     const n = rgb.length / 32;
     const colors = new Uint8Array(4 * n);
     let pending = null;
+    let picked = null;
     const blend = (t) => {
         const sem = overlays[current].bytes;
         for (let i = 0; i < n; i++) {
+            const dim = picked !== null && ids[i] !== picked ? 0.25 : 1;
             for (let c = 0; c < 3; c++) {
                 const a = rgb[32 * i + 24 + c];
-                colors[4 * i + c] = Math.round(a + t * (sem[32 * i + 24 + c] - a));
+                colors[4 * i + c] = Math.round(dim * (a + t * (sem[32 * i + 24 + c] - a)));
             }
         }
         worker.postMessage({ colors });
@@ -1624,12 +1657,142 @@ async function semanticOverlay(urls, rgb, worker, start) {
         }
     };
     show();
+    const info = document.createElement("div");
+    if (ids) {
+        info.textContent = "click an object";
+        panel.append(info);
+    }
+    // The object under pixel (x, y): the splats there, front to back, each
+    // as the vertex shader draws it, composited; the object (or none) that
+    // takes the most weight.
+    const pick = (x, y) => {
+        const { view: v, projection: p, fx, fy } = camera();
+        const f = new Float32Array(rgb.buffer, rgb.byteOffset, rgb.length >> 2);
+        const hits = [];
+        for (let i = 0; i < n; i++) {
+            const [px, py, pz] = [f[8 * i], f[8 * i + 1], f[8 * i + 2]];
+            const cx = v[0] * px + v[4] * py + v[8] * pz + v[12];
+            const cy = v[1] * px + v[5] * py + v[9] * pz + v[13];
+            const cz = v[2] * px + v[6] * py + v[10] * pz + v[14];
+            if (!(cz > 0)) continue;
+            // The shader's clip: centres beyond 1.2 times the view are not
+            // drawn, and splats fade in over the near plane.
+            const [qx, qy, qz, qw] = [0, 1, 2, 3].map(
+                (k) => p[k] * cx + p[4 + k] * cy + p[8 + k] * cz + p[12 + k],
+            );
+            const clip = 1.2 * qw;
+            if (qz < -clip || Math.abs(qx) > clip || Math.abs(qy) > clip) continue;
+            const du = x - ((qx / qw + 1) * innerWidth) / 2;
+            const dv = y - ((1 - qy / qw) * innerHeight) / 2;
+            const s = [f[8 * i + 3], f[8 * i + 4], f[8 * i + 5]];
+            // No footprint reaches beyond 1,024 px, or √8 of its standard
+            // deviations, at most the largest scale, further off the axis.
+            const reach = Math.min(
+                1024,
+                (3 * Math.max(...s) * Math.max(fx, fy) * (1 + Math.hypot(cx, cy) / cz)) / cz,
+            );
+            if (Math.abs(du) > reach || Math.abs(dv) > reach) continue;
+            // M = S R and the covariance MᵀM, as the worker builds them.
+            const q = [0, 1, 2, 3].map((k) => (rgb[32 * i + 28 + k] - 128) / 128);
+            const M = [
+                1 - 2 * (q[2] * q[2] + q[3] * q[3]),
+                2 * (q[1] * q[2] + q[0] * q[3]),
+                2 * (q[1] * q[3] - q[0] * q[2]),
+                2 * (q[1] * q[2] - q[0] * q[3]),
+                1 - 2 * (q[1] * q[1] + q[3] * q[3]),
+                2 * (q[2] * q[3] + q[0] * q[1]),
+                2 * (q[1] * q[3] + q[0] * q[2]),
+                2 * (q[2] * q[3] - q[0] * q[1]),
+                1 - 2 * (q[1] * q[1] + q[2] * q[2]),
+            ].map((k, j) => k * s[Math.floor(j / 3)]);
+            const sigma = (a, b) => M[a] * M[b] + M[3 + a] * M[3 + b] + M[6 + a] * M[6 + b];
+            // T = J W: the projection's Jacobian in pixels times the view's
+            // rotation (column-major), then the footprint T Σ Tᵀ.
+            const J = [
+                [fx / cz, 0, (-fx * cx) / (cz * cz)],
+                [0, fy / cz, (-fy * cy) / (cz * cz)],
+            ];
+            const T = J.map((row) =>
+                [0, 1, 2].map((c) => row[0] * v[4 * c] + row[1] * v[4 * c + 1] + row[2] * v[4 * c + 2]),
+            );
+            const cov = (a, b) => {
+                let sum = 0;
+                for (let r = 0; r < 3; r++)
+                    for (let c = 0; c < 3; c++) sum += T[a][r] * sigma(r, c) * T[b][c];
+                return sum;
+            };
+            const [c00, c01, c11] = [cov(0, 0), cov(0, 1), cov(1, 1)];
+            // Its axes, as the shader takes them (the texture's 4Σ, the quad
+            // reaching √(2λ) of it, at most 1,024 px, over 2 in the quad's
+            // units): variances of at most 1024² / 8.
+            const mid = (c00 + c11) / 2;
+            const radius = Math.hypot((c00 - c11) / 2, c01);
+            const [l1, l2] = [mid + radius, mid - radius];
+            if (!(l2 > 0)) continue;
+            const [ex, ey] =
+                c01 != 0 ? [c01, l1 - c00] : c00 >= c11 ? [1, 0] : [0, 1];
+            const norm = Math.hypot(ex, ey);
+            const along = (du * ex + dv * ey) / norm;
+            const across = (du * ey - dv * ex) / norm;
+            const power =
+                (along * along) / (2 * Math.min(l1, 131072)) +
+                (across * across) / (2 * Math.min(l2, 131072));
+            if (power > 4) continue;
+            const fade = Math.min(1, Math.max(0, qz / qw + 1));
+            const alpha = Math.min(0.99, fade * (rgb[32 * i + 27] / 255) * Math.exp(-power));
+            if (alpha >= 1 / 255) hits.push([cz, alpha, ids[i]]);
+        }
+        hits.sort((a, b) => a[0] - b[0]);
+        const weight = new Map();
+        let through = 1;
+        for (const [, alpha, id] of hits) {
+            weight.set(id, (weight.get(id) || 0) + through * alpha);
+            through *= 1 - alpha;
+            if (through < 1e-3) break;
+        }
+        let best = null;
+        for (const [id, w] of weight) if (best === null || w > weight.get(best)) best = id;
+        return best === null || best == 0xffffffff ? null : best;
+    };
+    const select = (id) => {
+        picked = id;
+        const o = id === null ? null : objects.instances[id];
+        if (o) {
+            const name = objects.classes[o.class].name;
+            info.textContent =
+                name + " " + o.number + ", " + o.gaussians.toLocaleString("en") +
+                " gaussians (--select " + name + ":" + o.number + ")";
+        } else {
+            info.textContent = id === null ? "click an object" : "object " + id;
+        }
+        request(parseFloat(slider.value));
+    };
+    if (ids) {
+        const canvas = document.getElementById("canvas");
+        let down = null;
+        canvas.addEventListener("pointerdown", (e) => {
+            down = e.isPrimary && e.button == 0 && !e.ctrlKey && !e.metaKey
+                ? [e.clientX, e.clientY]
+                : null;
+        });
+        canvas.addEventListener("pointerup", (e) => {
+            if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 5) {
+                const id = pick(e.clientX, e.clientY);
+                select(id);
+                if (id === null) info.textContent = "no object there";
+            }
+            down = null;
+        });
+    }
     window.addEventListener("keydown", (e) => {
         if (e.code == "KeyM") {
             slider.value = parseFloat(slider.value) < 0.5 ? 1 : 0;
         } else if (e.code == "KeyO" && overlays.length > 1) {
             current = (current + 1) % overlays.length;
             show();
+        } else if (e.code == "Escape" && picked !== null) {
+            select(null);
+            return;
         } else {
             return;
         }

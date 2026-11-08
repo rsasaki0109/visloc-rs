@@ -225,6 +225,8 @@ gsplat_extract --ply run/scene.ply --semantic run/semantic.ply \
 - **`--list`** prints per object its gaussians, its centre and the size of
   the box that holds 90% of its gaussians' centres. On MeetingRoom_In
   chair 1 has 1,041 gaussians in 0.34 × 0.52 × 0.36 (the model's units).
+  A click on an object in the web viewer gives its number too
+  ([The viewer](#the-viewer)).
   - The last of the 25 chairs have 1 to 70 gaussians. They are the
     leftovers of objects whose gaussians went to another chair.
 - **`--select`.** `--select chair` keeps a whole class and `--select
@@ -380,6 +382,18 @@ parameters:
   splats per class, or the objects per class.
 - `&cameras=cameras.json` starts at the first capture viewpoint, and the
   number keys step through the captures.
+- **A click picks the object under the cursor.** The panel names it as
+  `gsplat_extract` takes it, e.g. "chair 3, 895 gaussians (--select
+  chair:3)", and the rest of the splat dims. Escape clears it.
+  - **How.** The viewer composites the splats under the cursor, front to
+    back, as its shader draws them. The object that takes the most weight
+    wins, or none: there it says "no object there".
+  - **Files.** It needs `instances.bin` beside `instances.splat`, each
+    splat's object, and the objects listed in `instances.json`.
+    `gsplat_semantic_cuda --web --instances` writes both.
+  - **On MeetingRoom_In** a pick takes 20–55 ms over the 88,309 splats.
+    The centre `--list` gives chair 3 projects onto the chair the click
+    picked.
 
 ## Training with the labels
 

@@ -368,12 +368,34 @@ pub fn instance_color(i: u32) -> [u8; 3] {
 }
 
 /// The instance overlay's legend: [`classes_json`] with each class's
-/// `count` its number of 3D instances, marked `"objects": true`.
-pub fn instances_json(classes: &[SemanticClass], instances_per_class: &[usize]) -> String {
-    classes_json(classes, instances_per_class).replacen(
-        "{\"classes\"",
-        "{\"objects\":true,\"classes\"",
-        1,
+/// `count` its number of 3D instances, marked `"objects": true`. Its
+/// `instances` give per 3D instance, in [`merge_instances`]' order, the
+/// class, the number among the class's instances (from 1, as
+/// `gsplat_extract --select <class>:<number>` takes it) and the gaussians.
+pub fn instances_json(classes: &[SemanticClass], instances: &[Instance]) -> String {
+    let mut per_class = vec![0usize; classes.len()];
+    let rows: Vec<String> = instances
+        .iter()
+        .map(|inst| {
+            let number = per_class.get_mut(inst.class as usize).map_or(0, |k| {
+                *k += 1;
+                *k
+            });
+            format!(
+                "{{\"class\":{},\"number\":{number},\"gaussians\":{}}}",
+                inst.class, inst.gaussians
+            )
+        })
+        .collect();
+    let legend = classes_json(classes, &per_class);
+    let fields = legend
+        .trim_end()
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or_default();
+    format!(
+        "{{\"objects\":true,{fields},\n\"instances\":[\n{}\n]}}\n",
+        rows.join(",\n")
     )
 }
 
@@ -581,6 +603,36 @@ mod tests {
         let json = classes_json(&classes, &[7]);
         assert!(
             json.contains(r#"{"index":0,"name":"a \"b\"","color":[1,2,3],"count":7}"#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn the_objects_legend_numbers_each_class_from_one() {
+        let classes: Vec<SemanticClass> = ["table", "chair"]
+            .iter()
+            .map(|n| SemanticClass {
+                name: n.to_string(),
+                color: [0, 0, 0],
+            })
+            .collect();
+        let inst = |class, gaussians| Instance {
+            class,
+            views: 3,
+            gaussians,
+        };
+        let json = instances_json(&classes, &[inst(1, 9), inst(0, 7), inst(1, 5)]);
+        assert!(json.starts_with(r#"{"objects":true,"classes":["#), "{json}");
+        assert!(
+            json.contains(r#""name":"chair","color":[0,0,0],"count":2}"#),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                "\"instances\":[\n{\"class\":1,\"number\":1,\"gaussians\":9},\n\
+                 {\"class\":0,\"number\":1,\"gaussians\":7},\n\
+                 {\"class\":1,\"number\":2,\"gaussians\":5}\n]}"
+            ),
             "{json}"
         );
     }

@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **The web viewer picks the object under a click.** With `&instances=`,
+  the panel names the object as `gsplat_extract --select` takes it
+  ("chair 3, 895 gaussians (--select chair:3)"), and the rest of the splat
+  dims; Escape clears it.
+  - **How.** The splats under the cursor are composited front to back, as
+    the viewer's shader draws them. The object with the most weight wins.
+  - **Files.** `gsplat_semantic_cuda --web --instances` now also writes
+    `instances.bin`, each splat's object (u32). `instances.json` lists
+    each object's class, number and gaussians.
+  - **MeetingRoom_In.** A pick takes 20–55 ms over 88,309 splats
+    (docs/semantic_splat.md, "The viewer").
+
 - **`gsplat_extract --drop`: classes or single objects removed from a
   labelled splat.** It takes the same as `--select`, and removes them from
   the selection or, without `--select`, from the whole splat.

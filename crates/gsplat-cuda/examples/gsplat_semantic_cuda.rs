@@ -37,7 +37,10 @@
 //! objects seen in fewer than `--min-views` views (3) are dropped
 //! (`semantic::merge_instances`). `--out` then has an `instance` property
 //! (-1: none), and `--web` writes `instances.splat` (each object its own
-//! colour) and `instances.json`.
+//! colour), `instances.json` (the legend, and per object its class and
+//! number as `gsplat_extract` takes them) and `instances.bin` (each splat's
+//! object, u32 little-endian, 4294967295 for none), with which the viewer
+//! picks the object under a click.
 //!
 //! `--check` holds out every `--holdout`-th view (8, as `gsplat_train_cuda`)
 //! and lets only the others vote, then renders the painted splat at each
@@ -58,8 +61,8 @@ use visloc_gsplat_core::gaussian::Scene;
 use visloc_gsplat_core::ply::{ply_properties, save_ply_with, scene_from_ply};
 use visloc_gsplat_core::semantic::{
     classes_json, colour_by_class, instance_color, instances_json, label_from_logits,
-    label_gaussians, merge_instances, paint, parse_classes, view_instance_members, ViewInstance,
-    NO_INSTANCE,
+    label_gaussians, merge_instances, paint, parse_classes, view_instance_members, Instance,
+    ViewInstance, NO_INSTANCE,
 };
 use visloc_gsplat_core::splat::{importance_order, save_splat};
 use visloc_gsplat_cuda::CudaGsplat;
@@ -240,6 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3D instances: each view's instance image votes on its own, then the
     // view instances merge across views.
     let mut instance_of: Vec<u32> = Vec::new();
+    let mut found: Vec<Instance> = Vec::new();
     let mut per_class_instances = vec![0usize; k];
     if instances {
         let t1 = std::time::Instant::now();
@@ -267,7 +271,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let gaussian_class: Vec<u8> = per.iter().map(|l| l.class).collect();
-        let found;
         (instance_of, found) = merge_instances(&view_insts, &gaussian_class, overlap, min_views);
         for f in &found {
             if let Some(c) = per_class_instances.get_mut(f.class as usize) {
@@ -517,10 +520,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if instances {
             let colors: Vec<[u8; 3]> = instance_of.iter().map(|&i| instance_color(i)).collect();
             save_splat(&pick(&paint(&scene, &colors)), dir.join("instances.splat"))?;
-            std::fs::write(
-                dir.join("instances.json"),
-                instances_json(&classes, &per_class_instances),
-            )?;
+            std::fs::write(dir.join("instances.json"), instances_json(&classes, &found))?;
+            // Each splat's object, in the splats' order, for picking.
+            let ids: Vec<u8> = order
+                .iter()
+                .flat_map(|&i| instance_of[i].to_le_bytes())
+                .collect();
+            std::fs::write(dir.join("instances.bin"), ids)?;
         }
         // The capture viewpoints in antimatter15's cameras.json: per view the
         // centre and the camera-to-world rotation, row by row.
