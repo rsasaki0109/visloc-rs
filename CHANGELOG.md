@@ -19,6 +19,14 @@ All notable changes to `visloc-rs` will be documented here.
     87.9–88.2% of the held-out pixels (89.6–89.9% with the shapes,
     79.4–84.5% without the labels). Building_In: 91.3% (92.4% with the
     shapes, 87.2% without) at 32.00 and 32.05 dB.
+  - **Outdoors.** On FIORD's Bridge_Out (sky, snow, buildings), with
+    eleven SAM 3 prompts, four runs at the default:
+    - 95.2% of the held-out pixels, against 93.7–93.8% without the labels
+      and 95.7% with the shapes.
+    - Windows' IoU goes from 49–53% to 71%.
+    - No floaters, at 30.91–31.17 dB (31.17–31.20 dB without the labels).
+    - Lamp posts and trees gain little, and the splat keeps none of the
+      people walking past (docs/semantic_splat.md, "Bridge_Out").
   - **`--semantic-shape`** keeps the previous behaviour.
     `--semantic-logits-only` is unchanged.
   - **What did not help:** a cross-entropy linear below P_y / A = 0.1 or
