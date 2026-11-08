@@ -7,7 +7,7 @@ use nalgebra::{Quaternion, Rotation3, Vector3};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{sh_rest_coeffs_per_channel, Gaussian, Scene};
 use visloc_gsplat_core::lens::{Lens, Projection};
-use visloc_gsplat_cuda::{CudaGsplat, GscCamera, StepParams};
+use visloc_gsplat_cuda::{CudaGsplat, GscCamera, LabelGeometry, StepParams};
 use visloc_gsplat_render::packing::PackedScene;
 use visloc_gsplat_train::config::pack_rgba8;
 use visloc_gsplat_train::metrics::ssim_with_grad;
@@ -234,10 +234,10 @@ fn refine_actions_carry_the_logits() {
 
 /// Labels rendered from known gaussians (each its own class of `k`, logits
 /// one-hot times 8) are fitted by logits from zero, the geometry held still
-/// (`geometry` false) or learning too; returns the mean cross-entropy every
-/// 50 steps and the share of labelled pixels whose blended class
-/// probabilities' largest is the label at the end.
-fn fit_labels(gs: &mut CudaGsplat, geometry: bool) -> (Vec<f64>, f64) {
+/// ([`LabelGeometry::LogitsOnly`]) or learning too; returns the mean
+/// cross-entropy every 50 steps and the share of labelled pixels whose
+/// blended class probabilities' largest is the label at the end.
+fn fit_labels(gs: &mut CudaGsplat, geometry: LabelGeometry) -> (Vec<f64>, f64) {
     let (w, h) = (64u32, 48u32);
     let k = 5usize;
     let mut scene = random_scene(60, 21, 0);
@@ -287,7 +287,7 @@ fn fit_labels(gs: &mut CudaGsplat, geometry: bool) -> (Vec<f64>, f64) {
             sh_active_degree: 0,
             background: [0.0; 3],
             ssim_weight: 0.0,
-            lr: if geometry {
+            lr: if geometry != LabelGeometry::LogitsOnly {
                 [1e-3, 1e-3, 1e-3, 1e-2, 0.0, 0.0]
             } else {
                 [0.0; 6]
@@ -334,23 +334,23 @@ fn fit_labels(gs: &mut CudaGsplat, geometry: bool) -> (Vec<f64>, f64) {
 #[test]
 fn labels_train_the_logits() {
     let Some(mut gs) = gsplat() else { return };
-    for geometry in [false, true] {
+    for geometry in [
+        LabelGeometry::LogitsOnly,
+        LabelGeometry::OpacityPosition,
+        LabelGeometry::Full,
+    ] {
         let (mean_loss, agree) = fit_labels(&mut gs, geometry);
         eprintln!(
-            "geometry {geometry}: cross-entropy every 50 steps {mean_loss:.4?}, {:.1}% of the labelled pixels agree",
+            "{geometry:?}: cross-entropy every 50 steps {mean_loss:.4?}, {:.1}% of the labelled pixels agree",
             100.0 * agree
         );
         assert!(
             mean_loss.last().unwrap() < &(0.5 * mean_loss[0]),
-            "geometry {geometry}: the cross-entropy fell from {:.4} to only {:.4}",
+            "{geometry:?}: the cross-entropy fell from {:.4} to only {:.4}",
             mean_loss[0],
             mean_loss.last().unwrap()
         );
-        assert!(
-            agree > 0.9,
-            "geometry {geometry}: {:.1}% agree",
-            100.0 * agree
-        );
+        assert!(agree > 0.9, "{geometry:?}: {:.1}% agree", 100.0 * agree);
     }
 }
 

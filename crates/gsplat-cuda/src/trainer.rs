@@ -27,7 +27,7 @@ use visloc_gsplat_train::dataset::{
 };
 use visloc_gsplat_train::densify::{BrushRefineConfig, DensifyReport, Group, Population};
 
-use crate::{CudaGsplat, GscCamera, GsplatCudaError, StepParams};
+use crate::{CudaGsplat, GscCamera, GsplatCudaError, LabelGeometry, StepParams};
 
 #[derive(Debug)]
 pub enum CudaTrainError {
@@ -62,9 +62,9 @@ pub struct SemanticTraining {
     pub weight: f32,
     /// Learning rate of the logits.
     pub lr: f32,
-    /// The cross-entropy also moves the gaussians and counts towards brush's
-    /// refine weight; false trains the logits alone.
-    pub geometry: bool,
+    /// What the cross-entropy moves besides the logits (by default the
+    /// opacities and centres).
+    pub geometry: LabelGeometry,
 }
 
 impl Default for SemanticTraining {
@@ -72,7 +72,7 @@ impl Default for SemanticTraining {
         Self {
             weight: 0.02,
             lr: 2.5e-3,
-            geometry: true,
+            geometry: LabelGeometry::default(),
         }
     }
 }
@@ -310,7 +310,7 @@ impl CudaTrainer {
             },
             semantic_weight: self.semantic.map_or(0.0, |(_, s)| s.weight),
             lr_semantic: self.semantic.map_or(0.0, |(_, s)| s.lr),
-            semantic_geometry: self.semantic.is_some_and(|(_, s)| s.geometry) as u32,
+            semantic_geometry: self.semantic.map_or(0, |(_, s)| s.geometry as u32),
         };
         self.gs.train_step(&params)?;
         self.step += 1;

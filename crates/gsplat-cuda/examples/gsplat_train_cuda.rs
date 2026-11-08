@@ -10,7 +10,8 @@
 //!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
 //!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>] \
-//!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.0025] [--semantic-logits-only]]
+//!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.0025] \
+//!     [--semantic-logits-only | --semantic-shape]]
 //! ```
 //!
 //! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
@@ -31,8 +32,9 @@
 //! `--labels` trains a logit per class and gaussian against the training
 //! views' labels (`scripts/sam3_labels.py`'s `<dir>/<image name>.png` and
 //! `classes.txt`): `--semantic-weight` x the mean cross-entropy over the
-//! labelled pixels, which also moves the gaussians unless
-//! `--semantic-logits-only`. The output then has the float properties
+//! labelled pixels. It also moves the gaussians' opacities and centres:
+//! `--semantic-logits-only` trains the logits alone, `--semantic-shape` moves
+//! the shapes too. The output then has the float properties
 //! `class_logit_<c>` per class, which `gsplat_semantic_cuda --logits` reads.
 
 use std::path::{Path, PathBuf};
@@ -42,7 +44,7 @@ use image::imageops::FilterType;
 use visloc_gsplat_core::ply::{save_ply, save_ply_with};
 use visloc_gsplat_core::semantic::{parse_classes, NO_LABEL};
 use visloc_gsplat_cuda::trainer::{CudaTrainer, SemanticTraining};
-use visloc_gsplat_cuda::CudaGsplat;
+use visloc_gsplat_cuda::{CudaGsplat, LabelGeometry};
 use visloc_gsplat_train::config::TrainConfig;
 use visloc_gsplat_train::dataset::{
     find_model_dir, load_colmap_dataset_with, load_view_rgb, load_view_rgb_mask, EquirectOptions,
@@ -101,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--labels" => labels = Some(PathBuf::from(next()?)),
             "--semantic-weight" => semantic.weight = next()?.parse()?,
             "--semantic-lr" => semantic.lr = next()?.parse()?,
-            "--semantic-logits-only" => semantic.geometry = false,
+            "--semantic-logits-only" => semantic.geometry = LabelGeometry::LogitsOnly,
+            "--semantic-shape" => semantic.geometry = LabelGeometry::Full,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -175,10 +178,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 classes.len(),
                 semantic.weight,
                 semantic.lr,
-                if semantic.geometry {
-                    ""
-                } else {
-                    ", logits only"
+                match semantic.geometry {
+                    LabelGeometry::LogitsOnly => ", logits only",
+                    LabelGeometry::OpacityPosition => "",
+                    LabelGeometry::Full => ", shapes too",
                 }
             );
             classes

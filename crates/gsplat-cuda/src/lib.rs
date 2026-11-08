@@ -40,6 +40,24 @@ pub const SCREEN_GRAD_FLOATS: usize = 10;
 /// Most classes the semantic logits take ([`CudaGsplat::set_labels`]).
 pub const MAX_SEMANTIC_CLASSES: usize = 16;
 
+/// What the labels' cross-entropy moves besides the logits, through each
+/// splat's blending weight ([`StepParams::semantic_geometry`],
+/// [`CudaGsplat::label_backward`]). It counts towards brush's refine weight
+/// unless [`LogitsOnly`](Self::LogitsOnly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum LabelGeometry {
+    /// Nothing: the logits alone.
+    LogitsOnly = 0,
+    /// The opacities and the centres. Their shapes take no part: through
+    /// them the labels grew splats over the pixels of their class, large
+    /// ones that showed as floaters from other views.
+    #[default]
+    OpacityPosition = 1,
+    /// The shapes (scale and rotation) too.
+    Full = 2,
+}
+
 /// Camera as the native ABI takes it (`GscCamera` in the CUDA source).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,8 +170,8 @@ pub struct StepParams {
     pub semantic_weight: f32,
     /// Learning rate of the logits.
     pub lr_semantic: f32,
-    /// The cross-entropy also moves the gaussians through their blending
-    /// weights, and counts towards brush's refine weight (0 = logits only).
+    /// What the cross-entropy moves besides the logits: a [`LabelGeometry`]
+    /// as `u32` (0 only the logits, 1 opacities and centres, 2 shapes too).
     pub semantic_geometry: u32,
 }
 
@@ -524,7 +542,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 14;
+    pub const ABI_VERSION: u32 = 15;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -977,13 +995,14 @@ impl CudaGsplat {
     /// image's size): the unweighted mean over its labelled pixels, and the
     /// gradients of `weight` times it as
     /// [`classes_backward`](Self::classes_backward) gives them, the logits'
-    /// through the softmax. With `geometry` false only the logits get one.
+    /// through the softmax. `geometry` picks which of the others get one
+    /// ([`LabelGeometry::Full`] as `classes_backward`).
     pub fn label_backward(
         &mut self,
         view: &CameraView,
         image: u32,
         weight: f32,
-        geometry: bool,
+        geometry: LabelGeometry,
     ) -> Result<(f64, Gradients, Vec<f32>), GsplatCudaError> {
         let cam = GscCamera::from_view(view);
         let num_classes = self.logit_classes;
