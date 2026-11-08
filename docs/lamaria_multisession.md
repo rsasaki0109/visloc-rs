@@ -1,15 +1,38 @@
-# LaMAria: the walks refined together across recordings
+# LaMAria: the recordings refined together
 
-Each recording's VIO and BA chain runs on its own ([lamaria_submission.md](lamaria_submission.md)). The walking
+Each recording's VIO and BA chain runs on its own ([lamaria_submission.md](lamaria_submission.md)). The
 recordings, though, cover the same few streets again and again. Here they are refined together, offline:
 - Where two recordings pass the same place, a keyframe of one is localized in the other's map.
 - A pose graph over every recording's keyframes then takes these cross edges with each recording's own odometry.
-- GPS only proposes which keyframes to try.
+- GPS proposes which keyframes to try and places each recording roughly before the solve.
 
-The challenge's rules allow offline and multi-session processing and any recorded sensor, stated in the method's
-description. The six training walks were solved inside the test graph, and the settings were chosen on their
-scores; no test ground truth was used. On those six walks the chain scores 445.3 in total, and submission 8's
-setting 546.8. Submission 8 (2026-11-07) is built this way; its score is pending.
+**Withdrawn (2026-11-08).** No submission uses this any more. Each sequence's estimate again comes from its own
+recording only, and the leaderboard entry goes back to submission 7. The scripts stay as an experiment.
+- **The rules are silent.** The challenge's rules
+  ([documentation](https://lamaria.ethz.ch/slam_documentation)) say nothing about using other recordings,
+  offline processing or sensors.
+- **The other methods appear to solve each sequence alone.** From Short to Long, Aria's SLAM loses 19.8 points,
+  SLAM Dunk 18.5 and GroundedSLAM 16.2: the drift of a longer walk. Submission 9 loses 0.3, because other
+  recordings hold its long walks. Their descriptions do not say either way.
+- **So a score from the whole test set together is not comparable** with theirs.
+- **Its results guide nothing.** Submission 9's test scores and its estimates are not used to choose, tune,
+  initialize or supervise the single-session methods.
+
+The six training walks were solved inside the test graph, and the settings were chosen on their scores; no test
+ground truth was used.
+
+Submission 8 (2026-11-07) refined 49 test walks this way, but it was never evaluated: the site was unreachable
+until submission 9 replaced it. Submission 9 adds three walks with poor GPS and eight of the ten Moving recordings
+([Adding recordings to the solved graph](#adding-recordings-to-the-solved-graph)). On the leaderboard
+(2026-11-08) every track gains 18–33 points, and the mean goes from 57.7 to 81.3:
+
+| | Short | Medium | Long | Low light | Moving | Mean |
+|---|---:|---:|---:|---:|---:|---:|
+| Submission 7 | 69.7 | 56.8 | 54.1 | 60.6 | 47.3 | 57.7 |
+| Submission 9 (withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
+
+[lamaria_test_results.md](lamaria_test_results.md) has the sequences. On the six training walks inside the test
+graph, the chain scores 445.3 in total and submission 8's setting 546.8:
 
 | Sequence | The chain | The first build | Submission 8 |
 |---|---:|---:|---:|
@@ -95,7 +118,8 @@ about the same: each has few neighbours among the eight.
 
 The test graph has 55 recordings: 49 test walks and the six training walks above, without the two Moving ones.
 
-These walks are left out and keep their chain estimates:
+Submission 8 leaves these walks out, and they keep their chain estimates. Submission 9 adds the first three
+([Walks with poor GPS](#walks-with-poor-gps)).
 - sequence_1_16 has 12 fixes.
 - sequence_1_17, 2_10 and 4_7 have no fix with an accuracy of 10 m or better.
 
@@ -167,6 +191,124 @@ The walks submission 8 moved most also agree better with GPS:
 - sequence_4_3: 2.85 → 2.63 m.
 - sequence_4_8: 4.85 → 4.44 m.
 
+## Adding recordings to the solved graph
+
+Submission 9 adds recordings to submission 8's graph and leaves the 55 already solved as they are.
+
+### Held recordings
+
+`lamaria_xs_graph.py --hold DIR` takes the recordings with a trajectory in `DIR`, an earlier solve's output, as
+solved:
+- They stay where that solve put them, through the rigid placement and Gauss-Newton.
+- The edges among them count for nothing.
+- Only the other recordings are solved and written.
+
+Solving everything again would move the 55 as well. With the three walks below joined in one joint solve, the six
+training walks fall from 546.8 to 544.6 (4_10 87.9 → 84.7). Held instead, the 55 stay as submission 8 byte for
+byte. The three walks come out within 0.13–0.20 m of the joint solve (median, after a rigid fit).
+
+### Walks with poor GPS
+
+The matcher places each recording by its fixes with an accuracy of 10 m or better, and leaves out a recording
+with fewer than 30 of them. Such walks join in two matching runs, with `--loose` and `--only` naming them:
+
+1. **Stage 1.** They take fixes up to 50 m (10 are enough). Every 10th 1 Hz keyframe tries the 4 nearest maps
+   within 30 m, against 5 map keyframes (`--radius 30 --window 5 --every 10 --max-maps 4`).
+2. **Stage 2.** Each is placed by the first run's edges with 100+ inliers instead (`--place`; a robust 2D fit,
+   Cauchy 3 m). Every 2nd keyframe then tries the 4 nearest maps within 12 m (`--every 2 --max-maps 4`).
+
+In the graph these walks start from fixes up to 50 m.
+
+**A training check.** Two training walks, 1_20 and 4_11, were given poor GPS: a third of their fixes, each off by
+a slowly wandering 20 m error (16.1 and 22.6 m at the median), with an accuracy of 40 m. Their 1,466 edges were
+taken out of submission 8's 38,791.
+- Stage 1 found 267 edges.
+- Stage 2 placed the two walks 7.3 and 9.3 m from where their GPS had put them, and found 1,845 edges.
+
+Solved in the test graph, the six training walks score:
+
+| Sequence | Left out (the chain) | Joined in two stages |
+|---|---:|---:|
+| sequence_1_20 | 88.65 | 93.64 |
+| sequence_4_11 | 71.02 | 90.06 |
+| The other four | 365.21 | 367.26 |
+| Total | 524.88 | **550.96** |
+
+**On the test.** sequence_1_16, 1_17, 2_10 and 4_7 were left out of submission 8.
+- Stage 1: 1,778 queries, 514 edges, 14 minutes.
+- Stage 2 placed 1_16 by 45 edges, 19.5 m from where its GPS had put it. It placed 1_17 by 127 edges (7.7 m) and
+  2_10 by 114 (9.4 m). It then found 3,298 edges from 6,737 queries in 34 minutes.
+- In the held solve the three walks have 931, 1,441 and 1,552 cross edges.
+- sequence_4_7 gets no edge: its GPS puts it about 1 km from every other recording. It keeps its chain estimate.
+
+On the leaderboard, 1_16 goes from 35.7 to 76.1, 1_17 from 53.9 to 90.4, and 2_10 from 73.0 to 88.0.
+
+### The Moving recordings
+
+The Moving recordings walk and ride, a tram for instance. Submission 7 bridges their missed rides by GPS
+([lamaria_gps.md](lamaria_gps.md#test-set-submission-7)).
+
+**Training.**
+- **The two training Moving recordings,** joined to submission 8's graph, do not gain together:
+  - sequence_5_11 falls from 51.46 to 40.93. Its ride, missed before its first good fix, leaves its first CP 35 m
+    off, and the edges then bend the rest of it.
+  - sequence_5_12 goes from 5.80 to 7.62.
+- **Bridged rides gain.** The GPS bridges made on purpose ([Missed rides on the training
+  sequences](lamaria_gps.md#missed-rides-on-the-training-sequences)) were put in the graph in place of five
+  training walks. The graph takes back 17–29 points of each ride:
+
+  | Sequence | Without the ride, in the graph | 90 s missed, bridged by GPS | The same in the graph |
+  |---|---:|---:|---:|
+  | sequence_1_20 | 93.33 | 47.79 | 76.77 |
+  | sequence_2_11 | 95.02 | 57.26 | 79.45 |
+  | sequence_3_18 | 91.14 | 43.78 | 68.85 |
+  | sequence_4_10 | 87.89 | 57.32 | 80.80 |
+  | sequence_4_11 | 88.13 | 68.67 | 85.48 |
+
+- **Looser odometry on the ride** (`--fast-speed 3`, with 50 % or 20 % of the step) changes the six training
+  walks' total by 0.02. It is not used.
+
+The test Moving recordings start from submission 7's estimates, bridged except 5_8 and 5_10, where the bridging
+found no jump.
+
+**On the test.**
+- **The keyframes.** The ten recordings' keyframes came to 9.0 GB, fetched and mapped in about an hour.
+- **The edges.** One matching run with `--only` covered the pairs that include a Moving recording, among all 65
+  recordings: every 2nd 1 Hz keyframe against the 4 nearest maps. It found 15,593 edges from 50,103 queries in
+  2.6 hours.
+- **The solve.** The ten recordings were then solved with the 58 walks held.
+
+| Sequence | Cross edges | Odometry scale | GPS residual, median | GPS residual, 90 % | Score, submission 7 → 9 |
+|---|---:|---:|---:|---:|---:|
+| sequence_5_1 | 1,695 | 1.04 | 3.88 → 3.05 m | 7.83 → 7.88 m | 43.4 → 68.2 |
+| sequence_5_2 | 3,380 | 0.90 | 3.72 → 3.44 m | 9.07 → 7.85 m | 51.7 → 82.8 |
+| sequence_5_3 | 2,826 | 1.00 | 3.90 → 3.00 m | 8.12 → 7.58 m | 31.0 → 41.9 |
+| sequence_5_4 | 2,037 | 1.16 | 4.51 → 3.56 m | 15.31 → 9.97 m | 36.2 → 69.0 |
+| sequence_5_5 | 2,092 | 0.70 | 4.12 → 4.23 m | 9.99 → 10.21 m | 63.7 (kept) |
+| sequence_5_6 | 1,114 | 1.00 | 4.32 → 3.67 m | 12.50 → 10.41 m | 35.2 → 62.4 |
+| sequence_5_7 | 1,512 | 0.75 | 3.03 → 3.39 m | 6.73 → 6.85 m | 69.2 (kept) |
+| sequence_5_8 | 1,678 | 0.57 | 2.97 → 2.81 m | 7.21 → 7.27 m | 72.3 → 88.3 |
+| sequence_5_9 | 835 | 1.49 | 3.60 → 2.66 m | 12.21 → 5.97 m | 37.6 → 62.5 |
+| sequence_5_10 | 1,806 | 0.94 | 2.79 → 2.75 m | 6.16 → 6.17 m | 32.8 → 59.4 |
+
+- **The rule was set before the solve.** A recording whose median GPS residual grew would keep submission 7's
+  estimate. That kept sequence_5_5 (+0.11 m) and 5_7 (+0.36 m).
+- **The eight joined all gain,** by 10.9 to 32.8 points. The Moving track goes from 47.3 to 66.7.
+- **The GPS residual hardly foretold the gains.** sequence_5_10's median moved by 0.04 m and its score by 26.6.
+
+### GPS in the solve: a negative result
+
+`--gps-sigma` puts every fix into the solve, with Cauchy weights at 2 sigmas. It does worse on the dense graph:
+
+| Graph | Without | 30 m | 10 m | 3 m |
+|---|---:|---:|---:|---:|
+| The test graph (the six training walks) | **546.8** | 544.0 | 525.2 | 465.9 |
+| The eight training recordings (training settings) | 510.1 | **511.7** | 510.8 | 500.3 |
+
+The fixes are off by about 3 m in the streets, while the cross edges miss by 0.05 m. The GPS terms pull the
+recordings apart where the edges already hold them. On the sparse graph the gain at 30 m (+1.6) is within the
+noise of the settings.
+
 ## Other matchers: a negative result
 
 FlexGlue (2026) and the matchers of VisMatch were tried in place of ALIKED + LightGlue.
@@ -233,8 +375,29 @@ python scripts/lamaria_assemble_submission.py $SUB/submission.zip $WORK/slam sub
 chain's training work, with every other keyframe of its ALIKED features. The training walks' scores come from
 the official evaluator on their converted `.tum` files, as for the chain.
 
-The method's description on the leaderboard states the multi-session processing and the GPS:
+Submission 9 then adds the walks with poor GPS (`LEFT`) and the Moving recordings (`MV`), each with their own
+keyframes and maps first:
 
-> Multi-session: all walking recordings (test, plus six training ones without ground truth) are refined jointly
-> offline in a 4-DoF pose graph, with cross-recording ALIKED+LightGlue localization and per-recording odometry
-> weights from one round of variance-component estimation; GPS only proposes the candidate pairs.
+```sh
+# the walks with poor GPS: two matching runs, then a solve with submission 8's 55 held
+L=${LEFT// /,}
+python scripts/lamaria_xs_match.py $WORK $WORK/left_a $SEQS $LEFT --only $L --loose $L --max-maps 4 \
+  --radius 30 --window 5 --every 10
+python scripts/lamaria_xs_match.py $WORK $WORK/left_b $SEQS $LEFT --only $L --loose $L --max-maps 4 \
+  --place $WORK/left_a/edges.npy --every 2
+python scripts/lamaria_xs_graph.py $WORK $WORK/left_hold $SEQS $LEFT --hold $WORK/solve \
+  --edges $WORK/edges_{a,b,c}/edges.npy $WORK/left_{a,b}/edges.npy
+# the Moving recordings: their pairs only, then a solve with the 58 walks held (HOLD links to both solves)
+python scripts/lamaria_xs_match.py $WORK $WORK/mv $SEQS $LEFT $MV --only ${MV// /,} --every 2 --max-maps 4
+python scripts/lamaria_xs_graph.py $WORK $WORK/mv_solve $SEQS $LEFT $MV --hold $HOLD \
+  --edges $WORK/edges_{a,b,c}/edges.npy $WORK/left_{a,b}/edges.npy $WORK/mv/edges.npy
+```
+
+The method description drafted for submission 9 stated the multi-session processing and the GPS:
+
+> Multi-session: 49 test walks with usable GPS, plus six training walks without their ground truth, are refined
+> jointly offline in a 4-DoF pose graph, with cross-recording ALIKED+LightGlue localization and per-recording
+> odometry weights from one round of variance-component estimation. Three more walks with poor GPS, and 8 of the
+> 10 Moving recordings, then join that graph with the others held fixed; the two Moving recordings whose fit to
+> GPS got worse keep their earlier estimates. GPS proposes the candidate pairs and places the recordings roughly
+> before the solve.
