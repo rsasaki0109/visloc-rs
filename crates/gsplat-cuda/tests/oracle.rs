@@ -828,6 +828,115 @@ fn class_channels_match_the_colour_channel() {
     }
 }
 
+/// Training's labels cross-entropy (the label channel inside the colour
+/// kernels, `label_backward`) against the same loss through every class
+/// channel (`render_classes`, the gradient on the host, `classes_backward`).
+/// The labels come in warp-sized blocks on the left, so a warp sees one or
+/// two of them, and in narrow stripes on the right, three or more.
+#[test]
+fn label_loss_matches_the_class_channels() {
+    let Some(mut cuda) = rasterizer() else { return };
+    let (w, h) = (64u32, 48u32);
+    let view = view(w, h);
+    let scene = random_scene(60, 13, 0, 1.0);
+    let npix = (w * h) as usize;
+    cuda.set_scene(&PackedScene::from_scene(&scene))
+        .expect("upload");
+    cuda.set_images(w, h, &vec![0u32; npix]).expect("images");
+    let weight = 0.3f32;
+    for k in [5usize, 16] {
+        let logits: Vec<f32> = (0..scene.len() * k)
+            .map(|i| 3.0 * (i as f32 * 0.37).sin())
+            .collect();
+        let labels: Vec<u8> = (0..npix)
+            .map(|p| {
+                let (x, y) = (p % w as usize, p / w as usize);
+                let block = if x < 32 {
+                    x / 8 + y / 4
+                } else {
+                    x / 3 + 2 * (y / 5)
+                };
+                let l = block % (k + 1);
+                if l == k {
+                    255
+                } else {
+                    l as u8
+                }
+            })
+            .collect();
+        cuda.set_logits(k, Some(&logits)).expect("logits");
+        cuda.set_labels(k, w, h, &labels).expect("labels");
+
+        let s = cuda.render_classes(&view, k).expect("render classes");
+        let count = labels.iter().filter(|&&l| (l as usize) < k).count() as f32;
+        let mut d_sem = vec![0.0f32; npix * k];
+        let mut want_loss = 0.0f64;
+        for p in 0..npix {
+            let y = labels[p] as usize;
+            let cover: f32 = s[p * k..(p + 1) * k].iter().sum();
+            if y >= k || cover <= 1e-4 {
+                continue;
+            }
+            let py = s[p * k + y].max(1e-12);
+            for c in 0..k {
+                let hot = if c == y { 1.0 / py } else { 0.0 };
+                d_sem[p * k + c] = weight / count * (1.0 / cover - hot);
+            }
+            want_loss += f64::from(cover.ln() - py.ln()) / f64::from(count);
+        }
+        let (by_classes, want_logits) = cuda.classes_backward(&d_sem, k).expect("backward");
+
+        let (loss, by_labels, g_logits) = cuda
+            .label_backward(&view, 0, weight, true)
+            .expect("label backward");
+        assert!(
+            (loss - want_loss).abs() < 1e-4 * want_loss,
+            "k {k}: loss {loss} against {want_loss}"
+        );
+        let scale = |v: &[f32]| v.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-9);
+        let off = |a: &[f32], b: &[f32]| {
+            let s = scale(a);
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| (x - y).abs() / s)
+                .fold(0.0f32, f32::max)
+        };
+        let errors = [
+            ("screen", off(&by_classes.screen, &by_labels.screen)),
+            (
+                "transforms",
+                off(&by_classes.transforms, &by_labels.transforms),
+            ),
+            ("opacity", off(&by_classes.opacity, &by_labels.opacity)),
+            ("logits", off(&want_logits, &g_logits)),
+        ];
+        let report: Vec<String> = errors
+            .iter()
+            .map(|(what, e)| format!("{what} {e:.2e}"))
+            .collect();
+        eprintln!(
+            "{k} classes, labels against the class channels: {}",
+            report.join(", ")
+        );
+        for (what, e) in errors {
+            assert!(e < 1e-4, "k {k}: {what} off by {e:.2e}");
+        }
+
+        // Logits only: the same logit gradient, nothing else.
+        let (_, by_logits, only) = cuda
+            .label_backward(&view, 0, weight, false)
+            .expect("label backward");
+        assert!(
+            by_logits.screen.iter().all(|&v| v == 0.0),
+            "k {k}: geometry moved"
+        );
+        assert!(by_logits.transforms.iter().all(|&v| v == 0.0));
+        assert!(by_logits.opacity.iter().all(|&v| v == 0.0));
+        let e = off(&g_logits, &only);
+        assert!(e < 1e-6, "k {k}: logits-only gradient off by {e:.2e}");
+    }
+}
+
 /// The camera-space normal the CUDA side blends for a splat of rotation `q`
 /// and log-scales `ls` at camera-space centre `p`: the axis of the smallest
 /// scale (ties to the lower axis), turned to face the camera when `flip` is

@@ -32,12 +32,16 @@
 //
 // Semantic training (ABI 13): with labels per image (set_labels), every
 // gaussian also carries a logit per class. A step blends the softmax of each
-// gaussian's logits, its class probabilities, like colour (softmax_kernel,
-// sem_fwd_kernel), adds the cross-entropy of the pixel's normalised blend
-// against its label (sem_loss_kernel), and differentiates it into the
-// logits (sem_bwd_kernel, softmax_bwd_kernel) and, through alpha, the
-// gaussians' geometry and opacity. Blending probabilities rather than
-// logits keeps each gaussian's own class the one it renders.
+// gaussian's logits, its class probabilities, like colour, adds the
+// cross-entropy of the pixel's normalised blend against its label, and
+// differentiates it into the logits and, through alpha, the gaussians'
+// geometry and opacity. Blending probabilities rather than logits keeps each
+// gaussian's own class the one it renders. Since ABI 14 the colour kernels
+// carry it (raster_fwd_kernel and raster_bwd_kernel with kLab,
+// label_loss_kernel): the loss needs only the label's channel and the
+// coverage, and its gradient two floats per pixel. sem_fwd_kernel and
+// sem_bwd_kernel blend and differentiate every class channel, for
+// render_classes and classes_backward.
 
 #include <cuda_runtime.h>
 
@@ -49,6 +53,7 @@
 #include <cstdio>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 extern "C" {
@@ -78,7 +83,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 13;
+constexpr uint32_t kAbiVersion = 14;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -526,6 +531,11 @@ __global__ void ranges_kernel(uint32_t m, const unsigned long long* __restrict__
     if (i + 1 == m || uint32_t(keys[i + 1] >> 32) != tile) ranges[tile].y = i + 1;
 }
 
+// Floats per staged splat of the label channel's class probabilities: the
+// class count made odd, so threads staging consecutive splats write distinct
+// shared-memory banks.
+__host__ __device__ inline int lab_stride(int k) { return k | 1; }
+
 // Pixel of thread `tid` within its 16x16 tile: warp w covers the 8x4
 // sub-tile (w % 2, w / 2), compact so that a splat touches few warps.
 __device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
@@ -549,21 +559,27 @@ __device__ inline void tile_pixel(int tid, uint32_t& lx, uint32_t& ly) {
 // sum_i T_i a_i z_i of the splat centres, the depth channel the depth-prior
 // and depth-normal losses train, and `acc_normal` (nullable, 3 floats per
 // pixel; needs `plane`) the normal channel sum_i T_i a_i n_i of the splats'
-// plane normals, as rasterize.wgsl's geometry variant.
-template <bool kDepth>
+// plane normals, as rasterize.wgsl's geometry variant. With kLab, `acc_lab`
+// receives at each pixel whose label (`labels`) is below `sem_k` the blended
+// probability of that class, P_y = sum_i T_i a_i p_iy (`probs`, sem_k per
+// gaussian; 0 elsewhere): all the labels' cross-entropy needs
+// (label_loss_kernel), staged in dynamic shared memory (lab_smem bytes).
+template <bool kDepth, bool kLab>
 __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
     const float* __restrict__ depth, const float4* __restrict__ plane, int planar, float4 intr,
     const float3* __restrict__ rays, float* __restrict__ out_img, float* __restrict__ final_t,
     uint32_t* __restrict__ last_idx, float* __restrict__ out_depth, float* __restrict__ acc_depth,
-    float* __restrict__ acc_normal) {
+    float* __restrict__ acc_normal, int sem_k, const float* __restrict__ probs, const uint8_t* __restrict__ labels,
+    float* __restrict__ acc_lab) {
     __shared__ float2 s_xy[kBlock];
     __shared__ float4 s_co[kBlock];
     __shared__ float3 s_col[kBlock];
     __shared__ uint32_t s_mask[kBlock];
     __shared__ float s_depth[kDepth ? kBlock : 1];
     __shared__ float4 s_plane[kDepth ? kBlock : 1];
+    extern __shared__ float s_prob[];  // kLab: lab_stride(sem_k) per staged splat
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
     const uint32_t warp_bit = 1u << (tid >> 5);
@@ -577,6 +593,9 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     // The pixel's ray through a lens (for the planar depth); a pinhole's
     // comes from `intr`.
     const float3 ray = kDepth && rays && in_image ? rays[py * img_w + px] : make_float3(0.f, 0.f, 0.f);
+    const int ks = lab_stride(sem_k);
+    const uint32_t lab = kLab && in_image ? labels[py * img_w + px] : 0xffu;
+    const uint32_t lab_col = lab < uint32_t(sem_k) ? lab : 0u;
 
     float3 acc = make_float3(0.f, 0.f, 0.f);
     float trans = 1.f;
@@ -584,6 +603,7 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
     float median = 0.f;
     float zacc = 0.f;
     float3 nacc = make_float3(0.f, 0.f, 0.f);
+    float pacc = 0.f;
     bool done = !in_image;
     for (uint32_t start = range.x; start < range.y; start += kBlock) {
         // Also the barrier that protects the staged batch before it is reloaded.
@@ -601,6 +621,8 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                 s_depth[tid] = depth[g];
                 if (plane) s_plane[tid] = plane[g];
             }
+            if (kLab)
+                for (int c = 0; c < sem_k; ++c) s_prob[tid * ks + c] = probs[size_t(g) * sem_k + c];
         }
         __syncthreads();
         if (!done) {
@@ -616,6 +638,7 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
                     if (a >= 1.f / 255.f) {
                         const float3 c = s_col[s];
                         const float w = trans * a;
+                        if (kLab) pacc += w * s_prob[s * ks + lab_col];
                         if (kDepth) {
                             zacc += w * s_depth[s];
                             if (acc_normal) {
@@ -656,6 +679,7 @@ __global__ void __launch_bounds__(kBlock) raster_fwd_kernel(
         out_img[pix * 3 + 2] = acc.z + trans * bg.z;
         final_t[pix] = trans;
         last_idx[pix] = last;
+        if (kLab) acc_lab[pix] = lab < uint32_t(sem_k) ? pacc : 0.f;
         if (kDepth) {
             out_depth[pix * 2] = median;
             out_depth[pix * 2 + 1] = 1.f - trans;
@@ -734,16 +758,13 @@ __global__ void __launch_bounds__(kBlock) vote_kernel(uint32_t img_w, uint32_t i
 // The class channels of the last forward: per pixel
 // S_c = sum_i T_i a_i z_ic over the splats raster_fwd_kernel blended
 // (background 0), z_i the gaussian's `k` values (its class probabilities in
-// training), into acc_sem (k floats per pixel). Only the pixels with a label
-// below k are composited (every pixel when `labels` is null); the others get
-// zeros.
+// training), into acc_sem (k floats per pixel), as render_classes gives them.
 __global__ void __launch_bounds__(kBlock) sem_fwd_kernel(uint32_t img_w, uint32_t img_h, int k,
                                                          const uint2* __restrict__ ranges,
                                                          const uint32_t* __restrict__ vals,
                                                          const float2* __restrict__ xy,
                                                          const float4* __restrict__ conic_op,
                                                          const float* __restrict__ logits,
-                                                         const uint8_t* __restrict__ labels,
                                                          float* __restrict__ acc_sem) {
     __shared__ float2 s_xy[kBlock];
     __shared__ float4 s_co[kBlock];
@@ -758,7 +779,6 @@ __global__ void __launch_bounds__(kBlock) sem_fwd_kernel(uint32_t img_w, uint32_
     const uint32_t py = blockIdx.y * kTile + ly;
     const bool in_image = px < img_w && py < img_h;
     const uint32_t pix = py * img_w + px;
-    const bool active = in_image && (!labels || labels[pix] < uint32_t(k));
     const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
     const uint2 range = ranges[tile];
 
@@ -766,7 +786,7 @@ __global__ void __launch_bounds__(kBlock) sem_fwd_kernel(uint32_t img_w, uint32_
 #pragma unroll
     for (int c = 0; c < kMaxSem; ++c) acc[c] = 0.f;
     float trans = 1.f;
-    bool done = !active;
+    bool done = !in_image;
     for (uint32_t start = range.x; start < range.y; start += kBlock) {
         // Also the barrier that protects the staged batch before it is reloaded.
         if (__syncthreads_count(done) == kBlock) break;
@@ -843,14 +863,28 @@ __device__ inline float warp_sum32(float (&v)[32], int lane) {
 // centre's depth through `g_depth` (slot 10 of the butterfly). kGeo 2 adds
 // the normal channel (acc_normal; `d_normal` 3 floats per pixel) the same
 // way, the plane normals' share going to `g_normal` (slots 11-13).
-template <int kGeo>
+//
+// kLab adds the labels' cross-entropy (label_loss_kernel), its gradient
+// d_lab = (alpha, beta) per pixel: d/dP_c = alpha - beta [c = y] of the
+// class channels P_c = sum_i T_i a_i p_ic, y the pixel's label. As the p_i
+// sum to 1 the alpha part reaches no logit (the softmax's backward cancels
+// a gradient shared by every class), so a splat's class-y probability gets
+// -T_i a_i beta into `g_logits` (sem_k per gaussian, before the softmax's
+// backward), and through alpha (with `lab_geo`) the channels give
+// T_i (alpha (1 - B) - beta (p_iy - B_y)), B and B_y the coverage and class-y
+// channel composited behind the splat. The refine weight sums the colour's
+// and the labels' magnitudes, as separate passes would. Per warp the first
+// two labels go through the butterfly (slots 14, 15); lanes of any other
+// label add their own.
+template <int kGeo, bool kLab>
 __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float4* __restrict__ color,
     const float* __restrict__ final_t, const uint32_t* __restrict__ last_idx, const float* __restrict__ d_image,
     float* __restrict__ screen_grads, const float* __restrict__ depth, const float* __restrict__ d_depth,
     float* __restrict__ g_depth, const float4* __restrict__ plane, const float* __restrict__ d_normal,
-    float* __restrict__ g_normal) {
+    float* __restrict__ g_normal, int sem_k, const float* __restrict__ probs, const uint8_t* __restrict__ labels,
+    const float2* __restrict__ d_lab, int lab_geo, float* __restrict__ g_logits) {
     constexpr bool kZ = kGeo >= 1;
     constexpr bool kN = kGeo >= 2;
     __shared__ float2 s_xy[kBwdBatch];
@@ -860,6 +894,7 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     __shared__ uint32_t s_cm[kBwdBatch];
     __shared__ float s_z[kZ ? kBwdBatch : 1];
     __shared__ float3 s_n[kN ? kBwdBatch : 1];
+    extern __shared__ float s_prob[];  // kLab: lab_stride(sem_k) per staged splat
     __shared__ uint32_t s_last;
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
@@ -879,6 +914,10 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     float3 behind = bg;
     float gz = 0.f, behind_z = 0.f;
     float3 gn = make_float3(0.f, 0.f, 0.f), behind_n = make_float3(0.f, 0.f, 0.f);
+    const int ks = lab_stride(sem_k);
+    uint32_t lab = 0xffu;
+    float2 gl = make_float2(0.f, 0.f);  // (alpha, beta)
+    float behind_all = 0.f, behind_y = 0.f;
     if (in_image) {
         const uint32_t pix = py * img_w + px;
         t_cur = final_t[pix];
@@ -886,6 +925,24 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
         g = make_float3(d_image[pix * 3], d_image[pix * 3 + 1], d_image[pix * 3 + 2]);
         if (kZ) gz = d_depth[pix];
         if (kN) gn = make_float3(d_normal[pix * 3], d_normal[pix * 3 + 1], d_normal[pix * 3 + 2]);
+        if (kLab) {
+            lab = labels[pix];
+            gl = d_lab[pix];
+        }
+    }
+    // The warp's first two labels (c0, c1; -1: none) and this lane's slot:
+    // 0, 1 for those, 2 for another label, 3 for no gradient.
+    const bool lab_on = kLab && lab < uint32_t(sem_k) && gl.y != 0.f;
+    const uint32_t lab_col = lab_on ? lab : 0u;
+    int c0 = -1, c1 = -1, slot = 3;
+    if (kLab) {
+        const unsigned m0 = __ballot_sync(0xffffffffu, lab_on);
+        if (m0) {
+            c0 = __shfl_sync(0xffffffffu, int(lab_col), __ffs(m0) - 1);
+            const unsigned m1 = __ballot_sync(0xffffffffu, lab_on && int(lab_col) != c0);
+            if (m1) c1 = __shfl_sync(0xffffffffu, int(lab_col), __ffs(m1) - 1);
+        }
+        if (lab_on) slot = int(lab_col) == c0 ? 0 : (int(lab_col) == c1 ? 1 : 2);
     }
     if (tid == 0) s_last = 0;
     __syncthreads();
@@ -912,6 +969,8 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 const float4 pl = plane[gi];
                 s_n[tid] = make_float3(pl.x, pl.y, pl.z);
             }
+            if (kLab)
+                for (int c = 0; c < sem_k; ++c) s_prob[tid * ks + c] = probs[size_t(gi) * sem_k + c];
         }
         __syncthreads();
 
@@ -923,6 +982,7 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
             float3 g_col = make_float3(0.f, 0.f, 0.f);
             float g_zs = 0.f;
             float3 g_ns = make_float3(0.f, 0.f, 0.f);
+            float g_l0 = 0.f, g_l1 = 0.f;
             bool hit = false;
             if (in_image && j < last) {
                 const float4 co = s_co[s];
@@ -958,20 +1018,37 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                             behind_n.y = a * nv.y + (1.f - a) * behind_n.y;
                             behind_n.z = a * nv.z + (1.f - a) * behind_n.z;
                         }
+                        float d_alpha_lab = 0.f;
+                        if (kLab) {
+                            const float pz = s_prob[s * ks + lab_col];
+                            const float gy = -w * gl.y;
+                            if (slot == 0)
+                                g_l0 = gy;
+                            else if (slot == 1)
+                                g_l1 = gy;
+                            else if (slot == 2)
+                                atomicAdd(&g_logits[size_t(s_gid[s]) * sem_k + lab_col], gy);
+                            if (lab_geo) d_alpha_lab = t_before * (gl.x * (1.f - behind_all) - gl.y * (pz - behind_y));
+                            behind_all = a + (1.f - a) * behind_all;
+                            behind_y = a * pz + (1.f - a) * behind_y;
+                        }
                         behind.x = a * col.x + (1.f - a) * behind.x;
                         behind.y = a * col.y + (1.f - a) * behind.y;
                         behind.z = a * col.z + (1.f - a) * behind.z;
                         t_cur = t_before;
                         // A clamped alpha passes no gradient to opacity, conic or mean.
                         if (raw <= 0.99f) {
-                            const float d_sigma = -d_alpha * a;
-                            g_u = d_sigma * -(co.x * dx + co.y * dy);
-                            g_v = d_sigma * -(co.y * dx + co.z * dy);
+                            const float d_alpha_all = kLab ? d_alpha + d_alpha_lab : d_alpha;
+                            const float d_sigma = -d_alpha_all * a;
+                            const float fu = -(co.x * dx + co.y * dy), fv = -(co.y * dx + co.z * dy);
+                            g_u = d_sigma * fu;
+                            g_v = d_sigma * fv;
                             g_a = d_sigma * 0.5f * dx * dx;
                             g_b = d_sigma * dx * dy;
                             g_c = d_sigma * 0.5f * dy * dy;
-                            g_o = d_alpha * e;
-                            g_r = fabsf(g_u) * fw + fabsf(g_v) * fh;
+                            g_o = d_alpha_all * e;
+                            g_r = kLab ? (fabsf(d_alpha) + fabsf(d_alpha_lab)) * a * (fabsf(fu) * fw + fabsf(fv) * fh)
+                                       : fabsf(g_u) * fw + fabsf(g_v) * fh;
                         }
                     }
                 }
@@ -985,8 +1062,8 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 const float w3 = xstep(g_b, g_ns.x, h4, 16);
                 const float w4 = xstep(g_c, g_ns.y, h4, 16);
                 const float w5 = xstep(g_o, g_ns.z, h4, 16);
-                const float w6 = xstep(g_col.x, 0.f, h4, 16);
-                const float w7 = xstep(g_col.y, 0.f, h4, 16);
+                const float w6 = xstep(g_col.x, g_l0, h4, 16);
+                const float w7 = xstep(g_col.y, g_l1, h4, 16);
                 const bool h3 = (lane & 8) != 0;
                 const float x0 = xstep(w0, w4, h3, 8);
                 const float x1 = xstep(w1, w5, h3, 8);
@@ -1003,6 +1080,8 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                 if (kZ && (lane & 1) == 0 && comp == kNumGrad && z != 0.f) atomicAdd(&g_depth[s_gid[s]], z);
                 if (kN && (lane & 1) == 0 && comp > kNumGrad && comp <= kNumGrad + 3 && z != 0.f)
                     atomicAdd(&g_normal[size_t(s_gid[s]) * 3 + (comp - kNumGrad - 1)], z);
+                if (kLab && (lane & 1) == 0 && comp >= 14 && z != 0.f)
+                    atomicAdd(&g_logits[size_t(s_gid[s]) * sem_k + (comp == 14 ? c0 : c1)], z);
             }
         }
         bend = bstart;
@@ -1013,15 +1092,13 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
 // each tile back to front as raster_bwd_kernel does for the colour: each
 // splat's values get T_i a_i d_sem (into g_logits, k per gaussian), and with
 // `geometry` its share through alpha reaches screen_grads (du dv dA dB dC
-// dopacity and the refine weight). Only the pixels sem_fwd_kernel
-// composited pass a gradient. A splat's per-lane values (7 screen
+// dopacity and the refine weight). A splat's per-lane values (7 screen
 // components, then the k class values) are summed per warp by warp_sum32.
 __global__ void __launch_bounds__(kBlock) sem_bwd_kernel(
     uint32_t img_w, uint32_t img_h, int k, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
     const float2* __restrict__ xy, const float4* __restrict__ conic_op, const float* __restrict__ logits,
-    const float* __restrict__ final_t, const uint32_t* __restrict__ last_idx, const uint8_t* __restrict__ labels,
-    const float* __restrict__ d_sem, int geometry, float* __restrict__ screen_grads,
-    float* __restrict__ g_logits) {
+    const float* __restrict__ final_t, const uint32_t* __restrict__ last_idx, const float* __restrict__ d_sem,
+    int geometry, float* __restrict__ screen_grads, float* __restrict__ g_logits) {
     __shared__ float2 s_xy[kBwdBatch];
     __shared__ float4 s_co[kBwdBatch];
     __shared__ uint32_t s_gid[kBwdBatch];
@@ -1037,7 +1114,6 @@ __global__ void __launch_bounds__(kBlock) sem_bwd_kernel(
     const uint32_t py = blockIdx.y * kTile + ly;
     const bool in_image = px < img_w && py < img_h;
     const uint32_t pix = py * img_w + px;
-    const bool active = in_image && (!labels || labels[pix] < uint32_t(k));
     const float sx = float(px) + 0.5f, sy = float(py) + 0.5f;
     const uint2 range = ranges[tile];
     const float fw = float(img_w), fh = float(img_h);
@@ -1047,10 +1123,10 @@ __global__ void __launch_bounds__(kBlock) sem_bwd_kernel(
     float gs[kMaxSem], behind[kMaxSem];
 #pragma unroll
     for (int c = 0; c < kMaxSem; ++c) {
-        gs[c] = active && c < k ? d_sem[size_t(pix) * k + c] : 0.f;
+        gs[c] = in_image && c < k ? d_sem[size_t(pix) * k + c] : 0.f;
         behind[c] = 0.f;
     }
-    if (active) {
+    if (in_image) {
         t_cur = final_t[pix];
         last = last_idx[pix];
     }
@@ -1084,7 +1160,7 @@ __global__ void __launch_bounds__(kBlock) sem_bwd_kernel(
 #pragma unroll
             for (int c = 0; c < 32; ++c) v[c] = 0.f;
             bool hit = false;
-            if (active && j < last) {
+            if (in_image && j < last) {
                 const float4 co = s_co[s];
                 const float dx = sx - s_xy[s].x;
                 const float dy = sy - s_xy[s].y;
@@ -1619,32 +1695,29 @@ __global__ void softmax_bwd_kernel(int n, int k, const float* __restrict__ probs
     for (int c = 0; c < k; ++c) gi[c] = p[c] * (gi[c] - dot);
 }
 
-// Labels: per pixel with a label y below k, P the blended class probabilities
-// (sem_fwd_kernel) and A = sum_c P_c its coverage, the cross-entropy
-// -log(P_y / A) of the normalised blend, over the `count` such pixels.
-// d_sem_c = weight (1 / A - [c = y] / P_y) / count, the gradient of weight *
-// the mean; zeros where there is no label or (almost) no splat.
-// acc += the unweighted mean.
-__global__ void __launch_bounds__(kBlock) sem_loss_kernel(uint32_t npix, int k, const uint8_t* __restrict__ labels,
-                                                          const float* __restrict__ acc_sem, float weight,
-                                                          float inv_count, float* __restrict__ d_sem,
-                                                          double* __restrict__ acc) {
+// Labels: per pixel with a label y below k, P_y its class channel
+// (raster_fwd_kernel's acc_lab) and A = sum_c P_c = 1 - T its coverage (the
+// probabilities sum to 1), the cross-entropy -log(P_y / A) of the normalised
+// blend, over the `count` such pixels. Its gradient, weight times that of the
+// mean, is d/dP_c = alpha - beta [c = y] with alpha = weight / (count A) and
+// beta = weight / (count P_y), into d_lab as (alpha, beta); zeros where there
+// is no label or (almost) no splat. acc += the unweighted mean.
+__global__ void __launch_bounds__(kBlock) label_loss_kernel(uint32_t npix, int k, const uint8_t* __restrict__ labels,
+                                                            const float* __restrict__ acc_lab,
+                                                            const float* __restrict__ final_t, float weight,
+                                                            float inv_count, float2* __restrict__ d_lab,
+                                                            double* __restrict__ acc) {
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     float l = 0.f;
     if (i < npix) {
-        const uint32_t label = labels[i];
-        const float* s = acc_sem + size_t(i) * k;
-        float* d = d_sem + size_t(i) * k;
-        float cover = 0.f;
-        for (int c = 0; c < k; ++c) cover += s[c];
-        if (label < uint32_t(k) && cover > 1e-4f) {
-            const float py = fmaxf(s[label], 1e-12f);
-            for (int c = 0; c < k; ++c)
-                d[c] = weight * inv_count * (1.f / cover - (uint32_t(c) == label ? 1.f / py : 0.f));
+        float2 d = make_float2(0.f, 0.f);
+        const float cover = 1.f - final_t[i];
+        if (labels[i] < uint32_t(k) && cover > 1e-4f) {
+            const float py = fmaxf(acc_lab[i], 1e-12f);
+            d = make_float2(weight * inv_count / cover, weight * inv_count / py);
             l = (logf(cover) - logf(py)) * inv_count;
-        } else {
-            for (int c = 0; c < k; ++c) d[c] = 0.f;
         }
+        d_lab[i] = d;
     }
     block_add(l, acc);
 }
@@ -2157,11 +2230,12 @@ struct Ctx {
     // `vote_k` classes (0: none yet).
     Buf labels, votes;
     int vote_n = 0, vote_k = 0;
-    // Semantic training (sem_*_kernel): `sem_k` classes (0: none), per
-    // gaussian their logits, Adam moments, probabilities and gradient; per
-    // uploaded image its labels (`sem_images` of them) and labelled pixels;
-    // per pixel the last render's class channels and their gradient.
-    Buf sem, sem_m1, sem_m2, sem_prob, sem_grad, sem_labels, acc_sem, d_sem;
+    // Semantic training: `sem_k` classes (0: none), per gaussian their
+    // logits, Adam moments, probabilities and gradient; per uploaded image its
+    // labels (`sem_images` of them) and labelled pixels; per pixel the last
+    // render's class channels and their gradient (render_classes), and a
+    // step's label channel and its (alpha, beta) gradient (label_loss_kernel).
+    Buf sem, sem_m1, sem_m2, sem_prob, sem_grad, sem_labels, acc_sem, d_sem, acc_lab, d_lab;
     int sem_k = 0, sem_images = 0;
     std::vector<uint32_t> sem_counts;
     int num_priors = 0;
@@ -2290,9 +2364,11 @@ int camera_rays(Ctx* ctx, const float3** out) {
 
 // Render the uploaded scene from ctx->cam; with `out_depth` (device, 2 floats
 // per pixel) also the median depth and opacity, at the splat planes when
-// `planar`, and (nullable) the expected-depth and normal channels.
+// `planar`, and (nullable) the expected-depth and normal channels. With
+// `labels` (device, a label per pixel) also the label channel into acc_lab,
+// from the class probabilities in sem_prob.
 int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float* acc_depth = nullptr,
-                float* acc_normal = nullptr) {
+                float* acc_normal = nullptr, const uint8_t* labels = nullptr) {
     const int n = ctx->n;
     const GscCamera cam = ctx->cam;
     ctx->tile_bw = (cam.width + kTile - 1) / kTile;
@@ -2385,14 +2461,21 @@ int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float
         GSC_CHECK(ctx, cudaGetLastError());
         if (planar) GSC_TRY(camera_rays(ctx, &rays));
     }
+    float* acc_lab = nullptr;
+    if (labels) GSC_TRY(ensure(ctx, ctx->acc_lab, pixels, &acc_lab));
+    const auto* probs = static_cast<const float*>(ctx->sem_prob.ptr);
+    const size_t smem = labels ? size_t(kBlock) * lab_stride(ctx->sem_k) * sizeof(float) : 0;
+    const auto raster = [&](auto depth_c, auto lab_c) {
+        constexpr bool kDepth = decltype(depth_c)::value;
+        raster_fwd_kernel<kDepth, decltype(lab_c)::value><<<grid, kBlock, smem>>>(
+            cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op, color, depth, kDepth ? plane : nullptr,
+            kDepth && planar && plane, intr, kDepth ? rays : nullptr, image, final_t, last_idx, out_depth, acc_depth,
+            acc_normal, ctx->sem_k, probs, labels, acc_lab);
+    };
     if (out_depth)
-        raster_fwd_kernel<true><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
-                                                  color, depth, plane, planar && plane, intr, rays, image, final_t,
-                                                  last_idx, out_depth, acc_depth, acc_normal);
+        labels ? raster(std::true_type{}, std::true_type{}) : raster(std::true_type{}, std::false_type{});
     else
-        raster_fwd_kernel<false><<<grid, kBlock>>>(cam.width, cam.height, ctx->bg, ranges, vals_sorted, xy, conic_op,
-                                                   color, depth, nullptr, 0, intr, nullptr, image, final_t, last_idx,
-                                                   nullptr, nullptr, nullptr);
+        labels ? raster(std::false_type{}, std::true_type{}) : raster(std::false_type{}, std::false_type{});
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRaster));
     ctx->have_forward = true;
@@ -2405,14 +2488,16 @@ int run_forward(Ctx* ctx, float* out_depth = nullptr, bool planar = false, float
 // `zero_sh` false the SH gradients are written for every projected gaussian
 // instead, and left stale for the others). `geo`: 1 also differentiates the
 // expected-depth channel (d_depth), 2 the depth and normal channels (d_depth,
-// d_normal; the render must have them). With `sem.on` the class channels'
-// d_sem is differentiated too, through the softmax to the logits
-// (sem_bwd_kernel, softmax_bwd_kernel, into sem_grad; the class channels
-// must have been rendered with the same labels); `rgb` false leaves the
-// colour out.
+// d_normal; the render must have them). With `sem.channels` the class
+// channels' d_sem (render_classes) is differentiated too (sem_bwd_kernel,
+// after the colour; `rgb` false leaves the colour out), with `sem.labels_ce`
+// the labels' cross-entropy, d_lab (raster_bwd_kernel with kLab; the forward
+// rendered the label channel of `sem.labels`). Either reaches the logits
+// through the softmax (softmax_bwd_kernel, into sem_grad).
 struct SemBackward {
-    bool on = false;
-    const uint8_t* labels = nullptr;  // null: every pixel
+    bool channels = false;
+    bool labels_ce = false;
+    const uint8_t* labels = nullptr;  // labels_ce: the pixels' labels
     bool geometry = true;             // alpha's share reaches the gaussians
 };
 int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool rgb = true) {
@@ -2440,6 +2525,9 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool
     if (geo >= 1) GSC_TRY(ensure_zero(ctx, ctx->g_depth, n, &g_depth));
     float* g_normal = nullptr;
     if (geo >= 2) GSC_TRY(ensure_zero(ctx, ctx->g_normal, size_t(n) * 3, &g_normal));
+    float* g_logits = nullptr;
+    if (sem.channels || sem.labels_ce)
+        GSC_TRY(ensure_zero(ctx, ctx->sem_grad, size_t(n) * ctx->sem_k, &g_logits));
 
     GSC_TRY(stage_begin(ctx, kRasterBwd));
     const dim3 grid(ctx->tile_bw, ctx->tile_bh);
@@ -2453,33 +2541,38 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool
     const auto* d_image = static_cast<const float*>(ctx->d_image.ptr);
     const auto* depth = static_cast<const float*>(ctx->depth.ptr);
     const auto* d_depth = static_cast<const float*>(ctx->d_depth.ptr);
+    const auto* probs = static_cast<const float*>(ctx->sem_prob.ptr);
+    const size_t smem = sem.labels_ce ? size_t(kBwdBatch) * lab_stride(ctx->sem_k) * sizeof(float) : 0;
+    const auto raster = [&](auto geo_c, auto lab_c) {
+        constexpr int kGeo = decltype(geo_c)::value;
+        raster_bwd_kernel<kGeo, decltype(lab_c)::value><<<grid, kBlock, smem>>>(
+            ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op, color, final_t, last_idx, d_image,
+            screen_grads, kGeo >= 1 ? depth : nullptr, kGeo >= 1 ? d_depth : nullptr, g_depth,
+            kGeo >= 2 ? static_cast<const float4*>(ctx->plane.ptr) : nullptr,
+            kGeo >= 2 ? static_cast<const float*>(ctx->d_normal.ptr) : nullptr, g_normal, ctx->sem_k, probs,
+            sem.labels, static_cast<const float2*>(ctx->d_lab.ptr), sem.geometry ? 1 : 0, g_logits);
+    };
+    const auto with_labels = [&](auto geo_c) {
+        sem.labels_ce ? raster(geo_c, std::true_type{}) : raster(geo_c, std::false_type{});
+    };
     if (!rgb) {
         // Nothing from the colour.
     } else if (geo >= 2)
-        raster_bwd_kernel<2><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
-                                               color, final_t, last_idx, d_image, screen_grads, depth, d_depth,
-                                               g_depth, static_cast<const float4*>(ctx->plane.ptr),
-                                               static_cast<const float*>(ctx->d_normal.ptr), g_normal);
+        with_labels(std::integral_constant<int, 2>{});
     else if (geo == 1)
-        raster_bwd_kernel<1><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
-                                               color, final_t, last_idx, d_image, screen_grads, depth, d_depth,
-                                               g_depth, nullptr, nullptr, nullptr);
+        with_labels(std::integral_constant<int, 1>{});
     else
-        raster_bwd_kernel<0><<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->bg, ranges, vals, xy, conic_op,
-                                               color, final_t, last_idx, d_image, screen_grads, nullptr, nullptr,
-                                               nullptr, nullptr, nullptr, nullptr);
+        with_labels(std::integral_constant<int, 0>{});
     GSC_CHECK(ctx, cudaGetLastError());
     GSC_TRY(stage_end(ctx, kRasterBwd));
-    if (sem.on) {
-        float* g_logits;
-        GSC_TRY(ensure_zero(ctx, ctx->sem_grad, size_t(n) * ctx->sem_k, &g_logits));
+    if (g_logits) {
         GSC_TRY(stage_begin(ctx, kSemanticBwd));
-        const auto* probs = static_cast<const float*>(ctx->sem_prob.ptr);
-        sem_bwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->sem_k, ranges, vals, xy, conic_op,
-                                         probs, final_t, last_idx, sem.labels,
-                                         static_cast<const float*>(ctx->d_sem.ptr), sem.geometry ? 1 : 0,
-                                         screen_grads, g_logits);
-        GSC_CHECK(ctx, cudaGetLastError());
+        if (sem.channels) {
+            sem_bwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->sem_k, ranges, vals, xy, conic_op,
+                                             probs, final_t, last_idx, static_cast<const float*>(ctx->d_sem.ptr),
+                                             sem.geometry ? 1 : 0, screen_grads, g_logits);
+            GSC_CHECK(ctx, cudaGetLastError());
+        }
         if (n > 0) {
             softmax_bwd_kernel<<<blocks_for(n), 256>>>(n, ctx->sem_k, probs, g_logits);
             GSC_CHECK(ctx, cudaGetLastError());
@@ -2542,12 +2635,36 @@ int run_normal_loss(Ctx* ctx, float weight, double* acc) {
     return 0;
 }
 
+// The labels of uploaded image `image` on the device.
+const uint8_t* image_labels(const Ctx* ctx, uint32_t image) {
+    return static_cast<const uint8_t*>(ctx->sem_labels.ptr) + size_t(image) * ctx->pixels();
+}
+
+// The labels' cross-entropy of the last render (which has the label channel
+// of uploaded image `image`, see run_forward) times `weight`
+// (label_loss_kernel): its gradient into d_lab, the unweighted mean added to
+// `acc`.
+int run_label_loss(Ctx* ctx, uint32_t image, float weight, double* acc) {
+    const uint32_t npix = uint32_t(ctx->pixels());
+    float2* d_lab;
+    GSC_TRY(ensure(ctx, ctx->d_lab, npix, &d_lab));
+    const uint32_t count = ctx->sem_counts[image];
+    label_loss_kernel<<<blocks_for(npix), kBlock>>>(npix, ctx->sem_k, image_labels(ctx, image),
+                                                    static_cast<const float*>(ctx->acc_lab.ptr),
+                                                    static_cast<const float*>(ctx->final_t.ptr), weight,
+                                                    count > 0 ? 1.f / float(count) : 0.f, d_lab, acc);
+    GSC_CHECK(ctx, cudaGetLastError());
+    return 0;
+}
+
 // (1 - w) L1 + w (1 - SSIM) of the last render against uploaded image
 // `image`: its gradient into d_image, and the unweighted mean L1 and the
 // SSIM sum added to loss_acc. With `depth_weight` the depth prior and with
 // `normal_weight` the depth-normal loss too (their gradients into d_depth and
-// d_normal; the render must have the channels).
-int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0.f, float normal_weight = 0.f) {
+// d_normal; the render must have the channels), and with `label_weight` the
+// labels' cross-entropy (run_label_loss; the render has the label channel).
+int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0.f, float normal_weight = 0.f,
+             float label_weight = 0.f) {
     if (!ctx->have_forward) {
         ctx->error = "loss: no render to compare";
         return -1;
@@ -2596,6 +2713,7 @@ int run_loss(Ctx* ctx, uint32_t image, float ssim_weight, float depth_weight = 0
         }
         GSC_TRY(run_normal_loss(ctx, normal_weight, acc + 3));
     }
+    if (label_weight > 0.f) GSC_TRY(run_label_loss(ctx, image, label_weight, acc + 4));
     GSC_TRY(stage_end(ctx, kLoss));
     ctx->loss_steps++;
     return 0;
@@ -2611,45 +2729,39 @@ int reset_logits(Ctx* ctx) {
     return 0;
 }
 
-// The gaussians' class probabilities (softmax_kernel, into sem_prob) and
-// their channels for the last forward into acc_sem (sem_fwd_kernel), on the
-// pixels with a label (`labels` null: every pixel).
-int run_sem_forward(Ctx* ctx, const uint8_t* labels) {
-    if (!ctx->have_forward || ctx->sem_k == 0) {
-        ctx->error = "semantic forward: needs a render and logits";
-        return -1;
-    }
-    float *acc_sem, *probs;
-    GSC_TRY(ensure(ctx, ctx->acc_sem, ctx->pixels() * ctx->sem_k, &acc_sem));
+// The gaussians' class probabilities, the softmax of their logits
+// (softmax_kernel, into sem_prob).
+int run_softmax(Ctx* ctx) {
+    float* probs;
     GSC_TRY(ensure(ctx, ctx->sem_prob, size_t(ctx->n) * ctx->sem_k, &probs));
     if (ctx->n > 0) {
         softmax_kernel<<<blocks_for(ctx->n), 256>>>(ctx->n, ctx->sem_k, static_cast<const float*>(ctx->sem.ptr),
                                                     probs);
         GSC_CHECK(ctx, cudaGetLastError());
+    }
+    return 0;
+}
+
+// The gaussians' class probabilities and their channels for the last
+// forward, at every pixel, into acc_sem (sem_fwd_kernel).
+int run_sem_forward(Ctx* ctx) {
+    if (!ctx->have_forward || ctx->sem_k == 0) {
+        ctx->error = "semantic forward: needs a render and logits";
+        return -1;
+    }
+    float* acc_sem;
+    GSC_TRY(ensure(ctx, ctx->acc_sem, ctx->pixels() * ctx->sem_k, &acc_sem));
+    GSC_TRY(run_softmax(ctx));
+    if (ctx->n > 0) {
         const dim3 grid(ctx->tile_bw, ctx->tile_bh);
         sem_fwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->sem_k,
                                          static_cast<const uint2*>(ctx->ranges.ptr),
                                          static_cast<const uint32_t*>(ctx->vals_sorted.ptr),
                                          static_cast<const float2*>(ctx->xy.ptr),
-                                         static_cast<const float4*>(ctx->conic_op.ptr), probs, labels, acc_sem);
+                                         static_cast<const float4*>(ctx->conic_op.ptr),
+                                         static_cast<const float*>(ctx->sem_prob.ptr), acc_sem);
         GSC_CHECK(ctx, cudaGetLastError());
     }
-    return 0;
-}
-
-// The labels' cross-entropy for the last render against uploaded image
-// `image` (sem_loss_kernel): its gradient into d_sem, the unweighted mean
-// added to `acc`.
-int run_sem_loss(Ctx* ctx, uint32_t image, float weight, double* acc) {
-    const uint32_t npix = uint32_t(ctx->pixels());
-    const uint8_t* labels = static_cast<const uint8_t*>(ctx->sem_labels.ptr) + size_t(image) * npix;
-    float* d_sem;
-    GSC_TRY(ensure(ctx, ctx->d_sem, size_t(npix) * ctx->sem_k, &d_sem));
-    const uint32_t count = ctx->sem_counts[image];
-    sem_loss_kernel<<<blocks_for(npix), kBlock>>>(npix, ctx->sem_k, labels,
-                                                  static_cast<const float*>(ctx->acc_sem.ptr), weight,
-                                                  count > 0 ? 1.f / float(count) : 0.f, d_sem, acc);
-    GSC_CHECK(ctx, cudaGetLastError());
     return 0;
 }
 
@@ -2723,7 +2835,7 @@ GSC_EXPORT void visloc_gsplat_cuda_destroy(void* handle) {
                    &ctx->gt,          &ctx->abc,       &ctx->loss_acc, &ctx->weight_max, &ctx->seen,
                    &ctx->actions,     &ctx->counts,    &ctx->cum,      &ctx->labels,     &ctx->votes,
                    &ctx->sem,         &ctx->sem_m1,    &ctx->sem_m2,   &ctx->sem_grad,   &ctx->sem_labels,
-                   &ctx->acc_sem,     &ctx->d_sem};
+                   &ctx->acc_sem,     &ctx->d_sem, &ctx->sem_prob, &ctx->acc_lab, &ctx->d_lab};
     for (Buf* b : bufs) free_buf(*b);
     for (int s = 0; s < kNumStages; ++s) {
         if (ctx->ev_start[s]) cudaEventDestroy(ctx->ev_start[s]);
@@ -2974,7 +3086,7 @@ GSC_EXPORT int visloc_gsplat_cuda_render_classes(void* handle, const GscCamera* 
     GSC_TRY(set_camera(ctx, cam, bg, 0));
     clear_stages(ctx);
     GSC_TRY(run_forward(ctx));
-    GSC_TRY(run_sem_forward(ctx, nullptr));
+    GSC_TRY(run_sem_forward(ctx));
     GSC_TRY(collect_stages(ctx));
     GSC_CHECK(ctx, cudaDeviceSynchronize());
     if (out)
@@ -3005,10 +3117,62 @@ GSC_EXPORT int visloc_gsplat_cuda_classes_backward(void* handle, const float* d_
         ctx->ms[s] = 0.f;
     }
     SemBackward sem;
-    sem.on = true;
+    sem.channels = true;
     GSC_TRY(run_backward(ctx, true, 0, sem, false));
     GSC_TRY(collect_stages(ctx));
     GSC_CHECK(ctx, cudaDeviceSynchronize());
+    float* dst[2] = {g_transforms, g_opacity};
+    for (int k = 0; k < 2; ++k) {
+        const size_t count = size_t(ctx->n) * ctx->stride(k);
+        if (dst[k] && count > 0)
+            GSC_CHECK(ctx, cudaMemcpy(dst[k], ctx->grads[k].ptr, count * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+    if (g_logits && ctx->n > 0)
+        GSC_CHECK(ctx, cudaMemcpy(g_logits, ctx->sem_grad.ptr, size_t(ctx->n) * ctx->sem_k * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    if (screen_grads && ctx->n > 0)
+        GSC_CHECK(ctx, cudaMemcpy(screen_grads, ctx->screen_grads.ptr, size_t(ctx->n) * kNumGrad * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+// The labels' cross-entropy as a training step computes it, for uploaded
+// image `image` seen from `cam` (that image's size): `loss` (nullable)
+// receives the unweighted mean over its labelled pixels, and the outputs
+// (nullable, as classes_backward's) the gradients of weight times it, the
+// logits' through the softmax; with `geometry` 0 only the logits get one.
+GSC_EXPORT int visloc_gsplat_cuda_label_backward(void* handle, const GscCamera* cam, uint32_t image, float weight,
+                                                 int geometry, double* loss, float* g_transforms, float* g_opacity,
+                                                 float* g_logits, float* screen_grads) {
+    Ctx* ctx = static_cast<Ctx*>(handle);
+    if (!ctx) return -1;
+    if (!cam || ctx->sem_k == 0 || ctx->sem_images != ctx->num_images || image >= uint32_t(ctx->num_images) ||
+        cam->width != ctx->gt_w || cam->height != ctx->gt_h) {
+        ctx->error = "label_backward: needs labels (set_labels) and a camera of their size";
+        return -1;
+    }
+    const float bg[3] = {0.f, 0.f, 0.f};
+    GSC_TRY(set_camera(ctx, cam, bg, 0));
+    clear_stages(ctx);
+    GSC_TRY(run_softmax(ctx));
+    SemBackward sem;
+    sem.labels_ce = true;
+    sem.labels = image_labels(ctx, image);
+    sem.geometry = geometry != 0;
+    GSC_TRY(run_forward(ctx, nullptr, false, nullptr, nullptr, sem.labels));
+    // The slot after the step's sums, so take_loss is undisturbed.
+    double* acc;
+    GSC_TRY(ensure(ctx, ctx->loss_acc, kNumLossSums + 1, &acc));
+    double* sum = acc + kNumLossSums;
+    GSC_CHECK(ctx, cudaMemsetAsync(sum, 0, sizeof(double)));
+    GSC_TRY(run_label_loss(ctx, image, weight, sum));
+    // No colour gradient.
+    float* d_image;
+    GSC_TRY(ensure_zero(ctx, ctx->d_image, ctx->pixels() * 3, &d_image));
+    GSC_TRY(run_backward(ctx, true, 0, sem));
+    GSC_TRY(collect_stages(ctx));
+    GSC_CHECK(ctx, cudaDeviceSynchronize());
+    if (loss) GSC_CHECK(ctx, cudaMemcpy(loss, sum, sizeof(double), cudaMemcpyDeviceToHost));
     float* dst[2] = {g_transforms, g_opacity};
     for (int k = 0; k < 2; ++k) {
         const size_t count = size_t(ctx->n) * ctx->stride(k);
@@ -3169,27 +3333,26 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
         return -1;
     }
     clear_stages(ctx);
+    SemBackward sem;
+    if (sem_on) {
+        sem.labels_ce = true;
+        sem.labels = image_labels(ctx, p->image);
+        sem.geometry = p->semantic_geometry != 0;
+        GSC_TRY(stage_begin(ctx, kSemantic));
+        GSC_TRY(run_softmax(ctx));
+        GSC_TRY(stage_end(ctx, kSemantic));
+    }
     if (depth_on || normal_on) {
         float *depth_out, *acc_depth, *acc_normal = nullptr;
         GSC_TRY(ensure(ctx, ctx->depth_out, ctx->pixels() * 2, &depth_out));
         GSC_TRY(ensure(ctx, ctx->acc_depth, ctx->pixels(), &acc_depth));
         if (normal_on) GSC_TRY(ensure(ctx, ctx->acc_normal, ctx->pixels() * 3, &acc_normal));
-        GSC_TRY(run_forward(ctx, depth_out, false, acc_depth, acc_normal));
+        GSC_TRY(run_forward(ctx, depth_out, false, acc_depth, acc_normal, sem.labels));
     } else {
-        GSC_TRY(run_forward(ctx));
+        GSC_TRY(run_forward(ctx, nullptr, false, nullptr, nullptr, sem.labels));
     }
     GSC_TRY(run_loss(ctx, p->image, p->ssim_weight, depth_on ? p->depth_weight : 0.f,
-                     normal_on ? p->normal_weight : 0.f));
-    SemBackward sem;
-    if (sem_on) {
-        sem.on = true;
-        sem.labels = static_cast<const uint8_t*>(ctx->sem_labels.ptr) + size_t(p->image) * ctx->pixels();
-        sem.geometry = p->semantic_geometry != 0;
-        GSC_TRY(stage_begin(ctx, kSemantic));
-        GSC_TRY(run_sem_forward(ctx, sem.labels));
-        GSC_TRY(run_sem_loss(ctx, p->image, p->semantic_weight, static_cast<double*>(ctx->loss_acc.ptr) + 4));
-        GSC_TRY(stage_end(ctx, kSemantic));
-    }
+                     normal_on ? p->normal_weight : 0.f, sem_on ? p->semantic_weight : 0.f));
     GSC_TRY(run_backward(ctx, p->sparse_sh_adam == 0, normal_on ? 2 : (depth_on ? 1 : 0), sem));
 
     const int n = ctx->n;

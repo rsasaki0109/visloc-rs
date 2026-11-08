@@ -6,6 +6,28 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Training with the labels inside the colour kernels (CUDA ABI 14).**
+  - **The label channel.** The cross-entropy needs only each pixel's
+    label-class channel P_y and its coverage 1 - T. `raster_fwd_kernel`
+    now blends P_y alongside the colour. `raster_bwd_kernel` takes the
+    loss's gradient, two floats per pixel from `label_loss_kernel`, with
+    the colour's. The logits' gradient leaves out the part every class
+    shares, which the softmax's backward cancels.
+  - **Time.** The labels add about 1 ms per step instead of 5.6 ms. In one
+    session, MeetingRoom_In's 30k steps took 192 s without them, a median
+    of 216 s with them (eight runs) and 372–378 s with the separate passes.
+    On Building_In they took 335 s against 298 s.
+  - **Results** as before: seven of the eight runs give 32.50–32.60 dB
+    and 89.7–89.9% of the held-out pixels. In the eighth, floaters
+    appeared in front of two held-out views (27.69 dB).
+  - **Test.** `label_loss_matches_the_class_channels` checks the loss and
+    every gradient against the same loss through every class channel
+    (`render_classes`, the gradient on the CPU, `classes_backward`), for 5
+    and 16 classes. Worst error 2.6e-6.
+  - **API.** `CudaGsplat::label_backward`. `render_classes` and
+    `classes_backward` keep separate passes, now over every pixel.
+  - **Fix.** Destroying a context now frees its class probabilities.
+
 - **Where each class's pixels go (`gsplat_semantic_cuda --check`).**
   - **Per class** the check prints the recall and the precision, each with
     the classes that took the most of the rest, and the run prints each
@@ -24,13 +46,12 @@ All notable changes to `visloc-rs` will be documented here.
 - **Training with the labels (`gsplat_train_cuda --labels`, CUDA ABI 13).**
   - **Classes in training.** Every gaussian gets a logit per class (16 at
     most). The softmax of its logits, its class probabilities, is blended
-    like colour (`sem_fwd_kernel`).
+    like colour.
   - **The loss.** `--semantic-weight` (0.02) times the mean cross-entropy
-    of each labelled pixel's normalised blend against SAM 3's label
-    (`sem_loss_kernel`).
+    of each labelled pixel's normalised blend against SAM 3's label.
   - **The gradient.** It reaches the logits and, through alpha, the
-    gaussians' geometry, opacity and brush's refine weight
-    (`sem_bwd_kernel`). `--semantic-logits-only` keeps it to the logits.
+    gaussians' geometry, opacity and brush's refine weight.
+    `--semantic-logits-only` keeps it to the logits.
   - **Output.** `scene.ply` gains `class_logit_<c>` properties
     (`ply::ply_properties` reads them back), and `gsplat_semantic_cuda
     --logits` takes the classes from them.
@@ -45,8 +66,8 @@ All notable changes to `visloc-rs` will be documented here.
   - **Building_In:** pixel accuracy 87.2–87.3% → 92.4%, mIoU 57.8–58.2% →
     71.9%, instances 26.1–26.2% → 45.4%, at the same PSNR. Its ceiling
     lights' IoU goes from 19.6% to 81.5% at weight 0.05.
-  - **Cost.** The class passes double the training time. Details in
-    docs/semantic_splat.md.
+  - **Cost.** About 12% more training time (the entry above; separate
+    passes doubled it). Details in docs/semantic_splat.md.
   - **Building_In with the vote alone** is in the doc too: 87.2% of the
     held-out pixels and 26.1% of the instances.
 

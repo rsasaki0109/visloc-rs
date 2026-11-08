@@ -277,6 +277,12 @@ training instead (CUDA only):
   position, shape and opacity. It also counts towards brush's refine
   weight, so the refine splits gaussians where the labels disagree with
   them. `--semantic-logits-only` keeps it to the logits.
+- **In the colour kernels** (CUDA ABI 14). The loss needs only each
+  pixel's label-class channel P_y and its coverage, which is 1 - T since
+  the probabilities sum to 1. So the colour's forward blends P_y alongside
+  the colour, and its backward takes the loss's gradient, two floats per
+  pixel, with the colour's. The part of the gradient that every class
+  shares cancels in the softmax's backward and is left out.
 - **Output.** `scene.ply` gains a `class_logit_<c>` property per class.
   `gsplat_semantic_cuda --logits` takes the classes from them. Without
   `--logits`, the trained splat is voted on as any other.
@@ -330,12 +336,23 @@ on the same splat.
   - Objects: chairs match at 0.5 85.1% of the time (73.8% before), walls
     84.6% (51.3%) and windows 28.0% (8.0%).
 - **The cost.**
-  - **Image quality.** At 0.02 the PSNR stays within the plain runs' range.
+  - **Image quality.** At 0.02 the PSNR stays within the plain runs' range,
+    but for one run in eight with floaters (below).
     Higher weights trade PSNR for agreement, with more gaussians: 96,680
     at 0.05 and 129,500 at 0.2, against 88,170.
-  - **Time.** The class passes take 5.6 ms per step, 1.4 ms forward and
-    4.2 ms backward, more than the rest of the step. 30k steps take 288 s
-    of training instead of 142 s.
+  - **Time.** The class channels first had passes of their own: 5.6 ms
+    per step (1.4 ms forward, 4.2 ms backward), more than the rest of the
+    step, and 30k steps took 288 s of training instead of 142 s. Inside
+    the colour kernels they take about 1 ms. In one session, 30k steps
+    took 192 s without the labels, a median of 216 s with them (eight runs,
+    179–234 s) and 372–378 s with the separate passes (two runs).
+- **Eight runs at 0.02 inside the colour kernels.**
+  - Seven give 32.50–32.60 dB, and from their logits 89.7–89.9% of the
+    held-out pixels and an mIoU of 81.7–81.9%. Three runs with the
+    separate passes gave 32.43–32.69 dB.
+  - In the eighth, floaters appeared in front of two of the 14 held-out
+    views between steps 20,000 and 30,000: 27.69 dB, and 86.4% of the
+    pixels. The training loss kept falling.
 
 ### Building_In
 
@@ -354,8 +371,10 @@ The same settings, with 29 held-out views:
     their instances matched at 0.5 from 9.0% to 49.2%.
   - Doors from 60.4% to 81.4%, walls from 62.1% to 81.4%, the elevator
     from 0.3% to 9.5%.
-- **The cost.** At 0.02 the PSNR stays, and 30k steps take 442 s of
-  training against 227 s.
+- **The cost.** At 0.02 the PSNR stays. 30k steps took 442 s of training
+  against 227 s with the separate passes. Inside the colour kernels they
+  took 335 s against 298 s, in another session (31.90 dB, 92.3% of the
+  held-out pixels and an mIoU of 70.6% from the logits).
 
 As before, these numbers measure agreement with SAM 3's labels of photos
 the training never saw, not with a ground truth.
