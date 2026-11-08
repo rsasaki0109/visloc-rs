@@ -17,8 +17,11 @@ per-pixel labels of its photos:
 
 The labels can also shape the training itself (`gsplat_train_cuda
 --labels`). The held-out pixels that agree with SAM 3 rise at the same
-PSNR: from 79–85% to 89.8% on MeetingRoom_In, and from 87% to 92.4% on
-Building_In ([Training with the labels](#training-with-the-labels)).
+PSNR: from 79–85% to 88.0% on MeetingRoom_In, and from 87% to 91.3% on
+Building_In. Letting the labels change the splats' shapes too
+(`--semantic-shape`) gives 89.8% and 92.4%, but grows large splats that
+showed as floaters in some runs
+([Training with the labels](#training-with-the-labels)).
 
 <p align="center">
   <img src="assets/semantic_meetingroom.jpg" alt="FIORD MeetingRoom_In from two viewpoints: the trained splat in its colours (left), painted by the SAM 3 class of each gaussian (middle: table red, chairs green, floor yellow, ceiling blue, walls orange, windows purple, doors cyan, whiteboards magenta, ceiling lights lime), and by object (right: each chair, table, window and light its own colour)" width="900">
@@ -277,9 +280,12 @@ training instead (CUDA only):
   Its mean over the labelled pixels, times `--semantic-weight` (0.02), is
   added to the photometric loss.
 - **The gradient** reaches the logits and, through each splat's alpha, its
-  position, shape and opacity. It also counts towards brush's refine
-  weight, so the refine splits gaussians where the labels disagree with
-  them. `--semantic-logits-only` keeps it to the logits.
+  opacity and position. It also counts towards brush's refine weight, so
+  the refine splits gaussians where the labels disagree with them.
+  `--semantic-shape` lets it change the splats' shapes (scale and
+  rotation) too, which agrees more with SAM 3 but grows large splats that
+  can show as floaters ([Floaters and the shapes](#floaters-and-the-shapes)).
+  `--semantic-logits-only` keeps it to the logits.
 - **In the colour kernels** (CUDA ABI 14). The loss needs only each
   pixel's label-class channel P_y and its coverage, which is 1 - T since
   the probabilities sum to 1. So the colour's forward blends P_y alongside
@@ -312,15 +318,16 @@ on the same splat.
 | Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
 |---|---|---|---|---|
 | Without the labels shaping the splat (4 runs) | 32.67–32.76 dB | 79.4–84.5% | 68.9–73.1% | 64.4–66.1% |
-| `--semantic-weight 0.02` | 32.69 dB | 89.8% | 81.5% | 76.8% |
-| `--semantic-weight 0.05` (2 runs) | 31.80, 32.34 dB | 90.6%, 90.9% | 83.1%, 83.3% | 78.9%, 79.2% |
-| `--semantic-weight 0.2` | 31.39 dB | 91.7% | 84.6% | 80.0% |
+| `--semantic-weight 0.02`, the default (9 runs, logits) | 32.44–32.75 dB | 87.9–88.2% | 79.3–79.5% | 77.7% (one run) |
+| `--semantic-shape`, weight 0.02 | 32.69 dB | 89.8% | 81.5% | 76.8% |
+| `--semantic-shape`, weight 0.05 (2 runs) | 31.80, 32.34 dB | 90.6%, 90.9% | 83.1%, 83.3% | 78.9%, 79.2% |
+| `--semantic-shape`, weight 0.2 | 31.39 dB | 91.7% | 84.6% | 80.0% |
 
 <p align="center">
   <img src="assets/semantic_trained_meetingroom.jpg" alt="Two held-out views of MeetingRoom_In, upright, each as four panels: the photo, SAM 3's labels, the classes voted onto a splat trained without the labels, and the classes of a splat trained with them. With the labels, the windows on the left and the wall on the right (top row) and the door on the left (bottom row) come out as SAM 3 labels them. The glass wall on the right of the bottom row is a window in both splats, where SAM 3 left most of it unlabelled." width="900">
 </p>
 
-<p align="center"><sub>Two of the 14 held-out views, through the fisheye (<code>--check-images</code>): the photo, SAM 3's labels, the vote on a splat trained without them, and the classes of one trained with them (<code>--semantic-weight 0.02</code>). Pixel accuracy 74.9% → 90.1% (top) and 80.9% → 90.8% (bottom).</sub></p>
+<p align="center"><sub>Two of the 14 held-out views, through the fisheye (<code>--check-images</code>): the photo, SAM 3's labels, the vote on a splat trained without them, and the classes of one trained with them (<code>--semantic-shape</code>, weight 0.02). Pixel accuracy 74.9% → 90.1% (top) and 80.9% → 90.8% (bottom).</sub></p>
 
 - **Without the labels.** The four runs are:
   - the splat above;
@@ -333,14 +340,16 @@ on the same splat.
 - **Logits and votes.** In every run, the classes from the trained logits
   score within 0.4 points of the vote on the same splat, in pixel accuracy
   and in mIoU.
-- **Where it gains**, `--semantic-weight 0.05` against the plain run:
+- **Where it gains**, `--semantic-shape --semantic-weight 0.05` against the
+  plain run:
   - Ceiling lights' IoU goes from 41.6% to 72.5%, windows' from 35.0% to
     53.6%, walls' from 67.2% to 81.5% and chairs' from 75.8% to 84.2%.
   - Objects: chairs match at 0.5 85.1% of the time (73.8% before), walls
     84.6% (51.3%) and windows 28.0% (8.0%).
 - **The cost.**
-  - **Image quality.** At 0.02 the PSNR stays within the plain runs' range,
-    but for one run in eight with floaters (below).
+  - **Image quality.** At 0.02 the PSNR stays within the plain runs'
+    range. With the shapes it drops by about 0.15 dB, and floaters showed
+    in 2 of 16 runs ([Floaters and the shapes](#floaters-and-the-shapes)).
     Higher weights trade PSNR for agreement, with more gaussians: 96,680
     at 0.05 and 129,500 at 0.2, against 88,170.
   - **Time.** The class channels first had passes of their own: 5.6 ms
@@ -349,13 +358,6 @@ on the same splat.
     the colour kernels they take about 1 ms. In one session, 30k steps
     took 192 s without the labels, a median of 216 s with them (eight runs,
     179–234 s) and 372–378 s with the separate passes (two runs).
-- **Eight runs at 0.02 inside the colour kernels.**
-  - Seven give 32.50–32.60 dB, and from their logits 89.7–89.9% of the
-    held-out pixels and an mIoU of 81.7–81.9%. Three runs with the
-    separate passes gave 32.43–32.69 dB.
-  - In the eighth, floaters appeared in front of two of the 14 held-out
-    views between steps 20,000 and 30,000: 27.69 dB, and 86.4% of the
-    pixels. The training loss kept falling.
 
 ### Building_In
 
@@ -364,12 +366,17 @@ The same settings, with 29 held-out views:
 | Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
 |---|---|---|---|---|
 | Without the labels shaping the splat (2 runs) | 31.98, 32.05 dB | 87.2%, 87.3% | 57.8%, 58.2% | 26.1%, 26.2% |
-| `--semantic-weight 0.02` | 31.97 dB | 92.4% | 71.9% | 45.4% |
-| `--semantic-weight 0.05` | 31.40 dB | 92.9% | 73.3% | 49.1% |
+| `--semantic-weight 0.02`, the default (2 runs, logits) | 32.00, 32.05 dB | 91.3%, 91.3% | 67.7%, 67.8% | 43.2%, 43.5% |
+| `--semantic-shape`, weight 0.02 | 31.97 dB | 92.4% | 71.9% | 45.4% |
+| `--semantic-shape`, weight 0.05 | 31.40 dB | 92.9% | 73.3% | 49.1% |
 
 - **Without the labels.** The two runs are the splat above and one with
   `--semantic-logits-only`.
-- **Where it gains**, at 0.05 against the logits-only run:
+- **Large splats** (footprint above 2,000 px² in a held-out view, see
+  [Floaters and the shapes](#floaters-and-the-shapes)): 45 without the
+  labels, 50 and 59 at the default, 159 with `--semantic-shape`.
+- **Where it gains**, `--semantic-shape` at 0.05 against the logits-only
+  run:
   - The corridors' many small ceiling lights: IoU from 19.6% to 81.5%, and
     their instances matched at 0.5 from 9.0% to 49.2%.
   - Doors from 60.4% to 81.4%, walls from 62.1% to 81.4%, the elevator
@@ -377,16 +384,59 @@ The same settings, with 29 held-out views:
 - **The cost.** At 0.02 the PSNR stays. 30k steps took 442 s of training
   against 227 s with the separate passes. Inside the colour kernels they
   took 335 s against 298 s, in another session (31.90 dB, 92.3% of the
-  held-out pixels and an mIoU of 70.6% from the logits).
+  held-out pixels and an mIoU of 70.6% from the logits, with the shapes).
 
 As before, these numbers measure agreement with SAM 3's labels of photos
 the training never saw, not with a ground truth.
+
+### Floaters and the shapes
+
+Until CUDA ABI 15 the labels also changed the splats' shapes, as
+`--semantic-shape` still does. In 2 of 16 such runs at 0.02 on
+MeetingRoom_In, floaters appeared in front of some held-out views between
+steps 20,000 and 30,000: 27.69 and 30.63 dB, against 32.35–32.73 dB for
+the other 14. None of the 10 runs without the labels had any.
+
+- **Large splats.** Through the shape, the cross-entropy spreads a splat
+  over the pixels of its class next to it. The held-out views then see
+  95–156 splats with a footprint above 2,000 px² (the square root of the
+  determinant of the projected covariance, times the opacity), against
+  22–45 without the labels. The floaters were such splats: flat, and
+  larger than the room.
+- **Which gradient grows them.** In each row below the labels move only
+  part of each splat. Every row is MeetingRoom_In at 0.02, scored on the
+  14 held-out views; "Large splats" counts footprints above 2,000 px².
+
+| The labels move | Runs | Large splats | PSNR | Pixel accuracy (logits) |
+|---|---|---|---|---|
+| Everything (`--semantic-shape`) | 8 | 95–156 | 32.35–32.73 dB, one 30.63 dB | 89.6–89.9%, the floater run 89.0% |
+| Everything but the centre | 1 | 128 | 32.47 dB | 89.6% |
+| Everything, the shape only shrinking | 2 | 11, 19 | 32.47, 32.57 dB | 87.6%, 87.9% |
+| Opacity and centre (the default) | 8 | 31–51 | 32.46–32.75 dB | 87.9–88.2% |
+| Opacity alone | 2 | 36, 37 | 32.63, 32.68 dB | 87.6%, 87.9% |
+| Nothing (without the labels) | 8 | 22–45 | 32.57–32.77 dB | 79.4–84.5% (votes, the four runs above) |
+
+- **The shape's gradient grows them**, and the shape's growing alone
+  gives the last 1.8 points: kept from the shape, or let only shrink it,
+  the labels leave as few large splats as no labels do, and 88% of the
+  pixels agree.
+- **No floaters** in the eight runs at the default, and their PSNR is
+  that of the runs without the labels.
+- **What did not help.** Making the cross-entropy linear below P_y / A =
+  0.1 or 0.5, which bounds its gradient where the label's class is
+  nearly absent, or leaving the labels out of the refine weight: 96–126
+  large splats and 89.7–89.8% of the pixels, as with everything.
+
+The eight runs at the default used a build that switched the conic's
+share off at run time. One run of this code gave 32.44 dB, 41 large
+splats and 88.0% of the pixels.
 
 ## Windows
 
 Windows score lowest of the named classes on both scenes. `--check` shows
 where their pixels go: the vote on a splat trained without the labels, and
-the classes of one trained with them (`--logits`, weight 0.02).
+the classes of one trained with them (`--logits`, `--semantic-shape`, weight
+0.02).
 
 | Scene, splat | Window recall | Missed as | Window precision | Taken from |
 |---|---|---|---|---|

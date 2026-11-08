@@ -8,8 +8,8 @@ use nalgebra::{Quaternion, Vector3};
 use visloc_gsplat_core::backward::{render_backward, render_backward_screen, render_f64};
 use visloc_gsplat_core::camera::{CameraView, PinholeCamera};
 use visloc_gsplat_core::gaussian::{sh_rest_coeffs_per_channel, Gaussian, Scene};
-use visloc_gsplat_cuda::{CudaGsplat, SCREEN_GRAD_FLOATS};
-use visloc_gsplat_render::packing::PackedScene;
+use visloc_gsplat_cuda::{CudaGsplat, LabelGeometry, SCREEN_GRAD_FLOATS};
+use visloc_gsplat_render::packing::{PackedScene, TRANSFORM_FLOATS};
 
 fn rasterizer() -> Option<CudaGsplat> {
     match CudaGsplat::from_env() {
@@ -830,7 +830,10 @@ fn class_channels_match_the_colour_channel() {
 
 /// Training's labels cross-entropy (the label channel inside the colour
 /// kernels, `label_backward`) against the same loss through every class
-/// channel (`render_classes`, the gradient on the host, `classes_backward`).
+/// channel (`render_classes`, the gradient on the host, `classes_backward`),
+/// which moves the shapes too ([`LabelGeometry::Full`]); the default
+/// [`LabelGeometry::OpacityPosition`] leaves the conic out, and logits only
+/// the rest.
 /// The labels come in warp-sized blocks on the left, so a warp sees one or
 /// two of them, and in narrow stripes on the right, three or more.
 #[test]
@@ -887,7 +890,7 @@ fn label_loss_matches_the_class_channels() {
         let (by_classes, want_logits) = cuda.classes_backward(&d_sem, k).expect("backward");
 
         let (loss, by_labels, g_logits) = cuda
-            .label_backward(&view, 0, weight, true)
+            .label_backward(&view, 0, weight, LabelGeometry::Full)
             .expect("label backward");
         assert!(
             (loss - want_loss).abs() < 1e-4 * want_loss,
@@ -924,7 +927,7 @@ fn label_loss_matches_the_class_channels() {
 
         // Logits only: the same logit gradient, nothing else.
         let (_, by_logits, only) = cuda
-            .label_backward(&view, 0, weight, false)
+            .label_backward(&view, 0, weight, LabelGeometry::LogitsOnly)
             .expect("label backward");
         assert!(
             by_logits.screen.iter().all(|&v| v == 0.0),
@@ -934,6 +937,48 @@ fn label_loss_matches_the_class_channels() {
         assert!(by_logits.opacity.iter().all(|&v| v == 0.0));
         let e = off(&g_logits, &only);
         assert!(e < 1e-6, "k {k}: logits-only gradient off by {e:.2e}");
+
+        // Opacities and centres: the full gradient without the conic's
+        // share, so nothing for the rotations and scales either.
+        let (_, by_moves, moved) = cuda
+            .label_backward(&view, 0, weight, LabelGeometry::OpacityPosition)
+            .expect("label backward");
+        let slots = |g: &[f32], keep: &[usize]| -> Vec<f32> {
+            g.chunks_exact(SCREEN_GRAD_FLOATS)
+                .flat_map(|s| keep.iter().map(|&i| s[i]).collect::<Vec<_>>())
+                .collect()
+        };
+        assert!(
+            slots(&by_moves.screen, &[2, 3, 4])
+                .iter()
+                .all(|&v| v == 0.0),
+            "k {k}: the conic moved"
+        );
+        assert!(
+            by_moves
+                .transforms
+                .chunks_exact(TRANSFORM_FLOATS)
+                .all(|t| t[3..].iter().all(|&v| v == 0.0)),
+            "k {k}: a rotation or scale moved"
+        );
+        let keep = [0, 1, 5, 9];
+        let errors = [
+            (
+                "screen",
+                off(
+                    &slots(&by_labels.screen, &keep),
+                    &slots(&by_moves.screen, &keep),
+                ),
+            ),
+            ("opacity", off(&by_labels.opacity, &by_moves.opacity)),
+            ("logits", off(&g_logits, &moved)),
+        ];
+        for (what, e) in errors {
+            assert!(
+                e < 1e-6,
+                "k {k}: opacities and centres, {what} off by {e:.2e}"
+            );
+        }
     }
 }
 

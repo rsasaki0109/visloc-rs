@@ -41,7 +41,10 @@
 // label_loss_kernel): the loss needs only the label's channel and the
 // coverage, and its gradient two floats per pixel. sem_fwd_kernel and
 // sem_bwd_kernel blend and differentiate every class channel, for
-// render_classes and classes_backward.
+// render_classes and classes_backward. Since ABI 15 the labels move the
+// gaussians' opacities and centres but not their shapes unless asked
+// (semantic_geometry 2): through the shape they grew splats over the pixels
+// of their class, large ones that showed as floaters from other views.
 
 #include <cuda_runtime.h>
 
@@ -83,7 +86,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 14;
+constexpr uint32_t kAbiVersion = 15;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;
@@ -870,12 +873,13 @@ __device__ inline float warp_sum32(float (&v)[32], int lane) {
 // sum to 1 the alpha part reaches no logit (the softmax's backward cancels
 // a gradient shared by every class), so a splat's class-y probability gets
 // -T_i a_i beta into `g_logits` (sem_k per gaussian, before the softmax's
-// backward), and through alpha (with `lab_geo`) the channels give
+// backward), and through alpha the channels give
 // T_i (alpha (1 - B) - beta (p_iy - B_y)), B and B_y the coverage and class-y
-// channel composited behind the splat. The refine weight sums the colour's
-// and the labels' magnitudes, as separate passes would. Per warp the first
-// two labels go through the butterfly (slots 14, 15); lanes of any other
-// label add their own.
+// channel composited behind the splat: with `lab_geo` 1 to the opacity and
+// the centre, 2 to the conic too, 0 to neither. The refine weight sums the
+// colour's and the labels' magnitudes, as separate passes would. Per warp
+// the first two labels go through the butterfly (slots 14, 15); lanes of
+// any other label add their own.
 template <int kGeo, bool kLab>
 __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
     uint32_t img_w, uint32_t img_h, float3 bg, const uint2* __restrict__ ranges, const uint32_t* __restrict__ vals,
@@ -1040,12 +1044,14 @@ __global__ void __launch_bounds__(kBlock) raster_bwd_kernel(
                         if (raw <= 0.99f) {
                             const float d_alpha_all = kLab ? d_alpha + d_alpha_lab : d_alpha;
                             const float d_sigma = -d_alpha_all * a;
+                            // The conic takes the labels' share with lab_geo 2 only.
+                            const float d_sigma_c = kLab && lab_geo < 2 ? -d_alpha * a : d_sigma;
                             const float fu = -(co.x * dx + co.y * dy), fv = -(co.y * dx + co.z * dy);
                             g_u = d_sigma * fu;
                             g_v = d_sigma * fv;
-                            g_a = d_sigma * 0.5f * dx * dx;
-                            g_b = d_sigma * dx * dy;
-                            g_c = d_sigma * 0.5f * dy * dy;
+                            g_a = d_sigma_c * 0.5f * dx * dx;
+                            g_b = d_sigma_c * dx * dy;
+                            g_c = d_sigma_c * 0.5f * dy * dy;
                             g_o = d_alpha_all * e;
                             g_r = kLab ? (fabsf(d_alpha) + fabsf(d_alpha_lab)) * a * (fabsf(fu) * fw + fabsf(fv) * fh)
                                        : fabsf(g_u) * fw + fabsf(g_v) * fh;
@@ -2498,7 +2504,10 @@ struct SemBackward {
     bool channels = false;
     bool labels_ce = false;
     const uint8_t* labels = nullptr;  // labels_ce: the pixels' labels
-    bool geometry = true;             // alpha's share reaches the gaussians
+    // Alpha's share reaches the gaussians: 0 not, 1 their opacities and
+    // centres (labels_ce only; the class channels take 1 as 2), 2 their
+    // shapes too.
+    int geometry = 2;
 };
 int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool rgb = true) {
     if (!ctx->have_forward) {
@@ -2550,7 +2559,7 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool
             screen_grads, kGeo >= 1 ? depth : nullptr, kGeo >= 1 ? d_depth : nullptr, g_depth,
             kGeo >= 2 ? static_cast<const float4*>(ctx->plane.ptr) : nullptr,
             kGeo >= 2 ? static_cast<const float*>(ctx->d_normal.ptr) : nullptr, g_normal, ctx->sem_k, probs,
-            sem.labels, static_cast<const float2*>(ctx->d_lab.ptr), sem.geometry ? 1 : 0, g_logits);
+            sem.labels, static_cast<const float2*>(ctx->d_lab.ptr), sem.geometry, g_logits);
     };
     const auto with_labels = [&](auto geo_c) {
         sem.labels_ce ? raster(geo_c, std::true_type{}) : raster(geo_c, std::false_type{});
@@ -2570,7 +2579,7 @@ int run_backward(Ctx* ctx, bool zero_sh, int geo = 0, SemBackward sem = {}, bool
         if (sem.channels) {
             sem_bwd_kernel<<<grid, kBlock>>>(ctx->cam.width, ctx->cam.height, ctx->sem_k, ranges, vals, xy, conic_op,
                                              probs, final_t, last_idx, static_cast<const float*>(ctx->d_sem.ptr),
-                                             sem.geometry ? 1 : 0, screen_grads, g_logits);
+                                             sem.geometry != 0 ? 1 : 0, screen_grads, g_logits);
             GSC_CHECK(ctx, cudaGetLastError());
         }
         if (n > 0) {
@@ -2791,7 +2800,7 @@ struct GscStepParams {
     float normal_weight;       // depth-normal loss (0 = off)
     float semantic_weight;     // labels' cross-entropy (set_labels; 0 = off)
     float lr_semantic;         // learning rate of the logits
-    uint32_t semantic_geometry; // the labels also move the gaussians (0 = logits only)
+    uint32_t semantic_geometry; // the labels also move: 0 only the logits, 1 opacities and centres, 2 shapes too
 };
 
 #if defined(_WIN32)
@@ -3140,7 +3149,9 @@ GSC_EXPORT int visloc_gsplat_cuda_classes_backward(void* handle, const float* d_
 // image `image` seen from `cam` (that image's size): `loss` (nullable)
 // receives the unweighted mean over its labelled pixels, and the outputs
 // (nullable, as classes_backward's) the gradients of weight times it, the
-// logits' through the softmax; with `geometry` 0 only the logits get one.
+// logits' through the softmax. `geometry` as train_step's
+// semantic_geometry: 0 only the logits get one, 1 also the opacities and
+// centres, 2 the shapes too (classes_backward's).
 GSC_EXPORT int visloc_gsplat_cuda_label_backward(void* handle, const GscCamera* cam, uint32_t image, float weight,
                                                  int geometry, double* loss, float* g_transforms, float* g_opacity,
                                                  float* g_logits, float* screen_grads) {
@@ -3158,7 +3169,7 @@ GSC_EXPORT int visloc_gsplat_cuda_label_backward(void* handle, const GscCamera* 
     SemBackward sem;
     sem.labels_ce = true;
     sem.labels = image_labels(ctx, image);
-    sem.geometry = geometry != 0;
+    sem.geometry = std::clamp(geometry, 0, 2);
     GSC_TRY(run_forward(ctx, nullptr, false, nullptr, nullptr, sem.labels));
     // The slot after the step's sums, so take_loss is undisturbed.
     double* acc;
@@ -3337,7 +3348,7 @@ GSC_EXPORT int visloc_gsplat_cuda_train_step(void* handle, const GscStepParams* 
     if (sem_on) {
         sem.labels_ce = true;
         sem.labels = image_labels(ctx, p->image);
-        sem.geometry = p->semantic_geometry != 0;
+        sem.geometry = int(std::min(p->semantic_geometry, 2u));
         GSC_TRY(stage_begin(ctx, kSemantic));
         GSC_TRY(run_softmax(ctx));
         GSC_TRY(stage_end(ctx, kSemantic));

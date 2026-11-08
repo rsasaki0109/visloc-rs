@@ -6,6 +6,33 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Labels move the splats' opacities and centres, not their shapes (CUDA
+  ABI 15).**
+  - **Why.** Through the shape, the labels' cross-entropy spread splats
+    over the pixels of their class. On MeetingRoom_In the held-out views
+    saw 95–156 splats with a footprint above 2,000 px², against 22–45
+    without the labels. In 2 of 16 runs some showed as floaters (27.69 and
+    30.63 dB, against 32.35–32.73 dB for the others).
+  - **Now.** `gsplat_train_cuda --labels` leaves the conic out of the
+    labels' gradient. In eight MeetingRoom_In runs: 31–51 large splats, no
+    floaters, 32.46–32.75 dB (32.57–32.77 dB without the labels), and
+    87.9–88.2% of the held-out pixels (89.6–89.9% with the shapes,
+    79.4–84.5% without the labels). Building_In: 91.3% (92.4% with the
+    shapes, 87.2% without) at 32.00 and 32.05 dB.
+  - **`--semantic-shape`** keeps the previous behaviour.
+    `--semantic-logits-only` is unchanged.
+  - **What did not help:** a cross-entropy linear below P_y / A = 0.1 or
+    0.5, or the labels left out of the refine weight (96–126 large
+    splats). Letting the labels only shrink a shape removed the large
+    splats and the 1.8 points with them.
+  - **API.** `LabelGeometry` (`LogitsOnly`, `OpacityPosition`, the
+    default, `Full`) for `SemanticTraining::geometry`,
+    `StepParams::semantic_geometry` (as `u32`) and
+    `CudaGsplat::label_backward`.
+  - **Tests.** The oracle test checks that the default's conic, rotation
+    and scale gradients are exactly zero, and that its other gradients
+    match the full gradient's. `labels_train_the_logits` fits all three.
+
 - **`sam3_labels.py --prompt-threshold`.** `--prompt-threshold window=0.4`
   keeps one prompt's instances from its own score instead of
   `--threshold`'s (docs/semantic_splat.md, "Windows alone at 0.4").

@@ -39,7 +39,7 @@ The packaging follows the DPVO CUDA kernels:
 | Meshes from the expected depth the depth losses train (`gsplat_mesh_cuda --expected-depth`, `mesh::MeshDepth`) | Done; with the depth prior at 30, ETH3D mesh F1 33.3% → 63.6% (the prior's MVS clouds: 67.6%) |
 | Exhaustive SIFT matching for `build_photo_dataset` (`gsplat_photos_cuda`, feature `photos`) | Done; the CPU matcher's matches bit for bit, south-building's front end 780.7 s → 18.4 s |
 | Label votes: each splat's blending weight per pixel class, summed over views (`CudaGsplat::vote_labels`, example `gsplat_semantic_cuda`) | Done; SAM 3 classes on FIORD's MeetingRoom_In, 82.6% of held-out pixels ([semantic_splat.md](semantic_splat.md)) |
-| Semantic training: a logit per class and gaussian, its softmax blended like colour, the cross-entropy against per-pixel labels into the logits and, through alpha, the geometry (`CudaTrainer::set_labels`, `gsplat_train_cuda --labels`) | Done; held-out pixels at the same PSNR: MeetingRoom_In 79.4–84.5% → 89.8%, Building_In 87.2–87.3% → 92.4%; training 12% slower, the labels carried by the colour kernels (2x as separate passes) ([semantic_splat.md](semantic_splat.md#training-with-the-labels)) |
+| Semantic training: a logit per class and gaussian, its softmax blended like colour, the cross-entropy against per-pixel labels into the logits and, through alpha, the opacities and centres (the shapes too with `--semantic-shape`; `CudaTrainer::set_labels`, `gsplat_train_cuda --labels`) | Done; held-out pixels at the same PSNR: MeetingRoom_In 79.4–84.5% → 88.0%, Building_In 87.2–87.3% → 91.3% (89.8% and 92.4% with the shapes, which grow floaters in some runs); training 12% slower, the labels carried by the colour kernels (2x as separate passes) ([semantic_splat.md](semantic_splat.md#training-with-the-labels)) |
 
 The maths is the wgpu renderer's (`compute_projected`, `tile_row_span`,
 `rasterize`, `rasterize_backward`, `project_backward`), so both backends and
@@ -157,9 +157,12 @@ More tests check the depth and normal outputs:
     two labels, and narrow stripes on the right, three or more. Some pixels
     have none.
   - **Result.** For k = 5 and 16, the loss and the screen, transform,
-    opacity and logit gradients: worst error 2.6e-6 (screen), 7.2e-7
-    elsewhere. With the geometry off, only the logits get a gradient, the
-    same one.
+    opacity and logit gradients with the shapes moving (`LabelGeometry::Full`):
+    worst error 2.5e-6 (screen), 7.3e-7 elsewhere.
+  - **The default** (`LabelGeometry::OpacityPosition`) gives the conic,
+    rotations and scales exactly zero, and the centres, opacities, refine
+    weight and logits the full gradient's within 1e-6. With the logits
+    only, only the logits get a gradient, the same one.
 
 `tests/training.rs` checks the training step:
 
@@ -171,7 +174,7 @@ More tests check the depth and normal outputs:
 | 300 steps on a scene rendered from known gaussians, colours and opacities perturbed, dense and sparse SH Adam | Mean L1 0.0175 → 0.0009 in both; a gaussian behind every camera keeps its SH bit for bit |
 | 300 steps of the depth-normal loss (weight 1) on a dense scene fitted to its own renders, only rotations learning | Depth-normal loss 0.286 → 0.099 |
 | Refine scatter with semantic logits | Each row's logits follow it (a split's and a clone's two rows keep the parent's); `set_scene` zeroes them |
-| 300 steps of the labels' cross-entropy (weight 1) from zero logits, against labels rendered from one-hot logits, geometry held still or learning | Cross-entropy 0.76 → 0.32 and 0.74 → 0.17; 95.2% and 96.5% of the labelled pixels agree |
+| 300 steps of the labels' cross-entropy (weight 1) from zero logits, against labels rendered from one-hot logits: geometry held still, opacities and centres learning, or shapes too | Cross-entropy 0.76 → 0.32, 0.75 → 0.30 and 0.74 → 0.17; 95.2%, 92.6% and 96.5% of the labelled pixels agree |
 
 ## Training on south-building
 
