@@ -305,6 +305,18 @@ type ClassesBackwardFn = unsafe extern "C" fn(
     *mut c_float,
     *mut c_float,
 ) -> c_int;
+type LabelBackwardFn = unsafe extern "C" fn(
+    *mut c_void,
+    *const GscCamera,
+    u32,
+    c_float,
+    c_int,
+    *mut c_double,
+    *mut c_float,
+    *mut c_float,
+    *mut c_float,
+    *mut c_float,
+) -> c_int;
 
 /// A descriptor's best match among the other image's (see
 /// [`CudaGsplat::match_top2`]): scores `|other|^2 - 2 dot` in byte units
@@ -463,6 +475,7 @@ struct Api {
     set_labels: SetLabelsFn,
     render_classes: RenderClassesFn,
     classes_backward: ClassesBackwardFn,
+    label_backward: LabelBackwardFn,
 }
 
 /// The native context: a scene, its Adam state and the training images on
@@ -511,7 +524,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 13;
+    pub const ABI_VERSION: u32 = 14;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
@@ -571,6 +584,7 @@ impl CudaGsplat {
                 set_labels: symbol(&library, "visloc_gsplat_cuda_set_labels", path)?,
                 render_classes: symbol(&library, "visloc_gsplat_cuda_render_classes", path)?,
                 classes_backward: symbol(&library, "visloc_gsplat_cuda_classes_backward", path)?,
+                label_backward: symbol(&library, "visloc_gsplat_cuda_label_backward", path)?,
             };
             (version, create, stage_names, api)
         };
@@ -956,6 +970,52 @@ impl CudaGsplat {
         };
         self.check(code)?;
         Ok((grads, g_logits))
+    }
+
+    /// The labels' cross-entropy as a training step computes it, for image
+    /// `image` of [`set_labels`](Self::set_labels) seen from `view` (that
+    /// image's size): the unweighted mean over its labelled pixels, and the
+    /// gradients of `weight` times it as
+    /// [`classes_backward`](Self::classes_backward) gives them, the logits'
+    /// through the softmax. With `geometry` false only the logits get one.
+    pub fn label_backward(
+        &mut self,
+        view: &CameraView,
+        image: u32,
+        weight: f32,
+        geometry: bool,
+    ) -> Result<(f64, Gradients, Vec<f32>), GsplatCudaError> {
+        let cam = GscCamera::from_view(view);
+        let num_classes = self.logit_classes;
+        let n = self.num_gaussians();
+        let mut loss = 0.0f64;
+        let mut grads = Gradients {
+            transforms: vec![0.0; n * TRANSFORM_FLOATS],
+            opacity: vec![0.0; n],
+            sh: Vec::new(),
+            screen: vec![0.0; n * SCREEN_GRAD_FLOATS],
+        };
+        let mut g_logits = vec![0.0f32; n * num_classes];
+        // SAFETY: every output holds the size the native side writes for the
+        // current scene and the logits' class count (it refuses a context
+        // without labels, whose count `logit_classes` mirrors).
+        let code = unsafe {
+            (self.api.label_backward)(
+                self.ctx(),
+                &cam,
+                image,
+                weight,
+                geometry as c_int,
+                &mut loss,
+                grads.transforms.as_mut_ptr(),
+                grads.opacity.as_mut_ptr(),
+                g_logits.as_mut_ptr(),
+                grads.screen.as_mut_ptr(),
+            )
+        };
+        self.check(code)?;
+        self.pixels = cam.width as usize * cam.height as usize;
+        Ok((loss, grads, g_logits))
     }
 
     /// [`render_depth`](Self::render_depth) (centre median depth) plus the
