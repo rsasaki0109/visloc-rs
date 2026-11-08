@@ -18,9 +18,10 @@ per-pixel labels of its photos:
 The labels can also shape the training itself (`gsplat_train_cuda
 --labels`). The held-out pixels that agree with SAM 3 rise at the same
 PSNR: from 79–85% to 88.0% on MeetingRoom_In, and from 87% to 91.3% on
-Building_In. Letting the labels change the splats' shapes too
-(`--semantic-shape`) gives 89.8% and 92.4%, but grows large splats that
-showed as floaters in some runs
+Building_In. Outdoors, on Bridge_Out, they rise from 93.7% to 95.2%, 0.1 dB
+lower on average. Letting the labels change the splats' shapes too
+(`--semantic-shape`) gives 89.8%, 92.4% and 95.7%, but grows large splats
+that showed as floaters in some MeetingRoom_In runs
 ([Training with the labels](#training-with-the-labels)).
 
 <p align="center">
@@ -250,6 +251,72 @@ match. By class:
 | stairs | 17 | 64.7% |
 | elevator | 12 | 0.0% |
 
+## Bridge_Out
+
+Outdoors: FIORD's Bridge_Out, a snowy yard between buildings, with the
+front lens refined and its tripod masked out as for the other two. It has
+272 photos at 800 px and 235,765 gaussians.
+
+- **SAM 3:** eleven prompts for the scene, `sky, snow, building, window,
+  door, tree, bike rack, railing, lamp post, person, sign`, with
+  `--rotate 180`: 239 s for the 272 photos.
+  - Of the labelled pixels, 41% are snow, 29% sky and 21% building.
+  - SAM 3 labels almost no doors or signs (0.01% of the pixels).
+- **The vote:** 1.7 s.
+  - 59% of the gaussians are snow and 24% building.
+  - The sky takes 29% of the pixels but 1.0% of the gaussians, few and
+    large.
+- **Objects:** 6,930 view instances merge into 60 objects in 81 s. Among
+  them are 12 trees, 11 patches of snow, 10 buildings, 10 bike racks, 6
+  windows, 6 railings and 4 lamp posts.
+
+`--check` holds out 34 views and lets the other 238 vote:
+
+| | Pixel accuracy | mIoU (12 classes) |
+|---|---|---|
+| Held-out views | 93.7% | 43.0% |
+
+| Class | IoU | Class | IoU |
+|---|---|---|---|
+| sky | 98.2% | tree | 41.4% |
+| snow | 97.3% | bike rack | 27.2% |
+| building | 87.8% | railing | 58.4% |
+| window | 48.1% | lamp post | 12.9% |
+| door | 0.0% | person | 0.0% |
+| other | 44.9% | sign | 0.0% |
+
+- **Sky and snow** take 70% of the pixels and agree on 97–98% of them.
+  More of the pixels agree than indoors.
+- **Three classes at zero** pull the mIoU down. Over the other nine it is
+  57.4%.
+  - **People** walking past are in a few photos each. The splat keeps
+    none of them: 96% of their held-out pixels render as the snow behind
+    them.
+  - **Doors and signs.** SAM 3 labels them small and seldom, and no
+    gaussian takes either class.
+- **Thin things** agree least.
+  - **Lamp posts:** IoU 12.9%. Of the pixels the splat paints as lamp
+    post, SAM 3 labels 67% as building.
+  - **Bike racks:** IoU 27.2%. The splat paints 45% of their pixels as
+    "other" and 25% as snow.
+
+The objects match at IoU 0.5 for 39.3% of the 922 held-out instances
+(64.4% on MeetingRoom_In, 26.1% on Building_In):
+
+| Class | Held-out instances | Matched at 0.5 |
+|---|---|---|
+| tree | 201 | 1.5% |
+| window | 152 | 69.1% |
+| snow | 116 | 61.2% |
+| building | 115 | 86.1% |
+| lamp post | 95 | 14.7% |
+| railing | 91 | 30.8% |
+| bike rack | 54 | 14.8% |
+| door | 44 | 0.0% |
+| sky | 34 | 100.0% |
+| person | 13 | 0.0% |
+| sign | 7 | 0.0% |
+
 ## The viewer
 
 `docs/euroc_splat/index.html` (antimatter15's WebGL viewer) takes these
@@ -386,6 +453,50 @@ The same settings, with 29 held-out views:
   took 335 s against 298 s, in another session (31.90 dB, 92.3% of the
   held-out pixels and an mIoU of 70.6% from the logits, with the shapes).
 
+### Bridge_Out
+
+The same settings outdoors ([Bridge_Out](#bridge_out)), with 34 held-out
+views:
+
+| Training | PSNR | Pixel accuracy | mIoU | Instances matched at 0.5 |
+|---|---|---|---|---|
+| Without the labels (2 runs, votes) | 31.17, 31.20 dB | 93.7%, 93.8% | 43.3%, 43.5% | 38.1%, 38.6% |
+| `--semantic-weight 0.02`, the default (4 runs, logits) | 30.91–31.17 dB | 95.2% | 47.2–47.5% | 39.7–42.2% |
+| `--semantic-shape`, weight 0.02 (2 runs, logits) | 30.98, 31.14 dB | 95.7%, 95.7% | 49.2%, 49.2% | 43.9%, 44.0% |
+
+- **Without the labels.** These are two runs of this build. The splat
+  above, from an earlier build, gave 31.32 dB and also 93.7%. Unlike
+  indoors, the runs agree closely.
+- **Where it gains**, the default against the runs without the labels
+  (with the shapes in brackets):
+  - Windows' IoU goes from 49.4–52.6% to 70.6–71.1% (75.1%).
+  - "Other" goes from 45% to 55% (59%), and buildings from 87–88% to 91%.
+  - Bike racks go from 27–28% to 33–35% (38–39%), and railings from
+    59–60% to 62% (69–70%).
+  - Sky and snow were at 97–98% already.
+- **Thin things gain least.**
+  - Trees go from 42–43% to 44–46%.
+  - Lamp posts go from 12.5–12.6% to 13.0–13.6% from the logits. The vote
+    on the same splats gives them 22.8–23.1%.
+  - The vote scores 95.8% of the pixels and an mIoU of 48.5–48.7%. The
+    lamp posts make most of the mIoU's difference. On MeetingRoom_In votes
+    and logits stay within 0.4 points.
+- **People stay out.** Trained with the labels, the splat still keeps none
+  of the people walking past: their IoU stays at 0.0–0.3%.
+- **The cost.**
+  - **Image quality.** None of the eight runs has floaters: no held-out
+    view is more than 1.7 dB below its median over the runs. The default's
+    PSNR is 0.1 dB lower on average (31.06 against 31.18 dB).
+  - **Gaussians.** The default has 9% fewer: 212,449–215,291 against
+    235,079 and 235,864. The runs with the shapes have 213,703 and
+    214,648.
+  - **Large splats** (footprint above 2,000 px² in a held-out view): 92
+    and 94 without the labels, 90–141 at the default, and 142 and 152 with
+    the shapes. 88–94% of them are snow or sky, which also cover large
+    parts of the photos.
+  - **Time.** 30k steps took 213–214 s without the labels and 224–233 s
+    with them.
+
 As before, these numbers measure agreement with SAM 3's labels of photos
 the training never saw, not with a ground truth.
 
@@ -422,6 +533,9 @@ the other 14. None of the 10 runs without the labels had any.
   pixels agree.
 - **No floaters** in the eight runs at the default, and their PSNR is
   that of the runs without the labels.
+- **Outdoors**, on Bridge_Out, the shapes add fewer large splats: 142 and
+  152, against 92 and 94 without the labels. Nearly all of them lie on the
+  snow and in the sky. None of its eight runs, above, had floaters.
 - **What did not help.** Making the cross-entropy linear below P_y / A =
   0.1 or 0.5, which bounds its gradient where the label's class is
   nearly absent, or leaving the labels out of the refine weight: 96–126
