@@ -7,7 +7,7 @@
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_semantic_cuda -- \
 //!   --ply scene.ply --data <colmap_root> --labels <dir> --out semantic.ply \
 //!   [--web <dir> [--max 400000]] [--instances [--instance-overlap 0.5] [--min-views 3]] \
-//!   [--check [--holdout 8]] [--logits]
+//!   [--check [--holdout 8] [--check-images <dir>]] [--logits]
 //! ```
 //!
 //! `<dir>` holds `classes.txt` (`index r g b name` per line) and a label
@@ -41,11 +41,14 @@
 //!
 //! `--check` holds out every `--holdout`-th view (8, as `gsplat_train_cuda`)
 //! and lets only the others vote, then renders the painted splat at each
-//! held-out view and scores it against that view's labels:
-//! pixel accuracy and IoU per class (a pixel's class: the class colour
-//! nearest its render). With `--instances` it also matches the objects
-//! against each held-out view's instances, by a soft pixel IoU in blending
-//! weight.
+//! held-out view and scores it against that view's labels: pixel accuracy
+//! and per class its IoU, recall and precision, each with the classes that
+//! took the rest (a pixel's class: the class colour nearest its render).
+//! `--check-images <dir>` writes each held-out view's classes as rendered
+//! (`<image stem>.png`) and as labelled (`<image stem>_labels.png`), in the
+//! class colours (black: none). With `--instances` it also matches the
+//! objects against each held-out view's instances, by a soft pixel IoU in
+//! blending weight.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut overlap = 0.5f32;
     let mut min_views = 3usize;
     let mut from_logits = false;
+    let mut check_images: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
@@ -91,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max" => max = next()?.parse()?,
             "--check" => check = true,
             "--holdout" => holdout = next()?.parse()?,
+            "--check-images" => check_images = Some(PathBuf::from(next()?)),
             "--instances" => instances = true,
             "--instance-overlap" => overlap = next()?.parse()?,
             "--min-views" => min_views = next()?.parse()?,
@@ -203,26 +208,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         label_gaussians(&votes, k)
     };
 
+    // Per class its share of the gaussians and their mean confidence (the
+    // class's share of a gaussian's votes, or its probability from logits).
     let mut counts = vec![0usize; k];
+    let mut sure = vec![0.0f64; k];
     let mut unseen = 0usize;
-    let mut confidence = 0.0f64;
     for l in &per {
         match counts.get_mut(l.class as usize) {
             Some(c) => {
                 *c += 1;
-                confidence += l.confidence as f64;
+                sure[l.class as usize] += l.confidence as f64;
             }
             None => unseen += 1,
         }
     }
     let n = scene.len().max(1) as f64;
-    for (c, &count) in classes.iter().zip(&counts) {
-        println!("  {:>6.2}% {}", 100.0 * count as f64 / n, c.name);
+    for (c, cls) in classes.iter().enumerate() {
+        println!(
+            "  {:>6.2}% {}, confidence {:.3}",
+            100.0 * counts[c] as f64 / n,
+            cls.name,
+            sure[c] / counts[c].max(1) as f64
+        );
     }
     println!(
         "  {:>6.2}% seen by no labelled pixel; mean confidence {:.3}",
         100.0 * unseen as f64 / n,
-        confidence / (scene.len() - unseen).max(1) as f64
+        sure.iter().sum::<f64>() / (scene.len() - unseen).max(1) as f64
     );
 
     // 3D instances: each view's instance image votes on its own, then the
@@ -300,30 +312,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .chain([[0.0; 3]])
             .collect();
         let (mut inter, mut union) = (vec![0u64; k + 1], vec![0u64; k + 1]);
+        // confusion[t * (k + 1) + p]: labelled t, rendered as p (k: none).
+        let mut confusion = vec![0u64; k * (k + 1)];
         let (mut right, mut total, mut checked) = (0u64, 0u64, 0usize);
+        if let Some(dir) = &check_images {
+            std::fs::create_dir_all(dir)?;
+        }
         for v in &dataset.eval {
             let Some(truth) = view_labels(v)? else {
                 continue;
             };
             checked += 1;
             let frame = gs.render(&v.camera, [0.0; 3], 0)?;
-            for (&t, rgb) in truth.iter().zip(frame.rgb.chunks_exact(3)) {
+            let pred: Vec<usize> = frame
+                .rgb
+                .chunks_exact(3)
+                .map(|rgb| {
+                    let dist = |c: &[f32; 3]| (0..3).map(|i| (c[i] - rgb[i]).powi(2)).sum::<f32>();
+                    (0..=k)
+                        .min_by(|&a, &b| dist(&colors[a]).total_cmp(&dist(&colors[b])))
+                        .unwrap_or(k)
+                })
+                .collect();
+            for (&t, &pred) in truth.iter().zip(&pred) {
                 let t = t as usize;
                 if t >= k {
                     continue;
                 }
-                let dist = |c: &[f32; 3]| (0..3).map(|i| (c[i] - rgb[i]).powi(2)).sum::<f32>();
-                let pred = (0..=k)
-                    .min_by(|&a, &b| dist(&colors[a]).total_cmp(&dist(&colors[b])))
-                    .unwrap_or(k);
                 total += 1;
                 union[t] += 1;
+                confusion[t * (k + 1) + pred] += 1;
                 if pred == t {
                     right += 1;
                     inter[t] += 1;
                 } else {
                     union[pred] += 1;
                 }
+            }
+            if let Some(dir) = &check_images {
+                // The view's classes as rendered and as labelled, in the
+                // class colours (black: none).
+                let (w, h) = (v.camera.camera.width, v.camera.camera.height);
+                let paint = |c: usize| colors[c.min(k)].map(|x| (x * 255.0).round() as u8);
+                let stem = Path::new(&v.name).with_extension("");
+                let stem = stem.file_name().unwrap_or_default().to_string_lossy();
+                let rendered: Vec<u8> = pred.iter().flat_map(|&c| paint(c)).collect();
+                let labelled: Vec<u8> = truth.iter().flat_map(|&t| paint(t as usize)).collect();
+                image::RgbImage::from_raw(w, h, rendered)
+                    .ok_or("render size")?
+                    .save(dir.join(format!("{stem}.png")))?;
+                image::RgbImage::from_raw(w, h, labelled)
+                    .ok_or("label size")?
+                    .save(dir.join(format!("{stem}_labels.png")))?;
             }
         }
         let ious: Vec<f64> = (0..k)
@@ -337,14 +377,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             100.0 * ious.iter().sum::<f64>() / ious.len().max(1) as f64,
             ious.len()
         );
-        for (c, cls) in classes.iter().enumerate() {
-            if union[c] > 0 {
-                println!(
-                    "  IoU {:>5.1}% {}",
-                    100.0 * inter[c] as f64 / union[c] as f64,
-                    cls.name
-                );
+        // Per class its recall and precision and, after each, what took the
+        // rest (the three largest shares of 0.5% or more).
+        let name = |c: usize| classes.get(c).map_or("none", |cls| cls.name.as_str());
+        let shares = |pairs: Vec<(usize, u64)>, of: u64| {
+            let mut pairs: Vec<(usize, u64)> = pairs
+                .into_iter()
+                .filter(|&(_, n)| n * 200 >= of.max(1))
+                .collect();
+            pairs.sort_by_key(|&(c, n)| (std::cmp::Reverse(n), c));
+            let top: Vec<String> = pairs
+                .iter()
+                .take(3)
+                .map(|&(c, n)| format!("{} {:.1}%", name(c), 100.0 * n as f64 / of as f64))
+                .collect();
+            if top.is_empty() {
+                String::new()
+            } else {
+                format!(" (else {})", top.join(", "))
             }
+        };
+        let at = |t: usize, p: usize| confusion[t * (k + 1) + p];
+        for c in (0..k).filter(|&c| union[c] > 0) {
+            let labelled: u64 = (0..=k).map(|p| at(c, p)).sum();
+            let rendered: u64 = (0..k).map(|t| at(t, c)).sum();
+            let missed = (0..=k).filter(|&p| p != c).map(|p| (p, at(c, p))).collect();
+            let taken = (0..k).filter(|&t| t != c).map(|t| (t, at(t, c))).collect();
+            println!(
+                "  IoU {:>5.1}% {}: recall {:.1}%{}, precision {:.1}%{}",
+                100.0 * inter[c] as f64 / union[c] as f64,
+                name(c),
+                100.0 * at(c, c) as f64 / labelled.max(1) as f64,
+                shares(missed, labelled),
+                100.0 * at(c, c) as f64 / rendered.max(1) as f64,
+                shares(taken, rendered),
+            );
         }
     }
 

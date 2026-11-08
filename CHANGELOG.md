@@ -6,6 +6,21 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Where each class's pixels go (`gsplat_semantic_cuda --check`).**
+  - **Per class** the check prints the recall and the precision, each with
+    the classes that took the most of the rest, and the run prints each
+    class's mean confidence over its gaussians.
+  - **`--check-images <dir>`** writes each held-out view's classes as
+    rendered and as SAM 3 labelled them, in the class colours.
+  - **Windows** (docs/semantic_splat.md, "Windows"): their errors are
+    pixels SAM 3 calls "other", not walls. SAM 3 drops whole windows in some
+    photos: in two held-out MeetingRoom_In photos its best "window" scores
+    0.47, under the 0.5 cut, and the splats carry the windows in from the
+    other photos. The window IoU understates them.
+  - **A before/after figure**: two held-out MeetingRoom_In views, the vote
+    on a plain splat against a splat trained with the labels (74.9% →
+    90.1% and 80.9% → 90.8% of their pixels).
+
 - **Training with the labels (`gsplat_train_cuda --labels`, CUDA ABI 13).**
   - **Classes in training.** Every gaussian gets a logit per class (16 at
     most). The softmax of its logits, its class probabilities, is blended
