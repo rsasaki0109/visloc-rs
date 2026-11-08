@@ -6,6 +6,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`gsplat_extract`: classes or single objects cut out of a labelled
+  splat** (`visloc-gsplat-core` example, no GPU).
+  - **Input.** It reads `scene.ply` for the colours, and
+    `gsplat_semantic_cuda`'s `--out` for each gaussian's class and object.
+  - **Output.** `--select chair:1` (or a whole class, `--select chair`,
+    repeated for more) goes to a PLY with `class` and `instance`, and to a
+    `.splat` for the web viewer.
+  - **`--list`** prints each class's objects with their gaussians, centre
+    and size.
+  - **MeetingRoom_In.** Chair 1 is 1,041 of the 88,309 gaussians. The big
+    table with all the chairs is 15,027 (docs/semantic_splat.md, "One
+    object on its own").
+
 - **Labels move the splats' opacities and centres, not their shapes (CUDA
   ABI 15).**
   - **Why.** Through the shape, the labels' cross-entropy spread splats
