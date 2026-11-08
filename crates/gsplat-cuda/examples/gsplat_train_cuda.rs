@@ -10,7 +10,7 @@
 //!   [--sparse-sh-adam] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
 //!   [--normal-weight 0.005 [--normal-start 7000]] [--alpha-mask] [--save-eval <dir>] \
-//!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.0025] \
+//!   [--labels <dir> [--semantic-weight 0.02] [--semantic-lr 0.01] \
 //!     [--semantic-logits-only | --semantic-shape]]
 //! ```
 //!

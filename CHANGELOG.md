@@ -1287,6 +1287,28 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **The labels' logits learn 4x faster: `--semantic-lr` (and
+  `SemanticTraining::lr`) defaults to 0.01, was 0.0025.**
+  - **Why.** Slow logits leave the cross-entropy to the opacities early on.
+    Gaussians of the wrong class turn transparent and are pruned, and each
+    pruned one is one fewer grown by the refine.
+  - **Bridge_Out.** Steps 1,000–5,000 pruned 3.5x as many gaussians as
+    without the labels. That left 9% fewer gaussians and 0.1 dB less PSNR
+    (30.91–31.17 dB against 31.17–31.20 dB).
+  - **Now.**
+    - Bridge_Out: 239,402 and 241,035 gaussians, 31.31 and 31.37 dB, and
+      95.0% of the held-out pixels (95.2% before).
+    - Building_In: 32.10 and 32.27 dB (32.00 and 32.05), 91.2–91.3%.
+    - MeetingRoom_In: 32.54–32.64 dB, 88.1–88.3%.
+    - No floaters.
+  - **Found by** capping a run without labels at the labelled runs' count
+    (31.09 and 31.15 dB) and by training the logits alone (31.21 dB),
+    docs/semantic_splat.md, "The logits' learning rate".
+  - **For the classes, vote** on a splat trained with the labels rather
+    than read its logits. On Bridge_Out the logits give thin classes to
+    gaussians that lie partly on them: lamp posts' IoU is 13% from the
+    logits against 23% voted.
+
 - **`GpuMatcher::match_pairs` returns a `Result` (#469).** Breaking:
   `match_pairs` and `match_pairs_async` return
   `Result<Vec<Vec<DescriptorMatch>>, SiftGpuError>`. A lost device or a
