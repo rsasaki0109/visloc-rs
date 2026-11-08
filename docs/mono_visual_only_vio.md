@@ -31,7 +31,7 @@ GPLv3); the C++ functions are named as behaviour references, and deviations are 
 | IMU input | Used | **Ignored** entirely. MargData has `used_imu = false`. | - |
 
 Implementation: `vio/estimator.rs` (`visual_only_bootstrap`, `visual_only_prediction`,
-`visual_only_refine_pose`, `visual_only_two_view`, triangulation gates), `vio/window.rs`
+`visual_only_refine_pose`, `visual_only_two_view`, triangulation gates), `vio/window/`
 (`VisualOnlyPrior`, `visual_only_factor`), `config.rs` (key), and the demo `--mono-vo`. The
 demo writes `trajectory.tum` (online), plus `trajectory_refined_window.tum` (each frame's last
 in-window pose) and `trajectory_refined_kf.tum` (pose relative to its reference keyframe,

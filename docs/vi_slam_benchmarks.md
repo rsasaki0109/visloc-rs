@@ -446,7 +446,7 @@ flowchart LR
     IMU["IMU samples"] --> PRE["IMU preintegration<br/>imu/preintegration.rs, imu/sampling.rs"]
     EPI --> INIT["Initialization<br/>initialization.rs"]
     PRE --> INIT
-    INIT --> LM["ABS_QR LM sliding window + FEJ<br/>vio/estimator.rs, vio/window.rs, vio/aom.rs"]
+    INIT --> LM["ABS_QR LM sliding window + FEJ<br/>vio/estimator.rs, vio/window/, vio/aom/"]
     LM --> MARG["Square-root marginalization<br/>vio/margdata.rs"]
     MARG --> OUT["Trajectory (TUM / CSV) + MargData packets<br/>adapter.rs"]
     OUT --> MAP["Offline mapper<br/>mapper/mod.rs, mapper/session.rs"]
