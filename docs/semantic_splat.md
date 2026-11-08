@@ -415,5 +415,30 @@ the classes of one trained with them (`--logits`, weight 0.02).
 
 So the 3D labels carry a window into the photos where SAM 3 dropped it, and
 `--check`, scoring against SAM 3, counts that as an error. The window IoU
-understates them. A lower threshold would keep those windows; whether it
-costs other classes more false positives is not measured.
+understates them.
+
+### A lower threshold
+
+SAM 3 ran again on MeetingRoom_In's 106 photos at `--threshold 0.4` and
+0.3, 97 s each. Each label set was voted onto the same plain splat and
+checked against its own held-out labels:
+
+| Threshold | Window gaussians | Window confidence | Window IoU | mIoU | Pixel accuracy | Wall IoU | Ceiling light IoU |
+|---|---|---|---|---|---|---|---|
+| 0.5 (default) | 7.5% | 0.63 | 34.2% | 73.8% | 84.7% | 63.4% | 51.8% |
+| 0.4 | 17.2% | 0.77 | 64.1% | 74.9% | 84.5% | 61.1% | 50.8% |
+| 0.3 | 23.7% | 0.76 | 76.6% | 72.9% | 83.8% | 56.0% | 41.0% |
+
+- **At 0.4 SAM 3 keeps the glass walls it dropped.**
+  - Frame 16's back wall becomes window: 39,387 pixels, none at 0.5.
+  - Frame 64's becomes window in part.
+  - The other named classes' IoU moves by 2.3 points at most. "Other" loses
+    the windows it held, 52.5% → 41.1%.
+- **At 0.3 the windows grow further**, but walls drop to 56.0% and ceiling
+  lights to 41.0%, and the mIoU falls below that at 0.5.
+- **Comparing the rows.** Each row scores against its own labels, so the
+  IoUs compare across rows only loosely. The confidence, how far the photos
+  agree, needs no reference.
+
+On this room 0.4 suits the windows. `sam3_labels.py` uses one threshold
+for every prompt, and Building_In is untested at 0.4.
