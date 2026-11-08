@@ -1,14 +1,15 @@
 # LaMAria: GPU のローカル PC への引き継ぎ
 
-2026-11-02 時点（成績は 2026-11-06 の提出 7 まで）。2026-10-27 まではクラウド（GitHub Actions、GPU なし）で進め、そのあと 8 GB の GPU を積んだローカル PC（Windows の WSL2 Ubuntu、データは外付け SSD の NTFS）で続けた。
+2026-11-02 時点（成績は 2026-11-08 の提出 9 まで）。2026-10-27 まではクラウド（GitHub Actions、GPU なし）で進め、そのあと 8 GB の GPU を積んだローカル PC（Windows の WSL2 Ubuntu、データは外付け SSD の NTFS）で続けた。
 
 ## 現状
 
-提出 7 回目（2026-11-06）の成績。手法名は visloc-rs
-（<https://lamaria.ethz.ch/method_info.php?id=48>）で、平均では 6 位（参考枠の Aria's SLAM を含む。リーダーボード自体は Short の点で並ぶ）。
+提出 9 回目（2026-11-08）の成績。手法名は visloc-rs
+（<https://lamaria.ethz.ch/method_info.php?id=48>）。平均 81.3 は、2026-11-06 時点で載っていたどの手法の平均よりも高い（参考枠の Aria's SLAM の 75.9 を含む）。ただし、リーダーボード自体は Short の点で並ぶ。Short は SLAM Dunk の 89.6 に届いていない。ほかの手法の点は 2026-11-06 時点のもの。
 
 | | Short | Medium | Long | Low light | Moving | 平均 |
 |---|---:|---:|---:|---:|---:|---:|
+| visloc-rs（提出 9） | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
 | visloc-rs（提出 7） | 69.7 | 56.8 | 54.1 | 60.6 | 47.3 | 57.7 |
 | visloc-rs（提出 6） | 69.7 | 56.8 | 54.1 | 60.6 | 30.6 | 54.3 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
@@ -19,22 +20,26 @@
 
 提出 7 は、提出 6 の Moving の 8 系列を GPS でつなぎ直したもの（[lamaria_gps.md](lamaria_gps.md)）。路面電車を見落としていた 5_5 は 3.1 → 63.7、5_6 は 2.4 → 35.2 になった。
 
+提出 9 は、提出 7 の 60 系列を、録画どうしをまとめて解いた推定に差し替えたもの（[lamaria_multisession.md](lamaria_multisession.md)）。差し替えたのは歩行 52 系列と Moving 8 系列。歩行 53 系列の平均は 61.0 → 85.7、Moving は 47.3 → 66.7 になった。点が下がったのは 1_15 の −0.8（94.9 → 94.1）だけ。提出 8 は作ったが、サイトに届かないあいだに提出 9 に置き換えたので、評価されていない。
+
 - **手法**: Rust 版 Basalt の VIO のあとに、バッチ VI-BA のチェーンをつなぐ。チェーンの中身は SIFT、VIO で導いた照合、union-find のトラック、ループ補正、録画後のパス、パスで導いた再照合。
   - 機器 1WM093701G1276 の Short の 5 系列だけ、パスで ALIKED のキーポイントを LightGlue で照合する（提出 5 から）。
   - 使うセンサーは SLAM カメラ 2 台と 1 kHz の IMU。各系列で VIO は 1 本だけ走らせる。
   - 提出 7 から、Moving の系列だけ、乗車で軌跡が飛んだ所を raw 録画の GPS でつなぎ直す。
+  - 提出 9 から、歩行 52 系列と Moving 8 系列を、録画どうしでまとめてオフラインで解き直す。同じ場所を通るほかの録画の地図に位置を合わせ、ポーズグラフを解く。
   - 詳細:
     - [lamaria_submission.md](lamaria_submission.md)（提出パイプライン）
     - [lamaria_batch_ba.md](lamaria_batch_ba.md)（BA と実験の記録）
     - [lamaria_test_results.md](lamaria_test_results.md)（提出ごとの結果）
     - [lamaria_gps.md](lamaria_gps.md)（GPS の精度、向きの補正の否定結果、乗車のつなぎ直し）
-    - [lamaria_multisession.md](lamaria_multisession.md)（歩行の全録画をまとめて解く多セッションのポーズグラフ。提出 8 から）
+    - [lamaria_multisession.md](lamaria_multisession.md)（録画をまとめて解く多セッションのポーズグラフ。提出 9 から）
 - **点を落としている所**: 制御点がすべて 1 m 以内に入った系列では、Short で平均 86.0 点取れている（GroundedSLAM の Short は 87.0）。
   差は、系列の途中から溜まる 1〜5 m のずれでほぼ説明できる。
   - 長い一方向のルートで縮尺と向きがゆっくりずれること（Short・Medium・Long の弱い系列）。
   - 路面電車のドア窓越しに街並みが少ししか見えず、乗車区間を見落とすこと（Moving の 5_5、5_6）。VIO では今も見落とすが、提出 7 から GPS でつないでいる。
+  - 提出 9 では、同じ道を通るほかの録画がこのずれの大半を消した。いま低いのは、歩行の 4_2（66.0）と 1_4（67.1）、Moving の 5_3（41.9）。
 
-## GPU の PC でやったこと（2026-10-27〜11-07）
+## GPU の PC でやったこと（2026-10-27〜11-08）
 
 | やったこと | 結果 | 記録 |
 |---|---|---|
@@ -47,7 +52,10 @@
 | 学習 12 系列すべてに種 1〜3 | 基準は sequence_2_12 を除く 11 系列で 68.59 ± 0.13。sequence_2_12 は種だけで 47.5〜57.9 動く | [All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds) |
 | 4〜16 秒離れたキーフレームを RoMa で密に照合し、SIFT のキーポイントに吸着させて足す | sequence_2_11 では吸着した対応の 93〜96 % が正しく、正しい対応が 3〜5 割増える（暗い 4_10 ではほぼ増えない）。それでも 2_11 は 89.25 → 88.96、3_18 は 54.27 → 52.29 で、3_18 は向きのばらつきが増える。録画の 3 倍強の時間がかかる。採らない | [Dense matches between distant keyframes](lamaria_batch_ba.md#dense-matches-between-distant-keyframes) |
 | sequence_3_18 に残る誤差の内訳（疑似正解で取り除く診断） | 今は 54.27。向きを除くと 69.35、縮尺を除くと 58.09、両方で 86.92。向きは片道のルートで積分したジャイロ任せ。速く動く区間で縮尺がずれるのは 3_18 だけで、ほかの系列には一貫して出ない | [What sequence_3_18 still loses](lamaria_batch_ba.md#what-sequence_3_18-still-loses) |
-| 歩行の録画をまとめて解く（同じ場所を通る録画の地図に ALIKED + LightGlue で位置を合わせ、全録画のキーフレームを 4 自由度のポーズグラフで解く。GPS は組の候補だけ） | テストの歩行 49 系列と一緒に解いた学習の歩行 6 系列で、合計 445.3 → 546.8（3_18 は 54.3 → 91.1、4_10 は 59.8 → 87.9）。設定はこの 6 系列で選んだ。提出 8 に使う | [lamaria_multisession.md](lamaria_multisession.md) |
+| 歩行の録画をまとめて解く（同じ場所を通る録画の地図に ALIKED + LightGlue で位置を合わせ、全録画のキーフレームを 4 自由度のポーズグラフで解く。GPS は組の候補だけ） | テストの歩行 49 系列と一緒に解いた学習の歩行 6 系列で、合計 445.3 → 546.8（3_18 は 54.3 → 91.1、4_10 は 59.8 → 87.9）。設定はこの 6 系列で選んだ。提出 9 で平均 57.7 → 81.3 | [lamaria_multisession.md](lamaria_multisession.md) |
+| GPS が少ない歩行を 2 段階でつなぐ（50 m までの GPS で近くを探し、見つかったエッジで置き直してもう一度照合） | 学習の 2 系列の GPS をわざと悪くして確かめ、6 系列の合計が 524.9 → 551.0。テストでは 1_16 が 35.7 → 76.1、1_17 が 53.9 → 90.4、2_10 が 73.0 → 88.0（提出 9）。4_7 は GPS がほかの録画から約 1 km 離れていて、つなげない | [Walks with poor GPS](lamaria_multisession.md#walks-with-poor-gps) |
+| Moving の録画をグラフに足す（解いた歩行は動かさない） | テストの 8 系列がすべて上がり、トラックは 47.3 → 66.7（提出 9）。GPS とのずれが増えた 5_5 と 5_7 は提出 7 のまま。学習の 5_11 は、見落とした乗車が最初の良い GPS より前にあり、51.5 → 40.9 に下がる | [The Moving recordings](lamaria_multisession.md#the-moving-recordings) |
+| GPS をグラフの最適化に入れる | 密なテストのグラフでは下がる（なしで 546.8、σ 30 m で 544.0、3 m で 465.9）。採らない | [GPS in the solve](lamaria_multisession.md#gps-in-the-solve-a-negative-result) |
 | マッチャーを FlexGlue や VisMatch のものに替える | FlexGlue は固定ペアで位置が決まる数が 2〜5 倍になるが、学習 8 系列のグラフでは LightGlue を超えない（504〜505 対 510.1）。RoMa v2 は GPU を共有した状態で、最初のマップの分も 1 時間で終わらなかった。採らない | [Other matchers](lamaria_multisession.md#other-matchers-a-negative-result) |
 
 ## 残っている案
@@ -56,7 +64,7 @@
 - **評価の進め方**: 改善案は、IMU に雑音を少し足した種 1〜3 の実行どうしで比べる。対象は学習 12 系列のうち sequence_2_12 を除く 11 系列（基準は種 1〜3 の平均 68.59 ± 0.13）。平均を 0.4 以上上げ、過半の系列を上げれば採る。sequence_2_12 は種だけで 47.5〜57.9 動くので、結果は記録するが判断には使わない。3 種で約 11 時間かかる（[All twelve training sequences under the seeds](lamaria_batch_ba.md#all-twelve-training-sequences-under-the-seeds)）。
   - 同じ入力のままの実行は、チェーンの設定を選ぶのに使った 5 系列で約 1.2 点甘く出る。ほかの 7 系列では甘くならない。
 - **条件付きのプラットフォームフィルター**: IMU の速度変化と VIO の速度が食い違うときだけ条件を緩める。学習系列は変わらないはずだが、効果は学習で確かめられない。当たっても平均 +0.4〜0.8。
-- **新しい VIO / 前段**: GroundedSLAM との差（約 18 点）を詰めるには、ずれそのものを減らす新しい部品が要る。数週間規模で、効く保証はない。
+- **新しい VIO / 前段**: 提出 7 の時点では、GroundedSLAM との差（約 18 点）を詰めるには、ずれそのものを減らす新しい部品が要ると見ていた。数週間規模で、効く保証はない。提出 9 では、録画どうしをまとめて解くことで、この差を超えた。
 
 ## 外部 SSD のデータ配置
 
