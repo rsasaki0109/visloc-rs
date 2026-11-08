@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release -p visloc-gsplat-core --example gsplat_extract -- \
 //!     --ply scene.ply --semantic semantic.ply --classes labels/classes.txt \
-//!     [--list] [--select chair:3]... [--out chair.ply] [--splat chair.splat]
+//!     [--list] [--select chair:3]... [--drop chair:3]... [--out chair.ply] [--splat chair.splat]
 //! ```
 //!
 //! `--semantic` is `gsplat_semantic_cuda`'s `--out` for `--ply`: the same
@@ -12,10 +12,12 @@
 //! from 1 in instance order, with their gaussians, centre and size.
 //!
 //! `--select <class>` keeps a whole class and `--select <class>:<n>` its
-//! n-th object; repeat it for more. The kept gaussians, in their colours
-//! from `--ply`, go to `--out` (with the `class` and `instance` properties)
-//! and to `--splat` (antimatter15's `.splat`, largest first) for the web
-//! viewer: `docs/euroc_splat/index.html?url=chair.splat`.
+//! n-th object; repeat it for more. `--drop` takes the same and removes
+//! them, from the selection or, without `--select`, from the whole splat.
+//! The kept gaussians, in their colours from `--ply`, go to `--out` (with
+//! the `class` and `instance` properties) and to `--splat` (antimatter15's
+//! `.splat`, largest first) for the web viewer:
+//! `docs/euroc_splat/index.html?url=chair.splat`.
 
 use std::path::PathBuf;
 
@@ -31,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut classes: Option<PathBuf> = None;
     let mut list = false;
     let mut select: Vec<String> = Vec::new();
+    let mut drop: Vec<String> = Vec::new();
     let mut out: Option<PathBuf> = None;
     let mut splat: Option<PathBuf> = None;
     while let Some(a) = args.next() {
@@ -41,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--classes" => classes = Some(PathBuf::from(next()?)),
             "--list" => list = true,
             "--select" => select.push(next()?),
+            "--drop" => drop.push(next()?),
             "--out" => out = Some(PathBuf::from(next()?)),
             "--splat" => splat = Some(PathBuf::from(next()?)),
             other => return Err(format!("unknown argument {other}").into()),
@@ -49,8 +53,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ply = ply.ok_or("--ply <scene.ply> is required")?;
     let semantic = semantic.ok_or("--semantic <semantic.ply> is required")?;
     let classes = classes.ok_or("--classes <classes.txt> is required")?;
-    if !list && (select.is_empty() || (out.is_none() && splat.is_none())) {
-        return Err("give --list, or --select with --out or --splat".into());
+    let cut = !select.is_empty() || !drop.is_empty();
+    if !list && (!cut || (out.is_none() && splat.is_none())) {
+        return Err("give --list, or --select or --drop with --out or --splat".into());
     }
 
     let classes = parse_classes(&std::fs::read_to_string(&classes)?)?;
@@ -129,31 +134,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    if select.is_empty() {
+    if !cut {
         return Ok(());
     }
 
-    let mut keep = vec![false; n];
-    for spec in &select {
+    // The gaussians of a whole class (`<class>`) or of one object
+    // (`<class>:<n>`).
+    let named = |flag: &str, spec: &str| -> Result<Vec<usize>, Box<dyn std::error::Error>> {
         let (name, number) = match spec.rsplit_once(':') {
             Some((name, number)) => (name, Some(number.parse::<usize>()?)),
-            None => (spec.as_str(), None),
+            None => (spec, None),
         };
         let c = classes
             .iter()
             .position(|cls| cls.name == name)
-            .ok_or(format!("--select {spec}: no class {name}"))?;
+            .ok_or(format!("{flag} {spec}: no class {name}"))?;
         match number {
-            None => (0..n)
-                .filter(|&g| class[g] == c)
-                .for_each(|g| keep[g] = true),
+            None => Ok((0..n).filter(|&g| class[g] == c).collect()),
             Some(number) => {
                 let &i = by_class[c].get(number.wrapping_sub(1)).ok_or(format!(
-                    "--select {spec}: {name}'s {} objects are numbered from 1",
+                    "{flag} {spec}: {name}'s {} objects are numbered from 1",
                     by_class[c].len()
                 ))?;
-                objects[i].1.iter().for_each(|&g| keep[g] = true);
+                Ok(objects[i].1.clone())
             }
+        }
+    };
+    let mut keep = vec![select.is_empty(); n];
+    for spec in &select {
+        for g in named("--select", spec)? {
+            keep[g] = true;
+        }
+    }
+    for spec in &drop {
+        for g in named("--drop", spec)? {
+            keep[g] = false;
         }
     }
     let kept: Vec<usize> = (0..n).filter(|&g| keep[g]).collect();

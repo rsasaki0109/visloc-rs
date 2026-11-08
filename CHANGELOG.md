@@ -6,6 +6,14 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`gsplat_extract --drop`: classes or single objects removed from a
+  labelled splat.** It takes the same as `--select`, and removes them from
+  the selection or, without `--select`, from the whole splat.
+  - **MeetingRoom_In.** `--drop chair` keeps 76,149 of the 88,309
+    gaussians. The floor shows no holes where the chairs stood, but dark
+    streaks of floor gaussians where their legs were (docs/semantic_splat.md,
+    "One object on its own").
+
 - **`gsplat_extract`: classes or single objects cut out of a labelled
   splat** (`visloc-gsplat-core` example, no GPU).
   - **Input.** It reads `scene.ply` for the colours, and
