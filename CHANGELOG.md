@@ -17,6 +17,9 @@ All notable changes to `visloc-rs` will be documented here.
     trained 30k steps on the prior, which costs the images 1–2 dB.
   - **Cost.** 37 to 87 s per scene, a tenth of the training
     (docs/gsplat_cuda.md, "A geometry copy of the plain splat").
+  - **With APD's maps.** The MVS maps made with `--deformable
+    --deformable-strong-median --sources 20` take the hybrid to 76.5%.
+    That costs about four times the MVS time.
 
 - **CUDA trainer: Adam moments in bf16 (opt-in, `--bf16-moments`, ABI
   16).**
