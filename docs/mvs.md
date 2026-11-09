@@ -1004,8 +1004,10 @@ And office at 3200 px, the L4 runs' size (its DSLR images resized to
   the r54 runs at 3200 px put APD-MVS's own code at 88.8% on office. These
   parts, without the rest of APD's pipeline, do not close that gap.
 - **Where it is useful.** It suits runs at reduced resolution, such as the
-  1600 px maps the splat meshes are fused with
-  ([gsplat_cuda.md](gsplat_cuda.md#mvs-depth-the-splat-filling-its-holes)).
+  1600 px maps the splat meshes are fused with. There, with 20 sources,
+  the MVS depth's own mesh gains 9.2 points over three scenes, and its
+  hybrid with a geometry copy of the splat 5.5, to 76.5%
+  ([gsplat_cuda.md](gsplat_cuda.md#a-geometry-copy-of-the-plain-splat)).
   It stays opt-in.
 
 ### Fusion settings

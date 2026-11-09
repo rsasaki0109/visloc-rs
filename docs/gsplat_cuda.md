@@ -836,6 +836,37 @@ gsplat_mesh_cuda --ply geometry.ply --data data --expected-depth \
   the copy alone scores 63.9% (the prior-30 splat's: 67.7%), and the
   hybrid 70.0%.
 
+**With APD's maps.** visloc-mvs with APD's patches, the strong median and
+20 sources ([mvs.md](mvs.md#apds-patches-with-the-strong-median-on-cuda);
+`--deformable --deformable-strong-median --sources 20`, 1600 px) fuses
+better depth. The meshes above, made again from those maps
+(`mvs_apd/fused_depth`):
+
+| Mesh | Maps | office | terrains | playground | mean |
+|---|---|---|---|---|---|
+| MVS cloud (`fused.ply`, not a mesh) | defaults | 72.8% | 85.1% | 67.7% | 75.2% |
+| MVS cloud (`fused.ply`, not a mesh) | APD | 78.0% | 87.9% | 70.7% | 78.9% |
+| MVS depth only | defaults | 49.2% | 81.6% | 57.9% | 62.9% |
+| MVS depth only | APD | 67.1% | **84.6%** | 64.6% | 72.1% |
+| MVS + plain splat | defaults | 52.3% | 80.3% | 65.3% | 66.0% |
+| MVS + plain splat | APD | 68.9% | 82.9% | 68.0% | 73.3% |
+| MVS + copy (fine-tuned on the default maps) | defaults | 65.2% | 81.0% | 66.6% | 71.0% |
+| MVS + copy (fine-tuned on the default maps) | APD | **75.3%** | 83.7% | **70.4%** | **76.5%** |
+| MVS + copy fine-tuned on the APD maps | APD | 74.9% | 83.4% | 69.6% | 75.9% |
+| copy fine-tuned on the APD maps, alone | | 52.8% | 73.0% | 56.2% | 60.7% |
+
+- **Every mesh gains.** The MVS depth alone gains 9.2 points on average,
+  office 17.9: APD's completeness fills the maps' holes. The best hybrid
+  reaches 76.5%, 5.5 points above the default maps, with the images still
+  the plain splat's.
+- **The copy fine-tuned on the default maps does as well.** Fine-tuning it
+  on the APD maps instead scores 0.5 points lower in the hybrid (75.9%). It
+  matters which maps go into the mesh, not which ones the copy learned.
+- **terrains' MVS depth alone beats every hybrid** (84.6% against 83.7%),
+  as with the default maps.
+- **Cost.** The APD maps take about four times as long: 397, 905 and
+  824 s, against 108, 209 and 194 s.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
