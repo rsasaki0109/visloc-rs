@@ -1010,6 +1010,25 @@ And office at 3200 px, the L4 runs' size (its DSLR images resized to
   ([gsplat_cuda.md](gsplat_cuda.md#a-geometry-copy-of-the-plain-splat)).
   It stays opt-in.
 
+**Weak pixels in warps of their own.** A weak pixel's cost also samples
+its anchors' patches: 36 + 72 samples per view, against 36 for the
+others. A warp that holds both kinds runs at the weak pixels' pace. On
+office at 800 px, 57–77% of a view's pixels are weak, and 78–97% of the
+warps hold at least one. So after `find_anchors`, each colour's pixels are
+listed in the checkerboard grid's order with the weak ones last, and
+`propagate` runs one thread per entry. APD with 20 sources at 1600 px:
+
+| Scene | Before | Weak pixels last |
+|---|---|---|
+| office | 77.7%, 418 s; 78.0%, 397 s | 77.5%, 356 s |
+| kicker | 83.7%, 658 s | 83.9%, 590 s |
+| playground | 70.6%, 835 s; 70.7%, 824 s | 71.0%, 716 s |
+
+- **10 to 15% less time, the same F1.** Two runs of the same code already
+  differ by 0.3 points (office). The deformable patches' runs are not
+  bit for bit repeatable.
+- **The default patches** have no weak pixels and keep the grid's order.
+
 ### Fusion settings
 
 The same depth maps fused with different rules (CPU runs with one

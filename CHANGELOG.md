@@ -1333,6 +1333,20 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **visloc-mvs on CUDA: with deformable patches, the weak pixels propagate
+  in warps of their own.**
+  - **Why.** A weak pixel's cost also samples its anchors' patches (36 +
+    72 samples per view, against 36). A warp that holds both kinds runs at
+    the weak pixels' pace. On office, 57–77% of the pixels are weak and
+    78–97% of the warps hold at least one.
+  - **How.** After `find_anchors`, each colour's pixels are listed in the
+    checkerboard grid's order with the weak ones last, and `propagate`
+    runs one thread per entry.
+  - **Result.** APD with 20 sources at 1600 px takes 10–15% less time
+    (office 397–418 → 356 s, kicker 658 → 590 s, playground 824–835 →
+    716 s), with the same F1 (77.5 / 83.9 / 71.0%). The default patches
+    are unchanged (docs/mvs.md, "Weak pixels in warps of their own").
+
 - **CUDA trainer: the backward pass takes two pixels per thread.**
   - **How.** raster_bwd runs 128 threads per tile, each warp an 8x8 block,
     and adds a lane's two pixels before the warp's reduction. The

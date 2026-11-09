@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <new>
 #include <string>
+#include <vector>
 
 extern "C" {
 
@@ -136,6 +137,9 @@ struct Bufs {
     uint32_t* classes;
     const uint32_t* nearest;
     uint32_t* anchors;
+    // The propagations' pixels, colour after colour (visloc_mvs_cuda_find_anchors);
+    // null: the checkerboard grid's.
+    const uint32_t* order;
 };
 
 __device__ inline uint32_t hash(uint32_t v) {
@@ -802,10 +806,21 @@ __global__ void __launch_bounds__(128) find_anchors_kernel(MvsParams params, Buf
     b.classes[i] = 3u;
 }
 
-__global__ void __launch_bounds__(128) propagate_kernel(MvsParams params, Bufs b) {
-    const uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
-    const uint32_t x = 2u * (blockIdx.x * blockDim.x + threadIdx.x) + ((y + params.color) % 2u);
-    if (x >= params.width || y >= params.height) return;
+// One propagation of the pixels of colour params.color: on the checkerboard
+// grid, or with b.order its `count` pixels from `first` on, one per thread.
+__global__ void __launch_bounds__(128) propagate_kernel(MvsParams params, Bufs b, uint32_t first, uint32_t count) {
+    uint32_t x, y;
+    if (b.order) {
+        const uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+        if (k >= count) return;
+        const uint32_t p = b.order[first + k];
+        x = p % params.width;
+        y = p / params.width;
+    } else {
+        y = blockIdx.y * blockDim.y + threadIdx.y;
+        x = 2u * (blockIdx.x * blockDim.x + threadIdx.x) + ((y + params.color) % 2u);
+        if (x >= params.width || y >= params.height) return;
+    }
     const uint32_t w = params.width, h = params.height;
     const uint32_t n = params.num_sources;
     const uint32_t i = y * w + x;
@@ -1105,7 +1120,9 @@ struct Ctx {
     Bufs b = {};
     bool begun = false;
     Buf sources, images, layers, priors, planes, costs, best_views, init_planes, prior_planes, pre_costs, classes,
-        nearest, anchors;
+        nearest, anchors, order;
+    // Colour c's pixels in b.order: [order_start[c], order_start[c + 1]).
+    uint32_t order_start[3] = {0, 0, 0};
 };
 
 #define MVS_CHECK(ctx, expr)                                                      \
@@ -1178,7 +1195,7 @@ MVS_EXPORT void visloc_mvs_cuda_destroy(void* handle) {
     if (!ctx) return;
     for (Buf* b : {&ctx->sources, &ctx->images, &ctx->layers, &ctx->priors, &ctx->planes, &ctx->costs,
                    &ctx->best_views, &ctx->init_planes, &ctx->prior_planes, &ctx->pre_costs, &ctx->classes,
-                   &ctx->nearest, &ctx->anchors})
+                   &ctx->nearest, &ctx->anchors, &ctx->order})
         free_buf(*b);
     delete ctx;
 }
@@ -1232,6 +1249,7 @@ MVS_EXPORT int visloc_mvs_cuda_begin(void* handle, const MvsInputs* in, const Mv
     b.nearest = static_cast<const uint32_t*>(p);
     if (zeroed(ctx, ctx->anchors, in->deformable ? npix * MAX_ANCHORS * sizeof(uint32_t) : 0, &p) != 0) return -1;
     b.anchors = static_cast<uint32_t*>(p);
+    b.order = nullptr;
     ctx->begun = true;
     init_kernel<<<pixel_grid(ctx->w, ctx->h), dim3(16, 8)>>>(*params, b);
     return finish(ctx);
@@ -1266,15 +1284,51 @@ MVS_EXPORT int visloc_mvs_cuda_find_anchors(void* handle, const MvsParams* param
     MVS_CHECK(ctx, cudaMemcpy(const_cast<uint32_t*>(ctx->b.nearest), nearest,
                               size_t(ctx->w) * ctx->h * sizeof(uint32_t), cudaMemcpyHostToDevice));
     find_anchors_kernel<<<pixel_grid(ctx->w, ctx->h), dim3(16, 8)>>>(*params, ctx->b);
-    return finish(ctx);
+    if (finish(ctx) != 0) return -1;
+    // The propagations' pixels: per colour, the checkerboard grid's order
+    // (blocks, then threads), with the weak pixels that took anchors (class
+    // 3) after the others. Their cost also samples the anchors' patches, and
+    // a warp holding both kinds runs at the weak ones' pace.
+    const uint32_t w = ctx->w, h = ctx->h;
+    std::vector<uint32_t> classes(size_t(w) * h);
+    MVS_CHECK(ctx, cudaMemcpy(classes.data(), ctx->b.classes, classes.size() * sizeof(uint32_t),
+                              cudaMemcpyDeviceToHost));
+    std::vector<uint32_t> order, weak;
+    order.reserve(classes.size());
+    const uint32_t gx = ((w + 1) / 2 + 15) / 16, gy = (h + 7) / 8;
+    for (uint32_t c = 0; c < 2; c++) {
+        ctx->order_start[c] = uint32_t(order.size());
+        weak.clear();
+        for (uint32_t by = 0; by < gy; by++)
+            for (uint32_t bx = 0; bx < gx; bx++)
+                for (uint32_t ty = 0; ty < 8; ty++)
+                    for (uint32_t tx = 0; tx < 16; tx++) {
+                        const uint32_t y = by * 8 + ty, x = 2 * (bx * 16 + tx) + (y + c) % 2;
+                        if (x >= w || y >= h) continue;
+                        const uint32_t i = y * w + x;
+                        (classes[i] == 3u ? weak : order).push_back(i);
+                    }
+        order.insert(order.end(), weak.begin(), weak.end());
+    }
+    ctx->order_start[2] = uint32_t(order.size());
+    void* p;
+    if (upload(ctx, ctx->order, order.data(), order.size() * sizeof(uint32_t), &p) != 0) return -1;
+    ctx->b.order = static_cast<const uint32_t*>(p);
+    return 0;
 }
 
 // One propagation of the pixels of colour params->color.
 MVS_EXPORT int visloc_mvs_cuda_propagate(void* handle, const MvsParams* params) {
     Ctx* ctx = static_cast<Ctx*>(handle);
     if (!ctx || !params || !ctx->begun) return -1;
-    const uint32_t half = (ctx->w + 1) / 2;
-    propagate_kernel<<<dim3((half + 15) / 16, (ctx->h + 7) / 8), dim3(16, 8)>>>(*params, ctx->b);
+    if (ctx->b.order) {
+        const uint32_t c = params->color % 2u;
+        const uint32_t n = ctx->order_start[c + 1] - ctx->order_start[c];
+        if (n > 0) propagate_kernel<<<(n + 127) / 128, 128>>>(*params, ctx->b, ctx->order_start[c], n);
+    } else {
+        const uint32_t half = (ctx->w + 1) / 2;
+        propagate_kernel<<<dim3((half + 15) / 16, (ctx->h + 7) / 8), dim3(16, 8)>>>(*params, ctx->b, 0, 0);
+    }
     return finish(ctx);
 }
 
