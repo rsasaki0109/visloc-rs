@@ -190,7 +190,7 @@ Primary paths:
 - `pipelines/mapping/src/lib.rs`
 - `pipelines/mapping/tests/keyframe_policy.rs`
 - `examples/euroc_online_slam_vi_demo.rs`
-- `examples/euroc_online_slam_vi_image_demo.rs`
+- `examples/euroc_online_slam_vi_image_demo/`
 - `docs/motion_based_vi_alignment.md`
 - `scripts/run_euroc_covisibility_local_ba_ab.py`
 - `scripts/run_euroc_covisibility_runtime_sweep.py`

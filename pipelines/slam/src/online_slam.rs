@@ -2576,7 +2576,7 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// Loop-closure constraints admitted into the graph this frame — both
     /// the shared-landmark and (when configured) appearance streams — with
     /// enough detail for external diagnostics (e.g.
-    /// `examples/euroc_online_slam_vi_image_demo.rs`'s `loop_constraints.csv`).
+    /// `examples/euroc_online_slam_vi_image_demo`'s `loop_constraints.csv`).
     /// Does NOT include constraints admitted via the `pcm_batch_rescreen`
     /// promotion path.
     pub admitted_constraints: Vec<OnlineSlamAdmittedLoopConstraint>,
@@ -5959,7 +5959,7 @@ mod bias_release_promotion_tests {
     /// reconstructs the pipeline via
     /// `OnlineSlamPipeline::new(map, tracker, mapper, slam.config.clone())`
     /// (the independent-submap path in
-    /// `examples/euroc_online_slam_vi_image_demo.rs`) then hit
+    /// `examples/euroc_online_slam_vi_image_demo/`) then hit
     /// `OnlineSlamConfig::validate`'s `GravityMismatch` panic, because
     /// `config.vi_init.initializer.gravity_world` still held the original
     /// seed while `config.imu.gravity_world` held the estimate. This test

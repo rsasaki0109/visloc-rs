@@ -86,7 +86,7 @@ does not change that. Reverted, not shipped.
 - `crates/vision/src/features/superpoint_onnx.rs` (Phase-27 in-Rust ONNX extractor behind `onnx-inference` feature; stub fallback when feature is off)
 - `rust-toolchain.toml` (binary determinism mitigation #1 — channel pinned to `1.94.0`)
 
-### CLI flags on `examples/euroc_online_slam_vi_image_demo.rs`
+### CLI flags on `examples/euroc_online_slam_vi_image_demo/`
 Recommended (ship in user-facing config):
 - `--feature-extractor {hog,superpoint-offline}` (Phase-15/26)
 - `--stereo-bootstrap-strict` (Phase-23 #2 — the universal win)
