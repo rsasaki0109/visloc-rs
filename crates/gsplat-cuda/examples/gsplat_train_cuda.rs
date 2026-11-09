@@ -5,7 +5,7 @@
 //! scripts/build_gsplat_cuda.sh /tmp/gsplat_cuda
 //! VISLOC_GSPLAT_CUDA_LIB=/tmp/gsplat_cuda/libvisloc_gsplat_cuda.so \
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_train_cuda -- \
-//!   --data <colmap_root> --steps 30000 --out scene.ply [--eval-every 5000] \
+//!   --data <colmap_root> --steps 30000 --out scene.ply [--init trained.ply] [--eval-every 5000] \
 //!   [--max-gaussians 2500000] [--sh-interval 1000] [--no-densify] [--profile] \
 //!   [--sparse-sh-adam] [--bf16-moments] [--holdout 8] [--mesh mesh.ply [--planar-depth]] \
 //!   [--depth-prior <dir> [--depth-weight 0.1 [--depth-weight-final W]]] \
@@ -14,7 +14,11 @@
 //!     [--semantic-logits-only | --semantic-shape]]
 //! ```
 //!
-//! Initialises from `sparse/0/points3D`, holds out every `--holdout`th view
+//! Initialises from `sparse/0/points3D`, or with `--init` from a trained
+//! splat: e.g. a geometry copy of a plain splat, fine-tuned for a few
+//! thousand steps on a depth prior (`--no-densify --depth-prior <dir>
+//! --depth-weight 30`) and meshed from its expected depth, while the plain
+//! splat stays the one for images. Holds out every `--holdout`th view
 //! (8: the brush / Inria split; 0 trains on every view) and reports eval
 //! PSNR and SSIM of the CUDA renders with `visloc_gsplat_train::metrics`.
 //! Training time leaves the evaluations out. `--mesh` also extracts a mesh
@@ -41,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use image::imageops::FilterType;
-use visloc_gsplat_core::ply::{save_ply, save_ply_with};
+use visloc_gsplat_core::ply::{save_ply, save_ply_with, scene_from_ply};
 use visloc_gsplat_core::semantic::{parse_classes, NO_LABEL};
 use visloc_gsplat_cuda::trainer::{CudaTrainer, SemanticTraining};
 use visloc_gsplat_cuda::{CudaGsplat, LabelGeometry};
@@ -57,6 +61,7 @@ use visloc_gsplat_train::metrics::{psnr_masked, ssim};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut data: Option<PathBuf> = None;
+    let mut init_ply: Option<PathBuf> = None;
     let mut out = PathBuf::from("gsplat_train_cuda.ply");
     let mut cfg = TrainConfig::brush_preset();
     let mut eval_every = 5000usize;
@@ -76,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut next = || args.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
             "--data" => data = Some(PathBuf::from(next()?)),
+            "--init" => init_ply = Some(PathBuf::from(next()?)),
             "--out" => out = PathBuf::from(next()?),
             "--steps" => cfg.steps = next()?.parse()?,
             "--eval-every" => eval_every = next()?.parse()?,
@@ -120,10 +126,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut |m| println!("{m}"),
     )?;
     let points = read_points3d(find_model_dir(&data)?)?;
-    let init = seed_scene(&points, 3);
+    let (init, what) = match &init_ply {
+        Some(path) => (scene_from_ply(&std::fs::read(path)?)?, "gaussians"),
+        None => (seed_scene(&points, 3), "points"),
+    };
     println!(
-        "{} points, {} train / {} eval views",
-        points.len(),
+        "{} {what}, {} train / {} eval views",
+        init.len(),
         dataset.train.len(),
         dataset.eval.len()
     );

@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **`gsplat_train_cuda --init <scene.ply>`: training from a trained
+  splat.**
+  - **A geometry copy.** A plain splat's copy is fine-tuned for 3k steps
+    on the MVS prior (`--no-densify --depth-prior ... --depth-weight 30`),
+    and its expected depth is meshed with the MVS maps. The images come
+    from the plain splat.
+  - **ETH3D** (office, terrains, playground). The hybrid mesh scores 71.0%
+    at 2 cm, against 66.0% with the plain splat and 70.9% with a splat
+    trained 30k steps on the prior, which costs the images 1–2 dB.
+  - **Cost.** 37 to 87 s per scene, a tenth of the training
+    (docs/gsplat_cuda.md, "A geometry copy of the plain splat").
+
 - **CUDA trainer: Adam moments in bf16 (opt-in, `--bf16-moments`, ABI
   16).**
   - **Faster and smaller.** The dense optimizer moves 20 bytes per element
