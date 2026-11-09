@@ -6,6 +6,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **CUDA trainer: Adam moments in bf16 (opt-in, `--bf16-moments`, ABI
+  16).**
+  - **Faster and smaller.** The dense optimizer moves 20 bytes per element
+    instead of 28, and takes 28% less time (6.66 → 4.79 ms per step on
+    south-building's 1.35M gaussians). The moments take half the memory.
+  - **Stochastic rounding.** Beta2's 0.1% steps are under half a bf16
+    step, so the stores round stochastically.
+  - **south-building.** 23.00 and 22.86 dB at 30k, against 23.02 and
+    22.88 with float moments. Training took 4–6% less time
+    (docs/gsplat_cuda.md, "Two pixels per thread, and bf16 moments").
+
 - **The web viewer picks the object under a click.** With `&instances=`,
   the panel names the object as `gsplat_extract --select` takes it
   ("chair 3, 895 gaussians (--select chair:3)"), and the rest of the splat
@@ -1306,6 +1317,15 @@ All notable changes to `visloc-rs` will be documented here.
     while poses carried tens of metres between rare fixes reach decimetres.
 
 ### Changed
+
+- **CUDA trainer: the backward pass takes two pixels per thread.**
+  - **How.** raster_bwd runs 128 threads per tile, each warp an 8x8 block,
+    and adds a lane's two pixels before the warp's reduction. The
+    shuffles and global reductions per pixel halve.
+  - **Result.** raster_bwd takes 9–10% less time (6.05–6.42 → 5.60–5.83
+    ms per step on south-building). A step takes 20.8–21.2 ms of wall
+    time, 18.6 ms with bf16 moments (was 21.2–22.0).
+  - **Same maths.** The gradients change only in summation order.
 
 - **The labels' logits learn 4x faster: `--semantic-lr` (and
   `SemanticTraining::lr`) defaults to 0.01, was 0.0025.**
