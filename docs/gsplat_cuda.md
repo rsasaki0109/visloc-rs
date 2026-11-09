@@ -781,6 +781,61 @@ only the filter changes them:
   80.2%). On the other scenes the better hybrid still adds 0.8 (terrace)
   to 18.0 points (office).
 
+#### A geometry copy of the plain splat
+
+A prior moves the splats and costs the images; a plain splat keeps the
+images but meshes worse. Both can come from one training run: the plain
+splat for the images, and a copy of it fine-tuned briefly on the prior for
+the mesh.
+
+```text
+gsplat_train_cuda --data data --init scene.ply --steps 3000 --no-densify --holdout 8 \
+    --depth-prior mvs_cuda/fused_depth --depth-weight 30 --out geometry.ply
+gsplat_mesh_cuda --ply geometry.ply --data data --expected-depth \
+    --depth-maps mvs_cuda/fused_depth --gpu-tsdf --voxel 0.01 --max-depth 20 ...
+```
+
+- **The copy.** `--init` starts from the plain splat (here the one that
+  held out every 8th view). The gaussians are kept as they are, with no
+  refine, and brush's learning rates start again from their first values.
+- **The meshes.** Every mesh below is made by the same binary from all
+  views: the GPU TSDF at 1 cm, depths up to 20 m, the 1600 px maps for the
+  hybrids. F1 at 2 cm:
+
+| Mesh | Extra training (office / terrains / playground) | office | terrains | playground | mean |
+|---|---|---|---|---|---|
+| plain splat alone (planar median) | | 22.6% | 34.3% | 43.5% | 33.4% |
+| MVS + plain splat (planar median) | | 52.3% | 80.3% | 65.3% | 66.0% |
+| copy, 3k steps, alone | 37 / 58 / 87 s | 46.2% | 71.9% | 53.3% | 57.1% |
+| MVS + copy, 3k steps | | 65.2% | **81.0%** | **66.6%** | **71.0%** |
+| copy, 10k steps, alone | 112 / 173 / 265 s | 54.6% | 75.9% | 61.2% | 63.9% |
+| MVS + copy, 10k steps | | 63.7% | 80.5% | 65.8% | 70.0% |
+| prior-30 splat alone (30k steps, every view) | a run of its own | 62.9% | 78.1% | 62.0% | 67.7% |
+| MVS + prior-30 splat | | **67.2%** | 80.2% | 65.3% | 70.9% |
+| prior 30 → 1 splat alone (held out) | a run of its own | 54.9% | 70.6% | 52.0% | 59.2% |
+| MVS + prior 30 → 1 splat | | 65.7% | 80.3% | 66.1% | 70.7% |
+
+- **The copy's hybrid matches the prior-trained splats', and the images
+  stay the plain splat's.**
+  - **Geometry.** With 3k steps the hybrid scores 71.0% on average,
+    against 70.9% for the prior-30 splat and 70.7% for the prior that
+    fades.
+  - **Images.** They come from the plain splat: 22.31 / 25.79 / 19.27 dB
+    held out. The fading prior costs 1.06 dB of that, and the constant one
+    more.
+  - **Cost.** The copy takes 37 to 87 s, a tenth of the plain splat's
+    training (377 / 508 / 799 s). It renders worse than the plain splat,
+    20.05 / 23.53 / 18.45 dB held out, but it is only meshed.
+- **Where it pays.**
+  - office gains 13.0 points over the plain splat's hybrid. Its weak
+    texture leaves the MVS depth with holes, and there the copy fills them
+    better.
+  - On terrains and playground it adds 0.8 and 1.3 points: the plain
+    splat already fills their holes about as well.
+- **Longer fine-tuning helps the copy alone, not the hybrid.** At 10k steps
+  the copy alone scores 63.9% (the prior-30 splat's: 67.7%), and the
+  hybrid 70.0%.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
@@ -881,9 +936,13 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
    expected depth with a strong depth prior
    brings the mesh within a few points of its MVS prior, at 1.8 dB of
    held-out PSNR; fading the prior halves that cost and keeps most of the
-   gain. Open: a prior that leaves the image alone (on separate geometry
-   channels, or splats the photometric loss cannot move off the surface),
-   and why the median depth lags.
+   gain.
+   - **Image and mesh together.** A copy of the plain splat, fine-tuned for
+     3k steps on the prior (a tenth of the training), gives the hybrid mesh
+     of the prior-trained splats (71.0% over three scenes), while the
+     images stay the plain splat's
+     ([a geometry copy](#a-geometry-copy-of-the-plain-splat)).
+   - **Open.** One splat that does both; why the median depth lags.
 2. **Speed.** A step takes about 21 ms, 18.6 ms with the opt-in bf16
    moments ([two pixels per thread, and bf16
    moments](#two-pixels-per-thread-and-bf16-moments)). Open:
