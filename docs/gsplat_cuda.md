@@ -28,7 +28,7 @@ The packaging follows the DPVO CUDA kernels:
 |---|---|
 | Rasterizer forward (projection, SH colour, tile binning, sort, compositing) | Done |
 | Backward to every gaussian parameter (mean, quaternion, log-scale, opacity logit, SH) | Done |
-| Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam | Done |
+| Training step: L1 + D-SSIM, Adam with brush's aux losses, refine statistics, mean noise; opt-in sparse SH Adam and bf16 moments | Done |
 | Trainer loop (`trainer::CudaTrainer`, example `gsplat_train_cuda`): brush's refine strategy and learning rates, or a fixed population | Done |
 | Inria densification rule, per-image appearance | Not supported (the trainer refuses these configurations) |
 | Median depth (splat centre, or where the ray meets the splat plane) and mesh extraction (`gsplat_mesh_cuda`, `gsplat_train_cuda --mesh`) | Done |
@@ -309,7 +309,60 @@ time per step (stages 19.7–20.0 ms).
 - **Where the time is.** A step stays at about 21 ms. The optimizer
   (6.7 ms) moves 28 bytes per element; only fewer bytes would help, such as
   moments in bf16 or the opt-in sparse SH Adam, and both change the
-  numerics. raster_bwd (6.1 ms) is the write-up's steps 5 and 6.
+  numerics. raster_bwd (6.1 ms) is the write-up's steps 5 and 6. Both are
+  done below.
+
+### Two pixels per thread, and bf16 moments
+
+Two more changes, timed the same way (128 steps on the first run's scene,
+three rounds alternating with the kernels before them). GPU ms per step,
+the sum of the stages, and the host wall time of a step:
+
+| Backward | Adam moments | raster_bwd | optimizer | Stages | Wall |
+|---|---|---|---|---|---|
+| One pixel per thread | float | 6.05–6.42 | 6.66 | 19.9–20.5 | 21.2–22.0 |
+| One pixel per thread | bf16 | 6.28–6.80 | 4.79 | 18.2–19.2 | 19.4–20.5 |
+| Two pixels per thread | float | 5.60–5.83 | 6.66 | 19.5–19.8 | 20.8–21.2 |
+| Two pixels per thread | bf16 | 5.53–5.54 | 4.79 | 17.4–17.5 | **18.6** |
+
+- **Two pixels per thread** (the write-up's step 6, without its per-warp
+  staging; the default).
+  - **Layout.** raster_bwd runs 128 threads per tile, and each warp covers
+    an 8x8 block: two of the 8x4 sub-tiles.
+  - **Fewer reductions.** For each splat a lane adds its two pixels'
+    contributions before the warp's butterfly, so the shuffles and global
+    reductions per pixel halve. A warp skips a splat that misses both its
+    sub-tiles, and a sub-tile's pixels skip one that misses theirs.
+  - **Result.** raster_bwd takes 9–10% less time. The maths per pixel is
+    unchanged, and the gradients change only in summation order.
+- **bf16 moments** (opt-in, `--bf16-moments`).
+  - **Format.** The Adam moments of the three groups are kept as bf16, the
+    top half of a float.
+  - **Result.** The dense optimizer moves 20 bytes per element instead of
+    28 and takes 28% less time. The moments take half the memory: 236
+    instead of 472 bytes per gaussian at degree 3.
+  - **Stochastic rounding.** With beta2 0.999 the second moment changes by
+    0.1% a step, which is under half a bf16 step (0.2%). Rounded to nearest
+    it would stop moving, so each store adds 16 random bits before it
+    truncates.
+  - **Switching.** A step that asks for the other precision converts the
+    moments, and refines scatter them in either.
+- **Both together** take a step to 18.6 ms of wall time, 15% less than
+  before.
+
+south-building trained again with each kind of moments, two runs each,
+before the two-pixel backward:
+
+| Adam moments | PSNR at 30k | SSIM | Gaussians | Training time |
+|---|---|---|---|---|
+| float | 23.02 / 22.88 | 0.814 / 0.813 | 1.39M / 1.36M | 617 / 601 s |
+| bf16 | 23.00 / 22.86 | 0.814 / 0.810 | 1.35M / 1.40M | 593 / 567 s |
+
+- **bf16 is within the spread.** It lands within the float runs' spread,
+  and within that of the three earlier dense runs (22.71–23.22 dB).
+- **Time saved.** It saves 4–6% of the training time. Refines and the
+  other stages make up the rest of a step.
+- **Still opt-in** until it has been checked on more scenes.
 
 ## Rasterizer timing on synthetic views
 
@@ -352,7 +405,7 @@ WSL2, CUDA 13.3:
 | SH register streaming, cooperative zeroing (step 3) | Not yet |
 | Contributor compaction and pruning the backward pass (step 4) | `splat_touched` gating in (`project_bwd`); compaction not yet (the backward pass starts at each tile's last blended entry) |
 | Branchless predication (step 5) | Not yet |
-| Two pixels per thread, per-warp staging without block barriers (step 6) | Not yet |
+| Two pixels per thread, per-warp staging without block barriers (step 6) | Two pixels per thread in raster_bwd: 128 threads per tile, each warp an 8x8 block ([above](#two-pixels-per-thread-and-bf16-moments)); per-warp staging not yet |
 
 ## Geometry on ETH3D
 
@@ -831,9 +884,11 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
    gain. Open: a prior that leaves the image alone (on separate geometry
    channels, or splats the photometric loss cannot move off the surface),
    and why the median depth lags.
-2. **Speed.** A step takes about 21 ms. The dense optimizer (6.7 ms) is
-   bound by memory, so it only gets faster with fewer bytes per element,
-   such as bf16 moments or the opt-in sparse SH Adam. raster_bwd (6.1 ms)
-   needs the write-up's steps 5 and 6. The two-stage sort, a vectorized Adam
-   and dropping the gradient memset each gained under 1%
-   ([tried](#tried-and-not-adopted)).
+2. **Speed.** A step takes about 21 ms, 18.6 ms with the opt-in bf16
+   moments ([two pixels per thread, and bf16
+   moments](#two-pixels-per-thread-and-bf16-moments)). Open:
+   - the write-up's step 5 and per-warp staging for raster_bwd (5.6 ms);
+   - bf16 moments as the default, once they are checked on more scenes.
+
+   The two-stage sort, a vectorized Adam and dropping the gradient memset
+   each gained under 1% ([tried](#tried-and-not-adopted)).

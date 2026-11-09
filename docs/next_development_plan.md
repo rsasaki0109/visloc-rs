@@ -51,7 +51,10 @@ The planned order:
    a time. Stopped at about 21 ms per step: the two-stage sort, a vectorized
    Adam and dropping the gradient memset each gained under 1%. The dense
    Adam is bound by memory, and raster_bwd needs steps 5 and 6
-   ([`gsplat_cuda.md`](gsplat_cuda.md#tried-and-not-adopted)).
+   ([`gsplat_cuda.md`](gsplat_cuda.md#tried-and-not-adopted)). Then two
+   pixels per thread in raster_bwd (−9 to −10% there) and opt-in bf16 Adam
+   moments (optimizer −28%) took a step to 18.6 ms
+   ([`gsplat_cuda.md`](gsplat_cuda.md#two-pixels-per-thread-and-bf16-moments)).
 5. Two-view verification on the GPU: 450 s of SmallCity's 600 s front end.
    On the WSL2 laptop the CPU matcher was the bottleneck instead (no wgpu):
    on south-building it took 780 s, and verification 578 s only because the

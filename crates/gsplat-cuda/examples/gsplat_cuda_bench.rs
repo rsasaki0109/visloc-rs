@@ -5,7 +5,7 @@
 //! VISLOC_GSPLAT_CUDA_LIB=/tmp/gsplat_cuda/libvisloc_gsplat_cuda.so \
 //!   cargo run --release -p visloc-gsplat-cuda --example gsplat_cuda_bench -- \
 //!   --scene docs/euroc_splat/euroc_v101.splat [--width 1280 --height 720] \
-//!   [--views 6] [--iters 20] [--fov-deg 70] [--data <colmap_root> [--sparse-sh-adam]]
+//!   [--views 6] [--iters 20] [--fov-deg 70] [--data <colmap_root> [--sparse-sh-adam] [--bf16-moments]]
 //! ```
 //!
 //! With `--data` (e.g. the dataset a `.ply` was trained on) each iteration is
@@ -41,6 +41,7 @@ struct Args {
     fov_deg: f32,
     data: Option<PathBuf>,
     sparse_sh_adam: bool,
+    bf16_moments: bool,
 }
 
 fn parse_args() -> Args {
@@ -53,6 +54,7 @@ fn parse_args() -> Args {
         fov_deg: 70.0,
         data: None,
         sparse_sh_adam: false,
+        bf16_moments: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -66,10 +68,12 @@ fn parse_args() -> Args {
             "--fov-deg" => args.fov_deg = value().parse().expect("--fov-deg"),
             "--data" => args.data = Some(PathBuf::from(value())),
             "--sparse-sh-adam" => args.sparse_sh_adam = true,
+            "--bf16-moments" => args.bf16_moments = true,
             "-h" | "--help" => {
                 eprintln!(
                     "usage: gsplat_cuda_bench --scene <.ply|.splat> [--width W] [--height H] \
-                     [--views N] [--iters N] [--fov-deg F] [--data <colmap_root> [--sparse-sh-adam]]"
+                     [--views N] [--iters N] [--fov-deg F] [--data <colmap_root> [--sparse-sh-adam] \
+                     [--bf16-moments]]"
                 );
                 std::process::exit(0);
             }
@@ -200,6 +204,7 @@ fn main() {
                 semantic_weight: 0.0,
                 lr_semantic: 0.0,
                 semantic_geometry: 0,
+                moments_bf16: args.bf16_moments as u32,
             };
             let t = std::time::Instant::now();
             cuda.train_step(&step).expect("train step");

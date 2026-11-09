@@ -173,6 +173,10 @@ pub struct StepParams {
     /// What the cross-entropy moves besides the logits: a [`LabelGeometry`]
     /// as `u32` (0 only the logits, 1 opacities and centres, 2 shapes too).
     pub semantic_geometry: u32,
+    /// Keep the Adam moments in bf16, rounded stochastically (0 = float).
+    /// The dense optimizer then moves 20 bytes per element instead of 28.
+    /// A step that asks for the other precision converts them.
+    pub moments_bf16: u32,
 }
 
 /// Settings of [`CudaGsplat::tsdf_surface`] (`GscTsdfParams` in the CUDA
@@ -542,7 +546,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 15;
+    pub const ABI_VERSION: u32 = 16;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
