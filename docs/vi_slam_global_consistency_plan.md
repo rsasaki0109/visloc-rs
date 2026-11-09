@@ -733,7 +733,7 @@ between consecutive keyframes, gravity fixed in world. Rather than
 re-deriving the preintegration residual/Jacobian, it reuses the VIO
 estimator's own already bit-exact-tested factor
 (`crate::imu::whitened_preintegration_factor`/`whitened_bias_random_walk_factor`,
-production code in `vio/window.rs`) and embeds its 9x30/6x30 Jacobian
+production code in `vio/window/imu.rs`) and embeds its 9x30/6x30 Jacobian
 directly into the joint system's Hessian/gradient blocks -- verified no sign
 adaptation is needed, since both the VIO's own state trial and the mapper's
 existing `apply_pose_solve` are Gauss-Newton steps against the same forward
