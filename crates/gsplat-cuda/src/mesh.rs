@@ -110,6 +110,11 @@ pub struct DepthMaps<'a> {
     /// the mesh is the maps' alone; a hole is unknown, so it carves no free
     /// space through the other views' surfaces).
     pub fill_from_splat: bool,
+    /// The weight of the splat's depth there (> 0), for its surface, colour
+    /// and carving alike; a map's depth weighs 1. Below 1, a voxel the
+    /// splat's depth alone reaches needs that many more views to pass
+    /// `MeshOptions::min_weight`.
+    pub fill_weight: f32,
 }
 
 /// [`extract_mesh`] with the TSDF fused and extracted on the device
@@ -149,6 +154,7 @@ pub fn extract_mesh_gpu(
             Some(m) if m.fill_from_splat => 1,
             Some(_) => 2,
         },
+        fill_weight: maps.map_or(1.0, |m| m.fill_weight),
     };
     let t0 = Instant::now();
     let surface = gs.tsdf_surface_with_maps(views, &params, maps.map(|m| m.maps))?;

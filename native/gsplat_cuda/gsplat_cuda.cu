@@ -92,7 +92,7 @@ struct GscCamera {
 
 namespace {
 
-constexpr uint32_t kAbiVersion = 16;
+constexpr uint32_t kAbiVersion = 17;
 constexpr int kTile = 16;
 constexpr int kBlock = kTile * kTile;
 constexpr int kBwdBatch = 128;

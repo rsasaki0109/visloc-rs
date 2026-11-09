@@ -214,6 +214,9 @@ pub struct TsdfParams {
     /// alone, a map's hole being unknown (no update, no carving) rather
     /// than free space (0 = no maps).
     pub override_mode: u32,
+    /// Mode 1: the weight of the splat's depth in a map's holes, for its
+    /// surface, colour and carving alike (> 0; a map's depth weighs 1).
+    pub fill_weight: f32,
 }
 
 /// The surface of a TSDF fused on the device, before its quads are
@@ -546,7 +549,7 @@ unsafe fn symbol<T: Copy>(
 }
 
 impl CudaGsplat {
-    pub const ABI_VERSION: u32 = 16;
+    pub const ABI_VERSION: u32 = 17;
 
     /// Load the library named by [`LIBRARY_ENV`], or `None` when it is unset.
     pub fn from_env() -> Option<Result<Self, GsplatCudaError>> {
