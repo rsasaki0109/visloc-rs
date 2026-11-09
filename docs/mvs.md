@@ -965,6 +965,49 @@ ground-truth poses, CPU (4 threads), F1 at 1, 2 and 5 cm:
 - These are 400 px runs on one scene; the strong median now runs on the
   GPU path as well, for 3200 px runs.
 
+### APD's patches with the strong median, on CUDA
+
+`--deformable --deformable-strong-median` ("APD" below) on five ETH3D
+scenes, run on CUDA with the ground-truth poses on an 8 GB laptop GPU.
+Some runs also take 20 source views instead of 10 (`--sources 20`, as
+APD-MVS takes up to 20). F1 at 2 cm, with accuracy / completeness, and the
+whole `mvs` run. At 1600 px:
+
+| Scene | Defaults | APD | 20 sources | APD, 20 sources |
+|---|---|---|---|---|
+| office | 72.8% (88.6 / 61.7), 108 s | 75.7% (80.7 / 71.3), 297 s | 74.6% (86.2 / 65.7), 138 s | **77.7%** (79.6 / 75.8), 418 s |
+| playground | 67.7% (84.1 / 56.6), 194 s | 70.3% (77.3 / 64.5), 577 s | 68.0% (83.5 / 57.4), 262 s | **70.6%** (76.4 / 65.6), 835 s |
+| kicker | 83.6% (87.9 / 79.7), 141 s | 83.5% (80.8 / 86.3), 425 s | **83.7%** (86.3 / 81.3), 211 s | **83.7%** (80.6 / 87.1), 658 s |
+| terrace | 88.5% (96.9 / 81.4), 112 s | **88.6%** (95.7 / 82.5), 304 s | | |
+| pipes | 79.2% (96.5 / 67.2), 59 s | **81.1%** (94.7 / 71.0), 153 s | | |
+
+And office at 3200 px, the L4 runs' size (its DSLR images resized to
+3200x2133):
+
+| Scene | Defaults | APD |
+|---|---|---|
+| office, 3200 px | **78.9%** (81.7 / 76.3), 449 s | 78.4% (75.5 / 81.7), 1255 s |
+
+- **At 1600 px APD helps the weak texture.**
+  - It adds 3.0 points on office, 2.6 on playground and 1.9 on pipes,
+    and moves kicker and terrace by 0.2 or less. The five-scene mean
+    rises from 78.3% to 79.9%.
+  - Each time it trades accuracy for completeness: office gives 7.9
+    points of accuracy for 9.6 of completeness.
+  - It takes 2.6 to 3.0 times as long.
+- **20 sources add a little, and more with APD.** Alone they add 1.8
+  points on office and 0.3 or less elsewhere, in 1.3 to 1.5 times the
+  time. With APD, office reaches 77.7% (+4.9).
+- **At 3200 px APD does not pay.** office loses 0.5 points: it gains 5.4
+  points of completeness and loses 6.2 of accuracy, in 2.8 times the
+  time. The defaults at 3200 px (78.9%) already beat APD at 1600 px, and
+  the r54 runs at 3200 px put APD-MVS's own code at 88.8% on office. These
+  parts, without the rest of APD's pipeline, do not close that gap.
+- **Where it is useful.** It suits runs at reduced resolution, such as the
+  1600 px maps the splat meshes are fused with
+  ([gsplat_cuda.md](gsplat_cuda.md#mvs-depth-the-splat-filling-its-holes)).
+  It stays opt-in.
+
 ### Fusion settings
 
 The same depth maps fused with different rules (CPU runs with one
