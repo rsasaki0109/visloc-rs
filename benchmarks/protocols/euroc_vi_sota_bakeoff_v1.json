@@ -22,7 +22,7 @@
     {
       "id": "visloc_stereo_vi",
       "role": "ours",
-      "entry": "examples/euroc_online_slam_vi_image_demo.rs",
+      "entry": "examples/euroc_online_slam_vi_image_demo/main.rs",
       "notes": "Single frozen motion-VI config after Basalt-parity gate passes."
     },
     {

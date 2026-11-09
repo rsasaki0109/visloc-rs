@@ -9,7 +9,7 @@
   "benchmark": {
     "id": "euroc-keyframe-tracked-landmark-drop",
     "name": "EuRoC online SLAM tracked-landmark keyframe policy A/B",
-    "script": "examples/euroc_online_slam_vi_image_demo.rs",
+    "script": "examples/euroc_online_slam_vi_image_demo/main.rs",
     "protocol": "same EuRoC image/IMU run with SimpleKeyframePolicy tracked-landmark-drop trigger disabled versus enabled; compare DNF, tracking success, ATE, keyframes, and local BA trigger counts",
     "docs": ["docs/motion_based_vi_alignment.md"]
   },

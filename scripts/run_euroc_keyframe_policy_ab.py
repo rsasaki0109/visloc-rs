@@ -328,7 +328,7 @@ def capture_manifest(
         "--benchmark-name",
         BENCHMARK_NAME,
         "--script",
-        f"examples/{EXAMPLE}.rs",
+        f"examples/{EXAMPLE}/main.rs",
         "--protocol",
         "fixed/tracked-drop SimpleKeyframePolicy A/B on identical EuRoC image/IMU command",
         "--docs",

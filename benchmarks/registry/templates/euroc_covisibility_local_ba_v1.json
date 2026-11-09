@@ -9,7 +9,7 @@
   "benchmark": {
     "id": "euroc-covisibility-local-ba",
     "name": "EuRoC online SLAM covisibility local BA A/B",
-    "script": "examples/euroc_online_slam_vi_image_demo.rs",
+    "script": "examples/euroc_online_slam_vi_image_demo/main.rs",
     "protocol": "same EuRoC image/IMU run with OnlineSlamConfig::covisibility_local_ba disabled versus enabled; compare DNF, tracking success, ATE, keyframes, and covisibility BA diagnostics",
     "docs": ["docs/motion_based_vi_alignment.md"]
   },

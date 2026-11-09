@@ -47,7 +47,7 @@ Phase-25 default stack.
 - **`MutualSoftmaxMatcher`** — LightGlue-style matcher (temperature
   20.0, mutual-NN, min_confidence 0.2). Already implements the
   `Matcher` trait and is used in `deep_frontend_two_view_demo`.
-- **`SuperPointOfflineExtractor`** (`examples/euroc_online_slam_vi_image_demo.rs`)
+- **`SuperPointOfflineExtractor`** (`examples/euroc_online_slam_vi_image_demo/extractor.rs`)
   — replays pre-exported `frame_NNNNNN_features.txt` files via the
   existing `FeatureExtractor` trait. Mono only; cam0 features
   required, optional cam1 features for stereo bootstrap.
@@ -207,8 +207,8 @@ each sequence.
   baseline numbers Phase-26 must improve on.
 - `pipelines/tracking/src/lib.rs` — `ImuVelocityRefreshPolicy`,
   `AdaptiveImuPoseMotionModel`; no changes needed for Phase-26.
-- `examples/euroc_online_slam_vi_image_demo.rs` — `SuperPointOfflineExtractor`
-  (around lines 387–540 in the current file); the CLI surface
+- `examples/euroc_online_slam_vi_image_demo/` — `SuperPointOfflineExtractor`
+  (`extractor.rs`); the CLI surface (`cli.rs`)
   Phase-26 extends.
 - `scripts/export_superpoint_lightglue.py` — the Python bridge;
   Phase-26 extends `--mono-dir` to `--stereo-dirs` or equivalent.

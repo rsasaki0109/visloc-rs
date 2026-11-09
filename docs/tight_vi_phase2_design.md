@@ -128,4 +128,4 @@ Sweep `bridge_keyframe_interval_*`, gate constant `k`, bias noise densities on V
 - `pipelines/slam/src/bundle.rs`
 - `pipelines/tracking/src/motion.rs`
 - `pipelines/tracking/src/tracker.rs`
-- `examples/euroc_online_slam_vi_image_demo.rs`
+- `examples/euroc_online_slam_vi_image_demo/`

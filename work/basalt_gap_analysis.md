@@ -73,7 +73,7 @@ Basalt "Visual-Inertial Odometry and Mapping" rests on four pillars:
 | Fixed body→camera SE(3) extrinsic composed into IMU residuals | **Yes** (as calibrated input, pre-given) | `bundle.rs`, `dpvo_vi_ba.rs` |
 | Covisibility-selected local BA (ORB-SLAM-style neighborhood) | **Yes**, A/B-testable | `covisibility_ba.rs` |
 | Loop closure / relocalization / pose-graph refinement | **Yes** (Sim(3) mirror + banded) | `online_slam.rs` |
-| Running VI entry points (EuRoC, stereo VO) | **Yes** | `euroc_online_slam_vi_image_demo.rs`, `online_slam_stereo_vo_kitti_demo.rs` |
+| Running VI entry points (EuRoC, stereo VO) | **Yes** | `euroc_online_slam_vi_image_demo/`, `online_slam_stereo_vo_kitti_demo.rs` |
 | Deep frontend (SuperPoint/LightGlue via ONNX) | **Yes** | `deep_frontend_two_view_demo.rs`, export scripts |
 
 ## The gap (Basalt-equivalent levers)

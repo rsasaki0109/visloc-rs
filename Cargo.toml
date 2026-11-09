@@ -199,7 +199,7 @@ required-features = ["image-io"]
 
 [[example]]
 name = "euroc_online_slam_vi_image_demo"
-path = "examples/euroc_online_slam_vi_image_demo.rs"
+path = "examples/euroc_online_slam_vi_image_demo/main.rs"
 required-features = ["image-io"]
 
 [[example]]

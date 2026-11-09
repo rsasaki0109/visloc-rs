@@ -119,7 +119,7 @@ in the extractor:
 ```
 
 For the EuRoC bench wiring add a CLI flag
-`--superpoint-onnx-model <path>` on `examples/euroc_online_slam_vi_image_demo.rs`.
+`--superpoint-onnx-model <path>` on `examples/euroc_online_slam_vi_image_demo/`.
 A future helper script `scripts/fetch_superpoint_onnx.sh` could
 download the model into `models/superpoint.onnx` with a checksum
 verification step.
@@ -180,7 +180,7 @@ ships.
 ## EuRoC demo wiring
 
 Mirror the existing `SuperPointOffline` integration in
-`examples/euroc_online_slam_vi_image_demo.rs`:
+`examples/euroc_online_slam_vi_image_demo/`:
 
 1. `enum FeatureExtractorKind` gains `SuperPointOnnx`.
 2. `enum DemoExtractor` gains `SuperPointOnnx(SuperPointOnnxExtractor)`.
