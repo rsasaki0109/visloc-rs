@@ -7,7 +7,8 @@ recordings, though, cover the same few streets again and again. Here they are re
 - GPS proposes which keyframes to try and places each recording roughly before the solve.
 
 **Withdrawn (2026-11-08).** No submission uses this any more. Each sequence's estimate again comes from its own
-recording only, and the leaderboard entry goes back to submission 7. The scripts stay as an experiment.
+recording only, and the leaderboard entry went back to submission 7: uploaded again on 2026-11-10, it scores as
+before. The scripts stay as an experiment.
 - **The rules are silent.** The challenge's rules
   ([documentation](https://lamaria.ethz.ch/slam_documentation)) say nothing about using other recordings,
   offline processing or sensors.
