@@ -186,9 +186,14 @@ Submission 7 is submission 6 with the eight bridged sequences replaced
 in submission 6. No test ground truth was used: the threshold and the options
 were set on the training sequences.
 
-The method's description on the leaderboard states the GPS, for example:
+The method's description on the leaderboard states the GPS (as saved on
+2026-11-10):
 
-> Stereo VIO (two SLAM cameras and the IMU) and a batch BA chain. On the
-> Moving platform track, the 1 Hz GPS of the raw recordings bridges jumps:
-> where the trajectory jumps by 25 m or more against the GPS fixes (accuracy
-> ≤ 10 m), the pieces between the jumps are moved to the GPS.
+> Stereo visual-inertial odometry (Rust port of Basalt) followed by an offline
+> batch visual-inertial bundle adjustment with loop closure (SIFT features,
+> union-find tracks, pose-graph loop correction; on some sequences, ALIKED
+> keypoints matched by LightGlue in the bundle adjustment pass). Uses the two
+> grayscale SLAM cameras and the 1 kHz IMU. On the Moving platform track only,
+> the 1 Hz GPS of the raw recordings bridges jumps: where the trajectory jumps
+> by 25 m or more against the GPS fixes (accuracy ≤ 10 m), the pieces between
+> the jumps are moved to the GPS. Single VIO run per sequence.

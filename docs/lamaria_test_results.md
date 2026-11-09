@@ -12,8 +12,8 @@ Moving platform track's missed rides with the recordings' GPS
 ([lamaria_gps.md](lamaria_gps.md)). Submission 9 refined the recordings
 together across recordings, offline
 ([lamaria_multisession.md](lamaria_multisession.md)), and was withdrawn: the
-entry goes back to submission 7 ([What changed between the
-submissions](#what-changed-between-the-submissions)).
+entry went back to submission 7, uploaded again on 2026-11-10 ([What changed
+between the submissions](#what-changed-between-the-submissions)).
 Submission 8 was built but never evaluated: the site was unreachable until
 submission 9 replaced it. Scores are the leaderboard's means per challenge.
 
@@ -27,6 +27,7 @@ submission 9 replaced it. Scores are the leaderboard's means per challenge.
 | 6 (2026-10-30) | 69.7 | **56.8** | 54.1 | 60.6 | 30.6 | 54.3 |
 | 7 (2026-11-06) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | **57.7** |
 | 9 (2026-11-08, withdrawn) | 87.8 | 81.6 | 87.5 | 82.7 | 66.7 | 81.3 |
+| 7, uploaded again (2026-11-10) | 69.7 | **56.8** | 54.1 | 60.6 | **47.3** | **57.7** |
 | Aria's SLAM (reference) | 90.7 | 78.5 | 70.9 | 84.2 | 55.0 | 75.9 |
 | SLAM Dunk | 89.6 | 78.9 | 71.1 | 85.4 | 52.3 | 75.5 |
 | GroundedSLAM (2026-10-29) | 87.0 | 72.7 | 70.8 | 81.9 | 49.8 | 72.4 |
@@ -34,12 +35,13 @@ submission 9 replaced it. Scores are the leaderboard's means per challenge.
 | FlexVIO | 73.1 | 62.9 | 56.7 | 69.7 | 28.1 | 58.1 |
 | FPV-SLAM, binocular (2026-10-28) | 77.3 | 58.8 | 51.0 | 64.6 | 29.6 | 56.3 |
 
-The other methods' scores are those listed on 2026-11-08, unchanged since
+The other methods' scores are those listed on 2026-11-10, unchanged since
 2026-11-06. Bold marks visloc-rs's best per challenge, leaving out the
 withdrawn submission 9.
 
-On 2026-11-06 visloc-rs ranked sixth by the mean of the five challenges (the
-leaderboard itself lists the methods by their Short score). Ahead of it were
+On 2026-11-06, and again on 2026-11-10, visloc-rs ranked sixth by the mean of
+the five challenges (the leaderboard itself lists the methods by their Short
+score). Ahead of it were
 Aria's SLAM (reproduced by the LaMAria team, 75.9), SLAM Dunk, GroundedSLAM,
 RedComet and FlexVIO; the leaderboard lists all of them as bino + imu. On the
 Moving platform track visloc-rs was fifth, behind Aria's SLAM (55.0), RedComet,
@@ -231,8 +233,11 @@ not evaluated, because the site could not be reached; submission 9 contains it.
   | sequence_5_7 | 69.2 (kept) | 66.7 % |
   | sequence_5_5 | 63.7 (kept) | 66.7 % |
 
-- **Withdrawn (2026-11-08).** The entry goes back to submission 7, uploaded
-  again once 24 hours have passed since submission 9's evaluation.
+- **Withdrawn (2026-11-08).** The entry went back to submission 7, uploaded
+  again on 2026-11-10, once 24 hours had passed since submission 9's
+  evaluation. All 63 sequences score as in its first upload, in score and in
+  CP recall at 1 m. The method description, which read "WIP", is submission
+  7's again ([lamaria_gps.md](lamaria_gps.md#test-set-submission-7)).
   - **The rules are silent.** The challenge's rules say nothing about using
     other recordings.
   - **The leading methods appear to solve each sequence alone.** From Short to
