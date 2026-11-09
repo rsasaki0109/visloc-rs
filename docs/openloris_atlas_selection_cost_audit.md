@@ -6,7 +6,7 @@ Do not revive it as a promoted end-to-end pipeline.
 
 ## Observed work
 
-`selected_landmarks_for_frames` in `integrate_rig_atlas_landmarks.rs` visits
+`selected_landmarks_for_frames` in `integrate_rig_atlas_landmarks/joint_ba.rs` visits
 every landmark per window and checks its observations for an active frame.
 The filtering runner calls this once per window. Saved accepted-window logs
 from `corridor1-1-m8-atlas-landmarks-v1/connected-filtered-ba-v1` contain:

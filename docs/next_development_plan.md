@@ -99,7 +99,7 @@ The planned order:
 | Item | Status | Gate |
 | --- | --- | --- |
 | Planning docs | Done: `PLAN.md` (233 KB) and the itemized 0.2.0 CHANGELOG (~4,800 lines) moved to [`archive/`](archive/); short handoff and changelog in their place | — |
-| Split very large source files | Done: `incremental_sfm`, `bundle`, `unordered_sfm_demo`, `vio/aom`, `rig_sfm` and `vio/window` are now directories of submodules (pure moves; test names and counts unchanged, public API unchanged) | Remaining large files are single test modules (aom `tests.rs` 11k) whose test paths are used as filters; next candidates `euroc_online_slam_vi_image_demo.rs` (10.2k), `integrate_rig_atlas_landmarks.rs` (9.6k) |
+| Split very large source files | Done: `incremental_sfm`, `bundle`, `unordered_sfm_demo`, `vio/aom`, `rig_sfm`, `vio/window`, `euroc_online_slam_vi_image_demo` and `integrate_rig_atlas_landmarks` are now directories of submodules (pure moves; test names and counts unchanged, public API unchanged) | Remaining large files are single test modules (aom `tests.rs` 11k) whose test paths are used as filters, and the EuRoC demo's 4.9k-line `main()`, which only a refactor can split; next candidates `vio/estimator.rs` (8.7k), `online_slam.rs` (7.7k), `dpvo_vo.rs` (7.3k) |
 
 ## Needs real data (not runnable from a dataset-less environment)
 
