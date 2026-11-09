@@ -381,6 +381,42 @@ every 8th view held out, one run each. PSNR / SSIM of the held-out views:
   four scenes point the same way.
 - **It stays opt-in.** It saves 5% of the training time on these scenes.
 
+### Per-warp staging in the backward pass
+
+raster_bwd staged each batch of 128 list entries for the whole tile,
+between two block barriers. Every warp then walked all 128 and skipped
+those whose footprint missed its sub-tiles. Now each warp stages its own
+splats (the write-up's step 6, complete):
+
+- **Staging.** The warp's lanes read 32 entries. A ballot keeps those whose
+  mask reaches either of the warp's sub-tiles, and their splats go, in
+  order, to 32 shared-memory slots of the warp's own.
+- **No block barrier.** A warp with little to do does not wait for the
+  others.
+- **Its own start.** A warp starts from the last entry its own pixels
+  blended, not the tile's.
+
+Timed as above (128 steps on the first run's scene, rounds alternating with
+the kernels before). A CPU-heavy SfM ran alongside, so these times are a
+little higher than in the table above. One round of the old kernels ran at
+25.2 ms of stages and is left out. GPU ms per step:
+
+| Backward staging | Adam moments | raster_bwd | Stages | Wall |
+|---|---|---|---|---|
+| Per tile | float | 5.95–6.30 | 20.6–20.9 | 21.9–22.6 |
+| Per warp | float | 4.99–5.40 | 19.4–20.1 | 21.1–22.1 |
+| Per tile | bf16 | 6.24–6.38 | 18.9–19.1 | 20.4–20.8 |
+| Per warp | bf16 | 5.29–5.44 | 18.2–18.5 | 19.9–20.3 |
+
+- **raster_bwd takes 15% less time**, about 0.9 ms a step. The wall time of
+  a step falls by 0.5–1 ms.
+- **The same maths.** It is unchanged per pixel, and the gradients change
+  only in summation order. A splat that reaches several warps' sub-tiles is
+  read by each of them, from the cache.
+- **south-building, 30k steps, float moments.** 22.92 dB held out with the
+  new kernels, against 23.02 dB with the old, within one run's spread
+  (above). Training took 698 and 711 s.
+
 ## Rasterizer timing on synthetic views
 
 Without `--data`, `gsplat_cuda_bench` renders and runs the backward pass
@@ -422,7 +458,7 @@ WSL2, CUDA 13.3:
 | SH register streaming, cooperative zeroing (step 3) | Not yet |
 | Contributor compaction and pruning the backward pass (step 4) | `splat_touched` gating in (`project_bwd`); compaction not yet (the backward pass starts at each tile's last blended entry) |
 | Branchless predication (step 5) | Not yet |
-| Two pixels per thread, per-warp staging without block barriers (step 6) | Two pixels per thread in raster_bwd: 128 threads per tile, each warp an 8x8 block ([above](#two-pixels-per-thread-and-bf16-moments)); per-warp staging not yet |
+| Two pixels per thread, per-warp staging without block barriers (step 6) | In: two pixels per thread in raster_bwd, 128 threads per tile, each warp an 8x8 block ([above](#two-pixels-per-thread-and-bf16-moments)); each warp stages the splats of its own sub-tiles, with no block barrier ([above](#per-warp-staging-in-the-backward-pass)) |
 
 ## Geometry on ETH3D
 
@@ -1062,11 +1098,12 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
      images stay the plain splat's
      ([a geometry copy](#a-geometry-copy-of-the-plain-splat)).
    - **Open.** One splat that does both; why the median depth lags.
-2. **Speed.** A step takes about 21 ms, 18.6 ms with the opt-in bf16
-   moments ([two pixels per thread, and bf16
-   moments](#two-pixels-per-thread-and-bf16-moments)). Open:
-   - the write-up's step 5 and per-warp staging for raster_bwd (5.6 ms);
-   - bf16 moments as the default, once they are checked on more scenes.
+2. **Speed.** Per-warp staging takes raster_bwd from about 6 ms to 5 ms
+   ([per-warp staging](#per-warp-staging-in-the-backward-pass)); the opt-in
+   bf16 moments save 1.9 ms more ([two pixels per thread, and bf16
+   moments](#two-pixels-per-thread-and-bf16-moments)), and stay opt-in
+   after four ETH3D scenes. Open: the write-up's step 5 (branchless
+   predication) for raster_bwd.
 
    The two-stage sort, a vectorized Adam and dropping the gradient memset
    each gained under 1% ([tried](#tried-and-not-adopted)).
