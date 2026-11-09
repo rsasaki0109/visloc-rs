@@ -991,6 +991,66 @@ F1 at 2 cm, weight 1 → 0.5, the meshes of the tables above:
     office 6.6 points (68.7%) and playground 9.0 (61.4%), with their
     floaters left in.
 
+#### Where terrains' hybrid loses, and why the median depth lags
+
+Two questions left open above. The answers come from the meshes and splats
+of the tables above.
+
+**terrains: the splat's depth moves surface the maps already have.** Its
+MVS depth alone (84.6%) still beats its best hybrid (84.3%). Both meshes
+use the APD maps; the hybrid fills their holes with the geometry copy's
+expected depth at weight 0.5. The evaluator wrote each mesh's per-point
+results at 2 cm (`--accuracy_cloud_output_path`,
+`--completeness_cloud_output_path`). They were compared ground-truth point
+by point, and per 1 cm cell, which is how the evaluator averages
+completeness:
+
+- **Gains and losses.** The hybrid gains completeness in some cells and
+  loses it in others: +1.7 and −2.1 points of the cell mean (83.5% →
+  83.1%).
+- **Moved, not gone.** Net, the middling cells lose: those with 3 to 10
+  ground-truth points go from 85.6% to 84.2%, those with 10 to 30 from
+  89.1% to 88.3%. The densest and the sparsest gain. In the cells that
+  lose more than half their share, the hybrid has a surface within 4–8 cm
+  of 75% of the points.
+- **The mechanism.** Where other views' maps already see a surface, the
+  splat's depth from one view's hole goes into the same voxels and pulls
+  the surface by a few centimetres. Elsewhere it fills real holes.
+- **Accuracy.** The surface only the splat adds is 8% of the hybrid's
+  points. It is 42% accurate where the scan sees it, but the scan sees only
+  5% of it, so accuracy drops little (86.4% → 86.1%).
+- **Not tried.** A fill that leaves alone the voxels some map has seen
+  would keep those cells.
+
+**Why the median depth lags in a splat trained on a prior.** Each view's
+three depths of the plain splat and of its geometry copy were rendered and
+compared with the MVS maps the copy was fine-tuned on (`mvs_cuda`), over
+the pixels both have. The relative error, its median and the share within
+1%:
+
+| Splat | Depth | office | terrains |
+|---|---|---|---|
+| plain | median | 4.31%, 21.8% | 3.95%, 26.9% |
+| plain | planar | 5.64%, 21.9% | 4.45%, 25.9% |
+| plain | expected | 14.75%, 4.7% | 36.57%, 2.7% |
+| geometry copy | median | 2.09%, 32.1% | 1.13%, 47.1% |
+| geometry copy | planar | 3.23%, 25.9% | 2.07%, 35.2% |
+| geometry copy | expected | **0.93%, 51.9%** | **0.37%, 76.2%** |
+
+- **The prior trains the expected depth.** The copy's expected depth comes
+  within 1% of the maps on 52% and 76% of the pixels.
+- **The median depth is one splat's.** It is the camera depth of the splat
+  that takes the transmittance to 0.5. Its error is two to three times the
+  expected depth's, with no offset: the copy's signed median is within
+  ±0.4% on both scenes. The splats lie scattered about the surface, and
+  only their blend sits on it.
+- **The planar depth does worse still.** It meets the plane of that same
+  splat, whose normal is looser than its centre.
+- **Without a prior it is the other way round.** The plain splat's expected
+  depth sits behind the surface (signed median +2.5% on office, +35% on
+  terrains), pulled back by what the surface lets through. There the median
+  depth is the better one, as the meshes above found.
+
 ## TSDF on the GPU
 
 `gsplat_mesh_cuda --gpu-tsdf` (`mesh::extract_mesh_gpu`) fuses and extracts
@@ -1097,7 +1157,12 @@ south-building (128 images at 1024x768, mean 10.5k SIFT, 8128 pairs):
      of the prior-trained splats (71.0% over three scenes), while the
      images stay the plain splat's
      ([a geometry copy](#a-geometry-copy-of-the-plain-splat)).
-   - **Open.** One splat that does both; why the median depth lags.
+   - **Answered.** One splat for both costs the images (the prior itself
+     does). The median depth lags because it is one splat's depth, while
+     the prior trains their blend
+     ([where terrains' hybrid loses](#where-terrains-hybrid-loses-and-why-the-median-depth-lags)).
+   - **Open.** A fill that leaves alone the voxels a map has seen, for
+     terrains.
 2. **Speed.** Per-warp staging takes raster_bwd from about 6 ms to 5 ms
    ([per-warp staging](#per-warp-staging-in-the-backward-pass)); the opt-in
    bf16 moments save 1.9 ms more ([two pixels per thread, and bf16
