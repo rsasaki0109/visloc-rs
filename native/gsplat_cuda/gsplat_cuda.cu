@@ -99,7 +99,7 @@ constexpr int kBwdBatch = 128;
 // The backward pass takes kBwdPix pixels per thread, kBwdThreads per tile.
 constexpr int kBwdPix = 2;
 constexpr int kBwdThreads = kBlock / kBwdPix;
-static_assert(kBwdPix == 2 && kBwdBatch <= kBwdThreads, "one staged splat per backward thread");
+static_assert(kBwdPix == 2 && kBwdBatch == kBwdThreads, "32 staged splats per backward warp");
 // du dv dA dB dC dopacity dr dg db, and the refine weight (brush / AbsGS:
 // sum over pixels of |dL/du| W + |dL/dv| H).
 constexpr int kNumGrad = 10;
@@ -877,8 +877,10 @@ __device__ inline float warp_sum32(float (&v)[32], int lane) {
 // with one global float reduction per component (fire-and-forget REDs; a
 // shared-memory float atomicAdd would be a CAS loop, and the warps that hit a
 // splat are few). Two pixels per thread halve the butterflies and REDs per
-// pixel. A warp skips the splats whose footprint misses both its sub-tiles,
-// and a sub-tile's pixels those that miss it (the list entry's mask). With
+// pixel. Each warp stages only the splats whose footprint reaches either of
+// its sub-tiles (the list entry's mask) in slots of its own, with no block
+// barrier, from the last entry its own pixels blended; a sub-tile's pixels
+// skip the splats that miss it. With
 // kGeo >= 1 the expected-depth channel (raster_fwd_kernel's acc_depth,
 // background 0) is differentiated too, for `d_depth` per pixel: its share
 // reaches the opacity and conic through alpha, and the splat centre's depth
@@ -917,8 +919,8 @@ __global__ void __launch_bounds__(kBwdThreads) raster_bwd_kernel(
     __shared__ uint32_t s_cm[kBwdBatch];
     __shared__ float s_z[kZ ? kBwdBatch : 1];
     __shared__ float3 s_n[kN ? kBwdBatch : 1];
-    extern __shared__ float s_prob[];  // kLab: lab_stride(sem_k) per staged splat
-    __shared__ uint32_t s_last;
+    __shared__ uint32_t s_j[kBwdBatch];  // the entry's index in the sorted list
+    extern __shared__ float s_prob[];    // kLab: lab_stride(sem_k) per staged splat
     const uint32_t tile = blockIdx.y * gridDim.x + blockIdx.x;
     const int tid = threadIdx.x;
     const int warp = tid >> 5, lane = tid & 31;
@@ -998,41 +1000,53 @@ __global__ void __launch_bounds__(kBwdThreads) raster_bwd_kernel(
         for (int q = 0; q < kBwdPix; ++q)
             if (lab_on[q]) slot[q] = int(lab_col[q]) == c0 ? 0 : (int(lab_col[q]) == c1 ? 1 : 2);
     }
-    if (tid == 0) s_last = 0;
-    __syncthreads();
-    atomicMax(&s_last, last_max);
-    __syncthreads();
-    const uint32_t stop = min(s_last, range.y);
+    // The warp starts at the last entry any of its pixels blended.
+    uint32_t stop = last_max;
+#pragma unroll
+    for (int m = 16; m >= 1; m >>= 1) stop = max(stop, __shfl_xor_sync(0xffffffffu, stop, m));
+    stop = min(stop, range.y);
+    // Each warp stages its own splats in its 32 slots, with no block barrier:
+    // lane l reads entry bend - 1 - l, and the entries whose footprint reaches
+    // either of the warp's sub-tiles are staged back to front.
+    const int first = warp * 32;
 
     for (uint32_t bend = stop; bend > range.x;) {
-        const uint32_t bstart = bend - range.x > uint32_t(kBwdBatch) ? bend - kBwdBatch : range.x;
-        const uint32_t cnt = bend - bstart;
-        // Every warp must be done with the previous batch before its slots are reused.
-        __syncthreads();
-        if (uint32_t(tid) < cnt) {
-            const uint32_t v = vals[bstart + tid];
+        const uint32_t bstart = bend - range.x > 32u ? bend - 32u : range.x;
+        const uint32_t e = bend - 1u - uint32_t(lane);
+        uint32_t v = 0;
+        bool keep = false;
+        if (uint32_t(lane) < bend - bstart) {
+            v = vals[e];
+            const uint32_t cm = v >> kIdBits;
+            keep = ((cm >> st[0]) & 1u) || ((cm >> st[1]) & 1u);
+        }
+        const unsigned kept = __ballot_sync(0xffffffffu, keep);
+        // Every lane must be done with the previous batch before its slots are reused.
+        __syncwarp();
+        if (keep) {
+            const int k = first + __popc(kept & ((1u << lane) - 1u));
             const uint32_t gi = v & kIdMask;
-            s_xy[tid] = xy[gi];
-            s_co[tid] = conic_op[gi];
+            s_xy[k] = xy[gi];
+            s_co[k] = conic_op[gi];
             const float4 c = color[gi];
-            s_col[tid] = make_float3(c.x, c.y, c.z);
-            s_gid[tid] = gi;
-            s_cm[tid] = v >> kIdBits;
-            if (kZ) s_z[tid] = depth[gi];
+            s_col[k] = make_float3(c.x, c.y, c.z);
+            s_gid[k] = gi;
+            s_cm[k] = v >> kIdBits;
+            s_j[k] = e;
+            if (kZ) s_z[k] = depth[gi];
             if (kN) {
                 const float4 pl = plane[gi];
-                s_n[tid] = make_float3(pl.x, pl.y, pl.z);
+                s_n[k] = make_float3(pl.x, pl.y, pl.z);
             }
             if (kLab)
-                for (int c = 0; c < sem_k; ++c) s_prob[tid * ks + c] = probs[size_t(gi) * sem_k + c];
+                for (int c = 0; c < sem_k; ++c) s_prob[k * ks + c] = probs[size_t(gi) * sem_k + c];
         }
-        __syncthreads();
+        __syncwarp();
 
-        for (int s = int(cnt) - 1; s >= 0; --s) {
-            // Warp-uniform: the footprint misses both of this warp's sub-tiles.
+        const int end = first + __popc(kept);
+        for (int s = first; s < end; ++s) {
             const uint32_t cm = s_cm[s];
-            if (!((cm >> st[0]) & 1u) && !((cm >> st[1]) & 1u)) continue;
-            const uint32_t j = bstart + uint32_t(s);
+            const uint32_t j = s_j[s];
             float g_u = 0.f, g_v = 0.f, g_a = 0.f, g_b = 0.f, g_c = 0.f, g_o = 0.f, g_r = 0.f;
             float3 g_col = make_float3(0.f, 0.f, 0.f);
             float g_zs = 0.f;

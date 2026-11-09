@@ -1333,6 +1333,17 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Changed
 
+- **CUDA trainer: raster_bwd stages splats per warp.**
+  - **How.** Each warp of a tile reads 32 list entries and keeps, by a
+    ballot, those whose sub-tile mask reaches its pixels, in shared-memory
+    slots of its own. There is no block barrier, and each warp starts from
+    the last entry its own pixels blended.
+  - **Result.** raster_bwd takes 15% less time (south-building's 1.35M
+    gaussians: 5.95–6.30 → 4.99–5.40 ms a step). The gradients change only
+    in summation order; south-building trains to 22.92 dB at 30k, against
+    23.02 dB with the old kernel (docs/gsplat_cuda.md, "Per-warp staging in
+    the backward pass").
+
 - **`gsplat_mesh_cuda --depth-maps`: the splat's depth in the maps' holes
   weighs half a map's (`--fill-weight 0.5`; was 1).**
   - **Why.** Where the splat's depth is wrong it adds wrong surface, and
